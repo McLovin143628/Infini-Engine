@@ -257,6 +257,9 @@ pub struct FrameData<'a> {
     /// packs from `scene.waters` and the lit passes read through `EnvBinding`.
     /// **Not resizable** — see `passes::EnvBinding::bind_group`'s invariant.
     pub wetness: &'a WetnessResources,
+    /// The P22.1 deformation window (texture + uniform), created once. See
+    /// [`crate::deform`].
+    pub deform: &'a crate::deform::DeformResources,
     /// Active shading view mode (R-P2). The lit scene passes select their
     /// wireframe pipeline variant on [`ViewMode::wireframe`]; the unlit branch is
     /// driven by the `View.flags.x` uniform instead (so no swap for Unlit).
@@ -310,6 +313,11 @@ pub struct EngineRenderer {
     /// `atmosphere`/`gi` it therefore carries no generation, which is exactly the
     /// exclusion `passes::EnvBinding::bind_group`'s invariant grants and explains.
     wetness: WetnessResources,
+    /// The P22.1 surface-deformation window: one R32Float texture + one uniform.
+    /// Created once at a **constant** size and never resized, so like `wetness`
+    /// it carries no generation and adds no `passes::ResourceKey` component —
+    /// see `crate::deform` for the rule quoted verbatim.
+    deform: crate::deform::DeformResources,
     /// P20.3 underwater engagement counter (see
     /// [`EngineRenderer::underwater_engaged_frames`]).
     underwater: passes::underwater::UnderwaterReport,
@@ -494,9 +502,22 @@ impl EngineRenderer {
             atmosphere,
             next_atmosphere_generation: 2,
             wetness: WetnessResources::new(gpu),
+            deform: crate::deform::DeformResources::new(gpu),
             underwater,
             voxel,
         }
+    }
+
+    /// How many deformation-window **texture uploads** this renderer has issued
+    /// since it was created (P22.1) — the engagement counter.
+    ///
+    /// The claim it exists to make is one a pixel comparison cannot: *a frame in
+    /// which nothing walked and the camera did not move costs nothing at all.*
+    /// Two frames of a still scene are identical whether the window re-uploaded a
+    /// megabyte or not, so the only honest evidence is the command stream. Zero
+    /// forever on a scene with no deformation field.
+    pub fn deform_uploads(&self) -> u64 {
+        self.deform.uploads()
     }
 
     /// How many frames the P20.3 underwater pass has **engaged** on since this
@@ -742,6 +763,31 @@ impl EngineRenderer {
             bytemuck::bytes_of(&pack_wetness(&scene.waters, &view.origin)),
         );
 
+        // P22.1 surface deformation. Same doctrine one phase on: the WINDOW is
+        // derived here, from the sparse field both projectors publish, so no host
+        // ever computes it and the two cannot disagree about which sample a texel
+        // carries. This is also the one place a camera legally touches the
+        // deformation path — it selects what is DRAWN out of sim-authoritative
+        // state and never what is simulated (the P21 camera-paged-store law).
+        //
+        // The wind phase is `ResolvedSky::cloud_time_s` off the cloud block both
+        // projectors already publish: the level's own clock, never a wall clock
+        // and never a frame index, so a golden renders the same frame twice and a
+        // replay reproduces the same sway.
+        let deform_uniform = self.deform.update(
+            gpu,
+            scene.deform.as_deref(),
+            &view.origin,
+            (view.eye_world.x, view.eye_world.z),
+            (
+                scene.atmosphere.clouds.time_s as f32,
+                scene.atmosphere.clouds.wind_x,
+                scene.atmosphere.clouds.wind_z,
+            ),
+        );
+        gpu.queue
+            .write_buffer(&self.deform.uniform, 0, bytemuck::bytes_of(&deform_uniform));
+
         let history_valid = self.settings.taa && !resized && self.prev_view_proj.is_some();
         let prev_vp = self.prev_view_proj.unwrap_or_else(|| jvp.to_cols_array());
         let cur = (self.frame_index & 1) as usize;
@@ -780,6 +826,7 @@ impl EngineRenderer {
             scatter_audit: &self.scatter_audit,
             atmosphere: &self.atmosphere,
             wetness: &self.wetness,
+            deform: &self.deform,
             view_mode: self.view_mode,
         };
         self.graph.run(gpu, &mut encoder, &frame);

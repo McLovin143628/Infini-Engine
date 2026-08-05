@@ -346,6 +346,7 @@ impl BatchScratch {
     fn new(
         gpu: &GpuContext,
         raster_bgl: &wgpu::BindGroupLayout,
+        deform: &crate::deform::DeformResources,
         prim: &PrimStorage,
         upload: Arc<InstanceUpload>,
     ) -> Self {
@@ -420,6 +421,14 @@ impl BatchScratch {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: prim.indices.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&deform.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: deform.uniform.as_entire_binding(),
                 },
             ],
         });
@@ -587,6 +596,33 @@ impl ScatterNode {
                     vs_storage(2),
                     vs_storage(3),
                     vs_storage(4),
+                    // P22.1 surface deformation: the window texture (5) and its
+                    // uniform (6). VERTEX-only — a scatter instance BENDS, it
+                    // does not shade differently, so the fragment stage never
+                    // reads either. Both are created once in
+                    // `EngineRenderer::new` and never resized, so a batch's
+                    // raster bind group (built once, outside the `GenCache` the
+                    // cull group needs) can hold them for the renderer's life.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -774,7 +810,13 @@ impl ScatterNode {
                 })
                 .clone();
             self.scratch.entry((key, b.id)).or_insert_with(|| {
-                BatchScratch::new(gpu, &self.raster_bgl, &self.prim_storage, upload)
+                BatchScratch::new(
+                    gpu,
+                    &self.raster_bgl,
+                    frame.deform,
+                    &self.prim_storage,
+                    upload,
+                )
             });
         }
         let live_content: std::collections::BTreeSet<u128> = frame

@@ -99,12 +99,76 @@ fn band_weights(d: f32) -> vec2<f32> {
     );
 }
 
+// ── P22.1 FOLIAGE BEND ───────────────────────────────────────────────────────
+//
+// Two things make a scatter instance stop reading as a plastic model glued to
+// the ground, and both are horizontal displacements that grow with height:
+//
+//  (a) **trampling** — grass in a footprint lies down. `deform_gradient` points
+//      INTO the dent, so `-gradient` is "out of the print", which is the way a
+//      crushed blade actually splays. At the exact centre of a print the
+//      gradient vanishes and nothing leans, which is why the vertical squash
+//      below exists as well: the middle of a footprint is flattened, not swept.
+//  (b) **wind** — a travelling sine along the wind direction, phased by
+//      `dfm.params.w`, which is `ResolvedSky::cloud_time_s`: the LEVEL's clock.
+//      No frame index, nothing remembered between frames — the same rule the
+//      dither hash above is written to, and for the same reason (a golden
+//      renders one frame from cold; a determinism gate renders two).
+//
+// Both ride `deform_enabled()`. That couples foliage wind to the presence of a
+// deformation field, which is not physics — it is byte-stability: turning
+// ambient sway on unconditionally would have moved every one of the 49
+// committed goldens. Giving wind its own switch is the documented follow-up.
+//
+// Returns `(lean_xz, squash)`: a horizontal displacement per metre of height,
+// and the vertical scale a trampled instance keeps.
+fn scatter_bend(base_xz: vec2<f32>) -> vec3<f32> {
+    if (!deform_enabled()) {
+        return vec3<f32>(0.0, 0.0, 1.0);
+    }
+    let depth = deform_depth(base_xz);
+    let trample = clamp(depth / max(dfm.params.y, 1e-4), 0.0, 1.0);
+    let g = deform_gradient(base_xz);
+    let gl = length(g);
+    var out_dir = vec2<f32>(0.0, 0.0);
+    if (gl > 1e-4) {
+        out_dir = -g / gl;
+    }
+    // Wavenumber for a WIND_WAVELENGTH_M-long gust; the phase advances with the
+    // wind's own speed so a stronger wind visibly runs faster across the field.
+    let k = 6.28318530718 / 4.0;
+    let phase = dot(base_xz, dfm.wind.xy) * k - dfm.wind.z * dfm.params.w * k;
+    let wind = dfm.wind.xy * (0.12 * sin(phase));
+    return vec3<f32>(
+        out_dir.x * dfm.params.z * trample + wind.x,
+        out_dir.y * dfm.params.z * trample + wind.y,
+        1.0 - 0.6 * trample,
+    );
+}
+
 @vertex
 fn vs_mesh(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> VsOut {
     let inst = s_instances[s_visible[iidx]];
     let vert = read_vertex(s_indices[sp.geom.x + vidx] + sp.geom.y);
     let center = sp.anchor.xyz + inst.offset;
-    let world = center + qrot(inst.rotation, vert[0] * inst.scale);
+    // P22.1: shear at the transform site. `local.y` is the vertex's height above
+    // the instance's own origin, so a displacement proportional to `h · h/r`
+    // leaves the base planted (h = 0 ⇒ no motion) and grows quadratically toward
+    // the tip — a bend, not a translation. `bend` is `vec3(lean_x, lean_z,
+    // squash)` and is exactly `vec3(0, 0, 1)` on every scene with no deformation
+    // field, so this is `local` unchanged and every pre-P22.1 scatter frame is
+    // byte-identical.
+    var local = qrot(inst.rotation, vert[0] * inst.scale);
+    let bend = scatter_bend(center.xz);
+    let radius = max(sp.anchor.w * inst.scale, 1e-4);
+    let h = max(local.y, 0.0);
+    let shear = h * clamp(h / radius, 0.0, 1.0);
+    local = vec3<f32>(
+        local.x + bend.x * shear,
+        local.y * bend.z,
+        local.z + bend.y * shear,
+    );
+    let world = center + local;
     // Uniform scale ⇒ the inverse-transpose of R·S is R·S⁻¹, which normalizes back
     // to R. So a scatter normal needs no normal matrix at all — one of the two
     // reasons the instance record fits in 48 bytes.
@@ -130,8 +194,17 @@ fn vs_impostor(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: 
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
     );
     let c = corners[vidx];
-    let center = sp.anchor.xyz + inst.offset;
+    let base = sp.anchor.xyz + inst.offset;
     let r = sp.anchor.w * inst.scale;
+    // P22.1: an impostor leans as a WHOLE CARD, evaluated once at its centre —
+    // never per vertex. A card is a billboard: shearing its corners individually
+    // would rotate the quad out of its screen-facing plane and it would stop
+    // being a billboard, so what a distant bent blade needs is for its silhouette
+    // to sit where the bent mesh's silhouette was. The lean is taken at the
+    // card's own mid height (`r`), which is where the mesh path's quadratic
+    // shear has moved to by then.
+    let bend = scatter_bend(base.xz);
+    let center = base + vec3<f32>(bend.x * r, -r * (1.0 - bend.z), bend.y * r);
     let world = center + view.cam_right.xyz * (c.x * r) + view.cam_up.xyz * (c.y * r);
 
     // A spherical normal over the disc, so the card shades as a blob of the right
@@ -147,7 +220,12 @@ fn vs_impostor(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: 
     out.normal = n;
     out.color = inst.color;
     out.world_pos = world;
-    let w = band_weights(distance(center, view.eye.xyz));
+    // The band weight is taken at the UNBENT base, exactly as `vs_mesh` takes it
+    // at its unbent centre and the cull compute takes it at the same offset. The
+    // dithered cross-fade is only hole-free because the mesh's `m` and the
+    // impostor's complement are the same number; letting a lean move one of them
+    // by a few centimetres would have opened pixels on the boundary.
+    let w = band_weights(distance(base, view.eye.xyz));
     out.fade = vec4<f32>(w.x, w.y, 1.0, 0.0);
     out.disc = c;
     return out;

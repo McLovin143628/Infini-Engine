@@ -1479,7 +1479,7 @@ fn the_composed_frame_stays_inside_the_frame_budget() {
 /// P20.3 also **re-blessed the three P20.1 water scenes**, deliberately: shoreline
 /// wetness is default-on and all three carry terrain, so their ground at and below
 /// the water level is now darker. Every other image is byte-identical.
-const GOLDENS: [&str; 49] = [
+const GOLDENS: [&str; 50] = [
     "2d_lit.png",
     "aerial_fog.png",
     "billboards.png",
@@ -1492,6 +1492,9 @@ const GOLDENS: [&str; 49] = [
     "clouds_scattered.png",
     "csm.png",
     "cubes.png",
+    // P22.1: a walked footprint trail + vehicle ruts pressed into snow, with the
+    // grass band bent out of the tracks. The batch's ONE new golden.
+    "deform.png",
     "editor_default.png",
     "gi_bleed.png",
     "gi_emissive.png",

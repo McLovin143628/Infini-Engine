@@ -1339,6 +1339,13 @@ impl EngineHost {
         // where the field moved, so re-projecting an unchanged cave costs a copy of
         // its vertex streams and no meshing at all.
         self.scene.voxels.clear();
+        // P22.1: the deformation field is NOT cleared — it is epoch-gated, because
+        // it is the one projected thing that is usually identical to last frame's.
+        // See `project_deform`, which is also where `None` is written when there is
+        // no field at all. It reads the DOCUMENT's world, which during Simulate is
+        // the very world `SimSession::fixed_step` presses footprints into — so the
+        // editor draws what it simulates, with no Ring-2 fold in between.
+        project_deform(&mut self.scene, inf_ecs::deform::deform_field(doc.world()));
         self.terrain_slots.clear();
         // `terrain_guid` (the tool target) is deliberately NOT cleared here — it
         // is re-validated against the new slot list at the end of the projection,
@@ -2706,6 +2713,48 @@ fn project_sky(scene: &mut RenderScene, world: &inf_ecs::EcsWorld) {
             ..RenderLight::default()
         });
     }
+}
+
+/// Project the surface deformation field (P22.1) onto the scene.
+///
+/// **MIRROR** — byte-identical in `inf_viewport::host` and `inf_player::render`,
+/// including this doc block, and pinned by `projector_mirror.rs`.
+///
+/// The projection is **epoch-gated rather than rebuilt**, which is the one thing
+/// this differs from every other list in the two projectors. The field only moves
+/// when something walked; a standing character would otherwise pay a copy of the
+/// whole live cell set sixty times a second for a projection identical to the last
+/// one. `RenderScene::deform` is an `Arc`, so an unchanged field costs one integer
+/// compare and nothing else — and the renderer's upload gate keys on the same
+/// epoch, so an unchanged field also uploads nothing (`inf_render::deform`).
+///
+/// The camera is nowhere in here. What is projected is the whole live field in
+/// its own lattice coordinates; which 128 m of it gets drawn is decided later, in
+/// the renderer, where a camera is legal.
+fn project_deform(scene: &mut RenderScene, field: Option<&inf_terrain::deform::DeformField>) {
+    let Some(field) = field.filter(|f| !f.is_empty()) else {
+        scene.deform = None;
+        return;
+    };
+    if scene
+        .deform
+        .as_ref()
+        .is_some_and(|d| d.epoch == field.epoch())
+    {
+        return;
+    }
+    scene.deform = Some(std::sync::Arc::new(inf_render::RenderDeform {
+        cell_samples: inf_terrain::deform::DEFORM_CELL_SAMPLES,
+        texel_m: inf_terrain::deform::DEFORM_SAMPLE_PITCH_M,
+        epoch: field.epoch(),
+        cells: field
+            .cells()
+            .map(|(coord, cell)| inf_render::RenderDeformCell {
+                coord: *coord,
+                depths: cell.depths().to_vec(),
+            })
+            .collect(),
+    }));
 }
 
 /// Project an ECS `Light` (+ its world transform) into a renderer light (R-P3).

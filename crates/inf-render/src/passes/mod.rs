@@ -50,6 +50,17 @@ pub(crate) enum ShaderKind {
     /// [`lit_scene_shader`]: common_view + env_lighting + the atmosphere library
     /// at the given group.
     Lit(u32),
+    /// [`lit_deform_shader`]: [`Lit`](ShaderKind::Lit) plus the P22.1
+    /// deformation window, whose texture and uniform bindings are named
+    /// explicitly because the two passes that read it put them in different
+    /// groups.
+    LitDeform {
+        env_group: u32,
+        tex_group: u32,
+        tex_bind: u32,
+        uni_group: u32,
+        uni_bind: u32,
+    },
     /// [`sky_shader`]: common_view + the atmosphere library at `@group(1)` — the
     /// sky pass, which needs the LUTs but not the lighting env.
     Sky,
@@ -317,7 +328,18 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
     (
         "terrain",
         include_str!("../shaders/terrain.wgsl"),
-        ShaderKind::Lit(3),
+        // P22.1: the deformation window texture joins the per-tile group
+        // (`@group(1) @binding(4)`) and its uniform the per-terrain material
+        // group (`@group(2) @binding(2)`) — the two groups terrain already binds,
+        // so no fifth group and no touch of the shared `EnvBinding` (which is
+        // fragment-only by construction and must stay that way).
+        ShaderKind::LitDeform {
+            env_group: 3,
+            tex_group: 1,
+            tex_bind: 4,
+            uni_group: 2,
+            uni_bind: 2,
+        },
     ),
     (
         "depth_prepass",
@@ -408,7 +430,15 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
     (
         "scatter_mesh",
         include_str!("../shaders/scatter_mesh.wgsl"),
-        ShaderKind::Lit(2),
+        // P22.1: both deformation bindings ride the scatter raster's own
+        // `@group(3)`, past the five it already had.
+        ShaderKind::LitDeform {
+            env_group: 2,
+            tex_group: 3,
+            tex_bind: 5,
+            uni_group: 3,
+            uni_bind: 6,
+        },
     ),
     (
         "water",
@@ -444,6 +474,17 @@ pub(crate) fn shader_source(label: &str) -> String {
     match kind {
         ShaderKind::Plain => scene_shader(source),
         ShaderKind::Lit(group) => lit_scene_shader(source, *group),
+        ShaderKind::LitDeform {
+            env_group,
+            tex_group,
+            tex_bind,
+            uni_group,
+            uni_bind,
+        } => lit_deform_shader(
+            source,
+            *env_group,
+            Some((*tex_group, *tex_bind, *uni_group, *uni_bind)),
+        ),
         ShaderKind::Sky => sky_shader(source),
         ShaderKind::AtmosphereCompute => atmosphere_compute_shader(source),
         ShaderKind::Cloud => cloud_shader(source),
@@ -464,6 +505,16 @@ pub(crate) fn shader_source(label: &str) -> String {
 /// terrain = 3). See [`EnvBinding`] + `shaders/env_lighting.wgsl` +
 /// `shaders/atmosphere*.wgsl`.
 pub(crate) fn lit_scene_shader(source: &str, env_group: u32) -> String {
+    lit_deform_shader(source, env_group, None)
+}
+
+/// [`lit_scene_shader`] with the P22.1 deformation window additionally bound at
+/// `(tex_group, tex_bind, uni_group, uni_bind)`.
+pub(crate) fn lit_deform_shader(
+    source: &str,
+    env_group: u32,
+    deform: Option<(u32, u32, u32, u32)>,
+) -> String {
     let env =
         include_str!("../shaders/env_lighting.wgsl").replace("GROUP_ENV", &env_group.to_string());
     // P17.3: the cloud-shadow receiver. It reads `atmos` (the cloud block) and
@@ -478,8 +529,18 @@ pub(crate) fn lit_scene_shader(source: &str, env_group: u32) -> String {
     // do not call `wet_apply` simply carry a dead function.
     let wetness =
         include_str!("../shaders/wetness.wgsl").replace("GROUP_ENV", &env_group.to_string());
+    // P22.1: the surface-deformation window, when the pass binds one. Composed
+    // last of the prelude — it declares its own bindings and needs nothing from
+    // the rest — and before the pass source, because WGSL has no forward
+    // declarations. Unlike `wetness` above it is **not** composed into every lit
+    // shader: its bindings are the pass's own, not the shared env group's, so a
+    // pass that does not bind them must not declare them either.
+    let deform = match deform {
+        Some((tg, tb, ug, ub)) => deform_source(tg, tb, ug, ub),
+        None => String::new(),
+    };
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../shaders/common_view.wgsl"),
         env,
         atmosphere_source(env_group, ENV_ATMOS_UNIFORM),
@@ -492,8 +553,32 @@ pub(crate) fn lit_scene_shader(source: &str, env_group: u32) -> String {
         atmosphere_apply_source(),
         cloud_shadow,
         wetness,
+        deform,
         source
     )
+}
+
+/// The P22.1 **surface-deformation window** library: the `Deform` uniform, the
+/// R32Float window texture, and `deform_depth` / `deform_gradient`.
+///
+/// Binding-substituted like the atmosphere and cloud libraries, with FOUR tokens
+/// rather than two because the texture and the uniform do not share a group in
+/// every pass: the terrain pass puts the texture beside its per-tile textures
+/// (`@group(1)`) and the uniform beside its per-terrain material (`@group(2)`),
+/// while the scatter raster keeps both in the one group it owns. Substituting
+/// rather than fixing them is what lets one library serve both without a second
+/// copy of the sampling arithmetic.
+pub(crate) fn deform_source(
+    tex_group: u32,
+    tex_bind: u32,
+    uni_group: u32,
+    uni_bind: u32,
+) -> String {
+    include_str!("../shaders/deform.wgsl")
+        .replace("DFM_TEX_GROUP", &tex_group.to_string())
+        .replace("DFM_TEX_BIND", &tex_bind.to_string())
+        .replace("DFM_UNI_GROUP", &uni_group.to_string())
+        .replace("DFM_UNI_BIND", &uni_bind.to_string())
 }
 
 /// The cache key every bind group that embeds a **resizable** resource is keyed

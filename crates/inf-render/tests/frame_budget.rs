@@ -11,8 +11,8 @@
 use glam::{DVec3, Quat, Vec3};
 use inf_math::FloatingOrigin;
 use inf_render::{
-    EngineRenderer, GpuContext, HeadlessTarget, MeshInstance, RenderScene, RenderView,
-    HEADLESS_FORMAT,
+    EngineRenderer, GpuContext, HeadlessTarget, MeshInstance, RenderDeform, RenderDeformCell,
+    RenderScene, RenderTerrain, RenderTerrainTile, RenderView, TerrainTileKey, HEADLESS_FORMAT,
 };
 
 /// Hard mean-per-frame budget, in milliseconds (a 30 FPS floor). Real GPUs render
@@ -710,4 +710,161 @@ fn scatter_cost_at_one_hundred_thousand_instances() {
             info.name
         );
     }
+}
+
+/// **The P22.1 surface-deformation budget.**
+///
+/// What the deformation path adds to a frame is a *pack* and an *upload* — a
+/// walking player's field changes every step, so the window re-packs and
+/// re-uploads its dirty rect every frame, and the terrain shader gains four
+/// window fetches per fragment on top of the four height fetches it already made.
+/// This measures the worst realistic version of both: a **saturated** field (the
+/// cell bound's worth of live cells is not realistic; a hundred metres of ruts is)
+/// under a camera that is inside the window, moving, so the window re-origins
+/// every frame and uploads in full.
+///
+/// It asserts against `inf_core::FRAME_BUDGET_MS` and declares **no constant of
+/// its own** — the §8 rule. The number here is a frame, and a frame has one
+/// budget.
+#[test]
+fn deform_window_cost() {
+    let Ok(gpu) = GpuContext::headless() else {
+        eprintln!("SKIP deform_window_cost: no GPU adapter");
+        return;
+    };
+    let info = gpu.adapter.get_info();
+    let virtualized = {
+        let n = info.name.to_ascii_lowercase();
+        n.contains("paravirtual") || n.contains("virtualbox") || n.contains("vmware")
+    };
+    let software = info.device_type == wgpu::DeviceType::Cpu || virtualized;
+
+    // A flat terrain wide enough to fill the frame, and a field of ruts across it.
+    const RES: u32 = 129;
+    const MPS: f64 = 0.25;
+    let span = (RES - 1) as f64 * MPS;
+    let n = (RES * RES) as usize;
+    let mut tiles = Vec::new();
+    for tx in 0..3 {
+        for tz in 0..3 {
+            tiles.push(RenderTerrainTile {
+                key: TerrainTileKey::lod0((tx, tz)),
+                origin: DVec3::new(tx as f64 * span, 0.0, tz as f64 * span),
+                heights: vec![0.0; n],
+                weights: vec![[0, 0, 0, 255]; n],
+                biomes: Vec::new(),
+                height_bounds: (0.0, 0.0),
+                holes: Vec::new(),
+                version: 1,
+            });
+        }
+    }
+    let mut field = inf_terrain::deform::DeformField::new();
+    // ~40 lanes × 90 m of rut: several hundred live cells, which is what an hour
+    // of driving around one area actually looks like.
+    for lane in 0..40 {
+        let z = 4.0 + lane as f64 * 2.0;
+        let mut x = 2.0;
+        while x < 92.0 {
+            field.stamp_contact(
+                glam::DVec2::new(x, z),
+                0.34,
+                inf_terrain::deform::PressureClass::Heavy,
+                3,
+                1.0 / 60.0,
+            );
+            x += 0.3;
+        }
+    }
+    assert!(field.cell_count() > 200, "the fixture must be a real load");
+    let deform = RenderDeform {
+        cell_samples: inf_terrain::deform::DEFORM_CELL_SAMPLES,
+        texel_m: inf_terrain::deform::DEFORM_SAMPLE_PITCH_M,
+        epoch: field.epoch(),
+        cells: field
+            .cells()
+            .map(|(coord, cell)| RenderDeformCell {
+                coord: *coord,
+                depths: cell.depths().to_vec(),
+            })
+            .collect(),
+    };
+    let scene = RenderScene {
+        terrains: vec![RenderTerrain {
+            id: 0,
+            tile_resolution: RES,
+            meters_per_sample: MPS,
+            tiles,
+            layers: Default::default(),
+            macro_variation: 0.0,
+            biome_palette: Vec::new(),
+        }],
+        deform: Some(std::sync::Arc::new(deform)),
+        ..Default::default()
+    };
+
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    const WARMUP: u32 = 10;
+    const MEASURED: u32 = 60;
+    // A moving camera, so the window re-origins and uploads in FULL every frame —
+    // the worst case, not the cached one.
+    let moving = |f: u32| {
+        let eye = DVec3::new(20.0 + f as f64 * 0.4, 9.0, 20.0);
+        RenderView {
+            origin: FloatingOrigin::new(DVec3::ZERO),
+            eye_world: eye,
+            forward: (DVec3::new(40.0, 0.0, 44.0) - eye).as_vec3().normalize(),
+            up: Vec3::Y,
+            fov_y: 60f32.to_radians(),
+            near: 0.05,
+            width: W,
+            height: H,
+            ortho: None,
+        }
+    };
+    for f in 0..WARMUP {
+        renderer.render(&gpu, &scene, &moving(f), &target.view, (W, H));
+    }
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+
+    let before = renderer.deform_uploads();
+    let start = std::time::Instant::now();
+    for f in 0..MEASURED {
+        renderer.render(&gpu, &scene, &moving(WARMUP + f), &target.view, (W, H));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    let mean_ms = start.elapsed().as_secs_f64() * 1000.0 / MEASURED as f64;
+    let uploads = renderer.deform_uploads() - before;
+
+    eprintln!(
+        "deform_window_cost: mean {mean_ms:.3} ms/frame over {MEASURED} frames, \
+         {uploads} window uploads, {} cells on {} ({:?}); budget {FRAME_BUDGET_MS} ms{}",
+        field.cell_count(),
+        info.name,
+        info.device_type,
+        if software {
+            " [software — smoke only]"
+        } else {
+            ""
+        }
+    );
+    // Anti-vacuity: the worst case really was the worst case — a moving camera
+    // re-uploaded the window on (almost) every measured frame.
+    assert!(
+        uploads as u32 >= MEASURED / 2,
+        "the moving camera only re-uploaded {uploads} times in {MEASURED} frames — \
+         this measured the cached path, not the worst one"
+    );
+
+    if software {
+        return;
+    }
+    assert!(
+        mean_ms < FRAME_BUDGET_MS,
+        "deformation frame mean {mean_ms:.3} ms exceeded the {FRAME_BUDGET_MS} ms \
+         budget on {} (the §8 budget only ratchets DOWN — investigate the \
+         regression, do not raise it)",
+        info.name
+    );
 }

@@ -33,6 +33,14 @@ tracing = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [dev-dependencies]
+# P22.1: the `golden_deform` scene presses its footprints with the REAL Ring-0
+# field (`inf_terrain::deform`) and then projects it exactly as the two hosts do,
+# so the golden exercises the shipped path end to end rather than a hand-written
+# depth buffer that could agree with nothing. DEV-ONLY — `inf-render` must never
+# depend on `inf-terrain` at build time (`RenderTerrain` is deliberately
+# self-contained rather than naming it), and this is the same arrangement
+# `inf-voxel` below already has. No cycle: `inf-terrain` names no renderer type.
+inf-terrain = { workspace = true }
 # P21.1: the `golden_voxel` scene is meshed by the REAL Surface-Nets mesher
 # rather than by a hand-written triangle soup, so the golden exercises the
 # shipped path end to end. DEV-ONLY — `inf-render` must never depend on

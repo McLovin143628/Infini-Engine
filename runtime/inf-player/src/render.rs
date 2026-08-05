@@ -364,6 +364,11 @@ pub fn project_scene_with_skinned(
     // `scatter` — a body's whole state is a pure function of its component, its
     // spline and the level clock, so there is nothing to carry over.
     scene.waters.clear();
+    // P22.1: the deformation field is NOT cleared — it is epoch-gated, because it
+    // is the one projected thing that is usually identical to last frame's. See
+    // `project_deform`, which is also where `None` is written when there is no
+    // field at all.
+    project_deform(scene, inf_ecs::deform::deform_field(sim.world()));
     // Track which vmesh assets are already listed this frame (dedup — the render
     // node caches GPU geometry by id, but the asset list must not duplicate), and
     // which `(mesh, skeleton)` pairs already own a `skinned_meshes` slot.
@@ -1440,6 +1445,48 @@ fn project_sky(scene: &mut RenderScene, world: &inf_ecs::EcsWorld) {
             ..RenderLight::default()
         });
     }
+}
+
+/// Project the surface deformation field (P22.1) onto the scene.
+///
+/// **MIRROR** — byte-identical in `inf_viewport::host` and `inf_player::render`,
+/// including this doc block, and pinned by `projector_mirror.rs`.
+///
+/// The projection is **epoch-gated rather than rebuilt**, which is the one thing
+/// this differs from every other list in the two projectors. The field only moves
+/// when something walked; a standing character would otherwise pay a copy of the
+/// whole live cell set sixty times a second for a projection identical to the last
+/// one. `RenderScene::deform` is an `Arc`, so an unchanged field costs one integer
+/// compare and nothing else — and the renderer's upload gate keys on the same
+/// epoch, so an unchanged field also uploads nothing (`inf_render::deform`).
+///
+/// The camera is nowhere in here. What is projected is the whole live field in
+/// its own lattice coordinates; which 128 m of it gets drawn is decided later, in
+/// the renderer, where a camera is legal.
+fn project_deform(scene: &mut RenderScene, field: Option<&inf_terrain::deform::DeformField>) {
+    let Some(field) = field.filter(|f| !f.is_empty()) else {
+        scene.deform = None;
+        return;
+    };
+    if scene
+        .deform
+        .as_ref()
+        .is_some_and(|d| d.epoch == field.epoch())
+    {
+        return;
+    }
+    scene.deform = Some(std::sync::Arc::new(inf_render::RenderDeform {
+        cell_samples: inf_terrain::deform::DEFORM_CELL_SAMPLES,
+        texel_m: inf_terrain::deform::DEFORM_SAMPLE_PITCH_M,
+        epoch: field.epoch(),
+        cells: field
+            .cells()
+            .map(|(coord, cell)| inf_render::RenderDeformCell {
+                coord: *coord,
+                depths: cell.depths().to_vec(),
+            })
+            .collect(),
+    }));
 }
 
 /// Project an ECS `Light` (+ its world transform) into a renderer light (R-P3).

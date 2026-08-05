@@ -26,16 +26,16 @@ use inf_render::{
     Ambient2D, AtmosphereParams, AtmosphereQuality, BloomSettings, CloudParams, CloudQuality,
     CloudVolumes, EngineRenderer, GiAudit, GiQuality, GiSettings, GpuContext, HAlign,
     HeadlessTarget, HeightFog, LightKind, MeshInstance, PrebatchedRun, PrecipParams, PrecipQuality,
-    PrimMesh, RenderChunk, RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain,
-    RenderTerrainLayer, RenderTerrainTile, RenderTilemap, RenderView, RenderVoxelChunk,
-    RenderVoxelVertex, RenderVoxelVolume, RenderWater, ScatterBatch, ScatterData, ScatterInstance,
-    ShadowSettings, SkinnedInstance, SkinnedMeshData, SkinnedVertex, SpriteInstance,
-    SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey, TextParams, TilemapParams,
-    VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode, VoxelChunkKey, WaterKindGpu,
-    WaterQuality, WaveField, WaveSpec, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE, BILLBOARD_SPHERICAL,
-    BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS, BUILTIN_FONT_TEXTURE,
-    CPU_GPU_EXACT_FRACTION, CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_TEXEL_TOLERANCE, HEADLESS_FORMAT,
-    TILE_CHUNK_DIM,
+    PrimMesh, RenderChunk, RenderDeform, RenderDeformCell, RenderLight, RenderLight2D, RenderScene,
+    RenderSettings, RenderTerrain, RenderTerrainLayer, RenderTerrainTile, RenderTilemap,
+    RenderView, RenderVoxelChunk, RenderVoxelVertex, RenderVoxelVolume, RenderWater, ScatterBatch,
+    ScatterData, ScatterInstance, ShadowSettings, SkinnedInstance, SkinnedMeshData, SkinnedVertex,
+    SpriteInstance, SpriteTextureUpload, SsaoSettings, SunParams, TerrainTileKey, TextParams,
+    TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, ViewMode, VoxelChunkKey,
+    WaterKindGpu, WaterQuality, WaveField, WaveSpec, BILLBOARD_CYLINDRICAL, BILLBOARD_NONE,
+    BILLBOARD_SPHERICAL, BUILTIN_FONT_COLS, BUILTIN_FONT_FIRST_CP, BUILTIN_FONT_ROWS,
+    BUILTIN_FONT_TEXTURE, CPU_GPU_EXACT_FRACTION, CPU_GPU_SHADOW_TOLERANCE,
+    CPU_GPU_TEXEL_TOLERANCE, HEADLESS_FORMAT, TILE_CHUNK_DIM,
 };
 
 const W: u32 = 320;
@@ -7770,4 +7770,330 @@ fn cave_mouth_view() -> RenderView {
         height: H,
         ortho: None,
     }
+}
+
+// ── surface deformation (P22.1) ──────────────────────────────────────────────
+
+/// Snow-layer terrain samples per tile edge, and metres between them.
+///
+/// 0.25 m/sample is deliberately **exactly** the deformation lattice pitch, so
+/// the fragment's central-difference normal (`span / (res - 1)`) steps one field
+/// sample at a time and a footprint reads as the shape it is rather than as a
+/// blur across four of them.
+const DFM_RES: u32 = 65;
+const DFM_MPS: f64 = 0.25;
+
+/// A flat 2 x 2-tile snow field — the ground the deformation golden presses.
+///
+/// Flat on purpose: relief of its own would make it impossible to say whether a
+/// dent in the frame came from the heightfield or from the deformation window,
+/// which is the whole thing this golden exists to pin.
+fn snow_flat_terrain() -> RenderTerrain {
+    let span = (DFM_RES - 1) as f64 * DFM_MPS;
+    let n = (DFM_RES * DFM_RES) as usize;
+    let mut tiles = Vec::new();
+    for tx in 0..2 {
+        for tz in 0..2 {
+            tiles.push(RenderTerrainTile {
+                key: TerrainTileKey::lod0((tx, tz)),
+                origin: DVec3::new(tx as f64 * span, 0.0, tz as f64 * span),
+                heights: vec![0.0; n],
+                // Pure layer 3 = snow, which is the deep/soft archetype in
+                // `inf_terrain::deform::LAYER_RESPONSE` and the one a boot
+                // actually sinks into.
+                weights: vec![[0, 0, 0, 255]; n],
+                biomes: Vec::new(),
+                height_bounds: (0.0, 0.0),
+                holes: Vec::new(),
+                version: 1,
+            });
+        }
+    }
+    RenderTerrain {
+        id: 0,
+        tile_resolution: DFM_RES,
+        meters_per_sample: DFM_MPS,
+        tiles,
+        layers: default_layers(),
+        macro_variation: 0.0,
+        biome_palette: Vec::new(),
+    }
+}
+
+/// Press a walked trail and a pair of vehicle ruts into a **real**
+/// `inf_terrain::deform::DeformField`, then project it exactly the way both
+/// hosts' `project_deform` does.
+///
+/// The real field rather than a hand-written buffer, for the same reason the P21
+/// voxel golden meshes with the real mesher: a golden built from a fixture the
+/// shipped code never produces pins a picture of nothing. Everything here — the
+/// falloff profile, the per-class depth fraction, the snow saturation — comes out
+/// of the Ring-0 response table.
+fn walked_deform() -> RenderDeform {
+    use inf_terrain::deform::{
+        DeformField, PressureClass, DEFORM_CELL_SAMPLES, DEFORM_SAMPLE_PITCH_M,
+    };
+    const SNOW: u8 = 3;
+    const DT: f64 = 1.0 / 60.0;
+    let mut field = DeformField::new();
+
+    // A gait: a footfall every 0.7 m, alternating 25 cm either side of the line,
+    // each rested on long enough to reach its class depth.
+    for i in 0..18u32 {
+        let x = 3.0 + i as f64 * 0.7;
+        let z = 5.0 + if i % 2 == 0 { -0.25 } else { 0.25 };
+        for _ in 0..24 {
+            field.stamp_contact(glam::DVec2::new(x, z), 0.22, PressureClass::Foot, SNOW, DT);
+        }
+    }
+    // Two parallel ruts across bare snow, and a third driven straight through the
+    // grass band so the foliage bend has tracks to lie down in.
+    for lane in [8.0f64, 9.2, 12.0] {
+        let mut x = 2.0;
+        while x < 17.0 {
+            for _ in 0..8 {
+                field.stamp_contact(
+                    glam::DVec2::new(x, lane),
+                    0.34,
+                    PressureClass::Heavy,
+                    SNOW,
+                    DT,
+                );
+            }
+            x += 0.12;
+        }
+    }
+    assert!(
+        !field.is_empty(),
+        "the fixture must actually press something"
+    );
+
+    RenderDeform {
+        cell_samples: DEFORM_CELL_SAMPLES,
+        texel_m: DEFORM_SAMPLE_PITCH_M,
+        epoch: field.epoch(),
+        cells: field
+            .cells()
+            .map(|(coord, cell)| RenderDeformCell {
+                coord: *coord,
+                depths: cell.depths().to_vec(),
+            })
+            .collect(),
+    }
+}
+
+/// Low grass over the same ground, so the scatter bend has something to bend.
+fn grass_over(n: u32, span: f64, center: DVec3) -> ScatterBatch {
+    let step = span / n as f64;
+    let scale = 0.24f32;
+    let mut out = Vec::with_capacity((n * n) as usize);
+    for i in 0..n * n {
+        let (gx, gz) = ((i % n) as f64, (i / n) as f64);
+        // The scatter goldens' integer hash — no `std` trig anywhere near
+        // committed pixels (the P14 LAW).
+        let mut h = i.wrapping_mul(2_654_435_761);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x27d4_eb2d);
+        let jx = ((h & 0xFFFF) as f64 / 65535.0) - 0.5;
+        let jz = (((h >> 16) & 0xFFFF) as f64 / 65535.0) - 0.5;
+        out.push(ScatterInstance {
+            position: DVec3::new(
+                center.x + (gx - (n as f64 - 1.0) * 0.5 + jx * 0.7) * step,
+                scale as f64 * 0.5,
+                center.z + (gz - (n as f64 - 1.0) * 0.5 + jz * 0.7) * step,
+            ),
+            rotation: Quat::IDENTITY,
+            scale,
+            color: [0.20, 0.42, 0.16, 1.0],
+        });
+    }
+    ScatterBatch::lit(
+        Arc::new(ScatterData::build(PrimMesh::Cube, center, out)),
+        center,
+        0.9,
+        91,
+    )
+}
+
+fn deform_scene() -> RenderScene {
+    let mut scene = RenderScene {
+        terrains: vec![snow_flat_terrain()],
+        scatter: vec![grass_over(44, 8.0, DVec3::new(11.0, 0.0, 12.0))],
+        deform: Some(Arc::new(walked_deform())),
+        lights: vec![RenderLight {
+            kind: LightKind::Directional,
+            // Low and across the trail: a footprint is a *shading* feature, and a
+            // sun overhead would light both walls of every dent equally.
+            direction: Vec3::new(-0.62, 0.34, -0.71).normalize(),
+            color: [1.0, 0.97, 0.92],
+            // Low intensity as well as a low angle: snow's albedo is ~0.9, and a
+            // brighter sun clips the whole field to white in the tonemap — which
+            // is exactly where a shading feature stops being visible.
+            intensity: 1.5,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    // The wind phase is the level's clock, published on the cloud block by both
+    // projectors (`ResolvedSky::cloud_time_s`) — no frame index, so two renders
+    // of this scene are the same frame.
+    scene.atmosphere.clouds.wind_x = 1.0;
+    scene.atmosphere.clouds.wind_z = 0.35;
+    scene.atmosphere.clouds.time_s = 12.5;
+    scene.mark_dirty();
+    scene
+}
+
+fn deform_view() -> RenderView {
+    look_view(DVec3::new(2.5, 8.0, -1.5), DVec3::new(11.0, 0.0, 11.0))
+}
+
+/// **Surface deformation golden** (P22.1): a walked footprint trail and a pair of
+/// vehicle ruts pressed into a snow-layer terrain patch, with grass scatter bent
+/// out of the tracks.
+///
+/// What it pins, and why each half needs the other: the vertex stage's
+/// displacement (the ground physically dips), the fragment stage's
+/// central-difference normal through the SAME `ground_height` wrapper (the dip is
+/// *shaded* — a vertex-only offset would leave the dent invisible under this
+/// grazing sun), the compaction darkening, and the scatter shear that lays the
+/// foliage down where the tracks ran.
+#[test]
+fn golden_deform() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let scene = deform_scene();
+    let view = deform_view();
+
+    // CPU-side, before a pixel is drawn: the fixture really pressed snow, and it
+    // pressed it to the depth the Ring-0 table says — not to a number this test
+    // invented.
+    let d = scene.deform.as_ref().expect("the fixture projects a field");
+    assert!(d.drawable());
+    let deepest = d
+        .cells
+        .iter()
+        .flat_map(|c| c.depths.iter().copied())
+        .fold(0.0f32, f32::max);
+    let snow_max = inf_terrain::deform::LAYER_RESPONSE[3].max_depth_m;
+    assert!(
+        (deepest - snow_max).abs() < 1e-6,
+        "a Heavy rut in snow must saturate at {snow_max} m, reached {deepest}"
+    );
+    assert!(
+        deepest <= inf_render::DEFORM_MAX_DEPTH_M,
+        "the skirt coupling: nothing may press past {} m",
+        inf_render::DEFORM_MAX_DEPTH_M
+    );
+
+    let img = check_golden(&gpu, "deform", &scene, &view);
+
+    // Structural, not just perceptual: the frame really contains snow, grass, and
+    // ground darker than the snow around it (the tracks).
+    let bright = img.chunks(4).filter(|p| p[0] > 200 && p[2] > 200).count();
+    let green = img
+        .chunks(4)
+        .filter(|p| p[1] > p[0] + 6 && p[1] > p[2] + 6)
+        .count();
+    assert!(bright > 8_000, "expected a snowfield ({bright} px)");
+    assert!(green > 1_000, "expected the grass band ({green} px)");
+
+    // The tracks are visible as *shading*, and the honest way to say so is against
+    // the same geometry with the field removed rather than against an absolute
+    // brightness threshold that snow's own albedo would decide.
+    let mut flat = deform_scene();
+    flat.deform = None;
+    flat.mark_dirty();
+    let without = render(&gpu, &flat, &view);
+    let darker = img
+        .chunks(4)
+        .zip(without.chunks(4))
+        .filter(|(a, b)| b[0] as i32 - a[0] as i32 > 6)
+        .count();
+    assert!(
+        darker > 400,
+        "only {darker} px darkened — the tracks are not reaching the terrain shader"
+    );
+    let moved = changed_fraction(&img, &without, H);
+    assert!(
+        moved > 0.02,
+        "the deformation moved only {moved:.4} of the frame — the window is not \
+         reaching the terrain shader"
+    );
+}
+
+/// **The off-path gate** (the P20.3 engagement-counter law): a scene with no
+/// deformation field must record the command stream it always did.
+///
+/// A pixel comparison cannot make this claim — a frame that uploaded a megabyte
+/// of zeroes looks exactly like one that uploaded nothing — so the assertion is
+/// on the upload counter, with a guard on the guard so it cannot pass vacuously.
+#[test]
+fn deform_off_path_never_engages() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    let view = deform_view();
+
+    // Arm 1: a scene with terrain and scatter but no field — many frames, zero
+    // uploads.
+    let mut flat = deform_scene();
+    flat.deform = None;
+    flat.mark_dirty();
+    assert_eq!(renderer.deform_uploads(), 0);
+    for f in 0..4 {
+        renderer.render(&gpu, &flat, &view, &target.view, (W, H));
+        assert_eq!(
+            renderer.deform_uploads(),
+            0,
+            "frame {f} uploaded a deformation window for a scene that has none"
+        );
+    }
+
+    // Arm 2 — THE GUARD ON THE GUARD. The same renderer, given a field, must
+    // upload. Without this, arm 1 would pass just as happily if the counter were
+    // never incremented at all.
+    let scene = deform_scene();
+    renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+    let after_first = renderer.deform_uploads();
+    assert!(
+        after_first >= 1,
+        "a scene WITH a deformation field uploaded nothing"
+    );
+
+    // Arm 3 — the dirty gate. Re-rendering the identical scene from the identical
+    // camera must upload nothing further: the window already holds the answer,
+    // and the epoch says so.
+    for f in 0..4 {
+        renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+        assert_eq!(
+            renderer.deform_uploads(),
+            after_first,
+            "frame {f} re-uploaded an unchanged window"
+        );
+    }
+
+    // Arm 4 — a moved camera re-windows (and is allowed to). This is what makes
+    // arm 3 a statement about the *gate* rather than about a counter that had
+    // simply stopped moving.
+    let panned = look_view(DVec3::new(41.0, 5.0, 39.0), DVec3::new(51.0, 0.0, 50.0));
+    renderer.render(&gpu, &scene, &panned, &target.view, (W, H));
+    assert!(
+        renderer.deform_uploads() > after_first,
+        "panning the camera off the window did not re-upload it"
+    );
+
+    // Arm 5 — dropping the field forgets the window, so the next real projection
+    // cannot be diffed against a stale one.
+    let before_drop = renderer.deform_uploads();
+    renderer.render(&gpu, &flat, &view, &target.view, (W, H));
+    assert_eq!(
+        renderer.deform_uploads(),
+        before_drop,
+        "a scene with no field uploaded on the way back out"
+    );
+    renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+    assert!(
+        renderer.deform_uploads() > before_drop,
+        "the window was not re-uploaded after the field had been dropped"
+    );
 }

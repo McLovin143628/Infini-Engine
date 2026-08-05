@@ -858,7 +858,22 @@ impl TerrainNode {
                 // `uint_entry` again because a bitfield read through a filtering
                 // sample type would be a float somebody has to guess an integer
                 // back out of — the same reason the biome ids at binding 2 are Uint.
-                entries: &[tex_entry(0), tex_entry(1), uint_entry(2), uint_entry(3)],
+                //
+                // Binding 4 is the P22.1 deformation window — the ONE entry in
+                // this group that is not per-tile. It rides here because it is
+                // read at the same rate the height texture is (`ground_height`
+                // calls both, in both stages) and because the group is already
+                // VERTEX|FRAGMENT; giving a single global texture its own fifth
+                // bind group would have cost a group for one view. `tex_entry`
+                // again: R32Float sampled with `textureLoad`, no sampler, no
+                // FLOAT32_FILTERABLE.
+                entries: &[
+                    tex_entry(0),
+                    tex_entry(1),
+                    uint_entry(2),
+                    uint_entry(3),
+                    tex_entry(4),
+                ],
             });
 
         // Splat material uniform bind group (@group(2)): the layer material at
@@ -876,11 +891,28 @@ impl TerrainNode {
             },
             count: None,
         };
+        // …and the P22.1 deformation uniform at binding 2, which is the one
+        // entry in this group the VERTEX stage reads: `ground_height` displaces
+        // geometry with it. A separate helper rather than widening
+        // `uniform_entry`, so the material and palette keep the fragment-only
+        // visibility they were declared with and the difference is visible at
+        // the call site. The shared `EnvBinding` was deliberately NOT used — it
+        // is fragment-only by construction and must stay that way.
+        let vf_uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
         let material_bgl = gpu
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("terrain-material"),
-                entries: &[uniform_entry(0), uniform_entry(1)],
+                entries: &[uniform_entry(0), uniform_entry(1), vf_uniform_entry(2)],
             });
         let env = super::EnvBinding::new(gpu);
         let layout = gpu
@@ -1016,7 +1048,12 @@ impl TerrainNode {
     /// else; evicting a page frees its textures the frame the projection drops it.
     /// Each terrain's splat material rides a value compare beside it (P16.6: one
     /// uniform slot per [`RenderTerrain::id`], released when that terrain leaves).
-    fn sync_textures(&mut self, gpu: &GpuContext, terrains: &[RenderTerrain]) {
+    fn sync_textures(
+        &mut self,
+        gpu: &GpuContext,
+        terrains: &[RenderTerrain],
+        deform: &crate::deform::DeformResources,
+    ) {
         // Splat material uniforms (one per terrain): write only on a real change,
         // and drop the slots of terrains that left the scene.
         let live_ids: BTreeSet<u64> = terrains.iter().map(|t| t.id).collect();
@@ -1044,7 +1081,8 @@ impl TerrainNode {
                     }
                 }
                 None => {
-                    let slot = create_material_slot(gpu, &self.material_bgl, material, palette);
+                    let slot =
+                        create_material_slot(gpu, &self.material_bgl, deform, material, palette);
                     gpu.queue
                         .write_buffer(&slot._buffer, 0, bytemuck::bytes_of(&material));
                     gpu.queue
@@ -1085,11 +1123,17 @@ impl TerrainNode {
                 // holes nobody authored.
                 let hole_words = planned_hole_words(tile, res);
                 let entry = self.textures.entry(key).or_insert_with(|| {
-                    create_tile_textures(gpu, &self.tile_bgl, res, tile.version, hole_words)
+                    create_tile_textures(gpu, &self.tile_bgl, deform, res, tile.version, hole_words)
                 });
                 if entry.cached.resolution != res || entry.cached.hole_words != hole_words {
-                    *entry =
-                        create_tile_textures(gpu, &self.tile_bgl, res, tile.version, hole_words);
+                    *entry = create_tile_textures(
+                        gpu,
+                        &self.tile_bgl,
+                        deform,
+                        res,
+                        tile.version,
+                        hole_words,
+                    );
                 }
                 entry.cached.version = tile.version;
                 let tex = &*entry;
@@ -1223,6 +1267,7 @@ impl TerrainNode {
 fn create_material_slot(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
+    deform: &crate::deform::DeformResources,
     material: MaterialRaw,
     palette: BiomePaletteRaw,
 ) -> MaterialSlot {
@@ -1250,6 +1295,15 @@ fn create_material_slot(
                 binding: 1,
                 resource: palette_buffer.as_entire_binding(),
             },
+            // The P22.1 deformation uniform. Created once in
+            // `EngineRenderer::new` and only ever `write_buffer`-ed, so a bind
+            // group built against it can never hold a stale view — the same
+            // exemption `WetnessResources` documents, and the reason this adds
+            // no `ResourceKey` component.
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: deform.uniform.as_entire_binding(),
+            },
         ],
     });
     MaterialSlot {
@@ -1275,6 +1329,7 @@ fn create_material_slot(
 fn create_tile_textures(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
+    deform: &crate::deform::DeformResources,
     res: u32,
     version: u64,
     hole_words: u32,
@@ -1340,6 +1395,13 @@ fn create_tile_textures(
                 binding: 3,
                 resource: wgpu::BindingResource::TextureView(&holeview),
             },
+            // The P22.1 deformation window — global, not per tile, and never
+            // resized, so every tile's bind group may hold the same view for the
+            // renderer's whole life.
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&deform.view),
+            },
         ],
     });
     TileTextures {
@@ -1368,7 +1430,7 @@ impl RenderNode for TerrainNode {
         if terrains.iter().all(|t| t.tiles.is_empty()) {
             return;
         }
-        self.sync_textures(gpu, terrains);
+        self.sync_textures(gpu, terrains, frame.deform);
 
         // Assemble each terrain independently — clipmap rings, source selection
         // and culling are all functions of ONE terrain's grid and residency, and

@@ -1634,6 +1634,24 @@ pub struct RenderScene {
     /// vertex/index buffer upload, keyed per volume by
     /// [`RenderVoxelVolume::id`].
     pub voxels: Vec<RenderVoxelVolume>,
+    /// The surface deformation field (P22.1) — the sparse map of how far the
+    /// ground has been pressed down by whatever has been standing on it.
+    ///
+    /// `None` on every level where nothing has touched a terrain (which is every
+    /// pre-P22.1 golden), and then [`crate::deform::DeformResources::update`]
+    /// writes a **disabled** uniform, no texture upload happens at all, and the
+    /// shader branches that read the window are present-but-false — so the
+    /// command stream and the arithmetic are both unchanged.
+    ///
+    /// Behind an `Arc` because it is the one projected field that is *usually
+    /// identical to last frame's*: the field only moves when something walked,
+    /// and a projector that rebuilt this for a standing character would pay the
+    /// copy the sparse representation exists to avoid. Hosts cache it on
+    /// [`crate::RenderDeform::epoch`] and clone the pointer.
+    ///
+    /// Sim-authoritative, always: the camera decides which part of this is *drawn*
+    /// (see [`crate::deform`]) and never what is in it.
+    pub deform: Option<std::sync::Arc<crate::deform::RenderDeform>>,
     /// 2D tilemaps (P8.1b). The sprite pass culls each tilemap's chunks against
     /// the camera and expands the visible ones into prebatched sprite runs, then
     /// batches them together with the loose `sprites`. Because culling depends on

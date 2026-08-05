@@ -97,6 +97,33 @@ fn sample_height(uv: vec2<f32>, res: f32) -> f32 {
     return mix(hx0, hx1, f.y);
 }
 
+// ── P22.1 SURFACE DEFORMATION ────────────────────────────────────────────────
+//
+// The ground height a patch actually draws at: the authored heightfield MINUS
+// whatever has been pressed into it. `deform.wgsl` (composed above) supplies
+// `deform_depth`, which returns 0 outside the window and 0 in every scene with
+// no deformation — so this is the identity function on every pre-P22.1 golden.
+//
+// **This wrapper is the point.** A vertex-only offset would dent the geometry
+// and leave the shading flat, which reads as a texture bug rather than a
+// footprint: the fragment's central-difference normal must see the same surface
+// the vertex stage moved. Both stages call THIS, and neither computes the offset
+// itself, so they cannot drift apart.
+//
+// `uv` is the patch coordinate (for the heightfield) and `world_xz` the SAME
+// point in render-local space (for the window) — two parameters rather than one
+// derivation, because the vertex stage has the patch origin to hand and the
+// fragment stage has `world_local`, and re-deriving either would be a second
+// place for the mapping to be wrong.
+//
+// Holes are handled by composition order, not by a second test: the fragment
+// discards a holed cell before it reaches any of this, and a holed vertex draws
+// nothing that survives. Testing again here would only let the two stages
+// disagree about which samples are ground.
+fn ground_height(uv: vec2<f32>, res: f32, world_xz: vec2<f32>) -> f32 {
+    return sample_height(uv, res) - deform_depth(world_xz);
+}
+
 // ── splat weights + procedural detail (P10.4) ────────────────────────────────
 
 fn load_weight(ij: vec2<i32>, res: f32) -> vec4<f32> {
@@ -245,8 +272,11 @@ fn vs(in: VIn) -> VOut {
     // vertex (snap uv to every-other vertex of this LOD). morph 0 → fine, 1 → coarse.
     let coarse_step = 2.0 / cells;
     let coarse_uv = round(uv / coarse_step) * coarse_step;
-    let h_fine = sample_height(uv, res);
-    let h_coarse = sample_height(coarse_uv, res);
+    // P22.1: both morph ends are read through `ground_height`, so a footprint
+    // survives the LOD blend instead of popping out of existence the moment a
+    // patch starts morphing toward its coarser grid.
+    let h_fine = ground_height(uv, res, in.o_span.xz + uv * span);
+    let h_coarse = ground_height(coarse_uv, res, in.o_span.xz + coarse_uv * span);
     let h = mix(h_fine, h_coarse, morph);
 
     // Render-local position: tile origin + planar offset + displaced height.
@@ -289,11 +319,20 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // Central-difference normal from the height texture (world-space gradient).
-    let hl = sample_height(in.uv - vec2<f32>(texel, 0.0), res);
-    let hr = sample_height(in.uv + vec2<f32>(texel, 0.0), res);
-    let hd = sample_height(in.uv - vec2<f32>(0.0, texel), res);
-    let hu = sample_height(in.uv + vec2<f32>(0.0, texel), res);
+    // Central-difference normal from the height texture (world-space gradient),
+    // through the SAME `ground_height` the vertex stage displaced with (P22.1) —
+    // so the shading follows the geometry into a footprint instead of lighting a
+    // dent as if it were flat. `uv + texel` is exactly `world_step` metres in x,
+    // which is why the neighbours' world positions come off `world_local`
+    // directly rather than being re-derived from the patch origin.
+    let hl = ground_height(in.uv - vec2<f32>(texel, 0.0), res,
+                           in.world_local.xz - vec2<f32>(world_step, 0.0));
+    let hr = ground_height(in.uv + vec2<f32>(texel, 0.0), res,
+                           in.world_local.xz + vec2<f32>(world_step, 0.0));
+    let hd = ground_height(in.uv - vec2<f32>(0.0, texel), res,
+                           in.world_local.xz - vec2<f32>(0.0, world_step));
+    let hu = ground_height(in.uv + vec2<f32>(0.0, texel), res,
+                           in.world_local.xz + vec2<f32>(0.0, world_step));
     let dhdx = (hr - hl) / (2.0 * world_step);
     let dhdz = (hu - hd) / (2.0 * world_step);
     let n = normalize(vec3<f32>(-dhdx, 1.0, -dhdz));
@@ -323,6 +362,19 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     let macro_fbm = 2.0 * fbm2(in.world_local.xz * 0.01) - 1.0;
     albedo = albedo * (1.0 + material.macro_amp.x * macro_fbm);
     albedo = clamp(albedo, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    // P22.1 COMPACTION DARKENING. Pressed ground is denser ground: the air is
+    // squeezed out of the snow, the mud closes over, and what light gets in
+    // scatters fewer times before it is absorbed. A single multiplicative term
+    // on the splat blend, at most −25% at full depth — deliberately NOT a second
+    // copy of the P20.3 wetness model, which is a different physical story (a
+    // film of water on top) with its own roughness term and its own uniform.
+    // `deform_depth` is 0 in every scene without deformation, so this is a
+    // multiply by 1 and every pre-P22.1 terrain golden stays byte-stable.
+    if (deform_enabled()) {
+        let pressed = clamp(deform_depth(in.world_local.xz) / max(dfm.params.y, 1e-4), 0.0, 1.0);
+        albedo = albedo * (1.0 - 0.25 * pressed);
+    }
     // ───────────────────────────────────────────────────────────────────────
 
     // Biomes view mode (P19.2): tint by the per-sample biome id instead of by the

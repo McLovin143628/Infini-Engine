@@ -15,6 +15,7 @@ pub mod caps;
 pub mod clouds;
 pub mod csm;
 pub mod debug_draw;
+pub mod deform;
 pub mod gi;
 pub mod gizmo;
 pub mod golden;
@@ -103,6 +104,13 @@ pub use water::{
     WaterKindGpu, WaterQuality, WaterSettings, WaterSurface, Wave, WaveField, WaveSpec, MAX_WAVES,
     OCEAN_EXTENT_M, OCEAN_SNAP_M, SHAFT_DECAY, SHAFT_GLOW_POWER, SHAFT_INTENSITY, SHAFT_REACH,
     SHAFT_TINT_DEPTH_M, UNDERWATER_FAR_M, UNDERWATER_RAMP_M,
+};
+// P22.1 surface deformation: the projected field, the camera-following window's
+// packing, and the engine constants argued in `deform.rs` rather than authored.
+pub use deform::{
+    deform_depth_reference, pack_deform_window, window_origin_texels, DeformResources,
+    DeformUniform, RenderDeform, RenderDeformCell, DEFORM_BEND_GAIN, DEFORM_MAX_DEPTH_M,
+    DEFORM_TEXEL_M, DEFORM_WINDOW_M, DEFORM_WINDOW_TEXELS, WIND_SWAY, WIND_WAVELENGTH_M,
 };
 // P20.3 shoreline wetness: the packing the renderer feeds the lit passes, and the
 // engine constants whose values are argued in `wetness.rs` rather than authored.
