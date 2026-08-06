@@ -580,6 +580,38 @@ Renormalizing the pair (`sqrt` is exactly specified, so still bit-portable) buys
 an exact isometry and leaves an *angle* error under 6e-8 rad. Any future feature
 that composes many portable-trig rotations needs the same treatment.
 
+## 7e. Addendum, the P23.5 audit — three things worth keeping
+
+The audit's fixes are in the ROADMAP's completion block. Three of them changed a
+*rule* rather than a line, and belong here.
+
+* **A gate that reads source must read a SCOPE, not a file.** The
+  replay-the-result gate banned the string `uv::unwrap` anywhere in `ops.rs` and
+  checked its positive halves with `.contains()` on the whole file. Both halves
+  were defeatable and one was defeated: a `pub fn recompute` wrapper re-solved on
+  replay with every test green, because the ban never saw the new spelling and the
+  positives were satisfied by unrelated lines. The rule that comes out of it is
+  narrow and reusable — **scope the read to the construct (brace-balance from its
+  own signature) and ban the MODULE rather than the function** — and it is now how
+  both source gates in this phase are written.
+* **A doctrine spread across N call sites needs a table, not N sentences.** The
+  settle/abandon rule was eleven hand-written statements over twenty commands, and
+  its cited test did not exist. What replaced it is a hand-written policy table
+  plus a source read that fails when a command is missing from it — so the
+  *default for a new door is "fails the build"* rather than "does not settle".
+  The same shape fits any rule of the form "every X must do Y unless it says
+  otherwise", and this codebase has several.
+* **A measurement can refuse a prescribed fix, and should.** The audit prescribed
+  reducing the rotation angle mod 2π. Measured across fifteen decades it improves
+  neither the collapse (the bound and the degenerate-pair refusal close that) nor
+  the accuracy (at 1e12 it is *worse*: 5.0e-5 against 3.4e-5), because at those
+  magnitudes the error is the input's own resolution and no reduction recovers a
+  digit that was never stored. It is not in the tree, and the table is in the code
+  at the point where someone will next be tempted to add it. **`inf_math::psin64`
+  is a degree-11 polynomial; below 2^52 its pair never degenerates (worst
+  `|s, c|` = 0.968, swept), and past ~2e16 it is exactly zero — so the honest
+  interface is a bound plus a refusal, not a fold.**
+
 ## 8. Ledger — what this memo does NOT decide
 
 * ~~**The gizmo on component selections.**~~ **Built in P23.5** (§7d): the same

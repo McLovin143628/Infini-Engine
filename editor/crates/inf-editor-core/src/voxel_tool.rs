@@ -219,7 +219,7 @@ pub const MIN_DAB_SPACING_M: f64 = 0.05;
 /// polyline. The 2D function is the one that decides *where* the dabs fall; this
 /// one only decides what a distance means.
 pub fn dab_centers(path: &[DVec3], spacing: f64) -> Vec<DVec3> {
-    dab_centers_capped(path, spacing, usize::MAX)
+    inf_terrain::dab_positions_3d(path, spacing)
 }
 
 /// [`dab_centers`], **bounded before it allocates** — the door an interactive
@@ -236,89 +236,13 @@ pub fn dab_centers(path: &[DVec3], spacing: f64) -> Vec<DVec3> {
 ///
 /// Returns at most `max_dabs + 1` points (the first is the path's own start,
 /// which callers `skip`).
+///
+/// **The body moved to `inf_terrain` at P23.5** and this is now the Ring-1 door
+/// onto it. The P23.5 audit found the reason: `inf_dcc::sculpt` had grown a
+/// second lift of the same rule and the two had already drifted on a non-finite
+/// spacing. One resampler, two names, no drift.
 pub fn dab_centers_capped(path: &[DVec3], spacing: f64, max_dabs: usize) -> Vec<DVec3> {
-    if path.is_empty() {
-        return Vec::new();
-    }
-    if path.len() == 1 || spacing.is_nan() || spacing <= 0.0 || spacing.is_infinite() {
-        return path.to_vec();
-    }
-    // Trim the path to the arc length the cap allows, BEFORE resampling it.
-    let total: f64 = path
-        .windows(2)
-        .map(|w| (w[1] - w[0]).length())
-        .filter(|d| d.is_finite())
-        .sum();
-    let allowed = (max_dabs as f64).saturating_mul_f64(spacing);
-    if allowed < total {
-        let end = point_at_arc(path, allowed);
-        let mut trimmed: Vec<DVec3> = Vec::new();
-        let mut walked = 0.0;
-        trimmed.push(path[0]);
-        for w in path.windows(2) {
-            let seg = (w[1] - w[0]).length();
-            if !seg.is_finite() || seg <= 0.0 {
-                continue;
-            }
-            if walked + seg >= allowed {
-                break;
-            }
-            walked += seg;
-            trimmed.push(w[1]);
-        }
-        trimmed.push(end);
-        return dab_centers_unbounded(&trimmed, spacing);
-    }
-    dab_centers_unbounded(path, spacing)
-}
-
-/// A helper so `usize::MAX * spacing` cannot become `inf` and then `NaN`.
-trait SaturatingMulF64 {
-    fn saturating_mul_f64(self, rhs: f64) -> f64;
-}
-impl SaturatingMulF64 for f64 {
-    fn saturating_mul_f64(self, rhs: f64) -> f64 {
-        let v = self * rhs;
-        if v.is_finite() {
-            v
-        } else {
-            f64::MAX
-        }
-    }
-}
-
-fn dab_centers_unbounded(path: &[DVec3], spacing: f64) -> Vec<DVec3> {
-    // Cumulative arc length, as a degenerate 2D path along +X. `dab_positions`
-    // then does all the work.
-    let mut arc = Vec::with_capacity(path.len());
-    let mut total = 0.0;
-    arc.push(DVec2::ZERO);
-    for w in path.windows(2) {
-        let seg = (w[1] - w[0]).length();
-        total += if seg.is_finite() { seg } else { 0.0 };
-        arc.push(DVec2::new(total, 0.0));
-    }
-    inf_terrain::dab_positions(&arc, spacing)
-        .into_iter()
-        .map(|p| point_at_arc(path, p.x))
-        .collect()
-}
-
-/// The point `s` metres along the polyline `path`, clamped to its ends.
-fn point_at_arc(path: &[DVec3], s: f64) -> DVec3 {
-    let mut remaining = s.max(0.0);
-    for w in path.windows(2) {
-        let seg = w[1] - w[0];
-        let len = seg.length();
-        if !len.is_finite() || len <= 0.0 {
-            continue;
-        }
-        if remaining <= len {
-            return w[0] + seg * (remaining / len);
-        }
-        remaining -= len;
-    }
-    *path.last().unwrap_or(&DVec3::ZERO)
+    inf_terrain::dab_positions_3d_capped(path, spacing, max_dabs)
 }
 
 /// A **box cut** resolved against the ground it spans — a foundation pit.

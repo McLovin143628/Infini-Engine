@@ -17,6 +17,24 @@ export type DccUnwrapDto = { ok: boolean,
  */
 refusal: string | null, charts: number, corners: number, seams: number, 
 /**
- * The worst per-chart relative residual after the fixed CG iteration count.
+ * **How much the worst chart has to stretch** — a property of the geometry.
+ * Non-zero for a shape that is not developable, however well the solve went.
  */
-worstResidual: number, doc: DccDocDto, };
+worstResidual: number, 
+/**
+ * **Whether the solver finished** — a property of the solve, zero iff CG
+ * converged. Split from `worstResidual` because one number gave the same
+ * reading, and therefore the same advice, to opposite causes: a *failed* flat
+ * plane read 5.7e-2 and a *converged* saddle read 4.1e-2.
+ */
+worstConvergence: number, 
+/**
+ * Triangles whose UV winding opposes their chart's majority — **folds**. A
+ * converged, low-distortion unwrap can still overlap itself when a chart is
+ * not a disk, and this is the only number that sees it.
+ */
+flipped: number, 
+/**
+ * Triangles across all charts, so `flipped` has a denominator.
+ */
+triangles: number, doc: DccDocDto, };

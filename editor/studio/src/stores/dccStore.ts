@@ -190,14 +190,32 @@ export const useDccStore = create<DccState>((set, get) => {
     }
   };
 
+  /**
+   * Adopt a returned document and re-render whatever is on screen.
+   *
+   * **Both pictures, not just the 3D one.** The UV pane used to refresh only from
+   * a `useEffect` keyed on `doc.generation` — the JOURNAL stamp — and a selection
+   * change does not move it, so picking a different face left the UV view showing
+   * the previous selection. `doc.selected` could not have fixed it either: it is a
+   * COUNT, so face A and face B both read `1`. The coupling belongs here, where
+   * one place decides "the picture is stale", and it is keyed on `selectionRev`,
+   * a content revision of the set itself.
+   *
+   * The UV frame is only asked for once one has been asked for before: a document
+   * whose UV pane was never opened does not pay for it.
+   */
   const adopt = (assetId: string, doc: DccDocDto): void => {
+    const before = entry(assetId);
     patch(assetId, { doc });
     void pump(assetId);
+    const moved =
+      before.doc?.selectionRev !== doc.selectionRev || before.doc?.generation !== doc.generation;
+    if (before.uvImage && moved) void get().uvRefresh(assetId);
   };
 
   const applyResult = (assetId: string, res: DccApplyDto): void => {
-    patch(assetId, { doc: res.doc, refusal: res.ok ? null : res.refusal });
-    void pump(assetId);
+    patch(assetId, { refusal: res.ok ? null : res.refusal });
+    adopt(assetId, res.doc);
   };
 
   return {
@@ -372,6 +390,10 @@ export const useDccStore = create<DccState>((set, get) => {
       try {
         const res = await dccIpc.dragBegin(doc.id, drag, x, y, DCC_PREVIEW_SIZE);
         adopt(assetId, res.doc);
+        // A **miss** is silent — it becomes a camera orbit — but a **refusal** is
+        // a sentence. An author whose brush did nothing needs to know it was the
+        // radius, not wonder whether they missed the model.
+        patch(assetId, { refusal: res.refusal });
         return res.grabbed;
       } catch (e) {
         patch(assetId, { refusal: String(e) });

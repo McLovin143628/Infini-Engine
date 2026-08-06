@@ -63,6 +63,7 @@ function docOf(assetId: string, over: Partial<DccDocDto> = {}): DccDocDto {
     dragging: false,
     dragPoints: 0,
     gizmo: null,
+    selectionRev: 1,
     seams: 0,
     charts: 1,
     import: {
@@ -401,7 +402,12 @@ describe("pointer drags (P23.5)", () => {
     // The distinction the whole tool rests on: a pointer that found neither the
     // surface nor a handle is the panel's cue to ORBIT, and putting "missed" in
     // the status bar as a refusal would train an author to ignore that line.
-    mocked.dragBegin.mockResolvedValue({ grabbed: false, handle: null, doc: docOf("aaa") });
+    mocked.dragBegin.mockResolvedValue({
+      grabbed: false,
+      handle: null,
+      refusal: null,
+      doc: docOf("aaa"),
+    });
     return useDccStore
       .getState()
       .dragBegin("aaa", { kind: "sculpt", mode: "draw", radius: 0.3, strength: 0.05, falloff: "Smooth" }, 10, 20)
@@ -418,6 +424,7 @@ describe("pointer drags (P23.5)", () => {
     mocked.dragBegin.mockResolvedValue({
       grabbed: true,
       handle: "X",
+      refusal: null,
       doc: docOf("aaa", { dragging: true, dragPoints: 1 }),
     });
     const grabbed = await useDccStore
@@ -492,6 +499,9 @@ describe("UV (P23.5)", () => {
       corners: 24,
       seams: 12,
       worstResidual: 3.5e-12,
+      worstConvergence: 1.2e-15,
+      flipped: 0,
+      triangles: 24,
       doc: docOf("aaa", { seams: 12, charts: 6 }),
     });
     await useDccStore.getState().unwrap("aaa");
@@ -512,6 +522,9 @@ describe("UV (P23.5)", () => {
       corners: 0,
       seams: 4,
       worstResidual: 0,
+      worstConvergence: 0,
+      flipped: 0,
+      triangles: 0,
       doc: docOf("aaa"),
     });
     await useDccStore.getState().unwrap("aaa");
@@ -524,5 +537,86 @@ describe("UV (P23.5)", () => {
     expect(mocked.uvPreview).toHaveBeenCalledWith("dcc:aaa", 256);
     expect(entry("aaa").uvImage).toContain("UV");
     expect(entry("bbb").uvImage).toBeNull();
+  });
+});
+
+describe("the UV pane follows the selection, not only the journal (P23.5 audit M3)", () => {
+  beforeEach(async () => {
+    await useDccStore.getState().open("aaa");
+    vi.clearAllMocks();
+    mocked.preview.mockResolvedValue({ image: "data:image/png;base64,AA", error: null, size: 256 });
+    mocked.uvPreview.mockResolvedValue({
+      image: "data:image/png;base64,UV1",
+      error: null,
+      size: 256,
+    });
+    // The pane has been opened once, which is what makes it something to keep
+    // current. A document that never opened it does not pay for the refresh.
+    await useDccStore.getState().uvRefresh("aaa");
+    vi.clearAllMocks();
+  });
+
+  it("re-renders the UV frame when a pick changes the SELECTION", async () => {
+    // The defect: the pane keyed on `doc.generation`, the JOURNAL stamp, which a
+    // selection change does not move — so picking a different face left the UV
+    // view showing the previous one. `doc.selected` could not have fixed it
+    // either: it is a count, and face A and face B both read 1.
+    mocked.uvPreview.mockResolvedValue({
+      image: "data:image/png;base64,UV2",
+      error: null,
+      size: 256,
+    });
+    mocked.pick.mockResolvedValue(
+      docOf("aaa", { generation: 1, selected: 1, selectionRev: 999 }),
+    );
+    await useDccStore.getState().pick("aaa", 10, 10, false);
+    expect(mocked.uvPreview).toHaveBeenCalledTimes(1);
+    expect(entry("aaa").uvImage).toContain("UV2");
+  });
+
+  it("does not re-render when nothing about the document moved", async () => {
+    // The other half: a call that returns the same selection at the same
+    // generation must not cost a UV render. Without this the fix is "refresh
+    // always", which is a different defect.
+    mocked.select.mockResolvedValue(docOf("aaa", { generation: 1, selectionRev: 1 }));
+    await useDccStore.getState().select("aaa", { action: "grow" });
+    expect(mocked.uvPreview).not.toHaveBeenCalled();
+  });
+
+  it("re-renders when the journal moves, too", async () => {
+    mocked.apply.mockResolvedValue({
+      ok: true,
+      refusal: null,
+      doc: docOf("aaa", { generation: 42, selectionRev: 1 }),
+    });
+    await useDccStore.getState().apply("aaa", { tool: "subdivide" });
+    expect(mocked.uvPreview).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a drag REFUSAL while leaving a plain miss silent", async () => {
+    // A miss becomes a camera orbit and must not put anything in the status bar;
+    // a refusal — the brush radius below its floor — is a sentence, or the author
+    // is left wondering whether they missed the model.
+    mocked.dragBegin.mockResolvedValue({
+      grabbed: false,
+      handle: null,
+      refusal: null,
+      doc: docOf("aaa"),
+    });
+    await useDccStore
+      .getState()
+      .dragBegin("aaa", { kind: "sculpt", mode: "draw", radius: 0.3, strength: 0.05, falloff: "Smooth" }, 1, 1);
+    expect(entry("aaa").refusal).toBeNull();
+
+    mocked.dragBegin.mockResolvedValue({
+      grabbed: false,
+      handle: null,
+      refusal: "a brush radius of 0.000000000001 m is below the 0.001 m floor",
+      doc: docOf("aaa"),
+    });
+    await useDccStore
+      .getState()
+      .dragBegin("aaa", { kind: "sculpt", mode: "draw", radius: 1e-12, strength: 0.05, falloff: "Smooth" }, 1, 1);
+    expect(entry("aaa").refusal).toContain("below the 0.001 m floor");
   });
 });

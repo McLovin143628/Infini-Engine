@@ -60,15 +60,48 @@ use glam::DVec3;
 use crate::ops::{Op, OpError};
 use crate::topo::{FaceId, HalfId, Mesh, VertId};
 
-/// Conjugate-gradient iterations per chart. **Fixed, not tolerance-driven.**
+/// The **floor** on conjugate-gradient iterations per chart.
 ///
-/// A `while residual > tol` loop makes the iteration count depend on a floating
-/// comparison, and therefore makes the answer depend on rounding — on a solver
-/// whose output is committed content, that is the same class of hazard as a
-/// non-portable `sin`. 256 is comfortably past convergence for the chart sizes a
-/// panel-scale model produces (the residual on the fixtures here is below 1e-10);
-/// where it is not, the number is reported.
+/// The count is not a tolerance test — a `while residual > tol` loop makes the
+/// iteration count depend on a floating comparison and therefore makes the answer
+/// depend on rounding, which on committed content is the same class of hazard as
+/// a non-portable `sin`. It is [`cg_iterations`], an **integer function of the
+/// chart's size**, which keeps the determinism argument exactly as it was: two
+/// runs on the same mesh do the same number of iterations because they have the
+/// same number of unknowns.
+///
+/// # Why this stopped being the whole story
+///
+/// It was a flat 256, justified against the 4-to-16-vertex fixtures in this
+/// file's tests — and the P23.5 audit measured what that meant one toolbar button
+/// away. A plane subdivided five times is 1 089 vertices, which an author reaches
+/// by clicking Subdivide five times; at 256 iterations its residual was 5.7e-2,
+/// its edge lengths were wrong by 361%, and **two triangles were folded — on a
+/// flat square, whose exact conformal map is a similarity**. Six subdivisions
+/// folded 338. Every one of them converges to ~1e-14 by 1024.
+///
+/// A solver that silently folds geometry at a size its own UI can produce is not
+/// a slow solver, it is a wrong one, and reporting the residual does not fix it
+/// because the fold is already in the file.
 pub const CG_ITERATIONS: usize = 256;
+
+/// The **ceiling** on conjugate-gradient iterations per chart.
+///
+/// CG on `2n` unknowns terminates in at most `2n` steps in exact arithmetic, so
+/// `4n` is twice the theoretical bound and the cap is only reached by charts far
+/// past what this editor is for. It exists so a pathological mesh costs a bounded
+/// wait rather than an unbounded one.
+pub const CG_ITERATION_CAP: usize = 8192;
+
+/// Iterations for a chart with `free` unconstrained vertices — `4·free`, clamped
+/// between [`CG_ITERATIONS`] and [`CG_ITERATION_CAP`].
+///
+/// Integer arithmetic on a count, so it is a pure function of the mesh and not of
+/// a rounding: the determinism gates are unchanged by it.
+pub fn cg_iterations(free: usize) -> usize {
+    free.saturating_mul(4)
+        .clamp(CG_ITERATIONS, CG_ITERATION_CAP)
+}
 
 /// The gap left between packed charts, as a fraction of the packed square.
 ///
@@ -88,17 +121,49 @@ pub struct ChartReport {
     /// The two vertices pinned to fix the null space, in the order they were
     /// pinned — see [`pin_pair`] for the rule.
     pub pinned: [VertId; 2],
-    /// `‖Ax − b‖ / ‖b‖` after [`CG_ITERATIONS`]. Reported, never hidden.
+    /// **How distorted the chart is**: `‖Ax − b‖ / ‖b‖` of the conformal system.
+    ///
+    /// Zero for a developable chart mapped perfectly; non-zero for a chart that
+    /// *cannot* be flattened without stretching, however well the solver did. A
+    /// saddle at its own optimum reads ~4e-2 and there is nothing wrong with it.
     pub residual: f64,
+    /// **Whether the solve finished**: `‖MᵀMx − Mᵀb‖ / ‖Mᵀb‖`, the residual of
+    /// the normal equations, which goes to zero **iff** CG converged — regardless
+    /// of how flattenable the chart was.
+    ///
+    /// The two numbers were one field until the P23.5 audit, and conflating them
+    /// gave the same reading to opposite causes: a *failed* flat plane read 5.7e-2
+    /// and a *converged* saddle read 4.1e-2, so the panel offered the same advice
+    /// for "the solver stopped early" and "this shape is not developable". Split,
+    /// each one answers its own question.
+    pub convergence: f64,
+    /// **Triangles whose UV winding is opposite the chart's majority** — the
+    /// fold count.
+    ///
+    /// A conformal solve can converge perfectly on a chart that is not a disk and
+    /// hand back a parameterization that overlaps itself; the residual cannot see
+    /// it, because an overlapping map can be a genuine least-squares optimum.
+    /// Measured on this crate's own seam recipe: a cylinder folds 20 triangles and
+    /// a torus **285 of 576**. Counted rather than refused — the author's next
+    /// move is another seam, and refusing the unwrap would take away the picture
+    /// that shows them where to put it.
+    pub flipped: usize,
+    /// Triangles in the chart, so `flipped` has a denominator.
+    pub triangles: usize,
 }
 
 /// What an unwrap did.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct UnwrapReport {
     pub charts: Vec<ChartReport>,
-    /// The worst per-chart residual — the one number that answers "did the solve
-    /// actually converge".
+    /// The worst per-chart [`ChartReport::residual`] — how badly the *worst* chart
+    /// has to stretch. A property of the geometry, not of the solver.
     pub worst_residual: f64,
+    /// The worst per-chart [`ChartReport::convergence`] — whether the *solver*
+    /// finished. A property of the solver, not of the geometry.
+    pub worst_convergence: f64,
+    /// Folded triangles across every chart (see [`ChartReport::flipped`]).
+    pub flipped: usize,
     /// Corners written.
     pub corners: usize,
     /// Seam edges the charts were cut along.
@@ -258,7 +323,8 @@ fn local_frame(mesh: &Mesh, t: [VertId; 3]) -> Option<[DVec2; 3]> {
 
 /// Solve one chart's LSCM system.
 ///
-/// Returns `(uv per chart vertex, residual)`. The system is built as `M x = r`
+/// Returns `(uv per chart vertex, distortion residual, convergence residual)`.
+/// The system is built as `M x = r`
 /// with `x` the `2·free` unknowns; the pinned columns move to the right-hand
 /// side, and it is solved in the least-squares sense by conjugate gradient on the
 /// normal equations `MᵀM x = Mᵀr`. `MᵀM` is never formed: CG only needs the
@@ -270,7 +336,7 @@ fn solve_chart(
     tris: &[[VertId; 3]],
     verts: &BTreeSet<VertId>,
     pins: [VertId; 2],
-) -> Option<(BTreeMap<VertId, DVec2>, f64)> {
+) -> Option<(BTreeMap<VertId, DVec2>, f64, f64)> {
     // Deterministic indexing: ascending vertex id, pinned vertices excluded.
     let free: Vec<VertId> = verts
         .iter()
@@ -373,7 +439,7 @@ fn solve_chart(
         let mut r = b.clone();
         let mut p = r.clone();
         let mut rs = dot(&r, &r);
-        for _ in 0..CG_ITERATIONS {
+        for _ in 0..cg_iterations(n) {
             if !(rs.is_finite() && rs > 0.0) {
                 break;
             }
@@ -397,19 +463,37 @@ fn solve_chart(
             }
             rs = rs_new;
         }
-        // The reported residual is of the ORIGINAL system `M x = rhs`, not of the
-        // normal equations: `‖MᵀM x − Mᵀb‖` can be tiny while the map is badly
-        // distorted, and the number an author reads has to be about the thing
-        // they can see.
+        // **Two residuals, because there are two questions.**
+        //
+        // `residual` is of the ORIGINAL system `M x = rhs`: how far the map is
+        // from conformal, i.e. how much this chart has to stretch. It is what an
+        // author can see, and it is non-zero for a shape that simply is not
+        // developable however perfectly the solve went.
+        //
+        // `convergence` is of the NORMAL equations `MᵀM x = Mᵀb`, whose residual
+        // goes to zero if and only if CG finished — regardless of how
+        // flattenable the chart was. Until the P23.5 audit only the first was
+        // reported, and the two failures it cannot tell apart were measured: a
+        // *failed* flat plane read 5.7e-2 and a *converged* saddle read 4.1e-2,
+        // and the panel gave the same advice for both.
+        let relative = |num: f64, den: f64| if den > 1e-300 { num / den } else { num };
+        let norm = |v: &[f64]| v.iter().map(|x| x * x).sum::<f64>().sqrt();
         let ax = mul(&x);
-        let num: f64 = ax
-            .iter()
-            .zip(&rhs)
-            .map(|(a, b)| (a - b) * (a - b))
-            .sum::<f64>()
-            .sqrt();
-        let den: f64 = rhs.iter().map(|b| b * b).sum::<f64>().sqrt();
-        let residual = if den > 1e-300 { num / den } else { num };
+        let residual = relative(
+            norm(&ax.iter().zip(&rhs).map(|(a, b)| a - b).collect::<Vec<_>>()),
+            norm(&rhs),
+        );
+        let normal = mul_t(&ax);
+        let convergence = relative(
+            norm(
+                &normal
+                    .iter()
+                    .zip(&b)
+                    .map(|(a, c)| a - c)
+                    .collect::<Vec<_>>(),
+            ),
+            norm(&b),
+        );
         if !x.iter().all(|c| c.is_finite()) {
             return None;
         }
@@ -417,10 +501,37 @@ fn solve_chart(
         for (i, &v) in free.iter().enumerate() {
             uv.insert(v, DVec2::new(x[2 * i], x[2 * i + 1]));
         }
-        return Some((uv, residual));
+        return Some((uv, residual, convergence));
     }
 
-    Some((pinned, 0.0))
+    Some((pinned, 0.0, 0.0))
+}
+
+/// **Triangles whose UV winding opposes the chart's majority** — the folds.
+///
+/// The sign of the 2D cross product (`perp_dot`) of each triangle's UV edges is
+/// its winding; a chart that lays down flat has one sign throughout. The majority
+/// is the reference rather than a fixed orientation, because LSCM's null space
+/// includes a reflection and a chart mirrored as a whole is not folded.
+///
+/// Zero-area UV triangles are counted as neither: they have no winding to
+/// disagree with, and calling them folds would report a fold on every degenerate
+/// sliver a legal mesh is allowed to contain.
+fn count_flipped(tris: &[[VertId; 3]], uv: &BTreeMap<VertId, DVec2>) -> usize {
+    let signed = |t: &[VertId; 3]| -> Option<f64> {
+        let (a, b, c) = (uv.get(&t[0])?, uv.get(&t[1])?, uv.get(&t[2])?);
+        let v = (*b - *a).perp_dot(*c - *a);
+        v.is_finite().then_some(v)
+    };
+    let (mut pos, mut neg) = (0usize, 0usize);
+    for t in tris {
+        match signed(t) {
+            Some(v) if v > 0.0 => pos += 1,
+            Some(v) if v < 0.0 => neg += 1,
+            _ => {}
+        }
+    }
+    pos.min(neg)
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -544,17 +655,24 @@ pub fn unwrap(mesh: &Mesh) -> Result<Unwrapped, OpError> {
                       pair to pin",
             });
         };
-        let Some((uv, residual)) = solve_chart(mesh, &tris, &verts, pins) else {
+        let Some((uv, residual, convergence)) = solve_chart(mesh, &tris, &verts, pins) else {
             return Err(OpError::DegenerateChart {
                 chart: ci,
                 why: "the conformal solve produced a non-finite coordinate",
             });
         };
+        // Counted BEFORE packing: packing translates and scales uniformly, which
+        // cannot change a winding, but counting on the solver's own output keeps
+        // the number a statement about the solve.
+        let flipped = count_flipped(&tris, &uv);
         reports.push(ChartReport {
             faces: faces.len(),
             verts: verts.len(),
             pinned: pins,
             residual,
+            convergence,
+            flipped,
+            triangles: tris.len(),
         });
         per_chart.push(uv);
     }
@@ -580,15 +698,19 @@ pub fn unwrap(mesh: &Mesh) -> Result<Unwrapped, OpError> {
         }
     }
 
-    let worst = reports
-        .iter()
-        .map(|r| r.residual)
-        .fold(0.0f64, |a, b| if b > a { b } else { a });
+    let worst = |f: fn(&ChartReport) -> f64| {
+        reports
+            .iter()
+            .map(f)
+            .fold(0.0f64, |a, b| if b > a { b } else { a })
+    };
     let report = UnwrapReport {
         corners: corners.len(),
         seams: seam_count(mesh),
+        worst_residual: worst(|r| r.residual),
+        worst_convergence: worst(|r| r.convergence),
+        flipped: reports.iter().map(|r| r.flipped).sum(),
         charts: reports,
-        worst_residual: worst,
     };
     Ok(Unwrapped {
         op: Op::Unwrap {
@@ -601,7 +723,7 @@ pub fn unwrap(mesh: &Mesh) -> Result<Unwrapped, OpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build::{cube, plane};
+    use crate::build::{cube, cylinder, plane};
     use crate::journal::MeshSession;
     use crate::ops::apply;
     use crate::topo::CornerData;
@@ -1191,6 +1313,108 @@ mod tests {
             after.vertex_count(),
             "every tangent must have moved off the constant"
         );
+    }
+
+    /// A plane subdivided `n` times — the shape a toolbar reaches by clicking
+    /// Subdivide `n` times, and the fixture the B1 blocker was measured on.
+    fn subdivided_plane(n: usize) -> Mesh {
+        let mut m = plane(2.0);
+        for _ in 0..n {
+            let faces: Vec<FaceId> = m.face_ids().collect();
+            apply(&mut m, &Op::SubdivideFaces { faces }).expect("subdivides");
+        }
+        m
+    }
+
+    #[test]
+    fn the_solver_converges_at_the_sizes_a_toolbar_can_reach() {
+        // **B1.** A flat square's exact conformal map is a similarity, so the
+        // residual, the fold count and the convergence must ALL be ~0 whatever
+        // its density — and at a flat 256 iterations they were not: 1 089
+        // vertices gave a 5.7e-2 residual, 361% edge error and TWO FOLDED
+        // TRIANGLES on a flat square, and 4 225 vertices folded 338. A solver
+        // that folds geometry at a size its own UI produces in five clicks is not
+        // slow, it is wrong.
+        for n in [4usize, 5, 6] {
+            let m = subdivided_plane(n);
+            let verts = m.vert_count();
+            let out = unwrap(&m).expect("a flat plane unwraps");
+            let c = &out.report.charts[0];
+            println!(
+                "subdivide x{n}: {verts} verts, {} tris, {} iters | residual {:.3e}                  convergence {:.3e} flipped {}",
+                c.triangles,
+                cg_iterations(c.verts.saturating_sub(2)),
+                c.residual,
+                c.convergence,
+                c.flipped
+            );
+            assert_eq!(
+                out.report.flipped, 0,
+                "x{n} ({verts} verts) folded {} triangles ON A FLAT SQUARE",
+                out.report.flipped
+            );
+            assert!(
+                out.report.worst_residual < 1e-6,
+                "x{n} ({verts} verts) residual {:.3e}",
+                out.report.worst_residual
+            );
+            assert!(
+                out.report.worst_convergence < 1e-6,
+                "x{n} ({verts} verts) convergence {:.3e}",
+                out.report.worst_convergence
+            );
+        }
+    }
+
+    #[test]
+    fn the_iteration_count_is_an_integer_function_of_the_chart() {
+        // The determinism argument, unchanged by making the count adaptive: it is
+        // integer arithmetic on a count, not a tolerance test on a float.
+        assert_eq!(cg_iterations(0), CG_ITERATIONS, "the floor holds");
+        assert_eq!(
+            cg_iterations(10),
+            CG_ITERATIONS,
+            "small charts take the floor"
+        );
+        assert_eq!(cg_iterations(1_000), 4_000);
+        assert_eq!(
+            cg_iterations(usize::MAX),
+            CG_ITERATION_CAP,
+            "and it saturates"
+        );
+        const { assert!(CG_ITERATION_CAP >= CG_ITERATIONS) };
+    }
+
+    #[test]
+    fn a_chart_that_cannot_lie_flat_is_counted_rather_than_called_converged() {
+        // **M4/M5.** A cylinder cut only at its rim is a tube: conformal, but not
+        // a disk, so the solve converges and the map still overlaps itself. The
+        // fold count is the only signal that sees it, and the two residuals have
+        // to disagree — convergence low, distortion not — or the panel gives the
+        // same advice for "the solver stopped early" and "this shape is not
+        // developable".
+        let m = cylinder(1.0, 2.0, 12);
+        let out = unwrap(&m).expect("unwraps");
+        println!(
+            "cylinder: charts {} residual {:.3e} convergence {:.3e} flipped {}/{}",
+            out.report.charts.len(),
+            out.report.worst_residual,
+            out.report.worst_convergence,
+            out.report.flipped,
+            out.report.charts.iter().map(|c| c.triangles).sum::<usize>()
+        );
+        assert!(
+            out.report.flipped > 0,
+            "a tube cannot lie flat; nothing detected the fold"
+        );
+        assert!(
+            out.report.worst_convergence < 1e-6,
+            "…and the SOLVER finished: {:.3e}",
+            out.report.worst_convergence
+        );
+        // The flat control: same code path, nothing folded, both numbers ~0.
+        let flat = unwrap(&subdivided_plane(2)).expect("unwraps");
+        assert_eq!(flat.report.flipped, 0);
     }
 
     #[test]

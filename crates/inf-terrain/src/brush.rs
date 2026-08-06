@@ -16,7 +16,7 @@
 //! A [`Stroke`] merges the dabs of one mouse-down→up gesture into a single
 //! [`HeightDelta`] (before = first touch, after = final).
 
-use glam::DVec2;
+use glam::{DVec2, DVec3};
 
 use crate::data::TerrainData;
 use crate::delta::{DeltaBuilder, HeightDelta};
@@ -465,4 +465,117 @@ pub fn dab_positions(path: &[DVec2], spacing: f64) -> Vec<DVec2> {
         carry = len - (t - spacing); // leftover past the last dab on this segment
     }
     out
+}
+
+// ── the 3D resampler (hoisted to Ring 0, P23.5 audit) ──────────────────────
+
+/// Resample a **3D** drag path at even arc length — [`dab_positions`] lifted off
+/// the XZ plane.
+///
+/// # Why this lives here and not beside its callers
+///
+/// It had two callers before it had a home: `inf_editor_core::voxel_tool`
+/// (P21.2's carve brush) and `inf_dcc::sculpt` (P23.5's mesh brush). Both needed
+/// "the same spacing rule as the terrain brush, in three dimensions", and both
+/// wrote their own lift — which is how two resamplers come to disagree, and they
+/// already had: one returned the whole path for a non-finite spacing and the
+/// other returned its first point. Hoisting it into the crate that owns
+/// [`dab_positions`] makes the spacing rule, the carry across segments and the
+/// boundary conventions **one function with one set of tests**, and leaves each
+/// caller owning only what a distance means to it.
+///
+/// The path is flattened onto its own arc-length axis, handed to
+/// [`dab_positions`], and the answers are lifted back onto the polyline. The 2D
+/// function decides *where* the dabs fall; this one only decides how far apart
+/// two 3D points are.
+pub fn dab_positions_3d(path: &[DVec3], spacing: f64) -> Vec<DVec3> {
+    dab_positions_3d_capped(path, spacing, usize::MAX)
+}
+
+/// [`dab_positions_3d`], **bounded before it allocates** — the door an
+/// interactive brush uses (the P21.3 audit's rule).
+///
+/// A `.take(n)` on the full list is a *filter*, not a bound: the whole list is
+/// built first. At a small radius a drag of a metre asks for tens of thousands of
+/// points, and at a very small one for enough to exhaust memory — taking the
+/// unsaved session with it. So the **path** is trimmed to `max_dabs · spacing` of
+/// arc length before the resampler ever sees it, and the remainder is carried by
+/// the caller (a brush resumes from the last dab actually placed; a one-shot
+/// stroke reports the truncation).
+///
+/// Returns at most `max_dabs + 1` points — the first is the path's own start.
+pub fn dab_positions_3d_capped(path: &[DVec3], spacing: f64, max_dabs: usize) -> Vec<DVec3> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    if path.len() == 1 || !spacing.is_finite() || spacing <= 0.0 {
+        return path.to_vec();
+    }
+    let total: f64 = path
+        .windows(2)
+        .map(|w| (w[1] - w[0]).length())
+        .filter(|d| d.is_finite())
+        .sum();
+    let allowed = {
+        // `usize::MAX * spacing` must not become `inf` and then `NaN`.
+        let v = max_dabs as f64 * spacing;
+        if v.is_finite() {
+            v
+        } else {
+            f64::MAX
+        }
+    };
+    if allowed < total {
+        let end = point_at_arc(path, allowed);
+        let mut trimmed: Vec<DVec3> = vec![path[0]];
+        let mut walked = 0.0;
+        for w in path.windows(2) {
+            let seg = (w[1] - w[0]).length();
+            if !seg.is_finite() || seg <= 0.0 {
+                continue;
+            }
+            if walked + seg >= allowed {
+                break;
+            }
+            walked += seg;
+            trimmed.push(w[1]);
+        }
+        trimmed.push(end);
+        return resample_3d(&trimmed, spacing);
+    }
+    resample_3d(path, spacing)
+}
+
+fn resample_3d(path: &[DVec3], spacing: f64) -> Vec<DVec3> {
+    // Cumulative arc length, as a degenerate 2D path along +X. `dab_positions`
+    // then does all the work.
+    let mut arc = Vec::with_capacity(path.len());
+    let mut total = 0.0;
+    arc.push(DVec2::ZERO);
+    for w in path.windows(2) {
+        let seg = (w[1] - w[0]).length();
+        total += if seg.is_finite() { seg } else { 0.0 };
+        arc.push(DVec2::new(total, 0.0));
+    }
+    dab_positions(&arc, spacing)
+        .into_iter()
+        .map(|p| point_at_arc(path, p.x))
+        .collect()
+}
+
+/// The point `s` metres along the polyline `path`, clamped to its ends.
+fn point_at_arc(path: &[DVec3], s: f64) -> DVec3 {
+    let mut remaining = s.max(0.0);
+    for w in path.windows(2) {
+        let seg = w[1] - w[0];
+        let len = seg.length();
+        if !len.is_finite() || len <= 0.0 {
+            continue;
+        }
+        if remaining <= len {
+            return w[0] + seg * (remaining / len);
+        }
+        remaining -= len;
+    }
+    *path.last().unwrap_or(&DVec3::ZERO)
 }

@@ -7489,12 +7489,78 @@ and the headless preview render is the proven offscreen-PNG path.
   base past 4 000 vertices.
   Tests: inf-dcc **204** (184 lib + 10 property + 8 determinism-law + 2 fracture),
   inf-editor-core `dcc` **31**, inf-studio **14**, frontend **363**.
+  **AUDIT FIXES (2026-08-05)** — one blocker and eight majors, all measured:
+  **B1, the solver under-converged at panel-reachable sizes and silently folded geometry.**
+  A plane plus five Subdivide clicks is 1 089 vertices; at the flat 256 iterations its residual
+  was 5.7e-2, its edges were wrong by 361%, and **two triangles were folded on a flat square**
+  whose exact conformal map is a similarity — six clicks folded 338. The count is now
+  `cg_iterations(free) = (4·free).clamp(256, 8192)`, integer arithmetic on a count so the
+  determinism argument is untouched; measured after: ×5 residual **3.3e-14** and ×6 **1.2e-13**,
+  both with **zero** folds.
+  **The rotation collapse.** Past ~2e16 `psin64` and `pcos64` both return exactly zero and
+  Rodrigues becomes an **axis projection** — finite, accepted, `validate` green (it audits
+  topology, not geometry), and a quad returned collinear from a public op that rides in a
+  session save. Closed by `MAX_ROTATION_RADIANS` (2^52, past which an `f64` has less than one
+  radian of resolution) **and** by making the degenerate `s²+c²` pair a refusal rather than a
+  fallthrough. The audit also prescribed a `mod 2π` fold, and **the measurement refused it**:
+  across `[6.5, 4.5e15]` the fold moves the angle error around without removing it (1e12:
+  3.4e-5 raw vs 5.0e-5 folded) because at those magnitudes the error *is* the input's own
+  resolution. It improves only `|s²+c²|−1`, which the renormalization already fixes — so it is
+  not in the tree, and the reasoning is in the code where the next reader will meet it.
+  **The dab explosion.** `stroke_dabs` had no radius floor and sat *ahead* of the kernel's
+  guards: a 1 m drag at 0.1 mm asked for 40 000 dabs (a ~3 MB journal entry inside the document
+  lock) and at 1e-12 m for 1.2e13 pushes — an OOM abort taking the unsaved session. Fixed with
+  `MIN_BRUSH_RADIUS_M` (1 mm, a refusal-as-value at the door) and `MAX_STROKE_DABS` (4096,
+  bounding the **path** before the resampler allocates — the P21.3 rule). The two constants are
+  one decision and a test pins their relationship: at the floor the cap covers 1.02 m of drag.
+  **The dab_positions duplicate is gone.** `inf_dcc` and `inf_editor_core::voxel_tool` had each
+  written their own lift of the terrain resampler — "deliberately the same algorithm", no gate,
+  and **already drifted** on a non-finite spacing. The 3D resampler is now
+  `inf_terrain::dab_positions_3d{,_capped}` and both callers are one line.
+  **Gates that did not reach.** The replay-the-result source gate banned one *spelling* and
+  checked its positives against the whole file — a `pub fn recompute` wrapper re-solved on
+  replay with 208/208 green; it now reads the **arm** (brace-balanced) and bans the **module**.
+  The settle/abandon doctrine was eleven prose statements over twenty commands and its cited
+  test **did not exist**; there is now a source-read policy table where a new door fails until
+  it chooses, and the cited test is real. The radius floor lived in a `#[tauri::command]`, where
+  deleting it failed nothing — it moved to Ring 1 (`dcc::begin_stroke`), the same finding and
+  the same fix as P23.4's save. Grab's influence-at-first-dab was ungated (the old test dragged
+  *perpendicular*, so the nearest vertex never changed); a lateral-drag gate now catches the
+  region walking.
+  **Honest verdicts.** `worstResidual` conflated "the solver stopped early" with "this shape is
+  not developable" — a failed flat plane read 5.7e-2 and a converged saddle 4.1e-2, same number,
+  same advice, opposite causes. Split into `residual` (distortion) and `convergence` (the normal
+  equations, zero iff CG finished), plus a per-chart **fold count**: nothing detected a
+  non-disk chart, and with this crate's own seam recipe a cylinder folds 16 of 44 triangles and
+  a torus 285 of 576. All three are on the wire and in the panel with advice that differs.
+  **M6, corroborated and capped.** One op per distinct weight was 105 journal ops per drag on a
+  289-vertex plane — about three full mesh clones at `CHECKPOINT_INTERVAL = 32`, evicting the
+  entire eight-slot checkpoint history — and the gate asserted `ops.len() > 1`, naming the defect
+  as a feature. Weights quantize to 1/64, capping a drag at 64 ops (measured 45 on a jittered
+  289-vertex mesh, 24 on a regular grid), and the gate asserts the **cap**. The real fix — a
+  weight table on a `Sculpt`-shaped transform op — is ledgered for the day sessions persist and
+  the wire has to move anyway.
+  **M3.** The UV pane keyed on the *journal* generation, which a selection change does not move,
+  so picking a different face never refreshed it — and `selected` is a count, so A→B both read
+  `1`. `DccDocDto::selectionRev` is a content **hash** (a counter can be forgotten by a new
+  mutation path; a hash cannot), and the store re-renders on it.
+  **Mirror ruling**: `Op::Mirror` does **not** refuse doubling a mesh that crosses its plane.
+  The runaway was a generator artefact — an author presses it once and gets one undo step — a
+  straddling mesh is the ordinary case to mirror, and the check would have to be geometric
+  beside a weld whose whole correctness rests on `2d − d == d` being exact. The battery stays
+  bounded; the op is unchanged.
+  Tests after the audit: inf-dcc **219**, inf-editor-core `dcc` **36**, inf-studio **15**,
+  inf-terrain **258**, frontend **367**.
   **Carried remainders**: the brush ring is drawn only *during* a stroke (a hover ring needs a
   pointer-move round trip the panel does not make); the sculpt seed is the nearest **vertex**,
   not the exact surface point; **UV editing in the 2D view is read-only** — vertex dragging in
   UV space is not built, and seam marking happens in the 3D view; the unwrap has no per-chart
-  re-solve, no angle-based auto-seaming and no rotation-to-minimal-bbox before packing;
-  a rotate gizmo has no on-screen angle readout; and P23.4's remainders all still stand.
+  re-solve, no angle-based auto-seaming and no rotation-to-minimal-bbox before packing; **a
+  soft drag is still one op per weight-bucket** (capped at 64, not collapsed to one — the
+  weight-table op is the real fix); a rotate gizmo has no on-screen angle readout; and P23.4's
+  remainders all still stand. **Worktree constraint**: `determinism_law` bakes
+  `CARGO_MANIFEST_DIR` at compile time (as `include_str!` must), so this crate's tests have to
+  be built and run in the same worktree — documented on the gate rather than worked around.
 - **P23.6 Asset round-trip** — 1. edited meshes save through the asset DB (dependency events
   already live-update referencing scenes); 2. "Edit Mesh" from the Content Drawer context menu;
   3. vgeom rebuild on save via the P18.3 machinery.

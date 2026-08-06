@@ -1592,6 +1592,31 @@ fn average_corner(corners: &[CornerData]) -> CornerData {
 /// A seam edge that already has a face on both sides is a genuine
 /// non-manifoldness — mirroring a closed solid that straddles the plane is not a
 /// thing — and comes back as [`OpError::EdgeAlreadyFaced`], inert.
+///
+/// # Ruling: mirroring a mesh that crosses its own plane is NOT refused
+///
+/// P23.5's property battery found a runaway — repeated mirrors of a mesh the
+/// transform ops had pushed off the plane doubled it to 6.6 million vertices —
+/// and the obvious reading is that this op should refuse to double a mesh that
+/// straddles its plane. It does not, and the reason is that the runaway was a
+/// **generator** artefact rather than a product hazard:
+///
+/// * an author presses Mirror deliberately, once, and gets **one undo step** for
+///   it; a script presses it forty times because it is picking uniformly from an
+///   enum;
+/// * a mesh that crosses the plane is a legal and ordinary thing to mirror — a
+///   symmetric prop modelled a hair over the line is the common case, not the
+///   pathological one — and refusing it would make the tool useless exactly when
+///   an author needs it most;
+/// * the check would have to be geometric ("does any vertex lie on the far
+///   side"), and this op's own correctness argument rests on staying arithmetic:
+///   the weld fires because `2d − d == d` exactly, and a geometric predicate
+///   beside it is a second, fuzzier answer to "is this vertex on the plane".
+///
+/// So the *battery* is bounded (it restarts from the base past 4 000 vertices)
+/// and the *op* is unchanged. What an author gets from a mistaken mirror is a
+/// mesh twice the size and Ctrl+Z; what they would have got from a refusal is a
+/// tool that says no to the model they are actually building.
 pub(crate) fn mirror(mesh: &mut Mesh, axis: MirrorAxis, coord: f64) -> Result<OpOutcome, OpError> {
     finite("a mirror plane coordinate", &[coord])?;
     let ax = axis.index();

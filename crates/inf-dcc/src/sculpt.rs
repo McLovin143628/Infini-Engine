@@ -122,45 +122,57 @@ impl SculptFalloff {
 /// one place and drill a hole.
 pub const DAB_SPACING_FRACTION: f64 = 0.25;
 
+/// **The most dabs one stroke may carry.**
+///
+/// A stroke is `O(dabs × local Dijkstra)` to apply and rides in the journal as
+/// data, so an unbounded count is two failures at once: a UI freeze inside the
+/// document lock, and a journal entry the size of the drag. The P23.5 audit
+/// measured both — a 1 m drag at a 0.1 mm radius asked for 40 000 dabs and a
+/// ~3 MB entry, and at 1e-12 m for 1.2e13 pushes, i.e. an out-of-memory abort
+/// taking the unsaved session with it.
+///
+/// 4096 is chosen against [`MIN_BRUSH_RADIUS_M`], not picked: at the radius floor
+/// the spacing is `0.25 × 1 mm`, so 4096 dabs cover **1.02 m** of drag — longer
+/// than any single gesture across a panel-scale model. The two numbers are one
+/// decision and the test that pins their relationship says so.
+pub const MAX_STROKE_DABS: usize = 4096;
+
+/// **The smallest brush radius a stroke may use**, metres.
+///
+/// The floor that makes [`MAX_STROKE_DABS`] unreachable in the product rather
+/// than merely survivable: a radius arrives over the IPC bridge as an `f64` from
+/// a number box, and `1e-12` is one keystroke away from `1e-1`. One millimetre is
+/// already below the edge length of anything modelled at 1 world unit = 1 metre,
+/// so a brush smaller than this cannot reach a second vertex and has nothing to
+/// do — which is why refusing it costs an author nothing and is reported as a
+/// value rather than clamped (a clamp would silently sculpt at a radius they did
+/// not ask for).
+pub const MIN_BRUSH_RADIUS_M: f64 = 1.0e-3;
+
 /// Resample a drag path into evenly spaced dab centres: the first path point,
 /// then one every `spacing` metres of arc length.
 ///
-/// The 3D mirror of `inf_terrain::dab_positions`, and deliberately the same
-/// algorithm rather than a re-derivation — a brush that spaced its dabs
-/// differently from the terrain brush would feel different for no reason anyone
-/// could name. A non-positive `spacing` returns the path unchanged; an empty path
-/// returns empty.
+/// **A wrapper over [`inf_terrain::dab_positions_3d`], not a second copy of it.**
+/// It used to be a copy — "deliberately the same algorithm" — and the P23.5 audit
+/// found what a copy always becomes: the two had already drifted on a non-finite
+/// spacing, with no gate anywhere that compared them. The spacing rule, the carry
+/// across segments and the boundary conventions now live in the crate that owns
+/// the 2D brush, and this crate owns only the call.
 pub fn dab_positions(path: &[DVec3], spacing: f64) -> Vec<DVec3> {
-    if path.is_empty() {
-        return Vec::new();
-    }
-    if !(spacing.is_finite() && spacing > 0.0) {
-        return path.to_vec();
-    }
-    let mut out = vec![path[0]];
-    let mut carry = 0.0; // arc length already consumed since the last dab
-    for w in path.windows(2) {
-        let (a, b) = (w[0], w[1]);
-        let seg = b - a;
-        let len = seg.length();
-        if !(len.is_finite() && len > 0.0) {
-            continue;
-        }
-        let dir = seg / len;
-        let mut t = spacing - carry; // distance into this segment to the next dab
-        while t <= len {
-            out.push(a + dir * t);
-            t += spacing;
-        }
-        carry = len - (t - spacing); // leftover past the last dab on this segment
-    }
-    out
+    inf_terrain::dab_positions_3d(path, spacing)
 }
 
-/// [`dab_positions`] at the brush's own spacing rule — the one door a caller
-/// should use, so "how far apart are dabs" has a single answer.
+/// [`dab_positions`] at the brush's own spacing rule and **bounded** — the one
+/// door a caller should use, so "how far apart are dabs" and "how many can there
+/// be" each have a single answer.
+///
+/// Bounded *before it allocates* (the P21.3 rule): the path is trimmed to the arc
+/// length [`MAX_STROKE_DABS`] allows and the resampler never sees the rest. A
+/// stroke long enough to hit the cap therefore paints its **beginning** and drops
+/// its tail — visibly short, which an author can see and repeat, rather than an
+/// allocation that ends the session.
 pub fn stroke_dabs(path: &[DVec3], radius: f64) -> Vec<DVec3> {
-    dab_positions(path, radius * DAB_SPACING_FRACTION)
+    inf_terrain::dab_positions_3d_capped(path, radius * DAB_SPACING_FRACTION, MAX_STROKE_DABS)
 }
 
 /// Apply a whole stroke. Called by [`crate::ops::apply`] for
@@ -176,6 +188,19 @@ pub(crate) fn sculpt(
     if dabs.is_empty() {
         return Err(OpError::EmptyOperand {
             what: "a sculpt stroke's dab list",
+        });
+    }
+    // **The guard, as opposed to the floor.** `stroke_dabs` caps what the panel
+    // produces, but an `Op` is data — it arrives from a restored session or a
+    // caller that built one by hand — and every dab is a Dijkstra plus a
+    // neighbourhood write. Refused as a value, with the count, so the number is
+    // actionable rather than a hang.
+    if dabs.len() > MAX_STROKE_DABS {
+        return Err(OpError::CountOutOfRange {
+            what: "a sculpt stroke's dab count",
+            value: dabs.len().min(u32::MAX as usize) as u32,
+            min: 1,
+            max: MAX_STROKE_DABS as u32,
         });
     }
     for d in dabs {
@@ -470,6 +495,148 @@ mod tests {
         assert!(dab_positions(&[], 1.0).is_empty());
         assert_eq!(dab_positions(&path, 0.0), path);
         assert_eq!(stroke_dabs(&path, 8.0), dab_positions(&path, 2.0));
+    }
+
+    #[test]
+    fn a_tiny_radius_cannot_explode_the_dab_list() {
+        // **The explosion.** `stroke_dabs` sits in front of the kernel's guards
+        // and had no floor of its own: spacing is `0.25 × radius`, so a 1 m drag
+        // at a 0.1 mm radius asked for 40 000 dabs (a ~3 MB journal entry and
+        // tens of seconds inside the document lock) and at 1e-12 m for 1.2e13
+        // pushes — an allocation that ends the session with the author's unsaved
+        // work in it. NaN, zero and negative were all guarded; small-and-positive
+        // was not.
+        //
+        // The bound is on the PATH, before the resampler allocates, so the
+        // pathological case is cheap rather than merely survivable.
+        let path = vec![DVec3::ZERO, DVec3::new(1.0, 0.0, 0.0)];
+        for radius in [1.0e-4_f64, 1.0e-9, 1.0e-12, f64::MIN_POSITIVE] {
+            let t = std::time::Instant::now();
+            let dabs = stroke_dabs(&path, radius);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            assert!(
+                dabs.len() <= MAX_STROKE_DABS + 1,
+                "radius {radius:e} produced {} dabs",
+                dabs.len()
+            );
+            assert!(ms < 500.0, "radius {radius:e} took {ms:.1} ms");
+        }
+
+        // And the two constants are ONE decision: at the radius floor the cap
+        // covers more than a metre of drag, so a legal stroke never meets it.
+        let reach = MAX_STROKE_DABS as f64 * DAB_SPACING_FRACTION * MIN_BRUSH_RADIUS_M;
+        assert!(
+            reach > 1.0,
+            "the cap covers only {reach} m of drag at the radius floor"
+        );
+
+        // A stroke at the floor over a normal drag is untouched by the cap.
+        let normal = stroke_dabs(&[DVec3::ZERO, DVec3::new(0.05, 0.0, 0.0)], 0.02);
+        assert_eq!(normal.len(), 11, "one dab every 5 mm over 50 mm");
+    }
+
+    #[test]
+    fn the_kernel_refuses_an_op_carrying_more_dabs_than_the_cap() {
+        // The guard behind the floor: an `Op` is DATA — it arrives from a
+        // restored session or a caller that built one by hand — so the cap has to
+        // exist at the door that applies it, not only at the door that builds it.
+        let mut m = plane(2.0);
+        let before = m.encoded();
+        let op = Op::Sculpt {
+            mode: SculptMode::Draw,
+            dabs: vec![[0.0; 3]; MAX_STROKE_DABS + 1],
+            radius: 0.5,
+            strength: 0.1,
+            falloff: SculptFalloff::Smooth,
+        };
+        match crate::ops::apply(&mut m, &op) {
+            Err(OpError::CountOutOfRange {
+                what, value, max, ..
+            }) => {
+                assert_eq!(what, "a sculpt stroke's dab count");
+                assert_eq!(value as usize, MAX_STROKE_DABS + 1);
+                assert_eq!(max as usize, MAX_STROKE_DABS);
+            }
+            other => panic!("an oversized stroke was not refused: {other:?}"),
+        }
+        assert_eq!(m.encoded(), before, "and the refusal is inert");
+    }
+
+    #[test]
+    fn the_resampler_is_the_terrain_brushs_and_not_a_copy_of_it() {
+        // The "deliberately the same algorithm" claim, made checkable. It was a
+        // COPY, with no gate comparing the two, and the P23.5 audit found they had
+        // already drifted on a non-finite spacing. Now there is one function; this
+        // asserts the lift agrees with the 2D original on a planar path, which is
+        // the only case where both are defined.
+        let path2: Vec<glam::DVec2> = vec![
+            glam::DVec2::new(0.0, 0.0),
+            glam::DVec2::new(4.0, 0.0),
+            glam::DVec2::new(9.0, 0.0),
+        ];
+        let path3: Vec<DVec3> = path2.iter().map(|p| DVec3::new(p.x, 0.0, 0.0)).collect();
+        for spacing in [0.5_f64, 1.0, 2.5, 7.0] {
+            let want = inf_terrain::dab_positions(&path2, spacing);
+            let got = dab_positions(&path3, spacing);
+            assert_eq!(got.len(), want.len(), "spacing {spacing}");
+            for (a, b) in got.iter().zip(&want) {
+                assert!(
+                    (a.x - b.x).abs() < 1e-12,
+                    "spacing {spacing}: {a:?} vs {b:?}"
+                );
+            }
+        }
+        // The edge cases both functions have to agree on, including the one they
+        // had drifted on.
+        assert!(dab_positions(&[], 1.0).is_empty());
+        assert_eq!(dab_positions(&path3, 0.0), path3);
+        assert_eq!(dab_positions(&path3, f64::NAN), path3);
+        assert_eq!(dab_positions(&path3, -1.0), path3);
+    }
+
+    #[test]
+    fn a_grab_does_not_let_the_region_walk_across_the_model() {
+        // **The claim the ROADMAP, the memo and the commit all make**, and which
+        // nothing checked: grab fixes its influence at the FIRST dab, so the set
+        // that moves is the set that was under the pointer when the drag started.
+        //
+        // The gate it did not have: a *lateral* drag. The earlier test drags
+        // perpendicular to the surface, so the vertex nearest the dab never
+        // changes and a per-dab recompute is indistinguishable from the real
+        // thing. Dragging along the surface separates them — under a recompute
+        // the far end moves too, and the grabbed region has walked.
+        let mut m = grid(6);
+        let at = |m: &Mesh, x: f64, z: f64| {
+            m.vert_ids()
+                .find(|&v| {
+                    let p = position(m, v);
+                    (p.x - x).abs() < 1e-12 && (p.z - z).abs() < 1e-12
+                })
+                .expect("a grid vertex")
+        };
+        let (start, end) = (at(&m, 1.0, 3.0), at(&m, 5.0, 3.0));
+        let (p0, p1) = (position(&m, start), position(&m, end));
+        crate::ops::apply(
+            &mut m,
+            &Op::Sculpt {
+                mode: SculptMode::Grab,
+                dabs: vec![[1.0, 0.0, 3.0], [3.0, 0.0, 3.0], [5.0, 0.0, 3.0]],
+                radius: 0.9,
+                strength: 1.0,
+                falloff: SculptFalloff::Linear,
+            },
+        )
+        .expect("grabs");
+        let moved_start = (position(&m, start) - p0).length();
+        let moved_end = (position(&m, end) - p1).length();
+        assert!(
+            moved_start > 1e-9,
+            "the vertex the drag STARTED on did not move"
+        );
+        assert!(
+            moved_end < 1e-9,
+            "the grabbed region walked: the vertex under the drag's END moved by              {moved_end}, which is what recomputing the influence per dab does"
+        );
     }
 
     #[test]

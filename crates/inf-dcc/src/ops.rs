@@ -177,6 +177,17 @@ pub enum OpError {
     /// over a zero axis has a bug, and silently applying the identity hides it.
     #[error("a rotation axis must have a direction, got {axis:?}")]
     ZeroAxis { axis: [f64; 3] },
+    /// An angle so large that reducing it modulo 2π is no longer meaningful.
+    ///
+    /// Refused rather than reduced-anyway, because beyond `2^52` an `f64` has
+    /// less than one radian of resolution: the value is not an angle the author
+    /// expressed, it is a magnitude that happens to be stored in the field. The
+    /// P23.5 audit found what the alternative was — `psin64` and `pcos64` both
+    /// return exactly zero past ~2e16, so Rodrigues quietly became an **axis
+    /// projection**, every coordinate stayed finite, `validate` passed (it audits
+    /// topology, not geometry) and a quad came back collinear.
+    #[error("a rotation of {radians} rad is past the limit of ±{limit}; angles that large are not angles")]
+    AngleOutOfRange { radians: f64, limit: f64 },
     /// An unwrap could not parameterize a chart. Carries the chart's index and
     /// the reason, because "unwrap failed" on a 40-chart model is not actionable.
     #[error("chart {chart} cannot be unwrapped: {why}")]

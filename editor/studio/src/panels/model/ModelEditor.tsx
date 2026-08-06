@@ -70,6 +70,16 @@ import { cn } from "../../lib/utils";
  */
 type PointerTool = "select" | "sculpt" | "gizmo";
 
+/**
+ * The smallest brush radius the backend accepts, metres — mirrored from
+ * `inf_dcc::MIN_BRUSH_RADIUS_M`.
+ *
+ * A mirror rather than a fetched value because it is a *constant of the tool*,
+ * and the backend refuses below it regardless: this only stops the number box
+ * offering an author a radius that will be turned down.
+ */
+const MIN_BRUSH_RADIUS_M = 1e-3;
+
 /** What the pointer is doing between down and up. */
 interface DragState {
   x: number;
@@ -230,10 +240,15 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   // **The UV frame follows the journal.** Keyed on the generation stamp, which
   // is the one thing that moves when the mesh does — a `dirty` flag would miss an
   // undo, and refreshing on every render would re-render on every mouse move.
+  // Keyed on the journal stamp AND the selection revision: a pick does not move
+  // the journal, and `selected` is a count that reads `1` for two different
+  // one-face selections. The store re-renders on both too — this effect is what
+  // fills the pane the first time it is opened.
   const generation = doc?.generation;
+  const selectionRev = doc?.selectionRev;
   useEffect(() => {
     if (assetId && showUv && generation !== undefined) void uvRefresh(assetId);
-  }, [assetId, showUv, generation, uvRefresh]);
+  }, [assetId, showUv, generation, selectionRev, uvRefresh]);
 
   // ── the preview surface ──────────────────────────────────────────────────
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -577,7 +592,15 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
                 </button>
               ))}
             </div>
-            <Num label="Radius (m)" value={brushRadius} onChange={(v) => setBrushRadius(Math.max(1e-4, v))} />
+            {/* Clamped at the input to the backend's own floor, so the common
+                case is a number box that will not go below it rather than a
+                refusal after the fact. The backend still refuses — this is the
+                affordance, not the guard. */}
+            <Num
+              label="Radius (m)"
+              value={brushRadius}
+              onChange={(v) => setBrushRadius(Math.max(MIN_BRUSH_RADIUS_M, v))}
+            />
             <Num label="Strength" value={brushStrength} step={0.01} onChange={setBrushStrength} />
             <p className="text-[10px] leading-snug text-(--ink-text-dim)">
               Radius is <b>geodesic</b> metres — measured across the surface, so the brush
@@ -786,16 +809,45 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
               value={lastUnwrap.charts}
               good={lastUnwrap.ok}
             />
+            {/* Three numbers, three questions. Distortion is a property of the
+                shape, convergence of the solve, and folds of neither — a chart
+                can converge perfectly and still overlap itself. One number gave
+                the same advice for all three. */}
             <Verdict
-              label="Residual"
+              label="Stretch"
               value={lastUnwrap.worstResidual.toExponential(1)}
               good={lastUnwrap.worstResidual < 1e-4}
             />
-            {lastUnwrap.worstResidual >= 1e-4 && (
+            <Verdict
+              label="Converged"
+              value={lastUnwrap.worstConvergence.toExponential(1)}
+              good={lastUnwrap.worstConvergence < 1e-6}
+            />
+            <Verdict
+              label="Folded tris"
+              value={`${lastUnwrap.flipped} / ${lastUnwrap.triangles}`}
+              good={lastUnwrap.flipped === 0}
+            />
+            {lastUnwrap.worstConvergence >= 1e-6 && (
+              <p className="rounded bg-(--ink-warn-bg,#3a2a12) p-1 text-[10px] leading-snug text-(--ink-warn,#ffb454)">
+                The solver did not finish on this mesh. The layout below is not the
+                answer it was converging to — treat it as provisional and report the
+                mesh.
+              </p>
+            )}
+            {lastUnwrap.flipped > 0 && (
+              <p className="rounded bg-(--ink-warn-bg,#3a2a12) p-1 text-[10px] leading-snug text-(--ink-warn,#ffb454)">
+                {lastUnwrap.flipped} triangles are folded over their neighbours: part
+                of this model <b>cannot be flattened</b> without a cut. A tube or a
+                closed shell has no flat form at all — mark a seam along it and unwrap
+                again.
+              </p>
+            )}
+            {lastUnwrap.worstResidual >= 1e-4 && lastUnwrap.flipped === 0 && (
               <p className="text-[10px] leading-snug text-(--ink-text-dim)">
-                The solver runs a fixed number of iterations and reports how far it
-                got. A large residual means a distorted chart, not a failure — add a
-                seam through the stretched area and unwrap again.
+                The layout is stretched but not folded: the shape is curved, so a
+                conformal map has to distort it. Another seam through the stretched
+                area reduces it.
               </p>
             )}
             {lastUnwrap.refusal && (

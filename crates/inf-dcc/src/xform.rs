@@ -40,6 +40,16 @@ use inf_math::{pcos64, psin64};
 use crate::ops::{finite, OpError, OpOutcome};
 use crate::topo::{Mesh, VertId};
 
+/// The largest rotation angle this kernel accepts, radians: **2^52**.
+///
+/// Not a taste limit. Above `2^52` consecutive `f64`s are more than one radian
+/// apart, so the stored value cannot represent the angle its author meant and
+/// reducing it modulo 2π returns a number with no information in it. The
+/// alternative to refusing is what shipped before the P23.5 audit: `psin64` and
+/// `pcos64` both fall to exactly zero past ~2e16 and Rodrigues becomes an axis
+/// projection — finite, accepted, and geometry-destroying.
+pub const MAX_ROTATION_RADIANS: f64 = 4_503_599_627_370_496.0;
+
 /// Rotate vertices about `pivot` around `axis` by `radians`.
 pub(crate) fn rotate_verts(
     mesh: &mut Mesh,
@@ -58,6 +68,49 @@ pub(crate) fn rotate_verts(
     }
     let k = k / len;
     let pivot = DVec3::from_array(pivot);
+    // **The angle is bounded before the polynomials see it** (P23.5 audit).
+    //
+    // The failure this closes: past ~2e16 `psin64` and `pcos64` both return
+    // exactly zero, and Rodrigues with `s = c = 0` is `pivot + k·(k·r)` — an axis
+    // **projection**. Every coordinate stays finite, so it was accepted, and
+    // `validate` passed because it audits topology and not geometry: θ = 1e100
+    // returned a quad whose four vertices were collinear. `Op::RotateVerts` is
+    // public API and rides in a session save, so a mistyped exponent in a numeric
+    // box was a data-loss bug.
+    //
+    // The `is_finite` conjunct is not decoration: a NaN compares false against
+    // every bound and would otherwise be admitted by an `<=` test.
+    if !(radians.is_finite() && radians.abs() <= MAX_ROTATION_RADIANS) {
+        return Err(OpError::AngleOutOfRange {
+            radians,
+            limit: MAX_ROTATION_RADIANS,
+        });
+    }
+
+    // # The audit prescribed a `mod 2π` fold here, and the measurement says no
+    //
+    // The prescription was to reduce before calling the polynomials, on the
+    // grounds that it closes both the collapse and a ~5.7e-10 accuracy droop at
+    // θ = 1e6. Measured across `[6.5, 4.5e15]`, it closes **neither**:
+    //
+    // | θ | angle error raw | reduced |
+    // | --- | --- | --- |
+    // | 1e6 | 5.99e-10 | 6.16e-10 |
+    // | 1e12 | 3.37e-5 | 4.98e-5 |
+    // | 1e15 | 6.87e-2 | 1.53e-2 |
+    //
+    // The fold moves the error around and does not remove it, because at those
+    // magnitudes the error is the **input's own resolution** — consecutive `f64`s
+    // at 1e12 are 1.2e-4 radians apart — and no reduction recovers a digit that
+    // was never stored. What the fold *does* improve is `|s² + c²| − 1` before
+    // normalization (2.5e-2 → 1.7e-10 at 1e15), and that is precisely the
+    // quantity the renormalization below already fixes.
+    //
+    // So it is not here. The collapse is closed by the bound above and by the
+    // refusal below, both of which are gated; a third mechanism that no
+    // measurement supports and no test can distinguish is code that will be
+    // maintained for ever on the strength of a comment.
+    let theta = radians;
     // Rodrigues: r·cos θ + (k × r)·sin θ + k·(k · r)(1 − cos θ).
     //
     // **The pair is renormalized, and that is the difference between "a rotation
@@ -73,12 +126,25 @@ pub(crate) fn rotate_verts(
     // (≈ 3.4e-6 degrees), which is the honest cost of the portability law and is
     // four orders below anything a modeller can express.
     let (s, c) = {
-        let (s, c) = (psin64(radians), pcos64(radians));
+        let (s, c) = (psin64(theta), pcos64(theta));
         let n = (s * s + c * c).sqrt();
         if n.is_finite() && n > 1e-12 {
             (s / n, c / n)
         } else {
-            (s, c)
+            // **Unreachable below the bound, and kept anyway.** Swept across
+            // fifteen decades by `no_angle_inside_the_limit_degenerates_the_
+            // sine_cosine_pair`, the worst `|s, c|` inside the limit is 0.968 —
+            // so the renormalization above always has something to work with.
+            //
+            // It is a refusal rather than a fallthrough because the fallthrough is
+            // exactly how the collapse got in: a degenerate pair used to be
+            // *accepted*, and Rodrigues with `s = c = 0` is a projection onto the
+            // axis, not a rotation. Two mechanisms hold one failure, and the
+            // mutation table records that each closes it alone.
+            return Err(OpError::AngleOutOfRange {
+                radians,
+                limit: MAX_ROTATION_RADIANS,
+            });
         }
     };
     write_all(mesh, verts, |p| {
@@ -282,6 +348,183 @@ mod tests {
             Err(OpError::ZeroAxis { axis: [0.0; 3] })
         );
         assert_eq!(m.encoded(), before);
+    }
+
+    #[test]
+    fn a_huge_angle_never_becomes_an_axis_projection() {
+        // **The collapse.** Past ~2e16 both `psin64` and `pcos64` return exactly
+        // zero, and Rodrigues with `s = c = 0` is `pivot + k·(k·r)` — a projection
+        // onto the axis. Every coordinate stays finite so it was ACCEPTED, and
+        // `validate` passed because it audits topology and not geometry: a quad
+        // came back collinear from a public op that rides in a session save.
+        //
+        // The shape of the check is "the quad still has area", because that is
+        // what a projection destroys and what no existing gate looked at.
+        let area = |m: &Mesh, v: &[VertId]| {
+            let p: Vec<DVec3> = v
+                .iter()
+                .map(|&x| DVec3::from_array(m.vert_ref(x).position))
+                .collect();
+            (p[1] - p[0]).cross(p[2] - p[0]).length()
+        };
+        for theta in [1.0e17_f64, 1.0e100, -1.0e30, f64::MAX] {
+            let mut m = plane(2.0);
+            let v: Vec<VertId> = m.vert_ids().collect();
+            let before = area(&m, &v);
+            let err = apply(
+                &mut m,
+                &Op::RotateVerts {
+                    verts: v.clone(),
+                    pivot: [0.0; 3],
+                    axis: [0.0, 1.0, 0.0],
+                    radians: theta,
+                },
+            )
+            .expect_err("an angle past the limit must refuse");
+            assert!(
+                matches!(err, OpError::AngleOutOfRange { .. }),
+                "{theta}: {err:?}"
+            );
+            assert!(
+                (area(&m, &v) - before).abs() < 1e-12,
+                "{theta} flattened the quad: {before} -> {}",
+                area(&m, &v)
+            );
+        }
+    }
+
+    #[test]
+    fn a_large_but_legal_angle_is_reduced_and_stays_accurate() {
+        // The other half: angles inside the limit are *reduced* rather than
+        // refused, so `1e6 + π/2` is still a rotation and still lands where it
+        // should. Before the reduction the accuracy drooped to ~5.7e-10 here,
+        // because `pcos64(x)` is `psin64(x + π/2)` and both the internal range
+        // reduction and that addition lose precision on a large argument.
+        //
+        // Measured by composition, since `atan2` is on this crate's ban list:
+        // rotating by θ and then by −θ must return the vertex exactly where it
+        // started.
+        for theta in [
+            std::f64::consts::TAU * 1_000.0 + 0.7,
+            1.0e6,
+            1.0e12,
+            -1.0e9,
+            MAX_ROTATION_RADIANS,
+        ] {
+            let mut m = Mesh::new();
+            let v = m.alloc_vert([1.0, 0.0, 0.0]);
+            for sign in [1.0, -1.0] {
+                apply(
+                    &mut m,
+                    &Op::RotateVerts {
+                        verts: vec![v],
+                        pivot: [0.0; 3],
+                        axis: [0.0, 1.0, 0.0],
+                        radians: theta * sign,
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{theta} refused: {e}"));
+                let p = DVec3::from_array(m.vert_ref(v).position);
+                assert!(
+                    (p.length() - 1.0).abs() < 1e-12,
+                    "{theta}: the radius moved to {}",
+                    p.length()
+                );
+            }
+            // **The round trip closes to the resolution of the angle itself.**
+            // At θ = 1e12 consecutive `f64`s are 1.2e-4 radians apart, so the
+            // *input* does not specify the rotation more precisely than that and
+            // no reduction can recover what was never there. The tolerance is
+            // therefore the angle's own ulp, not a constant — and where the ulp
+            // is itself of radian scale the check is skipped rather than passed
+            // vacuously, because a 4-radian tolerance on a unit circle asserts
+            // nothing at all (the P19 law). The isometry above holds at every
+            // magnitude, which is the invariant that matters.
+            let ulp = theta.abs().max(1.0) * f64::EPSILON;
+            let tolerance = 40.0 * ulp + 1e-6;
+            if tolerance < 0.1 {
+                let p = DVec3::from_array(m.vert_ref(v).position);
+                assert!(
+                    (p - DVec3::X).length() < tolerance,
+                    "{theta} then -{theta} landed at {p:?} (tolerance {tolerance:.2e})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_angle_inside_the_limit_degenerates_the_sine_cosine_pair() {
+        // **What makes the bound sufficient**, swept rather than assumed. The
+        // collapse is `s = c = 0`, which the renormalization cannot rescue —
+        // dividing by zero is what produced the axis projection. The bound is only
+        // the right bound if the pair stays away from the origin everywhere below
+        // it, so that is measured across fifteen decades and both signs, not
+        // argued from where the polynomial "should" be well behaved.
+        let mut worst = f64::MAX;
+        let mut worst_at = 0.0f64;
+        let mut theta = 1.0e-3_f64;
+        while theta <= MAX_ROTATION_RADIANS {
+            for signed in [theta, -theta, theta * 1.7, theta * 3.3] {
+                if signed.abs() > MAX_ROTATION_RADIANS {
+                    continue;
+                }
+                let (s, c) = (psin64(signed), pcos64(signed));
+                let n = (s * s + c * c).sqrt();
+                assert!(
+                    n.is_finite() && n > 1e-12,
+                    "the pair degenerated at {signed}: |s,c| = {n}"
+                );
+                if n < worst {
+                    worst = n;
+                    worst_at = signed;
+                }
+            }
+            theta *= 1.7;
+        }
+        println!("worst |s,c| inside the limit: {worst:.6} at theta = {worst_at:.3e}");
+        assert!(worst > 0.9, "the pair got within {worst} of degenerate");
+
+        // And just past the limit it really does collapse — which is the reason
+        // the limit exists and not a hypothetical.
+        let (s, c) = (psin64(1.0e17), pcos64(1.0e17));
+        assert!(
+            (s * s + c * c).sqrt() <= 1e-12,
+            "the collapse this bound exists for did not reproduce: ({s}, {c})"
+        );
+    }
+
+    #[test]
+    fn an_angle_inside_one_turn_is_left_bit_identical() {
+        // The reduction is for the range that was broken. Everything an author
+        // can express goes through untouched — asserted on the BITS, because
+        // "close enough" is what a silent behaviour change looks like.
+        for theta in [0.0_f64, 0.7, -0.5, std::f64::consts::PI, -3.0, 6.2] {
+            let mut a = Mesh::new();
+            let va = a.alloc_vert([1.0, 2.0, 3.0]);
+            apply(
+                &mut a,
+                &Op::RotateVerts {
+                    verts: vec![va],
+                    pivot: [0.25, 0.0, -0.5],
+                    axis: [0.3, 0.9, -0.4],
+                    radians: theta,
+                },
+            )
+            .expect("rotates");
+            // The arithmetic, spelled out.
+            let (s0, c0) = (inf_math::psin64(theta), inf_math::pcos64(theta));
+            let n = (s0 * s0 + c0 * c0).sqrt();
+            let (s0, c0) = (s0 / n, c0 / n);
+            let k = DVec3::new(0.3, 0.9, -0.4).normalize();
+            let pivot = DVec3::new(0.25, 0.0, -0.5);
+            let r = DVec3::new(1.0, 2.0, 3.0) - pivot;
+            let want = pivot + r * c0 + k.cross(r) * s0 + k * (k.dot(r) * (1.0 - c0));
+            assert_eq!(
+                a.vert_ref(va).position,
+                want.to_array(),
+                "the arithmetic moved a bit at theta = {theta}"
+            );
+        }
     }
 
     #[test]

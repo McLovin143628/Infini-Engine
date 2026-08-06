@@ -52,7 +52,7 @@ use inf_dcc::{
 use inf_editor_core::assets::vmesh;
 use inf_editor_core::dcc::{
     self, GizmoDrag, GizmoInFlight, GizmoMode, OverlayStyle, PendingDrag, PickHit, PreviewCache,
-    Projector, StrokeInFlight, VertTransform,
+    Projector, VertTransform,
 };
 use inf_editor_core::ipc::{
     DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto, DccGizmoModeDto,
@@ -288,6 +288,7 @@ fn doc_dto(doc: &DccDoc, session: &MeshSession) -> DccDocDto {
             _ => 0,
         },
         gizmo: doc.gizmo.map(gizmo_mode_dto),
+        selection_rev: dcc::selection_revision(&doc.selection),
         seams: inf_dcc::seam_count(mesh) as u32,
         charts: inf_dcc::charts(mesh).len() as u32,
     }
@@ -408,9 +409,14 @@ pub async fn dcc_open(
 /// would land in a journal that is destroyed a line later, so it could never be
 /// undone, saved, or seen. A settle here is not a smaller loss than an abandon —
 /// it is the same loss with a wasted `Mesh::transact` in front of it. Dropping
-/// `pending` with the document is therefore the decision, not the oversight, and
-/// `a_close_abandons_a_drag_while_every_other_door_settles_it` is what stops it
-/// quietly becoming the other one.
+/// `pending` with the document is therefore the decision, not the oversight.
+///
+/// Two gates hold the pair of it, and the citation used to name a test that did
+/// not exist: `a_close_abandons_a_drag_while_every_other_door_settles_it` is the
+/// behavioural half (this door reports the abandon, and exactly one door does),
+/// and `every_journal_door_declares_whether_it_settles_a_drag` is the structural
+/// half - it reads the command list out of this file and fails until a new door
+/// has *chosen* a policy, because the failing-open default was "does not settle".
 #[tauri::command]
 pub async fn dcc_close(asset_id: String, state: State<'_, DccState>) -> Result<(), String> {
     let id: AssetId = asset_id.parse().map_err(|e| format!("bad asset id: {e}"))?;
@@ -817,21 +823,40 @@ pub async fn dcc_drag_begin(
                 radius,
                 strength,
                 falloff,
-            } => match dcc::pick_surface(session.mesh(), &proj, px, py) {
-                Some((face, hit)) => {
-                    doc.pending = Some(PendingDrag::Stroke(StrokeInFlight {
+            } => {
+                // **Four lines that call Ring 1.** The radius floor and the
+                // surface hit are decided in `dcc::begin_stroke`, where a test can
+                // reach them — the P23.5 audit's mutation table found that with
+                // the floor written here, deleting it failed nothing at all
+                // (a `#[tauri::command]` is not drivable from any CI leg). Same
+                // finding as P23.4's save, same fix.
+                match dcc::begin_stroke(
+                    session.mesh(),
+                    &proj,
+                    px,
+                    py,
+                    dcc::BrushSettings {
                         mode: sculpt_mode_of(mode),
                         radius,
                         strength,
                         falloff: kernel_falloff_of(falloff),
-                        path: vec![hit],
-                        last_normal: inf_dcc::face_normal(session.mesh(), face)
-                            .unwrap_or(glam::DVec3::Y),
-                    }));
-                    (true, None)
+                    },
+                ) {
+                    Ok(Some(stroke)) => {
+                        doc.pending = Some(PendingDrag::Stroke(stroke));
+                        (true, None)
+                    }
+                    Ok(None) => (false, None),
+                    Err(refusal) => {
+                        return Ok(DccDragBeginDto {
+                            grabbed: false,
+                            handle: None,
+                            refusal: Some(refusal),
+                            doc: doc_dto(doc, session),
+                        })
+                    }
                 }
-                None => (false, None),
-            },
+            }
             DccDragDto::Gizmo {
                 mode,
                 snap,
@@ -844,6 +869,7 @@ pub async fn dcc_drag_begin(
                     return Ok(DccDragBeginDto {
                         grabbed: false,
                         handle: None,
+                        refusal: Some("nothing is selected, so the gizmo has no pivot".into()),
                         doc: doc_dto(doc, session),
                     });
                 };
@@ -886,6 +912,7 @@ pub async fn dcc_drag_begin(
         Ok(DccDragBeginDto {
             grabbed,
             handle,
+            refusal: None,
             doc: doc_dto(doc, session),
         })
     })?;
@@ -1296,6 +1323,10 @@ pub async fn dcc_unwrap(
                             corners: report.corners as u32,
                             seams: report.seams as u32,
                             worst_residual: report.worst_residual,
+                            worst_convergence: report.worst_convergence,
+                            flipped: report.flipped as u32,
+                            triangles: report.charts.iter().map(|c| c.triangles).sum::<usize>()
+                                as u32,
                             doc: doc_dto(doc, session),
                         })
                     }
@@ -1306,6 +1337,9 @@ pub async fn dcc_unwrap(
                         corners: 0,
                         seams: report.seams as u32,
                         worst_residual: 0.0,
+                        worst_convergence: 0.0,
+                        flipped: 0,
+                        triangles: 0,
                         doc: doc_dto(doc, session),
                     }),
                 }
@@ -1317,6 +1351,9 @@ pub async fn dcc_unwrap(
                 corners: 0,
                 seams: inf_dcc::seam_count(session.mesh()) as u32,
                 worst_residual: 0.0,
+                worst_convergence: 0.0,
+                flipped: 0,
+                triangles: 0,
                 doc: doc_dto(doc, session),
             }),
         }
@@ -1629,7 +1666,7 @@ mod tests {
             .mesh()
             .position(session.mesh().vert_ids().next().expect("a vertex"))
             .expect("live");
-        PendingDrag::Stroke(StrokeInFlight {
+        PendingDrag::Stroke(inf_editor_core::dcc::StrokeInFlight {
             mode: inf_dcc::SculptMode::Draw,
             radius: 0.9,
             strength: 0.1,
@@ -1690,7 +1727,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_abandons_a_drag_and_that_is_the_documented_exception() {
+    fn a_close_abandons_a_drag_while_every_other_door_settles_it() {
         // The other half of the doctrine. `DccState::close` frees the doc and the
         // journal together, so an op applied first could never be undone, saved
         // or seen — the abandon is the decision. This test is what stops it
@@ -1717,6 +1754,154 @@ mod tests {
             })
             .unwrap();
         assert!(!before.is_empty());
+    }
+
+    /// What a command does about a drag that is still in flight.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DragPolicy {
+        /// Touches the journal, so it settles first.
+        Settles,
+        /// Deliberately discards the drag - the two documented exceptions.
+        Abandons,
+        /// Reads, renders or moves the camera; the drag is none of its business.
+        NoJournal,
+        /// The one door whose whole job is to EXTEND the drag.
+        Extends,
+    }
+
+    /// This module's own source, read by the gate below.
+    const SOURCE: &str = include_str!("dcc.rs");
+
+    /// **Every command, and what it does about a pending drag.**
+    ///
+    /// Hand-written on purpose: a table derived from the code would agree with the
+    /// code by construction and prove nothing. This is the decision, written down
+    /// once, and the gate holds the code to it.
+    const DRAG_POLICY: [(&str, DragPolicy); 20] = [
+        ("dcc_open", DragPolicy::NoJournal),
+        ("dcc_close", DragPolicy::Abandons),
+        ("dcc_list", DragPolicy::NoJournal),
+        ("dcc_apply", DragPolicy::Settles),
+        ("dcc_select", DragPolicy::Settles),
+        ("dcc_pick", DragPolicy::Settles),
+        ("dcc_set_gizmo", DragPolicy::Settles),
+        ("dcc_drag_begin", DragPolicy::Settles),
+        ("dcc_drag_move", DragPolicy::Extends),
+        ("dcc_drag_end", DragPolicy::Settles),
+        ("dcc_drag_cancel", DragPolicy::Abandons),
+        ("dcc_orbit", DragPolicy::NoJournal),
+        ("dcc_frame", DragPolicy::NoJournal),
+        ("dcc_undo", DragPolicy::Settles),
+        ("dcc_redo", DragPolicy::Settles),
+        ("dcc_preview", DragPolicy::NoJournal),
+        ("dcc_save", DragPolicy::Settles),
+        ("dcc_merge_asset", DragPolicy::Settles),
+        ("dcc_unwrap", DragPolicy::Settles),
+        ("dcc_uv_preview", DragPolicy::NoJournal),
+    ];
+
+    /// The lines of a function body, from its signature until its braces balance.
+    fn body_of(source: &str, signature: &str) -> String {
+        let lines: Vec<&str> = source.lines().collect();
+        let start = lines
+            .iter()
+            .position(|l| l.contains(signature))
+            .unwrap_or_else(|| panic!("no line contains `{signature}`"));
+        let mut depth: i32 = 0;
+        // **`opened` is load-bearing.** A signature whose arguments are on the
+        // following lines has no `{` on its own line, so a "stop when the depth is
+        // zero" rule stops on argument two and reports an empty body — which reads
+        // as "this command does not settle" and fails a door that does.
+        let mut opened = false;
+        let mut out: Vec<&str> = Vec::new();
+        for line in &lines[start..] {
+            out.push(line);
+            for ch in line.chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            if opened && depth <= 0 {
+                break;
+            }
+        }
+        out.join("\n")
+    }
+
+    #[test]
+    fn every_journal_door_declares_whether_it_settles_a_drag() {
+        // **The gate the settle/abandon doctrine did not have.** The rule was
+        // eleven hand-written statements spread across twenty commands, and its
+        // cited test did not exist: the real one called the private `settle()`
+        // directly, which proves `settle` works and says *nothing* about which
+        // doors call it. A twenty-first command defaults to NOT settling, and that
+        // failure is silent, ordering-shaped, and only reachable when a pointer-up
+        // goes missing.
+        //
+        // So the source is read: every `pub async fn` in this file must be in the
+        // table above, and its body must match the policy it declared. A new door
+        // fails this test until somebody decides what it does.
+        let found: Vec<String> = SOURCE
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("pub async fn "))
+            .filter_map(|l| l.split('(').next())
+            .map(str::to_string)
+            .collect();
+        let mut a = found.clone();
+        let mut b: Vec<String> = DRAG_POLICY.iter().map(|(n, _)| n.to_string()).collect();
+        a.sort();
+        b.sort();
+        assert_eq!(
+            a, b,
+            "a command is missing from DRAG_POLICY (or the table names one that no \
+             longer exists). A new door must CHOOSE."
+        );
+
+        for (name, policy) in DRAG_POLICY {
+            let body = body_of(SOURCE, &format!("pub async fn {name}("));
+            let settles = body.contains("settle(doc, session)");
+            match policy {
+                DragPolicy::Settles => assert!(
+                    settles,
+                    "{name} is declared `Settles` and never calls `settle`: a drag \
+                     in flight when it runs is lost"
+                ),
+                DragPolicy::Abandons | DragPolicy::NoJournal | DragPolicy::Extends => {
+                    assert!(
+                        !settles,
+                        "{name} is declared {policy:?} but calls `settle` - it has \
+                         changed class without the table being told"
+                    )
+                }
+            }
+        }
+
+        // The abandons are the exceptions, so there must be exactly two and they
+        // must be the two that are documented as such.
+        let abandons: Vec<&str> = DRAG_POLICY
+            .iter()
+            .filter(|(_, p)| *p == DragPolicy::Abandons)
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+            abandons,
+            vec!["dcc_close", "dcc_drag_cancel"],
+            "the deliberate abandons are `close` (the journal goes with it) and \
+             `cancel` (the author said no). A third is a decision, not a detail."
+        );
+        assert_eq!(
+            DRAG_POLICY
+                .iter()
+                .filter(|(_, p)| *p == DragPolicy::Extends)
+                .count(),
+            1,
+            "exactly one door exists to GROW a drag"
+        );
     }
 
     #[test]

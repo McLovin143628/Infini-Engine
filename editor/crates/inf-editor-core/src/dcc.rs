@@ -1043,7 +1043,11 @@ pub fn transform_ops(
             let mut by_weight: std::collections::BTreeMap<u64, Vec<VertId>> =
                 std::collections::BTreeMap::new();
             for (v, w) in selection.soft_weights(mesh, mode, radius, falloff) {
-                by_weight.entry(w.to_bits()).or_default().push(v);
+                let q = quantize_weight(w);
+                if q <= 0.0 {
+                    continue;
+                }
+                by_weight.entry(q.to_bits()).or_default().push(v);
             }
             by_weight
         }
@@ -1080,6 +1084,78 @@ pub fn transform_ops(
             }
         })
         .collect()
+}
+
+/// How many distinct weights a soft transform may use — and therefore the most
+/// ops one drag can journal.
+///
+/// # Why a cap at all, and why this is the interim fix
+///
+/// "One op per distinct weight" is the right *shape* — a soft move is ordinary
+/// journal entries, so an undo gives the author their shape back — and it is the
+/// wrong *granularity*: geodesic distance is continuous, so a 289-vertex plane
+/// with a 3 m radius produced **105 ops from one drag**, which at
+/// `CHECKPOINT_INTERVAL = 32` takes about three full mesh snapshots and **evicts
+/// the entire eight-slot checkpoint history**, per drag, for ~7 kB of journal.
+/// The gate that was supposed to cover this asserted `ops.len() > 1` — it named
+/// the defect as a feature.
+///
+/// Quantizing to 64 steps caps a drag at 64 ops. The weight is a *falloff*, so
+/// the visual difference between `w` and `round(64w)/64` is at most 1/128 of the
+/// drag — invisible on a brush that already has a soft edge — and the bound is
+/// hard rather than statistical.
+///
+/// **The real fix is a weight table on a `Sculpt`-shaped transform op**, so one
+/// drag is one entry however many weights it touches. That is a wire change with
+/// a `SessionSave` bump behind it and it is ledgered, not done here: it should
+/// happen the day sessions actually persist, when the ladder has to move anyway.
+pub const SOFT_WEIGHT_STEPS: f64 = 64.0;
+
+/// A soft-select weight, rounded to [`SOFT_WEIGHT_STEPS`] steps.
+///
+/// `round` on a non-negative finite `f64` is exactly specified, so this keeps the
+/// op list a pure function of the mesh — the quantization bounds the journal
+/// without weakening the determinism argument.
+pub fn quantize_weight(w: f64) -> f64 {
+    if !w.is_finite() {
+        return 0.0;
+    }
+    (w.clamp(0.0, 1.0) * SOFT_WEIGHT_STEPS).round() / SOFT_WEIGHT_STEPS
+}
+
+/// A **content revision of the selection** — the number a view keys on to know
+/// its picture is stale.
+///
+/// # Why a hash and not a counter
+///
+/// A counter has to be bumped, and the P23.5 audit found what happens when the
+/// thing keyed on is not the thing that changed: the UV pane keyed on the
+/// *journal* generation, so picking a different face never refreshed it —
+/// selecting is not a journal op — and `selected` is a **count**, so switching
+/// from face A to face B left it reading `1` and even a count-keyed view would
+/// have stayed stale. That falsified the panel's own "one `SelectionSet`, one
+/// document" claim in the one place it was visible.
+///
+/// A hash over the set's contents cannot be forgotten by a new mutation path,
+/// which is the property a counter does not have. FNV-1a over the generation and
+/// the three id sets, in `BTreeSet` order.
+pub fn selection_revision(selection: &SelectionSet) -> u64 {
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |x: u64| {
+        acc ^= x;
+        acc = acc.wrapping_mul(0x1000_0000_01b3);
+    };
+    mix(selection.generation());
+    for v in selection.verts() {
+        mix(v.0 as u64 | (1 << 32));
+    }
+    for e in selection.edges() {
+        mix(e.0 as u64 | (2 << 32));
+    }
+    for f in selection.faces() {
+        mix(f.0 as u64 | (3 << 32));
+    }
+    acc
 }
 
 /// The pivot a gizmo sits on: the **centroid of the selected vertices**.
@@ -1284,6 +1360,74 @@ impl StrokeInFlight {
             falloff: self.falloff,
         })
     }
+}
+
+/// **Begin a sculpt stroke** — the pointer ray, the radius floor and the surface
+/// hit, in one place a test can reach.
+///
+/// Three answers, because there are three outcomes and the panel does something
+/// different for each:
+///
+/// * `Err(reason)` — **refused**. The radius is below [`inf_dcc::MIN_BRUSH_RADIUS_M`],
+///   which is a sentence the author needs to read.
+/// * `Ok(None)` — **missed**. The pointer is off the model; the gesture becomes a
+///   camera orbit and nothing is said.
+/// * `Ok(Some(stroke))` — grabbed.
+///
+/// # Why this is Ring 1 and not four lines inside the command
+///
+/// The floor lived in `dcc_drag_begin` and the P23.5 audit's mutation table found
+/// what that meant: deleting it failed **nothing**, because a `#[tauri::command]`
+/// cannot be driven from a test on any CI leg. That is the same finding P23.4's
+/// audit made about the save (§7c: *"a gate that inlines the code it is gating is
+/// a copy, not a gate"*), and it has the same fix — the decision moves to where a
+/// test can call it, and the command reports its verdict.
+/// The parameters a sculpt stroke is begun with — the popover's state, as one
+/// value so [`begin_stroke`] takes a brush rather than five loose numbers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BrushSettings {
+    pub mode: inf_dcc::SculptMode,
+    /// Geodesic reach, **metres**. Refused below [`inf_dcc::MIN_BRUSH_RADIUS_M`].
+    pub radius: f64,
+    pub strength: f64,
+    pub falloff: inf_dcc::SculptFalloff,
+}
+
+pub fn begin_stroke(
+    mesh: &Mesh,
+    proj: &Projector,
+    px: f32,
+    py: f32,
+    brush: BrushSettings,
+) -> Result<Option<StrokeInFlight>, String> {
+    let BrushSettings {
+        mode,
+        radius,
+        strength,
+        falloff,
+    } = brush;
+    // **A refusal as a value, not a clamp.** A clamp would sculpt at a radius the
+    // author did not ask for and never say so; the floor exists because `1e-12` is
+    // one keystroke from `1e-1` in a number box, and at that radius the resampler
+    // was asked for 1.2e13 dab positions — an out-of-memory abort taking the
+    // unsaved session with it.
+    if !(radius.is_finite() && radius >= inf_dcc::MIN_BRUSH_RADIUS_M) {
+        return Err(format!(
+            "a brush radius of {radius} m is below the {} m floor; a brush that              small cannot reach a second vertex on anything modelled in metres",
+            inf_dcc::MIN_BRUSH_RADIUS_M
+        ));
+    }
+    let Some((face, hit)) = pick_surface(mesh, proj, px, py) else {
+        return Ok(None);
+    };
+    Ok(Some(StrokeInFlight {
+        mode,
+        radius,
+        strength,
+        falloff,
+        path: vec![hit],
+        last_normal: inf_dcc::face_normal(mesh, face).unwrap_or(DVec3::Y),
+    }))
 }
 
 /// A gizmo drag being made: the handle, the pivot, and the transform the pointer
@@ -2521,6 +2665,15 @@ mod tests {
         ] {
             let ops = transform_ops(&m, &sel, SelectMode::Vert, pivot, xform, soft);
             assert!(ops.len() > 1, "the neighbourhood moves too: {ops:?}");
+            // **The CAP, not merely "more than one".** The old assertion was
+            // `> 1` and passed just as happily on the 105-op drag the audit
+            // measured — it named the defect as a feature.
+            assert!(
+                ops.len() <= SOFT_WEIGHT_STEPS as usize,
+                "a soft drag journalled {} ops; the quantization caps it at {}",
+                ops.len(),
+                SOFT_WEIGHT_STEPS
+            );
             for op in &ops {
                 match op {
                     // The weight scales the DELTA…
@@ -2553,6 +2706,129 @@ mod tests {
                 .count();
             assert_eq!(full, 1, "{ops:?}");
         }
+    }
+
+    #[test]
+    fn a_soft_drag_over_a_dense_selection_stays_inside_the_op_cap() {
+        // The measurement the cap is sized against: a 289-vertex plane with a 3 m
+        // radius produced **105 ops from one drag** before quantization, which is
+        // ~3 full mesh snapshots at `CHECKPOINT_INTERVAL = 32` and evicts the
+        // whole 8-slot checkpoint history — per drag.
+        let mut m = plane(2.0);
+        for _ in 0..4 {
+            let faces: Vec<_> = m.face_ids().collect();
+            inf_dcc::ops::apply(&mut m, &Op::SubdivideFaces { faces }).expect("subdivides");
+        }
+        assert!(m.vert_count() >= 289, "{} verts", m.vert_count());
+        // **Jittered, and that is what makes this a gate.** On a regular grid every
+        // geodesic distance is a multiple of the spacing, so the *geometry* has
+        // already quantized the weights and removing the quantization changes
+        // nothing — measured: 24 ops either way. A real model's distances are all
+        // distinct, which is the case the 105-op measurement came from and the case
+        // the cap exists for. A deterministic integer jitter, so the fixture is
+        // still a pure function of nothing.
+        for (i, v) in m.vert_ids().collect::<Vec<_>>().into_iter().enumerate() {
+            let p = m.position(v).expect("live");
+            let d = ((i * 2_654_435_761) % 1_000) as f64 / 1_000.0;
+            inf_dcc::ops::apply(
+                &mut m,
+                &Op::TranslateVerts {
+                    verts: vec![v],
+                    delta: [d * 0.01, 0.0, d * 0.013],
+                },
+            )
+            .expect("jitters");
+            let _ = p;
+        }
+        let mut sel = SelectionSet::new(1);
+        sel.set_vert(m.vert_ids().next().expect("a vertex"), true);
+        let ops = transform_ops(
+            &m,
+            &sel,
+            SelectMode::Vert,
+            DVec3::ZERO,
+            VertTransform::Translate(DVec3::Y),
+            Some((3.0, inf_terrain::Falloff::Linear)),
+        );
+        println!(
+            "soft drag: {} verts, {} ops (cap {})",
+            m.vert_count(),
+            ops.len(),
+            SOFT_WEIGHT_STEPS
+        );
+        assert!(
+            ops.len() <= SOFT_WEIGHT_STEPS as usize,
+            "{} ops from one drag",
+            ops.len()
+        );
+        // …and the quantization did not throw the neighbourhood away.
+        let moved: usize = ops
+            .iter()
+            .map(|o| match o {
+                Op::TranslateVerts { verts, .. } => verts.len(),
+                _ => 0,
+            })
+            .sum();
+        assert!(moved > 100, "only {moved} vertices move");
+    }
+
+    #[test]
+    fn a_quantized_weight_is_a_step_and_a_zero_weight_is_dropped() {
+        assert_eq!(quantize_weight(1.0), 1.0);
+        assert_eq!(quantize_weight(0.5), 0.5);
+        // `f64::round` breaks ties away from zero, so exactly half a step rounds
+        // UP — spelled out rather than discovered, because it decides whether the
+        // outermost ring of a falloff moves at all.
+        assert_eq!(
+            quantize_weight(1.0 / 128.0),
+            1.0 / 64.0,
+            "half a step rounds up"
+        );
+        assert_eq!(quantize_weight(1.0 / 256.0), 0.0, "below half a step drops");
+        assert_eq!(quantize_weight(1.0 / 64.0), 1.0 / 64.0);
+        assert_eq!(quantize_weight(f64::NAN), 0.0);
+        assert_eq!(quantize_weight(2.0), 1.0);
+        // Every representable answer is a multiple of the step.
+        for i in 0..=200 {
+            let q = quantize_weight(i as f64 / 200.0);
+            assert_eq!(q * SOFT_WEIGHT_STEPS, (q * SOFT_WEIGHT_STEPS).round());
+        }
+    }
+
+    #[test]
+    fn the_selection_revision_moves_when_the_selection_does_and_not_otherwise() {
+        // **M3.** The UV pane keyed on the JOURNAL generation, which a selection
+        // change does not move — and `selected` is a count, so face A and face B
+        // both read `1`. Neither number can tell those two states apart; this one
+        // has to.
+        let m = cube(1.0);
+        let faces: Vec<_> = m.face_ids().collect();
+        let mut a = SelectionSet::new(7);
+        a.set_face(faces[0], true);
+        let mut b = SelectionSet::new(7);
+        b.set_face(faces[1], true);
+        assert_eq!(
+            a.len(SelectMode::Face),
+            b.len(SelectMode::Face),
+            "the COUNT cannot tell these apart — that is the point"
+        );
+        assert_ne!(
+            selection_revision(&a),
+            selection_revision(&b),
+            "A and B are different selections and must read differently"
+        );
+        // Stable for an unchanged set, and it moves for the generation too.
+        let mut again = SelectionSet::new(7);
+        again.set_face(faces[0], true);
+        assert_eq!(selection_revision(&a), selection_revision(&again));
+        let mut later = SelectionSet::new(8);
+        later.set_face(faces[0], true);
+        assert_ne!(selection_revision(&a), selection_revision(&later));
+        // An empty selection is not the same as a one-face one.
+        assert_ne!(
+            selection_revision(&SelectionSet::new(7)),
+            selection_revision(&a)
+        );
     }
 
     #[test]
@@ -2607,6 +2883,68 @@ mod tests {
         assert!(sel.contains_face(f), "and it still names the same face");
         assert!(s.undo());
         assert_eq!(s.mesh().encoded(), before, "one undo takes the whole drag");
+    }
+
+    #[test]
+    fn a_stroke_below_the_radius_floor_is_refused_and_a_miss_is_not() {
+        // **The three answers**, and the reason this is Ring 1: the floor used to
+        // live in the Tauri command, where deleting it failed nothing at all.
+        //
+        // A refusal and a miss must stay distinguishable, because the panel does
+        // opposite things with them — a miss becomes a camera orbit, a refusal
+        // becomes a sentence in the status bar.
+        let m = cube(1.0);
+        let proj = projector(&m, 256);
+        let mode = inf_dcc::SculptMode::Draw;
+        let falloff = inf_dcc::SculptFalloff::Smooth;
+
+        for radius in [1.0e-4_f64, 1.0e-12, 0.0, -1.0, f64::NAN] {
+            let brush = BrushSettings {
+                mode,
+                radius,
+                strength: 0.1,
+                falloff,
+            };
+            let err = begin_stroke(&m, &proj, 128.0, 128.0, brush)
+                .expect_err("a radius below the floor must be refused");
+            assert!(err.contains("floor"), "{err}");
+        }
+        // At the floor exactly, and above it, the pointer is allowed to grab.
+        for radius in [inf_dcc::MIN_BRUSH_RADIUS_M, 0.25] {
+            let brush = BrushSettings {
+                mode,
+                radius,
+                strength: 0.1,
+                falloff,
+            };
+            let stroke = begin_stroke(&m, &proj, 128.0, 128.0, brush)
+                .expect("a legal radius is not refused")
+                .expect("the pointer is on the cube");
+            assert_eq!(stroke.path.len(), 1);
+            assert!((stroke.last_normal.length() - 1.0).abs() < 1e-9);
+        }
+        // And a miss is `Ok(None)` — silent, not an error.
+        let brush = BrushSettings {
+            mode,
+            radius: 0.25,
+            strength: 0.1,
+            falloff,
+        };
+        assert!(begin_stroke(&m, &proj, 3.0, 3.0, brush)
+            .expect("a miss is not a refusal")
+            .is_none());
+    }
+
+    #[test]
+    fn the_radius_floor_and_the_dab_cap_are_one_decision() {
+        // The two constants are sized against each other: at the floor, the cap
+        // covers more than a metre of drag, so a legal stroke never meets it.
+        // Asserted here as well as in the kernel because this is the door that
+        // enforces the floor, and a change to either number has to fail both.
+        let reach = inf_dcc::MAX_STROKE_DABS as f64
+            * inf_dcc::DAB_SPACING_FRACTION
+            * inf_dcc::MIN_BRUSH_RADIUS_M;
+        assert!(reach > 1.0, "{reach} m of drag at the floor");
     }
 
     #[test]

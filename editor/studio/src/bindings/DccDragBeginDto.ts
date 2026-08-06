@@ -20,4 +20,10 @@ grabbed: boolean,
  * Which gizmo handle was grabbed, for the panel's cursor. `None` for a
  * sculpt stroke or a miss.
  */
-handle: string | null, doc: DccDocDto, };
+handle: string | null, 
+/**
+ * Why the drag was **refused**, as opposed to having missed. A miss is silent
+ * — it becomes a camera orbit — but a refusal is a sentence, because an
+ * author whose brush did nothing needs to know it was the radius.
+ */
+refusal: string | null, doc: DccDocDto, };

@@ -48,6 +48,16 @@ dragPoints: number,
  */
 gizmo: DccGizmoModeDto | null, 
 /**
+ * **A content revision of the selection** — what a view keys on to know its
+ * picture is stale.
+ *
+ * Not the journal `generation` (a selection change does not move it) and not
+ * `selected` (a count: face A and face B both read `1`). Neither of those can
+ * tell two different one-face selections apart, and the UV pane keyed on the
+ * first of them and therefore never refreshed on a pick.
+ */
+selectionRev: number, 
+/**
  * Undirected edges marked as UV seams (P23.5).
  */
 seams: number, 

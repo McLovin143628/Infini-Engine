@@ -98,11 +98,16 @@ pub use model::{KnifePoint, MergeTarget, MirrorAxis, MAX_LOOP_CUTS};
 pub use ops::{Op, OpError, OpOutcome};
 pub use sculpt::{
     dab_positions, face_normal, stroke_dabs, SculptFalloff, SculptMode, DAB_SPACING_FRACTION,
+    MAX_STROKE_DABS, MIN_BRUSH_RADIUS_M,
 };
 pub use select::{
     canonical_edge, edge_loop, edge_ring, geodesic_distances, op_preserves_ids, SelectMode,
     SelectionSet,
 };
 pub use topo::{CanonicalMesh, CornerData, FaceId, HalfId, Mesh, VertId};
-pub use uv::{charts, seam_count, unwrap, ChartReport, UnwrapReport, Unwrapped, CG_ITERATIONS};
+pub use uv::{
+    cg_iterations, charts, seam_count, unwrap, ChartReport, UnwrapReport, Unwrapped, CG_ITERATIONS,
+    CG_ITERATION_CAP,
+};
 pub use validate::{validate, Violation};
+pub use xform::MAX_ROTATION_RADIANS;

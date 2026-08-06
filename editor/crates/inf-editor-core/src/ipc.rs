@@ -2559,6 +2559,15 @@ pub struct DccDocDto {
     /// and the selection, because the handles are drawn and picked backend-side
     /// and a panel-held copy would be a second opinion about the active tool.
     pub gizmo: Option<DccGizmoModeDto>,
+    /// **A content revision of the selection** — what a view keys on to know its
+    /// picture is stale.
+    ///
+    /// Not the journal `generation` (a selection change does not move it) and not
+    /// `selected` (a count: face A and face B both read `1`). Neither of those can
+    /// tell two different one-face selections apart, and the UV pane keyed on the
+    /// first of them and therefore never refreshed on a pick.
+    #[ts(type = "number")]
+    pub selection_rev: u64,
     /// Undirected edges marked as UV seams (P23.5).
     pub seams: u32,
     /// How many charts the seams cut the mesh into — the number an author checks
@@ -2751,8 +2760,20 @@ pub struct DccUnwrapDto {
     pub charts: u32,
     pub corners: u32,
     pub seams: u32,
-    /// The worst per-chart relative residual after the fixed CG iteration count.
+    /// **How much the worst chart has to stretch** — a property of the geometry.
+    /// Non-zero for a shape that is not developable, however well the solve went.
     pub worst_residual: f64,
+    /// **Whether the solver finished** — a property of the solve, zero iff CG
+    /// converged. Split from `worstResidual` because one number gave the same
+    /// reading, and therefore the same advice, to opposite causes: a *failed* flat
+    /// plane read 5.7e-2 and a *converged* saddle read 4.1e-2.
+    pub worst_convergence: f64,
+    /// Triangles whose UV winding opposes their chart's majority — **folds**. A
+    /// converged, low-distortion unwrap can still overlap itself when a chart is
+    /// not a disk, and this is the only number that sees it.
+    pub flipped: u32,
+    /// Triangles across all charts, so `flipped` has a denominator.
+    pub triangles: u32,
     pub doc: DccDocDto,
 }
 
@@ -2772,6 +2793,10 @@ pub struct DccDragBeginDto {
     /// Which gizmo handle was grabbed, for the panel's cursor. `None` for a
     /// sculpt stroke or a miss.
     pub handle: Option<String>,
+    /// Why the drag was **refused**, as opposed to having missed. A miss is silent
+    /// — it becomes a camera orbit — but a refusal is a sentence, because an
+    /// author whose brush did nothing needs to know it was the radius.
+    pub refusal: Option<String>,
     pub doc: DccDocDto,
 }
 

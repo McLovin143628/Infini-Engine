@@ -236,6 +236,13 @@ fn every_source_file_is_covered_by_the_bans_above() {
             }
         }
     }
+    // **Worktree constraint, stated rather than discovered.** `CARGO_MANIFEST_DIR`
+    // is baked in at COMPILE time, so a test binary built in one git worktree and
+    // run from another — which a shared `CARGO_TARGET_DIR` makes possible — reads
+    // the *building* worktree's sources. Every law in this file would then be
+    // enforced against the wrong tree, silently and greenly. `include_str!` has
+    // the same property and no runtime alternative at all, so the honest fix is
+    // the constraint: **build and run this crate's tests in the same worktree.**
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut on_disk: Vec<String> = Vec::new();
     walk(&dir, &mut on_disk);
@@ -340,22 +347,96 @@ fn no_skip_serializing_if_on_a_bincode_struct() {
 /// wrote it, and an op defined by a computation is an op whose recorded effect
 /// changes when the computation improves. That is the meshopt law (P18) one level
 /// up, and the only thing that can enforce it is reading the code.
+///
+/// # The first version of this gate was defeatable, and was defeated
+///
+/// It banned **one spelling** (`uv::unwrap`) across the whole file and checked
+/// its positive halves with `.contains()` on the whole file too. The P23.5 audit
+/// walked straight through it: a `pub fn recompute` wrapper re-solved on replay
+/// with 208 of 208 tests green, because the ban never saw the new spelling and
+/// the positive halves were satisfied by the *unchanged* lines elsewhere — a
+/// comment would have satisfied them.
+///
+/// So: the region is the **arm**, found by balancing braces from its own `match`
+/// pattern, and the ban is on the **module** (`uv::`) rather than on a function
+/// name. A wrapper, a rename and a re-export are all `uv::` something, and none
+/// of them can hide in a file this no longer reads whole.
 #[test]
 fn the_unwrap_op_replays_its_values_and_never_calls_the_solver() {
     let (_, ops) = SOURCES[5];
-    let hits = code_hits(ops, "uv::unwrap");
+    let arm = braced_block(ops, "Op::Unwrap { corners } => {");
+    let body = arm.join(
+        "
+",
+    );
+
+    // Negative: the whole MODULE, not one function in it.
+    let hits: Vec<&str> = arm
+        .iter()
+        .map(String::as_str)
+        .filter(|l| {
+            let t = l.trim_start();
+            !t.starts_with("//") && l.contains("uv::")
+        })
+        .collect();
     assert!(
         hits.is_empty(),
-        "ops.rs calls the unwrap solver. `Op::Unwrap` carries the computed UVs          and applying it must write THEM — see `crate::uv`. Found: {hits:?}"
+        "the `Op::Unwrap` arm names `uv::`. It must write the corners it CARRIES          — see `crate::uv`. Found: {hits:?}"
     );
-    // And the positive half: the arm has to exist and has to write the corners
-    // it was given, or the ban above is satisfied by an op that does nothing.
+
+    // Positive, scoped to the arm: it has to actually write them, or the ban
+    // above is satisfied by an op that does nothing.
     assert!(
-        ops.contains("Op::Unwrap { corners }"),
-        "ops.rs no longer applies `Op::Unwrap` by writing its corner list"
+        body.contains("mesh.half_mut(*h).uv = *uv;"),
+        "the `Op::Unwrap` arm no longer writes the UVs it carries:
+{body}"
+    );
+    // And the scoping itself is checked, because a `braced_block` that returned
+    // the whole file would make both assertions above meaningless.
+    assert!(
+        arm.len() < 40,
+        "the arm scope has slipped and now covers {} lines; the ban is only          meaningful while it is the ARM",
+        arm.len()
     );
     assert!(
-        ops.contains("mesh.half_mut(*h).uv = *uv;"),
-        "the unwrap arm no longer writes the UVs it carries"
+        !body.contains("Op::Sculpt"),
+        "the arm scope leaked into a neighbouring arm"
     );
+}
+
+/// The lines of the block that opens on the first line containing `needle`, up to
+/// and including the line where its braces balance again.
+///
+/// Brace-counting rather than an indentation or bare-`}` rule: a match arm closes
+/// at its own indentation, which `block_after`'s column-zero rule cannot see, and
+/// that is precisely how the first version of the gate above ended up reading the
+/// whole of `apply`.
+fn braced_block(source: &str, needle: &str) -> Vec<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("no line contains `{needle}`"));
+    let mut depth: i32 = 0;
+    // See the note on `body_of` in `commands/dcc.rs`: a "stop at depth zero" rule
+    // that has not yet SEEN a brace stops on the first line it is handed.
+    let mut opened = false;
+    let mut out = Vec::new();
+    for line in &lines[start..] {
+        out.push((*line).to_string());
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    opened = true;
+                }
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        if opened && depth <= 0 {
+            break;
+        }
+    }
+    out
 }
