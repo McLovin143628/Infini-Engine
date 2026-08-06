@@ -736,10 +736,26 @@ mod tests {
                     .unwrap() as usize]
                     .transform_point3(Vec3::ZERO)
                     .y;
-                assert!(
-                    (last - hips) > 0.1,
-                    "{plan:?}'s girdles are all at one height, so a hips-sized leg would have reached the ground and this gate proves nothing"
+                // **The double-space guard, on this literal too** (P24.2).
+                //
+                // This message is one of the two the P24.1 F4 sweep repaired
+                // after a scripted edit ate its `\` line continuation; only the
+                // other one (`asset.rs`'s remedy) got a check that would notice
+                // it happening again. Built first, asserted, then used — so the
+                // signature of an eaten continuation fails the test rather than
+                // riding along inside the failure message of a *different*
+                // assertion, where nobody would read it.
+                let why = format!(
+                    "{plan:?}'s girdles are all at one height, so a hips-sized \
+                     leg would have reached the ground and this gate proves \
+                     nothing"
                 );
+                assert!(
+                    !why.contains("  "),
+                    "the girdle message carries a run of spaces — a line \
+                     continuation was eaten: {why:?}"
+                );
+                assert!((last - hips) > 0.1, "{why}");
             }
         }
     }

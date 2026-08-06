@@ -174,6 +174,20 @@ pub struct ExportReport {
     /// normal, derived normals are normalized by construction, so this can only
     /// be an imported value passing through — a `[0, 5, 0]` in someone's asset.
     pub non_unit_normals_written: usize,
+    /// Submeshes [`ExportOptions::optimize`] was asked for and **did not run
+    /// on**, because they carry a skin stream (P24.2).
+    ///
+    /// `inf_mesh::optimize` returns `(vertices, indices)` and nothing else, so a
+    /// parallel per-vertex stream cannot follow its permutation. Skipping is the
+    /// only sound answer — the alternative is every vertex wearing another
+    /// vertex's weights — and it is *reported* rather than silent because the
+    /// flag's documented effect is "smaller and faster" and an author is entitled
+    /// to know it did not apply.
+    ///
+    /// Zero unless `optimize` is on. Lifting it needs a `MeshAsset`-level
+    /// optimize that permutes every stream at once; ledgered in ROADMAP §12's
+    /// P24 block.
+    pub optimize_skipped_skinned: usize,
 }
 
 /// Write a kernel mesh as a `.inf_mesh` payload.
@@ -205,7 +219,7 @@ pub fn to_mesh_asset(mesh: &Mesh, opts: &ExportOptions) -> (MeshAsset, ExportRep
     let mut emitted: BTreeSet<(VertId, VertId)> = BTreeSet::new();
     let mut submeshes = Vec::with_capacity(by_slot.len());
     for (slot, faces) in by_slot {
-        let (vertices, indices, fallbacks) =
+        let (vertices, indices, skin, fallbacks) =
             build_submesh(mesh, &faces, opts, &mut report, &mut emitted, &mut written);
         report.fan_fallbacks += fallbacks;
         if indices.is_empty() {
@@ -222,10 +236,22 @@ pub fn to_mesh_asset(mesh: &Mesh, opts: &ExportOptions) -> (MeshAsset, ExportRep
         // The one non-deterministic step in the crate, and it is opt-in. On
         // wasm32 `inf_mesh::optimize` does not exist (the meshopt C build is
         // host-only), so the flag is simply inert there.
+        //
+        // **It is also inert on a SKINNED submesh** (P24.2), and that is a
+        // refusal-as-value rather than an oversight: `inf_mesh::optimize`
+        // reorders and re-welds the vertex buffer and hands back only
+        // `(vertices, indices)`, so the parallel skin stream cannot be permuted
+        // with it. Running it anyway would leave every vertex wearing another
+        // vertex's weights — a character that deforms into confetti, from a flag
+        // whose documented effect is "smaller and faster". Counted, so the
+        // caller can see it happen.
         #[cfg(not(target_arch = "wasm32"))]
-        let (vertices, indices) = if opts.optimize {
+        let (vertices, indices) = if opts.optimize && skin.is_empty() {
             inf_mesh::optimize(vertices, indices)
         } else {
+            if opts.optimize {
+                report.optimize_skipped_skinned += 1;
+            }
             (vertices, indices)
         };
 
@@ -236,10 +262,11 @@ pub fn to_mesh_asset(mesh: &Mesh, opts: &ExportOptions) -> (MeshAsset, ExportRep
             vertices,
             indices,
             material_slot: slot,
-            // The kernel has no skinning model, and import refuses a skinned
-            // asset rather than dropping weights — so an exported submesh is
-            // rigid by construction, never by omission.
-            skin: Vec::new(),
+            // **The skin channel, written** (P24.2). Empty exactly when the
+            // kernel mesh is rigid — so a rigid submesh is still rigid by
+            // construction rather than by omission, and every pre-P24.2 payload
+            // this writer produced is byte-identical.
+            skin,
         });
     }
     report.submeshes = submeshes.len();
@@ -349,11 +376,17 @@ fn build_submesh(
     report: &mut ExportReport,
     emitted: &mut BTreeSet<(VertId, VertId)>,
     written: &mut BTreeSet<([u32; 3], VertId)>,
-) -> (Vec<MeshVertex>, Vec<u32>, usize) {
+) -> (Vec<MeshVertex>, Vec<u32>, Vec<inf_mesh::VertexSkin>, usize) {
     let mut key_to_index: BTreeMap<CornerKey, u32> = BTreeMap::new();
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
+    // The kernel vertex each written vertex came from — what the skin stream is
+    // built out of (P24.2). A parallel `Vec` rather than a field in `CornerKey`:
+    // the key already begins with the vertex, and a second copy of it would
+    // change nothing except the intern order this function's round-trip
+    // guarantee depends on.
+    let mut sources: Vec<VertId> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     let mut fallbacks = 0usize;
 
@@ -450,6 +483,7 @@ fn build_submesh(
                     positions.push(p32);
                     normals.push(n32);
                     uvs.push(uv32);
+                    sources.push(v);
                 }
                 indices.push(idx);
             }
@@ -467,7 +501,24 @@ fn build_submesh(
             tangent: tangents[i],
         })
         .collect();
-    (vertices, indices, fallbacks)
+    // The skin stream (P24.2), index-aligned to `vertices` — empty on a rigid
+    // mesh, which is what every pre-P24.2 payload and every primitive is, so
+    // nothing about a rigid export moved.
+    let skin: Vec<inf_mesh::VertexSkin> = if mesh.is_skinned() {
+        sources
+            .iter()
+            .map(|&v| {
+                let w = mesh.vert_weights(v).expect("live vertex id");
+                inf_mesh::VertexSkin {
+                    joints: w.joints,
+                    weights: w.weights,
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    (vertices, indices, skin, fallbacks)
 }
 
 /// The normal written for one corner, under a policy.
@@ -1731,6 +1782,129 @@ mod tests {
             4,
             "quad → 2 triangles, plus the two"
         );
+    }
+
+    /// **The skin round trip, byte for byte** (P24.2).
+    ///
+    /// `MeshAsset` → kernel → `MeshAsset` → kernel, and the skin streams are
+    /// compared as *bytes*, not as "both are skinned". This is the closure of
+    /// the two P23 placeholders at once: import refused a skinned asset rather
+    /// than dropping weights, and export wrote an empty stream because the kernel
+    /// had none to write.
+    ///
+    /// Why it can be exact: the reader welds by position and the writer re-splits
+    /// by corner attributes, so one kernel vertex fans back out to exactly the
+    /// output vertices it came from — and each of them gets that kernel vertex's
+    /// weights. The one thing that would break it is a *source* whose split
+    /// copies disagree, which is why `skin_conflicts` is asserted to be zero
+    /// here: with a conflict, "the winner's weights" is the honest answer and it
+    /// is not the source's.
+    #[test]
+    fn a_skinned_asset_round_trips_through_the_kernel_byte_for_byte() {
+        let mut a0 = crate::build::tests::textured_cube_asset();
+        let n = a0.submeshes[0].vertices.len();
+        // Weights keyed on the POSITION (a cube asset splits every corner three
+        // ways for its UVs, and index-keyed weights would make the split copies
+        // disagree — the weld would then legitimately pick one and the round trip
+        // would not be exact).
+        a0.submeshes[0].skin = (0..n)
+            .map(|i| {
+                let p = a0.submeshes[0].vertices[i].position;
+                let hi = (p[0] > 0.0) as u16 + 2 * (p[1] > 0.0) as u16;
+                inf_mesh::VertexSkin {
+                    joints: [hi, (hi + 1) % 4, 0, 0],
+                    weights: [0.75, 0.25, 0.0, 0.0],
+                }
+            })
+            .collect();
+
+        let m1 = from_mesh_asset(&a0).expect("a skinned asset reads");
+        assert_eq!(m1.report.skin_conflicts, 0, "the fixture must not conflict");
+        assert!(m1.mesh.is_skinned());
+        let (a1, report) = to_mesh_asset(&m1.mesh, &ExportOptions::default());
+        assert_eq!(
+            report.optimize_skipped_skinned, 0,
+            "optimize is off by default"
+        );
+
+        // The stream is present, index-aligned, and normalized.
+        for sm in &a1.submeshes {
+            assert_eq!(
+                sm.skin.len(),
+                sm.vertices.len(),
+                "a skin stream is parallel to its vertices"
+            );
+            for s in &sm.skin {
+                let sum: f32 = s.weights.iter().sum();
+                assert!((sum - 1.0).abs() < 1e-5, "{s:?} sums to {sum}");
+            }
+        }
+
+        // Byte-for-byte: re-reading and re-writing is a fixed point, which is the
+        // property the rigid round-trip gates already hold and the one a new
+        // channel is most likely to break.
+        let m2 = from_mesh_asset(&a1).expect("the writer's output re-reads");
+        assert_eq!(m2.report.skin_conflicts, 0);
+        assert_eq!(
+            m1.mesh.canonical(),
+            m2.mesh.canonical(),
+            "the kernel mesh is not a fixed point of export∘import"
+        );
+        let (a2, _) = to_mesh_asset(&m2.mesh, &ExportOptions::default());
+        assert_eq!(
+            a1.submeshes
+                .iter()
+                .map(|s| s.skin.clone())
+                .collect::<Vec<_>>(),
+            a2.submeshes
+                .iter()
+                .map(|s| s.skin.clone())
+                .collect::<Vec<_>>(),
+            "the skin streams are not byte-identical across the round trip"
+        );
+        // ANTI-VACUITY: the streams are not all-default, so "identical" is a
+        // statement about the weights and not about two empty vectors.
+        let distinct: std::collections::BTreeSet<[u16; 4]> = a1
+            .submeshes
+            .iter()
+            .flat_map(|s| s.skin.iter().map(|k| k.joints))
+            .collect();
+        assert!(
+            distinct.len() >= 3,
+            "the fixture carries {} distinct joint sets; a constant channel would \
+             compare equal however broken the copy was",
+            distinct.len()
+        );
+        // …and a RIGID mesh still writes nothing, so the pre-P24.2 payload shape
+        // is untouched.
+        let (rigid, _) = to_mesh_asset(&cube(1.0), &ExportOptions::default());
+        assert!(rigid.submeshes.iter().all(|s| s.skin.is_empty()));
+    }
+
+    /// `optimize` and a skin stream do not mix — the flag is skipped and says so.
+    ///
+    /// `inf_mesh::optimize` hands back `(vertices, indices)` only, so a parallel
+    /// stream cannot follow its permutation. Running it anyway would give every
+    /// vertex another vertex's weights.
+    #[test]
+    fn optimize_is_skipped_on_a_skinned_submesh_and_reported() {
+        let mut asset = crate::build::tests::textured_cube_asset();
+        let n = asset.submeshes[0].vertices.len();
+        asset.submeshes[0].skin = vec![inf_mesh::VertexSkin::default(); n];
+        let m = from_mesh_asset(&asset).unwrap().mesh;
+        let opts = ExportOptions {
+            optimize: true,
+            ..Default::default()
+        };
+        let (out, report) = to_mesh_asset(&m, &opts);
+        assert_eq!(report.optimize_skipped_skinned, out.submeshes.len());
+        for sm in &out.submeshes {
+            assert_eq!(sm.skin.len(), sm.vertices.len());
+        }
+        // The control: the same flag on a RIGID mesh is not skipped, so the
+        // counter is measuring the skin and not the flag.
+        let (_, rigid_report) = to_mesh_asset(&cube(1.0), &opts);
+        assert_eq!(rigid_report.optimize_skipped_skinned, 0);
     }
 
     #[test]

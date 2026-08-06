@@ -2482,7 +2482,9 @@ fn runtime_destruct_damage(
     // refusal-visibility principle the outcomes above are built on.
     if report.detached == 0 && report.energy_absorbed_j == 0.0 {
         logs.push(format!(
-            "destruct::apply_damage: {energy_j} J was not enough to break the              cheapest bond set on that actor, so NOTHING was spent (damage is not              banked — a bigger single blow, not more small ones)"
+            "destruct::apply_damage: {energy_j} J was not enough to break the \
+             cheapest bond set on that actor, so NOTHING was spent (damage is not \
+             banked — a bigger single blow, not more small ones)"
         ));
     }
     report.energy_absorbed_j

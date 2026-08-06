@@ -820,7 +820,8 @@ fn the_skinned_pose_rule_is_identical_in_both_stores() {
     assert_eq!(
         raw.matches("&mut self").count(),
         1,
-        "`resolve_skinned` contains more than one `&mut self`; the receiver          normalization below would erase the others too"
+        "`resolve_skinned` contains more than one `&mut self`; the receiver \
+         normalization below would erase the others too"
     );
     let mine = raw.replace("&mut self", "&self");
     let theirs = extract_method_with_doc(&read(PLAYER_ASSETS), "resolve_skinned");

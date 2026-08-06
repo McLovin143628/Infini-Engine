@@ -64,6 +64,7 @@ use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
 use crate::ops::OpError;
+use crate::skin::{SkinBinding, VertWeights};
 
 macro_rules! mesh_id {
     ($(#[$doc:meta])* $name:ident, $prefix:literal) => {
@@ -178,6 +179,17 @@ pub struct Vert {
     /// Outgoing half-edges, kept sorted ascending. Redundant with the links and
     /// validated against them.
     pub(crate) out: Vec<HalfId>,
+    /// **The skin channel** (P24.2): which joints deform this vertex.
+    ///
+    /// Total, never optional, and [`VertWeights::RIGID`] on an unskinned mesh —
+    /// see [the `skin` module](mod@crate::skin) for why a per-vertex `Option`
+    /// would fail its own completeness invariant on the next `AddVertex`.
+    ///
+    /// **Positional tail field.** bincode writes this struct's fields in
+    /// declaration order, so adding it changed the shape of every `Mesh` on the
+    /// wire and took [`crate::journal::SessionSave::CURRENT_VERSION`] from 2 to 3
+    /// with it. Anything appended after it does the same.
+    pub(crate) skin: VertWeights,
 }
 
 /// One half-edge.
@@ -259,6 +271,11 @@ pub struct Mesh {
     /// representable in JSON, and the dual-format rule means every struct here
     /// must survive a self-describing encoder.
     pub(crate) slot_names: Vec<(Option<u32>, String)>,
+    /// **What this mesh's joint indices mean** (P24.2), or `None` for a rigid
+    /// mesh. See [the `skin` module](mod@crate::skin).
+    ///
+    /// Positional tail field, appended at v3 — same rule as [`Vert::skin`].
+    pub(crate) skin: Option<SkinBinding>,
 }
 
 impl Mesh {
@@ -394,6 +411,38 @@ impl Mesh {
     pub fn material_slots(&self) -> &[String] {
         &self.material_slots
     }
+    // ── the skin channel (P24.2) ───────────────────────────────────────────
+
+    /// What this mesh's joint indices mean, or `None` when it is rigid.
+    pub fn skin_binding(&self) -> Option<SkinBinding> {
+        self.skin
+    }
+
+    /// Whether this mesh is bound to a skeleton.
+    pub fn is_skinned(&self) -> bool {
+        self.skin.is_some()
+    }
+
+    /// A vertex's skinning influences. `None` for a dead id — never a silent
+    /// default, so a stale selection reads as absent rather than as "rigid".
+    pub fn vert_weights(&self, v: VertId) -> Option<VertWeights> {
+        self.verts.get(v.0).map(|x| x.skin)
+    }
+
+    /// Bind (or re-bind) the skin channel. Internal: [`crate::ops::Op::BindSkin`]
+    /// is the only door, so a binding cannot appear without a journal entry.
+    pub(crate) fn set_skin_binding(&mut self, binding: Option<SkinBinding>) {
+        self.skin = binding;
+    }
+
+    /// Overwrite a vertex's influences. Internal, for the same reason: the
+    /// journalled ops are the only writers.
+    pub(crate) fn set_vert_weights(&mut self, v: VertId, w: VertWeights) {
+        if let Some(rec) = self.verts.get_mut(v.0) {
+            rec.skin = w;
+        }
+    }
+
     /// The submesh name recorded for a slot, if the mesh was imported from an
     /// asset that had one.
     pub fn slot_name(&self, slot: Option<u32>) -> Option<&str> {
@@ -518,11 +567,53 @@ impl Mesh {
 
     // ── low-level surgery ──────────────────────────────────────────────────
 
-    /// Create an isolated vertex.
+    /// Create an isolated vertex, **rigid**.
+    ///
+    /// The right door for a vertex with no provenance — `Op::AddVertex`, and the
+    /// primitive generators, which build a mesh out of nothing. A vertex a
+    /// structural op derives from existing geometry goes through
+    /// [`Mesh::alloc_vert_blended`] instead.
     pub(crate) fn alloc_vert(&mut self, position: [f64; 3]) -> VertId {
         VertId(self.verts.alloc(Vert {
             position,
             out: Vec::new(),
+            skin: VertWeights::RIGID,
+        }))
+    }
+
+    /// Create an isolated vertex whose skinning influences are **blended from
+    /// the vertices it came out of**.
+    ///
+    /// `sources` is `(vertex, coefficient)`; the coefficients need not sum to 1
+    /// (the blend renormalizes), and a dead source contributes nothing. A
+    /// split-edge midpoint passes its two endpoints at `1 − t` / `t`, a
+    /// subdivision centroid its face's corners equally, an extruded or mirrored
+    /// copy its single source at 1.
+    ///
+    /// **On a rigid mesh this is `alloc_vert`, bit for bit**: every source is
+    /// [`VertWeights::RIGID`], so the accumulated table is `{0: Σcoeff}` and
+    /// normalizing it gives `RIGID` back exactly. That is what lets every
+    /// structural op adopt this door without moving a single byte of an
+    /// unskinned session.
+    pub(crate) fn alloc_vert_blended(
+        &mut self,
+        position: [f64; 3],
+        sources: &[(VertId, f64)],
+    ) -> VertId {
+        let mut pairs: Vec<(u16, f64)> = Vec::new();
+        for &(v, coeff) in sources {
+            let Some(rec) = self.verts.get(v.0) else {
+                continue;
+            };
+            for (j, w) in rec.skin.joints.iter().zip(&rec.skin.weights) {
+                pairs.push((*j, *w as f64 * coeff));
+            }
+        }
+        let skin = VertWeights::from_pairs(&pairs);
+        VertId(self.verts.alloc(Vert {
+            position,
+            out: Vec::new(),
+            skin,
         }))
     }
 
@@ -920,18 +1011,37 @@ impl Mesh {
             });
         }
 
-        let mut isolated: Vec<[u64; 3]> = self
+        // The skin channel rides the same numbering: `vert_skin[i]` is the
+        // canonical vertex `i`'s influences, in the LABELLING-INDEPENDENT order
+        // (`VertWeights::influences`), so two isomorphic meshes that stored the
+        // same influences in different slots canonicalize the same. The stored
+        // order is deliberately not normalized — that is what keeps the asset
+        // round trip byte-exact — so the normalization has to happen here.
+        let mut vert_skin: Vec<CanonicalWeights> = vec![Vec::new(); verts.len()];
+        for (&vid, &canonical) in &number {
+            vert_skin[canonical as usize] = canonical_weights(self.vert_ref(vid).skin);
+        }
+
+        let mut isolated: Vec<([u64; 3], CanonicalWeights)> = self
             .vert_ids()
             .filter(|v| !number.contains_key(v))
-            .map(|v| bits3(self.vert_ref(v).position))
+            .map(|v| {
+                let rec = self.vert_ref(v);
+                (bits3(rec.position), canonical_weights(rec.skin))
+            })
             .collect();
         isolated.sort_unstable();
-        verts.extend(isolated);
+        for (p, w) in isolated {
+            verts.push(p);
+            vert_skin.push(w);
+        }
 
         CanonicalMesh {
             verts,
             faces,
             material_slots: self.material_slots.clone(),
+            skin: self.skin,
+            vert_skin,
         }
     }
 
@@ -961,7 +1071,27 @@ pub struct CanonicalMesh {
     pub verts: Vec<[u64; 3]>,
     pub faces: Vec<CanonicalFace>,
     pub material_slots: Vec<String>,
+    /// The skin binding (P24.2), or `None` for a rigid mesh.
+    pub skin: Option<SkinBinding>,
+    /// Each canonical vertex's influences as `(joint, weight bits)`, zero-weight
+    /// slots dropped and sorted descending by weight — **index-aligned to
+    /// `verts`**, so a mesh's weights are compared in the same labelling-free
+    /// frame as its geometry.
+    ///
+    /// Bits rather than `f32` because this type is `Eq` + `Ord` (it is the
+    /// comparison every round-trip gate makes), and because a weight that
+    /// differs by one ULP is a different weight — a tolerance here would hide
+    /// exactly the drift the gates exist to catch.
+    pub vert_skin: Vec<CanonicalWeights>,
 }
+
+/// One vertex's influences in [`CanonicalMesh`]'s labelling-free form:
+/// `(joint, weight bits)`, zero slots dropped, descending weight.
+///
+/// A named alias rather than the bare `Vec<(u16, u32)>` because the pair means
+/// nothing on sight — `(u16, u32)` reads as two indices — and because it appears
+/// in three signatures that have to agree.
+pub type CanonicalWeights = Vec<(u16, u32)>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CanonicalFace {
@@ -1012,6 +1142,16 @@ fn bits2(v: [f64; 2]) -> [u64; 2] {
 }
 fn bits3(v: [f64; 3]) -> [u64; 3] {
     [bits(v[0]), bits(v[1]), bits(v[2])]
+}
+
+/// One vertex's influences in the canonical (labelling-independent) form used by
+/// [`CanonicalMesh::vert_skin`]: zero slots dropped, descending weight, ties by
+/// ascending joint, weights as `f32` bit patterns with `-0.0` folded.
+fn canonical_weights(w: VertWeights) -> CanonicalWeights {
+    w.influences()
+        .into_iter()
+        .map(|(j, x)| (j, if x == 0.0 { 0 } else { x.to_bits() }))
+        .collect()
 }
 
 /// Index of the rotation that makes `items` lexicographically smallest.

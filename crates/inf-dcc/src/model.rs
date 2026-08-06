@@ -436,7 +436,8 @@ pub(crate) fn extrude_faces(
             let p = pos(m, v);
             let np = (p + delta).to_array();
             finite("an extruded vertex position", &np)?;
-            dup.insert(v, m.alloc_vert(np));
+            // A displaced copy inherits its source's skin (P24.2).
+            dup.insert(v, m.alloc_vert_blended(np, &[(v, 1.0)]));
         }
         let map = |v: VertId| *dup.get(&v).expect("every region vertex is duplicated");
 
@@ -567,7 +568,7 @@ pub(crate) fn extrude_edges(
         for &v in &ends {
             let np = (pos(m, v) + d).to_array();
             finite("an extruded vertex position", &np)?;
-            dup.insert(v, m.alloc_vert(np));
+            dup.insert(v, m.alloc_vert_blended(np, &[(v, 1.0)]));
         }
         let map = |v: VertId| *dup.get(&v).expect("every endpoint is duplicated");
         let mut made = Vec::with_capacity(walls.len());
@@ -764,7 +765,7 @@ fn inset_region(mesh: &mut Mesh, region: &Region, amount: f64) -> Result<OpOutco
 
     let mut inner: BTreeMap<VertId, VertId> = BTreeMap::new();
     for (&v, &p) in &moved {
-        inner.insert(v, mesh.alloc_vert(p));
+        inner.insert(v, mesh.alloc_vert_blended(p, &[(v, 1.0)]));
     }
     // An interior region vertex is not on the border and does not move.
     let map = |v: VertId| inner.get(&v).copied().unwrap_or(v);
@@ -978,10 +979,14 @@ fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64) -> Result<OpOutcome, OpErr
 
     mesh.remove_face_raw(f1);
     mesh.remove_face_raw(f2);
-    let va1 = mesh.alloc_vert(new_pos[0].to_array());
-    let vb1 = mesh.alloc_vert(new_pos[1].to_array());
-    let va2 = mesh.alloc_vert(new_pos[2].to_array());
-    let vb2 = mesh.alloc_vert(new_pos[3].to_array());
+    // Each chamfer vertex is an offset copy of `a` or `b` (`new_pos` is
+    // `[pa+in1, pb+in1, pa+in2, pb+in2]`), so it inherits that endpoint's skin
+    // (P24.2). Both endpoints are still live here — `remove_face_raw` frees
+    // face-less edges, never vertices.
+    let va1 = mesh.alloc_vert_blended(new_pos[0].to_array(), &[(a, 1.0)]);
+    let vb1 = mesh.alloc_vert_blended(new_pos[1].to_array(), &[(b, 1.0)]);
+    let va2 = mesh.alloc_vert_blended(new_pos[2].to_array(), &[(a, 1.0)]);
+    let vb2 = mesh.alloc_vert_blended(new_pos[3].to_array(), &[(b, 1.0)]);
 
     let n_1 = c1.verts.len();
     let n_2 = c2.verts.len();
@@ -1186,7 +1191,8 @@ pub(crate) fn loop_cut(mesh: &mut Mesh, half: HalfId, cuts: u32) -> Result<OpOut
                 let t = k as f64 / (n + 1) as f64;
                 let p = (a + (b - a) * t).to_array();
                 finite("a loop-cut vertex position", &p)?;
-                made.push(m.alloc_vert(p));
+                // Same `t` for the position and the skin (P24.2).
+                made.push(m.alloc_vert_blended(p, &[(lo, 1.0 - t), (hi, t)]));
             }
             touched.insert(lo);
             touched.insert(hi);
@@ -1546,7 +1552,7 @@ pub(crate) fn subdivide_faces(mesh: &mut Mesh, faces: &[FaceId]) -> Result<OpOut
         for &(lo, hi) in &edges {
             let p = ((pos(m, lo) + pos(m, hi)) * 0.5).to_array();
             finite("a subdivision midpoint", &p)?;
-            let v = m.alloc_vert(p);
+            let v = m.alloc_vert_blended(p, &[(lo, 0.5), (hi, 0.5)]);
             touched.insert(lo);
             touched.insert(hi);
             touched.insert(v);
@@ -1566,7 +1572,10 @@ pub(crate) fn subdivide_faces(mesh: &mut Mesh, faces: &[FaceId]) -> Result<OpOut
             }
             let cp = (acc / n as f64).to_array();
             finite("a subdivision centroid", &cp)?;
-            let centre = m.alloc_vert(cp);
+            // The centroid's skin is its face's corners averaged, exactly as its
+            // position is (P24.2).
+            let sources: Vec<(VertId, f64)> = c.verts.iter().map(|&v| (v, 1.0)).collect();
+            let centre = m.alloc_vert_blended(cp, &sources);
             centres.push(centre);
             touched.insert(centre);
             let centre_corner = average_corner(&c.corners);
@@ -1692,7 +1701,11 @@ pub(crate) fn mirror(mesh: &mut Mesh, axis: MirrorAxis, coord: f64) -> Result<Op
             let mut q = p;
             q[ax] = 2.0 * coord - p[ax];
             finite("a mirrored vertex position", &q)?;
-            let w = m.alloc_vert(q);
+            // The reflected copy inherits its source's skin verbatim — it does
+            // NOT swap left-side joints for right-side ones, because the kernel
+            // holds no skeleton to pair them by. Ledgered in the `skin` module
+            // and in ROADMAP §12's P24 block.
+            let w = m.alloc_vert_blended(q, &[(v, 1.0)]);
             map.insert(v, w);
             fresh.push(w);
         }

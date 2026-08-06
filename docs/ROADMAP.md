@@ -7849,6 +7849,23 @@ every asset kind at once and belongs to a deliberate bump, not to a repair batch
 above is written to **fail** the day it lands, so this entry gets retired rather than
 forgotten.
 
+**Also carried from P24.1 — the decode allowlist covers `simulate.rs` and not `pie.rs`.**
+`every_asset_decode_in_simulate_flows_through_the_reporting_door` reads a **module** scope
+(the P23 law) and requires every free-function `…::decode` call site in `simulate.rs` to be
+`decode_anim`. The same gate does not run over `editor/crates/inf-editor-core/src/pie.rs`,
+whose payload builder decodes the same asset kinds — and the P24.1 re-audit adopted B1's fix
+there by hand (the stale-`.inf_mesh` advisory) rather than by gate. Extending the allowlist to
+that module needs a **second permitted shape**, which is why it was ledgered instead of done:
+the biome-set arm decodes *deliberately* and ships the bytes either way (its own comment says
+so, and reporting there would be noise, not signal), and the file's `#[cfg(test)]` module adds
+two more sites that are fixtures rather than production decodes. An allowlist with an
+"except these" list is the ban it replaced, so the shape has to be named structurally —
+"a decode whose result is shipped regardless" is a different door from "a decode whose failure
+must be reported", and the door does not exist yet. Until it does, `pie.rs`'s advisories are
+kept honest one at a time: `the_stale_mesh_advisory_is_pinned_to_what_it_says` (P24.2) pins
+the warning text itself, because the behavioural test beside it stays green with the warning
+deleted.
+
 ### Phase 25 — Photogrammetry: photos → asset
 
 **Goal:** photos in, game-ready asset out, entirely in-engine. **Done when:** a

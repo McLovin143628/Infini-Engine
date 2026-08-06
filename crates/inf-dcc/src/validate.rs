@@ -25,6 +25,7 @@
 //! | no wire edges | no edge is face-less on both sides |
 //! | sharpness | the flag agrees across a twin pair |
 //! | numbers | positions and UVs are finite |
+//! | skin (P24.2) | an unbound mesh carries no weights; a bound one names ≥ 1 joint, every influence is in range, and every vertex's weights are normalized |
 //! | Euler | per connected component *with faces*: `V − E + F = 2 − 2g − b` admits a non-negative integer genus |
 //!
 //! # What is deliberately NOT checked
@@ -48,7 +49,13 @@ use serde::{Deserialize, Serialize};
 use crate::topo::{FaceId, HalfId, Mesh, VertId};
 
 /// One broken invariant, with the elements that break it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PartialEq` but **not `Eq`** since P24.2: [`Violation::SkinNotNormalized`]
+/// reports the sum it refused, and a reading is worth more than a verdict (a sum
+/// of `0` and a sum of `1.4` are different authoring mistakes). Same trade the
+/// crate's own [`crate::ops::OpError`] and `inf_anim::template::TemplateError`
+/// already make, and nothing compares violations by hash or orders them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Violation {
     /// `twin(h)` names a dead slot.
     DeadTwin { half: HalfId, twin: HalfId },
@@ -157,6 +164,36 @@ pub enum Violation {
         /// `V − E + F`.
         chi: i64,
     },
+    // ── the skin channel (P24.2) ───────────────────────────────────────────
+    /// A vertex carries influences on a mesh that is **not bound** to a
+    /// skeleton, so its joint indices name nothing.
+    ///
+    /// This is the invariant that makes the two Options of the skin channel
+    /// sound (see [the `skin` module](mod@crate::skin)): a vertex's weights are
+    /// total and default to rigid, so "unbound" has exactly one representation
+    /// and a mesh cannot quietly hold a weight table nobody can interpret.
+    SkinWithoutBinding { vert: VertId },
+    /// A binding that names zero joints — every index would be out of range.
+    SkinBindingEmpty,
+    /// An influence naming a joint index at or past the bound skeleton's count.
+    SkinJointOutOfRange {
+        vert: VertId,
+        joint: u16,
+        joints: u32,
+    },
+    /// A vertex's weights are not normalized: one is negative or non-finite, or
+    /// they do not sum to 1 within [`crate::skin::WEIGHT_SUM_TOLERANCE`].
+    SkinNotNormalized {
+        vert: VertId,
+        /// What the weights actually sum to — a reading, not a verdict, because
+        /// a sum of `0` and a sum of `1.4` are different authoring mistakes.
+        ///
+        /// Named `weight_sum` rather than `sum` so the declaration says on its
+        /// own line what kind of number it is: the crate's `f32` law is a
+        /// line-level allowlist, and a field called `sum: f32` is exactly the
+        /// line that law exists to stop.
+        weight_sum: f32,
+    },
 }
 
 /// Check every invariant. `Ok(())` or every violation found, in a deterministic
@@ -169,6 +206,10 @@ pub fn validate(mesh: &Mesh) -> Result<(), Vec<Violation>> {
     check_faces(mesh, &mut v);
     check_edges(mesh, &mut v);
     check_numbers(mesh, &mut v);
+    // The skin channel is a per-vertex attribute plus one mesh-level record, so
+    // it is checkable on a structurally broken mesh and belongs with the other
+    // attribute checks rather than behind the `v.is_empty()` gate below.
+    check_skin(mesh, &mut v);
     // The structural checks above are what the loop/fan walks assume. Running a
     // fan walk over links that are already known-broken produces cascades of
     // noise, so the topology-dependent checks only run on a structurally sound
@@ -375,6 +416,47 @@ fn check_numbers(mesh: &Mesh, out: &mut Vec<Violation>) {
         if let Some(n) = mesh.corner_normal(h).expect("live half-edge id") {
             if !n.iter().all(|x| x.is_finite()) {
                 out.push(Violation::NonFiniteNormal { half: h });
+            }
+        }
+    }
+}
+
+/// **The skin channel** (P24.2) — see [the `skin` module](mod@crate::skin).
+///
+/// Four separate readings, not one "the skin is bad": an out-of-range index, an
+/// unnormalized set and an orphan weight table are three different authoring
+/// mistakes with three different remedies, and a check that reported them as one
+/// would send an author to the wrong one two times in three.
+fn check_skin(mesh: &Mesh, out: &mut Vec<Violation>) {
+    match mesh.skin_binding() {
+        None => {
+            for v in mesh.vert_ids() {
+                if !mesh.vert_weights(v).expect("live vertex id").is_rigid() {
+                    out.push(Violation::SkinWithoutBinding { vert: v });
+                }
+            }
+        }
+        Some(binding) => {
+            if binding.joints == 0 {
+                out.push(Violation::SkinBindingEmpty);
+            }
+            for v in mesh.vert_ids() {
+                let w = mesh.vert_weights(v).expect("live vertex id");
+                if let Some(j) = w.max_joint() {
+                    if j as u32 >= binding.joints {
+                        out.push(Violation::SkinJointOutOfRange {
+                            vert: v,
+                            joint: j,
+                            joints: binding.joints,
+                        });
+                    }
+                }
+                if !w.is_normalized() {
+                    out.push(Violation::SkinNotNormalized {
+                        vert: v,
+                        weight_sum: w.weights.iter().sum(),
+                    });
+                }
             }
         }
     }
@@ -705,6 +787,11 @@ mod tests {
     // Two of the nine — `check_loops` and `check_vertex_manifold` — run only when
     // every structural check is already clean, so their fixtures have to be
     // otherwise perfect meshes. That constraint is why they were skipped before.
+    //
+    // P24.2 added a **tenth**, `check_skin`, and it arrives with the same
+    // discipline: four falsifications below, one per reading it can produce,
+    // because a check that only fires on one of its four branches is three
+    // untested checks wearing one name.
 
     #[test]
     fn check_faces_catches_a_face_that_does_not_own_its_representative_half() {
@@ -769,6 +856,83 @@ mod tests {
                 .any(|e| matches!(e, Violation::NonFiniteUv { half } if *half == c)),
             "{errs:?}"
         );
+    }
+
+    /// **The tenth check, falsified four ways** (P24.2) — one per reading, and a
+    /// control proving a correctly skinned cube is clean.
+    #[test]
+    fn check_skin_catches_each_of_its_four_readings() {
+        use crate::skin::{SkinBinding, VertWeights};
+
+        let bind = |m: &mut Mesh, joints: u32| {
+            m.set_skin_binding(Some(SkinBinding {
+                skeleton: Some([7; 16]),
+                joints,
+            }))
+        };
+
+        // (a) weights with no binding — the invariant that makes "unbound" have
+        //     exactly one representation.
+        let mut m = cube(1.0);
+        let v = m.vert_ids().next().unwrap();
+        m.set_vert_weights(v, VertWeights::from_pairs(&[(0, 0.5), (1, 0.5)]));
+        let errs = validate(&m).expect_err("weights on a rigid mesh");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, Violation::SkinWithoutBinding { vert } if *vert == v)),
+            "{errs:?}"
+        );
+
+        // (b) a binding with no joints.
+        let mut m = cube(1.0);
+        bind(&mut m, 0);
+        let errs = validate(&m).expect_err("a zero-joint binding");
+        assert!(errs.contains(&Violation::SkinBindingEmpty), "{errs:?}");
+
+        // (c) an influence past the end of the skeleton.
+        let mut m = cube(1.0);
+        bind(&mut m, 2);
+        let v = m.vert_ids().next().unwrap();
+        m.set_vert_weights(v, VertWeights::from_pairs(&[(5, 1.0)]));
+        let errs = validate(&m).expect_err("an out-of-range joint");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                Violation::SkinJointOutOfRange { vert, joint, joints }
+                    if *vert == v && *joint == 5 && *joints == 2
+            )),
+            "{errs:?}"
+        );
+
+        // (d) weights that do not sum to 1. Written straight into the record,
+        //     because every constructor in `skin` normalizes — which is the
+        //     point: this reading exists for a save that arrived from somewhere
+        //     else, and `MeshSession::restore` is the door it guards.
+        let mut m = cube(1.0);
+        bind(&mut m, 4);
+        let v = m.vert_ids().next().unwrap();
+        m.verts.get_mut(v.0).unwrap().skin = VertWeights {
+            joints: [0, 1, 0, 0],
+            weights: [0.5, 0.2, 0.0, 0.0],
+        };
+        let errs = validate(&m).expect_err("unnormalized weights");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                Violation::SkinNotNormalized { vert, weight_sum }
+                    if *vert == v && (*weight_sum - 0.7).abs() < 1e-6
+            )),
+            "{errs:?}"
+        );
+
+        // The control: a properly bound and weighted cube is clean, so the four
+        // arms above are catching the defect and not the binding.
+        let mut m = cube(1.0);
+        bind(&mut m, 4);
+        for v in m.vert_ids().collect::<Vec<_>>() {
+            m.set_vert_weights(v, VertWeights::from_pairs(&[(1, 0.7), (3, 0.3)]));
+        }
+        assert_eq!(validate(&m), Ok(()));
     }
 
     #[test]

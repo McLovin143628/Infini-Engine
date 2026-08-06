@@ -62,6 +62,7 @@ use inf_math::{pcos64, psin64};
 use inf_mesh::{MeshAsset, MeshVertex};
 use serde::{Deserialize, Serialize};
 
+use crate::skin::{SkinBinding, VertWeights};
 use crate::topo::{CornerData, HalfId, Mesh, VertId};
 
 /// The position weld tolerance: **exactly zero**. See the module docs.
@@ -72,8 +73,22 @@ pub const WELD_TOLERANCE: f64 = 0.0;
 pub enum ImportError {
     #[error("mesh asset schema v{found} is newer than this build understands (v{current})")]
     UnsupportedSchema { found: u32, current: u32 },
-    #[error("submesh {submesh} carries skinning weights, which this kernel cannot represent")]
-    Skinned { submesh: usize },
+    /// A skin stream whose length does not match its submesh's vertex count.
+    ///
+    /// `SubMesh::skin` is a **parallel stream** — its own doc says
+    /// `skin.len() == vertices.len()` when it is non-empty — so a mismatch means
+    /// the two halves of one submesh came from different places. Refused rather
+    /// than zipped to the shorter of the two, which would weight some of the mesh
+    /// and silently leave the rest riding joint 0.
+    ///
+    /// (This replaces `ImportError::Skinned`, the P23 placeholder that refused
+    /// *every* skinned asset because the kernel had nowhere to put a weight.)
+    #[error("submesh {submesh} has {vertices} vertices but {skin} skin records")]
+    SkinLengthMismatch {
+        submesh: usize,
+        vertices: usize,
+        skin: usize,
+    },
     #[error("submesh {submesh} has {indices} indices, which is not a whole number of triangles")]
     IndexCountNotTriangles { submesh: usize, indices: usize },
     #[error("submesh {submesh} index {index} is out of range ({vertices} vertices)")]
@@ -139,6 +154,21 @@ pub struct ImportReport {
     /// no such latitude and refuses outright
     /// ([`crate::ops::OpError::NonFinite`]).
     pub non_finite_values: usize,
+    /// **The skin-weld advisory** (P24.2): welded positions where two source
+    /// vertices disagreed about their skinning influences.
+    ///
+    /// A `MeshAsset` splits one surface vertex into several wherever a UV or a
+    /// normal seam runs through it, and a well-formed exporter gives every copy
+    /// the same weights — so this is normally zero, and a non-zero reading means
+    /// the source's own split copies disagree. First occurrence wins (in index
+    /// order, which is deterministic); averaging would invent a weight nobody
+    /// authored, and refusing would lock an author out of a file that is only
+    /// *slightly* wrong.
+    ///
+    /// It is also the exact number that makes the export round trip inexact: at
+    /// zero, re-exporting reproduces every skin record; at `n`, up to `n` of them
+    /// come back as the winner's.
+    pub skin_conflicts: usize,
 }
 
 /// A mesh plus what the reader had to do to produce it.
@@ -161,11 +191,24 @@ pub fn from_mesh_asset(asset: &MeshAsset) -> Result<MeshImport, ImportError> {
     // Provisional vertices: position bits → index, in first-appearance order.
     let mut weld: BTreeMap<[u64; 3], usize> = BTreeMap::new();
     let mut positions: Vec<[f64; 3]> = Vec::new();
+    // **The skin channel** (P24.2), index-aligned to `positions`. `None` marks a
+    // welded position no skinned submesh has spoken for yet, so the FIRST
+    // occurrence wins and later disagreements are counted rather than fought
+    // over — see `ImportReport::skin_conflicts`.
+    let mut skins: Vec<Option<VertWeights>> = Vec::new();
     let mut faces: Vec<RawFace> = Vec::new();
+    let mut any_skin = false;
 
     for (si, sm) in asset.submeshes.iter().enumerate() {
         if !sm.skin.is_empty() {
-            return Err(ImportError::Skinned { submesh: si });
+            if sm.skin.len() != sm.vertices.len() {
+                return Err(ImportError::SkinLengthMismatch {
+                    submesh: si,
+                    vertices: sm.vertices.len(),
+                    skin: sm.skin.len(),
+                });
+            }
+            any_skin = true;
         }
         if sm.indices.len() % 3 != 0 {
             return Err(ImportError::IndexCountNotTriangles {
@@ -200,8 +243,27 @@ pub fn from_mesh_asset(asset: &MeshAsset) -> Result<MeshImport, ImportError> {
                 let key = bits3(p);
                 let idx = *weld.entry(key).or_insert_with(|| {
                     positions.push(p);
+                    skins.push(None);
                     positions.len() - 1
                 });
+                // The skin channel rides the weld (P24.2). A `MeshAsset` splits
+                // one surface vertex into several whenever a UV or a normal seam
+                // runs through it, and every copy carries the SAME influences —
+                // so first-occurrence-wins is exact in the overwhelmingly common
+                // case, and the rare disagreement is *counted* rather than
+                // silently averaged into a weight nobody authored.
+                if !sm.skin.is_empty() {
+                    let s = sm.skin[raw as usize];
+                    let w = VertWeights {
+                        joints: s.joints,
+                        weights: s.weights,
+                    };
+                    match &skins[idx] {
+                        None => skins[idx] = Some(w),
+                        Some(prev) if *prev != w => report.skin_conflicts += 1,
+                        Some(_) => {}
+                    }
+                }
                 verts[k] = idx;
                 corners[k] = CornerData {
                     uv: [v.uv[0] as f64, v.uv[1] as f64],
@@ -243,11 +305,28 @@ pub fn from_mesh_asset(asset: &MeshAsset) -> Result<MeshImport, ImportError> {
         }
     }
 
-    report.fan_splits = split_bowties(&mut faces, &mut positions);
+    report.fan_splits = split_bowties(&mut faces, &mut positions, &mut skins);
 
     // ── build ──────────────────────────────────────────────────────────────
     let mut mesh = Mesh::new();
     let ids: Vec<VertId> = positions.iter().map(|&p| mesh.alloc_vert(p)).collect();
+    // The channel, if the asset carried one. `joints` is the tightest count the
+    // FILE supports (one past the highest index it names) because a bare weight
+    // stream says nothing more — see `SkinBinding::joints`.
+    if any_skin {
+        let mut top = 0u32;
+        for (v, w) in ids.iter().zip(&skins) {
+            let w = w.unwrap_or(VertWeights::RIGID).normalized();
+            if let Some(j) = w.max_joint() {
+                top = top.max(j as u32 + 1);
+            }
+            mesh.set_vert_weights(*v, w);
+        }
+        mesh.set_skin_binding(Some(SkinBinding {
+            skeleton: None,
+            joints: top.max(1),
+        }));
+    }
     mesh.set_material_slots(asset.material_slots.clone());
     for sm in &asset.submeshes {
         mesh.set_slot_name(sm.material_slot, sm.name.clone());
@@ -278,7 +357,11 @@ struct RawFace {
 
 /// Partition each welded vertex's corners into fans and give every fan after the
 /// first its own vertex. Returns how many vertices were minted.
-fn split_bowties(faces: &mut [RawFace], positions: &mut Vec<[f64; 3]>) -> usize {
+fn split_bowties(
+    faces: &mut [RawFace],
+    positions: &mut Vec<[f64; 3]>,
+    skins: &mut Vec<Option<VertWeights>>,
+) -> usize {
     // corner = (face index, corner index within that face)
     let mut at_vert: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
     for (fi, face) in faces.iter().enumerate() {
@@ -324,6 +407,9 @@ fn split_bowties(faces: &mut [RawFace], positions: &mut Vec<[f64; 3]>) -> usize 
                 continue; // the first fan keeps the original vertex
             }
             positions.push(positions[v]);
+            // A fan split mints a vertex at the SAME position, so it is the same
+            // surface point and carries the same influences (P24.2).
+            skins.push(skins[v]);
             let fresh = positions.len() - 1;
             minted += 1;
             for &k in members {
@@ -752,14 +838,105 @@ pub(crate) mod tests {
         assert_eq!(validate(&imported.mesh), Ok(()));
     }
 
+    /// **A skinned submesh now reads** (P24.2) — the P23 refusal is closed.
+    ///
+    /// Three claims: the weights arrive, the binding's joint count is the
+    /// tightest one the FILE supports (a bare weight stream says no more), and
+    /// the imported mesh is valid — which is the check that would fire if an
+    /// index or a normalization slipped through the weld.
     #[test]
-    fn a_skinned_submesh_is_refused_rather_than_silently_stripped() {
+    fn a_skinned_submesh_reads_its_weights_into_the_channel() {
         let mut asset = textured_cube_asset();
-        asset.submeshes[0].skin = vec![Default::default(); 24];
+        let n = asset.submeshes[0].vertices.len();
+        // Every vertex on joint 3, and the `+x` half sharing with joint 1 — so
+        // the channel is not a constant and "the weights arrived" is falsifiable.
+        //
+        // Keyed on the POSITION, not on the index: a `MeshAsset` cube is 24
+        // vertices for 8 corners (the UV split), and an index-keyed pattern gives
+        // the split copies of one corner different weights. That is a real
+        // conflict, `skin_conflicts` counts it correctly, and it is a defect in
+        // the fixture rather than in the reader — measured, on the first run of
+        // this test.
+        asset.submeshes[0].skin = (0..n)
+            .map(|i| inf_mesh::VertexSkin {
+                joints: [3, 1, 0, 0],
+                weights: if asset.submeshes[0].vertices[i].position[0] > 0.0 {
+                    [0.5, 0.5, 0.0, 0.0]
+                } else {
+                    [1.0, 0.0, 0.0, 0.0]
+                },
+            })
+            .collect();
+        let import = from_mesh_asset(&asset).expect("a skinned asset now reads");
+        assert_eq!(
+            import.mesh.skin_binding(),
+            Some(SkinBinding {
+                skeleton: None,
+                joints: 4
+            }),
+            "the binding is as tight as the file, and names no skeleton"
+        );
+        assert_eq!(validate(&import.mesh), Ok(()));
+        assert_eq!(import.report.skin_conflicts, 0);
+        let weighted = import
+            .mesh
+            .vert_ids()
+            .filter(|&v| import.mesh.vert_weights(v).unwrap().weight_of(1) > 0.0)
+            .count();
+        assert!(
+            weighted > 0 && weighted < import.mesh.vert_count(),
+            "{weighted} of {} vertices share joint 1 — a constant channel would \
+             prove nothing",
+            import.mesh.vert_count()
+        );
+    }
+
+    /// A skin stream that is not index-aligned to its vertices is refused by
+    /// name — the two halves of one submesh came from different places.
+    #[test]
+    fn a_ragged_skin_stream_is_refused_by_name() {
+        let mut asset = textured_cube_asset();
+        asset.submeshes[0].skin = vec![Default::default(); 3];
+        let vertices = asset.submeshes[0].vertices.len();
         assert_eq!(
             from_mesh_asset(&asset),
-            Err(ImportError::Skinned { submesh: 0 })
+            Err(ImportError::SkinLengthMismatch {
+                submesh: 0,
+                vertices,
+                skin: 3
+            })
         );
+    }
+
+    /// **The weld's skin advisory is real, and it is counted rather than
+    /// averaged.**
+    ///
+    /// Two source vertices at one position with different influences: the first
+    /// wins, the disagreement is reported, and the mesh is still valid. The
+    /// control below is the same fixture with matching weights, which reports
+    /// zero — so the counter is measuring the conflict and not the split.
+    #[test]
+    fn split_copies_that_disagree_about_their_weights_are_counted() {
+        let base = textured_cube_asset();
+        let n = base.submeshes[0].vertices.len();
+        let make = |disagree: bool| {
+            let mut asset = base.clone();
+            asset.submeshes[0].skin = (0..n)
+                .map(|i| inf_mesh::VertexSkin {
+                    joints: [if disagree && i % 2 == 1 { 2 } else { 1 }, 0, 0, 0],
+                    weights: [1.0, 0.0, 0.0, 0.0],
+                })
+                .collect();
+            from_mesh_asset(&asset).expect("reads")
+        };
+        let clean = make(false);
+        assert_eq!(clean.report.skin_conflicts, 0, "the control must be clean");
+        let messy = make(true);
+        assert!(
+            messy.report.skin_conflicts > 0,
+            "a disagreement at a welded position must be reported"
+        );
+        assert_eq!(validate(&messy.mesh), Ok(()));
     }
 
     #[test]

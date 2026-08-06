@@ -1115,6 +1115,71 @@ mod tests {
         assert_eq!(payload.fractures.len(), 1);
     }
 
+    /// **…and the warning itself is pinned** (P24.2 chore).
+    ///
+    /// The test above proves the payload ships no fracture for a stale mesh —
+    /// which is exactly what it did *before* the adoption, silently. Deleting the
+    /// `tracing::warn!` leaves that test green, so nothing in the repo stopped
+    /// the advisory from being removed; the cook-advisory doctrine says a silent
+    /// hazard gets an advisory, and an advisory nothing asserts is one edit from
+    /// gone.
+    ///
+    /// Read off the module's own source (line endings normalized — a `.rs` is
+    /// checked out CRLF under `core.autocrlf`, the P22 law). What is pinned is
+    /// the *sentence*, not the formatting: the two clauses that make the message
+    /// worth reading are "previews as INDESTRUCTIBLE" and the fact that the
+    /// cooked build still fractures it, which together name the divergence.
+    #[test]
+    fn the_stale_mesh_advisory_is_pinned_to_what_it_says() {
+        let whole = include_str!("pie.rs").replace("\r\n", "\n");
+        // **Only the production half.** This test quotes the phrases it looks
+        // for, so searching the whole file would find its own source and pass on
+        // an empty module — the vacuity that makes a source gate worthless.
+        let cut = whole
+            .find("\n#[cfg(test)]\n")
+            .expect("this module has a test section");
+        let src = whole[..cut].to_string();
+        // Search the source with the `\`-continuations collapsed, so re-wrapping
+        // the literal is free and only the WORDS are load-bearing.
+        let flat: String = {
+            let mut out = String::with_capacity(src.len());
+            let mut chars = src.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\\' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                    while chars.peek().is_some_and(|c| *c == ' ') {
+                        chars.next();
+                    }
+                    continue;
+                }
+                out.push(c);
+            }
+            out
+        };
+        for phrase in [
+            "did not decode, so this actor previews as INDESTRUCTIBLE",
+            "while the cooked build still fractures it",
+        ] {
+            assert!(
+                flat.contains(phrase),
+                "the destructible-mesh advisory no longer says {phrase:?} — the \
+                 stale-mesh test stays green without it, so this is the only \
+                 thing keeping the warning honest"
+            );
+        }
+        // Not vacuous: the phrases live inside a `tracing::warn!`, not a comment.
+        let at = flat
+            .find("did not decode, so this actor previews as INDESTRUCTIBLE")
+            .expect("just asserted");
+        let before = &flat[..at];
+        assert!(
+            before
+                .rfind("tracing::warn!")
+                .is_some_and(|w| before[w..].matches('\n').count() <= 2),
+            "the advisory text is no longer inside a `tracing::warn!`"
+        );
+    }
+
     /// A 2 m cube, encoded — the mesh the fracture pin derives from.
     fn fracture_cube() -> inf_mesh::MeshAsset {
         let c = |x: f32, y: f32, z: f32| inf_mesh::MeshVertex {
@@ -1206,7 +1271,8 @@ mod tests {
         assert_eq!(
             archetype_first, 24,
             "the fixture no longer reproduces the archetype/document split — an \
-             archetype walk visits the same actor first, so this test would pass              against the very bug it exists to catch"
+             archetype walk visits the same actor first, so this test would pass \
+             against the very bug it exists to catch"
         );
         let params = destructible_mesh_params(&doc);
         assert_eq!(params.len(), 1, "one mesh, one fracture");

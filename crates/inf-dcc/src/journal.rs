@@ -105,24 +105,68 @@ impl SessionSave {
     ///   first half-edge — which is precisely why the version is the first field
     ///   and why this had to move.
     ///
-    /// **No migration, and that is the honest answer**: `MeshSession` has only
-    /// ever lived in `DccState` for the life of a process, so **zero v1 sessions
-    /// exist** anywhere. Writing a v1→v2 migration would be writing a decoder for
-    /// a file that has never been produced and then claiming it works. A v1 save
-    /// is refused loudly by [`MeshSession::restore`], which is the right answer
-    /// for a file that cannot exist.
+    /// * **v3** (P24.2): the **skin channel**. `Vert` gained a `skin:
+    ///   VertWeights` tail field and `Mesh` gained a `skin:
+    ///   Option<SkinBinding>` tail field, so — positional encoding again — a v2
+    ///   save read as v3 runs out of bytes at the first vertex and a v3 save read
+    ///   as v2 leaves the whole channel as trailing garbage. The three new `Op`
+    ///   variants (27/28/29) did **not** need this bump; they are appended, and
+    ///   `op_discriminants_are_frozen` is what says so in bytes.
+    ///
+    /// **No migration, and that is still the honest answer**: `MeshSession` has
+    /// only ever lived in `DccState` for the life of a process, so **zero v1 or
+    /// v2 sessions exist** on any disk. Writing a migration would be writing a
+    /// decoder for a file that has never been produced and then claiming it
+    /// works. Both directions are refused loudly by [`MeshSession::restore`] —
+    /// and the refusal is a *named* error carrying a remedy
+    /// ([`SessionError::SchemaTooOld`] / [`SessionError::SchemaTooNew`]), which
+    /// is the `inf_asset` doctrine applied to the one format in this crate that
+    /// is not an `AssetPayload`.
     ///
     /// Bump on any change to this struct's shape, to `Mesh`'s, or to the `Op`
     /// discriminants — the last of which is pinned separately, because a
     /// mis-numbered variant produces a structurally valid save of the wrong edit.
-    pub const CURRENT_VERSION: u32 = 2;
+    pub const CURRENT_VERSION: u32 = 3;
+
+    /// What to do about a session this build is too new to read.
+    ///
+    /// An **instruction**, not a restatement — the bar `SkeletonAsset`'s
+    /// `UPGRADE_REMEDY` set at P24.1. It can say "nothing is lost" and mean it:
+    /// a session is in-progress edit *history*, and the `.inf_mesh` it was opened
+    /// from is a separate file this refusal does not touch.
+    pub const TOO_OLD_REMEDY: &'static str =
+        "re-open the mesh (Content Drawer ▸ double-click) — the asset itself is unaffected, only this session's undo history is discarded";
+
+    /// …and one this build is too old to read.
+    pub const TOO_NEW_REMEDY: &'static str =
+        "update Infinity Engine, or re-open the mesh (Content Drawer ▸ double-click) to start a fresh history from the asset on disk";
 }
 
 /// Why a [`SessionSave`] could not become a session.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SessionError {
-    #[error("session schema v{found} is not v{current}; this build cannot read it")]
-    UnsupportedSchema { found: u32, current: u32 },
+    /// The save was written by an **older** build and cannot be read by this
+    /// one.
+    ///
+    /// Split from [`SessionError::SchemaTooNew`] at P24.2, on the doctrine
+    /// `inf_asset` established for `AssetPayload`: the two directions are
+    /// different problems with different remedies, and one message that covers
+    /// both tells a user nothing they can act on. This crate's format is not an
+    /// `AssetPayload` (it is a session, not an asset), so it carries its own
+    /// remedy rather than inheriting one.
+    #[error("this edit session was written by an older build (schema v{found}, this build reads v{current}); {remedy}")]
+    SchemaTooOld {
+        found: u32,
+        current: u32,
+        remedy: &'static str,
+    },
+    /// The save was written by a **newer** build.
+    #[error("this edit session was written by a newer build (schema v{found}, this build reads v{current}); {remedy}")]
+    SchemaTooNew {
+        found: u32,
+        current: u32,
+        remedy: &'static str,
+    },
     /// The base mesh is not a valid mesh. Replaying ops onto it would produce
     /// nonsense at best and, because the internal accessors assert the kernel's
     /// own invariants rather than validating input, a panic at worst.
@@ -365,11 +409,26 @@ impl MeshSession {
     /// 5. **The replayed mesh**, because a valid base plus a replay is only a
     ///    valid mesh if every op in *this build* preserves the invariants.
     pub fn restore(save: SessionSave) -> Result<Self, SessionError> {
-        if save.schema_version != SessionSave::CURRENT_VERSION {
-            return Err(SessionError::UnsupportedSchema {
-                found: save.schema_version,
-                current: SessionSave::CURRENT_VERSION,
-            });
+        // Both directions, each by its own name (P24.2). The remedies differ
+        // because the situations do: an old session is *stale work* the user can
+        // abandon safely (the asset on disk is the authority and is untouched),
+        // and a new one means the tool is behind the file.
+        match save.schema_version.cmp(&SessionSave::CURRENT_VERSION) {
+            std::cmp::Ordering::Less => {
+                return Err(SessionError::SchemaTooOld {
+                    found: save.schema_version,
+                    current: SessionSave::CURRENT_VERSION,
+                    remedy: SessionSave::TOO_OLD_REMEDY,
+                })
+            }
+            std::cmp::Ordering::Greater => {
+                return Err(SessionError::SchemaTooNew {
+                    found: save.schema_version,
+                    current: SessionSave::CURRENT_VERSION,
+                    remedy: SessionSave::TOO_NEW_REMEDY,
+                })
+            }
+            std::cmp::Ordering::Equal => {}
         }
         validate(&save.base).map_err(SessionError::InvalidBase)?;
         if save.cursor > save.ops.len() {
@@ -701,6 +760,15 @@ mod tests {
             // P23.5's UV half, appended after them.
             Op::SetEdgeSeam { .. } => 25,
             Op::Unwrap { .. } => 26,
+            // P24.2's THREE skin ops, appended after them. Fourth batch, same
+            // rule: nothing above moved, so `CollapseEdge{7}` is still `[5, 7]`
+            // and every byte string pinned by an earlier batch is unchanged.
+            // `SessionSave::CURRENT_VERSION` moved to 3 in this batch — for the
+            // `Mesh`'s new shape, NOT for these, which is exactly the
+            // distinction this match exists to keep legible.
+            Op::BindSkin { .. } => 27,
+            Op::AssignWeights { .. } => 28,
+            Op::ClearSkin => 29,
         }
     }
 
@@ -774,7 +842,14 @@ mod tests {
             | Op::RotateVerts { .. }
             | Op::ScaleVerts { .. }
             | Op::SetEdgeSeam { .. }
-            | Op::Unwrap { .. } => Vec::new(),
+            | Op::Unwrap { .. }
+            // P24.2's three carry no nested enum: a joint index is a number, a
+            // weight is a float, and the skeleton is an `Option<[u8; 16]>` whose
+            // two tags are serde's own — the same shape as every other `Option`
+            // in this file and not a domain enum anyone can renumber.
+            | Op::BindSkin { .. }
+            | Op::AssignWeights { .. }
+            | Op::ClearSkin => Vec::new(),
         }
     }
 
@@ -876,8 +951,14 @@ mod tests {
                 seam: true,
             },
             Op::Unwrap { corners: vec![] },
+            Op::BindSkin {
+                skeleton: None,
+                joints: 1,
+            },
+            Op::AssignWeights { weights: vec![] },
+            Op::ClearSkin,
         ];
-        assert_eq!(every.len(), 27, "one sample per variant");
+        assert_eq!(every.len(), 30, "one sample per variant");
         let cfg = bincode::config::standard();
         for op in &every {
             let bytes = bincode::serde::encode_to_vec(op, cfg).unwrap();
@@ -895,10 +976,19 @@ mod tests {
             vec![5, 7],
         );
         // The op discriminants are append-only and every byte string above is
-        // unchanged. The version DID move at P23.5, and not for them: `Mesh`
-        // grew a `seam` field, which changes the shape of the `base` this struct
-        // carries. See `SessionSave::CURRENT_VERSION`.
-        assert_eq!(SessionSave::CURRENT_VERSION, 2);
+        // unchanged. The version moved at P23.5 and again at P24.2, and neither
+        // time for them: `Mesh` grew a `seam` field and then a skin channel, and
+        // both change the shape of the `base` this struct carries. See
+        // `SessionSave::CURRENT_VERSION`.
+        assert_eq!(SessionSave::CURRENT_VERSION, 3);
+        // `ClearSkin` is a UNIT variant, so its whole encoding is its
+        // discriminant — one byte, and the last free index. Pinned as bytes
+        // because a unit variant is the easiest kind to renumber by accident
+        // (nothing about it mentions a field).
+        assert_eq!(
+            bincode::serde::encode_to_vec(Op::ClearSkin, cfg).unwrap(),
+            vec![29]
+        );
     }
 
     #[test]
@@ -1032,23 +1122,251 @@ mod tests {
         );
     }
 
+    /// **Both directions are named refusals that say what to do** (P24.2).
+    ///
+    /// Not one `UnsupportedSchema` for both: a session from an older build and
+    /// one from a newer build are different problems with different remedies,
+    /// and the SchemaTooOld doctrine is that the message a user reads has to be
+    /// an instruction. The asserts below are on the rendered strings as well as
+    /// on the variants, because the string is the part a user sees.
     #[test]
-    fn restore_refuses_a_save_from_another_schema() {
+    fn restore_refuses_a_save_from_another_schema_in_both_directions() {
         let s = MeshSession::new(plane(2.0));
         let mut save = s.save();
+
         save.schema_version = SessionSave::CURRENT_VERSION + 1;
         assert_eq!(
             MeshSession::restore(save.clone()),
-            Err(SessionError::UnsupportedSchema {
+            Err(SessionError::SchemaTooNew {
                 found: SessionSave::CURRENT_VERSION + 1,
                 current: SessionSave::CURRENT_VERSION,
+                remedy: SessionSave::TOO_NEW_REMEDY,
+            })
+        );
+
+        save.schema_version = SessionSave::CURRENT_VERSION - 1;
+        assert_eq!(
+            MeshSession::restore(save.clone()),
+            Err(SessionError::SchemaTooOld {
+                found: SessionSave::CURRENT_VERSION - 1,
+                current: SessionSave::CURRENT_VERSION,
+                remedy: SessionSave::TOO_OLD_REMEDY,
             })
         );
         save.schema_version = 0;
         assert!(matches!(
             MeshSession::restore(save),
-            Err(SessionError::UnsupportedSchema { .. })
+            Err(SessionError::SchemaTooOld { .. })
         ));
+
+        // The messages are instructions, and they are readable — the run-of-
+        // spaces guard the P24.1 F4 sweep put on `SkeletonAsset`'s remedy, on
+        // this format's two.
+        for remedy in [SessionSave::TOO_OLD_REMEDY, SessionSave::TOO_NEW_REMEDY] {
+            assert!(remedy.contains("Content Drawer"), "{remedy}");
+            assert!(
+                !remedy.contains("  "),
+                "a remedy carries a run of spaces — a line continuation was \
+                 eaten: {remedy:?}"
+            );
+        }
+        let mut save = s.save();
+        save.schema_version = 2;
+        let msg = MeshSession::restore(save).unwrap_err().to_string();
+        assert!(msg.contains("older build"), "{msg}");
+        assert!(msg.contains(SessionSave::TOO_OLD_REMEDY), "{msg}");
+    }
+
+    /// **A real v2 save, as a shadow struct** — the M6 lesson.
+    ///
+    /// The cheap version of this test encodes today's `SessionSave` and lops
+    /// bytes off the end, which pins nothing: it is the *current* encoder's
+    /// output either way, so the day the current encoder changes the "old" bytes
+    /// change with it and the test still passes. What a version ladder needs is
+    /// bytes shaped like the OLD struct, written by a declaration of the old
+    /// struct — so the shadow types below are P23.5's `Vert` / `Mesh` /
+    /// `SessionSave`, frozen, with no `skin` anywhere.
+    ///
+    /// What it proves, precisely: those bytes carry a leading `2`, this build
+    /// refuses them **by name and with a remedy**, and — the part that makes the
+    /// bump necessary rather than decorative — they do not decode as a v3
+    /// `SessionSave` at all, because `Vert` grew a tail and bincode is
+    /// positional.
+    #[test]
+    fn a_v2_save_is_refused_by_name_and_could_not_have_been_read_anyway() {
+        #[derive(Serialize)]
+        struct V2Vert {
+            position: [f64; 3],
+            out: Vec<u32>,
+        }
+        #[derive(Serialize)]
+        struct V2Arena<T> {
+            slots: Vec<Option<T>>,
+            free: Vec<u32>,
+        }
+        #[derive(Serialize)]
+        struct V2Half {
+            origin: u32,
+            twin: u32,
+            next: u32,
+            prev: u32,
+            face: Option<u32>,
+            uv: [f64; 2],
+            normal: Option<[f64; 3]>,
+            sharp: bool,
+            seam: bool,
+        }
+        #[derive(Serialize)]
+        struct V2Face {
+            half: u32,
+            material_slot: Option<u32>,
+        }
+        #[derive(Serialize)]
+        struct V2Mesh {
+            verts: V2Arena<V2Vert>,
+            halfs: V2Arena<V2Half>,
+            faces: V2Arena<V2Face>,
+            material_slots: Vec<String>,
+            slot_names: Vec<(Option<u32>, String)>,
+        }
+        #[derive(Serialize)]
+        struct V2Save {
+            schema_version: u32,
+            base: V2Mesh,
+            ops: Vec<Op>,
+            cursor: usize,
+        }
+
+        // A one-triangle v2 mesh: three vertices, three twin pairs, one face.
+        let v2 = V2Save {
+            schema_version: 2,
+            base: V2Mesh {
+                verts: V2Arena {
+                    slots: (0..3)
+                        .map(|i| {
+                            Some(V2Vert {
+                                position: [i as f64, 0.0, 0.0],
+                                out: vec![2 * i],
+                            })
+                        })
+                        .collect(),
+                    free: Vec::new(),
+                },
+                halfs: V2Arena {
+                    slots: (0..6)
+                        .map(|i| {
+                            Some(V2Half {
+                                origin: i / 2,
+                                twin: i ^ 1,
+                                next: (i + 2) % 6,
+                                prev: (i + 4) % 6,
+                                face: (i % 2 == 0).then_some(0),
+                                uv: [0.0, 0.0],
+                                normal: None,
+                                sharp: false,
+                                seam: false,
+                            })
+                        })
+                        .collect(),
+                    free: Vec::new(),
+                },
+                faces: V2Arena {
+                    slots: vec![Some(V2Face {
+                        half: 0,
+                        material_slot: None,
+                    })],
+                    free: Vec::new(),
+                },
+                material_slots: Vec::new(),
+                slot_names: Vec::new(),
+            },
+            ops: vec![Op::CollapseEdge { half: HalfId(7) }],
+            cursor: 0,
+        };
+        let cfg = bincode::config::standard();
+        let bytes = bincode::serde::encode_to_vec(&v2, cfg).unwrap();
+        assert_eq!(bytes[0], 2, "the version is still the first byte at v2");
+
+        // (a) THE REASON THE BUMP WAS NECESSARY: these bytes are not a v3
+        //     `SessionSave` at all. `Vert` grew a tail, bincode is positional, so
+        //     reading a v2 stream as v3 walks off the end of the vertex arena.
+        //     Measured, not assumed — this is the claim a version ladder is FOR,
+        //     and a ladder whose old bytes happen to decode is a ladder that was
+        //     not needed.
+        assert!(
+            bincode::serde::decode_from_slice::<SessionSave, _>(&bytes, cfg).is_err(),
+            "v2 bytes decoded as a v3 SessionSave — then the shape did not \
+             change and this bump has no justification"
+        );
+
+        // (b) And the ladder that a v2 save DOES reach — a session handed over
+        //     as a value, which is how `DccState` restores one — refuses it by
+        //     name, with the remedy.
+        let mut v2_shaped = MeshSession::new(plane(2.0)).save();
+        v2_shaped.schema_version = 2;
+        assert_eq!(
+            MeshSession::restore(v2_shaped),
+            Err(SessionError::SchemaTooOld {
+                found: 2,
+                current: SessionSave::CURRENT_VERSION,
+                remedy: SessionSave::TOO_OLD_REMEDY,
+            }),
+            "a v2 save must be refused by name"
+        );
+    }
+
+    /// **The v3 shape, pinned by FULL BYTE CONSUMPTION.**
+    ///
+    /// `decode_from_slice` ignores trailing bytes, so "it decoded" is not
+    /// "the shape is right": a save with an extra field appended decodes
+    /// perfectly as the shorter struct and silently drops it. Asserting that the
+    /// decoder consumed **every** byte is what turns a successful decode into a
+    /// statement about the shape.
+    #[test]
+    fn a_v3_save_decodes_consuming_every_byte() {
+        let mut s = MeshSession::new(cube(1.0));
+        s.apply(Op::BindSkin {
+            skeleton: Some([3; 16]),
+            joints: 5,
+        })
+        .unwrap();
+        let first = s.mesh().vert_ids().next().unwrap();
+        s.apply(Op::AssignWeights {
+            weights: vec![(
+                first,
+                crate::skin::VertWeights::from_pairs(&[(1, 0.25), (4, 0.75)]),
+            )],
+        })
+        .unwrap();
+
+        let cfg = bincode::config::standard();
+        let save = s.save();
+        let bytes = bincode::serde::encode_to_vec(&save, cfg).unwrap();
+        assert_eq!(bytes[0], 3, "the version is the first byte");
+        let (back, consumed): (SessionSave, usize) =
+            bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
+        assert_eq!(
+            consumed,
+            bytes.len(),
+            "the decoder left bytes on the floor — the struct on the wire is not \
+             the struct this build declares"
+        );
+        assert_eq!(back, save);
+        // …and the channel survived the round trip, values and all.
+        let restored = MeshSession::restore(back).unwrap();
+        assert_eq!(
+            restored.mesh().skin_binding(),
+            Some(crate::skin::SkinBinding {
+                skeleton: Some([3; 16]),
+                joints: 5
+            })
+        );
+        assert_eq!(restored.mesh().canonical(), s.mesh().canonical());
+        // The dual-format rule (architecture rule 4): the same save through a
+        // self-describing encoder is the same value.
+        let json: SessionSave =
+            serde_json::from_str(&serde_json::to_string(&save).unwrap()).unwrap();
+        assert_eq!(json, save);
     }
 
     // ── B3: the base mesh is validated at the trust boundary ────────────────

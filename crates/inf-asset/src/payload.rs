@@ -227,8 +227,17 @@ mod tests {
     /// Every case below returned a confident `SchemaTooOld` before the floor and
     /// the plausibility bound existed — a wrong diagnosis, which sends a user to
     /// re-import an asset whose problem is not its age.
+    ///
+    /// **Renamed at P24.2**, because the old name (`garbage_is_still_a_decode
+    /// _error`) claimed more than the body asserts and more than is true: the
+    /// zero-filled case *decodes*, as `Foo { schema_version: 0, n: 0 }`, and
+    /// `bincode_cannot_tell_a_zero_filled_file_from_an_empty_asset` below is
+    /// where that bound is written down. What every case here really shares is
+    /// the property this test was built to hold — the decoder never tells a
+    /// **version story** about bytes that carry none, whatever else it does with
+    /// them. The name now says that and nothing more.
     #[test]
-    fn garbage_is_still_a_decode_error() {
+    fn garbage_never_gets_a_version_story() {
         let cases: [(&str, &[u8]); 4] = [
             ("empty", &[]),
             // A lone zero byte: varint 0, a version no schema has ever had.

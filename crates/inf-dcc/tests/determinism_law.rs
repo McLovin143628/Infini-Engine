@@ -22,8 +22,15 @@
 //!    mesh makes two runs on the *same* machine disagree. `BTreeMap`/`BTreeSet`
 //!    everywhere.
 //! 4. **`f32` world coordinates** — architecture rule 3. `f32` exists in this
-//!    crate only at the `MeshAsset` boundary, which is `build.rs` (reading) and
-//!    `export.rs` (writing).
+//!    crate at the `MeshAsset` boundary — `build.rs` (reading) and `export.rs`
+//!    (writing) — and, since P24.2, in the **skin channel**: `skin.rs` in full,
+//!    plus the lines of `topo.rs`/`ops.rs`/`validate.rs` that carry a weight. A
+//!    skinning weight is a dimensionless coefficient in `[0, 1]` whose whole life
+//!    is spent between an `f32` file and an `f32` vertex buffer; it is not a world
+//!    coordinate and rule 3 does not reach it. The ban keeps its teeth by staying
+//!    a **line**-level allowlist rather than a file exemption: an `f32` position
+//!    or UV in those three files still fails, because the line would not mention
+//!    a weight.
 //!
 //! The P22.4 lesson this gate is built to survive: a ban enumerates what you
 //! thought of. So the checks below are on *tokens that compile*, and each one
@@ -35,7 +42,7 @@
 /// not cover it, and a new module is exactly where the next `.sin()` or `HashMap`
 /// would land. `every_source_file_is_covered` reads the directory and fails if
 /// this list has fallen behind, so the coverage cannot rot silently.
-const SOURCES: [(&str, &str); 11] = [
+const SOURCES: [(&str, &str); 12] = [
     ("lib.rs", include_str!("../src/lib.rs")),
     ("topo.rs", include_str!("../src/topo.rs")),
     ("validate.rs", include_str!("../src/validate.rs")),
@@ -47,6 +54,7 @@ const SOURCES: [(&str, &str); 11] = [
     ("sculpt.rs", include_str!("../src/sculpt.rs")),
     ("xform.rs", include_str!("../src/xform.rs")),
     ("uv.rs", include_str!("../src/uv.rs")),
+    ("skin.rs", include_str!("../src/skin.rs")),
 ];
 
 const JOURNAL: &str = include_str!("../src/journal.rs");
@@ -182,30 +190,71 @@ fn meshopt_appears_only_at_export_and_never_in_an_op() {
     );
 }
 
+/// **`f32` is a boundary, not a habit** — and P24.2 gave it a second boundary.
+///
+/// Positions, normals and every intermediate are `f64` (architecture rule 3).
+/// `build.rs` reads `f32` out of a `MeshVertex` and `export.rs` writes it back;
+/// `skin.rs` *is* the weight representation (a deliberate mirror of
+/// `inf_mesh::VertexSkin`, whose weights are `f32` in the file and in the GPU
+/// buffer). Everywhere else an `f32` would mean a world coordinate that lost
+/// precision inside the kernel.
+///
+/// The three files the skin channel reaches into keep the ban, at **line**
+/// granularity: an `f32` there is legal only on a line that is about a weight.
+/// A file-level exemption would have retired the law for `topo.rs` — the file
+/// that holds every position in the crate — in exchange for one struct field.
 #[test]
-fn f32_lives_only_at_the_asset_boundary() {
-    // Positions, normals and every intermediate are `f64` (architecture rule 3).
-    // `build.rs` reads `f32` out of a `MeshVertex` and `export.rs` writes it
-    // back; anywhere else it would mean a world coordinate lost precision inside
-    // the kernel.
+fn f32_lives_only_at_the_asset_boundary_and_the_skin_channel() {
+    // Tokens that make an `f32` line a *weight* line rather than a coordinate
+    // one. Deliberately short: `skin` and `weight` are the channel's whole
+    // vocabulary, and `joint` is what a weight is attached to.
+    const SKIN_TOKENS: [&str; 5] = ["skin", "Skin", "weight", "Weight", "joint"];
+
     for (name, src) in [
-        SOURCES[1],
-        SOURCES[2],
-        SOURCES[5],
-        SOURCES[6],
-        SOURCES[7],
-        SOURCES[8],
-        SOURCES[9],
-        SOURCES[10],
+        SOURCES[1],  // topo.rs
+        SOURCES[2],  // validate.rs
+        SOURCES[5],  // ops.rs
+        SOURCES[6],  // model.rs
+        SOURCES[7],  // select.rs
+        SOURCES[8],  // sculpt.rs
+        SOURCES[9],  // xform.rs
+        SOURCES[10], // uv.rs
         ("journal.rs", JOURNAL),
     ] {
-        let hits = code_hits(src, "f32");
+        let stray: Vec<(usize, String)> = code_hits(src, "f32")
+            .into_iter()
+            .filter(|(_, line)| !SKIN_TOKENS.iter().any(|t| line.contains(t)))
+            .collect();
         assert!(
-            hits.is_empty(),
-            "{name} mentions f32; the kernel is f64 and the only f32 boundary is \
-             build.rs/export.rs. Found: {hits:?}"
+            stray.is_empty(),
+            "{name} mentions f32 on a line that is not about a skinning weight; \
+             the kernel is f64 and the only f32 boundaries are build.rs/export.rs \
+             (the asset) and skin.rs (the weight channel). Found: {stray:?}"
         );
     }
+    // NOT VACUOUS, twice over. The channel really does put `f32` in those files
+    // (so the allowlist is doing work rather than covering an empty set), and
+    // `skin.rs` really is the weight representation (so exempting it is a
+    // statement about that file and not a blanket).
+    let permitted: Vec<(&str, usize, String)> = [SOURCES[2], SOURCES[5]]
+        .into_iter()
+        .flat_map(|(name, src)| {
+            code_hits(src, "f32")
+                .into_iter()
+                .filter(|(_, line)| SKIN_TOKENS.iter().any(|t| line.contains(t)))
+                .map(move |(n, line)| (name, n, line))
+        })
+        .collect();
+    assert!(
+        !permitted.is_empty(),
+        "no file above carries a permitted f32 line — the allowlist is \
+         permitting nothing, and would keep passing if it permitted everything"
+    );
+    assert!(
+        code_hits(SOURCES[11].1, "f32").len() >= 3,
+        "skin.rs is exempt because it IS the f32 weight representation; it no \
+         longer is"
+    );
 }
 
 #[test]
@@ -298,7 +347,7 @@ fn the_id_preservation_classifier_has_no_wildcard_and_names_every_op() {
         .filter(|v| !v.is_empty())
         .map(str::to_string)
         .collect();
-    assert_eq!(variants.len(), 27, "found {variants:?}");
+    assert_eq!(variants.len(), 30, "found {variants:?}");
     let joined = body.join(" ");
     for v in &variants {
         assert!(

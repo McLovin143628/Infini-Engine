@@ -83,6 +83,7 @@ pub mod model;
 pub mod ops;
 pub mod sculpt;
 pub mod select;
+pub mod skin;
 pub mod topo;
 pub mod uv;
 pub mod validate;
@@ -104,6 +105,7 @@ pub use select::{
     canonical_edge, edge_loop, edge_ring, geodesic_distances, op_preserves_ids, SelectMode,
     SelectionSet,
 };
+pub use skin::{SkinBinding, VertWeights, MAX_INFLUENCES, WEIGHT_SUM_TOLERANCE};
 pub use topo::{CanonicalMesh, CornerData, FaceId, HalfId, Mesh, VertId};
 pub use uv::{
     cg_iterations, charts, seam_count, unwrap, ChartReport, UnwrapReport, Unwrapped, CG_ITERATIONS,

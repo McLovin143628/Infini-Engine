@@ -226,6 +226,42 @@ pub enum OpError {
     /// is wrong with the recording rather than what is wrong with a click.
     #[error("the unwrap names {0}, which is not a live face corner")]
     UnwrapCornerMissing(HalfId),
+
+    // ── the skin ops (P24.2) ───────────────────────────────────────────────
+    /// A skin op ran on a mesh that is not bound to a skeleton.
+    ///
+    /// Refused rather than auto-binding, because a weight table's joint indices
+    /// only mean something against a *named* skeleton, and inventing one from an
+    /// `AssignWeights` would let two halves of a character bind to two rigs.
+    #[error("this mesh is not bound to a skeleton; bind it before assigning weights")]
+    NotSkinned,
+    /// A binding with no joints. A zero-joint skeleton cannot be a skeleton
+    /// ([`inf_anim::SkeletonError::Empty`] says the same thing one crate over),
+    /// and every joint index would be out of range against it.
+    ///
+    /// [`inf_anim::SkeletonError::Empty`]: https://docs.rs/inf-anim
+    #[error("a skin binding needs at least one joint")]
+    SkinBindingEmpty,
+    /// An influence naming a joint the bound skeleton does not have.
+    ///
+    /// This is also what a **re-bind onto a smaller skeleton** refuses with: the
+    /// alternative is clamping the index, which silently re-weights the vertex to
+    /// a different bone.
+    #[error("vertex {vert} is weighted to joint {joint}, but the skeleton has {joints}")]
+    SkinJointOutOfRange {
+        vert: VertId,
+        joint: u16,
+        joints: u32,
+    },
+    /// An influence set that cannot be normalized: every weight zero, or one of
+    /// them negative or non-finite.
+    ///
+    /// Not silently replaced with [`crate::skin::VertWeights::RIGID`]. That
+    /// fallback exists inside the blending helpers, where the caller has said
+    /// nothing about the vertex; here the caller has said something specific and
+    /// it does not describe a vertex, so it comes back as a refusal.
+    #[error("the weights on vertex {vert} do not describe an influence set ({why})")]
+    SkinWeightsDegenerate { vert: VertId, why: &'static str },
 }
 
 /// Every value crossing an op boundary is checked here, once.
@@ -419,6 +455,63 @@ pub enum Op {
     /// `corners` is `(half-edge, uv)` sorted by half-edge — deterministic on the
     /// wire and cheap to verify.
     Unwrap { corners: Vec<(HalfId, [f64; 2])> },
+
+    // ── the skin ops (P24.2) — appended at 27, 28 and 29 ───────────────────
+    //
+    // Same discipline, fourth time: `frozen_discriminant` has no wildcard, so
+    // each of these stopped the crate compiling until it was given the next free
+    // index by hand, and `Op::CollapseEdge { half: 7 }` still encodes `[5, 7]`.
+    // `SessionSave::CURRENT_VERSION` DID move for this batch — not for these
+    // three, but because `Vert` and `Mesh` grew skin fields and the `base` a save
+    // carries is therefore a different shape.
+    /// **Bind the mesh to a skeleton**, giving its joint indices a meaning.
+    ///
+    /// Every vertex keeps the weights it had — which, on a mesh that has never
+    /// been skinned, is [`crate::skin::VertWeights::RIGID`] everywhere: 100 % of
+    /// joint 0. A newly bound character therefore rides its root joint, which is
+    /// wrong-looking and *valid*, and is exactly the state the auto-fit and the
+    /// weight solve exist to replace.
+    ///
+    /// Re-binding is allowed and is how a rig change lands; it refuses only when
+    /// the new skeleton has too few joints for the weights already on the mesh
+    /// ([`OpError::SkinJointOutOfRange`]), because silently clamping an index
+    /// re-weights a character to a different bone.
+    BindSkin {
+        /// The `.inf_skel` GUID, raw bytes (this crate has no `uuid` dep), or
+        /// `None` when the caller genuinely does not know — see
+        /// [`crate::skin::SkinBinding`].
+        skeleton: Option<[u8; 16]>,
+        /// The skeleton's joint count at bind time.
+        joints: u32,
+    },
+    /// **The weight table, as a fact** — `(vertex, influences)` pairs, sorted by
+    /// vertex.
+    ///
+    /// This is the ledgered weight-table op P23 wrote down and did not build.
+    /// It carries the *values*, and replay does **not** re-solve, for the reason
+    /// [`Op::Unwrap`] carries its UVs: a journal is replayed by a different build
+    /// than wrote it, so an op whose effect is "whatever the current solver says"
+    /// means improving the solver silently rewrites every session ever recorded.
+    /// The heat solve and the paint brush both *produce* one of these; neither is
+    /// in the journal.
+    ///
+    /// Weights are renormalized on apply, so a caller may hand raw sums; the
+    /// normalization is `f32` arithmetic on stated values and is therefore still
+    /// a pure function of the op.
+    AssignWeights {
+        /// `(vertex, influences)`, sorted by vertex id — deterministic on the
+        /// wire and cheap to verify.
+        weights: Vec<(VertId, crate::skin::VertWeights)>,
+    },
+    /// **Unbind**, and reset every vertex to
+    /// [`crate::skin::VertWeights::RIGID`].
+    ///
+    /// Both halves, deliberately: an unbind that left the weights behind would
+    /// leave a mesh carrying joint indices nothing can interpret, which
+    /// [`crate::validate`] calls a violation
+    /// ([`crate::validate::Violation::SkinWithoutBinding`]). "Clear the skin"
+    /// means the mesh is rigid again, and rigid has one representation.
+    ClearSkin,
 }
 
 /// Apply one op. See the module docs for the three rules this upholds.
@@ -624,6 +717,89 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
             }
             Ok(OpOutcome::default())
         }
+
+        // ── the skin ops (P24.2) ───────────────────────────────────────────
+        //
+        // All three are attribute writes: no face is rebuilt, no slot is freed,
+        // so every live id still names what it named (`op_preserves_ids`), and
+        // all three check everything before the first write, so a refusal is
+        // inert without needing a `transact` (the `TranslateVerts` shape).
+        Op::BindSkin { skeleton, joints } => {
+            if *joints == 0 {
+                return Err(OpError::SkinBindingEmpty);
+            }
+            // A re-bind must not orphan a weight that is already on the mesh.
+            for v in mesh.vert_ids() {
+                if let Some(j) = mesh.vert_ref(v).skin.max_joint() {
+                    if j as u32 >= *joints {
+                        return Err(OpError::SkinJointOutOfRange {
+                            vert: v,
+                            joint: j,
+                            joints: *joints,
+                        });
+                    }
+                }
+            }
+            mesh.set_skin_binding(Some(crate::skin::SkinBinding {
+                skeleton: *skeleton,
+                joints: *joints,
+            }));
+            Ok(OpOutcome::default())
+        }
+
+        Op::AssignWeights { weights } => {
+            let Some(binding) = mesh.skin_binding() else {
+                return Err(OpError::NotSkinned);
+            };
+            for (v, w) in weights {
+                if !mesh.has_vert(*v) {
+                    return Err(OpError::NoSuchVert(*v));
+                }
+                if !w.weights.iter().all(|x| x.is_finite()) {
+                    return Err(OpError::SkinWeightsDegenerate {
+                        vert: *v,
+                        why: "a weight is not finite",
+                    });
+                }
+                if w.weights.iter().any(|x| *x < 0.0) {
+                    return Err(OpError::SkinWeightsDegenerate {
+                        vert: *v,
+                        why: "a weight is negative",
+                    });
+                }
+                if w.weights.iter().sum::<f32>() <= 0.0 {
+                    return Err(OpError::SkinWeightsDegenerate {
+                        vert: *v,
+                        why: "every weight is zero, so the vertex is influenced by nothing",
+                    });
+                }
+                if let Some(j) = w.max_joint() {
+                    if j as u32 >= binding.joints {
+                        return Err(OpError::SkinJointOutOfRange {
+                            vert: *v,
+                            joint: j,
+                            joints: binding.joints,
+                        });
+                    }
+                }
+            }
+            for (v, w) in weights {
+                mesh.set_vert_weights(*v, w.normalized());
+            }
+            Ok(OpOutcome::default())
+        }
+
+        Op::ClearSkin => {
+            if mesh.skin_binding().is_none() {
+                return Err(OpError::NotSkinned);
+            }
+            mesh.set_skin_binding(None);
+            let ids: Vec<VertId> = mesh.vert_ids().collect();
+            for v in ids {
+                mesh.set_vert_weights(v, crate::skin::VertWeights::RIGID);
+            }
+            Ok(OpOutcome::default())
+        }
     }
 }
 
@@ -709,7 +885,10 @@ fn split_edge(mesh: &mut Mesh, half: HalfId, t: f64) -> Result<OpOutcome, OpErro
     let out = mesh.transact(|m| {
         let sharp = m.capture_edge_flags(&incident);
         let patches: Vec<FacePatch> = incident.iter().map(|&f| m.remove_face_raw(f)).collect();
-        let mid_vert = m.alloc_vert(mid);
+        // The midpoint's skin is its endpoints' skins at the same `t` the
+        // position uses (P24.2) — one lerp, two channels, so a split on a
+        // weighted arm does not put a rigid vertex in the middle of it.
+        let mid_vert = m.alloc_vert_blended(mid, &[(a, 1.0 - t), (b, t)]);
         let mut touched: BTreeSet<VertId> = [a, b, mid_vert].into_iter().collect();
         for patch in &patches {
             touched.extend(patch.verts.iter().copied());
@@ -1597,6 +1776,263 @@ mod tests {
             ),
             Err(OpError::NormalNotUnit { .. })
         ));
+    }
+
+    // ── the skin ops (P24.2) ───────────────────────────────────────────────
+
+    use crate::skin::{SkinBinding, VertWeights};
+
+    /// A cube bound to a 6-joint skeleton.
+    fn skinned_cube() -> Mesh {
+        let mut m = cube(1.0);
+        apply(
+            &mut m,
+            &Op::BindSkin {
+                skeleton: Some([9; 16]),
+                joints: 6,
+            },
+        )
+        .expect("binds");
+        m
+    }
+
+    #[test]
+    fn binding_leaves_every_vertex_rigid_and_valid() {
+        let m = skinned_cube();
+        assert_eq!(
+            m.skin_binding(),
+            Some(SkinBinding {
+                skeleton: Some([9; 16]),
+                joints: 6
+            })
+        );
+        assert!(
+            m.vert_ids()
+                .all(|v| m.vert_weights(v).unwrap() == VertWeights::RIGID),
+            "a fresh bind rides joint 0 — wrong-looking and VALID, which is the \
+             state auto-fit and the weight solve replace"
+        );
+        assert_eq!(validate(&m), Ok(()));
+    }
+
+    #[test]
+    fn a_zero_joint_binding_is_refused_inertly() {
+        let mut m = cube(1.0);
+        refuses(
+            &mut m,
+            Op::BindSkin {
+                skeleton: None,
+                joints: 0,
+            },
+            OpError::SkinBindingEmpty,
+        );
+        assert!(!m.is_skinned());
+    }
+
+    #[test]
+    fn re_binding_onto_a_smaller_skeleton_refuses_rather_than_clamping() {
+        let mut m = skinned_cube();
+        let v = m.vert_ids().next().unwrap();
+        expect_ok(
+            &mut m,
+            Op::AssignWeights {
+                weights: vec![(v, VertWeights::from_pairs(&[(5, 1.0)]))],
+            },
+        );
+        // Joint 5 exists in a 6-joint rig and not in a 3-joint one. Clamping the
+        // index would silently re-weight this vertex to a different bone.
+        refuses(
+            &mut m,
+            Op::BindSkin {
+                skeleton: Some([1; 16]),
+                joints: 3,
+            },
+            OpError::SkinJointOutOfRange {
+                vert: v,
+                joint: 5,
+                joints: 3,
+            },
+        );
+        // …and a WIDER re-bind is fine, which is how a rig change lands.
+        expect_ok(
+            &mut m,
+            Op::BindSkin {
+                skeleton: Some([1; 16]),
+                joints: 40,
+            },
+        );
+    }
+
+    #[test]
+    fn assigning_weights_refuses_every_way_it_can_and_stays_inert() {
+        let v = cube(1.0).vert_ids().next().unwrap();
+        let good = VertWeights::from_pairs(&[(1, 1.0)]);
+
+        // On an unbound mesh there is nothing for an index to mean.
+        let mut rigid = cube(1.0);
+        refuses(
+            &mut rigid,
+            Op::AssignWeights {
+                weights: vec![(v, good)],
+            },
+            OpError::NotSkinned,
+        );
+
+        let mut m = skinned_cube();
+        refuses(
+            &mut m,
+            Op::AssignWeights {
+                weights: vec![(VertId(9_999), good)],
+            },
+            OpError::NoSuchVert(VertId(9_999)),
+        );
+        refuses(
+            &mut m,
+            Op::AssignWeights {
+                weights: vec![(v, VertWeights::from_pairs(&[(6, 1.0)]))],
+            },
+            OpError::SkinJointOutOfRange {
+                vert: v,
+                joint: 6,
+                joints: 6,
+            },
+        );
+        for (bad, why) in [
+            (
+                VertWeights {
+                    joints: [1, 0, 0, 0],
+                    weights: [f32::NAN, 0.0, 0.0, 0.0],
+                },
+                "a weight is not finite",
+            ),
+            (
+                VertWeights {
+                    joints: [1, 2, 0, 0],
+                    weights: [1.5, -0.5, 0.0, 0.0],
+                },
+                "a weight is negative",
+            ),
+            (
+                VertWeights {
+                    joints: [1, 0, 0, 0],
+                    weights: [0.0; 4],
+                },
+                "every weight is zero, so the vertex is influenced by nothing",
+            ),
+        ] {
+            refuses(
+                &mut m,
+                Op::AssignWeights {
+                    weights: vec![(v, bad)],
+                },
+                OpError::SkinWeightsDegenerate { vert: v, why },
+            );
+        }
+        // The whole batch is inert: a good pair alongside a bad one writes
+        // NOTHING, because every pair is checked before the first write.
+        let others: Vec<VertId> = m.vert_ids().take(2).collect();
+        refuses(
+            &mut m,
+            Op::AssignWeights {
+                weights: vec![
+                    (others[1], good),
+                    (
+                        others[0],
+                        VertWeights {
+                            joints: [1, 0, 0, 0],
+                            weights: [0.0; 4],
+                        },
+                    ),
+                ],
+            },
+            OpError::SkinWeightsDegenerate {
+                vert: others[0],
+                why: "every weight is zero, so the vertex is influenced by nothing",
+            },
+        );
+        assert_eq!(m.vert_weights(others[1]), Some(VertWeights::RIGID));
+    }
+
+    #[test]
+    fn assigned_weights_are_renormalized_on_apply() {
+        let mut m = skinned_cube();
+        let v = m.vert_ids().next().unwrap();
+        expect_ok(
+            &mut m,
+            Op::AssignWeights {
+                weights: vec![(
+                    v,
+                    VertWeights {
+                        joints: [1, 2, 0, 0],
+                        weights: [3.0, 1.0, 0.0, 0.0],
+                    },
+                )],
+            },
+        );
+        let w = m.vert_weights(v).unwrap();
+        assert!(w.is_normalized(), "{w:?}");
+        assert!((w.weight_of(1) - 0.75).abs() < 1e-6, "{w:?}");
+    }
+
+    #[test]
+    fn clearing_the_skin_unbinds_and_resets_every_vertex() {
+        let mut m = skinned_cube();
+        let v = m.vert_ids().next().unwrap();
+        expect_ok(
+            &mut m,
+            Op::AssignWeights {
+                weights: vec![(v, VertWeights::from_pairs(&[(2, 0.4), (4, 0.6)]))],
+            },
+        );
+        expect_ok(&mut m, Op::ClearSkin);
+        assert!(!m.is_skinned());
+        assert!(
+            m.vert_ids()
+                .all(|v| m.vert_weights(v).unwrap() == VertWeights::RIGID),
+            "an unbind that left weights behind is a `SkinWithoutBinding`"
+        );
+        // Idempotence is NOT the rule: a second clear is a refusal, so the UI
+        // cannot report "cleared" for an op that did nothing.
+        refuses(&mut m, Op::ClearSkin, OpError::NotSkinned);
+    }
+
+    /// **A structural op carries the channel through** (P24.2): a split-edge
+    /// midpoint is its endpoints' weights at the same `t` as its position.
+    #[test]
+    fn a_split_blends_the_weights_of_the_edge_it_cuts() {
+        let mut m = skinned_cube();
+        let h = m
+            .half_ids()
+            .find(|&h| m.is_boundary(h) == Some(false))
+            .unwrap();
+        let (a, b) = (m.origin(h).unwrap(), m.dest(h).unwrap());
+        expect_ok(
+            &mut m,
+            Op::AssignWeights {
+                weights: vec![
+                    (a, VertWeights::from_pairs(&[(1, 1.0)])),
+                    (b, VertWeights::from_pairs(&[(2, 1.0)])),
+                ],
+            },
+        );
+        let out = expect_ok(&mut m, Op::SplitEdge { half: h, t: 0.25 });
+        let mid = out.verts[0];
+        let w = m.vert_weights(mid).unwrap();
+        assert!((w.weight_of(1) - 0.75).abs() < 1e-6, "{w:?}");
+        assert!((w.weight_of(2) - 0.25).abs() < 1e-6, "{w:?}");
+        // The CONTROL: the same split on a rigid mesh produces a rigid vertex,
+        // bit for bit — which is what makes "no unskinned edit moved" true.
+        let mut rigid = cube(1.0);
+        let h = rigid
+            .half_ids()
+            .find(|&h| rigid.is_boundary(h) == Some(false))
+            .unwrap();
+        let out = expect_ok(&mut rigid, Op::SplitEdge { half: h, t: 0.25 });
+        assert_eq!(
+            rigid.vert_weights(out.verts[0]),
+            Some(VertWeights::RIGID),
+            "a blend of rigid sources must be exactly RIGID"
+        );
     }
 
     #[test]

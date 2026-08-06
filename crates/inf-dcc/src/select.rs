@@ -99,7 +99,15 @@ pub fn op_preserves_ids(op: &Op) -> bool {
         // A seam mark and an unwrap write per-edge and per-corner attributes.
         // Nothing is rebuilt, so nothing is renumbered.
         | Op::SetEdgeSeam { .. }
-        | Op::Unwrap { .. } => true,
+        | Op::Unwrap { .. }
+        // P24.2: the skin ops write a per-vertex attribute and a mesh-level
+        // binding. Nothing is rebuilt — which is load-bearing for the weight
+        // brush, not incidental: an author painting across a selected region
+        // must still have it selected when the stroke lands, exactly as for
+        // `Op::Sculpt`.
+        | Op::BindSkin { .. }
+        | Op::AssignWeights { .. }
+        | Op::ClearSkin => true,
         // Everything else frees slots (which the LIFO free list then hands back
         // to something different) or rebuilds a patch outright.
         Op::RemoveVertex { .. }
