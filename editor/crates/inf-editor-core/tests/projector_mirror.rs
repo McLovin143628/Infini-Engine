@@ -45,6 +45,8 @@
 //! differently from the preview", which is precisely the class of thing that is
 //! discovered by a player, not by a test.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 
 fn workspace_root() -> PathBuf {
@@ -54,36 +56,13 @@ fn workspace_root() -> PathBuf {
         .join("..")
 }
 
-/// Byte offset of the **real item** `fn <name>(` — never a mention of the
-/// signature inside a comment, a string or a backticked cross-reference.
-///
-/// The distinction is the whole of the P21.2 re-audit's F1. A plain
-/// `source.find("fn project_voxel(")` matched a backticked self-reference *inside
-/// that function's own doc comment*, several screens above the item, and every
-/// caller below silently inherited the wrong anchor.
-///
-/// The test is positional rather than lexical: everything between the start of the
-/// matched line and the `fn` keyword must be item qualifiers and nothing else. A
-/// `///`, a backtick or prose fails it, so a doc block can name the signature as
-/// often as it likes without moving the anchor.
-fn item_start(source: &str, name: &str) -> usize {
-    let needle = format!("fn {name}(");
-    let mut from = 0usize;
-    while let Some(rel) = source[from..].find(&needle) {
-        let at = from + rel;
-        let line_start = source[..at].rfind('\n').map_or(0, |i| i + 1);
-        let is_item = source[line_start..at].split_whitespace().all(|w| {
-            matches!(w, "pub" | "async" | "const" | "unsafe" | "extern")
-                || w.starts_with("pub(")
-                || w.starts_with('"')
-        });
-        if is_item {
-            return at;
-        }
-        from = at + 1;
-    }
-    panic!("`{needle}` occurs nowhere as an item — was the projector renamed?");
-}
+// The positional anchor lives in `support` since the P24.1 re-audit's F2: it was
+// re-implemented naively in a second test binary the same day it was fixed here,
+// because a helper another binary cannot see is a helper that gets written twice.
+// The reasoning that made it positional — a backticked self-reference inside
+// `project_voxel`'s own doc comment, which drifted two blocks to 23 lines against
+// 17 with this file green — is recorded on `support::item_start`.
+use support::item_start;
 
 /// The **item text** — the signature line (qualifiers included) through the
 /// closing brace at column 0 — with line endings normalized (the two files can be

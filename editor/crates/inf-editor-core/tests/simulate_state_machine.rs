@@ -14,6 +14,8 @@
 //! the narrower claim it was written for; the pose half is
 //! `runtime/inf-player/tests/pose_parity.rs`.
 
+mod support;
+
 use std::collections::BTreeMap;
 
 use glam::DVec2;
@@ -129,58 +131,98 @@ fn condition_machine_holds_until_its_variable_flips() {
     let asm = doc.world().world().get::<AnimStateMachine>(e).unwrap();
     assert_eq!(asm.runtime.current, 0, "condition never met → stays idle");
 }
-// ── P24.1 audit B1: no error on the sim path is discarded ────────────────────
+// ── P24.1 audit B1 / re-audit F1+F2: no decode on the sim path is silent ─────
 
-/// The `resolve_anim_assets` item's source text, signature line through its
-/// closing brace at column 0.
-fn resolve_anim_assets_src() -> String {
-    // Normalized: `core.autocrlf = true` checks `.rs` out CRLF on Windows.
-    let src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/simulate.rs"),
-    )
-    .expect("simulate.rs is readable")
-    .replace("\r\n", "\n");
-    let at = src
-        .find("pub fn resolve_anim_assets<H>(")
-        .expect("`resolve_anim_assets` is still an item");
-    let rest = &src[at..];
-    let end = rest.find("\n}\n").expect("it terminates at column 0") + 3;
-    rest[..end].to_string()
+/// The **one** door a fallible asset decode may flow through in `simulate.rs`.
+///
+/// An ALLOWLIST, not a ban list. The re-audit's finding was that banning `.ok()`
+/// enumerates the spellings whoever wrote the ban happened to think of: the same
+/// silent decode passes as `.map_or(None, Some)`, as `if let Ok(x) = …`, as
+/// `let Ok(x) = … else`, or laundered through a one-line helper elsewhere in the
+/// module. What all of those share is the **call** — so the gate asks which
+/// function is called, and requires the answer to be this one.
+const REPORTING_DOOR: &str = "decode_anim";
+
+/// Where the gate looks: the **whole module**, not one item.
+///
+/// A per-item scope would still miss the laundering case (a helper defined
+/// outside the item that swallows the error inside itself), which is exactly the
+/// respelling that motivated this rebuild. `decode_anim` is the module's single
+/// asset-decode call site; everything else must route through it. (The P23 law:
+/// read a SCOPE, ban the MODULE.)
+fn simulate_module_code() -> String {
+    // Comments and string literals are blanked FIRST. A gate that matches raw
+    // source reads prose as code — the previous ban would have fired on a doc
+    // comment quoting `.ok()` while explaining why `.ok()` is wrong, which is
+    // the sentence such a gate is most likely to be written next to.
+    support::strip_comments_and_strings(&support::read_crate_source("src/simulate.rs"))
 }
 
-/// **Every decode on the Simulate path reports its failure** (P24.1 audit B1).
+/// **Every asset decode on the Simulate path reports its failure** (P24.1 B1).
 ///
-/// This was `inf_asset::decode::<T>(&b).ok()`, four times, and the `.ok()` was the
-/// whole defect. A `.inf_skel` written before the v2 `limits` tail cannot be
+/// This was `inf_asset::decode::<T>(&b).ok()`, five times, and the `.ok()` was
+/// the whole defect. A `.inf_skel` written before the v2 `limits` tail cannot be
 /// decoded (bincode is positional), so the `None` propagated, the skeleton
 /// registry stayed empty, the machine advanced while publishing no pose, and the
 /// character silently stopped animating with its sockets back at the origin —
 /// P24.1's own defect, reintroduced through a discarded error. Every project that
 /// imported a glTF before this batch has v1 `.inf_skel` files.
-///
-/// A SCOPE, not a spelling: the ban is over `resolve_anim_assets`'s whole item, so
-/// a fifth decode added tomorrow has to go through the reporting door too. (The
-/// P23 law — a byte pin cannot see a semantic change; read a scope, ban the
-/// module.)
 #[test]
-fn no_decode_on_the_simulate_path_discards_its_error() {
-    let body = resolve_anim_assets_src();
+fn every_asset_decode_in_simulate_flows_through_the_reporting_door() {
+    let code = simulate_module_code();
+    let sites = support::decode_call_sites(&code);
+
+    // Not vacuous: the module really does decode assets, and really does route
+    // them. If this shrank to nothing the allowlist below would be satisfied by
+    // an empty set.
+    let through_door = sites.iter().filter(|(_, p)| p == REPORTING_DOOR).count();
     assert!(
-        !body.contains(".ok()"),
-        "a decode inside `resolve_anim_assets` discards its error — a stale \
-         `.inf_skel` would then stop a character animating with no message at \
-         all, which is the exact failure P24.1's audit blocked on:\n{body}"
+        through_door >= 5,
+        "expected at least five decodes through `{REPORTING_DOOR}` (the \
+         `SkeletalMesh` skeleton, the machine, the `AnimPlayer` clip, that clip's \
+         own skeleton, each clip the machine's states play, and the `.inf_audio` \
+         clips); found {through_door} in {sites:?}"
     );
-    // …and it is not a stub: every one of the five asset lookups goes through the
-    // reporting door. FIVE, measured — this was written as four and the test said
-    // otherwise: the transitive machine-clip walk lives inside this item too, not
-    // outside it.
+
+    // The door's own line span. Anchored through `support::item_start`, so a
+    // mention of the signature in a doc comment cannot move it — the F2 finding,
+    // which is what this line exists to be immune to.
+    let raw = support::read_crate_source("src/simulate.rs");
+    let door_text = support::item_text(&raw, REPORTING_DOOR);
+    let door_at = raw
+        .find(&door_text)
+        .expect("the extracted item is a substring of its file");
+    let door_first = raw[..door_at].bytes().filter(|c| *c == b'\n').count() + 1;
+    let door_last = door_first + door_text.bytes().filter(|c| *c == b'\n').count();
+
+    // The allowlist: a decode call site is legal iff it calls the door, OR it IS
+    // the one `inf_asset::decode` inside the door's own body.
+    let stray: Vec<&(usize, String)> = sites
+        .iter()
+        .filter(|(line, path)| {
+            let inside_door = (door_first..=door_last).contains(line);
+            !(path == REPORTING_DOOR || (path == "inf_asset::decode" && inside_door))
+        })
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "an asset decode in `simulate.rs` does not go through `{REPORTING_DOOR}` \
+         (lines {door_first}..={door_last}) — however its result is spelled, a \
+         stale asset would then stop a character animating (or an emitter \
+         sounding) with no message at all, which is the exact failure P24.1's \
+         audit blocked on. Offending call sites (line, callee): {stray:?}"
+    );
+    // …and the door really does decode, exactly once. Two stubs are identical.
     assert_eq!(
-        body.matches("decode_anim::<").count(),
-        5,
-        "expected five reported decodes — the `SkeletalMesh` skeleton, the machine, \
-         the `AnimPlayer` clip, that clip's own skeleton, and each clip the \
-         machine's states play:\n{body}"
+        sites
+            .iter()
+            .filter(|(line, path)| path == "inf_asset::decode"
+                && (door_first..=door_last).contains(line))
+            .count(),
+        1,
+        "`{REPORTING_DOOR}` (lines {door_first}..={door_last}) no longer calls \
+         `inf_asset::decode` exactly once — it is the module's single decode site \
+         by construction"
     );
 }
 

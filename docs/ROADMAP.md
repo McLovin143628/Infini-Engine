@@ -7828,6 +7828,27 @@ end-of-stream. The gate that would prove it: hand the real `--pie` subprocess a 
 a decremented `schema_version` and assert a `PlayerToEditor::Error` naming the schema, not a
 successful exit.
 
+**Also carried from P24.1 — the bound of "both directions are named errors".** `inf_asset`'s
+codec now reports a stale payload as `SchemaTooOld` with a remedy, and `peek_schema_version`
+refuses to invent a version for bytes that carry none (`v >= 1`, and no further than
+`current + 8` ahead). What it cannot do is tell a *non-asset* from an asset, because bincode
+is a length-and-order format with no self-description. Measured, and pinned by
+`inf_asset::payload::tests::bincode_cannot_tell_a_zero_filled_file_from_an_empty_asset`:
+
+* a **zero-filled buffer** — what a truncated or pre-allocated write leaves — decodes as a
+  perfectly valid `schema_version = 0` asset with every field at its zero, and `migrate()`
+  accepts it (`0 <= current`);
+* a valid leading varint over rubbish (`[0x01, 0xAB, 0xCD, 0xEF]`) decodes as a valid *v1*
+  asset. Its head is indistinguishable from a genuinely truncated v1 file, which is why the
+  peek deliberately does **not** reject it — doing so would switch off the diagnosis the peek
+  exists to give.
+
+The candidate fix is a `schema_version >= 1` floor inside `AssetPayload::migrate`, so a
+zero-filled file is refused rather than loaded as an empty asset. That changes behaviour for
+every asset kind at once and belongs to a deliberate bump, not to a repair batch. The test
+above is written to **fail** the day it lands, so this entry gets retired rather than
+forgotten.
+
 ### Phase 25 — Photogrammetry: photos → asset
 
 **Goal:** photos in, game-ready asset out, entirely in-engine. **Done when:** a

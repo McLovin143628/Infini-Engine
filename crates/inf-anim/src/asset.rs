@@ -87,7 +87,7 @@ impl AssetPayload for SkeletonAsset {
     // A rig has TWO doors, unlike most imported kinds, and a user reading this
     // message is usually looking at a project imported before P24.1.
     const UPGRADE_REMEDY: &'static str =
-        "re-import the source model (Content Drawer ▸ Import), or generate a fresh          rig from a template (Content Drawer ▸ Add ▸ Skeleton)";
+        "re-import the source model (Content Drawer ▸ Import), or generate a fresh rig from a template (Content Drawer ▸ Add ▸ Skeleton)";
     fn schema_version(&self) -> u32 {
         self.schema_version
     }
@@ -277,6 +277,16 @@ mod tests {
                 // The remedy has to be an INSTRUCTION, not a restatement.
                 assert!(remedy.contains("Import"), "{remedy}");
                 assert!(remedy.contains("template"), "{remedy}");
+                // …and it has to be READABLE. A run of spaces inside a
+                // user-facing literal is the scripted-edit law's signature: a
+                // `\` line continuation eaten by a non-raw Python string, which
+                // has now cost this repo ten mangled messages across two phases.
+                // The check is one line and this text is the whole point of B1.
+                assert!(
+                    !remedy.contains("  "),
+                    "the remedy carries a run of spaces — a line continuation was \
+                     eaten: {remedy:?}"
+                );
             }
             other => panic!("expected SchemaTooOld, got {other:?}"),
         }

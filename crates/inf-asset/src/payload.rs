@@ -73,18 +73,50 @@ pub fn encode<T: AssetPayload>(value: &T) -> Result<Vec<u8>> {
         .map_err(|e| AssetError::Encode(e.to_string()))
 }
 
+/// How far above a reader's own `SCHEMA_VERSION` a peeked version may sit and
+/// still be *plausibly* a version rather than a coincidence.
+///
+/// A leading varint that decodes is not evidence of much — any bytes have one.
+/// The peek exists to turn a real version skew into an actionable message, and a
+/// schema does not jump by more than a handful of steps between two builds a user
+/// has both of. Beyond this the honest answer is "these are not asset bytes",
+/// which the decoder's own error already says.
+const PLAUSIBLE_VERSION_LEAD: u32 = 8;
+
 /// The leading `schema_version` of an asset payload, read **without decoding the
-/// rest of it**.
+/// rest of it** — `None` when the head is not plausibly one.
 ///
 /// Every [`AssetPayload`] keeps `schema_version` as its **first** field precisely
 /// so this is possible; under `bincode::config::standard()` that is a leading
 /// varint, and this decodes exactly that one integer.
 ///
-/// `None` for bytes that are not an asset payload at all (empty, or a malformed
-/// varint) — the caller then has nothing better to say than the decoder's own
-/// error, which is correct.
-pub fn peek_schema_version(bytes: &[u8]) -> Option<u32> {
+/// # It refuses to invent a version (P24.1 re-audit F3)
+///
+/// The first cut returned whatever varint it found, and *every* byte sequence has
+/// a leading varint. `[0x00]` came back as version **0** — a version no schema has
+/// ever had, since they all start at 1 — and `[0x01, 0xAB, 0xCD, 0xEF]` as version
+/// **1**, which then produced a confident `SchemaTooOld` naming a remedy for a file
+/// whose problem is not its age. A wrong diagnosis is worse than none: it sends a
+/// user to re-import an asset that is simply corrupt.
+///
+/// So: `version >= 1`, and no further above `current` than
+/// [`PLAUSIBLE_VERSION_LEAD`]. `current` is the reader's own
+/// [`AssetPayload::SCHEMA_VERSION`]; pass `None` when there is no type in hand and
+/// only the floor applies.
+///
+/// **A bound, not a proof.** A zero-filled buffer is still a *structurally valid*
+/// encoding of most schemas — it only fails here because its version is 0. See the
+/// ROADMAP's P24 block for the "v>=1 floor at decode time" ledger entry.
+pub fn peek_schema_version(bytes: &[u8], current: Option<u32>) -> Option<u32> {
     let (v, _): (u32, usize) = bincode::decode_from_slice(bytes, bincode_config()).ok()?;
+    if v == 0 {
+        return None; // no schema has ever been v0
+    }
+    if let Some(current) = current {
+        if v > current.saturating_add(PLAUSIBLE_VERSION_LEAD) {
+            return None; // a version that far ahead is not a version
+        }
+    }
     Some(v)
 }
 
@@ -108,7 +140,7 @@ pub fn decode<T: AssetPayload>(bytes: &[u8]) -> Result<T> {
     match bincode::serde::decode_from_slice::<T, _>(bytes, bincode_config()) {
         Ok((value, _)) => value.migrate(),
         Err(e) => {
-            if let Some(found) = peek_schema_version(bytes) {
+            if let Some(found) = peek_schema_version(bytes, Some(T::SCHEMA_VERSION)) {
                 if found < T::SCHEMA_VERSION {
                     return Err(AssetError::SchemaTooOld {
                         kind: T::KIND.slug(),
@@ -141,6 +173,13 @@ mod tests {
         }
     }
 
+    /// The pre-tail shape of `Foo` — a real shadow struct, so "what v1 was" is
+    /// written down rather than derived from the current encoder.
+    #[derive(Serialize)]
+    struct FooV1 {
+        schema_version: u32,
+    }
+
     #[test]
     fn encode_is_deterministic_and_round_trips() {
         let foo = Foo {
@@ -160,10 +199,6 @@ mod tests {
     /// struct with the older shape, encoded, then decoded through the current one.
     #[test]
     fn decode_names_an_older_schema_and_says_what_to_do() {
-        #[derive(Serialize)]
-        struct FooV1 {
-            schema_version: u32,
-        }
         let bytes =
             bincode::serde::encode_to_vec(&FooV1 { schema_version: 1 }, bincode_config()).unwrap();
         match decode::<Foo>(&bytes) {
@@ -186,12 +221,85 @@ mod tests {
         assert!(msg.contains(Foo::UPGRADE_REMEDY), "{msg}");
     }
 
-    /// Bytes that are not a payload at all still report the decoder's own error —
-    /// the peek must not invent a version story for garbage.
+    /// **Bytes that are not a payload get the decoder's own error, never a
+    /// version story** (P24.1 re-audit F3).
+    ///
+    /// Every case below returned a confident `SchemaTooOld` before the floor and
+    /// the plausibility bound existed — a wrong diagnosis, which sends a user to
+    /// re-import an asset whose problem is not its age.
     #[test]
     fn garbage_is_still_a_decode_error() {
-        assert!(peek_schema_version(&[]).is_none());
-        assert!(matches!(decode::<Foo>(&[]), Err(AssetError::Decode(_))));
+        let cases: [(&str, &[u8]); 4] = [
+            ("empty", &[]),
+            // A lone zero byte: varint 0, a version no schema has ever had.
+            ("a lone zero", &[0x00]),
+            // A zero-filled buffer, which is what a truncated write leaves behind.
+            ("zero-filled", &[0u8; 32]),
+            // A version implausibly far ahead: not a skew, just not asset bytes.
+            ("an implausible version", &[250, 0xFF, 0xFF]),
+        ];
+        // The **trailing-garbage** case (`[0x01, 0xAB, 0xCD, 0xEF]`) is deliberately
+        // NOT here, and measuring it is why: it does not reach the peek at all —
+        // it *decodes*, as `Foo { schema_version: 1, n: 171 }`. Its head is a
+        // v1-shaped head, indistinguishable from a genuinely truncated v1 file, so
+        // refusing it would switch off the diagnosis the peek exists to give. It
+        // is pinned in `bincode_cannot_tell_a_zero_filled_file_from_an_empty_asset`
+        // below, as the bound it actually is.
+        for (label, bytes) in cases {
+            assert!(
+                peek_schema_version(bytes, Some(Foo::SCHEMA_VERSION)).is_none(),
+                "{label}: the peek invented a version"
+            );
+            // Whatever `decode` does with these, it must never be `SchemaTooOld`:
+            // that error names a remedy, and a remedy for the wrong problem is
+            // worse than the decoder's own message.
+            assert!(
+                !matches!(decode::<Foo>(bytes), Err(AssetError::SchemaTooOld { .. })),
+                "{label}: reported a version story for bytes that carry none"
+            );
+        }
+        // …and a REAL older version is still recognised, or the bound above has
+        // simply switched the feature off.
+        let v1 =
+            bincode::serde::encode_to_vec(&FooV1 { schema_version: 1 }, bincode_config()).unwrap();
+        assert_eq!(peek_schema_version(&v1, Some(Foo::SCHEMA_VERSION)), Some(1));
+    }
+
+    /// **The bound of the "both directions are named errors" claim** — measured,
+    /// so the ledger entry is a fact and not a worry (P24.1 re-audit).
+    ///
+    /// Two inputs that are not assets at all still *decode*, because bincode is a
+    /// length-and-order format with no self-description: it has no way to say
+    /// "these bytes were never an asset". So:
+    ///
+    ///  * a **zero-filled** buffer — what a truncated or pre-allocated write
+    ///    leaves — decodes as a perfectly valid `schema_version = 0` asset with
+    ///    every field at its zero;
+    ///  * a valid leading varint over rubbish decodes as a valid *older* asset,
+    ///    and is indistinguishable from a genuinely truncated one. That is why
+    ///    `peek_schema_version` does **not** try to reject it: those bytes are a
+    ///    v1-shaped head, and refusing them would switch off the very diagnosis
+    ///    the peek exists to give.
+    ///
+    /// Closing the first one is a `schema_version >= 1` floor inside `migrate`,
+    /// which is a behaviour change for every kind at once and belongs to a
+    /// deliberate bump — ledgered in the ROADMAP's P24 block, not smuggled in
+    /// here. This test is what will fail the day it lands, which is the point.
+    #[test]
+    fn bincode_cannot_tell_a_zero_filled_file_from_an_empty_asset() {
+        let zeros = decode::<Foo>(&[0u8; 32]).expect("a zero-filled buffer decodes today");
+        assert_eq!(
+            zeros,
+            Foo {
+                schema_version: 0,
+                n: 0
+            },
+            "the bound moved — if a v>=1 floor landed in `migrate`, retire the \
+             ROADMAP ledger entry along with this assertion"
+        );
+        let over_garbage =
+            decode::<Foo>(&[0x01, 0xAB, 0xCD, 0xEF]).expect("a v1-shaped head decodes today");
+        assert_eq!(over_garbage.schema_version, 1);
     }
 
     #[test]

@@ -2719,7 +2719,7 @@ where
         if let Some(clip_guid) = world.world().get::<AudioSource>(e).and_then(|s| s.clip) {
             if let Entry::Vacant(v) = clips.entry(clip_guid) {
                 if let Some(asset) =
-                    resolve_audio(clip_guid).and_then(|b| inf_asset::decode::<AudioAsset>(&b).ok())
+                    resolve_audio(clip_guid).and_then(|b| decode_anim::<AudioAsset>(clip_guid, &b))
                 {
                     v.insert(asset);
                 }

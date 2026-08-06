@@ -738,7 +738,7 @@ mod tests {
                     .y;
                 assert!(
                     (last - hips) > 0.1,
-                    "{plan:?}'s girdles are all at one height, so a hips-sized leg                      would have reached the ground and this gate proves nothing"
+                    "{plan:?}'s girdles are all at one height, so a hips-sized leg would have reached the ground and this gate proves nothing"
                 );
             }
         }

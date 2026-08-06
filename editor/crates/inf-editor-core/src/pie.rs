@@ -705,8 +705,26 @@ where
         let Some(bytes) = resolve_mesh(mesh_id) else {
             continue;
         };
-        let Ok(mesh) = inf_asset::decode::<inf_mesh::MeshAsset>(&bytes) else {
-            continue;
+        // Reported, not discarded (P24.1 re-audit adoption — B1's exact shape,
+        // 130 lines down the same function).
+        //
+        // A `.inf_mesh` an older build wrote does not decode (bincode is
+        // positional), so this `else { continue }` dropped the actor's fracture
+        // from the payload — while the COOK, reading the same mesh through its own
+        // decode, still derived one. PIE then previewed an indestructible prop and
+        // the shipped build broke it, with no message anywhere. Silent hazards get
+        // advisories; that is the cook-advisory doctrine, and it applies to the
+        // payload builder because the payload IS the preview's content.
+        let mesh = match inf_asset::decode::<inf_mesh::MeshAsset>(&bytes) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    "pie: destructible mesh {mesh_id} did not decode, so this actor \
+                     previews as INDESTRUCTIBLE while the cooked build still \
+                     fractures it: {e}"
+                );
+                continue;
+            }
         };
         let Some(asset) = derive_fracture(&mesh, mesh_id, params) else {
             continue;
@@ -1000,6 +1018,101 @@ mod tests {
             payload.schema_version,
             inf_runtime::pie::SCENE_PAYLOAD_VERSION
         );
+    }
+
+    /// **A stale `.inf_mesh` is refused BY NAME, not dropped** (P24.1 re-audit
+    /// adoption).
+    ///
+    /// The payload builder's mesh decode was `let Ok(m) = … else { continue }`.
+    /// A `.inf_mesh` an older build wrote does not decode — bincode is positional
+    /// — so the actor's fracture silently left the payload while the cook, reading
+    /// the same file, still derived one: PIE previews an indestructible prop and
+    /// the shipped build breaks it. Exactly B1's shape, 130 lines down the same
+    /// function.
+    ///
+    /// What this pins is the **named** error the warning now carries, on the same
+    /// door every asset kind goes through, plus the honest outcome: the payload
+    /// ships no fracture for that mesh rather than a wrong one.
+    #[test]
+    fn a_stale_destructible_mesh_is_named_and_ships_no_fracture() {
+        const MESH: Uuid = Uuid::from_u128(0x2401_C0DE);
+
+        // A `MeshAsset` payload from a build before its current tail — modelled
+        // the way it happens, by encoding a shorter shape.
+        #[derive(serde::Serialize)]
+        struct MeshAssetV1 {
+            schema_version: u32,
+        }
+        let stale = bincode::serde::encode_to_vec(
+            &MeshAssetV1 { schema_version: 1 },
+            inf_asset::bincode_config(),
+        )
+        .unwrap();
+
+        // The refusal is named, and it is the one the warning renders.
+        let err = inf_asset::decode::<inf_mesh::MeshAsset>(&stale)
+            .expect_err("a truncated mesh payload must not decode");
+        assert!(
+            matches!(
+                err,
+                inf_asset::AssetError::SchemaTooOld { kind: "mesh", .. }
+                    | inf_asset::AssetError::Decode(_)
+            ),
+            "expected a named refusal, got {err:?}"
+        );
+
+        // …and the payload ships no fracture for it, rather than a wrong one.
+        let mut doc = SceneDoc::new();
+        let e = doc.create(SpawnKind::Empty, "Wall", None);
+        {
+            let world = doc.world_mut();
+            let id = world.entity_of(e).expect("the entity exists");
+            world.world_mut().entity_mut(id).insert((
+                inf_ecs::components::Destructible {
+                    chunk_count: 6,
+                    ..Default::default()
+                },
+                inf_ecs::components::MeshRef {
+                    asset: Some(MESH),
+                    ..Default::default()
+                },
+            ));
+            world.mark_dirty();
+        }
+        let payload = build_scene_payload(
+            &doc,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |g| (g == MESH).then(|| stale.clone()),
+            60,
+            false,
+        )
+        .expect("the payload still builds — one stale mesh must not stop Play");
+        assert!(
+            payload.fractures.is_empty(),
+            "a mesh that did not decode must contribute no fracture"
+        );
+        // The control: the SAME fixture with a readable mesh does ship one, so the
+        // emptiness above is the refusal and not a broken fixture.
+        let good = inf_asset::encode(&fracture_cube()).expect("encodes");
+        let payload = build_scene_payload(
+            &doc,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |_| None,
+            |g| (g == MESH).then(|| good.clone()),
+            60,
+            false,
+        )
+        .expect("payload builds");
+        assert_eq!(payload.fractures.len(), 1);
     }
 
     /// A 2 m cube, encoded — the mesh the fracture pin derives from.
