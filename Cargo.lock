@@ -3282,6 +3282,7 @@ dependencies = [
  "inf-audio",
  "inf-blueprint",
  "inf-core",
+ "inf-dcc",
  "inf-ecs",
  "inf-editor-core",
  "inf-graph",

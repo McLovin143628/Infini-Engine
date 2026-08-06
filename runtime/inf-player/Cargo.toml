@@ -149,6 +149,12 @@ winit = { workspace = true, features = ["android-native-activity"] }
 
 [dev-dependencies]
 inf-editor-core = { workspace = true }
+# `grammar_bake` re-opens the baked `.inf_mesh` through the DCC kernel's own
+# reader, because "can this be edited again" is a question only that reader can
+# answer — inferring it from `ExportReport::coincident_vertices` would be the
+# codebase's own "inference dressed as measurement" (P22). Dev-only: the shipped
+# player never names the modelling kernel.
+inf-dcc = { workspace = true }
 # `biome_pcg` authors a real `scatter.merge` graph so the P19.3 multi-rule
 # lowering rides the shipping pipeline in the gate, not only in its unit tests.
 # Test-only: the shipped player never builds a graph, it only lowers one.

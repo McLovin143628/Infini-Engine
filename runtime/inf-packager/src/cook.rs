@@ -945,6 +945,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     warnings.extend(unresolvable_image_masks(&db, &closure));
     warnings.extend(dangling_grammar_modules(&db, &closure));
     warnings.extend(unfracturable_destructible_meshes(&db, &closure));
+    warnings.extend(unbaked_destructible_populations(&db, &closure));
 
     // ── 4/5/6/7. blueprints + levels + vmesh + fracture ─────────────────────
     //
@@ -1592,6 +1593,77 @@ fn unfracturable_destructible_meshes(db: &AssetDb, closure: &[AssetId]) -> Vec<S
         .collect()
 }
 
+/// The sentence one unbaked destructible population gets.
+///
+/// A pure function so the wording is unit-testable, like every other advisory in
+/// this file. It names the **fix** rather than the symptom, because "this will
+/// not break" is something the author can see and "bake it first" is not.
+pub fn unbaked_population_advisory(
+    level: AssetId,
+    entity: uuid::Uuid,
+    mesh: Option<AssetId>,
+) -> String {
+    let names = match mesh {
+        Some(m) => format!("its MeshRef names mesh {m}, and ONLY that mesh will fracture"),
+        None => "its MeshRef names no mesh asset at all, so nothing will fracture".to_string(),
+    };
+    format!(
+        "level {level}: entity {entity} is Destructible and also carries a PcgVolume — a \
+         scattered population is INSTANCES, not geometry, so {names}. Everything the \
+         grammar placed stays standing and cannot be broken. Bake the population into one \
+         mesh (the grammar bake, `inf_editor_core::bake`) and point the entity's MeshRef \
+         at the result"
+    )
+}
+
+/// **P23.6: a `Destructible` on a still-scattered (unbaked) population.**
+///
+/// The P22 ruling, met from the other side: *a `Destructible` names no asset of
+/// its own — the cook fractures the ONE mesh its actor's `MeshRef.asset` points
+/// at* (`docs/memos/p22-strength.md` §5). The P19 grammar produces a
+/// **population**: `ScatteredSolid`s placed as instances, with no merged mesh
+/// anywhere in the pipeline. So an author who puts a `Destructible` on a grammar
+/// building gets a cook that succeeds, a level that loads, a charge that goes
+/// off — and a building that stands there, because the only thing that could
+/// break is whatever primitive box its `MeshRef` happens to name.
+///
+/// Nothing in the pipeline fails, which is exactly why it needs a signpost: this
+/// is the P16 advisory doctrine's own case, a silent hazard the author cannot
+/// see. The fix now exists (P23.6's bake), so the advisory can name it.
+///
+/// Deliberately **not** conditioned on the population being non-empty: a
+/// `PcgVolume`'s `structures` are `#[serde(skip)]`, recomputed from the graph on
+/// load, so the persisted level says nothing about how many solids it will
+/// produce. Asking would mean evaluating the grammar inside an advisory sweep.
+fn unbaked_destructible_populations(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
+    let mut bad: BTreeSet<(AssetId, uuid::Uuid, Option<AssetId>)> = BTreeSet::new();
+    for &id in closure {
+        let Some(entry) = db.get(id) else { continue };
+        if entry.kind() != AssetKind::Level {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&entry.path) else {
+            continue;
+        };
+        let Ok(level) = inf_scene::decode(&raw) else {
+            continue;
+        };
+        for e in &level.entities {
+            if e.destructible.is_none() || e.pcg_volume.is_none() {
+                continue;
+            }
+            bad.insert((
+                id,
+                e.guid,
+                e.mesh.as_ref().and_then(|m| m.asset).map(AssetId),
+            ));
+        }
+    }
+    bad.into_iter()
+        .map(|(level, entity, mesh)| unbaked_population_advisory(level, entity, mesh))
+        .collect()
+}
+
 /// **P21.2 (a): a `VoxelVolume.voxel_size_m` that disagrees with its asset.**
 ///
 /// The component carries a voxel scale and so does the `.inf_voxel` header, and
@@ -2192,7 +2264,9 @@ fn motion_clip_refs(motion: &inf_anim::state_machine::Motion) -> Vec<[u8; 16]> {
 /// precedent.
 #[cfg(test)]
 mod vmesh_advisory {
-    use super::{classify_skip, sub_threshold_advisory, AssetId, VmeshSkip};
+    use super::{
+        classify_skip, sub_threshold_advisory, unbaked_population_advisory, AssetId, VmeshSkip,
+    };
 
     /// Real geometry under the bar is the advisable case; an empty mesh is not.
     /// A cube IS the honest rendering of no geometry, so saying anything about it
@@ -2233,6 +2307,48 @@ mod vmesh_advisory {
         assert!(
             msg.contains("PLACEHOLDER CUBE"),
             "states the consequence — the part that makes it worth reading: {msg}"
+        );
+    }
+
+    /// **P23.6 — the unbaked-population signpost.** Same bar as above: which
+    /// level, which entity, what will actually happen, and the fix. The two arms
+    /// differ in the *consequence*, which is the part an author acts on: with a
+    /// mesh, one box breaks and the building does not; with none, nothing does.
+    #[test]
+    fn the_unbaked_population_advisory_names_the_entity_the_effect_and_the_bake() {
+        let level = AssetId::new();
+        let entity = uuid::Uuid::from_u128(0x2306_00AB);
+        let mesh = AssetId::new();
+
+        let with = unbaked_population_advisory(level, entity, Some(mesh));
+        assert!(with.contains(&level.to_string()), "names the level: {with}");
+        assert!(
+            with.contains(&entity.to_string()),
+            "names the entity: {with}"
+        );
+        assert!(with.contains(&mesh.to_string()), "names the mesh: {with}");
+        assert!(
+            with.contains("ONLY that mesh will fracture"),
+            "states what actually happens: {with}"
+        );
+        assert!(
+            with.contains("cannot be broken"),
+            "states the consequence: {with}"
+        );
+        assert!(
+            with.contains("Bake the population"),
+            "names the fix: {with}"
+        );
+
+        let without = unbaked_population_advisory(level, entity, None);
+        assert!(
+            without.contains("nothing will fracture"),
+            "an entity with no mesh gets the harsher, truer sentence: {without}"
+        );
+        assert_ne!(
+            with, without,
+            "the two cases must not read identically — the reader's next action \
+             differs"
         );
     }
 }

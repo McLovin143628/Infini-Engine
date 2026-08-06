@@ -2002,6 +2002,78 @@ mod tests {
             .unwrap();
     }
 
+    /// The asset tick's source, read by the gate below.
+    const ASSETS_SOURCE: &str = include_str!("assets.rs");
+
+    /// Identifiers that would make a refresh depend on whether a simulation is
+    /// running. Banned by NAME (the state, the query and the module), not by
+    /// spelling of one call — P23.5's law: **ban the module, not the function**,
+    /// because the wrapper is what got past the last source gate.
+    const SIM_GATE_NAMES: [&str; 4] = ["SimState", "sim_is_running", "is_running", "sim::"];
+
+    /// **The P23.6 headline's missing link, held where a test can reach it.**
+    ///
+    /// `dcc_edit_during_simulate.rs` executes both *ends* of the live-update
+    /// chain — the save writes new bytes, and `EditorRenderAssets` re-keys on
+    /// them while a `SimSession` is alive. The link between them is this
+    /// function's push, and a `#[tauri::command]` cannot be driven from a test on
+    /// any CI leg. So it is read instead, and the two things read are the two
+    /// ways it could break:
+    ///
+    /// 1. **The push is at statement level** — its line is indented exactly four
+    ///    spaces, i.e. the body's own scope. Wrapping it in *any* condition
+    ///    (`if !sim.is_running() { … }` being the one this phase is about)
+    ///    indents it and fails here. That is the whole falsification: measured,
+    ///    a sim-gated skip fails this test and nothing else in the tree.
+    /// 2. **Nothing sim-shaped is named at all** in the save, or in the
+    ///    background asset tick that carries an *external* edit down the same
+    ///    path. A refresh that consults the play state is a refresh that can be
+    ///    skipped.
+    #[test]
+    fn the_save_pushes_its_invalidation_unconditionally() {
+        let body = body_of(SOURCE, "pub async fn dcc_save(");
+        let push = "    viewport.refresh_asset_index(super::Target::All);";
+        assert!(
+            body.lines().any(|l| l == push),
+            "dcc_save must push `{}` at STATEMENT level — a viewport that is not \
+             told keeps drawing the geometry the author just replaced, and a \
+             conditional push is a skip waiting for a condition to be true",
+            push.trim()
+        );
+        assert!(
+            body.lines()
+                .any(|l| l == "    let _ = app.emit(\"assets://changed\", ());"),
+            "dcc_save must emit `assets://changed` at statement level so every \
+             referencing view re-resolves"
+        );
+        for name in SIM_GATE_NAMES {
+            assert!(
+                !body.contains(name),
+                "dcc_save names `{name}`: the save's invalidation has been made \
+                 to depend on whether a simulation is running. An asset edit is \
+                 not in the document, so Simulate has no opinion about it — see \
+                 docs/memos/p23-dcc-design.md §3."
+            );
+        }
+
+        // The watcher's half: an EXTERNAL edit (a mesh rewritten by another tool,
+        // or by a second window) reaches the viewport through the background
+        // tick, which must be just as unaware of play state.
+        let tick = body_of(ASSETS_SOURCE, "fn spawn_tick(");
+        assert!(
+            tick.contains("viewport.refresh_asset_index(super::Target::All);"),
+            "the asset tick no longer refreshes the viewport index — an external \
+             mesh edit would never reach the renderer"
+        );
+        for name in SIM_GATE_NAMES {
+            assert!(
+                !tick.contains(name),
+                "the asset tick names `{name}`: the watcher's refresh has been \
+                 made to depend on play state"
+            );
+        }
+    }
+
     #[test]
     fn a_selection_is_dropped_when_an_op_moves_the_stamp() {
         let state = DccState::default();
