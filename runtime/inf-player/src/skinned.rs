@@ -121,6 +121,12 @@ enum Content {
     /// the sibling `inf_asset` sidecars (the twin of
     /// [`VmeshRegistry::from_dir`](crate::vmesh::VmeshRegistry::from_dir)).
     Dir(HashMap<Uuid, PathBuf>),
+    /// Bytes that arrived over the PIE wire (P24.1, `ScenePayload` v7). The editor
+    /// has the project's asset DB and the player subprocess has no filesystem
+    /// handle to it at all, so a PIE session's skeletal source *is* the payload —
+    /// the same shape [`crate::voxel::VoxelRegistry`]'s `Memory` source took for
+    /// the identical reason in P21.4.
+    Memory(HashMap<Uuid, Vec<u8>>),
 }
 
 /// Every skeletal render asset the shipped player can draw, resolved by GUID out
@@ -187,6 +193,35 @@ impl SkinnedRegistry {
     pub fn from_dir(dir: &Path) -> Self {
         Self {
             content: Content::Dir(index_dir(dir)),
+            ..Self::default()
+        }
+    }
+
+    /// Serve skeletal payloads carried by a PIE `ScenePayload` (P24.1).
+    ///
+    /// All three byte vectors go into ONE map because they are keyed by asset
+    /// GUID and asset GUIDs are unique across kinds — `load_payload` decodes by
+    /// the type its caller asked for, so a mesh looked up as a skeleton would
+    /// fail to decode rather than be mistaken for one.
+    ///
+    /// Before this door the windowed PIE player was handed
+    /// [`SkinnedRegistry::new`] — an inert store — so every character in an
+    /// embedded or new-window PIE session drew as a placeholder cube while the
+    /// headless PIE the gates drive, and the shipped build, drew real geometry.
+    /// P21.4 fixed the identical class for voxel volumes; this is the same fix.
+    pub fn from_payload(
+        meshes: &[(Uuid, Vec<u8>)],
+        skeletons: &[(Uuid, Vec<u8>)],
+        clips: &[(Uuid, Vec<u8>)],
+    ) -> Self {
+        let map: HashMap<Uuid, Vec<u8>> = meshes
+            .iter()
+            .chain(skeletons)
+            .chain(clips)
+            .cloned()
+            .collect();
+        Self {
+            content: Content::Memory(map),
             ..Self::default()
         }
     }
@@ -369,6 +404,7 @@ impl SkinnedRegistry {
                     }
                 }
             }
+            Content::Memory(map) => map.get(&id)?.clone(),
         };
         match inf_asset::decode::<T>(&bytes) {
             Ok(v) => Some(v),

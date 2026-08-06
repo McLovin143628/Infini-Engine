@@ -99,14 +99,21 @@ pub struct PlayerApp {
     vmeshes: Arc<VmeshRegistry>,
     /// Skeletal render assets a `SkeletalMesh` resolves to (the P18.3 follow-up);
     /// attached to the render host so a bound character draws its real posed
-    /// geometry. Inert for primitive-only / PIE / browser worlds, which is why
-    /// [`PlayerApp::new`] starts it empty and only [`run`] replaces it.
+    /// geometry. Inert for primitive-only / browser worlds, which is why
+    /// [`PlayerApp::new`] starts it empty and [`run`] / [`run_pie`] replace it.
+    ///
+    /// **PIE is no longer inert** (P24.1): `ScenePayload` v7 carries the
+    /// `.inf_mesh` bytes, so [`run_pie`] hands over a real store and a windowed
+    /// preview draws the same character the shipped build does. It drew a
+    /// placeholder cube for three phases, because skeletons, clips and machines
+    /// crossed the wire and the mesh did not.
     skinned: Arc<SkinnedRegistry>,
     /// Where a `VoxelVolume.asset` finds its `.inf_voxel` bytes (P21.1) — the
-    /// cooked pack or a dev content directory. Attached to the render host so a
-    /// placed cave draws its real carved surface. Inert for primitive-only / PIE /
-    /// browser worlds, like `skinned` and for the same reason, which is why
-    /// [`PlayerApp::new`] starts it empty and only [`run`] replaces it.
+    /// cooked pack, a dev content directory, or (P21.4) the PIE payload. Attached
+    /// to the render host so a placed cave draws its real carved surface. Inert
+    /// for primitive-only / browser worlds, like `skinned` and for the same
+    /// reason, which is why [`PlayerApp::new`] starts it empty and [`run`] /
+    /// [`run_pie`] replace it.
     voxel_assets: Arc<VoxelRegistry>,
     /// The loaded level's scene-persisted render block (R-P4); the render host
     /// maps it onto the live `RenderSettings` at build (and device-loss rebuild).
@@ -519,10 +526,11 @@ pub fn run(
 /// but wired to a PIE control channel (Pause/Resume/Step/Stop/Eject/SetViewport)
 /// and a report sink (`Window` handle for reparenting, `Paused`/`Resumed`/…).
 /// Blocks until Stop or the window closes.
-// Eight parameters trips clippy's arity lint. Bundling them would hide the one
-// that matters — `voxel_assets` was ADDED here in P21.4 because a windowed PIE
-// session was binding no volumes and drawing no caves, and a struct is exactly
-// where a field like that goes back to being easy to forget to fill.
+// Nine parameters trips clippy's arity lint. Bundling them would hide the two
+// that matter — `voxel_assets` was ADDED here in P21.4 because a windowed PIE
+// session was binding no volumes and drawing no caves, and `skinned` in P24.1
+// because it was drawing every character as a placeholder cube. A struct is
+// exactly where a field like that goes back to being easy to forget to fill.
 #[allow(clippy::too_many_arguments)]
 pub fn run_pie(
     title: String,
@@ -533,11 +541,14 @@ pub fn run_pie(
     control: Receiver<EditorToPlayer>,
     out: Box<dyn Write>,
     voxel_assets: Arc<VoxelRegistry>,
+    skinned: Arc<SkinnedRegistry>,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    // PIE streams no vmesh assets yet (a documented follow-up); asset meshes render
-    // as placeholder cubes in PIE until the payload carries the vmesh index.
+    // PIE streams no vmesh assets yet (a documented follow-up); a *rigid*
+    // `MeshRef.asset` still renders as a placeholder cube in PIE until the payload
+    // carries the vmesh index. A `SkeletalMesh` no longer does — see `skinned`
+    // below and `ScenePayload::meshes` (v7).
     // PIE also starts from the default render block (the streamed scene payload
     // carries no settings yet — a documented follow-up mirroring the vmesh gap).
     let mut app = PlayerApp::new(
@@ -555,6 +566,13 @@ pub fn run_pie(
     // while the headless one, which the gate drives, draws them correctly. Passed
     // in rather than defaulted so the gap cannot reopen silently.
     app.voxel_assets = voxel_assets;
+    // P24.1: the payload's `.inf_mesh` / `.inf_skel` / `.inf_anim` bytes
+    // (`ScenePayload` v7). Without them `resolve_skinned` misses on the mesh and
+    // every character in a windowed PIE session draws as the slate placeholder
+    // cube — while the headless PIE the gates drive, and the shipped build, draw
+    // real posed geometry. The identical class P21.4 closed for voxel volumes,
+    // and passed in rather than defaulted for the identical reason.
+    app.skinned = skinned;
     app.pie = Some(PieLink {
         control,
         out,

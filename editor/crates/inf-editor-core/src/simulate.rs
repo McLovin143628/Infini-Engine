@@ -2650,26 +2650,20 @@ where
     (machines, root_clips, skeletons, pose_clips)
 }
 
-/// Every `.inf_anim` GUID a state machine's states play, `Guid`-sorted and
-/// deduplicated — the single-clip states and every entry of every blend space.
+/// Every `.inf_anim` GUID a state machine's states play, as `Uuid`s — the Ring-1
+/// spelling of [`inf_anim::StateMachine::clip_refs`].
 ///
-/// One walk, in Ring 1, called by the editor's resolver and by the PIE payload
-/// builder. A second copy would be the drift this batch is repairing: a payload
-/// that shipped fewer clips than the sim resolves is a character that animates in
-/// Simulate and stands still in PIE.
+/// A thin conversion and nothing else: the walk itself is Ring 0 because THREE
+/// consumers have to close the same `state machine → clip` edge (the cook's
+/// dependency closure, the PIE payload builder, and the editor Simulate
+/// resolver), and before P24.1 the cook closed it and the PIE payload did not.
+/// `inf-anim` is `uuid`-free by design, hence the map here.
 pub fn machine_clip_refs(machine: &StateMachine) -> BTreeSet<Uuid> {
-    use inf_anim::Motion;
-    let mut out = BTreeSet::new();
-    for state in &machine.states {
-        match &state.motion {
-            Motion::Clip(c) => {
-                out.insert(Uuid::from_bytes(*c));
-            }
-            Motion::Blend1D(s) => out.extend(s.entries.iter().map(|e| Uuid::from_bytes(e.clip))),
-            Motion::Blend2D(s) => out.extend(s.entries.iter().map(|e| Uuid::from_bytes(e.clip))),
-        }
-    }
-    out
+    machine
+        .clip_refs()
+        .into_iter()
+        .map(Uuid::from_bytes)
+        .collect()
 }
 
 /// Resolve every `.inf_audio` clip an [`AudioSource`] in `doc` references, keyed by

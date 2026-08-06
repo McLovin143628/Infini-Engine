@@ -513,9 +513,20 @@ where
     // `SkeletalMesh.skeleton` / `AnimPlayer.clip` / `AnimStateMachine.sm` GUIDs
     // resolved to their `.inf_skel` / `.inf_anim` / `.inf_sm` bytes, so the PIE
     // player resolves state machines + root-motion clips exactly like the shipping
-    // pack path (PIE == shipping for animation). A machine's transitively-played
-    // clips ship with the cooked pack for pose rendering (human-verified);
-    // gate (c) asserts the state trace, which needs only the machine + actor vars.
+    // pack path (PIE == shipping for animation).
+    //
+    // **P24.1 closes the transitive hop.** This comment used to say a machine's
+    // transitively-played clips "ship with the cooked pack for pose rendering
+    // (human-verified)", and that the state trace "needs only the machine + actor
+    // vars". The first half was true — `inf_packager::cook::asset_deps` has closed
+    // the `state machine → clip` edge since P11.4 — and the second half stopped
+    // being true the moment the machine started driving the DRAWN pose. A payload
+    // that shipped the machine and not its clips would preview every state as the
+    // rest pose while the shipped build animated: exactly the divergence this file
+    // exists to prevent, arriving through the one asset nothing references by
+    // component. Both closures now go through the SAME Ring-0 walk
+    // (`inf_anim::StateMachine::clip_refs`) rather than two that agree by
+    // construction.
     let mut skeletons: Vec<(Uuid, Vec<u8>)> = Vec::new();
     let mut clips: Vec<(Uuid, Vec<u8>)> = Vec::new();
     let mut machines: Vec<(Uuid, Vec<u8>)> = Vec::new();
@@ -544,6 +555,21 @@ where
         if let Some(sm) = w.get::<AnimStateMachine>(e).and_then(|s| s.sm) {
             collect(sm, &mut machines, &mut resolve_anim, &mut seen_anim);
         }
+    }
+    // The transitive hop: every clip the resolved machines' states play. Walked
+    // over the machine BYTES that were just collected, so a machine that did not
+    // resolve contributes nothing and the payload never claims a clip it has no
+    // machine for. `Guid` order (the Ring-0 walk returns a `BTreeSet`), so the
+    // payload is a deterministic function of the document.
+    let machine_clips: Vec<Uuid> = machines
+        .iter()
+        .filter_map(|(_, bytes)| inf_asset::decode::<inf_anim::StateMachineAsset>(bytes).ok())
+        .flat_map(|a| crate::simulate::machine_clip_refs(&a.machine))
+        .collect::<std::collections::BTreeSet<Uuid>>()
+        .into_iter()
+        .collect();
+    for clip in machine_clips {
+        collect(clip, &mut clips, &mut resolve_anim, &mut seen_anim);
     }
 
     // Referenced voxel volumes (P21.4): every `VoxelVolume.asset` ref resolved to
@@ -629,6 +655,36 @@ where
     // degenerate, too few chunks), is simply absent: the actor previews as
     // indestructible, which is exactly what the shipped build does with the same
     // refusal.
+    // Referenced skeletal meshes (P24.1): every `SkeletalMesh.mesh` ref resolved to
+    // its `.inf_mesh` bytes, through the SAME `resolve_mesh` door the fracture
+    // derivation below reads.
+    //
+    // The one part of a character that never crossed this wire. Skeletons, clips
+    // and machines have ridden it since v3, so a PIE session stepped its
+    // characters exactly like the shipped build — and drew every one of them as a
+    // placeholder cube, because the mesh bytes the skinned pass needs were absent
+    // and `SkinnedRegistry::resolve_skinned` therefore missed on rule 1.
+    //
+    // Carried, not computed: the bind-space rebuild that turns these bytes into a
+    // `SkinnedMeshData` is a MIRROR pair between the two render stores, so doing
+    // it here would put a third copy of it in the tree.
+    let mut meshes: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut seen_mesh: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let Some(mesh) = world.world().get::<SkeletalMesh>(e).and_then(|s| s.mesh) else {
+            continue;
+        };
+        if !seen_mesh.insert(mesh) {
+            continue;
+        }
+        if let Some(bytes) = resolve_mesh(mesh) {
+            meshes.push((mesh, bytes));
+        }
+    }
+
     let mut fractures: Vec<(Uuid, Vec<u8>)> = Vec::new();
     for (mesh_id, params) in destructible_mesh_params(doc) {
         let Some(bytes) = resolve_mesh(mesh_id) else {
@@ -656,7 +712,8 @@ where
             .with_anim_assets(skeletons, clips, machines)
             .with_voxels(voxels)
             .with_terrains(terrains)
-            .with_fractures(fractures),
+            .with_fractures(fractures)
+            .with_meshes(meshes),
     )
 }
 
@@ -780,6 +837,15 @@ mod tests {
         const VOXELS: Uuid = Uuid::from_u128(0x2104_0E05);
         const TERRAIN: Uuid = Uuid::from_u128(0x2104_0E06);
         const MESH: Uuid = Uuid::from_u128(0x2203_0E07);
+        /// The SkeletalMesh's own `.inf_mesh` (P24.1, payload v7) — a different
+        /// asset from the destructible's, so "the mesh resolver filled `meshes`"
+        /// and "it filled `fractures`" are distinguishable.
+        const SKMESH: Uuid = Uuid::from_u128(0x2401_0E08);
+        /// The `.inf_sm` and the clip its only state plays. The clip is named by
+        /// NO component — it lives inside the machine's payload — so it is only in
+        /// the payload if the transitive walk ran.
+        const SM: Uuid = Uuid::from_u128(0x2401_0E09);
+        const SM_CLIP: Uuid = Uuid::from_u128(0x2401_0E0A);
 
         let mut doc = SceneDoc::new();
         let e = doc.create(SpawnKind::Empty, "Everything", None);
@@ -799,7 +865,11 @@ mod tests {
                 },
                 SkeletalMesh {
                     skeleton: Some(SKEL),
-                    ..SkeletalMesh::default()
+                    mesh: Some(SKMESH),
+                },
+                inf_ecs::components::AnimStateMachine {
+                    sm: Some(SM),
+                    ..Default::default()
                 },
                 VoxelVolume::from_asset(VOXELS),
                 // P22.3: the seventh resolver is the odd one out — it hands
@@ -825,11 +895,39 @@ mod tests {
             &doc,
             |g| (g == CLASS).then(|| BlueprintClass::new("act:probe", "Probe")),
             |g| (g == GRAPH).then(|| b"PCG".to_vec()),
-            |g| (g == SKEL).then(|| b"SKEL".to_vec()),
+            |g| {
+                if g == SKEL {
+                    Some(b"SKEL".to_vec())
+                } else if g == SM {
+                    Some(
+                        inf_asset::encode(&inf_anim::StateMachineAsset::new(
+                            inf_anim::StateMachine {
+                                states: vec![inf_anim::SmState::clip("idle", *SM_CLIP.as_bytes())],
+                                transitions: vec![],
+                                entry: 0,
+                            },
+                            None,
+                        ))
+                        .expect("encodes"),
+                    )
+                } else if g == SM_CLIP {
+                    Some(b"SM_CLIP".to_vec())
+                } else {
+                    None
+                }
+            },
             |g| (g == BIOMES).then(|| b"BIOMES".to_vec()),
             |g| (g == VOXELS).then(|| b"VOXELS".to_vec()),
             |g| (g == TERRAIN).then(|| b"TERRAIN".to_vec()),
-            |g| (g == MESH).then(|| inf_asset::encode(&fracture_cube()).expect("encodes")),
+            |g| {
+                if g == MESH {
+                    Some(inf_asset::encode(&fracture_cube()).expect("encodes"))
+                } else if g == SKMESH {
+                    Some(b"SKMESH".to_vec())
+                } else {
+                    None
+                }
+            },
             60,
             false,
         )
@@ -839,6 +937,25 @@ mod tests {
         assert_eq!(payload.classes[0].0, CLASS);
         assert_eq!(payload.pcgs, vec![(GRAPH, b"PCG".to_vec())]);
         assert_eq!(payload.skeletons, vec![(SKEL, b"SKEL".to_vec())]);
+        // P24.1 (v7): the SkeletalMesh's own `.inf_mesh`, through the SAME resolver
+        // the fracture derivation reads — and it must not be the destructible's.
+        assert_eq!(
+            payload.meshes,
+            vec![(SKMESH, b"SKMESH".to_vec())],
+            "the payload carries no skeletal mesh — every character in a windowed \
+             PIE session would draw as a placeholder cube"
+        );
+        // P24.1: the machine, and the clip its only state plays. The clip is named
+        // by no component at all; it is in the payload only because the transitive
+        // `state machine → clip` walk ran. Without it the shipped build animates
+        // and the preview stands still.
+        assert_eq!(payload.machines.len(), 1);
+        assert_eq!(payload.machines[0].0, SM);
+        assert!(
+            payload.clips.iter().any(|(g, _)| *g == SM_CLIP),
+            "the payload dropped the clip the machine's state plays: {:?}",
+            payload.clips.iter().map(|(g, _)| *g).collect::<Vec<_>>()
+        );
         assert_eq!(payload.biome_sets, vec![(BIOMES, b"BIOMES".to_vec())]);
         assert_eq!(payload.voxels, vec![(VOXELS, b"VOXELS".to_vec())]);
         assert_eq!(payload.terrains, vec![(TERRAIN, b"TERRAIN".to_vec())]);

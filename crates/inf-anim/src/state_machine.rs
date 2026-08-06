@@ -320,6 +320,36 @@ impl<'a> SmContext<'a> {
     }
 }
 
+/// Every clip a [`Motion`] plays: a single clip, or every entry of a 1D/2D blend
+/// space.
+///
+/// **The one walk.** A machine names its clips *inside its own payload* and no
+/// component references them, so every consumer that has to close the
+/// `state machine → clip` edge has to do it from here: the cook's dependency
+/// closure (`inf_packager::cook::asset_deps`), the PIE payload builder, and the
+/// editor Simulate resolver. It was written twice before P24.1 — the cook closed
+/// the edge and the PIE payload did not, which was invisible for as long as
+/// nothing evaluated the machine's pose, and became "the character animates in
+/// the shipped build and stands still in the preview" the moment something did.
+pub fn motion_clip_refs(motion: &Motion) -> Vec<ClipRef> {
+    match motion {
+        Motion::Clip(c) => vec![*c],
+        Motion::Blend1D(space) => space.entries.iter().map(|e| e.clip).collect(),
+        Motion::Blend2D(space) => space.entries.iter().map(|e| e.clip).collect(),
+    }
+}
+
+impl StateMachine {
+    /// Every clip GUID this machine's states play, deduplicated and in ascending
+    /// byte order (deterministic). See [`motion_clip_refs`].
+    pub fn clip_refs(&self) -> std::collections::BTreeSet<ClipRef> {
+        self.states
+            .iter()
+            .flat_map(|s| motion_clip_refs(&s.motion))
+            .collect()
+    }
+}
+
 /// Sample a [`Motion`] into a [`Pose`] at play-head `t` (seconds), reading any
 /// blend-space parameters from `ctx`.
 pub fn sample_motion<'c>(
@@ -440,6 +470,45 @@ mod tests {
             ],
             entry: 0,
         }
+    }
+
+    /// The one `state machine → clip` walk covers single clips AND blend-space
+    /// entries, deduplicated. Both consumers (the cook's dependency closure and
+    /// the PIE payload) ship exactly what this returns.
+    #[test]
+    fn clip_refs_cover_single_clips_and_blend_entries() {
+        use crate::blend_space::{BlendEntry1D, BlendSpace1D};
+        let sm = StateMachine {
+            states: vec![
+                SmState::clip("idle", [1; 16]),
+                // A blend space whose entries include the SAME clip as `idle` —
+                // the dedupe has to be real, not incidental.
+                SmState {
+                    name: "locomotion".into(),
+                    motion: Motion::Blend1D(BlendSpace1D::new(
+                        "speed",
+                        vec![
+                            BlendEntry1D {
+                                pos: 0.0,
+                                clip: [1; 16],
+                            },
+                            BlendEntry1D {
+                                pos: 1.0,
+                                clip: [2; 16],
+                            },
+                        ],
+                    )),
+                    looping: true,
+                    speed: 1.0,
+                    position: (0.0, 0.0),
+                },
+            ],
+            transitions: vec![],
+            entry: 0,
+        };
+        let refs: Vec<ClipRef> = sm.clip_refs().into_iter().collect();
+        assert_eq!(refs, vec![[1u8; 16], [2u8; 16]]);
+        assert!(StateMachine::empty().clip_refs().is_empty());
     }
 
     #[test]

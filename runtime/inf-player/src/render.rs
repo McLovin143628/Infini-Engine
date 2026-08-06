@@ -59,7 +59,8 @@ pub struct PlayerRenderHost {
     vmeshes: Arc<VmeshRegistry>,
     /// The skeletal render assets a `SkeletalMesh` resolves to (bind-space
     /// geometry + skeletons + clips), from the loaded pack / dev-dir; inert for
-    /// the `--demo` / PIE / browser worlds. Set via [`set_skinned`].
+    /// the `--demo` / browser worlds (PIE has carried real bytes since P24.1's
+    /// `ScenePayload` v7). Set via [`set_skinned`].
     ///
     /// [`set_skinned`]: PlayerRenderHost::set_skinned
     skinned: Arc<SkinnedRegistry>,

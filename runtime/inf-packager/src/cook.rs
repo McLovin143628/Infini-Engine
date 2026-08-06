@@ -1391,11 +1391,16 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
             };
             let mut deps: Vec<AssetId> = Vec::new();
             deps.extend(sm.skeleton.map(|b| AssetId(uuid::Uuid::from_bytes(b))));
-            for st in &sm.machine.states {
-                for clip in motion_clip_refs(&st.motion) {
-                    deps.push(AssetId(uuid::Uuid::from_bytes(clip)));
-                }
-            }
+            // P24.1: through the Ring-0 walk, not a local copy. The PIE payload
+            // builder closes the same edge from the same function, because this
+            // one closed it and that one did not — a divergence with no symptom
+            // until the machine started driving the drawn pose.
+            deps.extend(
+                sm.machine
+                    .clip_refs()
+                    .into_iter()
+                    .map(|c| AssetId(uuid::Uuid::from_bytes(c))),
+            );
             deps
         }
         AssetKind::AnimClip => {
@@ -2251,17 +2256,6 @@ fn dangling_grammar_modules(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
             )
         })
         .collect()
-}
-
-/// Every clip GUID a state's [`Motion`](inf_anim::state_machine::Motion) plays: a
-/// single clip, or every entry of a 1D/2D blend space.
-fn motion_clip_refs(motion: &inf_anim::state_machine::Motion) -> Vec<[u8; 16]> {
-    use inf_anim::state_machine::Motion;
-    match motion {
-        Motion::Clip(c) => vec![*c],
-        Motion::Blend1D(space) => space.entries.iter().map(|e| e.clip).collect(),
-        Motion::Blend2D(space) => space.entries.iter().map(|e| e.clip).collect(),
-    }
 }
 
 /// The sub-threshold vmesh advisory (P18.3 audit). Pure rules, so the trigger and

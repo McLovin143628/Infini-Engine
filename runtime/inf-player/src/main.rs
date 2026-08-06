@@ -375,6 +375,13 @@ fn run_pie_window(
         std::sync::Arc::new(inf_player::voxel::VoxelRegistry::from_payload(
             &payload.voxels,
         )),
+        // P24.1 (`ScenePayload` v7): the skeletal bytes a windowed PIE session
+        // has never had. Same shape, same reason as the voxel line above.
+        std::sync::Arc::new(inf_player::skinned::SkinnedRegistry::from_payload(
+            &payload.meshes,
+            &payload.skeletons,
+            &payload.clips,
+        )),
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

@@ -88,7 +88,20 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   mouths" and "a level PIE can preview" were mutually exclusive until now.
 ///   `serialize::strip_streamed_terrain` still blanks the inline working set, so
 ///   PIE streams from the asset exactly as the shipped build does.
-pub const SCENE_PAYLOAD_VERSION: u32 = 6;
+/// * **v7** — `meshes` (P24.1): the `.inf_mesh` payloads a level's
+///   `SkeletalMesh.mesh` refs name. Skeletons, clips and machines have ridden
+///   this envelope since v3, so a PIE session has always *simulated* its
+///   characters correctly — and it drew every one of them as a placeholder cube,
+///   because the mesh bytes the skinned pass needs were the one part that never
+///   crossed. See [`ScenePayload::meshes`].
+///
+/// **The only payload bump of P24.1**, and deliberately audited against the rest
+/// of the phase before freezing. P24.4's cloth is *sim state* over a garment that
+/// is itself an `.inf_mesh`, so it needs a GUID added to the **collector** and
+/// nothing added to the wire; hair guides that ride a mesh or a skeleton are the
+/// same. A distinct `.inf_hair` asset kind — which P24.4 has not chosen — would
+/// be a v8, and would be the honest reason for one.
+pub const SCENE_PAYLOAD_VERSION: u32 = 7;
 
 /// Upper bound on a single frame; anything larger means a desynced or
 /// corrupt stream and is treated as an error rather than an allocation. A
@@ -204,6 +217,28 @@ pub struct ScenePayload {
     /// second destructible mesh had silently stopped resolving.
     #[serde(default)]
     pub fractures: Vec<(Uuid, Vec<u8>)>,
+    /// Referenced skeletal meshes: `(asset guid, .inf_mesh bincode bytes)` — keyed
+    /// by a level's `SkeletalMesh.mesh` refs (schema v7, P24.1).
+    ///
+    /// The one part of a character that never crossed this wire. `skeletons`,
+    /// `clips` and `machines` have ridden it since v3, so a PIE session stepped
+    /// its characters exactly like the shipped build and then drew every one of
+    /// them as a **placeholder cube** — the `SkinnedRegistry` the windowed PIE
+    /// player was handed had no content at all, so `resolve_skinned` missed on
+    /// the mesh and the projector fell through to its slate placeholder.
+    ///
+    /// Keyed by ASSET, deduplicated, and resolved through the caller's `.inf_mesh`
+    /// door — the same one P22.3's fracture derivation reads. Unlike `fractures`
+    /// these bytes are carried, not computed: the skinned pass's bind-space
+    /// rebuild (`skinned_mesh_data`) is a MIRROR pair, so running it here would
+    /// put a third copy of it in the tree.
+    ///
+    /// Empty on a level with no `SkeletalMesh`, **which is also what a caller that
+    /// does not resolve meshes produces** — the P21.4 "two empty maps agreeing"
+    /// hazard, and the reason `pie.rs`'s payload pin asserts an exact expected
+    /// count taken from its fixture before anything is compared.
+    #[serde(default)]
+    pub meshes: Vec<(Uuid, Vec<u8>)>,
 }
 
 impl ScenePayload {
@@ -230,6 +265,7 @@ impl ScenePayload {
             voxels: Vec::new(),
             terrains: Vec::new(),
             fractures: Vec::new(),
+            meshes: Vec::new(),
         }
     }
 
@@ -295,6 +331,14 @@ impl ScenePayload {
     /// [`with_pcgs`](Self::with_pcgs).
     pub fn with_terrains(mut self, terrains: Vec<(Uuid, Vec<u8>)>) -> Self {
         self.terrains = terrains;
+        self
+    }
+
+    /// Attach the referenced `.inf_mesh` payloads (`(asset guid, bytes)`) a
+    /// level's `SkeletalMesh.mesh` refs name (P24.1). Builder-style, exactly like
+    /// [`with_pcgs`](Self::with_pcgs).
+    pub fn with_meshes(mut self, meshes: Vec<(Uuid, Vec<u8>)>) -> Self {
+        self.meshes = meshes;
         self
     }
 
@@ -585,6 +629,10 @@ mod tests {
             (Uuid::from_u128(0x21_04_02), vec![0xBB; 32]),
         ])
         .with_terrains(vec![(Uuid::from_u128(0x21_04_03), vec![0xCC; 128])])
+        // v7 (P24.1) — NON-EMPTY, for the reason the round-trip test below
+        // records: an empty new field cannot distinguish a tail append from a
+        // mid-struct insertion.
+        .with_meshes(vec![(Uuid::from_u128(0x24_01_01), vec![0xDD; 96])])
     }
 
     /// **The round trip the v5 fields never had.** Every earlier envelope test
@@ -613,6 +661,10 @@ mod tests {
         assert!(got.windowed);
         assert_eq!(got.voxels.len(), 2);
         assert_eq!(got.terrains[0].1.len(), 128);
+        // v7 (P24.1): the newest tail field, likewise named rather than left to
+        // the struct equality.
+        assert_eq!(got.meshes.len(), 1);
+        assert_eq!(got.meshes[0].1.len(), 96);
     }
 
     /// **The tail is positional, and it is at the tail.** A reader that knows only
@@ -650,15 +702,21 @@ mod tests {
     }
 
     /// …and the version check is what stops it running with the caves missing.
+    ///
+    /// **Both directions.** The envelope is positional, so a *newer* payload is as
+    /// unreadable as an older one — `check_version` is exact equality and not a
+    /// floor, and this asserts the property rather than the implementation.
     #[test]
     fn a_version_mismatch_is_refused_loudly() {
         let mut p = payload_with_assets();
         assert!(p.check_version().is_ok());
-        p.schema_version = SCENE_PAYLOAD_VERSION - 1;
-        let err = p
-            .check_version()
-            .expect_err("a stale payload must be refused");
-        assert!(err.contains("schema"), "{err}");
+        for v in [SCENE_PAYLOAD_VERSION - 1, SCENE_PAYLOAD_VERSION + 1] {
+            p.schema_version = v;
+            let err = p
+                .check_version()
+                .expect_err("a mismatched payload must be refused");
+            assert!(err.contains("schema"), "{err}");
+        }
     }
 
     /// A frame past the cap is a **real error**, not a truncated length header
