@@ -257,6 +257,7 @@ fn import_dto(r: &ImportReport) -> DccImportDto {
         sharp_edges: r.sharp_edges as u32,
         boundary_edges: r.boundary_edges as u32,
         non_finite_values: r.non_finite_values as u32,
+        skin_conflicts: r.skin_conflicts as u32,
     }
 }
 
@@ -266,6 +267,8 @@ fn export_dto(r: &ExportReport) -> DccExportDto {
         vertices: r.vertices as u32,
         triangles: r.triangles as u32,
         fan_fallbacks: r.fan_fallbacks as u32,
+        optimized: r.optimized,
+        optimize_skipped_skinned: r.optimize_skipped_skinned as u32,
         fallback_tangents: r.fallback_tangents as u32,
         coincident_vertices: r.coincident_vertices as u32,
         reused_diagonals: r.reused_diagonals as u32,

@@ -194,6 +194,38 @@ fn meshopt_appears_only_at_export_and_never_in_an_op() {
     );
 }
 
+/// A file's **production** half: everything before `#[cfg(test)]`, with line
+/// numbers preserved so a reported hit points at the real line.
+///
+/// The f32 law is about world coordinates in the kernel. A test fixture that
+/// builds `[f32::NAN, 0.0, 0.0, 0.0]` to check a refusal is not a coordinate —
+/// it is the thing that *checks* the code that must not have one. Cutting the
+/// tail keeps the ban aimed at what it names, and it is the same cut
+/// `inf-anim`'s `portable_pose` gate makes for the same reason.
+///
+/// Lines are replaced by empty ones rather than dropped, so `code_hits`' 1-based
+/// numbering still matches the file.
+fn production_only(src: &str) -> String {
+    // CR stripped rather than "\r\n" → "\n" rewritten: the P22 law only needs the
+    // carriage returns gone before a `\n`-delimited search, and a char filter has
+    // no escape sequence for a scripted edit to mangle (this line arrived once as
+    // a literal newline inside a string, which clippy caught as "replacing text
+    // with itself").
+    let src: String = src.chars().filter(|c| *c != '\r').collect();
+    let cut = src
+        .lines()
+        .position(|l| l == "#[cfg(test)]")
+        .unwrap_or(usize::MAX);
+    src.lines()
+        .enumerate()
+        .map(|(i, l)| if i >= cut { "" } else { l })
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        )
+}
+
 /// **`f32` is a boundary, not a habit** — and P24.2 gave it a second boundary.
 ///
 /// Positions, normals and every intermediate are `f64` (architecture rule 3).
@@ -209,10 +241,33 @@ fn meshopt_appears_only_at_export_and_never_in_an_op() {
 /// that holds every position in the crate — in exchange for one struct field.
 #[test]
 fn f32_lives_only_at_the_asset_boundary_and_the_skin_channel() {
-    // Tokens that make an `f32` line a *weight* line rather than a coordinate
-    // one. Deliberately short: `skin` and `weight` are the channel's whole
-    // vocabulary, and `joint` is what a weight is attached to.
-    const SKIN_TOKENS: [&str; 5] = ["skin", "Skin", "weight", "Weight", "joint"];
+    // **Exemptions are FILES and LITERAL LINES — never a vocabulary**
+    // (P24.2 audit M-F32LAW).
+    //
+    // This was a token filter: an `f32` line was permitted if it mentioned
+    // `skin`, `weight` or `joint`. The audit's finding is that those are
+    // *geometry* words in this crate — `select.rs`'s `soft_weights` and
+    // `sculpt.rs`'s `dab_weights` scale metre displacements — so a future `f32`
+    // world coordinate on a line mentioning `weight` would have sailed through.
+    // A vocabulary exemption is a ban list wearing an allowlist's clothes.
+    //
+    // What replaces it says exactly what is permitted and nothing more:
+    //
+    // * `heat.rs` and `paint.rs` join `skin.rs` as **exempt files**, because
+    //   they compute weights and nothing else — every `f32` in them is a
+    //   coefficient in `[0, 1]`, and their only geometry (`DVec3` dab centres,
+    //   bone segments) is `f64` and stays `f64`. The anti-vacuity arm below
+    //   checks each one really is a weight file.
+    // * `validate.rs` and `ops.rs` get **two literal lines**, matched whole.
+    //
+    // A new `f32` line has to be added here by hand — which is the decision the
+    // token rule was making automatically, and wrongly.
+    const EXEMPT_LINES: [&str; 2] = [
+        // validate.rs — the reading `Violation::SkinNotNormalized` carries.
+        "weight_sum: f32,",
+        // ops.rs — the normalization check on an `AssignWeights` payload.
+        "if w.weights.iter().sum::<f32>() <= 0.0 {",
+    ];
 
     for (name, src) in [
         SOURCES[1],  // topo.rs
@@ -224,13 +279,11 @@ fn f32_lives_only_at_the_asset_boundary_and_the_skin_channel() {
         SOURCES[9],  // xform.rs
         SOURCES[10], // uv.rs
         SOURCES[12], // bvh.rs — pure f64, no boundary at all
-        SOURCES[14], // heat.rs — solves in f64; only the WEIGHTS it gathers are f32
-        SOURCES[15], // paint.rs — same
         ("journal.rs", JOURNAL),
     ] {
-        let stray: Vec<(usize, String)> = code_hits(src, "f32")
+        let stray: Vec<(usize, String)> = code_hits(&production_only(src), "f32")
             .into_iter()
-            .filter(|(_, line)| !SKIN_TOKENS.iter().any(|t| line.contains(t)))
+            .filter(|(_, line)| !EXEMPT_LINES.iter().any(|e| line.trim() == *e))
             .collect();
         assert!(
             stray.is_empty(),
@@ -243,20 +296,44 @@ fn f32_lives_only_at_the_asset_boundary_and_the_skin_channel() {
     // (so the allowlist is doing work rather than covering an empty set), and
     // `skin.rs` really is the weight representation (so exempting it is a
     // statement about that file and not a blanket).
-    let permitted: Vec<(&str, usize, String)> = [SOURCES[2], SOURCES[5]]
-        .into_iter()
-        .flat_map(|(name, src)| {
-            code_hits(src, "f32")
-                .into_iter()
-                .filter(|(_, line)| SKIN_TOKENS.iter().any(|t| line.contains(t)))
-                .map(move |(n, line)| (name, n, line))
-        })
-        .collect();
-    assert!(
-        !permitted.is_empty(),
-        "no file above carries a permitted f32 line — the allowlist is \
-         permitting nothing, and would keep passing if it permitted everything"
-    );
+    // NOT VACUOUS, three ways.
+    //
+    // (a) Every frozen exemption must match a line that EXISTS. An exemption for
+    //     a line somebody deleted is a hole nobody is using and nobody will
+    //     notice — and the next `f32` to land on that line's text gets in free.
+    let scanned: String = [SOURCES[2], SOURCES[5]]
+        .iter()
+        .map(|(_, src)| production_only(src))
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+    for exempt in EXEMPT_LINES {
+        assert!(
+            scanned.lines().any(|l| l.trim() == exempt),
+            "the frozen f32 exemption {exempt:?} matches no line any more; delete              it rather than leaving a hole"
+        );
+    }
+    // (b) Each EXEMPT FILE really is a weight file — that is the whole claim the
+    //     exemption rests on, and it is checkable.
+    for (name, src) in [SOURCES[11], SOURCES[14], SOURCES[15]] {
+        let code = production_only(src);
+        assert!(
+            code.contains("VertWeights"),
+            "{name} is exempt from the f32 law because it computes skinning              weights; it no longer mentions `VertWeights`, so the exemption is              covering something else now"
+        );
+        // No f32 VECTOR type: `[f32; 3]`, or a `Vec3::` that is not a `DVec3::`.
+        // Counting the two is how the check tells them apart — `contains` cannot,
+        // because `DVec3::new` contains `Vec3::new`, which is how this arm first
+        // reported a false positive on the f64 line it exists to permit.
+        let f32_vecs = code.matches("Vec3::").count() - code.matches("DVec3::").count();
+        assert!(
+            !code.contains("[f32; 3]") && f32_vecs == 0,
+            "{name} is exempt from the f32 law and has grown an f32 POSITION              ({f32_vecs} `Vec3::` uses that are not `DVec3::`); the exemption is              a statement about weights, not a blanket"
+        );
+    }
+
     assert!(
         code_hits(SOURCES[11].1, "f32").len() >= 3,
         "skin.rs is exempt because it IS the f32 weight representation; it no \

@@ -1177,6 +1177,75 @@ mod tests {
         assert!(msg.contains(SessionSave::TOO_OLD_REMEDY), "{msg}");
     }
 
+    /// **Appending a tail field without bumping must FAIL** (P24.2 audit M-BUMP).
+    ///
+    /// The shape pin next door is *symmetric*: it decodes today's save and checks
+    /// every byte is consumed. That catches a field REMOVED and it does not catch
+    /// a field ADDED — the added bytes are simply trailing, and
+    /// `decode_from_slice` ignores trailing bytes by contract. So nothing in the
+    /// crate forced the NEXT bump, on the very format this batch just bumped.
+    ///
+    /// This is the asymmetric half, and it is the M6 lesson applied to the format
+    /// M6 was learned on: a **shadow v4** — today's struct plus one tail field,
+    /// exactly what an author appending a field would write — must not be
+    /// readable as a v3. Two claims, and the second is the one with teeth:
+    ///
+    ///  1. the v4 bytes are LONGER, so a field really was added;
+    ///  2. decoding them as `SessionSave` leaves bytes on the floor, which is the
+    ///     signature the shape pin next door refuses. If a future append ever
+    ///     came out byte-compatible, this test says so before the ladder is
+    ///     quietly wrong.
+    #[test]
+    fn a_tail_field_appended_without_a_bump_is_caught_by_the_shape_pin() {
+        #[derive(Serialize)]
+        struct V4Save<'a> {
+            schema_version: u32,
+            base: &'a Mesh,
+            ops: &'a [Op],
+            cursor: usize,
+            /// The append an author would make. Any type; the point is the bytes.
+            tail: Vec<u32>,
+        }
+        let s = MeshSession::new(cube(1.0));
+        let save = s.save();
+        let cfg = bincode::config::standard();
+        let v3 = bincode::serde::encode_to_vec(&save, cfg).unwrap();
+        let v4 = bincode::serde::encode_to_vec(
+            &V4Save {
+                schema_version: save.schema_version,
+                base: &save.base,
+                ops: &save.ops,
+                cursor: save.cursor,
+                tail: vec![7, 8, 9],
+            },
+            cfg,
+        )
+        .unwrap();
+
+        assert!(
+            v4.len() > v3.len(),
+            "the shadow v4 is not longer than v3, so nothing was appended and              this test is measuring nothing"
+        );
+        // The asymmetric claim: v4 bytes decode as a v3 `SessionSave` — that is
+        // what makes an un-bumped append silent — and the decoder does NOT
+        // consume them all, which is what the shape pin refuses.
+        let (back, consumed): (SessionSave, usize) =
+            bincode::serde::decode_from_slice(&v4, cfg).expect("a longer save still decodes");
+        assert_eq!(
+            back, save,
+            "the appended field changed the prefix; then it was not an append"
+        );
+        assert!(
+            consumed < v4.len(),
+            "an appended tail field left NO trailing bytes, so              `a_v3_save_decodes_consuming_every_byte` could not see it either —              the ladder has no forcing function at all"
+        );
+        assert_eq!(
+            v4.len() - consumed,
+            v4.len() - v3.len(),
+            "the unconsumed tail is not exactly the appended field"
+        );
+    }
+
     /// **A real v2 save, as a shadow struct** — the M6 lesson.
     ///
     /// The cheap version of this test encodes today's `SessionSave` and lops

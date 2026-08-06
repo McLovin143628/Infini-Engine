@@ -46,7 +46,7 @@ pub use components::{
 // gameplay layer calls is a facade item like `update_attachments`.
 pub use hierarchy::{ChildOf, Children};
 pub use math::{Color, Vec2d, Vec3d};
-pub use pose::{clear_ik_goals, ik_goals, set_ik_goals, IkGoal};
+pub use pose::{clear_ik_goals, ik_goals, ik_outcomes, set_ik_goals, IkGoal, IkOutcome};
 // Terrain heightfield types re-exported so downstream editor crates (e.g. the
 // viewport host) reach them through the ECS facade without a direct dep.
 pub use inf_terrain::{HeightSource, TerrainData, TerrainTile};

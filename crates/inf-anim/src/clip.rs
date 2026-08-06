@@ -90,7 +90,11 @@ impl QuatTrack {
         if a.dot(b) < 0.0 {
             b = -b;
         }
-        Some(a.slerp(b, frac).normalize())
+        // **Portable, not `Quat::slerp`** (P24.2 audit M-SLERP): this is the
+        // `#[default]` interpolation and what the glTF importer emits, so it is
+        // the single most-travelled quaternion blend in the engine -- and its
+        // result rides `state_bytes`. `pslerp` normalizes internally.
+        Some(inf_math::pslerp(a, b, frac))
     }
 }
 

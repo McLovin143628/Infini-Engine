@@ -74,6 +74,8 @@ function docOf(assetId: string, over: Partial<DccDocDto> = {}): DccDocDto {
       sharpEdges: 12,
       boundaryEdges: 0,
       nonFiniteValues: 0,
+      // P24.2: the skin weld's advisory.
+      skinConflicts: 0,
     },
     // P24.2: a fixture mesh is rigid unless a case says otherwise.
     skinJoints: null,
@@ -286,6 +288,8 @@ describe("save", () => {
     reusedDiagonals: 0,
     nonFiniteWritten: 0,
     nonUnitNormalsWritten: 0,
+    optimized: false,
+    optimizeSkippedSkinned: 0,
   });
 
   beforeEach(async () => {

@@ -146,7 +146,37 @@ pub struct IkGoal {
 /// The resource is **absent** until something sets a goal, so a level with no IK
 /// is byte-identical to its pre-P24.2 self, `pose_state_bytes` included.
 #[derive(Resource, Default, Debug, Clone, PartialEq)]
-pub struct IkTargetsRes(pub BTreeMap<Uuid, Vec<IkGoal>>);
+pub struct IkTargetsRes {
+    /// The goals, by entity.
+    pub goals: BTreeMap<Uuid, Vec<IkGoal>>,
+    /// **What the last fixed step's solves said** — one entry per goal, in the
+    /// order the goals were applied (P24.2 audit M-CALLER).
+    ///
+    /// The step used to spell the solve `let _ = solve_chain(..)`, which made
+    /// four typed error variants and every field of [`inf_anim::IkReport`]
+    /// unreachable by any layer of the engine: a chain that is not a chain, a
+    /// target 40 m out of reach and a clean hit were the same silence. Landing
+    /// the verdict here costs one small vector per posed entity and makes
+    /// "did the foot reach the ground" answerable — by a gate, by the Details
+    /// panel, and by whatever eventually drives these goals.
+    ///
+    /// Rebuilt from scratch each step, exactly like [`PoseStoreRes`], so a stale
+    /// verdict cannot outlive the goal that produced it.
+    pub last: BTreeMap<Uuid, Vec<IkOutcome>>,
+}
+
+/// What one goal's solve did, this step.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IkOutcome {
+    /// The chain solved. Carries how far the tip landed from the target and
+    /// whether that counts as reached.
+    Solved(inf_anim::IkReport),
+    /// The solve refused, by name. The pose is untouched for this chain.
+    Refused(inf_anim::IkError),
+    /// The entity had a goal but published no pose (no resolvable skeleton), so
+    /// nothing was solved — distinct from "solved and missed".
+    NotPosed,
+}
 
 /// **The write door.** Set (or replace) an entity's IK goals.
 ///
@@ -158,8 +188,9 @@ pub fn set_ik_goals(world: &mut EcsWorld, guid: Uuid, goals: Vec<IkGoal>) {
     if goals.is_empty() {
         let empty = match w.get_resource_mut::<IkTargetsRes>() {
             Some(mut res) => {
-                res.0.remove(&guid);
-                res.0.is_empty()
+                res.goals.remove(&guid);
+                res.last.remove(&guid);
+                res.goals.is_empty()
             }
             None => return,
         };
@@ -171,7 +202,7 @@ pub fn set_ik_goals(world: &mut EcsWorld, guid: Uuid, goals: Vec<IkGoal>) {
     if !w.contains_resource::<IkTargetsRes>() {
         w.insert_resource(IkTargetsRes::default());
     }
-    w.resource_mut::<IkTargetsRes>().0.insert(guid, goals);
+    w.resource_mut::<IkTargetsRes>().goals.insert(guid, goals);
 }
 
 /// The goals set for `guid`, if any — the read door the fixed step goes through.
@@ -179,7 +210,20 @@ pub fn ik_goals(world: &EcsWorld, guid: Uuid) -> Option<&[IkGoal]> {
     world
         .world()
         .get_resource::<IkTargetsRes>()
-        .and_then(|r| r.0.get(&guid))
+        .and_then(|r| r.goals.get(&guid))
+        .map(Vec::as_slice)
+}
+
+/// **What the last fixed step's IK solves said** for `guid` (audit M-CALLER).
+///
+/// The observable end of the report slot: a caller — or a gate — can ask whether
+/// a foot reached the ground, or which typed refusal a chain came back with,
+/// instead of the whole verdict being discarded inside the step.
+pub fn ik_outcomes(world: &EcsWorld, guid: Uuid) -> Option<&[IkOutcome]> {
+    world
+        .world()
+        .get_resource::<IkTargetsRes>()
+        .and_then(|r| r.last.get(&guid))
         .map(Vec::as_slice)
 }
 
@@ -384,13 +428,15 @@ pub fn step_pose_evaluation<'c>(
     let goals: BTreeMap<Uuid, Vec<IkGoal>> = world
         .world()
         .get_resource::<IkTargetsRes>()
-        .map(|r| r.0.clone())
+        .map(|r| r.goals.clone())
         .unwrap_or_default();
     let mut posed: BTreeMap<Uuid, EvaluatedPose> = BTreeMap::new();
+    let mut verdicts: BTreeMap<Uuid, Vec<IkOutcome>> = BTreeMap::new();
     for (entity, guid, sm_guid, rt_state, skeleton_id) in targets {
         let Some(machine) = machines(sm_guid) else {
             continue;
         };
+        let mut outcomes: Vec<IkOutcome> = Vec::new();
         let actor_vars = vars(guid);
         let mut rt = to_anim_runtime(rt_state);
         {
@@ -415,12 +461,20 @@ pub fn step_pose_evaluation<'c>(
                         // a **value**, and the pose it refused on is untouched —
                         // so one bad goal costs its own chain and nothing else.
                         for goal in goals.get(&guid).map(Vec::as_slice).unwrap_or(&[]) {
-                            let _ = inf_anim::solve_chain(
-                                &asset.skeleton,
-                                &mut pose,
-                                &goal.chain,
-                                glam::Vec3::from_array(goal.target),
-                                goal.pole.map(glam::Vec3::from_array),
+                            // The verdict is KEPT (audit M-CALLER): `let _ =`
+                            // here made every typed refusal and every reach
+                            // number unreachable by any layer.
+                            outcomes.push(
+                                match inf_anim::solve_chain(
+                                    &asset.skeleton,
+                                    &mut pose,
+                                    &goal.chain,
+                                    glam::Vec3::from_array(goal.target),
+                                    goal.pole.map(glam::Vec3::from_array),
+                                ) {
+                                    Ok(r) => IkOutcome::Solved(r),
+                                    Err(e) => IkOutcome::Refused(e),
+                                },
                             );
                         }
                         let sockets =
@@ -437,12 +491,26 @@ pub fn step_pose_evaluation<'c>(
                 }
             }
         }
+        if !goals.get(&guid).map(Vec::is_empty).unwrap_or(true) {
+            // A goal that produced no outcome means the entity published no pose
+            // at all — a distinct answer from "solved and missed".
+            if outcomes.is_empty() {
+                outcomes.push(IkOutcome::NotPosed);
+            }
+            verdicts.insert(guid, outcomes);
+        }
         if let Some(mut asm) = world.world_mut().get_mut::<AnimStateMachine>(entity) {
             asm.runtime = from_anim_runtime(rt);
         }
     }
 
     // 3. Publish (rule 4).
+    {
+        let w = world.world_mut();
+        if let Some(mut res) = w.get_resource_mut::<IkTargetsRes>() {
+            res.last = verdicts;
+        }
+    }
     let w = world.world_mut();
     if posed.is_empty() {
         if w.contains_resource::<PoseStoreRes>() {

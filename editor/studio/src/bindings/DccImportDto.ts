@@ -8,4 +8,12 @@
  * weld (tolerance zero, and it stays zero) is why. Telling them beats picking an
  * epsilon on their behalf.
  */
-export type DccImportDto = { sourceVertices: number, weldedPositions: number, fanSplits: number, degenerateTrianglesSkipped: number, sharpEdges: number, boundaryEdges: number, nonFiniteValues: number, };
+export type DccImportDto = { sourceVertices: number, weldedPositions: number, fanSplits: number, degenerateTrianglesSkipped: number, sharpEdges: number, boundaryEdges: number, nonFiniteValues: number, 
+/**
+ * **Welded positions where two source vertices disagreed about their
+ * skinning influences** (P24.2). Normally zero — a well-formed exporter
+ * gives every split copy of a vertex the same weights — and a non-zero
+ * reading is also the exact number that makes the export round trip
+ * inexact, because first-occurrence wins.
+ */
+skinConflicts: number, };

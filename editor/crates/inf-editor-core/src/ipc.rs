@@ -2499,6 +2499,12 @@ pub struct DccImportDto {
     pub sharp_edges: u32,
     pub boundary_edges: u32,
     pub non_finite_values: u32,
+    /// **Welded positions where two source vertices disagreed about their
+    /// skinning influences** (P24.2). Normally zero — a well-formed exporter
+    /// gives every split copy of a vertex the same weights — and a non-zero
+    /// reading is also the exact number that makes the export round trip
+    /// inexact, because first-occurrence wins.
+    pub skin_conflicts: u32,
 }
 
 /// What the writer had to do on the way out — the two unroundtrippable counters
@@ -2511,6 +2517,12 @@ pub struct DccExportDto {
     pub triangles: u32,
     pub fan_fallbacks: u32,
     pub fallback_tangents: u32,
+    /// Whether `meshopt` ran — the crate's one non-deterministic step, and the
+    /// only field here that is a *setting* rather than a count.
+    ///
+    /// Reached the author for the first time at P24.2, found by the drift pin
+    /// (`report_drift.rs`) while it was being written for `skin_conflicts`.
+    pub optimized: bool,
     /// Kernel vertices that share a position with another. **Non-zero means the
     /// next open will not be this mesh**: the reader's exact weld fuses them.
     pub coincident_vertices: u32,
@@ -2519,6 +2531,12 @@ pub struct DccExportDto {
     pub reused_diagonals: u32,
     pub non_finite_written: u32,
     pub non_unit_normals_written: u32,
+    /// Submeshes `optimize` was asked for and **did not run on**, because they
+    /// carry a skin stream (P24.2). `inf_mesh::optimize` returns
+    /// `(vertices, indices)` only, so a parallel per-vertex stream cannot follow
+    /// its permutation — running it would give every vertex another vertex's
+    /// weights. Skipping is the sound answer; this is the author being told.
+    pub optimize_skipped_skinned: u32,
 }
 
 /// One open Model Editor document.

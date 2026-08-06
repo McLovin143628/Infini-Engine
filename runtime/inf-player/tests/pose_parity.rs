@@ -99,6 +99,42 @@ fn hold(deg: f32) -> AnimClip {
     }
 }
 
+/// A clip that **actually interpolates**: two distinct keys under
+/// `Interpolation::Linear`, which is the `#[default]` and what the glTF importer
+/// emits.
+///
+/// # Why the fixture had to grow this (P24.2 audit M-SLERP)
+///
+/// Every arm above used `hold` — one key, `Step` — and the machine's transitions
+/// had `duration: 0.0`. That is the **one configuration in which no quaternion
+/// blend runs at all**: `Step` never slerps, and a zero-duration cross-fade never
+/// calls `blend_poses`. So the parity gate was certifying portability on exactly
+/// the path that avoids the non-portable operation, and `Quat::slerp` — three
+/// `std` `sin` calls — sat on the committed trace unexamined.
+///
+/// Its keys are 40° apart so the interpolated value at any `frac` is far from
+/// both, and the joint it drives is the same one `hold` drives, so the two
+/// fixtures are directly comparable.
+fn sweep(from_deg: f32, to_deg: f32) -> AnimClip {
+    AnimClip {
+        name: format!("sweep{from_deg}_{to_deg}"),
+        duration: 1.0,
+        tracks: vec![JointTrack {
+            joint: 1,
+            translation: None,
+            rotation: Some(QuatTrack::new(
+                vec![0.0, 1.0],
+                vec![
+                    Quat::from_rotation_z(from_deg.to_radians()).to_array(),
+                    Quat::from_rotation_z(to_deg.to_radians()).to_array(),
+                ],
+                Interpolation::Linear,
+            )),
+            scale: None,
+        }],
+    }
+}
+
 /// idle → walk → run, both transitions **unconditional**, so the machine walks
 /// its states on consecutive fixed steps with no actor and no Blueprint variable
 /// in the picture. Each state holds a different angle, so "which state is the
@@ -557,6 +593,23 @@ fn both_hosts_land_the_attachment_on_the_same_animated_joint() {
 /// It costs no host-side change at all, which is the point of putting the solve
 /// inside `step_pose_evaluation`: neither `SimSession::fixed_step` nor
 /// `RuntimeSim::fixed_step` mentions IK, so they cannot mention it differently.
+///
+/// # "Both hosts" means IN-PROCESS, and that is a real limit (audit M-PIE)
+///
+/// This compares `SimSession` and `RuntimeSim` inside **one** process. It is not
+/// a `--pie` subprocess arm, and the P24.2 report claimed one — wrongly. Every
+/// arm in this file is in-process.
+///
+/// The gap is not closed by adding a test-only hook that injects a goal into the
+/// player, and that ruling is the boot-paths law: a boot path that exists only
+/// for a test is a path the shipped binary does not take, and P21.4 already paid
+/// for exactly that (`sim_from_payload` had to become the one PIE seam because
+/// the real `--pie` binary was building its sim differently from every test).
+///
+/// It closes naturally at **P24.3**, where the authored `IkTarget` component
+/// lands behind the scene bump: the payload then carries the component, the
+/// subprocess builds its sim from that payload through the door it already uses,
+/// and IK engages with no hook at all. Ledgered in ROADMAP §12's P24 block.
 #[test]
 fn both_hosts_apply_ik_the_same_way_and_a_moved_target_moves_the_trace() {
     // The fixture's rig is a straight 3-joint chain up +Y with 1 m bones, so
@@ -787,5 +840,217 @@ fn a_goal_on_a_non_finite_pose_refuses_instead_of_panicking() {
             .chunks_exact(4)
             .any(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]).is_nan()),
         "the fixture's pose is finite, so it is not exercising B1 at all"
+    );
+}
+
+// ── P24.2 audit M-SLERP: the gate must certify the REAL configuration ───────
+
+/// **The parity gate on the configuration that actually blends.**
+///
+/// Every other arm in this file uses `Step` keys and zero-duration transitions —
+/// the one shape in which no quaternion blend runs at all. This one uses
+/// `Interpolation::Linear` clips (the `#[default]`, and what the glTF importer
+/// emits) **and** a cross-fade with `duration > 0`, so both blend paths execute:
+/// `QuatTrack::sample`'s slerp between two keys, and `blend_poses`' slerp between
+/// two states.
+///
+/// Both are now `inf_math::pslerp`. Before this batch they were `Quat::slerp`,
+/// which is three `std` `sin` calls, and the P14 law says those are not
+/// bit-identical across targets — on a trace that is folded into `state_bytes`
+/// and compared between the editor and the shipped player.
+///
+/// Nothing in a single-machine test can *prove* cross-target identity; what it
+/// can do is prove the fixture reaches the code, which is the half that was
+/// missing. `the_animation_blend_uses_no_platform_dependent_trigonometry` is the
+/// other half.
+#[test]
+fn both_hosts_agree_on_a_fixture_that_really_interpolates() {
+    fn blending_machine() -> StateMachine {
+        StateMachine {
+            states: vec![
+                SmState::clip("idle", *IDLE.as_bytes()),
+                SmState::clip("walk", *WALK.as_bytes()),
+            ],
+            transitions: vec![SmTransition {
+                from: 0,
+                to: 1,
+                // NON-ZERO: this is what makes `blend_poses` run at all.
+                duration: 0.25,
+                conditions: vec![],
+                exit_time: None,
+            }],
+            entry: 0,
+        }
+    }
+    fn clips() -> BTreeMap<Uuid, AnimClip> {
+        BTreeMap::from([
+            (IDLE, sweep(0.0, 40.0)),
+            (WALK, sweep(40.0, 80.0)),
+            (RUN, sweep(80.0, 120.0)),
+        ])
+    }
+    fn player() -> Vec<Vec<u8>> {
+        let mut world = EcsWorld::new();
+        let e = world.spawn_with_guid(HERO, "Hero", None);
+        world.world_mut().entity_mut(e).insert(character());
+        world.mark_dirty();
+        let mut sim = RuntimeSim::new(world, Vec::new(), DVec2::ZERO, HZ);
+        sim.set_state_machines(BTreeMap::from([(SM, blending_machine())]));
+        sim.set_skeletons(skeletons());
+        sim.set_pose_clips(clips());
+        (0..STEPS)
+            .map(|_| {
+                sim.step_once(RuntimeInput::default());
+                inf_ecs::pose::pose_state_bytes(sim.world())
+            })
+            .collect()
+    }
+    fn editor() -> Vec<Vec<u8>> {
+        let mut doc = SceneDoc::new();
+        let e = doc.create_with_guid(HERO, inf_editor_core::ipc::SpawnKind::Empty, "Hero", None);
+        doc.world_mut()
+            .world_mut()
+            .entity_mut(e)
+            .insert(character());
+        doc.world_mut().mark_dirty();
+        let mut session = SimSession::enter(&mut doc, Vec::new(), DVec2::ZERO, HZ);
+        session.set_state_machines(BTreeMap::from([(SM, blending_machine())]));
+        session.set_skeletons(skeletons());
+        session.set_pose_clips(clips());
+        let out = (0..STEPS)
+            .map(|_| {
+                session.step_once(&mut doc, SimInput::default());
+                inf_ecs::pose::pose_state_bytes(doc.world())
+            })
+            .collect();
+        session.exit(&mut doc);
+        out
+    }
+
+    let p = player();
+    // NOT `assert_not_vacuous`: that helper asserts the last two steps are
+    // EQUAL, because the `hold` fixture parks on a constant angle. A sweeping
+    // clip legitimately keeps moving, which is the entire point of this arm — so
+    // it carries its own anti-vacuity instead, and a stronger one.
+    assert_eq!(p.len() as u32, STEPS);
+    assert!(p.iter().all(|b| !b.is_empty()), "nothing was posed");
+    // THE FIXTURE REALLY BLENDS: consecutive steps differ *within* a state, which
+    // a `Step` clip cannot produce, and which is the whole point of this arm.
+    assert_ne!(
+        p[0], p[1],
+        "the pose is constant between steps — the fixture is not interpolating, \
+         so this arm is certifying the same thing the Step arms already do"
+    );
+    // The two hosts agree over the interpolating path, byte for byte.
+    assert_eq!(
+        p,
+        editor(),
+        "the editor's Simulate and the player's runtime disagree once a real          quaternion blend is in the picture"
+    );
+}
+
+/// **The IK verdict is OBSERVABLE** (P24.2 audit M-CALLER).
+///
+/// The fixed step spelled the solve `let _ = solve_chain(..)`, which made four
+/// typed error variants and every field of `IkReport` unreachable by any layer of
+/// the engine: an unreachable target, a chain that is not a chain, and a clean hit
+/// were the same silence. This asserts all three are now distinguishable from
+/// outside the step, through `inf_ecs::ik_outcomes`.
+#[test]
+fn the_step_records_what_each_ik_goal_did() {
+    fn run(goal: inf_ecs::IkGoal) -> Vec<inf_ecs::IkOutcome> {
+        let mut world = EcsWorld::new();
+        let e = world.spawn_with_guid(HERO, "Hero", None);
+        world.world_mut().entity_mut(e).insert(character());
+        world.mark_dirty();
+        let mut sim = RuntimeSim::new(world, Vec::new(), DVec2::ZERO, HZ);
+        sim.set_state_machines(machines());
+        sim.set_skeletons(skeletons());
+        sim.set_pose_clips(pose_clips());
+        inf_ecs::set_ik_goals(sim.world_mut(), HERO, vec![goal]);
+        sim.step_once(RuntimeInput::default());
+        inf_ecs::ik_outcomes(sim.world(), HERO)
+            .expect("a goal was set, so a verdict must exist")
+            .to_vec()
+    }
+
+    // (a) REACHED — the rig is a 3-joint chain of 1 m bones, so a target 1.2 m
+    //     out is comfortably inside its reach.
+    let reached = run(inf_ecs::IkGoal {
+        chain: vec![0, 1, 2],
+        target: [1.2, 1.2, 0.0],
+        pole: Some([2.0, 1.0, 0.0]),
+    });
+    match reached.as_slice() {
+        [inf_ecs::IkOutcome::Solved(r)] => {
+            assert!(r.reached, "{r:?}");
+            assert!(r.reach_error < 1.0e-3, "{r:?}");
+            assert!((r.chain_length - 2.0).abs() < 1e-4, "{r:?}");
+        }
+        other => panic!("expected one Solved, got {other:?}"),
+    }
+
+    // (b) OUT OF REACH — not a refusal, and the number says how far by.
+    let missed = run(inf_ecs::IkGoal {
+        chain: vec![0, 1, 2],
+        target: [100.0, 0.0, 0.0],
+        pole: None,
+    });
+    match missed.as_slice() {
+        [inf_ecs::IkOutcome::Solved(r)] => {
+            assert!(!r.reached, "{r:?}");
+            assert!(
+                (r.reach_error - 98.0).abs() < 0.1,
+                "the miss distance must be the honest one: {r:?}"
+            );
+        }
+        other => panic!("expected one Solved-but-unreached, got {other:?}"),
+    }
+
+    // (c) REFUSED, by name — 0 is not the parent of 2 in this rig.
+    let refused = run(inf_ecs::IkGoal {
+        chain: vec![0, 2],
+        target: [0.5, 1.0, 0.0],
+        pole: None,
+    });
+    match refused.as_slice() {
+        [inf_ecs::IkOutcome::Refused(inf_anim::IkError::NotAChain { parent, child })] => {
+            assert_eq!((*parent, *child), (0, 2));
+        }
+        other => panic!("expected a named refusal, got {other:?}"),
+    }
+
+    // ANTI-VACUITY: the three outcomes are actually different from each other.
+    // Three identical `Solved` values would satisfy every `match` above only by
+    // accident, and this says so directly.
+    assert_ne!(reached, missed);
+    assert_ne!(reached, refused);
+
+    // …and the slot is REBUILT each step, not accumulated: a world whose goals
+    // are cleared reports nothing rather than yesterday's verdict.
+    let mut world = EcsWorld::new();
+    let e = world.spawn_with_guid(HERO, "Hero", None);
+    world.world_mut().entity_mut(e).insert(character());
+    world.mark_dirty();
+    let mut sim = RuntimeSim::new(world, Vec::new(), DVec2::ZERO, HZ);
+    sim.set_state_machines(machines());
+    sim.set_skeletons(skeletons());
+    sim.set_pose_clips(pose_clips());
+    inf_ecs::set_ik_goals(
+        sim.world_mut(),
+        HERO,
+        vec![inf_ecs::IkGoal {
+            chain: vec![0, 1, 2],
+            target: [1.2, 1.2, 0.0],
+            pole: None,
+        }],
+    );
+    sim.step_once(RuntimeInput::default());
+    assert!(inf_ecs::ik_outcomes(sim.world(), HERO).is_some());
+    inf_ecs::set_ik_goals(sim.world_mut(), HERO, Vec::new());
+    sim.step_once(RuntimeInput::default());
+    assert!(
+        inf_ecs::ik_outcomes(sim.world(), HERO).is_none(),
+        "a cleared goal left its verdict behind"
     );
 }

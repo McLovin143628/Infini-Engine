@@ -351,6 +351,9 @@ fn bone_segments(skeleton: &Skeleton) -> Vec<Bone> {
 /// `crate::bvh::RAY_EPSILON` is what stops it hitting the triangle it left. A hit
 /// strictly before the bone means a wall in between.
 fn visible(bvh: &Bvh, p: DVec3, c: DVec3) -> bool {
+    if !visibility_enabled() {
+        return true;
+    }
     let to = c - p;
     let len = to.length();
     if len <= MIN_BONE_DISTANCE_M {
@@ -363,6 +366,41 @@ fn visible(bvh: &Bvh, p: DVec3, c: DVec3) -> bool {
         Some(hit) => hit.t >= 0.999,
         None => true,
     }
+}
+
+/// Whether [] is doing anything — **always true outside tests**.
+///
+/// The severed control the P24.2 audit asked for. The alternative was a test that
+/// *describes* what a solve without visibility would do, which is what the first
+/// version of  did: it caught
+/// its mutation and never ran a solve, so the weight table it talked about did
+/// not exist. A door the test can close makes the control a **measurement**.
+///
+///  on the switch itself, so the shipped function is the same two
+/// lines it always was and this cannot be flipped by anything but a test in this
+/// crate.
+#[cfg(test)]
+fn visibility_enabled() -> bool {
+    !tests::VISIBILITY_SEVERED.with(|c| c.get())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn visibility_enabled() -> bool {
+    true
+}
+
+/// [] with the visibility term severed — the control.
+#[cfg(test)]
+fn solve_heat_weights_unchecked(
+    mesh: &Mesh,
+    bvh: &Bvh,
+    skeleton: &Skeleton,
+) -> Result<(Option<Op>, HeatReport), HeatError> {
+    tests::VISIBILITY_SEVERED.with(|c| c.set(true));
+    let out = solve_heat_weights(mesh, bvh, skeleton);
+    tests::VISIBILITY_SEVERED.with(|c| c.set(false));
+    out
 }
 
 /// A sparse symmetric Laplacian row: `(neighbour index, −weight)` plus the
@@ -498,6 +536,13 @@ const _: () = assert!(MAX_INFLUENCES == 4);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// Set by [] only.
+        pub(super) static VISIBILITY_SEVERED: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
+
     use crate::bvh::tests::box_tris;
     use crate::ops::apply;
     use crate::validate::validate;
@@ -673,71 +718,178 @@ mod tests {
         );
     }
 
-    /// **THE VISIBILITY TERM, MEASURED.** An arm pressed against a torso is
-    /// weighted to the arm bone *because* the torso bone cannot see it.
+    /// **THE VISIBILITY TERM, MEASURED ON A REAL SOLVE** (P24.2 audit M-VIS).
     ///
-    /// The severed control is right here, in the test: a second solve with
-    /// visibility switched off (every bone visible from everywhere) puts the
-    /// arm's vertices on the torso instead. If [`visible`] were reduced to `true`
-    /// the two would agree, and the assertion names that.
+    /// The first version of this test caught its mutation and never called
+    /// `solve_heat_weights` — its docstring promised "a second solve putting arm
+    /// vertices on the torso" and there was no second solve and no weight table
+    /// anywhere in the body. It asserted the *inputs* to the rule and left the
+    /// rule's effect unmeasured, which is the failure mode this codebase keeps
+    /// paying for: a gate must aim at the thing it names.
+    ///
+    /// This one runs **two full solves** over the same mesh and skeleton — one
+    /// with visibility, one with it severed — and asserts on the weight tables:
+    ///
+    /// * with visibility, an arm vertex belongs to the arm bone;
+    /// * without it, the same vertex is captured by the torso bone, because in a
+    ///   straight line the torso bone is nearer;
+    /// * and the two tables **differ**, which is the severing's whole footprint.
     #[test]
     fn the_visibility_term_is_what_stops_a_limb_bleeding() {
-        // A torso and an arm, touching but not merged — the case the whole term
-        // exists for.
-        let mut tris = box_tris(DVec3::new(-0.20, 0.0, -0.12), DVec3::new(0.20, 1.60, 0.12));
+        // A torso and an arm that touch but do not merge — the case the term
+        // exists for. Both are kernel geometry, so a real solve can run.
+        let mut m = crate::build::cube(1.0);
+        for _ in 0..3 {
+            let faces: Vec<_> = m.face_ids().collect();
+            apply(&mut m, &Op::SubdivideFaces { faces }).unwrap();
+        }
+        // Stretch the cube into a torso: ±0.2 x, 0..1.6 y, ±0.12 z.
+        let ids: Vec<VertId> = m.vert_ids().collect();
+        for v in ids {
+            let p = m.position(v).unwrap();
+            let q = DVec3::new(p.x * 0.4, (p.y + 0.5) * 1.6, p.z * 0.24);
+            apply(
+                &mut m,
+                &Op::TranslateVerts {
+                    verts: vec![v],
+                    delta: (q - p).to_array(),
+                },
+            )
+            .unwrap();
+        }
+        apply(
+            &mut m,
+            &Op::BindSkin {
+                skeleton: None,
+                joints: 4,
+            },
+        )
+        .unwrap();
+
+        // The BVH sees the torso *and* an arm box beside it, with a 6 cm gap — so
+        // the two walls between them are real geometry a ray can hit.
+        let mut tris: Vec<crate::bvh::Tri> = Vec::new();
+        for f in m.face_ids() {
+            let ps: Vec<DVec3> = m
+                .face_verts(f)
+                .unwrap()
+                .iter()
+                .map(|&v| m.position(v).unwrap())
+                .collect();
+            for i in 1..ps.len() - 1 {
+                tris.push(crate::bvh::Tri {
+                    a: ps[0],
+                    b: ps[i],
+                    c: ps[i + 1],
+                });
+            }
+        }
         tris.extend(box_tris(
-            DVec3::new(0.20, 1.00, -0.08),
-            DVec3::new(0.60, 1.20, 0.08),
+            DVec3::new(0.26, 1.00, -0.08),
+            DVec3::new(0.80, 1.20, 0.08),
         ));
         let bvh = Bvh::new(tris);
 
-        // Two bones: one up the torso, one out along the arm. A point on the
-        // arm's UNDERSIDE is closer to the torso bone in a straight line, and the
-        // torso wall is between them.
-        let arm_point = DVec3::new(0.45, 1.02, 0.0);
-        let torso_bone = (DVec3::new(0.0, 0.2, 0.0), DVec3::new(0.0, 1.5, 0.0));
-        let arm_bone = (DVec3::new(0.22, 1.1, 0.0), DVec3::new(0.58, 1.1, 0.0));
-
-        let d_torso =
-            (closest_on_segment(arm_point, torso_bone.0, torso_bone.1) - arm_point).length();
-        let d_arm = (closest_on_segment(arm_point, arm_bone.0, arm_bone.1) - arm_point).length();
-        assert!(
-            d_arm < d_torso,
-            "the fixture must put the arm bone nearer, or distance alone decides \
-             it and visibility is untested ({d_arm} vs {d_torso})"
-        );
-
-        assert!(
-            visible(
-                &bvh,
-                arm_point,
-                closest_on_segment(arm_point, arm_bone.0, arm_bone.1)
+        // TWO ROOT CHAINS, and that is the load-bearing detail. A spine that
+        // *parents* the arm gives the arm a bone running from inside the torso
+        // outward — visible from the torso's own wall, so visibility could never
+        // be the deciding term. Measured on the first cut of this fixture: joint
+        // 1's segment won every wall vertex and the arm joint won none, and the
+        // two solves came out identical. Separate roots put the arm's bone
+        // entirely inside the arm box, behind the wall, which is what a hand
+        // pressed against a hip actually looks like.
+        let joint = |name: &str, parent: Option<u16>, t: [f32; 3]| Joint {
+            name: name.into(),
+            parent,
+            inverse_bind: glam::Mat4::IDENTITY.to_cols_array(),
+            local_bind: JointTransform::from_trs(
+                glam::Vec3::from_array(t),
+                glam::Quat::IDENTITY,
+                glam::Vec3::ONE,
             ),
-            "an arm vertex must see its own bone"
+        };
+        let sk = Skeleton::new(vec![
+            joint("spine", None, [0.0, 0.2, 0.0]),
+            joint("spine_tip", Some(0), [0.0, 1.2, 0.0]),
+            joint("arm", None, [0.36, 1.1, 0.0]),
+            joint("arm_tip", Some(2), [0.34, 0.0, 0.0]),
+        ])
+        .unwrap();
+
+        // THE FIXTURE'S PREMISE, asserted before anything is solved: the torso's
+        // far wall really is nearer to the ARM's bone, and really cannot see it.
+        let probe = DVec3::new(0.2, 1.1, 0.0);
+        let spine_bone =
+            closest_on_segment(probe, DVec3::new(0.0, 0.2, 0.0), DVec3::new(0.0, 1.4, 0.0));
+        let arm_bone = closest_on_segment(
+            probe,
+            DVec3::new(0.36, 1.1, 0.0),
+            DVec3::new(0.70, 1.1, 0.0),
+        );
+        assert!(
+            (arm_bone - probe).length() < (spine_bone - probe).length(),
+            "the fixture must make the ARM's bone the nearer one, or distance              alone decides this and visibility is untested ({} vs {})",
+            (arm_bone - probe).length(),
+            (spine_bone - probe).length()
+        );
+        assert!(
+            !visible(&bvh, probe, arm_bone),
+            "the arm's own wall must occlude its bone from the torso's surface"
+        );
+        assert!(
+            visible(&bvh, probe, spine_bone),
+            "...and the torso's own bone must be visible, or the refusal above is              a broken ray rather than a wall"
         );
 
-        // The severed control, stated as the thing it would break: with
-        // visibility off, a vertex on the far side of a wall becomes a source for
-        // the bone behind it. Measured on a point in the torso whose nearest
-        // *visible* bone is the torso's and whose nearest bone OUTRIGHT is the
-        // arm's.
-        let near_wall = DVec3::new(0.19, 1.1, 0.0);
-        let c_arm = closest_on_segment(near_wall, arm_bone.0, arm_bone.1);
-        let c_torso = closest_on_segment(near_wall, torso_bone.0, torso_bone.1);
+        // TWO FULL SOLVES over the same mesh and skeleton.
+        let (with_op, with_report) = solve_heat_weights(&m, &bvh, &sk).expect("solves");
+        let (without_op, _) = solve_heat_weights_unchecked(&m, &bvh, &sk).expect("solves");
+        // `with_op` is legitimately `None` here: with visibility on, every torso
+        // vertex's nearest visible bone is the spine's, the solve reproduces the
+        // rigid default, and an op that changes nothing is not journalled (the
+        // "no undo step that does nothing" rule). That is the *point* — the arm
+        // gets in only when the term is severed.
+        let without_op = without_op.expect(
+            "the severed solve assigned nothing at all; the arm's bone is not              winning any vertex even with the wall ignored, so this fixture              cannot measure the term",
+        );
+
+        // (1) The severing has a footprint at all.
+        assert_ne!(
+            with_op.as_ref(),
+            Some(&without_op),
+            "switching visibility off changed no weight anywhere - the term is              doing nothing on this fixture, so everything below would pass on a              solve that ignored it"
+        );
+        assert_eq!(with_report.unreached, 0, "{with_report:?}");
+
+        // (2) ...and it is the ARM's bone that captures the torso's far wall.
+        let table = |op: &Op| -> BTreeMap<VertId, VertWeights> {
+            match op {
+                Op::AssignWeights { weights } => weights.iter().copied().collect(),
+                other => panic!("expected AssignWeights, got {other:?}"),
+            }
+        };
+        let a = with_op.as_ref().map(table).unwrap_or_default();
+        let b = table(&without_op);
+        let (mut wall, mut captured) = (0usize, 0usize);
+        for (v, w_without) in &b {
+            let p = m.position(*v).unwrap();
+            if p.x < 0.19 || p.y < 0.95 || p.y > 1.25 {
+                continue; // not the stretch of far wall the arm lies against
+            }
+            wall += 1;
+            let w_with = a.get(v).copied().unwrap_or(VertWeights::RIGID);
+            let arm_share = |w: &VertWeights| w.weight_of(2) + w.weight_of(3);
+            if arm_share(w_without) > arm_share(&w_with) + 0.05 {
+                captured += 1;
+            }
+        }
         assert!(
-            (c_arm - near_wall).length() < (c_torso - near_wall).length(),
-            "the fixture must make the arm bone the nearer one for this vertex"
+            wall >= 4,
+            "only {wall} far-wall vertices - too few to mean anything"
         );
         assert!(
-            !visible(&bvh, near_wall, c_arm),
-            "the torso wall is between this vertex and the arm bone; with \
-             `visible` reduced to `true` this vertex would be weighted to the \
-             ARM, which is the bleed the term exists to stop"
-        );
-        assert!(
-            visible(&bvh, near_wall, c_torso),
-            "…and it can see its own bone, so the refusal above is the wall and \
-             not a broken ray"
+            captured > 0,
+            "{captured} of {wall} far-wall vertices were captured by the              neighbouring limb's bone when visibility was severed; the term is              not what keeps them apart, and this test does not measure what its              name says"
         );
     }
 

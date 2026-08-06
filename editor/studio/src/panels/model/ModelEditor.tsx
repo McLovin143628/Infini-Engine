@@ -983,6 +983,21 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           value={imp.nonFiniteValues}
           good={imp.nonFiniteValues === 0}
         />
+        {/* P24.2: the skin weld's advisory. Non-zero means two source vertices
+            at one position disagreed about their influences — first occurrence
+            won, and re-exporting will not reproduce the loser's weights. */}
+        <Verdict
+          label="Skin conflicts"
+          value={imp.skinConflicts}
+          good={imp.skinConflicts === 0}
+        />
+        {imp.skinConflicts > 0 && (
+          <p className="text-[10px] leading-snug text-(--ink-text-dim)">
+            Two source vertices at the same position carried <b>different</b>{" "}
+            skinning weights. The first one won; re-exporting will not reproduce
+            the other. Nothing was averaged.
+          </p>
+        )}
 
         {lastSave && (
           <>
@@ -990,6 +1005,16 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
               LAST SAVE
             </div>
             <Verdict label="Triangles" value={lastSave.export.triangles} good />
+            {/* P24.2: `optimize` cannot permute a parallel skin stream, so it is
+                skipped on a skinned submesh — and the author is told, because the
+                flag's documented effect is "smaller and faster". */}
+            {lastSave.export.optimizeSkippedSkinned > 0 && (
+              <Verdict
+                label="Optimize skipped (skinned)"
+                value={lastSave.export.optimizeSkippedSkinned}
+                good={false}
+              />
+            )}
             <Verdict label="Vertices" value={lastSave.export.vertices} good />
             <Verdict label="vmesh" value={lastSave.vmesh} good={lastSave.vmesh !== "skipped"} />
             {lastSave.advisories.map((a) => (

@@ -6,6 +6,14 @@
  */
 export type DccExportDto = { submeshes: number, vertices: number, triangles: number, fanFallbacks: number, fallbackTangents: number, 
 /**
+ * Whether `meshopt` ran — the crate's one non-deterministic step, and the
+ * only field here that is a *setting* rather than a count.
+ *
+ * Reached the author for the first time at P24.2, found by the drift pin
+ * (`report_drift.rs`) while it was being written for `skin_conflicts`.
+ */
+optimized: boolean, 
+/**
  * Kernel vertices that share a position with another. **Non-zero means the
  * next open will not be this mesh**: the reader's exact weld fuses them.
  */
@@ -14,4 +22,12 @@ coincidentVertices: number,
  * Triangulation diagonals that had to repeat an existing edge. The other way
  * a written asset comes back unreadable.
  */
-reusedDiagonals: number, nonFiniteWritten: number, nonUnitNormalsWritten: number, };
+reusedDiagonals: number, nonFiniteWritten: number, nonUnitNormalsWritten: number, 
+/**
+ * Submeshes `optimize` was asked for and **did not run on**, because they
+ * carry a skin stream (P24.2). `inf_mesh::optimize` returns
+ * `(vertices, indices)` only, so a parallel per-vertex stream cannot follow
+ * its permutation — running it would give every vertex another vertex's
+ * weights. Skipping is the sound answer; this is the author being told.
+ */
+optimizeSkippedSkinned: number, };

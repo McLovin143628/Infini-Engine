@@ -13,6 +13,13 @@ glam = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 inf-asset = { workspace = true }
+# `pslerp` -- the BIT-PORTABLE quaternion arc (P24.2 audit M-SLERP). `Quat::slerp`
+# calls `acos_approx` plus three `sin`s, and every blend in this crate feeds an
+# evaluated pose that is folded into the sim's `state_bytes` and compared between
+# the editor's Simulate and the shipped player. The P14 law says `std` trig is not
+# bit-identical across targets, so it cannot be on that path. Ring 0 -> Ring 0,
+# no cycle, and it adds no external crate (glam and nothing else).
+inf-math = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

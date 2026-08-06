@@ -86,11 +86,15 @@ pub fn blend_poses(a: &Pose, b: &Pose, alpha: f32) -> Pose {
         let t = la.translation_vec().lerp(lb.translation_vec(), alpha);
         let s = la.scale_vec().lerp(lb.scale_vec(), alpha);
         let qa = la.rotation_quat();
-        let mut qb = lb.rotation_quat();
-        if qa.dot(qb) < 0.0 {
-            qb = -qb;
-        }
-        let r = qa.slerp(qb, alpha).normalize();
+        let qb = lb.rotation_quat();
+        // **`inf_math::pslerp`, not `Quat::slerp`** (P24.2 audit M-SLERP).
+        // glam's calls `acos_approx` plus three `sin`s -- `std` libm, which the
+        // P14 law says is not bit-identical across targets -- and this blend runs
+        // on every state-machine transition with a non-zero duration and in every
+        // blend space. Its result reaches the evaluated pose, which is folded into
+        // `state_bytes`, which two hosts are compared on. `pslerp` takes the
+        // shortest arc itself, so the sign fix that used to be here is inside it.
+        let r = inf_math::pslerp(qa, qb, alpha);
         locals.push(JointTransform::from_trs(t, r, s));
     }
     Pose { locals }

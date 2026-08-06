@@ -2937,6 +2937,7 @@ dependencies = [
  "bincode",
  "glam 0.33.2",
  "inf-asset",
+ "inf-math",
  "serde",
  "serde_json",
  "thiserror 2.0.19",

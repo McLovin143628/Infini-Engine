@@ -7851,6 +7851,15 @@ forgotten.
 
 **Carried from P24.2 (ledgered, not fixed).** Four, each measured rather than assumed:
 
+* **The P24.2 IK parity gate is IN-PROCESS, not a `--pie` subprocess.** The batch
+  report claimed a real subprocess arm with IK; there is none — all of
+  `pose_parity`'s arms compare `SimSession` against `RuntimeSim` inside one
+  process. The false claim was the defect (the audit re-checked after five
+  spurious grep hits). **Ruling: do not build a test-only goal-injection hook into
+  the player** — that is a boot path the shipped binary does not take, which is
+  the law P21.4 paid for. The arm closes naturally at P24.3: with the authored
+  `IkTarget` component in the scene, the payload carries it and the subprocess
+  engages IK through the door it already uses.
 * **`IkTarget` is a runtime resource, not an authored component — deliberately.**
   `inf_scene::EntityRecord` is a positional bincode struct with one `Option<T>` field per
   component type, so adding one moves the wire; that is exactly how P22.2's `Destructible` took
