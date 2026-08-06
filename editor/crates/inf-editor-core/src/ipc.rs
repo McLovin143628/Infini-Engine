@@ -2546,6 +2546,19 @@ pub struct DccDocDto {
     pub import: DccImportDto,
     /// How many waypoints the knife has collected (see `dcc_pick`).
     pub knife_points: u32,
+    /// A pointer drag is in flight (P23.5). The panel reads it to keep sending
+    /// moves and to know that a `dcc_drag_end` is owed — but the **backend** is
+    /// what settles an orphaned one, because a panel that has already unmounted
+    /// cannot.
+    pub dragging: bool,
+    /// How many raw path points the stroke in flight has collected. `0` for a
+    /// gizmo drag or no drag. Surfaced so "is this doing anything" is answerable
+    /// from the status bar.
+    pub drag_points: u32,
+    /// Which transform gizmo is armed, if any. Backend state, like the camera
+    /// and the selection, because the handles are drawn and picked backend-side
+    /// and a panel-held copy would be a second opinion about the active tool.
+    pub gizmo: Option<DccGizmoModeDto>,
 }
 
 /// The result of a tool press: what it did, or why it refused.
@@ -2648,6 +2661,86 @@ pub enum DccSelectDto {
     /// Edge loop / edge ring through the last-picked edge.
     Loop,
     Ring,
+}
+
+// ── P23.5: sculpt strokes and the component gizmo ──────────────────────────
+
+/// What a brush dab does. A mirror of `inf_dcc::SculptMode`, for the reason
+/// [`DccModeDto`] is a mirror of `SelectMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum DccSculptModeDto {
+    #[default]
+    Draw,
+    Smooth,
+    Flatten,
+    Grab,
+}
+
+/// Which transform the component gizmo is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum DccGizmoModeDto {
+    #[default]
+    Translate,
+    Rotate,
+    Scale,
+}
+
+/// A pointer drag the Model Editor is about to start.
+///
+/// **One shape for both gestures.** A sculpt stroke and a gizmo drag are the same
+/// pointer-down / move / up sequence with different arithmetic, so they share one
+/// command triple (`dcc_drag_begin` / `_move` / `_end`) and one pending slot on
+/// the document. Two triples would be two places for a drag to be forgotten, and
+/// a forgotten drag is exactly what the orphan-settler doctrine exists to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DccDragDto {
+    /// Paint along the drag path. `radius` is metres of **geodesic** reach;
+    /// `strength` is metres at full weight for `draw`, a blend fraction for
+    /// `smooth`/`flatten`, and a multiplier on the drag for `grab`.
+    Sculpt {
+        mode: DccSculptModeDto,
+        radius: f64,
+        strength: f64,
+        falloff: SculptFalloffDto,
+    },
+    /// Drag a handle on the current selection. `snap` quantizes the result
+    /// (metres / radians / ratio; `0` = off) and `soft_radius` turns on
+    /// soft-select weighting when positive.
+    Gizmo {
+        mode: DccGizmoModeDto,
+        snap: f64,
+        /// Renamed explicitly because `rename_all` on a **tagged enum** renames
+        /// its variants, not its fields — so without this the one multi-word
+        /// field in this file's Dcc surface would have crossed the bridge as
+        /// `soft_radius` while every neighbour is camelCase, and the mismatch
+        /// would only ever show up as a silently-zero radius.
+        #[serde(rename = "softRadius")]
+        #[ts(rename = "softRadius")]
+        soft_radius: f64,
+        falloff: SculptFalloffDto,
+    },
+}
+
+/// The result of starting a drag: whether the pointer actually grabbed anything.
+///
+/// Distinguished from [`DccApplyDto`] because "the pointer missed the model" is
+/// not a refusal to report in the status bar — it is the panel's cue to orbit the
+/// camera instead, which is the behaviour that makes a sculpt tool usable without
+/// a modifier key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DccDragBeginDto {
+    /// `true` when a drag is now in flight. `false` means the pointer hit
+    /// nothing, nothing is pending, and the panel should treat the gesture as a
+    /// camera orbit.
+    pub grabbed: bool,
+    /// Which gizmo handle was grabbed, for the panel's cursor. `None` for a
+    /// sculpt stroke or a miss.
+    pub handle: Option<String>,
+    pub doc: DccDocDto,
 }
 
 #[cfg(test)]

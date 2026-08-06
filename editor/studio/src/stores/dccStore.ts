@@ -39,6 +39,8 @@ import { registerUndoScope } from "../lib/undoScopes";
 import { dcc as dccIpc, DCC_PREVIEW_SIZE } from "../lib/ipc";
 import type { DccApplyDto } from "../bindings/DccApplyDto";
 import type { DccDocDto } from "../bindings/DccDocDto";
+import type { DccDragDto } from "../bindings/DccDragDto";
+import type { DccGizmoModeDto } from "../bindings/DccGizmoModeDto";
 import type { DccModeDto } from "../bindings/DccModeDto";
 import type { DccSaveDto } from "../bindings/DccSaveDto";
 import type { DccSelectDto } from "../bindings/DccSelectDto";
@@ -82,6 +84,14 @@ interface DccState {
   save: (assetId: string) => Promise<void>;
   mergeAsset: (assetId: string, dropped: string) => Promise<void>;
   refresh: (assetId: string) => void;
+
+  // ── pointer drags (P23.5) ───────────────────────────────────────────────
+  setGizmo: (assetId: string, mode: DccGizmoModeDto | null) => Promise<void>;
+  /** Returns whether the pointer actually grabbed something. */
+  dragBegin: (assetId: string, drag: DccDragDto, x: number, y: number) => Promise<boolean>;
+  dragMove: (assetId: string, x: number, y: number) => Promise<void>;
+  dragEnd: (assetId: string) => Promise<void>;
+  dragCancel: (assetId: string) => Promise<void>;
 }
 
 const EMPTY: DccEntry = {
@@ -327,6 +337,66 @@ export const useDccStore = create<DccState>((set, get) => {
     },
 
     refresh: (assetId) => void pump(assetId),
+
+    // ── pointer drags ─────────────────────────────────────────────────────
+    //
+    // `dragMove` deliberately does NOT await a document: it appends a point and
+    // the next preview frame is what shows it. One round trip per pointer-move
+    // instead of two, on the path that fires the most.
+
+    setGizmo: async (assetId, mode) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      try {
+        adopt(assetId, await dccIpc.setGizmo(doc.id, mode));
+      } catch (e) {
+        patch(assetId, { refusal: String(e) });
+      }
+    },
+
+    dragBegin: async (assetId, drag, x, y) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return false;
+      try {
+        const res = await dccIpc.dragBegin(doc.id, drag, x, y, DCC_PREVIEW_SIZE);
+        adopt(assetId, res.doc);
+        return res.grabbed;
+      } catch (e) {
+        patch(assetId, { refusal: String(e) });
+        return false;
+      }
+    },
+
+    dragMove: async (assetId, x, y) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      try {
+        await dccIpc.dragMove(doc.id, x, y, DCC_PREVIEW_SIZE);
+        await pump(assetId);
+      } catch (e) {
+        console.error("dcc.dragMove failed", e);
+      }
+    },
+
+    dragEnd: async (assetId) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      try {
+        applyResult(assetId, await dccIpc.dragEnd(doc.id));
+      } catch (e) {
+        patch(assetId, { refusal: String(e) });
+      }
+    },
+
+    dragCancel: async (assetId) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      try {
+        adopt(assetId, await dccIpc.dragCancel(doc.id));
+      } catch (e) {
+        patch(assetId, { refusal: String(e) });
+      }
+    },
   };
 });
 

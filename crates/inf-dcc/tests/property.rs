@@ -23,7 +23,7 @@ use proptest::prelude::*;
 use inf_dcc::{
     cube, cylinder, from_mesh_asset, op_preserves_ids, plane, to_mesh_asset, torus, validate,
     CornerData, ExportOptions, FaceId, HalfId, ImportError, KnifePoint, MergeTarget, Mesh,
-    MeshSession, MirrorAxis, Op, SelectMode, SelectionSet, VertId,
+    MeshSession, MirrorAxis, Op, SculptFalloff, SculptMode, SelectMode, SelectionSet, VertId,
 };
 
 /// A generated op, before it is resolved against a mesh.
@@ -36,7 +36,7 @@ struct Choice {
 }
 
 fn choice() -> impl Strategy<Value = Choice> {
-    (0u8..22, any::<u16>(), any::<u16>(), any::<u8>()).prop_map(|(kind, a, b, p)| Choice {
+    (0u8..25, any::<u16>(), any::<u16>(), any::<u8>()).prop_map(|(kind, a, b, p)| Choice {
         kind,
         a,
         b,
@@ -180,7 +180,7 @@ fn make_op(mesh: &Mesh, c: Choice) -> Op {
         20 => Op::SubdivideFaces {
             faces: two_faces(&faces, c),
         },
-        _ => Op::Mirror {
+        21 => Op::Mirror {
             axis: match c.p % 3 {
                 0 => MirrorAxis::X,
                 1 => MirrorAxis::Y,
@@ -190,6 +190,91 @@ fn make_op(mesh: &Mesh, c: Choice) -> Op {
             // seam weld is genuinely exercised rather than always missing.
             coord: 0.0,
         },
+
+        // ── the P23.5 sculpt / gizmo set ───────────────────────────────────
+        //
+        // A stroke is generated with a REAL path (several dabs, resampled by the
+        // product's own `stroke_dabs`) rather than a single point, because the
+        // whole claim of the op is that a multi-dab gesture replays byte for
+        // byte — a one-dab generator would test the easy half only.
+        22 => {
+            let seed = pick(&verts, c.a, dead_v);
+            let start = mesh.position(seed).unwrap_or(glam::DVec3::ZERO);
+            // **The radius is a fraction of the model, not an absolute.** The
+            // first version used 0.4 m, and a script that happened to apply a few
+            // shrinking `ScaleVerts` left every dab covering the WHOLE mesh — a
+            // Dijkstra plus a normal fan over every vertex, per dab, which took
+            // the reachability battery from 0.7 s to 95 s. A brush sized to the
+            // model is also the more honest generator: it exercises the same
+            // fraction of the surface whatever the script did to the scale.
+            let extent = model_extent(mesh);
+            let radius = (extent * 0.12).max(1e-9);
+            let path: Vec<glam::DVec3> = (0..3)
+                .map(|i| {
+                    start
+                        + glam::DVec3::new(
+                            scale(c.b) * radius * i as f64,
+                            radius * 0.1 * i as f64,
+                            0.0,
+                        )
+                })
+                .collect();
+            Op::Sculpt {
+                mode: match c.p % 4 {
+                    0 => SculptMode::Draw,
+                    1 => SculptMode::Smooth,
+                    2 => SculptMode::Flatten,
+                    _ => SculptMode::Grab,
+                },
+                dabs: inf_dcc::stroke_dabs(&path, radius)
+                    .into_iter()
+                    .map(|d| d.to_array())
+                    .collect(),
+                radius,
+                strength: scale(c.a) * radius * 0.3,
+                falloff: match c.p % 3 {
+                    0 => SculptFalloff::Smooth,
+                    1 => SculptFalloff::Linear,
+                    _ => SculptFalloff::Sharp,
+                },
+            }
+        }
+        23 => Op::RotateVerts {
+            verts: vec![pick(&verts, c.a, dead_v), pick(&verts, c.b, dead_v)],
+            pivot: [0.0, 0.0, 0.0],
+            axis: [0.0, 1.0, 0.0],
+            radians: scale(c.a) * 0.5,
+        },
+        _ => Op::ScaleVerts {
+            verts: vec![pick(&verts, c.a, dead_v), pick(&verts, c.b, dead_v)],
+            pivot: [0.0, 0.0, 0.0],
+            factor: [
+                1.0 + scale(c.a) * 0.2,
+                1.0 + scale(c.b) * 0.2,
+                1.0 + scale(c.a) * 0.1,
+            ],
+        },
+    }
+}
+
+/// The longest side of the mesh's bounding box, or `0` when it has no vertices.
+/// Used to size a generated brush against the model rather than against nothing.
+fn model_extent(mesh: &Mesh) -> f64 {
+    let (mut lo, mut hi) = (glam::DVec3::splat(f64::MAX), glam::DVec3::splat(f64::MIN));
+    let mut any = false;
+    for v in mesh.vert_ids() {
+        if let Some(p) = mesh.position(v) {
+            if p.is_finite() {
+                lo = lo.min(p);
+                hi = hi.max(p);
+                any = true;
+            }
+        }
+    }
+    if any {
+        (hi - lo).max_element().max(0.0)
+    } else {
+        0.0
     }
 }
 
@@ -259,7 +344,7 @@ fn the_generator_reaches_both_applied_and_refused_ops() {
         };
         let script: Vec<Choice> = (0..200)
             .map(|_| Choice {
-                kind: (next() % 22) as u8,
+                kind: (next() % 25) as u8,
                 a: next() as u16,
                 b: next() as u16,
                 p: next() as u8,
@@ -279,8 +364,8 @@ fn the_generator_reaches_both_applied_and_refused_ops() {
     }
 }
 
-/// Every one of the nine modelling ops must actually APPLY somewhere in the
-/// battery, not merely be generated and refused.
+/// Every one of the twelve modelling / sculpt ops must actually APPLY somewhere
+/// in the battery, not merely be generated and refused.
 ///
 /// The P19 vacuity law, aimed at the exact way this file could rot: `make_op`
 /// resolves ids against the live mesh, so a change to a picking rule (or an op
@@ -295,7 +380,7 @@ fn every_modelling_op_applies_at_least_once_somewhere_in_the_battery() {
         ("cylinder", cylinder(0.5, 2.0, 6)),
         ("torus", torus(1.0, 0.3, 6, 4)),
     ];
-    let mut applied = [0usize; 22];
+    let mut applied = [0usize; 25];
     for (_, base) in bases {
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut next = || {
@@ -304,10 +389,11 @@ fn every_modelling_op_applies_at_least_once_somewhere_in_the_battery() {
                 .wrapping_add(1_442_695_040_888_963_407);
             (state >> 33) as u32
         };
+        let seed_mesh = base.clone();
         let mut session = MeshSession::new(base);
         for _ in 0..600 {
             let c = Choice {
-                kind: (next() % 22) as u8,
+                kind: (next() % 25) as u8,
                 a: next() as u16,
                 b: next() as u16,
                 p: next() as u8,
@@ -316,10 +402,21 @@ fn every_modelling_op_applies_at_least_once_somewhere_in_the_battery() {
             if session.apply(op).is_ok() {
                 applied[c.kind as usize] += 1;
             }
+            // **A bounded battery.** `Mirror` doubles the mesh, and once the
+            // transform ops have pushed geometry off the mirror plane the seam
+            // weld stops collapsing anything — so a script that reaches it a few
+            // dozen times grows exponentially. The P23.5 generator found exactly
+            // that: 6.6 million vertices on the plane and 93 seconds of CI, in a
+            // battery whose point is *reachability*, not size. Restarting from
+            // the base past the cap keeps every kind reachable (the counts are
+            // cumulative across restarts) and keeps the runtime a constant.
+            if session.mesh().vert_count() > 4_000 {
+                session = MeshSession::new(seed_mesh.clone());
+            }
         }
         assert_eq!(validate(session.mesh()), Ok(()));
     }
-    for kind in 13..22 {
+    for kind in 13..25 {
         assert!(
             applied[kind] > 0,
             "op kind {kind} never applied — the generator cannot reach it, so \

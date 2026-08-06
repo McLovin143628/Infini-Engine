@@ -81,9 +81,11 @@ pub mod export;
 pub mod journal;
 pub mod model;
 pub mod ops;
+pub mod sculpt;
 pub mod select;
 pub mod topo;
 pub mod validate;
+pub mod xform;
 
 pub use build::{
     cube, cylinder, from_mesh_asset, plane, torus, ImportError, ImportReport, MeshImport,
@@ -93,6 +95,9 @@ pub use export::{to_mesh_asset, ExportOptions, ExportReport, NormalPolicy, TANGE
 pub use journal::{MeshSession, SessionError, SessionSave, CHECKPOINT_INTERVAL, MAX_CHECKPOINTS};
 pub use model::{KnifePoint, MergeTarget, MirrorAxis, MAX_LOOP_CUTS};
 pub use ops::{Op, OpError, OpOutcome};
+pub use sculpt::{
+    dab_positions, face_normal, stroke_dabs, SculptFalloff, SculptMode, DAB_SPACING_FRACTION,
+};
 pub use select::{
     canonical_edge, edge_loop, edge_ring, geodesic_distances, op_preserves_ids, SelectMode,
     SelectionSet,

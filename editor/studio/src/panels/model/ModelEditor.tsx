@@ -51,8 +51,43 @@ import {
 import { DCC_PREVIEW_SIZE } from "../../lib/ipc";
 import { useAssetStore } from "../../stores/assetStore";
 import { useDccEntry, useDccStore } from "../../stores/dccStore";
+import type { DccDragDto } from "../../bindings/DccDragDto";
+import type { DccGizmoModeDto } from "../../bindings/DccGizmoModeDto";
 import type { DccModeDto } from "../../bindings/DccModeDto";
+import type { DccSculptModeDto } from "../../bindings/DccSculptModeDto";
+import type { SculptFalloffDto } from "../../bindings/SculptFalloffDto";
 import { cn } from "../../lib/utils";
+
+/**
+ * Which gesture the left pointer button makes on the preview.
+ *
+ * `select` is the P23.4 behaviour (click picks, drag orbits) and stays the
+ * default: a modeller whose click did something unexpected is a modeller who
+ * stops trusting the panel. `sculpt` and `gizmo` are the P23.5 additions, and
+ * both of them **fall back to orbit when the pointer misses** — a stroke that
+ * starts off the silhouette is a camera move, so neither tool costs the author
+ * their navigation.
+ */
+type PointerTool = "select" | "sculpt" | "gizmo";
+
+/** What the pointer is doing between down and up. */
+interface DragState {
+  x: number;
+  y: number;
+  /** The preview-space pixel the gesture started on, for a click that picks. */
+  downX: number;
+  downY: number;
+  moved: boolean;
+  /**
+   * `pending` while `dragBegin` is in flight — the backend has not said yet
+   * whether the pointer grabbed anything, and moves during that window are
+   * dropped rather than guessed at.
+   */
+  kind: "pending" | "drag" | "orbit";
+  /** The pointer came up before `dragBegin` resolved. */
+  released: boolean;
+  shift: boolean;
+}
 
 /** A small labelled number input. */
 function Num({
@@ -138,6 +173,11 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const frame = useDccStore((s) => s.frame);
   const save = useDccStore((s) => s.save);
   const mergeAsset = useDccStore((s) => s.mergeAsset);
+  const setGizmo = useDccStore((s) => s.setGizmo);
+  const dragBegin = useDccStore((s) => s.dragBegin);
+  const dragMove = useDccStore((s) => s.dragMove);
+  const dragEnd = useDccStore((s) => s.dragEnd);
+  const dragCancel = useDccStore((s) => s.dragCancel);
   const assetsById = useAssetStore((s) => s.assets);
 
   // Tool parameters. Local, because they are the popover's state and nothing
@@ -149,6 +189,16 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const [mirrorAxis, setMirrorAxis] = useState("x");
   const [individual, setIndividual] = useState(false);
   const [dropTarget, setDropTarget] = useState(false);
+
+  // ── P23.5 tool state ─────────────────────────────────────────────────────
+  const [tool, setTool] = useState<PointerTool>("select");
+  const [sculptMode, setSculptMode] = useState<DccSculptModeDto>("draw");
+  const [brushRadius, setBrushRadius] = useState(0.3);
+  const [brushStrength, setBrushStrength] = useState(0.05);
+  const [falloff, setFalloff] = useState<SculptFalloffDto>("Smooth");
+  const [gizmoMode, setGizmoMode] = useState<DccGizmoModeDto>("translate");
+  const [snap, setSnap] = useState(0);
+  const [softRadius, setSoftRadius] = useState(0);
 
   // The panel instance is `model:<assetId>` — a singleton per asset, like the
   // material editor's per-graph tab.
@@ -162,10 +212,19 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
     if (!assetId) return;
     return () => void close(assetId);
   }, [assetId, close]);
+  // **The handles are drawn backend-side**, so arming the gizmo is a call, not a
+  // local flag. Sent whenever the tool or its mode changes — including on the
+  // way out of the tool, which is what makes the handles disappear rather than
+  // linger over a select-mode click.
+  useEffect(() => {
+    if (!assetId || !doc) return;
+    const want = tool === "gizmo" ? gizmoMode : null;
+    if (doc.gizmo !== want) void setGizmo(assetId, want);
+  }, [assetId, doc, tool, gizmoMode, setGizmo]);
 
   // ── the preview surface ──────────────────────────────────────────────────
   const imgRef = useRef<HTMLImageElement | null>(null);
-  const drag = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const drag = useRef<DragState | null>(null);
 
   /** Pointer position in the PREVIEW's own pixel space (what `dcc_pick` wants). */
   const toPreviewPx = useCallback((e: React.PointerEvent): [number, number] => {
@@ -177,10 +236,71 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
     return [(e.clientX - r.left) * sx, (e.clientY - r.top) * sy];
   }, []);
 
+  /**
+   * The drag this pointer-down would start, or `null` for the select tool.
+   *
+   * Built here rather than in the store because the parameters are the panel's
+   * popover state and nothing outside this component has an opinion about them —
+   * the same rule the P23.4 tool parameters already follow.
+   */
+  const dragRequest = (): DccDragDto | null => {
+    if (tool === "sculpt") {
+      return {
+        kind: "sculpt",
+        mode: sculptMode,
+        radius: brushRadius,
+        strength: brushStrength,
+        falloff,
+      };
+    }
+    if (tool === "gizmo") {
+      return { kind: "gizmo", mode: gizmoMode, snap, softRadius, falloff };
+    }
+    return null;
+  };
+
   const onPointerDown = (e: React.PointerEvent) => {
     e.currentTarget.setPointerCapture(e.pointerId);
-    drag.current = { x: e.clientX, y: e.clientY, moved: false };
+    const [px, py] = toPreviewPx(e);
+    const d: DragState = {
+      x: e.clientX,
+      y: e.clientY,
+      downX: px,
+      downY: py,
+      moved: false,
+      kind: "orbit",
+      released: false,
+      shift: e.shiftKey || e.ctrlKey,
+    };
+    drag.current = d;
+    const request = assetId ? dragRequest() : null;
+    if (!assetId || !request) return;
+
+    // The backend decides whether the pointer grabbed anything, because only it
+    // knows where the surface and the handles are. Until it answers, the gesture
+    // is `pending` and its moves are dropped — a few milliseconds of path, which
+    // is cheaper than guessing wrong and orbiting the camera through a stroke.
+    d.kind = "pending";
+    void dragBegin(assetId, request, px, py).then((grabbed) => {
+      const settle = () => {
+        if (grabbed) void dragEnd(assetId);
+        else if (!d.moved) void pick(assetId, d.downX, d.downY, d.shift);
+      };
+      if (drag.current !== d) {
+        // The gesture is already over (or another has started): finish this one
+        // so the backend is never left holding a drag nobody will end. The
+        // backend settles orphans anyway — this is the panel doing its half.
+        settle();
+        return;
+      }
+      d.kind = grabbed ? "drag" : "orbit";
+      if (d.released) {
+        drag.current = null;
+        settle();
+      }
+    });
   };
+
   const onPointerMove = (e: React.PointerEvent) => {
     const d = drag.current;
     if (!d) return;
@@ -190,20 +310,48 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
     d.moved = true;
     d.x = e.clientX;
     d.y = e.clientY;
-    if (assetId) void orbit(assetId, -dx * 0.4, dy * 0.4, 0);
+    if (!assetId) return;
+    if (d.kind === "drag") {
+      const [px, py] = toPreviewPx(e);
+      void dragMove(assetId, px, py);
+    } else if (d.kind === "orbit") {
+      void orbit(assetId, -dx * 0.4, dy * 0.4, 0);
+    }
+    // `pending`: the backend has not answered yet, so there is nothing to move.
   };
+
   const onPointerUp = (e: React.PointerEvent) => {
     const d = drag.current;
+    if (!d) return;
+    if (d.kind === "pending") {
+      // Let the `dragBegin` resolver finish the gesture — it is the only place
+      // that knows whether there is a drag to end.
+      d.released = true;
+      return;
+    }
     drag.current = null;
+    if (!assetId) return;
+    if (d.kind === "drag") {
+      void dragEnd(assetId);
+      return;
+    }
     // A drag orbits; a click selects. Separated by the same 3 px threshold, so a
     // slightly shaky click still selects rather than nudging the camera.
-    if (d && !d.moved) {
+    if (!d.moved) {
       const [x, y] = toPreviewPx(e);
-      if (assetId) void pick(assetId, x, y, e.shiftKey || e.ctrlKey);
+      void pick(assetId, x, y, e.shiftKey || e.ctrlKey);
     }
   };
   const onWheel = (e: React.WheelEvent) => {
     if (assetId) void orbit(assetId, 0, 0, e.deltaY > 0 ? 0.12 : -0.12);
+  };
+  /** Escape throws the drag away — the author's explicit "no". */
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape" && assetId && doc?.dragging) {
+      e.preventDefault();
+      drag.current = null;
+      void dragCancel(assetId);
+    }
   };
 
   // ── drag-and-drop: a mesh asset dropped on the panel merges in ───────────
@@ -304,12 +452,18 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
               src={image}
               alt="mesh preview"
               draggable={false}
-              className="max-h-full max-w-full cursor-crosshair select-none rounded"
+              className={cn(
+                "max-h-full max-w-full select-none rounded outline-none",
+                tool === "sculpt" ? "cursor-cell" : "cursor-crosshair",
+              )}
               style={{ imageRendering: "pixelated" }}
+              tabIndex={0}
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={onPointerUp}
+              onPointerCancel={onPointerUp}
               onWheel={onWheel}
+              onKeyDown={onKeyDown}
             />
           ) : (
             <div className="text-(--ink-text-dim)">{previewError ?? "Rendering…"}</div>
@@ -321,6 +475,11 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           <span>{doc.faces} f</span>
           <span className="text-(--ink-text)">{doc.selected} selected</span>
           {doc.knifePoints > 1 && <span>knife: {doc.knifePoints} points</span>}
+          {doc.dragging && (
+            <span className="text-(--ink-accent)">
+              {doc.dragPoints > 0 ? `stroke: ${doc.dragPoints} points` : "dragging"} · Esc cancels
+            </span>
+          )}
           {refusal && <span className="ml-auto truncate text-(--ink-warn,#ffb454)">{refusal}</span>}
         </div>
       </div>
@@ -332,6 +491,110 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           {modeButton("edge", <ChevronsLeftRight size={12} />, "Edge")}
           {modeButton("face", <Square size={12} />, "Face")}
         </div>
+
+        <div className="text-[10px] font-semibold tracking-wide text-(--ink-text-dim)">
+          POINTER
+        </div>
+        <div className="flex gap-1">
+          {(["select", "sculpt", "gizmo"] as PointerTool[]).map((t) => (
+            <button
+              key={t}
+              className={cn(
+                "flex flex-1 items-center justify-center gap-1 rounded px-2 py-1 text-[11px] capitalize",
+                tool === t
+                  ? "bg-(--ink-accent) text-(--ink-text-onaccent)"
+                  : "bg-(--ink-bg-2) hover:bg-(--ink-bg-3)",
+              )}
+              onClick={() => setTool(t)}
+              title={
+                t === "select"
+                  ? "Click picks, drag orbits"
+                  : t === "sculpt"
+                    ? "Drag on the surface to paint. One stroke = one undo step."
+                    : "Drag a handle on the selection. Off the handles, the drag orbits."
+              }
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+
+        {tool === "sculpt" && (
+          <>
+            <div className="flex gap-1">
+              {(["draw", "smooth", "flatten", "grab"] as DccSculptModeDto[]).map((m) => (
+                <button
+                  key={m}
+                  className={cn(
+                    "flex-1 rounded px-1 py-1 text-[10px] capitalize",
+                    sculptMode === m
+                      ? "bg-(--ink-accent) text-(--ink-text-onaccent)"
+                      : "bg-(--ink-bg-2) hover:bg-(--ink-bg-3)",
+                  )}
+                  onClick={() => setSculptMode(m)}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+            <Num label="Radius (m)" value={brushRadius} onChange={(v) => setBrushRadius(Math.max(1e-4, v))} />
+            <Num label="Strength" value={brushStrength} step={0.01} onChange={setBrushStrength} />
+            <p className="text-[10px] leading-snug text-(--ink-text-dim)">
+              Radius is <b>geodesic</b> metres — measured across the surface, so the brush
+              does not reach through a thin wall. Strength is metres at full weight for
+              draw, a blend fraction for smooth and flatten, and a multiplier on the drag
+              for grab.
+            </p>
+          </>
+        )}
+
+        {tool === "gizmo" && (
+          <>
+            <div className="flex gap-1">
+              {(["translate", "rotate", "scale"] as DccGizmoModeDto[]).map((m) => (
+                <button
+                  key={m}
+                  className={cn(
+                    "flex-1 rounded px-1 py-1 text-[10px] capitalize",
+                    gizmoMode === m
+                      ? "bg-(--ink-accent) text-(--ink-text-onaccent)"
+                      : "bg-(--ink-bg-2) hover:bg-(--ink-bg-3)",
+                  )}
+                  onClick={() => setGizmoMode(m)}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+            <Num label="Snap" value={snap} step={0.05} onChange={(v) => setSnap(Math.max(0, v))} />
+            <Num
+              label="Soft radius (m)"
+              value={softRadius}
+              onChange={(v) => setSoftRadius(Math.max(0, v))}
+            />
+            <p className="text-[10px] leading-snug text-(--ink-text-dim)">
+              The handles sit on the selection&rsquo;s centroid. Snap 0 is off; a soft radius
+              above 0 blends the move into the geodesic neighbourhood. The Translate box
+              below journals the identical op.
+            </p>
+          </>
+        )}
+
+        {(tool === "sculpt" || tool === "gizmo") && (
+          <label className="flex items-center justify-between gap-2 text-[11px]">
+            <span className="text-(--ink-text-dim)">Falloff</span>
+            <select
+              value={falloff}
+              onChange={(e) => setFalloff(e.target.value as SculptFalloffDto)}
+              className="rounded border border-(--ink-border) bg-(--ink-bg-2) px-1 py-0.5 text-[11px]"
+            >
+              <option value="Smooth">Smooth</option>
+              <option value="Sphere">Sphere</option>
+              <option value="Linear">Linear</option>
+              <option value="Sharp">Sharp</option>
+            </select>
+          </label>
+        )}
 
         <div className="text-[10px] font-semibold tracking-wide text-(--ink-text-dim)">SELECT</div>
         <div className="grid grid-cols-2 gap-1">

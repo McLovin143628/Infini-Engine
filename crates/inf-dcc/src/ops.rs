@@ -170,6 +170,23 @@ pub enum OpError {
     /// clamp would silently produce a shape they did not ask for.
     #[error("{what} of {amount} turns the geometry inside out; use a smaller one")]
     WouldInvert { what: &'static str, amount: f64 },
+
+    // ── the sculpt / transform / UV ops (P23.5) ────────────────────────────
+    /// A rotation whose axis has no direction, so there is nothing to rotate
+    /// about. Refused rather than treated as "no rotation": a caller that handed
+    /// over a zero axis has a bug, and silently applying the identity hides it.
+    #[error("a rotation axis must have a direction, got {axis:?}")]
+    ZeroAxis { axis: [f64; 3] },
+    /// An unwrap could not parameterize a chart. Carries the chart's index and
+    /// the reason, because "unwrap failed" on a 40-chart model is not actionable.
+    #[error("chart {chart} cannot be unwrapped: {why}")]
+    DegenerateChart { chart: usize, why: &'static str },
+    /// An [`Op::Unwrap`] naming a half-edge that is not a live face corner.
+    ///
+    /// Separate from [`OpError::BoundaryCorner`] so a *replayed* unwrap says what
+    /// is wrong with the recording rather than what is wrong with a click.
+    #[error("the unwrap names {0}, which is not a live face corner")]
+    UnwrapCornerMissing(HalfId),
 }
 
 /// Every value crossing an op boundary is checked here, once.
@@ -302,6 +319,44 @@ pub enum Op {
     SubdivideFaces { faces: Vec<FaceId> },
     /// Reflect the whole mesh across an axis-aligned plane, welding the seam.
     Mirror { axis: MirrorAxis, coord: f64 },
+
+    // ── the sculpt / gizmo ops (P23.5) — APPENDED, never inserted ──────────
+    //
+    // Wire positions 22..=24, taken by the same discipline as P23.4's nine: the
+    // `frozen_discriminant` match in `crate::journal`'s tests has no wildcard, so
+    // each of these stopped the crate compiling until it was given the next free
+    // index by hand. `Op::CollapseEdge { half: 7 }` still encodes `[5, 7]`.
+    /// **A whole brush stroke as one entry** — every dab centre of one
+    /// mouse-down→up gesture, replayed as data (see [`crate::sculpt`]).
+    ///
+    /// The journal has no transactions, so the op *is* the transaction: one
+    /// journal entry per stroke and one undo step per stroke, which is the
+    /// terrain `Stroke::begin`/`add_dab`/`finish` doctrine adapted to a structure
+    /// whose atom is already an op.
+    Sculpt {
+        mode: crate::sculpt::SculptMode,
+        /// Dab centres in metres, **already** arc-length resampled by
+        /// [`crate::sculpt::stroke_dabs`], so replay does not depend on the
+        /// resampler.
+        dabs: Vec<[f64; 3]>,
+        radius: f64,
+        strength: f64,
+        falloff: crate::sculpt::SculptFalloff,
+    },
+    /// Rotate vertices about a pivot. See [`crate::xform`] for why the pivot is
+    /// on the wire and the soft-select weight is not.
+    RotateVerts {
+        verts: Vec<VertId>,
+        pivot: [f64; 3],
+        axis: [f64; 3],
+        radians: f64,
+    },
+    /// Scale vertices about a pivot, per axis.
+    ScaleVerts {
+        verts: Vec<VertId>,
+        pivot: [f64; 3],
+        factor: [f64; 3],
+    },
 }
 
 /// Apply one op. See the module docs for the three rules this upholds.
@@ -462,6 +517,27 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
         Op::MergeVerts { verts, target } => model::merge_verts(mesh, verts, *target),
         Op::SubdivideFaces { faces } => model::subdivide_faces(mesh, faces),
         Op::Mirror { axis, coord } => model::mirror(mesh, *axis, *coord),
+
+        // The sculpt / gizmo set (P23.5). Same three rules: a refusal is a typed
+        // value, the mesh stays valid, and the whole thing is one journal entry.
+        Op::Sculpt {
+            mode,
+            dabs,
+            radius,
+            strength,
+            falloff,
+        } => crate::sculpt::sculpt(mesh, *mode, dabs, *radius, *strength, *falloff),
+        Op::RotateVerts {
+            verts,
+            pivot,
+            axis,
+            radians,
+        } => crate::xform::rotate_verts(mesh, verts, *pivot, *axis, *radians),
+        Op::ScaleVerts {
+            verts,
+            pivot,
+            factor,
+        } => crate::xform::scale_verts(mesh, verts, *pivot, *factor),
     }
 }
 

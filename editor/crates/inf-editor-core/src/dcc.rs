@@ -170,6 +170,11 @@ pub fn frame(bounds: inf_mesh::Aabb) -> PreviewView {
 #[derive(Debug, Clone, Copy)]
 pub struct Projector {
     view_proj: Mat4,
+    /// The inverse, cached because **every** pointer interaction needs it: a
+    /// sculpt dab, a gizmo grab and a gizmo update are all "pixel → world ray".
+    /// Inverting per call would be three inversions per drag frame of a matrix
+    /// that changes only when the camera does.
+    inv_view_proj: Mat4,
     eye: Vec3,
     size: f32,
 }
@@ -188,6 +193,7 @@ impl Projector {
         let (eye, view_proj) = view.view_proj();
         Self {
             view_proj,
+            inv_view_proj: view_proj.inverse(),
             eye,
             size: size.max(1) as f32,
         }
@@ -199,6 +205,43 @@ impl Projector {
 
     pub fn size(&self) -> f32 {
         self.size
+    }
+
+    /// The camera matrix itself — handed to `inf_render::gizmo`, which takes a
+    /// `view_proj` and does its own analytic hit-testing with it.
+    ///
+    /// Exposed rather than re-derived so the gizmo's picking and this module's
+    /// drawing are the same projection as [`pick`]'s: the P23.4 rule ("one
+    /// projection, or the panel lies") does not stop being true because the thing
+    /// being picked is a handle rather than a face.
+    pub fn view_proj(&self) -> Mat4 {
+        self.view_proj
+    }
+
+    /// The world-space ray through a pixel, as `(origin on the near plane,
+    /// unit direction)`.
+    ///
+    /// **Built by inverting the projection**, not by re-deriving a camera basis
+    /// from [`PreviewView`]'s fields. A hand-built basis would be a second answer
+    /// to "where is the camera" and would drift from `view_proj` the first time
+    /// either changed — the same reasoning that put `pick` and `draw_overlay`
+    /// behind one `Projector`. The near plane is `z = 0` and the far plane
+    /// `z = 1`: the preview's `perspective_rh` documents itself as the wgpu
+    /// `[0, 1]` depth convention.
+    ///
+    /// `None` when the inverse is degenerate or the pixel maps to nothing finite.
+    pub fn ray(&self, px: f32, py: f32) -> Option<(Vec3, Vec3)> {
+        let ndc_x = px / self.size * 2.0 - 1.0;
+        let ndc_y = 1.0 - py / self.size * 2.0;
+        let unproject = |z: f32| -> Option<Vec3> {
+            let p = self.inv_view_proj * glam::Vec4::new(ndc_x, ndc_y, z, 1.0);
+            (p.w.is_finite() && p.w.abs() > 1e-12).then(|| p.xyz() / p.w)
+        };
+        let a = unproject(0.0)?;
+        let b = unproject(1.0)?;
+        let d = b - a;
+        let len = d.length();
+        (a.is_finite() && len.is_finite() && len > 1e-12).then(|| (a, d / len))
     }
 
     /// Project a world point. `None` when it is at or behind the eye plane —
@@ -646,6 +689,535 @@ fn blend(rgba: &mut [u8], w: i32, x: i32, y: i32, colour: [u8; 3], alpha: u8) {
     rgba[i + 3] = 255;
 }
 
+// ── the surface point under the pointer (P23.5) ────────────────────────────
+
+/// The point on the model under `(px, py)`, and the face it is on.
+///
+/// **The face is found by the picker, not by a separate ray-vs-triangle sweep.**
+/// [`pick`] in [`SelectMode::Face`] already answers "which front-facing polygon
+/// contains this pixel, nearest first"; asking a second time with a different
+/// method would give a different answer along every silhouette, and a brush that
+/// lands on a face other than the one that highlights is a brush an author cannot
+/// aim. So this asks the picker, then intersects the ray with **that** face's
+/// plane.
+///
+/// `None` when the pointer is over empty space, or the face is degenerate (no
+/// normal), or the ray is parallel to it.
+pub fn pick_surface(mesh: &Mesh, proj: &Projector, px: f32, py: f32) -> Option<(FaceId, DVec3)> {
+    let PickHit::Face(f) = pick(mesh, proj, SelectMode::Face, px, py)? else {
+        return None;
+    };
+    let n = inf_dcc::face_normal(mesh, f)?;
+    let verts = mesh.face_verts(f)?;
+    let mut centroid = DVec3::ZERO;
+    for &v in &verts {
+        centroid += mesh.position(v)?;
+    }
+    let centroid = centroid / verts.len() as f64;
+
+    let (ro, rd) = proj.ray(px, py)?;
+    let ro = DVec3::new(ro.x as f64, ro.y as f64, ro.z as f64);
+    let rd = DVec3::new(rd.x as f64, rd.y as f64, rd.z as f64);
+    let denom = n.dot(rd);
+    if !(denom.is_finite() && denom.abs() > 1e-12) {
+        return None;
+    }
+    let t = n.dot(centroid - ro) / denom;
+    let hit = ro + rd * t;
+    hit.is_finite().then_some((f, hit))
+}
+
+/// Draw the brush footprint: a ring of `radius` metres in the surface's tangent
+/// plane at `centre`.
+///
+/// **In the tangent plane rather than facing the camera**, because that is what
+/// the brush actually does — the influence is measured *on the surface* — and
+/// because a screen-facing disc would need the camera's basis, which is a second
+/// answer to "where is the camera" this module deliberately does not keep (see
+/// [`Projector::ray`]).
+///
+/// **Honest limit**: the influence is *geodesic*, so on a folded or bumpy surface
+/// the reach is shorter than the ring in some directions and the ring is an
+/// upper bound, not an outline. That is the same relationship the terrain brush's
+/// disc has to its own falloff, and drawing the true geodesic frontier would mean
+/// running the Dijkstra once per preview frame for a decoration.
+pub fn draw_brush_ring(
+    rgba: &mut [u8],
+    size: u32,
+    proj: &Projector,
+    centre: DVec3,
+    normal: DVec3,
+    radius: f64,
+    colour: [u8; 3],
+) {
+    if rgba.len() < (size as usize) * (size as usize) * 4 {
+        return;
+    }
+    if !(centre.is_finite() && normal.is_finite() && radius.is_finite() && radius > 0.0) {
+        return;
+    }
+    let n = normal.normalize_or_zero();
+    if n == DVec3::ZERO {
+        return;
+    }
+    // Any tangent will do; picked off the least-aligned axis so the cross product
+    // never degenerates.
+    let seed = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
+    let u = n.cross(seed).normalize_or_zero();
+    let v = n.cross(u);
+    let w = size as i32;
+    let mut prev: Option<Projected> = None;
+    for i in 0..=RING_SEGMENTS {
+        let a = i as f64 / RING_SEGMENTS as f64 * std::f64::consts::TAU;
+        let p = centre + (u * a.cos() + v * a.sin()) * radius;
+        let here = proj.point(p);
+        if let (Some(a), Some(b)) = (prev, here) {
+            line(rgba, w, a.x, a.y, b.x, b.y, colour);
+        }
+        prev = here;
+    }
+}
+
+/// Segment count for every circle this module draws, and the number
+/// `inf_render::gizmo::pick_axis` uses internally for its rotate rings. A ring
+/// drawn with a different count than the one picked against is a ring that is
+/// hittable where it is not painted.
+const RING_SEGMENTS: usize = 48;
+
+// ── the component gizmo (P23.5, the P23.4 deferral) ────────────────────────
+
+pub use inf_render::gizmo::{GizmoAxis, GizmoDelta, GizmoDrag, GizmoMode};
+
+/// A transform to apply to a selection, pivot-relative.
+///
+/// The **one** shape both the numeric tools and the dragged gizmo produce, so
+/// "the gizmo and the number box do the same thing" is a property of the code and
+/// not a claim about two code paths. [`transform_ops`] is where it becomes ops.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VertTransform {
+    Translate(DVec3),
+    Rotate { axis: DVec3, radians: f64 },
+    Scale(DVec3),
+}
+
+impl VertTransform {
+    /// The pure-Rust half of "what a drag update means", lifted out of
+    /// `inf_render`'s render-space types.
+    ///
+    /// `GizmoDelta` is `f32` because the viewport's gizmo works in render-local
+    /// space after the floating-origin rebase. A DCC document is a single asset
+    /// at its own origin, so the widening is exact and there is nothing to rebase
+    /// — but the *conversion* has to happen somewhere, and here is better than in
+    /// a command, where a test cannot reach it.
+    pub fn from_gizmo(delta: GizmoDelta) -> Self {
+        match delta {
+            GizmoDelta::Translate(d) => VertTransform::Translate(d),
+            GizmoDelta::Rotate { axis, radians } => VertTransform::Rotate {
+                axis: DVec3::new(axis.x as f64, axis.y as f64, axis.z as f64),
+                radians: radians as f64,
+            },
+            GizmoDelta::Scale(f) => {
+                VertTransform::Scale(DVec3::new(f.x as f64, f.y as f64, f.z as f64))
+            }
+        }
+    }
+
+    /// Whether this transform would move anything at all — the test a commit uses
+    /// to avoid journalling a click that did not drag.
+    pub fn is_identity(&self) -> bool {
+        match self {
+            VertTransform::Translate(d) => *d == DVec3::ZERO,
+            VertTransform::Rotate { radians, .. } => *radians == 0.0,
+            VertTransform::Scale(f) => *f == DVec3::ONE,
+        }
+    }
+}
+
+/// Turn a transform into journal ops, honouring soft-select weights.
+///
+/// **One op per distinct weight**, which is the `SoftTranslate` shape P23.4
+/// established and the reason `Op::RotateVerts` / `Op::ScaleVerts` do not carry a
+/// weight table (see [`inf_dcc::xform`]). `soft` is `Some((radius, falloff))` for
+/// a soft transform and `None` for a hard one; a hard transform therefore emits
+/// exactly one op, over the resolved vertices in ascending id order.
+///
+/// The weight blends toward the identity, per kind:
+/// * translate — the delta is scaled;
+/// * rotate — the **angle** is scaled, so every vertex still travels on a circle
+///   about the pivot rather than being dragged off one by a scaled chord;
+/// * scale — the factor is lerped from `1`, so weight `0` is "unchanged" rather
+///   than "collapsed onto the pivot".
+pub fn transform_ops(
+    mesh: &Mesh,
+    selection: &SelectionSet,
+    mode: SelectMode,
+    pivot: DVec3,
+    xform: VertTransform,
+    soft: Option<(f64, inf_terrain::Falloff)>,
+) -> Vec<Op> {
+    let groups: std::collections::BTreeMap<u64, Vec<VertId>> = match soft {
+        Some((radius, falloff)) => {
+            let mut by_weight: std::collections::BTreeMap<u64, Vec<VertId>> =
+                std::collections::BTreeMap::new();
+            for (v, w) in selection.soft_weights(mesh, mode, radius, falloff) {
+                by_weight.entry(w.to_bits()).or_default().push(v);
+            }
+            by_weight
+        }
+        None => {
+            let verts: Vec<VertId> = selection.resolved_verts(mesh, mode).into_iter().collect();
+            if verts.is_empty() {
+                Default::default()
+            } else {
+                [(1.0f64.to_bits(), verts)].into_iter().collect()
+            }
+        }
+    };
+
+    groups
+        .into_iter()
+        .map(|(bits, verts)| {
+            let w = f64::from_bits(bits);
+            match xform {
+                VertTransform::Translate(d) => Op::TranslateVerts {
+                    verts,
+                    delta: (d * w).to_array(),
+                },
+                VertTransform::Rotate { axis, radians } => Op::RotateVerts {
+                    verts,
+                    pivot: pivot.to_array(),
+                    axis: axis.to_array(),
+                    radians: radians * w,
+                },
+                VertTransform::Scale(f) => Op::ScaleVerts {
+                    verts,
+                    pivot: pivot.to_array(),
+                    factor: (DVec3::ONE + (f - DVec3::ONE) * w).to_array(),
+                },
+            }
+        })
+        .collect()
+}
+
+/// The pivot a gizmo sits on: the **centroid of the selected vertices**.
+///
+/// Not the bounding-box centre: a centroid is what the transform ops are
+/// pivot-relative to, and a box centre would put the visible handle somewhere the
+/// rotation is not actually about on any asymmetric selection.
+pub fn gizmo_pivot(mesh: &Mesh, selection: &SelectionSet, mode: SelectMode) -> Option<DVec3> {
+    let verts = selection.resolved_verts(mesh, mode);
+    if verts.is_empty() {
+        return None;
+    }
+    let mut acc = DVec3::ZERO;
+    let mut n = 0usize;
+    for v in verts {
+        if let Some(p) = mesh.position(v) {
+            if p.is_finite() {
+                acc += p;
+                n += 1;
+            }
+        }
+    }
+    (n > 0).then(|| acc / n as f64)
+}
+
+/// The gizmo's world size at `pivot` — screen-constant, through
+/// `inf_render`'s own rule so the handle is the same fraction of the frame here
+/// as it is in the level viewport.
+pub fn gizmo_size(proj: &Projector, view: PreviewView, pivot: DVec3) -> f32 {
+    let p = Vec3::new(pivot.x as f32, pivot.y as f32, pivot.z as f32);
+    inf_render::gizmo::gizmo_world_size(p, proj.eye(), view.fov_deg.to_radians())
+}
+
+/// Which handle is under `(px, py)`, through `inf_render::gizmo::pick_axis` — the
+/// same analytic 11-pixel hit-test the level viewport's gizmo uses.
+///
+/// Reused rather than re-derived: the DCC's gizmo is the *same widget* on a
+/// different set of things, and a second hit-tester would be a second feel.
+pub fn pick_gizmo(
+    proj: &Projector,
+    view: PreviewView,
+    pivot: DVec3,
+    mode: GizmoMode,
+    px: f32,
+    py: f32,
+) -> Option<GizmoAxis> {
+    let p = Vec3::new(pivot.x as f32, pivot.y as f32, pivot.z as f32);
+    inf_render::gizmo::pick_axis(
+        mode,
+        p,
+        glam::Quat::IDENTITY,
+        gizmo_size(proj, view, pivot),
+        proj.view_proj(),
+        glam::Vec2::new(px, py),
+        proj.size(),
+        proj.size(),
+        false,
+    )
+}
+
+/// Composite the gizmo handles into a rendered frame.
+///
+/// **Drawn to match `pick_axis`'s geometry exactly** — axis lines from the pivot
+/// to `pivot + dir × size`, plane markers at `pivot + (u + v) × size × 0.35`, and
+/// rotate rings of radius `size` sampled at [`RING_SEGMENTS`]. `inf_render`'s
+/// `build_geometry` is the level viewport's twin of this and emits `DebugDraw`
+/// lines into a GPU pass, which is exactly what this panel does not have (the
+/// P23.4 ruling: the overlay is CPU-composited so what lights up is what `pick`
+/// would return). The two therefore draw the same shape by two mechanisms, and
+/// `the_gizmo_is_hittable_wherever_it_is_painted` is the gate that keeps this one
+/// honest against the picker it shares.
+pub fn draw_gizmo(
+    rgba: &mut [u8],
+    size: u32,
+    proj: &Projector,
+    view: PreviewView,
+    pivot: DVec3,
+    mode: GizmoMode,
+    active: Option<GizmoAxis>,
+) {
+    if rgba.len() < (size as usize) * (size as usize) * 4 {
+        return;
+    }
+    if !pivot.is_finite() {
+        return;
+    }
+    let w = size as i32;
+    let g = gizmo_size(proj, view, pivot);
+    if !(g.is_finite() && g > 0.0) {
+        return;
+    }
+    let origin = pivot;
+    let colour = |axis: GizmoAxis| -> [u8; 3] {
+        if active == Some(axis) {
+            return [255, 217, 38]; // the amber highlight `build_geometry` uses
+        }
+        let c = axis.color();
+        [
+            (c[0] * 255.0) as u8,
+            (c[1] * 255.0) as u8,
+            (c[2] * 255.0) as u8,
+        ]
+    };
+    let axis_dir = |axis: GizmoAxis| {
+        let d = axis.dir();
+        DVec3::new(d.x as f64, d.y as f64, d.z as f64)
+    };
+    let g = g as f64;
+
+    if mode == GizmoMode::Rotate {
+        for a in [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z] {
+            let n = axis_dir(a);
+            let (u, v) = plane_tangents(n);
+            let mut prev: Option<Projected> = None;
+            for i in 0..=RING_SEGMENTS {
+                let t = i as f64 / RING_SEGMENTS as f64 * std::f64::consts::TAU;
+                let p = proj.point(origin + (u * t.cos() + v * t.sin()) * g);
+                if let (Some(x), Some(y)) = (prev, p) {
+                    line(rgba, w, x.x, x.y, y.x, y.y, colour(a));
+                }
+                prev = p;
+            }
+        }
+        return;
+    }
+
+    // Translate / scale: the three axis lines, then the three plane markers.
+    for a in [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z] {
+        let (Some(o), Some(tip)) = (proj.point(origin), proj.point(origin + axis_dir(a) * g))
+        else {
+            continue;
+        };
+        line(rgba, w, o.x, o.y, tip.x, tip.y, colour(a));
+        // A solid tip so the end of a short handle is still visible and still
+        // matches `pick_axis`, whose axis test is distance to the SEGMENT.
+        dot(rgba, w, tip.x, tip.y, 2, colour(a));
+    }
+    for a in [GizmoAxis::PlaneX, GizmoAxis::PlaneY, GizmoAxis::PlaneZ] {
+        let (u, v) = plane_tangents(axis_dir(a));
+        let corner = origin + (u + v) * g * 0.35;
+        if let Some(c) = proj.point(corner) {
+            dot(rgba, w, c.x, c.y, 3, colour(a));
+        }
+    }
+}
+
+/// The two tangents of a plane whose normal is an axis direction — the same
+/// choice `inf_render::gizmo`'s private `plane_tangents` makes, and it has to
+/// be, or the plane handles are drawn in one corner and picked in another.
+fn plane_tangents(normal: DVec3) -> (DVec3, DVec3) {
+    if normal == DVec3::X {
+        (DVec3::Y, DVec3::Z)
+    } else if normal == DVec3::Y {
+        (DVec3::X, DVec3::Z)
+    } else {
+        (DVec3::X, DVec3::Y)
+    }
+}
+
+// ── a drag in flight, and the orphan-settler doctrine (P23.5) ──────────────
+
+/// A brush stroke being drawn: the parameters, and the raw surface points the
+/// pointer has visited so far.
+///
+/// The **raw** path, not the resampled dabs: resampling is arc-length, so
+/// resampling incrementally as points arrive would produce a different dab set
+/// than resampling the finished path once. One resample, at the end, in
+/// [`StrokeInFlight::op`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrokeInFlight {
+    pub mode: inf_dcc::SculptMode,
+    pub radius: f64,
+    pub strength: f64,
+    pub falloff: inf_dcc::SculptFalloff,
+    pub path: Vec<DVec3>,
+    /// The surface normal at the most recent path point — **display state**, so
+    /// [`draw_brush_ring`] can lay the footprint in the tangent plane without
+    /// searching for the face again on every frame. Not part of the op: the
+    /// stroke's arithmetic derives its own normals from the mesh.
+    pub last_normal: DVec3,
+}
+
+impl StrokeInFlight {
+    /// The journal entry this stroke has become, or `None` when it never touched
+    /// the surface.
+    pub fn op(&self) -> Option<Op> {
+        if self.path.is_empty() {
+            return None;
+        }
+        let dabs: Vec<[f64; 3]> = inf_dcc::stroke_dabs(&self.path, self.radius)
+            .into_iter()
+            .map(|p| p.to_array())
+            .collect();
+        if dabs.is_empty() {
+            return None;
+        }
+        Some(Op::Sculpt {
+            mode: self.mode,
+            dabs,
+            radius: self.radius,
+            strength: self.strength,
+            falloff: self.falloff,
+        })
+    }
+}
+
+/// A gizmo drag being made: the handle, the pivot, and the transform the pointer
+/// currently implies.
+#[derive(Debug, Clone, Copy)]
+pub struct GizmoInFlight {
+    pub drag: GizmoDrag,
+    pub pivot: DVec3,
+    pub xform: VertTransform,
+    /// `Some((radius, falloff))` when the drag is soft.
+    pub soft: Option<(f64, inf_terrain::Falloff)>,
+}
+
+/// **The one pending-interaction slot on a document.**
+///
+/// Sculpt and the gizmo are the same gesture with different arithmetic —
+/// pointer-down, a run of moves, pointer-up — so they share one slot, one
+/// preview path and one settler. Two slots would be two places for a drag to be
+/// forgotten, and forgetting a drag is exactly what the doctrine below exists to
+/// prevent.
+#[derive(Debug, Clone)]
+pub enum PendingDrag {
+    Stroke(StrokeInFlight),
+    Gizmo(Box<GizmoInFlight>),
+}
+
+impl PendingDrag {
+    /// The ops this drag would commit, given the document it belongs to.
+    ///
+    /// Empty when the gesture did nothing — a click with no drag, or a stroke
+    /// whose pointer never found the surface. The caller journals nothing for an
+    /// empty list, which is what makes "click on the model in sculpt mode" not
+    /// produce an undo step.
+    pub fn ops(&self, mesh: &Mesh, selection: &SelectionSet, mode: SelectMode) -> Vec<Op> {
+        match self {
+            PendingDrag::Stroke(s) => s.op().into_iter().collect(),
+            PendingDrag::Gizmo(g) => {
+                if g.xform.is_identity() {
+                    Vec::new()
+                } else {
+                    transform_ops(mesh, selection, mode, g.pivot, g.xform, g.soft)
+                }
+            }
+        }
+    }
+
+    /// The mesh this drag would produce, for the live preview — **a scratch copy,
+    /// never the document's**.
+    ///
+    /// Refusals here are swallowed on purpose: a preview frame is not the place
+    /// to learn that an in-progress drag has overflowed, and the same ops go
+    /// through the journal on pointer-up where the refusal *is* reported. What
+    /// comes back on a refusal is the mesh as it stands, which is the honest
+    /// picture of "nothing has been committed".
+    pub fn scratch(
+        &self,
+        session: &inf_dcc::MeshSession,
+        selection: &SelectionSet,
+        mode: SelectMode,
+    ) -> Mesh {
+        let mut mesh = session.mesh().clone();
+        for op in self.ops(session.mesh(), selection, mode) {
+            if inf_dcc::ops::apply(&mut mesh, &op).is_err() {
+                return session.mesh().clone();
+            }
+        }
+        mesh
+    }
+}
+
+/// **Settle a drag that is still in flight** — the P21.3 orphan-settler doctrine
+/// applied to a gesture rather than to a terrain edit.
+///
+/// A pointer-up is not guaranteed to arrive: the panel can close, the tool can
+/// change, the document can be saved or undone, or a detached window can lose
+/// pointer capture. Every one of those doors calls this, and the ruling is
+/// **settle, not abandon**: the dabs are the author's work, they are already
+/// visible in the preview, and a gesture that silently evaporates is the failure
+/// this codebase keeps paying for.
+///
+/// The **one exception is closing the document**, and it is not this function —
+/// `dcc_close` drops the whole session in the same call, so committing an op into
+/// a journal that is about to be freed is a write nobody can undo, save or see.
+/// That door abandons, deliberately, and says so.
+///
+/// Returns the refusal text if the settle was attempted and refused; `None` when
+/// there was nothing pending or it applied cleanly. **The selection is carried,
+/// never dropped**: every op a drag produces is `op_preserves_ids`, so insisting
+/// on a drop would deselect the face the author just sculpted.
+pub fn settle_drag(
+    session: &mut inf_dcc::MeshSession,
+    selection: &mut SelectionSet,
+    mode: SelectMode,
+    pending: Option<PendingDrag>,
+) -> Option<String> {
+    let pending = pending?;
+    let ops = pending.ops(session.mesh(), selection, mode);
+    if ops.is_empty() {
+        return None;
+    }
+    let mut refusal = None;
+    for op in ops {
+        debug_assert!(
+            inf_dcc::op_preserves_ids(&op),
+            "a drag must only produce ops that keep ids, or the selection has to drop"
+        );
+        match session.apply(op) {
+            Ok(_) => selection.carry(session.generation(), session.mesh()),
+            Err(e) => {
+                refusal = Some(e.to_string());
+                break;
+            }
+        }
+    }
+    refusal
+}
+
 // ── the save (M1) ──────────────────────────────────────────────────────────
 
 /// What a save did.
@@ -803,12 +1375,20 @@ pub fn save_mesh_session(
 /// a camera that moved 144 bytes. `GenCache`'s rule, one layer up: the key is
 /// what actually invalidates, and here that is the generation stamp and nothing
 /// else.
+/// **What a live drag costs, measured** (P23.5). See
+/// [`PreviewCache::get_with_pending`] for the numbers and the ruling.
 #[derive(Default)]
 pub struct PreviewCache {
     stamp: Option<u64>,
     geometry: Option<std::sync::Arc<EditGeometry>>,
     mesh: Option<std::sync::Arc<Mesh>>,
     tessellations: u64,
+    /// The scratch half: the generation and the drag "shape" the uncommitted
+    /// frame was built for.
+    scratch_key: Option<(u64, usize)>,
+    scratch_geometry: Option<std::sync::Arc<EditGeometry>>,
+    scratch_mesh: Option<std::sync::Arc<Mesh>>,
+    scratch_tessellations: u64,
 }
 
 impl PreviewCache {
@@ -842,6 +1422,123 @@ impl PreviewCache {
             self.mesh.clone().expect("just filled"),
         )
     }
+
+    /// How many times the **scratch** tessellator has run — the uncommitted half
+    /// of the cache, counted separately so a gate can say "an orbit during a
+    /// drag costs nothing extra" rather than assuming it.
+    pub fn scratch_tessellations(&self) -> u64 {
+        self.scratch_tessellations
+    }
+
+    /// The geometry and mesh a frame should draw, given a drag that has not been
+    /// committed yet.
+    ///
+    /// # The side channel, and why it is a full re-tessellation
+    ///
+    /// [`PreviewCache::get`]'s key is the journal generation, and an uncommitted
+    /// drag *does not move it* — that is the whole point of not journalling until
+    /// pointer-up. So a live drag needs a second channel, and v1's is the honest
+    /// one: apply the pending ops to a **clone**, tessellate that, and key the
+    /// result on `(generation, path length / drag step)` so a frame whose drag
+    /// has not changed — an orbit mid-stroke, a re-render after a resize — is
+    /// still free.
+    ///
+    /// **Measured on this machine**, by `live_drag_frame_cost_is_measured`, in a
+    /// **debug** build (the profile CI and the editor's dev runs use; a release
+    /// build is several times faster and the ratio is what matters here):
+    ///
+    /// | mesh | `tessellate` | clone + 1 dab + tessellate |
+    /// | --- | --- | --- |
+    /// | subdivided cube, 26 v / 48 tri | 0.17 ms | 0.11 ms |
+    /// | subdivided cube, 1 538 v / 3 072 tri | 8.6 ms | 9.1 ms |
+    ///
+    /// **The clone and the stroke are free; the tessellation is the whole cost**
+    /// — the two columns agree to within noise at both sizes, which is the useful
+    /// finding and the one that says the scratch channel adds nothing of its own.
+    ///
+    /// Against the P23.2a budget — 0.09 ms to render at 256² and ~0.34 ms to
+    /// encode — a drag frame on a small model is comfortable and a **1.5 k-vertex
+    /// model is already the dominant cost at ~9 ms**, i.e. about 30 fps in a
+    /// debug build and fine in release. Stated rather than hidden: **this path
+    /// will not hold an interactive rate on a model of a hundred thousand
+    /// vertices.** The next lever is displacing the cached vertex buffer in place
+    /// rather than re-running the exporter, which needs the writer to expose its
+    /// corner→vertex map — a remainder, not a defect. What is *not* on the table
+    /// is displacing on the GPU: the CPU picker could not see it, and the panel
+    /// would go back to highlighting one thing and hitting another.
+    pub fn get_with_pending(
+        &mut self,
+        session: &inf_dcc::MeshSession,
+        selection: &SelectionSet,
+        mode: SelectMode,
+        pending: Option<&PendingDrag>,
+    ) -> (std::sync::Arc<EditGeometry>, std::sync::Arc<Mesh>) {
+        let Some(pending) = pending else {
+            // Nothing in flight: the committed path, and the scratch is released
+            // so a finished drag does not hold a second copy of the mesh for the
+            // rest of the session.
+            self.scratch_key = None;
+            self.scratch_geometry = None;
+            self.scratch_mesh = None;
+            return self.get(session);
+        };
+        let step = match pending {
+            PendingDrag::Stroke(s) => s.path.len(),
+            // A gizmo's "shape" is its current transform; hashing the bits keeps
+            // the key one integer without pretending a float is a step count.
+            PendingDrag::Gizmo(g) => drag_step(&g.xform),
+        };
+        let key = (session.generation(), step);
+        if self.scratch_key != Some(key)
+            || self.scratch_geometry.is_none()
+            || self.scratch_mesh.is_none()
+        {
+            let mesh = pending.scratch(session, selection, mode);
+            self.scratch_key = Some(key);
+            self.scratch_geometry = Some(std::sync::Arc::new(tessellate(&mesh)));
+            self.scratch_mesh = Some(std::sync::Arc::new(mesh));
+            self.scratch_tessellations += 1;
+        }
+        (
+            self.scratch_geometry.clone().expect("just filled"),
+            self.scratch_mesh.clone().expect("just filled"),
+        )
+    }
+}
+
+/// A gizmo transform reduced to one integer, so an unchanged drag is a cache hit.
+///
+/// Deliberately a **hash of the exact bits**, not a quantization: two transforms
+/// that differ in the last ulp are different pictures, and a key that called them
+/// equal would freeze the preview on a slow drag.
+fn drag_step(xform: &VertTransform) -> usize {
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |x: f64| {
+        acc ^= x.to_bits();
+        acc = acc.wrapping_mul(0x1000_0000_01b3);
+    };
+    match xform {
+        VertTransform::Translate(d) => {
+            mix(1.0);
+            mix(d.x);
+            mix(d.y);
+            mix(d.z);
+        }
+        VertTransform::Rotate { axis, radians } => {
+            mix(2.0);
+            mix(axis.x);
+            mix(axis.y);
+            mix(axis.z);
+            mix(*radians);
+        }
+        VertTransform::Scale(f) => {
+            mix(3.0);
+            mix(f.x);
+            mix(f.y);
+            mix(f.z);
+        }
+    }
+    acc as usize
 }
 
 // ── drag-and-drop modularity, v1 ───────────────────────────────────────────
@@ -1354,6 +2051,554 @@ mod tests {
         assert!(!std::sync::Arc::ptr_eq(&geo1, &geo0));
         assert_eq!(cache.tessellations(), 2);
         assert!(geo1.indices.len() > geo0.indices.len());
+    }
+
+    // ── P23.5: rays, the surface point, the gizmo, and drags in flight ──────
+
+    #[test]
+    fn a_ray_through_a_projected_point_passes_back_through_that_point() {
+        // The inverse of `Projector::point`, and the property that makes a dab
+        // land where the pointer is. Asserted as a *distance from the ray*, which
+        // is what a pick actually needs, rather than as an equality of two
+        // matrices nobody looks at.
+        let m = cube(1.0);
+        let proj = projector(&m, 256);
+        for v in m.vert_ids() {
+            let p = m.position(v).expect("live");
+            let s = proj.point(p).expect("visible");
+            let (ro, rd) = proj.ray(s.x, s.y).expect("a ray through a visible pixel");
+            let q = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
+            let along = (q - ro).dot(rd);
+            let off = (q - (ro + rd * along)).length();
+            assert!(off < 1e-3, "{v} is {off} m off its own ray");
+            assert!(along > 0.0, "{v} is behind the ray origin");
+        }
+        // A ray at the exact centre of the frame must aim at the target.
+        let (_, rd) = proj.ray(128.0, 128.0).expect("a centre ray");
+        assert!((rd.length() - 1.0).abs() < 1e-5, "the direction is unit");
+    }
+
+    #[test]
+    fn a_surface_pick_lands_on_the_face_the_picker_returns_and_on_its_plane() {
+        let m = cube(1.0);
+        let proj = projector(&m, 256);
+        let (f, hit) = pick_surface(&m, &proj, 128.0, 128.0).expect("the cube is in the way");
+        assert_eq!(
+            pick(&m, &proj, SelectMode::Face, 128.0, 128.0),
+            Some(PickHit::Face(f)),
+            "the surface point must be on the face the PICKER reports, or the \
+             brush lands somewhere the highlight is not"
+        );
+        // On that face's plane, and inside its silhouette.
+        let n = inf_dcc::face_normal(&m, f).expect("a normal");
+        let verts = m.face_verts(f).expect("live");
+        let c: DVec3 = verts
+            .iter()
+            .map(|&v| m.position(v).expect("live"))
+            .sum::<DVec3>()
+            / verts.len() as f64;
+        assert!((hit - c).dot(n).abs() < 1e-9, "{hit:?} is off the plane");
+        let back = proj
+            .point(hit)
+            .expect("the hit projects back into the frame");
+        assert!(
+            (back.x - 128.0).abs() < 0.5 && (back.y - 128.0).abs() < 0.5,
+            "the hit re-projects to {back:?}, not to the pixel it came from"
+        );
+    }
+
+    #[test]
+    fn a_surface_pick_in_open_space_is_none() {
+        let m = cube(1.0);
+        let proj = projector(&m, 256);
+        assert!(pick_surface(&m, &proj, 3.0, 3.0).is_none());
+    }
+
+    #[test]
+    fn the_brush_ring_is_drawn_around_the_dab_and_nowhere_else() {
+        let m = cube(1.0);
+        let proj = projector(&m, 256);
+        let (f, hit) = pick_surface(&m, &proj, 128.0, 128.0).expect("a hit");
+        let n = inf_dcc::face_normal(&m, f).expect("a normal");
+        let mut rgba = vec![0u8; 256 * 256 * 4];
+        let colour = [7u8, 200, 190];
+        draw_brush_ring(&mut rgba, 256, &proj, hit, n, 0.25, colour);
+
+        let painted: Vec<(f64, f64)> = rgba
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(_, p)| p[0..3] == colour)
+            .map(|(i, _)| (((i % 256) as f64), ((i / 256) as f64)))
+            .collect();
+        assert!(!painted.is_empty(), "the ring must actually be drawn");
+        // Its centroid is the dab, and every painted pixel is roughly one
+        // projected radius away — a ring, not a disc and not a smear.
+        let cx = painted.iter().map(|p| p.0).sum::<f64>() / painted.len() as f64;
+        let cy = painted.iter().map(|p| p.1).sum::<f64>() / painted.len() as f64;
+        assert!(
+            (cx - 128.0).abs() < 3.0 && (cy - 128.0).abs() < 3.0,
+            "the ring is centred at ({cx:.1}, {cy:.1}), not on the dab"
+        );
+        let radii: Vec<f64> = painted
+            .iter()
+            .map(|p| ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt())
+            .collect();
+        let rmin = radii.iter().copied().fold(f64::MAX, f64::min);
+        let rmax = radii.iter().copied().fold(0.0, f64::max);
+        assert!(rmin > 2.0, "something was painted at the centre: {rmin}");
+        assert!(
+            rmax / rmin < 2.0,
+            "the ring is not round in projection: {rmin}..{rmax}"
+        );
+        // A degenerate call paints nothing rather than panicking.
+        let mut blank = vec![0u8; 256 * 256 * 4];
+        draw_brush_ring(&mut blank, 256, &proj, hit, DVec3::ZERO, 0.25, colour);
+        draw_brush_ring(&mut blank, 256, &proj, hit, n, f64::NAN, colour);
+        assert!(blank.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn the_gizmo_is_hittable_wherever_it_is_painted() {
+        // The P23.4 rule, extended to the handles: the compositor draws the axis
+        // to `pivot + dir × size` and `pick_axis` measures distance to that same
+        // segment, so the end of every painted handle must be a hit. If the two
+        // ever disagree the author drags nothing while looking straight at the
+        // arrow.
+        let m = cube(1.0);
+        let view = frame(tessellate(&m).bounds);
+        let proj = Projector::new(view, 256);
+        let mut sel = SelectionSet::new(1);
+        for f in m.face_ids() {
+            sel.set_face(f, true);
+        }
+        let pivot = gizmo_pivot(&m, &sel, SelectMode::Face).expect("a pivot");
+        assert!(pivot.length() < 1e-9, "a cube's centroid is its centre");
+
+        for mode in [GizmoMode::Translate, GizmoMode::Scale] {
+            let g = gizmo_size(&proj, view, pivot) as f64;
+            for axis in [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z] {
+                let d = axis.dir();
+                let tip = pivot + DVec3::new(d.x as f64, d.y as f64, d.z as f64) * g;
+                let s = proj.point(tip).expect("the tip is in frame");
+                assert_eq!(
+                    pick_gizmo(&proj, view, pivot, mode, s.x, s.y),
+                    Some(axis),
+                    "{mode:?}/{axis:?}: the painted tip is not hittable"
+                );
+            }
+        }
+        // A rotate ring is hittable on the ring, and open space is not a hit in
+        // any mode.
+        let g = gizmo_size(&proj, view, pivot) as f64;
+        let ring = proj
+            .point(pivot + DVec3::Y * g)
+            .expect("a point on the X ring");
+        assert!(pick_gizmo(&proj, view, pivot, GizmoMode::Rotate, ring.x, ring.y).is_some());
+        for mode in [GizmoMode::Translate, GizmoMode::Rotate, GizmoMode::Scale] {
+            assert_eq!(
+                pick_gizmo(&proj, view, pivot, mode, 2.0, 2.0),
+                None,
+                "{mode:?} claims a hit in the corner of the frame"
+            );
+        }
+    }
+
+    #[test]
+    fn drawing_the_gizmo_marks_the_pixels_the_picker_answers_for() {
+        let m = cube(1.0);
+        let view = frame(tessellate(&m).bounds);
+        let proj = Projector::new(view, 256);
+        let mut sel = SelectionSet::new(1);
+        for f in m.face_ids() {
+            sel.set_face(f, true);
+        }
+        let pivot = gizmo_pivot(&m, &sel, SelectMode::Face).expect("a pivot");
+        let mut rgba = vec![0u8; 256 * 256 * 4];
+        draw_gizmo(
+            &mut rgba,
+            256,
+            &proj,
+            view,
+            pivot,
+            GizmoMode::Translate,
+            Some(GizmoAxis::X),
+        );
+        // Something is painted, the active axis takes the amber highlight, and
+        // every painted pixel is a place the picker answers for.
+        let painted: Vec<usize> = rgba
+            .chunks_exact(4)
+            .enumerate()
+            .filter(|(_, p)| p[0..3] != [0, 0, 0])
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            painted.len() > 40,
+            "the gizmo drew {} pixels",
+            painted.len()
+        );
+        assert!(
+            rgba.chunks_exact(4).any(|p| p[0..3] == [255, 217, 38]),
+            "the active axis is not highlighted"
+        );
+        let hits = painted
+            .iter()
+            .filter(|&&i| {
+                pick_gizmo(
+                    &proj,
+                    view,
+                    pivot,
+                    GizmoMode::Translate,
+                    (i % 256) as f32,
+                    (i / 256) as f32,
+                )
+                .is_some()
+            })
+            .count();
+        assert_eq!(
+            hits,
+            painted.len(),
+            "{} painted pixels are not hittable",
+            painted.len() - hits
+        );
+        // An undersized buffer is refused, like the overlay's.
+        let mut small = vec![0u8; 16];
+        let before = small.clone();
+        draw_gizmo(
+            &mut small,
+            256,
+            &proj,
+            view,
+            pivot,
+            GizmoMode::Translate,
+            None,
+        );
+        assert_eq!(small, before);
+    }
+
+    #[test]
+    fn the_numeric_tool_and_the_gizmo_produce_identical_ops() {
+        // Deliverable 2's contract, and the reason `transform_ops` exists at all:
+        // the direct-manipulation twin must not be a second implementation. A
+        // gizmo drag that resolves to a 0.25 m move along +X and a number box
+        // that says 0.25 must journal the SAME op.
+        let m = plane(2.0);
+        let mut sel = SelectionSet::new(1);
+        for f in m.face_ids() {
+            sel.set_face(f, true);
+        }
+        let pivot = gizmo_pivot(&m, &sel, SelectMode::Face).expect("a pivot");
+        let delta = DVec3::new(0.25, 0.0, 0.0);
+
+        let numeric = transform_ops(
+            &m,
+            &sel,
+            SelectMode::Face,
+            pivot,
+            VertTransform::Translate(delta),
+            None,
+        );
+        let dragged = transform_ops(
+            &m,
+            &sel,
+            SelectMode::Face,
+            pivot,
+            VertTransform::from_gizmo(GizmoDelta::Translate(delta)),
+            None,
+        );
+        assert_eq!(numeric, dragged);
+        assert_eq!(numeric.len(), 1, "a hard transform is ONE op: {numeric:?}");
+        let verts: Vec<VertId> = sel
+            .resolved_verts(&m, SelectMode::Face)
+            .into_iter()
+            .collect();
+        assert_eq!(
+            numeric,
+            vec![Op::TranslateVerts {
+                verts,
+                delta: [0.25, 0.0, 0.0]
+            }]
+        );
+    }
+
+    #[test]
+    fn a_soft_transform_is_one_op_per_weight_and_blends_toward_the_identity() {
+        let m = cube(2.0);
+        let mut sel = SelectionSet::new(1);
+        sel.set_vert(m.vert_ids().next().expect("a vertex"), true);
+        let pivot = gizmo_pivot(&m, &sel, SelectMode::Vert).expect("a pivot");
+        let soft = Some((6.0, inf_terrain::Falloff::Linear));
+
+        for xform in [
+            VertTransform::Translate(DVec3::Y),
+            VertTransform::Rotate {
+                axis: DVec3::Y,
+                radians: 0.5,
+            },
+            VertTransform::Scale(DVec3::splat(2.0)),
+        ] {
+            let ops = transform_ops(&m, &sel, SelectMode::Vert, pivot, xform, soft);
+            assert!(ops.len() > 1, "the neighbourhood moves too: {ops:?}");
+            for op in &ops {
+                match op {
+                    // The weight scales the DELTA…
+                    Op::TranslateVerts { delta, .. } => {
+                        assert!(delta[1] > 0.0 && delta[1] <= 1.0, "{delta:?}")
+                    }
+                    // …the ANGLE (so every vertex still travels on a circle)…
+                    Op::RotateVerts {
+                        radians, pivot: p, ..
+                    } => {
+                        assert!(*radians > 0.0 && *radians <= 0.5, "{radians}");
+                        assert_eq!(*p, pivot.to_array(), "every op shares the pivot");
+                    }
+                    // …and the FACTOR lerps from 1, not from 0.
+                    Op::ScaleVerts { factor, .. } => {
+                        assert!(factor[0] > 1.0 && factor[0] <= 2.0, "{factor:?}")
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+            // Exactly one group is at full weight — the selection itself.
+            let full = ops
+                .iter()
+                .filter(|o| match o {
+                    Op::TranslateVerts { delta, .. } => delta[1] == 1.0,
+                    Op::RotateVerts { radians, .. } => *radians == 0.5,
+                    Op::ScaleVerts { factor, .. } => factor[0] == 2.0,
+                    _ => false,
+                })
+                .count();
+            assert_eq!(full, 1, "{ops:?}");
+        }
+    }
+
+    #[test]
+    fn a_transform_with_nothing_selected_produces_no_ops() {
+        let m = plane(2.0);
+        let sel = SelectionSet::new(1);
+        assert!(transform_ops(
+            &m,
+            &sel,
+            SelectMode::Face,
+            DVec3::ZERO,
+            VertTransform::Translate(DVec3::X),
+            None
+        )
+        .is_empty());
+        assert!(gizmo_pivot(&m, &sel, SelectMode::Face).is_none());
+    }
+
+    #[test]
+    fn a_drag_in_flight_is_settled_and_the_selection_survives_it() {
+        // **The orphan-settler ruling, tested rather than asserted in prose.** A
+        // stroke whose pointer-up never arrives is committed by whichever door
+        // notices — and because every op a drag makes preserves ids, the
+        // selection is CARRIED, not dropped. A settle that dropped it would
+        // deselect the face the author is sculpting on every tool switch.
+        let mut s = MeshSession::new(cube(1.0));
+        let mut sel = SelectionSet::new(s.generation());
+        let f = s.mesh().face_ids().next().expect("a face");
+        sel.set_face(f, true);
+        let start = s
+            .mesh()
+            .position(s.mesh().vert_ids().next().expect("a vertex"))
+            .expect("live");
+        let pending = PendingDrag::Stroke(StrokeInFlight {
+            mode: inf_dcc::SculptMode::Draw,
+            radius: 0.8,
+            strength: 0.1,
+            falloff: inf_dcc::SculptFalloff::Smooth,
+            path: (0..6)
+                .map(|i| start + DVec3::X * (i as f64 * 0.1))
+                .collect(),
+            last_normal: DVec3::Y,
+        });
+        let before = s.mesh().encoded();
+        assert_eq!(
+            settle_drag(&mut s, &mut sel, SelectMode::Face, Some(pending)),
+            None
+        );
+        assert_eq!(s.ops().len(), 1, "a whole stroke is ONE journal entry");
+        assert_ne!(s.mesh().encoded(), before);
+        assert_eq!(sel.generation(), s.generation(), "the selection kept up");
+        assert!(sel.contains_face(f), "and it still names the same face");
+        assert!(s.undo());
+        assert_eq!(s.mesh().encoded(), before, "one undo takes the whole drag");
+    }
+
+    #[test]
+    fn a_gesture_that_did_nothing_journals_nothing() {
+        // A click with no drag must not produce an undo step. The gizmo's guard
+        // is `VertTransform::is_identity`; the stroke's is an empty path.
+        let mut s = MeshSession::new(cube(1.0));
+        let mut sel = SelectionSet::new(s.generation());
+        for f in s.mesh().face_ids() {
+            sel.set_face(f, true);
+        }
+        let pivot = gizmo_pivot(s.mesh(), &sel, SelectMode::Face).expect("a pivot");
+        let drag = GizmoDrag::begin(
+            GizmoMode::Translate,
+            GizmoAxis::X,
+            glam::Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, 5.0),
+            Vec3::new(0.0, 0.0, -1.0),
+        );
+        for pending in [
+            PendingDrag::Gizmo(Box::new(GizmoInFlight {
+                drag,
+                pivot,
+                xform: VertTransform::Translate(DVec3::ZERO),
+                soft: None,
+            })),
+            PendingDrag::Stroke(StrokeInFlight {
+                mode: inf_dcc::SculptMode::Draw,
+                radius: 0.5,
+                strength: 0.1,
+                falloff: inf_dcc::SculptFalloff::Smooth,
+                path: Vec::new(),
+                last_normal: DVec3::Y,
+            }),
+        ] {
+            assert!(pending.ops(s.mesh(), &sel, SelectMode::Face).is_empty());
+            assert_eq!(
+                settle_drag(&mut s, &mut sel, SelectMode::Face, Some(pending)),
+                None
+            );
+        }
+        assert_eq!(s.ops().len(), 0, "nothing was journalled");
+    }
+
+    #[test]
+    fn the_live_preview_re_tessellates_only_when_the_drag_moves() {
+        // The scratch channel's own contract, made checkable the same way
+        // `an_orbit_never_re_tessellates` made the committed one. Ten frames of a
+        // motionless drag cost one tessellation; extending the path costs one
+        // more; and letting go returns to the cached committed geometry.
+        let s = MeshSession::new(cube(1.0));
+        let sel = SelectionSet::new(s.generation());
+        let mut cache = PreviewCache::new();
+        let mut stroke = StrokeInFlight {
+            mode: inf_dcc::SculptMode::Draw,
+            radius: 0.8,
+            strength: 0.1,
+            falloff: inf_dcc::SculptFalloff::Smooth,
+            path: vec![DVec3::new(0.5, 0.5, 0.5)],
+            last_normal: DVec3::Y,
+        };
+        let pending = PendingDrag::Stroke(stroke.clone());
+        let (geo0, _) = cache.get_with_pending(&s, &sel, SelectMode::Face, Some(&pending));
+        for _ in 0..10 {
+            let (g, _) = cache.get_with_pending(&s, &sel, SelectMode::Face, Some(&pending));
+            assert!(std::sync::Arc::ptr_eq(&g, &geo0), "a new scratch frame");
+        }
+        assert_eq!(cache.scratch_tessellations(), 1, "ten frames, one scratch");
+        assert_eq!(
+            cache.tessellations(),
+            0,
+            "and the committed path is untouched"
+        );
+
+        stroke.path.push(DVec3::new(0.6, 0.5, 0.5));
+        let moved = PendingDrag::Stroke(stroke);
+        let (geo1, _) = cache.get_with_pending(&s, &sel, SelectMode::Face, Some(&moved));
+        assert!(!std::sync::Arc::ptr_eq(&geo1, &geo0));
+        assert_eq!(cache.scratch_tessellations(), 2);
+
+        // Pointer-up: back to the committed cache, and the scratch is released.
+        let (committed, _) = cache.get_with_pending(&s, &sel, SelectMode::Face, None);
+        assert_eq!(cache.tessellations(), 1);
+        assert_eq!(
+            cache.scratch_tessellations(),
+            2,
+            "no extra scratch on release"
+        );
+        assert!(!std::sync::Arc::ptr_eq(&committed, &geo1));
+    }
+
+    #[test]
+    fn the_scratch_never_touches_the_document() {
+        // The whole reason the live channel is a clone: a preview frame must not
+        // be able to edit the mesh. Ten frames of a stroke, and the session's
+        // bytes and journal are exactly what they were.
+        let s = MeshSession::new(cube(1.0));
+        let sel = SelectionSet::new(s.generation());
+        let before = s.mesh().encoded();
+        let mut cache = PreviewCache::new();
+        let pending = PendingDrag::Stroke(StrokeInFlight {
+            mode: inf_dcc::SculptMode::Draw,
+            radius: 2.0,
+            strength: 0.5,
+            falloff: inf_dcc::SculptFalloff::Smooth,
+            path: vec![DVec3::new(0.5, 0.5, 0.5), DVec3::new(0.5, 0.9, 0.5)],
+            last_normal: DVec3::Y,
+        });
+        let (geo, scratch) = cache.get_with_pending(&s, &sel, SelectMode::Face, Some(&pending));
+        assert_eq!(s.mesh().encoded(), before, "the document did not move");
+        assert_eq!(s.ops().len(), 0, "and nothing was journalled");
+        assert_ne!(
+            scratch.encoded(),
+            before,
+            "…while the scratch DOES show the uncommitted dab"
+        );
+        assert!(geo.verts.len() >= 8);
+    }
+
+    #[test]
+    fn live_drag_frame_cost_is_measured() {
+        // **The number the P23.5 ruling rests on**, taken rather than assumed.
+        // A live drag frame is a mesh clone plus the pending ops plus a full
+        // re-tessellation through the writer, because the `PreviewCache`'s key is
+        // the journal generation and an uncommitted drag deliberately does not
+        // move it. The figures land in the docs on
+        // `PreviewCache::get_with_pending`; the assertion here is loose on
+        // purpose — it exists to catch an accidental O(n²), not to pin a machine.
+        //
+        // Two sizes, so the shape of the cost is visible and not just its value:
+        // a scratch frame must be a small constant factor over the committed
+        // tessellation at BOTH, or something in the path is superlinear.
+        for subdivisions in [1usize, 4] {
+            let mut s = MeshSession::new(cube(1.0));
+            for _ in 0..subdivisions {
+                let faces: Vec<_> = s.mesh().face_ids().collect();
+                s.apply(inf_dcc::Op::SubdivideFaces { faces })
+                    .expect("subdivides");
+            }
+            let verts = s.mesh().vert_count();
+            let sel = SelectionSet::new(s.generation());
+            let pending = PendingDrag::Stroke(StrokeInFlight {
+                mode: inf_dcc::SculptMode::Draw,
+                radius: 0.3,
+                strength: 0.05,
+                falloff: inf_dcc::SculptFalloff::Smooth,
+                path: vec![DVec3::new(0.5, 0.5, 0.5)],
+                last_normal: DVec3::Y,
+            });
+
+            let t = std::time::Instant::now();
+            let plain = tessellate(s.mesh());
+            let committed_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+            // A fresh cache per frame, so this measures the SCRATCH path and not
+            // the hit path `the_live_preview_re_tessellates_only_when_the_drag_
+            // moves` already pins.
+            let frames = 5;
+            let t = std::time::Instant::now();
+            for _ in 0..frames {
+                let mut c = PreviewCache::new();
+                let _ = c.get_with_pending(&s, &sel, SelectMode::Face, Some(&pending));
+            }
+            let scratch_ms = t.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+
+            println!(
+                "live-drag frame cost: {verts} verts, {} tris | tessellate                  {committed_ms:.2} ms | clone+apply+tessellate {scratch_ms:.2} ms",
+                plain.indices.len() / 3
+            );
+            assert!(
+                scratch_ms < 2_000.0,
+                "a scratch frame took {scratch_ms:.1} ms on {verts} vertices — that                  is not a constant factor over the {committed_ms:.1} ms tessellation"
+            );
+        }
     }
 
     #[test]

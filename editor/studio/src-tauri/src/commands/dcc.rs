@@ -50,10 +50,14 @@ use inf_dcc::{
     SelectMode, SelectionSet, VertId,
 };
 use inf_editor_core::assets::vmesh;
-use inf_editor_core::dcc::{self, OverlayStyle, PickHit, PreviewCache, Projector};
+use inf_editor_core::dcc::{
+    self, GizmoDrag, GizmoInFlight, GizmoMode, OverlayStyle, PendingDrag, PickHit, PreviewCache,
+    Projector, StrokeInFlight, VertTransform,
+};
 use inf_editor_core::ipc::{
-    DccApplyDto, DccDocDto, DccExportDto, DccImportDto, DccModeDto, DccPreviewDto, DccSaveDto,
-    DccSelectDto, DccToolDto, SculptFalloffDto,
+    DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto, DccGizmoModeDto,
+    DccImportDto, DccModeDto, DccPreviewDto, DccSaveDto, DccSculptModeDto, DccSelectDto,
+    DccToolDto, SculptFalloffDto,
 };
 use inf_editor_core::thumbnail::{encode_png_fast, PreviewView, Thumbnailer};
 use tauri::{AppHandle, Emitter, State};
@@ -62,6 +66,10 @@ use tauri::{AppHandle, Emitter, State};
 /// 0.09 ms there and the transport is the real cost — 512² pushes ~1.4 MB of
 /// base64 per frame through the webview bridge, which is ~42 MB/s at 30 fps.
 const PREVIEW_SIZE: u32 = 256;
+
+/// The brush footprint's ink — a cyan that neither the neutral grey surface
+/// (`DCC_SURFACE_WGSL`) nor the amber selection can be confused with.
+const BRUSH_RING: [u8; 3] = [64, 220, 210];
 
 /// One open mesh document. The mesh itself lives in the journal.
 struct DccDoc {
@@ -91,6 +99,16 @@ struct DccDoc {
     /// generation that produced them — so an orbit costs a camera write and two
     /// `Arc` clones rather than a full export (P23.4 audit — M6).
     preview: PreviewCache,
+    /// **The one pointer-drag slot** (P23.5): a sculpt stroke or a gizmo drag,
+    /// never both. Uncommitted — the preview renders it from a scratch copy and
+    /// the journal does not hear about it until the gesture settles.
+    pending: Option<PendingDrag>,
+    /// Snap for the drag in flight (metres / radians / ratio; `0` = off).
+    drag_snap: f32,
+    /// Which transform gizmo is armed, if any. Backend state because the *pivot*
+    /// and the handles are drawn backend-side, and a panel-held copy would be a
+    /// second opinion about which tool is active.
+    gizmo: Option<GizmoMode>,
 }
 
 struct DccStore {
@@ -165,6 +183,40 @@ fn mode_dto(m: SelectMode) -> DccModeDto {
     }
 }
 
+fn sculpt_mode_of(m: DccSculptModeDto) -> inf_dcc::SculptMode {
+    match m {
+        DccSculptModeDto::Draw => inf_dcc::SculptMode::Draw,
+        DccSculptModeDto::Smooth => inf_dcc::SculptMode::Smooth,
+        DccSculptModeDto::Flatten => inf_dcc::SculptMode::Flatten,
+        DccSculptModeDto::Grab => inf_dcc::SculptMode::Grab,
+    }
+}
+
+fn kernel_falloff_of(f: SculptFalloffDto) -> inf_dcc::SculptFalloff {
+    match f {
+        SculptFalloffDto::Smooth => inf_dcc::SculptFalloff::Smooth,
+        SculptFalloffDto::Sphere => inf_dcc::SculptFalloff::Sphere,
+        SculptFalloffDto::Linear => inf_dcc::SculptFalloff::Linear,
+        SculptFalloffDto::Sharp => inf_dcc::SculptFalloff::Sharp,
+    }
+}
+
+fn gizmo_mode_of(m: DccGizmoModeDto) -> GizmoMode {
+    match m {
+        DccGizmoModeDto::Translate => GizmoMode::Translate,
+        DccGizmoModeDto::Rotate => GizmoMode::Rotate,
+        DccGizmoModeDto::Scale => GizmoMode::Scale,
+    }
+}
+
+fn gizmo_mode_dto(m: GizmoMode) -> DccGizmoModeDto {
+    match m {
+        GizmoMode::Translate => DccGizmoModeDto::Translate,
+        GizmoMode::Rotate => DccGizmoModeDto::Rotate,
+        GizmoMode::Scale => DccGizmoModeDto::Scale,
+    }
+}
+
 fn falloff_of(f: SculptFalloffDto) -> inf_terrain::Falloff {
     match f {
         SculptFalloffDto::Smooth => inf_terrain::Falloff::Smooth,
@@ -217,7 +269,30 @@ fn doc_dto(doc: &DccDoc, session: &MeshSession) -> DccDocDto {
         generation: session.generation(),
         import: import_dto(&doc.import),
         knife_points: doc.knife.len() as u32,
+        dragging: doc.pending.is_some(),
+        drag_points: match &doc.pending {
+            Some(PendingDrag::Stroke(s)) => s.path.len() as u32,
+            _ => 0,
+        },
+        gizmo: doc.gizmo.map(gizmo_mode_dto),
     }
+}
+
+/// **Settle a drag that is still in flight, before doing anything else.**
+///
+/// The P21.3 orphan-settler doctrine (P23.5): a pointer-up is not guaranteed to
+/// arrive — the panel can close, the tool can change, a detached window can lose
+/// pointer capture — so every command that touches the journal calls this first
+/// and the dabs already on screen become a real, undoable edit.
+///
+/// **Settle, not abandon**, everywhere except `dcc_close`, which frees the
+/// session in the same call and therefore has nothing to settle *into*; see the
+/// note there. The logic itself is `inf_editor_core::dcc::settle_drag`, in Ring 1,
+/// because a `#[tauri::command]` cannot be driven from a test and this is the
+/// rule the whole doctrine rests on.
+fn settle(doc: &mut DccDoc, session: &mut MeshSession) -> Option<String> {
+    let pending = doc.pending.take();
+    dcc::settle_drag(session, &mut doc.selection, doc.mode, pending)
 }
 
 /// Bring the selection up to the session's stamp, the only way a caller is
@@ -280,6 +355,9 @@ pub async fn dcc_open(
             knife: Vec::new(),
             last_edge: None,
             preview: PreviewCache::new(),
+            pending: None,
+            drag_snap: 0.0,
+            gizmo: None,
         };
         let dto = doc_dto(&doc, &session);
         s.docs.insert(doc_id.clone(), doc);
@@ -302,6 +380,22 @@ pub async fn dcc_open(
 ///
 /// Idempotent: closing an asset with no open document is a no-op, which is what
 /// lets the frontend send it speculatively during that race.
+///
+/// # This door ABANDONS a drag in flight, and every other door settles one
+///
+/// The orphan-settler doctrine (P21.3, applied to gestures in P23.5) says a
+/// half-finished interaction is settled deliberately or abandoned deliberately —
+/// never merely dropped. Every other command here settles, because the dabs are
+/// the author's work and are already on screen.
+///
+/// **Close is the exception, and it has to be.** `DccState::close` frees the
+/// `DccDoc` and the `MeshSession` together, in this call: an op applied first
+/// would land in a journal that is destroyed a line later, so it could never be
+/// undone, saved, or seen. A settle here is not a smaller loss than an abandon —
+/// it is the same loss with a wasted `Mesh::transact` in front of it. Dropping
+/// `pending` with the document is therefore the decision, not the oversight, and
+/// `a_close_abandons_a_drag_while_every_other_door_settles_it` is what stops it
+/// quietly becoming the other one.
 #[tauri::command]
 pub async fn dcc_close(asset_id: String, state: State<'_, DccState>) -> Result<(), String> {
     let id: AssetId = asset_id.parse().map_err(|e| format!("bad asset id: {e}"))?;
@@ -332,6 +426,9 @@ pub async fn dcc_apply(
 ) -> Result<DccApplyDto, String> {
     let out = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
+        // A tool press with a drag still in flight settles it first: the author's
+        // dabs become a real edit, and the tool runs on the mesh they can see.
+        settle(doc, session);
         sync(doc, session);
         let ops = build_ops(doc, session, &tool)?;
         if ops.is_empty() {
@@ -475,45 +572,37 @@ fn build_ops(doc: &DccDoc, session: &MeshSession, tool: &DccToolDto) -> Result<V
                 coord: *coord,
             }]
         }
-        DccToolDto::Translate { delta } => {
-            if verts.is_empty() {
-                Vec::new()
-            } else {
-                vec![Op::TranslateVerts {
-                    verts,
-                    delta: *delta,
-                }]
-            }
-        }
+        // **Both translate tools go through `dcc::transform_ops`**, which is the
+        // same function the dragged gizmo commits through (P23.5). That is the
+        // whole of "the numeric path and the direct-manipulation path produce
+        // identical ops": not two implementations kept in step by a test, but one
+        // implementation with a test that says so at the product boundary
+        // (`the_gizmo_and_the_numeric_tool_journal_the_same_op`).
+        DccToolDto::Translate { delta } => dcc::transform_ops(
+            mesh,
+            &doc.selection,
+            doc.mode,
+            // A hard translate is pivot-free; the pivot is only read by the
+            // rotate and scale forms.
+            glam::DVec3::ZERO,
+            VertTransform::Translate(glam::DVec3::from_array(*delta)),
+            None,
+        ),
+        // One `TranslateVerts` per distinct weight, so the whole soft move is
+        // ordinary journal entries — and so an author who undoes gets their shape
+        // back rather than a partially-relaxed one.
         DccToolDto::SoftTranslate {
             delta,
             radius,
             falloff,
-        } => {
-            // One `TranslateVerts` per distinct weight, so the whole soft move is
-            // ordinary journal entries — and so an author who undoes gets their
-            // shape back rather than a partially-relaxed one.
-            let weights = doc
-                .selection
-                .soft_weights(mesh, doc.mode, *radius, falloff_of(*falloff));
-            if weights.is_empty() {
-                return Ok(Vec::new());
-            }
-            let mut by_weight: BTreeMap<u64, Vec<VertId>> = BTreeMap::new();
-            for (v, w) in weights {
-                by_weight.entry(w.to_bits()).or_default().push(v);
-            }
-            by_weight
-                .into_iter()
-                .map(|(bits, verts)| {
-                    let w = f64::from_bits(bits);
-                    Op::TranslateVerts {
-                        verts,
-                        delta: [delta[0] * w, delta[1] * w, delta[2] * w],
-                    }
-                })
-                .collect()
-        }
+        } => dcc::transform_ops(
+            mesh,
+            &doc.selection,
+            doc.mode,
+            glam::DVec3::ZERO,
+            VertTransform::Translate(glam::DVec3::from_array(*delta)),
+            Some((*radius, falloff_of(*falloff))),
+        ),
         DccToolDto::Delete => match doc.mode {
             SelectMode::Face => faces
                 .into_iter()
@@ -550,6 +639,7 @@ pub async fn dcc_select(
 ) -> Result<DccDocDto, String> {
     state.with(|s| {
         let (doc, session) = s.pair(&id)?;
+        settle(doc, session);
         sync(doc, session);
         let mesh = session.mesh();
         match action {
@@ -605,6 +695,7 @@ pub async fn dcc_pick(
 ) -> Result<DccDocDto, String> {
     state.with(|s| {
         let (doc, session) = s.pair(&id)?;
+        settle(doc, session);
         sync(doc, session);
         let mesh = session.mesh();
         let proj = Projector::new(doc.view, size.max(1));
@@ -649,6 +740,215 @@ pub async fn dcc_pick(
     })
 }
 
+// ── pointer drags: the sculpt brush and the component gizmo (P23.5) ────────
+
+/// Arm or disarm the transform gizmo.
+///
+/// Backend state, like the camera and the selection: the handles are drawn and
+/// hit-tested backend-side, so a panel-held copy of "which tool is on" would be a
+/// second opinion about what the pixels under the pointer mean.
+#[tauri::command]
+pub async fn dcc_set_gizmo(
+    id: String,
+    mode: Option<DccGizmoModeDto>,
+    state: State<'_, DccState>,
+) -> Result<DccDocDto, String> {
+    state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        settle(doc, session);
+        doc.gizmo = mode.map(gizmo_mode_of);
+        Ok(doc_dto(doc, session))
+    })
+}
+
+/// Begin a pointer drag — a sculpt stroke or a gizmo drag.
+///
+/// **A miss is not a refusal.** `grabbed: false` means the pointer found neither
+/// the surface (sculpt) nor a handle (gizmo), nothing is pending, and the panel
+/// should treat the gesture as a camera orbit. That is what lets one pointer
+/// button paint on the model and orbit off it without a modifier.
+#[tauri::command]
+pub async fn dcc_drag_begin(
+    app: AppHandle,
+    id: String,
+    drag: DccDragDto,
+    x: f64,
+    y: f64,
+    size: u32,
+    state: State<'_, DccState>,
+) -> Result<DccDragBeginDto, String> {
+    let out = state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        // A second `begin` without an `end` — a lost pointer-up — settles the
+        // first rather than discarding it.
+        settle(doc, session);
+        sync(doc, session);
+        let proj = Projector::new(doc.view, size.max(1));
+        let (px, py) = (x as f32, y as f32);
+        let (grabbed, handle) = match drag {
+            DccDragDto::Sculpt {
+                mode,
+                radius,
+                strength,
+                falloff,
+            } => match dcc::pick_surface(session.mesh(), &proj, px, py) {
+                Some((face, hit)) => {
+                    doc.pending = Some(PendingDrag::Stroke(StrokeInFlight {
+                        mode: sculpt_mode_of(mode),
+                        radius,
+                        strength,
+                        falloff: kernel_falloff_of(falloff),
+                        path: vec![hit],
+                        last_normal: inf_dcc::face_normal(session.mesh(), face)
+                            .unwrap_or(glam::DVec3::Y),
+                    }));
+                    (true, None)
+                }
+                None => (false, None),
+            },
+            DccDragDto::Gizmo {
+                mode,
+                snap,
+                soft_radius,
+                falloff,
+            } => {
+                let gmode = gizmo_mode_of(mode);
+                doc.gizmo = Some(gmode);
+                let Some(pivot) = dcc::gizmo_pivot(session.mesh(), &doc.selection, doc.mode) else {
+                    return Ok(DccDragBeginDto {
+                        grabbed: false,
+                        handle: None,
+                        doc: doc_dto(doc, session),
+                    });
+                };
+                match (
+                    dcc::pick_gizmo(&proj, doc.view, pivot, gmode, px, py),
+                    proj.ray(px, py),
+                ) {
+                    (Some(axis), Some((ro, rd))) => {
+                        let origin =
+                            glam::Vec3::new(pivot.x as f32, pivot.y as f32, pivot.z as f32);
+                        doc.drag_snap = snap as f32;
+                        doc.pending = Some(PendingDrag::Gizmo(Box::new(GizmoInFlight {
+                            drag: GizmoDrag::begin(
+                                gmode,
+                                axis,
+                                glam::Quat::IDENTITY,
+                                origin,
+                                ro,
+                                rd,
+                            ),
+                            pivot,
+                            // Zero until the first move: a click that never
+                            // dragged must journal nothing.
+                            xform: match gmode {
+                                GizmoMode::Translate => VertTransform::Translate(glam::DVec3::ZERO),
+                                GizmoMode::Rotate => VertTransform::Rotate {
+                                    axis: glam::DVec3::Y,
+                                    radians: 0.0,
+                                },
+                                GizmoMode::Scale => VertTransform::Scale(glam::DVec3::ONE),
+                            },
+                            soft: (soft_radius > 0.0).then(|| (soft_radius, falloff_of(falloff))),
+                        })));
+                        (true, Some(format!("{axis:?}")))
+                    }
+                    _ => (false, None),
+                }
+            }
+        };
+        Ok(DccDragBeginDto {
+            grabbed,
+            handle,
+            doc: doc_dto(doc, session),
+        })
+    })?;
+    let _ = app.emit("dcc://sync", id);
+    Ok(out)
+}
+
+/// Extend the drag in flight. Cheap on purpose: it appends a point (or updates a
+/// transform) and returns nothing, because the panel's next `dcc_preview` is what
+/// shows the result and a document round trip per pointer-move would double the
+/// bridge traffic of a drag.
+///
+/// A move that finds nothing is **skipped**, not an error: a sculpt drag that
+/// wanders off the silhouette and back must not tear the stroke in two, and a
+/// gizmo ray that cannot be built leaves the last transform standing.
+#[tauri::command]
+pub async fn dcc_drag_move(
+    id: String,
+    x: f64,
+    y: f64,
+    size: u32,
+    state: State<'_, DccState>,
+) -> Result<(), String> {
+    state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        let proj = Projector::new(doc.view, size.max(1));
+        let (px, py) = (x as f32, y as f32);
+        let snap = doc.drag_snap;
+        match doc.pending.as_mut() {
+            Some(PendingDrag::Stroke(stroke)) => {
+                if let Some((face, hit)) = dcc::pick_surface(session.mesh(), &proj, px, py) {
+                    stroke.path.push(hit);
+                    if let Some(n) = inf_dcc::face_normal(session.mesh(), face) {
+                        stroke.last_normal = n;
+                    }
+                }
+            }
+            Some(PendingDrag::Gizmo(g)) => {
+                if let Some((ro, rd)) = proj.ray(px, py) {
+                    g.xform = VertTransform::from_gizmo(g.drag.update(ro, rd, snap));
+                }
+            }
+            None => {}
+        }
+        Ok(())
+    })
+}
+
+/// Finish the drag: **one journal entry** for the whole gesture.
+#[tauri::command]
+pub async fn dcc_drag_end(
+    app: AppHandle,
+    id: String,
+    state: State<'_, DccState>,
+) -> Result<DccApplyDto, String> {
+    let out = state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        let refusal = settle(doc, session);
+        Ok(DccApplyDto {
+            ok: refusal.is_none(),
+            refusal,
+            doc: doc_dto(doc, session),
+        })
+    })?;
+    let _ = app.emit("dcc://sync", id);
+    Ok(out)
+}
+
+/// Throw the drag in flight away — the author's explicit "no" (Escape).
+///
+/// The **only** deliberate abandon besides `dcc_close`, and it is deliberate in
+/// the other direction: an author who presses Escape has said the gesture was a
+/// mistake, and settling it anyway would make Escape mean "commit and then
+/// undo".
+#[tauri::command]
+pub async fn dcc_drag_cancel(
+    app: AppHandle,
+    id: String,
+    state: State<'_, DccState>,
+) -> Result<DccDocDto, String> {
+    let dto = state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        doc.pending = None;
+        Ok(doc_dto(doc, session))
+    })?;
+    let _ = app.emit("dcc://sync", id);
+    Ok(dto)
+}
+
 /// Orbit / dolly the preview camera. Degrees and metres.
 #[tauri::command]
 pub async fn dcc_orbit(
@@ -689,6 +989,9 @@ pub async fn dcc_undo(
 ) -> Result<DccDocDto, String> {
     let dto = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
+        // Settle FIRST, so Ctrl+Z during a drag undoes that drag rather than the
+        // edit before it and then losing the drag entirely.
+        settle(doc, session);
         session.undo();
         sync(doc, session);
         Ok(doc_dto(doc, session))
@@ -706,6 +1009,7 @@ pub async fn dcc_redo(
 ) -> Result<DccDocDto, String> {
     let dto = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
+        settle(doc, session);
         session.redo();
         sync(doc, session);
         Ok(doc_dto(doc, session))
@@ -731,12 +1035,40 @@ pub async fn dcc_preview(
     // Everything CPU-side under the store lock, then render outside it: the GPU
     // call is the long one and nothing else in this module needs the store while
     // it runs.
-    let (geo, mesh_copy, stamp, view, selection, mode) = state.with(|s| {
+    #[allow(clippy::type_complexity)]
+    let (geo, mesh_copy, stamp, view, selection, mode, brush, gizmo) = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
         sync(doc, session);
         // Cached on the generation stamp: an orbit re-renders without
-        // re-tessellating and without cloning the mesh (P23.4 audit — M6).
-        let (geo, mesh) = doc.preview.get(session);
+        // re-tessellating and without cloning the mesh (P23.4 audit — M6). With
+        // a drag in flight the uncommitted side channel takes over, keyed on the
+        // drag's own shape so an orbit mid-stroke is still free
+        // (`PreviewCache::get_with_pending`, and the cost is measured there).
+        let (geo, mesh) =
+            doc.preview
+                .get_with_pending(session, &doc.selection, doc.mode, doc.pending.as_ref());
+        // A brush ring while a stroke is live. **Only while it is live**: a hover
+        // ring would need a pointer-move round trip the panel does not make, and
+        // it is a stated remainder rather than a silently missing feature.
+        let brush = match &doc.pending {
+            Some(PendingDrag::Stroke(st)) => {
+                st.path.last().map(|&c| (c, st.last_normal, st.radius))
+            }
+            _ => None,
+        };
+        // The gizmo is drawn against the COMMITTED selection's pivot, which is
+        // where the drag was begun — recomputing it from the scratch mesh would
+        // make the handle chase the geometry it is moving.
+        let gizmo = doc
+            .gizmo
+            .zip(dcc::gizmo_pivot(session.mesh(), &doc.selection, doc.mode))
+            .map(|(g, p)| {
+                let active = match &doc.pending {
+                    Some(PendingDrag::Gizmo(d)) => Some(d.drag.axis),
+                    _ => None,
+                };
+                (g, p, active)
+            });
         Ok((
             geo,
             mesh,
@@ -744,6 +1076,8 @@ pub async fn dcc_preview(
             doc.view,
             doc.selection.clone(),
             doc.mode,
+            brush,
+            gizmo,
         ))
     })?;
 
@@ -786,6 +1120,14 @@ pub async fn dcc_preview(
         mode,
         &OverlayStyle::default(),
     );
+    // Handles under the brush ring: the ring follows the pointer and must never
+    // be the thing hidden.
+    if let Some((gmode, pivot, active)) = gizmo {
+        dcc::draw_gizmo(&mut rgba, size, &proj, view, pivot, gmode, active);
+    }
+    if let Some((centre, normal, radius)) = brush {
+        dcc::draw_brush_ring(&mut rgba, size, &proj, centre, normal, radius, BRUSH_RING);
+    }
     let png = encode_png_fast(size, &rgba)?;
     Ok(DccPreviewDto {
         image: Some(format!(
@@ -814,6 +1156,9 @@ pub async fn dcc_save(
 ) -> Result<DccSaveDto, String> {
     let (asset, mesh, generation) = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
+        // A save with a stroke in flight writes the stroke: the author can see it
+        // on screen, so a file that did not contain it would be a save that lied.
+        settle(doc, session);
         Ok((doc.asset, session.mesh().clone(), session.generation()))
     })?;
 
@@ -926,6 +1271,7 @@ pub async fn dcc_merge_asset(
 
     let out = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
+        settle(doc, session);
         sync(doc, session);
         let here = dcc::tessellate(session.mesh()).bounds;
         let there = dcc::tessellate(&incoming.mesh).bounds;
@@ -978,6 +1324,9 @@ mod tests {
                         knife: Vec::new(),
                         last_edge: None,
                         preview: PreviewCache::new(),
+                        pending: None,
+                        drag_snap: 0.0,
+                        gizmo: None,
                     },
                 );
                 s.journals.insert(id.to_string(), session);
@@ -1137,6 +1486,199 @@ mod tests {
                 // "unsaved edits" rather than "different bytes".
                 session.undo();
                 assert!(doc_dto(doc, session).dirty);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    // ── P23.5: drags, settlers, and the gizmo/numeric equivalence ──────────
+
+    /// A stroke over the first vertex of the seeded mesh, ready to settle.
+    fn stroke_of(session: &MeshSession) -> PendingDrag {
+        let start = session
+            .mesh()
+            .position(session.mesh().vert_ids().next().expect("a vertex"))
+            .expect("live");
+        PendingDrag::Stroke(StrokeInFlight {
+            mode: inf_dcc::SculptMode::Draw,
+            radius: 0.9,
+            strength: 0.1,
+            falloff: inf_dcc::SculptFalloff::Smooth,
+            path: (0..5)
+                .map(|i| start + glam::DVec3::X * (i as f64 * 0.1))
+                .collect(),
+            last_normal: glam::DVec3::Y,
+        })
+    }
+
+    #[test]
+    fn every_journal_door_settles_a_drag_in_flight() {
+        // The orphan-settler doctrine, measured at the door rather than asserted
+        // in a comment: a stroke still in flight when the author presses a tool,
+        // changes selection, undoes or saves becomes ONE journalled edit first.
+        let state = DccState::default();
+        seed(&state, "dcc:1", inf_dcc::cube(1.0));
+        state
+            .with(|s| {
+                let (doc, session) = s.pair("dcc:1")?;
+                doc.pending = Some(stroke_of(session));
+                let before = session.mesh().encoded();
+                assert_eq!(settle(doc, session), None);
+                assert_eq!(session.ops().len(), 1, "one entry for the whole stroke");
+                assert!(doc.pending.is_none(), "and the slot is empty afterwards");
+                assert_ne!(session.mesh().encoded(), before);
+                // Settling again is a no-op, which is what makes calling it at
+                // every door cheap enough to actually do.
+                assert_eq!(settle(doc, session), None);
+                assert_eq!(session.ops().len(), 1);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_settled_stroke_keeps_the_selection_it_was_painted_on() {
+        // Every op a drag makes is `op_preserves_ids`, so the settle CARRIES the
+        // selection. Dropping it would deselect the face under the brush on every
+        // tool switch — which is what `sync` would have done if `settle` had not
+        // been the thing that ran first.
+        let state = DccState::default();
+        seed(&state, "dcc:1", inf_dcc::cube(1.0));
+        state
+            .with(|s| {
+                let (doc, session) = s.pair("dcc:1")?;
+                let f = session.mesh().face_ids().next().unwrap();
+                doc.selection.set_face(f, true);
+                doc.pending = Some(stroke_of(session));
+                settle(doc, session);
+                sync(doc, session);
+                assert_eq!(doc.selection.len(SelectMode::Face), 1);
+                assert!(doc.selection.contains_face(f));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn closing_abandons_a_drag_and_that_is_the_documented_exception() {
+        // The other half of the doctrine. `DccState::close` frees the doc and the
+        // journal together, so an op applied first could never be undone, saved
+        // or seen — the abandon is the decision. This test is what stops it
+        // quietly becoming a settle, and what stops the settle above quietly
+        // becoming an abandon.
+        let state = DccState::default();
+        seed(&state, "dcc:1", inf_dcc::cube(1.0));
+        let before = state
+            .with(|s| {
+                let (doc, session) = s.pair("dcc:1")?;
+                doc.pending = Some(stroke_of(session));
+                Ok(session.mesh().encoded())
+            })
+            .unwrap();
+        state.close("dcc:1").unwrap();
+        state
+            .with(|s| {
+                assert!(s.docs.is_empty(), "doc freed");
+                assert!(s.journals.is_empty(), "journal freed, drag and all");
+                Ok(())
+            })
+            .unwrap();
+        assert!(!before.is_empty());
+    }
+
+    #[test]
+    fn the_gizmo_and_the_numeric_tool_journal_the_same_op() {
+        // Deliverable 2's contract at the PRODUCT boundary, not just in Ring 1:
+        // `build_ops` is what a toolbar press goes through and `PendingDrag::ops`
+        // is what a released handle goes through, and for the same delta the two
+        // must produce byte-equal journal entries. A gizmo that quietly emitted a
+        // different op would make undo behave differently depending on how the
+        // author moved something.
+        let state = DccState::default();
+        seed(&state, "dcc:1", inf_dcc::cube(1.0));
+        state
+            .with(|s| {
+                let (doc, session) = s.pair("dcc:1")?;
+                let f = session.mesh().face_ids().next().unwrap();
+                doc.selection.set_face(f, true);
+                let delta = [0.25, 0.0, 0.0];
+
+                let numeric = build_ops(doc, session, &DccToolDto::Translate { delta })?;
+                let pivot =
+                    dcc::gizmo_pivot(session.mesh(), &doc.selection, doc.mode).expect("a pivot");
+                let dragged = PendingDrag::Gizmo(Box::new(GizmoInFlight {
+                    drag: GizmoDrag::begin(
+                        GizmoMode::Translate,
+                        inf_editor_core::dcc::GizmoAxis::X,
+                        glam::Quat::IDENTITY,
+                        glam::Vec3::ZERO,
+                        glam::Vec3::new(0.0, 0.0, 5.0),
+                        glam::Vec3::new(0.0, 0.0, -1.0),
+                    ),
+                    pivot,
+                    xform: VertTransform::Translate(glam::DVec3::from_array(delta)),
+                    soft: None,
+                }))
+                .ops(session.mesh(), &doc.selection, doc.mode);
+
+                assert_eq!(numeric, dragged, "the twin tools disagree");
+                assert_eq!(numeric.len(), 1);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_click_that_never_dragged_journals_nothing() {
+        let state = DccState::default();
+        seed(&state, "dcc:1", inf_dcc::cube(1.0));
+        state
+            .with(|s| {
+                let (doc, session) = s.pair("dcc:1")?;
+                for f in session.mesh().face_ids().collect::<Vec<_>>() {
+                    doc.selection.set_face(f, true);
+                }
+                let pivot =
+                    dcc::gizmo_pivot(session.mesh(), &doc.selection, doc.mode).expect("a pivot");
+                doc.pending = Some(PendingDrag::Gizmo(Box::new(GizmoInFlight {
+                    drag: GizmoDrag::begin(
+                        GizmoMode::Translate,
+                        inf_editor_core::dcc::GizmoAxis::X,
+                        glam::Quat::IDENTITY,
+                        glam::Vec3::ZERO,
+                        glam::Vec3::new(0.0, 0.0, 5.0),
+                        glam::Vec3::new(0.0, 0.0, -1.0),
+                    ),
+                    pivot,
+                    xform: VertTransform::Translate(glam::DVec3::ZERO),
+                    soft: None,
+                })));
+                assert_eq!(settle(doc, session), None);
+                assert_eq!(session.ops().len(), 0, "an undo step for a click");
+                assert!(!doc_dto(doc, session).dragging);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn the_document_reports_the_drag_the_panel_owes_an_end_for() {
+        let state = DccState::default();
+        seed(&state, "dcc:1", inf_dcc::cube(1.0));
+        state
+            .with(|s| {
+                let (doc, session) = s.pair("dcc:1")?;
+                assert!(!doc_dto(doc, session).dragging);
+                doc.pending = Some(stroke_of(session));
+                let dto = doc_dto(doc, session);
+                assert!(dto.dragging);
+                assert_eq!(dto.drag_points, 5);
+                assert_eq!(dto.gizmo, None);
+                doc.gizmo = Some(GizmoMode::Rotate);
+                assert_eq!(
+                    doc_dto(doc, session).gizmo,
+                    Some(inf_editor_core::ipc::DccGizmoModeDto::Rotate)
+                );
                 Ok(())
             })
             .unwrap();

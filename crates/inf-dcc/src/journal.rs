@@ -428,6 +428,7 @@ mod tests {
     use super::*;
     use crate::build::{cube, plane};
     use crate::model::{KnifePoint, MergeTarget, MirrorAxis};
+    use crate::sculpt::{SculptFalloff, SculptMode};
     use crate::topo::{CornerData, FaceId, HalfId, VertId};
     use crate::validate::validate;
 
@@ -672,6 +673,13 @@ mod tests {
             Op::MergeVerts { .. } => 19,
             Op::SubdivideFaces { .. } => 20,
             Op::Mirror { .. } => 21,
+            // P23.5 appended THREE more, in this order, at the next free indices.
+            // Same rule and the same reason: nothing above moved, so every byte
+            // string pinned by the earlier batches is unchanged and
+            // `SessionSave::CURRENT_VERSION` does not have to move for this.
+            Op::Sculpt { .. } => 22,
+            Op::RotateVerts { .. } => 23,
+            Op::ScaleVerts { .. } => 24,
         }
     }
 
@@ -700,6 +708,24 @@ mod tests {
                     KnifePoint::Edge { .. } => 1,
                 })
                 .collect(),
+            // P23.5's stroke carries TWO nested enums, and both of them change
+            // what a replayed session does rather than whether it decodes: swap
+            // `Draw` and `Grab` and a saved stroke becomes a different edit with
+            // no error anywhere, exactly like `MergeTarget`.
+            Op::Sculpt { mode, falloff, .. } => vec![
+                match mode {
+                    SculptMode::Draw => 0,
+                    SculptMode::Smooth => 1,
+                    SculptMode::Flatten => 2,
+                    SculptMode::Grab => 3,
+                },
+                match falloff {
+                    SculptFalloff::Smooth => 0,
+                    SculptFalloff::Sphere => 1,
+                    SculptFalloff::Linear => 2,
+                    SculptFalloff::Sharp => 3,
+                },
+            ],
             // **Exhaustive, no wildcard.** A `_ =>` here reads as "these carry no
             // nested enum" and stays true only until one of them does — at which
             // point this function returns an empty vector for it and the freeze
@@ -723,7 +749,9 @@ mod tests {
             | Op::InsetFaces { .. }
             | Op::BevelEdges { .. }
             | Op::LoopCut { .. }
-            | Op::SubdivideFaces { .. } => Vec::new(),
+            | Op::SubdivideFaces { .. }
+            | Op::RotateVerts { .. }
+            | Op::ScaleVerts { .. } => Vec::new(),
         }
     }
 
@@ -802,8 +830,26 @@ mod tests {
                 axis: MirrorAxis::X,
                 coord: 0.0,
             },
+            Op::Sculpt {
+                mode: SculptMode::Draw,
+                dabs: vec![],
+                radius: 1.0,
+                strength: 0.1,
+                falloff: SculptFalloff::Smooth,
+            },
+            Op::RotateVerts {
+                verts: vec![],
+                pivot: [0.0; 3],
+                axis: [0.0, 1.0, 0.0],
+                radians: 0.0,
+            },
+            Op::ScaleVerts {
+                verts: vec![],
+                pivot: [0.0; 3],
+                factor: [1.0; 3],
+            },
         ];
-        assert_eq!(every.len(), 22, "one sample per variant");
+        assert_eq!(every.len(), 25, "one sample per variant");
         let cfg = bincode::config::standard();
         for op in &every {
             let bytes = bincode::serde::encode_to_vec(op, cfg).unwrap();
@@ -870,6 +916,36 @@ mod tests {
         let bytes = bincode::serde::encode_to_vec(&knife, cfg).unwrap();
         assert_eq!((bytes[0], bytes[1], bytes[2]), (18, 2, 0), "Knife header");
         assert_eq!(frozen_nested(&knife), vec![0, 1]);
+
+        // P23.5's stroke: `[22, mode, len(dabs)=0, radius…, strength…, falloff]`.
+        // The mode is the second byte and the falloff is the last one, so both
+        // ends of the record are pinned without asserting on the float encoding
+        // in between.
+        for (mode, tag) in [
+            (SculptMode::Draw, 0u8),
+            (SculptMode::Smooth, 1),
+            (SculptMode::Flatten, 2),
+            (SculptMode::Grab, 3),
+        ] {
+            for (falloff, ftag) in [
+                (SculptFalloff::Smooth, 0u8),
+                (SculptFalloff::Sphere, 1),
+                (SculptFalloff::Linear, 2),
+                (SculptFalloff::Sharp, 3),
+            ] {
+                let op = Op::Sculpt {
+                    mode,
+                    dabs: vec![],
+                    radius: 1.0,
+                    strength: 0.5,
+                    falloff,
+                };
+                let b = bincode::serde::encode_to_vec(&op, cfg).unwrap();
+                assert_eq!((b[0], b[1], b[2]), (22, tag, 0), "{op:?} moved on the wire");
+                assert_eq!(*b.last().expect("a non-empty record"), ftag);
+                assert_eq!(frozen_nested(&op), vec![tag, ftag]);
+            }
+        }
     }
 
     #[test]

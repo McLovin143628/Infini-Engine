@@ -35,7 +35,7 @@
 /// not cover it, and a new module is exactly where the next `.sin()` or `HashMap`
 /// would land. `every_source_file_is_covered` reads the directory and fails if
 /// this list has fallen behind, so the coverage cannot rot silently.
-const SOURCES: [(&str, &str); 8] = [
+const SOURCES: [(&str, &str); 10] = [
     ("lib.rs", include_str!("../src/lib.rs")),
     ("topo.rs", include_str!("../src/topo.rs")),
     ("validate.rs", include_str!("../src/validate.rs")),
@@ -44,6 +44,8 @@ const SOURCES: [(&str, &str); 8] = [
     ("ops.rs", include_str!("../src/ops.rs")),
     ("model.rs", include_str!("../src/model.rs")),
     ("select.rs", include_str!("../src/select.rs")),
+    ("sculpt.rs", include_str!("../src/sculpt.rs")),
+    ("xform.rs", include_str!("../src/xform.rs")),
 ];
 
 const JOURNAL: &str = include_str!("../src/journal.rs");
@@ -67,9 +69,30 @@ fn no_std_transcendentals_anywhere() {
     // `sqrt` is absent from this list on purpose: it is exactly specified by
     // IEEE-754 and therefore bit-portable, which is why the tangent frame may
     // normalize freely while the primitive generators may not call `sin`.
+    // The four glam constructors at the end are the P23.5 addition, and they are
+    // the reason the ban list needed to grow rather than merely be re-run: a
+    // rotation op is committed content, and `DQuat::from_axis_angle` /
+    // `DMat3::from_axis_angle` reach `sin_cos` **inside another crate**, where no
+    // grep of this one would ever see them. `crate::xform` builds its rotation by
+    // hand from `inf_math`'s portable pair for exactly that reason.
     let banned = [
-        ".sin()", ".cos()", ".tan()", ".cbrt()", ".powf(", ".atan2(", ".exp()", ".ln()",
-        "f64::sin", "f64::cos", "f32::sin", "f32::cos",
+        ".sin()",
+        ".cos()",
+        ".tan()",
+        ".cbrt()",
+        ".powf(",
+        ".atan2(",
+        ".exp()",
+        ".ln()",
+        "f64::sin",
+        "f64::cos",
+        "f32::sin",
+        "f32::cos",
+        ".sin_cos()",
+        "from_axis_angle",
+        "from_rotation_x",
+        "from_rotation_y",
+        "from_rotation_z",
     ];
     for (name, src) in SOURCES
         .iter()
@@ -99,6 +122,15 @@ fn the_primitives_go_through_inf_maths_portable_trig() {
     assert!(
         build.contains("pcos64("),
         "build.rs must use inf_math::pcos64"
+    );
+    // The other crate with a curve in it (P23.5): a gizmo rotation is committed
+    // content, so `xform.rs` must be *calling* the portable pair and not merely
+    // failing to call `sin`. Without this half, deleting the rotation entirely
+    // would satisfy the ban.
+    let (_, xform) = SOURCES[9];
+    assert!(
+        xform.contains("psin64(") && xform.contains("pcos64("),
+        "xform.rs must build its rotation from inf_math's portable trig"
     );
 }
 
@@ -161,6 +193,8 @@ fn f32_lives_only_at_the_asset_boundary() {
         SOURCES[5],
         SOURCES[6],
         SOURCES[7],
+        SOURCES[8],
+        SOURCES[9],
         ("journal.rs", JOURNAL),
     ] {
         let hits = code_hits(src, "f32");
@@ -255,7 +289,7 @@ fn the_id_preservation_classifier_has_no_wildcard_and_names_every_op() {
         .filter(|v| !v.is_empty())
         .map(str::to_string)
         .collect();
-    assert_eq!(variants.len(), 22, "found {variants:?}");
+    assert_eq!(variants.len(), 25, "found {variants:?}");
     let joined = body.join(" ");
     for v in &variants {
         assert!(

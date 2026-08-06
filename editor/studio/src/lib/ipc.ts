@@ -33,6 +33,9 @@ import type { MixerConfigDto } from "../bindings/MixerConfigDto";
 import type { DataAssetDto } from "../bindings/DataAssetDto";
 import type { DccApplyDto } from "../bindings/DccApplyDto";
 import type { DccDocDto } from "../bindings/DccDocDto";
+import type { DccDragBeginDto } from "../bindings/DccDragBeginDto";
+import type { DccDragDto } from "../bindings/DccDragDto";
+import type { DccGizmoModeDto } from "../bindings/DccGizmoModeDto";
 import type { DccPreviewDto } from "../bindings/DccPreviewDto";
 import type { DccSaveDto } from "../bindings/DccSaveDto";
 import type { DccSelectDto } from "../bindings/DccSelectDto";
@@ -883,6 +886,37 @@ export const dcc = {
   /** Drop another mesh asset in as a second component. */
   mergeAsset: (id: string, assetId: string): Promise<DccApplyDto> =>
     invoke<DccApplyDto>("dcc_merge_asset", { id, assetId }),
+
+  // ── pointer drags (P23.5): the sculpt brush and the component gizmo ──────
+  //
+  // One triple for both gestures, because they ARE one gesture with different
+  // arithmetic. The backend holds the drag; the panel owes it an `end` (or a
+  // `cancel`) — and if the panel disappears mid-drag, every other backend door
+  // settles the orphan rather than dropping it.
+
+  /** Arm or disarm the transform gizmo (`null` hides the handles). */
+  setGizmo: (id: string, mode: DccGizmoModeDto | null): Promise<DccDocDto> =>
+    invoke<DccDocDto>("dcc_set_gizmo", { id, mode }),
+  /**
+   * Start a drag. `grabbed: false` means the pointer found neither the surface
+   * nor a handle — **not** an error: it is the panel's cue to orbit instead,
+   * which is what lets one button paint on the model and orbit off it.
+   */
+  dragBegin: (
+    id: string,
+    drag: DccDragDto,
+    x: number,
+    y: number,
+    size: number,
+  ): Promise<DccDragBeginDto> =>
+    invoke<DccDragBeginDto>("dcc_drag_begin", { id, drag, x, y, size }),
+  /** Extend the drag. Returns nothing: the next `preview` is what shows it. */
+  dragMove: (id: string, x: number, y: number, size: number): Promise<void> =>
+    invoke("dcc_drag_move", { id, x, y, size }),
+  /** Finish the drag — ONE journal entry for the whole gesture. */
+  dragEnd: (id: string): Promise<DccApplyDto> => invoke<DccApplyDto>("dcc_drag_end", { id }),
+  /** Throw the drag away (Escape). The author's explicit "no". */
+  dragCancel: (id: string): Promise<DccDocDto> => invoke<DccDocDto>("dcc_drag_cancel", { id }),
 };
 
 /**

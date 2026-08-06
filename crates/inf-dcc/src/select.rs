@@ -88,7 +88,14 @@ pub fn op_preserves_ids(op: &Op) -> bool {
         | Op::SetCornerUv { .. }
         | Op::SetCornerNormal { .. }
         | Op::SetEdgeSharp { .. }
-        | Op::SetFaceSlot { .. } => true,
+        | Op::SetFaceSlot { .. }
+        // P23.5: a stroke and a gizmo drag move POSITIONS. No face is rebuilt,
+        // no slot is freed, so every live id still names what it named — which
+        // is exactly what makes sculpting usable: an author who drags the brush
+        // across a selected region must still have it selected afterwards.
+        | Op::Sculpt { .. }
+        | Op::RotateVerts { .. }
+        | Op::ScaleVerts { .. } => true,
         // Everything else frees slots (which the LIFO free list then hands back
         // to something different) or rebuilds a patch outright.
         Op::RemoveVertex { .. }
@@ -933,7 +940,7 @@ mod tests {
         // that side, and `determinism_law`'s source gate proves the function
         // still enumerates every variant instead of defaulting through a
         // wildcard. Three different failures, three different gates.
-        let hand: [(Op, bool); 22] = [
+        let hand: [(Op, bool); 25] = [
             (Op::AddVertex { position: [0.0; 3] }, true),
             (Op::RemoveVertex { vert: VertId(0) }, false),
             (
@@ -1054,6 +1061,33 @@ mod tests {
                 },
                 false,
             ),
+            (
+                Op::Sculpt {
+                    mode: crate::sculpt::SculptMode::Draw,
+                    dabs: vec![],
+                    radius: 1.0,
+                    strength: 0.1,
+                    falloff: crate::sculpt::SculptFalloff::Smooth,
+                },
+                true,
+            ),
+            (
+                Op::RotateVerts {
+                    verts: vec![],
+                    pivot: [0.0; 3],
+                    axis: [0.0, 1.0, 0.0],
+                    radians: 0.0,
+                },
+                true,
+            ),
+            (
+                Op::ScaleVerts {
+                    verts: vec![],
+                    pivot: [0.0; 3],
+                    factor: [1.0; 3],
+                },
+                true,
+            ),
         ];
         for (op, want) in &hand {
             assert_eq!(
@@ -1064,8 +1098,8 @@ mod tests {
         }
         assert_eq!(
             hand.iter().filter(|(_, w)| *w).count(),
-            6,
-            "six ops preserve ids; a seventh is a claim that needs its own proof"
+            9,
+            "nine ops preserve ids; a tenth is a claim that needs its own proof"
         );
     }
 

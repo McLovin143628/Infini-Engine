@@ -28,6 +28,11 @@ vi.mock("../../lib/ipc", () => ({
     preview: vi.fn(),
     save: vi.fn(),
     mergeAsset: vi.fn(),
+    setGizmo: vi.fn(),
+    dragBegin: vi.fn(),
+    dragMove: vi.fn(),
+    dragEnd: vi.fn(),
+    dragCancel: vi.fn(),
   },
   DCC_PREVIEW_SIZE: 256,
 }));
@@ -53,6 +58,9 @@ function docOf(assetId: string, over: Partial<DccDocDto> = {}): DccDocDto {
     dirty: false,
     generation: 1,
     knifePoints: 0,
+    dragging: false,
+    dragPoints: 0,
+    gizmo: null,
     import: {
       sourceVertices: 24,
       weldedPositions: 8,
@@ -374,5 +382,84 @@ describe("the close race (P23.4 re-audit — M-2/M-3)", () => {
     await useDccStore.getState().close("aaa");
     await useDccStore.getState().open("aaa");
     expect(entry("aaa").doc?.id).toBe("dcc:aaa");
+  });
+});
+
+describe("pointer drags (P23.5)", () => {
+  beforeEach(async () => {
+    await useDccStore.getState().open("aaa");
+    await useDccStore.getState().open("bbb");
+    vi.clearAllMocks();
+    mocked.preview.mockResolvedValue({ image: "data:image/png;base64,AA", error: null, size: 256 });
+  });
+
+  it("reports a MISS as a miss rather than as a refusal", () => {
+    // The distinction the whole tool rests on: a pointer that found neither the
+    // surface nor a handle is the panel's cue to ORBIT, and putting "missed" in
+    // the status bar as a refusal would train an author to ignore that line.
+    mocked.dragBegin.mockResolvedValue({ grabbed: false, handle: null, doc: docOf("aaa") });
+    return useDccStore
+      .getState()
+      .dragBegin("aaa", { kind: "sculpt", mode: "draw", radius: 0.3, strength: 0.05, falloff: "Smooth" }, 10, 20)
+      .then((grabbed) => {
+        expect(grabbed).toBe(false);
+        expect(entry("aaa").refusal).toBeNull();
+      });
+  });
+
+  it("passes the preview size both calls share, and adopts the returned document", async () => {
+    // The P23.4 rule, still true for drags: the projection is built from `size`,
+    // so a drag begun at one size against an image rendered at another lands
+    // somewhere else.
+    mocked.dragBegin.mockResolvedValue({
+      grabbed: true,
+      handle: "X",
+      doc: docOf("aaa", { dragging: true, dragPoints: 1 }),
+    });
+    const grabbed = await useDccStore
+      .getState()
+      .dragBegin("aaa", { kind: "gizmo", mode: "translate", snap: 0, softRadius: 0, falloff: "Smooth" }, 10, 20);
+    expect(grabbed).toBe(true);
+    expect(mocked.dragBegin).toHaveBeenCalledWith(
+      "dcc:aaa",
+      { kind: "gizmo", mode: "translate", snap: 0, softRadius: 0, falloff: "Smooth" },
+      10,
+      20,
+      256,
+    );
+    expect(entry("aaa").doc?.dragging).toBe(true);
+    expect(entry("bbb").doc?.dragging).toBe(false);
+  });
+
+  it("renders a frame per move without asking for a document", async () => {
+    // A move is the highest-frequency call in the panel. It returns nothing on
+    // purpose — the preview frame IS the feedback — so a drag costs one round
+    // trip per pointer-move rather than two.
+    mocked.dragMove.mockResolvedValue(undefined);
+    await useDccStore.getState().dragMove("aaa", 11, 22);
+    expect(mocked.dragMove).toHaveBeenCalledWith("dcc:aaa", 11, 22, 256);
+    expect(mocked.preview).toHaveBeenCalled();
+  });
+
+  it("surfaces a refusal from the settle, on the document that refused", async () => {
+    mocked.dragEnd.mockResolvedValue({
+      ok: false,
+      refusal: "a sculpted vertex position is not finite",
+      doc: docOf("aaa", { dragging: false }),
+    });
+    await useDccStore.getState().dragEnd("aaa");
+    expect(entry("aaa").refusal).toContain("not finite");
+    expect(entry("bbb").refusal).toBeNull();
+  });
+
+  it("cancelling clears the drag and arming the gizmo goes to the backend", async () => {
+    mocked.dragCancel.mockResolvedValue(docOf("aaa", { dragging: false }));
+    await useDccStore.getState().dragCancel("aaa");
+    expect(entry("aaa").doc?.dragging).toBe(false);
+
+    mocked.setGizmo.mockResolvedValue(docOf("aaa", { gizmo: "rotate" }));
+    await useDccStore.getState().setGizmo("aaa", "rotate");
+    expect(mocked.setGizmo).toHaveBeenCalledWith("dcc:aaa", "rotate");
+    expect(entry("aaa").doc?.gizmo).toBe("rotate");
   });
 });
