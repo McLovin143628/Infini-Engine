@@ -57,7 +57,7 @@ use inf_editor_core::dcc::{
 use inf_editor_core::ipc::{
     DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto, DccGizmoModeDto,
     DccImportDto, DccModeDto, DccPreviewDto, DccSaveDto, DccSculptModeDto, DccSelectDto,
-    DccToolDto, SculptFalloffDto,
+    DccToolDto, DccUnwrapDto, SculptFalloffDto,
 };
 use inf_editor_core::thumbnail::{encode_png_fast, PreviewView, Thumbnailer};
 use tauri::{AppHandle, Emitter, State};
@@ -147,11 +147,24 @@ impl DccState {
 
     /// Drop a document and its journal together — the whole point of the
     /// two-map shape (`graph_close`'s rule, and the leak it fixed).
-    fn close(&self, id: &str) -> Result<(), String> {
+    ///
+    /// Returns **whether a pointer drag was abandoned**. Not decoration: the
+    /// abandon is the one deliberate exception to the orphan-settler doctrine
+    /// (see [`dcc_close`]), and without a return value it is *unobservable* — the
+    /// doc and the journal are gone either way, so a test could not tell a close
+    /// that abandoned from one that settled, and the exception would be a comment
+    /// rather than a decision. It is also what the log line reports, because an
+    /// author whose strokes vanished with a panel deserves to find out why.
+    fn close(&self, id: &str) -> Result<bool, String> {
         self.with(|s| {
-            s.docs.remove(id);
+            let abandoned = s.docs.remove(id).is_some_and(|d| {
+                matches!(
+                    d.pending,
+                    Some(PendingDrag::Stroke(_)) | Some(PendingDrag::Gizmo(_))
+                )
+            });
             s.journals.remove(id);
-            Ok(())
+            Ok(abandoned)
         })
     }
 }
@@ -275,6 +288,8 @@ fn doc_dto(doc: &DccDoc, session: &MeshSession) -> DccDocDto {
             _ => 0,
         },
         gizmo: doc.gizmo.map(gizmo_mode_dto),
+        seams: inf_dcc::seam_count(mesh) as u32,
+        charts: inf_dcc::charts(mesh).len() as u32,
     }
 }
 
@@ -399,7 +414,12 @@ pub async fn dcc_open(
 #[tauri::command]
 pub async fn dcc_close(asset_id: String, state: State<'_, DccState>) -> Result<(), String> {
     let id: AssetId = asset_id.parse().map_err(|e| format!("bad asset id: {e}"))?;
-    state.close(&format!("dcc:{id}"))
+    if state.close(&format!("dcc:{id}"))? {
+        tracing::info!(
+            "the Model Editor for {id} closed with a drag in flight; it was              discarded (the session it would have been journalled into is gone)"
+        );
+    }
+    Ok(())
 }
 
 /// Every open document.
@@ -603,6 +623,12 @@ fn build_ops(doc: &DccDoc, session: &MeshSession, tool: &DccToolDto) -> Result<V
             VertTransform::Translate(glam::DVec3::from_array(*delta)),
             Some((*radius, falloff_of(*falloff))),
         ),
+        // One op per edge, so an undo peels one mark at a time — the same rule
+        // the per-face batch tools follow.
+        DccToolDto::Seam { seam } => edges
+            .into_iter()
+            .map(|half| Op::SetEdgeSeam { half, seam: *seam })
+            .collect(),
         DccToolDto::Delete => match doc.mode {
             SelectMode::Face => faces
                 .into_iter()
@@ -1238,6 +1264,107 @@ fn advisories(r: &ExportReport) -> Vec<String> {
     out
 }
 
+/// Unwrap the mesh: cut at the seams, parameterize each chart, pack, and journal
+/// the **result**.
+///
+/// The solver runs here and its output becomes one `Op::Unwrap`; replay does not
+/// re-solve (see `inf_dcc::uv` for why that is a decision and not an
+/// optimization). A refusal — a chart with no area, or no pair to pin — comes
+/// back as a value with the chart index in it.
+#[tauri::command]
+pub async fn dcc_unwrap(
+    app: AppHandle,
+    id: String,
+    state: State<'_, DccState>,
+) -> Result<DccUnwrapDto, String> {
+    let out = state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        settle(doc, session);
+        sync(doc, session);
+        match inf_dcc::unwrap(session.mesh()) {
+            Ok(unwrapped) => {
+                let report = unwrapped.report;
+                match session.apply(unwrapped.op) {
+                    Ok(_) => {
+                        // `Op::Unwrap` is a pure attribute write, so the ids the
+                        // author has selected still name what they named.
+                        doc.selection.carry(session.generation(), session.mesh());
+                        Ok(DccUnwrapDto {
+                            ok: true,
+                            refusal: None,
+                            charts: report.charts.len() as u32,
+                            corners: report.corners as u32,
+                            seams: report.seams as u32,
+                            worst_residual: report.worst_residual,
+                            doc: doc_dto(doc, session),
+                        })
+                    }
+                    Err(e) => Ok(DccUnwrapDto {
+                        ok: false,
+                        refusal: Some(refusal_text(&e)),
+                        charts: 0,
+                        corners: 0,
+                        seams: report.seams as u32,
+                        worst_residual: 0.0,
+                        doc: doc_dto(doc, session),
+                    }),
+                }
+            }
+            Err(e) => Ok(DccUnwrapDto {
+                ok: false,
+                refusal: Some(refusal_text(&e)),
+                charts: 0,
+                corners: 0,
+                seams: inf_dcc::seam_count(session.mesh()) as u32,
+                worst_residual: 0.0,
+                doc: doc_dto(doc, session),
+            }),
+        }
+    })?;
+    let _ = app.emit("dcc://sync", id);
+    Ok(out)
+}
+
+/// One frame of the **2D UV view**: the charts, the wireframe, the seams and the
+/// shared selection, composited on the CPU and encoded like the 3D preview.
+///
+/// No GPU at all — a UV layout is flat lines on a flat square — which is why this
+/// one cannot report "no adapter" and always has an image.
+#[tauri::command]
+pub async fn dcc_uv_preview(
+    id: String,
+    size: u32,
+    state: State<'_, DccState>,
+) -> Result<DccPreviewDto, String> {
+    let size = size.clamp(64, 1024);
+    let (mesh, selection, mode) = state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        sync(doc, session);
+        // The COMMITTED mesh, not the drag scratch: a sculpt moves positions and
+        // leaves UVs alone, so a drag changes nothing in this view and rendering
+        // the scratch would cost a tessellation for an identical picture.
+        Ok((session.mesh().clone(), doc.selection.clone(), doc.mode))
+    })?;
+    let mut rgba = vec![0u8; (size as usize) * (size as usize) * 4];
+    dcc::draw_uv_layout(
+        &mut rgba,
+        size,
+        &mesh,
+        &selection,
+        mode,
+        &dcc::UvStyle::default(),
+    );
+    let png = encode_png_fast(size, &rgba)?;
+    Ok(DccPreviewDto {
+        image: Some(format!(
+            "data:image/png;base64,{}",
+            super::assets::base64(&png)
+        )),
+        error: None,
+        size,
+    })
+}
+
 /// Drop another mesh asset into this document as a second component — the
 /// drag-and-drop modularity seed (see [`inf_editor_core::dcc::merge_into`] for
 /// exactly what v1 does and does not do).
@@ -1339,7 +1466,10 @@ mod tests {
     fn close_frees_the_doc_and_journal() {
         let state = DccState::default();
         seed(&state, "dcc:1", inf_dcc::cube(1.0));
-        state.close("dcc:1").unwrap();
+        assert!(
+            !state.close("dcc:1").unwrap(),
+            "nothing was in flight, so nothing was abandoned"
+        );
         state
             .with(|s| {
                 assert!(s.docs.is_empty(), "doc freed");
@@ -1575,7 +1705,10 @@ mod tests {
                 Ok(session.mesh().encoded())
             })
             .unwrap();
-        state.close("dcc:1").unwrap();
+        assert!(
+            state.close("dcc:1").unwrap(),
+            "the close must REPORT the abandon — without that the decision is              unobservable, and a close that settled instead would pass this test"
+        );
         state
             .with(|s| {
                 assert!(s.docs.is_empty(), "doc freed");

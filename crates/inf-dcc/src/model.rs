@@ -62,7 +62,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::export::newell;
 use crate::ops::{finite, lerp_corner, weld_impl, OpError, OpOutcome};
-use crate::topo::{CornerData, FaceId, HalfId, Mesh, VertId};
+use crate::topo::{CornerData, EdgeFlags, FaceId, HalfId, Mesh, VertId};
 
 /// The most cuts one [`crate::ops::Op::LoopCut`] may make.
 ///
@@ -352,6 +352,32 @@ fn sharpen(mesh: &mut Mesh, a: VertId, b: VertId) {
     }
 }
 
+/// The captured flags of the undirected edge `lo–hi`, or the default.
+///
+/// The lookup every op that *subdivides an edge* needs, so the pieces inherit
+/// what the parent had. Written once because it was written three times as a
+/// sharpness-only `any(|&(x, y, s)| s && …)` — which is exactly the shape that
+/// keeps one flag and drops the other when a second one arrives (P23.5: it did).
+pub(crate) fn flags_of(
+    captured: &[(VertId, VertId, EdgeFlags)],
+    lo: VertId,
+    hi: VertId,
+) -> EdgeFlags {
+    captured
+        .iter()
+        .find(|&&(x, y, _)| (x == lo && y == hi) || (x == hi && y == lo))
+        .map(|&(_, _, f)| f)
+        .unwrap_or_default()
+}
+
+/// Give the undirected edge `a–b` the flags a parent edge had, if it exists.
+fn inherit_flags(mesh: &mut Mesh, a: VertId, b: VertId, flags: EdgeFlags) {
+    if let Some(h) = mesh.find_half(a, b) {
+        mesh.set_sharp_pair(h, flags.sharp);
+        mesh.set_seam_pair(h, flags.seam);
+    }
+}
+
 // ── extrude ────────────────────────────────────────────────────────────────
 
 /// Extrude a face region along its own area-weighted normal.
@@ -400,7 +426,7 @@ pub(crate) fn extrude_faces(
             )
         })
         .collect();
-    let sharp = mesh.capture_sharp(&region.faces);
+    let sharp = mesh.capture_edge_flags(&region.faces);
 
     mesh.transact(|m| {
         // The displaced copies, allocated in ascending source order so the id
@@ -448,9 +474,9 @@ pub(crate) fn extrude_faces(
             }
         }
 
-        let moved: Vec<(VertId, VertId, bool)> =
+        let moved: Vec<(VertId, VertId, EdgeFlags)> =
             sharp.iter().map(|&(x, y, s)| (map(x), map(y), s)).collect();
-        m.apply_sharp(&moved);
+        m.apply_edge_flags(&moved);
         // The silhouette: the border edge and its copy read as hard, while the
         // *vertical* wall edges stay as they were — so extruding a ring of faces
         // off a cylinder keeps the barrel smooth and still gets a crisp rim.
@@ -734,7 +760,7 @@ fn inset_region(mesh: &mut Mesh, region: &Region, amount: f64) -> Result<OpOutco
             newell(mesh, f)
         })
         .collect();
-    let sharp = mesh.capture_sharp(&region.faces);
+    let sharp = mesh.capture_edge_flags(&region.faces);
 
     let mut inner: BTreeMap<VertId, VertId> = BTreeMap::new();
     for (&v, &p) in &moved {
@@ -773,10 +799,10 @@ fn inset_region(mesh: &mut Mesh, region: &Region, amount: f64) -> Result<OpOutco
     refuse_if_inverted(mesh, &ring, &ring_normals, "an inset amount", amount)?;
     let sites: Vec<(VertId, VertId)> = border.iter().map(|&(a, b, ..)| (a, b)).collect();
     refuse_if_edge_reversed(mesh, &sites, map, "an inset amount", amount)?;
-    let remapped: Vec<(VertId, VertId, bool)> =
+    let remapped: Vec<(VertId, VertId, EdgeFlags)> =
         sharp.iter().map(|&(x, y, s)| (map(x), map(y), s)).collect();
-    mesh.apply_sharp(&sharp);
-    mesh.apply_sharp(&remapped);
+    mesh.apply_edge_flags(&sharp);
+    mesh.apply_edge_flags(&remapped);
     mesh.finish_patch(&touched)?;
     Ok(OpOutcome {
         verts: inner.values().copied().collect(),
@@ -892,7 +918,7 @@ fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64) -> Result<OpOutcome, OpErr
     // The two faces the chamfer grows: an amount past the far side of either of
     // them folds it through itself, and the topology stays perfect.
     let normals = [newell(mesh, f1), newell(mesh, f2)];
-    let sharp = mesh.capture_sharp(&[f1, f2]);
+    let sharp = mesh.capture_edge_flags(&[f1, f2]);
     // Where a and b sit in each captured loop. `f1` holds a→b, `f2` holds b→a.
     let i1 = index_of(&c1.verts, a);
     let i2 = index_of(&c2.verts, b);
@@ -965,7 +991,7 @@ fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64) -> Result<OpOutcome, OpErr
     ];
     let _ = (&grown, &caps);
 
-    mesh.apply_sharp(&sharp);
+    mesh.apply_edge_flags(&sharp);
     if was_sharp {
         // The chamfer keeps the crease it replaced: a flat-shaded box beveled
         // stays flat-shaded, rather than acquiring a smooth band nobody asked for.
@@ -1088,7 +1114,7 @@ pub(crate) fn loop_cut(mesh: &mut Mesh, half: HalfId, cuts: u32) -> Result<OpOut
         .copied()
         .chain(fringe_faces.iter().copied())
         .collect();
-    let sharp = mesh.capture_sharp(&all);
+    let sharp = mesh.capture_edge_flags(&all);
 
     mesh.transact(|m| {
         for &f in &all {
@@ -1179,20 +1205,21 @@ pub(crate) fn loop_cut(mesh: &mut Mesh, half: HalfId, cuts: u32) -> Result<OpOut
             made.push(m.add_face_raw(&verts, &corners, c.slot)?);
         }
         let _ = &made;
-        m.apply_sharp(&sharp);
-        // A cut edge inherits the sharpness of the edge it came from, on both of
-        // its halves — the same rule `SplitEdge` already applies.
+        m.apply_edge_flags(&sharp);
+        // A cut edge inherits the flags of the edge it came from, on both of its
+        // halves — the same rule `SplitEdge` already applies, and since P23.5
+        // that means the seam as well as the sharpness. A loop cut across a UV
+        // seam that dropped the seam would silently re-join two charts.
         for (&(lo, hi), made_verts) in &cut {
-            if sharp
-                .iter()
-                .any(|&(x, y, s)| s && ((x == lo && y == hi) || (x == hi && y == lo)))
-            {
-                let mut chain = vec![lo];
-                chain.extend(made_verts.iter().copied());
-                chain.push(hi);
-                for w in chain.windows(2) {
-                    sharpen(m, w[0], w[1]);
-                }
+            let flags = flags_of(&sharp, lo, hi);
+            if flags == EdgeFlags::default() {
+                continue;
+            }
+            let mut chain = vec![lo];
+            chain.extend(made_verts.iter().copied());
+            chain.push(hi);
+            for w in chain.windows(2) {
+                inherit_flags(m, w[0], w[1], flags);
             }
         }
         m.finish_patch(&touched)?;
@@ -1446,7 +1473,7 @@ pub(crate) fn subdivide_faces(mesh: &mut Mesh, faces: &[FaceId]) -> Result<OpOut
         .copied()
         .chain(fringe_ids.iter().copied())
         .collect();
-    let sharp = mesh.capture_sharp(&all);
+    let sharp = mesh.capture_edge_flags(&all);
     // Every undirected edge of the region: each one gets exactly one midpoint,
     // shared by both faces that use it.
     let mut edges: BTreeSet<(VertId, VertId)> = BTreeSet::new();
@@ -1509,15 +1536,14 @@ pub(crate) fn subdivide_faces(mesh: &mut Mesh, faces: &[FaceId]) -> Result<OpOut
             fringe_made.push(m.add_face_raw(&verts, &corners, c.slot)?);
         }
         let _ = &fringe_made;
-        m.apply_sharp(&sharp);
+        m.apply_edge_flags(&sharp);
         for (&(lo, hi), made_verts) in &mid {
-            if sharp
-                .iter()
-                .any(|&(x, y, s)| s && ((x == lo && y == hi) || (x == hi && y == lo)))
-            {
-                sharpen(m, lo, made_verts[0]);
-                sharpen(m, made_verts[0], hi);
+            let flags = flags_of(&sharp, lo, hi);
+            if flags == EdgeFlags::default() {
+                continue;
             }
+            inherit_flags(m, lo, made_verts[0], flags);
+            inherit_flags(m, made_verts[0], hi, flags);
         }
         m.finish_patch(&touched)?;
         Ok(OpOutcome {
@@ -1570,9 +1596,9 @@ pub(crate) fn mirror(mesh: &mut Mesh, axis: MirrorAxis, coord: f64) -> Result<Op
     finite("a mirror plane coordinate", &[coord])?;
     let ax = axis.index();
     let captured: Vec<Captured> = mesh.face_ids().map(|f| capture(mesh, f)).collect();
-    let sharp: Vec<(VertId, VertId, bool)> = {
+    let sharp: Vec<(VertId, VertId, EdgeFlags)> = {
         let all: Vec<FaceId> = mesh.face_ids().collect();
-        mesh.capture_sharp(&all)
+        mesh.capture_edge_flags(&all)
     };
 
     mesh.transact(|m| {
@@ -1612,11 +1638,11 @@ pub(crate) fn mirror(mesh: &mut Mesh, axis: MirrorAxis, coord: f64) -> Result<Op
                 .collect();
             made.push(m.add_face_raw(&verts, &corners, c.slot)?);
         }
-        let mirrored: Vec<(VertId, VertId, bool)> = sharp
+        let mirrored: Vec<(VertId, VertId, EdgeFlags)> = sharp
             .iter()
             .map(|&(x, y, s)| (map[&x], map[&y], s))
             .collect();
-        m.apply_sharp(&mirrored);
+        m.apply_edge_flags(&mirrored);
         m.finish_patch(&touched)?;
         Ok(OpOutcome {
             verts: fresh,

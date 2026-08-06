@@ -515,15 +515,84 @@ Two consequences worth recording:
   gate now go through one function. LAW: **a gate that inlines the code it is
   gating is a copy, not a gate.**
 
+## 7d. Addendum, P23.5 — the brush, the gizmo and the UV half
+
+Sculpt, the component gizmo and the UV pipeline landed (2026-08-05). Six things
+this memo left open are now decided.
+
+* **A stroke is an op, not a transaction.** §8 left "UV/sculpt data model" to
+  this batch, and the sculpt half's answer is structural: `inf_terrain`'s brush
+  needs `Stroke::begin`/`add_dab`/`finish` because *its* undo unit is a
+  `HeightDelta` several dabs accumulate into. This journal's atom is already an
+  `Op`, so the adaptation is to put the whole gesture **inside** one —
+  `Op::Sculpt` carries every dab centre of one mouse-down→up drag. One journal
+  entry, one undo step, and the replay story comes free because a stroke is
+  data. The dabs are arc-length resampled *before* they reach the op, so replay
+  does not depend on the resampler either.
+* **The gizmo is the same widget, not a second one** (§8's first ledger item,
+  answered). `inf_render::gizmo` is pure interaction math over a `view_proj`, so
+  the DCC reuses `pick_axis`'s analytic 11-pixel hit test and
+  `GizmoDrag::update`'s deltas verbatim. What is *not* reused is
+  `build_geometry`, which emits `DebugDraw` lines into a GPU pass this panel does
+  not have — so the handles are drawn by the CPU compositor, and a gate asserts
+  every painted pixel is a pixel the picker answers for. §6's hard constraint
+  holds unchanged: nothing in `host.rs` was touched and the DCC projector is not
+  in the mirror set.
+* **One door for the numeric tool and the dragged handle.** Both produce a
+  `VertTransform` and both go through `dcc::transform_ops`. The alternative —
+  two code paths kept in step by a test — is the shape §7c's LAW already
+  condemned ("a gate that inlines the code it is gating is a copy, not a gate"),
+  one layer up.
+* **The orphan-settler doctrine reaches gestures.** A pointer-up is not
+  guaranteed: the panel can close, the tool can change, a detached window can
+  lose capture. Every journal-touching command settles the pending drag first.
+  **`dcc_close` abandons, deliberately** — it frees the `MeshSession` in the same
+  call, so an op applied first could never be undone, saved or seen; a settle
+  there is the same loss with a wasted `Mesh::transact` in front of it. Escape
+  abandons too, because Escape means "no" and not "commit then undo". Both
+  directions are tested, so neither can quietly become the other.
+* **The live-drag side channel is a scratch clone, and it was measured.** §5's
+  `PreviewCache` keys on the journal generation, and an uncommitted drag
+  deliberately does not move it — so a drag needs a second channel. v1 applies
+  the pending ops to a clone and re-tessellates, keyed on the drag's own shape.
+  Debug build: 26 v → 0.17 ms committed / 0.11 ms scratch; 1 538 v → 8.6 / 9.1.
+  **The clone and the stroke are free; the tessellation is the whole cost.** The
+  stated limit is that this will not hold an interactive rate at a hundred
+  thousand vertices, and the next lever is displacing the cached vertex buffer in
+  place — *not* displacing on the GPU, which would put the drawn surface and the
+  pickable surface back into disagreement (§7b's first ruling).
+* **The unwrap journals its RESULT, and the solver is not part of the op.**
+  `Op::Unwrap` carries the computed per-corner UVs; replay does not re-solve. The
+  solver is deterministic today — `BTreeMap`-ordered `f64` over `+ - * /` and
+  `sqrt`, a fixed-iteration CG, no transcendental — and that is *still* not a
+  reason to define an op as "whatever this build's solver says". §4's meshopt LAW
+  is about a journal being replayed by a different build than wrote it; applying
+  the same reasoning to a solver that has not yet been improved is the cheap
+  version of learning it twice.
+
+And one number this memo should carry, because it constrains a whole class of
+future work: **`inf_math::psin64` is accurate to ~5.7e-8, and that is enough to
+make a rotation not a rotation.** The raw polynomial's `s² + c²` is not 1, so
+Rodrigues built from it is a rotation composed with a slight scale — a
+quarter-turn of a 1 m vertex came back 56 nanometres short, and repeated gizmo
+drags would have shrunk a selection with nothing to tell the author why.
+Renormalizing the pair (`sqrt` is exactly specified, so still bit-portable) buys
+an exact isometry and leaves an *angle* error under 6e-8 rad. Any future feature
+that composes many portable-trig rotations needs the same treatment.
+
 ## 8. Ledger — what this memo does NOT decide
 
-* **The gizmo on component selections.** P23.4's deliverable 3, deferred to
-  P23.5: the Model Editor translates through a numeric tool, not a dragged
-  handle, and the drag plumbing a component gizmo needs is the same plumbing
-  P23.5's brush wants. Building it twice would be building it twice.
-* **UV/sculpt data model** (P23.5). ~~Whether seams live on the half-edge or in a
-  side table is a kernel question and belongs with the kernel.~~ **Answered by
-  P23.3, see §7a: on the half-edge.** The brush/unwrap half is still P23.5's.
+* ~~**The gizmo on component selections.**~~ **Built in P23.5** (§7d): the same
+  widget, the same `pick_axis`, one `transform_ops` door shared with the numeric
+  tool.
+* ~~**UV/sculpt data model** (P23.5).~~ **Answered in full**: seams on the
+  half-edge twin pair (P23.3 §7a for the storage discipline, P23.5 for the flag
+  itself), the stroke as one op, the unwrap as its own result (§7d).
+* **UV *editing* in the 2D view** is still open. P23.5's UV panel is
+  read-mostly: it draws the charts, the seams and the shared selection, and
+  seam marking happens in the 3D view. Dragging a vertex in UV space needs a
+  pick in UV pixel space and a per-corner move op, and it is a remainder rather
+  than a design question.
 * **Multi-object edit.** v1 edits one mesh. Whether a session can hold several
   is a UI question that the `docs: BTreeMap<Id, Doc>` shape already permits.
 * **The vmesh-in-PIE-payload follow-up** (blocker 1 in §3) is not P23 work; it

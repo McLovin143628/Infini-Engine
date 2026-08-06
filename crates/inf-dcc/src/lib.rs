@@ -84,6 +84,7 @@ pub mod ops;
 pub mod sculpt;
 pub mod select;
 pub mod topo;
+pub mod uv;
 pub mod validate;
 pub mod xform;
 
@@ -103,4 +104,5 @@ pub use select::{
     SelectionSet,
 };
 pub use topo::{CanonicalMesh, CornerData, FaceId, HalfId, Mesh, VertId};
+pub use uv::{charts, seam_count, unwrap, ChartReport, UnwrapReport, Unwrapped, CG_ITERATIONS};
 pub use validate::{validate, Violation};

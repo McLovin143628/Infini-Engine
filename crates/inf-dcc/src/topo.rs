@@ -200,6 +200,18 @@ pub struct HalfEdge {
     /// Sharpness of the undirected edge. Held on both halves and required to
     /// agree ([`crate::validate::Violation::SharpDisagrees`]).
     pub(crate) sharp: bool,
+    /// **UV seam** of the undirected edge (P23.5): a cut the unwrapper opens the
+    /// surface along. Same storage discipline as `sharp` -- on the twin pair,
+    /// held on both halves, required to agree
+    /// ([`crate::validate::Violation::SeamDisagrees`]) -- because it describes
+    /// one *undirected* edge and must not depend on which half you ask.
+    ///
+    /// It is a different flag from `sharp` on purpose, even though authors often
+    /// mark the same edges: sharpness is a **shading** statement the writer turns
+    /// into split normals, and a seam is a **parameterization** statement the
+    /// unwrapper turns into a chart boundary. Tying them would make marking a
+    /// crease silently re-cut the UVs.
+    pub(crate) seam: bool,
 }
 
 /// A face: one of its half-edges, plus the material slot it draws with.
@@ -362,6 +374,11 @@ impl Mesh {
     }
     pub fn is_sharp(&self, h: HalfId) -> Option<bool> {
         self.halfs.get(h.0).map(|x| x.sharp)
+    }
+
+    /// Whether the undirected edge is a **UV seam** (P23.5).
+    pub fn is_seam(&self, h: HalfId) -> Option<bool> {
+        self.halfs.get(h.0).map(|x| x.seam)
     }
     pub fn face_slot(&self, f: FaceId) -> Option<Option<u32>> {
         self.faces.get(f.0).map(|x| x.material_slot)
@@ -538,6 +555,7 @@ impl Mesh {
             uv: [0.0, 0.0],
             normal: None,
             sharp: false,
+            seam: false,
         };
         let h = HalfId(self.halfs.alloc(blank(a)));
         let t = HalfId(self.halfs.alloc(blank(b)));
@@ -716,10 +734,17 @@ impl Mesh {
         }
     }
 
-    /// The sharp flags of the undirected edges a set of faces touches, as
-    /// `(from, to, sharp)` triples — captured before a rebuild so sharpness
-    /// survives an op that re-creates the local patch.
-    pub(crate) fn capture_sharp(&self, faces: &[FaceId]) -> Vec<(VertId, VertId, bool)> {
+    /// The per-edge flags of the undirected edges a set of faces touches, as
+    /// `(from, to, flags)` triples — captured before a rebuild so they survive
+    /// an op that re-creates the local patch.
+    ///
+    /// **One capture for both flags** (P23.5). Sharpness had this treatment from
+    /// P23.3 and the seam flag needed exactly the same one at exactly the same
+    /// dozen call sites; a second `capture_seam`/`apply_seam` pair would have
+    /// been a dozen more places for an op to remember one and forget the other,
+    /// and the forgetting would be invisible until an author's UV cut vanished
+    /// three bevels later.
+    pub(crate) fn capture_edge_flags(&self, faces: &[FaceId]) -> Vec<(VertId, VertId, EdgeFlags)> {
         let mut out = Vec::new();
         for &f in faces {
             let Some(loop_halfs) = self.face_loop(f) else {
@@ -727,9 +752,16 @@ impl Mesh {
             };
             for h in loop_halfs {
                 let rec = self.half_ref(h);
-                if rec.sharp {
+                if rec.sharp || rec.seam {
                     let d = self.dest(h).expect("live half-edge id");
-                    out.push((rec.origin, d, true));
+                    out.push((
+                        rec.origin,
+                        d,
+                        EdgeFlags {
+                            sharp: rec.sharp,
+                            seam: rec.seam,
+                        },
+                    ));
                 }
             }
         }
@@ -745,16 +777,26 @@ impl Mesh {
         self.half_mut(t).sharp = sharp;
     }
 
-    /// Re-apply captured sharpness to whatever edges still exist.
-    pub(crate) fn apply_sharp(&mut self, captured: &[(VertId, VertId, bool)]) {
-        for &(a, b, sharp) in captured {
+    /// Set the seam flag on **both** halves. Same rule, same reason.
+    pub(crate) fn set_seam_pair(&mut self, h: HalfId, seam: bool) {
+        let t = self.half_ref(h).twin;
+        self.half_mut(h).seam = seam;
+        self.half_mut(t).seam = seam;
+    }
+
+    /// Re-apply captured edge flags to whatever edges still exist.
+    pub(crate) fn apply_edge_flags(&mut self, captured: &[(VertId, VertId, EdgeFlags)]) {
+        for &(a, b, flags) in captured {
             if !self.has_vert(a) || !self.has_vert(b) {
                 continue;
             }
             if let Some(h) = self.find_half(a, b) {
                 let t = self.half_ref(h).twin;
-                self.half_mut(h).sharp = sharp;
-                self.half_mut(t).sharp = sharp;
+                for x in [h, t] {
+                    let rec = self.half_mut(x);
+                    rec.sharp = flags.sharp;
+                    rec.seam = flags.seam;
+                }
             }
         }
     }
@@ -869,6 +911,7 @@ impl Mesh {
                     uv: entry.key[i].uv,
                     normal: entry.key[i].normal,
                     sharp: entry.key[i].sharp,
+                    seam: entry.key[i].seam,
                 });
             }
             faces.push(CanonicalFace {
@@ -899,6 +942,7 @@ impl Mesh {
             uv: bits2(rec.uv),
             normal: rec.normal.map(bits3),
             sharp: rec.sharp,
+            seam: rec.seam,
         }
     }
 
@@ -931,6 +975,7 @@ pub struct CanonicalCorner {
     pub uv: [u64; 2],
     pub normal: Option<[u64; 3]>,
     pub sharp: bool,
+    pub seam: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -939,6 +984,18 @@ struct CornerKey {
     uv: [u64; 2],
     normal: Option<[u64; 3]>,
     sharp: bool,
+    seam: bool,
+}
+
+/// The per-edge boolean flags carried across a structural rebuild.
+///
+/// A struct rather than two loose `bool`s so [`Mesh::capture_edge_flags`] and
+/// [`Mesh::apply_edge_flags`] cannot be extended for one flag and not the other:
+/// adding a third stops every call site compiling until it is filled in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct EdgeFlags {
+    pub(crate) sharp: bool,
+    pub(crate) seam: bool,
 }
 
 /// `f64` → a comparable bit pattern, with `-0.0` folded onto `+0.0` so an op

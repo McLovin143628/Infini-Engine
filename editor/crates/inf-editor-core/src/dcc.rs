@@ -689,6 +689,189 @@ fn blend(rgba: &mut [u8], w: i32, x: i32, y: i32, colour: [u8; 3], alpha: u8) {
     rgba[i + 3] = 255;
 }
 
+// ── the 2D UV view (P23.5) ─────────────────────────────────────────────────
+
+/// The UV view's palette.
+#[derive(Debug, Clone, Copy)]
+pub struct UvStyle {
+    pub background: [u8; 3],
+    /// The `[0,1]²` boundary — the texture's own edge.
+    pub border: [u8; 3],
+    pub wire: [u8; 3],
+    /// An edge whose 3D twin pair carries a seam flag. Drawn last and thickest,
+    /// because a seam is the one thing in this view an author is looking *for*.
+    pub seam: [u8; 3],
+    pub selected: [u8; 3],
+    pub fill: [u8; 3],
+    pub fill_alpha: u8,
+}
+
+impl Default for UvStyle {
+    fn default() -> Self {
+        Self {
+            background: [18, 19, 22],
+            border: [70, 74, 82],
+            wire: [126, 132, 142],
+            seam: [255, 96, 72],
+            selected: [255, 168, 46],
+            fill: [255, 148, 32],
+            fill_alpha: 70,
+        }
+    }
+}
+
+/// Draw the UV layout into an RGBA buffer.
+///
+/// # Why this is rasterized in Rust and not drawn on a `<canvas>`
+///
+/// The `SpriteSheetPanel` draws its frames in the frontend, and that is right for
+/// it: a sprite sheet's rectangles *are* the document. A UV layout is not — it is
+/// a **projection of the mesh**, and every question it answers ("is this edge a
+/// seam", "is this corner selected", "which chart is this") is a question the
+/// backend already owns and the frontend has no copy of. Shipping the answer
+/// would mean shipping a polygon soup plus a seam set plus a selection per frame
+/// and keeping a second renderer in step with `draw_overlay` — the same
+/// two-answers-to-one-question shape the P23.4 ruling rejected for the 3D
+/// overlay. So it goes down the identical path: composite here, `encode_png_fast`,
+/// one `<img>`.
+///
+/// # Edges are drawn per CORNER PAIR, and that is what makes charts visible
+///
+/// A vertex on a seam has a different UV in each chart it belongs to (P23.3 §7a:
+/// attributes live where seams live). Drawing "vertex UV to vertex UV" would
+/// therefore need a vertex UV, which does not exist — and would stitch the charts
+/// back together on screen. Walking each face loop and joining `uv(h)` to
+/// `uv(next(h))` draws exactly what the writer will emit.
+///
+/// `selection` is the **same set the 3D view shows**, which is the whole of the
+/// synchronization: there is one selection, in one document.
+pub fn draw_uv_layout(
+    rgba: &mut [u8],
+    size: u32,
+    mesh: &Mesh,
+    selection: &SelectionSet,
+    mode: SelectMode,
+    style: &UvStyle,
+) {
+    let n = (size as usize) * (size as usize) * 4;
+    if rgba.len() < n {
+        return;
+    }
+    for px in rgba[..n].chunks_exact_mut(4) {
+        px[0] = style.background[0];
+        px[1] = style.background[1];
+        px[2] = style.background[2];
+        px[3] = 255;
+    }
+    let w = size as i32;
+    let s = size as f32;
+    // UV (0,0) is bottom-left; pixel y grows downward.
+    let to_px = |uv: [f64; 2]| Projected {
+        x: uv[0] as f32 * s,
+        y: (1.0 - uv[1] as f32) * s,
+        depth: 0.0,
+    };
+
+    // Selected faces first, so the wires land on their own tint.
+    if mode == SelectMode::Face {
+        for &f in selection.faces() {
+            let Some(poly) = face_uv_polygon(mesh, f, &to_px) else {
+                continue;
+            };
+            fill_polygon(rgba, w, &poly, style.fill, style.fill_alpha);
+        }
+    }
+
+    // **Three passes, and the order is the priority order.** Every outline is
+    // drawn plain first; then the frame; then the seams; then the selection. A
+    // single pass that picked one colour per edge made a *selected seam* read as
+    // a seam — which is the one edge the author is certainly looking at — and
+    // made a chart packed against `u = 0` swallow the border. Collecting and
+    // re-drawing costs one `Vec` of segments and removes both.
+    let mut seams: Vec<(Projected, Projected)> = Vec::new();
+    let mut hot: Vec<(Projected, Projected)> = Vec::new();
+    for f in mesh.face_ids() {
+        let Some(halfs) = mesh.face_loop(f) else {
+            continue;
+        };
+        let count = halfs.len();
+        for i in 0..count {
+            let (h, next) = (halfs[i], halfs[(i + 1) % count]);
+            let (Some(a), Some(b)) = (mesh.corner_uv(h), mesh.corner_uv(next)) else {
+                continue;
+            };
+            let (pa, pb) = (to_px(a), to_px(b));
+            line(rgba, w, pa.x, pa.y, pb.x, pb.y, style.wire);
+            if mesh.is_seam(h) == Some(true) {
+                seams.push((pa, pb));
+            }
+            let selected = match mode {
+                SelectMode::Edge => selection.contains_edge(mesh, h),
+                SelectMode::Face => selection.contains_face(f),
+                SelectMode::Vert => false,
+            };
+            if selected {
+                hot.push((pa, pb));
+            }
+        }
+    }
+    // **The unit square, drawn after the wires.** A chart packed hard against
+    // `u = 0` or `v = 1` puts its outline exactly on the border, and drawing the
+    // border first meant the wireframe swallowed it entirely — measured: 127 wire
+    // pixels and not one border pixel left. The frame is the reference the whole
+    // view is read against, so it goes on top of the thing it frames.
+    for (a, b) in [
+        ((0.0, 0.0), (s, 0.0)),
+        ((s, 0.0), (s, s)),
+        ((s, s), (0.0, s)),
+        ((0.0, s), (0.0, 0.0)),
+    ] {
+        line(rgba, w, a.0, a.1, b.0, b.1, style.border);
+    }
+
+    for (pa, pb) in seams {
+        // Two passes one pixel apart: the seam has to read at a glance in a view
+        // that is otherwise all thin grey lines, and a second colour alone does
+        // not survive being one pixel wide next to a bright selection.
+        line(rgba, w, pa.x, pa.y, pb.x, pb.y, style.seam);
+        line(rgba, w, pa.x, pa.y + 1.0, pb.x, pb.y + 1.0, style.seam);
+    }
+    for (pa, pb) in hot {
+        line(rgba, w, pa.x, pa.y, pb.x, pb.y, style.selected);
+    }
+
+    if mode == SelectMode::Vert {
+        for f in mesh.face_ids() {
+            let Some(halfs) = mesh.face_loop(f) else {
+                continue;
+            };
+            for h in halfs {
+                let (Some(v), Some(uv)) = (mesh.origin(h), mesh.corner_uv(h)) else {
+                    continue;
+                };
+                if !selection.contains_vert(v) {
+                    continue;
+                }
+                let p = to_px(uv);
+                dot(rgba, w, p.x, p.y, 3, style.selected);
+            }
+        }
+    }
+}
+
+fn face_uv_polygon(
+    mesh: &Mesh,
+    f: FaceId,
+    to_px: &impl Fn([f64; 2]) -> Projected,
+) -> Option<Vec<Projected>> {
+    let halfs = mesh.face_loop(f)?;
+    let mut out = Vec::with_capacity(halfs.len());
+    for h in halfs {
+        out.push(to_px(mesh.corner_uv(h)?));
+    }
+    (out.len() >= 3).then_some(out)
+}
+
 // ── the surface point under the pointer (P23.5) ────────────────────────────
 
 /// The point on the model under `(px, py)`, and the face it is on.
@@ -2599,6 +2782,118 @@ mod tests {
                 "a scratch frame took {scratch_ms:.1} ms on {verts} vertices — that                  is not a constant factor over the {committed_ms:.1} ms tessellation"
             );
         }
+    }
+
+    #[test]
+    fn the_uv_view_draws_the_layout_the_writer_would_emit() {
+        // Every claim the panel makes about this picture, measured: the charts
+        // are inside the unit square, a seam is drawn in the seam colour, and the
+        // shared selection lights up here as well as in the 3D view.
+        let mut m = cube(1.0);
+        // Cut the hard edges so there are six charts to look at.
+        for h in m.half_ids().collect::<Vec<_>>() {
+            if inf_dcc::canonical_edge(&m, h) != Some(h) {
+                continue;
+            }
+            let (Some(Some(f)), Some(Some(g))) =
+                (m.face_of(h), m.twin(h).and_then(|t| m.face_of(t)))
+            else {
+                continue;
+            };
+            let (Some(a), Some(b)) = (inf_dcc::face_normal(&m, f), inf_dcc::face_normal(&m, g))
+            else {
+                continue;
+            };
+            if a.dot(b) < 0.7 {
+                m = {
+                    let mut s = MeshSession::new(m);
+                    s.apply(Op::SetEdgeSeam {
+                        half: h,
+                        seam: true,
+                    })
+                    .expect("marks");
+                    s.mesh().clone()
+                };
+            }
+        }
+        assert_eq!(inf_dcc::seam_count(&m), 12);
+        let out = inf_dcc::unwrap(&m).expect("unwraps");
+        inf_dcc::ops::apply(&mut m, &out.op).expect("applies");
+
+        let style = UvStyle::default();
+        let mut rgba = vec![0u8; 128 * 128 * 4];
+        let mut sel = SelectionSet::new(1);
+        draw_uv_layout(&mut rgba, 128, &m, &sel, SelectMode::Face, &style);
+        let seam_px = rgba
+            .chunks_exact(4)
+            .filter(|p| p[0..3] == style.seam)
+            .count();
+        assert!(seam_px > 20, "the seams are not drawn: {seam_px} pixels");
+        assert!(
+            rgba.chunks_exact(4).any(|p| p[0..3] == style.border),
+            "the unit square is not drawn"
+        );
+        // Every one of this cube's twelve edges is a seam, so the seam pass
+        // covers the whole outline: a wire pixel here would mean an edge had
+        // been missed by the seam pass.
+        assert_eq!(
+            rgba.chunks_exact(4)
+                .filter(|p| p[0..3] == style.wire)
+                .count(),
+            0,
+            "an edge was drawn as a wire when all twelve are seams"
+        );
+        // Nothing selected paints nothing hot…
+        assert_eq!(
+            rgba.chunks_exact(4)
+                .filter(|p| p[0..3] == style.selected)
+                .count(),
+            0
+        );
+        // …and the SAME selection the 3D view holds lights up here.
+        let f = m.face_ids().next().expect("a face");
+        sel.set_face(f, true);
+        let mut hot = vec![0u8; 128 * 128 * 4];
+        draw_uv_layout(&mut hot, 128, &m, &sel, SelectMode::Face, &style);
+        assert_ne!(hot, rgba, "selecting a face must change the UV picture");
+        assert!(
+            hot.chunks_exact(4).any(|p| p[0..3] == style.selected),
+            "a selected face's outline must beat the seam colour: the selection              is what the author is pointing at"
+        );
+
+        // An undersized buffer is refused, like every other compositor here.
+        let mut small = vec![9u8; 16];
+        let before = small.clone();
+        draw_uv_layout(&mut small, 128, &m, &sel, SelectMode::Face, &style);
+        assert_eq!(small, before);
+    }
+
+    #[test]
+    fn a_mesh_with_no_uvs_still_draws_a_frame_rather_than_nothing() {
+        // Opening the UV view before unwrapping is the normal first move, and it
+        // must show the empty square rather than a blank panel that reads as a
+        // broken render.
+        let m = cube(1.0);
+        let style = UvStyle::default();
+        let mut rgba = vec![0u8; 64 * 64 * 4];
+        draw_uv_layout(
+            &mut rgba,
+            64,
+            &m,
+            &SelectionSet::new(1),
+            SelectMode::Vert,
+            &style,
+        );
+        assert!(
+            rgba.chunks_exact(4).any(|p| p[0..3] == style.border),
+            "the unit square must be visible even with nothing unwrapped"
+        );
+        // NOT `any(wire)`: `cube()` gives every face the full unit square, so all
+        // six outlines land exactly on the border and the frame (drawn last)
+        // covers them. That is the honest picture of an un-unwrapped primitive —
+        // six charts stacked on top of each other — and it is what the panel's
+        // "unwrap first" prompt is for.
+        assert!(rgba.chunks_exact(4).all(|p| p[3] == 255));
     }
 
     #[test]

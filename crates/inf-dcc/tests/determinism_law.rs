@@ -35,7 +35,7 @@
 /// not cover it, and a new module is exactly where the next `.sin()` or `HashMap`
 /// would land. `every_source_file_is_covered` reads the directory and fails if
 /// this list has fallen behind, so the coverage cannot rot silently.
-const SOURCES: [(&str, &str); 10] = [
+const SOURCES: [(&str, &str); 11] = [
     ("lib.rs", include_str!("../src/lib.rs")),
     ("topo.rs", include_str!("../src/topo.rs")),
     ("validate.rs", include_str!("../src/validate.rs")),
@@ -46,6 +46,7 @@ const SOURCES: [(&str, &str); 10] = [
     ("select.rs", include_str!("../src/select.rs")),
     ("sculpt.rs", include_str!("../src/sculpt.rs")),
     ("xform.rs", include_str!("../src/xform.rs")),
+    ("uv.rs", include_str!("../src/uv.rs")),
 ];
 
 const JOURNAL: &str = include_str!("../src/journal.rs");
@@ -195,6 +196,7 @@ fn f32_lives_only_at_the_asset_boundary() {
         SOURCES[7],
         SOURCES[8],
         SOURCES[9],
+        SOURCES[10],
         ("journal.rs", JOURNAL),
     ] {
         let hits = code_hits(src, "f32");
@@ -289,7 +291,7 @@ fn the_id_preservation_classifier_has_no_wildcard_and_names_every_op() {
         .filter(|v| !v.is_empty())
         .map(str::to_string)
         .collect();
-    assert_eq!(variants.len(), 25, "found {variants:?}");
+    assert_eq!(variants.len(), 27, "found {variants:?}");
     let joined = body.join(" ");
     for v in &variants {
         assert!(
@@ -327,4 +329,33 @@ fn no_skip_serializing_if_on_a_bincode_struct() {
             "{name} uses skip_serializing_if on a type that is encoded with bincode"
         );
     }
+}
+
+/// **`Op::Unwrap` must replay its VALUES, never re-run the solver.**
+///
+/// This one is a source grep because it *cannot* be a runtime assertion: the
+/// solver is deterministic today, so an `apply` that re-solved would produce the
+/// same UVs and every property test in the crate would stay green. The claim is
+/// about a **future build** — a journal is replayed by a different build than
+/// wrote it, and an op defined by a computation is an op whose recorded effect
+/// changes when the computation improves. That is the meshopt law (P18) one level
+/// up, and the only thing that can enforce it is reading the code.
+#[test]
+fn the_unwrap_op_replays_its_values_and_never_calls_the_solver() {
+    let (_, ops) = SOURCES[5];
+    let hits = code_hits(ops, "uv::unwrap");
+    assert!(
+        hits.is_empty(),
+        "ops.rs calls the unwrap solver. `Op::Unwrap` carries the computed UVs          and applying it must write THEM — see `crate::uv`. Found: {hits:?}"
+    );
+    // And the positive half: the arm has to exist and has to write the corners
+    // it was given, or the ban above is satisfied by an op that does nothing.
+    assert!(
+        ops.contains("Op::Unwrap { corners }"),
+        "ops.rs no longer applies `Op::Unwrap` by writing its corner list"
+    );
+    assert!(
+        ops.contains("mesh.half_mut(*h).uv = *uv;"),
+        "the unwrap arm no longer writes the UVs it carries"
+    );
 }

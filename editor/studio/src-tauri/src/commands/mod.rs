@@ -92,6 +92,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         dcc::dcc_drag_move,
         dcc::dcc_drag_end,
         dcc::dcc_drag_cancel,
+        dcc::dcc_unwrap,
+        dcc::dcc_uv_preview,
         terrain::terrain_erode,
         terrain::terrain_export_data_map,
         terrain::terrain_probe_heightmap,

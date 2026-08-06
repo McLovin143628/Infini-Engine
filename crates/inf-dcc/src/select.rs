@@ -95,7 +95,11 @@ pub fn op_preserves_ids(op: &Op) -> bool {
         // across a selected region must still have it selected afterwards.
         | Op::Sculpt { .. }
         | Op::RotateVerts { .. }
-        | Op::ScaleVerts { .. } => true,
+        | Op::ScaleVerts { .. }
+        // A seam mark and an unwrap write per-edge and per-corner attributes.
+        // Nothing is rebuilt, so nothing is renumbered.
+        | Op::SetEdgeSeam { .. }
+        | Op::Unwrap { .. } => true,
         // Everything else frees slots (which the LIFO free list then hands back
         // to something different) or rebuilds a patch outright.
         Op::RemoveVertex { .. }
@@ -940,7 +944,7 @@ mod tests {
         // that side, and `determinism_law`'s source gate proves the function
         // still enumerates every variant instead of defaulting through a
         // wildcard. Three different failures, three different gates.
-        let hand: [(Op, bool); 25] = [
+        let hand: [(Op, bool); 27] = [
             (Op::AddVertex { position: [0.0; 3] }, true),
             (Op::RemoveVertex { vert: VertId(0) }, false),
             (
@@ -1088,6 +1092,14 @@ mod tests {
                 },
                 true,
             ),
+            (
+                Op::SetEdgeSeam {
+                    half: HalfId(0),
+                    seam: true,
+                },
+                true,
+            ),
+            (Op::Unwrap { corners: vec![] }, true),
         ];
         for (op, want) in &hand {
             assert_eq!(
@@ -1098,8 +1110,8 @@ mod tests {
         }
         assert_eq!(
             hand.iter().filter(|(_, w)| *w).count(),
-            9,
-            "nine ops preserve ids; a tenth is a claim that needs its own proof"
+            11,
+            "eleven ops preserve ids; a twelfth is a claim that needs its own proof"
         );
     }
 

@@ -567,6 +567,82 @@ mod tests {
     }
 
     #[test]
+    fn a_smooth_dab_is_a_jacobi_sweep_and_not_a_walk_in_id_order() {
+        // **The gate the Jacobi choice did not have** (found by mutation: writing
+        // as the sweep goes failed nothing). Gauss-Seidel is just as
+        // deterministic — the map is a `BTreeMap` — so no determinism test can
+        // see it. It is deterministically *wrong*: the relaxation propagates
+        // along ascending vertex id, which is an arena artefact, so the same
+        // shape smooths differently depending on the order its vertices happened
+        // to be allocated in.
+        //
+        // Measured against the definition rather than against a second
+        // implementation: every target is the mean of the neighbours'
+        // **original** positions, blended by the brush weight.
+        let mut m = grid(3);
+        for (i, v) in m.vert_ids().collect::<Vec<_>>().into_iter().enumerate() {
+            let p = position(&m, v);
+            // A lumpy surface whose lumps are not symmetric, so a sweep that
+            // used updated neighbours could not coincidentally agree.
+            m.vert_mut(v).position = [p.x, (i % 3) as f64 * 0.37, p.z];
+        }
+        let before: BTreeMap<VertId, DVec3> = m.vert_ids().map(|v| (v, position(&m, v))).collect();
+        let seed = m
+            .vert_ids()
+            .find(|&v| {
+                let p = before[&v];
+                (p.x - 1.0).abs() < 1e-12 && (p.z - 1.0).abs() < 1e-12
+            })
+            .expect("an interior vertex");
+        let centre = before[&seed];
+        let (radius, strength) = (1.8_f64, 1.0_f64);
+        // The distances are the ones the dab saw: measured on the surface BEFORE
+        // it moved, because the brush weighs the mesh it was aimed at.
+        let dist = geodesic_distances(&m, &[seed].into_iter().collect(), radius);
+
+        crate::ops::apply(
+            &mut m,
+            &Op::Sculpt {
+                mode: SculptMode::Smooth,
+                dabs: vec![centre.to_array()],
+                radius,
+                strength,
+                falloff: SculptFalloff::Linear,
+            },
+        )
+        .expect("smooths");
+
+        let mut checked = 0usize;
+        for (&v, &d) in &dist {
+            let w = inf_terrain::Falloff::Linear.weight(d, radius);
+            if w <= 0.0 {
+                continue;
+            }
+            // The neighbour mean, from the positions as they stood BEFORE the dab.
+            let neighbours: BTreeSet<VertId> = m
+                .vert_outgoing(v)
+                .expect("live")
+                .iter()
+                .filter_map(|&h| m.dest(h))
+                .collect();
+            let mut acc = DVec3::ZERO;
+            for n in &neighbours {
+                acc += before[n];
+            }
+            let target = acc / neighbours.len() as f64;
+            let p = before[&v];
+            let want = p + (target - p) * (strength * w);
+            let got = position(&m, v);
+            assert!(
+                (got - want).length() < 1e-12,
+                "{v} moved to {got:?}, a Jacobi sweep puts it at {want:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 5, "only {checked} vertices were under the brush");
+    }
+
+    #[test]
     fn a_flatten_stroke_pulls_toward_the_plane_it_started_on() {
         let mut m = grid(4);
         // A bumpy patch: alternate vertices raised.

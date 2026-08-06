@@ -45,6 +45,7 @@ import type { DccModeDto } from "../bindings/DccModeDto";
 import type { DccSaveDto } from "../bindings/DccSaveDto";
 import type { DccSelectDto } from "../bindings/DccSelectDto";
 import type { DccToolDto } from "../bindings/DccToolDto";
+import type { DccUnwrapDto } from "../bindings/DccUnwrapDto";
 
 /** One open document's view state. */
 export interface DccEntry {
@@ -65,6 +66,10 @@ export interface DccEntry {
   lastSave: DccSaveDto | null;
   busy: boolean;
   status: string | null;
+  /** The 2D UV view's last frame, or `null` before it was ever asked for. */
+  uvImage: string | null;
+  /** The last unwrap's verdict, kept until the NEXT unwrap — like `lastSave`. */
+  lastUnwrap: DccUnwrapDto | null;
 }
 
 interface DccState {
@@ -92,6 +97,11 @@ interface DccState {
   dragMove: (assetId: string, x: number, y: number) => Promise<void>;
   dragEnd: (assetId: string) => Promise<void>;
   dragCancel: (assetId: string) => Promise<void>;
+
+  // ── UV (P23.5) ──────────────────────────────────────────────────────────
+  unwrap: (assetId: string) => Promise<void>;
+  /** Render one UV frame. Called when the view is open, after every edit. */
+  uvRefresh: (assetId: string) => Promise<void>;
 }
 
 const EMPTY: DccEntry = {
@@ -102,6 +112,8 @@ const EMPTY: DccEntry = {
   lastSave: null,
   busy: false,
   status: null,
+  uvImage: null,
+  lastUnwrap: null,
 };
 
 /**
@@ -395,6 +407,39 @@ export const useDccStore = create<DccState>((set, get) => {
         adopt(assetId, await dccIpc.dragCancel(doc.id));
       } catch (e) {
         patch(assetId, { refusal: String(e) });
+      }
+    },
+
+    // ── UV ────────────────────────────────────────────────────────────────
+
+    unwrap: async (assetId) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      patch(assetId, { busy: true });
+      try {
+        const res = await dccIpc.unwrap(doc.id);
+        patch(assetId, {
+          doc: res.doc,
+          lastUnwrap: res,
+          refusal: res.ok ? null : res.refusal,
+        });
+        void pump(assetId);
+        await get().uvRefresh(assetId);
+      } catch (e) {
+        patch(assetId, { refusal: String(e) });
+      } finally {
+        patch(assetId, { busy: false });
+      }
+    },
+
+    uvRefresh: async (assetId) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      try {
+        const frame = await dccIpc.uvPreview(doc.id, DCC_PREVIEW_SIZE);
+        patch(assetId, { uvImage: frame.image });
+      } catch (e) {
+        console.error("dcc.uvPreview failed", e);
       }
     },
   };

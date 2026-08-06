@@ -79,7 +79,9 @@ pub const MAX_CHECKPOINTS: usize = 8;
 ///
 /// # And the enum discriminants underneath it
 ///
-/// The version guards the *shape* of this struct. It does **not** guard
+/// The version guards the *shape* of this struct **and of everything it
+/// contains** — including [`Mesh`], whose `HalfEdge` grew a `seam` flag at P23.5
+/// and took the version from 1 to 2 with it. It does **not** guard
 /// [`Op`]'s discriminants, because a mis-numbered variant produces a
 /// structurally valid save of the wrong edit. That is pinned separately by the
 /// frozen-discriminant test (the P19 wire-enum law): `Op` is **append-only**,
@@ -95,9 +97,25 @@ pub struct SessionSave {
 }
 
 impl SessionSave {
-    /// v1: `{schema_version, base, ops, cursor}` with the [`Op`] discriminants
-    /// frozen by `op_discriminants_are_frozen`. Bump on any change to either.
-    pub const CURRENT_VERSION: u32 = 1;
+    /// * **v1** (P23.3): `{schema_version, base, ops, cursor}`, `Op` frozen by
+    ///   `op_discriminants_are_frozen`.
+    /// * **v2** (P23.5): `Mesh`'s `HalfEdge` grew a `seam: bool`, so the `base`
+    ///   this struct carries is a **different shape** on the wire. bincode is
+    ///   positional, so a v1 save read as v2 mis-parses everything after the
+    ///   first half-edge — which is precisely why the version is the first field
+    ///   and why this had to move.
+    ///
+    /// **No migration, and that is the honest answer**: `MeshSession` has only
+    /// ever lived in `DccState` for the life of a process, so **zero v1 sessions
+    /// exist** anywhere. Writing a v1→v2 migration would be writing a decoder for
+    /// a file that has never been produced and then claiming it works. A v1 save
+    /// is refused loudly by [`MeshSession::restore`], which is the right answer
+    /// for a file that cannot exist.
+    ///
+    /// Bump on any change to this struct's shape, to `Mesh`'s, or to the `Op`
+    /// discriminants — the last of which is pinned separately, because a
+    /// mis-numbered variant produces a structurally valid save of the wrong edit.
+    pub const CURRENT_VERSION: u32 = 2;
 }
 
 /// Why a [`SessionSave`] could not become a session.
@@ -680,6 +698,9 @@ mod tests {
             Op::Sculpt { .. } => 22,
             Op::RotateVerts { .. } => 23,
             Op::ScaleVerts { .. } => 24,
+            // P23.5's UV half, appended after them.
+            Op::SetEdgeSeam { .. } => 25,
+            Op::Unwrap { .. } => 26,
         }
     }
 
@@ -751,7 +772,9 @@ mod tests {
             | Op::LoopCut { .. }
             | Op::SubdivideFaces { .. }
             | Op::RotateVerts { .. }
-            | Op::ScaleVerts { .. } => Vec::new(),
+            | Op::ScaleVerts { .. }
+            | Op::SetEdgeSeam { .. }
+            | Op::Unwrap { .. } => Vec::new(),
         }
     }
 
@@ -848,8 +871,13 @@ mod tests {
                 pivot: [0.0; 3],
                 factor: [1.0; 3],
             },
+            Op::SetEdgeSeam {
+                half: HalfId(0),
+                seam: true,
+            },
+            Op::Unwrap { corners: vec![] },
         ];
-        assert_eq!(every.len(), 25, "one sample per variant");
+        assert_eq!(every.len(), 27, "one sample per variant");
         let cfg = bincode::config::standard();
         for op in &every {
             let bytes = bincode::serde::encode_to_vec(op, cfg).unwrap();
@@ -866,9 +894,11 @@ mod tests {
             bincode::serde::encode_to_vec(Op::CollapseEdge { half: HalfId(7) }, cfg).unwrap(),
             vec![5, 7],
         );
-        // And the version ladder did NOT move: appending leaves every already-
-        // written session decoding as exactly what it said.
-        assert_eq!(SessionSave::CURRENT_VERSION, 1);
+        // The op discriminants are append-only and every byte string above is
+        // unchanged. The version DID move at P23.5, and not for them: `Mesh`
+        // grew a `seam` field, which changes the shape of the `base` this struct
+        // carries. See `SessionSave::CURRENT_VERSION`.
+        assert_eq!(SessionSave::CURRENT_VERSION, 2);
     }
 
     #[test]

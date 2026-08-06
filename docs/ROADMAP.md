@@ -7413,6 +7413,88 @@ and the headless preview render is the proven offscreen-PNG path.
 - **P23.5 Sculpt & UV** — 1. brush sculpt on the edit mesh, reusing the terrain brush/falloff
   doctrine; 2. UV seams + an LSCM-class unwrap + a 2D UV panel; 3. normals and tangents
   recompute.
+  **DONE 2026-08-05** — the brush, the component gizmo (P23.4's deferral) and the UV half.
+  No new external dependency (the CG solver is written here), scene v20 and `MeshAsset` v2
+  untouched, goldens stay 50. **`SessionSave` v1 → v2**, and for a reason no `Op` pin could
+  see: `Mesh`'s `HalfEdge` grew a `seam: bool`, so the `base` a save carries is a different
+  *shape* on the wire. No migration is written and that is the honest answer — `MeshSession`
+  has only ever lived in `DccState` for the life of a process, so **zero v1 sessions exist**,
+  and a decoder for a file that has never been produced is a claim, not a ladder.
+  **Sculpt** (`inf_dcc::sculpt`, `Op::Sculpt` at 22): the terrain `Stroke::begin`/`add_dab`/
+  `finish` doctrine adapted to a journal that has no transactions — **the op IS the
+  transaction**, carrying every dab centre of one mouse-down→up gesture, so a stroke is one
+  journal entry and one undo step. Dabs are arc-length resampled by `stroke_dabs` (the 3D
+  mirror of `inf_terrain::dab_positions`) **before** they reach the op, so replay does not
+  depend on the resampler. Four modes: draw along the influenced region's averaged normal,
+  smooth as a **Jacobi** Laplacian sweep (Gauss-Seidel would relax along ascending vertex id,
+  an arena artefact), flatten toward the plane the stroke *started* on (a per-dab plane
+  chases the geometry and converges on nothing), and grab, whose influence set is fixed at the
+  first dab so the grabbed region cannot walk across the model. Influence is the **existing**
+  geodesic machinery seeded at the vertex nearest each dab, through `inf_terrain::Falloff`.
+  Honest limit: geodesic distance lives on the *edge graph*, so the felt centre of the brush
+  snaps to the nearest vertex.
+  **The component gizmo** reuses `inf_render::gizmo` wholesale — `pick_axis`'s analytic
+  11-pixel hit test, `GizmoDrag::update`'s delta math, `gizmo_world_size`'s screen-constant
+  rule — and the DCC projector stays out of the `projector_mirror` set (the P23.1 §6 hard
+  constraint, unchanged). New `Op::RotateVerts` / `Op::ScaleVerts` (23, 24) carry a **pivot**
+  and no weight table: the caller emits one op per distinct soft-select weight, the
+  `SoftTranslate` shape. Both the number box and the dragged handle go through **one**
+  function, `inf_editor_core::dcc::transform_ops`, and the equivalence is tested at the
+  product boundary rather than asserted. Rodrigues is built from `inf_math::psin64`/`pcos64`
+  and **the sine/cosine pair is renormalized**: the raw degree-11 polynomial is a rotation
+  composed with a slight scale, so a quarter-turn of a 1 m vertex came back 56 nm short and
+  repeated drags would have shrunk a selection with nothing to tell the author why. What
+  remains is an *angle* error under 6e-8 rad, which is the honest price of the portability
+  law.
+  **The orphan-settler doctrine** (P21.3, applied to gestures): a drag lives in ONE `pending`
+  slot on the document, and every journal-touching command settles it first — so a stroke
+  whose pointer-up never arrives becomes a real, undoable edit. **`dcc_close` is the one
+  deliberate abandon** (it frees the journal in the same call, so a settle there is the same
+  loss with a wasted `transact` in front of it) and `dcc_drag_cancel` is the other (Escape
+  means "no", not "commit then undo"). Both directions have a test.
+  **Live feedback, measured** rather than assumed: `PreviewCache`'s key is the journal
+  generation and an uncommitted drag deliberately does not move it, so the drag renders from a
+  scratch clone keyed on the drag's own shape. Debug build: 26 v → 0.17 ms committed / 0.11 ms
+  scratch; 1 538 v → 8.6 / 9.1. **The clone and the stroke are free; the tessellation is the
+  whole cost**, which is the finding — and the stated limit is that this path will not hold an
+  interactive rate at a hundred thousand vertices.
+  **UV** (`inf_dcc::uv`, `Op::SetEdgeSeam` at 25 and `Op::Unwrap` at 26): seams live on the
+  half-edge twin pair, the `sharp` storage discipline exactly (`capture_edge_flags`/
+  `apply_edge_flags` widened to carry both, because a second capture/apply pair would have
+  been a dozen more places to remember one flag and forget the other). LSCM per chart, pure
+  Rust, **no external dep**: the sparse system is assembled in `BTreeMap` order and solved by
+  a **fixed-iteration** conjugate gradient on the normal equations — fixed because a
+  `while residual > tol` loop makes the answer depend on rounding, and the price is paid by
+  **reporting** the residual (`‖Ax − b‖/‖b‖` of the ORIGINAL system, not of the normal
+  equations, because the number an author reads has to be about the thing they can see).
+  **The pin rule**: `p0` is the chart's lowest `VertId`, `p1` the vertex farthest from it,
+  ties by lowest id. **The packing rule**: shelf by decreasing height, ties by decreasing
+  width, ties by chart index — a total order, so the layout cannot depend on the sort's
+  stability — into a bin of width `√(Σ area)`, then normalized into `[0,1]²`.
+  **Replay does not re-solve**: `Op::Unwrap` carries the computed per-corner UVs. The solver
+  *is* deterministic today; that is still not a reason to make an op mean "whatever this
+  build's solver says" — the meshopt lesson applied before it can bite, since a journal is
+  replayed by a different build than wrote it.
+  **The 2D UV view** is a second pane in the Model Editor, CPU-composited and PNG-encoded down
+  the same path as the 3D overlay, for the same reason: seams, charts and the selection are
+  backend facts and a `<canvas>` renderer would be a second answer to them. The selection is
+  literally shared — one `SelectionSet`, one document. Edges are drawn per **corner pair**, so
+  a vertex on a seam draws twice and the charts come apart on screen the way they do in the
+  file. Draw order is the priority order (wires → frame → seams → selection), which the first
+  version got wrong twice: a chart packed against `u = 0` swallowed the border, and a selected
+  seam read as a seam.
+  FOUND, and worth keeping: the reachability battery could **run away to 6.6 million
+  vertices** on the plane — `Mirror` doubles a mesh the new transform ops have pushed off its
+  own mirror plane — taking a 0.7 s property suite to 93 s. Bounded by restarting from the
+  base past 4 000 vertices.
+  Tests: inf-dcc **204** (184 lib + 10 property + 8 determinism-law + 2 fracture),
+  inf-editor-core `dcc` **31**, inf-studio **14**, frontend **363**.
+  **Carried remainders**: the brush ring is drawn only *during* a stroke (a hover ring needs a
+  pointer-move round trip the panel does not make); the sculpt seed is the nearest **vertex**,
+  not the exact surface point; **UV editing in the 2D view is read-only** — vertex dragging in
+  UV space is not built, and seam marking happens in the 3D view; the unwrap has no per-chart
+  re-solve, no angle-based auto-seaming and no rotation-to-minimal-bbox before packing;
+  a rotate gizmo has no on-screen angle readout; and P23.4's remainders all still stand.
 - **P23.6 Asset round-trip** — 1. edited meshes save through the asset DB (dependency events
   already live-update referencing scenes); 2. "Edit Mesh" from the Content Drawer context menu;
   3. vgeom rebuild on save via the P18.3 machinery.

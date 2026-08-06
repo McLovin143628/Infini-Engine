@@ -2559,6 +2559,11 @@ pub struct DccDocDto {
     /// and the selection, because the handles are drawn and picked backend-side
     /// and a panel-held copy would be a second opinion about the active tool.
     pub gizmo: Option<DccGizmoModeDto>,
+    /// Undirected edges marked as UV seams (P23.5).
+    pub seams: u32,
+    /// How many charts the seams cut the mesh into — the number an author checks
+    /// **before** unwrapping, because it is the thing their seam marks control.
+    pub charts: u32,
 }
 
 /// The result of a tool press: what it did, or why it refused.
@@ -2633,6 +2638,11 @@ pub enum DccToolDto {
     },
     Translate {
         delta: [f64; 3],
+    },
+    /// Mark (or clear) the selected edges as **UV seams** (P23.5). One op per
+    /// edge, so an undo peels one mark at a time.
+    Seam {
+        seam: bool,
     },
     /// Soft-translate: the selection at full weight, its geodesic neighbourhood
     /// scaled by the falloff.
@@ -2722,6 +2732,28 @@ pub enum DccDragDto {
         soft_radius: f64,
         falloff: SculptFalloffDto,
     },
+}
+
+/// The verdict on an unwrap — the P20.4 readout pattern, and the place the
+/// solver's **residual** is reported rather than hidden.
+///
+/// `worstResidual` is `‖Ax − b‖ / ‖b‖` for the worst chart after the fixed
+/// iteration count. A fixed-count solver either converged or it did not, and the
+/// only honest interface is to say which: a big number means a distorted chart,
+/// not a failure, and the author can act on it (add a seam) in a way that "unwrap
+/// complete" would never have prompted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DccUnwrapDto {
+    pub ok: bool,
+    /// The kernel's typed refusal, rendered for a human. Empty when `ok`.
+    pub refusal: Option<String>,
+    pub charts: u32,
+    pub corners: u32,
+    pub seams: u32,
+    /// The worst per-chart relative residual after the fixed CG iteration count.
+    pub worst_residual: f64,
+    pub doc: DccDocDto,
 }
 
 /// The result of starting a drag: whether the pointer actually grabbed anything.

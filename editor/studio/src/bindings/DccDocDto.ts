@@ -46,4 +46,13 @@ dragPoints: number,
  * and the selection, because the handles are drawn and picked backend-side
  * and a panel-held copy would be a second opinion about the active tool.
  */
-gizmo: DccGizmoModeDto | null, };
+gizmo: DccGizmoModeDto | null, 
+/**
+ * Undirected edges marked as UV seams (P23.5).
+ */
+seams: number, 
+/**
+ * How many charts the seams cut the mesh into — the number an author checks
+ * **before** unwrapping, because it is the thing their seam marks control.
+ */
+charts: number, };

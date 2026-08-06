@@ -40,6 +40,7 @@ import type { DccPreviewDto } from "../bindings/DccPreviewDto";
 import type { DccSaveDto } from "../bindings/DccSaveDto";
 import type { DccSelectDto } from "../bindings/DccSelectDto";
 import type { DccToolDto } from "../bindings/DccToolDto";
+import type { DccUnwrapDto } from "../bindings/DccUnwrapDto";
 import type { DataFieldDto } from "../bindings/DataFieldDto";
 import type { DeleteResult } from "../bindings/DeleteResult";
 import type { AddableComponentDto } from "../bindings/AddableComponentDto";
@@ -917,6 +918,24 @@ export const dcc = {
   dragEnd: (id: string): Promise<DccApplyDto> => invoke<DccApplyDto>("dcc_drag_end", { id }),
   /** Throw the drag away (Escape). The author's explicit "no". */
   dragCancel: (id: string): Promise<DccDocDto> => invoke<DccDocDto>("dcc_drag_cancel", { id }),
+
+  // ── UV (P23.5) ──────────────────────────────────────────────────────────
+
+  /**
+   * Cut at the seams, solve, pack, and journal the RESULT as one op.
+   *
+   * `worstResidual` is the honest half: the solver runs a fixed iteration count,
+   * so a big number means a distorted chart the author can fix by adding a seam
+   * — not a failure, and not something to hide behind "unwrap complete".
+   */
+  unwrap: (id: string): Promise<DccUnwrapDto> => invoke<DccUnwrapDto>("dcc_unwrap", { id }),
+  /**
+   * One frame of the 2D UV view. CPU-composited like the 3D overlay and for the
+   * same reason: seams, charts and the selection are backend facts, and a second
+   * renderer would be a second answer to them.
+   */
+  uvPreview: (id: string, size: number): Promise<DccPreviewDto> =>
+    invoke<DccPreviewDto>("dcc_uv_preview", { id, size }),
 };
 
 /**

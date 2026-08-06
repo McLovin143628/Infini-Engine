@@ -14,10 +14,10 @@ use inf_editor_core::ipc::{
     BiomeDefDto, BiomeSetDto, BiomeSettingsDto, ComponentDto, DataAssetDto, DataFieldDto,
     DataMapExportDto, DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto,
     DccGizmoModeDto, DccImportDto, DccModeDto, DccPreviewDto, DccSaveDto, DccSculptModeDto,
-    DccSelectDto, DccToolDto, DeleteResult, DetailsDto, ErosionParamsDto, ErosionReportDto,
-    FileEntryDto, FoliageSettingsDto, GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto,
-    ImportEventDto, LakePreviewDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto,
-    PackageKindCountDto, PackageResultDto, PartitionSettingsDto, ProjectInfoDto,
+    DccSelectDto, DccToolDto, DccUnwrapDto, DeleteResult, DetailsDto, ErosionParamsDto,
+    ErosionReportDto, FileEntryDto, FoliageSettingsDto, GitFileDto, GitStatusDto, GizmoModeDto,
+    GizmoSpaceDto, ImportEventDto, LakePreviewDto, LayoutSummary, LevelSettingsDto, LogLine,
+    PackageErrorDto, PackageKindCountDto, PackageResultDto, PartitionSettingsDto, ProjectInfoDto,
     ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto, RecentProjectDto,
     RiverBedConflictDto, RiverClimbDto, RiverReportDto, SaveResultDto, SceneDelta, SceneNode,
     SceneSnapshot, SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto,
@@ -60,6 +60,7 @@ fn export_bindings() {
     DccDragBeginDto::export_all(&cfg).expect("export DccDragBeginDto");
     DccSculptModeDto::export_all(&cfg).expect("export DccSculptModeDto");
     DccGizmoModeDto::export_all(&cfg).expect("export DccGizmoModeDto");
+    DccUnwrapDto::export_all(&cfg).expect("export DccUnwrapDto");
     LayoutSummary::export_all(&cfg).expect("export LayoutSummary");
     SceneNode::export_all(&cfg).expect("export SceneNode");
     SceneSnapshot::export_all(&cfg).expect("export SceneSnapshot");

@@ -33,6 +33,8 @@ vi.mock("../../lib/ipc", () => ({
     dragMove: vi.fn(),
     dragEnd: vi.fn(),
     dragCancel: vi.fn(),
+    unwrap: vi.fn(),
+    uvPreview: vi.fn(),
   },
   DCC_PREVIEW_SIZE: 256,
 }));
@@ -61,6 +63,8 @@ function docOf(assetId: string, over: Partial<DccDocDto> = {}): DccDocDto {
     dragging: false,
     dragPoints: 0,
     gizmo: null,
+    seams: 0,
+    charts: 1,
     import: {
       sourceVertices: 24,
       weldedPositions: 8,
@@ -461,5 +465,64 @@ describe("pointer drags (P23.5)", () => {
     await useDccStore.getState().setGizmo("aaa", "rotate");
     expect(mocked.setGizmo).toHaveBeenCalledWith("dcc:aaa", "rotate");
     expect(entry("aaa").doc?.gizmo).toBe("rotate");
+  });
+});
+
+describe("UV (P23.5)", () => {
+  beforeEach(async () => {
+    await useDccStore.getState().open("aaa");
+    await useDccStore.getState().open("bbb");
+    vi.clearAllMocks();
+    mocked.preview.mockResolvedValue({ image: "data:image/png;base64,AA", error: null, size: 256 });
+    mocked.uvPreview.mockResolvedValue({
+      image: "data:image/png;base64,UV",
+      error: null,
+      size: 256,
+    });
+  });
+
+  it("keeps the unwrap verdict — including its residual — on the document", async () => {
+    // The residual is the one honest number a fixed-iteration solver owes its
+    // caller, so it has to survive the round trip and stay put: an author who
+    // unwraps and then clicks anything else must still be able to read it.
+    mocked.unwrap.mockResolvedValue({
+      ok: true,
+      refusal: null,
+      charts: 6,
+      corners: 24,
+      seams: 12,
+      worstResidual: 3.5e-12,
+      doc: docOf("aaa", { seams: 12, charts: 6 }),
+    });
+    await useDccStore.getState().unwrap("aaa");
+    expect(entry("aaa").lastUnwrap?.charts).toBe(6);
+    expect(entry("aaa").lastUnwrap?.worstResidual).toBeCloseTo(3.5e-12);
+    expect(entry("aaa").doc?.charts).toBe(6);
+    expect(entry("aaa").uvImage).toContain("UV");
+    // …and it went to the document that asked, not to its neighbour.
+    expect(entry("bbb").lastUnwrap).toBeNull();
+    expect(entry("bbb").uvImage).toBeNull();
+  });
+
+  it("shows a refusal instead of pretending the unwrap worked", async () => {
+    mocked.unwrap.mockResolvedValue({
+      ok: false,
+      refusal: "chart 2 cannot be unwrapped: every triangle in it has zero area",
+      charts: 0,
+      corners: 0,
+      seams: 4,
+      worstResidual: 0,
+      doc: docOf("aaa"),
+    });
+    await useDccStore.getState().unwrap("aaa");
+    expect(entry("aaa").refusal).toContain("zero area");
+    expect(entry("aaa").lastUnwrap?.ok).toBe(false);
+  });
+
+  it("renders a UV frame on demand, per document", async () => {
+    await useDccStore.getState().uvRefresh("aaa");
+    expect(mocked.uvPreview).toHaveBeenCalledWith("dcc:aaa", 256);
+    expect(entry("aaa").uvImage).toContain("UV");
+    expect(entry("bbb").uvImage).toBeNull();
   });
 });

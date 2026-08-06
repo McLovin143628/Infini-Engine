@@ -47,7 +47,7 @@ use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{self, KnifePoint, MergeTarget, MirrorAxis};
-use crate::topo::{CornerData, FaceId, FacePatch, HalfId, Mesh, VertId};
+use crate::topo::{CornerData, EdgeFlags, FaceId, FacePatch, HalfId, Mesh, VertId};
 
 /// Why an op refused. Every variant names the elements involved, so a refusal is
 /// something a UI can explain rather than something it has to translate.
@@ -357,6 +357,29 @@ pub enum Op {
         pivot: [f64; 3],
         factor: [f64; 3],
     },
+
+    // ── the UV ops (P23.5) — appended at 25 and 26 ─────────────────────────
+    /// Mark or clear a **UV seam** on an undirected edge. Written through both
+    /// halves, exactly like [`Op::SetEdgeSharp`].
+    ///
+    /// One op with a bool rather than the `MarkSeam` / `ClearSeam` pair the spec
+    /// sketched: `SetEdgeSharp` is the same statement about the same storage in
+    /// the same enum, and two conventions for one idea is how a wire format
+    /// starts drifting. "Mark" and "clear" are the two values of `seam`.
+    SetEdgeSeam { half: HalfId, seam: bool },
+    /// **The result of an unwrap**, as per-corner UVs.
+    ///
+    /// The op carries the computed layout, and replay does **not** re-solve. The
+    /// solver is deterministic today (see [`crate::uv`]) and this is not a
+    /// hedge against that — it is the meshopt lesson applied before it can bite:
+    /// a journal is replayed by a *different build* than wrote it, so an op whose
+    /// effect is "whatever the current solver says" means improving the solver
+    /// silently rewrites every session ever recorded. Carrying the values makes
+    /// an unwrap a fact, and the solver a tool that produced it.
+    ///
+    /// `corners` is `(half-edge, uv)` sorted by half-edge — deterministic on the
+    /// wire and cheap to verify.
+    Unwrap { corners: Vec<(HalfId, [f64; 2])> },
 }
 
 /// Apply one op. See the module docs for the three rules this upholds.
@@ -538,6 +561,30 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
             pivot,
             factor,
         } => crate::xform::scale_verts(mesh, verts, *pivot, *factor),
+
+        Op::SetEdgeSeam { half, seam } => {
+            if !mesh.has_half(*half) {
+                return Err(OpError::NoSuchHalf(*half));
+            }
+            mesh.set_seam_pair(*half, *seam);
+            Ok(OpOutcome::default())
+        }
+        Op::Unwrap { corners } => {
+            // Every id and every value is checked before the first write, so the
+            // refusal is inert without needing a transaction — the
+            // `TranslateVerts` shape.
+            for (h, uv) in corners {
+                match mesh.face_of(*h) {
+                    Some(Some(_)) => {}
+                    _ => return Err(OpError::UnwrapCornerMissing(*h)),
+                }
+                finite("an unwrapped corner uv", uv)?;
+            }
+            for (h, uv) in corners {
+                mesh.half_mut(*h).uv = *uv;
+            }
+            Ok(OpOutcome::default())
+        }
     }
 }
 
@@ -621,7 +668,7 @@ fn split_edge(mesh: &mut Mesh, half: HalfId, t: f64) -> Result<OpOutcome, OpErro
     }
 
     let out = mesh.transact(|m| {
-        let sharp = m.capture_sharp(&incident);
+        let sharp = m.capture_edge_flags(&incident);
         let patches: Vec<FacePatch> = incident.iter().map(|&f| m.remove_face_raw(f)).collect();
         let mid_vert = m.alloc_vert(mid);
         let mut touched: BTreeSet<VertId> = [a, b, mid_vert].into_iter().collect();
@@ -654,15 +701,16 @@ fn split_edge(mesh: &mut Mesh, half: HalfId, t: f64) -> Result<OpOutcome, OpErro
             touched.extend(verts.iter().copied());
             rebuilt.push(m.add_face_raw(&verts, &corners, patch.slot)?);
         }
-        m.apply_sharp(&sharp);
-        // The two halves of the split edge inherit the original's sharpness.
-        let was_sharp = sharp
-            .iter()
-            .any(|&(x, y, s)| s && ((x == a && y == b) || (x == b && y == a)));
-        if was_sharp {
+        m.apply_edge_flags(&sharp);
+        // The two halves of the split edge inherit the original's flags — its
+        // sharpness AND (since P23.5) its seam, which is what stops splitting an
+        // edge on a UV cut from quietly healing the cut.
+        let flags = crate::model::flags_of(&sharp, a, b);
+        if flags != EdgeFlags::default() {
             for (x, y) in [(a, mid_vert), (mid_vert, b)] {
                 if let Some(h) = m.find_half(x, y) {
-                    m.set_sharp_pair(h, true);
+                    m.set_sharp_pair(h, flags.sharp);
+                    m.set_seam_pair(h, flags.seam);
                 }
             }
         }
@@ -694,7 +742,7 @@ fn split_face(mesh: &mut Mesh, from: HalfId, to: HalfId) -> Result<OpOutcome, Op
     let (i, j) = if i < j { (i, j) } else { (j, i) };
 
     let out = mesh.transact(|m| {
-        let sharp = m.capture_sharp(&[fa]);
+        let sharp = m.capture_edge_flags(&[fa]);
         let patch = m.remove_face_raw(fa);
         let n = patch.verts.len();
         let mut loops: Vec<(Vec<VertId>, Vec<CornerData>)> = Vec::with_capacity(2);
@@ -711,7 +759,7 @@ fn split_face(mesh: &mut Mesh, from: HalfId, to: HalfId) -> Result<OpOutcome, Op
         for (verts, corners) in &loops {
             made.push(m.add_face_raw(verts, corners, patch.slot)?);
         }
-        m.apply_sharp(&sharp);
+        m.apply_edge_flags(&sharp);
         m.finish_patch(&touched)?;
         Ok(OpOutcome {
             faces: made,
@@ -790,8 +838,8 @@ pub(crate) fn weld_impl(
             _ => None,
         })
         .collect();
-    let sharp: Vec<(VertId, VertId, bool)> = mesh
-        .capture_sharp(&incident)
+    let sharp: Vec<(VertId, VertId, EdgeFlags)> = mesh
+        .capture_edge_flags(&incident)
         .into_iter()
         .map(|(x, y, s)| {
             (
@@ -861,7 +909,7 @@ pub(crate) fn weld_impl(
             incident: leftover,
         });
     }
-    mesh.apply_sharp(&sharp);
+    mesh.apply_edge_flags(&sharp);
     mesh.finish_patch(&touched)?;
     Ok(made)
 }

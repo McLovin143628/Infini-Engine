@@ -162,7 +162,8 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   // time; a store read that did not name the asset gave both of them whichever
   // document was opened last, and every tool press went to the wrong mesh.
   const assetId = params;
-  const { doc, image, previewError, refusal, lastSave, status, busy } = useDccEntry(assetId);
+  const { doc, image, previewError, refusal, lastSave, lastUnwrap, uvImage, status, busy } =
+    useDccEntry(assetId);
   const open = useDccStore((s) => s.open);
   const close = useDccStore((s) => s.close);
   const apply = useDccStore((s) => s.apply);
@@ -178,6 +179,8 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const dragMove = useDccStore((s) => s.dragMove);
   const dragEnd = useDccStore((s) => s.dragEnd);
   const dragCancel = useDccStore((s) => s.dragCancel);
+  const unwrap = useDccStore((s) => s.unwrap);
+  const uvRefresh = useDccStore((s) => s.uvRefresh);
   const assetsById = useAssetStore((s) => s.assets);
 
   // Tool parameters. Local, because they are the popover's state and nothing
@@ -199,6 +202,8 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const [gizmoMode, setGizmoMode] = useState<DccGizmoModeDto>("translate");
   const [snap, setSnap] = useState(0);
   const [softRadius, setSoftRadius] = useState(0);
+  /** The 2D UV view, shown beside the 3D one rather than instead of it. */
+  const [showUv, setShowUv] = useState(false);
 
   // The panel instance is `model:<assetId>` — a singleton per asset, like the
   // material editor's per-graph tab.
@@ -221,6 +226,14 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
     const want = tool === "gizmo" ? gizmoMode : null;
     if (doc.gizmo !== want) void setGizmo(assetId, want);
   }, [assetId, doc, tool, gizmoMode, setGizmo]);
+
+  // **The UV frame follows the journal.** Keyed on the generation stamp, which
+  // is the one thing that moves when the mesh does — a `dirty` flag would miss an
+  // undo, and refreshing on every render would re-render on every mouse move.
+  const generation = doc?.generation;
+  useEffect(() => {
+    if (assetId && showUv && generation !== undefined) void uvRefresh(assetId);
+  }, [assetId, showUv, generation, uvRefresh]);
 
   // ── the preview surface ──────────────────────────────────────────────────
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -418,6 +431,16 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
               <Redo2 size={13} />
             </button>
             <button
+              className={cn(
+                "rounded p-1 hover:bg-(--ink-bg-3)",
+                showUv && "bg-(--ink-accent) text-(--ink-text-onaccent)",
+              )}
+              onClick={() => setShowUv((v) => !v)}
+              title="Show the 2D UV layout (the selection is shared with the 3D view)"
+            >
+              <Grid2x2 size={13} />
+            </button>
+            <button
               className="rounded p-1 hover:bg-(--ink-bg-3)"
               onClick={() => assetId && void frame(assetId)}
               title="Frame the whole mesh"
@@ -469,6 +492,23 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
             <div className="text-(--ink-text-dim)">{previewError ?? "Rendering…"}</div>
           )}
         </div>
+        {showUv && (
+          <div className="flex h-48 shrink-0 items-center justify-center border-t border-(--ink-border) bg-(--ink-bg-0) p-2">
+            {uvImage ? (
+              <img
+                src={uvImage}
+                alt="uv layout"
+                draggable={false}
+                className="max-h-full max-w-full select-none rounded"
+                style={{ imageRendering: "pixelated" }}
+              />
+            ) : (
+              <span className="text-[11px] text-(--ink-text-dim)">
+                Mark seams in Edge mode, then Unwrap.
+              </span>
+            )}
+          </div>
+        )}
         <div className="flex h-6 shrink-0 items-center gap-3 border-t border-(--ink-border) bg-(--ink-bg-2) px-2 text-[11px] text-(--ink-text-dim)">
           <span>{doc.verts} v</span>
           <span>{doc.edges} e</span>
@@ -707,6 +747,64 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           disabled={nothing}
           onClick={() => assetId && void apply(assetId, { tool: "delete" })}
         />
+
+        <div className="text-[10px] font-semibold tracking-wide text-(--ink-text-dim)">UV</div>
+        <div className="grid grid-cols-2 gap-1">
+          <ToolButton
+            label="Mark seam"
+            icon={<Scissors size={12} />}
+            disabled={nothing || mode !== "edge"}
+            onClick={() => assetId && void apply(assetId, { tool: "seam", seam: true })}
+            title="Cut the selected edges. Charts are the components the cuts leave behind."
+          />
+          <ToolButton
+            label="Clear seam"
+            icon={<Scissors size={12} />}
+            disabled={nothing || mode !== "edge"}
+            onClick={() => assetId && void apply(assetId, { tool: "seam", seam: false })}
+          />
+        </div>
+        <ToolButton
+          label="Unwrap"
+          icon={<Grid2x2 size={12} />}
+          disabled={busy}
+          onClick={() => {
+            if (!assetId) return;
+            setShowUv(true);
+            void unwrap(assetId);
+          }}
+          title="Least-squares conformal unwrap, one chart per seam-cut component, packed into 0..1."
+        />
+        <div className="flex gap-2 text-[11px] text-(--ink-text-dim)">
+          <span>{doc.seams} seams</span>
+          <span>{doc.charts} charts</span>
+        </div>
+        {lastUnwrap && (
+          <>
+            <Verdict
+              label="Charts"
+              value={lastUnwrap.charts}
+              good={lastUnwrap.ok}
+            />
+            <Verdict
+              label="Residual"
+              value={lastUnwrap.worstResidual.toExponential(1)}
+              good={lastUnwrap.worstResidual < 1e-4}
+            />
+            {lastUnwrap.worstResidual >= 1e-4 && (
+              <p className="text-[10px] leading-snug text-(--ink-text-dim)">
+                The solver runs a fixed number of iterations and reports how far it
+                got. A large residual means a distorted chart, not a failure — add a
+                seam through the stretched area and unwrap again.
+              </p>
+            )}
+            {lastUnwrap.refusal && (
+              <p className="rounded bg-(--ink-warn-bg,#3a2a12) p-1 text-[10px] leading-snug text-(--ink-warn,#ffb454)">
+                {lastUnwrap.refusal}
+              </p>
+            )}
+          </>
+        )}
 
         {/* ── readouts ──────────────────────────────────────────────── */}
         <div className="mt-1 text-[10px] font-semibold tracking-wide text-(--ink-text-dim)">

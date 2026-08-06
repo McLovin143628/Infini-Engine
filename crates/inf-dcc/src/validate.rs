@@ -128,6 +128,11 @@ pub enum Violation {
     /// `sharp` differs across a twin pair — the flag describes one undirected
     /// edge and must not depend on which half you ask.
     SharpDisagrees { half: HalfId, twin: HalfId },
+    /// `seam` differs across a twin pair (P23.5). Same rule as `sharp`, and the
+    /// same reason it is checked separately rather than folded in: the two flags
+    /// mean different things, and a message naming the wrong one sends an author
+    /// looking at their creases when their UV cut is what broke.
+    SeamDisagrees { half: HalfId, twin: HalfId },
     /// A face names a material slot the mesh has no name for.
     UnknownSlot {
         face: FaceId,
@@ -208,6 +213,9 @@ fn check_twins(mesh: &Mesh, out: &mut Vec<Violation>) {
         }
         if mesh.is_sharp(h) != mesh.is_sharp(t) {
             out.push(Violation::SharpDisagrees { half: h, twin: t });
+        }
+        if mesh.is_seam(h) != mesh.is_seam(t) {
+            out.push(Violation::SeamDisagrees { half: h, twin: t });
         }
         if mesh.face_of(h) == Some(None) && mesh.face_of(t) == Some(None) {
             out.push(Violation::WireEdge { half: h });
@@ -610,6 +618,26 @@ mod tests {
         assert!(errs
             .iter()
             .any(|e| matches!(e, Violation::SharpDisagrees { .. })));
+    }
+
+    #[test]
+    fn one_sided_seam_is_caught_too() {
+        // The seam flag gets the same twin-agreement invariant as sharpness, and
+        // it needs its own gate: `SharpDisagrees` cannot see it, so without this
+        // an op that wrote one half of a seam would be caught by nothing.
+        let mut m = cube(1.0);
+        let h = m.half_ids().next().unwrap();
+        m.halfs.get_mut(h.0).expect("live half-edge id").seam = true;
+        let errs = validate(&m).expect_err("one-sided seam must be caught");
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, Violation::SeamDisagrees { .. })));
+        // And through the door it is meant to be written by, both halves agree.
+        let mut m = cube(1.0);
+        m.set_seam_pair(h, true);
+        assert_eq!(validate(&m), Ok(()));
+        assert_eq!(m.is_seam(h), Some(true));
+        assert_eq!(m.is_seam(m.twin(h).unwrap()), Some(true));
     }
 
     #[test]
