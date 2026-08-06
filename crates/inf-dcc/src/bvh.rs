@@ -338,11 +338,13 @@ impl Bvh {
         if self.tris.is_empty() || !direction.is_finite() || direction == DVec3::ZERO {
             return;
         }
-        let inv = DVec3::new(1.0 / direction.x, 1.0 / direction.y, 1.0 / direction.z);
+        // No reciprocal is precomputed: `slab_hit` takes the direction itself and
+        // branches per axis, because a zero component's reciprocal is the ∞ that
+        // used to produce a NaN and cull a real hit. See `slab_hit`.
         let mut stack: Vec<u32> = vec![0];
         while let Some(idx) = stack.pop() {
             let node = self.nodes[idx as usize];
-            if !slab_hit(origin, inv, node) {
+            if !slab_hit(origin, direction, node) {
                 continue;
             }
             if node.count > 0 {
@@ -459,18 +461,76 @@ fn aabb_distance2(p: DVec3, node: Node) -> f64 {
 }
 
 /// Slab test: does the ray meet the box at any `t > `[`RAY_EPSILON`]?
-fn slab_hit(origin: DVec3, inv: DVec3, node: Node) -> bool {
-    let t0 = (node.min - origin) * inv;
-    let t1 = (node.max - origin) * inv;
-    // `min`/`max` on the pair handles a negative component of `inv` without a
-    // branch; an infinite `inv` component (a ray parallel to an axis) produces
-    // ±inf, which orders correctly, and only a NaN — origin exactly on the slab
-    // AND a zero direction component — would not. `for_each_hit` refuses a zero
-    // direction outright.
-    let lo = t0.min(t1);
-    let hi = t0.max(t1);
-    let enter = lo.x.max(lo.y).max(lo.z).max(RAY_EPSILON);
-    let exit = hi.x.min(hi.y).min(hi.z);
+///
+/// # The branch-free form was WRONG, and it culled real hits
+///
+/// This used to be `(min − origin) * inv` with `inv = 1/direction`, relying on
+/// `min`/`max` to sort the pair. The comment that stood here claimed the only
+/// hazard — a NaN from `0 · ∞` when a direction component is zero *and* the
+/// origin sits exactly on that slab's plane — could not arise because
+/// [`Bvh::for_each_hit`] "refuses a zero direction outright". **It refuses a
+/// zero *vector*, not a zero *component*.** A direction like `(0, 0, −1)` has
+/// two zero components, `1/0 = ∞`, and an origin whose `y` is exactly the box's
+/// `min.y` gives `(min.y − origin.y) · ∞ = 0 · ∞ = NaN`. glam's `min`/`max` are
+/// branch forms (`if a < b`), and a NaN compares false against everything, so it
+/// propagates into **both** bounds and `enter <= exit` reads false: the node is
+/// culled and every triangle under it disappears.
+///
+/// Measured by the P24.2 audit: 727 divergences from brute force over 31 043
+/// real auto-fit ray candidates, 29 of them returning `None` where a hit exists.
+/// `Bvh::contains` happened to be immune (its three vote directions have no zero
+/// component by construction, which was luck rather than design);
+/// [`crate::heat`]'s visibility rays were exposed — 564 of 1 544 tube queries
+/// have an exactly-zero component, because a vertex and a bone on a
+/// bilaterally-symmetric model share a coordinate constantly.
+///
+/// # The form that replaces it
+///
+/// Per-axis, with the zero-direction case handled **explicitly**: a ray parallel
+/// to a slab either starts inside that slab (and the axis constrains nothing) or
+/// it never enters it. No reciprocal is taken for a zero component, so no `∞`
+/// reaches a multiply, so no `NaN` can be produced. The one remaining
+/// `0 · ∞` — a *denormal* direction component whose reciprocal overflows, with
+/// the origin exactly on the plane — is folded to `0.0`, which is its limit: the
+/// ray is at that plane *now*.
+///
+/// The cost is three branches on a path that had none. Measured against the
+/// alternative of keeping the fast form and pre-nudging origins: a nudge is a
+/// tolerance, and it would have to be chosen against a model's scale.
+fn slab_hit(origin: DVec3, direction: DVec3, node: Node) -> bool {
+    let (o, d) = (origin.to_array(), direction.to_array());
+    let (lo, hi) = (node.min.to_array(), node.max.to_array());
+    let mut enter = RAY_EPSILON;
+    let mut exit = f64::INFINITY;
+    for axis in 0..3 {
+        if d[axis] == 0.0 {
+            // Parallel to this slab: it constrains nothing if the origin is
+            // already between the planes, and excludes everything if not.
+            if o[axis] < lo[axis] || o[axis] > hi[axis] {
+                return false;
+            }
+            continue;
+        }
+        let inv = 1.0 / d[axis];
+        let mut t0 = (lo[axis] - o[axis]) * inv;
+        let mut t1 = (hi[axis] - o[axis]) * inv;
+        // `0 · ∞`, from a denormal direction component with the origin exactly on
+        // the plane. Its limit is 0 — the ray is at that plane now.
+        if t0.is_nan() {
+            t0 = 0.0;
+        }
+        if t1.is_nan() {
+            t1 = 0.0;
+        }
+        if t0 > t1 {
+            std::mem::swap(&mut t0, &mut t1);
+        }
+        enter = enter.max(t0);
+        exit = exit.min(t1);
+        if enter > exit {
+            return false;
+        }
+    }
     enter <= exit
 }
 
@@ -740,6 +800,153 @@ pub(crate) mod tests {
         // …and inward it crosses the far face exactly once.
         let hit = bvh.first_hit(from, -DVec3::X).expect("crosses the box");
         assert!((hit.t - 2.0).abs() < 1e-9, "{hit:?}");
+    }
+
+    /// **The P24.2 audit's minimal repro, enshrined** (blocker B2).
+    ///
+    /// A ray straight down `−z` at an origin whose `y` is *exactly* the box's
+    /// `min.y`. Under the old branch-free slab test `1/0 = ∞` and
+    /// `(min.y − origin.y) · ∞ = 0 · ∞ = NaN`, which glam's comparison-form
+    /// `min`/`max` propagated into both bounds, so `enter <= exit` read false and
+    /// the root node was culled: `None`, on a ray that plainly crosses the box.
+    ///
+    /// The third arm is the one that made it a *blocker* rather than a curiosity:
+    /// nudging the origin by a picometre restores the hit, so the failure is
+    /// invisible to any test whose numbers are not exactly aligned — and a
+    /// bilaterally-symmetric character model aligns coordinates constantly.
+    #[test]
+    fn a_ray_whose_origin_sits_on_a_slab_plane_is_not_culled() {
+        // min.y is exactly 0.0, and so is the ray origin's y.
+        let bvh = Bvh::new(box_tris(
+            DVec3::new(-1.0, 0.0, -1.0),
+            DVec3::new(1.0, 2.0, 1.0),
+        ));
+        let origin = DVec3::new(0.0, 0.0, 5.0);
+        let dir = DVec3::new(0.0, 0.0, -1.0);
+
+        let hit = bvh
+            .first_hit(origin, dir)
+            .expect("the ray crosses the box; the slab test must not cull it");
+        assert!((hit.t - 4.0).abs() < 1e-12, "{hit:?}");
+
+        // Brute force agrees — the authority the sweep below generalizes.
+        let brute = bvh
+            .triangles()
+            .iter()
+            .filter_map(|t| ray_triangle(origin, dir, t))
+            .fold(f64::INFINITY, f64::min);
+        assert!((brute - 4.0).abs() < 1e-12, "brute force says {brute}");
+
+        // …and the picometre nudge that used to be the difference now changes
+        // nothing, which is what "no longer alignment-sensitive" means.
+        let nudged = bvh
+            .first_hit(origin + DVec3::new(0.0, 1e-12, 0.0), dir)
+            .expect("still a hit");
+        assert!((nudged.t - hit.t).abs() < 1e-9, "{nudged:?} vs {hit:?}");
+
+        // The other two axes, and the winding depth that reads off them.
+        for (o, d) in [
+            (DVec3::new(-5.0, 0.0, 0.0), DVec3::X),
+            (DVec3::new(0.0, 0.0, -5.0), DVec3::Z),
+            (DVec3::new(-1.0, 5.0, 0.0), -DVec3::Y),
+        ] {
+            assert!(
+                bvh.first_hit(o, d).is_some(),
+                "an axis-aligned ray from {o:?} along {d:?} was culled"
+            );
+        }
+    }
+
+    /// **The audit's regression instrument**: the hierarchy agrees with brute
+    /// force over a *candidate sweep*, and the divergence counter is asserted to
+    /// be zero rather than merely "no panic".
+    ///
+    /// Every origin here is drawn from the coordinates the geometry itself uses —
+    /// face planes, corners, midpoints — because that is where the defect lived:
+    /// a sweep over pseudo-random floats would have hit an exact plane with
+    /// probability zero and certified the broken code. Directions include every
+    /// signed axis (two zero components each), every face diagonal (one zero
+    /// component) and a skew control.
+    #[test]
+    fn no_ray_diverges_from_brute_force_over_the_aligned_candidate_sweep() {
+        let mut tris = box_tris(DVec3::new(-1.0, 0.0, -1.0), DVec3::new(1.0, 2.0, 1.0));
+        tris.extend(box_tris(
+            DVec3::new(0.5, 0.5, -0.5),
+            DVec3::new(2.5, 1.0, 0.5),
+        ));
+        let bvh = Bvh::new(tris);
+
+        // Coordinates the geometry is built from — the alignment the bug needed.
+        let coords = [-2.5, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 2.5];
+        let dirs: Vec<DVec3> = [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, -1.0],
+            [-1.0, 0.0, 1.0],
+            [0.37, -0.81, 0.29],
+        ]
+        .into_iter()
+        .map(DVec3::from_array)
+        .collect();
+
+        let mut candidates = 0usize;
+        let mut real_hits = 0usize;
+        let mut divergences = 0usize;
+        let mut missed_entirely = 0usize;
+        let mut worst: Option<(DVec3, DVec3, Option<f64>, f64)> = None;
+        for &x in &coords {
+            for &y in &coords {
+                for &z in &coords {
+                    let origin = DVec3::new(x, y, z);
+                    for &dir in &dirs {
+                        candidates += 1;
+                        let mine = bvh.first_hit(origin, dir).map(|h| h.t);
+                        // The authority: every triangle, no hierarchy.
+                        let brute = bvh
+                            .triangles()
+                            .iter()
+                            .filter_map(|t| ray_triangle(origin, dir, t))
+                            .fold(f64::INFINITY, f64::min);
+                        let brute = brute.is_finite().then_some(brute);
+                        if brute.is_some() {
+                            real_hits += 1;
+                        }
+                        let agrees = match (mine, brute) {
+                            (None, None) => true,
+                            (Some(a), Some(b)) => (a - b).abs() <= 1e-9 * b.abs().max(1.0),
+                            _ => false,
+                        };
+                        if !agrees {
+                            divergences += 1;
+                            if brute.is_some() && mine.is_none() {
+                                missed_entirely += 1;
+                            }
+                            if worst.is_none() {
+                                worst = Some((origin, dir, mine, brute.unwrap_or(f64::NAN)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            (divergences, missed_entirely),
+            (0, 0),
+            "{divergences} of {candidates} candidates diverge from brute force \
+             ({missed_entirely} returning None where a hit exists); first: {worst:?}"
+        );
+        // NOT VACUOUS: the sweep is big, and most of it really does cross the
+        // geometry — an agreement over rays that all miss proves nothing.
+        assert!(candidates > 5_000, "{candidates} candidates is too few");
+        assert!(
+            real_hits > candidates / 4,
+            "only {real_hits} of {candidates} candidates hit anything; two              agreeing `None`s are not a measurement"
+        );
     }
 
     #[test]

@@ -117,6 +117,19 @@ pub enum IkError {
     NonFinite { what: &'static str, value: [f32; 3] },
 }
 
+/// Whether `len` is a **usable** bone length: finite, and at least
+/// [`MIN_BONE_LENGTH_M`].
+///
+/// A *positive* predicate, deliberately. The P24.2 audit's B1 finding was that
+/// `len < MIN_BONE_LENGTH_M` is **false** for a NaN, so the guard written the
+/// obvious way waves every non-finite length through to arithmetic that then
+/// panics or manufactures a NaN. Writing the good case and negating the *call*
+/// puts non-finite values on the refusal side without a negated float
+/// comparison — which clippy distrusts for precisely this reason.
+fn usable_length(len: f32) -> bool {
+    len.is_finite() && len >= MIN_BONE_LENGTH_M
+}
+
 /// **Two-bone IK in positional form** — root, mid, tip, and a pole that decides
 /// which way the joint bends.
 ///
@@ -135,11 +148,27 @@ pub fn two_bone_positions(
     target: Vec3,
     pole: Vec3,
 ) -> (Vec3, Vec3) {
+    // **Finiteness first, on the POINTS** — measured while writing the B1
+    // regression: `root.x = +inf` gives `l1 = +inf`, which satisfies
+    // `l1 >= MIN_BONE_LENGTH_M` perfectly well and walks the whole computation
+    // into NaN. A polarity-flipped length guard closes the NaN half of the audit
+    // finding and not the infinity half; this closes both, at the primitive, so a
+    // direct caller is as safe as one coming through `solve_chain`.
+    if !(root.is_finite() && mid.is_finite() && tip.is_finite() && target.is_finite()) {
+        return (mid, tip);
+    }
     let l1 = (mid - root).length();
     let l2 = (tip - mid).length();
     let to_target = target - root;
     let d_raw = to_target.length();
-    if l1 < MIN_BONE_LENGTH_M || l2 < MIN_BONE_LENGTH_M || d_raw < MIN_BONE_LENGTH_M {
+    // **Polarity, not taste** (P24.2 audit B1). `x < MIN` is FALSE for a NaN, so
+    // the written-the-obvious-way guard waves a non-finite length straight
+    // through — and `f32::clamp` below asserts `min <= max`, which panics inside
+    // a fixed step. `!(x >= MIN)` is TRUE for a NaN, so every non-finite input
+    // takes the refusal branch. The `+inf` sibling was worse than the panic: no
+    // assert fires, `[NaN; 4]` lands in `pose.locals`, and it rides
+    // `state_bytes` into the palette.
+    if !usable_length(l1) || !usable_length(l2) || !usable_length(d_raw) {
         return (mid, tip);
     }
     let u = to_target / d_raw;
@@ -180,6 +209,10 @@ pub fn fabrik(points: &mut [Vec3], target: Vec3) {
     if n < 2 {
         return;
     }
+    // Same rule at the other entry point.
+    if !target.is_finite() || !points.iter().all(|p| p.is_finite()) {
+        return;
+    }
     let lengths: Vec<f32> = (1..n)
         .map(|i| (points[i] - points[i - 1]).length())
         .collect();
@@ -187,7 +220,7 @@ pub fn fabrik(points: &mut [Vec3], target: Vec3) {
     let root = points[0];
     let to_target = target - root;
     let reach = to_target.length();
-    if reach < MIN_BONE_LENGTH_M {
+    if !usable_length(reach) {
         return;
     }
     if reach >= total {
@@ -262,11 +295,49 @@ pub fn solve_chain(
             .map(|&j| globals[j as usize].transform_point3(Vec3::ZERO))
             .collect()
     };
+    // **The pose is an input too** (audit B1). `solve_chain` validated its target
+    // and its pole and never the thing it was solving *over*: a pose carrying a
+    // NaN — from a clip whose keys are corrupt, a blend that divided by zero, or
+    // an earlier goal on an overlapping chain — reached the arithmetic below and
+    // came back as `[NaN; 4]` in `pose.locals`, which the trace then committed.
+    // Checked on the CHAIN's joints only: an unrelated joint's NaN is not this
+    // solve's business, and refusing the whole pose for it would make one bad
+    // clip disable every chain on the character.
+    for &j in chain {
+        let l = &pose.locals[j as usize];
+        for (what, v) in [
+            (
+                "an IK chain joint's translation",
+                Vec3::from_array(l.translation),
+            ),
+            ("an IK chain joint's scale", Vec3::from_array(l.scale)),
+        ] {
+            finite(what, v)?;
+        }
+        if !l.rotation.iter().all(|c| c.is_finite()) {
+            return Err(IkError::NonFinite {
+                what: "an IK chain joint's rotation",
+                value: [l.rotation[0], l.rotation[1], l.rotation[2]],
+            });
+        }
+    }
+
     let start = positions(pose);
+    // …and the model-space positions the pose produced, because a finite local
+    // TRS can still compose into a non-finite global (the M3 lesson: the
+    // finiteness contract holds on RESULTS).
+    for (i, p) in start.iter().enumerate() {
+        if !p.is_finite() {
+            return Err(IkError::NonFinite {
+                what: "an IK chain joint's model-space position",
+                value: [chain[i] as f32, p.x, p.y],
+            });
+        }
+    }
     let mut lengths = Vec::with_capacity(chain.len() - 1);
     for i in 1..start.len() {
         let len = (start[i] - start[i - 1]).length();
-        if len < MIN_BONE_LENGTH_M {
+        if !usable_length(len) {
             return Err(IkError::DegenerateBone {
                 parent: chain[i - 1],
                 child: chain[i],
@@ -299,7 +370,7 @@ pub fn solve_chain(
         let child_now = globals[chain[i + 1] as usize].transform_point3(Vec3::ZERO);
         let cur = child_now - here;
         let want = goal[i + 1] - here;
-        if cur.length() < MIN_BONE_LENGTH_M || want.length() < MIN_BONE_LENGTH_M {
+        if !usable_length(cur.length()) || !usable_length(want.length()) {
             continue;
         }
         let delta = rotation_between(cur.normalize(), want.normalize());
@@ -363,10 +434,10 @@ fn any_perpendicular(v: Vec3) -> Vec3 {
     };
     let c = v.cross(axis);
     let len = c.length();
-    if len < MIN_BONE_LENGTH_M {
-        Vec3::X
-    } else {
+    if usable_length(len) {
         c / len
+    } else {
+        Vec3::X
     }
 }
 
@@ -393,7 +464,7 @@ fn perpendicular_toward(axis: Vec3, hint: Vec3, fallback: Vec3) -> Vec3 {
 fn step_toward(from: Vec3, to: Vec3, length: f32) -> Vec3 {
     let d = to - from;
     let len = d.length();
-    if len < MIN_BONE_LENGTH_M {
+    if !usable_length(len) {
         // No direction to preserve; extend along +Y so the chain stays the right
         // length rather than collapsing.
         return from + Vec3::Y * length;
@@ -588,6 +659,132 @@ mod tests {
         ));
         // …and the pose is untouched by any of them.
         assert_eq!(pose, Pose::rest(&sk));
+    }
+
+    /// Bit-for-bit pose equality.
+    ///
+    /// `assert_eq!` cannot express "unchanged" for a pose carrying a NaN:
+    /// `NaN != NaN`, so a pose compares unequal to *itself*. These tests are
+    /// about a refusal being **inert**, which is a statement about bytes.
+    fn same_bits(a: &Pose, b: &Pose) -> bool {
+        a.locals.len() == b.locals.len()
+            && a.locals.iter().zip(&b.locals).all(|(x, y)| {
+                x.translation
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .eq(y.translation.iter().map(|v| v.to_bits()))
+                    && x.rotation
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .eq(y.rotation.iter().map(|v| v.to_bits()))
+                    && x.scale
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .eq(y.scale.iter().map(|v| v.to_bits()))
+            })
+    }
+
+    /// **A non-finite pose is a REFUSAL, never a panic and never a NaN**
+    /// (P24.2 audit B1).
+    ///
+    /// Both halves of the finding, because they failed differently:
+    ///
+    /// * **NaN panicked.** `l1 < MIN` is false for a NaN, so the guard waved it
+    ///   through to `f32::clamp`, whose `assert!(min <= max)` aborts — inside a
+    ///   fixed step, taking the session with it.
+    /// * **`+inf` did not panic, which was worse.** No assert fires, the
+    ///   arithmetic produces `[NaN; 4]`, and it lands in `pose.locals` → the
+    ///   evaluated pose → `state_bytes` → the GPU palette. A silent NaN in a
+    ///   committed trace is the failure a panic at least announces.
+    #[test]
+    fn a_non_finite_pose_is_refused_by_name_and_leaves_the_pose_alone() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            // (a) a non-finite TRANSLATION on a chain joint.
+            let sk = chain_skeleton(3);
+            let mut pose = Pose::rest(&sk);
+            pose.locals[1].translation[1] = bad;
+            let before = pose.clone();
+            let err = solve_chain(&sk, &mut pose, &[0, 1, 2], Vec3::new(1.0, 1.0, 0.0), None)
+                .expect_err("a non-finite pose must refuse");
+            assert!(
+                matches!(err, IkError::NonFinite { .. }),
+                "{bad}: got {err:?}"
+            );
+            assert!(
+                same_bits(&pose, &before),
+                "{bad}: a refusal must leave the pose alone"
+            );
+
+            // (b) a non-finite ROTATION, which the translation check cannot see.
+            let mut pose = Pose::rest(&sk);
+            pose.locals[1].rotation[0] = bad;
+            let before = pose.clone();
+            assert!(matches!(
+                solve_chain(&sk, &mut pose, &[0, 1, 2], Vec3::new(1.0, 1.0, 0.0), None),
+                Err(IkError::NonFinite { .. })
+            ));
+            assert!(same_bits(&pose, &before));
+
+            // (c) a non-finite SCALE, which composes into the globals.
+            let mut pose = Pose::rest(&sk);
+            pose.locals[0].scale[0] = bad;
+            let before = pose.clone();
+            assert!(matches!(
+                solve_chain(&sk, &mut pose, &[0, 1, 2], Vec3::new(1.0, 1.0, 0.0), None),
+                Err(IkError::NonFinite { .. })
+            ));
+            assert!(same_bits(&pose, &before));
+        }
+    }
+
+    /// The primitive underneath it: `two_bone_positions` on non-finite inputs
+    /// returns its inputs rather than panicking or manufacturing a NaN.
+    ///
+    /// Called directly, so the guard is exercised where it lives — the refusal in
+    /// `solve_chain` above would satisfy the test without this ever running.
+    #[test]
+    fn two_bone_positions_never_panics_and_never_produces_a_nan() {
+        let ok = (Vec3::ZERO, Vec3::Y, Vec3::new(0.0, 2.0, 0.0));
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for case in 0..4 {
+                let (mut root, mut mid, mut tip) = ok;
+                let mut target = Vec3::new(1.0, 1.0, 0.0);
+                match case {
+                    0 => root.x = bad,
+                    1 => mid.y = bad,
+                    2 => tip.z = bad,
+                    _ => target.x = bad,
+                }
+                let (m, t) = two_bone_positions(root, mid, tip, target, Vec3::X);
+                let unchanged = m
+                    .to_array()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .eq(mid.to_array().iter().map(|v| v.to_bits()))
+                    && t.to_array()
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .eq(tip.to_array().iter().map(|v| v.to_bits()));
+                assert!(
+                    (m.is_finite() && t.is_finite()) || unchanged,
+                    "{bad} at case {case}: produced {m:?} / {t:?}, which is                      neither a finite answer nor the untouched input"
+                );
+            }
+        }
+        // …and FABRIK, the other entry point.
+        for bad in [f32::NAN, f32::INFINITY] {
+            let mut pts = vec![Vec3::ZERO, Vec3::Y, Vec3::new(0.0, 2.0, 0.0)];
+            let before = pts.clone();
+            fabrik(&mut pts, Vec3::new(bad, 1.0, 0.0));
+            assert!(
+                pts.iter().all(|p| p.is_finite()) || pts == before,
+                "{bad}: fabrik produced {pts:?}"
+            );
+            assert!(
+                pts.iter().all(|p| !p.is_nan()),
+                "{bad}: fabrik manufactured a NaN: {pts:?}"
+            );
+        }
     }
 
     #[test]

@@ -646,3 +646,146 @@ fn a_refused_or_unreachable_goal_leaves_a_usable_trace() {
         );
     }
 }
+
+/// **B1 at the host boundary**: a goal whose numbers are not numbers cannot
+/// panic the fixed step, and cannot put a NaN in the trace.
+///
+/// The audit's finding was reachable exactly here — `step_pose_evaluation` calls
+/// `solve_chain` on every goal, and before the fix a NaN target reached
+/// `f32::clamp`'s `assert!(min <= max)` and aborted the session, while `+inf`
+/// produced `[NaN; 4]` in `pose.locals` and rode `state_bytes` into the palette.
+///
+/// The assertion is against the **no-IK baseline**, not merely "it did not
+/// crash": a refused goal must leave the pose exactly as the machine evaluated
+/// it, so the trace is byte-identical to a character with no goal at all.
+#[test]
+fn a_non_finite_goal_cannot_panic_the_step_or_reach_the_trace() {
+    let baseline = player_trace();
+    for target in [
+        [f32::NAN, 1.0, 0.0],
+        [f32::INFINITY, 1.0, 0.0],
+        [f32::NEG_INFINITY, 1.0, 0.0],
+        [0.5, f32::NAN, 0.0],
+    ] {
+        let goal = inf_ecs::IkGoal {
+            chain: vec![0, 1, 2],
+            target,
+            pole: None,
+        };
+        let trace = player_trace_with_ik(Some(goal.clone()));
+        assert_eq!(
+            trace, baseline,
+            "{target:?}: a non-finite goal changed the trace; it must be refused \
+             and leave the machine's pose alone"
+        );
+        // Not a single NaN reached the bytes. `pose_state_bytes` is little-endian
+        // f32s, so this reads them back and checks every one.
+        for step in &trace {
+            for chunk in step[32..].chunks_exact(4) {
+                let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                assert!(!v.is_nan(), "{target:?}: a NaN reached the trace");
+            }
+        }
+        // Both hosts agree about the refusal, as they do about everything else.
+        assert_eq!(trace, editor_trace_with_ik(Some(goal)));
+    }
+    // ANTI-VACUITY: a FINITE goal on the same chain does move the trace, so the
+    // equalities above are about the refusal and not about IK being inert.
+    let live = player_trace_with_ik(Some(inf_ecs::IkGoal {
+        chain: vec![0, 1, 2],
+        target: [1.2, 1.2, 0.0],
+        pole: Some([2.0, 1.0, 0.0]),
+    }));
+    assert_ne!(live, baseline);
+}
+
+/// **B1's ACTUAL vector at the host**: a non-finite *pose*, not a non-finite
+/// target.
+///
+/// Written after the first attempt at this arm failed to falsify. That one fed a
+/// NaN **target**, which `solve_chain` has refused since the day it was written
+/// (`finite("an IK target", …)`) — so removing every guard the B1 fix added left
+/// it green. The finding was about the pose: a clip whose key is not a number
+/// puts a NaN in `pose.locals`, `two_bone_positions` computed
+/// `l1 = (mid − root).length() = NaN`, `NaN < MIN` is **false**, and the guard
+/// waved it through to `f32::clamp`, whose `assert!(min <= max)` aborts the
+/// fixed step.
+///
+/// So the fixture manufactures one: a state machine playing a clip with a
+/// `[NaN; 4]` rotation key. Two claims, and the first is the blocker:
+///
+/// 1. **the step completes** — pre-fix this panicked, taking the session down;
+/// 2. the trace is byte-identical to the same world with no goal at all, so the
+///    refused solve contributed nothing rather than half-solving.
+#[test]
+fn a_goal_on_a_non_finite_pose_refuses_instead_of_panicking() {
+    fn broken_clips() -> BTreeMap<Uuid, AnimClip> {
+        BTreeMap::from([(
+            IDLE,
+            AnimClip {
+                name: "broken".into(),
+                duration: 1.0,
+                tracks: vec![JointTrack {
+                    joint: 1,
+                    translation: None,
+                    // Not a number, in the one place a corrupt clip, a divide by
+                    // zero in a blend, or a bad import would put one.
+                    rotation: Some(QuatTrack::new(
+                        vec![0.0],
+                        vec![[f32::NAN; 4]],
+                        Interpolation::Step,
+                    )),
+                    scale: None,
+                }],
+            },
+        )])
+    }
+    fn trace(goal: Option<inf_ecs::IkGoal>) -> Vec<Vec<u8>> {
+        let mut world = EcsWorld::new();
+        let e = world.spawn_with_guid(HERO, "Hero", None);
+        world.world_mut().entity_mut(e).insert(character());
+        world.mark_dirty();
+        let mut sim = RuntimeSim::new(world, Vec::new(), DVec2::ZERO, HZ);
+        // One state, no transitions: the machine sits on the broken clip.
+        sim.set_state_machines(BTreeMap::from([(
+            SM,
+            StateMachine {
+                states: vec![SmState::clip("idle", *IDLE.as_bytes())],
+                transitions: vec![],
+                entry: 0,
+            },
+        )]));
+        sim.set_skeletons(skeletons());
+        sim.set_pose_clips(broken_clips());
+        if let Some(g) = goal {
+            inf_ecs::set_ik_goals(sim.world_mut(), HERO, vec![g]);
+        }
+        (0..STEPS)
+            .map(|_| {
+                // The blocker: pre-fix, THIS call aborted the process.
+                sim.step_once(RuntimeInput::default());
+                inf_ecs::pose::pose_state_bytes(sim.world())
+            })
+            .collect()
+    }
+
+    let without = trace(None);
+    let with = trace(Some(inf_ecs::IkGoal {
+        chain: vec![0, 1, 2],
+        target: [0.5, 1.0, 0.0],
+        pole: None,
+    }));
+    assert_eq!(
+        with, without,
+        "a goal over a non-finite pose must be refused whole; the trace moved, \
+         so the solve ran on numbers that are not numbers"
+    );
+    // The fixture really is broken — otherwise this test proves nothing about
+    // non-finite poses, only that two clean traces agree.
+    assert!(
+        without[0][32..]
+            .chunks_exact(4)
+            .any(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]).is_nan()),
+        "the fixture's pose is finite, so it is not exercising B1 at all"
+    );
+}
