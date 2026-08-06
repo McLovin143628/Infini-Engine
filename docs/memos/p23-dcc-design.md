@@ -612,6 +612,55 @@ The audit's fixes are in the ROADMAP's completion block. Three of them changed a
   `|s, c|` = 0.968, swept), and past ~2e16 it is exactly zero — so the honest
   interface is a bound plus a refusal, not a fold.**
 
+## 7f. Addendum, P23.6 — the chain, executed, and what it cost
+
+The asset round-trip closed the phase (2026-08-06). Three things this memo asserted
+are now *measurements* rather than arguments, and one thing it did not
+anticipate is the phase's most valuable finding.
+
+* **§3's claim about Simulate is executed, not reasoned about.** A save spliced
+  into the middle of a live `SimSession` leaves the step trace **bit-identical to
+  a control run**, the editor re-keys mid-run, `exit` restores the document byte
+  for byte, and the asset keeps the edit
+  (`inf-editor-core/tests/dcc_edit_during_simulate.rs`). The chain was also
+  *read* rather than assumed: the watcher's indexed-extension set covers a
+  `.inf_mesh` **rewrite** as well as an insert, and neither the background asset
+  tick nor `dcc_save` names any play state. The one link a test cannot execute —
+  a `#[tauri::command]` — is held by a source-scope gate that requires the
+  refresh push at **statement level**, so a `if !sim_is_running()` around it
+  fails that gate and nothing else. §2's "the scene sees the edit for free"
+  turned out to be exactly true, which is worth recording precisely because it
+  was the kind of claim that is usually not.
+* **The bake exists, and §7's "kit pieces are mesh assets" now has a producer.**
+  `inf_editor_core::bake` collapses a P19 scattered building into ONE
+  `MeshAsset`, which is what lets a `Destructible` fracture it (the P22 ledger
+  item). The finding that shaped the module: a `ScatteredSolid` is **always an
+  oriented box** and carries **no material identity** — the kind lives on the
+  parallel instance list, and the two lists are index-aligned *only* for
+  buildings. So there are two doors and the generic one **refuses an unaligned
+  pair as a value** rather than guessing.
+* **§7a's round-trip hazard is not hypothetical, and the ordinary case is a
+  bevel.** §7a recorded that a legal kernel mesh can fail to survive a write/read
+  round trip and named the worst case ("an edge used twice, and the read is
+  refused"). P23.6's gate models the prop the phase's own sentence asks for and
+  hits it: `Op::BevelEdges` on a cap that a `MeshAsset` carries as two triangles
+  sharing a diagonal leaves collinear boundaries and a coincident pair per
+  corner, and the saved prop **cannot be re-opened**. Attributed op by op — the
+  extrude and the loop cut are clean — and pinned three ways (6 un-earable faces,
+  8 coincident vertices, 101 of 106 vertices with no usable tangent, plus the one
+  chart of eighteen that does not converge). The advisory doctrine did its job:
+  the save *says* the vertices will fuse. The bevel is the defect, and it is the
+  first thing to fix in the next DCC batch.
+
+And one consequence of the whole phase that belongs beside §5's measurements
+because it is about what *ships* rather than what is authored: **a hand-modelled
+prop is a few dozen triangles, and the cook's `[vgeom] min_triangles` is 2048.**
+`RenderScene` has one door for non-primitive geometry, the editor's
+`ensure_vmesh` derives from one triangle, and the result is a prop that looks
+right for the whole time it is being modelled and ships as a placeholder cube.
+The advisory exists and names the fix; the DCC's entire output class lives in
+that gap, and the phase gate asserts it rather than dodging it.
+
 ## 8. Ledger — what this memo does NOT decide
 
 * ~~**The gizmo on component selections.**~~ **Built in P23.5** (§7d): the same

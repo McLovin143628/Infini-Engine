@@ -7564,6 +7564,185 @@ and the headless preview render is the proven offscreen-PNG path.
 - **P23.6 Asset round-trip** — 1. edited meshes save through the asset DB (dependency events
   already live-update referencing scenes); 2. "Edit Mesh" from the Content Drawer context menu;
   3. vgeom rebuild on save via the P18.3 machinery.
+  **DONE 2026-08-06** — the three doors were already built by P23.4/P23.5, so this batch's work
+  was to **prove the chain end to end**, close the P22 carried ledger item, and gate the phase.
+  (1) **Edit during Simulate, executed** (`inf-editor-core/tests/dcc_edit_during_simulate.rs`):
+  a save spliced into the middle of a live `SimSession` leaves the step trace **bit-identical to
+  a control run**, the editor's `EditorRenderAssets` re-keys mid-run on the payload's content
+  hash, `SimSession::exit` restores the document byte-for-byte while the **asset keeps the
+  edit**, and the op journal undoes back to the import baseline after Stop. **No Simulate-gated
+  skip exists anywhere in the chain** — read rather than assumed: the watcher's
+  `INDEXED_ASSET_EXTENSIONS` covers `.inf_mesh`/`.inf_vmesh` for a *rewrite* as well as an
+  insert, `asset_tick` names no play state, and `dcc_save`'s push is unconditional. The link a
+  test cannot execute (a `#[tauri::command]`) is held by a **source-scope gate** that reads the
+  save's body and requires the push at *statement level* — mutation-measured: wrapping it in
+  `if !sim_is_running()` fails that gate **and nothing else in the tree**.
+  (2) **The grammar → mesh bake** (`inf_editor_core::bake`, the P22 carried item): a P19
+  scattered building baked into ONE `MeshAsset` through the kernel, so a `Destructible` can
+  fracture it. Two doors, because the material identity is only recoverable on one of them —
+  `parts_from_building` (the assembler pushes an instance and a collider together at every
+  site, so `kind_index` names a `ModuleDef` and the palette survives the bake) and
+  `parts_from_solids` (the ECS mirror has lost the kind, one slot, and it says so);
+  `parts_from_output` **refuses an unaligned pair as a typed value** rather than guessing.
+  `runtime/inf-player/tests/grammar_bake.rs` runs the whole pipe: a furnished house bakes into
+  >50 parts across >3 slots, `fracture_mesh` breaks it into sane chunks, and the cook ships a
+  derived `.inf_fracture` keyed off the baked mesh. A **new cook advisory**
+  (`unbaked_population_advisory`) fires when a `Destructible` shares an entity with a
+  `PcgVolume` — the honest signpost for the case that cooks silently and cannot break.
+  (3) **`runtime/inf-player/tests/phase23_gate.rs`** over the committed
+  `samples/phase23-workshop` — 13 tests covering arms (a)–(i), every one through the product
+  op path.
+  Goldens stay **50** (the workshop has none: every claim it makes is asserted as bytes).
+  Schemas frozen — scene v20, `MeshAsset` v2, `SessionSave` v2, `ScenePayload` v6, all
+  untouched. No new external dependency (`inf-dcc` becomes a **dev**-dependency of
+  `inf-player`, so the shipped player still never links the modelling kernel).
+
+> **PHASE 23 COMPLETE — you can model in the engine** (2026-08-06). The phase's own done-when
+> sentence is built and gated: *model a usable prop (extrude / bevel / loop-cut), unwrap it,
+> save it as a standard mesh asset, and watch a scene that references it live-update — with
+> clean undo and deterministic op replay.*
+>
+> **The shipped ledger, by batch.**
+>
+> * **P23.1 design memo + P23.2a multi-viewport enabler** — `be89e94` (the memo:
+>   asset-scoped sessions, no DNA/RNA clone, `meshopt` never in the journal), `0dd6286`,
+>   `e24180f`, `7b100e8`, `03bbcab` (keyed `ViewportState` with `Target::{Primary,Named,All}`
+>   named at all 31 resolution points, the **store hoist**, panel-focus undo routing, and
+>   `PreviewSession` — measured at **0.34 ms** warm at 512², against a 22.9 ms *PNG encode*).
+> * **P23.3 the half-edge kernel** — `d5657bd` (topology, validation, weld/seam import, core
+>   ops), `3e53982` (the `MeshAsset` **writer** `inf-mesh` never had, tangents, the op
+>   journal), `04bd116`, `96320af` (the audit: ears that stay inside the polygon, a versioned
+>   `SessionSave`, a validating `restore`, the Euler gate, one stamp scheme).
+> * **P23.4 modelling ops + the Model Editor** — `f569dfc` (extrude / inset / bevel / loop cut
+>   / knife / merge / subdivide / mirror + the selection model), `5c8da8f` (the panel, the CPU
+>   picker, "Edit Mesh"), `612791f` (per-document panels, an atomic save the gate can see),
+>   `4f5873f` (**disk truth for the save verdict** — a bool that reports on the filesystem must
+>   ask the filesystem).
+> * **P23.5 sculpt + UV** — `0aeeb71` (strokes and component transforms on the journal),
+>   `67d0628` (seams, LSCM unwrap, the UV view), `6f4c84d` (a solver that converges, gates that
+>   reach the doors, honest verdicts).
+> * **P23.6 asset round-trip + the phase gate** — this batch: the edit-during-Simulate proof,
+>   the grammar bake, `samples/phase23-workshop` + `phase23_gate`, and this block.
+>
+> **The phase's laws.**
+>
+> * **A gate must aim at the thing it names.** P23.2a's pipeline-cache test called `program()`
+>   and never `render()`, so an unconditional rebuild left nine preview tests green while warm
+>   latency degraded tenfold. Met again in P23.6: "every corner UV is inside the unit square" is
+>   satisfied **perfectly** by a layout that left every UV at (0, 0), so the arm also measures
+>   the atlas's span — and that measurement is what turned up the packer's real behaviour.
+> * **A byte pin cannot see a semantic change.** P23.5's replay-the-result gate banned the
+>   string `uv::unwrap` in a file and checked its positives with `.contains()`; a `pub fn
+>   recompute` wrapper defeated both with every test green. Source gates read a **scope**
+>   (brace-balance from the construct's own signature) and ban the **module**. P23.6's two new
+>   source gates are written that way, and the drag-policy table's shape — a hand-written
+>   decision plus a read that fails when a door is missing from it — is the reusable form.
+> * **Adding a check can retire gates downstream.** The save's verdict is now checked against
+>   the *filesystem*, which made `SaveError::Torn` reachable for the first time and turned a
+>   database question that was always `Ok` into a real one.
+> * **Measure the prescription before landing it.** P23.5's audit prescribed reducing the
+>   rotation angle mod 2π; measured across fifteen decades it improves neither the collapse nor
+>   the accuracy (at 1e12 it is *worse*), so it is not in the tree and the table is at the point
+>   where somebody will next be tempted. P23.6 met the same rule from the other end: two
+>   alternative bevel targets were **measured** before the recipe settled on the rim, and both
+>   are worse (a 32.0 convergence, and a chart the solver refuses outright).
+> * **The gate must be built to falsify, and it was measured.** Three mutations, three
+>   different failure sets: a **no-op save** (dropping `rewrite_payload` from
+>   `save_mesh_session`) fails arms (c), (d) and (g) plus two of the three Ring-1
+>   edit-during-Simulate tests; a **sim-gated refresh** in `dcc_save` fails the inf-studio
+>   source gate **and nothing else**; **per-process face order** inside a submesh (a `HashSet`
+>   where the writer has a `BTreeMap`) fails arms (a), (e) and the fresh-process replay (f).
+>   The fourth mutation is the honest one: an `Op::Unwrap` that **re-solves** instead of
+>   replaying its journalled result is **invisible to (f)** — the solver is deterministic, so
+>   both processes agree — and is caught by `inf-dcc`'s own
+>   `the_unwrap_op_replays_its_values_and_never_calls_the_solver`. A gate cannot falsify a
+>   defect whose effect it cannot observe, and saying which gate *does* is better than
+>   pretending.
+>
+> **What P23.6 measured that nobody had.** The gate models a prop the way the phase's sentence
+> says to, and the bevel is where everything costs something. `Op::BevelEdges` on the rim of a
+> cap that arrives from a `MeshAsset` as *two triangles sharing a diagonal* leaves n-gons with
+> collinear boundary vertices and a coincident pair at each corner where two beveled edges meet.
+> Replaying the journal one op at a time attributes it exactly: the extrude and the loop cut are
+> clean (0 fan fallbacks, 0 coincident), and the bevel introduces **6 un-earable faces, 8
+> coincident vertices, and 60 more vertices with no usable tangent** at once. Three independent
+> consequences, all now pinned in the gate:
+>
+> * **A saved beveled prop cannot be re-opened.** The reader's weld is exact, so the coincident
+>   pairs fuse and an edge ends up used twice: `from_mesh_asset` refuses it as
+>   `NonManifoldEdge`. The asset is a perfectly good `.inf_mesh` — it decodes, derives a DAG,
+>   cooks, renders and fractures — but an author who models with a bevel, saves, and later
+>   double-clicks the asset gets a refusal. The save is **not silent**: `coincident_vertices`
+>   is what the Model Editor turns into *"N vertices share a position with another. Re-opening
+>   this mesh will FUSE them."* The advisory doctrine did its job; the bevel is the defect.
+> * **101 of 106 written vertices take the fallback tangent** on the finished prop, because the
+>   fan the writer falls back to on those n-gons produces UV-degenerate triangles that carry no
+>   direction. A plain cube — modelled or unwrapped — reads **zero**, which is what makes this
+>   an attribution rather than a shrug. Normal-mapped materials on hand-modelled geometry will
+>   light wrong until the ear clipper handles collinear boundaries.
+> * **One chart of eighteen does not converge**: 1.6e-2 where the other seventeen read below
+>   1e-15, on a chart whose exact answer is a flat polygon. 256 CG iterations on a
+>   twenty-unknown system is not an iteration-count problem — it is the same slivers,
+>   ill-conditioning the conformal system. Bounded (`PHASE23_CONVERGENCE_BOUND`) and pinned to
+>   **exactly one** chart, so a second stalling chart fails rather than hiding under it.
+>
+> And one more the atlas gave up for free: eighteen charts pack into a column **0.13 wide**, so
+> ~87% of the UV square is empty and the prop's texel density is seven times worse than the
+> space it was given. That is the measured cost of P23.5's "no rotation-to-minimal-bbox before
+> packing" remainder, pinned so a better packer fails the arm and rewrites this paragraph.
+>
+> **A modelled prop ships as a placeholder cube unless you lower a threshold.** The workshop is
+> the one flagship sample in the tree whose cook is *not* silent, and the reason is a property
+> of the whole DCC output class rather than of this sample: a hand-modelled prop is a few dozen
+> triangles, the cook's `[vgeom] min_triangles` is **2048**, and `RenderScene` has exactly one
+> door for non-primitive geometry. The editor's `ensure_vmesh` derives from one triangle, so the
+> prop looks right for the entire time it is being authored and ships as a cube. Arm (i) asserts
+> the advisory is the **only** one, that it names the fix, and that lowering the threshold
+> silences the cook completely.
+>
+> **Honest remainder ledger** (carried, and each one is a real thing an author will meet):
+>
+> * **The bevel's degeneracy**, above — the single most valuable thing to fix next, because it
+>   is upstream of three separate symptoms.
+> * **Edit during embedded PIE is still impossible**, and the memo said so before the code did:
+>   the embedded player draws **placeholder cubes** for asset meshes (no vmesh in the payload)
+>   and `embed_foreign` hides the editor viewport while it runs. The supported live-edit paths
+>   are **Simulate** (proven here) and **Play in New Window**. This is a ledger item, not a
+>   design.
+> * **A component gizmo has no on-screen angle readout**, so a rotate is a drag with no number.
+> * **UV editing in the 2D view is read-only** — the panel draws charts, seams and the shared
+>   selection; dragging a vertex in UV space needs a pick in UV pixel space and a per-corner
+>   move op, and neither exists.
+> * **No auto-seam.** Seam marking is a 3D-view act; the gate picks its own seam set (edges
+>   whose faces are not coplanar) precisely because the product does not.
+> * **Bevel has no segments** — one chamfer, never a rounded profile.
+> * **The knife is not free-form**: a path of points on existing topology, not a cut anywhere.
+> * **The wireframe is back-face-culled, not depth-tested.** An edge on the near side that sits
+>   behind another *part* of the same model still draws, so a folded prop reads as mild x-ray.
+>   Fixing it means reading the depth buffer back beside the colour.
+> * **A detached panel window installs no keybinding listener**, so Ctrl+Z pressed *inside* a
+>   torn-off Model/Material/Blueprint/PCG editor does nothing at all. The `panel://focus` report
+>   fixes the MAIN window's aim, not the detached window's own shortcuts.
+> * **A soft drag is still one op per weight bucket** (capped at 64). The weight-table sculpt op
+>   is the real fix and is not built.
+> * **Live sculpt stops being interactive around 100k vertices**: the drag's scratch channel
+>   re-tessellates a clone, measured at 8.6/9.1 ms for 1 538 vertices in a debug build, and the
+>   next lever is displacing the cached vertex buffer in place — *not* on the GPU, which would
+>   put the drawn surface and the pickable surface back into disagreement.
+> * **The brush ring is drawn only during a stroke** (a hover ring needs a pointer-move round
+>   trip the panel does not make), and the sculpt seed is the nearest **vertex**, not the exact
+>   surface point.
+> * **A lost preview device stays lost**: `Thumbnailer` caches its `GpuContext` with no
+>   `is_lost()` check, so after a driver TDR every preview reads "No preview" until restart.
+> * **There is no `viewport_detach`**, so the keyed viewport map only ever grows.
+> * **The bake is boxes and prisms, merged and not welded.** That is not a simplification of the
+>   grammar — a `ScatteredSolid` *is* an oriented box, always — but the parts are separate shells
+>   with coincident corners where they abut, so a baked building is geometry for rendering and
+>   fracture and **cannot be re-opened in the Model Editor** either. Measured
+>   (`BakeReport::reopenable`), not assumed: a population whose parts do *not* touch re-opens
+>   fine, and the gate asserts both halves. A `ModuleDef.mesh` GUID is deliberately not read (the
+>   bake would then depend on the asset database and stop being a pure function), and there is
+>   no boolean union.
 
 ### Phase 24 — DCC v2: characters
 

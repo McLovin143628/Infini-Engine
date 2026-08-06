@@ -7554,9 +7554,480 @@ debris budget held, the control twin survived the identical charge); budgets;\n\
 pool-size determinism; and the save-after-damage identity.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// ── Phase 23 gate scene: `samples/phase23-workshop` (P23.6) ──────────────────
+//
+// **The smallest sample in the tree, and deliberately so.** Every other phase
+// gate ships a level whose *content* is the claim. This phase's claim is about a
+// PIPELINE — model, unwrap, save, live-update, undo, replay — so the committed
+// level's job is only to reference a mesh and be simulatable while that mesh is
+// edited underneath it. Anything more would be content the gate does not read.
+//
+// What IS load-bearing is `Prop.inf_mesh`: it is the **import baseline**, the
+// state undo has to land on byte for byte (gate arm (e)), so it is committed and
+// locked like every other sample payload.
+
+const PHASE23_LEVEL_GUID: Uuid = uuid::uuid!("23060000-0000-4000-8000-000000000001");
+/// The mesh the gate edits. Committed as a plain cube — the "cube primitive"
+/// the phase's done-when sentence starts from.
+pub const PHASE23_MESH_GUID: Uuid = uuid::uuid!("23060000-0000-4000-8000-000000000002");
+pub const PHASE23_SUN_GUID: Uuid = uuid::uuid!("23060000-0000-4000-8000-000000000010");
+pub const PHASE23_GROUND_GUID: Uuid = uuid::uuid!("23060000-0000-4000-8000-000000000011");
+/// The actor that draws the edited mesh and falls while it is being edited.
+pub const PHASE23_PROP_GUID: Uuid = uuid::uuid!("23060000-0000-4000-8000-000000000012");
+
+/// The baseline prop's edge, metres.
+pub const PHASE23_PROP_SIZE_M: f64 = 2.0;
+/// Steps the gate's Simulate arm traces: 1.5 s at 60 Hz, which is fall, contact
+/// and settle. The save is spliced at [`PHASE23_SAVE_AT`] — mid-fall, where a
+/// perturbation would be loudest.
+pub const PHASE23_STEPS: usize = 90;
+pub const PHASE23_SAVE_AT: usize = 30;
+/// How far the gate extrudes the prop's lid, metres.
+pub const PHASE23_EXTRUDE_M: f64 = 1.5;
+/// The bevel the gate rounds the extruded rim with, metres.
+pub const PHASE23_BEVEL_M: f64 = 0.2;
+
+/// The committed baseline: a cube, written through the DCC's own writer.
+///
+/// Through `inf_dcc::to_mesh_asset` rather than hand-built triangles, because the
+/// gate's undo arm compares this against what the kernel produces after a full
+/// undo — and a hand-built asset would differ in its corner interning order
+/// alone, which is part of the format (the P23.3 LAW).
+pub fn phase23_baseline_mesh() -> inf_mesh::MeshAsset {
+    let (asset, _) = inf_dcc::to_mesh_asset(
+        &inf_dcc::cube(PHASE23_PROP_SIZE_M),
+        &inf_dcc::ExportOptions::default(),
+    );
+    asset
+}
+
+/// The workshop level: a sun, a static floor, and one dynamic prop that
+/// **references the mesh under edit**.
+///
+/// The reference is what makes the live-update and edit-during-Simulate arms mean
+/// anything: the entity draws the very asset the gate rewrites, while its
+/// collider is authored and therefore *cannot* be reached by a mesh edit. That
+/// pair — visibly coupled, physically independent — is the whole shape of the
+/// asset-scoped ruling.
+pub fn phase23_workshop_scene() -> SceneDoc {
+    use inf_ecs::components::{
+        BodyKind3D, Collider3D, ColliderShape3DKind, Light, LightKind, Material, MeshRef,
+        Primitive, RigidBody3D, Transform,
+    };
+    use inf_ecs::math::{Color, Vec3d};
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Phase 23 Workshop");
+
+    doc.create_with_guid(PHASE23_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        PHASE23_SUN_GUID,
+        Transform {
+            translation: Vec3d::ZERO,
+            rotation: Vec3d::new(-50.0, -30.0, 0.0),
+            scale: Vec3d::ONE,
+        }
+    );
+    insert!(
+        doc,
+        PHASE23_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            color: Color::WHITE,
+            intensity: 3.0,
+            ..Default::default()
+        }
+    );
+
+    doc.create_with_guid(PHASE23_GROUND_GUID, SpawnKind::Empty, "Floor", None);
+    insert!(
+        doc,
+        PHASE23_GROUND_GUID,
+        Transform {
+            translation: Vec3d::new(0.0, -0.5, 0.0),
+            rotation: Vec3d::ZERO,
+            scale: Vec3d::ONE,
+        }
+    );
+    insert!(
+        doc,
+        PHASE23_GROUND_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Static,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE23_GROUND_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(20.0, 0.5, 20.0),
+            ..Default::default()
+        }
+    );
+
+    doc.create_with_guid(PHASE23_PROP_GUID, SpawnKind::Empty, "Prop", None);
+    insert!(
+        doc,
+        PHASE23_PROP_GUID,
+        Transform {
+            translation: Vec3d::new(0.0, 4.0, 0.0),
+            rotation: Vec3d::ZERO,
+            scale: Vec3d::ONE,
+        }
+    );
+    insert!(
+        doc,
+        PHASE23_PROP_GUID,
+        MeshRef {
+            primitive: Primitive::Cube,
+            asset: Some(PHASE23_MESH_GUID),
+        }
+    );
+    insert!(doc, PHASE23_PROP_GUID, Material::default());
+    insert!(
+        doc,
+        PHASE23_PROP_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            ..Default::default()
+        }
+    );
+    // Authored density, not rapier's 1 kg/m³ placeholder — the P20.2/P22.4
+    // finding, met once more. A prop that weighs 8 grams settles differently.
+    insert!(
+        doc,
+        PHASE23_PROP_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::splat(PHASE23_PROP_SIZE_M * 0.5),
+            density: 500.0,
+            ..Default::default()
+        }
+    );
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+/// Faces every one of whose vertices lies on the plane `y`.
+fn phase23_faces_at_y(mesh: &inf_dcc::Mesh, y: f64) -> Vec<inf_dcc::FaceId> {
+    mesh.face_ids()
+        .filter(|&f| {
+            mesh.face_verts(f).is_some_and(|vs| {
+                vs.iter()
+                    .all(|&v| mesh.position(v).is_some_and(|p| (p.y - y).abs() < 1e-9))
+            })
+        })
+        .collect()
+}
+
+/// The lowest-id **vertical** half-edge of the extruded wall: origin on the
+/// original lid plane, destination directly above it on the new one.
+///
+/// Vertical is what makes the loop cut go anywhere: the ring steps across each
+/// quad to the edge *opposite* the one it entered on, so entering a wall on its
+/// vertical edge walks around all four walls and closes. Entering on a
+/// horizontal one would step off the strip immediately.
+fn phase23_wall_seed(mesh: &inf_dcc::Mesh, low: f64, high: f64) -> Option<inf_dcc::HalfId> {
+    mesh.half_ids().find(|&h| {
+        let (Some(a), Some(b)) = (
+            mesh.origin(h).and_then(|v| mesh.position(v)),
+            mesh.twin(h)
+                .and_then(|t| mesh.origin(t))
+                .and_then(|v| mesh.position(v)),
+        ) else {
+            return false;
+        };
+        (a.y - low).abs() < 1e-9
+            && (b.y - high).abs() < 1e-9
+            && (a.x - b.x).abs() < 1e-9
+            && (a.z - b.z).abs() < 1e-9
+    })
+}
+
+/// The rim: canonical edges on plane `y` that separate the **cap** (a face whose
+/// every vertex is on that plane) from anything else.
+///
+/// This is what an author bevels — the hard top edge of a prop — and the recipe
+/// aims here even though it is the one op in the batch that finds a limit. See
+/// [`phase23_unwrap_prop`] for what the limit is and why it is asserted rather
+/// than designed around: two alternatives were measured (bevel the extrusion's
+/// vertical corners; bevel the loop's own edges) and both produce **worse**
+/// geometry — 32.0 and, respectively, a chart the solver refuses outright as
+/// zero-area. The rim is the one that leaves a valid, fold-free unwrap.
+fn phase23_rim_edges(mesh: &inf_dcc::Mesh, y: f64) -> Vec<inf_dcc::HalfId> {
+    let on_plane = |f: inf_dcc::FaceId| {
+        mesh.face_verts(f).is_some_and(|vs| {
+            vs.iter()
+                .all(|&v| mesh.position(v).is_some_and(|p| (p.y - y).abs() < 1e-9))
+        })
+    };
+    mesh.half_ids()
+        .filter(|&h| inf_dcc::canonical_edge(mesh, h) == Some(h))
+        .filter(|&h| {
+            let Some(t) = mesh.twin(h) else { return false };
+            let (Some(Some(a)), Some(Some(b))) = (mesh.face_of(h), mesh.face_of(t)) else {
+                return false;
+            };
+            on_plane(a) != on_plane(b)
+        })
+        .collect()
+}
+
+/// **The modelling recipe the gate performs**, as one function so the gate and
+/// its replay probe cannot drift apart.
+///
+/// Extrude the lid, loop-cut the walls it made, bevel the new rim — the three
+/// ops the phase's done-when sentence names, in the order the topology allows:
+/// the loop cut needs the extrusion's **quad** walls (an edge ring is only
+/// defined across quads), and beveling the rim first would replace the very edges
+/// the ring walks.
+///
+/// Applied through [`inf_dcc::MeshSession::apply`], so what comes out is the
+/// product's journal — the same `Vec<Op>` a session in the panel would hold, and
+/// the thing arm (f) replays from cold.
+pub fn phase23_model_prop(session: &mut inf_dcc::MeshSession) -> Result<(), String> {
+    use inf_dcc::Op;
+    let lid_y = PHASE23_PROP_SIZE_M * 0.5;
+    let top_y = lid_y + PHASE23_EXTRUDE_M;
+
+    let lid = phase23_faces_at_y(session.mesh(), lid_y);
+    if lid.len() != 2 {
+        return Err(format!(
+            "expected the cube's lid to arrive as two triangles, found {}",
+            lid.len()
+        ));
+    }
+    session
+        .apply(Op::ExtrudeFaces {
+            faces: lid,
+            distance: PHASE23_EXTRUDE_M,
+        })
+        .map_err(|e| format!("extrude: {e}"))?;
+
+    let seed = phase23_wall_seed(session.mesh(), lid_y, top_y)
+        .ok_or_else(|| "the extrude left no vertical wall edge to ring".to_string())?;
+    session
+        .apply(Op::LoopCut {
+            half: seed,
+            cuts: 1,
+        })
+        .map_err(|e| format!("loop cut: {e}"))?;
+
+    let rim = phase23_rim_edges(session.mesh(), top_y);
+    if rim.len() != 4 {
+        return Err(format!("expected a four-edge rim, found {}", rim.len()));
+    }
+    session
+        .apply(Op::BevelEdges {
+            edges: rim,
+            amount: PHASE23_BEVEL_M,
+        })
+        .map_err(|e| format!("bevel: {e}"))?;
+    Ok(())
+}
+
+/// The seam set the gate cuts before unwrapping: every canonical edge whose two
+/// faces are **not coplanar**.
+///
+/// The gate picks its own seams because the product does not: seam marking is a
+/// 3D-view act and auto-seaming is a named Phase 23 remainder. What this set buys
+/// is a prop cut into *flat* charts, which is what makes "fold count zero" a
+/// statement about the solver rather than about how curved the prop happens to
+/// be.
+pub fn phase23_seam_edges(mesh: &inf_dcc::Mesh) -> Vec<inf_dcc::HalfId> {
+    mesh.half_ids()
+        .filter(|&h| inf_dcc::canonical_edge(mesh, h) == Some(h))
+        .filter(|&h| {
+            let Some(t) = mesh.twin(h) else { return false };
+            let (Some(Some(a)), Some(Some(b))) = (mesh.face_of(h), mesh.face_of(t)) else {
+                return false;
+            };
+            inf_dcc::face_normal(mesh, a)
+                .zip(inf_dcc::face_normal(mesh, b))
+                .is_none_or(|(na, nb)| na.dot(nb) < 0.999)
+        })
+        .collect()
+}
+
+/// **The one chart the solver does not finish, and the number it stops at.**
+///
+/// Measured on this prop: seventeen of its eighteen charts converge below 1e-15,
+/// and the eighteenth — the **beveled cap** — stops at 1.6e-2 with a residual of
+/// 2.2e-2, on a chart whose exact answer is a flat polygon and whose fold count
+/// is zero. The cause is upstream of the solver: a `MeshAsset` carries the cap as
+/// *two triangles sharing a diagonal*, so beveling its four boundary edges leaves
+/// each triangle a 7-gon with vertices strung along the untouched diagonal, and
+/// [`inf_dcc::uv`]'s chart triangulator **fans an n-gon from its first vertex**.
+/// The slivers that fan produces make the conformal system ill-conditioned, and
+/// 256 CG iterations on a twenty-unknown system is not an iteration-count
+/// problem.
+///
+/// Recorded as a bound rather than designed around, because the two ways of
+/// designing around it were measured and are worse (see [`phase23_rim_edges`]),
+/// and because a gate that quietly avoids the one op that finds a limit is a gate
+/// that does not aim at the thing it names. The fix is an ear-clipping chart
+/// triangulator — the writer already has one — and it is a Phase 23 remainder.
+pub const PHASE23_CONVERGENCE_BOUND: f64 = 2.0e-2;
+
+/// Charts allowed to exceed [`PHASE23_CONVERGED`]. Exactly one, so a second
+/// stalling chart fails here rather than hiding under the bound above.
+pub const PHASE23_UNCONVERGED_CHARTS: usize = 1;
+/// What "converged" means for every other chart: machine epsilon, not a
+/// tolerance.
+pub const PHASE23_CONVERGED: f64 = 1.0e-12;
+
+/// Cut the seams and unwrap — the gate's arm (b), through the product path
+/// (`SetEdgeSeam` ops, then the solver's own `Op::Unwrap`).
+pub fn phase23_unwrap_prop(
+    session: &mut inf_dcc::MeshSession,
+) -> Result<inf_dcc::UnwrapReport, String> {
+    for half in phase23_seam_edges(session.mesh()) {
+        session
+            .apply(inf_dcc::Op::SetEdgeSeam { half, seam: true })
+            .map_err(|e| format!("seam: {e}"))?;
+    }
+    let unwrapped = inf_dcc::unwrap(session.mesh()).map_err(|e| format!("unwrap: {e}"))?;
+    session
+        .apply(unwrapped.op)
+        .map_err(|e| format!("apply unwrap: {e}"))?;
+    Ok(unwrapped.report)
+}
+
+/// `samples/phase23-workshop`, resolved from this crate's manifest dir.
+pub fn phase23_workshop_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/phase23-workshop")
+}
+
+/// Write every committed Phase 23 gate file.
+pub fn write_phase23_workshop() -> Result<(), String> {
+    let dir = phase23_workshop_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    crate::scene::serialize::save(
+        &phase23_workshop_scene(),
+        &dir.join("Phase23Workshop.inf_lvl"),
+        Some(PHASE23_LEVEL_GUID),
+    )?;
+
+    let bytes =
+        inf_asset::encode(&phase23_baseline_mesh()).map_err(|e| format!("encode mesh: {e}"))?;
+    let path = dir.join("Prop.inf_mesh");
+    std::fs::write(&path, &bytes).map_err(|e| format!("write mesh: {e}"))?;
+    inf_asset::AssetSidecar::new(
+        inf_asset::AssetId(PHASE23_MESH_GUID),
+        inf_asset::AssetKind::Mesh,
+        inf_asset::ContentHash::of(&bytes),
+    )
+    .save(&path)
+    .map_err(|e| format!("write mesh sidecar: {e}"))?;
+
+    std::fs::write(dir.join("README.md"), PHASE23_WORKSHOP_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const PHASE23_WORKSHOP_README: &str = "# Phase 23 Workshop (embedded-DCC gate scene)\n\n\
+Generated by `inf_editor_core::samples::phase23_workshop_scene` -- the P23.6 gate\n\
+scene, and the smallest sample in the tree on purpose. Every other phase gate ships a\n\
+level whose *content* is the claim; this phase's claim is about a **pipeline** (model,\n\
+unwrap, save, live-update, undo, deterministic replay), so the level's job is only to\n\
+reference a mesh and keep simulating while that mesh is edited underneath it.\n\n\
+- `Phase23Workshop.inf_lvl` -- a sun, a static floor, and one dynamic prop whose\n\
+  `MeshRef.asset` names the mesh below. **Visibly coupled, physically independent**:\n\
+  the prop draws the asset the gate rewrites, and its collider is authored, so a mesh\n\
+  edit cannot reach the simulation. That pair is the whole shape of the P23.1\n\
+  asset-scoped ruling.\n\
+- `Prop.inf_mesh` -- the **import baseline**: a 2 m cube written through the DCC's own\n\
+  `to_mesh_asset`. It is committed rather than generated at test time because the gate's\n\
+  undo arm compares a fully-undone journal against it *byte for byte*, and a hand-built\n\
+  asset would differ in its corner interning order alone (part of the format, per the\n\
+  P23.3 law).\n\n\
+## The gate (`runtime/inf-player/tests/phase23_gate.rs`)\n\n\
+Nine arms, all driven through the product op path rather than hand-built meshes:\n\
+(a) model a prop -- extrude, then loop cut, then bevel (that order: an edge ring is only\n\
+defined across quads, so the cut needs the extrusion walls and a bevel first would replace\n\
+the very edges the ring walks) -- and replay the journal twice, bit-identically;\n\
+(b) seams + unwrap: every corner inside the unit square, ZERO folds, and the convergence\n\
+field at machine epsilon on every chart but ONE -- the beveled cap, measured at 1.6e-2,\n\
+bounded and ledgered rather than hidden; (c) save as a standard asset\n\
+(`.inf_mesh` decodes, the derived `.inf_vmesh` decodes, the sidecar hash matches the\n\
+bytes); (d) live update -- a store that resolved the mesh BEFORE the edit re-keys after\n\
+it, and a pack cooked after the save carries the new bytes; (e) undo the whole journal\n\
+back to the baseline byte-for-byte, redo back to the edited state; (f) determinism, the\n\
+journal replayed in a fresh SUBPROCESS; (g) the edit-during-Simulate headline, at gate\n\
+level; (h) budgets (`LOAD_BUDGET_MS` for opens and saves); (i) cook advisories.\n\n\
+## What it is NOT\n\n\
+There is no blueprint here, and no scripted actor. The Simulate arm needs a world that\n\
+*moves* while a save lands in the middle of it, and gravity is the least interesting\n\
+thing that does -- which is what you want in a trace whose whole job is to be identical\n\
+to a control run.\n\n\
+The prop is small, and that is honest rather than lazy: a hand-modelled prop is a few\n\
+dozen triangles, which is **below the cook's `[vgeom] min_triangles`**. The gate asserts\n\
+the advisory the cook draws about exactly that, because it is the truth about this whole\n\
+class of asset -- see the Phase 23 completion block in `docs/ROADMAP.md`.\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Phase 23 workshop shape (P23.6) ────────────────────────────────────
+
+    /// The recipe runs, and every op in it does real work. Here rather than only
+    /// in the gate because a topology refusal is a *content* failure and this is
+    /// where the content lives — the gate would report it as "the prop did not
+    /// model", 10 minutes into a player build.
+    #[test]
+    fn the_workshop_recipe_models_a_prop() {
+        let import = inf_dcc::from_mesh_asset(&phase23_baseline_mesh()).expect("baseline reads");
+        assert_eq!(
+            import.mesh.face_count(),
+            12,
+            "a cube arrives as 12 triangles"
+        );
+        assert_eq!(import.report.boundary_edges, 0, "closed");
+        let mut session = inf_dcc::MeshSession::new(import.mesh);
+
+        phase23_model_prop(&mut session).expect("the recipe models");
+        assert_eq!(session.ops().len(), 3, "extrude, loop cut, bevel");
+        assert!(
+            session.mesh().face_count() > 20,
+            "the recipe left {} faces — it did not build anything",
+            session.mesh().face_count()
+        );
+        assert_eq!(inf_dcc::validate(session.mesh()), Ok(()));
+        // Still a closed solid, and taller by the extrude (less the bevel's
+        // chamfer, which cuts the rim rather than the cap).
+        assert!(session
+            .mesh()
+            .vert_ids()
+            .filter_map(|v| session.mesh().position(v))
+            .any(|p| (p.y - (PHASE23_PROP_SIZE_M * 0.5 + PHASE23_EXTRUDE_M)).abs() < 1e-9));
+
+        let report = phase23_unwrap_prop(&mut session).expect("the recipe unwraps");
+        assert_eq!(report.flipped, 0, "a flat-charted prop folds nowhere");
+        assert!(
+            report.worst_convergence < PHASE23_CONVERGENCE_BOUND,
+            "the solver stopped further short than the measured bound: {}",
+            report.worst_convergence
+        );
+        let stalled = report
+            .charts
+            .iter()
+            .filter(|c| c.convergence >= PHASE23_CONVERGED)
+            .count();
+        assert_eq!(
+            stalled, PHASE23_UNCONVERGED_CHARTS,
+            "{stalled} charts did not converge; exactly one is expected (the \
+             beveled cap — see PHASE23_CONVERGENCE_BOUND)"
+        );
+        assert!(report.seams > 0, "no seam was cut");
+    }
 
     // ── Phase 21 cavern shape (P21.4) ──────────────────────────────────────
 
@@ -7868,6 +8339,7 @@ mod tests {
             write_phase20_coastal().expect("regenerate phase20 coastal");
             write_phase21_cavern().expect("regenerate phase21 cavern");
             write_phase22_playground().expect("regenerate phase22 playground");
+            write_phase23_workshop().expect("regenerate phase23 workshop");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }
@@ -8215,6 +8687,29 @@ mod tests {
                 std::fs::read(p22dir.join("Phase22Playground.inf_terrain")).unwrap(),
                 phase22_terrain_asset().unwrap().into_bytes(),
                 "committed phase22-playground .inf_terrain drifted from the generator"
+            );
+        }
+
+        // Phase 23 workshop lock (P23.6). The `.inf_mesh` is locked for a reason
+        // the others are not: it is the **import baseline** the gate's undo arm
+        // compares against byte for byte, so a drifted baseline would not fail
+        // here as a byte diff — it would fail there as "undo went to the wrong
+        // place", which is a much worse place to learn it.
+        let p23dir = phase23_workshop_dir();
+        let p23lvl = p23dir.join("Phase23Workshop.inf_lvl");
+        if p23lvl.exists() {
+            assert_eq!(
+                std::fs::read(&p23lvl).unwrap(),
+                crate::scene::serialize::encode(&crate::scene::serialize::to_scene_file(
+                    &phase23_workshop_scene()
+                ))
+                .unwrap(),
+                "committed phase23-workshop .inf_lvl drifted from the generator"
+            );
+            assert_eq!(
+                std::fs::read(p23dir.join("Prop.inf_mesh")).unwrap(),
+                inf_asset::encode(&phase23_baseline_mesh()).unwrap(),
+                "committed phase23-workshop Prop.inf_mesh drifted from the generator"
             );
         }
     }
