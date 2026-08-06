@@ -162,6 +162,14 @@ pub enum OpError {
     /// Two consecutive knife waypoints are not corners of any one face.
     #[error("vertices {from} and {to} share no face, so the knife cannot cut between them")]
     KnifeNoCommonFace { from: VertId, to: VertId },
+    /// An offset large enough to fold a rebuilt face through itself.
+    ///
+    /// `validate` is a **topology** auditor and is blind to winding, so an
+    /// inside-out solid is a perfectly valid mesh to it. Refused rather than
+    /// clamped: the limit belongs to the author's geometry, not to the op, and a
+    /// clamp would silently produce a shape they did not ask for.
+    #[error("{what} of {amount} turns the geometry inside out; use a smaller one")]
+    WouldInvert { what: &'static str, amount: f64 },
 }
 
 /// Every value crossing an op boundary is checked here, once.
@@ -176,8 +184,26 @@ pub(crate) fn finite(what: &'static str, values: &[f64]) -> Result<(), OpError> 
     }
 }
 
-/// What an op created. Ids of rebuilt elements change (see the module docs), so
-/// a caller that wants to keep working on what it just made reads them here.
+/// **The op's successor** — what a caller should now be holding, not an
+/// inventory of everything the op touched.
+///
+/// The distinction is the whole value of the type, and getting it wrong is not a
+/// cosmetic error. An extrude *creates* a cap and four walls; if it reports both,
+/// the selection built from it contains the base vertices, and the very next
+/// drag flattens the extrusion the author just made. So:
+///
+/// | op | outcome |
+/// | --- | --- |
+/// | [`Op::ExtrudeFaces`] | the moved **cap**, and its vertices |
+/// | [`Op::InsetFaces`] | the **inner** faces |
+/// | [`Op::BevelEdges`] | the chamfer **strip** |
+/// | [`Op::LoopCut`] | the **new loop's edges**, and the cut vertices |
+/// | [`Op::Knife`] | the **cut edges** |
+/// | [`Op::SubdivideFaces`] | the region's sub-faces (never the fringe it re-cut) |
+///
+/// Ids of rebuilt elements change (see the module docs), which is why this is the
+/// only sound way for a caller to keep working: the ids it held a moment ago may
+/// name something else, and these do not.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OpOutcome {
     pub verts: Vec<VertId>,
@@ -541,6 +567,10 @@ fn split_edge(mesh: &mut Mesh, half: HalfId, t: f64) -> Result<OpOutcome, OpErro
                 &patch.corners[(at + 1) % n],
                 if forward { t } else { 1.0 - t },
             );
+            // The same finiteness law the modelling ops obey: an interpolated
+            // corner is a value this crate STORES, and two legal extremes
+            // interpolate to an infinity.
+            crate::model::finite_corner(&corner, "a split-edge corner")?;
             let mut verts = patch.verts.clone();
             let mut corners = patch.corners.clone();
             verts.insert(at + 1, mid_vert);

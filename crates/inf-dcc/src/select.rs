@@ -175,27 +175,35 @@ impl SelectionSet {
     pub fn adopt(&mut self, generation: u64, outcome: &OpOutcome, mesh: &Mesh) {
         self.generation = generation;
         self.clear();
+        // The outcome is taken **literally** — it is the op's successor, not an
+        // inventory (see [`OpOutcome`]) — and then widened DOWNWARD only: a face
+        // implies its edges and their vertices, an edge implies its endpoints.
+        // Never upward, because "the faces around these vertices" is exactly how
+        // an extrude's cap selection would grow back into the walls it was
+        // carefully kept apart from.
         self.verts.extend(outcome.verts.iter().copied());
         self.faces.extend(outcome.faces.iter().copied());
         for &h in &outcome.halfs {
-            if let Some(c) = canonical_edge(mesh, h) {
-                self.edges.insert(c);
+            let Some(c) = canonical_edge(mesh, h) else {
+                continue;
+            };
+            self.edges.insert(c);
+            if let Some([a, b]) = edge_ends(mesh, c) {
+                self.verts.insert(a);
+                self.verts.insert(b);
             }
         }
-        // A face selection implies its edges and vertices for the modes that are
-        // not the one the author is in — cheaper than making every reader convert.
-        if !outcome.faces.is_empty() {
-            let faces = self.faces.clone();
-            for f in faces {
-                if let Some(halfs) = mesh.face_loop(f) {
-                    for h in halfs {
-                        if let Some(c) = canonical_edge(mesh, h) {
-                            self.edges.insert(c);
-                        }
-                        if let Some(v) = mesh.origin(h) {
-                            self.verts.insert(v);
-                        }
-                    }
+        let faces = self.faces.clone();
+        for f in faces {
+            let Some(halfs) = mesh.face_loop(f) else {
+                continue;
+            };
+            for h in halfs {
+                if let Some(c) = canonical_edge(mesh, h) {
+                    self.edges.insert(c);
+                }
+                if let Some(v) = mesh.origin(h) {
+                    self.verts.insert(v);
                 }
             }
         }
@@ -810,7 +818,12 @@ mod tests {
             .expect("extrude");
         sel.adopt(s.generation(), &out, s.mesh());
         assert_eq!(sel.generation(), s.generation());
-        assert_eq!(sel.len(SelectMode::Face), 5, "the cap plus four walls");
+        assert_eq!(
+            sel.len(SelectMode::Face),
+            1,
+            "the CAP -- `adopt` takes the outcome literally and widens only downward"
+        );
+        assert_eq!(sel.len(SelectMode::Vert), 4, "and its four corners");
         assert!(sel.faces().iter().all(|&f| s.mesh().has_face(f),));
     }
 
@@ -909,6 +922,203 @@ mod tests {
             loops_before, loops_after,
             "...while naming different polygons"
         );
+    }
+
+    #[test]
+    fn every_op_is_classified_and_the_classification_is_the_one_written_down() {
+        // The table's *behaviour*, against a hand-written list rather than
+        // against itself. `the_id_preservation_table_agrees_with_what_the_ops
+        // _actually_do` proves the six "preserving" answers are true of the
+        // ops; this proves nothing has been quietly added to or removed from
+        // that side, and `determinism_law`'s source gate proves the function
+        // still enumerates every variant instead of defaulting through a
+        // wildcard. Three different failures, three different gates.
+        let hand: [(Op, bool); 22] = [
+            (Op::AddVertex { position: [0.0; 3] }, true),
+            (Op::RemoveVertex { vert: VertId(0) }, false),
+            (
+                Op::AddFace {
+                    verts: vec![],
+                    corners: vec![],
+                    slot: None,
+                },
+                false,
+            ),
+            (Op::RemoveFace { face: FaceId(0) }, false),
+            (
+                Op::SplitEdge {
+                    half: HalfId(0),
+                    t: 0.5,
+                },
+                false,
+            ),
+            (Op::CollapseEdge { half: HalfId(0) }, false),
+            (
+                Op::SplitFace {
+                    from: HalfId(0),
+                    to: HalfId(1),
+                },
+                false,
+            ),
+            (
+                Op::WeldVerts {
+                    keep: VertId(0),
+                    merge: VertId(1),
+                },
+                false,
+            ),
+            (
+                Op::TranslateVerts {
+                    verts: vec![],
+                    delta: [0.0; 3],
+                },
+                true,
+            ),
+            (
+                Op::SetCornerUv {
+                    half: HalfId(0),
+                    uv: [0.0; 2],
+                },
+                true,
+            ),
+            (
+                Op::SetCornerNormal {
+                    half: HalfId(0),
+                    normal: None,
+                },
+                true,
+            ),
+            (
+                Op::SetEdgeSharp {
+                    half: HalfId(0),
+                    sharp: true,
+                },
+                true,
+            ),
+            (
+                Op::SetFaceSlot {
+                    face: FaceId(0),
+                    slot: None,
+                },
+                true,
+            ),
+            (
+                Op::ExtrudeFaces {
+                    faces: vec![],
+                    distance: 1.0,
+                },
+                false,
+            ),
+            (
+                Op::ExtrudeEdges {
+                    edges: vec![],
+                    delta: [0.0; 3],
+                },
+                false,
+            ),
+            (
+                Op::InsetFaces {
+                    faces: vec![],
+                    amount: 0.1,
+                    individual: false,
+                },
+                false,
+            ),
+            (
+                Op::BevelEdges {
+                    edges: vec![],
+                    amount: 0.1,
+                },
+                false,
+            ),
+            (
+                Op::LoopCut {
+                    half: HalfId(0),
+                    cuts: 1,
+                },
+                false,
+            ),
+            (Op::Knife { path: vec![] }, false),
+            (
+                Op::MergeVerts {
+                    verts: vec![],
+                    target: crate::model::MergeTarget::Center,
+                },
+                false,
+            ),
+            (Op::SubdivideFaces { faces: vec![] }, false),
+            (
+                Op::Mirror {
+                    axis: crate::model::MirrorAxis::X,
+                    coord: 0.0,
+                },
+                false,
+            ),
+        ];
+        for (op, want) in &hand {
+            assert_eq!(
+                op_preserves_ids(op),
+                *want,
+                "{op:?} is classified differently from the hand list"
+            );
+        }
+        assert_eq!(
+            hand.iter().filter(|(_, w)| *w).count(),
+            6,
+            "six ops preserve ids; a seventh is a claim that needs its own proof"
+        );
+    }
+
+    #[test]
+    fn a_soft_select_measures_metres_and_not_hops() {
+        // The gate the unit-spaced fixtures could not be: on a grid where every
+        // edge is 1 m, a Dijkstra that returned a constant 1.0 per step is
+        // indistinguishable from one that measures. Here the row is spaced
+        // 0.1 / 0.1 / 0.1 / 2.7, so three hops is 0.3 m and four is 3.0 m, and
+        // the two answers cannot be confused.
+        let mut m = Mesh::new();
+        let xs = [0.0, 0.1, 0.2, 0.3, 3.0];
+        let mut lower = Vec::new();
+        let mut upper = Vec::new();
+        for &x in &xs {
+            lower.push(m.alloc_vert([x, 0.0, 0.0]));
+            upper.push(m.alloc_vert([x, 0.0, 1.0]));
+        }
+        let mut touched = BTreeSet::new();
+        for i in 0..xs.len() - 1 {
+            let quad = [lower[i], lower[i + 1], upper[i + 1], upper[i]];
+            touched.extend(quad);
+            m.add_face_raw(&quad, &[CornerData::default(); 4], None)
+                .expect("a strip is well formed");
+        }
+        m.finish_patch(&touched).expect("manifold");
+
+        let seeds: BTreeSet<VertId> = [lower[0]].into_iter().collect();
+        let d = geodesic_distances(&m, &seeds, 1.0);
+        // Measured in metres: 0.1, 0.2, 0.3 along the row — a hop count would
+        // have said 1, 2, 3 and stopped after the first.
+        for (i, want) in [(1usize, 0.1), (2, 0.2), (3, 0.3)] {
+            let got = *d
+                .get(&lower[i])
+                .unwrap_or_else(|| panic!("x = {} is 0.{i} m away and must be reached", xs[i]));
+            assert!(
+                (got - want).abs() < 1e-12,
+                "x={} gave {got}, want {want}",
+                xs[i]
+            );
+        }
+        assert!(
+            !d.contains_key(&lower[4]),
+            "the far vertex is 3.0 m away and outside a 1 m radius, however few \
+             hops it takes"
+        );
+        // And the weights follow the metres, not the topology.
+        let mut sel = SelectionSet::new(1);
+        sel.set_vert(lower[0], true);
+        let w = sel.soft_weights(&m, SelectMode::Vert, 1.0, Falloff::Linear);
+        assert!((w[&lower[1]] - 0.9).abs() < 1e-12, "{:?}", w.get(&lower[1]));
+        assert!((w[&lower[3]] - 0.7).abs() < 1e-12, "{:?}", w.get(&lower[3]));
+        assert!(!w.contains_key(&lower[4]));
     }
 
     #[test]

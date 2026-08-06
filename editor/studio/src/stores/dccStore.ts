@@ -1,24 +1,36 @@
 /**
- * **Model Editor store** (P23.4) — one open `.inf_mesh` document, its preview
- * frame, and the verdicts the panel reads out.
+ * **Model Editor store** (P23.4) — one entry per open `.inf_mesh` asset.
+ *
+ * # Why this is keyed, and what it was before
+ *
+ * The Model Editor panel is registered `singleton: false`: opening two meshes
+ * mints `model:<assetA>` and `model:<assetB>`, and the dock keeps **both tabs
+ * mounted** (switching a tab changes visibility, not mounting). This store used
+ * to hold a single `doc`, so the two panels shared it: both tabs rendered
+ * whichever mesh was opened last, every tool press in A edited B, A's backend
+ * session leaked for the life of the process, and closing A read the shared
+ * `doc` and closed **B** — blanking a document with unsaved work in it.
+ *
+ * The backend was multi-document from the first commit (`docs: BTreeMap<Id, Doc>`
+ * with a journal per id). This was purely the frontend collapsing it, which is
+ * why the fix is a `Record` and not a redesign.
  *
  * # The state is REPLACED, never patched
  *
- * Every mutating call returns a `DccDocDto` and this store overwrites `doc` with
- * it. That is not laziness: a modelling op moves the kernel's journal generation,
- * and ids are arena slots with a LIFO free list, so a structural op hands the
- * *same numbers* back naming different geometry. The backend owns the selection
- * for exactly that reason (it can compare stamps; the frontend cannot), and a
- * frontend that merged fields would be maintaining a second, wrong copy of it.
+ * Every mutating call returns a `DccDocDto` and the entry is overwritten with it.
+ * A modelling op moves the kernel's journal generation, and ids are arena slots
+ * with a LIFO free list, so a structural op hands the *same numbers* back naming
+ * different geometry. The backend owns the selection for exactly that reason (it
+ * can compare stamps; the frontend cannot), and a store that merged fields would
+ * be maintaining a second, wrong copy of it.
  *
- * # The preview is a serialized queue of ONE
+ * # The preview is a serialized queue of one, PER DOCUMENT
  *
  * An orbit fires pointer-moves faster than a render + PNG + base64 round trip
- * completes. Without a gate they pile up, the panel lags behind the mouse by
- * however many are in flight, and the *last* frame to arrive may not be the last
- * one asked for. So: one request in flight, at most one queued behind it, and the
- * queued one always carries the latest camera — which the backend owns, so
- * "latest" is simply "whatever it is when the request runs".
+ * completes. Without a gate they pile up, the panel lags the mouse by however
+ * many are in flight, and the last frame to arrive may not be the last one asked
+ * for. One request in flight per document, at most one queued behind it — *per
+ * document*, because a single global gate would make two open panels take turns.
  */
 import { create } from "zustand";
 
@@ -32,114 +44,137 @@ import type { DccSaveDto } from "../bindings/DccSaveDto";
 import type { DccSelectDto } from "../bindings/DccSelectDto";
 import type { DccToolDto } from "../bindings/DccToolDto";
 
-interface DccState {
+/** One open document's view state. */
+export interface DccEntry {
   doc: DccDocDto | null;
-  /** The open asset id, so a re-mount of the panel re-attaches to it. */
-  assetId: string | null;
   image: string | null;
   /** Why there is no image (no GPU adapter, or a shader that did not validate). */
   previewError: string | null;
-  /** The last tool refusal, shown until the next action. A value, not a throw. */
+  /** The last tool refusal, cleared by the next successful action. A value, not a throw. */
   refusal: string | null;
-  /** The last save's verdict — counters and advisories (the P20.4 readout). */
+  /**
+   * The last save's verdict — counters and advisories (the P20.4 readout).
+   *
+   * **Kept until the NEXT SAVE**, not until the next action. Its coincidence
+   * warning is the one sentence in the product that says "what is on disk is not
+   * what is in this session", and clearing it on the next click meant an author
+   * who pressed Save and then moved the mouse never read it.
+   */
   lastSave: DccSaveDto | null;
   busy: boolean;
   status: string | null;
-
-  open: (assetId: string) => Promise<void>;
-  close: () => Promise<void>;
-  apply: (tool: DccToolDto) => Promise<void>;
-  select: (action: DccSelectDto) => Promise<void>;
-  setMode: (mode: DccModeDto) => Promise<void>;
-  pick: (x: number, y: number, additive: boolean) => Promise<void>;
-  orbit: (yawDeg: number, pitchDeg: number, dolly: number) => Promise<void>;
-  frame: () => Promise<void>;
-  undo: () => Promise<void>;
-  redo: () => Promise<void>;
-  save: () => Promise<void>;
-  mergeAsset: (assetId: string) => Promise<void>;
-  refresh: () => void;
 }
 
+interface DccState {
+  /** Keyed by **asset id** — the same key the panel instance is parameterized by. */
+  docs: Record<string, DccEntry>;
+
+  open: (assetId: string) => Promise<void>;
+  close: (assetId: string) => Promise<void>;
+  apply: (assetId: string, tool: DccToolDto) => Promise<void>;
+  select: (assetId: string, action: DccSelectDto) => Promise<void>;
+  setMode: (assetId: string, mode: DccModeDto) => Promise<void>;
+  pick: (assetId: string, x: number, y: number, additive: boolean) => Promise<void>;
+  orbit: (assetId: string, yawDeg: number, pitchDeg: number, dolly: number) => Promise<void>;
+  frame: (assetId: string) => Promise<void>;
+  undo: (assetId: string) => Promise<void>;
+  redo: (assetId: string) => Promise<void>;
+  save: (assetId: string) => Promise<void>;
+  mergeAsset: (assetId: string, dropped: string) => Promise<void>;
+  refresh: (assetId: string) => void;
+}
+
+const EMPTY: DccEntry = {
+  doc: null,
+  image: null,
+  previewError: null,
+  refusal: null,
+  lastSave: null,
+  busy: false,
+  status: null,
+};
+
 /**
- * Preview scheduling state, deliberately outside the store: it is transport
- * bookkeeping, and putting it in zustand would re-render every subscriber on a
- * flag that describes the network rather than the document.
+ * Per-document preview scheduling, deliberately outside the store: it is
+ * transport bookkeeping, and putting it in zustand would re-render every
+ * subscriber on a flag that describes the network rather than the document.
  */
-let inFlight = false;
-let queued = false;
+const flight = new Map<string, { inFlight: boolean; queued: boolean }>();
+
+function gate(assetId: string): { inFlight: boolean; queued: boolean } {
+  let g = flight.get(assetId);
+  if (!g) {
+    g = { inFlight: false, queued: false };
+    flight.set(assetId, g);
+  }
+  return g;
+}
 
 export const useDccStore = create<DccState>((set, get) => {
-  /** Render one frame, then service whatever arrived while it was running. */
-  const pump = async (): Promise<void> => {
-    const doc = get().doc;
+  const entry = (assetId: string): DccEntry => get().docs[assetId] ?? EMPTY;
+
+  const patch = (assetId: string, next: Partial<DccEntry>): void =>
+    set((s) => ({ docs: { ...s.docs, [assetId]: { ...(s.docs[assetId] ?? EMPTY), ...next } } }));
+
+  /** Render one frame for `assetId`, then service whatever arrived meanwhile. */
+  const pump = async (assetId: string): Promise<void> => {
+    const doc = entry(assetId).doc;
     if (!doc) return;
-    if (inFlight) {
-      queued = true;
+    const g = gate(assetId);
+    if (g.inFlight) {
+      g.queued = true;
       return;
     }
-    inFlight = true;
+    g.inFlight = true;
     try {
       const frame = await dccIpc.preview(doc.id, DCC_PREVIEW_SIZE);
-      set({ image: frame.image, previewError: frame.error });
+      patch(assetId, { image: frame.image, previewError: frame.error });
     } catch (e) {
-      set({ previewError: String(e) });
+      patch(assetId, { previewError: String(e) });
     } finally {
-      inFlight = false;
+      g.inFlight = false;
     }
-    if (queued) {
-      queued = false;
-      await pump();
+    if (g.queued) {
+      g.queued = false;
+      await pump(assetId);
     }
   };
 
-  /** Adopt a returned document and re-render. */
-  const adopt = (doc: DccDocDto): void => {
-    set({ doc });
-    void pump();
+  const adopt = (assetId: string, doc: DccDocDto): void => {
+    patch(assetId, { doc });
+    void pump(assetId);
   };
 
-  const applyResult = (res: DccApplyDto): void => {
-    set({ doc: res.doc, refusal: res.ok ? null : res.refusal });
-    void pump();
+  const applyResult = (assetId: string, res: DccApplyDto): void => {
+    patch(assetId, { doc: res.doc, refusal: res.ok ? null : res.refusal });
+    void pump(assetId);
   };
 
   return {
-    doc: null,
-    assetId: null,
-    image: null,
-    previewError: null,
-    refusal: null,
-    lastSave: null,
-    busy: false,
-    status: null,
+    docs: {},
 
     open: async (assetId) => {
-      if (get().assetId === assetId && get().doc) return;
-      set({ busy: true, refusal: null, lastSave: null, status: null });
+      if (entry(assetId).doc) return;
+      patch(assetId, { busy: true, refusal: null, status: null });
       try {
         const doc = await dccIpc.open(assetId);
-        set({ doc, assetId, image: null, previewError: null });
-        await pump();
+        patch(assetId, { doc, image: null, previewError: null });
+        await pump(assetId);
       } catch (e) {
-        set({ doc: null, assetId: null, status: `Could not open: ${String(e)}` });
+        patch(assetId, { doc: null, status: `Could not open: ${String(e)}` });
       } finally {
-        set({ busy: false });
+        patch(assetId, { busy: false });
       }
     },
 
-    close: async () => {
-      const doc = get().doc;
-      set({
-        doc: null,
-        assetId: null,
-        image: null,
-        previewError: null,
-        refusal: null,
-        lastSave: null,
-        status: null,
+    close: async (assetId) => {
+      const doc = entry(assetId).doc;
+      flight.delete(assetId);
+      set((s) => {
+        const docs = { ...s.docs };
+        delete docs[assetId];
+        return { docs };
       });
-      queued = false;
       if (doc) {
         try {
           await dccIpc.close(doc.id);
@@ -149,125 +184,136 @@ export const useDccStore = create<DccState>((set, get) => {
       }
     },
 
-    apply: async (tool) => {
-      const doc = get().doc;
+    apply: async (assetId, tool) => {
+      const doc = entry(assetId).doc;
       if (!doc) return;
-      set({ busy: true });
+      patch(assetId, { busy: true });
       try {
-        applyResult(await dccIpc.apply(doc.id, tool));
+        applyResult(assetId, await dccIpc.apply(doc.id, tool));
       } catch (e) {
-        set({ refusal: String(e) });
+        patch(assetId, { refusal: String(e) });
       } finally {
-        set({ busy: false });
+        patch(assetId, { busy: false });
       }
     },
 
-    select: async (action) => {
-      const doc = get().doc;
+    select: async (assetId, action) => {
+      const doc = entry(assetId).doc;
       if (!doc) return;
       try {
-        adopt(await dccIpc.select(doc.id, action));
+        adopt(assetId, await dccIpc.select(doc.id, action));
       } catch (e) {
-        set({ refusal: String(e) });
+        patch(assetId, { refusal: String(e) });
       }
     },
 
-    setMode: async (mode) => {
-      await get().select({ action: "mode", mode });
+    setMode: async (assetId, mode) => {
+      await get().select(assetId, { action: "mode", mode });
     },
 
-    pick: async (x, y, additive) => {
-      const doc = get().doc;
+    pick: async (assetId, x, y, additive) => {
+      const doc = entry(assetId).doc;
       if (!doc) return;
       try {
-        adopt(await dccIpc.pick(doc.id, x, y, DCC_PREVIEW_SIZE, additive));
+        adopt(assetId, await dccIpc.pick(doc.id, x, y, DCC_PREVIEW_SIZE, additive));
       } catch (e) {
-        set({ refusal: String(e) });
+        patch(assetId, { refusal: String(e) });
       }
     },
 
-    orbit: async (yawDeg, pitchDeg, dolly) => {
-      const doc = get().doc;
+    orbit: async (assetId, yawDeg, pitchDeg, dolly) => {
+      const doc = entry(assetId).doc;
       if (!doc) return;
       try {
         await dccIpc.orbit(doc.id, yawDeg, pitchDeg, dolly);
-        await pump();
+        await pump(assetId);
       } catch (e) {
         console.error("dcc.orbit failed", e);
       }
     },
 
-    frame: async () => {
-      const doc = get().doc;
+    frame: async (assetId) => {
+      const doc = entry(assetId).doc;
       if (!doc) return;
       await dccIpc.frame(doc.id);
-      await pump();
+      await pump(assetId);
     },
 
-    undo: async () => {
-      const doc = get().doc;
+    undo: async (assetId) => {
+      const doc = entry(assetId).doc;
       if (!doc) return;
-      adopt(await dccIpc.undo(doc.id));
+      adopt(assetId, await dccIpc.undo(doc.id));
     },
 
-    redo: async () => {
-      const doc = get().doc;
+    redo: async (assetId) => {
+      const doc = entry(assetId).doc;
       if (!doc) return;
-      adopt(await dccIpc.redo(doc.id));
+      adopt(assetId, await dccIpc.redo(doc.id));
     },
 
-    save: async () => {
-      const doc = get().doc;
+    save: async (assetId) => {
+      const doc = entry(assetId).doc;
       if (!doc) return;
-      set({ busy: true, status: null });
+      patch(assetId, { busy: true, status: null });
       try {
         const lastSave = await dccIpc.save(doc.id);
         // Re-read the document: `dirty` is derived from the generation stamp on
         // the backend, so the only honest way to learn it is to ask.
         const docs = await dccIpc.list();
-        set({
+        patch(assetId, {
           lastSave,
-          doc: docs.find((d) => d.id === doc.id) ?? get().doc,
+          doc: docs.find((d) => d.id === doc.id) ?? entry(assetId).doc,
           status: `Saved ${doc.name}: ${lastSave.export.triangles} triangles, vmesh ${lastSave.vmesh}.`,
         });
       } catch (e) {
-        set({ status: `Save failed: ${String(e)}` });
+        patch(assetId, { status: `Save failed: ${String(e)}` });
       } finally {
-        set({ busy: false });
+        patch(assetId, { busy: false });
       }
     },
 
-    mergeAsset: async (assetId) => {
-      const doc = get().doc;
+    mergeAsset: async (assetId, dropped) => {
+      const doc = entry(assetId).doc;
       if (!doc) return;
-      set({ busy: true });
+      patch(assetId, { busy: true });
       try {
-        applyResult(await dccIpc.mergeAsset(doc.id, assetId));
+        applyResult(assetId, await dccIpc.mergeAsset(doc.id, dropped));
       } catch (e) {
-        set({ refusal: String(e) });
+        patch(assetId, { refusal: String(e) });
       } finally {
-        set({ busy: false });
+        patch(assetId, { busy: false });
       }
     },
 
-    refresh: () => void pump(),
+    refresh: (assetId) => void pump(assetId),
   };
 });
 
-/** Test-only: clear the module-scoped preview queue between cases. */
-export function __resetDccPreviewQueueForTest(): void {
-  inFlight = false;
-  queued = false;
+/** One document's view state, for a panel that knows its own asset id. */
+export function useDccEntry(assetId: string | null): DccEntry {
+  return useDccStore((s) => (assetId ? (s.docs[assetId] ?? EMPTY) : EMPTY));
 }
 
-// **Ctrl+Z inside the Model Editor undoes the MESH** (P23.2a's routing registry).
+/** Test-only: clear the per-document preview queues between cases. */
+export function __resetDccPreviewQueueForTest(): void {
+  flight.clear();
+}
+
+// **Ctrl+Z inside the Model Editor undoes the MESH, in the panel you are looking
+// at** (P23.2a's routing registry; the aim is P23.4's fix).
 //
-// The kernel's op journal is the undo stack — `undo` truncates the cursor and
-// replays from the nearest checkpoint — so this claims the scope and the shell's
-// chord reaches the right document. Without it, Ctrl+Z here would undo the
-// SCENE: an actor the author cannot see, moving in a panel they are not looking
-// at, while the mesh in front of them does nothing.
+// The scope is handed the focused panel's `params`, which for `model:<assetId>`
+// is the asset id — so with two Model Editors open the chord reaches the document
+// under the cursor rather than whichever one happened to be opened last. The
+// kernel's op journal IS the undo stack (`undo` truncates the cursor and replays
+// from the nearest checkpoint); without this registration Ctrl+Z here would undo
+// the SCENE: an actor the author cannot see, moving in a panel they are not
+// looking at, while the mesh in front of them does nothing.
 registerUndoScope("model", {
-  undo: () => useDccStore.getState().undo(),
-  redo: () => useDccStore.getState().redo(),
+  undo: (params) => {
+    if (params) void useDccStore.getState().undo(params);
+  },
+  redo: (params) => {
+    if (params) void useDccStore.getState().redo(params);
+  },
 });

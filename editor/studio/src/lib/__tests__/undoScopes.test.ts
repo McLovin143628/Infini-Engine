@@ -109,6 +109,54 @@ test("closing the focused panel clears the focus, so undo goes back to the scene
   expect(undo).toHaveBeenCalledTimes(1);
 });
 
+test("a multi-instance panel routes to the instance under the cursor", () => {
+  // **The P23.4 blocker's other half.** The Model Editor is `singleton: false`,
+  // so two open meshes are two `"model"` panels and ONE registration between
+  // them. Routing by type alone reaches the right *editor* and the wrong
+  // *document* — Ctrl+Z in the panel you are looking at rewinds the mesh in the
+  // other tab, which is the original P23.2a bug with a smaller blast radius.
+  //
+  // So the scope is handed the focused instance's `params`, which for
+  // `model:<assetId>` is the asset id.
+  registerPanelType({
+    type: "model",
+    title: () => "Model",
+    icon: (() => null) as never,
+    component: (() => null) as never,
+    singleton: false,
+    defaultLocation: "float",
+    defaultSize: { w: 100, h: 100 },
+  });
+  const undo = vi.fn();
+  const redo = vi.fn();
+  registerUndoScope("model", { undo, redo });
+
+  const dock = useDockLayout.getState();
+  const a = dock.openPanel("model", "asset-a");
+  const b = dock.openPanel("model", "asset-b");
+  expect(a).not.toBe(b);
+
+  useDockLayout.getState().setFocusedPanel(b);
+  expect(dispatchUndo()).toBe(true);
+  expect(undo).toHaveBeenCalledWith("asset-b");
+
+  useDockLayout.getState().setFocusedPanel(a);
+  expect(dispatchRedo()).toBe(true);
+  expect(redo).toHaveBeenCalledWith("asset-a");
+});
+
+test("a singleton panel is handed a null parameter and ignores it", () => {
+  // The other registrations take no argument. TypeScript allows that (a
+  // zero-argument function is a valid one-argument function), and nothing about
+  // them had to change — asserted so a future signature change cannot break the
+  // three editors that predate this.
+  const undo = vi.fn();
+  registerUndoScope("material", { undo, redo: vi.fn() });
+  useDockLayout.getState().setFocusedPanel("material");
+  expect(dispatchUndo()).toBe(true);
+  expect(undo).toHaveBeenCalledWith(null);
+});
+
 test("an unregistered type has no scope", () => {
   expect(undoScopeFor("nobody")).toBeUndefined();
   expect(undoScopeFor(null)).toBeUndefined();

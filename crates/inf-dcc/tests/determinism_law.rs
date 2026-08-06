@@ -179,14 +179,30 @@ fn every_source_file_is_covered_by_the_bans_above() {
     // module that nothing greps. That is the P23.3 NB1 law in its general form:
     // when the code grows, every gate downstream has to be re-proven rather than
     // assumed, and here "re-proven" can be automatic.
+    // **Recursive**, because a module in a subdirectory is a module: reading only
+    // the top level meant the day `src/uv/` appears (P23.5), every law above
+    // silently stops applying to it and this gate keeps saying it does not.
+    fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir)
+            .expect("a readable directory")
+            .flatten()
+        {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .expect("a utf-8 file name")
+                        .to_string(),
+                );
+            }
+        }
+    }
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
-        .expect("the crate has a src/")
-        .filter_map(|e| {
-            let p = e.ok()?.path();
-            (p.extension()? == "rs").then(|| p.file_name()?.to_str().map(str::to_string))?
-        })
-        .collect();
+    let mut on_disk: Vec<String> = Vec::new();
+    walk(&dir, &mut on_disk);
     on_disk.sort();
     let mut covered: Vec<String> = SOURCES
         .iter()
@@ -201,6 +217,68 @@ fn every_source_file_is_covered_by_the_bans_above() {
     );
 }
 
+/// The **forcing function** behind `op_preserves_ids` — the property that makes
+/// a new modelling op impossible to add without classifying it.
+///
+/// Its *answers* are checked by two tests in `select`; what neither of them can
+/// see is a `_ => false` wildcard, which produces identical answers today and
+/// silently defaults every future op to "restructuring". That is behaviourally
+/// safe and structurally fatal: the whole point of the function is that it does
+/// not compile until somebody decides, and a wildcard removes exactly that.
+///
+/// Scanned **line by line** rather than by searching for a brace-newline
+/// pattern. `include_str!` hands back the file's own bytes, and on a Windows
+/// checkout under `core.autocrlf = true` those are CRLF — the P22 law, met
+/// again: a needle containing a newline simply is not there, and the gate
+/// aborts with a message about braces instead of failing.
+#[test]
+fn the_id_preservation_classifier_has_no_wildcard_and_names_every_op() {
+    let body = block_after(SOURCES[7].1, "pub fn op_preserves_ids");
+    assert!(
+        !body.iter().any(|l| l.contains("_ =>")),
+        "op_preserves_ids has a wildcard arm; a new op would default silently \
+         instead of stopping the build"
+    );
+
+    // Every variant of `Op`, read out of the enum itself rather than re-listed
+    // here, must be named by the classifier.
+    let decl = block_after(SOURCES[5].1, "pub enum Op {");
+    let variants: Vec<String> = decl
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| {
+            !l.starts_with("//")
+                && !l.starts_with('#')
+                && l.chars().next().is_some_and(char::is_uppercase)
+        })
+        .filter_map(|l| l.split([' ', '{', '(', ',']).next())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .collect();
+    assert_eq!(variants.len(), 22, "found {variants:?}");
+    let joined = body.join(" ");
+    for v in &variants {
+        assert!(
+            joined.contains(&format!("Op::{v} ")),
+            "op_preserves_ids does not name `Op::{v}`"
+        );
+    }
+}
+
+/// The lines of the block that opens on the first line containing `needle`, up
+/// to (not including) the next line that is a bare `}` at column zero.
+fn block_after(source: &str, needle: &str) -> Vec<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("no line contains `{needle}`"));
+    lines[start + 1..]
+        .iter()
+        .take_while(|l| l.trim_end() != "}")
+        .map(|l| l.to_string())
+        .collect()
+}
 #[test]
 fn no_skip_serializing_if_on_a_bincode_struct() {
     // The P10 law, caught three times: bincode is positional, so a conditionally

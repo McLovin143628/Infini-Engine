@@ -11,7 +11,7 @@
 //! validates**. A set with duplicate ids, or one that claims the reserved id `0`,
 //! makes every per-sample lookup ambiguous, and by the time it matters the ids are
 //! already baked into terrain tiles. Refusing at the save is the only cheap place
-//! to catch it — the cook refuses too ([`inf_packager`]'s `CookError::BiomeSet`),
+//! to catch it — the cook refuses too (`inf_packager`'s `CookError::BiomeSet`),
 //! but by then the author has painted with it.
 
 use std::path::Path;

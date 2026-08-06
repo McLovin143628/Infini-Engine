@@ -50,7 +50,7 @@ import {
 
 import { DCC_PREVIEW_SIZE } from "../../lib/ipc";
 import { useAssetStore } from "../../stores/assetStore";
-import { useDccStore } from "../../stores/dccStore";
+import { useDccEntry, useDccStore } from "../../stores/dccStore";
 import type { DccModeDto } from "../../bindings/DccModeDto";
 import { cn } from "../../lib/utils";
 
@@ -122,13 +122,12 @@ function Verdict({ label, value, good }: { label: string; value: number | string
 }
 
 export default function ModelEditor({ params }: { panelId: string; params: string | null }) {
-  const doc = useDccStore((s) => s.doc);
-  const image = useDccStore((s) => s.image);
-  const previewError = useDccStore((s) => s.previewError);
-  const refusal = useDccStore((s) => s.refusal);
-  const lastSave = useDccStore((s) => s.lastSave);
-  const status = useDccStore((s) => s.status);
-  const busy = useDccStore((s) => s.busy);
+  // **Every read and every write is keyed by this panel's own asset id.** The
+  // dock keeps inactive tabs MOUNTED, so two Model Editors render at the same
+  // time; a store read that did not name the asset gave both of them whichever
+  // document was opened last, and every tool press went to the wrong mesh.
+  const assetId = params;
+  const { doc, image, previewError, refusal, lastSave, status, busy } = useDccEntry(assetId);
   const open = useDccStore((s) => s.open);
   const close = useDccStore((s) => s.close);
   const apply = useDccStore((s) => s.apply);
@@ -154,9 +153,15 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   // The panel instance is `model:<assetId>` — a singleton per asset, like the
   // material editor's per-graph tab.
   useEffect(() => {
-    if (params) void open(params);
-  }, [params, open]);
-  useEffect(() => () => void close(), [close]);
+    if (assetId) void open(assetId);
+  }, [assetId, open]);
+  // Closing frees THIS document's backend session and journal. Reading the id
+  // from the closure rather than from the store is what stops a panel unmount
+  // closing its neighbour.
+  useEffect(() => {
+    if (!assetId) return;
+    return () => void close(assetId);
+  }, [assetId, close]);
 
   // ── the preview surface ──────────────────────────────────────────────────
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -185,7 +190,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
     d.moved = true;
     d.x = e.clientX;
     d.y = e.clientY;
-    void orbit(-dx * 0.4, dy * 0.4, 0);
+    if (assetId) void orbit(assetId, -dx * 0.4, dy * 0.4, 0);
   };
   const onPointerUp = (e: React.PointerEvent) => {
     const d = drag.current;
@@ -194,11 +199,11 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
     // slightly shaky click still selects rather than nudging the camera.
     if (d && !d.moved) {
       const [x, y] = toPreviewPx(e);
-      void pick(x, y, e.shiftKey || e.ctrlKey);
+      if (assetId) void pick(assetId, x, y, e.shiftKey || e.ctrlKey);
     }
   };
   const onWheel = (e: React.WheelEvent) => {
-    void orbit(0, 0, e.deltaY > 0 ? 0.12 : -0.12);
+    if (assetId) void orbit(assetId, 0, 0, e.deltaY > 0 ? 0.12 : -0.12);
   };
 
   // ── drag-and-drop: a mesh asset dropped on the panel merges in ───────────
@@ -208,13 +213,13 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
     const id = e.dataTransfer.getData("application/x-inf-asset") || e.dataTransfer.getData("text/plain");
     if (!id) return;
     if (assetsById[id]?.kind !== "mesh") return;
-    void mergeAsset(id);
+    if (assetId) void mergeAsset(assetId, id);
   };
 
   if (!doc) {
     return (
       <div className="flex h-full items-center justify-center p-4 text-xs text-(--ink-text-dim)">
-        {status ?? (params ? "Opening…" : "Open a mesh asset from the Content Drawer to edit it.")}
+        {status ?? (assetId ? "Opening…" : "Open a mesh asset from the Content Drawer to edit it.")}
       </div>
     );
   }
@@ -229,7 +234,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           ? "bg-(--ink-accent) text-(--ink-text-onaccent)"
           : "bg-(--ink-bg-2) hover:bg-(--ink-bg-3)",
       )}
-      onClick={() => void setMode(m)}
+      onClick={() => assetId && void setMode(assetId, m)}
       title={`${label} mode`}
     >
       {icon}
@@ -250,7 +255,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           <div className="ml-auto flex items-center gap-1">
             <button
               className="rounded p-1 hover:bg-(--ink-bg-3) disabled:opacity-40"
-              onClick={() => void useDccStore.getState().undo()}
+              onClick={() => assetId && void useDccStore.getState().undo(assetId)}
               disabled={!doc.canUndo}
               title="Undo (Ctrl+Z)"
             >
@@ -258,7 +263,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
             </button>
             <button
               className="rounded p-1 hover:bg-(--ink-bg-3) disabled:opacity-40"
-              onClick={() => void useDccStore.getState().redo()}
+              onClick={() => assetId && void useDccStore.getState().redo(assetId)}
               disabled={!doc.canRedo}
               title="Redo (Ctrl+Y)"
             >
@@ -266,14 +271,14 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
             </button>
             <button
               className="rounded p-1 hover:bg-(--ink-bg-3)"
-              onClick={() => void frame()}
+              onClick={() => assetId && void frame(assetId)}
               title="Frame the whole mesh"
             >
               <Frame size={13} />
             </button>
             <button
               className="flex items-center gap-1 rounded bg-(--ink-accent) px-2 py-0.5 text-(--ink-text-onaccent) hover:bg-(--ink-accent-hover) disabled:opacity-40"
-              onClick={() => void save()}
+              onClick={() => assetId && void save(assetId)}
               disabled={busy}
               title="Save the mesh asset (rewrites the payload and rebuilds its vmesh)"
             >
@@ -330,22 +335,22 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
 
         <div className="text-[10px] font-semibold tracking-wide text-(--ink-text-dim)">SELECT</div>
         <div className="grid grid-cols-2 gap-1">
-          <ToolButton label="All" icon={<Layers size={12} />} onClick={() => void select({ action: "all" })} />
-          <ToolButton label="None" icon={<Crosshair size={12} />} onClick={() => void select({ action: "none" })} />
-          <ToolButton label="Invert" icon={<Expand size={12} />} onClick={() => void select({ action: "invert" })} />
-          <ToolButton label="Linked" icon={<Merge size={12} />} onClick={() => void select({ action: "linked" })} />
-          <ToolButton label="Grow" icon={<Expand size={12} />} onClick={() => void select({ action: "grow" })} />
-          <ToolButton label="Shrink" icon={<Shrink size={12} />} onClick={() => void select({ action: "shrink" })} />
+          <ToolButton label="All" icon={<Layers size={12} />} onClick={() => assetId && void select(assetId, { action: "all" })} />
+          <ToolButton label="None" icon={<Crosshair size={12} />} onClick={() => assetId && void select(assetId, { action: "none" })} />
+          <ToolButton label="Invert" icon={<Expand size={12} />} onClick={() => assetId && void select(assetId, { action: "invert" })} />
+          <ToolButton label="Linked" icon={<Merge size={12} />} onClick={() => assetId && void select(assetId, { action: "linked" })} />
+          <ToolButton label="Grow" icon={<Expand size={12} />} onClick={() => assetId && void select(assetId, { action: "grow" })} />
+          <ToolButton label="Shrink" icon={<Shrink size={12} />} onClick={() => assetId && void select(assetId, { action: "shrink" })} />
           <ToolButton
             label="Loop"
             icon={<Spline size={12} />}
-            onClick={() => void select({ action: "loop" })}
+            onClick={() => assetId && void select(assetId, { action: "loop" })}
             title="Edge loop through the last edge you clicked"
           />
           <ToolButton
             label="Ring"
             icon={<Spline size={12} />}
-            onClick={() => void select({ action: "ring" })}
+            onClick={() => assetId && void select(assetId, { action: "ring" })}
             title="Edge ring through the last edge you clicked"
           />
         </div>
@@ -356,7 +361,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           label="Extrude"
           icon={<Box size={12} />}
           disabled={nothing || mode !== "face"}
-          onClick={() => void apply({ tool: "extrude", distance })}
+          onClick={() => assetId && void apply(assetId, { tool: "extrude", distance })}
           title="Extrude the selected faces along the region normal. A multi-face selection moves as ONE block: only its border gets walls."
         />
         <Num label="Inset (m)" value={inset} onChange={setInset} />
@@ -368,14 +373,14 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           label="Inset"
           icon={<Square size={12} />}
           disabled={nothing || mode !== "face"}
-          onClick={() => void apply({ tool: "inset", amount: inset, individual })}
+          onClick={() => assetId && void apply(assetId, { tool: "inset", amount: inset, individual })}
         />
         <Num label="Bevel (m)" value={bevel} onChange={setBevel} />
         <ToolButton
           label="Bevel"
           icon={<Slice size={12} />}
           disabled={nothing || mode !== "edge"}
-          onClick={() => void apply({ tool: "bevel", amount: bevel })}
+          onClick={() => assetId && void apply(assetId, { tool: "bevel", amount: bevel })}
           title="One flat chamfer strip per edge (v1 is a single segment)"
         />
         <Num label="Cuts" value={cuts} step={1} onChange={(v) => setCuts(Math.max(1, Math.round(v)))} />
@@ -383,21 +388,21 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           label="Loop Cut"
           icon={<Grid2x2 size={12} />}
           disabled={mode !== "edge"}
-          onClick={() => void apply({ tool: "loopCut", cuts })}
+          onClick={() => assetId && void apply(assetId, { tool: "loopCut", cuts })}
           title="Cut the quad strip through the last edge you clicked. Refuses on a non-quad."
         />
         <ToolButton
           label="Knife"
           icon={<Scissors size={12} />}
           disabled={mode !== "vert" || doc.knifePoints < 2}
-          onClick={() => void apply({ tool: "knife" })}
+          onClick={() => assetId && void apply(assetId, { tool: "knife" })}
           title="Cut along the vertices in the order you clicked them"
         />
         <ToolButton
           label="Subdivide"
           icon={<Grid2x2 size={12} />}
           disabled={nothing || mode !== "face"}
-          onClick={() => void apply({ tool: "subdivide" })}
+          onClick={() => assetId && void apply(assetId, { tool: "subdivide" })}
           title="Simple midpoint — density changes, the shape does not"
         />
         <div className="grid grid-cols-2 gap-1">
@@ -405,13 +410,13 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
             label="Merge ctr"
             icon={<Merge size={12} />}
             disabled={nothing}
-            onClick={() => void apply({ tool: "merge", center: true })}
+            onClick={() => assetId && void apply(assetId, { tool: "merge", center: true })}
           />
           <ToolButton
             label="Merge last"
             icon={<Merge size={12} />}
             disabled={nothing}
-            onClick={() => void apply({ tool: "merge", center: false })}
+            onClick={() => assetId && void apply(assetId, { tool: "merge", center: false })}
           />
         </div>
         <div className="flex items-center gap-1">
@@ -428,7 +433,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
             <ToolButton
               label="Mirror at 0"
               icon={<Triangle size={12} />}
-              onClick={() => void apply({ tool: "mirror", axis: mirrorAxis, coord: 0 })}
+              onClick={() => assetId && void apply(assetId, { tool: "mirror", axis: mirrorAxis, coord: 0 })}
               title="Reflect across the axis plane, welding anything exactly on it"
             />
           </div>
@@ -437,7 +442,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           label="Delete selection"
           icon={<Crosshair size={12} />}
           disabled={nothing}
-          onClick={() => void apply({ tool: "delete" })}
+          onClick={() => assetId && void apply(assetId, { tool: "delete" })}
         />
 
         {/* ── readouts ──────────────────────────────────────────────── */}

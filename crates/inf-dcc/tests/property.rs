@@ -528,7 +528,18 @@ proptest! {
                 }
             }
             Err(ImportError::NoGeometry) => {
-                prop_assert_eq!(session.mesh().face_count(), 0);
+                // Either there was nothing to write, or **every** triangle
+                // written collapsed in `f32` and the reader skipped the lot —
+                // the coincidence hazard again, in its third symptom. The
+                // entitlement is the same one: the writer must have said so.
+                prop_assert!(
+                    session.mesh().face_count() == 0
+                        || report.coincident_vertices > 0
+                        || report.reused_diagonals > 0,
+                    "the reader found no geometry in an asset written from {}                      face(s), with nothing in the report to blame: {:?}",
+                    session.mesh().face_count(),
+                    report
+                );
             }
             Err(ImportError::NonManifoldEdge { .. }) => {
                 prop_assert!(

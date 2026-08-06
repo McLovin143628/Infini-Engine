@@ -21,14 +21,21 @@
 //! survives Stop — because `SimSession::exit` reverts *the document*, and an
 //! asset edit is not in it.
 //!
-//! # Save is a rewrite **plus a synchronous derivation**, in one unit of work
+//! # Save lives in Ring 1, and that is a correctness decision
 //!
-//! `AssetProject::rewrite_payload` writes the bytes and re-hashes; it does not
-//! regenerate the derived `.inf_vmesh`, and the editor viewport has drawn real
-//! meshes through vgeom since P18.3. So a save without `ensure_vmesh` leaves the
-//! DAG describing the **old** geometry, with no error and no visual tell —
-//! exactly the failure shape this codebase keeps paying for. Both run under one
-//! `with_project`, so there is no window in which the two disagree.
+//! `dcc_save` is four lines that call [`inf_editor_core::dcc::save_mesh_session`].
+//! It is written there rather than here because a `#[tauri::command]` cannot be
+//! driven from a test on any CI leg: the first version inlined the rewrite and
+//! the derivation into this file and "proved" them with a Ring-1 test that
+//! inlined the same two calls — so deleting the derivation from *this* function
+//! failed nothing, and the gate certified a pattern rather than the product.
+//!
+//! What that function guarantees, and this one only reports:
+//! `rewrite_payload` alone leaves the derived `.inf_vmesh` describing the **old**
+//! geometry, which the viewport then redraws with complete confidence. The pair
+//! is therefore always (new payload, new DAG) or (new payload, no DAG) — never
+//! (new payload, stale DAG) — and the one state where that can still fail is
+//! reported in words that say what disk holds.
 //!
 //! Thumbnails need no invalidation: `ThumbnailCache` keys on the content hash, so
 //! a rewritten payload is a cache miss by construction.
@@ -38,12 +45,12 @@ use std::sync::Mutex;
 
 use inf_asset::{AssetId, AssetKind};
 use inf_dcc::{
-    canonical_edge, edge_loop, edge_ring, from_mesh_asset, op_preserves_ids, to_mesh_asset,
-    ExportOptions, ExportReport, FaceId, HalfId, ImportReport, KnifePoint, MergeTarget,
-    MeshSession, MirrorAxis, Op, OpError, SelectMode, SelectionSet, VertId,
+    canonical_edge, edge_loop, edge_ring, from_mesh_asset, op_preserves_ids, ExportReport, FaceId,
+    HalfId, ImportReport, KnifePoint, MergeTarget, MeshSession, MirrorAxis, Op, OpError,
+    SelectMode, SelectionSet, VertId,
 };
 use inf_editor_core::assets::vmesh;
-use inf_editor_core::dcc::{self, OverlayStyle, PickHit, Projector};
+use inf_editor_core::dcc::{self, OverlayStyle, PickHit, PreviewCache, Projector};
 use inf_editor_core::ipc::{
     DccApplyDto, DccDocDto, DccExportDto, DccImportDto, DccModeDto, DccPreviewDto, DccSaveDto,
     DccSelectDto, DccToolDto, SculptFalloffDto,
@@ -80,6 +87,10 @@ struct DccDoc {
     knife: Vec<VertId>,
     /// The last edge picked, for loop/ring select (which need a seed, not a set).
     last_edge: Option<HalfId>,
+    /// The tessellation and mesh snapshot the preview draws, held against the
+    /// generation that produced them — so an orbit costs a camera write and two
+    /// `Arc` clones rather than a full export (P23.4 audit — M6).
+    preview: PreviewCache,
 }
 
 struct DccStore {
@@ -268,6 +279,7 @@ pub async fn dcc_open(
             saved_generation: Some(session.generation()),
             knife: Vec::new(),
             last_edge: None,
+            preview: PreviewCache::new(),
         };
         let dto = doc_dto(&doc, &session);
         s.docs.insert(doc_id.clone(), doc);
@@ -707,14 +719,17 @@ pub async fn dcc_preview(
     // Everything CPU-side under the store lock, then render outside it: the GPU
     // call is the long one and nothing else in this module needs the store while
     // it runs.
-    let (geo, stamp, view, mesh_copy, selection, mode) = state.with(|s| {
+    let (geo, mesh_copy, stamp, view, selection, mode) = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
         sync(doc, session);
+        // Cached on the generation stamp: an orbit re-renders without
+        // re-tessellating and without cloning the mesh (P23.4 audit — M6).
+        let (geo, mesh) = doc.preview.get(session);
         Ok((
-            dcc::tessellate(session.mesh()),
+            geo,
+            mesh,
             session.generation(),
             doc.view,
-            session.mesh().clone(),
             doc.selection.clone(),
             doc.mode,
         ))
@@ -782,18 +797,17 @@ pub async fn dcc_save(
     assets: State<'_, super::assets::AssetState>,
     viewport: State<'_, super::ViewportState>,
 ) -> Result<DccSaveDto, String> {
-    let (asset, payload, report, generation) = state.with(|s| {
+    let (asset, mesh, generation) = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
-        let (payload, report) = to_mesh_asset(session.mesh(), &ExportOptions::default());
-        Ok((doc.asset, payload, report, session.generation()))
+        Ok((doc.asset, session.mesh().clone(), session.generation()))
     })?;
 
-    let derivation = assets.with_project(|proj| {
-        proj.rewrite_payload(asset, &payload, vec![])
-            .map_err(|e| format!("write mesh: {e}"))?;
-        vmesh::ensure_vmesh(proj, asset).map_err(|e| format!("derive vmesh: {e}"))
+    // ONE call, in Ring 1, where a test can reach it — see the module docs.
+    let outcome = assets.with_project(|proj| {
+        dcc::save_mesh_session(proj, asset, &mesh).map_err(|e| e.to_string())
     })?;
-    let vmesh = match derivation {
+    let report = outcome.export;
+    let vmesh = match outcome.vmesh {
         vmesh::VmeshDerivation::Built(_) => "built",
         vmesh::VmeshDerivation::Cached(_) => "cached",
         vmesh::VmeshDerivation::Skipped => "skipped",
@@ -948,6 +962,7 @@ mod tests {
                         saved_generation: Some(session.generation()),
                         knife: Vec::new(),
                         last_edge: None,
+                        preview: PreviewCache::new(),
                     },
                 );
                 s.journals.insert(id.to_string(), session);

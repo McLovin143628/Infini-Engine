@@ -8,10 +8,18 @@
 //! ```text
 //!   open  → inf_dcc::from_mesh_asset            (the kernel's reader)
 //!   edit  → Op::ExtrudeFaces                    (P23.4)
-//!   save  → AssetProject::rewrite_payload
-//!         → assets::vmesh::ensure_vmesh          SYNCHRONOUSLY (the P23.1 rule)
+//!   save  → inf_editor_core::dcc::save_mesh_session   ← THE PRODUCT PATH
 //!   draw  → EditorRenderAssets::resolve_vgeom    re-keyed by CONTENT HASH
 //! ```
+//!
+//! # It calls the function the command calls, and that is the point
+//!
+//! The first version of this file **inlined** the two calls the save makes. It
+//! passed, and it proved the *pattern* rather than the product: deleting
+//! `ensure_vmesh` from `dcc_save` failed nothing at all, because nothing
+//! executed `dcc_save`. A `#[tauri::command]` cannot be driven from a test, so
+//! the save is a Ring-1 function ([`inf_editor_core::dcc::save_mesh_session`])
+//! and both the command and this gate go through it.
 //!
 //! # The two claims, and why each has to be measured rather than reasoned about
 //!
@@ -39,6 +47,7 @@
 use inf_asset::{AssetId, AssetKind};
 use inf_dcc::{FaceId, MeshSession, Op};
 use inf_editor_core::assets::{vmesh, AssetProject};
+use inf_editor_core::dcc;
 use inf_editor_core::render_assets::EditorRenderAssets;
 
 /// Write `mesh` as a `.inf_mesh` and derive its DAG — the same two steps the
@@ -145,16 +154,17 @@ fn a_mesh_edited_in_the_model_editor_re_keys_and_redraws_in_the_scene() {
          interior to the region and gets none"
     );
 
-    // ── dcc_save ──────────────────────────────────────────────────────────
-    let (out, report) = inf_dcc::to_mesh_asset(session.mesh(), &inf_dcc::ExportOptions::default());
+    // ── dcc_save: THE PRODUCT PATH, not a re-statement of it ──────────────
+    let saved = dcc::save_mesh_session(&mut proj, mesh_id, session.mesh()).expect("saves");
     assert_eq!(
-        report.coincident_vertices, 0,
+        saved.export.coincident_vertices, 0,
         "the save's advisory is clean on a 1.5 m extrude"
     );
-    proj.rewrite_payload(mesh_id, &out, vec![]).unwrap();
-    // **Synchronously**, in the same unit of work as the rewrite (P23.1 §2). A
-    // background derivation is a window in which the level draws the old mesh.
-    vmesh::ensure_vmesh(&mut proj, mesh_id).unwrap();
+    assert!(
+        matches!(saved.vmesh, vmesh::VmeshDerivation::Built(_)),
+        "the derivation ran synchronously, in the same call: {:?}",
+        saved.vmesh
+    );
     drop(proj);
 
     // ── what the scene draws AFTER ────────────────────────────────────────
@@ -227,10 +237,8 @@ fn a_save_that_changes_nothing_leaves_the_render_key_alone() {
     let payload: inf_mesh::MeshAsset = proj.load_payload(mesh_id).unwrap();
     let import = inf_dcc::from_mesh_asset(&payload).unwrap();
     let session = MeshSession::new(import.mesh);
-    // Open and save with no edit in between.
-    let (out, _) = inf_dcc::to_mesh_asset(session.mesh(), &inf_dcc::ExportOptions::default());
-    proj.rewrite_payload(mesh_id, &out, vec![]).unwrap();
-    vmesh::ensure_vmesh(&mut proj, mesh_id).unwrap();
+    // Open and save with no edit in between, through the same door.
+    dcc::save_mesh_session(&mut proj, mesh_id, session.mesh()).expect("saves");
     drop(proj);
 
     store.refresh_index();
@@ -239,4 +247,64 @@ fn a_save_that_changes_nothing_leaves_the_render_key_alone() {
         before,
         "open-then-save must be a no-op — the kernel's round trip is a fixed point"
     );
+}
+
+#[test]
+fn a_save_whose_derivation_fails_removes_the_stale_dag_rather_than_leaving_it() {
+    // **The failure contract, executed.** `AssetProject` has a lock, not a
+    // transaction: the payload can land and the derivation can then fail. The
+    // state that must be unreachable is (new payload, OLD dag), because the
+    // watcher re-keys on the new content hash and the viewport draws the
+    // previous surface with complete confidence — the exact failure the design
+    // memo opens by naming.
+    //
+    // Provoked by handing the save a mesh with no faces: the writer produces an
+    // asset with no triangles, which `ensure_vmesh` declines to virtualize. That
+    // is `Skipped`, not an error — so this test asserts the *other* half of the
+    // invariant directly: after ANY save, the derived artifact on disk either
+    // describes what was just written or is not there at all.
+    let root = tempfile::tempdir().unwrap();
+    let mut proj = AssetProject::open(root.path()).unwrap();
+    let mesh_id = write_mesh(&mut proj, "Prop", &inf_dcc::cube(2.0));
+    let derived = inf_vgeom::derived_vmesh_id(mesh_id);
+    assert!(proj.db().contains(derived), "the fixture has a DAG");
+    let (before_verts, _) = derived_probe(root.path(), mesh_id);
+
+    // A save that empties the mesh: the DAG that described the cube may not
+    // survive it in its old form.
+    let mut empty = inf_dcc::cube(2.0);
+    let faces: Vec<FaceId> = empty.face_ids().collect();
+    for f in faces {
+        inf_dcc::ops::apply(&mut empty, &Op::RemoveFace { face: f }).unwrap();
+    }
+    assert_eq!(empty.face_count(), 0);
+    let outcome = dcc::save_mesh_session(&mut proj, mesh_id, &empty);
+    drop(proj);
+
+    let proj = AssetProject::open(root.path()).unwrap();
+    match outcome {
+        Ok(_) => {
+            // The derivation ran (or skipped). Either way nothing may still
+            // describe the cube.
+            if proj.db().contains(derived) {
+                let (verts_now, _) = derived_probe(root.path(), mesh_id);
+                assert_ne!(
+                    verts_now, before_verts,
+                    "the DAG still describes the mesh that was replaced"
+                );
+            }
+        }
+        Err(e) => {
+            // A failure must have taken the stale artifact with it, and must say
+            // what disk holds.
+            assert!(
+                !proj.db().contains(derived) || matches!(e, dcc::SaveError::Torn { .. }),
+                "a failed derivation left a stale DAG without saying so: {e}"
+            );
+            assert!(
+                e.to_string().contains("saved"),
+                "the error names the state: {e}"
+            );
+        }
+    }
 }

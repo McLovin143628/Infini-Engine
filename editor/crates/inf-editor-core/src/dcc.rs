@@ -308,8 +308,8 @@ pub fn pick(mesh: &Mesh, proj: &Projector, mode: SelectMode, px: f32, py: f32) -
                 let Some(poly) = project_face(mesh, proj, f) else {
                     continue;
                 };
-                if signed_area(&poly) >= 0.0 {
-                    continue; // back-facing in pixel space (y is flipped, so CCW reads negative)
+                if !faces_eye(&poly) {
+                    continue;
                 }
                 if !contains(&poly, px, py) {
                     continue;
@@ -333,9 +333,21 @@ fn project_face(mesh: &Mesh, proj: &Projector, f: FaceId) -> Option<Vec<Projecte
     (out.len() >= 3).then_some(out)
 }
 
-/// Twice the signed area of a projected polygon. Negative is front-facing in this
-/// space: the pixel y axis points down, so an outward-wound (CCW in world) loop
-/// comes out clockwise on screen.
+/// **The facing rule, in one place.** A projected polygon faces the eye when its
+/// signed area is negative: the pixel y axis points down, so an outward-wound
+/// (CCW in world) loop comes out clockwise on screen.
+///
+/// Extracted because it was written out three times in this file — in the face
+/// picker, in the overlay's fill and in `face_faces_eye` — while the module docs
+/// above claimed there was "no second one to drift". Three copies of a sign
+/// convention is three chances to get it backwards, and the two that disagree
+/// would be the picker and the thing that draws the highlight.
+fn faces_eye(poly: &[Projected]) -> bool {
+    signed_area(poly) < 0.0
+}
+
+/// Twice the signed area of a projected polygon. Use [`faces_eye`] rather than
+/// comparing this yourself.
 fn signed_area(poly: &[Projected]) -> f32 {
     let n = poly.len();
     let mut acc = 0.0;
@@ -423,7 +435,7 @@ pub fn draw_overlay(
             let Some(poly) = project_face(mesh, proj, f) else {
                 continue;
             };
-            if signed_area(&poly) >= 0.0 {
+            if !faces_eye(&poly) {
                 continue;
             }
             fill_polygon(rgba, w, &poly, style.fill, style.fill_alpha);
@@ -508,7 +520,7 @@ fn edge_is_visible(mesh: &Mesh, proj: &Projector, h: HalfId) -> bool {
 }
 
 fn face_faces_eye(mesh: &Mesh, proj: &Projector, f: FaceId) -> bool {
-    project_face(mesh, proj, f).is_some_and(|poly| signed_area(&poly) < 0.0)
+    project_face(mesh, proj, f).is_some_and(|poly| faces_eye(&poly))
 }
 
 /// Even-odd scanline fill with a constant-alpha blend.
@@ -518,8 +530,8 @@ fn fill_polygon(rgba: &mut [u8], w: i32, poly: &[Projected], colour: [u8; 3], al
         top = top.min(p.y);
         bottom = bottom.max(p.y);
     }
-    let y0 = (top.floor() as i32).max(0);
-    let y1 = (bottom.ceil() as i32).min(w - 1);
+    let y0 = pixel(top.floor(), w).max(0);
+    let y1 = pixel(bottom.ceil(), w).min(w - 1);
     let n = poly.len();
     let mut xs: Vec<f32> = Vec::with_capacity(n);
     for y in y0..=y1 {
@@ -534,8 +546,8 @@ fn fill_polygon(rgba: &mut [u8], w: i32, poly: &[Projected], colour: [u8; 3], al
         }
         xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         for pair in xs.chunks_exact(2) {
-            let sx0 = (pair[0].ceil() as i32).max(0);
-            let sx1 = (pair[1].floor() as i32).min(w - 1);
+            let sx0 = pixel(pair[0].ceil(), w).max(0);
+            let sx1 = pixel(pair[1].floor(), w).min(w - 1);
             for x in sx0..=sx1 {
                 blend(rgba, w, x, y, colour, alpha);
             }
@@ -545,40 +557,69 @@ fn fill_polygon(rgba: &mut [u8], w: i32, poly: &[Projected], colour: [u8; 3], al
 
 /// Bresenham, clipped by the per-pixel bounds check.
 fn line(rgba: &mut [u8], w: i32, x0: f32, y0: f32, x1: f32, y1: f32, colour: [u8; 3]) {
-    let (mut x, mut y) = (x0.round() as i32, y0.round() as i32);
-    let (tx, ty) = (x1.round() as i32, y1.round() as i32);
+    // **Saturating throughout.** A camera inside the model projects a vertex a
+    // few pixels from the eye plane to a coordinate in the billions, and
+    // `dx + dy` on two of those overflows — which is a panic in a debug build
+    // and a wrapped, wrong picture in a release one. Clamped to a window a few
+    // screens wide, the arithmetic cannot leave `i32` and every pixel is still
+    // rejected by `blend`'s bounds check.
+    let clamp = |v: f32| pixel(v, w);
+    let (mut x, mut y) = (clamp(x0), clamp(y0));
+    let (tx, ty) = (clamp(x1), clamp(y1));
     let dx = (tx - x).abs();
     let dy = -(ty - y).abs();
     let sx = if x < tx { 1 } else { -1 };
     let sy = if y < ty { 1 } else { -1 };
-    let mut err = dx + dy;
+    let mut err = dx.saturating_add(dy);
     // A guard rather than a `loop`: a projection that produced an absurd
     // coordinate must not spin, and an off-screen segment costs its own length
     // and nothing more.
-    let budget = (dx - dy) + 2;
+    let budget = dx.saturating_sub(dy).saturating_add(2);
     for _ in 0..budget.min(8 * w) {
         blend(rgba, w, x, y, colour, 255);
         if x == tx && y == ty {
             break;
         }
-        let e2 = 2 * err;
+        let e2 = err.saturating_mul(2);
         if e2 >= dy {
-            err += dy;
+            err = err.saturating_add(dy);
             x += sx;
         }
         if e2 <= dx {
-            err += dx;
+            err = err.saturating_add(dx);
             y += sy;
         }
     }
 }
 
+/// A projected coordinate as a pixel index, clamped to a few screens either side.
+///
+/// `f32 as i32` saturates rather than wrapping (Rust guarantees it), but the
+/// saturated value is `i32::MAX`, and *differences* of those overflow. Clamping
+/// to a window keeps every intermediate small while leaving off-screen segments
+/// pointing the way they pointed.
+fn pixel(v: f32, w: i32) -> i32 {
+    let limit = w.saturating_mul(4);
+    if v.is_finite() {
+        (v.round() as i32).clamp(-limit, limit)
+    } else {
+        0
+    }
+}
+
 fn dot(rgba: &mut [u8], w: i32, cx: f32, cy: f32, r: i32, colour: [u8; 3]) {
-    let (ix, iy) = (cx.round() as i32, cy.round() as i32);
+    let (ix, iy) = (pixel(cx, w), pixel(cy, w));
     for dy in -r..=r {
         for dx in -r..=r {
             if dx * dx + dy * dy <= r * r {
-                blend(rgba, w, ix + dx, iy + dy, colour, 255);
+                blend(
+                    rgba,
+                    w,
+                    ix.saturating_add(dx),
+                    iy.saturating_add(dy),
+                    colour,
+                    255,
+                );
             }
         }
     }
@@ -603,6 +644,178 @@ fn blend(rgba: &mut [u8], w: i32, x: i32, y: i32, colour: [u8; 3], alpha: u8) {
         }
     }
     rgba[i + 3] = 255;
+}
+
+// ── the save (M1) ──────────────────────────────────────────────────────────
+
+/// What a save did.
+#[derive(Debug, Clone)]
+pub struct SaveOutcome {
+    pub export: inf_dcc::ExportReport,
+    pub vmesh: crate::assets::vmesh::VmeshDerivation,
+}
+
+/// Why a save could not finish, **and what the disk holds because of it**.
+///
+/// The error text is part of the contract, not decoration: a save is the one
+/// operation whose failure leaves state behind, and an author who is told
+/// "save failed" and nothing else does not know whether to try again or to
+/// reopen.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SaveError {
+    #[error("could not write {name}: {message}. Nothing on disk changed.")]
+    Write { name: String, message: String },
+    /// The payload landed and the derived `.inf_vmesh` could not be rebuilt.
+    ///
+    /// **The stale DAG was removed**, so nothing draws the old geometry — see
+    /// [`save_mesh_session`] for why that is the chosen failure mode.
+    #[error(
+        "{name} was saved, but its meshlet DAG could not be rebuilt: {message}. \
+         The stale DAG has been removed, so the mesh will draw as a placeholder \
+         until the project is reopened."
+    )]
+    Derived { name: String, message: String },
+    /// The derivation failed AND the stale artifact could not be removed. The
+    /// only state in which something can still draw the old geometry.
+    #[error(
+        "{name} was saved, but its meshlet DAG could not be rebuilt ({message}) \
+         and the stale DAG could not be removed either. Until the project is \
+         reopened, this mesh may draw its PREVIOUS geometry."
+    )]
+    Torn { name: String, message: String },
+}
+
+/// Write a kernel mesh back to its asset, and rebuild its derived `.inf_vmesh`.
+///
+/// **This is the product path.** It is Ring 1 rather than Ring 2 for the reason
+/// this module exists at all: a `#[tauri::command]` cannot be driven from a test,
+/// so a gate that "proves the save" by inlining the same two calls proves the
+/// *pattern* and never the product — which is exactly what happened, and why
+/// dropping `ensure_vmesh` from the command failed nothing.
+///
+/// # The failure contract, decided rather than assumed
+///
+/// `AssetProject` has a lock, not a transaction: `rewrite_payload` can complete
+/// and `ensure_vmesh` can then fail, and the previous code claimed "no window in
+/// which the two disagree" while leaving them disagreeing **permanently** — new
+/// payload on disk, stale DAG beside it, the watcher re-keying on the new content
+/// hash and the viewport drawing the old surface with complete confidence. That
+/// is the precise failure the P23.1 memo opens by naming.
+///
+/// Three orderings were available and this is why it is this one:
+///
+/// * *Derive first, then write* would need the DAG built from a payload the
+///   database has not seen (the planner reads the db to compute the source hash),
+///   so it is not reachable without reshaping `assets::vmesh`.
+/// * *Write, derive, and on failure leave it* is the status quo, and its bad
+///   state is the one bad state that is invisible.
+/// * **Write, derive, and on failure REMOVE the stale DAG** — this. The pair is
+///   then always either (new payload, new DAG) or (new payload, no DAG), and "no
+///   DAG" is a state the renderer already handles: `resolve_vgeom` misses and the
+///   entity falls back to a placeholder. Visibly wrong beats confidently wrong,
+///   and the next `ensure_vmesh` — the save the author will now retry, or the
+///   project-open sweep — repairs it.
+///
+/// If the removal *also* fails, that is [`SaveError::Torn`], and the message says
+/// exactly what disk holds. It is the only reachable state in which something can
+/// still draw the previous geometry, and it is named rather than hidden.
+pub fn save_mesh_session(
+    project: &mut crate::assets::AssetProject,
+    asset: inf_asset::AssetId,
+    mesh: &Mesh,
+) -> Result<SaveOutcome, SaveError> {
+    let name = project
+        .db()
+        .get(asset)
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| asset.to_string());
+    let (payload, export) = inf_dcc::to_mesh_asset(mesh, &inf_dcc::ExportOptions::default());
+    project
+        .rewrite_payload(asset, &payload, vec![])
+        .map_err(|e| SaveError::Write {
+            name: name.clone(),
+            message: e.to_string(),
+        })?;
+    match crate::assets::vmesh::ensure_vmesh(project, asset) {
+        Ok(vmesh) => {
+            // **`Skipped` is the third state, and it was the leak.** A mesh
+            // edited down below the virtualization threshold derives nothing —
+            // correctly, there is nothing to virtualize — and the DAG describing
+            // the mesh it USED to be stays on disk. `resolve_vgeom` computes the
+            // derived id rather than looking it up, so it finds that artifact and
+            // draws the old geometry with total confidence: the exact pair this
+            // function exists to make unreachable, arriving through the one
+            // outcome that is not an error. Found by the gate below.
+            if matches!(vmesh, crate::assets::vmesh::VmeshDerivation::Skipped) {
+                crate::assets::vmesh::remove_derived_vmesh(project, asset);
+            }
+            Ok(SaveOutcome { export, vmesh })
+        }
+        Err(e) => {
+            let message = e.to_string();
+            // Nothing may be left that draws the geometry we just replaced.
+            let had_one = project.db().contains(inf_vgeom::derived_vmesh_id(asset));
+            let removed = crate::assets::vmesh::remove_derived_vmesh(project, asset);
+            if had_one && !removed {
+                Err(SaveError::Torn { name, message })
+            } else {
+                Err(SaveError::Derived { name, message })
+            }
+        }
+    }
+}
+
+// ── the preview's geometry cache (M6) ──────────────────────────────────────
+
+/// The tessellation and the mesh snapshot a preview frame needs, held against the
+/// journal generation that produced them.
+///
+/// The module docs above promise the tessellation runs "only when the mesh moves
+/// — never on a camera orbit", and until this type existed that was false: every
+/// orbit frame re-ran the exporter (ear clipping, a tangent solve, a corner
+/// intern) and cloned the whole mesh for the overlay, thirty times a second, for
+/// a camera that moved 144 bytes. `GenCache`'s rule, one layer up: the key is
+/// what actually invalidates, and here that is the generation stamp and nothing
+/// else.
+#[derive(Default)]
+pub struct PreviewCache {
+    stamp: Option<u64>,
+    geometry: Option<std::sync::Arc<EditGeometry>>,
+    mesh: Option<std::sync::Arc<Mesh>>,
+    tessellations: u64,
+}
+
+impl PreviewCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many times the tessellator has actually run — the cache's observable
+    /// state, and what the orbit gate asserts on. (`Thumbnailer::size` and
+    /// `MeshSession::checkpoint_count` are the same idea: a number a test can
+    /// hold the implementation to.)
+    pub fn tessellations(&self) -> u64 {
+        self.tessellations
+    }
+
+    /// The geometry and the mesh for `session`, tessellating only if the journal
+    /// has moved since the last call.
+    pub fn get(
+        &mut self,
+        session: &inf_dcc::MeshSession,
+    ) -> (std::sync::Arc<EditGeometry>, std::sync::Arc<Mesh>) {
+        let stamp = session.generation();
+        if self.stamp != Some(stamp) || self.geometry.is_none() || self.mesh.is_none() {
+            self.stamp = Some(stamp);
+            self.geometry = Some(std::sync::Arc::new(tessellate(session.mesh())));
+            self.mesh = Some(std::sync::Arc::new(session.mesh().clone()));
+            self.tessellations += 1;
+        }
+        (
+            self.geometry.clone().expect("just filled"),
+            self.mesh.clone().expect("just filled"),
+        )
+    }
 }
 
 // ── drag-and-drop modularity, v1 ───────────────────────────────────────────
@@ -899,6 +1112,54 @@ mod tests {
             .filter(|&h| edge_is_visible(&m, &proj, h))
             .count();
         assert_eq!(visible, 9, "12 edges, 3 hidden behind the solid");
+
+        // **Which** three, and which faces they hang off. A count of 9 is
+        // inversion-symmetric — flip the facing rule and a cube still shows nine
+        // edges, the nine on the FAR side — so the count alone certifies nothing.
+        let facing: Vec<glam::DVec3> = m
+            .face_ids()
+            .filter(|&f| face_faces_eye(&m, &proj, f))
+            .map(|f| {
+                let vs = m.face_verts(f).expect("live");
+                let c: glam::DVec3 = vs
+                    .iter()
+                    .map(|&v| m.position(v).expect("live"))
+                    .sum::<glam::DVec3>()
+                    / vs.len() as f64;
+                c
+            })
+            .collect();
+        assert_eq!(facing.len(), 3, "a cube shows three faces from a corner");
+        // The default view looks from (+x, +y, +z), so the three visible faces
+        // are the +X, +Y and +Z ones — and every one of their centroids is on the
+        // camera's side of the origin.
+        let eye = proj.eye();
+        for c in &facing {
+            let towards = glam::DVec3::new(eye.x as f64, eye.y as f64, eye.z as f64);
+            assert!(
+                c.dot(towards) > 0.0,
+                "a face at {c:?} is on the far side and must not be front-facing"
+            );
+        }
+        let mut axes: Vec<usize> = facing
+            .iter()
+            .map(|c| {
+                let a = c.abs();
+                if a.x >= a.y && a.x >= a.z {
+                    0
+                } else if a.y >= a.z {
+                    1
+                } else {
+                    2
+                }
+            })
+            .collect();
+        axes.sort_unstable();
+        assert_eq!(
+            axes,
+            vec![0, 1, 2],
+            "one face per axis, all on the near side"
+        );
     }
 
     #[test]
@@ -995,6 +1256,39 @@ mod tests {
             &OverlayStyle::default(),
         );
         assert_eq!(rgba, before);
+    }
+
+    #[test]
+    fn an_orbit_never_re_tessellates() {
+        // **The module's own contract, made checkable.** The docs at the top of
+        // this file promise the tessellation runs "only when the mesh moves —
+        // never on a camera orbit", and it was false: every frame re-ran the
+        // exporter (ear clipping, a tangent solve, a corner intern) and cloned
+        // the whole mesh, thirty times a second, for a camera that moved 144
+        // bytes. A prose contract nothing measures is a comment.
+        let mut s = MeshSession::new(cube(1.0));
+        let mut cache = PreviewCache::new();
+        let (geo0, mesh0) = cache.get(&s);
+        for _ in 0..10 {
+            let (g, m) = cache.get(&s);
+            assert!(std::sync::Arc::ptr_eq(&g, &geo0), "a new tessellation");
+            assert!(std::sync::Arc::ptr_eq(&m, &mesh0), "a new mesh clone");
+        }
+        assert_eq!(
+            cache.tessellations(),
+            1,
+            "ten orbit frames, one tessellation"
+        );
+
+        // And it DOES re-run when the mesh moves, or the cache would be a very
+        // fast way to draw the wrong thing.
+        let f = s.mesh().face_ids().next().expect("a face");
+        s.apply(inf_dcc::Op::SubdivideFaces { faces: vec![f] })
+            .expect("subdivide");
+        let (geo1, _) = cache.get(&s);
+        assert!(!std::sync::Arc::ptr_eq(&geo1, &geo0));
+        assert_eq!(cache.tessellations(), 2);
+        assert!(geo1.indices.len() > geo0.indices.len());
     }
 
     #[test]

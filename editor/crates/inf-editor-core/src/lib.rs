@@ -4,8 +4,9 @@
 
 pub mod assets;
 pub mod collision_layers;
-/// The Model Editor's Ring-1 half (P23.4): tessellation, the shared camera
-/// projection, CPU picking and the overlay compositor.
+// The Model Editor's Ring-1 half (P23.4). Its docs live in `dcc.rs`: a `///`
+// here is resolved in THIS module's scope, so every intra-doc link into the
+// module would dangle (seven of the nine doc warnings the audit counted).
 pub mod dcc;
 pub mod diagnostics;
 pub mod erosion_gpu;

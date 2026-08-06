@@ -24,8 +24,19 @@ import { useDockLayout } from "../panels/dock/dockLayoutStore";
 import { panelTypeOf } from "../panels/panelRegistry";
 
 export interface UndoScope {
-  undo: () => void | Promise<void>;
-  redo: () => void | Promise<void>;
+  /**
+   * `params` is the focused panel instance's parameter — for `model:<assetId>`,
+   * the asset id.
+   *
+   * A registry keyed by panel TYPE is one entry per editor, and that is right
+   * until an editor is multi-instance: two Model Editors are two `"model"`
+   * panels with one registration between them, and without the parameter the
+   * chord would reach whichever document the store happened to hold. Optional in
+   * practice — the singleton editors ignore it (a zero-argument function is a
+   * valid one-argument function in TypeScript), so nothing else had to change.
+   */
+  undo: (params: string | null) => void | Promise<void>;
+  redo: (params: string | null) => void | Promise<void>;
 }
 
 const scopes = new Map<string, UndoScope>();
@@ -59,13 +70,27 @@ export function activeUndoScope(): UndoScope | undefined {
 }
 
 /**
+ * The focused panel instance's parameter, read from the dock layout at call time.
+ *
+ * Read from the STORE rather than parsed out of the instance id: the id's shape
+ * (`"<type>:<params>"`) is `openPanel`'s business, and a second place that knows
+ * it is a second place to get it wrong the day a parameter contains a colon.
+ */
+export function activeUndoParams(): string | null {
+  const layout = useDockLayout.getState();
+  const focused = layout.focusedPanel;
+  if (!focused) return null;
+  return layout.layout.panels[focused]?.params ?? null;
+}
+
+/**
  * Route undo to the focused panel's scope; returns false when nothing claimed
  * it and the caller should fall back to the scene.
  */
 export function dispatchUndo(): boolean {
   const scope = activeUndoScope();
   if (!scope) return false;
-  void scope.undo();
+  void scope.undo(activeUndoParams());
   return true;
 }
 
@@ -73,7 +98,7 @@ export function dispatchUndo(): boolean {
 export function dispatchRedo(): boolean {
   const scope = activeUndoScope();
   if (!scope) return false;
-  void scope.redo();
+  void scope.redo(activeUndoParams());
   return true;
 }
 

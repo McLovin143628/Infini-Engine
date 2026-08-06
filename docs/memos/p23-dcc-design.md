@@ -470,8 +470,44 @@ ruling, same counter: `ExportReport::coincident_vertices` is what the save path
 surfaces, because nudging the author's geometry falsifies their model and
 refusing the export makes extrude-then-drag unsaveable.
 
+## 7c. Addendum, the P23.4 audit — the save's failure contract
+
+§2 said the save is `rewrite_payload` plus a **synchronous** `ensure_vmesh`, and
+gave the reason: a background derivation is a window in which the level draws
+the previous mesh. What it did not say is what happens when the derivation
+*fails*, and the first implementation answered that question by accident —
+leaving new payload and stale DAG on disk **permanently**, which is the same
+failure the memo opens by naming, with no window at all because it never closes.
+
+**Ruling.** `AssetProject` has a lock, not a transaction, so the pair cannot be
+made atomic. It can be made to have only good failure states:
+
+* the derivation succeeds → (new payload, new DAG);
+* the derivation fails → **the stale DAG is removed** → (new payload, no DAG).
+
+"No DAG" is a state the renderer already handles: `resolve_vgeom` misses and the
+entity falls back to a placeholder. Visibly wrong beats confidently wrong, and
+the next save or the project-open sweep repairs it. If the removal *also* fails —
+the only reachable state in which something can still draw the previous geometry
+— the error names it (`SaveError::Torn`) rather than hiding it.
+
+Two consequences worth recording:
+
+* **`VmeshDerivation::Skipped` is not an error, and was the leak.** A mesh edited
+  below the virtualization threshold derives nothing, correctly, and kept the DAG
+  describing the mesh it used to be. The save removes it.
+* **The save lives in Ring 1** (`inf_editor_core::dcc::save_mesh_session`), not in
+  the command. A `#[tauri::command]` cannot be driven from a test, and the first
+  gate for this proved the *pattern* by inlining the same two calls — so deleting
+  the derivation from the product failed nothing at all. Both the command and the
+  gate now go through one function. LAW: **a gate that inlines the code it is
+  gating is a copy, not a gate.**
+
 ## 8. Ledger — what this memo does NOT decide
 
+* **`SaveError::Torn` has no test.** Reaching it needs a filesystem that fails a
+  delete after succeeding a write. It is constructed and its message is part of
+  the contract; nothing exercises it.
 * **The gizmo on component selections.** P23.4's deliverable 3, deferred to
   P23.5: the Model Editor translates through a numeric tool, not a dragged
   handle, and the drag plumbing a component gizmo needs is the same plumbing

@@ -700,7 +700,30 @@ mod tests {
                     KnifePoint::Edge { .. } => 1,
                 })
                 .collect(),
-            _ => Vec::new(),
+            // **Exhaustive, no wildcard.** A `_ =>` here reads as "these carry no
+            // nested enum" and stays true only until one of them does — at which
+            // point this function returns an empty vector for it and the freeze
+            // test passes with zero coverage of a discriminant that is now on the
+            // wire. Listed out, a new nested enum stops the crate compiling.
+            Op::AddVertex { .. }
+            | Op::RemoveVertex { .. }
+            | Op::AddFace { .. }
+            | Op::RemoveFace { .. }
+            | Op::SplitEdge { .. }
+            | Op::CollapseEdge { .. }
+            | Op::SplitFace { .. }
+            | Op::WeldVerts { .. }
+            | Op::TranslateVerts { .. }
+            | Op::SetCornerUv { .. }
+            | Op::SetCornerNormal { .. }
+            | Op::SetEdgeSharp { .. }
+            | Op::SetFaceSlot { .. }
+            | Op::ExtrudeFaces { .. }
+            | Op::ExtrudeEdges { .. }
+            | Op::InsetFaces { .. }
+            | Op::BevelEdges { .. }
+            | Op::LoopCut { .. }
+            | Op::SubdivideFaces { .. } => Vec::new(),
         }
     }
 

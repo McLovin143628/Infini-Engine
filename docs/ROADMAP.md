@@ -7251,18 +7251,108 @@ and the headless preview render is the proven offscreen-PNG path.
   measures the drawn mark's centroid. **A shrink test must not put its block on a mesh
   boundary** — at a boundary there is nothing outside the selection, so those faces correctly
   stay, and a test expecting otherwise asserts a bug into existence.
-  **Mutation-verified**, each defect failing exactly the gates that name it: walling every
-  region edge instead of only the border → 2 (the one-wall and no-border tests); claiming
-  `SplitEdge` preserves ids → 2 (the table test + the selection property); dropping one of the
-  bevel's two end caps → 2 (both bevel tests); dropping the synchronous `ensure_vmesh` → 1
-  (the live-in-scene gate); drawing the overlay 3 px from where the picker picks → 1;
-  inverting the picker's front-face rule → 2; removing the preview's in-flight gate → 1 (ten
-  renders where one is required).
+  **Mutation-verified** — but see the audit block below: **one of these seven counts was
+  false and two were measured without `--no-fail-fast`**, which is not a count but "the
+  first target that failed". The re-measured table is there.
   Tests: inf-dcc **157** (138 lib + 10 property + 7 determinism-law + 2 fracture; the property
   generator now reaches all 22 op kinds, with a coverage guard that fails if any of the nine
   never applies, and `determinism_law` gained a gate on *itself* that reads `src/` and fails
   when its ban list falls behind), inf-editor-core +15 (13 `dcc` unit + 2 live-in-scene),
   inf-studio +8, frontend 347 (+14).
+  **AUDIT ROUND (fix-first, one commit).** One blocker, six majors, three blind gates — all
+  landed. What held, verified independently: region borders genuinely handle holes (annulus and
+  three-border fixtures, inner rims sealed); bevel stays manifold at adjacent and three-way
+  corners; loop cut is exact-once on torus rings; the knife is genuinely atomic (a self-crossing
+  path refuses byte-identical, including the nested rollback); all 22 refusals are inert; the
+  one-`Projector` claim is TRUE; the freeze pin is append-only by diff; the phantom sweep is
+  clean (320 citations, zero); and the coincidence-hazard ruling is upheld — the advisory chain
+  reaches the panel with count, consequence and remedy, and refusing the save would be worse.
+  **B1 — ONE GLOBAL STORE UNDER A MULTI-INSTANCE PANEL.** `dccStore` held a single `doc` while
+  the panel is registered `singleton: false` and the dock keeps inactive tabs **mounted**. Open
+  A then B and both tabs render B; every tool press in A edits B; A's backend session leaks for
+  the process's life; and closing A reads the shared doc and closes **B**, blanking a document
+  with unsaved work in it. The undo scope was one global too. The backend was multi-document
+  from the first commit, so this was purely the frontend collapsing it: the store is now keyed
+  by asset id with a per-panel selector, the preview queue is per document (a global gate would
+  have made two panels take turns), and the undo registry hands the scope the focused panel's
+  `params` so Ctrl+Z reaches the document under the cursor.
+  **M1 — THE SAVE WAS NOT ATOMIC AND ITS GATE DID NOT EXIST AS CLAIMED.** `AssetProject` has a
+  lock, not a transaction: `rewrite_payload` completes and `ensure_vmesh` can then fail, leaving
+  new payload + stale DAG **permanently** — the watcher re-keys on the new hash and the viewport
+  draws the old surface with complete confidence, which is the exact failure the design memo
+  opens by naming, while the module docs claimed "no window in which the two disagree". And the
+  claim that dropping `ensure_vmesh` failed a gate was **false**: independently measured **ZERO**,
+  because the gate was Ring-1 and *inlined* the pattern instead of calling the product. The save
+  is now `inf_editor_core::dcc::save_mesh_session` — Ring 1, so a test can reach it — the command
+  is four lines that call it, the gate calls it, and the mutation now fails **2**. Its failure
+  contract is decided rather than assumed: on a failed derivation the **stale DAG is removed**, so
+  the pair is always (new payload, new DAG) or (new payload, no DAG), and "no DAG" is a state the
+  renderer already handles (a placeholder — visibly wrong beats confidently wrong) that the next
+  save or project-open repairs. If the removal *also* fails, `SaveError::Torn` says exactly what
+  disk holds. Writing that gate immediately found a third state nobody had named: **`Skipped` is
+  not an error**, so a mesh edited below the virtualization threshold derived nothing and kept the
+  DAG describing the mesh it used to be. Closed.
+  **M2 — SUCCESSOR SELECTIONS WERE THE WHOLE PATCH.** `OpOutcome` reported everything an op
+  created, so an extrude handed back cap **and walls** and the successor selection dragged the
+  base vertices with it: extrude→drag *flattened* the extrude, extrude→extrude moved the whole
+  box, and a loop cut returned 20 of 20 strip edges where the new loop is 4. The test encoded the
+  defect ("the cap plus four walls"). `OpOutcome` is now documented as the op's **successor**, with
+  a table: extrude → the cap, inset → the inner faces, bevel → the strip, loop cut → the new
+  loop's edges, knife → the cut edges, subdivide → its own faces and never the fringe. `adopt`
+  takes it literally and widens **downward only**. The gate is the workflow:
+  `extrude_then_translate_moves_only_what_the_extrude_made`.
+  **M3 — derived corner UVs escaped the finiteness contract.** `lerp_corner`/`average_corner` are
+  arithmetic on values the reader preserves verbatim, so `SubdivideFaces`/`LoopCut`/`SplitEdge`
+  returned `Ok` leaving a mesh `validate` rejects — and the session then **failed its own
+  `restore`**, so the editor could save a document it could never reopen. Same law as the
+  positions (gate the value you STORE); the corners had simply never been brought under it.
+  **M4 — `MergeVerts` was not a function of its vertex set** (permuting three ids flipped `Ok` and
+  a refusal). Canonicalized; `Last` therefore means the highest id in the set, which is what the
+  only caller already passes. **M5 — bevel and inset accepted overshoots that INVERT the solid**
+  with `validate` blind to winding (a 2 m cube negative at ~2.83, an inset of −0.5 folding four
+  faces). Refused, not clamped, with the amount named — and it took **two** criteria, which is
+  the interesting part: a square face inset past its own centre maps its corners through a 180°
+  rotation, which is *orientation preserving*, so every normal agrees and what is actually broken
+  is that each ring quad became a bowtie. A negative inset reverses the ring's **normals**; a
+  positive overshoot reverses its **edges**. **M6 — the preview re-tessellated and cloned the whole
+  mesh EVERY ORBIT FRAME**, contradicting the module's own contract ("never on a camera orbit").
+  `PreviewCache` keys on the generation stamp and counts its own runs, so the contract is now
+  measurable: ten orbit frames, one tessellation.
+  **Blind gates, each now biting**: the classifier's arm list could be replaced by `_ => false`
+  suite-green (a source gate now proves it has no wildcard and names every variant, read out of
+  the enum itself); the geodesic step could be replaced by a constant 1.0 (every fixture was
+  unit-spaced and the thin-wall case used *disconnected* sheets, which a hop count also passes —
+  there is now a 0.1/0.1/0.1/2.7 strip where the two answers cannot be confused); the facing gate
+  asserted `visible == 9`, which is inversion-symmetric (it now asserts **which** faces, one per
+  axis, all on the camera's side); `frozen_nested`'s outer wildcard gave silent zero coverage to
+  any future nested enum (exhaustive now); the save advisory was cleared by the next action
+  rather than the next **save**, so an author who pressed Save and moved the mouse never read the
+  one sentence saying disk ≠ session; the facing rule was written three times in a file whose
+  docs claim "no second one to drift" (one `faces_eye` now); the overlay rasterizer overflowed
+  `i32` on extreme projections (saturating, with a clamp window); nine `cargo doc` warnings; and
+  the determinism self-gate did not recurse into subdirectories — the day `src/uv/` arrives every
+  law above would have stopped applying to it silently.
+  **Also found while writing the gates**: the property battery turned up a **third symptom** of
+  the coincidence hazard — a face whose triangles *all* collapse in `f32` makes the reader report
+  `NoGeometry` on a mesh that has faces. Same entitlement, now asserted.
+  **Re-measured mutation table** (every count with `--no-fail-fast`, run **serialized** — both are
+  house law now, since one earlier count was taken without the flag and a parallel run shares a
+  target directory): wall every region edge → **3**; claim `SplitEdge` preserves ids → **3**;
+  drop one of the bevel's end caps → **4**; skip the derivation *inside `save_mesh_session`* →
+  **2** (was **0** through the inlined gate); draw the overlay 3 px off → **1**; invert the facing
+  rule → **3**; remove the preview's in-flight gate → **1**; report the extrude's walls again →
+  **4**; collapse the store to one document → **4**; drop the inversion gate → **1**; drop the
+  derived-corner finiteness gate → **2**; drop the canonical merge order → **1**; re-tessellate
+  every frame → **1**.
+  LAWS added: **a Ring-1 gate that INLINES a Ring-2 pattern proves the pattern, never the
+  product** — the save's gate and the save's code were two copies of the same two calls, so the
+  product could lose one and nothing failed; the fix is that the logic lives where the test can
+  reach it and both go through the door. **A lock is not a transaction**, and a failure contract
+  that is not written down is the claim that failures do not happen. **An outcome is a successor,
+  not an inventory.** **A rotation is orientation-preserving, so a winding check cannot see a
+  fold-through** — the criterion for an offset is the direction of the edge it moved.
+  Tests after the audit: inf-dcc **169** (146 lib + 10 property + 11 determinism-law + 2
+  fracture), inf-editor-core +17, inf-studio +8, frontend **352**.
   **Carried remainders**: bevel has no segment count and no true multi-edge *vertex* bevel
   (several edges meeting at one vertex get a strip each with a wedge between them); the knife
   is a vertex/edge-point path, not free-form (that needs a ray-vs-face solve belonging with the
@@ -7272,7 +7362,12 @@ and the headless preview render is the proven offscreen-PNG path.
   panel translates through a numeric tool rather than a dragged handle; there is still **no
   `viewport_detach`** (harmless here only because the panel is DOM, not a native viewport);
   and the drop-merge copies geometry rather than referencing it, loses material slots, and
-  does not weld.
+  does not weld. Added by the audit: the wireframe's occlusion is **back-face culling, not
+  depth testing** (fixing it means reading the depth buffer back beside the colour);
+  `SaveError::Torn` is constructed but not reachable from any test, deliberately — it needs a
+  filesystem that fails a delete after succeeding a write; and a **detached** Model Editor
+  window still installs no keybinding listener, so Ctrl+Z inside a torn-off one does nothing
+  (the standing P23.2a limitation, unchanged and now with one more panel behind it).
 - **P23.5 Sculpt & UV** — 1. brush sculpt on the edit mesh, reusing the terrain brush/falloff
   doctrine; 2. UV seams + an LSCM-class unwrap + a 2D UV panel; 3. normals and tangents
   recompute.

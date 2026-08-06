@@ -18,7 +18,8 @@
 //! sides is interior and gets no wall, an edge with a selected face on only one
 //! side is the border and does. Two faces extruded together move as one wall
 //! with no membrane between them, which is what an author means by "extrude this
-//! area". [`Region`] computes that once and both ops read it.
+//! area". `Region` computes that once and both ops read it (private: the rule
+//! is public, the bookkeeping is not).
 //!
 //! # The v1 scopes, honestly
 //!
@@ -28,7 +29,7 @@
 //! * **Bevel is `segments = 1`** — one flat chamfer strip per edge, no rounding.
 //!   Its construction *keeps* both endpoints and caps each end of the strip with
 //!   a triangle, which is what makes it work at **any vertex valence** (see
-//!   [`bevel_edges`]). Blender dissolves the endpoint into an n-gon instead; that
+//!   `bevel_edges`). Blender dissolves the endpoint into an n-gon instead; that
 //!   is a nicer result and a much larger algorithm, and beveling several edges
 //!   that meet at one vertex produces one strip each with a wedge between them
 //!   rather than a true vertex bevel. Both are named remainders.
@@ -242,6 +243,94 @@ fn derived_corner(uv: [f64; 2]) -> CornerData {
     CornerData { uv, normal: None }
 }
 
+/// A derived corner's attributes must be finite **as stored**.
+///
+/// The P23.3 law — gate the value you STORE, not the value you were handed —
+/// reaches the corners this module *computes*. `lerp_corner` and
+/// [`average_corner`] are arithmetic on values the reader deliberately preserves
+/// verbatim (`ImportReport::non_finite_values`; and a legal `f32` UV near the top
+/// of the range is enough), so `a + (b - a) * t` overflows and a subdivide
+/// returned `Ok` on a mesh `validate` rejects. Worse: the session then failed its
+/// own `restore`, so the editor could save a document it could never reopen.
+pub(crate) fn finite_corner(c: &CornerData, what: &'static str) -> Result<(), OpError> {
+    finite(what, &c.uv)?;
+    if let Some(n) = c.normal {
+        finite(what, &n)?;
+    }
+    Ok(())
+}
+
+fn finite_corners(cs: &[CornerData], what: &'static str) -> Result<(), OpError> {
+    for c in cs {
+        finite_corner(c, what)?;
+    }
+    Ok(())
+}
+
+/// Refuse an amount that turned a rebuilt face inside out.
+///
+/// `validate` is **winding-agnostic** — it is a topology auditor, and a solid
+/// turned inside out by an overshooting offset is topologically perfect. So a
+/// 2 m cube beveled at 2.83 m and a face inset by −0.5 m both came back `Ok`
+/// with the geometry folded through itself, which is worse than a refusal in
+/// every way: it is invisible until the mesh is shaded, and it is on the undo
+/// stack as a legitimate edit.
+///
+/// The check is local and exact: every face the op *rebuilt* must still face the
+/// way it faced. Refusal rather than a clamp, per the units doctrine — the limit
+/// belongs to the author's geometry, not to this function, so the error names the
+/// amount that was rejected and lets them pick a smaller one.
+fn refuse_if_inverted(
+    mesh: &Mesh,
+    rebuilt: &[FaceId],
+    before: &[DVec3],
+    what: &'static str,
+    amount: f64,
+) -> Result<(), OpError> {
+    for (&f, &was) in rebuilt.iter().zip(before) {
+        if !above(was.length(), 1e-18) {
+            continue; // a degenerate source face has no orientation to preserve
+        }
+        if newell(mesh, f).dot(was) <= 0.0 {
+            return Err(OpError::WouldInvert { what, amount });
+        }
+    }
+    Ok(())
+}
+
+/// Refuse an offset that reversed a border edge.
+///
+/// The companion to [`refuse_if_inverted`], and it exists because that check is
+/// **not sufficient on its own**: a square face inset past its own centre maps
+/// its corners through a 180 degree rotation, which is *orientation preserving*,
+/// so the inner face comes back correctly wound and every normal agrees. What is
+/// actually broken is that each ring quad has become a bowtie — the offset edge
+/// runs the other way — and the criterion that sees it is the direction of the
+/// edge itself.
+///
+/// Between them the two checks cover both signs: a negative inset reverses the
+/// ring's *normals* (the inner face grows and stays perfectly wound), a
+/// positive overshoot reverses its *edges*.
+fn refuse_if_edge_reversed(
+    mesh: &Mesh,
+    sites: &[(VertId, VertId)],
+    map: impl Fn(VertId) -> VertId,
+    what: &'static str,
+    amount: f64,
+) -> Result<(), OpError> {
+    for &(a, b) in sites {
+        let was = pos(mesh, b) - pos(mesh, a);
+        let now = pos(mesh, map(b)) - pos(mesh, map(a));
+        if !above(was.length(), 1e-18) {
+            continue;
+        }
+        if now.dot(was) <= 0.0 {
+            return Err(OpError::WouldInvert { what, amount });
+        }
+    }
+    Ok(())
+}
+
 /// `x` is a real number strictly greater than `floor`.
 ///
 /// Spelled out rather than written `!(x > floor)` because the negation is the
@@ -331,20 +420,26 @@ pub(crate) fn extrude_faces(
 
         let mut touched: BTreeSet<VertId> = region.verts.clone();
         touched.extend(dup.values().copied());
-        let mut made = Vec::with_capacity(captured.len() + border.len());
+        // Split, because the OUTCOME is the cap alone — see the note on
+        // `OpOutcome`. An outcome carrying the walls too made the successor
+        // selection include the base vertices, so extrude-then-drag FLATTENED
+        // the extrusion it had just made.
+        let mut caps = Vec::with_capacity(captured.len());
+        let mut walls = Vec::with_capacity(border.len());
 
         // The moved region, on the duplicated vertices, keeping its attributes.
         for c in &captured {
             let verts: Vec<VertId> = c.verts.iter().copied().map(map).collect();
-            made.push(m.add_face_raw(&verts, &c.corners, c.slot)?);
+            caps.push(m.add_face_raw(&verts, &c.corners, c.slot)?);
         }
         // One wall per border edge. The region side of `a→b` is free (its face
         // was just removed) and the outside face still holds `b→a`, so the wall
         // claims `a→b` and its winding follows from that with nothing to choose.
         for &(a, b, ref ca, ref cb, slot) in &border {
             let (a2, b2) = (map(a), map(b));
-            made.push(m.add_face_raw(&[a, b, b2, a2], &[*ca, *cb, *cb, *ca], slot)?);
+            walls.push(m.add_face_raw(&[a, b, b2, a2], &[*ca, *cb, *cb, *ca], slot)?);
         }
+        let _ = &walls;
         // A region vertex with no incident wall — one strictly inside the region —
         // is now isolated: its faces all moved to its copy.
         for &v in &region.verts {
@@ -365,8 +460,10 @@ pub(crate) fn extrude_faces(
         }
         m.finish_patch(&touched)?;
         Ok(OpOutcome {
+            // The cap and the vertices it is built on — what the author now has
+            // hold of, and nothing else.
             verts: dup.values().copied().collect(),
-            faces: made,
+            faces: caps,
             ..Default::default()
         })
     })
@@ -600,6 +697,9 @@ fn inset_region(mesh: &mut Mesh, region: &Region, amount: f64) -> Result<OpOutco
     }
 
     let captured: Vec<Captured> = region.faces.iter().map(|&f| capture(mesh, f)).collect();
+    // The orientation each region face has NOW: an inset that overshoots folds
+    // the face through itself, and only a before/after comparison sees it.
+    let normals: Vec<DVec3> = region.faces.iter().map(|&f| newell(mesh, f)).collect();
     let border: Vec<BorderUvSite> = region
         .border
         .iter()
@@ -618,6 +718,22 @@ fn inset_region(mesh: &mut Mesh, region: &Region, amount: f64) -> Result<OpOutco
             )
         })
         .collect();
+    // The face each border edge came off. A ring quad is coplanar with it, so it
+    // must end up facing the same way -- and a NEGATIVE inset is exactly the case
+    // where it does not: the inner face grows and stays correctly wound while
+    // every quad in the ring turns inside out, which is why the check has to
+    // cover both and not just the face the author selected.
+    let ring_normals: Vec<DVec3> = region
+        .border
+        .iter()
+        .map(|&h| {
+            let f = mesh
+                .face_of(h)
+                .expect("live half-edge id")
+                .expect("a border half-edge belongs to a region face");
+            newell(mesh, f)
+        })
+        .collect();
     let sharp = mesh.capture_sharp(&region.faces);
 
     let mut inner: BTreeMap<VertId, VertId> = BTreeMap::new();
@@ -632,14 +748,17 @@ fn inset_region(mesh: &mut Mesh, region: &Region, amount: f64) -> Result<OpOutco
     }
     let mut touched: BTreeSet<VertId> = region.verts.clone();
     touched.extend(inner.values().copied());
-    let mut made = Vec::with_capacity(captured.len() + border.len());
+    // Inner faces and ring quads kept apart: the outcome is the inner faces, so
+    // inset-then-inset shrinks inward instead of walking the ring outward.
+    let mut inner_faces = Vec::with_capacity(captured.len());
+    let mut ring = Vec::with_capacity(border.len());
     for c in &captured {
         let verts: Vec<VertId> = c.verts.iter().copied().map(map).collect();
-        made.push(mesh.add_face_raw(&verts, &c.corners, c.slot)?);
+        inner_faces.push(mesh.add_face_raw(&verts, &c.corners, c.slot)?);
     }
     for &(a, b, uv_a, uv_b, slot) in &border {
         let (a2, b2) = (map(a), map(b));
-        made.push(mesh.add_face_raw(
+        ring.push(mesh.add_face_raw(
             &[a, b, b2, a2],
             &[
                 derived_corner(uv_a),
@@ -650,6 +769,10 @@ fn inset_region(mesh: &mut Mesh, region: &Region, amount: f64) -> Result<OpOutco
             slot,
         )?);
     }
+    refuse_if_inverted(mesh, &inner_faces, &normals, "an inset amount", amount)?;
+    refuse_if_inverted(mesh, &ring, &ring_normals, "an inset amount", amount)?;
+    let sites: Vec<(VertId, VertId)> = border.iter().map(|&(a, b, ..)| (a, b)).collect();
+    refuse_if_edge_reversed(mesh, &sites, map, "an inset amount", amount)?;
     let remapped: Vec<(VertId, VertId, bool)> =
         sharp.iter().map(|&(x, y, s)| (map(x), map(y), s)).collect();
     mesh.apply_sharp(&sharp);
@@ -657,7 +780,7 @@ fn inset_region(mesh: &mut Mesh, region: &Region, amount: f64) -> Result<OpOutco
     mesh.finish_patch(&touched)?;
     Ok(OpOutcome {
         verts: inner.values().copied().collect(),
-        faces: made,
+        faces: inner_faces,
         ..Default::default()
     })
 }
@@ -718,7 +841,7 @@ pub(crate) fn bevel_edges(
         for &(a, b) in &pairs {
             let h = m.find_half(a, b).ok_or(OpError::NoSuchVert(a))?;
             let out = bevel_one(m, h, amount)?;
-            made.extend(out.faces);
+            made.extend(out.faces); // the strips, one per beveled edge
             verts.extend(out.verts);
         }
         Ok(OpOutcome {
@@ -766,6 +889,9 @@ fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64) -> Result<OpOutcome, OpErr
 
     let c1 = capture(mesh, f1);
     let c2 = capture(mesh, f2);
+    // The two faces the chamfer grows: an amount past the far side of either of
+    // them folds it through itself, and the topology stays perfect.
+    let normals = [newell(mesh, f1), newell(mesh, f2)];
     let sharp = mesh.capture_sharp(&[f1, f2]);
     // Where a and b sit in each captured loop. `f1` holds a→b, `f2` holds b→a.
     let i1 = index_of(&c1.verts, a);
@@ -799,11 +925,14 @@ fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64) -> Result<OpOutcome, OpErr
     // The two grown faces, then the strip, then a cap at each end. Every one of
     // the eight new directed edges is twinned inside these five loops -- that is
     // the whole proof that the construction is manifold at any valence.
-    let mut made = vec![
+    let grown = [
         mesh.add_face_raw(&v1, &k1, c1.slot)?,
         mesh.add_face_raw(&v2, &k2, c2.slot)?,
     ];
-    made.push(mesh.add_face_raw(
+    refuse_if_inverted(mesh, &grown, &normals, "a bevel amount", amount)?;
+    // The STRIP is the successor: bevel-then-drag must move the chamfer, not the
+    // two faces it was cut out of.
+    let strip = mesh.add_face_raw(
         &[va1, va2, vb2, vb1],
         &[
             derived_corner(ca_1.uv),
@@ -812,25 +941,29 @@ fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64) -> Result<OpOutcome, OpErr
             derived_corner(cb_1.uv),
         ],
         c1.slot,
-    )?);
-    made.push(mesh.add_face_raw(
-        &[va1, a, va2],
-        &[
-            derived_corner(ca_1.uv),
-            derived_corner(ca_1.uv),
-            derived_corner(ca_2.uv),
-        ],
-        c1.slot,
-    )?);
-    made.push(mesh.add_face_raw(
-        &[b, vb1, vb2],
-        &[
-            derived_corner(cb_1.uv),
-            derived_corner(cb_1.uv),
-            derived_corner(cb_2.uv),
-        ],
-        c1.slot,
-    )?);
+    )?;
+
+    let caps = [
+        mesh.add_face_raw(
+            &[va1, a, va2],
+            &[
+                derived_corner(ca_1.uv),
+                derived_corner(ca_1.uv),
+                derived_corner(ca_2.uv),
+            ],
+            c1.slot,
+        )?,
+        mesh.add_face_raw(
+            &[b, vb1, vb2],
+            &[
+                derived_corner(cb_1.uv),
+                derived_corner(cb_1.uv),
+                derived_corner(cb_2.uv),
+            ],
+            c1.slot,
+        )?,
+    ];
+    let _ = (&grown, &caps);
 
     mesh.apply_sharp(&sharp);
     if was_sharp {
@@ -859,7 +992,7 @@ fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64) -> Result<OpOutcome, OpErr
     mesh.finish_patch(&touched)?;
     Ok(OpOutcome {
         verts: vec![va1, vb1, va2, vb2],
-        faces: made,
+        faces: vec![strip],
         ..Default::default()
     })
 }
@@ -992,6 +1125,11 @@ pub(crate) fn loop_cut(mesh: &mut Mesh, half: HalfId, cuts: u32) -> Result<OpOut
         };
 
         let mut made = Vec::new();
+        // The new loop, as vertex pairs — half-edge ids do not exist until the
+        // sub-quads are built, and vertex ids do. THIS is the op's successor: a
+        // loop cut whose outcome named all twenty edges of the strip selected the
+        // strip, not the loop, and the next tool then acted on the whole band.
+        let mut loop_pairs: Vec<(VertId, VertId)> = Vec::new();
         for q in &strip {
             let [p, qq, r, s] = q.verts;
             let c = along(p, qq); // c[0] nearest p
@@ -1024,14 +1162,23 @@ pub(crate) fn loop_cut(mesh: &mut Mesh, half: HalfId, cuts: u32) -> Result<OpOut
                 } else {
                     (d[n - k], dd[n - k])
                 };
-                made.push(m.add_face_raw(&[v0, v1, v2, v3], &[k0, k1, k2, k3], q.slot)?);
+                let corners = [k0, k1, k2, k3];
+                finite_corners(&corners, "a loop-cut corner")?;
+                made.push(m.add_face_raw(&[v0, v1, v2, v3], &corners, q.slot)?);
+                if k < n {
+                    // `v1`/`v2` are both cut vertices exactly when `k < n`; at
+                    // `k == n` they are the quad's own far rung.
+                    loop_pairs.push((v1, v2));
+                }
             }
         }
         for c in &fringe {
             let (verts, corners) = insert_cuts(&c.verts, &c.corners, &cut, n);
+            finite_corners(&corners, "a loop-cut corner")?;
             touched.extend(verts.iter().copied());
             made.push(m.add_face_raw(&verts, &corners, c.slot)?);
         }
+        let _ = &made;
         m.apply_sharp(&sharp);
         // A cut edge inherits the sharpness of the edge it came from, on both of
         // its halves — the same rule `SplitEdge` already applies.
@@ -1051,7 +1198,10 @@ pub(crate) fn loop_cut(mesh: &mut Mesh, half: HalfId, cuts: u32) -> Result<OpOut
         m.finish_patch(&touched)?;
         Ok(OpOutcome {
             verts: cut.values().flatten().copied().collect(),
-            faces: made,
+            halfs: loop_pairs
+                .iter()
+                .filter_map(|&(a, b)| m.find_half(a, b))
+                .collect(),
             ..Default::default()
         })
     })
@@ -1162,7 +1312,7 @@ pub(crate) fn knife(mesh: &mut Mesh, path: &[KnifePoint]) -> Result<OpOutcome, O
                 }
             }
         }
-        let mut faces = Vec::new();
+        let mut cuts: Vec<(VertId, VertId)> = Vec::new();
         for w in points.windows(2) {
             let (u, v) = (w[0], w[1]);
             if u == v {
@@ -1173,12 +1323,17 @@ pub(crate) fn knife(mesh: &mut Mesh, path: &[KnifePoint]) -> Result<OpOutcome, O
             }
             let (from, to) = common_face_corners(m, u, v)
                 .ok_or(OpError::KnifeNoCommonFace { from: u, to: v })?;
-            let out = crate::ops::apply(m, &crate::ops::Op::SplitFace { from, to })?;
-            faces.extend(out.faces);
+            crate::ops::apply(m, &crate::ops::Op::SplitFace { from, to })?;
+            cuts.push((u, v));
         }
+        // The cut edges, not the faces on either side of them: a knife's
+        // successor is the line it drew.
         Ok(OpOutcome {
             verts,
-            faces,
+            halfs: cuts
+                .iter()
+                .filter_map(|&(a, b)| m.find_half(a, b))
+                .collect(),
             ..Default::default()
         })
     })
@@ -1226,17 +1381,31 @@ pub(crate) fn merge_verts(
             return Err(OpError::SameVertex(v));
         }
     }
+    // **Canonicalized, because a merge is a function of its SET.** Welding in the
+    // caller's order made the result depend on it: two of the merged vertices
+    // adjacent in one face fold cleanly in one order and produce a repeated
+    // vertex in another, so permuting three ids flipped `Ok` and a refusal. That
+    // is the same ordering doctrine `inset_faces` states, applied to the op that
+    // had it backwards.
+    //
+    // The price is that `Last` means **the highest id in the set** rather than
+    // "the last one in the caller's list". That is what the only caller already
+    // passes (the selection resolves through a `BTreeSet`), and it is the whole
+    // difference between an op that replays and one that replays *if the UI
+    // enumerated the same way*.
+    let mut ordered: Vec<VertId> = verts.to_vec();
+    ordered.sort_unstable();
     let keep = match target {
-        MergeTarget::Center => verts[0],
-        MergeTarget::Last => verts[verts.len() - 1],
+        MergeTarget::Center => ordered[0],
+        MergeTarget::Last => ordered[ordered.len() - 1],
     };
     let place = match target {
         MergeTarget::Center => {
             let mut acc = DVec3::ZERO;
-            for &v in verts {
+            for &v in &ordered {
                 acc += pos(mesh, v);
             }
-            (acc / verts.len() as f64).to_array()
+            (acc / ordered.len() as f64).to_array()
         }
         MergeTarget::Last => pos(mesh, keep).to_array(),
     };
@@ -1244,7 +1413,7 @@ pub(crate) fn merge_verts(
 
     mesh.transact(|m| {
         let mut faces = Vec::new();
-        for &v in verts {
+        for &v in &ordered {
             if v == keep {
                 continue;
             }
@@ -1303,7 +1472,11 @@ pub(crate) fn subdivide_faces(mesh: &mut Mesh, faces: &[FaceId]) -> Result<OpOut
             touched.insert(v);
             mid.insert((lo, hi), vec![v]);
         }
+        // The region's sub-quads and the fringe faces kept apart: the fringe was
+        // rebuilt only because a shared edge cannot be split on one side, and it
+        // is not what the author subdivided.
         let mut made = Vec::new();
+        let mut fringe_made = Vec::new();
         let mut centres = Vec::with_capacity(captured.len());
         for c in &captured {
             let n = c.verts.len();
@@ -1317,24 +1490,25 @@ pub(crate) fn subdivide_faces(mesh: &mut Mesh, faces: &[FaceId]) -> Result<OpOut
             centres.push(centre);
             touched.insert(centre);
             let centre_corner = average_corner(&c.corners);
+            finite_corner(&centre_corner, "a subdivision corner")?;
             for i in 0..n {
                 let prev = (i + n - 1) % n;
                 let m_i = mid[&canonical_pair(c.verts[i], c.verts[(i + 1) % n])][0];
                 let m_p = mid[&canonical_pair(c.verts[prev], c.verts[i])][0];
                 let k_i = lerp_corner(&c.corners[i], &c.corners[(i + 1) % n], 0.5);
                 let k_p = lerp_corner(&c.corners[prev], &c.corners[i], 0.5);
-                made.push(m.add_face_raw(
-                    &[c.verts[i], m_i, centre, m_p],
-                    &[c.corners[i], k_i, centre_corner, k_p],
-                    c.slot,
-                )?);
+                let corners = [c.corners[i], k_i, centre_corner, k_p];
+                finite_corners(&corners, "a subdivision corner")?;
+                made.push(m.add_face_raw(&[c.verts[i], m_i, centre, m_p], &corners, c.slot)?);
             }
         }
         for c in &fringe {
             let (verts, corners) = insert_cuts(&c.verts, &c.corners, &mid, 1);
+            finite_corners(&corners, "a subdivision corner")?;
             touched.extend(verts.iter().copied());
-            made.push(m.add_face_raw(&verts, &corners, c.slot)?);
+            fringe_made.push(m.add_face_raw(&verts, &corners, c.slot)?);
         }
+        let _ = &fringe_made;
         m.apply_sharp(&sharp);
         for (&(lo, hi), made_verts) in &mid {
             if sharp
@@ -1509,7 +1683,12 @@ mod tests {
                 distance: 1.0,
             },
         );
-        assert_eq!(out.faces.len(), 5, "the moved cap plus four walls");
+        assert_eq!(
+            out.faces.len(),
+            1,
+            "the outcome is the CAP ALONE -- an outcome carrying the walls \n             makes the successor selection contain the base vertices, and the \n             next drag flattens the extrusion"
+        );
+        assert_eq!(out.verts.len(), 4, "and the four vertices it is built on");
         assert_eq!(m.vert_count(), 12);
         assert_eq!(m.face_count(), 10, "5 untouched + the cap + 4 walls");
         assert_eq!(euler(&m), 2, "still one closed genus-0 shell");
@@ -1547,6 +1726,7 @@ mod tests {
             .filter(|&f| newell(&m, f).normalize().y > 0.9)
             .collect();
         assert_eq!(region.len(), 2);
+        let before = m.face_count();
         let out = ok(
             &mut m,
             Op::ExtrudeFaces {
@@ -1554,13 +1734,64 @@ mod tests {
                 distance: 1.0,
             },
         );
+        assert_eq!(out.faces.len(), 2, "the outcome is the two moved caps");
         assert_eq!(
-            out.faces.len(),
-            6,
-            "two moved caps + FOUR walls — the shared edge is interior"
+            m.face_count(),
+            before + 4,
+            "two caps replace two faces and FOUR walls are added -- the \n             shared edge is interior to the region and gets none"
         );
         assert_eq!(euler(&m), 2);
         assert!(m.half_ids().all(|h| m.is_boundary(h) == Some(false)));
+    }
+
+    #[test]
+    fn extrude_then_translate_moves_only_what_the_extrude_made() {
+        // **The workflow the successor rule exists for.** Extrude, then drag
+        // what the op handed back. With an outcome that named the walls too,
+        // the drag took the base vertices with it and FLATTENED the extrusion
+        // -- the shape returned to where it started and the author was left
+        // with two coincident faces for their trouble.
+        let mut m = cube(2.0);
+        let top = m
+            .face_ids()
+            .find(|&f| newell(&m, f).normalize().y > 0.9)
+            .expect("+Y");
+        let out = ok(
+            &mut m,
+            Op::ExtrudeFaces {
+                faces: vec![top],
+                distance: 1.0,
+            },
+        );
+        let mut sel = crate::select::SelectionSet::new(1);
+        sel.adopt(1, &out, &m);
+        let moving: Vec<VertId> = sel
+            .resolved_verts(&m, crate::select::SelectMode::Face)
+            .into_iter()
+            .collect();
+        assert_eq!(moving.len(), 4, "the cap corners and nothing else");
+        let base_low = m.vert_ids().filter(|&v| pos(&m, v).y < -0.9).count();
+        ok(
+            &mut m,
+            Op::TranslateVerts {
+                verts: moving,
+                delta: [0.0, 1.0, 0.0],
+            },
+        );
+        // Taller, not flatter: the cap is at 3 m, the base has not moved, and
+        // the original rim is still where the extrude left it.
+        let top_y = m.vert_ids().map(|v| pos(&m, v).y).fold(f64::MIN, f64::max);
+        assert!((top_y - 3.0).abs() < 1e-12, "top at {top_y}");
+        assert_eq!(
+            m.vert_ids().filter(|&v| pos(&m, v).y < -0.9).count(),
+            base_low,
+            "the base is where it was"
+        );
+        let waist = m
+            .vert_ids()
+            .filter(|&v| (pos(&m, v).y - 1.0).abs() < 1e-12)
+            .count();
+        assert_eq!(waist, 4, "the original rim stayed at 1 m");
     }
 
     #[test]
@@ -1654,7 +1885,11 @@ mod tests {
                 individual: false,
             },
         );
-        assert_eq!(out.faces.len(), 5, "the shrunk face plus four ring quads");
+        assert_eq!(
+            out.faces.len(),
+            1,
+            "the outcome is the INNER face -- inset-then-inset must shrink \n             inward, not walk the ring outward"
+        );
         assert_eq!(m.vert_count(), 12);
         assert_eq!(euler(&m), 2);
         // The inset is coplanar: the solid is unchanged.
@@ -1727,7 +1962,12 @@ mod tests {
                 amount: 0.25,
             },
         );
-        assert_eq!(out.faces.len(), 5, "two grown faces + strip + two caps");
+        assert_eq!(
+            out.faces.len(),
+            1,
+            "the outcome is the chamfer STRIP -- the two faces it was cut out \n             of are not what the author now has hold of"
+        );
+        assert_eq!(m.face_loop(out.faces[0]).expect("live").len(), 4);
         assert_eq!(m.vert_count(), 12, "the 8 corners plus 4 offsets");
         assert_eq!(m.face_count(), 9);
         assert_eq!(euler(&m), 2, "still closed");
@@ -1840,6 +2080,11 @@ mod tests {
         let out = ok(&mut m, Op::LoopCut { half: h, cuts: 1 });
         assert_eq!(m.face_count(), 6, "each of the three quads split in two");
         assert_eq!(out.verts.len(), 4, "one cut per ring edge, 4 ring edges");
+        assert_eq!(
+            out.halfs.len(),
+            3,
+            "the outcome is the NEW LOOP -- one rung per cut quad, not the \n             twenty edges of the strip it ran through"
+        );
         assert_eq!(m.vert_count(), 12);
         assert_eq!(validate(&m), Ok(()));
     }
@@ -1857,7 +2102,8 @@ mod tests {
             })
             .expect("a vertical side edge");
         let out = ok(&mut m, Op::LoopCut { half: h, cuts: 2 });
-        assert_eq!(out.verts.len(), 16, "8 ring edges × 2 cuts");
+        assert_eq!(out.verts.len(), 16, "8 ring edges x 2 cuts");
+        assert_eq!(out.halfs.len(), 16, "two new closed loops of 8 rungs each");
         assert_eq!(m.face_count(), f0 + 16, "8 side quads become 24");
         assert_eq!(euler(&m), 2);
         assert!(m.half_ids().all(|h| m.is_boundary(h) == Some(false)));
@@ -1914,7 +2160,11 @@ mod tests {
                 ],
             },
         );
-        assert_eq!(out.faces.len(), 4, "two split faces, two halves each");
+        assert_eq!(
+            out.halfs.len(),
+            2,
+            "the outcome is the LINE the knife drew, not the faces beside it"
+        );
         assert_eq!(m.face_count(), 4);
         assert_eq!(validate(&m), Ok(()));
     }
@@ -1984,7 +2234,7 @@ mod tests {
                 ],
             },
         );
-        assert_eq!(out.faces.len(), 2, "only the diagonal cut anything");
+        assert_eq!(out.halfs.len(), 1, "only the diagonal cut anything");
         assert_eq!(m.face_count(), 2);
     }
 
@@ -2214,6 +2464,212 @@ mod tests {
         assert_eq!(out.verts.len(), 8, "nothing sat on the plane");
         assert_eq!(m.vert_count(), 16);
         assert_eq!(m.face_count(), 10);
+    }
+
+    // ── M3: a derived corner is a value this crate STORES ──────────────────
+
+    /// A quad whose corner UVs sit at the top of the finite range — legal on the
+    /// way in (the reader preserves attributes verbatim, by design), lethal to
+    /// arithmetic.
+    fn extreme_uv_quad() -> Mesh {
+        let mut m = plane(2.0);
+        let f = m.face_ids().next().expect("the quad");
+        let halfs = m.face_loop(f).expect("live");
+        let huge = 1.0e308_f64;
+        for (i, &h) in halfs.iter().enumerate() {
+            let sign = if i.is_multiple_of(2) { 1.0 } else { -1.0 };
+            m.half_mut(h).uv = [sign * huge, sign * huge];
+        }
+        m
+    }
+
+    #[test]
+    fn a_derived_corner_that_overflows_is_refused_not_stored() {
+        // Before this, `SubdivideFaces` and `LoopCut` returned `Ok` on a mesh
+        // `validate` rejects — and the session then failed its OWN `restore`, so
+        // the editor could save a document it could never reopen. Same law as the
+        // positions (gate the value you STORE); the corners had simply never been
+        // brought under it.
+        for op in [
+            Op::SubdivideFaces {
+                faces: vec![FaceId(0)],
+            },
+            Op::SplitEdge {
+                half: HalfId(0),
+                t: 0.5,
+            },
+        ] {
+            let mut m = extreme_uv_quad();
+            let err = refuses(&mut m, op.clone());
+            assert!(
+                matches!(err, OpError::NonFinite { .. }),
+                "{op:?} was refused for the wrong reason: {err:?}"
+            );
+            assert_eq!(crate::validate::validate(&m), Ok(()));
+        }
+    }
+
+    #[test]
+    fn a_session_can_always_reopen_what_it_saved() {
+        // The consequence the refusal closes, stated as the round trip it broke.
+        // `MeshSession::restore` validates, so an op that stored an infinity made
+        // the save unreadable — by the same build that wrote it.
+        let mut s = crate::journal::MeshSession::new(extreme_uv_quad());
+        let f = s.mesh().face_ids().next().expect("the quad");
+        assert!(s.apply(Op::SubdivideFaces { faces: vec![f] }).is_err());
+        // Legal work on the same fixture still journals and still restores.
+        let h = s
+            .mesh()
+            .half_ids()
+            .find(|&h| s.mesh().is_boundary(h) == Some(false))
+            .expect("a corner");
+        s.apply(Op::SetCornerUv {
+            half: h,
+            uv: [0.25, 0.5],
+        })
+        .expect("a normal edit");
+        let restored =
+            crate::journal::MeshSession::restore(s.save()).expect("what was saved reopens");
+        assert_eq!(restored.mesh().encoded(), s.mesh().encoded());
+    }
+
+    // ── M4: a merge is a function of its SET ───────────────────────────────
+
+    #[test]
+    fn merge_is_a_function_of_the_vertex_set_not_its_order() {
+        // It was not. Welding in the caller's order made the outcome depend on
+        // it — two merged vertices adjacent in one face fold cleanly one way and
+        // produce a repeated vertex the other — so permuting three ids flipped
+        // `Ok` and a refusal, and a journal replayed on a build whose UI
+        // enumerated differently produced a different mesh.
+        let base = cube(1.0);
+        let vs: Vec<VertId> = base.vert_ids().take(3).collect();
+        let permutations = [
+            [vs[0], vs[1], vs[2]],
+            [vs[0], vs[2], vs[1]],
+            [vs[1], vs[0], vs[2]],
+            [vs[1], vs[2], vs[0]],
+            [vs[2], vs[0], vs[1]],
+            [vs[2], vs[1], vs[0]],
+        ];
+        for target in [MergeTarget::Center, MergeTarget::Last] {
+            let mut results = Vec::new();
+            for p in permutations {
+                let mut m = base.clone();
+                let r = apply(
+                    &mut m,
+                    &Op::MergeVerts {
+                        verts: p.to_vec(),
+                        target,
+                    },
+                );
+                results.push(r.map(|_| m.encoded()));
+            }
+            let first = &results[0];
+            for (i, r) in results.iter().enumerate() {
+                assert_eq!(
+                    r.is_ok(),
+                    first.is_ok(),
+                    "{target:?}: permutation {i} disagreed about whether it applies"
+                );
+                assert_eq!(
+                    r, first,
+                    "{target:?}: permutation {i} produced a different mesh"
+                );
+            }
+        }
+    }
+
+    // ── M5: an offset that folds the solid is refused ──────────────────────
+
+    #[test]
+    fn a_bevel_larger_than_its_faces_is_refused_rather_than_inverting_them() {
+        // `validate` is a TOPOLOGY auditor and is blind to winding, so a 2 m cube
+        // beveled at 2.83 m came back Ok with the geometry folded through itself
+        // — invisible until it is shaded, and on the undo stack as a legitimate
+        // edit. The limit belongs to the author's geometry, so this refuses and
+        // names the amount rather than clamping to a number of its own.
+        let mut m = cube(2.0);
+        let h = m.half_ids().next().expect("an edge");
+        let before = six_volume(&m);
+        ok(
+            &mut m,
+            Op::BevelEdges {
+                edges: vec![h],
+                amount: 0.2,
+            },
+        );
+        assert!(
+            six_volume(&m) > 0.0 && six_volume(&m) < before,
+            "a legal chamfer"
+        );
+
+        let mut m = cube(2.0);
+        let h = m.half_ids().next().expect("an edge");
+        let err = refuses(
+            &mut m,
+            Op::BevelEdges {
+                edges: vec![h],
+                amount: 2.83,
+            },
+        );
+        assert!(
+            matches!(
+                err,
+                OpError::WouldInvert {
+                    what: "a bevel amount",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(
+            (six_volume(&m) - 8.0 * 6.0).abs() < 1e-9,
+            "and the cube is intact"
+        );
+    }
+
+    #[test]
+    fn an_inset_that_folds_its_face_is_refused_on_both_signs() {
+        let mut m = cube(2.0);
+        let top = m
+            .face_ids()
+            .find(|&f| newell(&m, f).normalize().y > 0.9)
+            .expect("+Y");
+        ok(
+            &mut m,
+            Op::InsetFaces {
+                faces: vec![top],
+                amount: 0.4,
+                individual: false,
+            },
+        );
+
+        for amount in [-0.5, 1.5] {
+            let mut m = cube(2.0);
+            let top = m
+                .face_ids()
+                .find(|&f| newell(&m, f).normalize().y > 0.9)
+                .expect("+Y");
+            let err = refuses(
+                &mut m,
+                Op::InsetFaces {
+                    faces: vec![top],
+                    amount,
+                    individual: false,
+                },
+            );
+            assert!(
+                matches!(
+                    err,
+                    OpError::WouldInvert {
+                        what: "an inset amount",
+                        ..
+                    }
+                ),
+                "amount {amount}: {err:?}"
+            );
+        }
     }
 
     // ── determinism ────────────────────────────────────────────────────────

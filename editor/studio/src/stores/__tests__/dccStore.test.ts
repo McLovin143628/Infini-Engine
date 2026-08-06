@@ -1,10 +1,16 @@
 // @vitest-environment jsdom
 //
-// Model Editor store (P23.4). Two things are worth testing here and the rest is
-// plumbing: the store **replaces** its document from every reply (because the
-// backend owns the selection and a structural op may have dropped it), and the
-// preview is a **serialized queue of one** (because an orbit fires faster than a
-// render + PNG + base64 round trip and a pile-up makes the panel lag the mouse).
+// Model Editor store (P23.4). Three things are worth testing here and the rest is
+// plumbing:
+//
+// 1. **Two documents are two documents.** The panel is `singleton: false` and the
+//    dock keeps inactive tabs mounted, so a store holding one `doc` gave both
+//    panels the same mesh — every tool press in A edited B, and closing A closed
+//    B. That is the blocker this file exists to hold shut.
+// 2. The store **replaces** its document from every reply, because the backend
+//    owns the selection and a structural op may have dropped it.
+// 3. The preview is a **serialized queue of one, per document** — an orbit fires
+//    faster than a render + PNG + base64 round trip completes.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../lib/ipc", () => ({
@@ -32,11 +38,11 @@ import { __resetDccPreviewQueueForTest, useDccStore } from "../dccStore";
 
 const mocked = vi.mocked(dcc);
 
-function docOf(over: Partial<DccDocDto> = {}): DccDocDto {
+function docOf(assetId: string, over: Partial<DccDocDto> = {}): DccDocDto {
   return {
-    id: "dcc:abc",
-    assetId: "abc",
-    name: "Prop",
+    id: `dcc:${assetId}`,
+    assetId,
+    name: `Prop-${assetId}`,
     mode: "face",
     verts: 8,
     edges: 12,
@@ -69,64 +75,105 @@ function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
   return { promise, resolve };
 }
 
+const entry = (assetId: string) => useDccStore.getState().docs[assetId];
+
 beforeEach(() => {
   vi.clearAllMocks();
   __resetDccPreviewQueueForTest();
-  useDccStore.setState({
-    doc: null,
-    assetId: null,
-    image: null,
-    previewError: null,
-    refusal: null,
-    lastSave: null,
-    busy: false,
-    status: null,
-  });
+  useDccStore.setState({ docs: {} });
   mocked.preview.mockResolvedValue({ image: "data:image/png;base64,AA", error: null, size: 256 });
+  mocked.open.mockImplementation((assetId: string) => Promise.resolve(docOf(assetId)));
 });
 
 afterEach(() => {
   __resetDccPreviewQueueForTest();
 });
 
-describe("open/close", () => {
-  it("opens an asset and renders the first frame", async () => {
-    mocked.open.mockResolvedValue(docOf());
-    await useDccStore.getState().open("abc");
-    expect(mocked.open).toHaveBeenCalledWith("abc");
-    expect(useDccStore.getState().doc?.id).toBe("dcc:abc");
-    expect(useDccStore.getState().image).toContain("data:image/png");
+describe("two documents are two documents (the P23.4 blocker)", () => {
+  beforeEach(async () => {
+    await useDccStore.getState().open("aaa");
+    await useDccStore.getState().open("bbb");
   });
 
+  it("keeps both open at once, each with its own document", () => {
+    expect(entry("aaa").doc?.id).toBe("dcc:aaa");
+    expect(entry("bbb").doc?.id).toBe("dcc:bbb");
+    expect(entry("aaa").doc?.name).toBe("Prop-aaa");
+  });
+
+  it("sends a tool press to the document it was pressed in", async () => {
+    mocked.apply.mockResolvedValue({
+      ok: true,
+      refusal: null,
+      doc: docOf("aaa", { faces: 10, dirty: true }),
+    });
+    await useDccStore.getState().apply("aaa", { tool: "extrude", distance: 0.5 });
+    expect(mocked.apply).toHaveBeenCalledWith("dcc:aaa", { tool: "extrude", distance: 0.5 });
+    expect(entry("aaa").doc?.faces).toBe(10);
+    expect(entry("bbb").doc?.faces).toBe(6, );
+    expect(entry("bbb").doc?.dirty).toBe(false);
+  });
+
+  it("keeps a refusal on the document that refused", async () => {
+    mocked.apply.mockResolvedValue({ ok: false, refusal: "no border", doc: docOf("bbb") });
+    await useDccStore.getState().apply("bbb", { tool: "inset", amount: 0.1, individual: false });
+    expect(entry("bbb").refusal).toBe("no border");
+    expect(entry("aaa").refusal).toBeNull();
+  });
+
+  it("closes only the document it was asked to close", async () => {
+    mocked.close.mockResolvedValue(undefined);
+    await useDccStore.getState().close("aaa");
+    expect(mocked.close).toHaveBeenCalledTimes(1);
+    expect(mocked.close).toHaveBeenCalledWith("dcc:aaa");
+    expect(entry("aaa")).toBeUndefined();
+    expect(entry("bbb")?.doc?.id).toBe("dcc:bbb", );
+  });
+
+  it("routes undo to the document it names", async () => {
+    mocked.undo.mockResolvedValue(docOf("bbb", { canRedo: true }));
+    await useDccStore.getState().undo("bbb");
+    expect(mocked.undo).toHaveBeenCalledWith("dcc:bbb");
+    expect(entry("bbb").doc?.canRedo).toBe(true);
+    expect(entry("aaa").doc?.canRedo).toBe(false);
+  });
+
+  it("gives each document its own preview queue", async () => {
+    // A global gate would have made two open panels take turns: a render in
+    // flight for A would queue B's instead of starting it.
+    vi.clearAllMocks();
+    const a = deferred<{ image: string | null; error: string | null; size: number }>();
+    mocked.preview.mockReturnValueOnce(a.promise);
+    mocked.preview.mockResolvedValue({ image: "data:image/png;base64,BB", error: null, size: 256 });
+    mocked.orbit.mockResolvedValue(undefined);
+
+    const pa = useDccStore.getState().orbit("aaa", 5, 0, 0);
+    const pb = useDccStore.getState().orbit("bbb", 5, 0, 0);
+    await Promise.resolve();
+    expect(mocked.preview).toHaveBeenCalledTimes(2);
+    a.resolve({ image: "data:image/png;base64,AA", error: null, size: 256 });
+    await Promise.all([pa, pb]);
+  });
+});
+
+describe("open/close", () => {
   it("re-opening the same asset does not re-fetch", async () => {
-    mocked.open.mockResolvedValue(docOf());
-    await useDccStore.getState().open("abc");
-    await useDccStore.getState().open("abc");
+    await useDccStore.getState().open("aaa");
+    await useDccStore.getState().open("aaa");
     expect(mocked.open).toHaveBeenCalledTimes(1);
   });
 
   it("surfaces an open failure as a status rather than throwing", async () => {
     mocked.open.mockRejectedValue("not a mesh asset");
-    await useDccStore.getState().open("abc");
-    expect(useDccStore.getState().doc).toBeNull();
-    expect(useDccStore.getState().status).toContain("not a mesh asset");
-  });
-
-  it("closes the backend document and clears the panel", async () => {
-    mocked.open.mockResolvedValue(docOf());
-    mocked.close.mockResolvedValue(undefined);
-    await useDccStore.getState().open("abc");
-    await useDccStore.getState().close();
-    expect(mocked.close).toHaveBeenCalledWith("dcc:abc");
-    expect(useDccStore.getState().doc).toBeNull();
-    expect(useDccStore.getState().image).toBeNull();
+    await useDccStore.getState().open("aaa");
+    expect(entry("aaa").doc).toBeNull();
+    expect(entry("aaa").status).toContain("not a mesh asset");
   });
 });
 
 describe("the document is replaced, never patched", () => {
   beforeEach(async () => {
-    mocked.open.mockResolvedValue(docOf());
-    await useDccStore.getState().open("abc");
+    await useDccStore.getState().open("aaa");
   });
 
   it("adopts the whole document a tool returns", async () => {
@@ -136,57 +183,45 @@ describe("the document is replaced, never patched", () => {
     mocked.apply.mockResolvedValue({
       ok: true,
       refusal: null,
-      doc: docOf({ faces: 10, verts: 12, selected: 5, generation: 2, dirty: true }),
+      doc: docOf("aaa", { faces: 10, verts: 12, selected: 1, generation: 2, dirty: true }),
     });
-    await useDccStore.getState().apply({ tool: "extrude", distance: 0.5 });
-    const doc = useDccStore.getState().doc!;
+    await useDccStore.getState().apply("aaa", { tool: "extrude", distance: 0.5 });
+    const doc = entry("aaa").doc!;
     expect(doc.faces).toBe(10);
-    expect(doc.selected).toBe(5);
+    expect(doc.selected).toBe(1);
     expect(doc.generation).toBe(2);
     expect(doc.dirty).toBe(true);
   });
 
-  it("shows a refusal as a value and keeps the document", async () => {
-    mocked.apply.mockResolvedValue({
-      ok: false,
-      refusal: "the region has no border, so there is nothing to inset",
-      doc: docOf(),
-    });
-    await useDccStore.getState().apply({ tool: "inset", amount: 0.1, individual: false });
-    expect(useDccStore.getState().refusal).toContain("no border");
-    expect(useDccStore.getState().doc).not.toBeNull();
-  });
-
   it("clears the refusal on the next successful tool", async () => {
-    mocked.apply.mockResolvedValueOnce({ ok: false, refusal: "nope", doc: docOf() });
-    await useDccStore.getState().apply({ tool: "subdivide" });
-    expect(useDccStore.getState().refusal).toBe("nope");
-    mocked.apply.mockResolvedValueOnce({ ok: true, refusal: null, doc: docOf() });
-    await useDccStore.getState().apply({ tool: "subdivide" });
-    expect(useDccStore.getState().refusal).toBeNull();
+    mocked.apply.mockResolvedValueOnce({ ok: false, refusal: "nope", doc: docOf("aaa") });
+    await useDccStore.getState().apply("aaa", { tool: "subdivide" });
+    expect(entry("aaa").refusal).toBe("nope");
+    mocked.apply.mockResolvedValueOnce({ ok: true, refusal: null, doc: docOf("aaa") });
+    await useDccStore.getState().apply("aaa", { tool: "subdivide" });
+    expect(entry("aaa").refusal).toBeNull();
   });
 
   it("sends the pick in preview pixels at the shared size", async () => {
-    mocked.pick.mockResolvedValue(docOf({ selected: 1 }));
-    await useDccStore.getState().pick(12, 34, true);
+    mocked.pick.mockResolvedValue(docOf("aaa", { selected: 1 }));
+    await useDccStore.getState().pick("aaa", 12, 34, true);
     // The size is the ONE constant `dcc_preview` was given: a pick computed
     // against a different projection lands somewhere else.
-    expect(mocked.pick).toHaveBeenCalledWith("dcc:abc", 12, 34, 256, true);
-    expect(useDccStore.getState().doc?.selected).toBe(1);
+    expect(mocked.pick).toHaveBeenCalledWith("dcc:aaa", 12, 34, 256, true);
+    expect(entry("aaa").doc?.selected).toBe(1);
   });
 
   it("routes a mode switch through the select command", async () => {
-    mocked.select.mockResolvedValue(docOf({ mode: "edge" }));
-    await useDccStore.getState().setMode("edge");
-    expect(mocked.select).toHaveBeenCalledWith("dcc:abc", { action: "mode", mode: "edge" });
-    expect(useDccStore.getState().doc?.mode).toBe("edge");
+    mocked.select.mockResolvedValue(docOf("aaa", { mode: "edge" }));
+    await useDccStore.getState().setMode("aaa", "edge");
+    expect(mocked.select).toHaveBeenCalledWith("dcc:aaa", { action: "mode", mode: "edge" });
+    expect(entry("aaa").doc?.mode).toBe("edge");
   });
 });
 
 describe("the preview queue", () => {
   beforeEach(async () => {
-    mocked.open.mockResolvedValue(docOf());
-    await useDccStore.getState().open("abc");
+    await useDccStore.getState().open("aaa");
     vi.clearAllMocks();
   });
 
@@ -200,7 +235,7 @@ describe("the preview queue", () => {
     mocked.preview.mockResolvedValue({ image: "data:image/png;base64,BB", error: null, size: 256 });
     mocked.orbit.mockResolvedValue(undefined);
 
-    const bursts = Array.from({ length: 10 }, () => useDccStore.getState().orbit(5, 0, 0));
+    const bursts = Array.from({ length: 10 }, () => useDccStore.getState().orbit("aaa", 5, 0, 0));
     // All ten orbit calls reach the backend — the CAMERA is cheap and must not
     // be dropped, or the model would stop following the mouse.
     await Promise.resolve();
@@ -210,7 +245,7 @@ describe("the preview queue", () => {
     first.resolve({ image: "data:image/png;base64,AA", error: null, size: 256 });
     await Promise.all(bursts);
     expect(mocked.preview).toHaveBeenCalledTimes(2);
-    expect(useDccStore.getState().image).toContain("BB");
+    expect(entry("aaa").image).toContain("BB");
   });
 
   it("reports a preview failure without clearing the document", async () => {
@@ -219,72 +254,70 @@ describe("the preview queue", () => {
       error: "no GPU adapter on this machine",
       size: 256,
     });
-    useDccStore.getState().refresh();
-    await vi.waitFor(() =>
-      expect(useDccStore.getState().previewError).toContain("no GPU adapter"),
-    );
-    expect(useDccStore.getState().doc).not.toBeNull();
+    useDccStore.getState().refresh("aaa");
+    await vi.waitFor(() => expect(entry("aaa").previewError).toContain("no GPU adapter"));
+    expect(entry("aaa").doc).not.toBeNull();
   });
 });
 
 describe("save", () => {
+  const report = (coincident: number) => ({
+    submeshes: 1,
+    vertices: 24,
+    triangles: 12,
+    fanFallbacks: 0,
+    fallbackTangents: 0,
+    coincidentVertices: coincident,
+    reusedDiagonals: 0,
+    nonFiniteWritten: 0,
+    nonUnitNormalsWritten: 0,
+  });
+
   beforeEach(async () => {
-    mocked.open.mockResolvedValue(docOf({ dirty: true }));
-    await useDccStore.getState().open("abc");
+    mocked.open.mockImplementation((assetId: string) =>
+      Promise.resolve(docOf(assetId, { dirty: true })),
+    );
+    await useDccStore.getState().open("aaa");
   });
 
   it("keeps the verdict and re-reads the document's dirty flag", async () => {
-    mocked.save.mockResolvedValue({
-      ok: true,
-      vmesh: "built",
-      advisories: [],
-      export: {
-        submeshes: 1,
-        vertices: 24,
-        triangles: 12,
-        fanFallbacks: 0,
-        fallbackTangents: 0,
-        coincidentVertices: 0,
-        reusedDiagonals: 0,
-        nonFiniteWritten: 0,
-        nonUnitNormalsWritten: 0,
-      },
-    });
+    mocked.save.mockResolvedValue({ ok: true, vmesh: "built", advisories: [], export: report(0) });
     // `dirty` is derived from the generation stamp on the BACKEND, so the only
     // honest way to learn it after a save is to ask.
-    mocked.list.mockResolvedValue([docOf({ dirty: false })]);
-    await useDccStore.getState().save();
-    expect(useDccStore.getState().lastSave?.vmesh).toBe("built");
-    expect(useDccStore.getState().doc?.dirty).toBe(false);
-    expect(useDccStore.getState().status).toContain("12 triangles");
+    mocked.list.mockResolvedValue([docOf("aaa", { dirty: false })]);
+    await useDccStore.getState().save("aaa");
+    expect(entry("aaa").lastSave?.vmesh).toBe("built");
+    expect(entry("aaa").doc?.dirty).toBe(false);
+    expect(entry("aaa").status).toContain("12 triangles");
   });
 
-  it("keeps the writer's advisories so the panel can show them", async () => {
+  it("keeps the coincidence advisory until the NEXT SAVE", async () => {
+    // It used to be cleared by the next action. That warning is the one sentence
+    // in the product saying "what is on disk is not what is in this session", and
+    // an author who pressed Save and then moved the mouse never read it.
     mocked.save.mockResolvedValue({
       ok: true,
       vmesh: "built",
       advisories: ["2 vertices share a position with another."],
-      export: {
-        submeshes: 1,
-        vertices: 24,
-        triangles: 12,
-        fanFallbacks: 0,
-        fallbackTangents: 0,
-        coincidentVertices: 2,
-        reusedDiagonals: 0,
-        nonFiniteWritten: 0,
-        nonUnitNormalsWritten: 0,
-      },
+      export: report(2),
     });
-    mocked.list.mockResolvedValue([docOf()]);
-    await useDccStore.getState().save();
-    expect(useDccStore.getState().lastSave?.advisories).toHaveLength(1);
-    expect(useDccStore.getState().lastSave?.export.coincidentVertices).toBe(2);
+    mocked.list.mockResolvedValue([docOf("aaa")]);
+    await useDccStore.getState().save("aaa");
+    expect(entry("aaa").lastSave?.advisories).toHaveLength(1);
+
+    mocked.apply.mockResolvedValue({ ok: true, refusal: null, doc: docOf("aaa") });
+    await useDccStore.getState().apply("aaa", { tool: "subdivide" });
+    await useDccStore.getState().select("aaa", { action: "all" }).catch(() => {});
+    expect(entry("aaa").lastSave?.export.coincidentVertices).toBe(2);
+
+    mocked.save.mockResolvedValue({ ok: true, vmesh: "built", advisories: [], export: report(0) });
+    await useDccStore.getState().save("aaa");
+    expect(entry("aaa").lastSave?.advisories).toHaveLength(0);
   });
 
   it("surfaces a save failure as a status", async () => {
     mocked.save.mockRejectedValue("disk full");
-    await useDccStore.getState().save();
-    expect(useDccStore.getState().status).toContain("disk full");
+    await useDccStore.getState().save("aaa");
+    expect(entry("aaa").status).toContain("disk full");
   });
 });
