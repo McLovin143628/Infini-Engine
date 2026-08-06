@@ -32,6 +32,16 @@ glam = { workspace = true }
 # second place for "why does the DCC brush feel different from the terrain brush"
 # to live. Ring 0 → Ring 0, and it adds no external crate to the tree.
 inf-terrain = { workspace = true }
+# `Skeleton`/`SkeletonAsset`/`build_template` — what `crate::autofit` PLACES
+# (P24.2). Ring 0 → Ring 0 and no cycle: `inf-anim` depends on glam/serde/
+# thiserror/inf-asset only, and `inf-mesh` (already a dependency of this crate)
+# has named it since P11. It adds no external crate.
+#
+# The direction is deliberate. Auto-fit needs both a mesh and a skeleton, and
+# putting it in `inf-anim` instead would make the *shipped player* link the
+# modelling kernel — `inf-dcc` is a dev-dependency of `inf-player` precisely so
+# that it does not.
+inf-anim = { workspace = true }
 serde = { workspace = true }
 # The op journal persists as bincode (a session that must survive a crash) and the
 # crate's determinism gates compare meshes by their encoded bytes — the cheapest
@@ -51,4 +61,6 @@ serde_json = { workspace = true }
 # `AssetId` for the fracture interplay test: a kernel-exported `MeshAsset` must be
 # consumable by `inf_mesh::fracture_mesh`, which keys its derived asset off the
 # source mesh's GUID. Dev-only — the kernel itself never names an asset id.
+# Also `encode` for the auto-fit determinism gate: two fits of the same mesh must
+# be byte-identical through the codec the rig will actually be written with.
 inf-asset = { workspace = true }

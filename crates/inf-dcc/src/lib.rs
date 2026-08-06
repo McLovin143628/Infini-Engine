@@ -76,7 +76,9 @@
 //! the bitangent handedness sign (±1), the glTF convention `MeshVertex` already
 //! carries.
 
+pub mod autofit;
 pub mod build;
+pub mod bvh;
 pub mod export;
 pub mod journal;
 pub mod model;
@@ -89,10 +91,12 @@ pub mod uv;
 pub mod validate;
 pub mod xform;
 
+pub use autofit::{fit_template, FitError, FitOptions, FitReport};
 pub use build::{
     cube, cylinder, from_mesh_asset, plane, torus, ImportError, ImportReport, MeshImport,
     WELD_TOLERANCE,
 };
+pub use bvh::{Bvh, ClosestHit, RayHit, Tri};
 pub use export::{to_mesh_asset, ExportOptions, ExportReport, NormalPolicy, TANGENT_FALLBACK};
 pub use journal::{MeshSession, SessionError, SessionSave, CHECKPOINT_INTERVAL, MAX_CHECKPOINTS};
 pub use model::{KnifePoint, MergeTarget, MirrorAxis, MAX_LOOP_CUTS};

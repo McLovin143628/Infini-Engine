@@ -42,7 +42,7 @@
 /// not cover it, and a new module is exactly where the next `.sin()` or `HashMap`
 /// would land. `every_source_file_is_covered` reads the directory and fails if
 /// this list has fallen behind, so the coverage cannot rot silently.
-const SOURCES: [(&str, &str); 12] = [
+const SOURCES: [(&str, &str); 14] = [
     ("lib.rs", include_str!("../src/lib.rs")),
     ("topo.rs", include_str!("../src/topo.rs")),
     ("validate.rs", include_str!("../src/validate.rs")),
@@ -55,6 +55,8 @@ const SOURCES: [(&str, &str); 12] = [
     ("xform.rs", include_str!("../src/xform.rs")),
     ("uv.rs", include_str!("../src/uv.rs")),
     ("skin.rs", include_str!("../src/skin.rs")),
+    ("bvh.rs", include_str!("../src/bvh.rs")),
+    ("autofit.rs", include_str!("../src/autofit.rs")),
 ];
 
 const JOURNAL: &str = include_str!("../src/journal.rs");
@@ -219,6 +221,7 @@ fn f32_lives_only_at_the_asset_boundary_and_the_skin_channel() {
         SOURCES[8],  // sculpt.rs
         SOURCES[9],  // xform.rs
         SOURCES[10], // uv.rs
+        SOURCES[12], // bvh.rs — pure f64, no boundary at all
         ("journal.rs", JOURNAL),
     ] {
         let stray: Vec<(usize, String)> = code_hits(src, "f32")
@@ -255,6 +258,75 @@ fn f32_lives_only_at_the_asset_boundary_and_the_skin_channel() {
         "skin.rs is exempt because it IS the f32 weight representation; it no \
          longer is"
     );
+}
+
+/// **The auto-fit converts once, at the wire** (P24.2).
+///
+/// `crate::autofit` produces an `inf_anim::SkeletonAsset`, whose every quantity
+/// is `f32` by that crate's own documented decision — so a file exemption would
+/// be the honest-looking answer and would say nothing. What the module actually
+/// claims is stronger and checkable: **all of its geometry is `f64`, and the
+/// narrowing happens in one function**, which is the discipline
+/// `inf_anim::template` records ("every proportion is f64, every emitted quantity
+/// is f32, and the conversion happens once at the wire").
+///
+/// So the gate is a *span*: every `f32` in `autofit.rs` must lie inside
+/// `fn emit_joints`. A second conversion anywhere — a joint nudged in `f32`
+/// halfway through refinement, a distance compared after narrowing — fails here
+/// and names its line.
+#[test]
+fn autofit_converts_to_f32_once_at_the_wire() {
+    let (name, src) = SOURCES[13];
+    assert_eq!(name, "autofit.rs");
+    // The emitter's line span, found positionally: the `fn` line through the
+    // next `}` at column 0. Line-by-line rather than by a `\n}\n` needle — the
+    // P22 CRLF law, met on this crate's own trig gate.
+    let lines: Vec<&str> = src.lines().collect();
+    let first = lines
+        .iter()
+        .position(|l| l.starts_with("fn emit_joints("))
+        .expect("`fn emit_joints(` is the wire; was it renamed?");
+    let last = first
+        + 1
+        + lines[first + 1..]
+            .iter()
+            .position(|l| *l == "}")
+            .expect("the emitter terminates at column 0");
+
+    let stray: Vec<(usize, String)> = code_hits(src, "f32")
+        .into_iter()
+        // `code_hits` reports 1-based lines; the span above is 0-based.
+        .filter(|(n, _)| !(first + 1..=last + 1).contains(n))
+        // The module docs name the rule they enforce, and `#[cfg(test)]` reads
+        // the emitted `f32` back to assert on it. Neither is a conversion on the
+        // fit's own path; the tests are excluded by span, below.
+        .filter(|(n, _)| *n < test_module_line(src))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "autofit.rs narrows to f32 outside `fn emit_joints` (lines {}..={}); the \
+         fit's geometry is f64 and converts ONCE, at the wire. Found: {stray:?}",
+        first + 1,
+        last + 1
+    );
+    // Not vacuous: the emitter really does convert.
+    let inside = code_hits(src, "f32")
+        .into_iter()
+        .filter(|(n, _)| (first + 1..=last + 1).contains(n))
+        .count();
+    assert!(
+        inside >= 2,
+        "`fn emit_joints` no longer converts anything — the span above is \
+         permitting nothing"
+    );
+}
+
+/// The 1-based line of `#[cfg(test)]`, or `usize::MAX` when a file has no tests.
+fn test_module_line(src: &str) -> usize {
+    src.lines()
+        .position(|l| l == "#[cfg(test)]")
+        .map(|i| i + 1)
+        .unwrap_or(usize::MAX)
 }
 
 #[test]
