@@ -41,7 +41,7 @@ pub use pose::{
 pub use retarget::{humanoid_joint_names, retarget_pose, RetargetMap};
 pub use root_motion::{root_delta, root_joint_index, RootMotionDelta};
 pub use skeleton::{Joint, JointTransform, Skeleton, SkeletonError};
-pub use sockets::{find_socket, socket_transform, Socket};
+pub use sockets::{find_socket, socket_transform, socket_transforms, Socket};
 pub use state_machine::{
     eval_pose, sample_motion, step, CmpOp, Motion, SmCondition, SmContext, SmRuntime, SmState,
     SmTransition, StateMachine,

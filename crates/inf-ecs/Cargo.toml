@@ -30,6 +30,18 @@ inf-terrain = { workspace = true }
 # frames carry, and the curve that does it lives once, in `inf_water::river`,
 # rather than being spelt again in each of the two scene projectors.
 inf-water = { workspace = true }
+# The pose pipeline a `.inf_sm` machine evaluates into (P24.1). Ring-0 → Ring-0:
+# `inf-anim` names only glam/serde/thiserror/inf-asset, so there is no cycle.
+#
+# It is here for ONE thing, and it is the same argument that put `inf-terrain`
+# and `inf-water` above: `pose::step_pose_evaluation` is the single fixed-step
+# rule BOTH hosts call, so the editor preview and the shipped player cannot
+# evaluate a character's pose differently. Written twice it would be two
+# byte-identical loops, which is precisely the shape the deform doctrine
+# replaced. Note this does NOT retire `components::SmRuntimeState`: the component
+# must derive `Reflect` + serde and `inf_anim::SmRuntime` derives neither, so the
+# POD mirror stays (and `pose::to_anim_runtime` is now its one conversion).
+inf-anim = { workspace = true }
 serde = { workspace = true }
 uuid = { workspace = true }
 # Profiling spans (P15.1): the per-phase sim systems carry `trace`-level

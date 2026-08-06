@@ -560,6 +560,8 @@ pub fn sim_from_built(built: BuiltWorld) -> RuntimeSim {
         hz,
         state_machines,
         root_clips,
+        skeletons,
+        pose_clips,
         audio_clips,
         ..
     } = built;
@@ -568,6 +570,14 @@ pub fn sim_from_built(built: BuiltWorld) -> RuntimeSim {
     for (guid, skel, clip) in root_clips {
         sim.register_root_motion_clip(guid, skel, clip);
     }
+    // P24.1: the skeletons + the clips a machine's states play. Without these the
+    // machines still step and no pose is ever published, so every character draws
+    // its rest pose — which is what the engine did before this batch, silently.
+    // Seeded HERE, in the one function every sim call site goes through, for the
+    // reason `sim_from_payload` records: a boot path that forgets an attachment
+    // does not crash, it agrees with itself.
+    sim.set_skeletons(skeletons);
+    sim.set_pose_clips(pose_clips);
     sim.set_audio_clips(audio_clips);
     sim
 }

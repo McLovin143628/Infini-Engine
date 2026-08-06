@@ -187,6 +187,55 @@ fn extract_method(source: &str, name: &str) -> String {
     panic!("`{needle}` does not terminate");
 }
 
+/// [`extract_method`] **plus its doc block** — the indented twin of
+/// [`extract_fn`], and what a mirrored `impl` method must actually be compared
+/// with.
+///
+/// P24.1 closed this hole. `extract_method` reads the item only, so for two
+/// batches the skeletal stores' `resolve_skinned` doc blocks were free to
+/// diverge — and they had: one side carried a paragraph naming the other file
+/// that the other side could not carry. That is exactly the defect
+/// [`extract_fn`]'s own doc argues against: **every rule the two copies share is
+/// written in the `///` lines and nowhere else**, so a rule corrected on one side
+/// only is the same defect as a line of code changed on one side only. The
+/// remedy is the one `skinned_mesh_data` already uses — side-neutral wording,
+/// with any "the twin lives at …" note in the module docs, which are not a
+/// mirrored pair.
+fn extract_method_with_doc(source: &str, name: &str) -> String {
+    let source = source.replace("\r\n", "\n");
+    let needle = format!("fn {name}(");
+    let start = source
+        .find(&needle)
+        .unwrap_or_else(|| panic!("`{needle}` not found — was the store method renamed?"));
+    let item_line = source[..start].rfind('\n').map_or(0, |i| i + 1);
+    let mut doc: Vec<&str> = Vec::new();
+    let mut cursor = item_line;
+    while cursor > 0 {
+        let prev_start = source[..cursor - 1].rfind('\n').map_or(0, |i| i + 1);
+        let line = &source[prev_start..cursor - 1];
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("///") {
+            doc.push(line);
+        } else if !trimmed.starts_with("#[") {
+            break;
+        }
+        cursor = prev_start;
+    }
+    assert!(
+        !doc.is_empty(),
+        "`fn {name}` carries no doc comment, so this gate would compare only its \
+         body — the same hole the free-function anchor fix closed."
+    );
+    doc.reverse();
+    let mut out = String::new();
+    for line in doc {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&extract_method(&source, name));
+    out
+}
+
 fn read(rel: &str) -> String {
     let path = workspace_root().join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
@@ -755,25 +804,30 @@ fn neither_projector_warns_about_fifty_thousand_instances() {
 // gate above.
 
 /// **The pose rule must be one rule.** No skeleton (or a jointless one) ⇒ the
-/// caller keeps its placeholder; no `AnimPlayer` / no clip / an unresolvable clip
-/// ⇒ the rest pose; otherwise the clip sampled at the play-head, honouring
-/// `looping`.
+/// caller keeps its placeholder; the pose the SIM evaluated for this entity, when
+/// there is one for this skeleton (P24.1); else no `AnimPlayer` / no clip / an
+/// unresolvable clip ⇒ the rest pose; else the clip sampled at the play-head,
+/// honouring `looping`.
 ///
-/// Every one of those three arms is a place the two hosts could silently drift,
+/// Every one of those four arms is a place the two hosts could silently drift,
 /// and each drift reads as a different bug in the shipped game: arm 1 as a
-/// character that vanishes instead of showing a placeholder, arm 2 as one that is
-/// invisible until it plays, arm 3 as one frozen in its bind pose. None of them
-/// is visible to a compiler, and only arm 3 would even show up in a scene-level
-/// comparison of the two hosts.
+/// character that vanishes instead of showing a placeholder, arm 2 as one whose
+/// **state machine drives the shipped build and not the preview** (or the
+/// reverse), arm 3 as one that is invisible until it plays, arm 4 as one frozen
+/// in its bind pose. None of them is visible to a compiler, and only arms 2 and 4
+/// would even show up in a scene-level comparison of the two hosts.
 ///
 /// **The one permitted difference**, normalized below: the editor's store resolves
 /// lazily into its own maps and is owned mutably by the viewport (`&mut self`);
 /// the player's memoizes behind its own locks because the projector holds it
 /// immutably (`&self`). That is a difference in *who owns the cache*, not in the
 /// rule.
+///
+/// The **doc block is compared too** since P24.1 — see
+/// [`extract_method_with_doc`] for the hole that closes.
 #[test]
 fn the_skinned_pose_rule_is_identical_in_both_stores() {
-    let raw = extract_method(&read(EDITOR_ASSETS), "resolve_skinned");
+    let raw = extract_method_with_doc(&read(EDITOR_ASSETS), "resolve_skinned");
     // The normalization must rewrite the RECEIVER and nothing else. A second
     // `&mut self` anywhere in the body would be silently erased along with it, and
     // an interior-mutability divergence is exactly the kind of difference this gate
@@ -785,7 +839,7 @@ fn the_skinned_pose_rule_is_identical_in_both_stores() {
         "`resolve_skinned` contains more than one `&mut self`; the receiver          normalization below would erase the others too"
     );
     let mine = raw.replace("&mut self", "&self");
-    let theirs = extract_method(&read(PLAYER_ASSETS), "resolve_skinned");
+    let theirs = extract_method_with_doc(&read(PLAYER_ASSETS), "resolve_skinned");
     assert_eq!(
         mine, theirs,
         "the editor's and the player's `resolve_skinned` have drifted — the two \
@@ -805,10 +859,16 @@ fn the_shared_pose_rule_is_not_a_stub() {
         "let mesh_id = sm.mesh?;",
         "let skeleton_id = sm.skeleton?;",
         "if skeleton.is_empty() {",
-        // Arm 3 — the play-head sampled through the shared Ring-0 sampler,
+        // Arm 2 (P24.1) — the SIM's pose, and both of its guards. A host that
+        // took `posed` without checking the skeleton would wear another rig's
+        // pose; one that dropped the arm entirely would draw a machine-driven
+        // character at rest while the other host animated it.
+        "posed.filter(|p| p.skeleton == skeleton_id && p.pose.len() == skeleton.len())",
+        "(Some(p), _) => p.pose.clone(),",
+        // Arm 4 — the play-head sampled through the shared Ring-0 sampler,
         // `looping` included (a host that dropped it would loop a one-shot).
         "inf_anim::sample_clip(&skeleton, &clip, p.t as f32, p.looping)",
-        // Arm 2 — rest pose for BOTH "no player/clip" and "clip did not resolve".
+        // Arm 3 — rest pose for BOTH "no player/clip" and "clip did not resolve".
         // Two occurrences, and the count is asserted below.
         "inf_anim::Pose::rest(&skeleton)",
         // The palette the skinned pass consumes, and the dedup key the projection
@@ -947,14 +1007,19 @@ fn the_skinned_instance_projection_matches_field_for_field() {
 #[test]
 fn both_projectors_draw_skeletal_meshes_the_same_way() {
     // Fragments that must appear in BOTH projectors, verbatim.
-    const SHARED: [&str; 10] = [
+    const SHARED: [&str; 11] = [
         // The branch is the `MeshRef`-absent arm: an entity is a rigid draw or a
         // skinned one, never both.
         "w.get::<MeshRef>(entity).is_none()",
         "w.get::<SkeletalMesh>(entity).copied()",
-        // The pose input, and the shared store call that applies the pose rule.
+        // The pose inputs, and the shared store call that applies the pose rule.
+        // `evaluated_pose` is the load-bearing one (P24.1): a host that stopped
+        // reading the sim's pose would draw every machine-driven character at
+        // rest while the other host animated it — the divergence a player finds
+        // and no pixel comparison in this repo would.
         "w.get::<inf_ecs::components::AnimPlayer>(entity).copied()",
-        "resolve_skinned(&sm, player.as_ref())",
+        "inf_ecs::pose::evaluated_pose(world, guid)",
+        "resolve_skinned(&sm, player.as_ref(), posed)",
         // ONE `skinned_meshes` slot per (mesh, skeleton) pair…
         "skinned_slots.entry(draw.key).or_insert_with(",
         // …and the entry is the store's own `Arc`, pushed with no copy.

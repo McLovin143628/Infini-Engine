@@ -7,9 +7,12 @@
 //! integration, run in `Guid`-independent (per-entity, order-free) fashion so it
 //! stays deterministic under any iteration order (§2.5).
 //!
-//! Pose *evaluation* (clip → skinning palette) is not done here — it happens at
-//! render projection time, where the skeleton/clip assets are available. This
-//! system only advances `t`; the wrap/clamp math lives on [`AnimPlayer::advance`].
+//! This system only advances `t`; the wrap/clamp math lives on
+//! [`AnimPlayer::advance`]. Turning an `AnimPlayer`'s play-head into a skinning
+//! palette is still render-projection work (the store has the clip bytes, this
+//! crate does not) — but a *state machine's* pose is not: since P24.1 it is
+//! evaluated at fixed step and published through [`crate::pose`], because it is
+//! what the renderer draws and what the socket attachments ride.
 
 use crate::components::AnimPlayer;
 use crate::world::EcsWorld;

@@ -82,9 +82,12 @@ pub async fn sim_start(
     // Resolve the scene's referenced anim assets (state machines + root-motion
     // clips) so an `AnimStateMachine` / `RootMotion` entity steps in Simulate
     // exactly as it will in the shipped player (P11.4).
-    let (machines, root_clips) = inf_editor_core::simulate::resolve_anim_assets(&doc, |guid| {
-        assets.load_anim_bytes(inf_asset::AssetId(guid))
-    });
+    // P24.1 adds the `.inf_skel` assets and the clips a machine's states play, so
+    // the machine drives the DRAWN pose rather than only its own runtime state.
+    let (machines, root_clips, skeletons, pose_clips) =
+        inf_editor_core::simulate::resolve_anim_assets(&doc, |guid| {
+            assets.load_anim_bytes(inf_asset::AssetId(guid))
+        });
     // Resolve the scene's referenced `.inf_audio` clips (P12.3) so an `AudioSource`
     // plays the same clip in Simulate as in the shipped player.
     let audio_clips = inf_editor_core::simulate::resolve_audio_assets(&doc, |guid| {
@@ -144,6 +147,8 @@ pub async fn sim_start(
     for (clip_guid, skeleton, clip) in root_clips {
         session.register_root_motion_clip(clip_guid, skeleton, clip);
     }
+    session.set_skeletons(skeletons);
+    session.set_pose_clips(pose_clips);
     session.set_audio_clips(audio_clips);
     session.set_voxel_volumes(voxel_volumes);
     // P22.3: what this level's destructible actors break into. DERIVED here, from

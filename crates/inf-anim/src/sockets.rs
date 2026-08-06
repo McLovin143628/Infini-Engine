@@ -72,6 +72,46 @@ pub fn find_socket<'a>(sockets: &'a [Socket], name: &str) -> Option<&'a Socket> 
     sockets.iter().find(|s| s.name == name)
 }
 
+/// Every socket's model-space transform for one pose, as `(name, matrix)` pairs
+/// **sorted by name**.
+///
+/// The batch form of [`socket_transform`], and the one a fixed step calls: it
+/// runs [`global_transforms`] **once** for the whole skeleton instead of once per
+/// socket, which is the difference between `O(joints)` and `O(sockets · joints)`
+/// per character per step. The per-socket rule is unchanged — `globals[joint] ·
+/// local_offset`, with the same defensive identity fallback for an out-of-range
+/// joint — and `socket_transforms_agree_with_the_single_socket_rule` below pins
+/// the two against each other so the fast path can never quietly mean something
+/// different from the definition.
+///
+/// Sorted by name because this is sim state: the attachment system looks a socket
+/// up by name, and a deterministic order makes the result of a *pose* a function
+/// of the skeleton alone rather than of the order sockets happened to be authored
+/// in. Duplicate names (which the editor does not produce) keep every entry; a
+/// lookup takes the first.
+pub fn socket_transforms(
+    skeleton: &Skeleton,
+    pose: &Pose,
+    sockets: &[Socket],
+) -> Vec<(String, Mat4)> {
+    if sockets.is_empty() {
+        return Vec::new();
+    }
+    let globals = global_transforms(skeleton, pose);
+    let mut out: Vec<(String, Mat4)> = sockets
+        .iter()
+        .map(|s| {
+            let base = globals
+                .get(s.joint as usize)
+                .copied()
+                .unwrap_or(Mat4::IDENTITY);
+            (s.name.clone(), base * s.local_offset.to_mat4())
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +173,39 @@ mod tests {
         let sockets = vec![Socket::new("a", 0), Socket::new("b", 1)];
         assert_eq!(find_socket(&sockets, "b").unwrap().joint, 1);
         assert!(find_socket(&sockets, "missing").is_none());
+    }
+
+    /// The batch form is the single-socket rule, run once per skeleton rather
+    /// than once per socket. If they ever disagreed, a character's weapon would
+    /// sit somewhere the socket editor's own preview says it does not.
+    #[test]
+    fn socket_transforms_agree_with_the_single_socket_rule() {
+        let sk = chain();
+        let mut pose = Pose::rest(&sk);
+        pose.locals[1].rotation = Quat::from_rotation_z(37f32.to_radians()).to_array();
+        let sockets = vec![
+            Socket::new("tip", 2).with_offset(JointTransform::from_trs(
+                Vec3::X,
+                Quat::from_rotation_y(0.3),
+                Vec3::ONE,
+            )),
+            Socket::new("base", 0),
+            // Out of range on purpose: the defensive fallback must be the same
+            // one on both paths.
+            Socket::new("ghost", 99),
+        ];
+        let batch = socket_transforms(&sk, &pose, &sockets);
+        assert_eq!(batch.len(), 3);
+        // Sorted by name — sim state, so the order is a property of the skeleton.
+        assert_eq!(
+            batch.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            vec!["base", "ghost", "tip"]
+        );
+        for s in &sockets {
+            let one = socket_transform(&sk, &pose, s);
+            let (_, many) = batch.iter().find(|(n, _)| n == &s.name).unwrap();
+            assert_eq!(one.to_cols_array(), many.to_cols_array(), "{}", s.name);
+        }
+        assert!(socket_transforms(&sk, &pose, &[]).is_empty());
     }
 }

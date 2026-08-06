@@ -1886,7 +1886,16 @@ impl EngineHost {
                     live_render_assets.extend(sm.skeleton);
                     let player = w.get::<inf_ecs::components::AnimPlayer>(entity).copied();
                     live_render_assets.extend(player.and_then(|p| p.clip));
-                    match self.render_assets.resolve_skinned(&sm, player.as_ref()) {
+                    // P24.1: the pose the SIM evaluated for this entity this fixed
+                    // step, if its `AnimStateMachine` published one. Read here rather
+                    // than derived here — the machine's pose is deterministic sim
+                    // state, folded into the trace, and a projector that re-evaluated
+                    // it would be a second opinion about what the character is doing.
+                    let posed = inf_ecs::pose::evaluated_pose(world, guid);
+                    match self
+                        .render_assets
+                        .resolve_skinned(&sm, player.as_ref(), posed)
+                    {
                         Some(draw) => {
                             // Real skinned geometry. PBR params come from the
                             // entity's `Material` exactly as they do on the rigid

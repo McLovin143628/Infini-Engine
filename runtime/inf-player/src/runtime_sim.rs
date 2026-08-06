@@ -40,7 +40,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use glam::{DQuat, DVec2, DVec3};
 use uuid::Uuid;
 
-use inf_anim::state_machine::{SmContext, SmRuntime, StateMachine};
+use inf_anim::state_machine::StateMachine;
 use inf_anim::{root_delta, AnimClip, Skeleton};
 use inf_audio::{
     Attenuation, AttenuationModel, AudioAsset, AudioCommand, AudioEngine, Listener, PlayCommand,
@@ -51,10 +51,9 @@ use inf_blueprint::interp::{
 use inf_blueprint::semantics::run_event;
 use inf_blueprint::{ActorInstance, BlueprintClass, EventKind, Host, InterpDebug, RunError, Value};
 use inf_ecs::components::{
-    AnimPlayer, AnimStateMachine, AudioListener, AudioSource, CharacterController2D,
-    CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
-    Destructible, DistanceModel, GlobalTransform, RootMotion, RootMotionMode, SmRuntimeState,
-    Terrain, Transform, VoxelVolume,
+    AnimPlayer, AudioListener, AudioSource, CharacterController2D, CharacterController3D,
+    Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, Destructible, DistanceModel,
+    GlobalTransform, RootMotion, RootMotionMode, Terrain, Transform, VoxelVolume,
 };
 use inf_ecs::{sim_snapshot, update_attachments, EcsWorld, Entity, Guid};
 use inf_physics::d3::{
@@ -176,6 +175,15 @@ pub struct RuntimeSim {
     /// Resolvable `.inf_sm` state machines keyed by asset GUID (P11.2). Entities
     /// with an `AnimStateMachine` whose `sm` GUID resolves here step each tick.
     state_machines: BTreeMap<Uuid, StateMachine>,
+    /// Resolvable `.inf_skel` assets keyed by asset GUID (P24.1) — the runtime
+    /// mirror of `SimSession::skeletons`. The skeleton a machine-driven
+    /// `SkeletalMesh` poses against, plus its authored sockets.
+    skeletons: BTreeMap<Uuid, inf_anim::SkeletonAsset>,
+    /// Resolvable `.inf_anim` clips a state machine's states **play**, keyed by
+    /// asset GUID (P24.1) — the runtime mirror of `SimSession::pose_clips`.
+    /// Distinct from [`clips`](Self::clips), which keys a clip *with the skeleton
+    /// it animates* because `root_delta` needs both.
+    pose_clips: BTreeMap<Uuid, AnimClip>,
     stepper: FixedStep,
     /// Actors keyed by `Guid` (deterministic iteration).
     actors: BTreeMap<Uuid, ActorState>,
@@ -326,6 +334,8 @@ impl RuntimeSim {
             bridge3d,
             clips: BTreeMap::new(),
             state_machines: BTreeMap::new(),
+            skeletons: BTreeMap::new(),
+            pose_clips: BTreeMap::new(),
             stepper: FixedStep::from_hz(hz),
             actors: states,
             entities,
@@ -390,6 +400,24 @@ impl RuntimeSim {
     /// GUID isn't registered simply doesn't step.
     pub fn set_state_machines(&mut self, machines: BTreeMap<Uuid, StateMachine>) {
         self.state_machines = machines;
+    }
+
+    /// Seed the resolvable `.inf_skel` assets (P24.1) — the runtime mirror of
+    /// `SimSession::set_skeletons`.
+    ///
+    /// Without them every machine still advances and none publishes a pose, so a
+    /// character falls back to its `AnimPlayer` (or its rest pose) — the
+    /// pre-P24.1 behaviour, which is why a boot path that forgets this door does
+    /// not crash and does not warn. `sim_from_built` is the one place that seeds
+    /// it, for exactly that reason.
+    pub fn set_skeletons(&mut self, skeletons: BTreeMap<Uuid, inf_anim::SkeletonAsset>) {
+        self.skeletons = skeletons;
+    }
+
+    /// Seed the resolvable `.inf_anim` clips a state machine's states play
+    /// (P24.1) — the runtime mirror of `SimSession::set_pose_clips`.
+    pub fn set_pose_clips(&mut self, clips: BTreeMap<Uuid, AnimClip>) {
+        self.pose_clips = clips;
     }
 
     /// Register a resolvable `.inf_audio` clip payload by asset GUID (P12.3) — the
@@ -678,8 +706,16 @@ impl RuntimeSim {
     }
 
     /// bincode of the `Guid`-sorted sim snapshot **followed by the surface
-    /// deformation field's bytes** — the per-step trace unit folded by the
-    /// determinism harness (same shape `inf_runtime::replay` hashes).
+    /// deformation field's bytes and the evaluated poses'** — the per-step trace
+    /// unit folded by the determinism harness (same shape `inf_runtime::replay`
+    /// hashes).
+    ///
+    /// P24.1 appends the poses on exactly the P22.1 argument below: the machine
+    /// now drives what is *drawn*, so the drawn pose is sim state, and appending
+    /// it here makes every gate the engine already has cover it at once — the
+    /// replay fold, `step_state_hash`, and the PIE `Frame::state_hash` the
+    /// `PIE == shipping` arms compare. A level that poses nothing produces an
+    /// empty vec, so every pre-P24.1 trace is byte-identical.
     ///
     /// P22.1 appends the field rather than tracing it separately, because that
     /// is what makes every gate the engine already has cover it at once: the
@@ -696,6 +732,7 @@ impl RuntimeSim {
         let mut out = bincode::serde::encode_to_vec(&snap, bincode::config::standard())
             .expect("sim snapshot is always encodable");
         out.extend_from_slice(&inf_ecs::deform::deform_state_bytes(&self.world));
+        out.extend_from_slice(&inf_ecs::pose::pose_state_bytes(&self.world));
         out
     }
 
@@ -964,45 +1001,42 @@ impl RuntimeSim {
         }
     }
 
-    /// Step every entity's [`AnimStateMachine`] (P11.2) whose `sm` GUID resolves
-    /// in [`state_machines`](Self::state_machines) — the runtime mirror of
-    /// `SimSession::advance_state_machines` (preview == shipped). Conditions +
-    /// blend params read the entity's actor Blueprint variables; an entity with no
-    /// actor gets an empty variable set (params default `0`). Order-independent →
-    /// deterministic.
+    /// Step every entity's [`AnimStateMachine`] (P11.2) **and evaluate the pose it
+    /// lands in** (P24.1), through the ONE Ring-0 rule both hosts call
+    /// ([`inf_ecs::pose::step_pose_evaluation`]) — the runtime mirror of
+    /// `SimSession::advance_state_machines` (preview == shipped).
+    ///
+    /// The loop this used to spell inline is gone: it was byte-identical to the
+    /// editor's, which is the shape `inf_ecs::deform` replaced. What is left is
+    /// *which registries answer*, which is genuinely host-local — the player
+    /// resolves them out of a cooked pack (or a PIE payload), the editor out of
+    /// the project's asset DB.
     fn advance_state_machines(&mut self, dt: f64) {
         if self.state_machines.is_empty() {
             return;
         }
-        let mut targets: Vec<(Entity, Uuid, Uuid, SmRuntimeState)> = Vec::new();
-        {
-            let w = self.world.world_mut();
-            let mut q = w.query::<(Entity, &Guid, &AnimStateMachine)>();
-            for (e, g, asm) in q.iter(w) {
-                if let Some(sm_guid) = asm.sm {
-                    targets.push((e, g.0, sm_guid, asm.runtime));
-                }
-            }
-        }
-        for (entity, guid, sm_guid, rt_state) in targets {
-            let Some(machine) = self.state_machines.get(&sm_guid) else {
-                continue;
-            };
-            let vars = self
-                .actors
-                .get(&guid)
+        // Split the borrow: the rule needs `&mut world` while the resolvers read
+        // sibling fields of the same struct.
+        let Self {
+            world,
+            state_machines,
+            skeletons,
+            pose_clips,
+            actors,
+            ..
+        } = self;
+        let (state_machines, skeletons, pose_clips, actors) =
+            (&*state_machines, &*skeletons, &*pose_clips, &*actors);
+        let machines = |g: Uuid| state_machines.get(&g);
+        let skels = |g: Uuid| skeletons.get(&g);
+        let clips = |c: inf_anim::ClipRef| pose_clips.get(&Uuid::from_bytes(c));
+        let vars = |g: Uuid| {
+            actors
+                .get(&g)
                 .map(|a| var_snapshot(&a.instance))
-                .unwrap_or_default();
-            let mut rt = to_anim_runtime(rt_state);
-            {
-                let lookup = |name: &str| vars.get(name).copied();
-                let ctx = SmContext::new(&lookup);
-                rt.advance(machine, &ctx, dt);
-            }
-            if let Some(mut asm) = self.world.world_mut().get_mut::<AnimStateMachine>(entity) {
-                asm.runtime = from_anim_runtime(rt);
-            }
-        }
+                .unwrap_or_default()
+        };
+        inf_ecs::pose::step_pose_evaluation(world, dt, &machines, &skels, &clips, &vars);
     }
 
     /// Snapshot the play-head `t` of every root-motion-driven playing entity
@@ -2526,34 +2560,13 @@ where
 }
 
 // ── P11.2 state-machine glue: ECS POD ↔ inf-anim runtime + var snapshot ──────
-// The editor `SimSession` duplicates these (preview == shipped) — see its docs
-// for why `SmRuntimeState` is a POD mirror kept out of `inf-anim`'s dep of `inf-ecs`.
-
-/// Convert the ECS component's transient runtime POD into the anim runtime.
-fn to_anim_runtime(s: SmRuntimeState) -> SmRuntime {
-    SmRuntime {
-        current: s.current,
-        prev: s.prev,
-        prev_time: s.prev_time,
-        fade_t: s.fade_t,
-        fade_dur: s.fade_dur,
-        state_time: s.state_time,
-        started: s.started,
-    }
-}
-
-/// Convert the advanced anim runtime back into the ECS component POD.
-fn from_anim_runtime(r: SmRuntime) -> SmRuntimeState {
-    SmRuntimeState {
-        current: r.current,
-        prev: r.prev,
-        prev_time: r.prev_time,
-        fade_t: r.fade_t,
-        fade_dur: r.fade_dur,
-        state_time: r.state_time,
-        started: r.started,
-    }
-}
+// P24.1: `to_anim_runtime` / `from_anim_runtime` used to live here, spelled
+// identically in this file and in the editor's `simulate.rs` — a hand-maintained
+// mirror pair for a struct-to-struct field copy. They are now
+// `inf_ecs::pose::{to_anim_runtime, from_anim_runtime}`, called by the one Ring-0
+// fixed-step rule both hosts share. `SmRuntimeState` itself stays a POD mirror:
+// the component derives `Reflect` + serde and `inf_anim::SmRuntime` derives
+// neither.
 
 /// A `name → f64` snapshot of an actor's Blueprint variables for the state
 /// machine's condition/param lookups (non-numeric values dropped; `Bool` → 1/0).

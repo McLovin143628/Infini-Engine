@@ -62,8 +62,16 @@
 //! (`&mut self` here, `&self` there — a difference in who owns the cache, not in the
 //! rule) as the single normalized token. Edit either side and the other must follow.
 //!
-//! The rule itself: rest pose, or the entity's [`AnimPlayer`] play-head sampled
-//! through [`inf_anim::sample_clip`].
+//! The rule itself (P24.1): the pose the **sim** evaluated for this entity when a
+//! state machine published one, else the entity's [`AnimPlayer`] play-head sampled
+//! through [`inf_anim::sample_clip`], else the rest pose.
+//!
+//! The **ONE permitted difference** between the two copies is the receiver:
+//! `&mut self` here (the viewport owns its store mutably) against `&self` there
+//! (that store memoizes behind its own locks because the projector holds it
+//! immutably). That is a difference in who owns the cache, not in the rule, and
+//! `projector_mirror.rs` normalizes exactly that token — doc block included —
+//! before comparing.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -72,6 +80,7 @@ use std::sync::Arc;
 use glam::Mat4;
 use inf_anim::{AnimClip, Skeleton};
 use inf_ecs::components::{AnimPlayer, SkeletalMesh};
+use inf_ecs::pose::EvaluatedPose;
 use inf_mesh::MeshAsset;
 use inf_render::{SkinnedMeshData, SkinnedVertex};
 use inf_vgeom::VgeomSource;
@@ -290,25 +299,38 @@ impl EditorRenderAssets {
         }
     }
 
-    /// Resolve a [`SkeletalMesh`] (+ its optional [`AnimPlayer`]) to a drawable
-    /// skinned instance: bind-space geometry plus the skinning palette for the
-    /// pose that is actually in force.
+    /// Resolve a [`SkeletalMesh`] (+ its optional [`AnimPlayer`], + the pose the
+    /// sim evaluated for this entity) to a drawable skinned instance: bind-space
+    /// geometry plus the skinning palette for the pose that is actually in force.
     ///
     /// The pose rule, in order:
     ///  1. no skeleton asset, or a skeleton with no joints ⇒ `None` (the caller
     ///     keeps the placeholder — a skinned mesh with no skeleton is not a
     ///     renderable thing);
-    ///  2. no `AnimPlayer`, or one with no clip, or a clip that will not resolve ⇒
+    ///  2. a `posed` entry from the sim ([`inf_ecs::pose`]) whose skeleton is the
+    ///     one bound here and whose joint count matches ⇒ **that pose**, because
+    ///     an `AnimStateMachine` beats an `AnimPlayer` and this is where "the
+    ///     machine wins" stops being a comment;
+    ///  3. no `AnimPlayer`, or one with no clip, or a clip that will not resolve ⇒
     ///     **rest pose** ([`inf_anim::Pose::rest`]);
-    ///  3. otherwise the clip sampled at the play-head, honouring `looping`.
+    ///  4. otherwise the clip sampled at the play-head, honouring `looping`.
     ///
-    /// Rule 2 is what makes a freshly dropped character *visible* rather than
-    /// invisible-until-you-press-play, and it is deliberately the same fallback the
-    /// components document (`AnimPlayer::clip: None → the bind pose`).
+    /// Rule 2's two guards are not defensive noise. The projector reads the pose
+    /// out of a sim-side store keyed by entity and resolves the skeleton out of
+    /// its own asset store: if a character were re-bound to a different rig
+    /// between the fixed step and the projection, applying the old pose would
+    /// deform it by another skeleton's hierarchy — silently, and only on the
+    /// frames where it happened. A mismatch falls through to rules 3/4, which is
+    /// always a pose the bound skeleton can wear.
+    ///
+    /// Rule 3 is what makes a freshly dropped character *visible* rather than
+    /// invisible-until-you-press-play, and it is deliberately the same fallback
+    /// the components document (`AnimPlayer::clip: None → the bind pose`).
     pub fn resolve_skinned(
         &mut self,
         sm: &SkeletalMesh,
         player: Option<&AnimPlayer>,
+        posed: Option<&EvaluatedPose>,
     ) -> Option<SkinnedDraw> {
         let mesh_id = sm.mesh?;
         let skeleton_id = sm.skeleton?;
@@ -317,12 +339,15 @@ impl EditorRenderAssets {
             return None;
         }
         let mesh = self.skinned_geometry(mesh_id, skeleton_id)?;
-        let pose = match player.and_then(|p| p.clip.map(|c| (p, c))) {
-            Some((p, clip_id)) => match self.clip(clip_id) {
+        let from_sim =
+            posed.filter(|p| p.skeleton == skeleton_id && p.pose.len() == skeleton.len());
+        let pose = match (from_sim, player.and_then(|p| p.clip.map(|c| (p, c)))) {
+            (Some(p), _) => p.pose.clone(),
+            (None, Some((p, clip_id))) => match self.clip(clip_id) {
                 Some(clip) => inf_anim::sample_clip(&skeleton, &clip, p.t as f32, p.looping),
                 None => inf_anim::Pose::rest(&skeleton),
             },
-            None => inf_anim::Pose::rest(&skeleton),
+            (None, None) => inf_anim::Pose::rest(&skeleton),
         };
         Some(SkinnedDraw {
             mesh,
@@ -812,7 +837,9 @@ mod tests {
             mesh: Some(mesh),
             skeleton: Some(skel),
         };
-        let draw = store.resolve_skinned(&sm, None).expect("rest pose draws");
+        let draw = store
+            .resolve_skinned(&sm, None, None)
+            .expect("rest pose draws");
         assert_eq!(draw.mesh.vertices.len(), 3);
         assert_eq!(draw.mesh.indices, vec![0, 1, 2]);
         assert_eq!(draw.palette.len(), 2, "one matrix per joint");
@@ -844,7 +871,7 @@ mod tests {
             skeleton: Some(skel),
         };
 
-        let rest = store.resolve_skinned(&sm, None).unwrap().palette;
+        let rest = store.resolve_skinned(&sm, None, None).unwrap().palette;
         let posed = store
             .resolve_skinned(
                 &sm,
@@ -856,6 +883,7 @@ mod tests {
                     t: 0.5,
                     ..AnimPlayer::default()
                 }),
+                None,
             )
             .unwrap()
             .palette;
@@ -872,6 +900,7 @@ mod tests {
                     t: 0.5,
                     ..AnimPlayer::default()
                 }),
+                None,
             )
             .unwrap()
             .palette;
@@ -889,7 +918,7 @@ mod tests {
             mesh: Some(mesh),
             skeleton: Some(skel),
         };
-        let rest = store.resolve_skinned(&sm, None).unwrap().palette;
+        let rest = store.resolve_skinned(&sm, None, None).unwrap().palette;
         let ghost = store
             .resolve_skinned(
                 &sm,
@@ -898,6 +927,7 @@ mod tests {
                     t: 0.5,
                     ..AnimPlayer::default()
                 }),
+                None,
             )
             .unwrap()
             .palette;
@@ -913,7 +943,7 @@ mod tests {
         store.set_content_root(Some(root));
 
         assert!(store
-            .resolve_skinned(&SkeletalMesh::default(), None)
+            .resolve_skinned(&SkeletalMesh::default(), None, None)
             .is_none());
         assert!(store
             .resolve_skinned(
@@ -921,7 +951,8 @@ mod tests {
                     mesh: Some(mesh),
                     skeleton: None
                 },
-                None
+                None,
+                None,
             )
             .is_none());
         assert!(store
@@ -930,7 +961,8 @@ mod tests {
                     mesh: Some(Uuid::from_u128(7)),
                     skeleton: Some(skel)
                 },
-                None
+                None,
+                None,
             )
             .is_none());
         // A rigid mesh with no skin stream is not skinned geometry.
@@ -954,5 +986,100 @@ mod tests {
         side.save(&payload).unwrap();
 
         assert!(content_paths_by_guid(dir.path()).is_empty());
+    }
+    /// An [`EvaluatedPose`] on `skeleton` with the tip joint bent 30° about X —
+    /// what a state machine in a non-entry state publishes.
+    fn bent_pose(skeleton: Uuid) -> EvaluatedPose {
+        let sk = two_joint_skeleton();
+        let mut pose = inf_anim::Pose::rest(&sk);
+        pose.locals[1].rotation = glam::Quat::from_rotation_x(30f32.to_radians()).to_array();
+        EvaluatedPose {
+            skeleton,
+            pose,
+            sockets: Vec::new(),
+        }
+    }
+
+    /// **The P24.1 headline gate, store half**: when the sim published a pose for
+    /// this entity, THAT is what the palette is built from — the `AnimPlayer` is
+    /// overruled, because an `AnimStateMachine` beats a clip play-head and this is
+    /// the only place that fact reaches the renderer.
+    #[test]
+    fn a_sim_evaluated_pose_beats_the_anim_player() {
+        let (_dir, root, mesh, skel, clip) = project_with_character();
+        let mut store = EditorRenderAssets::new();
+        store.set_content_root(Some(root));
+        let sm = SkeletalMesh {
+            mesh: Some(mesh),
+            skeleton: Some(skel),
+        };
+        let play = AnimPlayer {
+            clip: Some(clip),
+            t: 0.5,
+            ..AnimPlayer::default()
+        };
+
+        let rest = store.resolve_skinned(&sm, None, None).unwrap().palette;
+        let from_clip = store
+            .resolve_skinned(&sm, Some(&play), None)
+            .unwrap()
+            .palette;
+        let posed = bent_pose(skel);
+        let from_sim = store
+            .resolve_skinned(&sm, Some(&play), Some(&posed))
+            .unwrap()
+            .palette;
+
+        // All three are distinct: the machine's pose is neither the rest pose nor
+        // the clip's. (Comparing only against rest would pass for a store that
+        // simply kept sampling the clip.)
+        assert_ne!(from_sim[1].to_cols_array(), rest[1].to_cols_array());
+        assert_ne!(from_sim[1].to_cols_array(), from_clip[1].to_cols_array());
+        // …and with no player at all the sim pose still wins over rest.
+        let alone = store
+            .resolve_skinned(&sm, None, Some(&posed))
+            .unwrap()
+            .palette;
+        assert_eq!(alone[1].to_cols_array(), from_sim[1].to_cols_array());
+    }
+
+    /// Rule 2's guards: a pose evaluated against a **different skeleton**, or one
+    /// whose joint count does not match, is refused and the store falls through to
+    /// the `AnimPlayer` / rest arms. Applying it would deform a character by
+    /// another rig's hierarchy — silently, and only on the frames it happened.
+    #[test]
+    fn a_pose_from_another_skeleton_is_refused() {
+        let (_dir, root, mesh, skel, _clip) = project_with_character();
+        let mut store = EditorRenderAssets::new();
+        store.set_content_root(Some(root));
+        let sm = SkeletalMesh {
+            mesh: Some(mesh),
+            skeleton: Some(skel),
+        };
+        let rest = store.resolve_skinned(&sm, None, None).unwrap().palette;
+
+        let mut wrong_rig = bent_pose(skel);
+        wrong_rig.skeleton = Uuid::from_u128(0xBAD_5CE1);
+        assert_eq!(
+            store
+                .resolve_skinned(&sm, None, Some(&wrong_rig))
+                .unwrap()
+                .palette[1]
+                .to_cols_array(),
+            rest[1].to_cols_array(),
+            "a pose from another rig must not be worn"
+        );
+
+        let mut wrong_len = bent_pose(skel);
+        wrong_len.pose.locals.truncate(1);
+        assert_eq!(
+            store
+                .resolve_skinned(&sm, None, Some(&wrong_len))
+                .unwrap()
+                .palette[1]
+                .to_cols_array(),
+            rest[1].to_cols_array(),
+            "a pose with the wrong joint count must not be worn"
+        );
     }
 }

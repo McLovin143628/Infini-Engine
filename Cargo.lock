@@ -3030,6 +3030,7 @@ dependencies = [
  "bevy_tasks",
  "bincode",
  "glam 0.33.2",
+ "inf-anim",
  "inf-math",
  "inf-terrain",
  "inf-water",

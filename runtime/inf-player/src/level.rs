@@ -102,6 +102,15 @@ pub struct BuiltWorld {
     /// [`RuntimeSim::register_root_motion_clip`](crate::runtime_sim::RuntimeSim::register_root_motion_clip).
     /// A clip whose skeleton ref doesn't resolve is dropped (root motion needs it).
     pub root_clips: Vec<(Uuid, Skeleton, AnimClip)>,
+    /// Resolved `.inf_skel` assets keyed by asset GUID (P24.1) — the caller seeds
+    /// [`RuntimeSim::set_skeletons`](crate::runtime_sim::RuntimeSim::set_skeletons)
+    /// so a machine-driven character is posed by its machine rather than drawn at
+    /// rest. Sockets ride along (the attachment system reads them).
+    pub skeletons: BTreeMap<Uuid, inf_anim::SkeletonAsset>,
+    /// Resolved `.inf_anim` clips a state machine's states play, keyed by asset
+    /// GUID (P24.1) — the caller seeds
+    /// [`RuntimeSim::set_pose_clips`](crate::runtime_sim::RuntimeSim::set_pose_clips).
+    pub pose_clips: BTreeMap<Uuid, AnimClip>,
     /// Resolved `.inf_audio` clips keyed by asset GUID (P12.3) — the caller seeds
     /// [`RuntimeSim::set_audio_clips`](crate::runtime_sim::RuntimeSim::set_audio_clips)
     /// so a scene `AudioSource` plays the same clip as in the editor Simulate.
@@ -423,6 +432,35 @@ impl InfSceneWorldBuilder {
         out.sort_by_key(|(g, _, _)| *g);
         out
     }
+
+    /// The loaded `.inf_skel` assets, keyed by asset GUID (P24.1) — the map the
+    /// [`RuntimeSim`](crate::runtime_sim::RuntimeSim) poses machine-driven
+    /// characters against.
+    ///
+    /// Every indexed skeleton, not only the ones a `SkeletalMesh` names: the
+    /// source's anim index already resolved exactly the level's referenced set
+    /// (pack index / dev-dir sidecars / PIE payload), so filtering again here
+    /// would only risk dropping one.
+    fn resolve_skeletons(&self) -> BTreeMap<Uuid, SkeletonAsset> {
+        self.skeletons
+            .iter()
+            .map(|(g, a)| (*g, a.clone()))
+            .collect()
+    }
+
+    /// The loaded `.inf_anim` clips, keyed by asset GUID (P24.1) — the clips a
+    /// state machine's states play.
+    ///
+    /// Unlike [`resolve_root_clips`](Self::resolve_root_clips) this keeps clips
+    /// whose `skeleton` ref is `None` or unresolvable: the pose path takes its
+    /// skeleton from the *entity*, so a skeleton-agnostic clip is perfectly
+    /// playable — it is only root motion that needs the join.
+    fn resolve_pose_clips(&self) -> BTreeMap<Uuid, AnimClip> {
+        self.clips
+            .iter()
+            .map(|(g, ca)| (*g, ca.clip.clone()))
+            .collect()
+    }
 }
 
 impl WorldBuilder for InfSceneWorldBuilder {
@@ -513,6 +551,8 @@ impl WorldBuilder for InfSceneWorldBuilder {
             },
             state_machines: self.resolve_state_machines(),
             root_clips: self.resolve_root_clips(),
+            skeletons: self.resolve_skeletons(),
+            pose_clips: self.resolve_pose_clips(),
             audio_clips: self.resolve_audio_clips(),
             partition,
         })

@@ -38,7 +38,7 @@ use glam::{DQuat, DVec2, DVec3};
 use uuid::Uuid;
 
 // P11.3 root motion: the pure root-delta extractor + the clip/skeleton it reads.
-use inf_anim::state_machine::{SmContext, SmRuntime, StateMachine};
+use inf_anim::state_machine::StateMachine;
 use inf_anim::{root_delta, AnimClip, AnimClipAsset, Skeleton, SkeletonAsset, StateMachineAsset};
 use inf_audio::{
     Attenuation, AttenuationModel, AudioAsset, AudioCommand, AudioEngine, Listener, PlayCommand,
@@ -53,7 +53,7 @@ use inf_blueprint::{
 use inf_ecs::components::{
     AnimPlayer, AnimStateMachine, AudioListener, AudioSource, CharacterController2D,
     CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
-    Destructible, DistanceModel, GlobalTransform, RootMotion, RootMotionMode, SmRuntimeState,
+    Destructible, DistanceModel, GlobalTransform, RootMotion, RootMotionMode, SkeletalMesh,
     Terrain, Transform, VoxelVolume,
 };
 use inf_ecs::{update_attachments, EcsWorld, Entity, Guid};
@@ -194,6 +194,18 @@ pub struct SimSession {
     /// with an [`AnimStateMachine`] whose `sm` GUID resolves here are stepped each
     /// fixed tick.
     state_machines: BTreeMap<Uuid, StateMachine>,
+    /// Resolvable `.inf_skel` assets keyed by asset GUID (P24.1) — the skeleton a
+    /// machine-driven entity's [`SkeletalMesh`] names, plus its authored sockets.
+    /// Seeded via [`set_skeletons`](Self::set_skeletons); an entity whose skeleton
+    /// is absent still steps its machine and publishes no pose.
+    skeletons: BTreeMap<Uuid, inf_anim::SkeletonAsset>,
+    /// Resolvable `.inf_anim` clips a state machine's states **play**, keyed by
+    /// asset GUID (P24.1). Distinct from [`clips`](Self::clips), which keys a clip
+    /// *with the skeleton it animates* because `root_delta` needs both: the pose
+    /// path takes its skeleton from the entity, so it needs the clip alone. The
+    /// two overlap only when one clip is both an `AnimPlayer` clip on a
+    /// root-motion entity and a machine state's motion.
+    pose_clips: BTreeMap<Uuid, AnimClip>,
     /// Currently-held keys/actions.
     input: SimInput,
     /// Keys/actions held the previous tick (for rising-edge detection).
@@ -338,6 +350,10 @@ impl SimSession {
         //    run 1's footprints and its trace would not match the shipped
         //    player's, which starts from nothing every time.
         inf_ecs::deform::clear_deformation(doc.world_mut());
+        // ── P24.1 ── …and on an UNPOSED character, for exactly the same reason:
+        //    the evaluated-pose store is a resource too, so nothing above
+        //    captures it and nothing below would clear it.
+        inf_ecs::pose::clear_poses(doc.world_mut());
         let bridge = PhysicsBridge2D::new(gravity);
         // P11.3: a 3D bridge alongside the 2D one. The 2D vertical gravity maps to
         // world −Y; a character applies its own gravity through move_and_slide.
@@ -365,6 +381,8 @@ impl SimSession {
             entities,
             snapshot,
             state_machines: BTreeMap::new(),
+            skeletons: BTreeMap::new(),
+            pose_clips: BTreeMap::new(),
             input: SimInput::default(),
             prev_down: BTreeSet::new(),
             just_pressed: BTreeSet::new(),
@@ -469,6 +487,10 @@ impl SimSession {
         //    the class of bug the P21.4 "the render store IS the save's staging
         //    source" law was written about.
         inf_ecs::deform::clear_deformation(doc.world_mut());
+        // ── P24.1 ── the evaluated pose goes with it: a stopped session must not
+        //    leave the author's viewport drawing the last frame of a run's
+        //    animation over the document's own rest pose.
+        inf_ecs::pose::clear_poses(doc.world_mut());
     }
 
     /// Seed the resolvable `.inf_sm` state machines (P11.2). An entity carrying an
@@ -476,6 +498,27 @@ impl SimSession {
     /// tick against the actor's Blueprint variables.
     pub fn set_state_machines(&mut self, machines: BTreeMap<Uuid, StateMachine>) {
         self.state_machines = machines;
+    }
+
+    /// Seed the resolvable `.inf_skel` assets (P24.1) — the skeletons a
+    /// machine-driven [`SkeletalMesh`] poses against, sockets included.
+    ///
+    /// Without them `advance_state_machines` still advances every machine, and
+    /// publishes no pose at all: the drawn character falls back to its
+    /// `AnimPlayer` (or its rest pose), which is exactly the pre-P24.1 behaviour.
+    /// So a caller that forgets this door regresses rendering silently — which is
+    /// why `resolve_anim_assets` returns skeletons and clips in the SAME seed
+    /// tuple as the machines, and why the shipped player's builder resolves all
+    /// three together.
+    pub fn set_skeletons(&mut self, skeletons: BTreeMap<Uuid, inf_anim::SkeletonAsset>) {
+        self.skeletons = skeletons;
+    }
+
+    /// Seed the resolvable `.inf_anim` clips a state machine's states play
+    /// (P24.1). See [`pose_clips`](Self::pose_clips) for why this is not the
+    /// root-motion registry.
+    pub fn set_pose_clips(&mut self, clips: BTreeMap<Uuid, AnimClip>) {
+        self.pose_clips = clips;
     }
 
     /// Seed the simulation's fracture states (P22.3), keyed by entity `Guid`.
@@ -818,53 +861,40 @@ impl SimSession {
         }
     }
 
-    /// Step every entity's [`AnimStateMachine`] (P11.2) whose `sm` GUID resolves
-    /// in [`state_machines`](Self::state_machines). The transition conditions and
-    /// blend-space params read the entity's *actor* Blueprint variables (via the
-    /// [`SmContext`] seam); an entity with no actor gets an empty variable set, so
-    /// every param defaults to `0` (documented). Order-independent per entity →
-    /// deterministic. Runtime state lives on the component; only `t`-like play
-    /// state advances here (pose evaluation is render-time, the same placeholder
-    /// gap as [`inf_ecs::components::SkeletalMesh`]).
+    /// Step every entity's [`AnimStateMachine`] (P11.2) **and evaluate the pose it
+    /// lands in** (P24.1), through the ONE Ring-0 rule both hosts call
+    /// ([`inf_ecs::pose::step_pose_evaluation`]).
+    ///
+    /// Everything this used to spell inline — the read pass, the runtime POD
+    /// conversion, the `SmContext` seam, the write-back — now lives once, in
+    /// Ring 0, for the reason `inf_ecs::deform` records: two byte-identical loops
+    /// are two loops that can drift, and this one is the difference between the
+    /// preview and the shipped build posing a character the same way. All that is
+    /// left here is *which registries answer*, which is genuinely host-local (the
+    /// editor resolves them out of the project's asset DB, the player out of a
+    /// cooked pack).
+    ///
+    /// Transition conditions and blend-space params still read the entity's
+    /// *actor* Blueprint variables; an entity with no actor gets an empty variable
+    /// set, so every param defaults to `0` (documented, unchanged).
     fn advance_state_machines(&mut self, doc: &mut SceneDoc, dt: f64) {
         if self.state_machines.is_empty() {
             return;
         }
-        // Collect targets first so the mutable write-back doesn't overlap the read
-        // query. `(entity, guid, sm_guid, runtime-snapshot)`.
-        let mut targets: Vec<(Entity, Uuid, Uuid, SmRuntimeState)> = Vec::new();
-        {
-            let w = doc.world_mut().world_mut();
-            let mut q = w.query::<(Entity, &Guid, &AnimStateMachine)>();
-            for (e, g, asm) in q.iter(w) {
-                if let Some(sm_guid) = asm.sm {
-                    targets.push((e, g.0, sm_guid, asm.runtime));
-                }
-            }
-        }
-        for (entity, guid, sm_guid, rt_state) in targets {
-            let Some(machine) = self.state_machines.get(&sm_guid) else {
-                continue;
-            };
-            let vars = self
-                .actors
-                .get(&guid)
+        let state_machines = &self.state_machines;
+        let skeletons = &self.skeletons;
+        let pose_clips = &self.pose_clips;
+        let actors = &self.actors;
+        let machines = |g: Uuid| state_machines.get(&g);
+        let skels = |g: Uuid| skeletons.get(&g);
+        let clips = |c: inf_anim::ClipRef| pose_clips.get(&Uuid::from_bytes(c));
+        let vars = |g: Uuid| {
+            actors
+                .get(&g)
                 .map(|a| var_snapshot(&a.instance))
-                .unwrap_or_default();
-            let mut rt = to_anim_runtime(rt_state);
-            {
-                let lookup = |name: &str| vars.get(name).copied();
-                let ctx = SmContext::new(&lookup);
-                rt.advance(machine, &ctx, dt);
-            }
-            if let Some(mut asm) = doc
-                .world_mut()
-                .world_mut()
-                .get_mut::<AnimStateMachine>(entity)
-            {
-                asm.runtime = from_anim_runtime(rt);
-            }
-        }
+                .unwrap_or_default()
+        };
+        inf_ecs::pose::step_pose_evaluation(doc.world_mut(), dt, &machines, &skels, &clips, &vars);
     }
 
     /// Fire `event` (no args) on every actor.
@@ -2479,31 +2509,11 @@ fn clamp_material(m: i64) -> u8 {
 // `inf-anim` dep — see the `SmRuntimeState` docs). Duplicated in the shipped
 // player's `runtime_sim` for the same "preview == shipped" reason `SimHost` is.
 
-/// Convert the ECS component's transient runtime POD into the anim runtime.
-fn to_anim_runtime(s: SmRuntimeState) -> SmRuntime {
-    SmRuntime {
-        current: s.current,
-        prev: s.prev,
-        prev_time: s.prev_time,
-        fade_t: s.fade_t,
-        fade_dur: s.fade_dur,
-        state_time: s.state_time,
-        started: s.started,
-    }
-}
-
-/// Convert the advanced anim runtime back into the ECS component POD.
-fn from_anim_runtime(r: SmRuntime) -> SmRuntimeState {
-    SmRuntimeState {
-        current: r.current,
-        prev: r.prev,
-        prev_time: r.prev_time,
-        fade_t: r.fade_t,
-        fade_dur: r.fade_dur,
-        state_time: r.state_time,
-        started: r.started,
-    }
-}
+// P24.1: `to_anim_runtime` / `from_anim_runtime` used to live here, spelled
+// identically in this file and in the player's `runtime_sim` — a hand-maintained
+// mirror pair for a struct-to-struct field copy. They are now
+// `inf_ecs::pose::{to_anim_runtime, from_anim_runtime}`, called by the one Ring-0
+// fixed-step rule both hosts share.
 
 /// A `name → f64` snapshot of an actor's Blueprint variables, for the state
 /// machine's condition/param lookups. Non-numeric values (strings, unit, …) are
@@ -2531,10 +2541,19 @@ fn value_as_f64(v: &Value) -> Option<f64> {
 pub type ActorGuid = Guid;
 
 /// The seed maps [`resolve_anim_assets`] produces: the `.inf_sm` state machines
-/// (keyed by asset GUID) and the root-motion `(clip GUID, skeleton, clip)` triples.
+/// (keyed by asset GUID), the root-motion `(clip GUID, skeleton, clip)` triples,
+/// and — P24.1 — the `.inf_skel` assets and the clips a machine's states play.
+///
+/// A tuple, and a growing one, deliberately: every consumer seeds **all** of it
+/// (`SimSession::set_state_machines` + `register_root_motion_clip` +
+/// `set_skeletons` + `set_pose_clips`), so a caller that ignores an element fails
+/// to compile rather than quietly running a session whose characters never move.
+/// That is the same argument the PIE payload's positional tail records.
 pub type AnimSeed = (
     BTreeMap<Uuid, StateMachine>,
     Vec<(Uuid, Skeleton, AnimClip)>,
+    BTreeMap<Uuid, inf_anim::SkeletonAsset>,
+    BTreeMap<Uuid, AnimClip>,
 );
 
 /// Resolve a scene's referenced P11 animation assets into the seed maps a
@@ -2543,11 +2562,24 @@ pub type AnimSeed = (
 /// `(clip GUID, skeleton, clip)` triples it registers. `resolve_anim` reads an
 /// anim asset's raw bytes by GUID (the caller backs it with the project asset DB /
 /// the pack). A machine/clip whose bytes don't resolve is skipped; a clip whose
-/// skeleton doesn't resolve is dropped (root motion needs it). Deterministic
-/// (`BTreeMap`/Guid order). The caller seeds
-/// [`SimSession::set_state_machines`] + [`SimSession::register_root_motion_clip`]
-/// from the result — the editor Simulate twin of the player's
-/// `InfSceneWorldBuilder` anim resolution, so preview == shipped.
+/// skeleton doesn't resolve is dropped from the *root-motion* set (root motion
+/// needs it) but still reaches the pose set. Deterministic (`BTreeMap`/Guid
+/// order). The caller seeds [`SimSession::set_state_machines`] +
+/// [`SimSession::register_root_motion_clip`] + [`SimSession::set_skeletons`] +
+/// [`SimSession::set_pose_clips`] from the result — the editor Simulate twin of
+/// the player's `InfSceneWorldBuilder` anim resolution, so preview == shipped.
+///
+/// # The P24.1 transitive walk
+///
+/// Before this batch the walk stopped at the **directly referenced** GUIDs:
+/// `SkeletalMesh.skeleton`, `AnimPlayer.clip`, `AnimStateMachine.sm`. That was
+/// enough while the machine only ever advanced its own runtime state. Now the
+/// machine evaluates a **pose**, which needs the clips its own states play — and
+/// those are named inside the `.inf_sm`, not by any component. So each resolved
+/// machine is walked for its motions ([`machine_clip_refs`]) and each named clip
+/// is resolved through the same closure and the same dedupe. Without that hop a
+/// machine-driven character would resolve its machine, step it correctly, and
+/// draw its rest pose — the exact defect P24.1 exists to repair, one level up.
 pub fn resolve_anim_assets<H>(doc: &SceneDoc, mut resolve_anim: H) -> AnimSeed
 where
     H: FnMut(Uuid) -> Option<Vec<u8>>,
@@ -2555,12 +2587,23 @@ where
     use std::collections::btree_map::Entry;
     let mut machines: BTreeMap<Uuid, StateMachine> = BTreeMap::new();
     let mut clips: BTreeMap<Uuid, (Skeleton, AnimClip)> = BTreeMap::new();
+    let mut skeletons: BTreeMap<Uuid, SkeletonAsset> = BTreeMap::new();
+    let mut pose_clips: BTreeMap<Uuid, AnimClip> = BTreeMap::new();
     let world = doc.world();
     for &guid in doc.order() {
         let Some(e) = world.entity_of(guid) else {
             continue;
         };
         let w = world.world();
+        if let Some(sk_guid) = w.get::<SkeletalMesh>(e).and_then(|s| s.skeleton) {
+            if let Entry::Vacant(v) = skeletons.entry(sk_guid) {
+                if let Some(asset) =
+                    resolve_anim(sk_guid).and_then(|b| inf_asset::decode::<SkeletonAsset>(&b).ok())
+                {
+                    v.insert(asset);
+                }
+            }
+        }
         if let Some(sm_guid) = w.get::<AnimStateMachine>(e).and_then(|s| s.sm) {
             if let Entry::Vacant(v) = machines.entry(sm_guid) {
                 if let Some(asset) = resolve_anim(sm_guid)
@@ -2587,8 +2630,46 @@ where
             }
         }
     }
+    // The transitive hop: every clip a resolved machine's states play (P24.1).
+    let refs: Vec<Uuid> = machines
+        .values()
+        .flat_map(machine_clip_refs)
+        .collect::<BTreeSet<Uuid>>()
+        .into_iter()
+        .collect();
+    for clip_guid in refs {
+        if let Entry::Vacant(v) = pose_clips.entry(clip_guid) {
+            if let Some(ca) =
+                resolve_anim(clip_guid).and_then(|b| inf_asset::decode::<AnimClipAsset>(&b).ok())
+            {
+                v.insert(ca.clip);
+            }
+        }
+    }
     let root_clips = clips.into_iter().map(|(g, (s, c))| (g, s, c)).collect();
-    (machines, root_clips)
+    (machines, root_clips, skeletons, pose_clips)
+}
+
+/// Every `.inf_anim` GUID a state machine's states play, `Guid`-sorted and
+/// deduplicated — the single-clip states and every entry of every blend space.
+///
+/// One walk, in Ring 1, called by the editor's resolver and by the PIE payload
+/// builder. A second copy would be the drift this batch is repairing: a payload
+/// that shipped fewer clips than the sim resolves is a character that animates in
+/// Simulate and stands still in PIE.
+pub fn machine_clip_refs(machine: &StateMachine) -> BTreeSet<Uuid> {
+    use inf_anim::Motion;
+    let mut out = BTreeSet::new();
+    for state in &machine.states {
+        match &state.motion {
+            Motion::Clip(c) => {
+                out.insert(Uuid::from_bytes(*c));
+            }
+            Motion::Blend1D(s) => out.extend(s.entries.iter().map(|e| Uuid::from_bytes(e.clip))),
+            Motion::Blend2D(s) => out.extend(s.entries.iter().map(|e| Uuid::from_bytes(e.clip))),
+        }
+    }
+    out
 }
 
 /// Resolve every `.inf_audio` clip an [`AudioSource`] in `doc` references, keyed by

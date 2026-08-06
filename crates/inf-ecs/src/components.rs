@@ -2122,7 +2122,14 @@ fn default_params_from_vars() -> bool {
 /// evaluates its transition conditions against the actor's Blueprint variables
 /// and cross-fades between states (see `inf_anim::state_machine`). An entity may
 /// carry either an [`AnimPlayer`] or an `AnimStateMachine`; when both are present
-/// the **state machine wins** (documented in the Simulate/runtime tick).
+/// the **state machine wins**.
+///
+/// "Wins" was true of the sim and false of the renderer until P24.1: both fixed
+/// steps advanced this component correctly and both render stores read only
+/// `AnimPlayer.clip + t`, so a character in a non-entry state drew its rest pose.
+/// [`crate::pose::step_pose_evaluation`] is what makes the sentence true — the
+/// same fixed step evaluates the machine's pose and publishes it, and both
+/// projectors prefer it over the `AnimPlayer`.
 ///
 /// ## Persistence — the same v-slot gap as [`SkeletalMesh`] / [`AnimPlayer`]
 ///

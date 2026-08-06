@@ -147,6 +147,8 @@ pub fn build() -> BuiltWorld {
         label: "platformer-demo".to_string(),
         state_machines: std::collections::BTreeMap::new(),
         root_clips: Vec::new(),
+        skeletons: std::collections::BTreeMap::new(),
+        pose_clips: std::collections::BTreeMap::new(),
         audio_clips: std::collections::BTreeMap::new(),
         // The programmatic demo is a single document — nothing streams.
         partition: crate::level::PartitionContent::None,

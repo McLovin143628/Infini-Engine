@@ -18,6 +18,7 @@ pub mod deform;
 pub mod hierarchy;
 pub mod hydro;
 pub mod math;
+pub mod pose;
 pub mod props;
 pub mod refs;
 pub mod registry;

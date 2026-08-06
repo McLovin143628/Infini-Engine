@@ -7,9 +7,12 @@
 //! the `SmContext` seam; an entity with no actor gets an empty variable set, so
 //! params default to `0` — exercised here (the entity is not a blueprint actor).
 //!
-//! Pose evaluation → skinning palette is render-time (the same placeholder gap as
-//! `SkeletalMesh`); this test asserts the *runtime state* advances, which is what
-//! the tick owns.
+//! Pose evaluation → skinning palette **used to be** render-time (the same
+//! placeholder gap as `SkeletalMesh`), and P24.1 closed that: the same fixed step
+//! now evaluates the machine's pose and publishes it for both projectors
+//! (`inf_ecs::pose`). This file still asserts only the *runtime state*, which is
+//! the narrower claim it was written for; the pose half is
+//! `runtime/inf-player/tests/pose_parity.rs`.
 
 use std::collections::BTreeMap;
 
