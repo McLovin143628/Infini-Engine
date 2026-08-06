@@ -21,13 +21,19 @@
 //! * **template body plans** ([`template`], P24.1) generate rigs that use the
 //!   [`retarget::humanoid_joint_names`] vocabulary verbatim.
 //!
+//! * **IK** ([`ik`], P24.2) is a post-pass over an evaluated pose, applied inside
+//!   `inf_ecs::pose::step_pose_evaluation` so both hosts inherit it — and it is
+//!   `sqrt`-only, because its result rides the sim trace.
+//!
 //! Still open: **cubic tracks** — [`clip::Interpolation`] keeps `Step`/`Linear`
-//! and cubic is resampled to linear on import (documented in [`clip`]); and IK
-//! (P24.2), which will read [`template::JointLimit`].
+//! and cubic is resampled to linear on import (documented in [`clip`]); and
+//! **[`template::JointLimit`] is not yet read by the solver** (see [`ik`]).
 
 pub mod asset;
 pub mod blend_space;
 pub mod clip;
+// P24.2 inverse kinematics: the post-pass over an evaluated pose.
+pub mod ik;
 pub mod pose;
 pub mod skeleton;
 pub mod state_machine;
@@ -45,6 +51,10 @@ pub use blend_space::{
     BlendEntry2D, BlendSpace1D, BlendSpace2D, ClipRef,
 };
 pub use clip::{AnimClip, Interpolation, JointTrack, QuatTrack, Vec3Track};
+pub use ik::{
+    fabrik, rotation_between, solve_chain, two_bone_positions, IkError, IkReport,
+    FABRIK_ITERATIONS, MIN_BONE_LENGTH_M, REACH_TOLERANCE_M,
+};
 pub use pose::{
     advance_clip_time, blend_poses, global_transforms, sample_clip, skinning_matrices, Pose,
 };

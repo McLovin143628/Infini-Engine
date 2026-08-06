@@ -43,6 +43,10 @@
 //! * still sim state in every sense that matters: written only from the fixed
 //!   step, a pure function of the step history.
 //!
+//! Since P24.2 the same slot also applies **IK** ([`inf_anim::ik`]) as a post-pass
+//! over the evaluated pose, from [`IkTargetsRes`] — a second resource, for the
+//! same reasons and with the schema ruling written down on the type.
+//!
 //! The resource is **absent** until a machine actually evaluates a pose, and it
 //! is removed again the moment none does — so a level with no `AnimStateMachine`
 //! (or one whose skeletons do not resolve) is byte-identical to its pre-P24.1
@@ -97,6 +101,91 @@ pub fn from_anim_runtime(r: SmRuntime) -> SmRuntimeState {
         state_time: r.state_time,
         started: r.started,
     }
+}
+
+/// One IK goal: a chain of joints, where its tip must go, and which way it
+/// bends.
+///
+/// Model space — the same frame [`EvaluatedPose::pose`] is evaluated in — so a
+/// goal is a statement about the character's own body and not about where it is
+/// standing. A caller with a world-space target converts once, at its own edge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IkGoal {
+    /// Joint indices from the chain's root to its tip, each the parent of the
+    /// next. A chain that is not a parent walk is refused by
+    /// [`inf_anim::solve_chain`], as a value.
+    pub chain: Vec<u16>,
+    /// Where the tip must go (model space, metres).
+    pub target: [f32; 3],
+    /// A point the middle of the chain bends toward — a knee's forward, an
+    /// elbow's back. `None` keeps the pose's existing bend.
+    pub pole: Option<[f32; 3]>,
+}
+
+/// **Every entity's IK goals**, keyed by [`Guid`] — a bevy resource, exactly like
+/// [`PoseStoreRes`].
+///
+/// # THE SCHEMA RULING (P24.2), stated where it is implemented
+///
+/// An `IkTarget` **component** was the obvious home and it is not available:
+/// `inf_scene::EntityRecord` is a positional bincode struct with one
+/// `Option<T>` field per component type, so adding one appends a field and moves
+/// the wire — which is exactly how P22.2's `Destructible` took the scene from
+/// v19 to **v20**. Scene v20 is frozen for this batch, so the authored component
+/// is deferred to P24.3 rather than spending the phase's bump here.
+///
+/// What that leaves is the [`crate::deform::DeformFieldRes`] doctrine, which is
+/// the right shape for what IK targets *are* at runtime anyway: a resource is
+/// **written only from the fixed step's inputs and can never be saved**, so a
+/// foot planted on a slope this frame cannot end up in the author's document. It
+/// is sim state in every sense that matters — a pure function of the step history
+/// — and, because [`step_pose_evaluation`] reads it, **both hosts inherit IK with
+/// no host-side change at all**: no signature moved, no call site moved, and the
+/// two fixed steps cannot drift because neither of them knows this happened.
+///
+/// The resource is **absent** until something sets a goal, so a level with no IK
+/// is byte-identical to its pre-P24.2 self, `pose_state_bytes` included.
+#[derive(Resource, Default, Debug, Clone, PartialEq)]
+pub struct IkTargetsRes(pub BTreeMap<Uuid, Vec<IkGoal>>);
+
+/// **The write door.** Set (or replace) an entity's IK goals.
+///
+/// An empty list removes the entity's entry, and emptying the last entry removes
+/// the resource — so "no IK" has exactly one representation and a level that
+/// stops using it stops paying for it in the trace.
+pub fn set_ik_goals(world: &mut EcsWorld, guid: Uuid, goals: Vec<IkGoal>) {
+    let w = world.world_mut();
+    if goals.is_empty() {
+        let empty = match w.get_resource_mut::<IkTargetsRes>() {
+            Some(mut res) => {
+                res.0.remove(&guid);
+                res.0.is_empty()
+            }
+            None => return,
+        };
+        if empty {
+            w.remove_resource::<IkTargetsRes>();
+        }
+        return;
+    }
+    if !w.contains_resource::<IkTargetsRes>() {
+        w.insert_resource(IkTargetsRes::default());
+    }
+    w.resource_mut::<IkTargetsRes>().0.insert(guid, goals);
+}
+
+/// The goals set for `guid`, if any — the read door the fixed step goes through.
+pub fn ik_goals(world: &EcsWorld, guid: Uuid) -> Option<&[IkGoal]> {
+    world
+        .world()
+        .get_resource::<IkTargetsRes>()
+        .and_then(|r| r.0.get(&guid))
+        .map(Vec::as_slice)
+}
+
+/// **Forget every IK goal.** The twin of [`clear_poses`], and called by it.
+pub fn clear_ik_goals(world: &mut EcsWorld) {
+    world.world_mut().remove_resource::<IkTargetsRes>();
 }
 
 /// One entity's pose as the sim evaluated it this fixed step.
@@ -169,8 +258,15 @@ pub fn posed_count(world: &EcsWorld) -> usize {
 /// would keep deforming the author's document.
 ///
 /// Idempotent, and a no-op on a world that never posed anything.
+///
+/// **It clears the IK goals too** (P24.2), through this one door rather than a
+/// second call every caller would have to remember. A goal is the *input* the
+/// pose was produced from, so leaving it behind would let a stopped session's
+/// last foot plant bend the author's character on the next Simulate — the same
+/// leak `clear_deformation` exists to stop, one level up.
 pub fn clear_poses(world: &mut EcsWorld) {
     world.world_mut().remove_resource::<PoseStoreRes>();
+    clear_ik_goals(world);
 }
 
 /// The evaluated poses' canonical bytes, or an empty vec when nothing is posed —
@@ -280,6 +376,16 @@ pub fn step_pose_evaluation<'c>(
     targets.sort_by_key(|(_, guid, _, _, _)| *guid);
 
     // 2. Advance + evaluate.
+    //
+    // The IK goals are lifted out of the world FIRST, because the write-back
+    // below needs `&mut EcsWorld` and a borrow of the resource would outlive it.
+    // Cloned rather than referenced for the same reason; a goal is a chain and
+    // two floats, and a level has a handful.
+    let goals: BTreeMap<Uuid, Vec<IkGoal>> = world
+        .world()
+        .get_resource::<IkTargetsRes>()
+        .map(|r| r.0.clone())
+        .unwrap_or_default();
     let mut posed: BTreeMap<Uuid, EvaluatedPose> = BTreeMap::new();
     for (entity, guid, sm_guid, rt_state, skeleton_id) in targets {
         let Some(machine) = machines(sm_guid) else {
@@ -295,7 +401,28 @@ pub fn step_pose_evaluation<'c>(
             if let Some(id) = skeleton_id {
                 if let Some(asset) = skeletons(id) {
                     if !asset.skeleton.is_empty() {
-                        let pose = inf_anim::eval_pose(machine, &rt, &asset.skeleton, clips, &ctx);
+                        let mut pose =
+                            inf_anim::eval_pose(machine, &rt, &asset.skeleton, clips, &ctx);
+                        // ── P24.2 IK: a POST-PASS, before anything reads the
+                        //    pose ──
+                        //
+                        // Here and not in a projector: the sockets below are
+                        // derived from this pose and the trace is folded from it,
+                        // so IK applied later would be a pose the attachments and
+                        // every determinism gate could not see. Goals are applied
+                        // in the order they were set; a refusal (a chain that is
+                        // not a chain, a degenerate bone, a non-finite target) is
+                        // a **value**, and the pose it refused on is untouched —
+                        // so one bad goal costs its own chain and nothing else.
+                        for goal in goals.get(&guid).map(Vec::as_slice).unwrap_or(&[]) {
+                            let _ = inf_anim::solve_chain(
+                                &asset.skeleton,
+                                &mut pose,
+                                &goal.chain,
+                                glam::Vec3::from_array(goal.target),
+                                goal.pole.map(glam::Vec3::from_array),
+                            );
+                        }
                         let sockets =
                             inf_anim::socket_transforms(&asset.skeleton, &pose, &asset.sockets);
                         posed.insert(

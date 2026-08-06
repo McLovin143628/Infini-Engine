@@ -170,6 +170,12 @@ fn character() -> (AnimStateMachine, SkeletalMesh, AnimPlayer) {
 // ── the two hosts ───────────────────────────────────────────────────────────
 
 fn player_trace() -> Vec<Vec<u8>> {
+    player_trace_with_ik(None)
+}
+
+/// The player's trace, optionally with an IK goal set through the Ring-0 write
+/// door before the first step (P24.2).
+fn player_trace_with_ik(goal: Option<inf_ecs::IkGoal>) -> Vec<Vec<u8>> {
     let mut world = EcsWorld::new();
     let e = world.spawn_with_guid(HERO, "Hero", None);
     world.world_mut().entity_mut(e).insert(character());
@@ -178,6 +184,9 @@ fn player_trace() -> Vec<Vec<u8>> {
     sim.set_state_machines(machines());
     sim.set_skeletons(skeletons());
     sim.set_pose_clips(pose_clips());
+    if let Some(g) = goal {
+        inf_ecs::set_ik_goals(sim.world_mut(), HERO, vec![g]);
+    }
     (0..STEPS)
         .map(|_| {
             sim.step_once(RuntimeInput::default());
@@ -187,6 +196,11 @@ fn player_trace() -> Vec<Vec<u8>> {
 }
 
 fn editor_trace() -> Vec<Vec<u8>> {
+    editor_trace_with_ik(None)
+}
+
+/// The editor's trace, through the same Ring-0 door.
+fn editor_trace_with_ik(goal: Option<inf_ecs::IkGoal>) -> Vec<Vec<u8>> {
     let mut doc = SceneDoc::new();
     let e = doc.create_with_guid(HERO, inf_editor_core::ipc::SpawnKind::Empty, "Hero", None);
     doc.world_mut()
@@ -198,6 +212,9 @@ fn editor_trace() -> Vec<Vec<u8>> {
     session.set_state_machines(machines());
     session.set_skeletons(skeletons());
     session.set_pose_clips(pose_clips());
+    if let Some(g) = goal {
+        inf_ecs::set_ik_goals(doc.world_mut(), HERO, vec![g]);
+    }
     let out = (0..STEPS)
         .map(|_| {
             session.step_once(&mut doc, SimInput::default());
@@ -522,4 +539,110 @@ fn both_hosts_land_the_attachment_on_the_same_animated_joint() {
         player.iter().all(|p| p.length() > 1e-6),
         "the sword sat on the character's origin"
     );
+}
+
+// ── P24.2: IK is a post-pass in the SAME door, so both hosts inherit it ──────
+
+/// **The IK arm of the parity gate.**
+///
+/// Three claims, and the middle one is what makes the other two mean anything:
+///
+/// 1. **A goal moves the pose.** The same fixture with and without an IK target
+///    produces different trace bytes — so the post-pass ran, and this is not two
+///    identical traces agreeing about nothing.
+/// 2. **Moving the target moves the trace.** Two *different* targets disagree, so
+///    the pose is a function of the goal rather than of "an IK pass happened".
+/// 3. **Both hosts agree, byte for byte**, with IK on.
+///
+/// It costs no host-side change at all, which is the point of putting the solve
+/// inside `step_pose_evaluation`: neither `SimSession::fixed_step` nor
+/// `RuntimeSim::fixed_step` mentions IK, so they cannot mention it differently.
+#[test]
+fn both_hosts_apply_ik_the_same_way_and_a_moved_target_moves_the_trace() {
+    // The fixture's rig is a straight 3-joint chain up +Y with 1 m bones, so
+    // `[0, 1, 2]` is a two-bone chain with 2 m of reach.
+    let goal = |x: f32| inf_ecs::IkGoal {
+        chain: vec![0, 1, 2],
+        target: [x, 1.2, 0.0],
+        pole: Some([2.0, 1.0, 0.0]),
+    };
+
+    let plain = player_trace();
+    let with_ik = player_trace_with_ik(Some(goal(1.2)));
+    assert_not_vacuous(&plain);
+
+    // (1) The post-pass ran.
+    assert_ne!(
+        plain, with_ik,
+        "an IK goal did not change the pose at all — the post-pass is not \
+         running, and every assertion below would pass on a no-op"
+    );
+    // …and it did not simply erase the machine: the trace still MOVES as the
+    // machine walks its states, so IK bends the animated pose rather than
+    // replacing it.
+    assert_ne!(
+        with_ik[0], with_ik[1],
+        "with IK on, the pose stopped following the machine"
+    );
+
+    // (2) ANTI-VACUITY: a different target is a different pose.
+    let moved = player_trace_with_ik(Some(goal(-1.2)));
+    assert_ne!(
+        with_ik, moved,
+        "moving the IK target did not move the trace, so the pose is not a \
+         function of the goal"
+    );
+
+    // (3) The two hosts agree, with IK on.
+    let editor = editor_trace_with_ik(Some(goal(1.2)));
+    assert_eq!(
+        with_ik, editor,
+        "the editor's Simulate and the player's runtime evaluated different \
+         IK-solved poses"
+    );
+    // …and the no-IK traces still agree, so arm (3) is not passing because both
+    // hosts happen to ignore the goal.
+    assert_eq!(plain, editor_trace());
+}
+
+/// A goal the chain cannot satisfy is a **value, never a NaN or a panic** — and
+/// a goal naming a chain that is not a chain costs its own chain and nothing
+/// else.
+///
+/// The refusal is swallowed inside the fixed step on purpose (one bad goal must
+/// not stop a level animating), so what this pins is the *outcome*: the trace is
+/// still produced, still finite, and still identical between two runs.
+#[test]
+fn a_refused_or_unreachable_goal_leaves_a_usable_trace() {
+    for goal in [
+        // Unreachable: 100 m away from a 2 m chain.
+        inf_ecs::IkGoal {
+            chain: vec![0, 1, 2],
+            target: [100.0, 0.0, 0.0],
+            pole: None,
+        },
+        // Not a chain (0 is not the parent of 2 here — it skips a joint).
+        inf_ecs::IkGoal {
+            chain: vec![0, 2],
+            target: [0.5, 1.0, 0.0],
+            pole: None,
+        },
+        // A joint the skeleton does not have.
+        inf_ecs::IkGoal {
+            chain: vec![0, 1, 9],
+            target: [0.5, 1.0, 0.0],
+            pole: None,
+        },
+    ] {
+        let a = player_trace_with_ik(Some(goal.clone()));
+        let b = player_trace_with_ik(Some(goal.clone()));
+        assert_eq!(a.len() as u32, STEPS, "{goal:?} lost the trace");
+        assert!(!a[0].is_empty(), "{goal:?} stopped the character posing");
+        assert_eq!(a, b, "{goal:?} is not deterministic");
+        assert_eq!(
+            a,
+            editor_trace_with_ik(Some(goal.clone())),
+            "{goal:?}: the two hosts disagree about a refused goal"
+        );
+    }
 }

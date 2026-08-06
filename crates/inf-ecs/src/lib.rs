@@ -41,8 +41,12 @@ pub use components::{
     CHUNK_DIM, CHUNK_TILES, DEFAULT_DESTRUCTIBLE_CHUNKS, DEFAULT_DESTRUCTIBLE_DENSITY,
     DEFAULT_STRENGTH_PA,
 };
+// P24.2: the IK write door. `pose` and `deform` are otherwise spelled in full
+// by callers (the source-text mirror gates key on that), but a *write door* a
+// gameplay layer calls is a facade item like `update_attachments`.
 pub use hierarchy::{ChildOf, Children};
 pub use math::{Color, Vec2d, Vec3d};
+pub use pose::{clear_ik_goals, ik_goals, set_ik_goals, IkGoal};
 // Terrain heightfield types re-exported so downstream editor crates (e.g. the
 // viewport host) reach them through the ECS facade without a direct dep.
 pub use inf_terrain::{HeightSource, TerrainData, TerrainTile};

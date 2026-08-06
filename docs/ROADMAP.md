@@ -7849,6 +7849,30 @@ every asset kind at once and belongs to a deliberate bump, not to a repair batch
 above is written to **fail** the day it lands, so this entry gets retired rather than
 forgotten.
 
+**Carried from P24.2 (ledgered, not fixed).** Four, each measured rather than assumed:
+
+* **`IkTarget` is a runtime resource, not an authored component — deliberately.**
+  `inf_scene::EntityRecord` is a positional bincode struct with one `Option<T>` field per
+  component type, so adding one moves the wire; that is exactly how P22.2's `Destructible` took
+  the scene from v19 to **v20**. Scene v20 is frozen for this batch, so `inf_ecs::pose`'s
+  `IkTargetsRes` follows the `DeformFieldRes` doctrine instead (a resource: written from the
+  fixed step, never saved, inherited by both hosts with no host-side change). The consequence is
+  honest and real: **an IK target cannot be authored or saved today** — it is set by a caller at
+  runtime. The authored component, and the scene bump it needs, belong to **P24.3**.
+* **`Op::Mirror` does not mirror JOINTS.** A mirrored left arm keeps the left arm's joint
+  indices, because pairing `upper_arm_l` with `upper_arm_r` needs the skeleton and the kernel
+  deliberately holds none. The fix belongs with the auto-fit layer, which does have one.
+* **`ExportOptions::optimize` is skipped on a skinned submesh**, and reported
+  (`ExportReport::optimize_skipped_skinned`). `inf_mesh::optimize` returns `(vertices, indices)`
+  only, so a parallel per-vertex stream cannot follow its permutation — running it anyway gives
+  every vertex another vertex's weights. Lifting it needs a `MeshAsset`-level optimize that
+  permutes every stream at once.
+* **`template::JointLimit` is still not read by the IK solver.** P24.1 emitted hinge limits on
+  the knees and elbows precisely so P24.2 could clamp against them; the solvers landed without
+  it, so an elbow can bend backwards if a target asks it to. `two_bone_positions`'s pole already
+  decides the bend *plane*, which is the half that matters for a knee; the missing half is the
+  angular *range*.
+
 **Also carried from P24.1 — the decode allowlist covers `simulate.rs` and not `pie.rs`.**
 `every_asset_decode_in_simulate_flows_through_the_reporting_door` reads a **module** scope
 (the P23 law) and requires every free-function `…::decode` call site in `simulate.rs` to be
