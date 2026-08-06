@@ -15,6 +15,12 @@
 //! `(skeleton, pose, socket)` triple into a matrix. Making one *entity* follow
 //! another entity's socket is an ECS concern (`inf_ecs::AttachedTo` plus the
 //! post-anim-tick attachment system) — the pure math here is what it evaluates.
+//!
+//! It had **no runtime caller at all** until P24.1: the attachment system
+//! composed the target's origin and the offset, so a sword on `hand_r` rode the
+//! pelvis. [`socket_transforms`] is the batch form the fixed step calls, once per
+//! posed character, and `inf_ecs::pose::EvaluatedPose::sockets` is where its
+//! result lives.
 
 use glam::Mat4;
 use serde::{Deserialize, Serialize};

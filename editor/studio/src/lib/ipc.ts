@@ -1018,6 +1018,27 @@ export const sm = {
 };
 
 /**
+ * Skeleton templates (P24.1). One door: generate a parametric N-pedal rig and
+ * write it as a `.inf_skel` under `Content/Skeletons`, returning the new asset
+ * GUID. `plan` is one of `biped` / `quadruped` / `hexapod` / `npedal` (the last
+ * needs `legs`); everything the caller does not set comes from the generator's
+ * default proportions. Full proportion editing is the P24.5 wizard's job — this
+ * is the create door, not a skeleton editor.
+ */
+export const skel = {
+  createTemplate: (
+    plan: "biped" | "quadruped" | "hexapod" | "npedal",
+    opts: { legs?: number; heightM?: number; name?: string } = {},
+  ): Promise<string> =>
+    invoke<string>("skel_create_template", {
+      plan,
+      legs: opts.legs ?? null,
+      heightM: opts.heightM ?? null,
+      name: opts.name ?? null,
+    }),
+};
+
+/**
  * Cook / Package (P9.2 item 3). Runs `inf_packager::cook` against the open
  * project on a blocking task and resolves to a `PackageResultDto`, or **rejects
  * with a structured `PackageErrorDto`** (blueprint failures carry the class +

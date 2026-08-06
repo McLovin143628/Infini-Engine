@@ -539,7 +539,9 @@ fn import_event(ev: &ImportProgress) -> ImportEventDto {
     }
 }
 
-fn emit_changed(app: &AppHandle, state: &AssetState) {
+/// Broadcast `assets://changed` after a write. `pub(super)` so sibling command
+/// modules that create assets (P24.1's `skel`) announce them the same way.
+pub(super) fn emit_changed(app: &AppHandle, state: &AssetState) {
     let version = state.with_project(|p| Ok(p.version())).unwrap_or_default();
     let _ = app.emit("assets://changed", AssetChanged { version });
 }

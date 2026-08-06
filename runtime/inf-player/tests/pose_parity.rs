@@ -25,14 +25,15 @@
 
 use std::collections::BTreeMap;
 
-use glam::{DVec2, Mat4, Quat, Vec3};
+use glam::{DVec2, DVec3, Mat4, Quat, Vec3};
 use uuid::Uuid;
 
 use inf_anim::{
     AnimClip, Interpolation, Joint, JointTrack, JointTransform, QuatTrack, Skeleton, SkeletonAsset,
     SmState, SmTransition, Socket, StateMachine,
 };
-use inf_ecs::components::{AnimPlayer, AnimStateMachine, SkeletalMesh};
+use inf_ecs::components::{AnimPlayer, AnimStateMachine, AttachedTo, SkeletalMesh, Transform};
+use inf_ecs::math::Vec3d;
 use inf_ecs::EcsWorld;
 use inf_editor_core::scene::SceneDoc;
 use inf_editor_core::simulate::{SimInput, SimSession};
@@ -413,4 +414,112 @@ fn triangle() -> SkinnedMeshData {
         vertices: vec![v(0.0, 0.0, 0), v(1.0, 0.0, 1), v(0.0, 2.0, 2)],
         indices: vec![0, 1, 2],
     }
+}
+// ── P24.1 repair 3: the socket attachment, in both hosts ────────────────────
+
+const SWORD: Uuid = Uuid::from_u128(0x2401_0000_0000_0000_0000_0000_0000_0020);
+
+/// The sword that rides the character's `hand_r` socket.
+fn sword() -> (Transform, AttachedTo) {
+    (
+        Transform::IDENTITY,
+        AttachedTo::new(HERO, "hand_r", Vec3d::ZERO),
+    )
+}
+
+/// Where the sword ended up, in world space.
+fn follower_at(world: &EcsWorld) -> DVec3 {
+    let e = world.entity_of(SWORD).expect("the sword exists");
+    world
+        .world()
+        .get::<inf_ecs::components::GlobalTransform>(e)
+        .expect("a global transform")
+        .translation()
+}
+
+fn player_attachment_trace() -> Vec<DVec3> {
+    let mut world = EcsWorld::new();
+    let e = world.spawn_with_guid(HERO, "Hero", None);
+    world.world_mut().entity_mut(e).insert(character());
+    let s = world.spawn_with_guid(SWORD, "Sword", None);
+    world.world_mut().entity_mut(s).insert(sword());
+    world.mark_dirty();
+    let mut sim = RuntimeSim::new(world, Vec::new(), DVec2::ZERO, HZ);
+    sim.set_state_machines(machines());
+    sim.set_skeletons(skeletons());
+    sim.set_pose_clips(pose_clips());
+    (0..STEPS)
+        .map(|_| {
+            sim.step_once(RuntimeInput::default());
+            follower_at(sim.world())
+        })
+        .collect()
+}
+
+fn editor_attachment_trace() -> Vec<DVec3> {
+    let mut doc = SceneDoc::new();
+    let e = doc.create_with_guid(HERO, inf_editor_core::ipc::SpawnKind::Empty, "Hero", None);
+    doc.world_mut()
+        .world_mut()
+        .entity_mut(e)
+        .insert(character());
+    let s = doc.create_with_guid(SWORD, inf_editor_core::ipc::SpawnKind::Empty, "Sword", None);
+    doc.world_mut().world_mut().entity_mut(s).insert(sword());
+    doc.world_mut().mark_dirty();
+    let mut session = SimSession::enter(&mut doc, Vec::new(), DVec2::ZERO, HZ);
+    session.set_state_machines(machines());
+    session.set_skeletons(skeletons());
+    session.set_pose_clips(pose_clips());
+    let out = (0..STEPS)
+        .map(|_| {
+            session.step_once(&mut doc, SimInput::default());
+            follower_at(doc.world())
+        })
+        .collect();
+    session.exit(&mut doc);
+    out
+}
+
+/// **The socket lands on the animated joint, in both hosts, and it MOVES.**
+///
+/// The independent expectation is computed here out of `global_transforms` — the
+/// test does not read back the expression the attachment system wrote — and the
+/// anti-vacuity arm is the one that matters: a sword pinned to the character's
+/// ORIGIN, which is where it rode for three phases, agrees with a correct one on
+/// every assertion that only looks at one frame.
+#[test]
+fn both_hosts_land_the_attachment_on_the_same_animated_joint() {
+    let player = player_attachment_trace();
+    let editor = editor_attachment_trace();
+    assert_eq!(player.len() as u32, STEPS);
+    assert_eq!(player, editor, "the two hosts placed the sword differently");
+
+    // It moved with the machine's state, so it is riding the JOINT and not the
+    // entity origin (which never moves in this fixture).
+    assert_ne!(
+        player[0], player[1],
+        "the attachment did not follow the machine out of `idle` — a sword on the \
+         character's origin would produce exactly this trace"
+    );
+    assert_ne!(player[1], player[2], "walk → run did not move the socket");
+
+    // …and it is where the skeleton says it is. The machine is in `run` from step
+    // 2 on, so rebuild that pose and place joint 2 (the socket's) in world space.
+    let rig = rig();
+    let mut want_pose = inf_anim::Pose::rest(&rig.skeleton);
+    want_pose.locals[1].rotation = Quat::from_rotation_z(80f32.to_radians()).to_array();
+    let want = inf_anim::global_transforms(&rig.skeleton, &want_pose)[2]
+        .transform_point3(Vec3::ZERO)
+        .as_dvec3();
+    assert!(
+        (player[2] - want).length() < 1e-5,
+        "sword at {:?}, the animated joint is at {want:?}",
+        player[2]
+    );
+    // The origin control: the character never leaves the origin, so a
+    // pelvis-riding sword would sit at zero for the whole trace.
+    assert!(
+        player.iter().all(|p| p.length() > 1e-6),
+        "the sword sat on the character's origin"
+    );
 }

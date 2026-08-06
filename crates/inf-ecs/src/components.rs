@@ -2221,12 +2221,16 @@ impl RootMotion {
 /// entity's world `Transform` = `target.GlobalTransform · offset` each fixed step
 /// (post-anim-tick), so a weapon rides the hand, a hat rides the head, etc.
 ///
-/// `target` is the followed entity's stable [`Guid`]. The **socket** name records
-/// which authored skeleton socket the offset was baked from; in v1 the follow uses
-/// the target's `GlobalTransform` composed with `offset` (the socket's bind
-/// transform folded into the offset by the attach tool). Live pose-driven socket
-/// tracking — evaluating the skeleton's animated joint each step — needs the
-/// skeleton/clip assets in the sim world and is a documented follow-up.
+/// `target` is the followed entity's stable [`Guid`]; **socket** names the
+/// authored skeleton socket to ride, and an EMPTY name means the target's origin.
+///
+/// **Pose-driven since P24.1**: the follow composes `target.GlobalTransform ·
+/// socket_model · offset`, where `socket_model` is the socket's transform under
+/// the pose the sim evaluated for the target this fixed step
+/// ([`crate::pose::EvaluatedPose`]). Before that the socket name was recorded and
+/// never read, so a sword attached to `hand_r` rode the pelvis. A target with no
+/// evaluated pose — or a socket its skeleton does not author — keeps the origin
+/// follow, which is the right answer for an unbound rig and not an error.
 ///
 /// Not reflected (it carries a `Guid` link, like [`ActorClass`]); authored by the
 /// attach tool, shown read-only in Details.

@@ -13,30 +13,55 @@ use crate::clip::AnimClip;
 use crate::skeleton::Skeleton;
 use crate::sockets::Socket;
 use crate::state_machine::StateMachine;
+use crate::template::JointLimit;
 
-/// The `.inf_skel` payload: a skinning [`Skeleton`] plus its authored
-/// [`Socket`]s (P11.3 — sockets are per-skeleton attach points).
+/// The `.inf_skel` payload: a skinning [`Skeleton`], its authored [`Socket`]s
+/// (P11.3 — per-skeleton attach points) and its per-joint rotation
+/// [`JointLimit`]s (P24.1 — the IK input P24.2 consumes).
+///
+/// # The v2 ladder
+///
+/// `limits` is a **side table appended at the tail**, not fields on [`Joint`],
+/// and the reason is the engine's recurring bincode law: the codec is
+/// **positional**, and `Joint` lives inside a `Vec` inside this payload — growing
+/// it would re-interpret every byte after the first joint, in a container whose
+/// length prefix is already committed. A tail append is the only additive shape
+/// this format has, and even that is not free: `#[serde(default)]` cannot rescue
+/// a bincode struct from a short read, so a v1 payload does **not** decode as a
+/// v2 one. That is what `schema_version` is for, and it fails loudly (a decode
+/// error) rather than quietly.
+///
+/// The one committed v1 `.inf_skel` in the tree (`samples/character-demo`) is
+/// regenerated from its generator under `INF_BLESS_SAMPLES=1`.
+///
+/// **[`JointLimit`]'s fields are frozen** now that this has shipped — a later
+/// limit *kind* is an append behind another bump, not an edit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkeletonAsset {
     pub schema_version: u32,
     pub skeleton: Skeleton,
-    /// Named attach points riding the skeleton's joints. **Additive** (P11.3):
-    /// `#[serde(default)]` so a pre-socket `.inf_skel` payload still decodes to an
-    /// empty socket list. Serde-clean (no `skip_serializing_if`) per the crate's
-    /// bincode law.
+    /// Named attach points riding the skeleton's joints (P11.3). Serde-clean (no
+    /// `skip_serializing_if`) per the crate's bincode law.
     #[serde(default)]
     pub sockets: Vec<Socket>,
+    /// Per-joint rotation limits for IK (P24.1, schema v2). A joint **absent**
+    /// from this table is unlimited — see [`JointLimit`] for why that, and not a
+    /// full-range row, is the meaningful default. Serde-clean, at the tail.
+    #[serde(default)]
+    pub limits: Vec<JointLimit>,
 }
 
 impl SkeletonAsset {
-    pub const CURRENT_VERSION: u32 = 1;
+    /// v2 (P24.1) — `limits`. See the type's docs for the ladder.
+    pub const CURRENT_VERSION: u32 = 2;
 
-    /// Wrap a skeleton as a current-schema asset (no sockets).
+    /// Wrap a skeleton as a current-schema asset (no sockets, no limits).
     pub fn new(skeleton: Skeleton) -> Self {
         Self {
             schema_version: Self::CURRENT_VERSION,
             skeleton,
             sockets: Vec::new(),
+            limits: Vec::new(),
         }
     }
 
@@ -46,7 +71,13 @@ impl SkeletonAsset {
             schema_version: Self::CURRENT_VERSION,
             skeleton,
             sockets,
+            limits: Vec::new(),
         }
+    }
+
+    /// The rotation limit on `joint`, if one is authored.
+    pub fn limit(&self, joint: u16) -> Option<&JointLimit> {
+        self.limits.iter().find(|l| l.joint == joint)
     }
 }
 
@@ -164,6 +195,46 @@ mod tests {
         let back: SkeletonAsset = decode(&e1).unwrap();
         assert_eq!(back, a);
         assert!(back.sockets.is_empty());
+    }
+
+    /// v2: the limits side table rides the payload and round-trips.
+    #[test]
+    fn skeleton_asset_limits_round_trip() {
+        use crate::template::JointLimit;
+        let mut a = SkeletonAsset::new(skel());
+        assert_eq!(a.schema_version, 2);
+        assert!(a.limits.is_empty(), "an unlimited rig lists nothing");
+        a.limits = vec![JointLimit::hinge_x(1, -150.0, 0.0)];
+        let e1 = encode(&a).unwrap();
+        assert_eq!(e1, encode(&a).unwrap(), "re-encoding is byte-identical");
+        let back: SkeletonAsset = decode(&e1).unwrap();
+        assert_eq!(back, a);
+        assert_eq!(back.limit(1).unwrap().min_deg[0], -150.0);
+        assert!(back.limit(0).is_none(), "an absent joint is unlimited");
+    }
+
+    /// **The v1 → v2 break is loud, not silent.** bincode is positional and
+    /// `#[serde(default)]` cannot rescue a short read, so a payload written before
+    /// the `limits` tail fails to decode rather than decoding as something else.
+    /// This is what `schema_version` and the sample regeneration path are for.
+    #[test]
+    fn a_v1_payload_fails_loudly_rather_than_decoding_wrong() {
+        // A v1 payload IS a v2 payload with the trailing `limits` vector removed,
+        // and an empty `Vec` encodes as a single zero-length byte — so dropping
+        // that byte off a limits-free v2 encoding reproduces the v1 wire exactly,
+        // with no second serializer (and no dev-dependency) to get wrong.
+        let v2 = SkeletonAsset::with_sockets(skel(), vec![Socket::new("hand_r", 1)]);
+        let bytes = encode(&v2).unwrap();
+        assert_eq!(
+            *bytes.last().unwrap(),
+            0,
+            "an empty `limits` is one zero byte at the tail — if it is not, this              fixture is no longer reproducing a v1 payload"
+        );
+        let v1 = &bytes[..bytes.len() - 1];
+        assert!(
+            decode::<SkeletonAsset>(v1).is_err(),
+            "a v1 payload must not decode as v2 — a silent success here would mean              the reader invented a limits table out of whatever followed"
+        );
     }
 
     #[test]

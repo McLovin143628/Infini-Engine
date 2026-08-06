@@ -217,6 +217,11 @@ export default function ContentDrawer() {
                   ["enum", "Enum"],
                   ["table", "Data Table"],
                   ["biomeset", "Biome Set"],
+                  // P24.1 template body plans: a generated, socketed,
+                  // limit-carrying rig rather than an empty document.
+                  ["skel:biped", "Skeleton — Biped"],
+                  ["skel:quadruped", "Skeleton — Quadruped"],
+                  ["skel:hexapod", "Skeleton — Hexapod"],
                 ] as const
               ).map(([kind, label]) => (
                 <button

@@ -25,6 +25,7 @@ mod sequencer;
 mod settings;
 mod shell;
 mod sim;
+mod skel;
 mod sm;
 mod sorting;
 mod terminal;
@@ -123,6 +124,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         pcg::pcg_save,
         pcg::pcg_evaluate,
         pcg::pcg_evaluate_biomes,
+        skel::skel_create_template,
         sm::sm_list,
         sm::sm_create,
         sm::sm_get,

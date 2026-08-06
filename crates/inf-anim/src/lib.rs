@@ -28,6 +28,8 @@ pub mod state_machine;
 pub mod retarget;
 pub mod root_motion;
 pub mod sockets;
+// P24.1 template body plans: the parametric N-pedal skeleton generator.
+pub mod template;
 
 pub use asset::{AnimClipAsset, SkeletonAsset, StateMachineAsset};
 pub use blend_space::{
@@ -46,3 +48,4 @@ pub use state_machine::{
     eval_pose, motion_clip_refs, sample_motion, step, CmpOp, Motion, SmCondition, SmContext,
     SmRuntime, SmState, SmTransition, StateMachine,
 };
+pub use template::{build_template, BodyParams, BodyPlan, JointLimit, TemplateError, MAX_LEGS};
