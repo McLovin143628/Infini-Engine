@@ -22,10 +22,13 @@ P23.3 law).
 Nine arms, all driven through the product op path rather than hand-built meshes:
 (a) model a prop -- extrude, then loop cut, then bevel (that order: an edge ring is only
 defined across quads, so the cut needs the extrusion walls and a bevel first would replace
-the very edges the ring walks) -- and replay the journal twice, bit-identically;
+the very edges the ring walks). The bevel takes TWO OPPOSITE rim edges and not all four:
+bevels that MEET at a corner each offset it into their far face, on a right angle both land
+at one position, and the reader's exact weld fuses them into a non-manifold edge -- so
+`Op::BevelEdges` refuses that, and the gate asserts both the refusal and the pair that
+works. Then the journal is replayed twice, bit-identically;
 (b) seams + unwrap: every corner inside the unit square, ZERO folds, and the convergence
-field at machine epsilon on every chart but ONE -- the beveled cap, measured at 1.6e-2,
-bounded and ledgered rather than hidden; (c) save as a standard asset
+field at machine epsilon on EVERY chart; (c) save as a standard asset
 (`.inf_mesh` decodes, the derived `.inf_vmesh` decodes, the sidecar hash matches the
 bytes); (d) live update -- a store that resolved the mesh BEFORE the edit re-keys after
 it, and a pack cooked after the save carries the new bytes; (e) undo the whole journal

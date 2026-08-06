@@ -7750,16 +7750,15 @@ fn phase23_wall_seed(mesh: &inf_dcc::Mesh, low: f64, high: f64) -> Option<inf_dc
 }
 
 /// The rim: canonical edges on plane `y` that separate the **cap** (a face whose
-/// every vertex is on that plane) from anything else.
+/// every vertex is on that plane) from anything else. Four, in a cycle.
 ///
-/// This is what an author bevels — the hard top edge of a prop — and the recipe
-/// aims here even though it is the one op in the batch that finds a limit. See
-/// [`phase23_unwrap_prop`] for what the limit is and why it is asserted rather
-/// than designed around: two alternatives were measured (bevel the extrusion's
-/// vertical corners; bevel the loop's own edges) and both produce **worse**
-/// geometry — 32.0 and, respectively, a chart the solver refuses outright as
-/// zero-area. The rim is the one that leaves a valid, fold-free unwrap.
-fn phase23_rim_edges(mesh: &inf_dcc::Mesh, y: f64) -> Vec<inf_dcc::HalfId> {
+/// The recipe does **not** bevel all four, and that is the P23.6 ruling rather
+/// than a taste: two bevels meeting at a corner each offset it into their far
+/// face, both land in the same place on a right angle, and the exact weld in
+/// `from_mesh_asset` fuses them into an edge used twice. `Op::BevelEdges` now
+/// refuses it as [`inf_dcc::OpError::BevelCoincidentVertex`], so the recipe takes
+/// the largest **disjoint** subset — see [`phase23_disjoint_pair`].
+pub fn phase23_rim_edges(mesh: &inf_dcc::Mesh, y: f64) -> Vec<inf_dcc::HalfId> {
     let on_plane = |f: inf_dcc::FaceId| {
         mesh.face_verts(f).is_some_and(|vs| {
             vs.iter()
@@ -7778,19 +7777,71 @@ fn phase23_rim_edges(mesh: &inf_dcc::Mesh, y: f64) -> Vec<inf_dcc::HalfId> {
         .collect()
 }
 
+/// The first two edges of `edges` that share **no endpoint** — the largest set a
+/// bevel can take from a cycle, and the one the kernel will accept.
+///
+/// Lowest-id first and then the first later edge that does not touch it: a pure
+/// function of the mesh, so the journal it produces is the same on any machine.
+pub fn phase23_disjoint_pair(
+    mesh: &inf_dcc::Mesh,
+    edges: &[inf_dcc::HalfId],
+) -> Option<[inf_dcc::HalfId; 2]> {
+    let ends = |h: inf_dcc::HalfId| Some((mesh.origin(h)?, mesh.dest(h)?));
+    for (i, &a) in edges.iter().enumerate() {
+        let (a0, a1) = ends(a)?;
+        for &b in &edges[i + 1..] {
+            let (b0, b1) = ends(b)?;
+            if b0 != a0 && b0 != a1 && b1 != a0 && b1 != a1 {
+                return Some([a, b]);
+            }
+        }
+    }
+    None
+}
+
 /// **The modelling recipe the gate performs**, as one function so the gate and
 /// its replay probe cannot drift apart.
 ///
-/// Extrude the lid, loop-cut the walls it made, bevel the new rim — the three
-/// ops the phase's done-when sentence names, in the order the topology allows:
-/// the loop cut needs the extrusion's **quad** walls (an edge ring is only
-/// defined across quads), and beveling the rim first would replace the very edges
-/// the ring walks.
+/// Extrude the lid, loop-cut the walls it made, bevel two opposite edges of the
+/// new rim — the three ops the phase's done-when sentence names, in the order the
+/// topology allows: the loop cut needs the extrusion's **quad** walls (an edge
+/// ring is only defined across quads), and beveling the rim first would replace
+/// the very edges the ring walks.
+///
+/// **Two edges and not four**, because the kernel refuses the other two: bevels
+/// that meet at a corner place two vertices at one position, which the exact weld
+/// on the way back in fuses into a non-manifold edge. The gate asserts both — the
+/// pair that works, and the four that are refused (see
+/// [`inf_dcc::OpError::BevelCoincidentVertex`]).
 ///
 /// Applied through [`inf_dcc::MeshSession::apply`], so what comes out is the
 /// product's journal — the same `Vec<Op>` a session in the panel would hold, and
 /// the thing arm (f) replays from cold.
 pub fn phase23_model_prop(session: &mut inf_dcc::MeshSession) -> Result<(), String> {
+    use inf_dcc::Op;
+    let top_y = PHASE23_PROP_SIZE_M * 0.5 + PHASE23_EXTRUDE_M;
+    phase23_extrude_and_cut(session)?;
+    let rim = phase23_rim_edges(session.mesh(), top_y);
+    if rim.len() != 4 {
+        return Err(format!("expected a four-edge rim, found {}", rim.len()));
+    }
+    let pair = phase23_disjoint_pair(session.mesh(), &rim)
+        .ok_or_else(|| "the rim has no two edges that do not meet".to_string())?;
+    session
+        .apply(Op::BevelEdges {
+            edges: pair.to_vec(),
+            amount: PHASE23_BEVEL_M,
+        })
+        .map_err(|e| format!("bevel: {e}"))?;
+    Ok(())
+}
+
+/// The recipe's first two ops — extrude the lid, loop-cut the walls it made.
+///
+/// Split out so the gate's refusal arm can reach the state where the rim exists
+/// *before* anything has been beveled, without restating either op. A gate that
+/// rebuilt the first half by hand would be gating a copy (P23.4's LAW).
+pub fn phase23_extrude_and_cut(session: &mut inf_dcc::MeshSession) -> Result<(), String> {
     use inf_dcc::Op;
     let lid_y = PHASE23_PROP_SIZE_M * 0.5;
     let top_y = lid_y + PHASE23_EXTRUDE_M;
@@ -7818,16 +7869,6 @@ pub fn phase23_model_prop(session: &mut inf_dcc::MeshSession) -> Result<(), Stri
         })
         .map_err(|e| format!("loop cut: {e}"))?;
 
-    let rim = phase23_rim_edges(session.mesh(), top_y);
-    if rim.len() != 4 {
-        return Err(format!("expected a four-edge rim, found {}", rim.len()));
-    }
-    session
-        .apply(Op::BevelEdges {
-            edges: rim,
-            amount: PHASE23_BEVEL_M,
-        })
-        .map_err(|e| format!("bevel: {e}"))?;
     Ok(())
 }
 
@@ -7854,31 +7895,15 @@ pub fn phase23_seam_edges(mesh: &inf_dcc::Mesh) -> Vec<inf_dcc::HalfId> {
         .collect()
 }
 
-/// **The one chart the solver does not finish, and the number it stops at.**
+/// **What the unwrap must reach on this prop.**
 ///
-/// Measured on this prop: seventeen of its eighteen charts converge below 1e-15,
-/// and the eighteenth — the **beveled cap** — stops at 1.6e-2 with a residual of
-/// 2.2e-2, on a chart whose exact answer is a flat polygon and whose fold count
-/// is zero. The cause is upstream of the solver: a `MeshAsset` carries the cap as
-/// *two triangles sharing a diagonal*, so beveling its four boundary edges leaves
-/// each triangle a 7-gon with vertices strung along the untouched diagonal, and
-/// [`inf_dcc::uv`]'s chart triangulator **fans an n-gon from its first vertex**.
-/// The slivers that fan produces make the conformal system ill-conditioned, and
-/// 256 CG iterations on a twenty-unknown system is not an iteration-count
-/// problem.
-///
-/// Recorded as a bound rather than designed around, because the two ways of
-/// designing around it were measured and are worse (see [`phase23_rim_edges`]),
-/// and because a gate that quietly avoids the one op that finds a limit is a gate
-/// that does not aim at the thing it names. The fix is an ear-clipping chart
-/// triangulator — the writer already has one — and it is a Phase 23 remainder.
-pub const PHASE23_CONVERGENCE_BOUND: f64 = 2.0e-2;
-
-/// Charts allowed to exceed [`PHASE23_CONVERGED`]. Exactly one, so a second
-/// stalling chart fails here rather than hiding under the bound above.
-pub const PHASE23_UNCONVERGED_CHARTS: usize = 1;
-/// What "converged" means for every other chart: machine epsilon, not a
-/// tolerance.
+/// Machine epsilon on every chart, not a tolerance. Before the P23.6 bevel
+/// ruling the recipe beveled all four rim edges and left one chart stalled at
+/// 1.6e-2 — which was the *same* defect three symptoms deep, since the n-gons
+/// whose fan triangulation ill-conditioned that solve were the ones the corner
+/// coincidence produced. Refusing the bevel that cannot be saved removed the
+/// stalled chart with it, so the bound is no longer a bound: it is zero
+/// tolerance, and a chart that stalls again fails here.
 pub const PHASE23_CONVERGED: f64 = 1.0e-12;
 
 /// Cut the seams and unwrap — the gate's arm (b), through the product path
@@ -7951,10 +7976,13 @@ reference a mesh and keep simulating while that mesh is edited underneath it.\n\
 Nine arms, all driven through the product op path rather than hand-built meshes:\n\
 (a) model a prop -- extrude, then loop cut, then bevel (that order: an edge ring is only\n\
 defined across quads, so the cut needs the extrusion walls and a bevel first would replace\n\
-the very edges the ring walks) -- and replay the journal twice, bit-identically;\n\
+the very edges the ring walks). The bevel takes TWO OPPOSITE rim edges and not all four:\n\
+bevels that MEET at a corner each offset it into their far face, on a right angle both land\n\
+at one position, and the reader's exact weld fuses them into a non-manifold edge -- so\n\
+`Op::BevelEdges` refuses that, and the gate asserts both the refusal and the pair that\n\
+works. Then the journal is replayed twice, bit-identically;\n\
 (b) seams + unwrap: every corner inside the unit square, ZERO folds, and the convergence\n\
-field at machine epsilon on every chart but ONE -- the beveled cap, measured at 1.6e-2,\n\
-bounded and ledgered rather than hidden; (c) save as a standard asset\n\
+field at machine epsilon on EVERY chart; (c) save as a standard asset\n\
 (`.inf_mesh` decodes, the derived `.inf_vmesh` decodes, the sidecar hash matches the\n\
 bytes); (d) live update -- a store that resolved the mesh BEFORE the edit re-keys after\n\
 it, and a pack cooked after the save carries the new bytes; (e) undo the whole journal\n\
@@ -8011,20 +8039,17 @@ mod tests {
 
         let report = phase23_unwrap_prop(&mut session).expect("the recipe unwraps");
         assert_eq!(report.flipped, 0, "a flat-charted prop folds nowhere");
-        assert!(
-            report.worst_convergence < PHASE23_CONVERGENCE_BOUND,
-            "the solver stopped further short than the measured bound: {}",
-            report.worst_convergence
-        );
-        let stalled = report
+        let stalled: Vec<usize> = report
             .charts
             .iter()
-            .filter(|c| c.convergence >= PHASE23_CONVERGED)
-            .count();
-        assert_eq!(
-            stalled, PHASE23_UNCONVERGED_CHARTS,
-            "{stalled} charts did not converge; exactly one is expected (the \
-             beveled cap — see PHASE23_CONVERGENCE_BOUND)"
+            .enumerate()
+            .filter(|(_, c)| c.convergence >= PHASE23_CONVERGED)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            stalled.is_empty(),
+            "charts {stalled:?} did not converge (worst {})",
+            report.worst_convergence
         );
         assert!(report.seams > 0, "no seam was cut");
     }

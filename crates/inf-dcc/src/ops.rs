@@ -144,6 +144,34 @@ pub enum OpError {
     /// A bevel needs a face on both sides to offset into.
     #[error("edge {0} is on a boundary; a bevel needs a face on both sides")]
     BevelBoundaryEdge(HalfId),
+    /// **The bevel would build a mesh its own writer cannot save.**
+    ///
+    /// Two beveled edges that share an endpoint each push an offset copy of that
+    /// endpoint into their far faces, and on a right-angled corner those two
+    /// copies land at *exactly the same place*. The kernel can hold two vertices
+    /// at one position; a `MeshAsset` cannot — [`crate::from_mesh_asset`] welds
+    /// positions at a tolerance of **exactly zero**, so the pair fuses on the way
+    /// back in and an edge ends up used twice, which the reader refuses as
+    /// non-manifold.
+    ///
+    /// Refused rather than emitted, because a modelling op that hands back a file
+    /// nobody can re-open — with only a save-time advisory in between — is the
+    /// failure shape this codebase keeps paying for. The refusal is **inert**
+    /// (`Mesh::transact`), so the mesh is byte-identical afterwards.
+    ///
+    /// The remedy is in the message and it is honest: bevel edges that do not
+    /// meet. A **corner join** for meeting bevels — dissolving the shared vertex
+    /// into a patch — is the missing feature, and it is not built.
+    #[error(
+        "beveling edge {edge} would put a second vertex at ({}, {}, {}), where this \
+         bevel has already placed one: two beveled edges meeting at a corner each \
+         offset that corner into their far face, and on a right angle both land in \
+         the same place. Saving that produces a mesh the reader refuses as \
+         non-manifold. Bevel edges that do not share an endpoint; a corner join for \
+         meeting bevels is not built.",
+        at[0], at[1], at[2]
+    )]
+    BevelCoincidentVertex { edge: HalfId, at: [f64; 3] },
     /// A region border that passes through one vertex twice — a pinch — so the
     /// inset corner has no single miter.
     #[error("vertex {0} is on the region border more than once, so its inset corner is ambiguous")]

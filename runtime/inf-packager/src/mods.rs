@@ -146,6 +146,13 @@ pub fn build_mod_wasm(crate_dir: &Path) -> Result<ModBuildOutcome> {
             "--manifest-path",
         ])
         .arg(&manifest)
+        // **The nested build must not inherit `CARGO_TARGET_DIR`.** The artifact
+        // is looked up under `<crate>/target/wasm32-unknown-unknown/release`, so
+        // an inherited override — which is exactly what an isolated worktree, a
+        // shared-target CI cache or a developer's own export sets — puts the
+        // `.wasm` somewhere this function then reports as missing. Cleared rather
+        // than honoured, because the path below is the contract.
+        .env_remove("CARGO_TARGET_DIR")
         .output()
         .map_err(|e| CookError::Mod(format!("spawning cargo: {e}")))?;
     if !output.status.success() {

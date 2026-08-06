@@ -2001,76 +2001,145 @@ mod tests {
             })
             .unwrap();
     }
-
     /// The asset tick's source, read by the gate below.
     const ASSETS_SOURCE: &str = include_str!("assets.rs");
 
-    /// Identifiers that would make a refresh depend on whether a simulation is
-    /// running. Banned by NAME (the state, the query and the module), not by
-    /// spelling of one call — P23.5's law: **ban the module, not the function**,
-    /// because the wrapper is what got past the last source gate.
-    const SIM_GATE_NAMES: [&str; 4] = ["SimState", "sim_is_running", "is_running", "sim::"];
+    /// **The statement-level lines of a body**, comments and blanks removed.
+    ///
+    /// "Statement level" is literally the indentation of the construct's own
+    /// scope: `indent` spaces and no more. That is what makes the check see a
+    /// *condition* — wrapping a call in `if …` moves its line one level in and
+    /// takes it out of this set — and it is why the positives below are an
+    /// ordered comparison against a list rather than a `.contains()` over a whole
+    /// body, which a comment satisfies (P23.5's M1).
+    fn statements(body: &str, indent: usize) -> Vec<String> {
+        let pad = " ".repeat(indent);
+        body.lines()
+            .skip(1) // the signature line itself
+            .filter(|l| l.starts_with(&pad) && !l[indent..].starts_with(' '))
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .collect()
+    }
+
+    /// A body with its `//` comments stripped, for the bans — so a ban cannot
+    /// fire on prose and, more importantly, cannot be *satisfied* by it either.
+    fn code_only(body: &str) -> String {
+        body.lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **What may make the save's invalidation conditional: nothing.**
+    ///
+    /// An ALLOWLIST, not a ban list. The first version of this gate banned four
+    /// spellings (`SimState`, `sim_is_running`, `is_running`, `sim::`) and a fifth
+    /// — `paused()`, `PlayState`, any freshly-named helper — walked straight
+    /// through. What is checked instead is the whole statement *sequence*: a new
+    /// statement in this door, of any name, fails until somebody adds it here on
+    /// purpose. The P22 law one layer up — **a ban enumerates what you thought of,
+    /// an allowlist what is allowed.**
+    const DCC_SAVE_TAIL: [&str; 5] = [
+        "viewport.refresh_asset_index(super::Target::All);",
+        "let _ = app.emit(\"assets://changed\", ());",
+        "let _ = app.emit(\"dcc://sync\", id);",
+        "Ok(DccSaveDto {",
+        "})",
+    ];
+
+    /// The tick's refresh is legitimately nested — inside `if outcome.index_stale`
+    /// and then inside the state lookup — so its allowlist is the *guard chain*,
+    /// pinned line by line. A third rung on that chain fails here, which is the
+    /// one place an extra condition would look natural.
+    const TICK_REFRESH_CHAIN: [&str; 3] = [
+        "if outcome.index_stale {",
+        "if let Some(viewport) = app.try_state::<super::ViewportState>() {",
+        "viewport.refresh_asset_index(super::Target::All);",
+    ];
+
+    /// Module and concept substrings a refresh must not name. A backstop under the
+    /// allowlists above, never the primary check.
+    const SIM_TOKENS: [&str; 6] = ["sim", "Sim", "play", "Play", "paus", "Paus"];
 
     /// **The P23.6 headline's missing link, held where a test can reach it.**
     ///
-    /// `dcc_edit_during_simulate.rs` executes both *ends* of the live-update
-    /// chain — the save writes new bytes, and `EditorRenderAssets` re-keys on
-    /// them while a `SimSession` is alive. The link between them is this
-    /// function's push, and a `#[tauri::command]` cannot be driven from a test on
-    /// any CI leg. So it is read instead, and the two things read are the two
-    /// ways it could break:
+    /// `dcc_edit_during_simulate.rs` executes both *ends* of the live-update chain
+    /// — the save writes new bytes, and `EditorRenderAssets` re-keys on them while
+    /// a `SimSession` is alive. The link between them is this function's push, and
+    /// a `#[tauri::command]` cannot be driven from a test on any CI leg. So it is
+    /// read instead.
     ///
-    /// 1. **The push is at statement level** — its line is indented exactly four
-    ///    spaces, i.e. the body's own scope. Wrapping it in *any* condition
-    ///    (`if !sim.is_running() { … }` being the one this phase is about)
-    ///    indents it and fails here. That is the whole falsification: measured,
-    ///    a sim-gated skip fails this test and nothing else in the tree.
-    /// 2. **Nothing sim-shaped is named at all** in the save, or in the
-    ///    background asset tick that carries an *external* edit down the same
-    ///    path. A refresh that consults the play state is a refresh that can be
-    ///    skipped.
+    /// Three things are read, and each closes a hole the first version had:
+    ///
+    /// 1. **The save's tail is an exact statement sequence** at the body's own
+    ///    indentation. Wrapping the push in any condition moves it a level in and
+    ///    fails; inserting a statement before it fails; deleting it fails.
+    /// 2. **The tick's guard chain is pinned line by line.** The old version used
+    ///    `.contains()` over the whole body, which a comment satisfies.
+    /// 3. **The bans run over code with comments stripped**, and they ban
+    ///    substrings of module and concept names rather than four spellings — with
+    ///    the allowlists doing the real work, because a ban alone only catches what
+    ///    its author imagined.
     #[test]
     fn the_save_pushes_its_invalidation_unconditionally() {
-        let body = body_of(SOURCE, "pub async fn dcc_save(");
-        let push = "    viewport.refresh_asset_index(super::Target::All);";
-        assert!(
-            body.lines().any(|l| l == push),
-            "dcc_save must push `{}` at STATEMENT level — a viewport that is not \
-             told keeps drawing the geometry the author just replaced, and a \
-             conditional push is a skip waiting for a condition to be true",
-            push.trim()
+        let save = body_of(SOURCE, "pub async fn dcc_save(");
+        let tail = statements(&save, 4);
+        let at = tail
+            .iter()
+            .position(|l| l.starts_with("viewport.refresh_asset_index"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "dcc_save has no statement-level `viewport.refresh_asset_index` \
+                     - a viewport that is not told keeps drawing the geometry the \
+                     author just replaced, and a conditional push is a skip waiting \
+                     for a condition to be true. Statements seen: {tail:?}"
+                )
+            });
+        assert_eq!(
+            &tail[at..],
+            &DCC_SAVE_TAIL[..],
+            "dcc_save's tail is not the sequence DCC_SAVE_TAIL declares. A new \
+             statement here is a DECISION - add it to the list."
         );
-        assert!(
-            body.lines()
-                .any(|l| l == "    let _ = app.emit(\"assets://changed\", ());"),
-            "dcc_save must emit `assets://changed` at statement level so every \
-             referencing view re-resolves"
-        );
-        for name in SIM_GATE_NAMES {
-            assert!(
-                !body.contains(name),
-                "dcc_save names `{name}`: the save's invalidation has been made \
-                 to depend on whether a simulation is running. An asset edit is \
-                 not in the document, so Simulate has no opinion about it — see \
-                 docs/memos/p23-dcc-design.md §3."
-            );
-        }
 
-        // The watcher's half: an EXTERNAL edit (a mesh rewritten by another tool,
-        // or by a second window) reaches the viewport through the background
-        // tick, which must be just as unaware of play state.
+        // The tick's half, by BLOCK EXTRACTION rather than a whole-body scan:
+        // `body_of` brace-balances from the guard's own line, so what is pinned is
+        // that block and not whatever else the tick happens to contain.
         let tick = body_of(ASSETS_SOURCE, "fn spawn_tick(");
         assert!(
-            tick.contains("viewport.refresh_asset_index(super::Target::All);"),
-            "the asset tick no longer refreshes the viewport index — an external \
-             mesh edit would never reach the renderer"
+            tick.lines().any(|l| l == "            if outcome.index_stale {"),
+            "`if outcome.index_stale` is no longer a statement of the tick loop              itself - something else now decides whether the viewport is told"
         );
-        for name in SIM_GATE_NAMES {
-            assert!(
-                !tick.contains(name),
-                "the asset tick names `{name}`: the watcher's refresh has been \
-                 made to depend on play state"
-            );
+        let block = body_of(ASSETS_SOURCE, "if outcome.index_stale {");
+        let chain: Vec<String> = block
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| l.starts_with("if ") || l.starts_with("viewport.refresh_asset_index"))
+            .collect();
+        assert_eq!(
+            chain,
+            TICK_REFRESH_CHAIN
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+            "the asset tick's refresh guard chain changed. It is pinned line by              line because the nesting here is legitimate and therefore the one              place an extra condition would look natural."
+        );
+
+        for (name, body) in [("dcc_save", &save), ("spawn_tick", &tick)] {
+            let code = code_only(body);
+            for token in SIM_TOKENS {
+                assert!(
+                    !code.contains(token),
+                    "{name} names `{token}`: its invalidation has been made to \
+                     depend on play state. An asset edit is not in the document, so \
+                     Simulate has no opinion about it - see \
+                     docs/memos/p23-dcc-design.md section 3."
+                );
+            }
         }
     }
 

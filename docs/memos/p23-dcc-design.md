@@ -639,18 +639,42 @@ anticipate is the phase's most valuable finding.
   parallel instance list, and the two lists are index-aligned *only* for
   buildings. So there are two doors and the generic one **refuses an unaligned
   pair as a value** rather than guessing.
-* **§7a's round-trip hazard is not hypothetical, and the ordinary case is a
-  bevel.** §7a recorded that a legal kernel mesh can fail to survive a write/read
-  round trip and named the worst case ("an edge used twice, and the read is
-  refused"). P23.6's gate models the prop the phase's own sentence asks for and
-  hits it: `Op::BevelEdges` on a cap that a `MeshAsset` carries as two triangles
-  sharing a diagonal leaves collinear boundaries and a coincident pair per
-  corner, and the saved prop **cannot be re-opened**. Attributed op by op — the
-  extrude and the loop cut are clean — and pinned three ways (6 un-earable faces,
-  8 coincident vertices, 101 of 106 vertices with no usable tangent, plus the one
-  chart of eighteen that does not converge). The advisory doctrine did its job:
-  the save *says* the vertices will fuse. The bevel is the defect, and it is the
-  first thing to fix in the next DCC batch.
+* **§7a's round-trip hazard is not hypothetical, and it is about CORNERS.** §7a
+  recorded that a legal kernel mesh can fail to survive a write/read round trip
+  and named the worst case ("an edge used twice, and the read is refused").
+  P23.6's gate met it: `Op::BevelEdges` on the rim of a cap produced a prop that
+  saved, cooked, rendered and fractured — and that the Model Editor could not
+  re-open.
+
+  The first write-up blamed "a cap that arrives as two triangles sharing a
+  diagonal", and that was wrong. The diagonal is irrelevant: a cube's lid is a
+  *single quad* and its four rim edges produce the same 8 coincident vertices;
+  all twelve edges of a cube produce 48; two edges meeting anywhere produce 2;
+  two **disjoint** edges produce 0 and round-trip cleanly. The mechanism is the
+  construction this memo's §7b praised for knowing nothing about valence — two
+  bevels sharing an endpoint each offset it into their far face, and on a right
+  angle both land in the same place.
+
+  **Ruling: the op refuses.** A modelling op must not manufacture a file its own
+  reader rejects with only a save-time advisory in between. Emission was measured
+  first and is worse: welding the pair makes two cap triangles share a directed
+  edge, the same non-manifold state one step earlier, and the real fix is a
+  corner join with a case per valence — a feature, not a repair. The refusal is a
+  value, it is inert, and it names the remedy.
+
+  Refusing it retired three symptoms together, which is the part worth
+  remembering: the prop's save went from 8 coincident vertices, 101-of-106
+  untangented vertices and one stalled UV chart to **zero of each**, and the
+  atlas went from 18 fragments filling 0.13 of its `u` axis to 12 charts filling
+  0.77. They were never three findings.
+* **And the batch found the same shape in its own new code.** The bake chose its
+  two in-plane UV axes in the box's **local** frame and indexed a corner already
+  rotated into **world** space — so a yawed part projected onto its own normal,
+  `u` collapsed, and every triangle on that face lost its tangent. 8 of 12
+  triangles at 90°, 672 of 2 616 on a default House bake, reachable on any
+  rectangular building. The test that covered it asserted bounds and signed
+  volume, which are blind to it. P23.5's audit lesson, met in new code within one
+  batch: **a gate must aim at the thing it names.**
 
 And one consequence of the whole phase that belongs beside §5's measurements
 because it is about what *ships* rather than what is authored: **a hand-modelled

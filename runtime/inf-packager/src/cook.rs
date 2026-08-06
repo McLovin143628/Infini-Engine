@@ -1596,8 +1596,10 @@ fn unfracturable_destructible_meshes(db: &AssetDb, closure: &[AssetId]) -> Vec<S
 /// The sentence one unbaked destructible population gets.
 ///
 /// A pure function so the wording is unit-testable, like every other advisory in
-/// this file. It names the **fix** rather than the symptom, because "this will
-/// not break" is something the author can see and "bake it first" is not.
+/// this file, and it names a fix **the author can actually perform**. The first
+/// version prescribed `inf_editor_core::bake`, which is a library call with no
+/// editor command behind it — advice nobody reading a cook report can take, and
+/// the advisory law's own requirement failed on a technicality of wording.
 pub fn unbaked_population_advisory(
     level: AssetId,
     entity: uuid::Uuid,
@@ -1610,9 +1612,12 @@ pub fn unbaked_population_advisory(
     format!(
         "level {level}: entity {entity} is Destructible and also carries a PcgVolume — a \
          scattered population is INSTANCES, not geometry, so {names}. Everything the \
-         grammar placed stays standing and cannot be broken. Bake the population into one \
-         mesh (the grammar bake, `inf_editor_core::bake`) and point the entity's MeshRef \
-         at the result"
+         grammar placed stays standing and cannot be broken. Do one of two things: REMOVE \
+         the Destructible from this entity (on a population it does nothing), or REPLACE \
+         the population with a single mesh — import or model one and point the entity's \
+         MeshRef at it. (Collapsing a grammar population into one mesh is implemented, but \
+         only as a library call; there is no editor command for it yet, so it is not \
+         something you can do from here.)"
     )
 }
 
@@ -2315,7 +2320,7 @@ mod vmesh_advisory {
     /// differ in the *consequence*, which is the part an author acts on: with a
     /// mesh, one box breaks and the building does not; with none, nothing does.
     #[test]
-    fn the_unbaked_population_advisory_names_the_entity_the_effect_and_the_bake() {
+    fn the_unbaked_population_advisory_names_a_fix_an_author_can_perform() {
         let level = AssetId::new();
         let entity = uuid::Uuid::from_u128(0x2306_00AB);
         let mesh = AssetId::new();
@@ -2335,9 +2340,20 @@ mod vmesh_advisory {
             with.contains("cannot be broken"),
             "states the consequence: {with}"
         );
+        // **The remedy must be something an author can DO.** The first version
+        // prescribed `inf_editor_core::bake` — a library call with no editor
+        // command behind it, which is a note to a programmer rather than advice.
         assert!(
-            with.contains("Bake the population"),
-            "names the fix: {with}"
+            with.contains("REMOVE the Destructible") && with.contains("REPLACE"),
+            "names two fixes an author can actually perform: {with}"
+        );
+        assert!(
+            !with.contains("inf_editor_core") && !with.contains("::"),
+            "the advisory prescribes a code path an author cannot invoke: {with}"
+        );
+        assert!(
+            with.contains("no editor command for it yet"),
+            "…and says why the obvious fix is not offered: {with}"
         );
 
         let without = unbaked_population_advisory(level, entity, None);

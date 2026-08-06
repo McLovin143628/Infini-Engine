@@ -397,7 +397,15 @@ fn bits(x: f64) -> u64 {
     }
 }
 
-fn bits3(v: [f64; 3]) -> [u64; 3] {
+/// A position as the **reader's weld key**: exact bits, with `-0.0` folded onto
+/// `0.0`.
+///
+/// `pub(crate)` and not private, because [`crate::model::bevel_edges`] refuses a
+/// construction that would place two vertices at one position and "one position"
+/// has to mean *what the reader will fuse*, not a second opinion about it. One
+/// definition, read by both sides — the alternative is two rules that agree until
+/// somebody changes one.
+pub(crate) fn bits3(v: [f64; 3]) -> [u64; 3] {
     [bits(v[0]), bits(v[1]), bits(v[2])]
 }
 

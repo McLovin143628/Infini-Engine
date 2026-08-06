@@ -35,6 +35,12 @@ fn build_spinner() -> Result<Option<PathBuf>, String> {
             "--manifest-path",
         ])
         .arg(&manifest)
+        // The nested build must not inherit `CARGO_TARGET_DIR` — the `.wasm` is
+        // looked up under the crate's own `target/`, and an inherited override
+        // (an isolated worktree, a shared CI cache, a developer's export) puts it
+        // somewhere this test then reports as a missing toolchain. Same fix, same
+        // reason, as `inf_packager::mods::build_mod_wasm`.
+        .env_remove("CARGO_TARGET_DIR")
         .output()
         .map_err(|e| format!("spawning cargo: {e}"))?;
 

@@ -825,6 +825,33 @@ fn inset_region(mesh: &mut Mesh, region: &Region, amount: f64) -> Result<OpOutco
 /// the endpoint — which is what makes it work on a cube corner, a pole with
 /// twelve faces, and everything between, where a construction that dissolved the
 /// vertex would need a case per valence.
+///
+/// # The price of that, and the ruling (P23.6)
+///
+/// Knowing nothing about the corner is exactly why **two bevels that meet at one
+/// cannot be joined**. Each pushes its own offset copy of the shared endpoint
+/// into its far face, and on a right angle both copies land at the *same
+/// position*: measured on a cube, beveling all twelve edges leaves **48**
+/// coincident vertices, the four rim edges of a cap leave **8**, two edges
+/// sharing a single vertex leave **2**, and two *disjoint* edges leave **0**.
+///
+/// The kernel can hold two vertices at one place. `MeshAsset` cannot:
+/// [`crate::from_mesh_asset`] welds at a tolerance of **exactly zero**, so each
+/// pair fuses on the way back in and an edge ends up used twice — and every one
+/// of those measured cases produces a file the reader **refuses** as
+/// non-manifold, while the two-disjoint case round-trips cleanly.
+///
+/// So the op **refuses** rather than emitting it
+/// ([`OpError::BevelCoincidentVertex`]). The alternative was considered and
+/// measured first: welding the coincident pair would make the two cap triangles
+/// share a directed edge, which is the same non-manifold state one layer earlier;
+/// a real fix is a **corner join** that dissolves the shared vertex into a patch,
+/// which is a construction with a case per valence — precisely the thing this one
+/// was designed not to need. That is a feature, not a repair, and it is not
+/// built.
+///
+/// The refusal is a value and it is inert: the guard runs inside
+/// [`Mesh::transact`], so a refused bevel leaves the mesh byte-identical.
 pub(crate) fn bevel_edges(
     mesh: &mut Mesh,
     edges: &[HalfId],
@@ -862,11 +889,37 @@ pub(crate) fn bevel_edges(
     pairs.dedup();
 
     mesh.transact(|m| {
+        // **THE COINCIDENCE GUARD** (P23.6). Every position already in the mesh,
+        // keyed exactly as `from_mesh_asset` will weld them — so a new offset that
+        // lands on an existing vertex is caught as well as one that lands on
+        // another of this op's own. `or_insert` rather than `insert`: the input
+        // may already hold a coincident pair from an earlier op, and this op is
+        // not answerable for that.
+        let mut seen: BTreeMap<[u64; 3], VertId> = BTreeMap::new();
+        for v in m.vert_ids() {
+            seen.entry(crate::build::bits3(pos(m, v).to_array()))
+                .or_insert(v);
+        }
         let mut made = Vec::new();
         let mut verts = Vec::new();
         for &(a, b) in &pairs {
             let h = m.find_half(a, b).ok_or(OpError::NoSuchVert(a))?;
             let out = bevel_one(m, h, amount)?;
+            for &v in &out.verts {
+                let p = pos(m, v);
+                match seen.entry(crate::build::bits3(p.to_array())) {
+                    std::collections::btree_map::Entry::Occupied(e) if *e.get() != v => {
+                        return Err(OpError::BevelCoincidentVertex {
+                            edge: h,
+                            at: p.to_array(),
+                        })
+                    }
+                    std::collections::btree_map::Entry::Occupied(_) => {}
+                    std::collections::btree_map::Entry::Vacant(e) => {
+                        e.insert(v);
+                    }
+                }
+            }
             made.extend(out.faces); // the strips, one per beveled edge
             verts.extend(out.verts);
         }
@@ -2052,6 +2105,171 @@ mod tests {
         );
         assert_eq!(validate(&m), Ok(()));
         assert_eq!(euler(&m), 2);
+    }
+
+    /// Canonical edges of `m`, each undirected edge once.
+    fn canonical_edges(m: &Mesh) -> Vec<HalfId> {
+        m.half_ids()
+            .filter(|&h| crate::select::canonical_edge(m, h) == Some(h))
+            .collect()
+    }
+
+    /// **THE P23.6 RULING, with the measurement that produced it.**
+    ///
+    /// Two bevels meeting at a corner each offset it into their far face, and on
+    /// a right angle both land in the same place — which `MeshAsset` cannot carry
+    /// and its reader refuses. The four cases below are the ones that were
+    /// measured before the ruling was made, and they are now its regression
+    /// tests: the counts in the doc comment on [`bevel_edges`] are these.
+    ///
+    /// Written as *both* halves. A guard that refused everything would pass the
+    /// three refusals and fail the fourth, and the fourth is what says the op is
+    /// still useful.
+    #[test]
+    fn a_bevel_refuses_the_corners_it_cannot_save_and_allows_the_ones_it_can() {
+        // (1) two DISJOINT edges: no shared endpoint, no coincidence, and the
+        //     asset round-trips. This is the case that must keep working.
+        let mut m = cube(2.0);
+        let all = canonical_edges(&m);
+        let e0 = all[0];
+        let (a0, b0) = (m.origin(e0).expect("live"), m.dest(e0).expect("live"));
+        let touches = |m: &Mesh, h: HalfId| {
+            let (a, b) = (m.origin(h).expect("live"), m.dest(h).expect("live"));
+            a == a0 || a == b0 || b == a0 || b == b0
+        };
+        let disjoint = *all
+            .iter()
+            .find(|&&h| h != e0 && !touches(&m, h))
+            .expect("a cube has disjoint edges");
+        ok(
+            &mut m,
+            Op::BevelEdges {
+                edges: vec![e0, disjoint],
+                amount: 0.2,
+            },
+        );
+        let (asset, report) = crate::to_mesh_asset(&m, &crate::ExportOptions::default());
+        assert_eq!(
+            report.coincident_vertices, 0,
+            "two disjoint bevels must not manufacture a coincidence"
+        );
+        assert!(
+            crate::from_mesh_asset(&asset).is_ok(),
+            "and what they produce must re-open"
+        );
+
+        // (2) two edges sharing ONE vertex — the smallest refusing case.
+        let mut m = cube(2.0);
+        let all = canonical_edges(&m);
+        let e0 = all[0];
+        let (a0, b0) = (m.origin(e0).expect("live"), m.dest(e0).expect("live"));
+        let sharing = *all
+            .iter()
+            .find(|&&h| {
+                h != e0 && {
+                    let (a, b) = (m.origin(h).expect("live"), m.dest(h).expect("live"));
+                    a == a0 || b == a0 || a == b0 || b == b0
+                }
+            })
+            .expect("a cube has meeting edges");
+        let before = m.encoded();
+        let err = refuses(
+            &mut m,
+            Op::BevelEdges {
+                edges: vec![e0, sharing],
+                amount: 0.2,
+            },
+        );
+        assert!(
+            matches!(err, OpError::BevelCoincidentVertex { .. }),
+            "{err:?}"
+        );
+        // INERT — the whole point of `transact`.
+        assert_eq!(m.encoded(), before, "a refused bevel changed the mesh");
+        // …and the message carries the remedy, because a refusal an author
+        // cannot act on is a failure with better manners.
+        let text = err.to_string();
+        assert!(text.contains("do not share an endpoint"), "{text}");
+        assert!(text.contains("corner join"), "{text}");
+
+        // (3) every edge of a cube — the case an author will try first.
+        let mut m = cube(2.0);
+        let all = canonical_edges(&m);
+        assert_eq!(all.len(), 12);
+        let err = refuses(
+            &mut m,
+            Op::BevelEdges {
+                edges: all,
+                amount: 0.2,
+            },
+        );
+        assert!(
+            matches!(err, OpError::BevelCoincidentVertex { .. }),
+            "{err:?}"
+        );
+
+        // (4) the four rim edges of a cap — the P23.6 gate's own first recipe,
+        //     and the shape that produced the finding.
+        let mut m = cube(2.0);
+        let on_top = |m: &Mesh, f: FaceId| {
+            m.face_verts(f).is_some_and(|vs| {
+                vs.iter()
+                    .all(|&v| (m.position(v).expect("live").y - 1.0).abs() < 1e-9)
+            })
+        };
+        let rim: Vec<HalfId> = canonical_edges(&m)
+            .into_iter()
+            .filter(|&h| {
+                let t = m.twin(h).expect("live");
+                let (a, b) = (m.face_of(h).expect("live"), m.face_of(t).expect("live"));
+                let side = |f: Option<FaceId>| f.is_some_and(|f| on_top(&m, f));
+                side(a) != side(b)
+            })
+            .collect();
+        assert_eq!(rim.len(), 4, "a cube's lid has a four-edge rim");
+        let err = refuses(
+            &mut m,
+            Op::BevelEdges {
+                edges: rim,
+                amount: 0.2,
+            },
+        );
+        assert!(
+            matches!(err, OpError::BevelCoincidentVertex { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// The guard also catches an offset that lands on a vertex the mesh **already
+    /// had** — same harm, different provenance, and a version of it that only
+    /// compared this op's own output would miss it.
+    #[test]
+    fn a_bevel_refuses_an_offset_that_lands_on_an_existing_vertex() {
+        // A cube of edge 2 has vertices at ±1. Beveling one edge by exactly 2
+        // pushes its offsets onto the opposite corners.
+        let mut m = cube(2.0);
+        let h = m.half_ids().next().expect("an edge");
+        let err = refuses(
+            &mut m,
+            Op::BevelEdges {
+                edges: vec![h],
+                amount: 2.0,
+            },
+        );
+        // It is caught by *something* — either the inversion guard (the chamfer
+        // folds through the far side) or this one. Both are refusals and both are
+        // inert; what must not happen is a success.
+        assert!(
+            matches!(
+                err,
+                OpError::BevelCoincidentVertex { .. }
+                    | OpError::WouldInvert {
+                        what: "a bevel amount",
+                        ..
+                    }
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]

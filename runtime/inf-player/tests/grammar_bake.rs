@@ -66,6 +66,17 @@ fn baked_house() -> bake::BakedMesh {
     bake::bake_building(&house(), 0x2306, true).expect("the house bakes")
 }
 
+/// The summed volume of the boxes the assembler placed — an **independent**
+/// quantity, computed from the population rather than from anything the bake or
+/// the fracture reports about itself.
+fn parts_volume(params: &BuildingParams, seed: u64) -> f64 {
+    inf_pcg::building::build(params, seed, true)
+        .colliders
+        .iter()
+        .map(|c| 8.0 * c.half_extents.x * c.half_extents.y * c.half_extents.z)
+        .sum()
+}
+
 macro_rules! insert {
     ($doc:expr, $guid:expr, $comp:expr) => {{
         let e = $doc.entity_of($guid).expect("entity");
@@ -209,6 +220,49 @@ fn a_grammar_building_bakes_into_one_mesh_that_fractures_and_cooks() {
             .map(|s| &s.name)
             .collect::<Vec<_>>()
     );
+    // **THE ALIGNMENT, ASSERTED RATHER THAN ASSUMED.** "The palette survives the
+    // bake" is a claim about a *correspondence* — part `i`'s slot must name the
+    // module the assembler's instance `i` named — and asserting only that the
+    // names are not `slot_k` is true by construction of the patch that writes
+    // them. So the correspondence is re-derived here from the assembler's own two
+    // lists and compared element for element.
+    {
+        let out = inf_pcg::building::build(&house(), 0x2306, true);
+        let grammar = inf_pcg::archetype(house().archetype)
+            .grammar()
+            .expect("the palette parses");
+        let names: Vec<&str> = grammar.modules().iter().map(|m| m.name.as_str()).collect();
+        let input = bake::parts_from_building(&out, &grammar).expect("aligned");
+        assert_eq!(
+            input.parts.len(),
+            out.instances.len(),
+            "the bake dropped or invented a part"
+        );
+        let mut checked = 0usize;
+        for (part, inst) in input.parts.iter().zip(&out.instances) {
+            let want = names
+                .get(inst.kind_index as usize)
+                .copied()
+                .unwrap_or(bake::UNTYPED_SLOT);
+            let got = input.slot_names[part.slot as usize].as_str();
+            assert_eq!(
+                got, want,
+                "part slot {} names `{got}` where the assembler's instance named                  module `{want}`",
+                part.slot
+            );
+            checked += 1;
+        }
+        assert!(checked > 50, "only {checked} parts were checked");
+        // Anti-vacuity: the house must actually use SEVERAL modules, or every
+        // comparison above is `\"Slab\" == \"Slab\"`.
+        let distinct: std::collections::BTreeSet<u32> =
+            input.parts.iter().map(|p| p.slot).collect();
+        assert!(
+            distinct.len() > 3,
+            "the house used {} module(s); the alignment check needs several",
+            distinct.len()
+        );
+    }
     assert!(
         baked.asset.submeshes.iter().all(|s| s
             .material_slot
@@ -248,13 +302,27 @@ fn a_grammar_building_bakes_into_one_mesh_that_fractures_and_cooks() {
         "no chunk has a neighbour — nothing is bonded, so the structural solve \
          has nothing to solve"
     );
-    // The chunks account for the building: Voronoi cells tile the source hull, so
-    // their volumes sum to it. Loose (10%) because the cells are clipped against
-    // f32 geometry, tight enough that a bake that lost half its parts fails.
+    // **The chunks account for the building — against the BAKE, not against the
+    // fracture's own arithmetic.** The first version of this compared the chunk
+    // volumes' sum to `total_volume_m3()`, which is that same sum: a tautology
+    // that would have passed on a single chunk, on a hundred, and on rubble. The
+    // independent quantity is the geometry the bake produced, so the comparison is
+    // against the sum of the part boxes.
+    //
+    // **They are not equal, and the ratio is the finding.** Measured: 632.8 m³ of
+    // chunks against 121.8 m³ of walls, slabs and furniture — **5.2x** — because
+    // the Voronoi cells tile the HULL the fracture clips against, not the hollow
+    // shell the bake produced. A baked building therefore breaks into *solid
+    // blocks the size of its rooms*, not into wall fragments, and an author who
+    // expects a facade to come away in pieces will not get that. Ledgered in
+    // ROADMAP section 12's Phase 23 block; asserted here as a band so the day a
+    // shell-aware fracture lands, this fails and the ledger is rewritten.
     let total: f64 = fracture.chunks.iter().map(|c| c.volume_m3).sum();
+    let boxes: f64 = parts_volume(&house(), 0x2306);
+    let ratio = total / boxes;
     assert!(
-        (total - fracture.total_volume_m3()).abs() <= 1e-9,
-        "the report's own total disagrees with its chunks"
+        (3.0..8.0).contains(&ratio),
+        "the fracture holds {total:.1} m³ against {boxes:.1} m³ of baked parts          ({ratio:.1}x) — outside the hull-filling band this was measured at, so          either the bake lost geometry or the fracture changed what it chunks"
     );
     assert!(
         total > 1.0,
@@ -326,7 +394,11 @@ fn a_destructible_on_an_unbaked_population_draws_a_cook_advisory() {
         1,
         "expected exactly one unbaked-population advisory, got {warnings:?}"
     );
-    assert!(hit[0].contains("Bake the population"), "{}", hit[0]);
+    assert!(
+        hit[0].contains("REMOVE the Destructible") && hit[0].contains("REPLACE"),
+        "the advisory must name a fix an author can perform: {}",
+        hit[0]
+    );
     assert!(
         hit[0].contains(&Uuid::from_u128(BUILDING_GUID).to_string()),
         "the advisory names the entity: {}",

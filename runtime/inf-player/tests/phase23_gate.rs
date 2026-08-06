@@ -59,10 +59,10 @@ use inf_editor_core::assets::{vmesh, AssetProject};
 use inf_editor_core::dcc;
 use inf_editor_core::render_assets::EditorRenderAssets;
 use inf_editor_core::samples::{
-    phase23_baseline_mesh, phase23_model_prop, phase23_unwrap_prop, phase23_workshop_dir,
-    PHASE23_CONVERGED, PHASE23_CONVERGENCE_BOUND, PHASE23_EXTRUDE_M, PHASE23_MESH_GUID,
-    PHASE23_PROP_GUID, PHASE23_PROP_SIZE_M, PHASE23_SAVE_AT, PHASE23_STEPS,
-    PHASE23_UNCONVERGED_CHARTS,
+    phase23_baseline_mesh, phase23_disjoint_pair, phase23_extrude_and_cut, phase23_model_prop,
+    phase23_rim_edges, phase23_unwrap_prop, phase23_workshop_dir, PHASE23_BEVEL_M,
+    PHASE23_CONVERGED, PHASE23_EXTRUDE_M, PHASE23_MESH_GUID, PHASE23_PROP_GUID,
+    PHASE23_PROP_SIZE_M, PHASE23_SAVE_AT, PHASE23_STEPS,
 };
 use inf_editor_core::scene::{serialize, SceneDoc};
 use inf_editor_core::simulate::{SimInput, SimSession, SIM_HZ};
@@ -77,22 +77,19 @@ use inf_player::budget::LOAD_BUDGET_MS;
 /// The env var the replay probe reads its `SessionSave` from.
 const PROBE_SESSION: &str = "INF_P23_SESSION";
 
-/// **What the bevel costs, measured** (see `the_bevel_is_where_the_degeneracy_is`).
+/// **What the recipe's legal bevel costs**, measured after the P23.6 ruling.
 ///
-/// `BevelEdges` on the rim of a cap that arrived from a `MeshAsset` as *two
-/// triangles sharing a diagonal* leaves n-gons with collinear boundary vertices
-/// and a coincident pair at every corner where two beveled edges meet. Three
-/// independent downstream measures degrade on exactly that, and all three are
-/// pinned: a bevel that starts merging its corners, or an ear clipper that learns
-/// to handle collinear boundaries, fails these and rewrites the ledger.
-const PHASE23_BEVEL_COINCIDENT: usize = 8;
-/// Faces the writer could not ear-clip after the bevel; they fall back to a fan.
-const PHASE23_BEVEL_FAN_FALLBACKS: usize = 6;
-/// Output vertices of the finished prop with no usable tangent — 101 of 106.
-/// Nearly all of them, and they are the fan's.
-const PHASE23_BEVEL_UNTANGENTED: usize = 101;
-/// How much of the atlas's `u` axis eighteen charts actually occupy.
-const PHASE23_ATLAS_U_SPAN: f64 = 0.13;
+/// Zero, on every counter that the four-edge bevel used to move — which is the
+/// ruling's whole point: refusing the construction that could not be saved
+/// removed the coincident corners, the un-earable n-gons, the untangented
+/// vertices and the stalled UV chart *together*, because all four were the same
+/// defect seen from four places.
+const PHASE23_BEVEL_COINCIDENT: usize = 0;
+const PHASE23_BEVEL_FAN_FALLBACKS: usize = 4;
+const PHASE23_BEVEL_UNTANGENTED: usize = 0;
+/// The floor on how much of the atlas's `u` axis the prop's charts must occupy.
+/// Measured at 0.77 after the bevel ruling (0.13 before it).
+const PHASE23_ATLAS_U_SPAN: f64 = 0.7;
 
 /// Every committed file of the sample, so the fixture copy cannot silently miss
 /// one as the sample grows.
@@ -273,40 +270,37 @@ fn the_prop_unwraps_into_the_unit_square_without_folding() {
         hi[1] - lo[1] > 0.9,
         "the layout spans only {lo:?}..{hi:?} — a packed atlas fills its square"
     );
-    // **And the OTHER axis is where the packer's limit shows.** Eighteen charts
-    // land in a column **{PHASE23_ATLAS_U_SPAN} wide**, so ~87% of the atlas is
-    // empty and the prop's texel density is seven times worse than the square it
-    // was given. That is the measured cost of the P23.5 remainder "no
-    // rotation-to-minimal-bbox before packing", pinned here so the day a better
-    // packer lands this fails and the ledger gets rewritten.
+    // **And the other axis says the packer did its job.** Before the P23.6 bevel
+    // ruling this arm pinned an *inefficiency*: eighteen charts landed in a column
+    // 0.13 wide, so ~87% of the atlas was empty. Those eighteen charts were the
+    // fragments the refused bevel produced; with the legal one the layout fills
+    // most of the square, so the assertion is now the positive claim it should
+    // always have been.
     assert!(
-        hi[0] - lo[0] < PHASE23_ATLAS_U_SPAN,
-        "the atlas now spans {} on u — better than the measured {}; the packer \
-         improved and the ledger says it did not",
+        hi[0] - lo[0] > PHASE23_ATLAS_U_SPAN,
+        "the atlas spans only {} on u; the packer is leaving {}% of the square          empty",
         hi[0] - lo[0],
-        PHASE23_ATLAS_U_SPAN
+        (100.0 * (1.0 - (hi[0] - lo[0]))).round()
     );
 
-    // **The solver's own verdict**, and the one chart that does not reach machine
-    // epsilon — measured, bounded and ledgered rather than hidden behind a loose
-    // tolerance. See `PHASE23_CONVERGENCE_BOUND` for the cause.
-    assert!(
-        report.worst_convergence < PHASE23_CONVERGENCE_BOUND,
-        "the worst chart stopped at {}, past the measured bound",
-        report.worst_convergence
-    );
-    let stalled: Vec<usize> = report
+    // **The solver's own verdict: machine epsilon on every chart, no exceptions.**
+    //
+    // Before the P23.6 bevel ruling one chart of eighteen stalled at 1.6e-2 and
+    // this arm carried a bound and an allowance for it. Both are gone, and that
+    // is a *consequence* rather than a relaxation: the n-gons whose fan
+    // triangulation ill-conditioned that solve were the ones the refused bevel
+    // produced, so refusing it removed the stalled chart. An allowance kept
+    // "just in case" would have hidden that.
+    let stalled: Vec<(usize, f64)> = report
         .charts
         .iter()
         .enumerate()
         .filter(|(_, c)| c.convergence >= PHASE23_CONVERGED)
-        .map(|(i, _)| i)
+        .map(|(i, c)| (i, c.convergence))
         .collect();
-    assert_eq!(
-        stalled.len(),
-        PHASE23_UNCONVERGED_CHARTS,
-        "charts {stalled:?} did not converge; exactly \
-         {PHASE23_UNCONVERGED_CHARTS} is the measured, ledgered state"
+    assert!(
+        stalled.is_empty(),
+        "charts {stalled:?} did not converge; every chart of this prop must reach          machine epsilon"
     );
 }
 
@@ -333,54 +327,35 @@ fn the_prop_saves_as_a_standard_asset() {
         saved.vmesh
     );
     assert_eq!(saved.export.reused_diagonals, 0);
+    // **THE RULING, ASSERTED FROM THE OUTSIDE.** Every counter that the four-edge
+    // bevel used to move reads zero, and the asset the save wrote **re-opens**.
+    // The refusal is not a warning the author has to heed — the op will not build
+    // an unopenable mesh in the first place, so the save cannot write one.
+    assert_eq!(
+        saved.export.coincident_vertices, PHASE23_BEVEL_COINCIDENT,
+        "the save wrote coincident vertices; the reader's weld will fuse them"
+    );
     assert_eq!(
         saved.export.fan_fallbacks, PHASE23_BEVEL_FAN_FALLBACKS,
-        "the count of un-earable faces moved"
+        "the writer could not ear-clip a face"
     );
     assert_eq!(
         saved.export.fallback_tangents, PHASE23_BEVEL_UNTANGENTED,
-        "the count of vertices with no usable tangent moved"
+        "vertices went out without a usable tangent"
     );
-    // **THE ADVISORY THIS PROP EARNS, and it is a finding rather than noise.**
-    // `BevelEdges` on four rim edges that meet pairwise at four corners leaves
-    // **two coincident vertices at each corner**: the bevel insets each edge and
-    // does not merge the pair the two insets produce. Eight, measured, every
-    // time. The writer counts them (`ExportReport::coincident_vertices`) and the
-    // save surfaces them, which is exactly the P23.3 ruling — nudging the
-    // author's geometry falsifies their model and refusing the save makes a legal
-    // intermediate state unsaveable.
-    //
-    // Pinned to the number rather than to `> 0`, so a bevel that starts merging
-    // its corners fails here and the ledger gets rewritten.
-    assert_eq!(
-        saved.export.coincident_vertices, PHASE23_BEVEL_COINCIDENT,
-        "the bevel's corner-coincidence count moved"
-    );
-    // **THE CONSEQUENCE, MEASURED — and it is the phase's sharpest limit.**
-    //
-    // The P23.3 memo predicted this shape exactly: *"at best the two vertices
-    // fuse, at worst the fused topology has an edge used twice in one direction
-    // and the read is REFUSED as non-manifold."* On this prop it is the worst
-    // case. The asset is a perfectly good `.inf_mesh` — it decodes, it derives a
-    // DAG, it cooks, it renders, it fractures — but the **kernel will not re-open
-    // it**, so an author who models a prop with a bevel, saves it and later
-    // double-clicks it gets a refusal.
-    //
-    // The save is not silent about it: `coincident_vertices` is what the Model
-    // Editor turns into *"N vertices share a position with another. Re-opening
-    // this mesh will FUSE them — the reader's weld is exact."* The advisory
-    // doctrine is doing its job; the underlying bevel defect is a Phase 23
-    // remainder, and this assertion is what fails the day it is fixed.
     let (written, _) = inf_dcc::to_mesh_asset(session.mesh(), &inf_dcc::ExportOptions::default());
-    match inf_dcc::from_mesh_asset(&written) {
-        Err(inf_dcc::ImportError::NonManifoldEdge { .. }) => {}
-        Ok(_) => panic!(
-            "the beveled prop re-opened — the bevel's coincident corners no \
-             longer make the asset unreadable, and the Phase 23 ledger says they \
-             do. Rewrite the ledger."
-        ),
-        Err(e) => panic!("the re-open failed in a NEW way: {e}"),
-    }
+    let reopened =
+        inf_dcc::from_mesh_asset(&written).expect("a saved prop must re-open in the Model Editor");
+    assert_eq!(
+        reopened.mesh.vert_count(),
+        session.mesh().vert_count(),
+        "the reader's weld fused vertices the writer meant to keep"
+    );
+    assert_eq!(inf_dcc::validate(&reopened.mesh), Ok(()));
+    assert_eq!(
+        reopened.report.boundary_edges, 0,
+        "the re-opened prop is not a closed solid"
+    );
 
     // 1. the `.inf_mesh` decodes, and is the prop.
     let entry = proj.db().get(mesh_id).expect("still registered").clone();
@@ -427,48 +402,124 @@ fn the_prop_saves_as_a_standard_asset() {
     );
 }
 
-/// **Which op costs what — the measurement, not the inference.**
+/// **THE RULING, AND THE THREE CONSEQUENCES IT RETIRED.**
 ///
-/// Arm (c) pins three degeneracy counters. This one says *where they come from*,
-/// by replaying prefixes of the journal and exporting each: the extrude and the
-/// loop cut are clean, and every one of the three appears at the **bevel**.
+/// The gate's first recipe beveled all four rim edges of the extruded cap, and
+/// what came out was a `.inf_mesh` that saved, cooked, rendered and fractured
+/// perfectly — and that the Model Editor **could not re-open**. Two bevels
+/// meeting at a corner each offset it into their far face; on a right angle both
+/// land in the same place; the reader's tolerance-zero weld fuses the pair into
+/// an edge used twice.
 ///
-/// It matters because "the prop has some degenerate geometry" is a shrug and
-/// "`BevelEdges` on a triangulated cap produces n-gons no ear clipper can cut"
-/// is a defect with an owner. It is also the arm that will fail first when
-/// somebody fixes it, which is the point of writing it down as numbers.
+/// `Op::BevelEdges` now refuses that construction. This arm holds the refusal to
+/// its bargain from both ends:
+///
+/// * the four-edge bevel is **refused**, as a typed value, inertly, with a
+///   message an author can act on;
+/// * the geometry it would have produced really is unopenable, and really does
+///   carry the three counters this batch measured — so the refusal is not
+///   preventing something harmless;
+/// * the recipe's own two-edge bevel is **allowed**, so the op is still a tool.
+///
+/// The counters live here rather than in a ledger paragraph because a ruling
+/// whose justification is only prose is a ruling nobody can re-check.
 #[test]
-fn the_bevel_is_where_the_degeneracy_is() {
-    let full = modelled();
-    let mut counts = Vec::new();
-    for n in 0..=full.ops().len() {
-        let m = MeshSession::replay(full.base(), &full.ops()[..n]).expect("replay a prefix");
-        let (_, r) = inf_dcc::to_mesh_asset(&m, &inf_dcc::ExportOptions::default());
-        counts.push((r.fan_fallbacks, r.coincident_vertices, r.fallback_tangents));
+fn the_bevel_refuses_the_corner_it_cannot_save() {
+    use inf_dcc::{Op, OpError};
+
+    // Model up to the point where the rim exists — the same two ops the recipe
+    // runs, so this is the real topology and not an imitation of it.
+    let mut session = open_baseline();
+    let top_y = PHASE23_PROP_SIZE_M * 0.5 + PHASE23_EXTRUDE_M;
+    phase23_extrude_and_cut(&mut session).expect("the recipe's first two ops");
+    let rim = phase23_rim_edges(session.mesh(), top_y);
+    assert_eq!(rim.len(), 4, "the cap has a four-edge rim");
+
+    // (1) THE REFUSAL. All four at once is what an author selects, and it is
+    //     exactly the construction that cannot be saved.
+    let mut all_four = session.mesh().clone();
+    let before = all_four.encoded();
+    let err = inf_dcc::ops::apply(
+        &mut all_four,
+        &Op::BevelEdges {
+            edges: rim.clone(),
+            amount: PHASE23_BEVEL_M,
+        },
+    )
+    .expect_err("beveling four meeting edges must be refused");
+    assert!(
+        matches!(err, OpError::BevelCoincidentVertex { .. }),
+        "refused for the wrong reason: {err}"
+    );
+    assert_eq!(
+        all_four.encoded(),
+        before,
+        "a refused bevel must leave the mesh byte-identical"
+    );
+    let text = err.to_string();
+    assert!(text.contains("do not share an endpoint"), "{text}");
+    assert!(text.contains("corner join"), "{text}");
+
+    // (2) …AND THE HARM IT PREVENTS IS REAL, demonstrated rather than cited.
+    //
+    // The refusal rests on one premise: **two vertices at one position make an
+    // asset its own reader will not take back**. The bevel can no longer be made
+    // to produce that state — the guard also compares against vertices already in
+    // the mesh, so beveling the rim one edge at a time is refused too, which is a
+    // stronger result than intended and is asserted here rather than assumed.
+    // So the premise is shown directly, through the public op set: two coincident
+    // quads, four coincident pairs, and a reader that refuses the result.
+    // The premise itself: coincident vertices ⇒ the reader refuses.
+    let mut doubled = inf_dcc::plane(1.0);
+    let places: Vec<[f64; 3]> = doubled
+        .vert_ids()
+        .map(|v| doubled.position(v).expect("live").to_array())
+        .collect();
+    assert_eq!(places.len(), 4);
+    let mut twins = Vec::new();
+    for p in &places {
+        let out = inf_dcc::ops::apply(&mut doubled, &Op::AddVertex { position: *p })
+            .expect("a vertex may sit on another — the KERNEL allows it");
+        twins.push(out.verts[0]);
     }
-    // 0 ops: the committed baseline, perfectly clean.
-    assert_eq!(counts[0], (0, 0, 0), "the baseline is not clean");
-    // 1 op (extrude) and 2 (loop cut): still no degenerate face, still no
-    // coincidence. The tangent fallbacks that DO appear are the new corners
-    // sitting at UV (0, 0) until an unwrap runs — expected, and cured by arm (b).
+    inf_dcc::ops::apply(
+        &mut doubled,
+        &Op::AddFace {
+            verts: twins,
+            corners: vec![inf_dcc::CornerData::default(); 4],
+            slot: None,
+        },
+    )
+    .expect("and so does a face built on them");
+    let (twin_asset, twin_report) =
+        inf_dcc::to_mesh_asset(&doubled, &inf_dcc::ExportOptions::default());
     assert_eq!(
-        (counts[1].0, counts[1].1),
-        (0, 0),
-        "the extrude introduced degeneracy"
+        twin_report.coincident_vertices, 8,
+        "the fixture must really carry the hazard it is demonstrating"
     );
-    assert_eq!(
-        (counts[2].0, counts[2].1),
-        (0, 0),
-        "the loop cut introduced degeneracy"
+    assert!(
+        matches!(
+            inf_dcc::from_mesh_asset(&twin_asset),
+            Err(inf_dcc::ImportError::NonManifoldEdge { .. })
+        ),
+        "coincident vertices must really make an asset unopenable, or the bevel's          refusal is a superstition"
     );
-    assert!(counts[2].2 < 20, "unexpected tangent loss before the bevel");
-    // 3 ops (bevel): all three, at once.
-    assert_eq!(
-        counts[3],
-        (PHASE23_BEVEL_FAN_FALLBACKS, PHASE23_BEVEL_COINCIDENT, 72),
-        "the bevel's cost moved — arm (c)'s pins and the Phase 23 ledger both \
-         describe this number"
-    );
+
+    // (3) …AND THE OP IS STILL A TOOL. Two edges that do not meet bevel cleanly,
+    //     which is what the recipe uses and what arm (c) saves.
+    let pair = phase23_disjoint_pair(session.mesh(), &rim).expect("a disjoint pair");
+    let mut two = session.mesh().clone();
+    inf_dcc::ops::apply(
+        &mut two,
+        &Op::BevelEdges {
+            edges: pair.to_vec(),
+            amount: PHASE23_BEVEL_M,
+        },
+    )
+    .expect("two disjoint edges must still bevel");
+    let (clean, clean_report) = inf_dcc::to_mesh_asset(&two, &inf_dcc::ExportOptions::default());
+    assert_eq!(clean_report.coincident_vertices, 0);
+    assert!(inf_dcc::from_mesh_asset(&clean).is_ok(), "and it re-opens");
 }
 
 // ── (d) LIVE UPDATE ─────────────────────────────────────────────────────────

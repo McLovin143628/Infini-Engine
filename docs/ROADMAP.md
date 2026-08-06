@@ -7604,9 +7604,9 @@ and the headless preview render is the proven offscreen-PNG path.
 >
 > **The shipped ledger, by batch.**
 >
-> * **P23.1 design memo + P23.2a multi-viewport enabler** — `be89e94` (the memo:
->   asset-scoped sessions, no DNA/RNA clone, `meshopt` never in the journal), `0dd6286`,
->   `e24180f`, `7b100e8`, `03bbcab` (keyed `ViewportState` with `Target::{Primary,Named,All}`
+> * **P23.1 design memo + P23.2a multi-viewport enabler** — `e24180f` (the memo:
+>   asset-scoped sessions, no DNA/RNA clone, `meshopt` never in the journal); `be89e94`,
+>   `0dd6286`, `7b100e8`, `03bbcab` (keyed `ViewportState` with `Target::{Primary,Named,All}`
 >   named at all 31 resolution points, the **store hoist**, panel-focus undo routing, and
 >   `PreviewSession` — measured at **0.34 ms** warm at 512², against a 22.9 ms *PNG encode*).
 > * **P23.3 the half-edge kernel** — `d5657bd` (topology, validation, weld/seam import, core
@@ -7621,8 +7621,11 @@ and the headless preview render is the proven offscreen-PNG path.
 > * **P23.5 sculpt + UV** — `0aeeb71` (strokes and component transforms on the journal),
 >   `67d0628` (seams, LSCM unwrap, the UV view), `6f4c84d` (a solver that converges, gates that
 >   reach the doors, honest verdicts).
-> * **P23.6 asset round-trip + the phase gate** — this batch: the edit-during-Simulate proof,
->   the grammar bake, `samples/phase23-workshop` + `phase23_gate`, and this block.
+> * **P23.6 asset round-trip + the phase gate** — `8040593` (the edit-during-Simulate proof,
+>   the grammar bake, the unbaked-population advisory), `241af52` (`samples/phase23-workshop`
+>   + `phase23_gate`, this block), and the closing audit's fix commit: **the bevel refuses
+>   what it cannot save**, the bake's UV axes turn with the part, the source gate becomes an
+>   allowlist, and the advisory names a fix an author can perform.
 >
 > **The phase's laws.**
 >
@@ -7659,38 +7662,59 @@ and the headless preview render is the proven offscreen-PNG path.
 >   defect whose effect it cannot observe, and saying which gate *does* is better than
 >   pretending.
 >
-> **What P23.6 measured that nobody had.** The gate models a prop the way the phase's sentence
-> says to, and the bevel is where everything costs something. `Op::BevelEdges` on the rim of a
-> cap that arrives from a `MeshAsset` as *two triangles sharing a diagonal* leaves n-gons with
-> collinear boundary vertices and a coincident pair at each corner where two beveled edges meet.
-> Replaying the journal one op at a time attributes it exactly: the extrude and the loop cut are
-> clean (0 fan fallbacks, 0 coincident), and the bevel introduces **6 un-earable faces, 8
-> coincident vertices, and 60 more vertices with no usable tangent** at once. Three independent
-> consequences, all now pinned in the gate:
+> **What P23.6 measured, and the op that now refuses because of it.** The gate models a prop
+> the way the phase's sentence says to, and the bevel is where it found a limit.
+> `Op::BevelEdges` **manufactured a mesh its own writer could not save**: two beveled edges that
+> share an endpoint each push an offset copy of that endpoint into their far face, and on a
+> right angle both copies land at *exactly* the same position. `from_mesh_asset` welds at a
+> tolerance of **zero**, so the pair fuses on the way back in and an edge ends up used twice —
+> `NonManifoldEdge`, refused. Measured on a cube: all twelve edges leave **48** coincident
+> vertices, a cap's four rim edges leave **8**, two edges sharing one vertex leave **2**, and two
+> **disjoint** edges leave **0** and round-trip cleanly.
 >
-> * **A saved beveled prop cannot be re-opened.** The reader's weld is exact, so the coincident
->   pairs fuse and an edge ends up used twice: `from_mesh_asset` refuses it as
->   `NonManifoldEdge`. The asset is a perfectly good `.inf_mesh` — it decodes, derives a DAG,
->   cooks, renders and fractures — but an author who models with a bevel, saves, and later
->   double-clicks the asset gets a refusal. The save is **not silent**: `coincident_vertices`
->   is what the Model Editor turns into *"N vertices share a position with another. Re-opening
->   this mesh will FUSE them."* The advisory doctrine did its job; the bevel is the defect.
-> * **101 of 106 written vertices take the fallback tangent** on the finished prop, because the
->   fan the writer falls back to on those n-gons produces UV-degenerate triangles that carry no
->   direction. A plain cube — modelled or unwrapped — reads **zero**, which is what makes this
->   an attribution rather than a shrug. Normal-mapped materials on hand-modelled geometry will
->   light wrong until the ear clipper handles collinear boundaries.
-> * **One chart of eighteen does not converge**: 1.6e-2 where the other seventeen read below
->   1e-15, on a chart whose exact answer is a flat polygon. 256 CG iterations on a
->   twenty-unknown system is not an iteration-count problem — it is the same slivers,
->   ill-conditioning the conformal system. Bounded (`PHASE23_CONVERGENCE_BOUND`) and pinned to
->   **exactly one** chart, so a second stalling chart fails rather than hiding under it.
+> **The first write-up of this got the attribution wrong**, and correcting it is the point of
+> the measurement: it blamed "a cap that arrives from a `MeshAsset` as two triangles sharing a
+> diagonal". The diagonal is irrelevant. A cube's lid is a *single quad* and its four rim edges
+> produce the same 8 coincident vertices; two edges meeting anywhere produce 2. What the defect
+> is about is **corners**, and nothing else.
 >
-> And one more the atlas gave up for free: eighteen charts pack into a column **0.13 wide**, so
-> ~87% of the UV square is empty and the prop's texel density is seven times worse than the
-> space it was given. That is the measured cost of P23.5's "no rotation-to-minimal-bbox before
-> packing" remainder, pinned so a better packer fails the arm and rewrites this paragraph.
+> So the op **refuses** ([`OpError::BevelCoincidentVertex`]), inertly, naming the edge, the
+> position and the remedy — *bevel edges that do not share an endpoint; a corner join for
+> meeting bevels is not built*. Emission was considered first and rejected on measurement:
+> welding the coincident pair makes the two cap triangles share a directed edge, which is the
+> same non-manifold state one step earlier, and a real fix is a corner join that dissolves the
+> shared vertex into a patch — a construction with a case per valence, which is precisely what
+> P23.4's valence-agnostic bevel was designed not to need. That is a feature, not a repair.
 >
+> **Refusing it retired three separate symptoms at once**, which is how a codebase learns that
+> they were one defect seen from three places. With the recipe's bevel changed to the two
+> disjoint rim edges the kernel accepts, the prop's save now reads **0 coincident vertices, 0
+> fallback tangents** (it was 101 of 106) and **0 stalled UV charts** (it was one of eighteen, at
+> 1.6e-2 against 1e-15 for the rest) — and the saved asset **re-opens in the Model Editor**,
+> which the four-edge version could not. The atlas moved with it: 12 charts filling **0.77** of
+> the `u` axis, where the eighteen fragments the refused bevel produced had filled **0.13**, so
+> the "87% of the atlas is empty" finding is retired rather than carried. Four un-earable n-gons
+> remain (`fan_fallbacks = 4`, one per grown face of the two legal bevels); they cost nothing
+> measurable now that no vertex is coincident and no tangent is lost, and they are pinned.
+>
+> Every number above is a constant the gate compares against, not a sentence: `PHASE23_CONVERGED`
+> (1e-12, with **zero** charts allowed to exceed it), `PHASE23_ATLAS_U_SPAN` (0.7, a floor),
+> `PHASE23_BEVEL_COINCIDENT`/`FAN_FALLBACKS`/`UNTANGENTED` (0/4/0), and the four cube counts in
+> `inf-dcc`'s `a_bevel_refuses_the_corners_it_cannot_save_and_allows_the_ones_it_can`.
+>
+> **The other defect this batch found was in its own bake**, and it is the same shape as the one
+> P23.5's audit named: a claim asserted by bounds while the thing that mattered went unchecked.
+> `add_box` chose its two in-plane UV axes in the **box's local frame** and then indexed a corner
+> `corners()` had already rotated into **world** space. On a yawed part that projects the face
+> onto its own normal: `u` collapses to a constant, every triangle on it has zero UV area, and
+> its vertices get no tangent. Measured before the fix: **0 of 12** triangles degenerate at 0°,
+> **8 of 12 at 90°**, and **672 of 2 616 (25.7%)** on a default House bake with 1 344 vertices
+> untangented — reachable on any rectangular building, because the assembler yaws every wall
+> piece onto its wall's normal. The axes now rotate with the part; the existing test asserted
+> only bounds and signed volume (the third bounds-only test this phase), and now sweeps
+> 0/45/90/135° for UV non-degeneracy and asserts **zero** on the real House bake, with an
+> anti-vacuity check that the house contains rotated parts at all.
+
 > **A modelled prop ships as a placeholder cube unless you lower a threshold.** The workshop is
 > the one flagship sample in the tree whose cook is *not* silent, and the reason is a property
 > of the whole DCC output class rather than of this sample: a hand-modelled prop is a few dozen
@@ -7702,8 +7726,12 @@ and the headless preview render is the proven offscreen-PNG path.
 >
 > **Honest remainder ledger** (carried, and each one is a real thing an author will meet):
 >
-> * **The bevel's degeneracy**, above — the single most valuable thing to fix next, because it
->   is upstream of three separate symptoms.
+> * **Bevels that meet at a corner are REFUSED, not joined.** The op will not build what it
+>   cannot save (above), which makes the failure loud and inert instead of silent and fatal —
+>   but an author who selects a whole rim and asks for a chamfer still cannot have one. The
+>   missing feature is a **corner join**: dissolve the shared vertex into a patch and merge the
+>   two offsets into it. That is a construction with a case per valence, and it is the single
+>   most valuable thing to build next in the kernel.
 > * **Edit during embedded PIE is still impossible**, and the memo said so before the code did:
 >   the embedded player draws **placeholder cubes** for asset meshes (no vmesh in the payload)
 >   and `embed_foreign` hides the editor viewport while it runs. The supported live-edit paths
@@ -7735,14 +7763,24 @@ and the headless preview render is the proven offscreen-PNG path.
 > * **A lost preview device stays lost**: `Thumbnailer` caches its `GpuContext` with no
 >   `is_lost()` check, so after a driver TDR every preview reads "No preview" until restart.
 > * **There is no `viewport_detach`**, so the keyed viewport map only ever grows.
+> * **A baked building fractures as a SOLID, not as a shell.** Measured: 632.8 m³ of chunks
+>   against 121.8 m³ of walls, slabs and furniture — **5.2x** — because the Voronoi cells tile
+>   the hull the fracture clips against, not the hollow shell the bake produced. So a charge
+>   takes room-sized blocks out of a building rather than pieces of its facade. Asserted as a
+>   band in `grammar_bake.rs`, so a shell-aware fracture fails it and rewrites this line.
 > * **The bake is boxes and prisms, merged and not welded.** That is not a simplification of the
 >   grammar — a `ScatteredSolid` *is* an oriented box, always — but the parts are separate shells
->   with coincident corners where they abut, so a baked building is geometry for rendering and
->   fracture and **cannot be re-opened in the Model Editor** either. Measured
->   (`BakeReport::reopenable`), not assumed: a population whose parts do *not* touch re-opens
->   fine, and the gate asserts both halves. A `ModuleDef.mesh` GUID is deliberately not read (the
->   bake would then depend on the asset database and stop being a pure function), and there is
->   no boolean union.
+>   with coincident corners where they abut, so a baked building **cannot be re-opened in the
+>   Model Editor**. What it *is* good for is stated exactly rather than as "rendering": it
+>   renders, it virtualizes, and it fractures — three consumers that read triangles and never
+>   half-edge topology. Measured (`BakeReport::reopenable`), not assumed: a population whose
+>   parts do *not* touch re-opens fine, and the gate asserts both halves. A `ModuleDef.mesh`
+>   GUID is deliberately not read (the bake would then depend on the asset database and stop
+>   being a pure function), and there is no boolean union.
+> * **The bake's UVs are a per-face world-axis projection in metres**, not an atlas. They tile,
+>   they overlap by construction, and a lightmapper would need the unwrapper. The docs claimed
+>   "uniform texel density" — corrected, and the claim that *is* true (UV range proportional to
+>   a face's size in metres) is now the one asserted.
 
 ### Phase 24 — DCC v2: characters
 

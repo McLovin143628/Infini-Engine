@@ -84,11 +84,21 @@ use inf_pcg::{BuildingOutput, BuildingParams};
 /// Metres of surface per UV tile.
 ///
 /// The bake authors planar UVs rather than unwrapping, because a building is
-/// hundreds of axis-aligned boxes whose flattening is known in closed form and an
-/// LSCM solve over it would be slower and no better. A **constant metres-per-tile
-/// keeps the texel density uniform**, which per-face `0..1` UVs would not: a 10 m
-/// slab and a 0.2 m mullion would get the same UV range and fifty times the
-/// density apart.
+/// hundreds of boxes whose flattening is known in closed form and an LSCM solve
+/// over it would be slower and no better.
+///
+/// # What this does and does not buy, stated exactly
+///
+/// The projection is **world-axis-aligned per face, in metres**, so two faces of
+/// the same orientation are parameterized at the same scale and a 10 m slab and a
+/// 0.2 m mullion get UV ranges proportional to their size rather than both
+/// getting `0..1`. That is the property worth having, and it is the one asserted
+/// (`the_uv_scale_follows_the_part_size`).
+///
+/// It is **not** a uniform texel density in the sense a lightmapper means: the
+/// charts are not packed, they overlap in UV space by construction (every face
+/// tiles the same `[0,1)` lattice), and a tiling texture is what this
+/// parameterization is for. An atlas would need the unwrapper.
 pub const UV_METRES_PER_TILE: f64 = 2.0;
 
 /// The name given to every part when the population carries no module identity
@@ -157,6 +167,34 @@ pub struct BakeReport {
     /// topology. Measured, so the day a boolean union lands this flips and the
     /// ledger gets rewritten.
     pub reopenable: bool,
+}
+
+/// **Triangles whose UV area is zero**, so they carry no direction for a tangent
+/// and nothing for a tiling texture to follow.
+///
+/// A measurement rather than an internal detail, because it is what the yaw
+/// defect looked like from the outside and it is what its regression tests
+/// assert. `1e-12` rather than the tangent generator's `1e-20`: a projection onto
+/// a face's own normal collapses `u` to a *constant*, so the determinant is
+/// exactly zero and any threshold catches it — the looser one exists so a
+/// near-collapse (a part yawed 89.999°) is caught too rather than passing on a
+/// technicality.
+pub fn uv_degenerate_triangles(asset: &MeshAsset) -> usize {
+    let mut n = 0;
+    for sm in &asset.submeshes {
+        for tri in sm.indices.chunks_exact(3) {
+            let uv = |i: u32| {
+                let t = sm.vertices[i as usize].uv;
+                (t[0] as f64, t[1] as f64)
+            };
+            let (a, b, c) = (uv(tri[0]), uv(tri[1]), uv(tri[2]));
+            let det = (b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1);
+            if det.abs() < 1e-12 {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 /// A baked building.
@@ -433,20 +471,41 @@ fn add_box(mesh: &mut Mesh, part: &BakePart, origin: DVec3) -> Result<(), String
         let mut axis_v = DVec3::ZERO;
         axis_v[axis] = if positive { 1.0 } else { -1.0 };
         let normal = part.rotation.mul_vec3(axis_v);
-        // The two in-plane axes, in metres, so texel density is uniform across
-        // the whole building rather than per-face.
+        // **The two in-plane axes, ROTATED WITH THE PART.**
+        //
+        // They are chosen in the box's own frame — for a ±X face the in-plane
+        // pair is (Z, Y), and so on — and the corner they are dotted against has
+        // ALREADY been rotated into world space by `corners()`. Indexing the
+        // world-space corner by a local axis number is therefore a projection
+        // onto the wrong pair, and on a yawed part it is a projection onto the
+        // face's own normal: at 90° the `u` coordinate is constant across the
+        // face, every triangle on it has zero UV area, and its vertices get no
+        // usable tangent. Measured before the fix: 0 of 12 triangles degenerate
+        // at 0°, **8 of 12 at 90°**, and 672 of 2616 (25.7%) on a default House
+        // bake — reachable on any rectangular building, because the assembler
+        // yaws every wall piece onto its wall's normal.
+        //
+        // Rotating the pair and dotting keeps the world-aligned tiling the
+        // identity case had (it reduces to `local[i][ua]` exactly when the
+        // rotation is identity) while turning with the part.
         let (ua, va) = match axis {
             0 => (2usize, 1usize),
             1 => (0, 2),
             _ => (0, 1),
         };
+        let mut u_local = DVec3::ZERO;
+        u_local[ua] = 1.0;
+        let mut v_local = DVec3::ZERO;
+        v_local[va] = 1.0;
+        let u_dir = part.rotation.mul_vec3(u_local);
+        let v_dir = part.rotation.mul_vec3(v_local);
         let verts: Vec<_> = loop_indices.iter().map(|&i| ids[i]).collect();
         let corners: Vec<CornerData> = loop_indices
             .iter()
             .map(|&i| CornerData {
                 uv: [
-                    local[i][ua] / UV_METRES_PER_TILE,
-                    local[i][va] / UV_METRES_PER_TILE,
+                    local[i].dot(u_dir) / UV_METRES_PER_TILE,
+                    local[i].dot(v_dir) / UV_METRES_PER_TILE,
                 ],
                 normal: Some(normal.to_array()),
             })
@@ -638,20 +697,128 @@ mod tests {
         assert_eq!(baked.asset.submeshes[0].name, UNTYPED_SLOT);
     }
 
+    /// **A yawed part keeps its geometry AND its parameterization.**
+    ///
+    /// The geometry half of this test existed and passed while the UV half was
+    /// broken — the third bounds-only test this phase, and the reason the
+    /// projection defect survived a green tree: bounds and signed volume are
+    /// blind to which axes a UV was projected onto. Swept, because 90° is the
+    /// exact collapse and 45° is the case a tolerance would wave through.
     #[test]
-    fn a_yawed_part_bakes_rotated_geometry() {
+    fn a_yawed_part_bakes_rotated_geometry_and_a_usable_layout() {
+        for (name, deg) in [("0", 0.0f64), ("45", 45.0), ("90", 90.0), ("135", 135.0)] {
+            let mut input = one_box(0);
+            input.parts[0].rotation = DQuat::from_rotation_y(deg.to_radians());
+            let baked = bake_grammar_to_mesh(&input).unwrap();
+            // The solid is unchanged by a rotation about its own centre.
+            assert!(
+                (signed_volume(&baked.asset) - 48.0).abs() < 1e-4,
+                "at {name}deg the solid is {}",
+                signed_volume(&baked.asset)
+            );
+            // **The half that was missing.** Every triangle must carry UV area,
+            // or the surface has no direction for a tangent and no gradient for
+            // a tiling texture.
+            assert_eq!(
+                uv_degenerate_triangles(&baked.asset),
+                0,
+                "at {name}deg the layout collapsed on {} of {} triangles",
+                uv_degenerate_triangles(&baked.asset),
+                baked.report.export.triangles
+            );
+            assert_eq!(
+                baked.report.export.fallback_tangents, 0,
+                "at {name}deg {} vertices got no usable tangent",
+                baked.report.export.fallback_tangents
+            );
+        }
+        // And the geometry claim, at the angle that makes it visible.
         let mut input = one_box(0);
         input.parts[0].rotation = DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2);
         let baked = bake_grammar_to_mesh(&input).unwrap();
-        // A quarter turn about Y swaps the X and Z extents.
         assert!(
             (baked.asset.bounds.max[0] - 3.0).abs() < 1e-4,
             "{:?}",
             baked.asset.bounds
         );
         assert!((baked.asset.bounds.max[2] - 2.0).abs() < 1e-4);
-        // …and it is still a solid of the same volume.
-        assert!((signed_volume(&baked.asset) - 48.0).abs() < 1e-4);
+    }
+
+    /// The claim `UV_METRES_PER_TILE`'s docs actually make, asserted: the UV
+    /// range of a face is proportional to its size in metres, so a big slab and a
+    /// small mullion are not both mapped to `0..1`.
+    #[test]
+    fn the_uv_scale_follows_the_part_size() {
+        let span = |half: DVec3| {
+            let input = BakeInput {
+                parts: vec![BakePart {
+                    center: DVec3::new(0.0, half.y, 0.0),
+                    half_extents: half,
+                    rotation: DQuat::IDENTITY,
+                    slot: 0,
+                }],
+                slot_names: vec![UNTYPED_SLOT.into()],
+            };
+            let baked = bake_grammar_to_mesh(&input).unwrap();
+            let mut lo = f64::MAX;
+            let mut hi = f64::MIN;
+            for sm in &baked.asset.submeshes {
+                for v in &sm.vertices {
+                    lo = lo.min(v.uv[0] as f64);
+                    hi = hi.max(v.uv[0] as f64);
+                }
+            }
+            hi - lo
+        };
+        let big = span(DVec3::new(5.0, 0.1, 5.0));
+        let small = span(DVec3::new(0.1, 0.1, 0.1));
+        assert!(
+            big > small * 20.0,
+            "a 10 m slab spans {big} and a 0.2 m mullion {small}; the projection \
+             is supposed to be in METRES, not per-face"
+        );
+        // …and the unit really is `UV_METRES_PER_TILE` metres.
+        assert!(
+            (big - 10.0 / UV_METRES_PER_TILE).abs() < 1e-4,
+            "a 10 m face spans {big} tiles"
+        );
+    }
+
+    /// **The defect where it was reachable**: the assembler yaws wall pieces onto
+    /// their wall's normal, so a default House bake exercised it on a quarter of
+    /// its triangles. Asserted as zero on the real content rather than only on a
+    /// synthetic box.
+    #[test]
+    fn a_baked_house_has_no_collapsed_uvs() {
+        let params = BuildingParams::new(
+            ArchetypeId::House,
+            Rect2::from_center(DVec2::new(0.0, 0.0), DVec2::new(12.0, 9.0)),
+            0.0,
+            7,
+        );
+        let baked = bake_building(&params, 7, true).unwrap();
+        assert!(baked.report.export.triangles > 1000, "a real building");
+        assert_eq!(
+            uv_degenerate_triangles(&baked.asset),
+            0,
+            "{} of {} triangles have no UV area",
+            uv_degenerate_triangles(&baked.asset),
+            baked.report.export.triangles
+        );
+        assert_eq!(
+            baked.report.export.fallback_tangents, 0,
+            "{} vertices have no usable tangent",
+            baked.report.export.fallback_tangents
+        );
+        // Anti-vacuity: the house really does contain yawed parts, or this
+        // asserts zero on a population the defect could never have reached.
+        let out = inf_pcg::building::build(&params, 7, true);
+        assert!(
+            out.colliders
+                .iter()
+                .any(|c| c.rotation.to_axis_angle().1.abs() > 1e-9),
+            "no part of this house is rotated, so the sweep proves nothing"
+        );
     }
 
     #[test]
