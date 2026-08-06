@@ -7329,12 +7329,42 @@ and the headless preview render is the proven offscreen-PNG path.
   rather than the next **save**, so an author who pressed Save and moved the mouse never read the
   one sentence saying disk ≠ session; the facing rule was written three times in a file whose
   docs claim "no second one to drift" (one `faces_eye` now); the overlay rasterizer overflowed
-  `i32` on extreme projections (saturating, with a clamp window); nine `cargo doc` warnings; and
+  `i32` on extreme projections (saturating, with a clamp window — **and that one was listed
+  here without a gate**: reverting it failed nothing, which the re-audit caught and a test over
+  ±3e30, infinities and NaN now closes); nine `cargo doc` warnings; and
   the determinism self-gate did not recurse into subdirectories — the day `src/uv/` arrives every
   law above would have stopped applying to it silently.
   **Also found while writing the gates**: the property battery turned up a **third symptom** of
   the coincidence hazard — a face whose triangles *all* collapse in `f32` makes the reader report
   `NoGeometry` on a mesh that has faces. Same entitlement, now asserted.
+  **RE-AUDIT (one commit).** B1/M1/M2/M5 and the preview queue confirmed closed by independent
+  mutation. Four majors remained. **M-1 — `SaveError::Torn` was unreachable by any filesystem
+  failure, and `Derived` asserted a disk state nobody had checked.**
+  `AssetProject::delete` discards both `remove_file` results with `let _ =` and returns
+  `Ok(Vec::new())` unconditionally, so `remove_derived_vmesh`'s `.is_ok()` was **always true**
+  past its early returns — a database condition wearing a filesystem's clothes. When the delete
+  genuinely fails (a renderer holding the `.inf_vmesh` mapped — a real Windows case since P16)
+  the author was told "the stale DAG has been removed, the mesh will draw as a placeholder";
+  it had not been, `resolve_vgeom` found it, and the viewport drew the PREVIOUS geometry
+  confidently — the exact pair the save's headline invariant forbids, delivered by the error
+  path that claims to handle it. The verdict is now on-disk truth
+  (`delete(..).is_ok() && !path.exists()`), `Skipped`'s removal is checked like any other
+  (its answer had been dropped, so no path could observe a failed removal), and `Torn` is
+  reachable and **tested**: a handle opened without `FILE_SHARE_DELETE` blocks the unlink and
+  the save reports it, with a companion test proving the check is not simply inverted. LAW:
+  **a bool that reports on the filesystem must ask the filesystem.**
+  **M-2/M-3 — the B1 leak survived in a narrower window.** `close` read the entry's `doc`,
+  found it null because `open` had not resolved, and sent nothing — leaking the backend
+  document, its `MeshSession` and its journal for the process — and then `patch` created the
+  entry unconditionally, so every late-resolving `open`/`apply`/`save`/`mergeAsset`
+  **resurrected** a deleted document and `docs` never shrank. React StrictMode walks this on
+  every dev mount. Fixed with per-asset tombstones: `close` marks, deletes and sends
+  `dcc_close` **by asset id** (the command is now symmetric with `dcc_open` and idempotent, so
+  it can always be sent); `patch` never creates, so a late reply for a closed document is
+  dropped; and an `open` that resolves into a tombstone sends the close again, because the
+  session it just created is the one the first close could not name.
+  **M-4 — the i32 overflow fix was ungated** (reverting it failed nothing while the ledger
+  listed it under gates that bite). Promoted to a test over ±3e30, infinities and NaN.
   **Re-measured mutation table** (every count with `--no-fail-fast`, run **serialized** — both are
   house law now, since one earlier count was taken without the flag and a parallel run shares a
   target directory): wall every region edge → **3**; claim `SplitEdge` preserves ids → **3**;
@@ -7343,7 +7373,9 @@ and the headless preview render is the proven offscreen-PNG path.
   rule → **3**; remove the preview's in-flight gate → **1**; report the extrude's walls again →
   **4**; collapse the store to one document → **4**; drop the inversion gate → **1**; drop the
   derived-corner finiteness gate → **2**; drop the canonical merge order → **1**; re-tessellate
-  every frame → **1**.
+  every frame → **1**. Re-audit round: trust the database for the removal verdict → **1**; drop
+  `Skipped`'s removal answer → **1**; unclamp the rasterizer's pixel cast → **1**; require a
+  document before sending `dcc_close` → **1**; let `patch` create entries again → **2**.
   LAWS added: **a Ring-1 gate that INLINES a Ring-2 pattern proves the pattern, never the
   product** — the save's gate and the save's code were two copies of the same two calls, so the
   product could lose one and nothing failed; the fix is that the logic lives where the test can
@@ -7351,8 +7383,9 @@ and the headless preview render is the proven offscreen-PNG path.
   that is not written down is the claim that failures do not happen. **An outcome is a successor,
   not an inventory.** **A rotation is orientation-preserving, so a winding check cannot see a
   fold-through** — the criterion for an offset is the direction of the edge it moved.
-  Tests after the audit: inf-dcc **169** (146 lib + 10 property + 11 determinism-law + 2
-  fracture), inf-editor-core +17, inf-studio +8, frontend **352**.
+  Tests after both rounds: inf-dcc **166** (146 lib + 10 property + 8 determinism-law + 2
+  fracture), inf-editor-core **+20** (15 `dcc` unit + 5 live-in-scene, one of them
+  Windows-only), inf-studio +8, frontend **355**.
   **Carried remainders**: bevel has no segment count and no true multi-edge *vertex* bevel
   (several edges meeting at one vertex get a strip each with a wedge between them); the knife
   is a vertex/edge-point path, not free-form (that needs a ray-vs-face solve belonging with the
@@ -7364,10 +7397,19 @@ and the headless preview render is the proven offscreen-PNG path.
   and the drop-merge copies geometry rather than referencing it, loses material slots, and
   does not weld. Added by the audit: the wireframe's occlusion is **back-face culling, not
   depth testing** (fixing it means reading the depth buffer back beside the colour);
-  `SaveError::Torn` is constructed but not reachable from any test, deliberately — it needs a
-  filesystem that fails a delete after succeeding a write; and a **detached** Model Editor
+  and a **detached** Model Editor
   window still installs no keybinding listener, so Ctrl+Z inside a torn-off one does nothing
   (the standing P23.2a limitation, unchanged and now with one more panel behind it).
+  **`MergeVerts::Last` changed meaning** in the audit round — from "the last vertex in the
+  caller's list" to "the highest id in the set" — with **no version bump**, and that is a
+  deliberate call worth writing down rather than a detail. It is harmless today because no
+  session has ever been written to disk (`MeshSession` lives in `DccState` for the process),
+  and the only caller already passed a `BTreeSet`-ordered list, so nothing observable moved.
+  What it exposes is a real limit of the freeze pin: `Op`'s discriminants are pinned as
+  **bytes**, and a byte pin cannot see a *semantic* change — `[19, 2, 1]` encoded the same
+  edit before and after and means something different. The day sessions persist
+  (`SessionSave` already exists and already has a v1 ladder), this line is the warning that
+  the ladder has to move for a reason the byte test will never notice.
 - **P23.5 Sculpt & UV** — 1. brush sculpt on the edit mesh, reusing the terrain brush/falloff
   doctrine; 2. UV seams + an LSCM-class unwrap + a 2D UV panel; 3. normals and tangents
   recompute.

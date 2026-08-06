@@ -308,3 +308,101 @@ fn a_save_whose_derivation_fails_removes_the_stale_dag_rather_than_leaving_it() 
         }
     }
 }
+
+/// **`SaveError::Torn`, provoked.**
+///
+/// The one state in which something can still draw the previous geometry, and
+/// until the verdict was checked against the *filesystem* it was unreachable by
+/// any failure at all: `AssetProject::delete` drops both `remove_file` results
+/// and returns `Ok` unconditionally, so the old `.is_ok()` was a database
+/// question. An author whose `.inf_vmesh` could not be unlinked was told it had
+/// been, and the viewport went on drawing from it.
+///
+/// Windows only, and that is the honest scope rather than a convenience: an open
+/// handle blocks `DeleteFile` there (Rust's `File::open` does not pass
+/// `FILE_SHARE_DELETE`), which is exactly the renderer-holds-the-mmap case P16
+/// lives with. POSIX unlinks a mapped file happily, so on Linux and macOS this
+/// state is not reachable through the filesystem at all — which is worth knowing
+/// rather than papering over with a `#[ignore]`.
+#[cfg(windows)]
+#[test]
+fn a_save_that_cannot_remove_the_stale_dag_reports_torn_and_says_so() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let mut proj = AssetProject::open(root.path()).unwrap();
+    let mesh_id = write_mesh(&mut proj, "Prop", &inf_dcc::cube(2.0));
+    let derived = inf_vgeom::derived_vmesh_id(mesh_id);
+    let path = proj
+        .db()
+        .get(derived)
+        .expect("the fixture has a DAG")
+        .path
+        .clone();
+
+    // Hold the DAG open the way a renderer holding it mapped does — **without
+    // `FILE_SHARE_DELETE`**. Rust's `File::open` passes all three share flags by
+    // default, so a plain open does not block `DeleteFile` at all and the first
+    // version of this test proved nothing (it measured a successful removal and
+    // called it a locked file). The share mode is the whole fixture.
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    let _held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(&path)
+        .expect("the DAG is readable");
+
+    // A mesh with no faces derives nothing, so the save must remove the DAG that
+    // describes the cube — and cannot.
+    let mut empty = inf_dcc::cube(2.0);
+    let faces: Vec<FaceId> = empty.face_ids().collect();
+    for f in faces {
+        inf_dcc::ops::apply(&mut empty, &Op::RemoveFace { face: f }).unwrap();
+    }
+    let err = dcc::save_mesh_session(&mut proj, mesh_id, &empty)
+        .expect_err("the stale DAG cannot be removed while it is held open");
+
+    assert!(
+        matches!(err, dcc::SaveError::Torn { .. }),
+        "expected Torn, got {err}"
+    );
+    // The message is the contract: it must NOT claim the DAG is gone.
+    let text = err.to_string();
+    assert!(text.contains("could not be removed"), "{text}");
+    assert!(text.contains("PREVIOUS geometry"), "{text}");
+    assert!(
+        !text.contains("has been removed"),
+        "the error claims a removal that did not happen: {text}"
+    );
+    // And the claim is true: the file really is still there.
+    assert!(path.exists(), "the held file must still be on disk");
+}
+
+/// The other side of the same coin: with nothing holding it, the removal really
+/// happens and the verdict is the honest one.
+///
+/// Without this the disk check could be inverted (`path.exists()`) and every
+/// save would report `Torn` — which the test above would happily accept.
+#[test]
+fn a_save_that_can_remove_the_stale_dag_does_and_says_nothing_about_tearing() {
+    let root = tempfile::tempdir().unwrap();
+    let mut proj = AssetProject::open(root.path()).unwrap();
+    let mesh_id = write_mesh(&mut proj, "Prop", &inf_dcc::cube(2.0));
+    let derived = inf_vgeom::derived_vmesh_id(mesh_id);
+    let path = proj
+        .db()
+        .get(derived)
+        .expect("the fixture has a DAG")
+        .path
+        .clone();
+
+    let mut empty = inf_dcc::cube(2.0);
+    let faces: Vec<FaceId> = empty.face_ids().collect();
+    for f in faces {
+        inf_dcc::ops::apply(&mut empty, &Op::RemoveFace { face: f }).unwrap();
+    }
+    let out = dcc::save_mesh_session(&mut proj, mesh_id, &empty);
+    assert!(out.is_ok(), "nothing is holding the file: {out:?}");
+    assert!(!path.exists(), "the obsolete DAG is gone from disk");
+    assert!(!proj.db().contains(derived));
+}

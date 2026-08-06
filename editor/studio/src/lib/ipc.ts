@@ -854,7 +854,12 @@ export const graph = {
 export const dcc = {
   /** Open (or re-attach to) a mesh asset. Idempotent. */
   open: (assetId: string): Promise<DccDocDto> => invoke<DccDocDto>("dcc_open", { assetId }),
-  close: (id: string): Promise<void> => invoke("dcc_close", { id }),
+  /**
+   * Free a document, **by asset id**. Symmetric with `open`, and deliberately so:
+   * a panel that unmounts before its `open` resolves has no document id yet, and
+   * a close it cannot send is a leaked backend session. Idempotent.
+   */
+  close: (assetId: string): Promise<void> => invoke("dcc_close", { assetId }),
   list: (): Promise<DccDocDto[]> => invoke<DccDocDto[]>("dcc_list"),
   /** Press a tool against the current selection. A refusal is a value, not a throw. */
   apply: (id: string, tool: DccToolDto): Promise<DccApplyDto> =>

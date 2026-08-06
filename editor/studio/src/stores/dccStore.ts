@@ -101,6 +101,25 @@ const EMPTY: DccEntry = {
  */
 const flight = new Map<string, { inFlight: boolean; queued: boolean }>();
 
+/**
+ * Assets whose panel has closed — **the tombstones**.
+ *
+ * Every backend call is async, so between `open` being called and its reply
+ * arriving the panel can unmount (React StrictMode does exactly this on every
+ * dev mount). Without a tombstone that window leaked twice over: `close` read
+ * `entry(assetId).doc`, found `null` because the open had not resolved, and
+ * never sent `dcc_close` at all — so the backend `DccDoc`, its `MeshSession` and
+ * its journal lived for the process — and then the open resolved and `patch` put
+ * the entry straight back, because it created one unconditionally. `docs` never
+ * shrank, and a remount could adopt a session an in-flight close was about to
+ * destroy.
+ *
+ * The rule: a tombstoned asset accepts no state, and its `open` reply is answered
+ * with another `dcc_close` — because the session it just created is exactly the
+ * one the first close could not name.
+ */
+const tombstones = new Set<string>();
+
 function gate(assetId: string): { inFlight: boolean; queued: boolean } {
   let g = flight.get(assetId);
   if (!g) {
@@ -113,8 +132,17 @@ function gate(assetId: string): { inFlight: boolean; queued: boolean } {
 export const useDccStore = create<DccState>((set, get) => {
   const entry = (assetId: string): DccEntry => get().docs[assetId] ?? EMPTY;
 
+  /**
+   * Update an existing entry. **Never creates one** — a late reply for a
+   * document that has been closed is dropped, not resurrected. Only `open`
+   * creates, and only after clearing the tombstone.
+   */
   const patch = (assetId: string, next: Partial<DccEntry>): void =>
-    set((s) => ({ docs: { ...s.docs, [assetId]: { ...(s.docs[assetId] ?? EMPTY), ...next } } }));
+    set((s) => {
+      const cur = s.docs[assetId];
+      if (!cur) return s;
+      return { docs: { ...s.docs, [assetId]: { ...cur, ...next } } };
+    });
 
   /** Render one frame for `assetId`, then service whatever arrived meanwhile. */
   const pump = async (assetId: string): Promise<void> => {
@@ -155,9 +183,20 @@ export const useDccStore = create<DccState>((set, get) => {
 
     open: async (assetId) => {
       if (entry(assetId).doc) return;
-      patch(assetId, { busy: true, refusal: null, status: null });
+      tombstones.delete(assetId);
+      // The ONE place an entry is created.
+      set((s) => ({
+        docs: { ...s.docs, [assetId]: { ...EMPTY, busy: true } },
+      }));
       try {
         const doc = await dccIpc.open(assetId);
+        if (tombstones.has(assetId)) {
+          // Closed while this was in flight. The backend session exists NOW, and
+          // the `dcc_close` the close already sent found nothing to free — so it
+          // is sent again, and no state is adopted.
+          await dccIpc.close(assetId).catch(() => {});
+          return;
+        }
         patch(assetId, { doc, image: null, previewError: null });
         await pump(assetId);
       } catch (e) {
@@ -168,19 +207,21 @@ export const useDccStore = create<DccState>((set, get) => {
     },
 
     close: async (assetId) => {
-      const doc = entry(assetId).doc;
+      tombstones.add(assetId);
       flight.delete(assetId);
       set((s) => {
         const docs = { ...s.docs };
         delete docs[assetId];
         return { docs };
       });
-      if (doc) {
-        try {
-          await dccIpc.close(doc.id);
-        } catch (e) {
-          console.error("dcc.close failed", e);
-        }
+      // **Sent unconditionally**, not "if we have a document". A panel that
+      // unmounts before its open resolves has no document id, and the session it
+      // is about to be handed is exactly the one that would leak. `dcc_close`
+      // takes the ASSET id and is idempotent for that reason.
+      try {
+        await dccIpc.close(assetId);
+      } catch (e) {
+        console.error("dcc.close failed", e);
       }
     },
 
@@ -294,9 +335,10 @@ export function useDccEntry(assetId: string | null): DccEntry {
   return useDccStore((s) => (assetId ? (s.docs[assetId] ?? EMPTY) : EMPTY));
 }
 
-/** Test-only: clear the per-document preview queues between cases. */
+/** Test-only: clear the per-document preview queues and tombstones. */
 export function __resetDccPreviewQueueForTest(): void {
   flight.clear();
+  tombstones.clear();
 }
 
 // **Ctrl+Z inside the Model Editor undoes the MESH, in the panel you are looking

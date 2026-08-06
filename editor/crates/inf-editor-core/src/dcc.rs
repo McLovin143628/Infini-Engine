@@ -667,16 +667,24 @@ pub enum SaveError {
     Write { name: String, message: String },
     /// The payload landed and the derived `.inf_vmesh` could not be rebuilt.
     ///
-    /// **The stale DAG was removed**, so nothing draws the old geometry — see
-    /// [`save_mesh_session`] for why that is the chosen failure mode.
+    /// **The stale DAG is gone from disk** — verified, not assumed — so nothing
+    /// can draw the old geometry. See [`save_mesh_session`] for why that is the
+    /// chosen failure mode.
     #[error(
         "{name} was saved, but its meshlet DAG could not be rebuilt: {message}. \
          The stale DAG has been removed, so the mesh will draw as a placeholder \
          until the project is reopened."
     )]
     Derived { name: String, message: String },
-    /// The derivation failed AND the stale artifact could not be removed. The
-    /// only state in which something can still draw the old geometry.
+    /// Something is **still on disk** at the derived id: the delete failed (a
+    /// mapped file on Windows), or the artifact sitting there is *authored*
+    /// rather than derived and is not this code's to remove.
+    ///
+    /// The only state in which something can still draw the previous geometry,
+    /// and the reason the removal is checked against the filesystem: the
+    /// database's own answer is unconditionally `Ok`, so a version of this that
+    /// trusted it reported "removed, it will draw as a placeholder" over a file
+    /// that was still there and still being drawn.
     #[error(
         "{name} was saved, but its meshlet DAG could not be rebuilt ({message}) \
          and the stale DAG could not be removed either. Until the project is \
@@ -717,8 +725,14 @@ pub enum SaveError {
 ///   project-open sweep — repairs it.
 ///
 /// If the removal *also* fails, that is [`SaveError::Torn`], and the message says
-/// exactly what disk holds. It is the only reachable state in which something can
-/// still draw the previous geometry, and it is named rather than hidden.
+/// exactly what disk holds. It is the only state in which something can still
+/// draw the previous geometry, and it is named rather than hidden.
+///
+/// **"Fails" means the file is still there**, checked against the filesystem.
+/// `AssetProject::delete` reports success unconditionally, so a version of this
+/// that believed it would have told the author the DAG was gone while the
+/// renderer went on drawing from it — which is the failure this whole function
+/// exists to prevent, delivered by its own error path.
 pub fn save_mesh_session(
     project: &mut crate::assets::AssetProject,
     asset: inf_asset::AssetId,
@@ -745,21 +759,33 @@ pub fn save_mesh_session(
             // derived id rather than looking it up, so it finds that artifact and
             // draws the old geometry with total confidence: the exact pair this
             // function exists to make unreachable, arriving through the one
-            // outcome that is not an error. Found by the gate below.
-            if matches!(vmesh, crate::assets::vmesh::VmeshDerivation::Skipped) {
-                crate::assets::vmesh::remove_derived_vmesh(project, asset);
+            // outcome that is not an error.
+            //
+            // Its removal is checked like any other. It used to be called for
+            // effect and its answer dropped, which meant no path in this function
+            // could observe a removal that failed.
+            if matches!(vmesh, crate::assets::vmesh::VmeshDerivation::Skipped)
+                && !crate::assets::vmesh::remove_derived_vmesh(project, asset)
+            {
+                return Err(SaveError::Torn {
+                    name,
+                    message: "this mesh no longer has enough geometry to \
+                              virtualize, so its meshlet DAG is obsolete"
+                        .into(),
+                });
             }
             Ok(SaveOutcome { export, vmesh })
         }
         Err(e) => {
             let message = e.to_string();
-            // Nothing may be left that draws the geometry we just replaced.
-            let had_one = project.db().contains(inf_vgeom::derived_vmesh_id(asset));
-            let removed = crate::assets::vmesh::remove_derived_vmesh(project, asset);
-            if had_one && !removed {
-                Err(SaveError::Torn { name, message })
-            } else {
+            // Nothing may be left that draws the geometry we just replaced, and
+            // `remove_derived_vmesh` answers with the filesystem rather than the
+            // database — so this really is "is something still there", not "did
+            // the bookkeeping return Ok" (which it always did).
+            if crate::assets::vmesh::remove_derived_vmesh(project, asset) {
                 Err(SaveError::Derived { name, message })
+            } else {
+                Err(SaveError::Torn { name, message })
             }
         }
     }
@@ -1238,6 +1264,45 @@ mod tests {
             );
         }
         assert_eq!(rgba.len(), 64 * 64 * 4);
+    }
+
+    #[test]
+    fn the_rasterizer_survives_coordinates_no_screen_could_hold() {
+        // **The gate the overflow fix did not have.** Reverting `line` to
+        // `dx + dy` / `2 * err` / `(dx - dy) + 2` failed NOTHING, while the
+        // ledger listed it under gates that bite — so the fix was a claim.
+        //
+        // `f32 as i32` saturates (Rust guarantees it), and the saturated value is
+        // `i32::MAX`; it is the DIFFERENCES of those that overflow, which is a
+        // panic in a debug build and a wrapped, wrong picture in a release one.
+        // A camera dollied inside a model produces coordinates like these for
+        // real — the projection divides by a `w` a hair above zero.
+        let mut rgba = vec![0u8; 32 * 32 * 4];
+        let colour = [1u8, 2, 3];
+        for (x0, y0, x1, y1) in [
+            (-3.0e30f32, 0.0f32, 3.0e30f32, 5.0f32),
+            (3.0e30, -3.0e30, -3.0e30, 3.0e30),
+            (f32::NEG_INFINITY, 0.0, f32::INFINITY, 0.0),
+            (f32::NAN, f32::NAN, 4.0, 4.0),
+        ] {
+            line(&mut rgba, 32, x0, y0, x1, y1, colour);
+            dot(&mut rgba, 32, x0, y0, 3, colour);
+        }
+        // A polygon whose vertices are off in the same way must not hang the
+        // scanline fill either.
+        let far = |x: f32, y: f32| Projected { x, y, depth: 1.0 };
+        fill_polygon(
+            &mut rgba,
+            32,
+            &[
+                far(-3.0e30, -3.0e30),
+                far(3.0e30, -3.0e30),
+                far(0.0, 3.0e30),
+            ],
+            colour,
+            128,
+        );
+        assert_eq!(rgba.len(), 32 * 32 * 4, "the buffer is intact");
     }
 
     #[test]

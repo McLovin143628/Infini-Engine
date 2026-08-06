@@ -491,6 +491,18 @@ the next save or the project-open sweep repairs it. If the removal *also* fails 
 the only reachable state in which something can still draw the previous geometry
 — the error names it (`SaveError::Torn`) rather than hiding it.
 
+**And the verdict is checked against the filesystem, not the database.** This is
+the whole of the re-audit's M-1 and it is worth stating as a rule rather than a
+fix: `AssetProject::delete` drops both `remove_file` results and returns `Ok`
+unconditionally, so the removal helper's `is_ok()` was **always true** — a
+database condition that every caller read as a filesystem one. The save's error
+therefore told an author whose `.inf_vmesh` was held mapped (a real Windows case)
+that the stale DAG had been removed and the mesh would draw as a placeholder,
+while the file sat there being found by `resolve_vgeom` and drawing the previous
+geometry. `Torn` is now reachable, and tested with a handle opened without
+`FILE_SHARE_DELETE`. LAW: **a bool that reports on the filesystem must ask the
+filesystem.**
+
 Two consequences worth recording:
 
 * **`VmeshDerivation::Skipped` is not an error, and was the leak.** A mesh edited
@@ -505,9 +517,6 @@ Two consequences worth recording:
 
 ## 8. Ledger — what this memo does NOT decide
 
-* **`SaveError::Torn` has no test.** Reaching it needs a filesystem that fails a
-  delete after succeeding a write. It is constructed and its message is part of
-  the contract; nothing exercises it.
 * **The gizmo on component selections.** P23.4's deliverable 3, deferred to
   P23.5: the Model Editor translates through a numeric tool, not a dragged
   handle, and the drag plumbing a component gizmo needs is the same plumbing

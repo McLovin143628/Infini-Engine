@@ -290,10 +290,22 @@ pub async fn dcc_open(
     Ok(dto)
 }
 
-/// Free a document and its journal.
+/// Free a document and its journal, **by asset id** — the same key `dcc_open`
+/// takes.
+///
+/// Symmetric on purpose. The document id is `"dcc:<assetId>"`, and that format is
+/// constructed in exactly one place (`dcc_open`); a `dcc_close` taking the
+/// document id made the *frontend* build it, which meant a panel that had to
+/// close before its `open` resolved had no id to close with and simply did not
+/// send the call — leaking the session, the mesh and the journal for the life of
+/// the process. A close that needs nothing but the asset id can always be sent.
+///
+/// Idempotent: closing an asset with no open document is a no-op, which is what
+/// lets the frontend send it speculatively during that race.
 #[tauri::command]
-pub async fn dcc_close(id: String, state: State<'_, DccState>) -> Result<(), String> {
-    state.close(&id)
+pub async fn dcc_close(asset_id: String, state: State<'_, DccState>) -> Result<(), String> {
+    let id: AssetId = asset_id.parse().map_err(|e| format!("bad asset id: {e}"))?;
+    state.close(&format!("dcc:{id}"))
 }
 
 /// Every open document.
@@ -787,8 +799,11 @@ pub async fn dcc_preview(
 
 /// Write the edit mesh back to its asset.
 ///
-/// `rewrite_payload` **and** `ensure_vmesh`, under one project lock — see the
-/// module docs for why the second one is not optional.
+/// Four lines that call [`inf_editor_core::dcc::save_mesh_session`] and render
+/// its verdict. Everything the save actually guarantees — the payload rewrite,
+/// the synchronous derivation, and the removal of a DAG that would otherwise
+/// describe the geometry just replaced — is stated and tested there, because a
+/// `#[tauri::command]` cannot be driven from a test (see the module docs).
 #[tauri::command]
 pub async fn dcc_save(
     app: AppHandle,

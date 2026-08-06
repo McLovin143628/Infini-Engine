@@ -110,7 +110,7 @@ describe("two documents are two documents (the P23.4 blocker)", () => {
     await useDccStore.getState().apply("aaa", { tool: "extrude", distance: 0.5 });
     expect(mocked.apply).toHaveBeenCalledWith("dcc:aaa", { tool: "extrude", distance: 0.5 });
     expect(entry("aaa").doc?.faces).toBe(10);
-    expect(entry("bbb").doc?.faces).toBe(6, );
+    expect(entry("bbb").doc?.faces).toBe(6);
     expect(entry("bbb").doc?.dirty).toBe(false);
   });
 
@@ -125,9 +125,9 @@ describe("two documents are two documents (the P23.4 blocker)", () => {
     mocked.close.mockResolvedValue(undefined);
     await useDccStore.getState().close("aaa");
     expect(mocked.close).toHaveBeenCalledTimes(1);
-    expect(mocked.close).toHaveBeenCalledWith("dcc:aaa");
+    expect(mocked.close).toHaveBeenCalledWith("aaa");
     expect(entry("aaa")).toBeUndefined();
-    expect(entry("bbb")?.doc?.id).toBe("dcc:bbb", );
+    expect(entry("bbb")?.doc?.id).toBe("dcc:bbb");
   });
 
   it("routes undo to the document it names", async () => {
@@ -319,5 +319,60 @@ describe("save", () => {
     mocked.save.mockRejectedValue("disk full");
     await useDccStore.getState().save("aaa");
     expect(entry("aaa").status).toContain("disk full");
+  });
+});
+
+describe("the close race (P23.4 re-audit — M-2/M-3)", () => {
+  it("closes a document whose open has not resolved yet", async () => {
+    // The leak the tombstone exists for. `close` used to read `entry().doc`,
+    // find null because the open was still in flight, and send NOTHING — so the
+    // backend `DccDoc`, its `MeshSession` and its journal lived for the process.
+    // React StrictMode walks this path on every dev mount.
+    const open = deferred<ReturnType<typeof docOf>>();
+    mocked.open.mockReturnValueOnce(open.promise);
+    mocked.close.mockResolvedValue(undefined);
+
+    const opening = useDccStore.getState().open("aaa");
+    const closing = useDccStore.getState().close("aaa");
+    await closing;
+    // Sent by ASSET id, without waiting for a document that does not exist yet.
+    expect(mocked.close).toHaveBeenCalledWith("aaa");
+
+    open.resolve(docOf("aaa"));
+    await opening;
+
+    // The late reply neither resurrects the entry…
+    expect(entry("aaa")).toBeUndefined();
+    expect(Object.keys(useDccStore.getState().docs)).toHaveLength(0);
+    // …nor leaves the session it created behind: the first close found nothing,
+    // so the open's own reply sends another.
+    expect(mocked.close).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops a late tool reply for a closed document instead of resurrecting it", async () => {
+    // `patch` used to create an entry unconditionally, so ANY late-resolving
+    // open/apply/save/mergeAsset put a deleted document straight back and `docs`
+    // never shrank.
+    await useDccStore.getState().open("aaa");
+    const apply = deferred<{ ok: boolean; refusal: string | null; doc: DccDocDto }>();
+    mocked.apply.mockReturnValueOnce(apply.promise);
+    mocked.close.mockResolvedValue(undefined);
+
+    const applying = useDccStore.getState().apply("aaa", { tool: "subdivide" });
+    await useDccStore.getState().close("aaa");
+    expect(entry("aaa")).toBeUndefined();
+
+    apply.resolve({ ok: true, refusal: null, doc: docOf("aaa", { faces: 24 }) });
+    await applying;
+    expect(entry("aaa")).toBeUndefined();
+    expect(Object.keys(useDccStore.getState().docs)).toHaveLength(0);
+  });
+
+  it("re-opening after a close starts fresh rather than being tombstoned forever", async () => {
+    mocked.close.mockResolvedValue(undefined);
+    await useDccStore.getState().open("aaa");
+    await useDccStore.getState().close("aaa");
+    await useDccStore.getState().open("aaa");
+    expect(entry("aaa").doc?.id).toBe("dcc:aaa");
   });
 });

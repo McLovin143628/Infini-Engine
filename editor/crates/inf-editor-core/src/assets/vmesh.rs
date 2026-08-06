@@ -322,22 +322,47 @@ pub fn sweep(project: &mut AssetProject) -> Vec<AssetId> {
 
 /// Delete the `.inf_vmesh` derived from `mesh_id`, if the editor wrote one.
 ///
-/// Called when the mesh itself is deleted. Leaving the artifact behind would be
-/// worse than a leak: the viewport resolves by **computing** the id, so a stale
-/// `.inf_vmesh` keeps drawing geometry for a mesh asset that no longer exists —
-/// precisely the "no stale render" case P18.3 owes. Returns whether anything was
-/// removed.
+/// Called when the mesh itself is deleted, and by
+/// [`crate::dcc::save_mesh_session`] when a save must not leave a DAG describing
+/// the geometry it just replaced. Leaving the artifact behind would be worse than
+/// a leak: the viewport resolves by **computing** the id, so a stale `.inf_vmesh`
+/// keeps drawing geometry for a mesh that no longer has it — precisely the "no
+/// stale render" case P18.3 owes.
+///
+/// # The return value is ON-DISK TRUTH, and it has to be
+///
+/// It used to be `project.delete(..).is_ok()`, which is **always true past the
+/// early returns above**: [`AssetProject::delete`] drops both `remove_file`
+/// results with `let _ =` and returns `Ok(Vec::new())` unconditionally. So the
+/// bool answered a question about the *database* while every caller read it as a
+/// question about the *filesystem* — and the one caller that reports it to a
+/// human told them "the stale DAG has been removed, the mesh will draw as a
+/// placeholder" while the file was still sitting there, being found by
+/// `resolve_vgeom`, drawing the previous geometry with complete confidence. The
+/// exact pair the save's headline invariant forbids, arriving through the error
+/// path that claims to handle it.
+///
+/// That is not hypothetical on Windows: a `.inf_vmesh` the renderer holds mapped
+/// cannot be unlinked (the P16 mmap path), and Rust's `File::open` does not share
+/// delete either. So: **the payload must actually be gone from disk**, and a
+/// caller that is told otherwise is being told the truth.
+///
+/// `false` therefore means "something is still there on the derived id" — either
+/// because the delete failed, or because the artifact is *authored* rather than
+/// ours and this function will not touch it. Both cases will draw; both are worth
+/// the same answer.
 pub fn remove_derived_vmesh(project: &mut AssetProject, mesh_id: AssetId) -> bool {
     let derived_id = inf_vgeom::derived_vmesh_id(mesh_id);
     let Some(entry) = project.db().get(derived_id) else {
-        return false;
+        return true; // nothing on the derived id: nothing can draw from it
     };
     // Only ever remove an artifact this module wrote — an authored `.inf_vmesh`
     // that happens to sit on the derived id is not ours to delete.
     if entry.kind() != AssetKind::MeshletMesh || recorded_source_hash(&entry.sidecar).is_none() {
         return false;
     }
-    project.delete(derived_id, true).is_ok()
+    let path = entry.path.clone();
+    project.delete(derived_id, true).is_ok() && !path.exists()
 }
 
 /// Build the v2 paged `.inf_vmesh` image for a mesh's raw streams.
