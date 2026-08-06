@@ -563,7 +563,22 @@ where
     // payload is a deterministic function of the document.
     let machine_clips: Vec<Uuid> = machines
         .iter()
-        .filter_map(|(_, bytes)| inf_asset::decode::<inf_anim::StateMachineAsset>(bytes).ok())
+        .filter_map(|(guid, bytes)| {
+            // Reported, not discarded (P24.1 audit B1, the same class one level
+            // over): a machine whose bytes will not decode here still SHIPS — it
+            // was collected above — while its clips silently do not, so PIE would
+            // pose every state at rest while the cooked build animates.
+            match inf_asset::decode::<inf_anim::StateMachineAsset>(bytes) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    tracing::warn!(
+                        "pie: state machine {guid} ships but its clips could not be \
+                         resolved, so its states will pose at rest in PIE: {e}"
+                    );
+                    None
+                }
+            }
+        })
         .flat_map(|a| crate::simulate::machine_clip_refs(&a.machine))
         .collect::<std::collections::BTreeSet<Uuid>>()
         .into_iter()

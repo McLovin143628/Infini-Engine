@@ -28,6 +28,30 @@ pub enum AssetError {
         current: u32,
     },
 
+    /// A payload was written by an **older** build and this format cannot read
+    /// it back.
+    ///
+    /// Not the mirror of [`SchemaTooNew`](Self::SchemaTooNew): that one is caught
+    /// by `migrate()`, *after* a successful decode. This one is caught **instead
+    /// of** a decode, because bincode is positional — a field appended at the
+    /// tail since the file was written is a short read, and the decoder gives up
+    /// long before anything looks at `schema_version`. Without this variant the
+    /// caller sees `Decode("UnexpectedEnd")`, which names neither the cause nor
+    /// the cure.
+    ///
+    /// `remedy` is the payload type's own [`AssetPayload::UPGRADE_REMEDY`], so the
+    /// message a user reads tells them which door to walk through.
+    #[error(
+        "{kind} schema v{found} was written by an older build and this one speaks \
+         v{current}; bincode is positional, so it cannot be read back — {remedy}"
+    )]
+    SchemaTooOld {
+        kind: &'static str,
+        found: u32,
+        current: u32,
+        remedy: &'static str,
+    },
+
     /// A lookup or operation referenced an id not in the database.
     #[error("no asset with id {0}")]
     UnknownAsset(AssetId),

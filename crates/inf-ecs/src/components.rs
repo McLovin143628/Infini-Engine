@@ -1981,15 +1981,15 @@ impl PcgVolume {
 /// same documented gap as [`Sprite::texture`]) + `#[serde(default)]`, so they are
 /// assigned by drag-drop and still serde-persisted.
 ///
-/// ## Persistence — the same v-slot gap as [`Terrain`] / [`PcgVolume`]
+/// ## Persistence
 ///
-/// This is an **additive** component (registered + reflected + serde) but it is
-/// **not yet a slot in the `.inf_lvl` `EntityRecord`** (frozen at v4). A spawned
-/// [`SkeletalMesh`]/[`AnimPlayer`] is therefore live-session only; the v5 schema
-/// migration is where the pair first persists (the same pattern the
-/// `terrain_is_not_persisted_yet_v4_todo` guard pins). The guard test
-/// `skeletal_components_serde_round_trip` documents the gap; **no schema bump is
-/// made here.**
+/// **Persisted since scene v5.** `EntityRecord` carries `skeletal_mesh` and
+/// `anim_player` slots (`inf_scene`), the cook closes
+/// `level → SkeletalMesh.{mesh, skeleton}` and `level → AnimPlayer.clip` as real
+/// dependency edges, and the PIE payload ships the bytes. This block used to say
+/// the opposite — "not yet a slot in the `.inf_lvl` `EntityRecord` (frozen at
+/// v4) … live-session only" — which stopped being true at the v5 migration it
+/// itself pointed at, and was still here at v20.
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 #[reflect(Component, Default)]
 pub struct SkeletalMesh {
@@ -2131,13 +2131,15 @@ fn default_params_from_vars() -> bool {
 /// same fixed step evaluates the machine's pose and publishes it, and both
 /// projectors prefer it over the `AnimPlayer`.
 ///
-/// ## Persistence — the same v-slot gap as [`SkeletalMesh`] / [`AnimPlayer`]
+/// ## Persistence
 ///
-/// Additive component (registered + reflected + serde), but **not yet a slot in
-/// the `.inf_lvl` `EntityRecord`** (frozen at v4): a spawned `AnimStateMachine` is
-/// live-session only until the v5 schema migration. The [`runtime`](Self::runtime)
-/// field is `#[serde(skip)]` + `#[reflect(ignore)]` — rebuilt each play session,
-/// never persisted (like a physics solver's transient state).
+/// **Persisted since scene v5**, like [`SkeletalMesh`] / [`AnimPlayer`]:
+/// `EntityRecord` carries an `anim_state_machine` slot and the cook closes
+/// `level → AnimStateMachine.sm`. (This block used to claim the opposite; it was
+/// written at v4 and never revisited.) The [`runtime`](Self::runtime) field is
+/// `#[serde(skip)]` + `#[reflect(ignore)]` — rebuilt each play session, never
+/// persisted, like a physics solver's transient state — and so is the pose it
+/// drives, which lives in [`crate::pose`]'s resource and reaches no file at all.
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[reflect(Component, Default)]
 pub struct AnimStateMachine {
@@ -2232,8 +2234,11 @@ impl RootMotion {
 /// evaluated pose — or a socket its skeleton does not author — keeps the origin
 /// follow, which is the right answer for an unbound rig and not an error.
 ///
-/// Not reflected (it carries a `Guid` link, like [`ActorClass`]); authored by the
-/// attach tool, shown read-only in Details.
+/// Not reflected (it carries a `Guid` link, like [`ActorClass`]), and **there is
+/// no attach tool yet** — this doc claimed one from P11.3 on. An attachment is
+/// authored by code today (`AttachedTo::new`) and persisted through
+/// `EntityRecord::attached_to`; a viewport action that bakes one from a picked
+/// socket is a P24.3 deliverable ("sockets integration").
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AttachedTo {
     /// The followed entity's stable identity.
@@ -4764,10 +4769,13 @@ mod tests {
 
     #[test]
     fn skeletal_components_serde_round_trip() {
-        // NOTE: like `Terrain`/`PcgVolume`, `SkeletalMesh`/`AnimPlayer` are NOT yet
-        // slots in the v4 `.inf_lvl` `EntityRecord` — this component-level
-        // round-trip is all the persistence they have until the schema-v5
-        // migration (the same gap `terrain_is_not_persisted_yet_v4_todo` pins).
+        // NOTE (corrected P24.1): this used to say `SkeletalMesh`/`AnimPlayer` were
+        // "NOT yet slots in the v4 `.inf_lvl` `EntityRecord`" and that a
+        // component-level round trip was "all the persistence they have". Both
+        // became false at the schema-v5 migration the note itself pointed at —
+        // `inf_scene::EntityRecord` has carried `skeletal_mesh` and `anim_player`
+        // ever since, and the scene is at v20. What this test still covers is the
+        // component's OWN serde shape, which the record's slot delegates to.
         let sm = SkeletalMesh {
             mesh: Some(Uuid::from_u128(0xA11CE)),
             skeleton: Some(Uuid::from_u128(0xB0B)),

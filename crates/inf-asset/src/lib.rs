@@ -48,7 +48,7 @@ pub use pack::{
 // *section* beside its raw pages (`.inf_terrain`'s tile blobs, `.inf_vmesh`'s DAG
 // groups) encodes it with exactly the codec the framed path uses — one config,
 // one set of bytes, no second place to drift.
-pub use payload::{bincode_config, decode, encode, AssetPayload};
+pub use payload::{bincode_config, decode, encode, peek_schema_version, AssetPayload};
 pub use sidecar::{is_sidecar, sidecar_path, AssetSidecar, SIDECAR_SCHEMA_VERSION};
 #[cfg(not(target_arch = "wasm32"))]
 pub use watch::{AssetChange, AssetWatcher};

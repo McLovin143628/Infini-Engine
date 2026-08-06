@@ -320,18 +320,11 @@ impl<'a> SmContext<'a> {
     }
 }
 
-/// Every clip a [`Motion`] plays: a single clip, or every entry of a 1D/2D blend
-/// space.
-///
-/// **The one walk.** A machine names its clips *inside its own payload* and no
-/// component references them, so every consumer that has to close the
-/// `state machine → clip` edge has to do it from here: the cook's dependency
-/// closure (`inf_packager::cook::asset_deps`), the PIE payload builder, and the
-/// editor Simulate resolver. It was written twice before P24.1 — the cook closed
-/// the edge and the PIE payload did not, which was invisible for as long as
-/// nothing evaluated the machine's pose, and became "the character animates in
-/// the shipped build and stands still in the preview" the moment something did.
-pub fn motion_clip_refs(motion: &Motion) -> Vec<ClipRef> {
+/// Every clip one [`Motion`] plays: a single clip, or every entry of a 1D/2D
+/// blend space. **Private** — [`StateMachine::clip_refs`] is the door, and a
+/// second public spelling of the same walk is what the P24.1 audit asked to be
+/// closed rather than left as a `pub fn` with no callers.
+fn motion_clip_refs(motion: &Motion) -> Vec<ClipRef> {
     match motion {
         Motion::Clip(c) => vec![*c],
         Motion::Blend1D(space) => space.entries.iter().map(|e| e.clip).collect(),
@@ -341,7 +334,18 @@ pub fn motion_clip_refs(motion: &Motion) -> Vec<ClipRef> {
 
 impl StateMachine {
     /// Every clip GUID this machine's states play, deduplicated and in ascending
-    /// byte order (deterministic). See [`motion_clip_refs`].
+    /// byte order (deterministic).
+    ///
+    /// **The one walk.** A machine names its clips *inside its own payload* and no
+    /// component references them, so every consumer that has to close the
+    /// `state machine → clip` edge closes it from here: the cook's dependency
+    /// closure (`inf_packager::cook::asset_deps`), and — through
+    /// `inf_editor_core::simulate::machine_clip_refs`, which is this in `Uuid`
+    /// spelling — the PIE payload builder and the editor Simulate resolver. It was
+    /// written twice before P24.1: the cook closed the edge and the PIE payload
+    /// did not, which was invisible for as long as nothing evaluated the machine's
+    /// pose, and became "the character animates in the shipped build and stands
+    /// still in the preview" the moment something did.
     pub fn clip_refs(&self) -> std::collections::BTreeSet<ClipRef> {
         self.states
             .iter()

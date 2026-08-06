@@ -735,6 +735,27 @@ mod tests {
         }
     }
 
+    /// A pose with the WRONG joint count whose acceptance would be **visible**.
+    ///
+    /// The load-bearing detail is which joint is bent (P24.1 audit M4). The first
+    /// cut bent the tip and then truncated the tip away, so the short pose
+    /// evaluated byte-identical to rest — `global_transforms` back-fills a missing
+    /// joint from its bind transform — and the assertion below passed with or
+    /// without the length guard it exists to prove. Bending the **root**, which
+    /// survives the truncation, makes an accepted short pose produce a different
+    /// palette from rest, so deleting the guard fails the test.
+    fn short_pose_a_guardless_store_would_wear(skeleton: Uuid) -> EvaluatedPose {
+        let sk = two_joint_skeleton();
+        let mut pose = inf_anim::Pose::rest(&sk);
+        pose.locals[0].rotation = glam::Quat::from_rotation_x(40f32.to_radians()).to_array();
+        pose.locals.truncate(1);
+        EvaluatedPose {
+            skeleton,
+            pose,
+            sockets: Vec::new(),
+        }
+    }
+
     /// **The P24.1 headline gate, store half**: when the sim published a pose for
     /// this entity, THAT is what the palette is built from — the `AnimPlayer` is
     /// overruled, because an `AnimStateMachine` beats a clip play-head and this is
@@ -791,15 +812,32 @@ mod tests {
             "a pose from another rig must not be worn"
         );
 
-        let mut wrong_len = bent_pose(SKEL);
-        wrong_len.pose.locals.truncate(1);
+        let wrong_len = short_pose_a_guardless_store_would_wear(SKEL);
+        let drawn = reg
+            .resolve_skinned(&sm, None, Some(&wrong_len))
+            .unwrap()
+            .palette;
+        // Both joints, because a short pose that IS worn moves both: the bent root
+        // is joint 0's palette outright and rides through joint 1's global.
         assert_eq!(
-            reg.resolve_skinned(&sm, None, Some(&wrong_len))
-                .unwrap()
-                .palette[1]
-                .to_cols_array(),
+            drawn[0].to_cols_array(),
+            rest[0].to_cols_array(),
+            "a pose with the wrong joint count must not be worn"
+        );
+        assert_eq!(
+            drawn[1].to_cols_array(),
             rest[1].to_cols_array(),
             "a pose with the wrong joint count must not be worn"
+        );
+        // ANTI-VACUITY: the refused pose really would have changed the palette —
+        // otherwise the two assertions above hold whether the guard exists or not,
+        // which is exactly the hole the audit found.
+        let worn = inf_anim::skinning_matrices(&two_joint_skeleton(), &wrong_len.pose);
+        assert_ne!(
+            worn[0].to_cols_array(),
+            rest[0].to_cols_array(),
+            "the short pose evaluates to the rest palette, so refusing it is \
+             indistinguishable from accepting it"
         );
     }
 }

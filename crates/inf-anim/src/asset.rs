@@ -84,6 +84,10 @@ impl SkeletonAsset {
 impl AssetPayload for SkeletonAsset {
     const KIND: AssetKind = AssetKind::Skeleton;
     const SCHEMA_VERSION: u32 = Self::CURRENT_VERSION;
+    // A rig has TWO doors, unlike most imported kinds, and a user reading this
+    // message is usually looking at a project imported before P24.1.
+    const UPGRADE_REMEDY: &'static str =
+        "re-import the source model (Content Drawer ▸ Import), or generate a fresh          rig from a template (Content Drawer ▸ Add ▸ Skeleton)";
     fn schema_version(&self) -> u32 {
         self.schema_version
     }
@@ -167,6 +171,7 @@ mod tests {
     use crate::skeleton::{Joint, JointTransform};
     use glam::{Mat4, Quat};
     use inf_asset::{decode, encode};
+    use serde::Deserialize;
 
     fn skel() -> Skeleton {
         Skeleton::new(vec![
@@ -213,28 +218,120 @@ mod tests {
         assert!(back.limit(0).is_none(), "an absent joint is unlimited");
     }
 
-    /// **The v1 → v2 break is loud, not silent.** bincode is positional and
-    /// `#[serde(default)]` cannot rescue a short read, so a payload written before
-    /// the `limits` tail fails to decode rather than decoding as something else.
-    /// This is what `schema_version` and the sample regeneration path are for.
+    /// The **v1 wire shape** of a `.inf_skel`, spelled out.
+    ///
+    /// A real shadow struct, not a byte trimmed off a v2 encoding. The trimming
+    /// trick reproduced the right bytes and pinned nothing: it was *derived from
+    /// the live encoder*, so appending another tail field without bumping the
+    /// version would have kept it passing. This says what v1 was.
+    #[derive(Serialize)]
+    struct SkeletonAssetV1 {
+        schema_version: u32,
+        skeleton: Skeleton,
+        sockets: Vec<Socket>,
+    }
+
+    /// The **v2 wire shape**, positionally — the twin
+    /// `the_wire_shape_is_pinned_field_for_field` decodes a real encoding
+    /// through.
+    #[derive(Deserialize)]
+    struct SkeletonAssetV2Wire {
+        schema_version: u32,
+        skeleton: Skeleton,
+        sockets: Vec<Socket>,
+        limits: Vec<JointLimit>,
+    }
+
+    fn v1_bytes() -> Vec<u8> {
+        bincode::serde::encode_to_vec(
+            &SkeletonAssetV1 {
+                schema_version: 1,
+                skeleton: skel(),
+                sockets: vec![Socket::new("hand_r", 1)],
+            },
+            inf_asset::bincode_config(),
+        )
+        .unwrap()
+    }
+
+    /// **The v1 → v2 break is a NAMED refusal that says what to do.**
+    ///
+    /// bincode is positional and `#[serde(default)]` cannot rescue a short read,
+    /// so a payload written before the `limits` tail cannot be read back. What
+    /// matters is that it fails as [`AssetError::SchemaTooOld`] carrying this
+    /// type's remedy, and not as `Decode("UnexpectedEnd")` — a user with a
+    /// project imported before P24.1 sees this message and nothing else, and the
+    /// P24.1 audit's blocker was precisely that the sim path threw it away.
     #[test]
-    fn a_v1_payload_fails_loudly_rather_than_decoding_wrong() {
-        // A v1 payload IS a v2 payload with the trailing `limits` vector removed,
-        // and an empty `Vec` encodes as a single zero-length byte — so dropping
-        // that byte off a limits-free v2 encoding reproduces the v1 wire exactly,
-        // with no second serializer (and no dev-dependency) to get wrong.
-        let v2 = SkeletonAsset::with_sockets(skel(), vec![Socket::new("hand_r", 1)]);
-        let bytes = encode(&v2).unwrap();
+    fn a_v1_payload_is_refused_by_name_and_names_the_remedy() {
+        let err = decode::<SkeletonAsset>(&v1_bytes()).expect_err("v1 must not decode as v2");
+        match err {
+            inf_asset::AssetError::SchemaTooOld {
+                kind,
+                found,
+                current,
+                remedy,
+            } => {
+                assert_eq!(kind, "skeleton");
+                assert_eq!((found, current), (1, SkeletonAsset::CURRENT_VERSION));
+                // The remedy has to be an INSTRUCTION, not a restatement.
+                assert!(remedy.contains("Import"), "{remedy}");
+                assert!(remedy.contains("template"), "{remedy}");
+            }
+            other => panic!("expected SchemaTooOld, got {other:?}"),
+        }
+        // …and the rendered message carries it, because that string is what a
+        // user actually reads in the Output Log.
+        let msg = decode::<SkeletonAsset>(&v1_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("re-import the source model"), "{msg}");
+    }
+
+    /// **The other direction.** A payload from a newer build decodes structurally
+    /// and is rejected by `migrate`. Its three sibling `.inf_*` formats all pin
+    /// this; the skeleton did not until the P24.1 audit.
+    #[test]
+    fn a_future_payload_is_refused_as_too_new() {
+        let mut a = SkeletonAsset::new(skel());
+        a.schema_version = SkeletonAsset::CURRENT_VERSION + 1;
+        let bytes = encode(&a).unwrap();
+        assert!(matches!(
+            decode::<SkeletonAsset>(&bytes),
+            Err(inf_asset::AssetError::SchemaTooNew { .. })
+        ));
+    }
+
+    /// **The wire SHAPE is pinned, so a tail field cannot be appended without a
+    /// bump.**
+    ///
+    /// Two claims, and the second is the load-bearing one:
+    ///
+    ///  * the four fields decode positionally, in this order, with these types;
+    ///  * the decode consumes **every byte** of the encoding. A fifth field
+    ///    appended to `SkeletonAsset` would leave bytes unconsumed here and fail
+    ///    — which is exactly what the previous, encoder-derived fixture could not
+    ///    see, because it was built by asking the encoder what it emitted.
+    #[test]
+    fn the_wire_shape_is_pinned_field_for_field() {
+        let mut want = SkeletonAsset::with_sockets(skel(), vec![Socket::new("hand_r", 1)]);
+        want.limits = vec![JointLimit::hinge_x(1, -150.0, 0.0)];
+        let bytes = encode(&want).unwrap();
+
+        let (wire, consumed): (SkeletonAssetV2Wire, usize) =
+            bincode::serde::decode_from_slice(&bytes, inf_asset::bincode_config())
+                .expect("the v2 shape decodes the v2 wire");
         assert_eq!(
-            *bytes.last().unwrap(),
-            0,
-            "an empty `limits` is one zero byte at the tail — if it is not, this              fixture is no longer reproducing a v1 payload"
+            consumed,
+            bytes.len(),
+            "the encoding carries bytes the pinned four-field shape does not \
+             account for — a field was appended to `SkeletonAsset` without \
+             bumping `CURRENT_VERSION`"
         );
-        let v1 = &bytes[..bytes.len() - 1];
-        assert!(
-            decode::<SkeletonAsset>(v1).is_err(),
-            "a v1 payload must not decode as v2 — a silent success here would mean              the reader invented a limits table out of whatever followed"
-        );
+        assert_eq!(wire.schema_version, SkeletonAsset::CURRENT_VERSION);
+        assert_eq!(wire.skeleton, want.skeleton);
+        assert_eq!(wire.sockets, want.sockets);
+        assert_eq!(wire.limits, want.limits);
     }
 
     #[test]

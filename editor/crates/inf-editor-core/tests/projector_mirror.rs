@@ -167,10 +167,14 @@ fn extract_fn(source: &str, name: &str) -> String {
 /// methods on each host's own store type.
 fn extract_method(source: &str, name: &str) -> String {
     let source = source.replace("\r\n", "\n");
-    let needle = format!("fn {name}(");
-    let start = source
-        .find(&needle)
-        .unwrap_or_else(|| panic!("`{needle}` not found — was the store method renamed?"));
+    // Positionally anchored, exactly like the free-function extractor: a bare
+    // `source.find("fn <name>(")` matches the first MENTION, and for
+    // `project_voxel` that was a backticked self-reference inside the function's
+    // own doc comment (the P21.2-F1 defect this file documents at length).
+    // `item_start`'s rule — everything between the line start and the `fn` keyword
+    // must be item qualifiers — holds for an indented `impl` method too:
+    // `    pub fn foo(` leaves `pub`, and a `///` or a backtick fails it.
+    let start = item_start(&source, name);
     let mut depth = 0usize;
     for (i, c) in source[start..].char_indices() {
         match c {
@@ -184,7 +188,7 @@ fn extract_method(source: &str, name: &str) -> String {
             _ => {}
         }
     }
-    panic!("`{needle}` does not terminate");
+    panic!("`fn {name}(` does not terminate");
 }
 
 /// [`extract_method`] **plus its doc block** — the indented twin of
@@ -203,10 +207,11 @@ fn extract_method(source: &str, name: &str) -> String {
 /// mirrored pair.
 fn extract_method_with_doc(source: &str, name: &str) -> String {
     let source = source.replace("\r\n", "\n");
-    let needle = format!("fn {name}(");
-    let start = source
-        .find(&needle)
-        .unwrap_or_else(|| panic!("`{needle}` not found — was the store method renamed?"));
+    // See `extract_method`: the anchor is positional, never the first mention.
+    // Getting this wrong matters MORE here — a doc-comment anchor makes the
+    // backward walk below start inside the doc block and silently compare a
+    // fragment of it against a whole one.
+    let start = item_start(&source, name);
     let item_line = source[..start].rfind('\n').map_or(0, |i| i + 1);
     let mut doc: Vec<&str> = Vec::new();
     let mut cursor = item_line;

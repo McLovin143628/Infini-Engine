@@ -7,15 +7,23 @@
 //! f64 rationale). The `.inf_skel` / `.inf_anim` asset payloads live in
 //! [`asset`].
 //!
-//! ## Seams left for later P11 sub-phases
-//! * **Blend spaces (P11.2)** — [`pose::blend_poses`] is the two-pose primitive a
-//!   1D/2D blend space composes; multi-pose weighted blends layer on top.
-//! * **State machines (P11.2, `.inf_sm`)** — states hold clip refs + blend
-//!   weights; the interpreter drives [`pose::sample_clip`] + [`pose::blend_poses`].
-//! * **Sockets / retarget (P11.3)** — [`skeleton::Joint::name`] is retained per
-//!   joint precisely so sockets attach by name and retargeting maps by name.
-//! * **Cubic tracks** — [`clip::Interpolation`] keeps `Step`/`Linear`; cubic is
-//!   resampled to linear on import (documented in [`clip`]).
+//! ## What landed on the P11.1 seams
+//!
+//! All of them, by P24.1 — the list below used to read "seams left for later" and
+//! outlived every one of them:
+//! * **blend spaces** ([`blend_space`]) compose over [`pose::blend_poses`];
+//! * **state machines** ([`state_machine`], `.inf_sm`) drive
+//!   [`pose::sample_clip`] + [`pose::blend_poses`], and since P24.1 their pose is
+//!   evaluated at fixed step by `inf_ecs::pose` and is what both hosts DRAW;
+//! * **sockets** ([`sockets`]) and **retarget** ([`retarget`]) both key on
+//!   [`skeleton::Joint::name`], which is why it is retained per joint; a socket's
+//!   transform reaches an attached entity through `inf_ecs::attach`;
+//! * **template body plans** ([`template`], P24.1) generate rigs that use the
+//!   [`retarget::humanoid_joint_names`] vocabulary verbatim.
+//!
+//! Still open: **cubic tracks** — [`clip::Interpolation`] keeps `Step`/`Linear`
+//! and cubic is resampled to linear on import (documented in [`clip`]); and IK
+//! (P24.2), which will read [`template::JointLimit`].
 
 pub mod asset;
 pub mod blend_space;
@@ -45,7 +53,7 @@ pub use root_motion::{root_delta, root_joint_index, RootMotionDelta};
 pub use skeleton::{Joint, JointTransform, Skeleton, SkeletonError};
 pub use sockets::{find_socket, socket_transform, socket_transforms, Socket};
 pub use state_machine::{
-    eval_pose, motion_clip_refs, sample_motion, step, CmpOp, Motion, SmCondition, SmContext,
-    SmRuntime, SmState, SmTransition, StateMachine,
+    eval_pose, sample_motion, step, CmpOp, Motion, SmCondition, SmContext, SmRuntime, SmState,
+    SmTransition, StateMachine,
 };
 pub use template::{build_template, BodyParams, BodyPlan, JointLimit, TemplateError, MAX_LEGS};

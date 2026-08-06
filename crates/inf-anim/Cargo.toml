@@ -16,3 +16,10 @@ inf-asset = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Schema-ladder proofs for the `.inf_skel` wire (P24.1): the v1 shadow struct the
+# v1 -> v2 refusal is measured against, and the byte-consumption shape pin that
+# catches a tail field appended without a version bump. The same bincode 2.x
+# `inf-asset` encodes with, and the same reason `inf-ecs` carries it as a
+# dev-dependency. Test-only: the shipped crate still names only glam/serde/
+# thiserror/inf-asset.
+bincode = { workspace = true }

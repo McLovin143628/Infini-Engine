@@ -345,9 +345,13 @@ pub fn build_template(plan: BodyPlan, params: &BodyParams) -> Result<SkeletonAss
     // Girdle 0 is the REARMOST (it is the hips), and the last girdle is at the
     // shoulders. A biped has one girdle and it is the hips, so its leg joints
     // take the canonical unindexed names.
-    let leg_len = hip_y;
-    let upper_leg = leg_len * params.upper_limb_ratio;
-    let lower_leg = leg_len - upper_leg;
+    //
+    // **A leg is as long as its own girdle is high** (P24.1 audit M3). The first
+    // cut computed one `leg_len = hip_y` outside this loop, which is right only
+    // for girdle 0: every other girdle sits at `gy > hip_y`, so its feet landed at
+    // `gy − hip_y` — about half a metre in the air on a default quadruped, and
+    // those are the `foot_*` sockets P24.2's IK will plant. Standing on the ground
+    // is a property of each leg, not of the hips.
     let mut feet: Vec<(String, u16)> = Vec::new();
     for g in 0..girdles {
         // Girdles are spaced evenly from the hips to the shoulders along the run.
@@ -357,6 +361,8 @@ pub fn build_template(plan: BodyPlan, params: &BodyParams) -> Result<SkeletonAss
         } else {
             (0.0, hip_y)
         };
+        let upper_leg = gy * params.upper_limb_ratio;
+        let lower_leg = gy - upper_leg;
         // Attached to the root so a girdle's placement is independent of the
         // spine's segment count: the offset is measured from the hips.
         let anchor = b.push(
@@ -675,6 +681,66 @@ mod tests {
         // freshly generated rig draw its mesh unchanged.
         for m in crate::pose::skinning_matrices(sk, &Pose::rest(sk)) {
             assert!(m.abs_diff_eq(glam::Mat4::IDENTITY, 1e-5), "{m:?}");
+        }
+    }
+
+    /// **EVERY plan stands on the ground** (P24.1 audit M3).
+    ///
+    /// The proportions test above builds only `biped()` — the one plan whose
+    /// single girdle sits at the hips, and therefore the one plan that could not
+    /// fail. A multi-girdle body puts each girdle at its own height, and a leg
+    /// sized from the hips instead of from its own girdle leaves that girdle's
+    /// feet in the air: about half a metre on a default quadruped, on the very
+    /// sockets P24.2's IK will plant.
+    ///
+    /// Computed independently, out of `global_transforms`, over every foot joint
+    /// of every plan the drawer offers plus an arbitrary N-pedal.
+    #[test]
+    fn every_plan_stands_its_feet_on_the_ground() {
+        for plan in [
+            BodyPlan::Biped,
+            BodyPlan::Quadruped,
+            BodyPlan::Hexapod,
+            BodyPlan::Npedal { legs: 10 },
+        ] {
+            let asset = build_template(plan, &BodyParams::default()).unwrap();
+            let sk = &asset.skeleton;
+            let globals = global_transforms(sk, &Pose::rest(sk));
+            let feet: Vec<(usize, f32)> = sk
+                .joints()
+                .iter()
+                .enumerate()
+                .filter(|(_, j)| j.name.starts_with("foot_"))
+                .map(|(i, _)| (i, globals[i].transform_point3(Vec3::ZERO).y))
+                .collect();
+            assert_eq!(
+                feet.len(),
+                plan.legs() as usize,
+                "{plan:?} did not grow one foot per leg"
+            );
+            for (i, y) in &feet {
+                assert!(
+                    y.abs() < 1e-4,
+                    "{plan:?} foot `{}` floats at y = {y}",
+                    sk.joints()[*i].name
+                );
+            }
+            // …and the girdles really are at DIFFERENT heights, or this test is
+            // measuring one girdle repeated and would pass on the defect.
+            if plan.legs() > 2 {
+                let hips = globals[sk.index_of("hips").unwrap() as usize]
+                    .transform_point3(Vec3::ZERO)
+                    .y;
+                let last = globals[sk
+                    .index_of(&format!("girdle_{}", plan.legs() / 2 - 1))
+                    .unwrap() as usize]
+                    .transform_point3(Vec3::ZERO)
+                    .y;
+                assert!(
+                    (last - hips) > 0.1,
+                    "{plan:?}'s girdles are all at one height, so a hips-sized leg                      would have reached the ground and this gate proves nothing"
+                );
+            }
         }
     }
 

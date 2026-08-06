@@ -629,6 +629,10 @@ mod tests {
             (Uuid::from_u128(0x21_04_02), vec![0xBB; 32]),
         ])
         .with_terrains(vec![(Uuid::from_u128(0x21_04_03), vec![0xCC; 128])])
+        // P22.3 — non-empty for the same reason, and it was NOT until the P24.1
+        // audit: with `fractures` left empty it and `meshes` were two empty
+        // vectors, which agree with each other no matter which order they are in.
+        .with_fractures(vec![(Uuid::from_u128(0x22_03_01), vec![0xEE; 200])])
         // v7 (P24.1) — NON-EMPTY, for the reason the round-trip test below
         // records: an empty new field cannot distinguish a tail append from a
         // mid-struct insertion.
@@ -661,10 +665,102 @@ mod tests {
         assert!(got.windowed);
         assert_eq!(got.voxels.len(), 2);
         assert_eq!(got.terrains[0].1.len(), 128);
+        assert_eq!(got.fractures[0].1.len(), 200);
         // v7 (P24.1): the newest tail field, likewise named rather than left to
         // the struct equality.
         assert_eq!(got.meshes.len(), 1);
         assert_eq!(got.meshes[0].1.len(), 96);
+    }
+
+    /// **The WHOLE wire order is pinned, all fifteen fields** (P24.1 audit M5).
+    ///
+    /// The stale-reader test below models a *pre-v5* build and therefore stops at
+    /// `windowed` — correctly, that is its whole point. But it left the four tail
+    /// fields (`voxels`, `terrains`, `fractures`, `meshes`) unpinned in ORDER, and
+    /// the round trip above cannot see an order change either, because it compares
+    /// a payload with itself. `meshes` inserted between `voxels` and `terrains`
+    /// passed both.
+    ///
+    /// This decodes a real encoding through a positional twin listing every field
+    /// in the canonical order, then compares field for field. Two things make it
+    /// able to fail:
+    ///
+    ///  * the fixture gives every tail field **distinct, non-empty** content, so a
+    ///    swapped pair mismatches instead of two empty vectors agreeing (the exact
+    ///    hazard `ScenePayload::meshes`' own doc cites);
+    ///  * the decode must consume **every byte**, so a field appended without a
+    ///    version bump leaves a remainder here.
+    #[test]
+    fn the_wire_order_is_pinned_field_for_field() {
+        #[derive(Deserialize)]
+        struct WireOrder {
+            schema_version: u32,
+            label: String,
+            level_bytes: Vec<u8>,
+            classes: Vec<(Uuid, Vec<u8>)>,
+            pcgs: Vec<(Uuid, Vec<u8>)>,
+            skeletons: Vec<(Uuid, Vec<u8>)>,
+            clips: Vec<(Uuid, Vec<u8>)>,
+            machines: Vec<(Uuid, Vec<u8>)>,
+            biome_sets: Vec<(Uuid, Vec<u8>)>,
+            tick_hz: u32,
+            windowed: bool,
+            // ── the append-only tail ────────────────────────────────────────
+            voxels: Vec<(Uuid, Vec<u8>)>,
+            terrains: Vec<(Uuid, Vec<u8>)>,
+            fractures: Vec<(Uuid, Vec<u8>)>,
+            meshes: Vec<(Uuid, Vec<u8>)>,
+        }
+
+        let want = payload_with_assets();
+        // Every tail field carries different bytes AND a different length, so no
+        // two of them can compare equal by accident.
+        let tail_lens: Vec<usize> = [&want.voxels, &want.terrains, &want.fractures, &want.meshes]
+            .iter()
+            .map(|v| v[0].1.len())
+            .collect();
+        let mut uniq = tail_lens.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(
+            uniq.len(),
+            tail_lens.len(),
+            "two tail fields carry payloads of the same length, so swapping them \
+             would be invisible to this gate: {tail_lens:?}"
+        );
+
+        let bytes = bincode::serde::encode_to_vec(&want, bincode::config::standard()).unwrap();
+        let (wire, consumed): (WireOrder, usize) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+                .expect("the canonical 15-field order decodes the wire");
+        assert_eq!(
+            consumed,
+            bytes.len(),
+            "the encoding carries bytes the pinned 15-field order does not account \
+             for — a field was added to `ScenePayload` without extending this pin"
+        );
+
+        assert_eq!(wire.schema_version, SCENE_PAYLOAD_VERSION);
+        assert_eq!(wire.label, want.label);
+        assert_eq!(wire.level_bytes, want.level_bytes);
+        assert_eq!(wire.classes, want.classes);
+        assert_eq!(wire.pcgs, want.pcgs);
+        assert_eq!(wire.skeletons, want.skeletons);
+        assert_eq!(wire.clips, want.clips);
+        assert_eq!(wire.machines, want.machines);
+        assert_eq!(wire.biome_sets, want.biome_sets);
+        assert_eq!(wire.tick_hz, want.tick_hz);
+        assert_eq!(wire.windowed, want.windowed);
+        assert_eq!(wire.voxels, want.voxels, "`voxels` is not wire field 12");
+        assert_eq!(
+            wire.terrains, want.terrains,
+            "`terrains` is not wire field 13"
+        );
+        assert_eq!(
+            wire.fractures, want.fractures,
+            "`fractures` is not wire field 14"
+        );
+        assert_eq!(wire.meshes, want.meshes, "`meshes` is not wire field 15");
     }
 
     /// **The tail is positional, and it is at the tail.** A reader that knows only

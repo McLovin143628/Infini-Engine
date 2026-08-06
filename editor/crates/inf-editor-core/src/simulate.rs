@@ -2598,7 +2598,7 @@ where
         if let Some(sk_guid) = w.get::<SkeletalMesh>(e).and_then(|s| s.skeleton) {
             if let Entry::Vacant(v) = skeletons.entry(sk_guid) {
                 if let Some(asset) =
-                    resolve_anim(sk_guid).and_then(|b| inf_asset::decode::<SkeletonAsset>(&b).ok())
+                    resolve_anim(sk_guid).and_then(|b| decode_anim::<SkeletonAsset>(sk_guid, &b))
                 {
                     v.insert(asset);
                 }
@@ -2607,7 +2607,7 @@ where
         if let Some(sm_guid) = w.get::<AnimStateMachine>(e).and_then(|s| s.sm) {
             if let Entry::Vacant(v) = machines.entry(sm_guid) {
                 if let Some(asset) = resolve_anim(sm_guid)
-                    .and_then(|b| inf_asset::decode::<StateMachineAsset>(&b).ok())
+                    .and_then(|b| decode_anim::<StateMachineAsset>(sm_guid, &b))
                 {
                     v.insert(asset.machine);
                 }
@@ -2616,15 +2616,14 @@ where
         if let Some(clip_guid) = w.get::<AnimPlayer>(e).and_then(|p| p.clip) {
             if let Entry::Vacant(v) = clips.entry(clip_guid) {
                 if let Some(ca) = resolve_anim(clip_guid)
-                    .and_then(|b| inf_asset::decode::<AnimClipAsset>(&b).ok())
+                    .and_then(|b| decode_anim::<AnimClipAsset>(clip_guid, &b))
                 {
-                    if let Some(sk) = ca
-                        .skeleton
-                        .map(Uuid::from_bytes)
-                        .and_then(&mut resolve_anim)
-                        .and_then(|b| inf_asset::decode::<SkeletonAsset>(&b).ok())
-                    {
-                        v.insert((sk.skeleton, ca.clip));
+                    if let Some(sk_guid) = ca.skeleton.map(Uuid::from_bytes) {
+                        if let Some(sk) = resolve_anim(sk_guid)
+                            .and_then(|b| decode_anim::<SkeletonAsset>(sk_guid, &b))
+                        {
+                            v.insert((sk.skeleton, ca.clip));
+                        }
                     }
                 }
             }
@@ -2640,7 +2639,7 @@ where
     for clip_guid in refs {
         if let Entry::Vacant(v) = pose_clips.entry(clip_guid) {
             if let Some(ca) =
-                resolve_anim(clip_guid).and_then(|b| inf_asset::decode::<AnimClipAsset>(&b).ok())
+                resolve_anim(clip_guid).and_then(|b| decode_anim::<AnimClipAsset>(clip_guid, &b))
             {
                 v.insert(ca.clip);
             }
@@ -2650,14 +2649,48 @@ where
     (machines, root_clips, skeletons, pose_clips)
 }
 
+/// Decode one animation asset for a Simulate session, **saying so out loud when
+/// it does not load** (P24.1 audit B1).
+///
+/// This used to be `inf_asset::decode::<T>(&b).ok()`, and the `.ok()` was the
+/// whole defect: a `.inf_skel` written before the v2 `limits` tail fails to
+/// decode (bincode is positional), the `None` propagates, the skeleton registry
+/// stays empty, and the entity's state machine advances while publishing no pose.
+/// The character silently stops animating and its sockets revert to the origin —
+/// the exact behaviour P24.1 exists to remove, reintroduced through a discarded
+/// error.
+///
+/// `inf_asset::decode` names that case [`AssetError::SchemaTooOld`] and carries
+/// the remedy; this puts it in front of a human, on the editor's own
+/// `tracing` → Output Log path. The asset is still skipped — one stale rig must
+/// not stop a session starting — but skipping it is now a reported event rather
+/// than a silence.
+///
+/// [`AssetError::SchemaTooOld`]: inf_asset::AssetError::SchemaTooOld
+fn decode_anim<T: inf_asset::AssetPayload>(guid: Uuid, bytes: &[u8]) -> Option<T> {
+    match inf_asset::decode::<T>(bytes) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(
+                "simulate: animation asset {guid} ({}) did not load and will not \
+                 animate anything this session: {e}",
+                T::KIND.slug()
+            );
+            None
+        }
+    }
+}
+
 /// Every `.inf_anim` GUID a state machine's states play, as `Uuid`s — the Ring-1
 /// spelling of [`inf_anim::StateMachine::clip_refs`].
 ///
-/// A thin conversion and nothing else: the walk itself is Ring 0 because THREE
-/// consumers have to close the same `state machine → clip` edge (the cook's
-/// dependency closure, the PIE payload builder, and the editor Simulate
-/// resolver), and before P24.1 the cook closed it and the PIE payload did not.
-/// `inf-anim` is `uuid`-free by design, hence the map here.
+/// A thin conversion and nothing else. Its **two** consumers are both in this
+/// crate — the PIE payload builder (`crate::pie::build_scene_payload`) and
+/// `resolve_anim_assets` below; the cook is the third consumer of the *walk*, and
+/// it calls the Ring-0 `clip_refs` directly because `inf-anim` is `uuid`-free by
+/// design and the cook already speaks `[u8; 16]`. That is why the walk is Ring 0
+/// and this is only a spelling: before P24.1 the cook closed the edge and the PIE
+/// payload did not.
 pub fn machine_clip_refs(machine: &StateMachine) -> BTreeSet<Uuid> {
     machine
         .clip_refs()

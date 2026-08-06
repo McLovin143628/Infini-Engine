@@ -8454,6 +8454,16 @@ mod tests {
                 .unwrap(),
                 "committed character-demo .inf_sm drifted from the generator"
             );
+            // P24.1: the `.inf_skel` too. It is the ONE committed skeleton in the
+            // tree, so it is the only thing that would have caught the
+            // `SkeletonAsset` v1 → v2 wire change by *bytes* — and it was unlocked
+            // while its `.inf_lvl` and `.inf_sm` siblings were not.
+            assert_eq!(
+                std::fs::read(cdir.join("Character.inf_skel")).unwrap(),
+                inf_asset::encode(&inf_anim::SkeletonAsset::new(character_demo_skeleton()))
+                    .unwrap(),
+                "committed character-demo .inf_skel drifted from the generator"
+            );
         }
 
         // Physics-playground lock: the committed v6 `.inf_lvl` + the two

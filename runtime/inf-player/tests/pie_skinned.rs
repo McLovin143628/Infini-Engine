@@ -350,3 +350,64 @@ fn pie_subprocess_trace_matches_shipping_with_a_skinned_character() {
     );
     session.stop(Duration::from_secs(5)).expect("graceful stop");
 }
+/// **The wiring itself, pinned as source text.**
+///
+/// Everything above proves the payload carries a character and that a store built
+/// from it resolves one. None of it can see whether `run_pie_window` actually
+/// *hands that store over* — severing `SkinnedRegistry::from_payload(…)` back to
+/// `SkinnedRegistry::new()` in `main.rs` fails **zero** tests otherwise, because
+/// the skinned store feeds rendering and nothing else: no trace, no state hash, no
+/// simulation result changes. That is the whole shape of the P24.1 defect (three
+/// phases of placeholder cubes with every gate green), so the wiring needs a gate
+/// aimed at the wiring.
+///
+/// The repo's own idiom for render-only wiring — `runtime_destruct.rs`'s
+/// `the_windowed_player_exempts_pie_from_the_tier_budget` reads `window.rs` as
+/// source text for exactly this reason. Two halves, and the ABSENCE is the
+/// load-bearing one: a host that passed the payload store *and* left the inert
+/// constructor in place would satisfy a presence-only check while some other arm
+/// of the same match still handed over nothing.
+#[test]
+fn the_windowed_pie_host_hands_over_the_payloads_skinned_store() {
+    // Normalized: `core.autocrlf = true` checks `.rs` out CRLF on Windows.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+    )
+    .expect("main.rs is readable")
+    .replace("\r\n", "\n");
+
+    assert!(
+        src.contains("inf_player::skinned::SkinnedRegistry::from_payload("),
+        "the windowed PIE host no longer builds its skeletal store FROM THE \
+         PAYLOAD — every character in an embedded or new-window PIE session would \
+         draw as a placeholder cube again, and no trace comparison in this repo \
+         can see it"
+    );
+    assert!(
+        !src.contains("SkinnedRegistry::new()"),
+        "the windowed PIE host still constructs an INERT `SkinnedRegistry` — that \
+         is the exact call `from_payload` replaced, and a host doing both hands \
+         over nothing on whichever path reaches it first"
+    );
+    // …and all three byte vectors reach it: skeletons and clips crossed the wire
+    // from v3 and were never handed to the store, which is why the mesh arriving
+    // in v7 alone would still have drawn nothing.
+    for field in ["&payload.meshes", "&payload.skeletons", "&payload.clips"] {
+        assert!(
+            src.contains(field),
+            "the windowed PIE host does not pass `{field}` to its skeletal store"
+        );
+    }
+    // A guard on the guard: `run_pie` must still TAKE the store, or the argument
+    // above is being handed to a signature that drops it.
+    let window = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/window.rs"),
+    )
+    .expect("window.rs is readable")
+    .replace("\r\n", "\n");
+    assert!(
+        window.contains("skinned: Arc<SkinnedRegistry>,")
+            && window.contains("app.skinned = skinned;"),
+        "`run_pie` no longer accepts and installs a `SkinnedRegistry`"
+    );
+}

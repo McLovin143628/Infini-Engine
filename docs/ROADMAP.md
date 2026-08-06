@@ -7811,6 +7811,23 @@ skeleton editor.
   shape it → auto-rig → a default locomotion set wired to a state machine. The anti-pain
   headline.
 
+**Carried from P24.1 (ledgered, not fixed) — a gate candidate for P24.4.**
+`ScenePayload::check_version` refuses a mismatched envelope in both directions and is
+unit-tested in both, but only the **newer** direction is reachable end to end. Measured:
+`inf_runtime::pie::read_msg` decodes each frame body out of a length-delimited slice, so a
+payload from an *older* build is a short read — `decode_from_slice` fails inside `read_msg`,
+the player's reader thread's `while let Ok(msg) = read_msg(..)` **breaks**, the channel
+disconnects, and `main.rs`'s loop prints "editor closed the channel; exiting" and returns
+`ExitCode::SUCCESS`. `check_version` runs inside `build_world_from_payload`, which that path
+never reaches, so a version-skewed editor/player pair looks to the editor like a clean exit
+rather than a refusal. (A *newer* payload leaves trailing bytes, which `decode_from_slice`
+ignores, so it decodes and `check_version` fires correctly.) Pre-existing — the frame reader
+has behaved this way since Spike D — and out of P24.1's scope because fixing it means giving
+the reader thread a way to report a typed decode failure instead of treating every error as
+end-of-stream. The gate that would prove it: hand the real `--pie` subprocess a payload with
+a decremented `schema_version` and assert a `PlayerToEditor::Error` naming the schema, not a
+successful exit.
+
 ### Phase 25 — Photogrammetry: photos → asset
 
 **Goal:** photos in, game-ready asset out, entirely in-engine. **Done when:** a
