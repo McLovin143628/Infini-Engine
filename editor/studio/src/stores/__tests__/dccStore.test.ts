@@ -75,6 +75,8 @@ function docOf(assetId: string, over: Partial<DccDocDto> = {}): DccDocDto {
       boundaryEdges: 0,
       nonFiniteValues: 0,
     },
+    // P24.2: a fixture mesh is rigid unless a case says otherwise.
+    skinJoints: null,
     ...over,
   };
 }

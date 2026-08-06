@@ -65,4 +65,15 @@ seams: number,
  * How many charts the seams cut the mesh into — the number an author checks
  * **before** unwrapping, because it is the thing their seam marks control.
  */
-charts: number, };
+charts: number, 
+/**
+ * How many joints this mesh's skin channel is bound to, or `None` when it
+ * carries no skin (P24.2).
+ *
+ * The weight brush's **bound**, and the reason the influence picker is a
+ * number box rather than a list: a `.inf_mesh` records no skeleton (the
+ * pairing lives in the scene's `SkeletalMesh`), so the kernel knows how many
+ * joints its indices address and not what any of them is called. Names
+ * arrive with P24.3's skeleton binding UI.
+ */
+skinJoints: number | null, };

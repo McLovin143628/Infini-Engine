@@ -54,6 +54,7 @@ import { useDccEntry, useDccStore } from "../../stores/dccStore";
 import type { DccDragDto } from "../../bindings/DccDragDto";
 import type { DccGizmoModeDto } from "../../bindings/DccGizmoModeDto";
 import type { DccModeDto } from "../../bindings/DccModeDto";
+import type { DccPaintModeDto } from "../../bindings/DccPaintModeDto";
 import type { DccSculptModeDto } from "../../bindings/DccSculptModeDto";
 import type { SculptFalloffDto } from "../../bindings/SculptFalloffDto";
 import { cn } from "../../lib/utils";
@@ -68,7 +69,7 @@ import { cn } from "../../lib/utils";
  * starts off the silhouette is a camera move, so neither tool costs the author
  * their navigation.
  */
-type PointerTool = "select" | "sculpt" | "gizmo";
+type PointerTool = "select" | "sculpt" | "weights" | "gizmo";
 
 /**
  * The smallest brush radius the backend accepts, metres — mirrored from
@@ -209,6 +210,16 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const [brushRadius, setBrushRadius] = useState(0.3);
   const [brushStrength, setBrushStrength] = useState(0.05);
   const [falloff, setFalloff] = useState<SculptFalloffDto>("Smooth");
+  // ── P24.2 weight paint ───────────────────────────────────────────────────
+  //
+  // The influence is a NUMBER, not a name, and that is the honest surface: a
+  // `.inf_mesh` records no skeleton (the mesh-to-rig pairing lives in the
+  // scene's `SkeletalMesh`), so the kernel knows how many joints its indices
+  // address and not what any of them is called. `skinJoints` is the bound, and
+  // names arrive with P24.3's skeleton binding UI.
+  const [paintJoint, setPaintJoint] = useState(0);
+  const [paintMode, setPaintMode] = useState<DccPaintModeDto>("add");
+  const [paintStrength, setPaintStrength] = useState(0.25);
   const [gizmoMode, setGizmoMode] = useState<DccGizmoModeDto>("translate");
   const [snap, setSnap] = useState(0);
   const [softRadius, setSoftRadius] = useState(0);
@@ -278,6 +289,16 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
         mode: sculptMode,
         radius: brushRadius,
         strength: brushStrength,
+        falloff,
+      };
+    }
+    if (tool === "weights") {
+      return {
+        kind: "weightPaint",
+        joint: paintJoint,
+        mode: paintMode,
+        radius: brushRadius,
+        strength: paintStrength,
         falloff,
       };
     }
@@ -551,7 +572,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           POINTER
         </div>
         <div className="flex gap-1">
-          {(["select", "sculpt", "gizmo"] as PointerTool[]).map((t) => (
+          {(["select", "sculpt", "weights", "gizmo"] as PointerTool[]).map((t) => (
             <button
               key={t}
               className={cn(
@@ -566,13 +587,90 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
                   ? "Click picks, drag orbits"
                   : t === "sculpt"
                     ? "Drag on the surface to paint. One stroke = one undo step."
-                    : "Drag a handle on the selection. Off the handles, the drag orbits."
+                    : t === "weights"
+                      ? "Paint one skinning influence. Needs a mesh bound to a skeleton."
+                      : "Drag a handle on the selection. Off the handles, the drag orbits."
               }
             >
               {t}
             </button>
           ))}
         </div>
+
+        {tool === "weights" && (
+          <>
+            {/* The bound skeleton's joint count is the picker's range, and its
+                absence is the whole story: a rigid mesh has no influence to
+                paint, so the panel says so rather than offering a control that
+                only ever refuses. */}
+            {doc?.skinJoints == null ? (
+              <p className="text-[10px] leading-snug text-(--ink-text-dim)">
+                This mesh carries <b>no skin</b>, so there is no influence to
+                paint. Bind it to a skeleton first — the weight solve and the
+                binding UI arrive in P24.3.
+              </p>
+            ) : (
+              <>
+                <div className="flex gap-1">
+                  {(["add", "subtract", "replace", "smooth"] as DccPaintModeDto[]).map(
+                    (m) => (
+                      <button
+                        key={m}
+                        className={cn(
+                          "flex-1 rounded px-1 py-1 text-[10px] capitalize",
+                          paintMode === m
+                            ? "bg-(--ink-accent) text-(--ink-text-onaccent)"
+                            : "bg-(--ink-bg-2) hover:bg-(--ink-bg-3)",
+                        )}
+                        onClick={() => setPaintMode(m)}
+                      >
+                        {m}
+                      </button>
+                    ),
+                  )}
+                </div>
+                <label className="flex items-center justify-between gap-2 text-[11px]">
+                  <span className="text-(--ink-text-dim)">
+                    Influence (0–{doc.skinJoints - 1})
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={doc.skinJoints - 1}
+                    step={1}
+                    value={paintJoint}
+                    onChange={(e) =>
+                      setPaintJoint(
+                        Math.min(
+                          (doc?.skinJoints ?? 1) - 1,
+                          Math.max(0, Math.round(Number(e.target.value) || 0)),
+                        ),
+                      )
+                    }
+                    className="w-20 rounded border border-(--ink-border) bg-(--ink-bg-2) px-1 py-0.5 text-right text-[11px]"
+                  />
+                </label>
+                <Num
+                  label="Radius (m)"
+                  value={brushRadius}
+                  onChange={(v) => setBrushRadius(Math.max(MIN_BRUSH_RADIUS_M, v))}
+                />
+                <Num
+                  label="Strength"
+                  value={paintStrength}
+                  step={0.05}
+                  onChange={(v) => setPaintStrength(Math.min(1, Math.max(0, v)))}
+                />
+                <p className="text-[10px] leading-snug text-(--ink-text-dim)">
+                  Strength is a <b>weight delta</b> at full coverage, and coverage
+                  is the largest influence any dab of the stroke gave a vertex —
+                  so a slow drag paints the same as a fast one over the same
+                  ground. One stroke = one undo step.
+                </p>
+              </>
+            )}
+          </>
+        )}
 
         {tool === "sculpt" && (
           <>

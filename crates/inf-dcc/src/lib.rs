@@ -80,9 +80,11 @@ pub mod autofit;
 pub mod build;
 pub mod bvh;
 pub mod export;
+pub mod heat;
 pub mod journal;
 pub mod model;
 pub mod ops;
+pub mod paint;
 pub mod sculpt;
 pub mod select;
 pub mod skin;
@@ -98,9 +100,11 @@ pub use build::{
 };
 pub use bvh::{Bvh, ClosestHit, RayHit, Tri};
 pub use export::{to_mesh_asset, ExportOptions, ExportReport, NormalPolicy, TANGENT_FALLBACK};
+pub use heat::{solve_heat_weights, BoneReport, HeatError, HeatReport};
 pub use journal::{MeshSession, SessionError, SessionSave, CHECKPOINT_INTERVAL, MAX_CHECKPOINTS};
 pub use model::{KnifePoint, MergeTarget, MirrorAxis, MAX_LOOP_CUTS};
 pub use ops::{Op, OpError, OpOutcome};
+pub use paint::{paint_weights, PaintMode};
 pub use sculpt::{
     dab_positions, face_normal, stroke_dabs, SculptFalloff, SculptMode, DAB_SPACING_FRACTION,
     MAX_STROKE_DABS, MIN_BRUSH_RADIUS_M,

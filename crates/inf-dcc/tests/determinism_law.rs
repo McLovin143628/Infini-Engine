@@ -42,7 +42,7 @@
 /// not cover it, and a new module is exactly where the next `.sin()` or `HashMap`
 /// would land. `every_source_file_is_covered` reads the directory and fails if
 /// this list has fallen behind, so the coverage cannot rot silently.
-const SOURCES: [(&str, &str); 14] = [
+const SOURCES: [(&str, &str); 16] = [
     ("lib.rs", include_str!("../src/lib.rs")),
     ("topo.rs", include_str!("../src/topo.rs")),
     ("validate.rs", include_str!("../src/validate.rs")),
@@ -57,6 +57,8 @@ const SOURCES: [(&str, &str); 14] = [
     ("skin.rs", include_str!("../src/skin.rs")),
     ("bvh.rs", include_str!("../src/bvh.rs")),
     ("autofit.rs", include_str!("../src/autofit.rs")),
+    ("heat.rs", include_str!("../src/heat.rs")),
+    ("paint.rs", include_str!("../src/paint.rs")),
 ];
 
 const JOURNAL: &str = include_str!("../src/journal.rs");
@@ -222,6 +224,8 @@ fn f32_lives_only_at_the_asset_boundary_and_the_skin_channel() {
         SOURCES[9],  // xform.rs
         SOURCES[10], // uv.rs
         SOURCES[12], // bvh.rs — pure f64, no boundary at all
+        SOURCES[14], // heat.rs — solves in f64; only the WEIGHTS it gathers are f32
+        SOURCES[15], // paint.rs — same
         ("journal.rs", JOURNAL),
     ] {
         let stray: Vec<(usize, String)> = code_hits(src, "f32")

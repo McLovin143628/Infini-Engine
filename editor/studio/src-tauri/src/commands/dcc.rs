@@ -56,8 +56,8 @@ use inf_editor_core::dcc::{
 };
 use inf_editor_core::ipc::{
     DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto, DccGizmoModeDto,
-    DccImportDto, DccModeDto, DccPreviewDto, DccSaveDto, DccSculptModeDto, DccSelectDto,
-    DccToolDto, DccUnwrapDto, SculptFalloffDto,
+    DccImportDto, DccModeDto, DccPaintModeDto, DccPreviewDto, DccSaveDto, DccSculptModeDto,
+    DccSelectDto, DccToolDto, DccUnwrapDto, SculptFalloffDto,
 };
 use inf_editor_core::thumbnail::{encode_png_fast, PreviewView, Thumbnailer};
 use tauri::{AppHandle, Emitter, State};
@@ -205,6 +205,15 @@ fn sculpt_mode_of(m: DccSculptModeDto) -> inf_dcc::SculptMode {
     }
 }
 
+fn paint_mode_of(m: DccPaintModeDto) -> inf_dcc::PaintMode {
+    match m {
+        DccPaintModeDto::Add => inf_dcc::PaintMode::Add,
+        DccPaintModeDto::Subtract => inf_dcc::PaintMode::Subtract,
+        DccPaintModeDto::Replace => inf_dcc::PaintMode::Replace,
+        DccPaintModeDto::Smooth => inf_dcc::PaintMode::Smooth,
+    }
+}
+
 fn kernel_falloff_of(f: SculptFalloffDto) -> inf_dcc::SculptFalloff {
     match f {
         SculptFalloffDto::Smooth => inf_dcc::SculptFalloff::Smooth,
@@ -285,12 +294,17 @@ fn doc_dto(doc: &DccDoc, session: &MeshSession) -> DccDocDto {
         dragging: doc.pending.is_some(),
         drag_points: match &doc.pending {
             Some(PendingDrag::Stroke(s)) => s.path.len() as u32,
+            // A weight stroke is a stroke: "is this doing anything" has to be
+            // answerable for it too, or the status bar reads 0 while the author
+            // paints (P24.2).
+            Some(PendingDrag::Weights(w)) => w.path.len() as u32,
             _ => 0,
         },
         gizmo: doc.gizmo.map(gizmo_mode_dto),
         selection_rev: dcc::selection_revision(&doc.selection),
         seams: inf_dcc::seam_count(mesh) as u32,
         charts: inf_dcc::charts(mesh).len() as u32,
+        skin_joints: mesh.skin_binding().map(|b| b.joints),
     }
 }
 
@@ -857,6 +871,44 @@ pub async fn dcc_drag_begin(
                     }
                 }
             }
+            DccDragDto::WeightPaint {
+                joint,
+                mode,
+                radius,
+                strength,
+                falloff,
+            } => {
+                // Same four lines calling Ring 1, same reason: the radius floor,
+                // the "is this mesh even skinned" check and the joint range live
+                // in `dcc::begin_weight_stroke`, where a test can reach them.
+                match dcc::begin_weight_stroke(
+                    session.mesh(),
+                    &proj,
+                    px,
+                    py,
+                    dcc::WeightBrush {
+                        joint: joint.min(u16::MAX as u32) as u16,
+                        mode: paint_mode_of(mode),
+                        radius,
+                        strength,
+                        falloff: kernel_falloff_of(falloff),
+                    },
+                ) {
+                    Ok(Some(stroke)) => {
+                        doc.pending = Some(PendingDrag::Weights(stroke));
+                        (true, None)
+                    }
+                    Ok(None) => (false, None),
+                    Err(refusal) => {
+                        return Ok(DccDragBeginDto {
+                            grabbed: false,
+                            handle: None,
+                            refusal: Some(refusal),
+                            doc: doc_dto(doc, session),
+                        })
+                    }
+                }
+            }
             DccDragDto::Gizmo {
                 mode,
                 snap,
@@ -943,6 +995,14 @@ pub async fn dcc_drag_move(
         let snap = doc.drag_snap;
         match doc.pending.as_mut() {
             Some(PendingDrag::Stroke(stroke)) => {
+                if let Some((face, hit)) = dcc::pick_surface(session.mesh(), &proj, px, py) {
+                    stroke.path.push(hit);
+                    if let Some(n) = inf_dcc::face_normal(session.mesh(), face) {
+                        stroke.last_normal = n;
+                    }
+                }
+            }
+            Some(PendingDrag::Weights(stroke)) => {
                 if let Some((face, hit)) = dcc::pick_surface(session.mesh(), &proj, px, py) {
                     stroke.path.push(hit);
                     if let Some(n) = inf_dcc::face_normal(session.mesh(), face) {
@@ -1107,6 +1167,13 @@ pub async fn dcc_preview(
             Some(PendingDrag::Stroke(st)) => {
                 st.path.last().map(|&c| (c, st.last_normal, st.radius))
             }
+            // A weight stroke gets the same ring — it is the same gesture with
+            // the same reach, and a brush that draws no footprint while it is
+            // painting is the one an author cannot aim (P24.2).
+            Some(PendingDrag::Weights(st)) => st
+                .path
+                .last()
+                .map(|&c| (c, st.last_normal, st.brush.radius)),
             _ => None,
         };
         // The gizmo is drawn against the COMMITTED selection's pivot, which is

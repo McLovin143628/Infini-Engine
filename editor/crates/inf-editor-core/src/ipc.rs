@@ -2573,6 +2573,15 @@ pub struct DccDocDto {
     /// How many charts the seams cut the mesh into — the number an author checks
     /// **before** unwrapping, because it is the thing their seam marks control.
     pub charts: u32,
+    /// How many joints this mesh's skin channel is bound to, or `None` when it
+    /// carries no skin (P24.2).
+    ///
+    /// The weight brush's **bound**, and the reason the influence picker is a
+    /// number box rather than a list: a `.inf_mesh` records no skeleton (the
+    /// pairing lives in the scene's `SkeletalMesh`), so the kernel knows how many
+    /// joints its indices address and not what any of them is called. Names
+    /// arrive with P24.3's skeleton binding UI.
+    pub skin_joints: Option<u32>,
 }
 
 /// The result of a tool press: what it did, or why it refused.
@@ -2696,6 +2705,19 @@ pub enum DccSculptModeDto {
     Grab,
 }
 
+/// What a **weight** dab does to the influence under it (P24.2). A mirror of
+/// `inf_dcc::PaintMode`, for the reason [`DccSculptModeDto`] is a mirror of
+/// `SculptMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum DccPaintModeDto {
+    #[default]
+    Add,
+    Subtract,
+    Replace,
+    Smooth,
+}
+
 /// Which transform the component gizmo is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
@@ -2739,6 +2761,17 @@ pub enum DccDragDto {
         #[serde(rename = "softRadius")]
         #[ts(rename = "softRadius")]
         soft_radius: f64,
+        falloff: SculptFalloffDto,
+    },
+    /// Paint one **skinning influence** along the drag path (P24.2). `joint` is
+    /// an index into the mesh's bound skeleton; `strength` is a weight delta in
+    /// `[0, 1]` at full coverage, and `radius` is geodesic metres exactly as for
+    /// a sculpt stroke.
+    WeightPaint {
+        joint: u32,
+        mode: DccPaintModeDto,
+        radius: f64,
+        strength: f64,
         falloff: SculptFalloffDto,
     },
 }

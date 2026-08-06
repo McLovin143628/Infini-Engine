@@ -13,21 +13,22 @@ use inf_editor_core::ipc::{
     AddableComponentDto, AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot,
     BiomeDefDto, BiomeSetDto, BiomeSettingsDto, ComponentDto, DataAssetDto, DataFieldDto,
     DataMapExportDto, DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto,
-    DccGizmoModeDto, DccImportDto, DccModeDto, DccPreviewDto, DccSaveDto, DccSculptModeDto,
-    DccSelectDto, DccToolDto, DccUnwrapDto, DeleteResult, DetailsDto, ErosionParamsDto,
-    ErosionReportDto, FileEntryDto, FoliageSettingsDto, GitFileDto, GitStatusDto, GizmoModeDto,
-    GizmoSpaceDto, ImportEventDto, LakePreviewDto, LayoutSummary, LevelSettingsDto, LogLine,
-    PackageErrorDto, PackageKindCountDto, PackageResultDto, PartitionSettingsDto, ProjectInfoDto,
-    ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto, RecentProjectDto,
-    RiverBedConflictDto, RiverClimbDto, RiverReportDto, SaveResultDto, SceneDelta, SceneNode,
-    SceneSnapshot, SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto,
-    SeqInterpDto, SeqKeyDto, SeqTrackDto, SequenceDto, SkyAtmosphereDto, Snap2DDto, Snap3DDto,
-    SortingLayerDto, SpawnKind, SpoilModeDto, SpriteGridDto, SpriteRectDto, SpriteSheetDto,
-    TerrainBiomesDto, TerrainImportPlanDto, TerrainImportResultDto, TerrainImportSettingsDto,
-    TilemapCellDto, TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto, ViewportDrop,
-    ViewportGizmoDto, ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto,
-    VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto, WaterDefaultsDto,
-    WaterSettingsDto, WaterToolKindDto, WeatherDto, WeatherPresetDto,
+    DccGizmoModeDto, DccImportDto, DccModeDto, DccPaintModeDto, DccPreviewDto, DccSaveDto,
+    DccSculptModeDto, DccSelectDto, DccToolDto, DccUnwrapDto, DeleteResult, DetailsDto,
+    ErosionParamsDto, ErosionReportDto, FileEntryDto, FoliageSettingsDto, GitFileDto, GitStatusDto,
+    GizmoModeDto, GizmoSpaceDto, ImportEventDto, LakePreviewDto, LayoutSummary, LevelSettingsDto,
+    LogLine, PackageErrorDto, PackageKindCountDto, PackageResultDto, PartitionSettingsDto,
+    ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto,
+    RecentProjectDto, RiverBedConflictDto, RiverClimbDto, RiverReportDto, SaveResultDto,
+    SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto, SculptOpDto, SculptSettingsDto,
+    SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto, SeqTrackDto, SequenceDto,
+    SkyAtmosphereDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpoilModeDto,
+    SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto, TerrainImportPlanDto,
+    TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto, TilemapDto, TimeOfDayDto,
+    ToolModeDto, ViewModeDto, ViewportDrop, ViewportGizmoDto, ViewportKey, ViewportModeDto,
+    ViewportRect, ViewportToolStatusDto, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto,
+    VoxelToolKindDto, WaterDefaultsDto, WaterSettingsDto, WaterToolKindDto, WeatherDto,
+    WeatherPresetDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -59,6 +60,9 @@ fn export_bindings() {
     DccDragDto::export_all(&cfg).expect("export DccDragDto");
     DccDragBeginDto::export_all(&cfg).expect("export DccDragBeginDto");
     DccSculptModeDto::export_all(&cfg).expect("export DccSculptModeDto");
+    // P24.2: the weight brush's mode. Exported as a root because the panel
+    // holds one in local state before any drag exists to carry it.
+    DccPaintModeDto::export_all(&cfg).expect("export DccPaintModeDto");
     DccGizmoModeDto::export_all(&cfg).expect("export DccGizmoModeDto");
     DccUnwrapDto::export_all(&cfg).expect("export DccUnwrapDto");
     LayoutSummary::export_all(&cfg).expect("export LayoutSummary");

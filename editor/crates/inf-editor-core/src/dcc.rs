@@ -1413,7 +1413,8 @@ pub fn begin_stroke(
     // unsaved session with it.
     if !(radius.is_finite() && radius >= inf_dcc::MIN_BRUSH_RADIUS_M) {
         return Err(format!(
-            "a brush radius of {radius} m is below the {} m floor; a brush that              small cannot reach a second vertex on anything modelled in metres",
+            "a brush radius of {radius} m is below the {} m floor; a brush that \
+             small cannot reach a second vertex on anything modelled in metres",
             inf_dcc::MIN_BRUSH_RADIUS_M
         ));
     }
@@ -1452,6 +1453,125 @@ pub struct GizmoInFlight {
 pub enum PendingDrag {
     Stroke(StrokeInFlight),
     Gizmo(Box<GizmoInFlight>),
+    /// A **weight-paint** stroke (P24.2). Third gesture, same slot, same settler
+    /// — the reason the slot is one slot.
+    Weights(WeightStrokeInFlight),
+}
+
+/// The parameters a weight stroke is begun with — [`BrushSettings`]'s twin for
+/// the skin channel.
+///
+/// A separate struct rather than a mode on `BrushSettings` because the two share
+/// only their radius: a sculpt brush needs a falloff and a displacement, a weight
+/// brush needs a **joint**, and folding them would make "which joint" a field
+/// that means nothing three quarters of the time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WeightBrush {
+    /// The influence being painted — an index into the mesh's bound skeleton.
+    pub joint: u16,
+    pub mode: inf_dcc::PaintMode,
+    /// Geodesic reach, **metres**. Refused below [`inf_dcc::MIN_BRUSH_RADIUS_M`],
+    /// by the same door and for the same reason as a sculpt radius.
+    pub radius: f64,
+    /// Weight delta at full coverage, `[0, 1]`.
+    pub strength: f64,
+    pub falloff: inf_dcc::SculptFalloff,
+}
+
+/// A weight stroke being painted: the brush, and the raw surface points so far.
+///
+/// The **raw** path for the same reason [`StrokeInFlight`] keeps one — arc-length
+/// resampling incrementally gives a different dab set than resampling the
+/// finished path once.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WeightStrokeInFlight {
+    pub brush: WeightBrush,
+    pub path: Vec<DVec3>,
+    /// Display state for the brush ring, exactly as on a sculpt stroke.
+    pub last_normal: DVec3,
+}
+
+impl WeightStrokeInFlight {
+    /// The journal entry this stroke has become.
+    ///
+    /// **Needs the mesh**, unlike [`StrokeInFlight::op`], because the op carries
+    /// the stroke's *result* rather than its dabs — see [`inf_dcc::paint`] for
+    /// why a weight stroke cannot be replayed from its parameters.
+    pub fn op(&self, mesh: &Mesh) -> Option<Op> {
+        if self.path.is_empty() {
+            return None;
+        }
+        let dabs: Vec<[f64; 3]> = inf_dcc::stroke_dabs(&self.path, self.brush.radius)
+            .into_iter()
+            .map(|p| p.to_array())
+            .collect();
+        if dabs.is_empty() {
+            return None;
+        }
+        // A refusal here is swallowed and reported as "nothing to journal": every
+        // one of them was already checked at `begin_weight_stroke`, and a stroke
+        // is not the place to learn that the mesh was unbound between pointer-down
+        // and pointer-up. `settle_drag` is where a real refusal surfaces.
+        inf_dcc::paint_weights(
+            mesh,
+            self.brush.joint,
+            self.brush.mode,
+            &dabs,
+            self.brush.radius,
+            self.brush.strength,
+            self.brush.falloff,
+        )
+        .ok()
+        .flatten()
+    }
+}
+
+/// **Begin a weight-paint stroke.** The [`begin_stroke`] shape, on the skin
+/// channel: three answers, and every refusal decided in Ring 1 where a test can
+/// reach it.
+///
+/// * `Err(reason)` — the radius is below the floor, the mesh carries no skin, or
+///   the joint is not one the binding has. All three are sentences an author
+///   needs to read, and the last two are the ones a fresh mesh hits first.
+/// * `Ok(None)` — the pointer missed the model; the gesture becomes an orbit.
+/// * `Ok(Some(stroke))` — painting.
+pub fn begin_weight_stroke(
+    mesh: &Mesh,
+    proj: &Projector,
+    px: f32,
+    py: f32,
+    brush: WeightBrush,
+) -> Result<Option<WeightStrokeInFlight>, String> {
+    let Some(binding) = mesh.skin_binding() else {
+        return Err(
+            "this mesh carries no skin, so there is no influence to paint; bind it \
+             to a skeleton first"
+                .to_string(),
+        );
+    };
+    if brush.joint as u32 >= binding.joints {
+        return Err(format!(
+            "joint {} is out of range: this mesh is bound to a skeleton with {} \
+             joints",
+            brush.joint, binding.joints
+        ));
+    }
+    if !(brush.radius.is_finite() && brush.radius >= inf_dcc::MIN_BRUSH_RADIUS_M) {
+        return Err(format!(
+            "a brush radius of {} m is below the {} m floor; a brush that small \
+             cannot reach a second vertex on anything modelled in metres",
+            brush.radius,
+            inf_dcc::MIN_BRUSH_RADIUS_M
+        ));
+    }
+    let Some((face, hit)) = pick_surface(mesh, proj, px, py) else {
+        return Ok(None);
+    };
+    Ok(Some(WeightStrokeInFlight {
+        brush,
+        path: vec![hit],
+        last_normal: inf_dcc::face_normal(mesh, face).unwrap_or(DVec3::Y),
+    }))
 }
 
 impl PendingDrag {
@@ -1464,6 +1584,7 @@ impl PendingDrag {
     pub fn ops(&self, mesh: &Mesh, selection: &SelectionSet, mode: SelectMode) -> Vec<Op> {
         match self {
             PendingDrag::Stroke(s) => s.op().into_iter().collect(),
+            PendingDrag::Weights(w) => w.op(mesh).into_iter().collect(),
             PendingDrag::Gizmo(g) => {
                 if g.xform.is_identity() {
                     Vec::new()
@@ -1811,6 +1932,10 @@ impl PreviewCache {
         };
         let step = match pending {
             PendingDrag::Stroke(s) => s.path.len(),
+            // A weight stroke's shape is its path length, exactly as a sculpt
+            // stroke's — it changes no position, so the scratch mesh it produces
+            // is only ever re-tessellated when the stroke actually grew.
+            PendingDrag::Weights(w) => w.path.len(),
             // A gizmo's "shape" is its current transform; hashing the bits keeps
             // the key one integer without pretending a float is a step count.
             PendingDrag::Gizmo(g) => drag_step(&g.xform),
