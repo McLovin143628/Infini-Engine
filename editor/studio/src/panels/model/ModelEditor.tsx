@@ -1005,6 +1005,16 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
               LAST SAVE
             </div>
             <Verdict label="Triangles" value={lastSave.export.triangles} good />
+            {/* P24.2 re-audit minor 1: `optimized` reached the DTO and the TS
+                binding and stopped there — which by this gate's own headline law
+                ("a report field that never reaches the author is a field that
+                does not exist") meant it still did not exist. It is a SETTING,
+                not a count, so it is shown as the state it is. */}
+            <Verdict
+              label="meshopt"
+              value={lastSave.export.optimized ? "ran" : "off"}
+              good={!lastSave.export.optimized}
+            />
             {/* P24.2: `optimize` cannot permute a parallel skin stream, so it is
                 skipped on a skinned submesh — and the author is told, because the
                 flag's documented effect is "smaller and faster". */}

@@ -24,7 +24,7 @@
 //!   the entity forward across the loop point instead of snapping it back. A
 //!   single step is assumed shorter than the clip (true at any sane fixed rate).
 
-use glam::{EulerRot, Vec3};
+use glam::Vec3;
 
 use crate::clip::AnimClip;
 use crate::pose::sample_clip;
@@ -62,8 +62,19 @@ fn root_translation_at(skeleton: &Skeleton, clip: &AnimClip, root: usize, t: f32
 /// The root joint's local yaw (radians about +Y) at clip time `t`.
 fn root_yaw_at(skeleton: &Skeleton, clip: &AnimClip, root: usize, t: f32) -> f32 {
     let q = sample_clip(skeleton, clip, t, false).locals[root].rotation_quat();
-    // YXZ euler → the Y component is the yaw about the up axis.
-    q.to_euler(EulerRot::YXZ).0
+    // **`inf_math::pyaw`, not `Quat::to_euler`** (P24.2 re-audit F1).
+    //
+    // `to_euler` is `atan2` and `asin` inside glam — `std` libm, which the P14
+    // law says is not bit-identical across targets — and this function is
+    // reached from BOTH fixed steps (`simulate.rs` and `runtime_sim.rs` both
+    // call `root_delta`), writing the result into an entity's `Transform` and
+    // therefore into `state_bytes`. It slipped the P24.2 portability gate because
+    // that gate read four files and this was not one of them: its title was true
+    // of its file list and false of the pipeline.
+    //
+    // `pyaw` takes the same angle in closed form — `atan2(m02, m22)` of the YXZ
+    // decomposition — so it is one angle instead of three, and portable.
+    inf_math::pyaw(q)
 }
 
 /// The root-joint motion between play-head times `t0` and `t1` over `clip`.

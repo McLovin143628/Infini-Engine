@@ -816,21 +816,41 @@ mod tests {
         ])
         .unwrap();
 
-        // THE FIXTURE'S PREMISE, asserted before anything is solved: the torso's
-        // far wall really is nearer to the ARM's bone, and really cannot see it.
+        // THE FIXTURE'S PREMISE, **derived from the skeleton itself** and
+        // asserted before anything is solved (re-audit F2a).
+        //
+        // The first version of this block computed both bones from hard-coded
+        // literals, with no reference to `sk` at all — so it could not have
+        // failed on the broken fixture that preceded it, which was a *skeleton*
+        // mistake. A premise that cannot see the thing it is a premise about is
+        // decoration. `bone_segments` is the same function the solve uses, so the
+        // fixture and its premise cannot drift apart silently.
+        let bones = bone_segments(&sk);
         let probe = DVec3::new(0.2, 1.1, 0.0);
-        let spine_bone =
-            closest_on_segment(probe, DVec3::new(0.0, 0.2, 0.0), DVec3::new(0.0, 1.4, 0.0));
-        let arm_bone = closest_on_segment(
-            probe,
-            DVec3::new(0.36, 1.1, 0.0),
-            DVec3::new(0.70, 1.1, 0.0),
+        let nearest_of = |want_arm: bool| -> (DVec3, f64) {
+            let mut best = (DVec3::ZERO, f64::INFINITY);
+            for b in &bones {
+                // Joints 2 and 3 are the arm chain's; 0 and 1 are the spine's.
+                if (b.joint >= 2) != want_arm {
+                    continue;
+                }
+                let c = closest_on_segment(probe, b.a, b.b);
+                let d = (c - probe).length();
+                if d < best.1 {
+                    best = (c, d);
+                }
+            }
+            best
+        };
+        let (arm_bone, arm_d) = nearest_of(true);
+        let (spine_bone, spine_d) = nearest_of(false);
+        assert!(
+            arm_d.is_finite() && spine_d.is_finite(),
+            "the skeleton has no arm chain or no spine chain: {bones:?}"
         );
         assert!(
-            (arm_bone - probe).length() < (spine_bone - probe).length(),
-            "the fixture must make the ARM's bone the nearer one, or distance              alone decides this and visibility is untested ({} vs {})",
-            (arm_bone - probe).length(),
-            (spine_bone - probe).length()
+            arm_d < spine_d,
+            "the fixture must make the ARM's bone the nearer one, or distance              alone decides this and visibility is untested ({arm_d} vs {spine_d})"
         );
         assert!(
             !visible(&bvh, probe, arm_bone),
@@ -853,12 +873,17 @@ mod tests {
             "the severed solve assigned nothing at all; the arm's bone is not              winning any vertex even with the wall ignored, so this fixture              cannot measure the term",
         );
 
-        // (1) The severing has a footprint at all.
-        assert_ne!(
-            with_op.as_ref(),
-            Some(&without_op),
-            "switching visibility off changed no weight anywhere - the term is              doing nothing on this fixture, so everything below would pass on a              solve that ignored it"
+        // (1) **The severing has a footprint**, stated as the two things that
+        //     are actually true rather than as a comparison that cannot fail
+        //     (re-audit F2b: `assert_ne!(with_op.as_ref(), Some(&without_op))`
+        //     was a tautology — `with_op` is `None` by construction and
+        //     `without_op` had just been `.expect()`ed into `Some`).
+        assert!(
+            with_op.is_none(),
+            "with visibility ON, every torso vertex's nearest VISIBLE bone is the              spine's, so the solve reproduces the rigid default and journals              nothing. It journalled {with_op:?} instead — the fixture no longer              isolates the term, and the capture count below would be measuring              something else."
         );
+        // …and with it OFF a table appears at all. Together: the term is the
+        // whole difference between "no weights change" and "these do".
         assert_eq!(with_report.unreached, 0, "{with_report:?}");
 
         // (2) ...and it is the ARM's bone that captures the torso's far wall.

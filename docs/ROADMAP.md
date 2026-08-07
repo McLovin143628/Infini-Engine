@@ -7849,7 +7849,7 @@ every asset kind at once and belongs to a deliberate bump, not to a repair batch
 above is written to **fail** the day it lands, so this entry gets retired rather than
 forgotten.
 
-**Carried from P24.2 (ledgered, not fixed).** Four, each measured rather than assumed:
+**Carried from P24.2 (ledgered, not fixed).** Eight, each measured rather than assumed:
 
 * **The P24.2 IK parity gate is IN-PROCESS, not a `--pie` subprocess.** The batch
   report claimed a real subprocess arm with IK; there is none — all of
@@ -7860,6 +7860,34 @@ forgotten.
   the law P21.4 paid for. The arm closes naturally at P24.3: with the authored
   `IkTarget` component in the scene, the payload carries it and the subprocess
   engages IK through the door it already uses.
+* **The IK Blueprint node kit is deferred to P24.3.** `inf_ecs::set_ik_goals` is
+  the Ring-0 write door and it has **no production caller**: nothing in a shipped
+  build sets an IK goal today, so the solvers run only when a test or a future
+  gameplay layer asks. The node that would set one is a registration in
+  `inf-blueprint` plus a handler arm in *each* of the two hosts (`simulate.rs` and
+  `runtime_sim.rs`), and it belongs with the authored `IkTarget` it would
+  target — building it now would mean designing the node's wire shape against a
+  component that does not exist yet, then revisiting it one batch later. The
+  P24.2 audit's other half of this finding — the fixed step **discarding** the
+  solve's verdict — was unconditional and is fixed: `IkTargetsRes::last` carries
+  `IkOutcome::{Solved, Refused, NotPosed}` per goal, read through
+  `inf_ecs::ik_outcomes`, so `IkReport::reach_error` and all four `IkError`
+  variants are reachable by a caller and by a gate.
+* **`Quat::from_euler` / `to_euler` remain on the transform path, deliberately.**
+  `inf_ecs::components`' `GlobalTransform` propagation (components.rs:102 and
+  :111) converts euler degrees to a quaternion and back on every entity, which
+  reaches `sin_cos` and `atan2` inside glam — the same class as the
+  `root_motion` yaw the P24.2 re-audit fixed, and *not* fixed here. The reason is
+  structural: this is the **euler-degrees Transform doctrine** settled in Phase 3,
+  the authoring convention every entity transform has flowed through since scene
+  v1, and re-plumbing it changes what a `Transform` *is* — a schema and authoring
+  decision, not a fix-round item. Consequence, stated rather than glossed:
+  **same-platform traces are unaffected** (libm is deterministic per platform,
+  which is what every determinism gate in this repository actually compares), and
+  **cross-platform trace portability would require revisiting the
+  euler-conversion doctrine wholesale**. `inf-anim`'s `portable_pose` gate names
+  this exclusion in its own `LEDGERED_EXCLUSIONS` list so the gap is a decision
+  rather than an omission.
 * **`IkTarget` is a runtime resource, not an authored component — deliberately.**
   `inf_scene::EntityRecord` is a positional bincode struct with one `Option<T>` field per
   component type, so adding one moves the wire; that is exactly how P22.2's `Destructible` took
@@ -7868,6 +7896,15 @@ forgotten.
   fixed step, never saved, inherited by both hosts with no host-side change). The consequence is
   honest and real: **an IK target cannot be authored or saved today** — it is set by a caller at
   runtime. The authored component, and the scene bump it needs, belong to **P24.3**.
+* **Ten import/export report fields never reach the Model Editor panel.** Measured while
+  extending `report_drift.rs` across the kernel-to-UI seam (the hop that let `skin_conflicts`
+  and `optimized` ship invisible): `sourceVertices`, `weldedPositions`, `sharpEdges`,
+  `submeshes`, `fanFallbacks`, `fallbackTangents`, `coincidentVertices`, `reusedDiagonals`,
+  `nonFiniteWritten`, `nonUnitNormalsWritten`. All ten pre-date P24.2. They are **frozen in
+  that gate's `NOT_SHOWN` list**, so the next new counter must get a row or be added there by
+  hand — the decision the seam was making by default and wrongly. Retiring entries is a UI
+  task (some are already legible as mesh stats; three are writer advisories that have never
+  had rows), not a repair-round one.
 * **`Op::Mirror` does not mirror JOINTS.** A mirrored left arm keeps the left arm's joint
   indices, because pairing `upper_arm_l` with `upper_arm_r` needs the skeleton and the kernel
   deliberately holds none. The fix belongs with the auto-fit layer, which does have one.

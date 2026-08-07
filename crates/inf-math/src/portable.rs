@@ -226,6 +226,77 @@ pub fn pacos64(x: f64) -> f64 {
     y.clamp(0.0, PI)
 }
 
+/// Byte-portable two-argument arctangent (f64) — the quadrant-correct angle of
+/// the vector `(x, y)`, in `(-PI, PI]`.
+///
+/// # Built out of [`pacos64`], not out of a new polynomial
+///
+/// For any non-zero `(x, y)` with `r = sqrt(x^2 + y^2)`, the angle satisfies
+/// `cos(theta) = x / r`, and the sign of `y` picks the branch:
+///
+/// ```text
+///   atan2(y, x) = sign(y) * acos(x / r)
+/// ```
+///
+/// `acos` returns `[0, PI]`, so copying `y`'s sign onto it covers `(-PI, PI]`
+/// exactly. That is the whole implementation: one `sqrt`, one divide, one
+/// [`pacos64`]. No second minimax fit to justify, no second set of coefficients
+/// to keep honest, and the accuracy is inherited — including the half-angle
+/// series that makes `pacos64` sharp near `+/-1`, which is precisely where this
+/// lands when the vector is near an axis (the common case for a heading).
+///
+/// `(0, 0)` returns `0.0`: a zero vector has no direction, and a NaN there would
+/// propagate into a pose.
+///
+/// # Why it exists
+///
+/// `f64::atan2` is libm, and the P14 law says libm is not bit-identical across
+/// targets. The P24.2 re-audit found `root_motion`'s yaw extraction —
+/// `Quat::to_euler`, which is `atan2` and `asin` inside glam — on **both** fixed
+/// steps, writing an entity's `Transform` into `state_bytes`.
+pub fn patan2_64(y: f64, x: f64) -> f64 {
+    let r = (x * x + y * y).sqrt();
+    // A *positive* predicate, the B1 discipline: `!(r > 0.0)` reads as a negated
+    // float comparison (which clippy rightly distrusts) and this says the same
+    // thing forwards — a zero-length or non-finite vector has no direction, and a
+    // NaN here would propagate into a pose.
+    if !(r.is_finite() && r > 0.0) {
+        return 0.0;
+    }
+    let theta = pacos64(x / r);
+    if y < 0.0 {
+        -theta
+    } else {
+        theta
+    }
+}
+
+/// The **yaw** (rotation about `+Y`) of a quaternion, portably — the heading a
+/// root-motion clip turns a character by.
+///
+/// The closed form, which needs no euler decomposition at all:
+///
+/// ```text
+///   R = Ry(a) . Rx(b) . Rz(c)   =>   a = atan2(m02, m22)
+///   m02 = 2(xz + wy),   m22 = 1 - 2(x^2 + y^2)
+/// ```
+///
+/// **The denominator is the `YXZ` one, and getting it wrong is silent.**
+/// `1 - 2(y^2 + z^2)` is the `ZYX` (aerospace) yaw and is what every quick
+/// reference gives; it agrees with `YXZ` whenever pitch and roll are zero, which
+/// is every fixture a root-motion clip would casually be tested with. Measured on
+/// the first run of `portable_yaw_matches_glam`: identical for flat clips,
+/// **1.28 rad out** at 60 degrees of pitch and roll.
+///
+/// This is the `Y` component `Quat::to_euler(EulerRot::YXZ)` returns, and the
+/// test measures the agreement rather than asserting it. Taking it directly is
+/// not only portable but *cheaper*: glam's decomposition computes three angles
+/// and this needs one.
+pub fn pyaw(q: Quat) -> f32 {
+    let (x, y, z, w) = (q.x as f64, q.y as f64, q.z as f64, q.w as f64);
+    patan2_64(2.0 * (x * z + w * y), 1.0 - 2.0 * (x * x + y * y)) as f32
+}
+
 /// **Byte-portable spherical linear interpolation** between two rotations,
 /// taking the shortest arc.
 ///
@@ -406,12 +477,17 @@ mod tests {
                 worst_at = x;
             }
         }
-        // Measured: 1.5e-7, set by `psin64`'s own accuracy in the Newton
-        // branch. The series branch near ±1 is an order better.
+        // **The number is the measurement**, printed by the line below and read
+        // off it (P24.2 re-audit minor 4: this comment said "1.5e-7" and
+        // reproduction gave 3.3e-9 — an unmeasured figure left over from before
+        // the half-angle series landed, understating the function by two orders).
+        // The bound is kept at 2e-7, an order of headroom, because the point is
+        // to catch a regression rather than to pin a ULP.
         assert!(
             worst < 2.0e-7,
             "pacos64 is off by {worst} at x = {worst_at}"
         );
+        println!("MEASURED pacos64 worst absolute error = {worst:e} at x = {worst_at}");
         // The ends are exact by construction, and monotone in between.
         assert_eq!(pacos64(1.0), 0.0);
         assert!((pacos64(-1.0) - PI).abs() < 1e-12);
@@ -505,5 +581,79 @@ mod tests {
             let t = k as f32 / 13.0;
             assert_eq!(pslerp(a, b, t).to_array(), pslerp(a, b, t).to_array());
         }
+    }
+
+    /// [`patan2_64`] tracks `std`'s over the whole plane, quadrants included.
+    #[test]
+    fn patan2_64_tracks_std_atan2() {
+        let mut worst = 0.0f64;
+        let mut worst_at = (0.0f64, 0.0f64);
+        for i in -60..=60 {
+            for j in -60..=60 {
+                let (x, y) = (i as f64 / 7.0, j as f64 / 11.0);
+                if x == 0.0 && y == 0.0 {
+                    continue;
+                }
+                let e = (patan2_64(y, x) - y.atan2(x)).abs();
+                if e > worst {
+                    worst = e;
+                    worst_at = (y, x);
+                }
+            }
+        }
+        assert!(worst < 5.0e-7, "patan2_64 off by {worst} at {worst_at:?}");
+        // The axes and the quadrant signs, exactly where a heading lands.
+        assert_eq!(patan2_64(0.0, 1.0), 0.0);
+        assert!((patan2_64(1.0, 0.0) - PI / 2.0).abs() < 5.0e-7);
+        assert!((patan2_64(0.0, -1.0) - PI).abs() < 1e-12);
+        assert!((patan2_64(-1.0, 0.0) + PI / 2.0).abs() < 5.0e-7);
+        // A zero vector has no direction; a NaN there would ride into a pose.
+        assert_eq!(patan2_64(0.0, 0.0), 0.0);
+        assert_eq!(patan2_64(f64::NAN, 1.0), 0.0);
+        assert_eq!(patan2_64(1.0, f64::INFINITY), 0.0);
+    }
+
+    /// **[`pyaw`] is the `Y` component `Quat::to_euler(EulerRot::YXZ)` returns.**
+    ///
+    /// Measured rather than asserted, because the whole point of replacing the
+    /// decomposition is that the replacement must be the *same angle* — a root
+    /// motion clip that turned a character by a different amount would be a
+    /// behaviour change, not a portability fix.
+    #[test]
+    fn portable_yaw_matches_glam() {
+        let mut worst = 0.0f32;
+        let mut worst_at = (0.0f32, 0.0f32, 0.0f32);
+        for yi in -18..=18 {
+            for xi in -4..=4 {
+                for zi in -4..=4 {
+                    let (yaw, pitch, roll) = (
+                        yi as f32 * 10.0f32.to_radians(),
+                        xi as f32 * 15.0f32.to_radians(),
+                        zi as f32 * 15.0f32.to_radians(),
+                    );
+                    let q = Quat::from_euler(glam::EulerRot::YXZ, yaw, pitch, roll);
+                    let mine = pyaw(q);
+                    let theirs = q.to_euler(glam::EulerRot::YXZ).0;
+                    // Both live on (-PI, PI]; compare the shortest signed turn so
+                    // the seam at PI is not counted as a 2*PI disagreement.
+                    let mut d = (mine - theirs).abs();
+                    if d > std::f32::consts::PI {
+                        d = std::f32::consts::TAU - d;
+                    }
+                    if d > worst {
+                        worst = d;
+                        worst_at = (yaw, pitch, roll);
+                    }
+                }
+            }
+        }
+        assert!(
+            worst < 1.0e-5,
+            "pyaw differs from glam's YXZ yaw by {worst} rad at {worst_at:?}"
+        );
+        // NOT VACUOUS: the sweep really does cover a range of yaws.
+        assert!(pyaw(Quat::from_rotation_y(1.0)) > 0.9);
+        assert!(pyaw(Quat::from_rotation_y(-1.0)) < -0.9);
+        assert!(pyaw(Quat::IDENTITY).abs() < 1e-6);
     }
 }

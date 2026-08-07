@@ -30,7 +30,7 @@
 
 /// Files whose **whole item text** must be free of `std` transcendentals, with
 /// the reason each one is on the list.
-const SIM_PATH: [(&str, &str, &str); 4] = [
+const SIM_PATH: [(&str, &str, &str); 5] = [
     (
         "pose.rs",
         include_str!("../src/pose.rs"),
@@ -47,6 +47,11 @@ const SIM_PATH: [(&str, &str, &str); 4] = [
         "IK is a post-pass over that same pose, and its module docs have claimed this property since it was written",
     ),
     (
+        "root_motion.rs",
+        include_str!("../src/root_motion.rs"),
+        "root_delta writes an entity's Transform, from BOTH fixed steps, into state_bytes",
+    ),
+    (
         "state_machine.rs",
         include_str!("../src/state_machine.rs"),
         "eval_pose chooses and cross-fades the poses the two above produce",
@@ -59,7 +64,7 @@ const SIM_PATH: [(&str, &str, &str); 4] = [
 /// is `.abs()`, `.floor()` or `.clamp()`, for the same reason. `.cbrt()` IS here
 /// — the P22.4 widening: on `wasm32` the standard library routes it through the
 /// `libm` crate, so a browser client and a native one differ by an ulp.
-const BANNED_CALLS: [&str; 12] = [
+const BANNED_CALLS: [&str; 24] = [
     ".sin()",
     ".cos()",
     ".tan()",
@@ -72,6 +77,22 @@ const BANNED_CALLS: [&str; 12] = [
     ".powf(",
     ".exp()",
     ".ln()",
+    // **The UFCS spelling** (P24.2 re-audit minor 3). `.sin()` is a substring
+    // ban, so `f64::sin(x)` -- the same call, written the other way -- walked
+    // straight past it. A ban that enumerates one spelling is the P24.1 F1
+    // finding in miniature.
+    "f32::sin(",
+    "f64::sin(",
+    "f32::cos(",
+    "f64::cos(",
+    "f32::tan(",
+    "f64::tan(",
+    "f32::acos(",
+    "f64::acos(",
+    "f32::asin(",
+    "f64::asin(",
+    "f32::atan2(",
+    "f64::atan2(",
 ];
 
 /// glam constructors that reach `sin_cos` **inside another crate**, where no grep
@@ -106,14 +127,46 @@ const BANNED_GLAM: [&str; 8] = [
 ///   `pslerp` into a test fixture would make the fixture agree with the code
 ///   under test by construction.
 fn production_code(src: &str) -> String {
-    let src = src.replace("\r\n", "\n");
-    let src = match src.find("\n#[cfg(test)]\n") {
-        Some(i) => src[..i].to_string(),
-        None => src,
-    };
-    src.lines()
-        .map(|l| {
-            if l.trim_start().starts_with("//") {
+    // Carriage returns are FILTERED OUT rather than rewritten as a pair. The
+    // P22 law only needs them gone before a newline-delimited search, and a
+    // char filter carries no escape sequence for a scripted edit to mangle.
+    let src: String = src.chars().filter(|c| *c != '\r').collect();
+    // **Every** `#[cfg(test)]` region, not just the tail after the first one
+    // (P24.2 re-audit minor 2). Cutting at the first was sound for these five
+    // files -- each has one test module, last -- and that is a property of
+    // today's files rather than of the rule, which is exactly the shape of
+    // gate this repository keeps having to repair. Worse than unsound: an
+    // EARLY test module would discard every production line after it, and the
+    // ban would then scan almost nothing while still passing.
+    //
+    // A module is skipped from its attribute to the closing brace at ITS OWN
+    // indentation, so a nested one inside an `impl` is handled too.
+    let lines: Vec<&str> = src.lines().collect();
+    let mut keep = vec![true; lines.len()];
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim_start().starts_with("#[cfg(test)]") {
+            let indent = lines[i].len() - lines[i].trim_start().len();
+            let close = format!("{}}}", " ".repeat(indent));
+            keep[i] = false;
+            let mut j = i + 1;
+            while j < lines.len() {
+                keep[j] = false;
+                if lines[j] == close {
+                    break;
+                }
+                j += 1;
+            }
+            i = j + 1;
+            continue;
+        }
+        i += 1;
+    }
+    lines
+        .iter()
+        .enumerate()
+        .map(|(n, l)| {
+            if !keep[n] || l.trim_start().starts_with("//") {
                 ""
             } else {
                 l
@@ -121,6 +174,40 @@ fn production_code(src: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// **What this gate deliberately does NOT cover, and why** (P24.2 re-audit F1b).
+///
+/// `inf_ecs::components`' `GlobalTransform` propagation calls `Quat::from_euler`
+/// / `to_euler` (components.rs:102 and :111) on every entity transform, and that
+/// reaches `sin_cos` and `atan2` inside glam exactly as `to_euler` did in
+/// `root_motion`. It is **not** fixed here, and the reason is structural rather
+/// than an oversight:
+///
+/// * it is the **euler-degrees Transform doctrine** settled in Phase 3 -- the
+///   authoring convention every entity transform in the engine has flowed through
+///   since scene v1;
+/// * re-plumbing it means changing what a `Transform` *is*, which is a schema and
+///   an authoring decision, not a fix-round item.
+///
+/// The consequence, stated rather than glossed: **same-platform traces are
+/// unaffected** (libm is deterministic per platform, which is what every gate in
+/// this repository actually compares), and **cross-platform trace portability
+/// would require revisiting the euler-conversion doctrine wholesale**. Written
+/// down in ROADMAP section 12's P24 block so it is a decision rather than a gap.
+const LEDGERED_EXCLUSIONS: [(&str, &str); 1] = [(
+    "inf_ecs::components (GlobalTransform propagation)",
+    "the Phase-3 euler-degrees Transform doctrine; see ROADMAP section 12",
+)];
+
+#[test]
+fn the_ledgered_exclusions_are_named_rather_than_forgotten() {
+    // A list this gate is *allowed* not to cover has to be short and reasoned; an
+    // empty one would mean the gate claims total coverage, which it does not.
+    assert_eq!(LEDGERED_EXCLUSIONS.len(), 1);
+    for (what, why) in LEDGERED_EXCLUSIONS {
+        assert!(!what.is_empty() && why.len() > 20, "{what}: {why}");
+    }
 }
 
 #[test]
