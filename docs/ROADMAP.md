@@ -7849,10 +7849,11 @@ every asset kind at once and belongs to a deliberate bump, not to a repair batch
 above is written to **fail** the day it lands, so this entry gets retired rather than
 forgotten.
 
-**Carried from P24.2 — FOUR OF EIGHT CLOSED BY P24.3.** The eight entries below keep their
+**Carried from P24.2 — SIX OF EIGHT CLOSED BY P24.3.** The eight entries below keep their
 original wording, each with a **CLOSED (P24.3)** paragraph naming the gate that retired it,
 so the ledger reads as a history rather than as a list that quietly shrank. Four remain open,
-and one closure carries a narrower item forward.
+and one closure carries a narrower item forward. (Four closed in the scene-bump batch; the
+`Op::Mirror` and `optimize` entries closed in the modular-rigging batch, below.)
 
 * **The P24.2 IK parity gate is IN-PROCESS, not a `--pie` subprocess.** The batch
   report claimed a real subprocess arm with IK; there is none — all of
@@ -7956,14 +7957,105 @@ and one closure carries a narrower item forward.
   hand — the decision the seam was making by default and wrongly. Retiring entries is a UI
   task (some are already legible as mesh stats; three are writer advisories that have never
   had rows), not a repair-round one.
+
+  **RE-LEDGERED per field (P24.3), because the next reader would otherwise
+  re-derive it.** All ten are **Model Editor mesh counters** — none is a skeleton,
+  rig or character field, so the Skeleton Editor landing did not make a single one
+  of them cheaper and its own `SKEL_NOT_SHOWN` list is **empty**. Grouped by why
+  each is absent:
+
+   * *legible elsewhere as mesh stats* — `sourceVertices`, `weldedPositions`,
+     `sharpEdges`, `submeshes`. The panel's status strip already shows the live
+     `v / e / f` counts, and a second set of numbers describing the same mesh at a
+     different moment is a readout that raises questions rather than answering
+     them. Retiring these means designing an "import provenance" disclosure, not
+     adding a row.
+   * *writer advisories with no row anywhere* — `fanFallbacks`,
+     `fallbackTangents`, `coincidentVertices`, `reusedDiagonals`. These are the
+     three-plus-one that say the WRITER had to compromise. They want a warnings
+     list beside the save verdict, which is one UI element for four fields and the
+     right shape for them; none has ever had a home.
+   * *pure-count duplicates of a refusal already surfaced* —
+     `nonFiniteWritten`, `nonUnitNormalsWritten`. The conditions they count are
+     refused at the op door and reported by name there, so the counters are a
+     second, weaker statement of something the author has already been told.
+
+  The value of the freeze is unchanged and is entirely about the *next* field: a
+  new counter must get a row or be added to the list by hand. What P24.3 adds is
+  that the Skeleton Editor's fields are checked by a **separate root pair** with
+  its own (empty) exemption list, so a mesh counter and a rig field can never
+  exempt each other.
+
+* **The Skeleton Editor ships with no rotate gizmo (P24.3).** `translation` and
+  `scale` are `Vec3Field`s; `rotation` is a **quaternion** and is displayed but
+  not editable, because four number boxes that must stay normalized is a control
+  that produces invalid rigs by design. The value is written back unchanged by
+  every edit, so nothing is lost — but posing a joint by hand means editing its
+  translation only. The instrument this wants is the Model Editor's rotate gizmo
+  re-aimed at a joint, which is a viewport-picking surface this panel does not
+  have (it draws SVG from the joint list, deliberately — see the panel's module
+  docs). Also absent for the same reason: no bone picking in the 3D viewport, no
+  drag-to-reparent in the joint tree, and the `skel_merge_part` door has a command
+  and an `ipc.ts` wrapper but no panel control (an attach-joint picker is the
+  missing UI, not the missing rule).
+
+* **The rig preview is a DIAGRAM, not a render (P24.3).** `projectRig` composes
+  rest-pose globals as the running sum of `translation` down the `parent` chain and
+  projects orthographically front-on. Joint **rotations and scales are not
+  composed** — a rest pose whose joints carry rotations draws slightly wrong. That
+  bound is deliberate: getting it wrong in the *engine* is what
+  `recompute_inverse_binds` exists to prevent and that runs in Rust with a
+  property test on it, whereas here the cost is a bone drawn at the wrong angle in
+  a hierarchy diagram. Full composition (or an offscreen render on the Model
+  Editor's `Thumbnailer` path) is the upgrade.
 * **`Op::Mirror` does not mirror JOINTS.** A mirrored left arm keeps the left arm's joint
   indices, because pairing `upper_arm_l` with `upper_arm_r` needs the skeleton and the kernel
   deliberately holds none. The fix belongs with the auto-fit layer, which does have one.
+
+  **CLOSED (P24.3) — one level up, and it is not moving down.** The prediction in
+  this entry was wrong and the measurement says why: the auto-fit layer has a
+  skeleton, but the KERNEL still cannot pair joints, because
+  `inf_dcc::SkinBinding` carries a `.inf_skel` GUID and a joint **COUNT** — not a
+  joint list, and not names. Putting names on the binding changes `Mesh`'s shape
+  and therefore `SessionSave`'s: a schema bump for a convenience.
+
+  So `inf_editor_core::dcc::mirror_with_joints` composes `Op::Mirror` with an
+  `Op::AssignWeights` carrying the swapped table, using
+  `inf_anim::mirror_joint_map`. **Both ops carry values**, so a saved session
+  replays the swap as a fact rather than as "whatever this build's pairing rule
+  says" — the `Op::Unwrap` doctrine, applied to the rig. An unmatched sided joint
+  is a refusal by name; a rigid mesh takes the old path and is asserted
+  byte-identical to `Op::Mirror` alone; a skinned mesh whose skeleton the caller
+  could not resolve keeps the old behaviour and **reports** it
+  (`MirrorRigReport::weights_unmapped`).
+
+  **A correction to the convention this entry assumed.** The canonical names are a
+  `_l` / `_r` **suffix** (`upper_arm_l`, and `upper_leg_l0` for a multi-girdle
+  plan), not an `l_` / `r_` prefix. `mirrored_joint_name` is written against what
+  `build_template` actually emits, and a test pins that `l_upper_arm` is NOT
+  treated as sided — a mirror keyed on the wrong convention pairs nothing and
+  silently does the old thing.
 * **`ExportOptions::optimize` is skipped on a skinned submesh**, and reported
   (`ExportReport::optimize_skipped_skinned`). `inf_mesh::optimize` returns `(vertices, indices)`
   only, so a parallel per-vertex stream cannot follow its permutation — running it anyway gives
   every vertex another vertex's weights. Lifting it needs a `MeshAsset`-level optimize that
   permutes every stream at once.
+
+  **CLOSED (P24.3) as DOCTRINE, not as a deferral.** Measured, and the entry above
+  understates it: `inf_mesh::optimize` applies **two** permutations and exposes
+  neither. `generate_vertex_remap` + `remap_vertex_buffer` welds duplicates, so
+  the output is not even the same LENGTH as the input; `optimize_vertex_fetch`
+  then reorders again inside the same call. A skin-aware optimize is therefore not
+  a wrapper over this function — it is a different function, in `inf-mesh`, that
+  returns its remap, and it sits behind the **P18 meshopt law** (meshopt is not
+  cross-platform, so its output may never enter a journal or a committed payload).
+
+  The engine is consistent about it: `inf_mesh::gltf_import` takes the same way
+  out on the same reasoning, and
+  `the_skinned_optimize_skip_is_the_engines_one_doctrine` pins the two together as
+  source text — the only way to see a divergence, since they never meet at
+  runtime. The reason now lives on `ExportReport::optimize_skipped_skinned`
+  itself, where a reader of the field finds it.
 * **`template::JointLimit` is still not read by the IK solver.** P24.1 emitted hinge limits on
   the knees and elbows precisely so P24.2 could clamp against them; the solvers landed without
   it, so an elbow can bend backwards if a target asks it to. `two_bone_positions`'s pole already
@@ -8027,6 +8119,39 @@ goes through `build_mod_wasm`) is not in a group, with the remedy in the message
 its own anti-vacuity arms (the scan must walk >20 files and must identify `reload.rs`, the file
 the race was measured on). Mutation-measured: renaming the filter off `binary(reload)` fails
 both arms and names `crates::reload`; raising `max-threads` to 2 fails the config arm.
+
+**P24.3 (modular rigging) COMPLETE.** Five things landed and each retired a ledger entry or
+a hole:
+
+* **Scene v21** — the phase's ONE bump, carrying three slots: `IkTarget` (which retires
+  "an IK target cannot be authored or saved"), plus `ClothSim` and `HairGuides` spent early so
+  P24.4 does not need a forbidden v22. Both spare slots follow the `VoxelVolume` law (a
+  reference plus its authored knobs, so the component can never be the reason a future schema
+  moves) and **nothing simulates them yet** — stated on the types and in both codec ladders,
+  because a reserved slot is exactly the kind of thing that rots.
+* **The real `--pie` subprocess IK arm**, which P24.2 claimed and did not have. No injection
+  hook: the goal rides the `.inf_lvl` bytes the payload already carried, and the anti-vacuity
+  arm (moving the target moves the trace) is what says it was solved rather than merely carried.
+* **`inf_anim::merge` + `Op::AddMaterialSlots` (discriminant 30) + a rig-carrying
+  `merge_into`** — joints APPEND-ONLY, so an IK chain authored on a torso survives an arm being
+  attached *by construction* (asserted by solving the same chain before and after, not by
+  inspecting indices).
+* **The Skeleton Editor**, in three layers: `SkelSession` (Ring 1, snapshot-undo, deriving
+  inverse binds), fifteen commands + four DTOs + the `skel` IPC namespace (Ring 2), and the
+  panel — joint tree, transform/limit inspector, sockets, template instantiation, auto-fit, and
+  an SVG rig diagram. **`skel_save` is the `SkeletonAsset` writer this engine did not have.**
+* **The `fit_template` door**, opened after the `CanonicalMesh` → triangle hop was verified
+  (`triangle_soup`, pinned by a hand-computed closest-point query against the geometry rather
+  than against the BVH's own opinion). `inf_dcc::fit_template` has a caller for the first time
+  since P24.2.
+
+**The gate discipline that paid for itself twice this phase.** Two of P24.3's own mutation
+severings did not falsify, and both were found by running the matrix rather than by reasoning
+about it: unregistering the Skeleton Editor's undo scope broke **nothing** (fixed — three arms
+now cover it), and two attempts at "delete a DTO field from the panel" were *incomplete
+mutations* that made a working gate look dead (the third, a real deletion of both references,
+fires correctly). A mutation that does not falsify is either a hole or a bad mutation, and
+telling them apart requires looking.
 
 **Also carried from P24.1 — the decode allowlist covers `simulate.rs` and not `pie.rs`.**
 `every_asset_decode_in_simulate_flows_through_the_reporting_door` reads a **module** scope
