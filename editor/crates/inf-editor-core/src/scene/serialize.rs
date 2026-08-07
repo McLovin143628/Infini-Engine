@@ -12705,14 +12705,14 @@ mod tests {
             bincode::serde::decode_from_slice::<SceneFileV21Wire, _>(&v22, bincode_config()).err();
         assert!(
             err.is_some(),
-            "the pinned v21 shape read a payload with an extra entity slot as if              nothing had changed — the shape pin has no forcing function at all"
+            "the pinned v21 shape read a payload with an extra entity slot as if nothing had changed — the shape pin has no forcing function at all"
         );
         // …and the SAME bytes minus the appended slot decode cleanly, so the
         // refusal above is the slot's doing and not a broken fixture.
         assert!(
             bincode::serde::decode_from_slice::<SceneFileV21Wire, _>(&one_entity, bincode_config())
                 .is_ok(),
-            "the control payload does not decode either — the fixture is wrong,              not the pin"
+            "the control payload does not decode either — the fixture is wrong, not the pin"
         );
         let _ = v21;
     }

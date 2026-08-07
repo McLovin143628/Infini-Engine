@@ -912,7 +912,7 @@ fn ik_nodes() -> Vec<NodeDef> {
     vec![
         NodeDef::new("ik.set_goal", "Set IK Goal", "ik")
             .described(
-                "Move one of this entity's authored IK goals to a WORLD point.                  `goal` is its index in the IK Target component. Reports false when                  there is no such goal.",
+                "Move one of this entity's authored IK goals to a WORLD point. `goal` is its index in the IK Target component. Reports false when there is no such goal.",
             )
             .with_inputs(vec![
                 exec_in(),
@@ -925,7 +925,7 @@ fn ik_nodes() -> Vec<NodeDef> {
             .with_outputs(vec![exec_out(EXEC_THEN), PortDef::new("ok", PortType::Bool)]),
         NodeDef::new("ik.set_goal_weight", "Set IK Goal Weight", "ik")
             .described(
-                "How much of one authored goal's solve to apply, 0..1 — the door for                  fading a foot plant in and out instead of snapping. Reports false                  when there is no such goal.",
+                "How much of one authored goal's solve to apply, 0..1 — the door for fading a foot plant in and out instead of snapping. Reports false when there is no such goal.",
             )
             .with_inputs(vec![
                 exec_in(),
@@ -936,7 +936,7 @@ fn ik_nodes() -> Vec<NodeDef> {
             .with_outputs(vec![exec_out(EXEC_THEN), PortDef::new("ok", PortType::Bool)]),
         NodeDef::new("ik.enable_goal", "Enable IK Goal", "ik")
             .described(
-                "Turn one authored IK goal on or off. A disabled goal is not solved                  and costs nothing in the trace. Reports false when there is no such                  goal.",
+                "Turn one authored IK goal on or off. A disabled goal is not solved and costs nothing in the trace. Reports false when there is no such goal.",
             )
             .with_inputs(vec![
                 exec_in(),
@@ -947,13 +947,13 @@ fn ik_nodes() -> Vec<NodeDef> {
             .with_outputs(vec![exec_out(EXEC_THEN), PortDef::new("ok", PortType::Bool)]),
         NodeDef::new("ik.reached", "IK Reached", "ik")
             .described(
-                "True when EVERY one of this entity's IK goals landed on its target                  last step. False when it has none, or when any chain refused.",
+                "True when EVERY one of this entity's IK goals landed on its target last step. False when it has none, or when any chain refused.",
             )
             .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
             .with_outputs(vec![PortDef::new("reached", PortType::Bool)]),
         NodeDef::new("ik.reach_error", "IK Reach Error", "ik")
             .described(
-                "How far the worst of this entity's IK tips missed by last step,                  METRES. 0 when nothing was solved — from gameplay's side that is                  the same fact as a perfect solve.",
+                "How far the worst of this entity's IK tips missed by last step, METRES. 0 when nothing was solved — from gameplay's side that is the same fact as a perfect solve.",
             )
             .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
             .with_outputs(vec![PortDef::new("error_m", PortType::Float)]),
@@ -1591,11 +1591,20 @@ mod tests {
             }
             assert_eq!(
                 arms, declared,
-                "{host} dispatches a different set of `ik.*` nodes than the                  registry declares. An id in the registry and in neither host                  falls through to the unknown-call logger and the node silently                  does nothing; an id in a host and not the registry is an arm no                  author can reach."
+                "{host} dispatches a different set of `ik.*` nodes than the registry declares. An id in the registry and in neither host falls through to the unknown-call logger and the node silently does nothing; an id in a host and not the registry is an arm no author can reach."
             );
         }
     }
 
+    /// The `ik.*` kit (P24.3) is registered, and its actions have the ONE data
+    /// output the lowerer can bind to a `Stmt::Let` — the `voxel.carve_*` shape,
+    /// for the reason that kit's test records (a second output fans into
+    /// `ik::<op>::<field>`, which the hosts' two-segment match cannot see).
+    ///
+    /// Its doc was severed by the scripted insert in `9cd3517`, which anchored on
+    /// the `#[test]` line and pushed a new test's doc above it — the same
+    /// doc-graft collateral as the `export.rs` one repaired in `cee0ad4`. Restored
+    /// here, and that commit's other hunks were re-swept: this was the only one.
     #[test]
     fn ik_kit_is_registered() {
         let reg = blueprint_registry();

@@ -7367,7 +7367,7 @@ mod tests {
         let seed = SkyAtmosphere::default().cloud_seed;
         assert_eq!(
             seed, 0,
-            "the default cloud seed moved; the wire-width breakdown below prices              it as a varint, so re-derive the total rather than editing the number"
+            "the default cloud seed moved; the wire-width breakdown below prices it as a varint, so re-derive the total rather than editing the number"
         );
         let expected = BOOL                 // clouds_enabled
             + 11 * F32                      // coverage/type/bottom/top/density/detail/
@@ -7786,7 +7786,7 @@ mod tests {
         assert_eq!(
             encoded,
             vec![0u8],
-            "the default preset no longer encodes as variant index 0; re-derive              the width below rather than editing the number"
+            "the default preset no longer encodes as variant index 0; re-derive the width below rather than editing the number"
         );
         let index = u64::from(encoded[0]);
         let expected = BOOL                 // weather_enabled
@@ -9862,14 +9862,14 @@ mod tests {
             bincode::serde::decode_from_slice::<SceneFileV21Wire, _>(&v22, bincode_config()).err();
         assert!(
             err.is_some(),
-            "the pinned v21 shape read a payload with an extra entity slot as if              nothing had changed — the shape pin has no forcing function at all"
+            "the pinned v21 shape read a payload with an extra entity slot as if nothing had changed — the shape pin has no forcing function at all"
         );
         // …and the SAME bytes minus the appended slot decode cleanly, so the
         // refusal above is the slot's doing and not a broken fixture.
         assert!(
             bincode::serde::decode_from_slice::<SceneFileV21Wire, _>(&one_entity, bincode_config())
                 .is_ok(),
-            "the control payload does not decode either — the fixture is wrong,              not the pin"
+            "the control payload does not decode either — the fixture is wrong, not the pin"
         );
         let _ = v21;
     }

@@ -61,6 +61,31 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root")
 }
 
+/// The config as **code only** — every `#` comment line blanked (G1).
+///
+/// `.config/nextest.toml` carries 52 lines of comment, and the group check below
+/// is `cfg.contains("binary(<stem>)")` over the whole text. Measured: an
+/// ungrouped spawning binary whose name merely appears in a comment satisfied it.
+/// That is the comment-blindness `code_only` was written for in `report_drift`
+/// and in `export.rs`, reintroduced *inside the gate that fixed it* — so the
+/// stripper comes with the reader, not beside it.
+fn config_code() -> String {
+    config()
+        .lines()
+        .map(|l| {
+            if l.trim_start().starts_with('#') {
+                ""
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        )
+}
+
 fn config() -> String {
     // Normalized: `.gitattributes` pins `*.toml`-adjacent sources to LF, but a
     // reader that assumed it would be the third time this repository was bitten
@@ -133,7 +158,7 @@ fn the_fixture_groups_are_serialized_and_aimed_at_the_right_binaries() {
 #[test]
 fn every_fixture_building_test_binary_is_in_a_group() {
     let root = workspace_root();
-    let cfg = config();
+    let cfg = config_code();
     let mut offenders: Vec<String> = Vec::new();
     let mut scanned = 0usize;
     let mut found: BTreeSet<String> = BTreeSet::new();

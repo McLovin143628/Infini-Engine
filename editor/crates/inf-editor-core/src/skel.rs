@@ -811,7 +811,7 @@ mod tests {
         let attach_pos = globals[attach as usize].w_axis.truncate().length();
         assert!(
             attach_pos > 0.5,
-            "the attach joint is {attach_pos} m from the origin — too close for a              stale bind to be visible, so this test would pass either way"
+            "the attach joint is {attach_pos} m from the origin — too close for a stale bind to be visible, so this test would pass either way"
         );
     }
 

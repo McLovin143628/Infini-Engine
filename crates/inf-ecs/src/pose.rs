@@ -1460,11 +1460,15 @@ mod tests {
     /// passed all of them.
     ///
     /// Here the target ENTITY moves between steps, and the pose must follow it
-    /// each time. Three separate claims, because a weaker one is satisfiable by a
-    /// cache: the pose differs after each move, the pose at step 3 differs from
-    /// the pose at step 1 (so it is not merely oscillating), and returning the
-    /// anchor to where it started returns the pose to where it started (so the
-    /// solve is a function of the CURRENT anchor and not of the history).
+    /// each time.
+    ///
+    /// **Two of the three claims falsify a cache**, and the third does not — the
+    /// P24.3 re-audit's correction, recorded where the claim is made. The pose
+    /// differing after each move, and step 3 differing from step 1, are what a
+    /// read-once-and-cache implementation cannot produce. "Returning the anchor
+    /// returns the pose" is satisfiable by a cache keyed on the anchor's
+    /// position; it is a *determinism* claim, kept for its own sake, not counted
+    /// as cache detection.
     #[test]
     fn the_authored_goal_is_reconverted_on_every_fixed_step() {
         let f = Fixture::new();
@@ -1505,7 +1509,7 @@ mod tests {
         let c = pose_state_bytes(&w);
 
         assert!(!a.is_empty(), "nothing was posed at all");
-        assert_ne!(a, b, "the goal did not follow the anchor on step 2 — a                           read-once-and-cache implementation passes every other                           authored-goal test and fails here");
+        assert_ne!(a, b, "the goal did not follow the anchor on step 2 — a read-once-and-cache implementation passes every other authored-goal test and fails here");
         assert_ne!(b, c, "the goal did not follow the anchor on step 3");
         assert_ne!(a, c, "the pose is oscillating rather than tracking");
 
@@ -1516,7 +1520,7 @@ mod tests {
         assert_eq!(
             pose_state_bytes(&w),
             a,
-            "returning the anchor did not return the pose — the solve depends on              history rather than on the current conversion"
+            "returning the anchor did not return the pose — the solve depends on history rather than on the current conversion"
         );
     }
 

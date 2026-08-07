@@ -312,7 +312,7 @@ fn f32_lives_only_at_the_asset_boundary_and_the_skin_channel() {
     for exempt in EXEMPT_LINES {
         assert!(
             scanned.lines().any(|l| l.trim() == exempt),
-            "the frozen f32 exemption {exempt:?} matches no line any more; delete              it rather than leaving a hole"
+            "the frozen f32 exemption {exempt:?} matches no line any more; delete it rather than leaving a hole"
         );
     }
     // (b) Each EXEMPT FILE really is a weight file — that is the whole claim the
@@ -321,7 +321,7 @@ fn f32_lives_only_at_the_asset_boundary_and_the_skin_channel() {
         let code = production_only(src);
         assert!(
             code.contains("VertWeights"),
-            "{name} is exempt from the f32 law because it computes skinning              weights; it no longer mentions `VertWeights`, so the exemption is              covering something else now"
+            "{name} is exempt from the f32 law because it computes skinning weights; it no longer mentions `VertWeights`, so the exemption is covering something else now"
         );
         // No f32 VECTOR type: `[f32; 3]`, or a `Vec3::` that is not a `DVec3::`.
         // Counting the two is how the check tells them apart — `contains` cannot,
@@ -330,7 +330,7 @@ fn f32_lives_only_at_the_asset_boundary_and_the_skin_channel() {
         let f32_vecs = code.matches("Vec3::").count() - code.matches("DVec3::").count();
         assert!(
             !code.contains("[f32; 3]") && f32_vecs == 0,
-            "{name} is exempt from the f32 law and has grown an f32 POSITION              ({f32_vecs} `Vec3::` uses that are not `DVec3::`); the exemption is              a statement about weights, not a blanket"
+            "{name} is exempt from the f32 law and has grown an f32 POSITION ({f32_vecs} `Vec3::` uses that are not `DVec3::`); the exemption is a statement about weights, not a blanket"
         );
     }
 
@@ -515,6 +515,13 @@ fn the_id_preservation_classifier_has_no_wildcard_and_names_every_op() {
     // exact assert, the same severing fails with "left: 31, right: 30" and the
     // naming loop never runs.)
     //
+    // **Do not "fix" this back to an exact pin.** A floor plus an
+    // always-executing naming loop is what makes staleness harmless: the floor
+    // can only go stale in the direction that keeps passing, and the loop below
+    // gates every variant by name on every run. An exact pin restores the failure
+    // mode this comment describes — it fails FIRST, and the loop that does the
+    // real work never runs.
+    //
     // A floor keeps the anti-vacuity claim the line was for — the parser really
     // read the enum, rather than matching nothing and looping zero times — and
     // cannot go stale in the direction that disables anything: adding an op only
@@ -522,7 +529,7 @@ fn the_id_preservation_classifier_has_no_wildcard_and_names_every_op() {
     // by name.
     assert!(
         variants.len() >= 31,
-        "only {} variants parsed out of the `Op` enum — the parser is looking at          the wrong thing, so the naming loop below would pass vacuously. found          {variants:?}",
+        "only {} variants parsed out of the `Op` enum — the parser is looking at the wrong thing, so the naming loop below would pass vacuously. found {variants:?}",
         variants.len()
     );
     let joined = body.join(" ");
@@ -607,7 +614,7 @@ fn the_unwrap_op_replays_its_values_and_never_calls_the_solver() {
         .collect();
     assert!(
         hits.is_empty(),
-        "the `Op::Unwrap` arm names `uv::`. It must write the corners it CARRIES          — see `crate::uv`. Found: {hits:?}"
+        "the `Op::Unwrap` arm names `uv::`. It must write the corners it CARRIES — see `crate::uv`. Found: {hits:?}"
     );
 
     // Positive, scoped to the arm: it has to actually write them, or the ban
@@ -621,7 +628,7 @@ fn the_unwrap_op_replays_its_values_and_never_calls_the_solver() {
     // the whole file would make both assertions above meaningless.
     assert!(
         arm.len() < 40,
-        "the arm scope has slipped and now covers {} lines; the ban is only          meaningful while it is the ARM",
+        "the arm scope has slipped and now covers {} lines; the ban is only meaningful while it is the ARM",
         arm.len()
     );
     assert!(

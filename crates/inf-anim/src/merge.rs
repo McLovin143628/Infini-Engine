@@ -289,9 +289,15 @@ mod tests {
     /// A three-joint "torso": an **off-origin** root and **non-uniform** bones.
     ///
     /// Deliberately not unit-length-at-the-origin (F4): a symmetric chain makes
-    /// FABRIK's answer independent of which bones it used, so every merge
-    /// assertion built on it held vacuously — all four configurations of the old
-    /// fixture produced a bit-identical reach error.
+    /// FABRIK's answer independent of which bones it used, so the old fixture's
+    /// `reach_error` comparison was bit-identical across configurations and held
+    /// whichever bones the chain resolved to.
+    ///
+    /// **Corrected by the P24.3 re-audit**: the report said that fixture "could
+    /// not fail", and it did not reproduce — checked out at `af1a301` the old
+    /// suite already failed two tests. The narrower, true claim is that the
+    /// *equality assertion* proved nothing without these proportions and the
+    /// two-chains-differ control below.
     fn torso() -> SkeletonAsset {
         let sk = Skeleton::new(vec![
             joint("root", None, Vec3::new(0.13, 0.87, -0.05)),
@@ -377,9 +383,10 @@ mod tests {
         );
 
         // **The control that makes the equality mean something** (F4). The old
-        // fixture was unit-length bones at the origin, and all four
-        // configurations produced a bit-identical reach error — the assertion
-        // held even if the chain had resolved to entirely different bones.
+        // fixture was unit-length bones at the origin, so its reach error was
+        // bit-identical across configurations — the assertion held even if the
+        // chain had resolved to entirely different bones. (The report's stronger
+        // "the fixture could not fail" did not reproduce; see `torso`.)
         // Solving the merged rig's OTHER chain on the same target must give a
         // measurably different answer; if it did not, the rig's bones would be
         // interchangeable and the equality above would prove nothing.
@@ -397,7 +404,7 @@ mod tests {
         assert_ne!(
             after.reach_error.to_bits(),
             arm_solve.reach_error.to_bits(),
-            "two different chains give a bit-identical reach error — the fixture              is degenerate and the equality above proves nothing"
+            "two different chains give a bit-identical reach error — the fixture is degenerate and the equality above proves nothing"
         );
         assert_ne!(
             before.chain_length.to_bits(),

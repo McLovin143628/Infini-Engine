@@ -286,26 +286,66 @@ pub async fn skel_list(
     Ok(out)
 }
 
+/// **Apply one edit to a session and build the reply** — the funnel's whole
+/// rule, as a pure function.
+///
+/// # Why this is separate from [`edit`] (G2)
+///
+/// The snapshot-and-restore used to live inside the `#[tauri::command]` wrapper,
+/// and the audit measured what that cost: **severing `*s = before;` produced
+/// zero test failures.** `inf-studio` has no `tests/` directory, the wrapper
+/// needs a `State<'_, SkelState>` and an `AppHandle` that no workspace test can
+/// construct, and the Ring-1 property test drives `SkelSession` directly — so the
+/// funnel's headline claim was unreachable from every gate in the repository.
+///
+/// Splitting the rule out of the plumbing fixes that without pretending the
+/// plumbing is testable: this function takes a plain `&mut SkelSession` and
+/// returns the DTO, so `a_refusal_through_the_funnel_restores_the_session` below
+/// drives the real code path, and severing the restore fails it by name. What
+/// stays in [`edit`] is the lock, the name lookup and the event emit — which are
+/// the parts a test genuinely cannot reach, and which own no rule.
+///
+/// The property: **whatever `f` did on its way to refusing is undone**, including
+/// a checkpoint it had already pushed. The whole session is restored, not just
+/// the asset, so the undo stacks stay honest.
+fn apply_edit(
+    session: &mut SkelSession,
+    id: &str,
+    name: &str,
+    f: impl FnOnce(&mut SkelSession) -> Result<Option<String>, SkelError>,
+) -> SkelApplyDto {
+    let before = session.clone();
+    match f(session) {
+        Ok(warning) => SkelApplyDto {
+            ok: true,
+            refusal: None,
+            warning,
+            doc: doc_dto(id, name, session),
+        },
+        Err(e) => {
+            *session = before;
+            SkelApplyDto {
+                ok: false,
+                refusal: Some(e.to_string()),
+                warning: None,
+                doc: doc_dto(id, name, session),
+            }
+        }
+    }
+}
+
 /// Run one edit and answer with the new document, or the refusal.
 ///
-/// # The funnel OWNS "a refusal changes nothing" (F10)
-///
-/// It used to only *claim* it. There was no snapshot and no restore here: the
-/// property was implemented nine separate times inside `SkelSession`, by each
-/// mutator checking its preconditions before calling `checkpoint()`. That is a
-/// real discipline and it is not the same thing — it has to be re-derived for
-/// every new mutator, and a mutator that validates halfway through has no way
-/// back. The audit was right that the claim did not reproduce.
-///
-/// Now it is one line of state and one of restore: the session is cloned before
-/// `f` runs and put back if `f` refuses. A `SkelSession` is an asset plus two
-/// snapshot stacks — kilobytes for a rig, which is the same size argument the
-/// module's undo model rests on — so the clone is affordable at authoring rates
-/// and buys the property for every mutator that will ever be added, including
-/// ones that fail after mutating.
+/// The lock, the name lookup and the `skel://sync` emit; the rule itself is
+/// [`apply_edit`], which is where a test can reach it.
 ///
 /// **Every mutating command routes through this, `skel_save` included**, so the
-/// `skel://sync` emit cannot be forgotten on one of them either.
+/// emit cannot be forgotten on one of them. That routing is a *convention*
+/// enforced by review — there is no compile-time exhaustiveness here, and the
+/// earlier claim that a new mutator would be a build error was wrong (a
+/// mutate-then-refuse mutator compiles clean). What IS enforced is that any
+/// mutator which does route through gets the property, and that `SkelSession`'s
+/// own refusal paths leave it untouched (`every_refusal_leaves_the_session_untouched`).
 async fn edit(
     app: &AppHandle,
     id: &str,
@@ -315,31 +355,7 @@ async fn edit(
 ) -> Result<SkelApplyDto, String> {
     let guid: AssetId = id.parse().map_err(|e| format!("bad asset id: {e}"))?;
     let name = asset_name(assets, guid)?;
-    let out = state.with(|store| {
-        let s = doc_of(store, id)?;
-        let before = s.clone();
-        Ok(match f(s) {
-            Ok(warning) => SkelApplyDto {
-                ok: true,
-                refusal: None,
-                warning,
-                doc: doc_dto(id, &name, s),
-            },
-            Err(e) => {
-                // THE property, implemented once: whatever `f` did on its way to
-                // refusing is undone, including a checkpoint it had already
-                // pushed. Restoring the whole session (not just the asset) is
-                // what keeps the undo stacks honest.
-                *s = before;
-                SkelApplyDto {
-                    ok: false,
-                    refusal: Some(e.to_string()),
-                    warning: None,
-                    doc: doc_dto(id, &name, s),
-                }
-            }
-        })
-    })?;
+    let out = state.with(|store| Ok(apply_edit(doc_of(store, id)?, id, &name, f)))?;
     let _ = app.emit("skel://sync", id);
     Ok(out)
 }
@@ -658,7 +674,7 @@ pub async fn skel_fit_to_mesh(
         Ok((asset, report)) => {
             s.replace_asset(asset);
             Ok(Some(format!(
-                "fitted to a {:.2} m mesh: {} of {} joints landed inside it,                  symmetry {:.2}, {} refinement steps rejected",
+                "fitted to a {:.2} m mesh: {} of {} joints landed inside it, symmetry {:.2}, {} refinement steps rejected",
                 report.height_m,
                 report.joints_inside,
                 report.joints,
@@ -679,6 +695,66 @@ mod tests {
 
     fn biped() -> SkeletonAsset {
         build_template(BodyPlan::Biped, &BodyParams::default()).unwrap()
+    }
+
+    /// **A refusal through the funnel restores the session** (G2).
+    ///
+    /// The arm the audit found missing: severing `*s = before;` used to produce
+    /// zero failures anywhere in the workspace. This drives `apply_edit` — the
+    /// real code path the Tauri wrapper calls — with a closure that **mutates and
+    /// then refuses**, which is exactly the case precondition-checking inside
+    /// `SkelSession` cannot cover and the only reason the funnel owns a snapshot
+    /// at all.
+    #[test]
+    fn a_refusal_through_the_funnel_restores_the_session() {
+        let mut s = SkelSession::new(biped());
+        s.add_socket("keepsake", 0).expect("seed");
+        let before = s.asset().clone();
+        let (undo, redo, dirty) = (s.can_undo(), s.can_redo(), s.is_dirty());
+
+        let dto = apply_edit(&mut s, "id", "Rig", |sess| {
+            // Mutate FIRST, then refuse — a mutator that validates halfway
+            // through. Nothing in `SkelSession` protects against this; the
+            // funnel's snapshot is the only thing that does.
+            sess.add_socket("half_applied", 1)?;
+            sess.rename_joint(0, "renamed_before_refusing")?;
+            Err(SkelError::Write("the disk went away".into()))
+        });
+
+        assert!(!dto.ok);
+        assert_eq!(dto.refusal.as_deref(), Some("the disk went away"));
+        assert_eq!(
+            s.asset(),
+            &before,
+            "the funnel did not restore the session after a mutator refused partway through"
+        );
+        assert!(
+            !s.asset().sockets.iter().any(|k| k.name == "half_applied"),
+            "a socket added on the way to a refusal survived"
+        );
+        assert_eq!(s.can_undo(), undo, "the refusal left an undo step behind");
+        assert_eq!(s.can_redo(), redo, "the refusal dropped the redo branch");
+        assert_eq!(s.is_dirty(), dirty, "the refusal changed the dirty flag");
+        // …and the DTO it returned describes the restored document, not the
+        // half-applied one — a panel adopting it must not show the mutation.
+        assert!(!dto.doc.sockets.iter().any(|k| k.name == "half_applied"));
+        assert_eq!(dto.doc.joints[0].name, before.skeleton.joints()[0].name);
+    }
+
+    /// …and a SUCCESS is not rolled back — the anti-vacuity twin, without which
+    /// a funnel that restored unconditionally would pass the test above.
+    #[test]
+    fn a_successful_edit_through_the_funnel_is_kept() {
+        let mut s = SkelSession::new(biped());
+        let dto = apply_edit(&mut s, "id", "Rig", |sess| {
+            sess.add_socket("scabbard", 1)?;
+            Ok(Some("a warning".into()))
+        });
+        assert!(dto.ok && dto.refusal.is_none());
+        assert_eq!(dto.warning.as_deref(), Some("a warning"));
+        assert!(s.asset().sockets.iter().any(|k| k.name == "scabbard"));
+        assert!(dto.doc.sockets.iter().any(|k| k.name == "scabbard"));
+        assert!(s.is_dirty() && s.can_undo());
     }
 
     /// **The DTO projection tells the panel the three things it cannot derive**:

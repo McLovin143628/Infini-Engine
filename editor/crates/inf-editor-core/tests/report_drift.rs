@@ -318,12 +318,22 @@ fn every_report_field_reaches_the_panel() {
             if NOT_SHOWN.contains(&js.as_str()) {
                 continue;
             }
+            // **The PROPERTY-ACCESS form** (G3), not a bare substring. Two
+            // fields were nominally enforced and actually not: `id` stayed green
+            // after its only reader was deleted, because "id" occurs inside
+            // ordinary code — measured, 39 bare hits against 3 real readers
+            // (`strokeWidth`, `void`, `unmatchedSided` all contain "id"); and
+            // `name` was masked by `renameJoint`. `.id` matches none of those and
+            // `.name` matches no `renameJoint`,
+            // so both are genuinely enforced now — measured: all nineteen fields
+            // are readable in this form, so tightening cost no exemptions.
+            //
+            // The bound, stated: this is a NAME search, so three different DTOs'
+            // `name` fields are one needle. It cannot tell which was deleted,
+            // only that none of them is read any more.
             assert!(
-                panel.contains(&js),
-                "{what}: `{f}` (`{js}`) reaches the DTO and the TS binding but is \
-                 never referenced by the Model Editor's CODE — by this gate's own \
-                 law it is a field that does not exist. Add a row for it. (A \
-                 comment naming it does not count, and used to.)"
+                panel.contains(&format!(".{js}")),
+                "`{f}` (`.{js}`) reaches the DTO and the TS binding but is never                  READ by the Skeleton Editor's code — by this gate's own law it is                  a field that does not exist. Give it a row, or add it to                  `SKEL_NOT_SHOWN` with a reason. (A comment naming it does not                  count, and neither does a bare mention: the search is for the                  property access `.{js}`.)"
             );
         }
     }
@@ -520,6 +530,23 @@ fn every_skeleton_dto_field_reaches_the_panel() {
     }
     assert_eq!(camel("sided_without_twin"), "sidedWithoutTwin");
     assert_eq!(camel("limit_min_deg"), "limitMinDeg");
+    // The dotted form really is stricter, on the two fields that made it
+    // necessary — and the maskers are MEASURED from the panel, not imagined. A
+    // bare "id" search is satisfied 39 times there against 3 real readers
+    // (`strokeWidth`, `void`, `unmatchedSided` all contain "id"); a bare "name"
+    // search is satisfied by `renameJoint`. The audit named `className` for the
+    // second, which does not actually mask it — `className` carries a capital N
+    // and the search is case-sensitive. The finding was right, the mechanism was
+    // not, and this records the measurement.
+    assert!("strokeWidth={1.5}".contains("id"));
+    assert!(!"strokeWidth={1.5}".contains(".id"));
+    assert!("doc.unmatchedSided".contains("id"));
+    assert!("renameJoint(a, i, v)".contains("name"));
+    assert!(!"renameJoint(a, i, v)".contains(".name"));
+    assert!(
+        !"className={cn(a)}".contains("name"),
+        "className carries a capital N, so it never masked a lowercase `name`"
+    );
 }
 
 /// **…and every `SkelApplyDto` field reaches the STORE**, which is the layer that

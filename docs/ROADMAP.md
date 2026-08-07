@@ -8160,6 +8160,22 @@ Measured both ways: with the floor, severing the classifier fails with "does not
 `Op::AddMaterialSlots`"; with the old exact assert, the same severing fails with "left: 31,
 right: 30" and the naming loop never executes.
 
+**Two P24.3 report claims corrected by the re-audit.** Both were overstatements of real
+work, and the work stands; the claims did not:
+
+* **F4's "the fixture could not fail" did not reproduce.** The re-audit checked out `af1a301`
+  and ran the merge suite: the old fixture already failed **2** tests, so "all four
+  configurations were bit-identical and the assertion held regardless" describes the
+  `reach_error` comparison in isolation and not the test file. What the rebuild actually bought
+  is the part worth claiming: **non-uniform, off-origin, asymmetric fixtures plus a
+  two-chains-must-differ control**, so the equality is now a statement about *which bones were
+  used* rather than one that a symmetric rig satisfies for free.
+* **F7's third claim is not cache-detection.** "Returning the anchor returns the pose" is
+  satisfied by a read-once-and-cache implementation whose cache is keyed on the anchor's
+  position — it is a *determinism* claim, and a good one, but it is claims **1 and 2** (the pose
+  follows each move, and step 3 differs from step 1) that falsify a cache. The report counted
+  three falsifiers where there are two.
+
 **Carried from the P24.3 audit (ledgered, not fixed).** Two, both bounded by what a source
 check can see:
 
