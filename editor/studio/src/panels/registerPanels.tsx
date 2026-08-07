@@ -1,4 +1,5 @@
 import {
+  Bone,
   Box,
   Clapperboard,
   Code2,
@@ -31,6 +32,7 @@ import ProblemsPanel from "./ProblemsPanel";
 import SearchPanel from "./SearchPanel";
 import SequencerPanel from "./SequencerPanel";
 import ModelEditor from "./model/ModelEditor";
+import SkeletonEditor from "./skeleton/SkeletonEditor";
 import SpriteSheetPanel from "./SpriteSheetPanel";
 import TerminalPanel from "./TerminalPanel";
 import TilemapPanel from "./TilemapPanel";
@@ -220,6 +222,26 @@ registerPanelType({
   title: (params) => (params ? "Model" : "Model Editor"),
   icon: Pencil,
   component: ModelEditor,
+  singleton: false,
+  defaultLocation: "bottom",
+  defaultSize: { w: 1040, h: 560 },
+  transient: true,
+});
+
+/**
+ * **The Skeleton Editor** (P24.3) — one instance per rig, `"skeleton:<assetId>"`.
+ *
+ * The Model Editor's registration, for the Model Editor's reasons: a skeleton
+ * session is asset-scoped, so two open rigs are two panels rather than one panel
+ * that forgets, and `transient` because the document lives in `SkelState` for the
+ * process's life — a restored layout would show an empty tab pointing at an asset
+ * the backend has never heard of.
+ */
+registerPanelType({
+  type: "skeleton",
+  title: (params) => (params ? "Skeleton" : "Skeleton Editor"),
+  icon: Bone,
+  component: SkeletonEditor,
   singleton: false,
   defaultLocation: "bottom",
   defaultSize: { w: 1040, h: 560 },

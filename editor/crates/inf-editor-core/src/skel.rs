@@ -355,6 +355,18 @@ impl SkelSession {
         Ok(())
     }
 
+    /// **Replace the whole rig**, undoably — what an auto-fit lands through.
+    ///
+    /// Separate from [`SkelSession::instantiate_template`] because a fit's rig is
+    /// *computed from a mesh*, not generated from parameters: routing it through
+    /// the template door would mean re-deriving the parameters it was already
+    /// past. Same undo semantics, so a fit an author dislikes is one Ctrl+Z away
+    /// from the rig they had.
+    pub fn replace_asset(&mut self, asset: SkeletonAsset) {
+        self.checkpoint();
+        self.asset = asset;
+    }
+
     /// **Append a part** onto this rig at `attach` — the modular-rigging door
     /// (`inf_anim::merge_skeletons`), returning the joint offset the caller needs
     /// to remap the part's weight table.

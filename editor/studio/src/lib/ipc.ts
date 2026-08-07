@@ -1141,6 +1141,26 @@ export const skel = {
   redo: (id: string): Promise<SkelApplyDto> => invoke<SkelApplyDto>("skel_redo", { id }),
   /** Write the rig back to its `.inf_skel`. Dirty is cleared only on success. */
   save: (id: string): Promise<SkelApplyDto> => invoke<SkelApplyDto>("skel_save", { id }),
+
+  /**
+   * **Auto-fit a template into a mesh** and replace this rig with the result —
+   * one undoable edit. The `warning` carries the fit report (measured height, how
+   * many joints landed inside the mesh, symmetry, rejected steps), because a fit
+   * that placed most joints outside is one an author needs to see.
+   */
+  fitToMesh: (
+    id: string,
+    meshAsset: string,
+    plan: BodyPlanName,
+    opts: { legs?: number; heightM?: number } = {},
+  ): Promise<SkelApplyDto> =>
+    invoke<SkelApplyDto>("skel_fit_to_mesh", {
+      id,
+      meshAsset,
+      plan,
+      legs: opts.legs ?? null,
+      heightM: opts.heightM ?? null,
+    }),
 };
 
 /**

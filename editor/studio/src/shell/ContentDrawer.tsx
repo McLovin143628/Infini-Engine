@@ -14,8 +14,10 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Bone,
   Box,
   ChevronRight,
+  Circle,
   Copy,
   FileCode2,
   FileText,
@@ -36,7 +38,6 @@ import {
   Plus,
   Save,
   Search,
-  Circle,
   Star,
   Trash2,
   X,
@@ -80,7 +81,15 @@ function kindTint(kind: string): string {
 
 /** Static per-kind glyph — a switch (not a dynamic component binding) so the
  *  react-hooks static-components rule stays satisfied. */
-function KindGlyph({ kind, size, className }: { kind: string; size: number; className?: string }) {
+function KindGlyph({
+  kind,
+  size,
+  className,
+}: {
+  kind: string;
+  size: number;
+  className?: string;
+}) {
   const p = { size, className };
   switch (kind) {
     case "mesh":
@@ -97,6 +106,8 @@ function KindGlyph({ kind, size, className }: { kind: string; size: number; clas
       return <Music2 {...p} />;
     case "biome_set":
       return <Palette {...p} />;
+    case "skeleton":
+      return <Bone {...p} />;
     case "struct":
     case "enum":
       return <Layers {...p} />;
@@ -147,21 +158,38 @@ export default function ContentDrawer() {
     [collections, activeCollection],
   );
   const items = useMemo(
-    () => visibleAssets(assetsById, folder, kindFilter, search, activeCollection ? activeIds : null),
+    () =>
+      visibleAssets(
+        assetsById,
+        folder,
+        kindFilter,
+        search,
+        activeCollection ? activeIds : null,
+      ),
     [assetsById, folder, kindFilter, search, activeCollection, activeIds],
   );
 
-  const [menu, setMenu] = useState<{ x: number; y: number; asset: AssetDto } | null>(null);
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    asset: AssetDto;
+  } | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
   const onCellOpen = (asset: AssetDto) => {
     if (DATA_KINDS.has(asset.kind)) openEditor(asset.id);
-    else if (asset.kind === "material_instance") openInstanceEditor(asset.id); // E-P2
-    else if (asset.kind === "biome_set") openBiomeSetEditor(asset.id); // P19.2
+    else if (asset.kind === "material_instance")
+      openInstanceEditor(asset.id); // E-P2
+    else if (asset.kind === "biome_set")
+      openBiomeSetEditor(asset.id); // P19.2
     else if (asset.kind === "material")
       useDockLayout.getState().openPanel("material"); // P7.2 material editor
     // P23.4: a mesh opens the Model Editor, one panel instance per asset.
-    else if (asset.kind === "mesh") useDockLayout.getState().openPanel("model", asset.id);
+    else if (asset.kind === "mesh")
+      useDockLayout.getState().openPanel("model", asset.id);
+    // P24.3: a rig opens the Skeleton Editor, one panel instance per asset.
+    else if (asset.kind === "skeleton")
+      useDockLayout.getState().openPanel("skeleton", asset.id);
     else if (asset.kind === "pcg")
       useDockLayout.getState().openPanel("pcg"); // P10.5b PCG editor
     else if (asset.kind === "state_machine")
@@ -180,7 +208,9 @@ export default function ContentDrawer() {
     return [...set].sort();
   }, [assetsById]);
 
-  const activeImports = Object.values(imports).filter((i) => i.phase === "started" || i.phase === "progress");
+  const activeImports = Object.values(imports).filter(
+    (i) => i.phase === "started" || i.phase === "progress",
+  );
 
   return (
     <div
@@ -284,7 +314,9 @@ export default function ContentDrawer() {
             <Star size={11} /> Favorites
           </div>
           {favorites.length === 0 ? (
-            <div className="px-1 pb-2 text-[11px] text-(--ink-text-faint)">None yet</div>
+            <div className="px-1 pb-2 text-[11px] text-(--ink-text-faint)">
+              None yet
+            </div>
           ) : (
             favorites.map((f) => (
               <FolderRow
@@ -300,12 +332,19 @@ export default function ContentDrawer() {
           <div className="px-1 pt-1 pb-1 text-[11px] font-semibold text-(--ink-text-dim)">
             Content
           </div>
-          <FolderTree path="" activePath={folder} onSelect={setFolder} onFavorite={toggleFavorite} />
+          <FolderTree
+            path=""
+            activePath={folder}
+            onSelect={setFolder}
+            onFavorite={toggleFavorite}
+          />
         </div>
 
         {/* Filter column */}
         <div className="w-28 shrink-0 overflow-auto border-r border-(--ink-border) p-1.5">
-          <div className="px-1 pb-1 text-[11px] font-semibold text-(--ink-text-dim)">Filters</div>
+          <div className="px-1 pb-1 text-[11px] font-semibold text-(--ink-text-dim)">
+            Filters
+          </div>
           {kinds.length === 0 && (
             <div className="px-1 text-[11px] text-(--ink-text-faint)">—</div>
           )}
@@ -314,7 +353,9 @@ export default function ContentDrawer() {
               key={kind}
               className={cn(
                 "flex w-full items-center gap-1.5 rounded px-1.5 py-0.5 text-left text-xs capitalize",
-                kindFilter === kind ? "bg-(--ink-selection)" : "hover:bg-(--ink-bg-3)",
+                kindFilter === kind
+                  ? "bg-(--ink-selection)"
+                  : "hover:bg-(--ink-bg-3)",
               )}
               onClick={() => setKindFilter(kind)}
             >
@@ -340,7 +381,9 @@ export default function ContentDrawer() {
               onClose={closeBiomeSetEditor}
             />
           ) : !ready ? (
-            <div className="p-4 text-xs text-(--ink-text-faint)">Loading content…</div>
+            <div className="p-4 text-xs text-(--ink-text-faint)">
+              Loading content…
+            </div>
           ) : items.length === 0 ? (
             <div className="p-4 text-xs text-(--ink-text-faint)">
               No assets match. Use Import (or drag files in) to add content.
@@ -358,17 +401,31 @@ export default function ContentDrawer() {
       </div>
 
       {menu && (
-        <AssetContextMenu x={menu.x} y={menu.y} asset={menu.asset} onClose={() => setMenu(null)} />
+        <AssetContextMenu
+          x={menu.x}
+          y={menu.y}
+          asset={menu.asset}
+          onClose={() => setMenu(null)}
+        />
       )}
     </div>
   );
 }
 
-function Breadcrumbs({ folder, onNavigate }: { folder: string; onNavigate: (p: string) => void }) {
+function Breadcrumbs({
+  folder,
+  onNavigate,
+}: {
+  folder: string;
+  onNavigate: (p: string) => void;
+}) {
   const parts = folder === "" ? [] : folder.split("/");
   return (
     <div className="flex min-w-0 items-center gap-0.5 text-xs text-(--ink-text-dim)">
-      <button className="hover:text-(--ink-text)" onClick={() => onNavigate("")}>
+      <button
+        className="hover:text-(--ink-text)"
+        onClick={() => onNavigate("")}
+      >
         Content
       </button>
       {parts.map((part, i) => {
@@ -378,7 +435,9 @@ function Breadcrumbs({ folder, onNavigate }: { folder: string; onNavigate: (p: s
             <ChevronRight size={12} />
             <button
               className={cn(
-                i === parts.length - 1 ? "text-(--ink-text)" : "hover:text-(--ink-text)",
+                i === parts.length - 1
+                  ? "text-(--ink-text)"
+                  : "hover:text-(--ink-text)",
               )}
               onClick={() => onNavigate(path)}
             >
@@ -449,7 +508,11 @@ function CollectionsSection() {
     }
   };
   const onDelete = async (name: string) => {
-    if (window.confirm(`Delete collection "${name}"? (The assets themselves are not deleted.)`))
+    if (
+      window.confirm(
+        `Delete collection "${name}"? (The assets themselves are not deleted.)`,
+      )
+    )
       await del(name);
   };
 
@@ -468,14 +531,18 @@ function CollectionsSection() {
         </button>
       </div>
       {collections.length === 0 ? (
-        <div className="px-1 pb-1 text-[11px] text-(--ink-text-faint)">None yet</div>
+        <div className="px-1 pb-1 text-[11px] text-(--ink-text-faint)">
+          None yet
+        </div>
       ) : (
         collections.map((c) => (
           <div key={c.name} className="group flex items-center">
             <button
               className={cn(
                 "flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-0.5 text-left text-xs",
-                active === c.name ? "bg-(--ink-selection)" : "hover:bg-(--ink-bg-3)",
+                active === c.name
+                  ? "bg-(--ink-selection)"
+                  : "hover:bg-(--ink-bg-3)",
               )}
               onClick={() => setActive(c.name)}
               onDoubleClick={() => void onRename(c.name)}
@@ -517,14 +584,19 @@ function FolderTree({
   const folders = useAssetStore((s) => s.folders);
   const children = useMemo(() => childFolders(folders, path), [folders, path]);
   const folderDto = folders[path];
-  const label = path === "" ? "Content" : (folderDto?.name ?? path.split("/").pop() ?? path);
+  const label =
+    path === ""
+      ? "Content"
+      : (folderDto?.name ?? path.split("/").pop() ?? path);
   return (
     <div style={{ paddingLeft: depth === 0 ? 0 : 10 }}>
       {depth > 0 && (
         <button
           className={cn(
             "flex w-full items-center gap-1.5 rounded px-1.5 py-0.5 text-left text-xs",
-            activePath === path ? "bg-(--ink-selection)" : "hover:bg-(--ink-bg-3)",
+            activePath === path
+              ? "bg-(--ink-selection)"
+              : "hover:bg-(--ink-bg-3)",
           )}
           onClick={() => onSelect(path)}
           onDoubleClick={() => onFavorite(path)}
@@ -592,7 +664,13 @@ function AssetGrid({
 
   return (
     <div ref={parentRef} className="h-full overflow-auto p-1">
-      <div style={{ height: rowVirt.getTotalSize(), position: "relative", width: "100%" }}>
+      <div
+        style={{
+          height: rowVirt.getTotalSize(),
+          position: "relative",
+          width: "100%",
+        }}
+      >
         {rowVirt.getVirtualItems().map((vr) => {
           const start = vr.index * cols;
           const rowItems = items.slice(start, start + cols);
@@ -600,7 +678,11 @@ function AssetGrid({
             <div
               key={vr.key}
               className="absolute left-0 flex w-full gap-2 px-1"
-              style={{ top: 0, transform: `translateY(${vr.start}px)`, height: CELL_H }}
+              style={{
+                top: 0,
+                transform: `translateY(${vr.start}px)`,
+                height: CELL_H,
+              }}
             >
               {rowItems.map((a) => (
                 <AssetCell
@@ -667,7 +749,10 @@ function AssetCell({
     if (!hole) return;
     const r = hole.getBoundingClientRect();
     const inside =
-      e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+      e.clientX >= r.left &&
+      e.clientX <= r.right &&
+      e.clientY >= r.top &&
+      e.clientY <= r.bottom;
     if (inside) {
       if (asset.kind === "material" || asset.kind === "material_instance") {
         // Apply-by-drag: a material/instance dropped over the viewport assigns
@@ -723,9 +808,18 @@ function AssetCell({
       >
         <div className="relative flex aspect-square items-center justify-center overflow-hidden rounded-sm bg-(--ink-bg-0)">
           {thumb ? (
-            <img src={thumb} alt={asset.name} className="size-full object-cover" draggable={false} />
+            <img
+              src={thumb}
+              alt={asset.name}
+              className="size-full object-cover"
+              draggable={false}
+            />
           ) : (
-            <KindGlyph kind={asset.kind} size={30} className={kindTint(asset.kind)} />
+            <KindGlyph
+              kind={asset.kind}
+              size={30}
+              className={kindTint(asset.kind)}
+            />
           )}
           {asset.ref_count > 0 && (
             <span
@@ -739,14 +833,21 @@ function AssetCell({
         <span className="mt-1 truncate text-[11px]" title={asset.name}>
           {asset.name}
         </span>
-        <span className="truncate text-[10px] text-(--ink-text-faint)">{asset.kind_label}</span>
+        <span className="truncate text-[10px] text-(--ink-text-faint)">
+          {asset.kind_label}
+        </span>
       </button>
       {ghost && (
         <div
           className="pointer-events-none fixed z-50 flex items-center gap-1 rounded border border-(--ink-accent) bg-(--ink-bg-2) px-2 py-0.5 text-xs opacity-80"
           style={{ left: ghost.x + 10, top: ghost.y + 6 }}
         >
-          <KindGlyph kind={asset.kind} size={12} className={kindTint(asset.kind)} /> {asset.name}
+          <KindGlyph
+            kind={asset.kind}
+            size={12}
+            className={kindTint(asset.kind)}
+          />{" "}
+          {asset.name}
         </div>
       )}
     </>
@@ -778,7 +879,12 @@ function AssetContextMenu({
     duplicate: useAssetStore((s) => s.duplicate),
     deleteAsset: useAssetStore((s) => s.deleteAsset),
   };
-  const item = (label: string, glyph: React.ReactNode, run: () => void, danger = false) => (
+  const item = (
+    label: string,
+    glyph: React.ReactNode,
+    run: () => void,
+    danger = false,
+  ) => (
     <button
       className={cn(
         "flex w-full items-center gap-2 px-2.5 py-1 text-left text-xs hover:bg-(--ink-bg-3)",
@@ -800,7 +906,9 @@ function AssetContextMenu({
   const doDelete = async () => {
     const result = await store.deleteAsset(asset.id, false);
     if (!result.deleted) {
-      const names = result.blockers.map((b) => `• ${b.name} (${b.kind})`).join("\n");
+      const names = result.blockers
+        .map((b) => `• ${b.name} (${b.kind})`)
+        .join("\n");
       const ok = window.confirm(
         `"${asset.name}" is still referenced by ${result.blockers.length} asset(s):\n\n${names}\n\nDelete anyway? References will break.`,
       );
@@ -808,8 +916,11 @@ function AssetContextMenu({
     }
   };
   const showRefs = async () => {
-    const refs = await import("../lib/ipc").then((m) => m.assets.references(asset.id));
-    if (refs.length === 0) pushStatus(`"${asset.name}" is not referenced by anything.`);
+    const refs = await import("../lib/ipc").then((m) =>
+      m.assets.references(asset.id),
+    );
+    if (refs.length === 0)
+      pushStatus(`"${asset.name}" is not referenced by anything.`);
     else pushStatus(`${asset.name} ← ${refs.map((r) => r.name).join(", ")}`);
   };
   // The asset's absolute payload path = content root + its content-relative path.
@@ -833,7 +944,8 @@ function AssetContextMenu({
     await assets.createMaterialInstance(asset.id);
     pushStatus(`Created an instance of "${asset.name}".`);
   };
-  const isMaterialLike = asset.kind === "material" || asset.kind === "material_instance";
+  const isMaterialLike =
+    asset.kind === "material" || asset.kind === "material_instance";
   const bindToSelection = async () => {
     const n = await sceneIpc.applyActor(asset.id);
     pushStatus(
@@ -871,21 +983,47 @@ function AssetContextMenu({
       onClick={(e) => e.stopPropagation()}
     >
       {isMaterialLike &&
-        item("Apply to Selection", <Paintbrush size={13} />, () => void applyToSelection())}
+        item(
+          "Apply to Selection",
+          <Paintbrush size={13} />,
+          () => void applyToSelection(),
+        )}
       {asset.kind === "material_instance" &&
-        item("Edit Instance", <Pencil size={13} />, () => openInstanceEditor(asset.id))}
+        item("Edit Instance", <Pencil size={13} />, () =>
+          openInstanceEditor(asset.id),
+        )}
       {asset.kind === "blueprint" &&
-        item("Bind to Selection", <Link2 size={13} />, () => void bindToSelection())}
+        item(
+          "Bind to Selection",
+          <Link2 size={13} />,
+          () => void bindToSelection(),
+        )}
       {asset.kind === "material" &&
-        item("Create Instance", <Copy size={13} />, () => void createInstance())}
+        item(
+          "Create Instance",
+          <Copy size={13} />,
+          () => void createInstance(),
+        )}
       {asset.kind === "mesh" &&
         item("Edit Mesh", <Pencil size={13} />, () =>
           useDockLayout.getState().openPanel("model", asset.id),
         )}
+      {asset.kind === "skeleton" &&
+        item("Edit Skeleton", <Bone size={13} />, () =>
+          useDockLayout.getState().openPanel("skeleton", asset.id),
+        )}
       {item("Rename", <Pencil size={13} />, doRename)}
-      {item("Duplicate", <Copy size={13} />, () => void store.duplicate(asset.id))}
+      {item(
+        "Duplicate",
+        <Copy size={13} />,
+        () => void store.duplicate(asset.id),
+      )}
       {item("Show References", <Link2 size={13} />, () => void showRefs())}
-      {item("Reveal in Explorer", <FolderSearch size={13} />, () => void doReveal())}
+      {item(
+        "Reveal in Explorer",
+        <FolderSearch size={13} />,
+        () => void doReveal(),
+      )}
       <div className="my-1 h-px bg-(--ink-border)" />
       {/* Add to Collection ▸ (E-P8): a click-to-expand inline submenu. */}
       <button
@@ -896,7 +1034,10 @@ function AssetContextMenu({
         }}
       >
         <FolderPlus size={13} /> Add to Collection
-        <ChevronRight size={12} className={cn("ml-auto transition-transform", subOpen && "rotate-90")} />
+        <ChevronRight
+          size={12}
+          className={cn("ml-auto transition-transform", subOpen && "rotate-90")}
+        />
       </button>
       {subOpen && (
         <div className="border-y border-(--ink-border) bg-(--ink-bg-1) py-0.5">
@@ -918,7 +1059,11 @@ function AssetContextMenu({
         </div>
       )}
       {activeCollection &&
-        item("Remove from Collection", <Minus size={13} />, () => void removeFrom())}
+        item(
+          "Remove from Collection",
+          <Minus size={13} />,
+          () => void removeFrom(),
+        )}
       <div className="my-1 h-px bg-(--ink-border)" />
       {item("Delete", <Trash2 size={13} />, () => void doDelete(), true)}
     </div>

@@ -1995,6 +1995,45 @@ fn drag_step(xform: &VertTransform) -> usize {
 
 // ── drag-and-drop modularity, v1 ───────────────────────────────────────────
 
+/// **The tessellated mesh as a triangle soup**, for the auto-fit BVH (P24.3).
+///
+/// The hop `skel_fit_to_mesh` needed and that was missing: `inf_dcc::fit_template`
+/// takes a `Bvh`, `Bvh::new` takes `Vec<Tri>`, and the only route from a
+/// `CanonicalMesh` to triangles is [`tessellate`] — which yields the **drawn**
+/// buffers (`verts` + a `u32` index list), because they are the same triangles
+/// `to_mesh_asset` writes. So the conversion is a walk of `indices` in threes.
+///
+/// **Widened to `f64` here and not before**: `MeshVertex::position` is `f32`
+/// because it is a render vertex, and the BVH is an `f64` spatial structure
+/// (architecture rule 3). One widening, at the one seam, rather than an `f64`
+/// vertex format nothing else wants.
+///
+/// A trailing partial triangle is **dropped** rather than padded: an index list
+/// whose length is not a multiple of three is a malformed mesh, and inventing a
+/// vertex for it would put a triangle in the hierarchy that the mesh does not
+/// have. `chunks_exact` says exactly that.
+pub fn triangle_soup(geo: &EditGeometry) -> Vec<inf_dcc::Tri> {
+    geo.indices
+        .chunks_exact(3)
+        .filter_map(|t| {
+            let p = |i: u32| -> Option<DVec3> {
+                geo.verts.get(i as usize).map(|v| {
+                    DVec3::new(
+                        v.position[0] as f64,
+                        v.position[1] as f64,
+                        v.position[2] as f64,
+                    )
+                })
+            };
+            Some(inf_dcc::Tri {
+                a: p(t[0])?,
+                b: p(t[1])?,
+                c: p(t[2])?,
+            })
+        })
+        .collect()
+}
+
 /// What a rig-carrying [`merge_into`] did.
 ///
 /// Reported rather than inferred, because every number here is a thing that can
@@ -3649,6 +3688,107 @@ mod tests {
             sel.len(SelectMode::Face),
             6,
             "linked reaches one shell only"
+        );
+    }
+
+    // ── P24.3: the auto-fit hop ─────────────────────────────────
+
+    /// **The conversion is a triangle per index triple, and the positions are the
+    /// mesh's** — the two claims `triangle_soup` rests on.
+    ///
+    /// A cube is 6 quads, which `to_mesh_asset` triangulates to 12 triangles and
+    /// 36 indices. Both numbers are asserted, because a conversion that dropped
+    /// every other triple would still produce "some triangles".
+    #[test]
+    fn the_triangle_soup_is_one_tri_per_index_triple() {
+        let geo = tessellate(&cube(2.0));
+        assert_eq!(geo.indices.len(), 36, "a cube tessellates to 12 triangles");
+        let tris = triangle_soup(&geo);
+        assert_eq!(tris.len(), geo.indices.len() / 3);
+        assert_eq!(tris.len(), 12);
+
+        // Every corner the soup names is a corner of the mesh — so the positions
+        // came from `verts`, not from an off-by-one into it.
+        let (lo, hi) = (geo.bounds.min, geo.bounds.max);
+        for t in &tris {
+            for v in [t.a, t.b, t.c] {
+                for k in 0..3 {
+                    assert!(
+                        v[k] >= lo[k] as f64 - 1e-9 && v[k] <= hi[k] as f64 + 1e-9,
+                        "{v:?} is outside the mesh's own bounds {lo:?}..{hi:?}"
+                    );
+                }
+            }
+        }
+        // …and no triangle is degenerate, which an index triple read as
+        // `[i, i, i]` would be.
+        for t in &tris {
+            assert!(
+                (t.b - t.a).cross(t.c - t.a).length() > 1e-12,
+                "degenerate triangle {t:?}"
+            );
+        }
+    }
+
+    /// **A closest-point query through the converted BVH lands where the GEOMETRY
+    /// says** — checked against a hand-computed answer, not against the BVH's own
+    /// opinion.
+    ///
+    /// The fixture is `cube(2.0)`, whose bounds the tessellation reports
+    /// independently of anything the hierarchy does. A point 10 m above the
+    /// centre must project onto the top face: `y` at the bound, `x`/`z`
+    /// unchanged at 0, distance exactly `10 − max_y`. A soup that mangled
+    /// coordinates — swapped axes, kept `f32` precision, read the wrong vertex —
+    /// fails one of the three.
+    #[test]
+    fn a_closest_point_through_the_converted_soup_is_hand_checkable() {
+        let geo = tessellate(&cube(2.0));
+        let top = geo.bounds.max[1] as f64;
+        let bvh = inf_dcc::Bvh::new(triangle_soup(&geo));
+        assert!(!bvh.is_empty());
+
+        let q = DVec3::new(0.0, 10.0, 0.0);
+        let hit = bvh.closest_point(q).expect("a non-empty hierarchy answers");
+        assert!(
+            (hit.point.y - top).abs() < 1e-9,
+            "closest point y = {} but the top face is at {top}",
+            hit.point.y
+        );
+        assert!(
+            hit.point.x.abs() < 1e-9 && hit.point.z.abs() < 1e-9,
+            "{:?}",
+            hit.point
+        );
+        assert!(
+            ((10.0 - top) - (q - hit.point).length()).abs() < 1e-9,
+            "distance {} is not 10 - {top}",
+            (q - hit.point).length()
+        );
+
+        // …and the hierarchy really encloses the solid, which is what
+        // `FitReport::joints_inside` is computed from.
+        assert!(bvh.contains(DVec3::ZERO), "the cube's centre is inside it");
+        assert!(!bvh.contains(q));
+    }
+
+    /// The soup drops a trailing partial triangle rather than inventing a vertex
+    /// for it — and an out-of-range index takes its whole triangle with it.
+    #[test]
+    fn a_malformed_index_list_loses_only_its_bad_triangles() {
+        let mut geo = tessellate(&cube(2.0));
+        geo.indices.push(0);
+        geo.indices.push(1);
+        assert_eq!(
+            triangle_soup(&geo).len(),
+            12,
+            "a trailing pair must not become a triangle"
+        );
+        geo.indices.truncate(36);
+        geo.indices[0] = u32::MAX;
+        assert_eq!(
+            triangle_soup(&geo).len(),
+            11,
+            "an out-of-range index must drop its triangle, not panic or fabricate"
         );
     }
 

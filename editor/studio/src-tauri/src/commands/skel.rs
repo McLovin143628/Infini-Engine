@@ -585,6 +585,79 @@ pub async fn skel_save(
     Ok(out)
 }
 
+/// **Auto-fit a template to a mesh** — the door `inf_dcc::fit_template` has not
+/// had since P24.2.
+///
+/// The fit was built, tested and reachable only from its own unit tests: no
+/// Ring-2 command, no `ipc.ts` wrapper, so an author could not run it. The hop
+/// that was missing is `CanonicalMesh` → triangles, and it is now
+/// `inf_editor_core::dcc::triangle_soup`, verified against a hand-computed
+/// closest-point query rather than against the BVH's own opinion.
+///
+/// The fitted rig **replaces** the open one as one undoable edit, and the report
+/// comes back with it: a fit that placed most joints outside the mesh is one an
+/// author needs to see rather than infer from the viewport.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn skel_fit_to_mesh(
+    app: AppHandle,
+    id: String,
+    mesh_asset: String,
+    plan: String,
+    legs: Option<u16>,
+    height_m: Option<f64>,
+    state: State<'_, SkelState>,
+    assets: State<'_, AssetState>,
+) -> Result<SkelApplyDto, String> {
+    let plan = parse_plan(&plan, legs)?;
+    let mesh_id: AssetId = mesh_asset
+        .parse()
+        .map_err(|e| format!("bad asset id: {e}"))?;
+    let payload = assets.with_project(|p| {
+        let entry = p
+            .db()
+            .get(mesh_id)
+            .ok_or_else(|| format!("no asset {mesh_id}"))?;
+        if entry.kind() != AssetKind::Mesh {
+            return Err(format!("{} is not a mesh asset", entry.name));
+        }
+        p.load_payload::<inf_mesh::MeshAsset>(mesh_id)
+            .map_err(|e| e.to_string())
+    })?;
+    // Everything that can fail does so BEFORE the session is touched, so a
+    // refusal never leaves a half-fitted rig behind.
+    let imported = inf_dcc::from_mesh_asset(&payload).map_err(|e| e.to_string())?;
+    let geo = inf_editor_core::dcc::tessellate(&imported.mesh);
+    let bvh = inf_dcc::Bvh::new(inf_editor_core::dcc::triangle_soup(&geo));
+    let opts = inf_dcc::FitOptions {
+        plan,
+        params: BodyParams {
+            height_m: height_m.unwrap_or(BodyParams::default().height_m),
+            ..BodyParams::default()
+        },
+        ..inf_dcc::FitOptions::default()
+    };
+    let fitted = inf_dcc::fit_template(&bvh, &opts);
+
+    edit(&app, &id, &state, &assets, |s| match fitted {
+        Ok((asset, report)) => {
+            s.replace_asset(asset);
+            Ok(Some(format!(
+                "fitted to a {:.2} m mesh: {} of {} joints landed inside it,                  symmetry {:.2}, {} refinement steps rejected",
+                report.height_m,
+                report.joints_inside,
+                report.joints,
+                report.symmetry_score,
+                report.steps_rejected
+            )))
+        }
+        // The fit's own refusal, carried through as a VALUE — it names the
+        // degenerate measurement, which is the whole point of `FitError`.
+        Err(e) => Err(SkelError::Template(e.to_string())),
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

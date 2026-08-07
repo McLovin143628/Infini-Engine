@@ -333,3 +333,131 @@ fn the_panel_search_cannot_be_satisfied_by_a_comment() {
     // Line structure survives, so a stripped panel is still readable in a failure.
     assert_eq!(stripped.lines().count(), sample.lines().count());
 }
+
+// ── the Skeleton Editor's own root pair (P24.3) ─────────────────────────────
+//
+// **Its OWN pair, deliberately.** The arms above are hard-wired to the two DCC
+// report DTOs and the Model Editor's file, and extending them by adding a third
+// tuple would have made one gate answer for two panels: a failure would name a
+// file the reader is not editing, and the `NOT_SHOWN` list would become a shared
+// bucket where a mesh counter and a rig field exempt each other. So the skeleton
+// gets a second reader over the same rules.
+//
+// **Two files, two claims**, because the DTOs land in two places:
+//
+//  * `SkelJointDto` / `SkelSocketDto` / `SkelDocDto` describe the *document* and
+//    are what the PANEL renders;
+//  * `SkelApplyDto` is the *envelope* every mutating call returns — `ok`,
+//    `refusal`, `warning`, `doc` — and the panel never sees it, because the STORE
+//    unwraps it. Checking it against the panel would fail for a field that is
+//    handled correctly; checking it against the store is the honest seam.
+
+const SKEL_PANEL: &str = include_str!("../../../studio/src/panels/skeleton/SkeletonEditor.tsx");
+const SKEL_STORE: &str = include_str!("../../../studio/src/stores/skelStore.ts");
+
+/// Skeleton DTO fields the panel deliberately does **not** render.
+///
+/// Two entries, both structural rather than "we ran out of time":
+///
+/// * `index` on a **socket** is `joint`, and the panel shows the joint's *name*
+///   (`joints[s.joint]?.name`) — a number an author cannot act on is not a row.
+///   It is referenced, so it is not here; this list is only the genuine gaps.
+/// * `scale` on a **socket**: `place_socket` writes the identity, and there is no
+///   control that produces anything else. It is displayed in the socket row's
+///   `title` and therefore reaches the code — also not here.
+///
+/// What IS here is the one field with no reader at all. Recorded rather than
+/// silently permitted, which is the state that let `skin_conflicts` ship
+/// invisible.
+const SKEL_NOT_SHOWN: [&str; 0] = [];
+
+/// **Every skeleton DTO field reaches the panel's CODE.**
+///
+/// Same law, same stripper, same bound as the Model Editor arm: a presence check,
+/// not a rendering check, and a comment naming a field does not count.
+#[test]
+fn every_skeleton_dto_field_reaches_the_panel() {
+    let panel = code_only(SKEL_PANEL);
+    for decl in [
+        "pub struct SkelJointDto {",
+        "pub struct SkelSocketDto {",
+        "pub struct SkelDocDto {",
+    ] {
+        let fields = fields_of(DTOS, decl);
+        assert!(
+            fields.len() >= 5,
+            "{decl}: only {} fields parsed — the parser is looking at the wrong \
+             thing",
+            fields.len()
+        );
+        for f in &fields {
+            let js = camel(f);
+            if SKEL_NOT_SHOWN.contains(&js.as_str()) {
+                continue;
+            }
+            assert!(
+                panel.contains(&js),
+                "`{f}` (`{js}`) reaches the DTO and the TS binding but is never \
+                 referenced by the Skeleton Editor's CODE — by this gate's own law \
+                 it is a field that does not exist. Give it a row, or add it to \
+                 `SKEL_NOT_SHOWN` with a reason. (A comment naming it does not \
+                 count.)"
+            );
+        }
+    }
+    // NOT VACUOUS: the panel is the file this thinks it is, and it really is
+    // stripped — read through the same `code_only` as the assertions above.
+    assert!(
+        panel.contains("projectRig"),
+        "the skeleton panel has no renderer at all"
+    );
+    let raw: String = SKEL_PANEL.chars().filter(|c| *c != '\r').collect();
+    assert!(
+        panel.len() < raw.len(),
+        "nothing was stripped from the skeleton panel — either it has no comments \
+         any more or `code_only` has stopped working"
+    );
+    // Every frozen exemption must name a field that still EXISTS.
+    let all: Vec<String> = [
+        "pub struct SkelJointDto {",
+        "pub struct SkelSocketDto {",
+        "pub struct SkelDocDto {",
+    ]
+    .iter()
+    .flat_map(|d| fields_of(DTOS, d))
+    .map(|f| camel(&f))
+    .collect();
+    for x in SKEL_NOT_SHOWN {
+        assert!(
+            all.iter().any(|f| f == x),
+            "the frozen exemption {x:?} names no skeleton DTO field any more; \
+             delete it"
+        );
+    }
+    assert_eq!(camel("sided_without_twin"), "sidedWithoutTwin");
+    assert_eq!(camel("limit_min_deg"), "limitMinDeg");
+}
+
+/// **…and every `SkelApplyDto` field reaches the STORE**, which is the layer that
+/// unwraps the envelope.
+///
+/// `ok`, `refusal` and `warning` are three different answers and a store that
+/// dropped one would silently swallow either the refusal an author needs to read
+/// or the cost of a rename they just made.
+#[test]
+fn every_skeleton_apply_field_reaches_the_store() {
+    let store = SKEL_STORE
+        .chars()
+        .filter(|c| *c != '\r')
+        .collect::<String>();
+    let fields = fields_of(DTOS, "pub struct SkelApplyDto {");
+    assert_eq!(fields.len(), 4, "the envelope changed shape: {fields:?}");
+    for f in &fields {
+        let js = camel(f);
+        assert!(
+            store.contains(&format!("res.{js}")),
+            "`SkelApplyDto::{f}` is never read out of the reply in `skelStore` — \
+             the panel cannot show what the store did not unwrap"
+        );
+    }
+}

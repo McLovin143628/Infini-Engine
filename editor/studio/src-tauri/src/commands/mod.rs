@@ -140,6 +140,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         skel::skel_undo,
         skel::skel_redo,
         skel::skel_save,
+        skel::skel_fit_to_mesh,
         sm::sm_list,
         sm::sm_create,
         sm::sm_get,
