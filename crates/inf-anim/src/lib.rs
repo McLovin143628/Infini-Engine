@@ -25,9 +25,15 @@
 //!   `inf_ecs::pose::step_pose_evaluation` so both hosts inherit it — and it is
 //!   `sqrt`-only, because its result rides the sim trace.
 //!
+//! Since P24.3 the solver **reads [`template::JointLimit`]**: `solve_chain` takes
+//! the skeleton's limit table and clamps each hinge as that joint's rotation is
+//! written, so an elbow no longer bends backwards because a target asked it to.
+//! [`ik::IkReport::clamped`] reports how often the range was load-bearing.
+//!
 //! Still open: **cubic tracks** — [`clip::Interpolation`] keeps `Step`/`Linear`
-//! and cubic is resampled to linear on import (documented in [`clip`]); and
-//! **[`template::JointLimit`] is not yet read by the solver** (see [`ik`]).
+//! and cubic is resampled to linear on import (documented in [`clip`]); and a
+//! limit free on **more than one axis** is not applied (a swing-twist cone needs
+//! a decomposition this does not have — see [`ik`], and ROADMAP §12's P24 block).
 
 pub mod asset;
 pub mod blend_space;

@@ -52,6 +52,7 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(water_nodes());
     reg.register_all(voxel_nodes());
     reg.register_all(destruct_nodes());
+    reg.register_all(ik_nodes());
     reg
 }
 
@@ -885,6 +886,80 @@ fn voxel_nodes() -> Vec<NodeDef> {
             .with_outputs(vec![PortDef::new("height", PortType::Float)]),
     ]
 }
+/// The **IK kit** (P24.3) — three exec actions that move an authored goal and two
+/// pure queries that ask whether the limb got there.
+///
+/// # Why these nodes edit the AUTHORED component and take no chain
+///
+/// A chain is joint indices, which a Blueprint author does not have and could not
+/// type. Deriving one from a root/tip pair needs the skeleton, and neither host's
+/// dispatch context holds a skeleton registry — threading one into both would be
+/// a new field in two hand-maintained mirrors, for a derivation the author has
+/// already done in the Skeleton Editor.
+///
+/// So the split is by what each half knows. The `IkTarget` component says
+/// **which joints**; these nodes say **where the goal is**, per frame, by index
+/// into that list. `inf_ecs::set_ik_goals` remains the Ring-0 door for a caller
+/// that genuinely has a chain, and `step_pose_evaluation` solves both.
+///
+/// Every action reports `ok` rather than failing its handler: an entity with no
+/// `IkTarget`, or a goal index past the end, answers `false` and leaves the rest
+/// of the Tick body running — the `voxel.*` kit's ruling, one phase on.
+///
+/// `x`/`y`/`z` are **world** metres, exactly as an author placed the target with
+/// a gizmo; the fixed step converts into the character's own frame.
+fn ik_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("ik.set_goal", "Set IK Goal", "ik")
+            .described(
+                "Move one of this entity's authored IK goals to a WORLD point.                  `goal` is its index in the IK Target component. Reports false when                  there is no such goal.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("goal", PortType::Int),
+                PortDef::new("x", PortType::Float),
+                PortDef::new("y", PortType::Float),
+                PortDef::new("z", PortType::Float),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN), PortDef::new("ok", PortType::Bool)]),
+        NodeDef::new("ik.set_goal_weight", "Set IK Goal Weight", "ik")
+            .described(
+                "How much of one authored goal's solve to apply, 0..1 — the door for                  fading a foot plant in and out instead of snapping. Reports false                  when there is no such goal.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("goal", PortType::Int),
+                PortDef::new("weight", PortType::Float),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN), PortDef::new("ok", PortType::Bool)]),
+        NodeDef::new("ik.enable_goal", "Enable IK Goal", "ik")
+            .described(
+                "Turn one authored IK goal on or off. A disabled goal is not solved                  and costs nothing in the trace. Reports false when there is no such                  goal.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("goal", PortType::Int),
+                PortDef::new("enabled", PortType::Bool),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN), PortDef::new("ok", PortType::Bool)]),
+        NodeDef::new("ik.reached", "IK Reached", "ik")
+            .described(
+                "True when EVERY one of this entity's IK goals landed on its target                  last step. False when it has none, or when any chain refused.",
+            )
+            .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
+            .with_outputs(vec![PortDef::new("reached", PortType::Bool)]),
+        NodeDef::new("ik.reach_error", "IK Reach Error", "ik")
+            .described(
+                "How far the worst of this entity's IK tips missed by last step,                  METRES. 0 when nothing was solved — from gameplay's side that is                  the same fact as a perfect solve.",
+            )
+            .with_inputs(vec![PortDef::new("entity", PortType::Int).required()])
+            .with_outputs(vec![PortDef::new("error_m", PortType::Float)]),
+    ]
+}
+
 /// The destruction kit (P22.3) — **runtime destruction**: two exec actions that
 /// break things and two pure queries that ask what is left. The `voxel_nodes`
 /// shape, one phase later, because the two kits are the same idea about two
@@ -1457,6 +1532,53 @@ mod tests {
             blast.contains("NEWTON-SECONDS") && blast.contains("metres"),
             "radial_impulse must say what `impulse_ns` and `radius_m` are"
         );
+    }
+
+    /// The `ik.*` kit (P24.3) is registered, and its actions have the ONE data
+    /// output the lowerer can bind to a `Stmt::Let` — the `voxel.carve_*` shape,
+    /// for the reason that kit's test records (a second output fans into
+    /// `ik::<op>::<field>`, which the hosts' two-segment match cannot see).
+    #[test]
+    fn ik_kit_is_registered() {
+        let reg = blueprint_registry();
+        for id in [
+            "ik.set_goal",
+            "ik.set_goal_weight",
+            "ik.enable_goal",
+            "ik.reached",
+            "ik.reach_error",
+        ] {
+            assert!(reg.get(id).is_some(), "missing ik node {id}");
+            assert!(
+                reg.get(id).unwrap().input("entity").unwrap().required,
+                "{id} must name its character"
+            );
+        }
+        for id in ["ik.set_goal", "ik.set_goal_weight", "ik.enable_goal"] {
+            let d = reg.get(id).unwrap();
+            assert!(d.input(EXEC_IN).is_some(), "{id} must be an exec action");
+            assert!(d.output(EXEC_THEN).is_some(), "{id} must chain");
+            let data_outs: Vec<&str> = d
+                .outputs
+                .iter()
+                .filter(|p| !p.ty.is_exec())
+                .map(|p| p.name.as_str())
+                .collect();
+            assert_eq!(data_outs, ["ok"], "{id} must have exactly one data output");
+            assert_eq!(d.output("ok").unwrap().ty, PortType::Bool);
+        }
+        // The two queries are PURE: no exec pin at all, so they can be read from
+        // a condition without being sequenced.
+        for id in ["ik.reached", "ik.reach_error"] {
+            let d = reg.get(id).unwrap();
+            assert!(d.input(EXEC_IN).is_none(), "{id} must be a pure query");
+            assert!(d.output(EXEC_THEN).is_none(), "{id} must be a pure query");
+        }
+        // The units are SAID, not implied — the P22.3 `radial_impulse` lesson.
+        let e = reg.get("ik.reach_error").unwrap().description.clone();
+        assert!(e.contains("METRES"), "{e}");
+        let w = reg.get("ik.set_goal").unwrap().description.clone();
+        assert!(w.contains("WORLD"), "{w}");
     }
 
     #[test]

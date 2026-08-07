@@ -618,6 +618,7 @@ fn both_hosts_apply_ik_the_same_way_and_a_moved_target_moves_the_trace() {
         chain: vec![0, 1, 2],
         target: [x, 1.2, 0.0],
         pole: Some([2.0, 1.0, 0.0]),
+        weight: 1.0,
     };
 
     let plain = player_trace();
@@ -673,18 +674,21 @@ fn a_refused_or_unreachable_goal_leaves_a_usable_trace() {
             chain: vec![0, 1, 2],
             target: [100.0, 0.0, 0.0],
             pole: None,
+            weight: 1.0,
         },
         // Not a chain (0 is not the parent of 2 here — it skips a joint).
         inf_ecs::IkGoal {
             chain: vec![0, 2],
             target: [0.5, 1.0, 0.0],
             pole: None,
+            weight: 1.0,
         },
         // A joint the skeleton does not have.
         inf_ecs::IkGoal {
             chain: vec![0, 1, 9],
             target: [0.5, 1.0, 0.0],
             pole: None,
+            weight: 1.0,
         },
     ] {
         let a = player_trace_with_ik(Some(goal.clone()));
@@ -724,6 +728,7 @@ fn a_non_finite_goal_cannot_panic_the_step_or_reach_the_trace() {
             chain: vec![0, 1, 2],
             target,
             pole: None,
+            weight: 1.0,
         };
         let trace = player_trace_with_ik(Some(goal.clone()));
         assert_eq!(
@@ -748,6 +753,7 @@ fn a_non_finite_goal_cannot_panic_the_step_or_reach_the_trace() {
         chain: vec![0, 1, 2],
         target: [1.2, 1.2, 0.0],
         pole: Some([2.0, 1.0, 0.0]),
+        weight: 1.0,
     }));
     assert_ne!(live, baseline);
 }
@@ -827,6 +833,7 @@ fn a_goal_on_a_non_finite_pose_refuses_instead_of_panicking() {
         chain: vec![0, 1, 2],
         target: [0.5, 1.0, 0.0],
         pole: None,
+        weight: 1.0,
     }));
     assert_eq!(
         with, without,
@@ -980,6 +987,7 @@ fn the_step_records_what_each_ik_goal_did() {
         chain: vec![0, 1, 2],
         target: [1.2, 1.2, 0.0],
         pole: Some([2.0, 1.0, 0.0]),
+        weight: 1.0,
     });
     match reached.as_slice() {
         [inf_ecs::IkOutcome::Solved(r)] => {
@@ -995,6 +1003,7 @@ fn the_step_records_what_each_ik_goal_did() {
         chain: vec![0, 1, 2],
         target: [100.0, 0.0, 0.0],
         pole: None,
+        weight: 1.0,
     });
     match missed.as_slice() {
         [inf_ecs::IkOutcome::Solved(r)] => {
@@ -1012,6 +1021,7 @@ fn the_step_records_what_each_ik_goal_did() {
         chain: vec![0, 2],
         target: [0.5, 1.0, 0.0],
         pole: None,
+        weight: 1.0,
     });
     match refused.as_slice() {
         [inf_ecs::IkOutcome::Refused(inf_anim::IkError::NotAChain { parent, child })] => {
@@ -1043,6 +1053,7 @@ fn the_step_records_what_each_ik_goal_did() {
             chain: vec![0, 1, 2],
             target: [1.2, 1.2, 0.0],
             pole: None,
+            weight: 1.0,
         }],
     );
     sim.step_once(RuntimeInput::default());

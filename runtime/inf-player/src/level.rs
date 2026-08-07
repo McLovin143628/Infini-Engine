@@ -633,6 +633,9 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
             buoyancy,
             voxel_volume,
             destructible,
+            ik_target,
+            cloth_sim,
+            hair_guides,
         } = e;
 
         let entity = world.spawn_with_guid(guid, &name, None);
@@ -790,6 +793,23 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
             // nothing and means the component is on the entity before any
             // gameplay can ask about it.
             if let Some(c) = destructible {
+                em.insert(c);
+            }
+            // ── v21 character components (P24.3) ──
+            //
+            // `IkTarget` is the one with a reader today: `step_pose_evaluation`
+            // walks it every fixed step, which is what makes a real `--pie`
+            // subprocess engage IK through the door it always used rather than
+            // through a test-only injection hook. `ClothSim` and `HairGuides` are
+            // authored in v21 and read by P24.4; spawning them here costs nothing
+            // and means the components are on the entity before anything can ask.
+            if let Some(c) = ik_target {
+                em.insert(c);
+            }
+            if let Some(c) = cloth_sim {
+                em.insert(c);
+            }
+            if let Some(c) = hair_guides {
                 em.insert(c);
             }
         }
@@ -1796,6 +1816,9 @@ mod tests {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         };
         parent.sprite = Some(Sprite {
             size: Vec2d::new(1.0, 1.0),

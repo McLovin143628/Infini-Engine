@@ -55,11 +55,11 @@ pub use partition::{PartitionSettings, DEFAULT_CELL_SIZE_M};
 
 use inf_ecs::components::{
     AlwaysLoaded, AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource, BlendMode,
-    Buoyancy, Camera, CharacterController2D, CharacterController3D, Collider2D, Collider3D, Decal,
-    Destructible, Foliage, Joint2D, Joint3D, Light, Light2D, LightKind, Material, MeshRef,
-    NineSlice, PcgVolume, RigidBody2D, RigidBody3D, RootMotion, SkeletalMesh, SkyAtmosphere,
-    Spline, Sprite, StreamingSource, Terrain, TerrainLayer, Text2D, Tilemap, TimeOfDay, Transform,
-    Volume, VoxelVolume, WaterBody,
+    Buoyancy, Camera, CharacterController2D, CharacterController3D, ClothSim, Collider2D,
+    Collider3D, Decal, Destructible, Foliage, HairGuides, IkTarget, Joint2D, Joint3D, Light,
+    Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D, RigidBody3D,
+    RootMotion, SkeletalMesh, SkyAtmosphere, Spline, Sprite, StreamingSource, Terrain,
+    TerrainLayer, Text2D, Tilemap, TimeOfDay, Transform, Volume, VoxelVolume, WaterBody,
 };
 use inf_ecs::math::{Color, Vec2d, Vec3d};
 use serde::{Deserialize, Serialize};
@@ -262,7 +262,40 @@ use uuid::Uuid;
 ///
 ///   The wire cost to a level where nothing breaks is **one discriminant byte
 ///   per entity**, the same price every additive slot since v8 has paid.
-pub const SCHEMA_VERSION: u32 = 20;
+/// * **v21** — P24.3: the entity record appends **three** character slots at
+///   once — `ik_target` ([`IkTarget`]: the authored IK goals, which
+///   `inf_ecs::pose::step_pose_evaluation` re-reads every fixed step),
+///   `cloth_sim` ([`ClothSim`]) and `hair_guides` ([`HairGuides`]). No component
+///   changed shape and the file settings are untouched, so this is once again the
+///   [`EntityRecordV10`] *shape* of bump (new slots at the tail), not the
+///   [`EntityRecordV14`] one (a component that grew). The pre-v21 entity record
+///   is frozen as [`EntityRecordV20`] and lifts with all three `None` — a level
+///   with no IK, no garments and no hair, which is exactly what every pre-v21
+///   level was.
+///
+///   **Why three slots and not one.** A phase gets one scene bump. P24.3 needs
+///   `ik_target` (it is what retires P24.2's "an IK target cannot be authored or
+///   saved"); P24.4 needs cloth and hair, and would otherwise need a **v22**
+///   inside the same phase. So the choice was one bump carrying three slots or
+///   two bumps carrying one and two, and the empty slots cost a `None`
+///   discriminant byte each — the price every additive slot since v8 has paid.
+///   Stated plainly because a reserved slot is exactly the kind of thing that
+///   rots: as of P24.3 **nothing simulates cloth or hair**. Both components are
+///   authored, reflected, persisted and spawned; P24.4 is what gives them a
+///   reader. `ik_target` is read on the day it lands.
+///
+///   **Two of the three reference an asset, and one does not.** `ClothSim` and
+///   `HairGuides` each carry an `Option<Uuid>` naming a `.inf_cloth` / `.inf_hair`
+///   — asset kinds P24.4 defines, which is an `AssetKind` addition and touches no
+///   scene wire. Until then the slots are authored with `None` and the cook's
+///   dependency closure is unchanged. `IkTarget` references no asset at all: a
+///   chain is joint indices into the skeleton the entity's `SkeletalMesh` already
+///   names, so v21 adds no edge for it and there is nothing to dangle.
+///
+///   All three follow the [`VoxelVolume`] law — *the component is a reference
+///   plus its authored knobs, so it can never be the reason a future schema has
+///   to move* — and are therefore **frozen as shipped**.
+pub const SCHEMA_VERSION: u32 = 21;
 
 /// File-level simulation settings (schema v3+), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -526,6 +559,21 @@ pub struct RuntimeEntity {
     /// asset — the chunk set is derived from this entity's own `MeshRef`.
     #[serde(default)]
     pub destructible: Option<Destructible>,
+    // ── v21 (P24.3) character components ───────────────────────────
+    /// The authored IK goals on this character. Re-read from the document every
+    /// fixed step by `inf_ecs::pose::step_pose_evaluation`, converted from world
+    /// space into the character's own frame there — so a saved foot plant works
+    /// identically in the editor's Simulate and in the shipped player, through the
+    /// door both already used.
+    #[serde(default)]
+    pub ik_target: Option<IkTarget>,
+    /// A simulated garment (reference + per-wearer knobs). Authored in v21, read
+    /// by P24.4 — see the [`SCHEMA_VERSION`] ladder for why the slot is spent now.
+    #[serde(default)]
+    pub cloth_sim: Option<ClothSim>,
+    /// Strand hair (reference + per-wearer knobs). Same story as `cloth_sim`.
+    #[serde(default)]
+    pub hair_guides: Option<HairGuides>,
 }
 
 /// A decoded level ready for the runtime to instantiate.
@@ -545,7 +593,7 @@ impl RuntimeLevel {
         decode(bytes)
     }
 
-    /// Encode to the **current** schema (v20) — a deterministic bincode payload.
+    /// Encode to the **current** schema (v21) — a deterministic bincode payload.
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode(self)
     }
@@ -582,12 +630,25 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v20 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v21 file layout (current). `entities` reuses [`RuntimeEntity`].
+#[derive(Serialize, Deserialize)]
+struct SceneFileV21 {
+    schema_version: u32,
+    title: String,
+    entities: Vec<RuntimeEntity>,
+    #[serde(default)]
+    settings: RuntimeSettings,
+}
+
+/// A frozen schema-v20 file layout. It carried the **live** settings shape (v21
+/// did not touch [`RuntimeSettings`]), so only `entities` is repointed at the
+/// frozen [`EntityRecordV20`] — the shape this file held as [`RuntimeEntity`]
+/// until v21 appended the three character slots to the live record.
 #[derive(Serialize, Deserialize)]
 struct SceneFileV20 {
     schema_version: u32,
     title: String,
-    entities: Vec<RuntimeEntity>,
+    entities: Vec<EntityRecordV20>,
     #[serde(default)]
     settings: RuntimeSettings,
 }
@@ -1273,6 +1334,9 @@ impl EntityRecordV1 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 }
@@ -1324,6 +1388,9 @@ impl EntityRecordV2 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 }
@@ -1375,6 +1442,9 @@ impl EntityRecordV3 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 }
@@ -1426,6 +1496,9 @@ impl EntityRecordV4 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 }
@@ -1477,6 +1550,9 @@ impl EntityRecordV5 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 }
@@ -1531,6 +1607,9 @@ impl EntityRecordV6 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 }
@@ -1857,6 +1936,9 @@ impl EntityRecordV7 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 }
@@ -1995,6 +2077,9 @@ impl EntityRecordV8 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 }
@@ -2132,6 +2217,9 @@ impl EntityRecordV9 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 }
@@ -2261,6 +2349,9 @@ impl EntityRecordV10 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 
@@ -2547,6 +2638,9 @@ impl EntityRecordV11 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 
@@ -2905,6 +2999,9 @@ impl EntityRecordV12 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 
@@ -3350,6 +3447,9 @@ impl EntityRecordV13 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 
@@ -3534,6 +3634,9 @@ impl EntityRecordV14 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 
@@ -3719,6 +3822,9 @@ impl EntityRecordV15 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 
@@ -3904,6 +4010,9 @@ impl EntityRecordV16 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 
@@ -4095,6 +4204,9 @@ impl EntityRecordV17 {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 
@@ -4447,11 +4559,14 @@ struct EntityRecordV19 {
 }
 
 impl EntityRecordV19 {
-    /// Lift a frozen v19 record to the live (v20) [`RuntimeEntity`]. Every slot
-    /// carries through unchanged; the one new slot lifts to `None` — a level in
-    /// which nothing breaks, which is what a v19 level was.
-    fn into_runtime(self) -> RuntimeEntity {
-        RuntimeEntity {
+    /// Lift a frozen v19 record one rung, to the frozen [`EntityRecordV20`].
+    ///
+    /// It used to lift straight to the live record; v21 inserted
+    /// [`EntityRecordV20`] between this record and [`RuntimeEntity`], and a lift
+    /// that skipped the new rung would have to be re-audited on every future
+    /// bump. One hop per rung, exactly like [`EntityRecordV18::into_v19`].
+    fn into_v20(self) -> EntityRecordV20 {
+        EntityRecordV20 {
             guid: self.guid,
             name: self.name,
             parent: self.parent,
@@ -4549,6 +4664,217 @@ impl EntityRecordV19 {
             water_body: r.water_body,
             buoyancy: r.buoyancy,
             voxel_volume: r.voxel_volume,
+        }
+    }
+}
+
+/// The **pre-v21** entity byte layout (schema v21 froze this when P24.3 appended
+/// the three character slots). Identical to the live [`RuntimeEntity`] except that it
+/// has **no** `ik_target` / `cloth_sim` / `hair_guides` fields — that is
+/// precisely what v21 added — so this is the [`EntityRecordV10`] shape of bump (
+/// new slots at the tail), not the [`EntityRecordV14`] one (a component that
+/// grew).
+///
+/// This is the shape [`SceneFileV20`] used to hold as the live record, which is
+/// why the v20 decode arm now reads *this* type and lifts it: the bytes a v20
+/// player wrote have three fewer discriminants per entity than today's, and
+/// nothing but a frozen record can keep them decoding positionally forever.
+#[derive(Clone, Serialize, Deserialize)]
+struct EntityRecordV20 {
+    guid: Uuid,
+    name: String,
+    parent: Option<Uuid>,
+    transform: Transform,
+    visible: bool,
+    mesh: Option<MeshRef>,
+    material: Option<Material>,
+    light: Option<Light>,
+    camera: Option<Camera>,
+    #[serde(default)]
+    sprite: Option<Sprite>,
+    #[serde(default)]
+    tilemap: Option<Tilemap>,
+    #[serde(default)]
+    nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    text2d: Option<Text2D>,
+    #[serde(default)]
+    light_2d: Option<Light2D>,
+    #[serde(default)]
+    rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    actor: Option<Uuid>,
+    #[serde(default)]
+    terrain: Option<Terrain>,
+    #[serde(default)]
+    pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    root_motion: Option<RootMotion>,
+    #[serde(default)]
+    attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    audio_source: Option<AudioSource>,
+    #[serde(default)]
+    audio_listener: Option<AudioListener>,
+    #[serde(default)]
+    decal: Option<Decal>,
+    #[serde(default)]
+    volume: Option<Volume>,
+    #[serde(default)]
+    spline: Option<Spline>,
+    #[serde(default)]
+    foliage: Option<Foliage>,
+    #[serde(default)]
+    streaming_source: Option<StreamingSource>,
+    #[serde(default)]
+    always_loaded: Option<AlwaysLoaded>,
+    #[serde(default)]
+    time_of_day: Option<TimeOfDay>,
+    #[serde(default)]
+    sky_atmosphere: Option<SkyAtmosphere>,
+    /// The v17 slot this record still carries — a v20 level's water must
+    /// survive the v21 hop, not merely decode.
+    #[serde(default)]
+    water_body: Option<WaterBody>,
+    #[serde(default)]
+    buoyancy: Option<Buoyancy>,
+    /// The v19 slot this record still carries — a v20 level's caves must
+    /// survive the v21 hop, not merely decode.
+    #[serde(default)]
+    voxel_volume: Option<VoxelVolume>,
+    /// The v20 slot this record exists to keep carrying — a v20 level's
+    /// breakable walls must survive the v21 hop, not merely decode.
+    #[serde(default)]
+    destructible: Option<Destructible>,
+}
+
+impl EntityRecordV20 {
+    /// Lift a frozen v20 record to the live (v21) [`RuntimeEntity`]. Every slot carries
+    /// through unchanged; the three new slots lift to `None` — a level with no
+    /// IK, no garments and no hair, which is what a v20 level was.
+    fn into_runtime(self) -> RuntimeEntity {
+        RuntimeEntity {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: self.decal,
+            volume: self.volume,
+            spline: self.spline,
+            foliage: self.foliage,
+            streaming_source: self.streaming_source,
+            always_loaded: self.always_loaded,
+            time_of_day: self.time_of_day,
+            sky_atmosphere: self.sky_atmosphere,
+            water_body: self.water_body,
+            buoyancy: self.buoyancy,
+            voxel_volume: self.voxel_volume,
+            destructible: self.destructible,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
+        }
+    }
+
+    /// Project a live [`RuntimeEntity`] back onto the frozen v20 shape (the
+    /// **downgrade-bless** path that regenerates the committed v20 fixture).
+    /// Only the three character slots are lost — asserted as a property, not as a
+    /// field list, by `v20_entity_downgrade_is_lossless_except_for_the_character_slots`.
+    #[cfg(test)]
+    fn from_current(r: RuntimeEntity) -> Self {
+        Self {
+            guid: r.guid,
+            name: r.name,
+            parent: r.parent,
+            transform: r.transform,
+            visible: r.visible,
+            mesh: r.mesh,
+            material: r.material,
+            light: r.light,
+            camera: r.camera,
+            sprite: r.sprite,
+            tilemap: r.tilemap,
+            nine_slice: r.nine_slice,
+            text2d: r.text2d,
+            light_2d: r.light_2d,
+            rigid_body_2d: r.rigid_body_2d,
+            collider_2d: r.collider_2d,
+            character_controller_2d: r.character_controller_2d,
+            rigid_body_3d: r.rigid_body_3d,
+            collider_3d: r.collider_3d,
+            character_controller_3d: r.character_controller_3d,
+            actor: r.actor,
+            terrain: r.terrain,
+            pcg_volume: r.pcg_volume,
+            skeletal_mesh: r.skeletal_mesh,
+            anim_player: r.anim_player,
+            anim_state_machine: r.anim_state_machine,
+            root_motion: r.root_motion,
+            attached_to: r.attached_to,
+            joint_2d: r.joint_2d,
+            joint_3d: r.joint_3d,
+            audio_source: r.audio_source,
+            audio_listener: r.audio_listener,
+            decal: r.decal,
+            volume: r.volume,
+            spline: r.spline,
+            foliage: r.foliage,
+            streaming_source: r.streaming_source,
+            always_loaded: r.always_loaded,
+            time_of_day: r.time_of_day,
+            sky_atmosphere: r.sky_atmosphere,
+            water_body: r.water_body,
+            buoyancy: r.buoyancy,
+            voxel_volume: r.voxel_volume,
+            destructible: r.destructible,
         }
     }
 }
@@ -4806,7 +5132,8 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .entities
                     .into_iter()
                     .map(EntityRecordV18::into_v19)
-                    .map(EntityRecordV19::into_runtime)
+                    .map(EntityRecordV19::into_v20)
+                    .map(EntityRecordV20::into_runtime)
                     .collect(),
                 settings: v18.settings,
             })
@@ -4820,7 +5147,8 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                 entities: v19
                     .entities
                     .into_iter()
-                    .map(EntityRecordV19::into_runtime)
+                    .map(EntityRecordV19::into_v20)
+                    .map(EntityRecordV20::into_runtime)
                     .collect(),
                 settings: v19.settings,
             })
@@ -4831,8 +5159,22 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v20: {e}")))?;
             Ok(RuntimeLevel {
                 title: v20.title,
-                entities: v20.entities,
+                entities: v20
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV20::into_runtime)
+                    .collect(),
                 settings: v20.settings,
+            })
+        }
+        21 => {
+            let (v21, _): (SceneFileV21, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v21: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v21.title,
+                entities: v21.entities,
+                settings: v21.settings,
             })
         }
         found => Err(SceneError::SchemaTooNew {
@@ -4842,9 +5184,9 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     }
 }
 
-/// Encode a level to the current schema (v19) as a deterministic bincode payload.
+/// Encode a level to the current schema (v21) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV20 {
+    let file = SceneFileV21 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -6585,7 +6927,7 @@ mod tests {
         // — one growth per bump, all on the one entity that carries an
         // atmosphere.
         // …and **every** entity pays the v17 `water_body: None`, v18
-        // `buoyancy: None`, v19 `voxel_volume: None` and v20 `destructible: None`
+        // `buoyancy: None`, v19 `voxel_volume: None`, v20 `destructible: None` and the THREE v21 character
         // discriminants, which are the whole price of P20.1, P20.2, P21.1 and
         // P22.2 for a level with no water, nothing that floats, no volumetric
         // ground and nothing breakable.
@@ -6600,7 +6942,8 @@ mod tests {
                     * (WATER_SLOT_BYTES
                         + BUOYANCY_SLOT_BYTES
                         + VOXEL_SLOT_BYTES
-                        + DESTRUCTIBLE_SLOT_BYTES),
+                        + DESTRUCTIBLE_SLOT_BYTES
+                        + CHARACTER_SLOT_BYTES),
             "the one entity carrying an atmosphere grew by the physical block"
         );
     }
@@ -7049,7 +7392,8 @@ mod tests {
                     * (WATER_SLOT_BYTES
                         + BUOYANCY_SLOT_BYTES
                         + VOXEL_SLOT_BYTES
-                        + DESTRUCTIBLE_SLOT_BYTES),
+                        + DESTRUCTIBLE_SLOT_BYTES
+                        + CHARACTER_SLOT_BYTES),
             "the one entity carrying an atmosphere grew by the cloud block"
         );
     }
@@ -7464,7 +7808,8 @@ mod tests {
                     * (WATER_SLOT_BYTES
                         + BUOYANCY_SLOT_BYTES
                         + VOXEL_SLOT_BYTES
-                        + DESTRUCTIBLE_SLOT_BYTES),
+                        + DESTRUCTIBLE_SLOT_BYTES
+                        + CHARACTER_SLOT_BYTES),
             "the one entity carrying an atmosphere grew by the weather block"
         );
     }
@@ -8035,7 +8380,7 @@ mod tests {
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {
         assert_eq!(
-            SCHEMA_VERSION, 20,
+            SCHEMA_VERSION, 21,
             "the scene schema moved. Generation-1 frozen tiles (TerrainTileFrozenV1, via \
              TerrainV14) cover .inf_lvl v1..=v14, generation-2 (TerrainTileFrozenV2, via \
              TerrainV15) covers v15, and generation-3 (TerrainTileFrozenV3, which \
@@ -9021,10 +9366,34 @@ mod tests {
             settings: solid.settings,
         };
         let v19_bytes = bincode::serde::encode_to_vec(&v19, bincode_config()).unwrap();
+        // **Measured between the two FROZEN rungs, not against the live
+        // encoding** — the P22.2 lesson, met again the moment v21 landed. Against
+        // `solid_bytes` this asserted 258 == 255: v21's three appended slots were
+        // being reported as part of v20's price, which is exactly the way a
+        // wire-price test stops measuring a price and starts measuring a total.
+        let v20 = SceneFileV20 {
+            schema_version: 20,
+            title: solid.title.clone(),
+            entities: solid
+                .entities
+                .iter()
+                .cloned()
+                .map(EntityRecordV20::from_current)
+                .collect(),
+            settings: solid.settings,
+        };
+        let v20_bytes = bincode::serde::encode_to_vec(&v20, bincode_config()).unwrap();
         assert_eq!(
-            solid_bytes.len(),
+            v20_bytes.len(),
             v19_bytes.len() + DESTRUCTIBLE_SLOT_BYTES,
             "the v20 slot must cost exactly one discriminant byte on a solid entity"
+        );
+        // …and the live encoding is exactly the v20 rung plus v21's three, which
+        // is what makes the line above a price rather than a coincidence.
+        assert_eq!(
+            solid_bytes.len(),
+            v20_bytes.len() + CHARACTER_SLOT_BYTES,
+            "the v21 slots must cost exactly three discriminant bytes"
         );
 
         // …and the whole component round-trips through the live codec, which is
@@ -9038,5 +9407,421 @@ mod tests {
         assert_eq!(d.strength, 1.2e7);
         assert_eq!(d.density_kg_m3, 1900.0);
         assert!(!d.runtime_destruct);
+    }
+
+    // ── v21 character components (P24.3) ──────────────────────────────────
+
+    /// What the three v21 slots cost an entity that has no IK, no garment and no
+    /// hair: three `Option` discriminants, and nothing else.
+    const CHARACTER_SLOT_BYTES: usize = 3;
+
+    /// The **v20** destructible the fixture's wall carries: every field away from
+    /// its default, so a hop that produced defaults would be caught.
+    ///
+    /// The literals must match the editor codec's `v20_fixture_destructible`
+    /// exactly — the two committed fixtures are byte-compared by the editor's
+    /// `v20_fixture_matches_the_runtime_codecs_copy`, which is the whole point of
+    /// writing them twice.
+    fn v20_fixture_destructible() -> Destructible {
+        Destructible {
+            fracture_seed: 9,
+            chunk_count: 24,
+            strength: 1.2e7,
+            density_kg_m3: 1900.0,
+            runtime_destruct: false,
+        }
+    }
+
+    /// Rebuild the exact schema-v20 file the committed v20 fixture was generated
+    /// from, out of the frozen v20 record type (the provenance lock).
+    ///
+    /// Built by lifting [`v19_scene_reference`] one rung and then authoring the
+    /// slot v20 added, so the field list can never drift from the ladder: a slot
+    /// appended later shows up here as a compile error rather than as a fixture
+    /// that quietly stopped covering it.
+    fn v20_scene_reference() -> SceneFileV20 {
+        let v19 = v19_scene_reference();
+        let mut entities: Vec<EntityRecordV20> = v19
+            .entities
+            .into_iter()
+            .map(EntityRecordV19::into_v20)
+            .collect();
+        // The wall is what only v20 could write.
+        let wall = entities
+            .iter_mut()
+            .find(|e| e.name == "Cube")
+            .expect("the v19 fixture has a Cube");
+        wall.destructible = Some(v20_fixture_destructible());
+        SceneFileV20 {
+            schema_version: 20,
+            title: "V20 Fixture Level".into(),
+            entities,
+            settings: v19.settings,
+        }
+    }
+
+    /// Regenerate `tests/fixtures/scene_v20.inf_lvl` — the **downgrade-bless**
+    /// path, walked only under `INF_BLESS_FIXTURES=1`.
+    #[test]
+    fn bless_scene_v20_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v20_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 20);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v20.inf_lvl");
+        std::fs::write(&path, &bytes).unwrap();
+        eprintln!("blessed {} ({} bytes)", path.display(), bytes.len());
+    }
+
+    #[test]
+    fn v20_fixture_is_reproducible_and_genuinely_v20() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v20.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v20 fixture present");
+        assert_eq!(bytes[0], 20, "fixture must be a genuine schema-v20 payload");
+        let rebuilt =
+            bincode::serde::encode_to_vec(v20_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v20 fixture must match our frozen v20 writer"
+        );
+    }
+
+    /// A committed **v20** payload still loads, keeps everything v20 could
+    /// express — its wall's destructible and its cavern's volume included — and
+    /// lifts with **no IK, no garment and no hair**, which is exactly what a v20
+    /// level was. The "old bytes load forever" gate for the v21 bump.
+    #[test]
+    fn v20_loads_and_lifts_without_the_character_slots() {
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v20.inf_lvl"),
+        )
+        .expect("committed v20 fixture present");
+        assert_eq!(bytes[0], 20, "the fixture must really be v20");
+        let level = decode(&bytes).unwrap();
+        assert_eq!(level.title, "V20 Fixture Level");
+        assert_eq!(level.entities.len(), 6);
+        let by_name = |n: &str| level.entities.iter().find(|e| e.name == n).unwrap();
+
+        // Everything v19 authored is still here after TWO hops …
+        assert_eq!(by_name("River").water_body, Some(v17_fixture_water()));
+        assert_eq!(by_name("Raft").buoyancy, Some(v18_fixture_buoyancy()));
+        assert_eq!(by_name("Cavern").voxel_volume, Some(v19_fixture_volume()));
+        let t = by_name("Terrain").terrain.clone().expect("terrain slot");
+        assert_eq!(t.data.get_tile((0, 0)).unwrap().biome_sample(4, 1, 1), 3);
+        assert_eq!(level.settings.sim_hz, 90.0);
+        // … including the slot v20 itself added, which is the half a
+        // defaults-only fixture would never have proven.
+        assert_eq!(
+            by_name("Cube").destructible,
+            Some(v20_fixture_destructible())
+        );
+
+        // … and the three new slots lift to `None` on every entity.
+        for e in &level.entities {
+            assert!(
+                e.ik_target.is_none() && e.cloth_sim.is_none() && e.hair_guides.is_none(),
+                "a v20 level has no IK, no cloth and no hair; the lift must not conjure any"
+            );
+        }
+
+        // Re-encoding writes the current schema and round-trips.
+        let re = encode(&level).unwrap();
+        assert_eq!(re[0], SCHEMA_VERSION as u8);
+        assert_eq!(decode(&re).unwrap(), level);
+    }
+
+    /// The v20 downgrade is lossless **except** for the three character slots —
+    /// the only things v20 cannot express. Proven as a property (round-trip a
+    /// live record through the frozen shape) rather than by listing fields, so a
+    /// slot added later cannot silently fall out of the ladder.
+    #[test]
+    fn v20_entity_downgrade_is_lossless_except_for_the_character_slots() {
+        let live = RuntimeEntity {
+            water_body: Some(v17_fixture_water()),
+            buoyancy: Some(v18_fixture_buoyancy()),
+            voxel_volume: Some(v19_fixture_volume()),
+            destructible: Some(v20_fixture_destructible()),
+            ik_target: Some(v21_fixture_ik_target()),
+            cloth_sim: Some(v21_fixture_cloth()),
+            hair_guides: Some(v21_fixture_hair()),
+            ..v9_rec(Uuid::from_u128(0xFA00), "Wall", None).into_runtime()
+        };
+        let back = EntityRecordV20::from_current(live.clone()).into_runtime();
+
+        // The three are exactly what is lost — the destructible and the voxel
+        // volume, which v20 *can* express, are not …
+        assert!(back.ik_target.is_none() && back.cloth_sim.is_none() && back.hair_guides.is_none());
+        assert_eq!(back.destructible, live.destructible);
+        assert_eq!(back.voxel_volume, live.voxel_volume);
+        // … and nothing else moved: put them back and the records are equal,
+        // which is the property form of "only these fields".
+        assert_eq!(
+            RuntimeEntity {
+                ik_target: live.ik_target.clone(),
+                cloth_sim: live.cloth_sim,
+                hair_guides: live.hair_guides,
+                ..back
+            },
+            live,
+            "the v20 downgrade lost something other than the character slots"
+        );
+    }
+
+    /// The non-default `IkTarget` the v21 tests author: two chains, an entity
+    /// reference, a pole, a lowered weight and a disabled goal — every field away
+    /// from its default, so a hop that produced defaults would be caught.
+    fn v21_fixture_ik_target() -> IkTarget {
+        use inf_ecs::components::IkGoalRecord;
+        IkTarget {
+            goals: vec![
+                IkGoalRecord {
+                    chain: vec![3, 4, 5],
+                    target_entity: inf_ecs::refs::EntityRef::new(Uuid::from_u128(0xF_1CE0)),
+                    target: Vec3d::new(0.25, -0.5, 1.5),
+                    pole: Some(Vec3d::new(0.0, 0.0, 2.0)),
+                    weight: 0.75,
+                    enabled: true,
+                },
+                IkGoalRecord {
+                    chain: vec![7, 8],
+                    target: Vec3d::new(-1.0, 0.0, 0.0),
+                    enabled: false,
+                    ..Default::default()
+                },
+            ],
+        }
+    }
+
+    fn v21_fixture_cloth() -> ClothSim {
+        ClothSim {
+            asset: Some(Uuid::from_u128(0xF_C107)),
+            enabled: false,
+            quality: 3,
+        }
+    }
+
+    fn v21_fixture_hair() -> HairGuides {
+        HairGuides {
+            asset: Some(Uuid::from_u128(0xF_4A12)),
+            enabled: false,
+            quality: 2,
+        }
+    }
+
+    /// **The v21 price, isolated.** An entity with no character components pays
+    /// exactly three discriminant bytes; one that carries them pays the
+    /// components.
+    ///
+    /// Measured as a delta between the frozen v20 and live v21 encodings of the
+    /// very same record, so it is a *price* rather than an absolute that could
+    /// silently absorb a later bump's growth (the P22.2 lesson, which the v20
+    /// price test next door had to re-learn the moment this landed).
+    #[test]
+    fn v21_costs_three_bytes_per_ordinary_entity() {
+        let plain = v9_rec(Uuid::from_u128(0xFC01), "Bedrock", None).into_runtime();
+        let live = encode(&RuntimeLevel {
+            title: "t".into(),
+            entities: vec![plain.clone()],
+            settings: RuntimeSettings::default(),
+        })
+        .unwrap();
+        let frozen = bincode::serde::encode_to_vec(
+            &SceneFileV20 {
+                schema_version: 20,
+                title: "t".into(),
+                entities: vec![EntityRecordV20::from_current(plain.clone())],
+                settings: RuntimeSettings::default(),
+            },
+            bincode_config(),
+        )
+        .unwrap();
+        assert_eq!(
+            live.len(),
+            frozen.len() + CHARACTER_SLOT_BYTES,
+            "the three v21 slots must cost exactly one discriminant byte each"
+        );
+
+        // A record that CARRIES them costs more than its own discriminants —
+        // and the IK goals, which are the only unbounded one, cost their chains.
+        let rigged = RuntimeEntity {
+            ik_target: Some(v21_fixture_ik_target()),
+            cloth_sim: Some(v21_fixture_cloth()),
+            hair_guides: Some(v21_fixture_hair()),
+            ..plain
+        };
+        let rigged_bytes = encode(&RuntimeLevel {
+            title: "t".into(),
+            entities: vec![rigged],
+            settings: RuntimeSettings::default(),
+        })
+        .unwrap();
+        assert!(rigged_bytes.len() > live.len() + CHARACTER_SLOT_BYTES);
+    }
+
+    /// The v21 additions round-trip through the whole codec — including the
+    /// **new decode arm**, which only a payload stamped v21 exercises.
+    #[test]
+    fn v21_character_slots_round_trip_through_the_codec() {
+        let level = RuntimeLevel {
+            title: "Rigged".into(),
+            entities: vec![RuntimeEntity {
+                ik_target: Some(v21_fixture_ik_target()),
+                cloth_sim: Some(v21_fixture_cloth()),
+                hair_guides: Some(v21_fixture_hair()),
+                ..v9_rec(Uuid::from_u128(0xFB01), "Hero", None).into_runtime()
+            }],
+            settings: RuntimeSettings::default(),
+        };
+        let bytes = encode(&level).unwrap();
+        assert_eq!(bytes[0], SCHEMA_VERSION as u8);
+        let back = decode(&bytes).unwrap();
+        assert_eq!(back, level);
+        // Re-encoding is byte-identical.
+        assert_eq!(encode(&back).unwrap(), bytes);
+
+        // The goals survive field-for-field, including the disabled one — a hop
+        // that dropped `enabled: false` would still round-trip the vector's
+        // length.
+        let t = back.entities[0].ik_target.clone().unwrap();
+        assert_eq!(t.goals.len(), 2);
+        assert_eq!(t.goals[0].chain, vec![3, 4, 5]);
+        assert_eq!(t.goals[0].weight, 0.75);
+        assert_eq!(
+            t.goals[0].target_entity.get(),
+            Some(Uuid::from_u128(0xF_1CE0))
+        );
+        assert!(!t.goals[1].enabled);
+    }
+
+    /// **A v21 payload decodes consuming EVERY byte** — the shape pin.
+    ///
+    /// `decode_from_slice` ignores trailing bytes by contract, so a field
+    /// *removed* from the live record silently leaves a tail. Checked here on the
+    /// current schema, and paired with the asymmetric arm below, which is the
+    /// half that catches the opposite mistake.
+    #[test]
+    fn a_v21_payload_decodes_consuming_every_byte() {
+        let level = RuntimeLevel {
+            title: "Shape".into(),
+            entities: vec![
+                RuntimeEntity {
+                    ik_target: Some(v21_fixture_ik_target()),
+                    ..v9_rec(Uuid::from_u128(0xFD01), "A", None).into_runtime()
+                },
+                v9_rec(Uuid::from_u128(0xFD02), "B", None).into_runtime(),
+            ],
+            settings: RuntimeSettings::default(),
+        };
+        let bytes = encode(&level).unwrap();
+        let (_, consumed): (SceneFileV21, usize) =
+            bincode::serde::decode_from_slice(&bytes, bincode_config()).unwrap();
+        assert_eq!(
+            consumed,
+            bytes.len(),
+            "the v21 decoder left {} bytes on the floor",
+            bytes.len() - consumed
+        );
+    }
+
+    /// **Appending a tail slot without bumping must be CATCHABLE** — the
+    /// asymmetric half (the P24.2 audit's M-BUMP lesson, applied to the scene
+    /// wire the batch after it was learned).
+    ///
+    /// The shape pin next door is *symmetric*: it decodes today's payload and
+    /// checks every byte is consumed. That catches a slot REMOVED and it does not
+    /// catch one ADDED — the added bytes are simply trailing, and
+    /// `decode_from_slice` ignores trailing bytes by contract. So nothing in
+    /// either codec forced the NEXT bump, on the very format this batch just
+    /// bumped, and every scene bump from v8 to v21 has relied on an author
+    /// remembering.
+    ///
+    /// A **shadow v22** — today's record plus one tail slot, exactly what an
+    /// author appending a component would write — must not be readable as a v21.
+    /// Two claims, and the second is the one with teeth:
+    ///
+    ///  1. the v22 bytes are LONGER, so a slot really was added;
+    ///  2. decoding them as a `SceneFileV21` leaves bytes on the floor, which is
+    ///     the signature the shape pin refuses. If a future append ever came out
+    ///     byte-compatible, this says so before the ladder is quietly wrong.
+    #[test]
+    fn a_tail_slot_appended_without_a_bump_is_caught_by_the_shape_pin() {
+        // Bytes rather than a shadow RECORD: the record's 47 fields would have
+        // to be re-declared to append one, and a re-declaration that drifted from
+        // the live shape is exactly what this test exists to catch. Appending the
+        // encoded `None` discriminant produces the same byte sequence a new
+        // `Option<T>` slot on the last entity would — which is the whole content
+        // of "an appended slot".
+        let level = RuntimeLevel {
+            title: "Shadow".into(),
+            entities: vec![v9_rec(Uuid::from_u128(0xFE01), "A", None).into_runtime()],
+            settings: RuntimeSettings::default(),
+        };
+        let v21 = encode(&level).unwrap();
+        let mut v22 = v21.clone();
+        // One `None` discriminant — the cheapest possible appended slot, and
+        // therefore the hardest case for a pin to notice.
+        v22.extend_from_slice(
+            &bincode::serde::encode_to_vec(Option::<u8>::None, bincode_config()).unwrap(),
+        );
+
+        assert!(
+            v22.len() > v21.len(),
+            "the shadow v22 is not longer than v21, so nothing was appended and \
+             this test is measuring nothing"
+        );
+        // The asymmetric claim: v22 bytes decode as a v21 file — that is what
+        // makes an un-bumped append silent — and the decoder does NOT consume
+        // them all, which is what the shape pin refuses.
+        let (back, consumed): (SceneFileV21, usize) =
+            bincode::serde::decode_from_slice(&v22, bincode_config())
+                .expect("a longer payload still decodes");
+        assert_eq!(
+            back.entities.len(),
+            1,
+            "the appended bytes changed the prefix; then it was not an append"
+        );
+        assert!(
+            consumed < v22.len(),
+            "an appended tail slot left NO trailing bytes, so \
+             `a_v21_payload_decodes_consuming_every_byte` could not see it either — \
+             the ladder has no forcing function at all"
+        );
+        assert_eq!(
+            v22.len() - consumed,
+            v22.len() - v21.len(),
+            "the unconsumed tail is not exactly the appended slot"
+        );
+    }
+
+    /// A payload from a **newer** build is refused by name, with both versions in
+    /// the message — the [`SceneError::SchemaTooNew`] doctrine, re-checked at the
+    /// new ceiling.
+    #[test]
+    fn a_v22_payload_is_refused_by_name() {
+        let level = RuntimeLevel {
+            title: "Future".into(),
+            entities: vec![v9_rec(Uuid::from_u128(0xFF01), "A", None).into_runtime()],
+            settings: RuntimeSettings::default(),
+        };
+        let mut bytes = encode(&level).unwrap();
+        bytes[0] = SCHEMA_VERSION as u8 + 1;
+        match decode(&bytes) {
+            Err(SceneError::SchemaTooNew { found, current }) => {
+                assert_eq!(found, SCHEMA_VERSION + 1);
+                assert_eq!(current, SCHEMA_VERSION);
+            }
+            other => panic!("expected SchemaTooNew, got {other:?}"),
+        }
+        // …and there is no "too old" direction to refuse: every schema from v1 up
+        // is migrated by the ladder above, which is what makes this codec's
+        // contract different from `SessionSave`'s two-sided one.
+        assert!(decode(
+            &std::fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v20.inf_lvl")
+            )
+            .unwrap()
+        )
+        .is_ok());
     }
 }

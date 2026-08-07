@@ -709,6 +709,9 @@ fn a_persistent_blueprint_binds_in_a_partitioned_level() {
         buoyancy: None,
         voxel_volume: None,
         destructible: None,
+        ik_target: None,
+        cloth_sim: None,
+        hair_guides: None,
     };
 
     let level = inf_scene::RuntimeLevel {

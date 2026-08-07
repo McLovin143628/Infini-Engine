@@ -1306,6 +1306,9 @@ mod tests {
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }
     }
 

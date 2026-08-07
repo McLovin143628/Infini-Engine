@@ -34,10 +34,11 @@
 //! [`PoseStoreRes`] is a bevy **resource** on the sim world — verbatim the
 //! reasoning [`crate::deform::DeformFieldRes`] records:
 //!
-//! * not a component, so **no schema moves** (scene v20 is frozen; the scene
+//! * not a component, so **no schema moves** for the pose itself; the scene
 //!   serializer walks entities and components, never resources, so there is no
 //!   path from an evaluated pose to a file — which is correct, a pose is derived
-//!   state and not authored content);
+//!   state and not authored content (its *inputs* — the machine, and since v21
+//!   the IK target — are components, and that is the line);
 //! * not a host member, because both scene projectors read the sim world and
 //!   neither reads the host struct;
 //! * still sim state in every sense that matters: written only from the fixed
@@ -45,7 +46,12 @@
 //!
 //! Since P24.2 the same slot also applies **IK** ([`inf_anim::ik`]) as a post-pass
 //! over the evaluated pose, from [`IkTargetsRes`] — a second resource, for the
-//! same reasons and with the schema ruling written down on the type.
+//! same reasons and with the schema ruling written down on the type. Since P24.3
+//! it also reads the **authored** [`crate::components::IkTarget`] component
+//! (scene v21) through [`authored_ik_goals`], applies each goal's authored
+//! `weight` as a `pslerp` back toward the pre-solve pose, and hands the
+//! skeleton's [`inf_anim::JointLimit`] table to the solver so a hinge cannot be
+//! bent backwards by a target that asks.
 //!
 //! The resource is **absent** until a machine actually evaluates a pose, and it
 //! is removed again the moment none does — so a level with no `AnimStateMachine`
@@ -71,6 +77,7 @@ use inf_anim::{AnimClip, ClipRef, Pose, SkeletonAsset, SmContext, SmRuntime, Sta
 use uuid::Uuid;
 
 use crate::components::{AnimStateMachine, Guid, SkeletalMesh, SmRuntimeState};
+use crate::math::Vec3d;
 use crate::world::EcsWorld;
 
 /// Convert the ECS component's transient runtime POD into the anim runtime.
@@ -120,31 +127,62 @@ pub struct IkGoal {
     /// A point the middle of the chain bends toward — a knee's forward, an
     /// elbow's back. `None` keeps the pose's existing bend.
     pub pole: Option<[f32; 3]>,
+    /// How much of the solve to apply, `0..=1` (P24.3).
+    ///
+    /// `1.0` takes a path that never touches the pre-solve pose at all, so a
+    /// caller that never lowers the weight produces exactly the bytes P24.2 did.
+    /// Below 1 the chain's joints are `pslerp`ed from the pre-solve rotations
+    /// toward the solved ones — portable, because this feeds `state_bytes`.
+    pub weight: f32,
+}
+
+impl IkGoal {
+    /// A goal applied at full strength — the P24.2 shape, so a caller that has
+    /// no opinion about blending does not have to have one.
+    pub fn full(chain: Vec<u16>, target: [f32; 3], pole: Option<[f32; 3]>) -> Self {
+        Self {
+            chain,
+            target,
+            pole,
+            weight: 1.0,
+        }
+    }
 }
 
 /// **Every entity's IK goals**, keyed by [`Guid`] — a bevy resource, exactly like
 /// [`PoseStoreRes`].
 ///
-/// # THE SCHEMA RULING (P24.2), stated where it is implemented
+/// # THE SCHEMA RULING (P24.2), and what P24.3 did with it
 ///
-/// An `IkTarget` **component** was the obvious home and it is not available:
-/// `inf_scene::EntityRecord` is a positional bincode struct with one
-/// `Option<T>` field per component type, so adding one appends a field and moves
-/// the wire — which is exactly how P22.2's `Destructible` took the scene from
-/// v19 to **v20**. Scene v20 is frozen for this batch, so the authored component
-/// is deferred to P24.3 rather than spending the phase's bump here.
+/// P24.2 recorded that an `IkTarget` **component** was the obvious home and was
+/// not available: `inf_scene::EntityRecord` is a positional bincode struct with
+/// one `Option<T>` field per component type, so adding one appends a field and
+/// moves the wire — which is exactly how P22.2's `Destructible` took the scene
+/// from v19 to **v20**. Scene v20 was frozen for that batch, so the authored
+/// component was deferred here.
 ///
-/// What that leaves is the [`crate::deform::DeformFieldRes`] doctrine, which is
-/// the right shape for what IK targets *are* at runtime anyway: a resource is
-/// **written only from the fixed step's inputs and can never be saved**, so a
-/// foot planted on a slope this frame cannot end up in the author's document. It
-/// is sim state in every sense that matters — a pure function of the step history
-/// — and, because [`step_pose_evaluation`] reads it, **both hosts inherit IK with
-/// no host-side change at all**: no signature moved, no call site moved, and the
-/// two fixed steps cannot drift because neither of them knows this happened.
+/// **P24.3 spent the bump** ([`crate::components::IkTarget`], scene v21), and
+/// this resource did not go away — it became the *runtime* half of a pair:
 ///
-/// The resource is **absent** until something sets a goal, so a level with no IK
-/// is byte-identical to its pre-P24.2 self, `pose_state_bytes` included.
+/// * the **component** is authored, saved, and re-derived from the document on
+///   every fixed step by [`authored_ik_goals`];
+/// * this **resource** is what a script sets ([`set_ik_goals`], which the `ik.*`
+///   Blueprint kit calls) and is dropped when a session ends.
+///
+/// [`step_pose_evaluation`] solves the authored goals first and the runtime ones
+/// after, in one list, so neither source silently disables the other.
+///
+/// The reason to keep the resource at all is the [`crate::deform::DeformFieldRes`]
+/// doctrine, which is still the right shape for what a *scripted* IK target is:
+/// **written only from the fixed step's inputs and never saved**, so a foot
+/// planted on a slope this frame cannot end up in the author's document. And
+/// because [`step_pose_evaluation`] reads it, **both hosts inherit IK with no
+/// host-side change at all**: no signature moved, no call site moved, and the two
+/// fixed steps cannot drift because neither of them knows this happened.
+///
+/// The resource is **absent** until something sets a goal or an authored goal
+/// produces a verdict, so a level with no IK is byte-identical to its pre-P24.2
+/// self, `pose_state_bytes` included.
 #[derive(Resource, Default, Debug, Clone, PartialEq)]
 pub struct IkTargetsRes {
     /// The goals, by entity.
@@ -227,9 +265,227 @@ pub fn ik_outcomes(world: &EcsWorld, guid: Uuid) -> Option<&[IkOutcome]> {
         .map(Vec::as_slice)
 }
 
+// ── the `ik.*` node kit's Ring-0 doors (P24.3) ──────────────────────────────
+//
+// **The kit edits the AUTHORED component, not the runtime resource**, and that
+// is a decision worth stating where it is implemented.
+//
+// The obvious alternative was to have the nodes call [`set_ik_goals`]. It needs
+// a *chain*, which is joint indices, which a Blueprint author does not have and
+// could not type — deriving one from a root/tip pair needs the skeleton, and
+// neither host's Blueprint dispatch context holds a skeleton registry. Threading
+// one into both would be a new field in two hand-maintained mirrors, for a
+// derivation the author has already done: the chain is on the component.
+//
+// So the split is by *what each half knows*. The component says **which joints**
+// (authored once, in the Skeleton Editor); the kit says **where the goal is**
+// (per frame, from gameplay). [`set_ik_goals`] stays the door for a caller that
+// genuinely has a chain — the concatenation in [`step_pose_evaluation`] is what
+// keeps both live at once.
+//
+// Every door here returns a `bool` rather than erroring: a Blueprint node is not
+// a transaction, and failing the handler would take down the rest of the Tick
+// body for a goal index the author fixes by typing a smaller number (the
+// `voxel.*` kit's ruling, one phase on).
+
+/// Edit one authored goal's **world-space target**. `false` when the entity has
+/// no [`crate::components::IkTarget`] or the index is past its goal list.
+pub fn set_authored_goal_target(
+    world: &mut EcsWorld,
+    guid: Uuid,
+    index: usize,
+    target: Vec3d,
+) -> bool {
+    with_authored_goal(world, guid, index, |g| g.target = target)
+}
+
+/// Edit one authored goal's **weight** (clamped to `0..=1`; a non-finite value is
+/// refused rather than stored, because it would reach `pslerp`).
+pub fn set_authored_goal_weight(
+    world: &mut EcsWorld,
+    guid: Uuid,
+    index: usize,
+    weight: f32,
+) -> bool {
+    if !weight.is_finite() {
+        return false;
+    }
+    with_authored_goal(world, guid, index, |g| g.weight = weight.clamp(0.0, 1.0))
+}
+
+/// Turn one authored goal on or off.
+pub fn set_authored_goal_enabled(
+    world: &mut EcsWorld,
+    guid: Uuid,
+    index: usize,
+    enabled: bool,
+) -> bool {
+    with_authored_goal(world, guid, index, |g| g.enabled = enabled)
+}
+
+fn with_authored_goal(
+    world: &mut EcsWorld,
+    guid: Uuid,
+    index: usize,
+    edit: impl FnOnce(&mut crate::components::IkGoalRecord),
+) -> bool {
+    let Some(e) = world.entity_of(guid) else {
+        return false;
+    };
+    let Some(mut t) = world.world_mut().get_mut::<crate::components::IkTarget>(e) else {
+        return false;
+    };
+    match t.goals.get_mut(index) {
+        Some(g) => {
+            edit(g);
+            true
+        }
+        None => false,
+    }
+}
+
+/// **Did every goal reach its target last fixed step?**
+///
+/// The gameplay-readable half of [`ik_outcomes`], and the reason P24.2's
+/// `IkReport` is not write-only: "is the hand on the ladder rung yet" is now a
+/// question a Blueprint can ask. `false` on an entity with no goals — nothing
+/// reached, because nothing was asked — and on any goal that refused or was not
+/// posed, which is the conservative reading.
+pub fn ik_reached(world: &EcsWorld, guid: Uuid) -> bool {
+    match ik_outcomes(world, guid) {
+        Some(o) if !o.is_empty() => o.iter().all(|x| match x {
+            IkOutcome::Solved(r) => r.reached,
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// **The worst reach error across this entity's goals last step**, metres.
+///
+/// `0.0` when nothing was solved — the same number a perfect solve gives, and
+/// deliberately so: from gameplay's side "no goal" and "goal met" are both "the
+/// limb is where it should be". [`ik_outcomes`] is where the two differ.
+pub fn ik_reach_error(world: &EcsWorld, guid: Uuid) -> f32 {
+    ik_outcomes(world, guid)
+        .map(|o| {
+            o.iter()
+                .filter_map(|x| match x {
+                    IkOutcome::Solved(r) => Some(r.reach_error),
+                    _ => None,
+                })
+                .fold(0.0f32, f32::max)
+        })
+        .unwrap_or(0.0)
+}
+
 /// **Forget every IK goal.** The twin of [`clear_poses`], and called by it.
+///
+/// Clears the **runtime** goals only — the authored [`IkTarget`] components are
+/// document state and are re-read from scratch on the next step, exactly like the
+/// `AnimStateMachine` they sit beside. That asymmetry is the point of the two
+/// halves: what a script set is session state and is dropped when the session
+/// ends; what an author placed survives, because it is in the file.
 pub fn clear_ik_goals(world: &mut EcsWorld) {
     world.world_mut().remove_resource::<IkTargetsRes>();
+}
+
+/// **The authored goals, converted for the solver** — one entry per entity that
+/// carries a non-empty, enabled [`IkTarget`] (P24.3).
+///
+/// This is the whole of "an authored component becomes an IK goal", and it is
+/// called from inside [`step_pose_evaluation`] every fixed step rather than once
+/// at session start. Both halves of that matter:
+///
+/// * **Every step**, because a goal that follows a moving hand-hold — or a
+///   character that walks while its foot is planted — is the case IK exists for.
+///   Seeded once, a target would be a constant in the character's *own* frame and
+///   would drift with it.
+/// * **Inside the step**, because that keeps the number of doors at one. The
+///   editor's `SimSession` and the player's `RuntimeSim` both call
+///   `step_pose_evaluation` and neither knows this happens, which is exactly why
+///   their traces cannot disagree about it.
+///
+/// # The frame conversion, which is the reason this function exists
+///
+/// [`IkGoalRecord`] is **world** space (an author places a target with a gizmo,
+/// in the world) and [`IkGoal`] is **model** space (a pose is evaluated in the
+/// character's own frame). The conversion is the entity's own
+/// [`GlobalTransform`], inverted. An entity whose global transform is singular —
+/// a zero scale — has no inverse and its goals are **dropped**, not applied
+/// through a matrix full of infinities.
+///
+/// `target_entity` resolves through the world's GUID index; a GUID naming nothing
+/// is treated as unbound (`target` is then absolute), which leaves a chain
+/// reaching for the last thing it was told rather than snapping to rest when a
+/// hand-hold is deleted mid-session.
+pub fn authored_ik_goals(world: &mut EcsWorld) -> BTreeMap<Uuid, Vec<IkGoal>> {
+    use crate::components::{GlobalTransform, IkTarget};
+    // Collected (and CLONED) first, then walked in Guid order: the result must be
+    // a property of the level and not of bevy's archetype layout, and the anchor
+    // lookup below reads the same world this query borrows.
+    let mut rows: Vec<(Uuid, IkTarget, glam::DAffine3)> = {
+        let w = world.world_mut();
+        let mut q = w.query::<(&Guid, &IkTarget, &GlobalTransform)>();
+        q.iter(w).map(|(g, t, gt)| (g.0, t.clone(), gt.0)).collect()
+    };
+    rows.sort_by_key(|(g, _, _)| *g);
+    let w = world.world();
+    let mut out: BTreeMap<Uuid, Vec<IkGoal>> = BTreeMap::new();
+    for (guid, target, global) in rows {
+        if target.goals.is_empty() {
+            continue;
+        }
+        let det = global.matrix3.determinant();
+        if !det.is_finite() || det.abs() < 1.0e-12 {
+            // A singular placement has no model frame to convert into. Dropping
+            // the goals is the honest answer; inverting anyway makes every
+            // downstream number an infinity the solver would then refuse
+            // one-by-one with a NonFinite it could not explain.
+            continue;
+        }
+        let inv = global.inverse();
+        let mut goals = Vec::new();
+        for g in &target.goals {
+            if !g.enabled || g.chain.len() < 2 {
+                continue;
+            }
+            let anchor = g
+                .target_entity
+                .get()
+                .and_then(|id| world.entity_of(id))
+                .and_then(|e| w.get::<GlobalTransform>(e))
+                .map(|gt| gt.0.translation)
+                .unwrap_or(glam::DVec3::ZERO);
+            let world_target = anchor + glam::DVec3::new(g.target.x, g.target.y, g.target.z);
+            let local = inv.transform_point3(world_target);
+            // A pole is a DIRECTION-defining point in the same world frame, so it
+            // converts the same way — but it is deliberately NOT offset by the
+            // target entity: a pole says "bend toward here", and tying it to the
+            // thing the hand is reaching for would swing the elbow whenever the
+            // hand-hold moved.
+            let pole = g.pole.map(|p| {
+                let lp = inv.transform_point3(glam::DVec3::new(p.x, p.y, p.z));
+                [lp.x as f32, lp.y as f32, lp.z as f32]
+            });
+            goals.push(IkGoal {
+                chain: g.chain.clone(),
+                target: [local.x as f32, local.y as f32, local.z as f32],
+                pole,
+                // Clamped here rather than trusted: the field is authored, and a
+                // weight of 7 or of NaN must not reach `pslerp`.
+                weight: if g.weight.is_finite() {
+                    g.weight.clamp(0.0, 1.0)
+                } else {
+                    1.0
+                },
+            });
+        }
+        if !goals.is_empty() {
+            out.insert(guid, goals);
+        }
+    }
+    out
 }
 
 /// One entity's pose as the sim evaluated it this fixed step.
@@ -425,11 +681,22 @@ pub fn step_pose_evaluation<'c>(
     // below needs `&mut EcsWorld` and a borrow of the resource would outlive it.
     // Cloned rather than referenced for the same reason; a goal is a chain and
     // two floats, and a level has a handful.
-    let goals: BTreeMap<Uuid, Vec<IkGoal>> = world
+    //
+    // **The AUTHORED goals come first, then the runtime ones** (P24.3). Two
+    // sources, one list, in a fixed order — rather than one winning over the
+    // other, which would have made `set_ik_goals` (and therefore the `ik.*`
+    // Blueprint kit) a no-op on exactly the characters an author had rigged.
+    // Concatenation is also what keeps `IkTargetsRes::last` readable: the verdict
+    // vector lines up index-for-index with authored-then-runtime.
+    let mut goals: BTreeMap<Uuid, Vec<IkGoal>> = authored_ik_goals(world);
+    let runtime: BTreeMap<Uuid, Vec<IkGoal>> = world
         .world()
         .get_resource::<IkTargetsRes>()
         .map(|r| r.goals.clone())
         .unwrap_or_default();
+    for (guid, list) in runtime {
+        goals.entry(guid).or_default().extend(list);
+    }
     let mut posed: BTreeMap<Uuid, EvaluatedPose> = BTreeMap::new();
     let mut verdicts: BTreeMap<Uuid, Vec<IkOutcome>> = BTreeMap::new();
     for (entity, guid, sm_guid, rt_state, skeleton_id) in targets {
@@ -461,21 +728,60 @@ pub fn step_pose_evaluation<'c>(
                         // a **value**, and the pose it refused on is untouched —
                         // so one bad goal costs its own chain and nothing else.
                         for goal in goals.get(&guid).map(Vec::as_slice).unwrap_or(&[]) {
+                            // **The blend snapshot, taken only when it is
+                            // needed** (P24.3). At full weight nothing is
+                            // captured and nothing is blended, so a level that
+                            // never lowers a weight produces exactly the bytes
+                            // P24.2 did — the same "absent costs nothing"
+                            // discipline the resource itself follows.
+                            let before: Option<Vec<(usize, [f32; 4])>> =
+                                (goal.weight < 1.0).then(|| {
+                                    goal.chain
+                                        .iter()
+                                        .map(|&j| j as usize)
+                                        .filter(|&j| j < pose.locals.len())
+                                        .map(|j| (j, pose.locals[j].rotation))
+                                        .collect()
+                                });
                             // The verdict is KEPT (audit M-CALLER): `let _ =`
                             // here made every typed refusal and every reach
                             // number unreachable by any layer.
-                            outcomes.push(
-                                match inf_anim::solve_chain(
-                                    &asset.skeleton,
-                                    &mut pose,
-                                    &goal.chain,
-                                    glam::Vec3::from_array(goal.target),
-                                    goal.pole.map(glam::Vec3::from_array),
-                                ) {
-                                    Ok(r) => IkOutcome::Solved(r),
-                                    Err(e) => IkOutcome::Refused(e),
-                                },
-                            );
+                            let outcome = match inf_anim::solve_chain(
+                                &asset.skeleton,
+                                &mut pose,
+                                &goal.chain,
+                                glam::Vec3::from_array(goal.target),
+                                goal.pole.map(glam::Vec3::from_array),
+                                // **The authored joint limits** (P24.3). The
+                                // asset carries them and this is the only place
+                                // that has both it and the pose, so an elbow
+                                // bending backwards is now a thing the engine
+                                // cannot do rather than a thing no caller
+                                // happened to prevent.
+                                &asset.limits,
+                            ) {
+                                Ok(r) => IkOutcome::Solved(r),
+                                Err(e) => IkOutcome::Refused(e),
+                            };
+                            // Blend back toward the pre-solve pose. Applied only
+                            // on a SOLVE: a refusal leaves the pose untouched by
+                            // contract, so blending toward a snapshot of it would
+                            // be arithmetic on two equal values — and, on the
+                            // arm where the snapshot is `None`, would be a
+                            // silent no-op that hid the refusal's own rule.
+                            if let (Some(prev), IkOutcome::Solved(_)) = (&before, &outcome) {
+                                for &(j, rot) in prev {
+                                    let a = glam::Quat::from_array(rot);
+                                    let b = glam::Quat::from_array(pose.locals[j].rotation);
+                                    // `pslerp`, not `Quat::slerp`: the P24.2
+                                    // audit's M-SLERP finding — `slerp` reaches
+                                    // `acos_approx` plus three `sin`s, and this
+                                    // result is folded into `state_bytes`.
+                                    pose.locals[j].rotation =
+                                        inf_math::pslerp(a, b, goal.weight).to_array();
+                                }
+                            }
+                            outcomes.push(outcome);
                         }
                         let sockets =
                             inf_anim::socket_transforms(&asset.skeleton, &pose, &asset.sockets);
@@ -507,8 +813,19 @@ pub fn step_pose_evaluation<'c>(
     // 3. Publish (rule 4).
     {
         let w = world.world_mut();
-        if let Some(mut res) = w.get_resource_mut::<IkTargetsRes>() {
-            res.last = verdicts;
+        match w.get_resource_mut::<IkTargetsRes>() {
+            Some(mut res) => res.last = verdicts,
+            // **An AUTHORED goal has no resource to land its verdict in** — the
+            // resource is created by `set_ik_goals`, and P24.3's goals never go
+            // through it. Created here, and only when there is something to say,
+            // so a level with no IK at all still never grows one.
+            None if !verdicts.is_empty() => {
+                w.insert_resource(IkTargetsRes {
+                    goals: BTreeMap::new(),
+                    last: verdicts,
+                });
+            }
+            None => {}
         }
     }
     let w = world.world_mut();
@@ -849,5 +1166,333 @@ mod tests {
             started: true,
         };
         assert_eq!(from_anim_runtime(to_anim_runtime(s)), s);
+    }
+
+    // ── P24.3: the AUTHORED goals ─────────────────────────────────────────
+
+    use crate::components::{GlobalTransform, IkGoalRecord, IkTarget, Transform};
+    use crate::math::Vec3d;
+
+    /// The same character as [`world_with_character`], plus an authored
+    /// [`IkTarget`] and a real placement, so the world→model conversion has
+    /// something to convert.
+    fn world_with_authored_ik(guid: Uuid, at: Vec3d, goals: Vec<IkGoalRecord>) -> EcsWorld {
+        let mut world = EcsWorld::new();
+        world.world_mut().spawn((
+            Guid(guid),
+            Transform {
+                translation: at,
+                ..Default::default()
+            },
+            GlobalTransform(glam::DAffine3::from_translation(glam::DVec3::new(
+                at.x, at.y, at.z,
+            ))),
+            AnimStateMachine {
+                sm: Some(SM),
+                ..Default::default()
+            },
+            SkeletalMesh {
+                mesh: Some(Uuid::from_u128(9)),
+                skeleton: Some(SKEL),
+            },
+            IkTarget { goals },
+        ));
+        world.reindex_guids();
+        world
+    }
+
+    fn authored(chain: Vec<u16>, target: Vec3d) -> IkGoalRecord {
+        IkGoalRecord {
+            chain,
+            target,
+            ..Default::default()
+        }
+    }
+
+    /// **The headline gate for the authored half**: a saved `IkTarget` bends the
+    /// character, through the same one door both hosts call, with nothing set at
+    /// runtime.
+    #[test]
+    fn an_authored_ik_target_moves_the_pose() {
+        let guid = Uuid::from_u128(0x24_3001);
+        let f = Fixture::new();
+        let mut plain = world_with_character(guid);
+        f.step(&mut plain, 0.25, 0.0);
+        let rest = evaluated_pose(&plain, guid).unwrap().clone();
+
+        let mut rigged = world_with_authored_ik(
+            guid,
+            Vec3d::ZERO,
+            vec![authored(vec![0, 1], Vec3d::new(0.7, 0.7, 0.0))],
+        );
+        f.step(&mut rigged, 0.25, 0.0);
+        let posed = evaluated_pose(&rigged, guid).expect("a pose was published");
+        assert_ne!(
+            posed.pose, rest.pose,
+            "an authored IK target must reach the solver"
+        );
+        // …and it SAYS what it did, through the read door a gate can use.
+        let outcomes = ik_outcomes(&rigged, guid).expect("a verdict was published");
+        assert_eq!(outcomes.len(), 1);
+        assert!(
+            matches!(outcomes[0], IkOutcome::Solved(_)),
+            "{outcomes:?} — an authored goal must solve, not refuse"
+        );
+        // Nothing set a runtime goal, so the resource carries only the verdict.
+        assert!(ik_goals(&rigged, guid).is_none());
+    }
+
+    /// **Anti-vacuity, and the property the PIE arm rests on**: MOVING the
+    /// authored target moves the trace. A component that was read once and cached
+    /// would pass the test above and fail this one.
+    #[test]
+    fn moving_the_authored_target_moves_the_trace() {
+        let f = Fixture::new();
+        let guid = Uuid::from_u128(0x24_3002);
+        let bytes_for = |t: Vec3d| {
+            let mut w = world_with_authored_ik(guid, Vec3d::ZERO, vec![authored(vec![0, 1], t)]);
+            f.step(&mut w, 0.25, 0.0);
+            pose_state_bytes(&w)
+        };
+        let a = bytes_for(Vec3d::new(0.7, 0.7, 0.0));
+        let b = bytes_for(Vec3d::new(-0.7, 0.7, 0.0));
+        assert!(!a.is_empty());
+        assert_ne!(a, b, "the trace must be a function of where the target is");
+        // Same target twice ⇒ same bytes (the determinism half).
+        assert_eq!(a, bytes_for(Vec3d::new(0.7, 0.7, 0.0)));
+    }
+
+    /// The target is **world** space: the same authored offset on a character
+    /// standing somewhere else produces the same *model-space* pose, which is the
+    /// whole reason `authored_ik_goals` inverts the global transform.
+    #[test]
+    fn the_authored_target_is_world_space() {
+        let f = Fixture::new();
+        // Character at the origin reaching for world (0.7, 0.7, 0).
+        let mut here = world_with_authored_ik(
+            Uuid::from_u128(0x24_3003),
+            Vec3d::ZERO,
+            vec![authored(vec![0, 1], Vec3d::new(0.7, 0.7, 0.0))],
+        );
+        // The same character 100 m away, reaching for the point 100 m away — the
+        // same thing relative to its own body.
+        let mut there = world_with_authored_ik(
+            Uuid::from_u128(0x24_3003),
+            Vec3d::new(100.0, 0.0, 0.0),
+            vec![authored(vec![0, 1], Vec3d::new(100.7, 0.7, 0.0))],
+        );
+        f.step(&mut here, 0.25, 0.0);
+        f.step(&mut there, 0.25, 0.0);
+        let a = evaluated_pose(&here, Uuid::from_u128(0x24_3003)).unwrap();
+        let b = evaluated_pose(&there, Uuid::from_u128(0x24_3003)).unwrap();
+        assert_eq!(a.pose, b.pose, "the goal must be read in the WORLD frame");
+
+        // …and the control: the same authored number on the displaced character
+        // is a different pose, so the test above is not comparing two rest poses.
+        let mut naive = world_with_authored_ik(
+            Uuid::from_u128(0x24_3003),
+            Vec3d::new(100.0, 0.0, 0.0),
+            vec![authored(vec![0, 1], Vec3d::new(0.7, 0.7, 0.0))],
+        );
+        f.step(&mut naive, 0.25, 0.0);
+        assert_ne!(
+            evaluated_pose(&naive, Uuid::from_u128(0x24_3003))
+                .unwrap()
+                .pose,
+            a.pose
+        );
+    }
+
+    /// A goal that follows another **entity** tracks it — the case a constant
+    /// cannot express, and the reason `target_entity` is on the wire.
+    #[test]
+    fn a_goal_can_follow_another_entity() {
+        let f = Fixture::new();
+        let guid = Uuid::from_u128(0x24_3004);
+        let hold = Uuid::from_u128(0x24_3005);
+        let build = |hold_at: glam::DVec3| {
+            let mut w = world_with_authored_ik(
+                guid,
+                Vec3d::ZERO,
+                vec![IkGoalRecord {
+                    chain: vec![0, 1],
+                    target_entity: crate::refs::EntityRef::new(hold),
+                    ..Default::default()
+                }],
+            );
+            w.world_mut().spawn((
+                Guid(hold),
+                GlobalTransform(glam::DAffine3::from_translation(hold_at)),
+            ));
+            w.reindex_guids();
+            w
+        };
+        let mut a = build(glam::DVec3::new(0.7, 0.7, 0.0));
+        let mut b = build(glam::DVec3::new(-0.7, 0.7, 0.0));
+        f.step(&mut a, 0.25, 0.0);
+        f.step(&mut b, 0.25, 0.0);
+        assert_ne!(
+            evaluated_pose(&a, guid).unwrap().pose,
+            evaluated_pose(&b, guid).unwrap().pose,
+            "the chain must follow the entity it names"
+        );
+
+        // A GUID naming nothing is treated as unbound rather than as a refusal:
+        // the offset is then absolute, so the goal still solves.
+        let mut orphan = world_with_authored_ik(
+            guid,
+            Vec3d::ZERO,
+            vec![IkGoalRecord {
+                chain: vec![0, 1],
+                target_entity: crate::refs::EntityRef::new(Uuid::from_u128(0xDEAD)),
+                target: Vec3d::new(0.7, 0.7, 0.0),
+                ..Default::default()
+            }],
+        );
+        f.step(&mut orphan, 0.25, 0.0);
+        assert!(matches!(
+            ik_outcomes(&orphan, guid).unwrap()[0],
+            IkOutcome::Solved(_)
+        ));
+    }
+
+    /// `enabled: false` is authored, saved and **not solved** — and a disabled
+    /// goal costs nothing at all: no verdict, no resource.
+    #[test]
+    fn a_disabled_goal_is_not_solved() {
+        let f = Fixture::new();
+        let guid = Uuid::from_u128(0x24_3006);
+        let mut w = world_with_authored_ik(
+            guid,
+            Vec3d::ZERO,
+            vec![IkGoalRecord {
+                enabled: false,
+                ..authored(vec![0, 1], Vec3d::new(0.7, 0.7, 0.0))
+            }],
+        );
+        f.step(&mut w, 0.25, 0.0);
+        assert!(
+            ik_outcomes(&w, guid).is_none(),
+            "a disabled goal says nothing"
+        );
+        let mut plain = world_with_character(guid);
+        f.step(&mut plain, 0.25, 0.0);
+        assert_eq!(
+            pose_state_bytes(&w),
+            pose_state_bytes(&plain),
+            "a disabled goal must cost exactly nothing in the trace"
+        );
+    }
+
+    /// **The weight blends**, and full weight is byte-identical to no blend at
+    /// all — the claim `IkGoal::weight`'s doc makes.
+    #[test]
+    fn the_authored_weight_blends_and_full_weight_is_free() {
+        let f = Fixture::new();
+        let guid = Uuid::from_u128(0x24_3007);
+        let at = |weight: f32| {
+            let mut w = world_with_authored_ik(
+                guid,
+                Vec3d::ZERO,
+                vec![IkGoalRecord {
+                    weight,
+                    ..authored(vec![0, 1], Vec3d::new(0.7, 0.7, 0.0))
+                }],
+            );
+            f.step(&mut w, 0.25, 0.0);
+            (pose_state_bytes(&w), w)
+        };
+        let (full, _) = at(1.0);
+        let (half, _) = at(0.5);
+        let (none, zero_world) = at(0.0);
+
+        // A `1.0` weight takes the no-snapshot path; the bytes are the solve's.
+        assert_ne!(full, none, "a full-weight solve must move the pose");
+        assert_ne!(half, full, "a half weight must not be the full solve");
+        assert_ne!(half, none, "…nor the rest pose");
+
+        // Zero weight leaves the pose alone and STILL reports — a goal turned
+        // down to nothing is distinguishable from an absent one.
+        let mut plain = world_with_character(guid);
+        f.step(&mut plain, 0.25, 0.0);
+        assert_eq!(none, pose_state_bytes(&plain));
+        assert!(matches!(
+            ik_outcomes(&zero_world, guid).unwrap()[0],
+            IkOutcome::Solved(_)
+        ));
+    }
+
+    /// The authored goals and the runtime ones are **both** solved, authored
+    /// first — so `set_ik_goals` (and the `ik.*` node kit) is not silently
+    /// disabled on a character an author has rigged.
+    #[test]
+    fn authored_and_runtime_goals_are_concatenated() {
+        let f = Fixture::new();
+        let guid = Uuid::from_u128(0x24_3008);
+        let mut w = world_with_authored_ik(
+            guid,
+            Vec3d::ZERO,
+            vec![authored(vec![0, 1], Vec3d::new(0.7, 0.7, 0.0))],
+        );
+        set_ik_goals(
+            &mut w,
+            guid,
+            vec![IkGoal::full(vec![0, 1], [-0.7, 0.7, 0.0], None)],
+        );
+        f.step(&mut w, 0.25, 0.0);
+        let outcomes = ik_outcomes(&w, guid).expect("verdicts");
+        assert_eq!(outcomes.len(), 2, "both goals ran: {outcomes:?}");
+        // The runtime goal ran LAST, so the pose ends up at its target.
+        let posed = evaluated_pose(&w, guid).unwrap();
+        let tip = inf_anim::global_transforms(&f.skeleton.skeleton, &posed.pose)[1]
+            .transform_point3(glam::Vec3::ZERO);
+        assert!(
+            tip.x < 0.0,
+            "the LAST goal must win the tip position, got {tip:?}"
+        );
+    }
+
+    /// A singular placement (zero scale) has no model frame, so its goals are
+    /// dropped rather than run through a matrix of infinities.
+    #[test]
+    fn a_singular_placement_drops_its_goals() {
+        let f = Fixture::new();
+        let guid = Uuid::from_u128(0x24_3009);
+        let mut w = world_with_authored_ik(
+            guid,
+            Vec3d::ZERO,
+            vec![authored(vec![0, 1], Vec3d::new(0.7, 0.7, 0.0))],
+        );
+        let e = w.entity_of(guid).unwrap();
+        w.world_mut().get_mut::<GlobalTransform>(e).unwrap().0 =
+            glam::DAffine3::from_scale(glam::DVec3::ZERO);
+        f.step(&mut w, 0.25, 0.0);
+        assert!(ik_outcomes(&w, guid).is_none());
+        assert!(evaluated_pose(&w, guid)
+            .unwrap()
+            .pose
+            .locals
+            .iter()
+            .all(|l| l.rotation.iter().all(|c| c.is_finite())));
+    }
+
+    /// A world with an `IkTarget` but **no machine** never grows a store — the
+    /// pre-P24.1 byte-identity claim, re-checked now that a second component can
+    /// reach the step.
+    #[test]
+    fn an_ik_target_alone_never_grows_a_store() {
+        let mut world = EcsWorld::new();
+        world.world_mut().spawn((
+            Guid(Uuid::from_u128(0x24_300A)),
+            GlobalTransform::default(),
+            IkTarget {
+                goals: vec![authored(vec![0, 1], Vec3d::new(1.0, 0.0, 0.0))],
+            },
+        ));
+        world.reindex_guids();
+        Fixture::new().step(&mut world, 0.1, 1.0);
+        assert_eq!(posed_count(&world), 0);
+        assert!(pose_state_bytes(&world).is_empty());
+        assert!(world.world().get_resource::<IkTargetsRes>().is_none());
     }
 }

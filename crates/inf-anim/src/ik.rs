@@ -53,6 +53,7 @@ use glam::{Mat4, Quat, Vec3};
 
 use crate::pose::{global_transforms, Pose};
 use crate::skeleton::Skeleton;
+use crate::template::JointLimit;
 
 /// How many forward/backward sweeps [`solve_fabrik`] runs.
 ///
@@ -87,6 +88,17 @@ pub struct IkReport {
     pub reached: bool,
     /// The chain's total bone length — its reach (metres).
     pub chain_length: f32,
+    /// **How many of the chain's joints a [`JointLimit`] clamped** (P24.3).
+    ///
+    /// Observable on purpose, and it is what makes "the elbow does not bend
+    /// backwards" a thing a gate can assert rather than infer from a pose: a
+    /// clamp that silently did nothing and a chain that never needed one are the
+    /// same picture, and they are different numbers here.
+    ///
+    /// Counts only joints the clamp actually **moved** — a hinge already inside
+    /// its range is not reported, so this reads as "how often the limit was
+    /// load-bearing" and not "how many limits were consulted".
+    pub clamped: u32,
 }
 
 /// Why a solve refused.
@@ -247,6 +259,105 @@ pub fn fabrik(points: &mut [Vec3], target: Vec3) {
     }
 }
 
+/// The smallest twist a clamp counts as having **moved** a joint, radians.
+///
+/// ~6e-4°. The clamp rebuilds a quaternion through `psin64`/`pcos64` even when
+/// the angle was already in range, and that round trip is not bit-exact, so a
+/// zero threshold would report every limited joint as clamped and
+/// [`IkReport::clamped`] would say nothing. Far below any authored range and far
+/// above the rebuild's error.
+const CLAMP_EPSILON_RAD: f64 = 1.0e-5;
+
+/// **Clamp one local rotation into a hinge's authored range** (P24.3).
+///
+/// Returns the clamped rotation and whether it actually moved.
+///
+/// # What "0 degrees" means, and why the bind pose is an input
+///
+/// [`JointLimit`]'s range is measured **from the bind pose** — `hinge_x(knee,
+/// -150, 0)` describes a leg that is straight at rest and flexes to 150°
+/// backwards. So the clamp is applied to the *delta from bind*, not to the raw
+/// local rotation, and the bind rotation is put back afterwards. Clamping the
+/// raw local would make the range mean "from identity", which is a different
+/// (and, for any rig whose bind pose is not the identity, wrong) statement.
+///
+/// # Hinges only, deliberately, and it is counted
+///
+/// A limit with **exactly one** free axis is a hinge and is applied exactly: the
+/// delta is swing-twist decomposed about that axis, the swing (the two locked
+/// axes) is discarded, and the twist angle is clamped. A limit free on two or
+/// three axes has no canonical decomposition — three independent Euler clamps
+/// depend on the order you pick and gimbal-lock at the poles — so it is **left alone**
+/// rather than approximated. [`build_template`](crate::template::build_template)
+/// emits hinges and nothing else, so this covers every limit the engine
+/// currently produces; the gap is in ROADMAP §12's P24 block rather than hidden
+/// behind a plausible-looking cone solve.
+///
+/// # Portable arithmetic
+///
+/// `patan2_64` / `psin64` / `pcos64`, in `f64`, converting once at the wire — the
+/// P14 law (`std` trig is not bit-identical across targets) reaches here because
+/// the pose this edits is folded into `state_bytes` and compared between the
+/// editor's Simulate and the shipped player.
+fn clamp_to_limit(local: Quat, bind: Quat, limit: &JointLimit) -> (Quat, bool) {
+    // Exactly one free axis ⇒ a hinge. Anything else is not applied (see docs).
+    let mut axis_idx = None;
+    for a in 0..3 {
+        if limit.is_free(a) {
+            if axis_idx.is_some() {
+                return (local, false);
+            }
+            axis_idx = Some(a);
+        }
+    }
+    let mut axis = glam::DVec3::ZERO;
+    // A fully locked limit (no free axis) pins the joint to its bind pose, which
+    // is the coherent reading of "this joint may not rotate": the twist below is
+    // then clamped to the empty range [0, 0] about an arbitrary axis and the
+    // swing is discarded, so the delta collapses to the identity.
+    let a = axis_idx.unwrap_or(0);
+    axis[a] = 1.0;
+
+    let delta = (bind.inverse() * local).normalize();
+    let d = glam::DVec3::new(delta.x as f64, delta.y as f64, delta.z as f64);
+    let along = d.dot(axis);
+    // Signed twist about `axis`: q = (axis·sin(θ/2), cos(θ/2)), so
+    // θ = 2·atan2(q.xyz·axis, q.w) — and `patan2_64` handles the (0, 0) case as
+    // 0, which is the identity's answer and the right one.
+    let mut angle = 2.0 * inf_math::patan2_64(along, delta.w as f64);
+    // `atan2` puts the half-angle in (-π, π], so θ lands in (-2π, 2π]. Fold it
+    // into (-π, π] so a 190° twist clamps as −170° rather than as +190°, which
+    // an author's range would reject for the wrong reason.
+    if angle > std::f64::consts::PI {
+        angle -= std::f64::consts::TAU;
+    } else if angle < -std::f64::consts::PI {
+        angle += std::f64::consts::TAU;
+    }
+    let lo = (limit.min_deg[a] as f64).to_radians();
+    let hi = (limit.max_deg[a] as f64).to_radians();
+    // A limit authored backwards (min > max) would make `clamp` panic. Treat it
+    // as the degenerate empty range at `min`, which is what "you may not leave
+    // this angle" reads as, rather than aborting a fixed step.
+    let clamped_angle = if lo <= hi { angle.clamp(lo, hi) } else { lo };
+
+    let half = clamped_angle * 0.5;
+    let s = inf_math::psin64(half);
+    let v = axis * s;
+    let twist = Quat::from_xyzw(
+        v.x as f32,
+        v.y as f32,
+        v.z as f32,
+        inf_math::pcos64(half) as f32,
+    )
+    .normalize();
+    let out = (bind * twist).normalize();
+    // "Moved" is measured on the ANGLE, not on the quaternion: the rebuild is not
+    // bit-exact even for an in-range joint (see `CLAMP_EPSILON_RAD`), and the
+    // swing this discards is zero for the hinge poses the solver produces.
+    let moved = (clamped_angle - angle).abs() > CLAMP_EPSILON_RAD;
+    (out, moved)
+}
+
 /// **Apply an IK chain to a pose**, in model space.
 ///
 /// `chain` is joint indices from the chain's root to its tip, each the parent of
@@ -256,12 +367,25 @@ pub fn fabrik(points: &mut [Vec3], target: Vec3) {
 ///
 /// A 3-joint chain uses [`two_bone_positions`] (exact, one shot, and the pole
 /// decides the bend); anything longer uses [`fabrik`].
+///
+/// `limits` is the skeleton's [`JointLimit`] side table — `SkeletonAsset::limits`
+/// — and is consulted **per joint as that joint's rotation is written**, not as a
+/// pass afterwards. That ordering is load-bearing: joint `i+1`'s aim is measured
+/// against where joint `i` has just been put (see the loop below), so clamping
+/// after the fact would leave every downstream joint aimed at a position its
+/// parent is no longer in. Pass `&[]` for an unlimited solve.
+///
+/// **The parameter is required rather than defaulted** (P24.3). It has exactly
+/// one production caller — `inf_ecs::pose::step_pose_evaluation`, which has the
+/// `SkeletonAsset` in hand — and a second, defaulting door is how "the solver
+/// respects limits" becomes true of one call site and false of the other.
 pub fn solve_chain(
     skeleton: &Skeleton,
     pose: &mut Pose,
     chain: &[u16],
     target: Vec3,
     pole: Option<Vec3>,
+    limits: &[JointLimit],
 ) -> Result<IkReport, IkError> {
     if chain.len() < 2 {
         return Err(IkError::ChainTooShort(chain.len()));
@@ -364,6 +488,7 @@ pub fn solve_chain(
     // Turn the goal positions into ROTATIONS, one joint at a time, recomputing
     // the pose's globals after each — so joint `i+1`'s aim is measured against
     // where joint `i` has just put it, rather than against a stale frame.
+    let mut clamped = 0u32;
     for i in 0..chain.len() - 1 {
         let globals = global_transforms(skeleton, pose);
         let here = globals[chain[i] as usize].transform_point3(Vec3::ZERO);
@@ -382,7 +507,26 @@ pub fn solve_chain(
         };
         let global_rot = rotation_of(&globals[chain[i] as usize]);
         let new_global = (delta * global_rot).normalize();
-        let local = (parent_rot.inverse() * new_global).normalize();
+        let mut local = (parent_rot.inverse() * new_global).normalize();
+        // ── P24.3: the authored range, applied HERE ──
+        //
+        // Inside the loop and not after it, for the reason `solve_chain`'s doc
+        // gives: the next iteration recomputes `global_transforms` from this
+        // write, so a clamp applied afterwards would leave every downstream joint
+        // aimed at a position its parent had already been pulled out of. This is
+        // what closes P24.2's ledger entry — an elbow can no longer bend
+        // backwards because a target asked it to.
+        if let Some(limit) = limits.iter().find(|l| l.joint == chain[i]) {
+            let bind = skeleton
+                .joint(chain[i] as usize)
+                .map(|j| Quat::from_array(j.local_bind.rotation).normalize())
+                .unwrap_or(Quat::IDENTITY);
+            let (fixed, moved) = clamp_to_limit(local, bind, limit);
+            local = fixed;
+            if moved {
+                clamped += 1;
+            }
+        }
         pose.locals[chain[i] as usize].rotation = local.to_array();
     }
 
@@ -392,6 +536,7 @@ pub fn solve_chain(
         reach_error,
         reached: reach_error <= REACH_TOLERANCE_M,
         chain_length,
+        clamped,
     })
 }
 
@@ -530,6 +675,7 @@ mod tests {
             &[0, 1, 2],
             target,
             Some(Vec3::new(2.0, 1.0, 0.0)),
+            &[],
         )
         .expect("solves");
         assert!(
@@ -556,7 +702,7 @@ mod tests {
             let mut pose = Pose::rest(&sk);
             let reach = (chain.len() - 1) as f32;
             let target = Vec3::new(100.0, 0.0, 0.0);
-            let report = solve_chain(&sk, &mut pose, &chain, target, None).expect("solves");
+            let report = solve_chain(&sk, &mut pose, &chain, target, None, &[]).expect("solves");
             assert!(!report.reached, "{report:?}");
             let tip = tip_of(&sk, &pose, *chain.last().unwrap());
             assert!(tip.is_finite(), "an unreachable target produced {tip:?}");
@@ -583,7 +729,8 @@ mod tests {
         let sk = chain_skeleton(5);
         let mut pose = Pose::rest(&sk);
         let target = Vec3::new(2.0, 2.0, 1.0);
-        let report = solve_chain(&sk, &mut pose, &[0, 1, 2, 3, 4], target, None).expect("solves");
+        let report =
+            solve_chain(&sk, &mut pose, &[0, 1, 2, 3, 4], target, None, &[]).expect("solves");
         assert!(report.reached, "{report:?}");
         assert!(tip_of(&sk, &pose, 4).is_finite());
         // Bone lengths survive.
@@ -609,6 +756,7 @@ mod tests {
             &[0, 1, 2],
             target,
             Some(Vec3::new(0.0, 0.6, 5.0)),
+            &[],
         )
         .unwrap();
         solve_chain(
@@ -617,6 +765,7 @@ mod tests {
             &[0, 1, 2],
             target,
             Some(Vec3::new(0.0, 0.6, -5.0)),
+            &[],
         )
         .unwrap();
         let (a, b) = (tip_of(&sk, &front, 1), tip_of(&sk, &back, 1));
@@ -629,11 +778,11 @@ mod tests {
         let sk = chain_skeleton(3);
         let mut pose = Pose::rest(&sk);
         assert_eq!(
-            solve_chain(&sk, &mut pose, &[0], Vec3::ZERO, None),
+            solve_chain(&sk, &mut pose, &[0], Vec3::ZERO, None, &[]),
             Err(IkError::ChainTooShort(1))
         );
         assert_eq!(
-            solve_chain(&sk, &mut pose, &[0, 9], Vec3::ZERO, None),
+            solve_chain(&sk, &mut pose, &[0, 9], Vec3::ZERO, None, &[]),
             Err(IkError::NoSuchJoint {
                 joint: 9,
                 joints: 3
@@ -641,7 +790,7 @@ mod tests {
         );
         // 0 → 2 skips a joint, so it is not a chain.
         assert_eq!(
-            solve_chain(&sk, &mut pose, &[0, 2], Vec3::ZERO, None),
+            solve_chain(&sk, &mut pose, &[0, 2], Vec3::ZERO, None, &[]),
             Err(IkError::NotAChain {
                 parent: 0,
                 child: 2
@@ -653,7 +802,8 @@ mod tests {
                 &mut pose,
                 &[0, 1, 2],
                 Vec3::new(f32::NAN, 0.0, 0.0),
-                None
+                None,
+                &[],
             ),
             Err(IkError::NonFinite { .. })
         ));
@@ -704,8 +854,15 @@ mod tests {
             let mut pose = Pose::rest(&sk);
             pose.locals[1].translation[1] = bad;
             let before = pose.clone();
-            let err = solve_chain(&sk, &mut pose, &[0, 1, 2], Vec3::new(1.0, 1.0, 0.0), None)
-                .expect_err("a non-finite pose must refuse");
+            let err = solve_chain(
+                &sk,
+                &mut pose,
+                &[0, 1, 2],
+                Vec3::new(1.0, 1.0, 0.0),
+                None,
+                &[],
+            )
+            .expect_err("a non-finite pose must refuse");
             assert!(
                 matches!(err, IkError::NonFinite { .. }),
                 "{bad}: got {err:?}"
@@ -720,7 +877,14 @@ mod tests {
             pose.locals[1].rotation[0] = bad;
             let before = pose.clone();
             assert!(matches!(
-                solve_chain(&sk, &mut pose, &[0, 1, 2], Vec3::new(1.0, 1.0, 0.0), None),
+                solve_chain(
+                    &sk,
+                    &mut pose,
+                    &[0, 1, 2],
+                    Vec3::new(1.0, 1.0, 0.0),
+                    None,
+                    &[]
+                ),
                 Err(IkError::NonFinite { .. })
             ));
             assert!(same_bits(&pose, &before));
@@ -730,7 +894,14 @@ mod tests {
             pose.locals[0].scale[0] = bad;
             let before = pose.clone();
             assert!(matches!(
-                solve_chain(&sk, &mut pose, &[0, 1, 2], Vec3::new(1.0, 1.0, 0.0), None),
+                solve_chain(
+                    &sk,
+                    &mut pose,
+                    &[0, 1, 2],
+                    Vec3::new(1.0, 1.0, 0.0),
+                    None,
+                    &[]
+                ),
                 Err(IkError::NonFinite { .. })
             ));
             assert!(same_bits(&pose, &before));
@@ -806,7 +977,14 @@ mod tests {
         sk = Skeleton::new(joints).unwrap();
         let mut pose = Pose::rest(&sk);
         assert!(matches!(
-            solve_chain(&sk, &mut pose, &[0, 1, 2], Vec3::new(1.0, 1.0, 0.0), None),
+            solve_chain(
+                &sk,
+                &mut pose,
+                &[0, 1, 2],
+                Vec3::new(1.0, 1.0, 0.0),
+                None,
+                &[]
+            ),
             Err(IkError::DegenerateBone {
                 parent: 1,
                 child: 2,
@@ -822,8 +1000,8 @@ mod tests {
         let target = Vec3::new(1.1, 1.7, -0.4);
         let mut a = Pose::rest(&sk);
         let mut b = Pose::rest(&sk);
-        solve_chain(&sk, &mut a, &[0, 1, 2, 3], target, None).unwrap();
-        solve_chain(&sk, &mut b, &[0, 1, 2, 3], target, None).unwrap();
+        solve_chain(&sk, &mut a, &[0, 1, 2, 3], target, None, &[]).unwrap();
+        solve_chain(&sk, &mut b, &[0, 1, 2, 3], target, None, &[]).unwrap();
         assert_eq!(a, b);
     }
 
@@ -868,6 +1046,7 @@ mod tests {
             &[0, 1, 2, 3],
             Vec3::new(1.0, 2.0, 0.5),
             None,
+            &[],
         )
         .unwrap();
         for (a, b) in rest.locals.iter().zip(&pose.locals) {
@@ -875,5 +1054,239 @@ mod tests {
             assert_eq!(a.scale, b.scale);
         }
         assert_ne!(rest, pose, "…and something DID move");
+    }
+
+    // ── P24.3: the authored joint limits, applied ─────────────────────────
+
+    /// A hinge about local **Z**, which is the axis `chain_skeleton`'s bones bend
+    /// about: its joints run along +Y, so a bend in the XY plane is a rotation
+    /// about Z. `JointLimit::hinge_x` is the shape `build_template` emits for a
+    /// rig whose bones run along its own X; the *kind* is what is under test
+    /// here, not the axis, and picking the wrong one would have made every
+    /// assertion below vacuous (measured: the first draft did, and the clamp
+    /// silently discarded the whole bend as "swing").
+    fn hinge_z(joint: u16, min_deg: f32, max_deg: f32) -> JointLimit {
+        JointLimit {
+            joint,
+            min_deg: [0.0, 0.0, min_deg],
+            max_deg: [0.0, 0.0, max_deg],
+        }
+    }
+
+    /// An elbow that may flex toward **+X only**.
+    ///
+    /// The permitted range is [0°, 150°] and anything negative is the backwards
+    /// bend the limit exists to forbid. The sign is **measured, not derived**: the
+    /// elbow's local rotation is the fold of the forearm relative to the upper
+    /// arm, not the world-space swing of the limb, so reasoning "rotation about
+    /// +Z takes +Y onto −X" gets it backwards — which the first draft of this
+    /// test did, and the two assertions below are what caught it.
+    fn elbow_limit() -> JointLimit {
+        hinge_z(1, 0.0, 150.0)
+    }
+
+    /// **The headline gate for the P24.2 ledger entry** — an elbow asked to bend
+    /// backwards does not.
+    ///
+    /// The unlimited solve reaches the target by flexing the elbow the wrong way
+    /// (its range is 0°..150° and the pole puts the bend on the negative side);
+    /// the limited solve refuses to leave the range, is *reported* as having
+    /// clamped, and lands somewhere else. Three separate claims, because "the
+    /// pose differs" alone would also pass if the clamp merely jittered it.
+    #[test]
+    fn a_hinge_elbow_will_not_bend_backwards() {
+        let sk = chain_skeleton(3);
+        // A target that pulls the mid joint to NEGATIVE X, which for this rig is
+        // the direction the hinge forbids.
+        let target = Vec3::new(-1.2, 1.2, 0.0);
+        let pole = Some(Vec3::new(-2.0, 1.0, 0.0));
+
+        let mut free = Pose::rest(&sk);
+        let free_report = solve_chain(&sk, &mut free, &[0, 1, 2], target, pole, &[]).unwrap();
+        let mut held = Pose::rest(&sk);
+        let held_report =
+            solve_chain(&sk, &mut held, &[0, 1, 2], target, pole, &[elbow_limit()]).unwrap();
+
+        // 1. The unlimited solve really does go out of range — otherwise this
+        //    test measures a clamp that had nothing to clamp.
+        let free_z = free.locals[1].rotation[2];
+        assert!(
+            free_z < -1e-3,
+            "the unlimited elbow must bend the FORBIDDEN way for this to be a test; got {free_z}"
+        );
+        assert!(free_report.reached, "the unlimited solve reaches");
+        assert_eq!(free_report.clamped, 0, "nothing was limited");
+
+        // 2. The limited solve stays inside [−150, 0]°, measured on the joint's
+        //    own local rotation rather than on the report.
+        let held_z = held.locals[1].rotation[2];
+        assert!(
+            held_z >= -1e-4,
+            "the hinge left its 0..150 range: local rotation z = {held_z}"
+        );
+
+        // 3. …and it SAYS so, which is what makes the clamp observable.
+        assert_eq!(held_report.clamped, 1, "exactly the elbow was clamped");
+        assert_ne!(free.locals[1].rotation, held.locals[1].rotation);
+    }
+
+    /// A hinge already inside its range is left alone **and is not counted** —
+    /// the anti-vacuity twin of the test above. Without this, a `clamped` that
+    /// simply counted "limits consulted" would pass everything.
+    #[test]
+    fn an_in_range_hinge_is_neither_moved_nor_counted() {
+        let sk = chain_skeleton(3);
+        // A target on the +X side: the elbow flexes the way its range allows.
+        let target = Vec3::new(1.2, 1.2, 0.0);
+        let pole = Some(Vec3::new(2.0, 1.0, 0.0));
+        let mut free = Pose::rest(&sk);
+        let free_report = solve_chain(&sk, &mut free, &[0, 1, 2], target, pole, &[]).unwrap();
+        let mut held = Pose::rest(&sk);
+        let held_report =
+            solve_chain(&sk, &mut held, &[0, 1, 2], target, pole, &[elbow_limit()]).unwrap();
+        assert_eq!(held_report.clamped, 0, "an in-range hinge is not clamped");
+        assert!(free_report.reached && held_report.reached);
+        // The rebuild through psin/pcos is not bit-exact, so the poses are
+        // compared within a tolerance far tighter than any authored range.
+        for (a, b) in free.locals.iter().zip(&held.locals) {
+            for k in 0..4 {
+                assert!(
+                    (a.rotation[k] - b.rotation[k]).abs() < 1e-5,
+                    "an in-range hinge moved the pose: {a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
+    /// A limit whose range is measured **from the bind pose**, not from the
+    /// identity — the claim `clamp_to_limit`'s doc rests on.
+    ///
+    /// The rig's elbow is bent 45° at bind and the hinge permits ±0° (a fully
+    /// pinned joint), so the clamped result must be the *bind* rotation, which is
+    /// visibly not the identity. Clamping the raw local would have produced the
+    /// identity and this would fail.
+    #[test]
+    fn the_range_is_measured_from_the_bind_pose() {
+        let bend = Quat::from_rotation_x(std::f32::consts::FRAC_PI_4);
+        let mut joints = Vec::new();
+        for i in 0..3usize {
+            joints.push(Joint {
+                name: format!("j{i}"),
+                parent: (i > 0).then(|| i as u16 - 1),
+                inverse_bind: Mat4::IDENTITY.to_cols_array(),
+                local_bind: JointTransform::from_trs(
+                    if i == 0 { Vec3::ZERO } else { Vec3::Y },
+                    if i == 1 { bend } else { Quat::IDENTITY },
+                    Vec3::ONE,
+                ),
+            });
+        }
+        let sk = Skeleton::new(joints).unwrap();
+        let mut pose = Pose::rest(&sk);
+        // A fully pinned hinge: min == max == 0, so the delta from bind collapses
+        // to the identity and the local must come back as the bind rotation.
+        let pinned = JointLimit {
+            joint: 1,
+            min_deg: [0.0; 3],
+            max_deg: [0.0; 3],
+        };
+        solve_chain(
+            &sk,
+            &mut pose,
+            &[0, 1, 2],
+            Vec3::new(1.5, 0.5, 0.0),
+            None,
+            &[pinned],
+        )
+        .unwrap();
+        let got = Quat::from_array(pose.locals[1].rotation).normalize();
+        assert!(
+            got.abs_diff_eq(bend, 1e-5) || got.abs_diff_eq(-bend, 1e-5),
+            "a pinned joint must return to its BIND rotation, got {got:?} want {bend:?}"
+        );
+        assert!(
+            !got.abs_diff_eq(Quat::IDENTITY, 1e-3),
+            "…and the bind rotation is not the identity, or this proves nothing"
+        );
+    }
+
+    /// A limit free on **more than one axis** is left alone rather than
+    /// approximated — stated as a test so the gap is a decision and not a
+    /// surprise (ROADMAP §12's P24 block carries it).
+    #[test]
+    fn a_multi_axis_limit_is_not_applied() {
+        let sk = chain_skeleton(3);
+        let target = Vec3::new(-1.2, 1.2, 0.0);
+        let pole = Some(Vec3::new(-2.0, 1.0, 0.0));
+        let cone = JointLimit {
+            joint: 1,
+            min_deg: [0.0, -10.0, 0.0],
+            max_deg: [150.0, 10.0, 0.0],
+        };
+        let mut free = Pose::rest(&sk);
+        solve_chain(&sk, &mut free, &[0, 1, 2], target, pole, &[]).unwrap();
+        let mut held = Pose::rest(&sk);
+        let report = solve_chain(&sk, &mut held, &[0, 1, 2], target, pole, &[cone]).unwrap();
+        assert_eq!(report.clamped, 0);
+        assert_eq!(
+            free.locals, held.locals,
+            "a two-axis limit must be byte-identical to no limit at all"
+        );
+    }
+
+    /// A limit naming a joint that is not in the chain never fires, and a limit
+    /// authored backwards (`min > max`) does not panic a fixed step.
+    #[test]
+    fn irrelevant_and_backwards_limits_are_survivable() {
+        let sk = chain_skeleton(3);
+        let target = Vec3::new(-1.2, 1.2, 0.0);
+        let mut a = Pose::rest(&sk);
+        let r = solve_chain(
+            &sk,
+            &mut a,
+            &[0, 1, 2],
+            target,
+            None,
+            &[JointLimit::hinge_x(9, 0.0, 10.0)],
+        )
+        .unwrap();
+        assert_eq!(r.clamped, 0, "a limit on an absent joint cannot fire");
+
+        let mut b = Pose::rest(&sk);
+        let backwards = JointLimit {
+            joint: 1,
+            min_deg: [30.0, 0.0, 0.0],
+            max_deg: [-30.0, 0.0, 0.0],
+        };
+        let r = solve_chain(&sk, &mut b, &[0, 1, 2], target, None, &[backwards]).unwrap();
+        assert!(b
+            .locals
+            .iter()
+            .all(|l| l.rotation.iter().all(|c| c.is_finite())));
+        // `is_free` is `min < max`, so a backwards range has NO free axis: the
+        // joint is treated as pinned, which is a value and not a panic.
+        let _ = r.clamped;
+    }
+
+    /// The clamp is **deterministic** and uses no `std` transcendental: two
+    /// solves of the same inputs are bit-identical, which is the property the
+    /// PIE-vs-shipping trace comparison rests on.
+    #[test]
+    fn the_clamp_is_bit_deterministic() {
+        let sk = chain_skeleton(3);
+        let mut a = Pose::rest(&sk);
+        let mut b = Pose::rest(&sk);
+        for p in [&mut a, &mut b] {
+            solve_chain(
+                &sk,
+                p,
+                &[0, 1, 2],
+                Vec3::new(-1.1, 1.3, 0.2),
+                Some(Vec3::new(-2.0, 1.0, 0.0)),
+                &[elbow_limit()],
+            )
+            .unwrap();
+        }
+        assert_eq!(a, b);
     }
 }

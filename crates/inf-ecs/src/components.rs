@@ -4220,6 +4220,235 @@ impl Destructible {
     }
 }
 
+// ── v21 (P24.3) character components ────────────────────────────────────────
+
+/// **One authored IK goal**: which joints, where their tip must go, and how much
+/// of the solve to apply.
+///
+/// The persisted twin of [`crate::pose::IkGoal`], and deliberately *not* the same
+/// type. Three differences, each load-bearing:
+///
+/// * **World space, not model space.** `IkGoal` is model space, because that is
+///   the frame a pose is evaluated in. An author places a foot target with a
+///   gizmo, in the world, and a character that walks forward must not drag its
+///   goal along with it. [`crate::pose::step_pose_evaluation`] converts once, per
+///   step, through the entity's own global transform.
+/// * **`f64` positions.** Architecture rule 3: an authored world position is a
+///   world position, and `IkGoal`'s `f32` is a render-adjacent value derived from
+///   it after the rebase into the character's own frame.
+/// * **A target *entity*.** A goal that follows a moving hand-hold is the common
+///   case and cannot be expressed by a constant.
+///
+/// **Frozen once shipped** — `EntityRecord` is positional bincode, so growing
+/// this struct costs another bump in *both* codec mirrors.
+#[derive(Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Default)]
+pub struct IkGoalRecord {
+    /// Joint indices into the bound skeleton, from the chain's **root** to its
+    /// **tip**, each the parent of the next. Fewer than two joints, or a list
+    /// that is not a parent walk, is refused by `inf_anim::solve_chain` — as a
+    /// value, reported through [`crate::pose::ik_outcomes`], never as a panic.
+    #[serde(default)]
+    pub chain: Vec<u16>,
+    /// Follow this entity: the goal is `target` **offset from** its world
+    /// position. Unbound ⇒ `target` is an absolute world position.
+    ///
+    /// An [`EntityRef`](crate::refs::EntityRef) (E-P1) rather than a bare
+    /// `Option<Uuid>`, so the Details panel surfaces the entity-picker widget it
+    /// already has instead of `#[reflect(ignore)]`-ing the one field an author is
+    /// most likely to want to set by clicking. `#[serde(transparent)]` on that
+    /// wrapper makes the bytes identical to `Option<Uuid>`.
+    ///
+    /// A GUID that resolves to nothing is treated as unbound for the step rather
+    /// than disabling the goal, so a target deleted mid-session leaves the chain
+    /// reaching for the last thing it was told rather than snapping to rest.
+    #[serde(default)]
+    pub target_entity: crate::refs::EntityRef,
+    /// Where the tip must go — **world metres**, or the offset from
+    /// `target_entity` when that is set.
+    #[serde(default)]
+    pub target: Vec3d,
+    /// A point the middle of the chain bends toward — a knee's forward, an
+    /// elbow's back — in **world metres**. `None` keeps the pose's existing bend,
+    /// which is what `inf_anim::two_bone_positions` does with no opinion.
+    #[serde(default)]
+    pub pole: Option<Vec3d>,
+    /// How much of the solve to apply, `0..=1`.
+    ///
+    /// Not decoration: `1.0` applies the solved rotations verbatim (and takes a
+    /// path that is byte-identical to having no blend at all, so a level that
+    /// never lowers the weight has exactly its pre-P24.3 trace); below 1 the
+    /// chain's joints are `pslerp`ed from the pre-solve pose toward the solved
+    /// one, which is how a foot plant is faded in over a few steps instead of
+    /// snapping. `0.0` leaves the pose untouched and still **reports** — a
+    /// disabled-by-weight goal is distinguishable from an absent one.
+    #[serde(default = "default_ik_weight")]
+    pub weight: f32,
+    /// Off ⇒ the goal is authored, saved and not solved. The
+    /// `VoxelVolume::runtime_carve` shape of gate: an author disabling a chain
+    /// must not have to delete it and retype four joint indices.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_ik_weight() -> f32 {
+    1.0
+}
+
+impl Default for IkGoalRecord {
+    fn default() -> Self {
+        Self {
+            chain: Vec::new(),
+            target_entity: crate::refs::EntityRef::NONE,
+            target: Vec3d::ZERO,
+            pole: None,
+            weight: 1.0,
+            enabled: true,
+        }
+    }
+}
+
+/// **The authored IK goals on one character** (scene v21, P24.3).
+///
+/// # Why a list, and why one component
+///
+/// A bevy component is one-per-entity and a character has four chains (two feet,
+/// two hands) before anything exotic. So the component is the *list*, exactly as
+/// [`crate::pose::IkTargetsRes`] keys a `Vec<IkGoal>` per entity — the two shapes
+/// line up on purpose, because the fixed step's job is to turn one into the
+/// other and a mismatch there would be a conversion nobody could read.
+///
+/// # Why this closes P24.2's ledger entry rather than extending it
+///
+/// P24.2 shipped IK as a **resource** with the reasoning written on
+/// [`crate::pose::IkTargetsRes`]: an authored component needs a scene bump, and
+/// v20 was frozen. The honest consequence it recorded — *"an IK target cannot be
+/// authored or saved today"* — is what this component retires. The resource
+/// stays, and stays the runtime write door
+/// ([`crate::pose::set_ik_goals`], which the `ik.*` Blueprint kit calls); the
+/// component is the **authored** half, re-derived from the document every fixed
+/// step. Both are solved, authored first, and
+/// [`crate::pose::step_pose_evaluation`] is still the one door.
+///
+/// That layering is what makes the PIE gate possible: the component rides
+/// `EntityRecord` into the `.inf_lvl` bytes a `ScenePayload` already carries, so
+/// a real `--pie` subprocess engages IK through the door it always used, with no
+/// test-only injection hook anywhere (the P21.4 law).
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[reflect(Component, Default)]
+pub struct IkTarget {
+    /// The goals, applied **in order**. An empty list is the same as no
+    /// component: nothing is solved and no verdict is published.
+    #[serde(default)]
+    pub goals: Vec<IkGoalRecord>,
+}
+
+/// **A simulated garment on this character** (scene v21, P24.3 — read by P24.4).
+///
+/// # The reference-plus-knobs shape, and why the parameters are NOT here
+///
+/// This is `VoxelVolume`'s law applied a phase later, and that type's own doc
+/// states it: *"the component can never be the reason a future schema has to
+/// move: growing it would cost another bump in **both** codec mirrors"*. So the
+/// garment mesh, the XPBD constraint set, stiffness, damping, thickness, areal
+/// mass, iteration count and the collision set all live inside the `.inf_cloth`
+/// this points at — an asset, which versions itself, which P24.4 defines and
+/// which an `AssetKind` addition reaches without touching any scene wire at all.
+/// What is left on the entity is what genuinely differs **per wearer**.
+///
+/// # Why the slot is spent now rather than at P24.4
+///
+/// A phase gets one scene bump. P24.3 spends v21 on [`IkTarget`], and cloth
+/// authoring one batch later would need v22 — so the choice was one bump with
+/// three slots or two bumps with one and two. Both spare slots cost a
+/// `None` discriminant byte per entity, the price every additive slot since v8
+/// has paid, and the alternative is a forbidden second bump inside one phase.
+///
+/// **Stated plainly, because a reserved slot is exactly the kind of thing that
+/// rots**: as of P24.3 nothing simulates cloth. The component is authored,
+/// reflected, persisted, round-tripped and spawned onto the entity; no system
+/// reads it. P24.4 is what gives it a reader.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct ClothSim {
+    /// The `.inf_cloth` GUID this garment is described by, or `None` when the
+    /// component is authored but not yet bound.
+    ///
+    /// `None` is the honest state for "I added the component and have not picked
+    /// a garment", and it is what keeps the cook's dependency closure unchanged
+    /// for every level written before P24.4.
+    ///
+    /// `#[reflect(ignore)]` + serde-persisted, exactly like [`Sprite::texture`]:
+    /// an ASSET reference, which is the case `refs.rs` deliberately leaves on the
+    /// bare-`Uuid` convention until an asset-picker widget lands.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub asset: Option<Uuid>,
+    /// Whether the garment simulates at runtime.
+    ///
+    /// Defaults to `true` — a garment you attached is one you meant to wear —
+    /// and exists so a distant NPC's cloak can be pinned to the body without
+    /// deleting the authoring.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Per-wearer quality lever. `0` follows the machine's capability tier (the
+    /// P13 doctrine, and the only correct default); `1..=255` pins a substep
+    /// budget so a hero's coat can out-simulate a crowd's.
+    ///
+    /// Per-**entity** and not in the asset precisely because two characters
+    /// wearing the same garment can afford different budgets, which is the test
+    /// for whether something belongs on the component at all.
+    #[serde(default)]
+    pub quality: u8,
+}
+
+impl Default for ClothSim {
+    fn default() -> Self {
+        Self {
+            asset: None,
+            enabled: true,
+            quality: 0,
+        }
+    }
+}
+
+/// **Strand hair on this character** (scene v21, P24.3 — read by P24.4).
+///
+/// The [`ClothSim`] shape, for the [`ClothSim`] reasons: the guide curves, the
+/// clump and curl parameters, the interpolation counts and the card-generation
+/// recipe for lower tiers all live in the `.inf_hair` this points at, because
+/// they describe the *hairstyle* and not the *head wearing it*.
+///
+/// **As of P24.3 nothing renders or simulates hair.** Same honest note as
+/// [`ClothSim`]: authored, reflected, persisted, spawned, unread until P24.4.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct HairGuides {
+    /// The `.inf_hair` GUID, or `None` when authored but unbound.
+    /// `#[reflect(ignore)]` + serde-persisted, exactly like [`ClothSim::asset`].
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub asset: Option<Uuid>,
+    /// Whether the strands simulate at runtime. `false` still draws the hair —
+    /// it just does not move — which is the lower tiers' behaviour anyway.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Per-wearer quality lever, exactly [`ClothSim::quality`]: `0` follows the
+    /// capability tier, `1..=255` pins a strand budget.
+    #[serde(default)]
+    pub quality: u8,
+}
+
+impl Default for HairGuides {
+    fn default() -> Self {
+        Self {
+            asset: None,
+            enabled: true,
+            quality: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,12 +14,13 @@ use bevy_reflect::{TypePath, TypeRegistry};
 use crate::components::{
     AlwaysLoaded, AnimPlayer, AnimStateMachine, AtlasRect, AudioListener, AudioSource,
     BillboardMode, BlendMode, BodyKind2D, BodyKind3D, Buoyancy, Camera, CharacterController2D,
-    CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
-    CombineRule, Decal, Destructible, DistanceModel, Foliage, FoliagePaletteEntry, Joint2D,
-    Joint3D, JointKind2D, JointKind3D, Light, Light2D, LightKind, Material, MeshRef, Name,
-    NineSlice, PcgVolume, Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, SkyAtmosphere, Spline,
-    SplineInterp, Sprite, StreamingSource, Terrain, Text2D, TextAlign, Tilemap, TimeOfDay,
-    Transform, Visibility, Volume, VolumeKind, VoxelVolume, WaterBody, WaterKind, WeatherPreset,
+    CharacterController3D, ClothSim, Collider2D, Collider3D, ColliderShape2DKind,
+    ColliderShape3DKind, CombineRule, Decal, Destructible, DistanceModel, Foliage,
+    FoliagePaletteEntry, HairGuides, IkGoalRecord, IkTarget, Joint2D, Joint3D, JointKind2D,
+    JointKind3D, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice, PcgVolume,
+    Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, SkyAtmosphere, Spline, SplineInterp, Sprite,
+    StreamingSource, Terrain, Text2D, TextAlign, Tilemap, TimeOfDay, Transform, Visibility, Volume,
+    VolumeKind, VoxelVolume, WaterBody, WaterKind, WeatherPreset,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -81,6 +82,14 @@ impl ComponentRegistry {
         types.register::<SplineInterp>();
         types.register::<WaterKind>();
         types.register::<FoliagePaletteEntry>();
+        // P24.3 — `IkTarget::goals` is a `Vec<IkGoalRecord>`, so the Details
+        // walker's List arm needs the ELEMENT type registered (and its
+        // `ReflectDefault`, which is what the "add element" button constructs a
+        // new goal from). Exactly the `Vec3d`/`FoliagePaletteEntry` treatment,
+        // for exactly the same reason.
+        types.register::<IkGoalRecord>();
+        types.register_type_data::<IkGoalRecord, ReflectDefault>();
+        types.register_type_data::<u16, ReflectDefault>();
         // P17.4 — `SkyAtmosphere::weather_target`. Registered as a value type so
         // the Details grid surfaces it as the preset dropdown it is.
         types.register::<WeatherPreset>();
@@ -111,6 +120,16 @@ impl ComponentRegistry {
             SkeletalMesh => "Skeletal Mesh",
             AnimPlayer => "Anim Player",
             AnimStateMachine => "Anim State Machine",
+            // P24.3 — the three character components, kept together and directly
+            // after the animation block because that is the order an author
+            // builds a character in: bind the mesh, drive it, then plant its feet
+            // and dress it. `IkTarget` is read every fixed step by
+            // `crate::pose::step_pose_evaluation`; `ClothSim` and `HairGuides`
+            // are authored in v21 and read by P24.4 (see their docs — the note is
+            // on the type, not only here).
+            IkTarget => "IK Target",
+            ClothSim => "Cloth Sim",
+            HairGuides => "Hair Guides",
             Sprite => "Sprite",
             NineSlice => "Nine Slice",
             Text2D => "Text",
@@ -249,8 +268,9 @@ mod tests {
     #[test]
     fn core_components_are_registered() {
         let reg = ComponentRegistry::new();
-        // 36 through P20.2, + `VoxelVolume` at P21.1, + `Destructible` at P22.2.
-        assert_eq!(reg.editable().len(), 38);
+        // 36 through P20.2, + `VoxelVolume` at P21.1, + `Destructible` at P22.2,
+        // + the three character components at P24.3.
+        assert_eq!(reg.editable().len(), 41);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(

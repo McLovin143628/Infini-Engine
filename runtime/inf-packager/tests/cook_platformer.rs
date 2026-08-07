@@ -539,6 +539,9 @@ fn make_streaming_terrain_project_with(root: &Path, biomes: BiomeSetFixture) -> 
             buoyancy: None,
             voxel_volume: None,
             destructible: None,
+            ik_target: None,
+            cloth_sim: None,
+            hair_guides: None,
         }],
         settings: Default::default(),
     };

@@ -1784,6 +1784,73 @@ impl Host for SimHost<'_> {
                     Err(_) => 0,
                 }))
             }
+            // ── the `ik.*` kit (P24.3) ──
+            //
+            // Five arms, identical in both hosts, over the Ring-0 doors in
+            // `inf_ecs::pose`. Every action edits the entity's AUTHORED
+            // `IkTarget` by goal index — see `inf_blueprint::nodekit`'s `ik_nodes`
+            // for why a Blueprint cannot name a chain — and reports `ok` rather
+            // than failing its handler, because a bad goal index is something the
+            // author fixes by typing a smaller number and not a reason to take
+            // down the rest of the Tick body (the `voxel.*` ruling).
+            //
+            // The two queries are what make P24.2's `IkReport` reachable from
+            // gameplay at all: before them the fixed step computed a reach error
+            // that only a test could see.
+            (Some("ik"), Some("set_goal")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => inf_ecs::pose::set_authored_goal_target(
+                        self.world,
+                        guid,
+                        arg_i64(args, 1).max(0) as usize,
+                        inf_ecs::math::Vec3d::new(
+                            arg_f64(args, 2),
+                            arg_f64(args, 3),
+                            arg_f64(args, 4),
+                        ),
+                    ),
+                    Err(_) => false,
+                }))
+            }
+            (Some("ik"), Some("set_goal_weight")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => inf_ecs::pose::set_authored_goal_weight(
+                        self.world,
+                        guid,
+                        arg_i64(args, 1).max(0) as usize,
+                        arg_f64(args, 2) as f32,
+                    ),
+                    Err(_) => false,
+                }))
+            }
+            (Some("ik"), Some("enable_goal")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => inf_ecs::pose::set_authored_goal_enabled(
+                        self.world,
+                        guid,
+                        arg_i64(args, 1).max(0) as usize,
+                        matches!(args.get(2), Some(Value::Bool(true))),
+                    ),
+                    Err(_) => false,
+                }))
+            }
+            (Some("ik"), Some("reached")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => inf_ecs::pose::ik_reached(self.world, guid),
+                    Err(_) => false,
+                }))
+            }
+            (Some("ik"), Some("reach_error")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Float(match entity {
+                    Ok(guid) => inf_ecs::pose::ik_reach_error(self.world, guid) as f64,
+                    Err(_) => 0.0,
+                }))
+            }
             // Unknown engine call: log it (matching the graph preview host) so a
             // partially-authored blueprint still runs rather than aborting.
             _ => {

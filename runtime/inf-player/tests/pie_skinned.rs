@@ -411,3 +411,216 @@ fn the_windowed_pie_host_hands_over_the_payloads_skinned_store() {
         "`run_pie` no longer accepts and installs a `SkinnedRegistry`"
     );
 }
+
+// ── P24.3: the AUTHORED IkTarget, across the real `--pie` boundary ──────────
+
+/// The same character, plus an **authored** [`IkTarget`] reaching for `at`
+/// (world metres).
+///
+/// Deliberately the same builder as [`character_payload`] with one component
+/// added: the whole claim of the arms below is that the authored component
+/// crosses the wire *inside the level bytes a `ScenePayload` already carries* —
+/// no payload field, no `SCENE_PAYLOAD_VERSION` bump, and above all **no
+/// test-only injection hook in the player**, which is the P21.4 law and the
+/// reason P24.2 could not build this arm at all.
+fn character_payload_with_ik(at: inf_ecs::math::Vec3d) -> ScenePayload {
+    let mut doc = SceneDoc::new();
+    let e = doc.create_with_guid(HERO, SpawnKind::Empty, "Hero", None);
+    doc.world_mut().world_mut().entity_mut(e).insert((
+        SkeletalMesh {
+            mesh: Some(MESH),
+            skeleton: Some(SKEL),
+        },
+        AnimStateMachine {
+            sm: Some(SM),
+            ..Default::default()
+        },
+        inf_ecs::IkTarget {
+            goals: vec![inf_ecs::IkGoalRecord {
+                // Joints 0 → 1 of the fixture skeleton: the one bone it has.
+                chain: vec![0, 1],
+                target: at,
+                ..Default::default()
+            }],
+        },
+    ));
+    doc.world_mut().mark_dirty();
+    doc.world_mut().propagate();
+
+    let anim = anim_bytes();
+    let mesh_bytes = inf_asset::encode(&body()).unwrap();
+    build_scene_payload(
+        &doc,
+        |_| None,
+        |_| None,
+        |g| anim.get(&g).cloned(),
+        |_| None,
+        |_| None,
+        |_| None,
+        |g| (g == MESH).then(|| mesh_bytes.clone()),
+        0,
+        false,
+    )
+    .expect("build scene payload")
+}
+
+/// **The authored IK target survives the wire.** The guard the P21.4 lesson asks
+/// for, at the seam that produces the payload — asserted on the *decoded level
+/// bytes*, so nothing below can be two empty worlds agreeing.
+#[test]
+fn the_payload_carries_the_authored_ik_target_inside_the_level_bytes() {
+    let at = inf_ecs::math::Vec3d::new(0.6, 0.6, 0.0);
+    let payload = character_payload_with_ik(at);
+    // No new payload field, and the envelope version did NOT move.
+    assert_eq!(
+        payload.schema_version,
+        inf_runtime::pie::SCENE_PAYLOAD_VERSION,
+        "the authored component must ride the LEVEL bytes; a payload bump here \
+         would mean it did not"
+    );
+    let level = inf_scene::RuntimeLevel::decode(&payload.level_bytes)
+        .expect("the payload's level bytes decode");
+    assert_eq!(
+        level.entities[0].guid, HERO,
+        "the payload's level lost the character"
+    );
+    let t = level.entities[0]
+        .ik_target
+        .clone()
+        .expect("the authored IkTarget crossed the wire");
+    assert_eq!(t.goals.len(), 1);
+    assert_eq!(t.goals[0].chain, vec![0, 1]);
+    assert_eq!(t.goals[0].target, at, "the target moved on the way across");
+    assert!(t.goals[0].enabled);
+}
+
+/// **THE ARM P24.2 LEDGERED AND COULD NOT BUILD** (M-PIE): the *real* `--pie`
+/// subprocess, engaging IK through the authored component, folding a trace
+/// byte-identical to the shipping build's.
+///
+/// P24.2's report claimed a subprocess IK arm and there was none — every
+/// `pose_parity` arm compared `SimSession` against `RuntimeSim` inside one
+/// process. The ruling then was: **do not build a test-only goal-injection hook
+/// into the player** (a boot path the shipped binary does not take is the law
+/// P21.4 paid for), and the arm closes naturally once the goal is authored. This
+/// is that arm. The player is the real binary, the goal arrives in the `.inf_lvl`
+/// bytes, and nothing in `inf-player` knows a test is running.
+///
+/// Three claims, because equality alone is satisfiable by two dead worlds:
+///  1. the streamed PIE trace equals the shipping trace, step for step;
+///  2. the trace MOVES between steps (the machine is animating under the IK);
+///  3. **moving the authored target moves the trace** — the anti-vacuity arm,
+///     which is what says the goal was solved rather than merely carried.
+#[test]
+fn the_real_pie_subprocess_engages_the_authored_ik_target() {
+    const N: u32 = 8;
+    let run = |at: inf_ecs::math::Vec3d| -> Vec<u64> {
+        let payload = character_payload_with_ik(at);
+        let mut session = PieSession::spawn_scene(&player_bin(), &payload).expect("scene session");
+        session.step(N).expect("step N");
+        let mut got = Vec::with_capacity(N as usize);
+        for _ in 0..N {
+            let ev = session
+                .wait_for(Duration::from_secs(10), |e| {
+                    matches!(e, PlayerToEditor::Frame { .. })
+                })
+                .expect("a frame per step");
+            if let PlayerToEditor::Frame { state_hash, .. } = ev {
+                got.push(state_hash);
+            }
+        }
+        session.stop(Duration::from_secs(5)).expect("graceful stop");
+        // (1) the same payload, run in-process as the shipping build does.
+        let want = inf_player::scene_trace(&payload, N as u64).expect("shipping trace");
+        assert_eq!(
+            got, want,
+            "the REAL --pie subprocess folded a different trace from the shipping \
+             build of the same payload, with an authored IK goal in the level"
+        );
+        got
+    };
+
+    let near = run(inf_ecs::math::Vec3d::new(0.6, 0.6, 0.0));
+    // (2) the world is alive: the machine is animating under the solve.
+    assert!(
+        near.windows(2).any(|w| w[0] != w[1]),
+        "the trace never changed — this comparison says nothing about the pose"
+    );
+    // (3) ANTI-VACUITY: the goal is SOLVED, not merely carried. A player that
+    //     decoded the component and never handed it to `step_pose_evaluation`
+    //     passes (1) and (2) and fails here.
+    let far = run(inf_ecs::math::Vec3d::new(-0.6, 0.6, 0.0));
+    assert_ne!(
+        near, far,
+        "moving the authored IK target did not move the trace — the component \
+         crossed the wire and nothing solved it"
+    );
+}
+
+/// The `ik.*` node kit's doors, **through the two hosts' shared Ring-0 rule**.
+///
+/// The kit edits the authored component by goal index, so this is the property
+/// both handler arms rest on: an in-range index reports `true` and moves the
+/// solve; an out-of-range one reports `false` and changes nothing. Written
+/// against `inf_ecs::pose` rather than against either host because that is the
+/// one implementation both `simulate.rs` and `runtime_sim.rs` call — testing it
+/// twice would be testing the mirror, not the rule.
+#[test]
+fn the_ik_kits_doors_edit_the_authored_goal_and_refuse_by_value() {
+    let mut doc = SceneDoc::new();
+    let e = doc.create_with_guid(HERO, SpawnKind::Empty, "Hero", None);
+    doc.world_mut().world_mut().entity_mut(e).insert((
+        SkeletalMesh {
+            mesh: Some(MESH),
+            skeleton: Some(SKEL),
+        },
+        AnimStateMachine {
+            sm: Some(SM),
+            ..Default::default()
+        },
+        inf_ecs::IkTarget {
+            goals: vec![inf_ecs::IkGoalRecord {
+                chain: vec![0, 1],
+                ..Default::default()
+            }],
+        },
+    ));
+    doc.world_mut().mark_dirty();
+    let w = doc.world_mut();
+
+    let at = inf_ecs::math::Vec3d::new(0.6, 0.6, 0.0);
+    assert!(inf_ecs::pose::set_authored_goal_target(w, HERO, 0, at));
+    assert!(inf_ecs::pose::set_authored_goal_weight(w, HERO, 0, 0.5));
+    assert!(inf_ecs::pose::set_authored_goal_enabled(w, HERO, 0, false));
+    let t = w.world().get::<inf_ecs::IkTarget>(e).unwrap();
+    assert_eq!(t.goals[0].target, at);
+    assert_eq!(t.goals[0].weight, 0.5);
+    assert!(!t.goals[0].enabled);
+
+    // Refusals are VALUES: a goal index past the end, and an entity with no
+    // component at all, both answer `false` and leave the world alone.
+    assert!(!inf_ecs::pose::set_authored_goal_target(w, HERO, 9, at));
+    assert!(!inf_ecs::pose::set_authored_goal_target(
+        w,
+        Uuid::from_u128(0xDEAD),
+        0,
+        at
+    ));
+    // …and a non-finite weight never reaches `pslerp`.
+    assert!(!inf_ecs::pose::set_authored_goal_weight(
+        w,
+        HERO,
+        0,
+        f32::NAN
+    ));
+    assert_eq!(
+        w.world().get::<inf_ecs::IkTarget>(e).unwrap().goals[0].weight,
+        0.5,
+        "a refused weight must not have been written"
+    );
+
+    // The two queries answer on a world that has never stepped: nothing reached,
+    // no error — which is the conservative reading and not a panic.
+    assert!(!inf_ecs::pose::ik_reached(w, HERO));
+    assert_eq!(inf_ecs::pose::ik_reach_error(w, HERO), 0.0);
+}
