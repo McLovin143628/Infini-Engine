@@ -33,6 +33,7 @@ vi.mock("../../lib/ipc", () => ({
   },
 }));
 
+import { undoScopeFor } from "../../lib/undoScopes";
 import { skel } from "../../lib/ipc";
 import type { SkelDocDto } from "../../bindings/SkelDocDto";
 import type { SkelJointDto } from "../../bindings/SkelJointDto";
@@ -317,5 +318,54 @@ describe("the doors reach the backend by document id", () => {
     expect(entry("aaa").doc?.joints).toHaveLength(19);
     expect(entry("aaa").warning).toContain("1.80 m");
     expect(entry("aaa").busy).toBe(false);
+  });
+});
+
+describe("Ctrl+Z inside the panel undoes the RIG", () => {
+  // **The routing law, asserted rather than assumed** (P23.2a's registry, the
+  // P23.4 aim). The store registers its scope at MODULE scope, so importing it
+  // is what arms the chord — a registration that was deleted, renamed or moved
+  // behind a condition would leave Ctrl+Z undoing the SCENE while the skeleton
+  // in front of the author does nothing.
+  //
+  // Measured: before this test, unregistering the scope broke NOTHING in the
+  // suite. That is the whole reason it exists.
+  //
+  // What is asserted here is the registration and the call it makes. That the
+  // *dock* hands the focused instance's `params` to a multi-instance panel is
+  // one mechanism shared by every editor, and `lib/__tests__/undoScopes.test.ts`
+  // already proves it on the Model Editor — re-proving it here would be testing
+  // the dock twice and this panel once.
+
+  it("registers an undo scope for the skeleton panel type", () => {
+    expect(undoScopeFor("skeleton")).toBeDefined();
+  });
+
+  it("routes undo and redo to the rig the scope is handed", async () => {
+    const scope = undoScopeFor("skeleton");
+    expect(scope).toBeDefined();
+    await useSkelStore.getState().open("aaa");
+    await useSkelStore.getState().open("bbb");
+    mocked.undo.mockResolvedValue(ok(docOf("bbb", 4, { canRedo: true })));
+    mocked.redo.mockResolvedValue(ok(docOf("aaa", 4, { canUndo: true })));
+
+    // The chord reaches the rig NAMED by the focused panel's params — "bbb"
+    // here — and not whichever document happened to be opened last.
+    await scope!.undo("bbb");
+    expect(mocked.undo).toHaveBeenCalledWith("bbb");
+    expect(mocked.undo).not.toHaveBeenCalledWith("aaa");
+    expect(entry("bbb").doc?.canRedo).toBe(true);
+
+    await scope!.redo("aaa");
+    expect(mocked.redo).toHaveBeenCalledWith("aaa");
+    expect(entry("aaa").doc?.canUndo).toBe(true);
+  });
+
+  it("does nothing when the scope is handed no parameter", async () => {
+    const scope = undoScopeFor("skeleton");
+    await scope!.undo(null);
+    await scope!.redo(null);
+    expect(mocked.undo).not.toHaveBeenCalled();
+    expect(mocked.redo).not.toHaveBeenCalled();
   });
 });
