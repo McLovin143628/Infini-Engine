@@ -53,6 +53,7 @@ pub fn run() {
         .manage(commands::GraphState::default())
         .manage(commands::MaterialState::default())
         .manage(commands::DccState::default())
+        .manage(commands::SkelState::default())
         .manage(commands::PcgState::default())
         .manage(commands::SmEditorState::default())
         .manage(commands::ErosionState::default())

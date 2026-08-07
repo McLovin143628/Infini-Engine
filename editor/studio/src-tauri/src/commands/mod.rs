@@ -45,6 +45,7 @@ pub use project::ProjectState;
 pub use scene::{recover_scene_on_boot, SceneState};
 pub use sequencer::SequencerState;
 pub use sim::SimState;
+pub use skel::SkelState;
 pub use sm::SmEditorState;
 pub use terminal::PtyState;
 pub use terrain::ErosionState;
@@ -125,6 +126,20 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         pcg::pcg_evaluate,
         pcg::pcg_evaluate_biomes,
         skel::skel_create_template,
+        skel::skel_open,
+        skel::skel_close,
+        skel::skel_list,
+        skel::skel_rename_joint,
+        skel::skel_set_joint_transform,
+        skel::skel_set_limit,
+        skel::skel_add_socket,
+        skel::skel_remove_socket,
+        skel::skel_place_socket,
+        skel::skel_instantiate_template,
+        skel::skel_merge_part,
+        skel::skel_undo,
+        skel::skel_redo,
+        skel::skel_save,
         sm::sm_list,
         sm::sm_create,
         sm::sm_get,

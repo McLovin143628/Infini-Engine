@@ -21,14 +21,14 @@ use inf_editor_core::ipc::{
     ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto,
     RecentProjectDto, RiverBedConflictDto, RiverClimbDto, RiverReportDto, SaveResultDto,
     SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto, SculptOpDto, SculptSettingsDto,
-    SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto, SeqTrackDto, SequenceDto,
-    SkyAtmosphereDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpoilModeDto,
-    SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto, TerrainImportPlanDto,
-    TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto, TilemapDto, TimeOfDayDto,
-    ToolModeDto, ViewModeDto, ViewportDrop, ViewportGizmoDto, ViewportKey, ViewportModeDto,
-    ViewportRect, ViewportToolStatusDto, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto,
-    VoxelToolKindDto, WaterDefaultsDto, WaterSettingsDto, WaterToolKindDto, WeatherDto,
-    WeatherPresetDto,
+    SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto, SeqTrackDto, SequenceDto, SkelApplyDto,
+    SkelDocDto, SkelJointDto, SkelSocketDto, SkyAtmosphereDto, Snap2DDto, Snap3DDto,
+    SortingLayerDto, SpawnKind, SpoilModeDto, SpriteGridDto, SpriteRectDto, SpriteSheetDto,
+    TerrainBiomesDto, TerrainImportPlanDto, TerrainImportResultDto, TerrainImportSettingsDto,
+    TilemapCellDto, TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto, ViewportDrop,
+    ViewportGizmoDto, ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto,
+    VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto, WaterDefaultsDto,
+    WaterSettingsDto, WaterToolKindDto, WeatherDto, WeatherPresetDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -65,6 +65,14 @@ fn export_bindings() {
     DccPaintModeDto::export_all(&cfg).expect("export DccPaintModeDto");
     DccGizmoModeDto::export_all(&cfg).expect("export DccGizmoModeDto");
     DccUnwrapDto::export_all(&cfg).expect("export DccUnwrapDto");
+    // The Skeleton Editor (P24.3). `SkelApplyDto` pulls in `SkelDocDto`, which
+    // pulls in the joint and socket rows — all four are rooted anyway, per this
+    // file's rule that every `inf_editor_core::ipc` type appears here so a future
+    // consumer importing one directly cannot drift.
+    SkelApplyDto::export_all(&cfg).expect("export SkelApplyDto");
+    SkelDocDto::export_all(&cfg).expect("export SkelDocDto");
+    SkelJointDto::export_all(&cfg).expect("export SkelJointDto");
+    SkelSocketDto::export_all(&cfg).expect("export SkelSocketDto");
     LayoutSummary::export_all(&cfg).expect("export LayoutSummary");
     SceneNode::export_all(&cfg).expect("export SceneNode");
     SceneSnapshot::export_all(&cfg).expect("export SceneSnapshot");

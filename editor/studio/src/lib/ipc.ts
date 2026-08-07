@@ -41,6 +41,8 @@ import type { DccSaveDto } from "../bindings/DccSaveDto";
 import type { DccSelectDto } from "../bindings/DccSelectDto";
 import type { DccToolDto } from "../bindings/DccToolDto";
 import type { DccUnwrapDto } from "../bindings/DccUnwrapDto";
+import type { SkelApplyDto } from "../bindings/SkelApplyDto";
+import type { SkelDocDto } from "../bindings/SkelDocDto";
 import type { DataFieldDto } from "../bindings/DataFieldDto";
 import type { DeleteResult } from "../bindings/DeleteResult";
 import type { AddableComponentDto } from "../bindings/AddableComponentDto";
@@ -1027,7 +1029,7 @@ export const sm = {
  */
 export const skel = {
   createTemplate: (
-    plan: "biped" | "quadruped" | "hexapod" | "npedal",
+    plan: BodyPlanName,
     opts: { legs?: number; heightM?: number; name?: string } = {},
   ): Promise<string> =>
     invoke<string>("skel_create_template", {
@@ -1036,7 +1038,120 @@ export const skel = {
       heightM: opts.heightM ?? null,
       name: opts.name ?? null,
     }),
+
+  // ── the Skeleton Editor (P24.3) ───────────────────────────────
+  //
+  // The document key is the **asset GUID** — not a `"skel:<id>"` composite —
+  // because a skeleton session owns nothing the asset does not, so re-opening a
+  // rig returns the live document. `close` takes the same key for the reason
+  // `dcc.close` does: a panel that unmounts before its `open` resolves has no
+  // other id to close with, and a close it cannot send is a leaked session.
+  //
+  // **Every mutating call returns the whole document.** A rename or a template
+  // instantiation can renumber or replace every joint, so the store REPLACES its
+  // state rather than patching it — the `dcc` rule, for the same reason.
+
+  /** Open (or re-attach to) a skeleton asset. Idempotent. */
+  open: (assetId: string): Promise<SkelDocDto> =>
+    invoke<SkelDocDto>("skel_open", { assetId }),
+  /** Free the document and its undo history. Idempotent. */
+  close: (assetId: string): Promise<void> => invoke("skel_close", { assetId }),
+  list: (): Promise<SkelDocDto[]> => invoke<SkelDocDto[]>("skel_list"),
+
+  /**
+   * Rename a joint. A rename that leaves the canonical humanoid vocabulary, or
+   * breaks a left/right pair, still HAPPENS and comes back with a `warning` —
+   * refusing would make the editor unable to author a non-humanoid.
+   */
+  renameJoint: (id: string, joint: number, name: string): Promise<SkelApplyDto> =>
+    invoke<SkelApplyDto>("skel_rename_joint", { id, joint, name }),
+  /**
+   * Move a joint's **rest** transform. Every inverse bind is recomputed by the
+   * backend — not optional: a stale one deforms every mesh bound to the rig.
+   */
+  setJointTransform: (
+    id: string,
+    joint: number,
+    translation: [number, number, number],
+    rotation: [number, number, number, number],
+    scale: [number, number, number],
+  ): Promise<SkelApplyDto> =>
+    invoke<SkelApplyDto>("skel_set_joint_transform", {
+      id,
+      joint,
+      translation,
+      rotation,
+      scale,
+    }),
+  /**
+   * Set or clear a joint's rotation limit. Passing `null` for either bound
+   * **clears the row** — absent means unlimited, and a full-range row would be a
+   * different (authored) statement.
+   */
+  setLimit: (
+    id: string,
+    joint: number,
+    minDeg: [number, number, number] | null,
+    maxDeg: [number, number, number] | null,
+  ): Promise<SkelApplyDto> =>
+    invoke<SkelApplyDto>("skel_set_limit", { id, joint, minDeg, maxDeg }),
+
+  addSocket: (id: string, name: string, joint: number): Promise<SkelApplyDto> =>
+    invoke<SkelApplyDto>("skel_add_socket", { id, name, joint }),
+  removeSocket: (id: string, name: string): Promise<SkelApplyDto> =>
+    invoke<SkelApplyDto>("skel_remove_socket", { id, name }),
+  placeSocket: (
+    id: string,
+    name: string,
+    joint: number,
+    translation: [number, number, number],
+    rotation: [number, number, number, number],
+    scale: [number, number, number],
+  ): Promise<SkelApplyDto> =>
+    invoke<SkelApplyDto>("skel_place_socket", {
+      id,
+      name,
+      joint,
+      translation,
+      rotation,
+      scale,
+    }),
+
+  /** **Replace** the rig with a fresh template. Undoable, like every other edit. */
+  instantiateTemplate: (
+    id: string,
+    plan: BodyPlanName,
+    opts: { legs?: number; heightM?: number } = {},
+  ): Promise<SkelApplyDto> =>
+    invoke<SkelApplyDto>("skel_instantiate_template", {
+      id,
+      plan,
+      legs: opts.legs ?? null,
+      heightM: opts.heightM ?? null,
+    }),
+  /**
+   * Append another rig onto this one at `attach` — modular rigging. Base joint
+   * indices never move, so an IK chain authored on this rig survives; the
+   * `warning` carries the offset a merged part's weight table needs.
+   */
+  mergePart: (id: string, partAsset: string, attach: number): Promise<SkelApplyDto> =>
+    invoke<SkelApplyDto>("skel_merge_part", { id, partAsset, attach }),
+
+  undo: (id: string): Promise<SkelApplyDto> => invoke<SkelApplyDto>("skel_undo", { id }),
+  redo: (id: string): Promise<SkelApplyDto> => invoke<SkelApplyDto>("skel_redo", { id }),
+  /** Write the rig back to its `.inf_skel`. Dirty is cleared only on success. */
+  save: (id: string): Promise<SkelApplyDto> => invoke<SkelApplyDto>("skel_save", { id }),
 };
+
+/**
+ * The body plans the generator offers.
+ *
+ * A string union mirroring the backend's `parse_plan`, deliberately not a
+ * generated ts-rs enum: the backend's own comment says the plan set is the one
+ * part of this API expected to grow, and a name it does not know fails loudly
+ * with the list of what it does.
+ */
+export type BodyPlanName = "biped" | "quadruped" | "hexapod" | "npedal";
 
 /**
  * Cook / Package (P9.2 item 3). Runs `inf_packager::cook` against the open

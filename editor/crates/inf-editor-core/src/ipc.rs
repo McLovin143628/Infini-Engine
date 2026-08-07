@@ -2602,6 +2602,90 @@ pub struct DccDocDto {
     pub skin_joints: Option<u32>,
 }
 
+// ── the Skeleton Editor (P24.3) ─────────────────────────────────────────────
+
+/// One joint, as the tree view reads it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SkelJointDto {
+    /// Index into the skeleton's joints — the id every other command uses.
+    pub index: u16,
+    pub name: String,
+    /// `None` for a root.
+    pub parent: Option<u16>,
+    /// Local **rest** translation (metres), rotation (`[x,y,z,w]`) and scale —
+    /// the values the transform editor writes back. Not the animated pose: a
+    /// skeleton asset has none.
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
+    /// One of the canonical humanoid nineteen. The panel marks these because
+    /// renaming one costs `RetargetMap::humanoid_identity` a pairing.
+    pub canonical: bool,
+    /// This joint's left/right twin, when the rig has one.
+    pub mirror: Option<u16>,
+    /// The name says it has a side and the rig has no twin — mirroring across
+    /// this rig would weight the copy to the wrong side.
+    pub sided_without_twin: bool,
+    /// The authored rotation limit, if any: min/max degrees about local X/Y/Z.
+    /// **Absent means unlimited**, which is why these are `Option` and not a
+    /// full-range default (`inf_anim::JointLimit`'s own rule).
+    pub limit_min_deg: Option<[f32; 3]>,
+    pub limit_max_deg: Option<[f32; 3]>,
+}
+
+/// One socket, as the socket list reads it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SkelSocketDto {
+    pub name: String,
+    pub joint: u16,
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
+}
+
+/// One open Skeleton Editor document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SkelDocDto {
+    /// The asset GUID this document edits — also the document key. Unlike the
+    /// Model Editor there is no separate session file, so the asset **is** the
+    /// document and re-opening returns the live one.
+    pub id: String,
+    pub name: String,
+    pub joints: Vec<SkelJointDto>,
+    pub sockets: Vec<SkelSocketDto>,
+    /// Unsaved changes, measured against the bytes on disk rather than a flag —
+    /// so undoing back to the saved state correctly reads clean.
+    pub dirty: bool,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    /// Sided joints with no opposite number, by name. Non-empty means a mirror
+    /// across this rig is refused; the panel shows it as a rig warning rather
+    /// than waiting for the refusal.
+    pub unmatched_sided: Vec<String>,
+}
+
+/// The answer to every mutating Skeleton Editor command.
+///
+/// One shape for all of them (the [`DccApplyDto`] pattern) so the frontend has a
+/// single reducer, and a refusal can never be mistaken for a success that
+/// happened to change nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SkelApplyDto {
+    pub ok: bool,
+    /// Why it refused — the Ring-1 error's own text, which names the joint, the
+    /// socket or the parameter. `None` when `ok`.
+    pub refusal: Option<String>,
+    /// What a successful edit **cost**, when that is not nothing: a rename that
+    /// left the canonical vocabulary or broke a mirror pair. A warning, never a
+    /// refusal — the edit happened.
+    pub warning: Option<String>,
+    pub doc: SkelDocDto,
+}
+
 /// The result of a tool press: what it did, or why it refused.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
