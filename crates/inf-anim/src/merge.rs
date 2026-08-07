@@ -286,21 +286,28 @@ mod tests {
         }
     }
 
-    /// A two-joint "torso": root + chest.
+    /// A three-joint "torso": an **off-origin** root and **non-uniform** bones.
+    ///
+    /// Deliberately not unit-length-at-the-origin (F4): a symmetric chain makes
+    /// FABRIK's answer independent of which bones it used, so every merge
+    /// assertion built on it held vacuously — all four configurations of the old
+    /// fixture produced a bit-identical reach error.
     fn torso() -> SkeletonAsset {
         let sk = Skeleton::new(vec![
-            joint("root", None, Vec3::ZERO),
-            joint("chest", Some(0), Vec3::Y),
+            joint("root", None, Vec3::new(0.13, 0.87, -0.05)),
+            joint("chest", Some(0), Vec3::new(0.0, 0.42, 0.0)),
+            joint("neck", Some(1), Vec3::new(0.02, 0.17, 0.01)),
         ])
         .unwrap();
         SkeletonAsset::with_sockets(sk, vec![Socket::new("spine_top", 1)])
     }
 
-    /// A two-joint "arm": its own root + a hand.
+    /// A two-joint "arm", asymmetric and a different length from the torso's
+    /// bones, so a chain through it is distinguishable from one through them.
     fn arm() -> SkeletonAsset {
         let sk = Skeleton::new(vec![
-            joint("upper_arm_r", None, Vec3::ZERO),
-            joint("hand_r", Some(0), Vec3::X),
+            joint("upper_arm_r", None, Vec3::new(0.24, -0.03, 0.0)),
+            joint("hand_r", Some(0), Vec3::new(0.31, -0.09, 0.02)),
         ])
         .unwrap();
         let mut a = SkeletonAsset::with_sockets(sk, vec![Socket::new("grip_r", 1)]);
@@ -314,8 +321,8 @@ mod tests {
     fn a_merge_appends_and_never_moves_a_base_joint() {
         let (t, a) = (torso(), arm());
         let m = merge_skeletons(&t, &a, 1).expect("merges");
-        assert_eq!(m.joint_offset, 2);
-        assert_eq!(m.asset.skeleton.len(), 4);
+        assert_eq!(m.joint_offset, 3);
+        assert_eq!(m.asset.skeleton.len(), 5);
 
         // Base joints: same index, same name, same bind — byte-for-byte.
         for i in 0..t.skeleton.len() {
@@ -327,17 +334,17 @@ mod tests {
         }
         // The arm's root became a child of the attach joint; its own child kept
         // its parent, shifted.
-        assert_eq!(m.asset.skeleton.joint(2).unwrap().name, "upper_arm_r");
-        assert_eq!(m.asset.skeleton.joint(2).unwrap().parent, Some(1));
-        assert_eq!(m.asset.skeleton.joint(3).unwrap().parent, Some(2));
+        assert_eq!(m.asset.skeleton.joint(3).unwrap().name, "upper_arm_r");
+        assert_eq!(m.asset.skeleton.joint(3).unwrap().parent, Some(1));
+        assert_eq!(m.asset.skeleton.joint(4).unwrap().parent, Some(3));
         // Sockets unioned, the incoming one shifted.
         assert_eq!(m.asset.sockets.len(), 2);
         assert_eq!(m.asset.sockets[0], t.sockets[0]);
         assert_eq!(m.asset.sockets[1].name, "grip_r");
-        assert_eq!(m.asset.sockets[1].joint, 3);
+        assert_eq!(m.asset.sockets[1].joint, 4);
         // …and the limits came with it.
         assert_eq!(m.asset.limits.len(), 1);
-        assert_eq!(m.asset.limits[0].joint, 3);
+        assert_eq!(m.asset.limits[0].joint, 4);
     }
 
     /// **An IK chain on the torso survives an arm being attached** — the claim
@@ -347,16 +354,10 @@ mod tests {
     fn an_ik_chain_on_the_base_survives_the_merge() {
         let (t, a) = (torso(), arm());
         let chain: Vec<u16> = vec![0, 1];
+        let target = Vec3::new(0.31, 0.55, -0.12);
         let mut pose = crate::Pose::rest(&t.skeleton);
-        let before = crate::solve_chain(
-            &t.skeleton,
-            &mut pose,
-            &chain,
-            Vec3::new(0.5, 0.5, 0.0),
-            None,
-            &t.limits,
-        )
-        .expect("solves before");
+        let before = crate::solve_chain(&t.skeleton, &mut pose, &chain, target, None, &t.limits)
+            .expect("solves before");
 
         let m = merge_skeletons(&t, &a, 1).expect("merges");
         let mut pose = crate::Pose::rest(&m.asset.skeleton);
@@ -364,15 +365,84 @@ mod tests {
             &m.asset.skeleton,
             &mut pose,
             &chain,
-            Vec3::new(0.5, 0.5, 0.0),
+            target,
             None,
             &m.asset.limits,
         )
         .expect("the SAME chain still solves after the merge");
         assert_eq!(
-            before.reach_error, after.reach_error,
+            before.reach_error.to_bits(),
+            after.reach_error.to_bits(),
             "the chain resolved to different bones after a merge"
         );
+
+        // **The control that makes the equality mean something** (F4). The old
+        // fixture was unit-length bones at the origin, and all four
+        // configurations produced a bit-identical reach error — the assertion
+        // held even if the chain had resolved to entirely different bones.
+        // Solving the merged rig's OTHER chain on the same target must give a
+        // measurably different answer; if it did not, the rig's bones would be
+        // interchangeable and the equality above would prove nothing.
+        let mut other = crate::Pose::rest(&m.asset.skeleton);
+        let arm_chain: Vec<u16> = vec![m.joint_offset, m.joint_offset + 1];
+        let arm_solve = crate::solve_chain(
+            &m.asset.skeleton,
+            &mut other,
+            &arm_chain,
+            target,
+            None,
+            &m.asset.limits,
+        )
+        .expect("the arm chain solves");
+        assert_ne!(
+            after.reach_error.to_bits(),
+            arm_solve.reach_error.to_bits(),
+            "two different chains give a bit-identical reach error — the fixture              is degenerate and the equality above proves nothing"
+        );
+        assert_ne!(
+            before.chain_length.to_bits(),
+            arm_solve.chain_length.to_bits(),
+            "the two chains are the same length, so they are not distinguishable"
+        );
+    }
+
+    /// **F5: append-only is only testable at an INTERIOR attach joint.**
+    ///
+    /// Every earlier merge test attached at `base_len - 1`, where "append" and
+    /// "insert directly after the attach joint" produce the *same* layout — so
+    /// the distinction the whole rule is about was never exercised. Here the part
+    /// attaches at joint 0 of a three-joint torso, so an insert-after-attach
+    /// implementation would put it at indices 1..2 and shift `chest` and `neck`
+    /// up by two. Every base index staying put is now a claim with content.
+    #[test]
+    fn attaching_at_an_interior_joint_still_appends() {
+        let (t, a) = (torso(), arm());
+        let base_len = t.skeleton.len();
+        assert!(base_len >= 3, "the fixture must have an interior joint");
+        let m = merge_skeletons(&t, &a, 0).expect("merges");
+        assert_eq!(m.joint_offset as usize, base_len);
+
+        for i in 0..base_len {
+            assert_eq!(
+                m.asset.skeleton.joint(i).unwrap(),
+                t.skeleton.joint(i).unwrap(),
+                "base joint {i} moved; the merge inserted rather than appended"
+            );
+        }
+        assert_eq!(m.asset.skeleton.joint(1).unwrap().name, "chest");
+        assert_eq!(m.asset.skeleton.joint(2).unwrap().name, "neck");
+        assert_eq!(
+            m.asset.skeleton.joint(base_len).unwrap().name,
+            "upper_arm_r"
+        );
+        assert_eq!(m.asset.skeleton.joint(base_len).unwrap().parent, Some(0));
+        let sock = m
+            .asset
+            .sockets
+            .iter()
+            .find(|s| s.name == "spine_top")
+            .unwrap();
+        assert_eq!(sock.joint, 1, "a base socket followed a shift");
     }
 
     /// A colliding socket name refuses, by value, naming the socket — and
@@ -419,7 +489,7 @@ mod tests {
             merge_skeletons(&torso(), &arm(), 9),
             Err(SkeletonMergeError::NoSuchAttachJoint {
                 joint: 9,
-                joints: 2
+                joints: 3
             })
         );
     }
