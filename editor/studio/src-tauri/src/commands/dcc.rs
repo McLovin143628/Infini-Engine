@@ -1510,12 +1510,21 @@ pub async fn dcc_merge_asset(
         let here = dcc::tessellate(session.mesh()).bounds;
         let there = dcc::tessellate(&incoming.mesh).bounds;
         let offset = glam::DVec3::new((here.max[0] - there.min[0]) as f64 + 0.25, 0.0, 0.0);
-        match dcc::merge_into(session, &incoming.mesh, offset) {
-            Ok(faces) => {
+        // **`None` rig, deliberately** (P24.3). `merge_into` can carry a skin,
+        // and this door cannot supply what that needs: a `.inf_mesh` records no
+        // skeleton (`SkinBinding::skeleton` is `None` on import, by design — the
+        // pairing lives in the scene's `SkeletalMesh`), so merging two RIGS means
+        // the author naming both skeletons and an attach socket. That is the
+        // Skeleton Editor's job, and it also needs a `SkeletonAsset` writer to
+        // put the merged rig back. Until then this drops geometry and materials
+        // — which is strictly more than P23.4 did, since the slot table now comes
+        // with the part.
+        match dcc::merge_into(session, &incoming.mesh, offset, None) {
+            Ok(r) => {
                 doc.selection.sync(session.generation());
                 Ok(DccApplyDto {
-                    ok: faces > 0,
-                    refusal: (faces == 0).then(|| "the dropped mesh had no faces".to_string()),
+                    ok: r.faces > 0,
+                    refusal: (r.faces == 0).then(|| "the dropped mesh had no faces".to_string()),
                     doc: doc_dto(doc, session),
                 })
             }

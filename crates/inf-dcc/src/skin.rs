@@ -60,11 +60,21 @@
 //!
 //! # What is NOT here, and is ledgered
 //!
-//! * **A mirror op does not mirror joints.** `Op::Mirror` copies each vertex's
-//!   weights verbatim, so a mirrored left arm is still weighted to the left
-//!   arm's joints. Fixing it needs the skeleton (to pair `upper_arm_l` with
-//!   `upper_arm_r`), which the kernel deliberately does not hold — it belongs to
-//!   the auto-fit layer, and it is written down in ROADMAP §12's P24 block.
+//! * **A mirror op does not mirror joints — and it is not going to.**
+//!   `Op::Mirror` copies each vertex's weights verbatim, so a mirrored left arm
+//!   is still weighted to the left arm's joints. Pairing `upper_arm_l` with
+//!   `upper_arm_r` needs joint **names**, and [`SkinBinding`] carries a GUID and
+//!   a joint **count** — deliberately, because putting the names here would
+//!   change `Mesh`'s shape and therefore `SessionSave`'s, a schema bump for a
+//!   convenience.
+//!
+//!   P24.3 closed the defect **one level up** instead:
+//!   `inf_editor_core::dcc::mirror_with_joints` composes `Op::Mirror` with an
+//!   `Op::AssignWeights` carrying the swapped table, using
+//!   `inf_anim::mirror_joint_map`. Both ops carry *values*, so a saved session
+//!   replays the swap as a fact rather than as "whatever this build's pairing
+//!   rule says" — the [`crate::ops::Op::Unwrap`] doctrine, applied to the rig. A
+//!   sided joint with no twin is a refusal, by value.
 //! * **A weld keeps the surviving vertex's weights.** `WeldVerts`, `MergeVerts`
 //!   and `CollapseEdge` all name a survivor, and the survivor keeps what it had.
 //!   Averaging would be a silent third behaviour for an op whose contract is

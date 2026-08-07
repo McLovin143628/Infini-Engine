@@ -769,6 +769,11 @@ mod tests {
             Op::BindSkin { .. } => 27,
             Op::AssignWeights { .. } => 28,
             Op::ClearSkin => 29,
+            // P24.3's slot-table op, appended at the next free index. Fifth
+            // batch, same rule: nothing above moved, `CollapseEdge{7}` is still
+            // `[5, 7]`, and `SessionSave::CURRENT_VERSION` does NOT move — `Mesh`
+            // gained no field, only entries in a `Vec<String>` it already had.
+            Op::AddMaterialSlots { .. } => 30,
         }
     }
 
@@ -849,7 +854,10 @@ mod tests {
             // in this file and not a domain enum anyone can renumber.
             | Op::BindSkin { .. }
             | Op::AssignWeights { .. }
-            | Op::ClearSkin => Vec::new(),
+            | Op::ClearSkin
+            // P24.3's carries a `Vec<String>` — strings, not a domain enum
+            // anyone can renumber.
+            | Op::AddMaterialSlots { .. } => Vec::new(),
         }
     }
 
@@ -957,8 +965,11 @@ mod tests {
             },
             Op::AssignWeights { weights: vec![] },
             Op::ClearSkin,
+            Op::AddMaterialSlots {
+                names: vec!["Default".into()],
+            },
         ];
-        assert_eq!(every.len(), 30, "one sample per variant");
+        assert_eq!(every.len(), 31, "one sample per variant");
         let cfg = bincode::config::standard();
         for op in &every {
             let bytes = bincode::serde::encode_to_vec(op, cfg).unwrap();
@@ -988,6 +999,20 @@ mod tests {
         assert_eq!(
             bincode::serde::encode_to_vec(Op::ClearSkin, cfg).unwrap(),
             vec![29]
+        );
+        // P24.3's op is the new last free index, pinned as bytes for the same
+        // reason: `[30, 1, 1, 65]` is discriminant 30, one name, one byte long,
+        // `"A"`. `SessionSave::CURRENT_VERSION` is still 3 — asserted above —
+        // because appending an `Op` variant is not a shape change.
+        assert_eq!(
+            bincode::serde::encode_to_vec(
+                Op::AddMaterialSlots {
+                    names: vec!["A".into()]
+                },
+                cfg
+            )
+            .unwrap(),
+            vec![30, 1, 1, 65]
         );
     }
 

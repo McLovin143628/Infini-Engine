@@ -1703,8 +1703,10 @@ pub(crate) fn mirror(mesh: &mut Mesh, axis: MirrorAxis, coord: f64) -> Result<Op
             finite("a mirrored vertex position", &q)?;
             // The reflected copy inherits its source's skin verbatim — it does
             // NOT swap left-side joints for right-side ones, because the kernel
-            // holds no skeleton to pair them by. Ledgered in the `skin` module
-            // and in ROADMAP §12's P24 block.
+            // holds no skeleton to pair them by (a `SkinBinding` is a GUID and a
+            // joint COUNT). P24.3 does the swap one level up, as a second
+            // journalled op: see `inf_editor_core::dcc::mirror_with_joints` and
+            // the `skin` module docs.
             let w = m.alloc_vert_blended(q, &[(v, 1.0)]);
             map.insert(v, w);
             fresh.push(w);

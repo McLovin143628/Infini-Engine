@@ -107,7 +107,11 @@ pub fn op_preserves_ids(op: &Op) -> bool {
         // `Op::Sculpt`.
         | Op::BindSkin { .. }
         | Op::AssignWeights { .. }
-        | Op::ClearSkin => true,
+        | Op::ClearSkin
+        // P24.3: appending a name to the slot TABLE creates, moves and destroys
+        // no element. (It does change what `Mesh::canonical` reports, which is a
+        // different claim and the round-trip gates' business.)
+        | Op::AddMaterialSlots { .. } => true,
         // Everything else frees slots (which the LIFO free list then hands back
         // to something different) or rebuilds a patch outright.
         Op::RemoveVertex { .. }

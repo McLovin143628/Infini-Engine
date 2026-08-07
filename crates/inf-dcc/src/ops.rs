@@ -512,6 +512,47 @@ pub enum Op {
     /// ([`crate::validate::Violation::SkinWithoutBinding`]). "Clear the skin"
     /// means the mesh is rigid again, and rigid has one representation.
     ClearSkin,
+
+    // ── the slot-table op (P24.3) — appended at 30 ──────────────────
+    //
+    // Fifth batch, same discipline: `frozen_discriminant` has no wildcard, so
+    // this stopped the crate compiling until it was given the next free index by
+    // hand. `SessionSave::CURRENT_VERSION` does NOT move for it — `Mesh`'s shape
+    // is unchanged; only the contents of a `Vec<String>` it already had.
+    /// **Append material slots**, by name, to the end of the table.
+    ///
+    /// The op P23.4's `merge_into` said it could not have: *"No material slots.
+    /// Every dropped face lands on slot `None`, because the slot table is not an
+    /// `Op` — remapping the incoming names into this mesh's table would be a
+    /// mutation outside the journal, and a journal with a hole in it is worse than
+    /// a merge that loses a material assignment."* This is the `Op`, so the hole
+    /// closes and the merge keeps its materials.
+    ///
+    /// **Append-only, and that is the whole design.** A face records its slot as
+    /// an *index* ([`Mesh::face_slot`]), so inserting or reordering a slot
+    /// silently repaints every face after it — the same class of defect as
+    /// shifting a joint index under a weight table. Appending cannot: every
+    /// existing index still names what it named. There is deliberately no
+    /// rename-slot and no remove-slot op; both are index-preserving in principle
+    /// and neither has a caller, and an unused op on a frozen wire is a liability.
+    ///
+    /// Duplicate names are **allowed** and are the caller's business: two parts
+    /// that both use "Default" are two parts whose author may or may not want one
+    /// material. [`crate::MeshSession`] gives no policy;
+    /// `inf_editor_core::dcc::merge_into` reuses a same-named slot rather than
+    /// appending, and says so.
+    ///
+    /// An empty `names` is refused ([`OpError::EmptyOperand`]) rather than
+    /// silently recorded: a journal entry that does nothing is a journal entry
+    /// somebody will later read as evidence that something happened.
+    AddMaterialSlots {
+        /// The names to append, in order. The first lands at whatever
+        /// `mesh.material_slots().len()` was before the op — a caller that needs
+        /// the base index reads it there *before* applying, rather than through
+        /// an [`OpOutcome`] field: the outcome reports *element ids*, and a slot
+        /// index is not one.
+        names: Vec<String>,
+    },
 }
 
 /// Apply one op. See the module docs for the three rules this upholds.
@@ -786,6 +827,23 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
             for (v, w) in weights {
                 mesh.set_vert_weights(*v, w.normalized());
             }
+            Ok(OpOutcome::default())
+        }
+
+        Op::AddMaterialSlots { names } => {
+            // A no-op journal entry is worse than a refusal: it is evidence that
+            // something happened. (`EmptyOperand` is the crate's existing shape
+            // for this — `Op::ExtrudeFaces` and friends use it.)
+            if names.is_empty() {
+                return Err(OpError::EmptyOperand {
+                    what: "the material slot names",
+                });
+            }
+            let mut slots = mesh.material_slots().to_vec();
+            slots.extend(names.iter().cloned());
+            mesh.set_material_slots(slots);
+            // No ids were created, moved or destroyed — which is exactly what
+            // `select::op_preserves_ids` says about this op.
             Ok(OpOutcome::default())
         }
 
@@ -2047,6 +2105,107 @@ mod tests {
                 slot: Some(3),
             },
             OpError::UnknownSlot { slot: 3, slots: 1 },
+        );
+    }
+
+    // ── the slot-table op (P24.3) ─────────────────────────────────────────
+
+    /// **Appending a slot never repaints a face.** The whole reason the op is
+    /// append-only, asserted on the faces rather than on the table.
+    #[test]
+    fn adding_material_slots_appends_and_repaints_nothing() {
+        let mut m = cube(1.0);
+        apply(
+            &mut m,
+            &Op::AddMaterialSlots {
+                names: vec!["Base".into(), "Trim".into()],
+            },
+        )
+        .expect("appends");
+        assert_eq!(m.material_slots(), ["Base", "Trim"]);
+
+        // Paint a face with the second slot, then append a third: the face must
+        // still be slot 1.
+        let f = m.face_ids().next().unwrap();
+        apply(
+            &mut m,
+            &Op::SetFaceSlot {
+                face: f,
+                slot: Some(1),
+            },
+        )
+        .unwrap();
+        apply(
+            &mut m,
+            &Op::AddMaterialSlots {
+                names: vec!["Glass".into()],
+            },
+        )
+        .unwrap();
+        assert_eq!(m.material_slots(), ["Base", "Trim", "Glass"]);
+        assert_eq!(
+            m.face_slot(f),
+            Some(Some(1)),
+            "appending a slot repainted a face — the index it recorded moved"
+        );
+        // …and the newly appended index is now assignable, which it was not
+        // before (`check_slot` refused it).
+        apply(
+            &mut m,
+            &Op::SetFaceSlot {
+                face: f,
+                slot: Some(2),
+            },
+        )
+        .expect("the appended slot is in range");
+        assert_eq!(
+            apply(
+                &mut m,
+                &Op::SetFaceSlot {
+                    face: f,
+                    slot: Some(3)
+                }
+            ),
+            Err(OpError::UnknownSlot { slot: 3, slots: 3 }),
+            "one past the end must still refuse"
+        );
+    }
+
+    /// An empty append is refused rather than journalled — a no-op entry is
+    /// evidence that something happened.
+    #[test]
+    fn an_empty_slot_append_is_refused() {
+        let mut m = cube(1.0);
+        assert_eq!(
+            apply(&mut m, &Op::AddMaterialSlots { names: vec![] }),
+            Err(OpError::EmptyOperand {
+                what: "the material slot names"
+            })
+        );
+        assert!(
+            m.material_slots().is_empty(),
+            "a refusal must not half-apply"
+        );
+    }
+
+    /// Duplicate names are the caller's business, not the kernel's — the policy
+    /// note on the op, asserted so it cannot drift into a silent dedupe.
+    #[test]
+    fn duplicate_slot_names_are_allowed_by_the_kernel() {
+        let mut m = cube(1.0);
+        for _ in 0..2 {
+            apply(
+                &mut m,
+                &Op::AddMaterialSlots {
+                    names: vec!["Default".into()],
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            m.material_slots(),
+            ["Default", "Default"],
+            "the kernel must not dedupe; `merge_into` is where the policy lives"
         );
     }
 }

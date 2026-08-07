@@ -184,9 +184,31 @@ pub struct ExportReport {
     /// flag's documented effect is "smaller and faster" and an author is entitled
     /// to know it did not apply.
     ///
-    /// Zero unless `optimize` is on. Lifting it needs a `MeshAsset`-level
-    /// optimize that permutes every stream at once; ledgered in ROADMAP §12's
-    /// P24 block.
+    /// Zero unless `optimize` is on.
+    ///
+    /// # The P24.3 ruling: this is DOCTRINE, not a deferral
+    ///
+    /// P24.2 ledgered it as "lifting it needs a `MeshAsset`-level optimize that
+    /// permutes every stream at once". Measured in P24.3, that is true and it is
+    /// not the whole story — `inf_mesh::optimize` applies **two** permutations
+    /// and exposes neither:
+    ///
+    ///  1. `generate_vertex_remap` + `remap_vertex_buffer` welds duplicates, so
+    ///     the output is not even the same LENGTH as the input;
+    ///  2. `optimize_vertex_fetch` reorders again, on top, inside the same call.
+    ///
+    /// So a skin-aware optimize is not a wrapper over this function; it is a
+    /// different function that returns its remap, in `inf-mesh`, behind the
+    /// **meshopt law** (P18: meshopt is not cross-platform, so its output may
+    /// never enter a journal or a committed payload — bake time only). That is a
+    /// deliberate piece of work with a cross-platform hazard attached, not a
+    /// missing line here.
+    ///
+    /// **The engine is consistent about it**: `inf_mesh::gltf_import` takes the
+    /// same way out on the same reasoning, and
+    /// `the_skinned_optimize_skip_is_the_engines_one_doctrine` pins the two
+    /// together so one cannot quietly start optimizing skinned geometry while the
+    /// other does not. Re-ledgered in ROADMAP §12's P24 block with this reason.
     pub optimize_skipped_skinned: usize,
 }
 
@@ -1885,6 +1907,42 @@ mod tests {
     ///
     /// `inf_mesh::optimize` hands back `(vertices, indices)` only, so a parallel
     /// stream cannot follow its permutation. Running it anyway would give every
+    /// **One doctrine, two callers.** `inf_dcc`'s exporter and
+    /// `inf_mesh::gltf_import` both decline to run `meshopt` on a skinned
+    /// submesh, for the same reason, and this pins them together as source text
+    /// — the only way to see a divergence, since the two never meet at runtime.
+    ///
+    /// Without it, one could start optimizing skinned geometry while the other
+    /// did not, and the only symptom would be a character that deforms into
+    /// confetti on one import path and not the other.
+    #[test]
+    fn the_skinned_optimize_skip_is_the_engines_one_doctrine() {
+        // No line-ending normalization: both needles are single-line, so a CRLF
+        // checkout reads them identically. (The gates that DO span a newline —
+        // P22.4's trig law — are the ones that had to normalize.)
+        let importer = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../inf-mesh/src/gltf_import.rs"),
+        )
+        .expect("the glTF importer is readable");
+        assert!(
+            importer.contains("Skinned submesh: skip meshopt"),
+            "the glTF importer no longer states the skinned-optimize skip — either \
+             it started optimizing skinned geometry (every vertex would wear \
+             another vertex's weights) or the doctrine moved and this exporter \
+             was not told"
+        );
+        // …and the exporter's own gate is the emptiness of the skin stream, not
+        // a flag someone can forget to set.
+        let me = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/export.rs"),
+        )
+        .expect("readable");
+        assert!(
+            me.contains("opts.optimize && skin.is_empty()"),
+            "the exporter's skinned-optimize gate changed shape"
+        );
+    }
+
     /// vertex another vertex's weights.
     #[test]
     fn optimize_is_skipped_on_a_skinned_submesh_and_reported() {

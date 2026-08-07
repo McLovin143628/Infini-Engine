@@ -1995,11 +1995,32 @@ fn drag_step(xform: &VertTransform) -> usize {
 
 // ── drag-and-drop modularity, v1 ───────────────────────────────────────────
 
-/// Append another mesh into this document as a **new connected component**,
-/// offset by `offset` metres — the dcc-vision seed: assembling a prop out of kit
-/// pieces without leaving the Model Editor.
+/// What a rig-carrying [`merge_into`] did.
 ///
-/// **What v1 does**: applies an `AddVertex` per incoming vertex and an `AddFace`
+/// Reported rather than inferred, because every number here is a thing that can
+/// silently not happen: a merge that dropped the incoming weights, or landed
+/// every face on slot `None`, looks exactly like a merge that had none to carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MergeReport {
+    /// Faces added.
+    pub faces: usize,
+    /// Vertices added.
+    pub verts: usize,
+    /// Material slots **appended** to this document's table (never reused ones).
+    pub slots_appended: usize,
+    /// Incoming slots that matched an existing name and were **reused** rather
+    /// than appended.
+    pub slots_reused: usize,
+    /// Vertices whose incoming weights were re-indexed by `joint_offset` and
+    /// written onto the merged geometry.
+    pub verts_reweighted: usize,
+}
+
+/// Append another mesh into this document as a **new connected component**,
+/// offset by `offset` metres — the dcc-vision seed: assembling a prop, or a
+/// character, out of kit pieces without leaving the Model Editor.
+///
+/// **What it does**: applies an `AddVertex` per incoming vertex and an `AddFace`
 /// per incoming face, so the whole merge is ordinary journal entries — undo peels
 /// it off, replay reproduces it byte for byte, and nothing special-cases it
 /// anywhere. It has to be done against a live session rather than precomputed as
@@ -2007,25 +2028,79 @@ fn drag_step(xform: &VertTransform) -> usize {
 /// that is the same property that makes replay work, and it is why there is no
 /// pure `merge_ops` beside this.
 ///
-/// **What v1 does NOT do**, stated rather than left to be discovered:
-/// * **No welding or snapping.** The dropped part is a separate shell that
-///   happens to be nearby. Joining it is the author's `MergeVerts`.
-/// * **No material slots.** Every dropped face lands on slot `None`, because the
-///   slot *table* is not an `Op` — remapping the incoming names into this mesh's
-///   table would be a mutation outside the journal, and a journal with a hole in
-///   it is worse than a merge that loses a material assignment.
-/// * **No instancing.** The geometry is copied, so editing the source asset
-///   afterwards does not update what was dropped. That is the difference between
-///   assembling and referencing, and referencing is what the *scene* is for.
-/// * **No refusal recovery.** A merge that fails partway has already journalled
-///   what it applied; the caller undoes it. (Every op here is `AddVertex` or
-///   `AddFace` onto fresh vertices, so the only way to fail is a non-finite
-///   offset, which the caller rejects first.)
+/// # The rig comes with it (P24.3)
+///
+/// Two of P23.4's three stated non-goals are now closed, and both through ops
+/// rather than through a mutation the journal cannot see:
+///
+/// * **Material slots.** `Op::AddMaterialSlots` (discriminant 30) appends the
+///   incoming names this document does not already have, and each incoming slot
+///   index is mapped to its name's index here. A name that already exists is
+///   **reused**, not duplicated: two parts that both say "Default" are two parts
+///   whose author meant one material. The kernel has no opinion about that (it
+///   allows duplicates); the policy is here, where the author's intent is.
+/// * **Skin.** If the incoming mesh is bound, its weights are re-indexed by the
+///   `joint_offset` the caller got from `inf_anim::merge_skeletons` and written
+///   with one `Op::AssignWeights`, after an `Op::BindSkin` widens this document's
+///   binding to the merged skeleton's joint count. **The base document's weights
+///   are never touched** — that is the append-only law, one level up from the
+///   skeleton: torso joints keep their indices, so the torso's own weight table
+///   and any IK chain authored against it survive by construction.
+///
+/// The third non-goal stands: **no welding or snapping** (the dropped part is a
+/// separate shell that happens to be nearby; joining it is the author's
+/// `MergeVerts`), **no instancing** (geometry is copied — that is the difference
+/// between assembling and referencing, and referencing is what the *scene* is
+/// for), and **no refusal recovery** (a merge that fails partway has journalled
+/// what it applied; the caller undoes it).
+///
+/// # `rig` is `None` for a rigid merge
+///
+/// Passing `None` merges geometry and slots and leaves every new vertex rigid,
+/// which is what a prop kit wants and what every pre-P24.3 caller got. Passing
+/// `Some` is the character path, and the caller is expected to have merged the
+/// *skeletons* first — this function cannot, because a `Mesh` holds a joint
+/// count and no joint list.
 pub fn merge_into(
     session: &mut inf_dcc::MeshSession,
     incoming: &Mesh,
     offset: DVec3,
-) -> Result<usize, inf_dcc::OpError> {
+    rig: Option<MergeRig>,
+) -> Result<MergeReport, inf_dcc::OpError> {
+    let mut report = MergeReport::default();
+
+    // ── 1. the slot table, before any face names an index into it ──────────
+    //
+    // First, because `Op::AddFace` runs `check_slot` and an index past the end
+    // is a refusal — a merge that added its faces first would have to add them
+    // all on `None` and repaint afterwards, which is two journal entries per
+    // face for the same result.
+    let existing: Vec<String> = session.mesh().material_slots().to_vec();
+    let mut slot_map: Vec<u32> = Vec::with_capacity(incoming.material_slots().len());
+    let mut to_append: Vec<String> = Vec::new();
+    for name in incoming.material_slots() {
+        match existing.iter().position(|e| e == name) {
+            Some(i) => {
+                slot_map.push(i as u32);
+                report.slots_reused += 1;
+            }
+            None => match to_append.iter().position(|e| e == name) {
+                // The incoming table can itself repeat a name; appending it
+                // twice would make two slots nothing can tell apart.
+                Some(i) => slot_map.push((existing.len() + i) as u32),
+                None => {
+                    slot_map.push((existing.len() + to_append.len()) as u32);
+                    to_append.push(name.clone());
+                }
+            },
+        }
+    }
+    if !to_append.is_empty() {
+        report.slots_appended = to_append.len();
+        session.apply(Op::AddMaterialSlots { names: to_append })?;
+    }
+
+    // ── 2. the geometry ────────────────────────────────────────────────────
     let sources: Vec<VertId> = incoming.vert_ids().collect();
     let mut minted: std::collections::BTreeMap<VertId, VertId> = std::collections::BTreeMap::new();
     for &v in &sources {
@@ -2041,7 +2116,8 @@ pub fn merge_into(
         })?;
         minted.insert(v, out.verts[0]);
     }
-    let mut faces = 0usize;
+    report.verts = minted.len();
+
     for f in incoming.face_ids() {
         let Some(loop_halfs) = incoming.face_loop(f) else {
             continue;
@@ -2065,14 +2141,200 @@ pub fn merge_into(
         if !ok || verts.len() < 3 {
             continue;
         }
+        // The incoming face's slot, through the map built above. A face with no
+        // slot keeps none; a slot the incoming table does not actually have (it
+        // cannot, but the map is indexed) also keeps none rather than guessing.
+        let slot = incoming
+            .face_slot(f)
+            .flatten()
+            .and_then(|s| slot_map.get(s as usize).copied());
         session.apply(Op::AddFace {
             verts,
             corners,
-            slot: None,
+            slot,
         })?;
-        faces += 1;
+        report.faces += 1;
     }
-    Ok(faces)
+
+    // ── 3. the rig ─────────────────────────────────────────────────────────
+    let Some(rig) = rig else {
+        return Ok(report);
+    };
+    // Widen (or establish) this document's binding FIRST: `Op::AssignWeights`
+    // refuses on an unbound mesh (`OpError::NotSkinned`) and refuses a joint
+    // index past the binding's count, and the incoming indices are about to be
+    // shifted past the base skeleton's.
+    session.apply(Op::BindSkin {
+        skeleton: rig.skeleton,
+        joints: rig.joints,
+    })?;
+    let mut weights: Vec<(VertId, inf_dcc::VertWeights)> = Vec::new();
+    for (&src, &dst) in &minted {
+        let Some(w) = incoming.vert_weights(src) else {
+            continue;
+        };
+        if w.is_rigid() && rig.joint_offset == 0 {
+            // Nothing to say: an unweighted vertex on an unshifted rig is
+            // already what `AddVertex` produced.
+            continue;
+        }
+        let mut out = w;
+        for (j, weight) in out.joints.iter_mut().zip(&w.weights) {
+            // Zero-weight slots are parked on joint 0 by `VertWeights::normalized`
+            // and carry no influence; shifting them would move them off 0 for no
+            // reason and cost a range check against the merged skeleton.
+            if *weight != 0.0 {
+                *j += rig.joint_offset;
+            }
+        }
+        weights.push((dst, out));
+    }
+    if !weights.is_empty() {
+        // `AssignWeights` wants them sorted by vertex id; a `BTreeMap` walk is
+        // sorted by the SOURCE id, and the minted ids come from a free list.
+        weights.sort_by_key(|(v, _)| *v);
+        report.verts_reweighted = weights.len();
+        session.apply(Op::AssignWeights { weights })?;
+    }
+    Ok(report)
+}
+
+/// What [`merge_into`] needs to carry a skin, and nothing more.
+///
+/// Produced by the caller from `inf_anim::merge_skeletons`: `joint_offset` is
+/// that function's own output, and `joints` is the merged skeleton's length. Kept
+/// as a small POD rather than taking a `SkeletonAsset` because Ring 1 is where
+/// the two crates meet and `inf_dcc` must not learn what a skeleton is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergeRig {
+    /// The merged skeleton's `.inf_skel` GUID as raw bytes, or `None` when the
+    /// document does not know which skeleton it is bound to (the ordinary state
+    /// for a mesh opened from a bare `.inf_mesh` — see `inf_dcc::SkinBinding`).
+    pub skeleton: Option<[u8; 16]>,
+    /// The merged skeleton's joint count.
+    pub joints: u32,
+    /// What to add to an incoming joint index — `inf_anim::SkeletonMerge::joint_offset`.
+    pub joint_offset: u16,
+}
+
+/// **Mirror the mesh AND its joints** across an axis-aligned plane (P24.3).
+///
+/// `Op::Mirror` alone copies each vertex's weights verbatim, so a mirrored left
+/// arm is still weighted to the left arm's bones. Fixing that needs to pair
+/// `upper_arm_l` with `upper_arm_r`, which needs joint **names** — and
+/// `inf_dcc::SkinBinding` carries a GUID and a joint **count**, deliberately, so
+/// the kernel cannot do it. (Putting the names on the binding would change
+/// `Mesh`'s shape and therefore `SessionSave`'s, which is a schema bump for a
+/// convenience.)
+///
+/// So the pairing happens **here**, as a composition of two ops rather than as a
+/// new one:
+///
+///  1. `Op::Mirror`, whose outcome reports exactly the vertices it created;
+///  2. `Op::AssignWeights` over those vertices, with each influence's joint
+///     swapped through `inf_anim::mirror_joint_map`.
+///
+/// Both carry values, so the journal replays the mirror as a fact and a later
+/// build with a different `mirror_joint_map` cannot silently rewrite a saved
+/// session — the `Op::Unwrap` doctrine, applied to the rig.
+///
+/// An **unbound** mesh takes the `Op::Mirror`-only path, byte for byte as before.
+/// A bound mesh whose skeleton has a sided joint with no twin is **refused**, by
+/// value, naming the joints: mirroring it would produce a limb weighted to the
+/// wrong side and look correct doing it.
+pub fn mirror_with_joints(
+    session: &mut inf_dcc::MeshSession,
+    axis: inf_dcc::MirrorAxis,
+    coord: f64,
+    skeleton: Option<&inf_anim::Skeleton>,
+) -> Result<MirrorRigReport, MirrorRigError> {
+    let bound = session.mesh().is_skinned();
+    let map = match (bound, skeleton) {
+        (true, Some(sk)) => {
+            let unmatched = inf_anim::unmatched_sided_joints(sk);
+            if !unmatched.is_empty() {
+                return Err(MirrorRigError::UnmatchedJoints(unmatched));
+            }
+            Some(inf_anim::mirror_joint_map(sk))
+        }
+        // Rigid mesh, or a skinned one whose skeleton the caller could not
+        // resolve. The second case is REPORTED rather than refused: the author
+        // asked for a mirror, and a mirror with un-swapped weights is what this
+        // op has always done.
+        _ => None,
+    };
+    let out = session
+        .apply(Op::Mirror { axis, coord })
+        .map_err(MirrorRigError::Op)?;
+    let mut report = MirrorRigReport {
+        verts: out.verts.len(),
+        faces: out.faces.len(),
+        joints_swapped: 0,
+        weights_unmapped: !bound || map.is_none(),
+    };
+    let Some(map) = map else {
+        return Ok(report);
+    };
+    let mut weights: Vec<(VertId, inf_dcc::VertWeights)> = Vec::new();
+    for &v in &out.verts {
+        let Some(w) = session.mesh().vert_weights(v) else {
+            continue;
+        };
+        let mut swapped = w;
+        let mut moved = false;
+        for (j, weight) in swapped.joints.iter_mut().zip(&w.weights) {
+            if *weight == 0.0 {
+                continue;
+            }
+            if let Some(&twin) = map.get(*j as usize) {
+                if twin != *j {
+                    *j = twin;
+                    moved = true;
+                }
+            }
+        }
+        if moved {
+            weights.push((v, swapped));
+        }
+    }
+    if !weights.is_empty() {
+        weights.sort_by_key(|(v, _)| *v);
+        report.joints_swapped = weights.len();
+        session
+            .apply(Op::AssignWeights { weights })
+            .map_err(MirrorRigError::Op)?;
+    }
+    Ok(report)
+}
+
+/// What [`mirror_with_joints`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MirrorRigReport {
+    /// Vertices the mirror created.
+    pub verts: usize,
+    /// Faces the mirror created.
+    pub faces: usize,
+    /// Mirrored vertices whose influences moved to the other side's joints.
+    pub joints_swapped: usize,
+    /// **True when the weights were copied verbatim** — a rigid mesh (where that
+    /// is the only meaning) or a skinned one whose skeleton the caller did not
+    /// supply (where it is the pre-P24.3 behaviour, and worth saying out loud).
+    pub weights_unmapped: bool,
+}
+
+/// Why [`mirror_with_joints`] refused.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum MirrorRigError {
+    /// The kernel refused the mirror itself.
+    #[error("{0}")]
+    Op(inf_dcc::OpError),
+    /// The skeleton has sided joints with no opposite number, so a mirrored
+    /// vertex has nowhere correct to send its influence.
+    #[error(
+        "these joints name a side but have no opposite number, so mirroring \
+         would weight the copy to the wrong side: {0:?}"
+    )]
+    UnmatchedJoints(Vec<String>),
 }
 
 #[cfg(test)]
@@ -3363,8 +3625,13 @@ mod tests {
     fn a_dropped_mesh_becomes_a_second_component_through_the_journal() {
         let mut s = MeshSession::new(cube(1.0));
         let before = s.mesh().face_count();
-        let faces = merge_into(&mut s, &cube(1.0), DVec3::new(4.0, 0.0, 0.0)).expect("merges");
-        assert_eq!(faces, 6);
+        let r = merge_into(&mut s, &cube(1.0), DVec3::new(4.0, 0.0, 0.0), None).expect("merges");
+        assert_eq!(r.faces, 6);
+        assert_eq!(r.verts, 8);
+        // A rigid merge of a slot-less cube appends no slot and re-weights
+        // nothing — the pre-P24.3 shape, unchanged.
+        assert_eq!(r.slots_appended, 0);
+        assert_eq!(r.verts_reweighted, 0);
         assert_eq!(s.mesh().face_count(), before + 6);
         assert_eq!(s.mesh().vert_count(), 16);
         assert_eq!(inf_dcc::validate(s.mesh()), Ok(()));
@@ -3383,5 +3650,357 @@ mod tests {
             6,
             "linked reaches one shell only"
         );
+    }
+
+    // ── P24.3: the merge carries the rig ──────────────────────────────────
+
+    /// A skinned cube bound to `joints` bones, every vertex on `joint`.
+    fn skinned_cube(joints: u32, joint: u16) -> Mesh {
+        let mut s = MeshSession::new(cube(1.0));
+        s.apply(Op::BindSkin {
+            skeleton: None,
+            joints,
+        })
+        .expect("binds");
+        let weights: Vec<(VertId, inf_dcc::VertWeights)> = s
+            .mesh()
+            .vert_ids()
+            .map(|v| (v, inf_dcc::VertWeights::from_pairs(&[(joint, 1.0)])))
+            .collect();
+        s.apply(Op::AssignWeights { weights }).expect("weights");
+        s.mesh().clone()
+    }
+
+    /// A cube whose faces are painted with two named material slots.
+    fn slotted_cube(names: &[&str]) -> Mesh {
+        let mut s = MeshSession::new(cube(1.0));
+        s.apply(Op::AddMaterialSlots {
+            names: names.iter().map(|n| n.to_string()).collect(),
+        })
+        .expect("slots");
+        let faces: Vec<FaceId> = s.mesh().face_ids().collect();
+        for (i, f) in faces.iter().enumerate() {
+            s.apply(Op::SetFaceSlot {
+                face: *f,
+                slot: Some((i % names.len()) as u32),
+            })
+            .expect("paints");
+        }
+        s.mesh().clone()
+    }
+
+    /// **The headline gate for modular assembly**: merging a skinned arm onto a
+    /// skinned torso re-indexes the ARM's weights and leaves the TORSO's exactly
+    /// where they were.
+    ///
+    /// The torso is weighted to joint 1 of a 2-joint rig; the arm to joint 1 of
+    /// its own 2-joint rig, which after a merge is joint 3. A merge that dropped
+    /// the remap would leave the arm on joint 1 — deforming with the torso, and
+    /// looking plausible while doing it, which is why the assertion is on the
+    /// weights and not on a count.
+    #[test]
+    fn merging_a_skinned_part_reindexes_its_weights_and_never_the_bases() {
+        let mut s = MeshSession::new(skinned_cube(2, 1));
+        let torso_verts: Vec<VertId> = s.mesh().vert_ids().collect();
+
+        let r = merge_into(
+            &mut s,
+            &skinned_cube(2, 1),
+            DVec3::new(4.0, 0.0, 0.0),
+            Some(MergeRig {
+                skeleton: None,
+                joints: 4,
+                joint_offset: 2,
+            }),
+        )
+        .expect("merges");
+        assert_eq!(r.verts, 8);
+        assert_eq!(r.verts_reweighted, 8, "every merged vertex was re-indexed");
+
+        // The base's weights are byte-for-byte what they were — the append-only
+        // law, which is what lets an IK chain authored on the torso survive.
+        for v in &torso_verts {
+            let w = s.mesh().vert_weights(*v).expect("live");
+            assert_eq!(w.influences(), vec![(1, 1.0)], "a base vertex moved");
+        }
+        // …and the merged part rides joint 1 + 2 = 3.
+        let merged: Vec<VertId> = s
+            .mesh()
+            .vert_ids()
+            .filter(|v| !torso_verts.contains(v))
+            .collect();
+        assert_eq!(merged.len(), 8);
+        for v in merged {
+            let w = s.mesh().vert_weights(v).expect("live");
+            assert_eq!(
+                w.influences(),
+                vec![(3, 1.0)],
+                "the merged part kept the base's joint indices"
+            );
+        }
+        assert_eq!(
+            s.mesh().skin_binding().map(|b| b.joints),
+            Some(4),
+            "the binding must widen to the merged skeleton"
+        );
+        assert_eq!(inf_dcc::validate(s.mesh()), Ok(()));
+    }
+
+    /// The rig rides the JOURNAL, not a side channel: replaying the recorded ops
+    /// reproduces the merged document byte for byte, weights included.
+    #[test]
+    fn a_rig_carrying_merge_replays_byte_for_byte() {
+        let mut s = MeshSession::new(skinned_cube(2, 1));
+        merge_into(
+            &mut s,
+            &skinned_cube(2, 1),
+            DVec3::new(4.0, 0.0, 0.0),
+            Some(MergeRig {
+                skeleton: None,
+                joints: 4,
+                joint_offset: 2,
+            }),
+        )
+        .expect("merges");
+        let replayed =
+            MeshSession::replay(s.base(), &s.ops()[..s.cursor()]).expect("journalled ops replay");
+        assert_eq!(replayed.encoded(), s.mesh().encoded());
+        // …and undo peels the whole merge off, back to the torso alone.
+        let ops = s.ops().len();
+        for _ in 0..ops {
+            s.undo();
+        }
+        assert_eq!(s.mesh().vert_count(), 8);
+    }
+
+    /// **Material slots come with the part**, and a name both parts already use
+    /// is REUSED rather than duplicated — the policy this layer owns (the kernel
+    /// allows duplicates on purpose).
+    #[test]
+    fn merging_carries_material_slots_and_reuses_matching_names() {
+        let mut s = MeshSession::new(slotted_cube(&["Default", "Trim"]));
+        let r = merge_into(
+            &mut s,
+            &slotted_cube(&["Default", "Glass"]),
+            DVec3::new(4.0, 0.0, 0.0),
+            None,
+        )
+        .expect("merges");
+        assert_eq!(r.slots_reused, 1, "\"Default\" already existed");
+        assert_eq!(r.slots_appended, 1, "\"Glass\" did not");
+        assert_eq!(s.mesh().material_slots(), ["Default", "Trim", "Glass"]);
+
+        // The incoming faces landed on the RIGHT slots: its slot 0 ("Default")
+        // maps to 0 and its slot 1 ("Glass") to 2 — never to 1 ("Trim"), which
+        // is the mis-paint an offset-only remap would produce.
+        let painted: Vec<Option<u32>> = s
+            .mesh()
+            .face_ids()
+            .filter_map(|f| s.mesh().face_slot(f))
+            .collect();
+        assert_eq!(painted.len(), 12);
+        assert!(
+            painted.contains(&Some(2)),
+            "the appended slot was never used"
+        );
+        // Exactly the six base faces use slot 1; nothing merged does.
+        assert_eq!(
+            painted.iter().filter(|s| **s == Some(1)).count(),
+            3,
+            "the merged part was painted with the BASE's second material"
+        );
+    }
+
+    /// A merge with no rig leaves every new vertex rigid and the binding alone —
+    /// the prop-kit path, unchanged from P23.4.
+    #[test]
+    fn a_rigid_merge_never_touches_the_skin() {
+        let mut s = MeshSession::new(skinned_cube(2, 1));
+        let before = s.mesh().skin_binding();
+        let r = merge_into(&mut s, &cube(1.0), DVec3::new(4.0, 0.0, 0.0), None).expect("merges");
+        assert_eq!(r.verts_reweighted, 0);
+        assert_eq!(s.mesh().skin_binding(), before);
+        assert_eq!(inf_dcc::validate(s.mesh()), Ok(()));
+    }
+
+    // ── P24.3: Op::Mirror joins the joints ────────────────────────────────
+
+    /// A 4-joint rig: root, then `upper_arm_l` / `upper_arm_r` and a `hand_l` —
+    /// deliberately missing `hand_r`, so the unmatched arm can be tested too.
+    fn sided_skeleton(with_hand_r: bool) -> inf_anim::Skeleton {
+        let j = |name: &str, parent: Option<u16>| inf_anim::Joint {
+            name: name.into(),
+            parent,
+            inverse_bind: glam::Mat4::IDENTITY.to_cols_array(),
+            local_bind: inf_anim::JointTransform::IDENTITY,
+        };
+        let mut joints = vec![
+            j("hips", None),
+            j("upper_arm_l", Some(0)),
+            j("upper_arm_r", Some(0)),
+            j("hand_l", Some(1)),
+        ];
+        if with_hand_r {
+            joints.push(j("hand_r", Some(2)));
+        }
+        inf_anim::Skeleton::new(joints).unwrap()
+    }
+
+    /// **The headline gate for the mirror**: a mirrored left arm ends up
+    /// weighted to the RIGHT arm's joints.
+    ///
+    /// This is P24.2's ledgered `Op::Mirror` defect, closed one level up from the
+    /// kernel — which still cannot do it, because `SkinBinding` carries a joint
+    /// COUNT and no names.
+    #[test]
+    fn mirroring_a_skinned_mesh_swaps_its_left_and_right_joints() {
+        let sk = sided_skeleton(true);
+        // A cube entirely on `upper_arm_l` (joint 1), off the mirror plane.
+        let mut s = MeshSession::new(skinned_cube(5, 1));
+        let before: Vec<VertId> = s.mesh().vert_ids().collect();
+        // Move it off x = 0 so the mirror really produces new vertices.
+        s.apply(Op::TranslateVerts {
+            verts: before.clone(),
+            delta: [3.0, 0.0, 0.0],
+        })
+        .expect("translates");
+
+        let r =
+            mirror_with_joints(&mut s, inf_dcc::MirrorAxis::X, 0.0, Some(&sk)).expect("mirrors");
+        assert_eq!(r.verts, 8, "the mirror produced no copies");
+        assert!(!r.weights_unmapped);
+        assert_eq!(r.joints_swapped, 8, "every mirrored vertex moved side");
+
+        // The ORIGINAL vertices are untouched; the copies are on joint 2.
+        for v in &before {
+            assert_eq!(
+                s.mesh().vert_weights(*v).unwrap().influences(),
+                vec![(1, 1.0)],
+                "the mirror re-weighted the SOURCE"
+            );
+        }
+        let copies: Vec<VertId> = s
+            .mesh()
+            .vert_ids()
+            .filter(|v| !before.contains(v))
+            .collect();
+        assert_eq!(copies.len(), 8);
+        for v in copies {
+            assert_eq!(
+                s.mesh().vert_weights(v).unwrap().influences(),
+                vec![(2, 1.0)],
+                "a mirrored vertex is still weighted to the LEFT arm"
+            );
+        }
+        assert_eq!(inf_dcc::validate(s.mesh()), Ok(()));
+    }
+
+    /// …and the swap rides the JOURNAL as values, so a later build with a
+    /// different pairing rule cannot rewrite a saved session (the `Op::Unwrap`
+    /// doctrine).
+    #[test]
+    fn the_mirror_joint_swap_is_journalled_as_values() {
+        let sk = sided_skeleton(true);
+        let mut s = MeshSession::new(skinned_cube(5, 1));
+        let all: Vec<VertId> = s.mesh().vert_ids().collect();
+        s.apply(Op::TranslateVerts {
+            verts: all,
+            delta: [3.0, 0.0, 0.0],
+        })
+        .unwrap();
+        mirror_with_joints(&mut s, inf_dcc::MirrorAxis::X, 0.0, Some(&sk)).unwrap();
+
+        // Two ops, in this order — a Mirror and an AssignWeights carrying the
+        // swapped table.
+        let tail = &s.ops()[s.ops().len() - 2..];
+        assert!(matches!(tail[0], Op::Mirror { .. }));
+        match &tail[1] {
+            Op::AssignWeights { weights } => {
+                assert_eq!(weights.len(), 8);
+                assert!(
+                    weights
+                        .iter()
+                        .all(|(_, w)| w.influences() == vec![(2, 1.0)]),
+                    "the journalled weights are not the swapped ones"
+                );
+            }
+            other => panic!("expected AssignWeights, got {other:?}"),
+        }
+        let replayed = MeshSession::replay(s.base(), &s.ops()[..s.cursor()]).expect("replays");
+        assert_eq!(replayed.encoded(), s.mesh().encoded());
+    }
+
+    /// A sided joint with no twin **refuses**, by value, naming the joints —
+    /// mirroring it would weight the copy to the wrong side and look right.
+    #[test]
+    fn mirroring_against_a_half_sided_rig_refuses_by_name() {
+        let sk = sided_skeleton(false); // no `hand_r`
+        let mut s = MeshSession::new(skinned_cube(5, 1));
+        match mirror_with_joints(&mut s, inf_dcc::MirrorAxis::X, 0.0, Some(&sk)) {
+            Err(MirrorRigError::UnmatchedJoints(names)) => {
+                assert_eq!(names, vec!["hand_l".to_string()]);
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        // A refusal must not have applied the mirror.
+        assert_eq!(s.mesh().vert_count(), 8);
+        assert!(s.ops().is_empty());
+    }
+
+    /// A **rigid** mesh takes the plain-mirror path and says so — byte for byte
+    /// what `Op::Mirror` alone did before P24.3.
+    #[test]
+    fn mirroring_a_rigid_mesh_is_the_old_behaviour_and_is_reported() {
+        let mut plain = MeshSession::new(cube(1.0));
+        let all: Vec<VertId> = plain.mesh().vert_ids().collect();
+        plain
+            .apply(Op::TranslateVerts {
+                verts: all.clone(),
+                delta: [3.0, 0.0, 0.0],
+            })
+            .unwrap();
+        let mut viaop = MeshSession::new(cube(1.0));
+        viaop
+            .apply(Op::TranslateVerts {
+                verts: all,
+                delta: [3.0, 0.0, 0.0],
+            })
+            .unwrap();
+
+        let r = mirror_with_joints(&mut plain, inf_dcc::MirrorAxis::X, 0.0, None).expect("mirrors");
+        viaop
+            .apply(Op::Mirror {
+                axis: inf_dcc::MirrorAxis::X,
+                coord: 0.0,
+            })
+            .unwrap();
+        assert!(r.weights_unmapped, "a rigid mirror maps no joints");
+        assert_eq!(r.joints_swapped, 0);
+        assert_eq!(
+            plain.mesh().encoded(),
+            viaop.mesh().encoded(),
+            "the rigid path diverged from Op::Mirror alone"
+        );
+        assert_eq!(plain.ops().len(), viaop.ops().len());
+    }
+
+    /// A skinned mesh whose skeleton the caller could NOT resolve is mirrored
+    /// with un-swapped weights and **reports it** — the pre-P24.3 behaviour, made
+    /// visible rather than removed.
+    #[test]
+    fn a_skinned_mirror_without_a_skeleton_reports_unmapped_weights() {
+        let mut s = MeshSession::new(skinned_cube(5, 1));
+        let all: Vec<VertId> = s.mesh().vert_ids().collect();
+        s.apply(Op::TranslateVerts {
+            verts: all,
+            delta: [3.0, 0.0, 0.0],
+        })
+        .unwrap();
+        let r = mirror_with_joints(&mut s, inf_dcc::MirrorAxis::X, 0.0, None).expect("mirrors");
+        assert!(
+            r.weights_unmapped,
+            "the caller must be told the copies kept the source's joints"
+        );
+        assert_eq!(r.joints_swapped, 0);
     }
 }

@@ -40,6 +40,8 @@ pub mod blend_space;
 pub mod clip;
 // P24.2 inverse kinematics: the post-pass over an evaluated pose.
 pub mod ik;
+// P24.3 modular rigging: assembling one skeleton out of parts.
+pub mod merge;
 pub mod pose;
 pub mod skeleton;
 pub mod state_machine;
@@ -60,6 +62,10 @@ pub use clip::{AnimClip, Interpolation, JointTrack, QuatTrack, Vec3Track};
 pub use ik::{
     fabrik, rotation_between, solve_chain, two_bone_positions, IkError, IkReport,
     FABRIK_ITERATIONS, MIN_BONE_LENGTH_M, REACH_TOLERANCE_M,
+};
+pub use merge::{
+    merge_skeletons, mirror_joint_map, mirrored_joint_name, unmatched_sided_joints, SkeletonMerge,
+    SkeletonMergeError,
 };
 pub use pose::{
     advance_clip_time, blend_poses, global_transforms, sample_clip, skinning_matrices, Pose,
