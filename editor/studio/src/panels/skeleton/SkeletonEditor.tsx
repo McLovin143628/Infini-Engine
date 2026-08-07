@@ -346,7 +346,15 @@ export default function SkeletonEditor({
                 className="cursor-pointer"
                 onClick={() => select(assetId, p.joint.index)}
               >
-                <title>{`${p.joint.name} — ${p.world.map((v) => v.toFixed(2)).join(", ")} m`}</title>
+                {/* The joint's OWN local offset, which is exact — not the running
+                    sum `projectRig` draws with. That sum omits every parent
+                    rotation and scale (see the module docs), so rendering it as
+                    "x, y, z m" to two decimals stated a precision the diagram
+                    does not have, and the panel's own scale control falsified
+                    it. The label now says which number this is. */}
+                <title>{`${p.joint.name} — local offset ${p.joint.translation
+                  .map((v) => v.toFixed(3))
+                  .join(", ")} m`}</title>
               </circle>
             ))}
             {/* Sockets ride a joint; drawn as a ring on it. */}

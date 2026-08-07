@@ -54,6 +54,12 @@ pub enum SkelError {
     /// A socket name the skeleton does not author.
     #[error("no socket named {name:?}")]
     NoSuchSocket { name: String },
+    /// A joint name already in use by a **different** joint.
+    ///
+    /// Refused for `SocketExists`' reason: `index_of` is first-match, so a
+    /// duplicate makes the second joint invisible to every name-keyed API.
+    #[error("joint {joint} is already named {name:?}")]
+    JointExists { name: String, joint: u16 },
     /// A socket name already in use.
     ///
     /// Refused rather than de-duplicated, for `merge_skeletons`' reason:
@@ -70,6 +76,12 @@ pub enum SkelError {
     /// The generator refused to build a template.
     #[error("the template is invalid: {0}")]
     Template(String),
+    /// The asset could not be written to disk.
+    ///
+    /// Carried as a `SkelError` so a failed save takes the same funnel path as
+    /// every other refusal (F10) rather than a hand-written second one.
+    #[error("{0}")]
+    Write(String),
     /// A part could not be merged onto this rig.
     #[error("{0}")]
     Merge(String),
@@ -198,6 +210,17 @@ impl SkelSession {
     }
 
     /// Rename a joint. Returns what the rename cost — see [`RenameVerdict`].
+    ///
+    /// **A duplicate name is refused**, for the reason this file already gives
+    /// for sockets one function down (F12): `Skeleton::index_of` is
+    /// first-match, so a second joint sharing a name is invisible to *every*
+    /// name-keyed API in the engine — `mirror_joint_map`'s twin lookup,
+    /// `merge_skeletons`' collision check, `RetargetMap::humanoid_identity`, and
+    /// the panel's own tree. Allowing it would have made the rig's own editor the
+    /// one place that can produce a skeleton the rest of the engine mis-reads.
+    ///
+    /// Renaming a joint to the name it already has is **not** a duplicate: it is
+    /// a no-op an author gets by tabbing out of the field.
     pub fn rename_joint(&mut self, index: u16, name: &str) -> Result<RenameVerdict, SkelError> {
         self.joint_in_range(index)?;
         let name = name.trim();
@@ -205,6 +228,14 @@ impl SkelSession {
             return Err(SkelError::EmptyName {
                 what: "a joint name",
             });
+        }
+        if let Some(other) = self.asset.skeleton.index_of(name) {
+            if other != index {
+                return Err(SkelError::JointExists {
+                    name: name.into(),
+                    joint: other,
+                });
+            }
         }
         let previous = self.asset.skeleton.joints()[index as usize].name.clone();
         let was_canonical = inf_anim::humanoid_joint_names().contains(&previous.as_str());
@@ -374,6 +405,20 @@ impl SkelSession {
         let merged = merge_skeletons(&self.asset, incoming, attach)?;
         self.checkpoint();
         self.asset = merged.asset;
+        // **The merged part's inverse binds are STALE** (F9), and this module's
+        // own headline law says why that matters: `inverse_bind` is the inverse
+        // of the *composed* rest pose, and the merge just re-parented the
+        // incoming roots onto `attach`. The part's own binds were computed in its
+        // own root frame, so every merged joint is off by the attach joint's
+        // global transform — measured at ~0.93 m on this crate's own fixture,
+        // which is a limb that deforms from the wrong place.
+        //
+        // `set_joint_local` runs the recompute for exactly this reason; a merge
+        // moves more joints than any single edit and had been skipping it.
+        let mut joints = self.asset.skeleton.joints().to_vec();
+        recompute_inverse_binds(&mut joints);
+        self.asset.skeleton =
+            Skeleton::new(joints).expect("a bind recompute cannot break the topology");
         Ok(merged.joint_offset)
     }
 
@@ -704,6 +749,225 @@ mod tests {
         let len = s.asset().skeleton.len();
         assert!(matches!(s.merge_part(&dup, 0), Err(SkelError::Merge(_))));
         assert_eq!(s.asset().skeleton.len(), len);
+    }
+
+    /// **F9: a merged part's inverse binds are recomputed**, so the assembled rig
+    /// obeys this module's own headline law.
+    ///
+    /// Asserted as the defining property (`inverse_bind · global_bind == I`) on
+    /// the MERGED joints specifically, plus the measurement that made it a
+    /// finding: before the fix the tail's first joint was displaced by the attach
+    /// joint's global transform — ~0.93 m on this fixture, a limb deforming from
+    /// the wrong place.
+    #[test]
+    fn a_merged_part_gets_recomputed_inverse_binds() {
+        let mut s = SkelSession::new(biped());
+        let base_len = s.asset().skeleton.len();
+        let j = |name: &str, parent: Option<u16>, at: glam::Vec3| Joint {
+            name: name.into(),
+            parent,
+            inverse_bind: glam::Mat4::from_translation(-at).to_cols_array(),
+            local_bind: JointTransform::from_trs(at, glam::Quat::IDENTITY, glam::Vec3::ONE),
+        };
+        let tail = SkeletonAsset::new(
+            Skeleton::new(vec![
+                j("tail_0", None, glam::Vec3::ZERO),
+                j("tail_1", Some(0), glam::Vec3::new(0.0, 0.0, -0.3)),
+            ])
+            .unwrap(),
+        );
+        // Attach high up the spine, so the frame really moves.
+        let attach = s.asset().skeleton.index_of("chest").unwrap();
+        let offset = s.merge_part(&tail, attach).expect("merges") as usize;
+        assert_eq!(offset, base_len);
+
+        // The property, on EVERY joint — base and merged alike.
+        let joints = s.asset().skeleton.joints();
+        let mut globals: Vec<glam::Mat4> = Vec::new();
+        for jt in joints {
+            let l = jt.local_bind.to_mat4();
+            globals.push(match jt.parent {
+                Some(p) => globals[p as usize] * l,
+                None => l,
+            });
+        }
+        let mut worst = 0.0f32;
+        for (jt, g) in joints.iter().zip(&globals) {
+            let id = glam::Mat4::from_cols_array(&jt.inverse_bind) * *g;
+            let d = (id - glam::Mat4::IDENTITY)
+                .to_cols_array()
+                .iter()
+                .fold(0.0f32, |a, b| a.max(b.abs()));
+            worst = worst.max(d);
+            assert!(
+                d < 1e-4,
+                "{} has a stale inverse bind (off by {d})",
+                jt.name
+            );
+        }
+        let _ = worst;
+        // …and the fixture really would have caught it: the attach joint is not
+        // at the origin, so an un-recomputed merge is displaced by its position.
+        let attach_pos = globals[attach as usize].w_axis.truncate().length();
+        assert!(
+            attach_pos > 0.5,
+            "the attach joint is {attach_pos} m from the origin — too close for a              stale bind to be visible, so this test would pass either way"
+        );
+    }
+
+    /// **F12: a duplicate joint name is refused**, for the reason sockets already
+    /// are — `index_of` is first-match, so the second joint would be invisible to
+    /// every name-keyed API.
+    #[test]
+    fn a_duplicate_joint_name_is_refused() {
+        let mut s = SkelSession::new(biped());
+        let arm = s.asset().skeleton.index_of("upper_arm_l").unwrap();
+        let other = s.asset().skeleton.index_of("upper_arm_r").unwrap();
+        assert_eq!(
+            s.rename_joint(arm, "upper_arm_r"),
+            Err(SkelError::JointExists {
+                name: "upper_arm_r".into(),
+                joint: other,
+            })
+        );
+        assert!(!s.is_dirty(), "a refusal must not have edited anything");
+        assert!(!s.can_undo(), "a refusal must not push an undo step");
+        // Renaming a joint to the name it ALREADY has is a no-op, not a
+        // duplicate — an author gets it by tabbing out of the field.
+        assert!(s.rename_joint(arm, "upper_arm_l").is_ok());
+        // …and the name really is still unique afterwards.
+        let names: Vec<&str> = s
+            .asset()
+            .skeleton
+            .joints()
+            .iter()
+            .map(|j| j.name.as_str())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            names.len(),
+            "the rig has duplicate joint names"
+        );
+    }
+
+    /// **F10: a refusal changes nothing — as a PROPERTY, over every mutator.**
+    ///
+    /// The Ring-2 funnel now owns this by snapshot-and-restore, and this is the
+    /// Ring-1 half: each mutator, handed an input it must refuse, leaves the
+    /// session byte-identical to what it was. Written as a loop over the mutators
+    /// rather than one test each, so a mutator added later without the discipline
+    /// is a compile error here (the closure list is exhaustive by construction:
+    /// it names every `&mut self` method that can fail).
+    #[test]
+    fn every_refusal_leaves_the_session_untouched() {
+        type Mutator = (&'static str, fn(&mut SkelSession) -> bool);
+        let cases: Vec<Mutator> = vec![
+            ("rename: out of range", |s| {
+                s.rename_joint(9999, "x").is_err()
+            }),
+            ("rename: empty", |s| s.rename_joint(0, "  ").is_err()),
+            ("rename: duplicate", |s| {
+                let dup = s.asset().skeleton.joints()[1].name.clone();
+                s.rename_joint(0, &dup).is_err()
+            }),
+            ("set_joint_local: out of range", |s| {
+                s.set_joint_local(9999, JointTransform::IDENTITY).is_err()
+            }),
+            ("set_joint_local: non-finite", |s| {
+                let mut bad = JointTransform::IDENTITY;
+                bad.translation[2] = f32::INFINITY;
+                s.set_joint_local(0, bad).is_err()
+            }),
+            ("set_limit: out of range", |s| {
+                s.set_limit(9999, None).is_err()
+            }),
+            ("set_limit: non-finite", |s| {
+                s.set_limit(
+                    0,
+                    Some(JointLimit {
+                        joint: 0,
+                        min_deg: [f32::NAN, 0.0, 0.0],
+                        max_deg: [0.0; 3],
+                    }),
+                )
+                .is_err()
+            }),
+            ("add_socket: out of range", |s| {
+                s.add_socket("x", 9999).is_err()
+            }),
+            ("add_socket: empty name", |s| s.add_socket(" ", 0).is_err()),
+            ("add_socket: duplicate", |s| {
+                let n = s.asset().sockets[0].name.clone();
+                s.add_socket(&n, 0).is_err()
+            }),
+            ("remove_socket: absent", |s| {
+                s.remove_socket("nope").is_err()
+            }),
+            ("place_socket: absent", |s| {
+                s.place_socket("nope", 0, JointTransform::IDENTITY).is_err()
+            }),
+            ("place_socket: out of range", |s| {
+                let n = s.asset().sockets[0].name.clone();
+                s.place_socket(&n, 9999, JointTransform::IDENTITY).is_err()
+            }),
+            ("instantiate_template: degenerate", |s| {
+                s.instantiate_template(
+                    BodyPlan::Biped,
+                    &BodyParams {
+                        height_m: 0.0,
+                        ..Default::default()
+                    },
+                )
+                .is_err()
+            }),
+            ("merge_part: joint name collision", |s| {
+                let dup = SkeletonAsset::new(
+                    Skeleton::new(vec![Joint {
+                        name: s.asset().skeleton.joints()[0].name.clone(),
+                        parent: None,
+                        inverse_bind: glam::Mat4::IDENTITY.to_cols_array(),
+                        local_bind: JointTransform::IDENTITY,
+                    }])
+                    .unwrap(),
+                );
+                s.merge_part(&dup, 0).is_err()
+            }),
+            ("merge_part: bad attach", |s| {
+                let part = SkeletonAsset::new(
+                    Skeleton::new(vec![Joint {
+                        name: "spur".into(),
+                        parent: None,
+                        inverse_bind: glam::Mat4::IDENTITY.to_cols_array(),
+                        local_bind: JointTransform::IDENTITY,
+                    }])
+                    .unwrap(),
+                );
+                s.merge_part(&part, 9999).is_err()
+            }),
+        ];
+        assert!(
+            cases.len() >= 16,
+            "the mutator list shrank — a refusal path stopped being covered"
+        );
+        for (what, run) in cases {
+            // A session with SOME history, so "untouched" is a stronger claim
+            // than "still pristine".
+            let mut s = SkelSession::new(biped());
+            s.add_socket("keepsake", 0).expect("seed");
+            s.set_limit(1, Some(JointLimit::hinge_x(1, -10.0, 10.0)))
+                .expect("seed");
+            let before = s.asset().clone();
+            let (undo, redo, dirty) = (s.can_undo(), s.can_redo(), s.is_dirty());
+
+            assert!(run(&mut s), "{what}: expected a refusal and got success");
+            assert_eq!(s.asset(), &before, "{what}: the asset moved");
+            assert_eq!(s.can_undo(), undo, "{what}: pushed an undo step");
+            assert_eq!(s.can_redo(), redo, "{what}: dropped the redo branch");
+            assert_eq!(s.is_dirty(), dirty, "{what}: changed the dirty flag");
+        }
     }
 
     /// A non-finite transform never reaches the asset.

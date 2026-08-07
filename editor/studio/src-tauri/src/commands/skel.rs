@@ -288,9 +288,24 @@ pub async fn skel_list(
 
 /// Run one edit and answer with the new document, or the refusal.
 ///
-/// **Every mutating command funnels through this**, so "a refusal leaves the
-/// document exactly as it was" is a property of ONE function rather than of ten,
-/// and the `skel://sync` emit cannot be forgotten on one of them.
+/// # The funnel OWNS "a refusal changes nothing" (F10)
+///
+/// It used to only *claim* it. There was no snapshot and no restore here: the
+/// property was implemented nine separate times inside `SkelSession`, by each
+/// mutator checking its preconditions before calling `checkpoint()`. That is a
+/// real discipline and it is not the same thing — it has to be re-derived for
+/// every new mutator, and a mutator that validates halfway through has no way
+/// back. The audit was right that the claim did not reproduce.
+///
+/// Now it is one line of state and one of restore: the session is cloned before
+/// `f` runs and put back if `f` refuses. A `SkelSession` is an asset plus two
+/// snapshot stacks — kilobytes for a rig, which is the same size argument the
+/// module's undo model rests on — so the clone is affordable at authoring rates
+/// and buys the property for every mutator that will ever be added, including
+/// ones that fail after mutating.
+///
+/// **Every mutating command routes through this, `skel_save` included**, so the
+/// `skel://sync` emit cannot be forgotten on one of them either.
 async fn edit(
     app: &AppHandle,
     id: &str,
@@ -302,6 +317,7 @@ async fn edit(
     let name = asset_name(assets, guid)?;
     let out = state.with(|store| {
         let s = doc_of(store, id)?;
+        let before = s.clone();
         Ok(match f(s) {
             Ok(warning) => SkelApplyDto {
                 ok: true,
@@ -309,12 +325,19 @@ async fn edit(
                 warning,
                 doc: doc_dto(id, &name, s),
             },
-            Err(e) => SkelApplyDto {
-                ok: false,
-                refusal: Some(e.to_string()),
-                warning: None,
-                doc: doc_dto(id, &name, s),
-            },
+            Err(e) => {
+                // THE property, implemented once: whatever `f` did on its way to
+                // refusing is undone, including a checkpoint it had already
+                // pushed. Restoring the whole session (not just the asset) is
+                // what keeps the undo stacks honest.
+                *s = before;
+                SkelApplyDto {
+                    ok: false,
+                    refusal: Some(e.to_string()),
+                    warning: None,
+                    doc: doc_dto(id, &name, s),
+                }
+            }
         })
     })?;
     let _ = app.emit("skel://sync", id);
@@ -552,36 +575,28 @@ pub async fn skel_save(
     assets: State<'_, AssetState>,
 ) -> Result<SkelApplyDto, String> {
     let guid: AssetId = id.parse().map_err(|e| format!("bad asset id: {e}"))?;
-    let name = asset_name(&assets, guid)?;
     let payload = state.with(|store| Ok(doc_of(store, &id)?.asset().clone()))?;
+    // The write happens OUTSIDE the store lock and before the funnel, because it
+    // is I/O and the funnel holds a mutex. Its verdict is then what the funnel's
+    // closure returns, so a failed write takes the refusal path like any other —
+    // and `mark_saved` runs only on the success arm, which is the disk-truth rule
+    // (`SkelSession::mark_saved`).
     let written = assets.with_project(|p| {
         p.rewrite_payload(guid, &payload, vec![])
             .map_err(|e| e.to_string())
     });
-    let out = state.with(|store| {
-        let s = doc_of(store, &id)?;
-        Ok(match &written {
-            Ok(()) => {
-                s.mark_saved();
-                SkelApplyDto {
-                    ok: true,
-                    refusal: None,
-                    warning: None,
-                    doc: doc_dto(&id, &name, s),
-                }
-            }
-            Err(e) => SkelApplyDto {
-                ok: false,
-                refusal: Some(e.clone()),
-                warning: None,
-                doc: doc_dto(&id, &name, s),
-            },
-        })
-    })?;
-    if written.is_ok() {
+    let ok = written.is_ok();
+    let out = edit(&app, &id, &state, &assets, |s| match written {
+        Ok(()) => {
+            s.mark_saved();
+            Ok(None)
+        }
+        Err(e) => Err(SkelError::Write(e)),
+    })
+    .await?;
+    if ok {
         emit_changed(&app, &assets);
     }
-    let _ = app.emit("skel://sync", &id);
     Ok(out)
 }
 

@@ -369,3 +369,86 @@ describe("Ctrl+Z inside the panel undoes the RIG", () => {
     expect(mocked.redo).not.toHaveBeenCalled();
   });
 });
+
+describe("a rejected call is surfaced, and never wedges the document (F11)", () => {
+  // Twelve of fourteen actions were a bare `await` with no `catch`. A rejected
+  // IPC call became an unhandled rejection, the panel showed nothing, and
+  // `fitToMesh` — which sets `busy` first — left the flag set for the life of
+  // the document, disabling both Fit and Save with no explanation.
+  beforeEach(async () => {
+    await useSkelStore.getState().open("aaa");
+  });
+
+  it("turns a rejection into a refusal instead of an unhandled promise", async () => {
+    mocked.renameJoint.mockRejectedValue(new Error("ipc: no such command"));
+    await useSkelStore.getState().renameJoint("aaa", 0, "spine");
+    expect(entry("aaa").refusal).toContain("no such command");
+    expect(entry("aaa").busy).toBe(false);
+    // …and the document is still usable: the next success clears it.
+    mocked.renameJoint.mockResolvedValue(ok(docOf("aaa")));
+    await useSkelStore.getState().renameJoint("aaa", 0, "spine");
+    expect(entry("aaa").refusal).toBeNull();
+  });
+
+  it("clears `busy` when a long-running fit rejects", async () => {
+    mocked.fitToMesh.mockRejectedValue(new Error("no adapter"));
+    await useSkelStore.getState().fitToMesh("aaa", "mesh", "biped");
+    expect(entry("aaa").busy).toBe(false);
+    expect(entry("aaa").refusal).toContain("no adapter");
+    // The wedge this closes: with `busy` stuck, the panel disables Fit AND Save.
+    mocked.save.mockResolvedValue(ok(docOf("aaa")));
+    await useSkelStore.getState().save("aaa");
+    expect(entry("aaa").busy).toBe(false);
+    expect(entry("aaa").refusal).toBeNull();
+  });
+
+  it("catches on EVERY action, not just the two that had it", async () => {
+    // A rejection from each door in turn must leave a refusal and no busy flag.
+    // Named individually so a new action added without `run` shows up here.
+    const boom = new Error("backend went away");
+    const cases: [string, () => Promise<void>][] = [
+      ["renameJoint", () => useSkelStore.getState().renameJoint("aaa", 0, "x")],
+      [
+        "setJointTransform",
+        () =>
+          useSkelStore
+            .getState()
+            .setJointTransform("aaa", 0, [0, 0, 0], [0, 0, 0, 1], [1, 1, 1]),
+      ],
+      [
+        "setLimit",
+        () => useSkelStore.getState().setLimit("aaa", 0, null, null),
+      ],
+      ["addSocket", () => useSkelStore.getState().addSocket("aaa", "g", 0)],
+      ["removeSocket", () => useSkelStore.getState().removeSocket("aaa", "g")],
+      [
+        "placeSocket",
+        () => useSkelStore.getState().placeSocket("aaa", "g", 0, [0, 0, 0]),
+      ],
+      [
+        "instantiateTemplate",
+        () => useSkelStore.getState().instantiateTemplate("aaa", "biped"),
+      ],
+      ["mergePart", () => useSkelStore.getState().mergePart("aaa", "p", 0)],
+      ["undo", () => useSkelStore.getState().undo("aaa")],
+      ["redo", () => useSkelStore.getState().redo("aaa")],
+      ["save", () => useSkelStore.getState().save("aaa")],
+      [
+        "fitToMesh",
+        () => useSkelStore.getState().fitToMesh("aaa", "m", "biped"),
+      ],
+    ];
+    expect(cases).toHaveLength(12);
+    for (const [name, call] of cases) {
+      for (const fn of Object.values(mocked)) fn.mockRejectedValue(boom);
+      useSkelStore.setState({
+        docs: { aaa: { ...entry("aaa"), refusal: null, busy: false } },
+      });
+      await call();
+      expect(entry("aaa").refusal, `${name} swallowed its rejection`).toContain(
+        "backend went away",
+      );
+      expect(entry("aaa").busy, `${name} left the document busy`).toBe(false);
+    }
+  });
+});

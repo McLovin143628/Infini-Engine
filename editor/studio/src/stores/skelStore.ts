@@ -146,6 +146,39 @@ export const useSkelStore = create<SkelState>((set, get) => {
    * 19-joint list would read `undefined` on every field. Clearing it outright
    * would instead lose the author's place on every ordinary edit.
    */
+  /**
+   * Run one backend call and adopt its reply, **or surface why it did not
+   * arrive** (F11).
+   *
+   * Twelve of fourteen actions used to be a bare `await` with no `catch`: a
+   * rejected IPC call — the backend panicking, the document having been closed,
+   * a serialization mismatch — propagated out of a `void`-ed promise as an
+   * unhandled rejection, the panel showed nothing, and `fitToMesh` (which sets
+   * `busy` first) left the flag set forever, wedging both Fit and Save for the
+   * life of the document.
+   *
+   * So every action goes through here: `busy` is cleared in a `finally` and can
+   * never be stranded, and a rejection becomes a `refusal` string in the same
+   * slot a backend refusal uses — because from the author's side "the backend
+   * said no" and "the backend did not answer" are both "it did not happen", and
+   * the difference belongs in the message rather than in whether anything is
+   * shown at all.
+   */
+  const run = async (
+    assetId: string,
+    call: () => Promise<SkelApplyDto>,
+    opts: { busy?: boolean } = {},
+  ): Promise<void> => {
+    if (opts.busy) patch(assetId, { busy: true });
+    try {
+      applyResult(assetId, await call());
+    } catch (e) {
+      patch(assetId, { refusal: String(e) });
+    } finally {
+      patch(assetId, { busy: false });
+    }
+  };
+
   const applyResult = (assetId: string, res: SkelApplyDto): void => {
     const joints = res.doc.joints.length;
     const cur = entry(assetId).selected;
@@ -201,36 +234,25 @@ export const useSkelStore = create<SkelState>((set, get) => {
     select: (assetId, joint) => patch(assetId, { selected: joint }),
 
     renameJoint: async (assetId, joint, name) =>
-      applyResult(assetId, await skelIpc.renameJoint(assetId, joint, name)),
+      run(assetId, () => skelIpc.renameJoint(assetId, joint, name)),
 
     setJointTransform: async (assetId, joint, translation, rotation, scale) =>
-      applyResult(
-        assetId,
-        await skelIpc.setJointTransform(
-          assetId,
-          joint,
-          translation,
-          rotation,
-          scale,
-        ),
+      run(assetId, () =>
+        skelIpc.setJointTransform(assetId, joint, translation, rotation, scale),
       ),
 
     setLimit: async (assetId, joint, minDeg, maxDeg) =>
-      applyResult(
-        assetId,
-        await skelIpc.setLimit(assetId, joint, minDeg, maxDeg),
-      ),
+      run(assetId, () => skelIpc.setLimit(assetId, joint, minDeg, maxDeg)),
 
     addSocket: async (assetId, name, joint) =>
-      applyResult(assetId, await skelIpc.addSocket(assetId, name, joint)),
+      run(assetId, () => skelIpc.addSocket(assetId, name, joint)),
 
     removeSocket: async (assetId, name) =>
-      applyResult(assetId, await skelIpc.removeSocket(assetId, name)),
+      run(assetId, () => skelIpc.removeSocket(assetId, name)),
 
     placeSocket: async (assetId, name, joint, translation) =>
-      applyResult(
-        assetId,
-        await skelIpc.placeSocket(
+      run(assetId, () =>
+        skelIpc.placeSocket(
           assetId,
           name,
           joint,
@@ -241,23 +263,23 @@ export const useSkelStore = create<SkelState>((set, get) => {
       ),
 
     instantiateTemplate: async (assetId, plan, opts) =>
-      applyResult(
-        assetId,
-        await skelIpc.instantiateTemplate(assetId, plan, opts),
-      ),
+      run(assetId, () => skelIpc.instantiateTemplate(assetId, plan, opts)),
 
     mergePart: async (assetId, partAsset, attach) =>
-      applyResult(assetId, await skelIpc.mergePart(assetId, partAsset, attach)),
+      run(assetId, () => skelIpc.mergePart(assetId, partAsset, attach)),
 
-    fitToMesh: async (assetId, meshAsset, plan) => {
-      patch(assetId, { busy: true });
-      const res = await skelIpc.fitToMesh(assetId, meshAsset, plan);
-      applyResult(assetId, res);
-    },
+    // The one long-running action, so it shows `busy` — and `run`'s `finally`
+    // is what stops a rejection stranding the flag (F11: it used to wedge Fit
+    // AND Save for the life of the document, with nothing shown).
+    fitToMesh: async (assetId, meshAsset, plan) =>
+      run(assetId, () => skelIpc.fitToMesh(assetId, meshAsset, plan), {
+        busy: true,
+      }),
 
-    undo: async (assetId) => applyResult(assetId, await skelIpc.undo(assetId)),
-    redo: async (assetId) => applyResult(assetId, await skelIpc.redo(assetId)),
-    save: async (assetId) => applyResult(assetId, await skelIpc.save(assetId)),
+    undo: async (assetId) => run(assetId, () => skelIpc.undo(assetId)),
+    redo: async (assetId) => run(assetId, () => skelIpc.redo(assetId)),
+    save: async (assetId) =>
+      run(assetId, () => skelIpc.save(assetId), { busy: true }),
   };
 });
 
