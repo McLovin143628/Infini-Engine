@@ -1452,6 +1452,74 @@ mod tests {
         );
     }
 
+    /// **F7: the conversion really happens EVERY fixed step.**
+    ///
+    /// Every other authored-goal test steps once, and the `--pie` arm holds its
+    /// target constant — so "converted per fixed step, not cached at session
+    /// start" had no falsifier at all. A read-once-and-cache implementation
+    /// passed all of them.
+    ///
+    /// Here the target ENTITY moves between steps, and the pose must follow it
+    /// each time. Three separate claims, because a weaker one is satisfiable by a
+    /// cache: the pose differs after each move, the pose at step 3 differs from
+    /// the pose at step 1 (so it is not merely oscillating), and returning the
+    /// anchor to where it started returns the pose to where it started (so the
+    /// solve is a function of the CURRENT anchor and not of the history).
+    #[test]
+    fn the_authored_goal_is_reconverted_on_every_fixed_step() {
+        let f = Fixture::new();
+        let guid = Uuid::from_u128(0x24_300B);
+        let hold = Uuid::from_u128(0x24_300C);
+        let mut w = world_with_authored_ik(
+            guid,
+            Vec3d::ZERO,
+            vec![IkGoalRecord {
+                chain: vec![0, 1],
+                target_entity: crate::refs::EntityRef::new(hold),
+                ..Default::default()
+            }],
+        );
+        let anchor = w
+            .world_mut()
+            .spawn((
+                Guid(hold),
+                GlobalTransform(glam::DAffine3::from_translation(glam::DVec3::new(
+                    0.7, 0.7, 0.0,
+                ))),
+            ))
+            .id();
+        w.reindex_guids();
+
+        let move_to = |w: &mut EcsWorld, at: glam::DVec3| {
+            w.world_mut().get_mut::<GlobalTransform>(anchor).unwrap().0 =
+                glam::DAffine3::from_translation(at);
+        };
+
+        f.step(&mut w, 1.0 / 60.0, 0.0);
+        let a = pose_state_bytes(&w);
+        move_to(&mut w, glam::DVec3::new(-0.7, 0.7, 0.0));
+        f.step(&mut w, 1.0 / 60.0, 0.0);
+        let b = pose_state_bytes(&w);
+        move_to(&mut w, glam::DVec3::new(0.0, 0.99, 0.1));
+        f.step(&mut w, 1.0 / 60.0, 0.0);
+        let c = pose_state_bytes(&w);
+
+        assert!(!a.is_empty(), "nothing was posed at all");
+        assert_ne!(a, b, "the goal did not follow the anchor on step 2 — a                           read-once-and-cache implementation passes every other                           authored-goal test and fails here");
+        assert_ne!(b, c, "the goal did not follow the anchor on step 3");
+        assert_ne!(a, c, "the pose is oscillating rather than tracking");
+
+        // …and it is a function of WHERE THE ANCHOR IS NOW, not of how it got
+        // there: put it back and the pose comes back.
+        move_to(&mut w, glam::DVec3::new(0.7, 0.7, 0.0));
+        f.step(&mut w, 1.0 / 60.0, 0.0);
+        assert_eq!(
+            pose_state_bytes(&w),
+            a,
+            "returning the anchor did not return the pose — the solve depends on              history rather than on the current conversion"
+        );
+    }
+
     /// A singular placement (zero scale) has no model frame, so its goals are
     /// dropped rather than run through a matrix of infinities.
     #[test]

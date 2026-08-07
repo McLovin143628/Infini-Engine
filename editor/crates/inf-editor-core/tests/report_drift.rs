@@ -194,6 +194,72 @@ fn code_only(src: &str) -> String {
         .join("\n")
 }
 
+/// [`code_only`], with **string literals blanked too** (P24.3 audit F8).
+///
+/// The comment stripper closed one masking channel and left its twin open: a
+/// user-facing string can contain a field's name, so deleting the reader while
+/// keeping the tooltip that explains it leaves the gate green. It is the P24.2
+/// comment hole relocated into a literal.
+///
+/// Template-literal **interpolations** (`${...}`) are kept — those are code, and
+/// blanking them would delete real readers (`${sel.name}` is a reader). Newlines
+/// inside a literal are preserved so line numbers in a failure still line up.
+///
+/// # What this measured, which is not what was assumed
+///
+/// Run over the Skeleton Editor when it landed: **zero** of its nineteen DTO
+/// names are masked — every one appears in real code as well as, in some cases,
+/// a tooltip. So `SKEL_NOT_SHOWN` stays empty and this function changes no
+/// verdict today. It is here because the channel is real and the next field may
+/// not be so lucky, which is the same reason `code_only` exists.
+fn code_and_no_strings(src: &str) -> String {
+    let code = code_only(src);
+    let b: Vec<char> = code.chars().collect();
+    let mut out = String::with_capacity(code.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == '"' || c == '\'' || c == '`' {
+            let quote = c;
+            let mut j = i + 1;
+            while j < b.len() {
+                if b[j] == '\\' {
+                    j += 2;
+                    continue;
+                }
+                if b[j] == quote {
+                    break;
+                }
+                // `${ … }` inside a template literal is CODE.
+                if quote == '`' && b[j] == '$' && b.get(j + 1) == Some(&'{') {
+                    let mut k = j + 2;
+                    let mut depth = 1usize;
+                    while k < b.len() && depth > 0 {
+                        if b[k] == '{' {
+                            depth += 1;
+                        } else if b[k] == '}' {
+                            depth -= 1;
+                        }
+                        k += 1;
+                    }
+                    out.extend(&b[j..k.min(b.len())]);
+                    j = k;
+                    continue;
+                }
+                if b[j] == '\n' {
+                    out.push('\n');
+                }
+                j += 1;
+            }
+            i = j + 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 fn camel(snake: &str) -> String {
     let mut out = String::new();
     let mut up = false;
@@ -369,6 +435,21 @@ const SKEL_STORE: &str = include_str!("../../../studio/src/stores/skelStore.ts")
 /// What IS here is the one field with no reader at all. Recorded rather than
 /// silently permitted, which is the state that let `skin_conflicts` ship
 /// invisible.
+/// **Measured empty, and that is the finding.** Every one of the nineteen
+/// skeleton DTO names reaches the panel's code — including under
+/// `code_and_no_strings`, so none of them is propped up by a tooltip.
+///
+/// # The rename weakness, and why it is CLOSED elsewhere
+///
+/// This gate is a substring search, so renaming `sidedWithoutTwin` to
+/// `sidedWithoutTwinXX` in the panel would still satisfy it. That is a real
+/// limit and it is **not** load-bearing here: the panel is TypeScript reading a
+/// ts-rs-generated interface, so a field renamed on one side and not the other
+/// is a `tsc --noEmit` error, and `npm run typecheck` is part of CI. The
+/// substring search is the backstop for *deletion*, which the compiler cannot
+/// see because dropping a read is always valid TypeScript. Written down rather
+/// than assumed, because "the compiler has it" is exactly the kind of claim that
+/// stops being true quietly.
 const SKEL_NOT_SHOWN: [&str; 0] = [];
 
 /// **Every skeleton DTO field reaches the panel's CODE.**
@@ -377,7 +458,10 @@ const SKEL_NOT_SHOWN: [&str; 0] = [];
 /// not a rendering check, and a comment naming a field does not count.
 #[test]
 fn every_skeleton_dto_field_reaches_the_panel() {
-    let panel = code_only(SKEL_PANEL);
+    // Strings blanked too (F8): a tooltip naming a field must not keep a deleted
+    // reader "present". Measured when this landed — zero of the nineteen names
+    // are masked, so the list below stays empty and this only guards the future.
+    let panel = code_and_no_strings(SKEL_PANEL);
     for decl in [
         "pub struct SkelJointDto {",
         "pub struct SkelSocketDto {",

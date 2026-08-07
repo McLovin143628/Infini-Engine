@@ -30,10 +30,20 @@
 # `crates/inf-hotreload/tests/fixture_serialization.rs` pins this file's content
 # against the test names it must cover, so a new fixture-building test that is not
 # in a group fails rather than flaking.
+#
+# P24.3 audit F14 widened that detector from an enumeration of five literal
+# spellings (the failure mode this comment block describes, one level up) to a
+# CALL-SITE classification: a crate's sources are scanned for a cargo spawn, the
+# `pub fn`s declared in those files are collected, and any test binary that calls
+# one is a hazard. That is what found `inf-packager`'s `export_bundle` — which
+# spawns nothing itself and calls `inf_packager::export`, declared in `bundle.rs`,
+# which release-builds `inf-player` into the shared `target/release/`.
 
 [test-groups]
 # The two hot-reload fixture cdylibs, built into `target/hotreload-fixtures`.
 hotreload-fixtures = { max-threads = 1 }
+# The bundle export (see below).
+player-bundle-fixtures = { max-threads = 1 }
 # The spinner sample mod, built into `samples/mods/spinner/target`. Same shape,
 # same race, in two different crates — latent rather than observed, and grouped
 # here because "we have not seen it fail yet" is not a reason to leave it.
@@ -46,3 +56,15 @@ test-group = 'hotreload-fixtures'
 [[profile.default.overrides]]
 filter = 'binary(spinner_e2e) or binary(mods_e2e)'
 test-group = 'wasm-mod-fixtures'
+
+# `inf-packager`'s bundle export release-builds `inf-player` into the shared
+# `target/release/` and then reads the artifact — byte for byte the hotreload
+# race, in a crate whose tests never spell `Command::new` themselves. Only
+# Two binaries reach it — `inf-packager`'s own `export_bundle` and `inf-player`'s
+# `bundle`, both through `inf_packager::export`. The five `cook_*` binaries do
+# not call any module-level fn declared in a spawning file, verified by the
+# gate's own classifier, so they stay parallel.
+
+[[profile.default.overrides]]
+filter = 'binary(export_bundle) or binary(bundle)'
+test-group = 'player-bundle-fixtures'

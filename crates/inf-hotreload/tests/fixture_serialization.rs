@@ -104,20 +104,32 @@ fn the_fixture_groups_are_serialized_and_aimed_at_the_right_binaries() {
     }
 }
 
-/// **The forcing function.** Every integration test in the workspace that builds
-/// a cargo fixture must be inside a test group.
+/// **The forcing function.** Every test binary that can cause a cargo build into
+/// the shared target directory must be inside a test group.
 ///
-/// Without this, the config is a fix for the three tests that were flaking and an
-/// invitation for the fourth. The scan is deliberately over *source text*: a test
-/// that spawns `cargo build` names the subcommand as a string literal, and one
-/// that goes through `inf_packager::mods::build_mod_wasm` names that. Both
-/// spellings produce an artifact somebody then copies, which is the shape that
-/// races.
+/// # It was an enumeration, which is the failure mode it exists to prevent (F14)
 ///
-/// A new fixture-building test fails this by name, with the remedy in the
-/// message. Adding it to a group is the fix; adding it to `KNOWN` is not an
-/// option, because there is no `KNOWN` — the P23 ruling that a ban list
-/// enumerates what you thought of.
+/// The first cut listed five literal spellings of "spawns cargo" and searched
+/// `tests/*.rs` for them. That is the ban-list shape the P24.1 allowlist lesson
+/// is about, one level up: it can only see hazards somebody thought to spell, and
+/// it missed a real one. `inf-packager`'s `export_bundle` spawns nothing itself —
+/// it calls `inf_packager::export`, declared in `bundle.rs`, which
+/// release-builds `inf-player` into the shared `target/release/` and then reads
+/// the artifact. Byte for byte the hotreload race, in a crate whose tests never
+/// mention `Command::new`.
+///
+/// So the classification is by **call site**, in two passes:
+///
+///  1. scan every crate's `src/` and `tests/` for a cargo spawn, and collect the
+///     `pub fn`s declared in the files that have one — those are the doors
+///     through which a test can reach a build;
+///  2. a test binary is a hazard if it spawns directly **or** calls one of those
+///     doors.
+///
+/// Still source text, and still bounded: it follows one hop, not a call graph, so
+/// a test reaching a builder through two layers of indirection would be missed.
+/// That bound is stated rather than papered over — closing it properly needs a
+/// real call graph, which is a different tool. One hop is what found the miss.
 #[test]
 fn every_fixture_building_test_binary_is_in_a_group() {
     let root = workspace_root();
@@ -126,6 +138,66 @@ fn every_fixture_building_test_binary_is_in_a_group() {
     let mut scanned = 0usize;
     let mut found: BTreeSet<String> = BTreeSet::new();
 
+    // Pass 1: the doors, each QUALIFIED BY ITS CRATE.
+    //
+    // An unqualified name is useless here: the doors include `export`, `render`
+    // and `build`, and matching those as bare calls flagged fifteen unrelated
+    // test binaries (measured). A door is only reachable from another crate as
+    // `inf_packager::export(...)` or through a `use inf_packager::…` import, so
+    // the crate is part of the key.
+    let mut doors: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut spawning_files = 0usize;
+    for dir in ["crates", "editor/crates", "runtime", "tools"] {
+        let base = root.join(dir);
+        if !base.exists() {
+            continue;
+        }
+        for krate in std::fs::read_dir(&base).expect("read crate dir").flatten() {
+            let krate_ident = krate
+                .file_name()
+                .to_string_lossy()
+                .replace('-', "_")
+                .to_string();
+            for sub in ["src", "tests"] {
+                let d = krate.path().join(sub);
+                if !d.is_dir() {
+                    continue;
+                }
+                for entry in walk(&d) {
+                    let Ok(src) = std::fs::read_to_string(&entry) else {
+                        continue;
+                    };
+                    let src = src.replace("\r\n", "\n");
+                    if !(src.contains("Command::new") && src.contains("\"build\"")) {
+                        continue;
+                    }
+                    spawning_files += 1;
+                    for l in src.lines() {
+                        // **Module-level `pub fn` only** — no `trim()`. A spawning
+                        // file's `#[cfg(test)] mod tests` declares helpers called
+                        // `log`, `render` and `is_down`, and treating those as
+                        // doors flagged five unrelated `inf-player` binaries
+                        // (measured). A door has to be callable from another
+                        // crate, which means column zero.
+                        if let Some(rest) = l.strip_prefix("pub fn ") {
+                            if let Some(name) = rest.split(['(', '<', ' ']).next() {
+                                if !name.is_empty() {
+                                    doors.insert((krate_ident.clone(), name.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        spawning_files >= 3,
+        "only {spawning_files} files in the workspace spawn a cargo build — the \
+         scan is looking at the wrong place and every verdict below is vacuous"
+    );
+
+    // Pass 2: the test binaries.
     for dir in ["crates", "editor/crates", "runtime", "tools"] {
         let base = root.join(dir);
         if !base.exists() {
@@ -136,33 +208,35 @@ fn every_fixture_building_test_binary_is_in_a_group() {
             if !tests.is_dir() {
                 continue;
             }
-            for entry in std::fs::read_dir(&tests).expect("read tests dir").flatten() {
-                let p = entry.path();
+            for p in walk(&tests) {
                 if p.extension().and_then(|e| e.to_str()) != Some("rs") {
                     continue;
                 }
-                // **The detector cannot detect itself.** This file quotes every
-                // spelling it looks for, so it matches its own scan — and it
-                // builds nothing. Excluded by identity (`file!()`), not by name
-                // in a list: an exception list is the ban this gate replaced.
+                // The detector cannot detect itself: this file quotes every
+                // spelling it looks for and builds nothing. Excluded by
+                // `file!()` identity, not by a name in a list.
                 if p.file_name().and_then(|s| s.to_str())
                     == Path::new(file!()).file_name().and_then(|s| s.to_str())
                 {
                     continue;
                 }
                 scanned += 1;
-                let src = match std::fs::read_to_string(&p) {
-                    Ok(s) => s.replace("\r\n", "\n"),
-                    Err(_) => continue,
+                let Ok(src) = std::fs::read_to_string(&p) else {
+                    continue;
                 };
-                // Two spellings of "this test produces a cargo artifact":
-                // spawning the subcommand, or going through the packager's door.
-                let builds = (src.contains("Command::new(cargo)")
-                    || src.contains("Command::new(\"cargo\")")
-                    || src.contains("Command::new(env!(\"CARGO\"))"))
-                    && src.contains("\"build\"")
-                    || src.contains("build_mod_wasm(");
-                if !builds {
+                let src = src.replace("\r\n", "\n");
+                let direct = src.contains("Command::new") && src.contains("\"build\"");
+                // Two reachable forms, and both are needed: `export_bundle`
+                // calls `export(..)` after `use inf_packager::{export, ..}`, so a
+                // qualified-path-only rule misses it — measured. The import form
+                // is safe now that doors are module-level `pub fn`s only; with
+                // test-module helpers in the set it flagged fifteen binaries on
+                // names like `log` and `render`.
+                let via_door = doors.iter().any(|(k, d)| {
+                    src.contains(&format!("{k}::{d}("))
+                        || (src.contains(&format!("use {k}::")) && src.contains(&format!("{d}(")))
+                });
+                if !(direct || via_door) {
                     continue;
                 }
                 let stem = p
@@ -172,41 +246,54 @@ fn every_fixture_building_test_binary_is_in_a_group() {
                     .to_string();
                 found.insert(stem.clone());
                 if !cfg.contains(&format!("binary({stem})")) {
-                    offenders.push(format!("{}::{stem}", dir));
+                    offenders.push(format!("{dir}::{stem}"));
                 }
             }
         }
     }
 
-    // Anti-vacuity FIRST: a scan that found nothing would pass this test while
-    // proving nothing at all, which is the exact shape of a check that hides a
-    // real intrusion (the P19 lesson).
+    // Anti-vacuity FIRST.
     assert!(
         scanned > 20,
         "the scan walked only {scanned} test files — it is looking in the wrong \
          place and its verdict is meaningless"
     );
-    assert!(
-        found.contains("reload"),
-        "the scan did not identify `reload.rs` as a fixture-building test, and \
-         that is the file the whole race was measured on — the detection is \
-         broken, not the config. Found: {found:?}"
-    );
-    assert!(
-        found.len() >= 2,
-        "only one fixture-building test found ({found:?}); the spinner pair is \
-         built the same way and the scan should see it"
-    );
+    for must in ["reload", "export_bundle"] {
+        assert!(
+            found.contains(must),
+            "the scan did not identify `{must}` as reaching a cargo build. \
+             `reload` spawns directly; `export_bundle` reaches it through \
+             `inf_packager::export` and is the miss that made this a call-site \
+             classification rather than a list of spellings. Found: {found:?}"
+        );
+    }
 
     assert!(
         offenders.is_empty(),
-        "these test binaries build a cargo fixture and are NOT in a nextest test \
-         group: {offenders:?}\n\nUnder nextest each of their tests is its own \
-         process, so N of them run one `cargo build` each against a shared build \
-         directory. Cargo's lock serializes the builds and is released BEFORE the \
-         artifact is copied, so one process can unlink-and-relink the uplifted \
-         file another is mid-copy of (`No such file or directory`). Add the \
-         binary to an existing group in `.config/nextest.toml`, or give it a new \
-         one with `max-threads = 1`."
+        "these test binaries can cause a cargo build into the shared target \
+         directory and are NOT in a nextest test group: {offenders:?}\n\nUnder \
+         nextest each of their tests is its own process, so N of them run one \
+         build each against a shared directory. Cargo's lock serializes the \
+         builds and is released BEFORE the artifact is copied, so one process can \
+         unlink-and-relink the uplifted file another is mid-copy of (`No such \
+         file or directory`). Add the binary to an existing group in \
+         `.config/nextest.toml`, or give it a new one with `max-threads = 1`."
     );
+}
+
+/// Every `.rs` file under `dir`, recursively.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk(&p));
+        } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+            out.push(p);
+        }
+    }
+    out
 }
