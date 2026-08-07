@@ -1578,13 +1578,10 @@ mod tests {
             "editor/crates/inf-editor-core/src/simulate.rs",
             "runtime/inf-player/src/runtime_sim.rs",
         ] {
+            // No line-ending normalization: the needle is single-line, so a
+            // CRLF checkout reads it identically.
             let src = std::fs::read_to_string(root.join(host))
-                .unwrap_or_else(|e| panic!("read {host}: {e}"))
-                .replace(
-                    "
-", "
-",
-                );
+                .unwrap_or_else(|e| panic!("read {host}: {e}"));
             let mut arms: std::collections::BTreeSet<String> = Default::default();
             for (i, _) in src.match_indices("(Some(\"ik\"), Some(\"") {
                 let rest = &src[i + "(Some(\"ik\"), Some(\"".len()..];

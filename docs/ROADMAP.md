@@ -8160,6 +8160,24 @@ Measured both ways: with the floor, severing the classifier fails with "does not
 `Op::AddMaterialSlots`"; with the old exact assert, the same severing fails with "left: 31,
 right: 30" and the naming loop never executes.
 
+**Carried from the P24.3 audit (ledgered, not fixed).** Two, both bounded by what a source
+check can see:
+
+* **The `ik.*` host arms have no EXECUTION coverage.** `both_hosts_dispatch_exactly_the_registered_ik_nodes`
+  proves each host's arms are written and named exactly as the registry declares — which is the
+  half a text mirror between two character-identical blocks cannot prove — and the five Ring-0
+  doors they call have execution tests against a real world. What is missing is dispatching a
+  node *through a host* and asserting the effect, which needs that host's whole Blueprint
+  context struct (`&mut EcsWorld`, the voxel map, the fracture states, the audio queue, the
+  dispatch queue and eleven more fields) constructed in a test. The gap is one hop wide and the
+  fix is a `SimHost::for_test` constructor, which is a surface both hosts would then have to
+  keep honest — a deliberate piece of work, not a missing line.
+* **The fixture-group classifier follows ONE hop.** It collects module-level `pub fn`s from
+  files that spawn a cargo build and flags test binaries that call them directly or by import.
+  A test reaching a builder through two layers of indirection is invisible to it. Closing that
+  needs a real call graph, which is a different tool; one hop is what found `inf-player::bundle`,
+  which the previous five-spelling enumeration missed entirely.
+
 **P24.3 (modular rigging) COMPLETE.** Five things landed and each retired a ledger entry or
 a hole:
 
