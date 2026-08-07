@@ -8120,6 +8120,46 @@ its own anti-vacuity arms (the scan must walk >20 files and must identify `reloa
 the race was measured on). Mutation-measured: renaming the filter off `binary(reload)` fails
 both arms and names `crates::reload`; raising `max-threads` to 2 fails the config arm.
 
+**LAW (P24.3 audit) — A GREEN CLAIM QUOTES THE SUMMARY LINE VERBATIM.**
+
+P24.3 shipped three commits and three reports claiming "3598 passed, 0 failed" while
+`inf-dcc`'s `determinism_law` had been failing since `f917426`. The auditor measured 3598
+passed, **1 failed**, 8 ignored. The mechanism was found rather than guessed, and it is worth
+writing down because every part of it looks reasonable in isolation:
+
+```
+cargo test --workspace -j2 --no-fail-fast 2>&1   | grep -E "^test result"   | awk -F'[ ;]' '{p+=$4; f+=$6} END {print "PASSED:", p, "FAILED:", f}'
+```
+
+1. **The awk field index was structurally wrong.** `-F'[ ;]'` treats `; ` as TWO separators, so
+   an empty field sits between them: in `test result: FAILED. 9 passed; 1 failed; …`, `$6` is
+   `""` and the failure count is `$7`. `f+=$6` added zero on every line of every run — the
+   reported "FAILED: 0" was a **constant**, never a measurement. Reproduced against both a
+   passing and a failing summary line.
+2. **`grep -E "^test result"` discarded the corroborating evidence** — the `failures:` blocks,
+   the panic text, and cargo's own `error: test failed` line.
+3. **The pipeline's exit status was awk's**, which is 0 regardless, so a non-zero `cargo test`
+   was invisible to the shell too.
+
+Any one of the three would have caught it. The rule that follows is not "be careful with awk":
+
+> **A battery claim is evidence only when it quotes the runner's own summary line(s) verbatim,
+> with the passed / failed / ignored counts as printed, plus the process exit status.** A
+> derived aggregate may accompany them; it may never replace them. A green claim without the
+> verbatim line is not evidence and must be treated as unverified.
+
+`scripts/battery.sh` is that rule executable: it `tee`s the run, prints every `test result:`
+line as cargo wrote it, lists the failing binaries by name, and **exits with cargo's status**.
+Its aggregate is explicitly labelled as computed from those lines.
+
+The same round produced the sibling finding, on the gates rather than the reports: **a
+trip-wire that disables the real check when it goes stale is worse than no trip-wire.**
+`determinism_law`'s exact-count assert sat *before* the loop that gates every new `Op` against
+the classifier, so the moment the count went stale the loop stopped running. It is a floor now.
+Measured both ways: with the floor, severing the classifier fails with "does not name
+`Op::AddMaterialSlots`"; with the old exact assert, the same severing fails with "left: 31,
+right: 30" and the naming loop never executes.
+
 **P24.3 (modular rigging) COMPLETE.** Five things landed and each retired a ledger entry or
 a hole:
 

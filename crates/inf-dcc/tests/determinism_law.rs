@@ -500,7 +500,31 @@ fn the_id_preservation_classifier_has_no_wildcard_and_names_every_op() {
         .filter(|v| !v.is_empty())
         .map(str::to_string)
         .collect();
-    assert_eq!(variants.len(), 30, "found {variants:?}");
+    // **A FLOOR, not an exact count** — and the difference is the whole reason
+    // this gate exists.
+    //
+    // It was `assert_eq!(variants.len(), 30)`, and it sat BEFORE the naming loop.
+    // P24.3 appended `Op::AddMaterialSlots` and updated the classifier, the
+    // journal's `frozen_discriminant` and the journal's own count pin — but not
+    // this one, which nothing pointed at. The exact assert then failed on 31 vs
+    // 30, and because it precedes the loop, **the gate whose job is "a new op
+    // cannot be added unclassified" stopped executing entirely**, for three
+    // commits. A trip-wire that disables the real check when it goes stale is
+    // worse than no trip-wire. (Measured both ways: with the floor, severing the
+    // classifier fails with "does not name `Op::AddMaterialSlots`"; with the old
+    // exact assert, the same severing fails with "left: 31, right: 30" and the
+    // naming loop never runs.)
+    //
+    // A floor keeps the anti-vacuity claim the line was for — the parser really
+    // read the enum, rather than matching nothing and looping zero times — and
+    // cannot go stale in the direction that disables anything: adding an op only
+    // ever makes it more true, while the loop below still gates the new variant
+    // by name.
+    assert!(
+        variants.len() >= 31,
+        "only {} variants parsed out of the `Op` enum — the parser is looking at          the wrong thing, so the naming loop below would pass vacuously. found          {variants:?}",
+        variants.len()
+    );
     let joined = body.join(" ");
     for v in &variants {
         assert!(

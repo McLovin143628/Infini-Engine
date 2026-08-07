@@ -1903,46 +1903,163 @@ mod tests {
         assert!(rigid.submeshes.iter().all(|s| s.skin.is_empty()));
     }
 
+    /// `src` with every whole-line comment blanked.
+    ///
+    /// `report_drift`'s `code_only`, in the crate that needed it next. A source
+    /// gate that greps for a code string is satisfied by the *sentence explaining
+    /// the gate* — measured three times now: a JSX comment above a deleted panel
+    /// row (P24.2), this test's own doc comment, and the glTF importer's
+    /// `// … skip meshopt` sitting inside the branch this gate reads.
+    ///
+    /// Only whole-line comments are blanked: `//` also occurs mid-line inside
+    /// string literals, and blanking from there would delete real code. Line
+    /// endings are normalized first — the P22 CRLF law.
+    fn code_only(src: &str) -> String {
+        src.replace("\r\n", "\n")
+            .lines()
+            .map(|l| {
+                if l.trim_start().starts_with("//") {
+                    ""
+                } else {
+                    l
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// [`code_only`], plus the body of the test named `needle` excised.
+    ///
+    /// **A detector cannot detect itself**: a gate that greps its own file finds
+    /// the needle inside its own assertion's argument, so deleting the real call
+    /// site leaves it green. `inf-hotreload`'s `fixture_serialization` excludes
+    /// itself by `file!()` identity for the same reason; this is the
+    /// finer-grained form — one test excised from one file, so the rest of the
+    /// file (which is what the gate is about) is still read.
+    fn code_without_this_test(src: &str, needle: &str) -> String {
+        let stripped = code_only(src);
+        let Some(at) = stripped.find(needle) else {
+            panic!("no test named `{needle}` — renamed? the gate is reading its own body");
+        };
+        let tail = &stripped[at..];
+        let end = tail
+            .find("\n    }\n")
+            .map(|e| at + e + "\n    }\n".len())
+            .unwrap_or(stripped.len());
+        format!("{}{}", &stripped[..at], &stripped[end..])
+    }
+
+    /// **One doctrine, two callers — pinned on the CODE PATH, not on the prose.**
+    ///
+    /// `inf_dcc`'s exporter and `inf_mesh::gltf_import` both decline to run
+    /// `meshopt` on a skinned submesh, for the same reason, and the two never meet
+    /// at runtime — so a divergence is only visible as source text.
+    ///
+    /// # Two things the first cut got wrong, both measured
+    ///
+    /// * **It was self-satisfying.** It searched the whole of `export.rs` for
+    ///   `"opts.optimize && skin.is_empty()"`, and that string occurs twice: at
+    ///   the real guard, and *inside this assertion's own argument*. Deleting the
+    ///   real one left the gate green — the `fixture_serialization` lesson
+    ///   (a detector cannot detect itself) in a second place. Fixed by excising
+    ///   this test's own body before searching, by name.
+    /// * **The importer half pinned a COMMENT.** It required the string
+    ///   `"Skinned submesh: skip meshopt"`, which catches a reword and not the
+    ///   thing that matters: the importer could start calling `optimize` in the
+    ///   skinned branch with that comment sitting untouched above it, and every
+    ///   skinned import would silently desync `skin` from `vertices`. Fixed by
+    ///   reading the **branch** and asserting what it does and does not call.
+    ///
+    /// The bound stays honest: this is a source check, so it proves the call is
+    /// not written, not that the binary never runs it. That is the strongest
+    /// claim available across two crates that share no runtime.
+    #[test]
+    fn the_skinned_optimize_skip_is_the_engines_one_doctrine() {
+        // ── the exporter: the optimize call is GUARDED by an empty skin ──
+        //
+        // Read with this test's own body removed, so the needles below cannot be
+        // satisfied by the sentence explaining them.
+        let me = code_without_this_test(
+            &std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/export.rs"),
+            )
+            .expect("readable"),
+            "fn the_skinned_optimize_skip_is_the_engines_one_doctrine",
+        );
+        assert_eq!(
+            me.matches("opts.optimize && skin.is_empty()").count(),
+            1,
+            "the exporter's skinned-optimize guard occurs {} times outside this \
+             test — if it is 0 the guard is gone and skinned geometry is being \
+             optimized; if it is >1 this gate can be satisfied by a copy",
+            me.matches("opts.optimize && skin.is_empty()").count()
+        );
+        // **The "exactly one call site" half is NOT re-asserted here.**
+        // `determinism_law`'s `meshopt_appears_only_at_export_and_never_in_an_op`
+        // already owns that claim for the whole crate, and spelling the call
+        // literally in this assertion made that gate count THREE sites — one real
+        // and two inside this test's own argument. A second owner of one claim is
+        // how a gate starts reporting its own prose; the sibling keeps it.
+
+        // ── the importer: the SKINNED branch calls nothing of the kind ──
+        // Read as CODE, for the third time in this one gate: the importer's
+        // skinned branch explains itself with the word `meshopt` in a comment, so
+        // an un-stripped read reports the branch as calling it. (Measured — the
+        // first run of this arm failed exactly that way, which is also the
+        // evidence that the arm reads the branch at all.)
+        let importer = code_only(
+            &std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../inf-mesh/src/gltf_import.rs"),
+            )
+            .expect("the glTF importer is readable"),
+        );
+        let branches = importer
+            .split("let sub = if skin.is_empty() {")
+            .nth(1)
+            .expect(
+                "the glTF importer no longer branches on `skin.is_empty()` — either it \
+                 stopped distinguishing skinned submeshes (every skinned import would \
+                 desync its `skin` stream from `vertices`) or the branch moved and this \
+                 exporter was not told",
+            );
+        let (rigid, skinned) = branches
+            .split_once("} else {")
+            .expect("the `skin.is_empty()` branch has no else arm");
+        // The rigid arm optimizes …
+        assert!(
+            rigid.contains("optimize(verts, indices)"),
+            "the glTF importer's RIGID branch no longer optimizes — this gate is \
+             about the skinned one, but a rigid branch that stopped calling it \
+             means the shape changed under us"
+        );
+        // … and the skinned arm does not, at all. This is the claim a comment
+        // could not make: no `optimize`, no `meshopt`, however it is spelled.
+        let skinned_arm = skinned
+            .split_once("\n            };")
+            .map(|(a, _)| a)
+            .unwrap_or(skinned);
+        for banned in ["optimize(", "meshopt"] {
+            assert!(
+                !skinned_arm.contains(banned),
+                "the glTF importer's SKINNED branch now calls `{banned}` — meshopt \
+                 welds and reorders vertices, and the parallel `skin` stream cannot \
+                 follow, so every vertex would wear another vertex's weights. The \
+                 exporter declines for exactly this reason (`ExportReport::\
+                 optimize_skipped_skinned`); the two must agree.\n\nbranch:\n{skinned_arm}"
+            );
+        }
+        // NOT VACUOUS: the arm really is the skinned one, and it really was read.
+        assert!(
+            skinned_arm.contains("skin,"),
+            "the branch read as 'skinned' does not carry the skin stream: {skinned_arm}"
+        );
+    }
+
     /// `optimize` and a skin stream do not mix — the flag is skipped and says so.
     ///
     /// `inf_mesh::optimize` hands back `(vertices, indices)` only, so a parallel
     /// stream cannot follow its permutation. Running it anyway would give every
-    /// **One doctrine, two callers.** `inf_dcc`'s exporter and
-    /// `inf_mesh::gltf_import` both decline to run `meshopt` on a skinned
-    /// submesh, for the same reason, and this pins them together as source text
-    /// — the only way to see a divergence, since the two never meet at runtime.
-    ///
-    /// Without it, one could start optimizing skinned geometry while the other
-    /// did not, and the only symptom would be a character that deforms into
-    /// confetti on one import path and not the other.
-    #[test]
-    fn the_skinned_optimize_skip_is_the_engines_one_doctrine() {
-        // No line-ending normalization: both needles are single-line, so a CRLF
-        // checkout reads them identically. (The gates that DO span a newline —
-        // P22.4's trig law — are the ones that had to normalize.)
-        let importer = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../inf-mesh/src/gltf_import.rs"),
-        )
-        .expect("the glTF importer is readable");
-        assert!(
-            importer.contains("Skinned submesh: skip meshopt"),
-            "the glTF importer no longer states the skinned-optimize skip — either \
-             it started optimizing skinned geometry (every vertex would wear \
-             another vertex's weights) or the doctrine moved and this exporter \
-             was not told"
-        );
-        // …and the exporter's own gate is the emptiness of the skin stream, not
-        // a flag someone can forget to set.
-        let me = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/export.rs"),
-        )
-        .expect("readable");
-        assert!(
-            me.contains("opts.optimize && skin.is_empty()"),
-            "the exporter's skinned-optimize gate changed shape"
-        );
-    }
-
     /// vertex another vertex's weights.
     #[test]
     fn optimize_is_skipped_on_a_skinned_submesh_and_reported() {
