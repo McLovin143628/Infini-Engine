@@ -117,6 +117,10 @@ pub struct BuiltWorld {
     /// `ClothSim` wearer simulates in the shipped build exactly as it does in the
     /// editor's Simulate.
     pub cloths: BTreeMap<Uuid, inf_anim::ClothAsset>,
+    /// Resolved `.inf_hair` hairstyles keyed by asset GUID (P24.4) - the caller
+    /// seeds
+    /// [`RuntimeSim::set_hairs`](crate::runtime_sim::RuntimeSim::set_hairs).
+    pub hairs: BTreeMap<Uuid, inf_anim::HairAsset>,
     /// Resolved `.inf_audio` clips keyed by asset GUID (P12.3) — the caller seeds
     /// [`RuntimeSim::set_audio_clips`](crate::runtime_sim::RuntimeSim::set_audio_clips)
     /// so a scene `AudioSource` plays the same clip as in the editor Simulate.
@@ -317,6 +321,8 @@ pub struct InfSceneWorldBuilder {
     audio: HashMap<Uuid, inf_audio::AudioAsset>,
     /// `.inf_cloth` garment payloads keyed by asset GUID (P24.4).
     cloths: HashMap<Uuid, inf_anim::ClothAsset>,
+    /// `.inf_hair` hairstyle payloads keyed by asset GUID (P24.4).
+    hairs: HashMap<Uuid, inf_anim::HairAsset>,
     /// Gravity/rate used only when the level predates settings (v1/v2) — a v3
     /// level's own [`LevelSettings`](inf_scene::RuntimeSettings) always wins.
     gravity: DVec2,
@@ -340,6 +346,7 @@ impl InfSceneWorldBuilder {
             machines: HashMap::new(),
             audio: HashMap::new(),
             cloths: HashMap::new(),
+            hairs: HashMap::new(),
             gravity,
             hz,
             partition_pack: None,
@@ -396,6 +403,13 @@ impl InfSceneWorldBuilder {
     /// Builder style, wired by `build_world` from the source's cloth index.
     pub fn with_cloth_assets(mut self, cloths: HashMap<Uuid, inf_anim::ClothAsset>) -> Self {
         self.cloths = cloths;
+        self
+    }
+
+    /// Attach the `.inf_hair` hairstyles (asset GUID -> payload) used to seed the
+    /// [`RuntimeSim`](crate::runtime_sim::RuntimeSim)'s hair registry (P24.4).
+    pub fn with_hair_assets(mut self, hairs: HashMap<Uuid, inf_anim::HairAsset>) -> Self {
+        self.hairs = hairs;
         self
     }
 
@@ -572,6 +586,7 @@ impl WorldBuilder for InfSceneWorldBuilder {
             pose_clips: self.resolve_pose_clips(),
             audio_clips: self.resolve_audio_clips(),
             cloths: self.cloths.iter().map(|(g, c)| (*g, c.clone())).collect(),
+            hairs: self.hairs.iter().map(|(g, h)| (*g, h.clone())).collect(),
             partition,
         })
     }
@@ -1313,6 +1328,12 @@ pub fn load_cloth_assets_from_dir(dir: &Path) -> HashMap<Uuid, inf_anim::ClothAs
     load_anim_assets_by_guid_from_dir(dir, "inf_cloth")
 }
 
+/// The dev-dir `.inf_hair` payload map keyed by asset GUID (P24.4) - the hair
+/// twin of [`load_cloth_assets_from_dir`].
+pub fn load_hair_assets_from_dir(dir: &Path) -> HashMap<Uuid, inf_anim::HairAsset> {
+    load_anim_assets_by_guid_from_dir(dir, "inf_hair")
+}
+
 /// Bind actor classes to controllable entities (the P8/P9 heuristic mirrored from
 /// the editor's `samples::character_actors`): every entity carrying a
 /// `CharacterController2D` — in `Guid` order — is ticked with the first discovered
@@ -1621,6 +1642,12 @@ impl PackLevelSource {
     /// ships every garment a scene `ClothSim` references.
     pub fn cloth_assets(&self) -> Result<HashMap<Uuid, inf_anim::ClothAsset>, String> {
         self.anim_assets_by_guid(AssetKind::Cloth)
+    }
+
+    /// Every `.inf_hair` payload in the pack keyed by asset GUID (P24.4) - the
+    /// hair twin of [`cloth_assets`](Self::cloth_assets).
+    pub fn hair_assets(&self) -> Result<HashMap<Uuid, inf_anim::HairAsset>, String> {
+        self.anim_assets_by_guid(AssetKind::Hair)
     }
 
     /// Every `.inf_biomes` payload in the pack keyed by asset GUID (P19.3) — what

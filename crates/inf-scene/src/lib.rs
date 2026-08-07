@@ -283,9 +283,9 @@ use uuid::Uuid;
 ///   rots — and this is the update that keeps it from rotting: **P24.4 gave
 ///   `cloth_sim` its reader** (`inf_ecs::cloth::step_cloth_simulation`, the ONE
 ///   Ring-0 rule both fixed steps call, whose result is folded into
-///   `cloth_state_bytes` and compared between the two hosts). `hair_guides` is
-///   still authored, reflected, persisted and spawned with no reader; the same
-///   P24.4 batch is what gives it one. `ik_target` was read on the day it landed.
+///   `cloth_state_bytes` and compared between the two hosts). `hair_guides` got its reader in
+///   the same batch (`inf_ecs::hair::step_hair_simulation`, folded into
+///   `hair_state_bytes`), so all three v21 slots are now read. `ik_target` was read on the day it landed.
 ///
 ///   **Two of the three reference an asset, and one does not.** `ClothSim` and
 ///   `HairGuides` each carry an `Option<Uuid>` naming a `.inf_cloth` / `.inf_hair`

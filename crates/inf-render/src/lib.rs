@@ -89,7 +89,7 @@ pub use scene::{
     ScatterInstance, ScatterInstanceRaw, SkinnedInstance, SkinnedMeshData, SkinnedVertex,
     SkyParams, SpriteInstance, SpriteTextureUpload, SunParams, TerrainTileKey, TextureHandle,
     TilemapParams, VgeomAsset, VgeomInstance, VgeomMesh, VoxelChunkKey, CLOTH_TINT,
-    DEFAULT_SUN_DIR, ID_GIZMO_BASE, ID_NONE,
+    DEFAULT_SUN_DIR, HAIR_TINT, ID_GIZMO_BASE, ID_NONE,
 };
 pub use scene::{
     terrain_id_from_guid, Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk,

@@ -4439,8 +4439,20 @@ impl Default for ClothSim {
 /// recipe for lower tiers all live in the `.inf_hair` this points at, because
 /// they describe the *hairstyle* and not the *head wearing it*.
 ///
-/// **As of P24.3 nothing renders or simulates hair.** Same honest note as
-/// [`ClothSim`]: authored, reflected, persisted, spawned, unread until P24.4.
+/// # Its reader (P24.4)
+///
+/// [`crate::hair::step_hair_simulation`], the ONE Ring-0 rule both hosts' fixed
+/// steps call: it seeds guide strands from the `.inf_hair` this names, anchors
+/// each strand's root on the joint it rides in the pose the sim evaluated this
+/// step, advances a per-strand XPBD chain against the same capsules a garment
+/// collides with, and rebuilds the ribbons both projectors draw. The result is
+/// folded into [`crate::hair::hair_state_bytes`].
+///
+/// P24.3 recorded here that *"as of P24.3 nothing renders or simulates hair"*.
+/// That sentence is retired: the component is read, and drawn.
+///
+/// `quality` is read exactly as [`ClothSim::quality`] is, and **not** as the
+/// machine's capability tier — see that field for the P22.4 reason.
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[reflect(Component, Default)]
 pub struct HairGuides {

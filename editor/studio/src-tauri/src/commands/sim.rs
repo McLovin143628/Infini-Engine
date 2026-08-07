@@ -98,6 +98,10 @@ pub async fn sim_start(
     let cloths = inf_editor_core::simulate::resolve_cloth_assets(&doc, |guid| {
         assets.load_cloth_bytes(inf_asset::AssetId(guid))
     });
+    // …and the `.inf_hair` hairstyles (P24.4), same door, same reason.
+    let hairs = inf_editor_core::simulate::resolve_hair_assets(&doc, |guid| {
+        assets.load_hair_bytes(inf_asset::AssetId(guid))
+    });
     // Resolve the scene's referenced `.inf_voxel` volumes (P21.2) so a Blueprint
     // calling `terrain.height_at` over a carved hole reads the cave floor beneath
     // it — the same map the shipped player seeds through `attach_voxel_volumes`.
@@ -156,6 +160,7 @@ pub async fn sim_start(
     session.set_pose_clips(pose_clips);
     session.set_audio_clips(audio_clips);
     session.set_cloths(cloths);
+    session.set_hairs(hairs);
     session.set_voxel_volumes(voxel_volumes);
     // P22.3: what this level's destructible actors break into. DERIVED here, from
     // each actor's own mesh, by the same `inf_mesh::fracture_mesh` the cook runs

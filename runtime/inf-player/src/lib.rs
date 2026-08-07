@@ -192,6 +192,7 @@ fn build_world(args: &Args) -> Result<(BuiltWorld, TerrainContent), String> {
             let (skeletons, clips, machines) = level::load_anim_assets_from_dir(&content_dir);
             let audio = level::load_audio_assets_from_dir(&content_dir);
             let cloths = level::load_cloth_assets_from_dir(&content_dir);
+            let hairs = level::load_hair_assets_from_dir(&content_dir);
             let terrains = level::terrain_paths_by_guid_from_dir(&content_dir);
             let builder = InfSceneWorldBuilder::with_defaults(actors)
                 .with_bindings(by_guid)
@@ -199,6 +200,7 @@ fn build_world(args: &Args) -> Result<(BuiltWorld, TerrainContent), String> {
                 .with_biome_sets(biome_sets)
                 .with_anim_assets(skeletons, clips, machines)
                 .with_cloth_assets(cloths)
+                .with_hair_assets(hairs)
                 .with_audio(audio);
             Ok((
                 level::load(&source, &builder)?,
@@ -265,12 +267,14 @@ pub fn build_world_from_pack(source: &PackLevelSource) -> Result<BuiltWorld, Str
     let (skeletons, clips, machines) = source.anim_assets()?;
     let audio = source.audio_assets()?;
     let cloths = source.cloth_assets()?;
+    let hairs = source.hair_assets()?;
     let builder = InfSceneWorldBuilder::with_defaults(actors)
         .with_bindings(by_guid)
         .with_pcgs(pcgs)
         .with_biome_sets(biome_sets)
         .with_anim_assets(skeletons, clips, machines)
         .with_cloth_assets(cloths)
+        .with_hair_assets(hairs)
         .with_audio(audio)
         // P16.5: a partitioned cooked level resolves its derived `.inf_part` out
         // of this same (already-open) pack mapping.
@@ -568,6 +572,7 @@ pub fn sim_from_built(built: BuiltWorld) -> RuntimeSim {
         pose_clips,
         audio_clips,
         cloths,
+        hairs,
         ..
     } = built;
     let mut sim = RuntimeSim::new(world, actors, gravity, hz);
@@ -589,6 +594,7 @@ pub fn sim_from_built(built: BuiltWorld) -> RuntimeSim {
     // goes through, and a boot path that forgets an attachment does not crash, it
     // agrees with itself (the P21.4 law).
     sim.set_cloths(cloths);
+    sim.set_hairs(hairs);
     sim
 }
 

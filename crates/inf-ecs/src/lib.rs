@@ -17,6 +17,8 @@ pub mod attach;
 pub mod cloth;
 pub mod components;
 pub mod deform;
+// P24.4: the fixed-step slot that turns `HairGuides` into moving strands.
+pub mod hair;
 pub mod hierarchy;
 pub mod hydro;
 pub mod math;

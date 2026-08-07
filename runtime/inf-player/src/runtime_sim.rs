@@ -189,6 +189,9 @@ pub struct RuntimeSim {
     /// here simulates; one whose does not keeps its component and simulates
     /// nothing (`inf_ecs::cloth`'s rule 2).
     cloths: BTreeMap<Uuid, inf_anim::ClothAsset>,
+    /// Resolvable `.inf_hair` hairstyles keyed by asset GUID (P24.4) - the
+    /// runtime mirror of `SimSession::hairs`.
+    hairs: BTreeMap<Uuid, inf_anim::HairAsset>,
     stepper: FixedStep,
     /// Actors keyed by `Guid` (deterministic iteration).
     actors: BTreeMap<Uuid, ActorState>,
@@ -342,6 +345,7 @@ impl RuntimeSim {
             skeletons: BTreeMap::new(),
             pose_clips: BTreeMap::new(),
             cloths: BTreeMap::new(),
+            hairs: BTreeMap::new(),
             stepper: FixedStep::from_hz(hz),
             actors: states,
             entities,
@@ -435,6 +439,17 @@ impl RuntimeSim {
     /// The garments this sim can resolve (a read for tests and gates).
     pub fn cloths(&self) -> &BTreeMap<Uuid, inf_anim::ClothAsset> {
         &self.cloths
+    }
+
+    /// Seed the resolvable `.inf_hair` hairstyles (P24.4) - the runtime mirror of
+    /// `SimSession::set_hairs`.
+    pub fn set_hairs(&mut self, hairs: BTreeMap<Uuid, inf_anim::HairAsset>) {
+        self.hairs = hairs;
+    }
+
+    /// The hairstyles this sim can resolve (a read for tests and gates).
+    pub fn hairs(&self) -> &BTreeMap<Uuid, inf_anim::HairAsset> {
+        &self.hairs
     }
 
     /// Register a resolvable `.inf_audio` clip payload by asset GUID (P12.3) — the
@@ -760,6 +775,7 @@ impl RuntimeSim {
         out.extend_from_slice(&inf_ecs::deform::deform_state_bytes(&self.world));
         out.extend_from_slice(&inf_ecs::pose::pose_state_bytes(&self.world));
         out.extend_from_slice(&inf_ecs::cloth::cloth_state_bytes(&self.world));
+        out.extend_from_slice(&inf_ecs::hair::hair_state_bytes(&self.world));
         out
     }
 
@@ -880,6 +896,10 @@ impl RuntimeSim {
         //    falls. Inert (one empty query, no allocation) on every level with no
         //    `ClothSim`. (MIRROR of `SimSession::fixed_step`.)
         self.step_cloth(dt);
+        // -- P24.4 hair -- strands fall on the head the pose just put them on,
+        //    in the same slot and for the same reasons as the garment above.
+        //    (MIRROR of `SimSession::fixed_step`.)
+        self.step_hair(dt);
         // ── P14.5 WASM mods ── tick sandboxed mods against the world (after
         //    gameplay/physics/anim), then propagate their transform edits.
         self.tick_mods(dt);
@@ -1100,6 +1120,25 @@ impl RuntimeSim {
         let garments = |g: Uuid| cloths.get(&g);
         let skels = |g: Uuid| skeletons.get(&g);
         inf_ecs::cloth::step_cloth_simulation(world, dt, &garments, &skels);
+    }
+
+    /// Advance every worn hairstyle (P24.4) through the ONE Ring-0 rule both hosts
+    /// call ([`inf_ecs::hair::step_hair_simulation`]) - the runtime mirror of
+    /// `SimSession::step_hair`.
+    fn step_hair(&mut self, dt: f64) {
+        if self.hairs.is_empty() {
+            return;
+        }
+        let Self {
+            world,
+            hairs,
+            skeletons,
+            ..
+        } = self;
+        let (hairs, skeletons) = (&*hairs, &*skeletons);
+        let styles = |g: Uuid| hairs.get(&g);
+        let skels = |g: Uuid| skeletons.get(&g);
+        inf_ecs::hair::step_hair_simulation(world, dt, &styles, &skels);
     }
 
     /// Snapshot the play-head `t` of every root-motion-driven playing entity

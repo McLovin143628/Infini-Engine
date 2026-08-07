@@ -538,7 +538,7 @@ impl ClothState {
 /// is constant across a substep and forming it per constraint would be arithmetic
 /// repeated a few thousand times a step for no result.
 #[inline]
-fn solve_edge(x: &mut [Vec3], w: &[f32], e: &ClothEdge, alpha: f32, lambda: &mut f32) {
+pub fn solve_edge(x: &mut [Vec3], w: &[f32], e: &ClothEdge, alpha: f32, lambda: &mut f32) {
     let (i, j) = (e.a as usize, e.b as usize);
     // The asset was validated at seed, so these are in range; the guard is what
     // makes that a property of the code rather than of the caller.
@@ -570,7 +570,7 @@ fn solve_edge(x: &mut [Vec3], w: &[f32], e: &ClothEdge, alpha: f32, lambda: &mut
 /// defined normal and is pushed along `+Y` — an arbitrary but *fixed* choice, so
 /// the degenerate case is deterministic rather than uninitialized.
 #[inline]
-fn resolve_capsule(p: Vec3, c: &Capsule, thickness_m: f32) -> Option<Vec3> {
+pub fn resolve_capsule(p: Vec3, c: &Capsule, thickness_m: f32) -> Option<Vec3> {
     let ab = c.b - c.a;
     let len2 = ab.dot(ab);
     let t = if len2 > MIN_CONSTRAINT_LEN_M * MIN_CONSTRAINT_LEN_M {

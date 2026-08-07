@@ -408,6 +408,13 @@ pub struct SkinnedMeshData {
 /// two projectors cannot disagree about it. Ledgered in ROADMAP §12's P24 block.
 pub const CLOTH_TINT: [f32; 4] = [0.42, 0.46, 0.58, 1.0];
 
+/// The tint a simulated hair ribbon draws in (linear rgba).
+///
+/// Distinct from [`CLOTH_TINT`] for the same reason that one is distinct from the
+/// wearer's `Material`: a coat and a head of hair on one character have to be
+/// tellable apart, and v1 has no per-asset material to tell them apart with.
+pub const HAIR_TINT: [f32; 4] = [0.20, 0.14, 0.10, 1.0];
+
 /// **A CPU-deformed mesh, as something the skinned pass can draw** (P24.4).
 ///
 /// # Why cloth and hair reuse the skinned path instead of getting a pass

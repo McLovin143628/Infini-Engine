@@ -1390,6 +1390,9 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
                 // door for three paths" law was written about, so the edge lands
                 // in the same pass as every other component reference.
                 deps.extend(e.cloth_sim.as_ref().and_then(|c| c.asset).map(AssetId));
+                // P24.4: and a HairGuides pulls its `.inf_hair`, same edge, same
+                // reason.
+                deps.extend(e.hair_guides.as_ref().and_then(|h| h.asset).map(AssetId));
             }
             deps
         }

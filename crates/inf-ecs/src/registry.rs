@@ -125,9 +125,9 @@ impl ComponentRegistry {
             // builds a character in: bind the mesh, drive it, then plant its feet
             // and dress it. `IkTarget` is read every fixed step by
             // `crate::pose::step_pose_evaluation`; `ClothSim` since P24.4 by
-            // `crate::cloth::step_cloth_simulation`; `HairGuides` is authored in
-            // v21 and gets its reader in the same P24.4 batch (see their docs —
-            // the note is on the type, not only here).
+            // `crate::cloth::step_cloth_simulation`; `HairGuides` since P24.4 by
+            // `crate::hair::step_hair_simulation`. (The note is on the types, not
+            // only here.) All three v21 slots now have readers.
             IkTarget => "IK Target",
             ClothSim => "Cloth Sim",
             HairGuides => "Hair Guides",

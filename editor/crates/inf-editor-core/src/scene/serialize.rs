@@ -345,9 +345,9 @@ use crate::scene::SceneDoc;
 ///   reserved slot is exactly the kind of thing that rots** — and this is the
 ///   update that keeps it from rotting: P24.4 gave `cloth_sim` its reader
 ///   (`inf_ecs::cloth::step_cloth_simulation`, called from both fixed steps, its
-///   result folded into the compared trace). `hair_guides` is still authored,
-///   reflected, persisted and spawned with no reader; the same batch gives it
-///   one.
+///   result folded into the compared trace). `hair_guides` got its reader in the
+///   same batch (`inf_ecs::hair::step_hair_simulation`), so all three v21 slots
+///   are now read.
 ///
 ///   The wire price to a level with no rigged character is **three discriminant
 ///   bytes per entity** — one per slot, the same price every additive slot since

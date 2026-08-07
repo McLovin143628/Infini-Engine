@@ -683,6 +683,14 @@ pub fn project_scene_full(
                 cloth_rot.as_quat(),
                 cloth_scale.as_vec3(),
             );
+            project_hair(
+                scene,
+                world,
+                guid,
+                translation,
+                cloth_rot.as_quat(),
+                cloth_scale.as_vec3(),
+            );
         }
         if w.get::<MeshRef>(entity).is_none() {
             if let Some(sm) = w.get::<SkeletalMesh>(entity).copied() {
@@ -2018,6 +2026,49 @@ fn project_cloth(
     });
 }
 
+/// **A simulated hairstyle, as a skinned draw** (P24.4).
+/// The twin of `project_cloth`, and deliberately the same shape: the sim's
+/// `inf_ecs::hair` store already holds this wearer's ribbon positions and index
+/// list, both rebuilt inside the fixed step, so a projector reads the sim world
+/// and builds nothing of its own. The ribbons are computed there rather than here
+/// precisely because there are two projectors and one fixed step.
+///
+/// Rides the **skinned** path with a one-entry identity palette, carries
+/// `ID_NONE`, and is a fresh `Arc` per projection — see `project_cloth` for each
+/// of those three, which hold here for the same reasons.
+///
+/// **MIRROR** of the other host's `project_hair` — keep the two byte-identical,
+/// **this doc block included**. Side-neutral wording on purpose.
+fn project_hair(
+    scene: &mut inf_render::RenderScene,
+    world: &inf_ecs::EcsWorld,
+    guid: uuid::Uuid,
+    translation: glam::DVec3,
+    rotation: glam::Quat,
+    scale: glam::Vec3,
+) {
+    let Some(live) = inf_ecs::hair::live_hair(world, guid) else {
+        return;
+    };
+    let mesh = inf_render::deformed_skinned_mesh(&live.ribbon_positions, &live.ribbon_indices);
+    if mesh.indices.len() < 3 {
+        return;
+    }
+    scene.skinned_meshes.push(std::sync::Arc::new(mesh));
+    let slot = scene.skinned_meshes.len() - 1;
+    scene.skinned.push(inf_render::SkinnedInstance {
+        translation,
+        rotation,
+        scale,
+        color: inf_render::HAIR_TINT,
+        metallic: 0.0,
+        roughness: 0.45,
+        emissive: [0.0; 3],
+        id: inf_render::ID_NONE,
+        mesh: slot,
+        palette: vec![glam::Mat4::IDENTITY],
+    });
+}
 #[cfg(test)]
 mod render_settings_tests {
     use super::{apply_record, RenderSettings, RenderSettingsRecord};

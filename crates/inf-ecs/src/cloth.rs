@@ -164,7 +164,7 @@ pub fn cloth_state_bytes(world: &EcsWorld) -> Vec<u8> {
 /// A singular placement (a zero scale) has no model frame to convert into and
 /// answers `None`; the caller skips the garment rather than simulating it under a
 /// gravity full of infinities.
-fn model_gravity(global: &glam::DAffine3) -> Option<Vec3> {
+pub(crate) fn model_gravity(global: &glam::DAffine3) -> Option<Vec3> {
     let det = global.matrix3.determinant();
     if !det.is_finite() || det.abs() < 1.0e-12 {
         return None;

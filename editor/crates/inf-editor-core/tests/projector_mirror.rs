@@ -1994,3 +1994,83 @@ fn both_projectors_draw_cloth_beside_the_wearer() {
         );
     }
 }
+
+/// The two `project_hair` projectors must be **byte-identical, doc block
+/// included** — the `project_cloth` gate, on the ribbons.
+#[test]
+fn project_hair_is_identical_in_both_projectors() {
+    assert_eq!(
+        extract_fn(&read(VIEWPORT), "project_hair"),
+        extract_fn(&read(PLAYER), "project_hair"),
+        "the two `project_hair` projectors have drifted"
+    );
+}
+
+/// Both fixed steps must run the **hair slot**, through the ONE Ring-0 rule, and
+/// adjacent to the cloth slot.
+#[test]
+fn both_fixed_steps_run_the_hair_slot() {
+    const RUNTIME_SIM: &str = "runtime/inf-player/src/runtime_sim.rs";
+    const SIMULATE: &str = "editor/crates/inf-editor-core/src/simulate.rs";
+    for (label, path, cloth, hair) in [
+        (
+            "shipped player",
+            RUNTIME_SIM,
+            "self.step_cloth(dt);",
+            "self.step_hair(dt);",
+        ),
+        (
+            "editor Simulate",
+            SIMULATE,
+            "self.step_cloth(doc, dt);",
+            "self.step_hair(doc, dt);",
+        ),
+    ] {
+        let whole = read(path).replace("\r\n", "\n");
+        let start = whole.find("fn fixed_step(").expect("a fixed step");
+        let src = whole[start..].to_string();
+        let at_cloth = src.find(cloth).expect("the cloth slot");
+        let at_hair = src
+            .find(hair)
+            .unwrap_or_else(|| panic!("the {label} fixed step does not run the hair slot"));
+        assert!(
+            at_cloth < at_hair,
+            "the {label} runs the hair slot before the cloth slot; the two must \
+             stay adjacent and ordered, or the hosts can diverge about which of \
+             the two sees the other's writes"
+        );
+        // The rule lives ONCE: neither host may spell the strand solve inline.
+        assert!(whole.contains("inf_ecs::hair::step_hair_simulation("));
+        assert!(
+            !whole.contains("inf_anim::hair::step_hair("),
+            "the {label} calls the strand solver DIRECTLY — the binding (roots, \
+             capsules, ribbons, seeding) would then exist twice, which is the \
+             shape `inf_ecs::deform` was written to retire"
+        );
+    }
+}
+
+/// The hair trace is appended **after** the cloth trace, and both after the pose.
+#[test]
+fn the_hair_trace_is_appended_after_the_cloth_trace() {
+    let src = read("runtime/inf-player/src/runtime_sim.rs").replace("\r\n", "\n");
+    let start = src
+        .find("pub fn state_bytes(")
+        .expect("the player folds a trace");
+    let body = &src[start..];
+    let body = &body[..body.find("\n    }\n").expect("the fn ends")];
+    let pose = body
+        .find("pose::pose_state_bytes")
+        .expect("the pose section");
+    let cloth = body
+        .find("cloth::cloth_state_bytes")
+        .expect("the cloth section");
+    let hair = body
+        .find("hair::hair_state_bytes")
+        .expect("the hair section is not appended at all");
+    assert!(
+        pose < cloth && cloth < hair,
+        "the trace sections moved: every committed hash was folded over \
+         snapshot ++ deform ++ pose ++ cloth ++ hair, in that order"
+    );
+}

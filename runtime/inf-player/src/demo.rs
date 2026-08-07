@@ -151,6 +151,7 @@ pub fn build() -> BuiltWorld {
         pose_clips: std::collections::BTreeMap::new(),
         audio_clips: std::collections::BTreeMap::new(),
         cloths: std::collections::BTreeMap::new(),
+        hairs: std::collections::BTreeMap::new(),
         // The programmatic demo is a single document — nothing streams.
         partition: crate::level::PartitionContent::None,
     }
