@@ -9694,6 +9694,25 @@ mod tests {
         assert!(!t.goals[1].enabled);
     }
 
+    /// One entity as the v21 wire lays it out: the frozen 44-field record, then
+    /// the three tails P24.3 appended. A `type` because clippy counts the tuple's
+    /// nesting, and because naming it says what it is.
+    type V21EntityWire = (
+        EntityRecordV20,
+        Option<IkTarget>,
+        Option<ClothSim>,
+        Option<HairGuides>,
+    );
+
+    /// The same, borrowed, plus one appended slot — the shadow v22's entity.
+    type V22EntityShadow<'a> = (
+        &'a EntityRecordV20,
+        &'a Option<IkTarget>,
+        &'a Option<ClothSim>,
+        &'a Option<HairGuides>,
+        Option<u8>,
+    );
+
     /// **The v21 wire shape, pinned against an INDEPENDENT declaration.**
     ///
     /// The `SkeletonAssetV2Wire` idiom (`inf-anim`), applied to the scene. The
@@ -9714,12 +9733,7 @@ mod tests {
     struct SceneFileV21Wire {
         schema_version: u32,
         title: String,
-        entities: Vec<(
-            EntityRecordV20,
-            Option<IkTarget>,
-            Option<ClothSim>,
-            Option<HairGuides>,
-        )>,
+        entities: Vec<V21EntityWire>,
         settings: RuntimeSettings,
     }
 
@@ -9729,13 +9743,7 @@ mod tests {
     struct SceneFileV22Shadow<'a> {
         schema_version: u32,
         title: &'a str,
-        entities: Vec<(
-            &'a EntityRecordV20,
-            &'a Option<IkTarget>,
-            &'a Option<ClothSim>,
-            &'a Option<HairGuides>,
-            Option<u8>,
-        )>,
+        entities: Vec<V22EntityShadow<'a>>,
         settings: RuntimeSettings,
     }
 
