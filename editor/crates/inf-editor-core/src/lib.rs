@@ -11,6 +11,8 @@ pub mod collision_layers;
 // here is resolved in THIS module's scope, so every intra-doc link into the
 // module would dangle (seven of the nine doc warnings the audit counted).
 pub mod dcc;
+// P24.3: the Skeleton Editor's Ring-1 half — an editing session over a
+// `SkeletonAsset`, snapshot-undone (see the module docs for why not a journal).
 pub mod diagnostics;
 pub mod erosion_gpu;
 pub mod hydro;
@@ -26,6 +28,7 @@ pub mod samples;
 pub mod scene;
 pub mod sequencer;
 pub mod simulate;
+pub mod skel;
 pub mod sorting;
 /// Editing an asset-backed terrain + the save write-back (P16.4b).
 pub mod terrain_edit;
