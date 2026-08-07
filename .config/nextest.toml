@@ -1,0 +1,48 @@
+# cargo-nextest configuration.
+#
+# The repository's only entry, and it exists for one reason: **nextest runs every
+# test in its own process**, and two families of tests in this workspace build a
+# fixture crate with `cargo build` and then COPY the artifact. Cargo's build-
+# directory lock serializes the builds and is released *before* the copy runs, so
+# N sibling processes can still relink each other's uplifted artifact while one of
+# them is mid-`fs::copy`. That is the macOS CI failure
+# `copy fixture dylib … No such file or directory`.
+#
+# Two earlier fixes narrowed it and did not close it:
+#
+#   * `d01c3e8` gave each process a private stash to load from, which stops a
+#     rebuild tearing a file the process already opened — it does not help the
+#     copy that has not happened yet;
+#   * `f2828e3` gave the fixtures a dedicated `target/hotreload-fixtures`, which
+#     removes FOREIGN relinking (the test binaries' own feature unification) — it
+#     does not remove the three sibling test processes relinking each other's
+#     uplift hardlink, because cargo's `link_or_copy` does `remove_file` then
+#     `hard_link` with no lock held by the process that is copying.
+#
+# A test group with `max-threads = 1` removes the concurrency instead of the
+# symptom: at most one member of the group runs at a time, and the group's members
+# are the *only* writers of those directories (verified — nothing else in the
+# workspace names `target/hotreload-fixtures` or `samples/mods/spinner/target`).
+# So a copy can never overlap a relink. Under plain `cargo test` the same tests
+# are THREADS in one process and `reload.rs`'s `OnceLock` already serializes them,
+# so both runners are covered by construction rather than by luck.
+#
+# `crates/inf-hotreload/tests/fixture_serialization.rs` pins this file's content
+# against the test names it must cover, so a new fixture-building test that is not
+# in a group fails rather than flaking.
+
+[test-groups]
+# The two hot-reload fixture cdylibs, built into `target/hotreload-fixtures`.
+hotreload-fixtures = { max-threads = 1 }
+# The spinner sample mod, built into `samples/mods/spinner/target`. Same shape,
+# same race, in two different crates — latent rather than observed, and grouped
+# here because "we have not seen it fail yet" is not a reason to leave it.
+wasm-mod-fixtures = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(inf-hotreload) and binary(reload)'
+test-group = 'hotreload-fixtures'
+
+[[profile.default.overrides]]
+filter = 'binary(spinner_e2e) or binary(mods_e2e)'
+test-group = 'wasm-mod-fixtures'

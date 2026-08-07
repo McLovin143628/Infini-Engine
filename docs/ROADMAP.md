@@ -7849,7 +7849,10 @@ every asset kind at once and belongs to a deliberate bump, not to a repair batch
 above is written to **fail** the day it lands, so this entry gets retired rather than
 forgotten.
 
-**Carried from P24.2 (ledgered, not fixed).** Eight, each measured rather than assumed:
+**Carried from P24.2 — FOUR OF EIGHT CLOSED BY P24.3.** The eight entries below keep their
+original wording, each with a **CLOSED (P24.3)** paragraph naming the gate that retired it,
+so the ledger reads as a history rather than as a list that quietly shrank. Four remain open,
+and one closure carries a narrower item forward.
 
 * **The P24.2 IK parity gate is IN-PROCESS, not a `--pie` subprocess.** The batch
   report claimed a real subprocess arm with IK; there is none — all of
@@ -7860,6 +7863,19 @@ forgotten.
   the law P21.4 paid for. The arm closes naturally at P24.3: with the authored
   `IkTarget` component in the scene, the payload carries it and the subprocess
   engages IK through the door it already uses.
+
+  **CLOSED (P24.3).** `pie_skinned.rs`'s
+  `the_real_pie_subprocess_engages_the_authored_ik_target` spawns the actual
+  `inf-player` binary in `--pie`, steps it 8 times and compares the streamed
+  trace against `inf_player::scene_trace` of the same payload. **No injection
+  hook exists**: the goal arrives inside the `.inf_lvl` bytes the payload already
+  carried, which `the_payload_carries_the_authored_ik_target_inside_the_level_bytes`
+  asserts by decoding `payload.level_bytes` with `SCENE_PAYLOAD_VERSION`
+  unchanged. The anti-vacuity arm — **moving the authored target moves the
+  trace** — is what says the goal was solved rather than merely carried; a player
+  that decoded the component and never handed it to `step_pose_evaluation` passes
+  the equality and fails that. Mutation-measured: severing `authored_ik_goals`
+  inside the fixed step fails this arm and six `inf-ecs` `pose` tests by name.
 * **The IK Blueprint node kit is deferred to P24.3.** `inf_ecs::set_ik_goals` is
   the Ring-0 write door and it has **no production caller**: nothing in a shipped
   build sets an IK goal today, so the solvers run only when a test or a future
@@ -7873,6 +7889,26 @@ forgotten.
   `IkOutcome::{Solved, Refused, NotPosed}` per goal, read through
   `inf_ecs::ik_outcomes`, so `IkReport::reach_error` and all four `IkError`
   variants are reachable by a caller and by a gate.
+
+  **CLOSED (P24.3).** The `ik.*` kit: `ik.set_goal`, `ik.set_goal_weight`,
+  `ik.enable_goal` (exec actions, one `ok: Bool` output each — the
+  `voxel.carve_*` shape, so the lowerer binds them to a `Stmt::Let`) and
+  `ik.reached` / `ik.reach_error` (pure queries), registered in
+  `inf_blueprint::nodekit` and handled by five identical arms in **both** hosts.
+  **They edit the authored `IkTarget` by goal index rather than calling
+  `set_ik_goals`**, and the reasoning is written on `inf_ecs::pose`: a chain is
+  joint indices an author cannot type, deriving one from a root/tip pair needs a
+  skeleton registry *neither* host's Blueprint dispatch context holds, and
+  threading one into both would be a new field in two hand-maintained mirrors for
+  a derivation the author has already done in the Skeleton Editor. The split is
+  by what each half knows — the component says *which joints*, the kit says
+  *where the goal is*. `ik.reached` / `ik.reach_error` are what make P24.2's
+  `IkReport` reachable from gameplay at all.
+
+  **Narrowed, not gone:** `inf_ecs::set_ik_goals` itself still has no production
+  caller. It remains the Ring-0 door for a caller that genuinely has a chain, and
+  `step_pose_evaluation` concatenates its goals **after** the authored ones so
+  neither source silently disables the other.
 * **`Quat::from_euler` / `to_euler` remain on the transform path, deliberately.**
   `inf_ecs::components`' `GlobalTransform` propagation (components.rs:102 and
   :111) converts euler degrees to a quaternion and back on every entity, which
@@ -7896,6 +7932,21 @@ forgotten.
   fixed step, never saved, inherited by both hosts with no host-side change). The consequence is
   honest and real: **an IK target cannot be authored or saved today** — it is set by a caller at
   runtime. The authored component, and the scene bump it needs, belong to **P24.3**.
+
+  **CLOSED (P24.3).** Scene **v21** appends `ik_target` — an `IkTarget`, which is
+  a `Vec<IkGoalRecord>`, because a bevy component is one-per-entity and a
+  character has four chains before anything exotic. It is **world**-space `f64`
+  where `IkGoal` is model-space `f32`: an author places a target with a gizmo, in
+  the world, and a character that walks forward must not drag its goal along, so
+  `inf_ecs::pose::authored_ik_goals` converts once per **fixed step** through the
+  entity's own `GlobalTransform` — every step and not at session start, because a
+  goal that follows a moving hand-hold is the case IK exists for. A singular
+  placement (zero scale) **drops** its goals rather than inverting into
+  infinities. The resource did not go away: it became the *runtime* half of a
+  pair, and both halves are solved, authored first. `IkGoal` also gained a
+  `weight`, applied as a `pslerp` back toward the pre-solve pose; at `1.0` the
+  snapshot is never taken, so a level that never lowers a weight produces exactly
+  P24.2's bytes.
 * **Ten import/export report fields never reach the Model Editor panel.** Measured while
   extending `report_drift.rs` across the kernel-to-UI seam (the hop that let `skin_conflicts`
   and `optimized` ship invisible): `sourceVertices`, `weldedPositions`, `sharpEdges`,
@@ -7918,6 +7969,64 @@ forgotten.
   it, so an elbow can bend backwards if a target asks it to. `two_bone_positions`'s pole already
   decides the bend *plane*, which is the half that matters for a knee; the missing half is the
   angular *range*.
+
+  **CLOSED (P24.3).** `solve_chain` takes a **required** `limits: &[JointLimit]`
+  — required and not defaulted, because a second defaulting door is how "the
+  solver respects limits" becomes true of one call site and false of the other;
+  it has exactly one production caller. The clamp runs **inside** the per-joint
+  loop rather than as a pass afterwards: the next iteration recomputes
+  `global_transforms` from that write, so a late clamp would leave every
+  downstream joint aimed at a position its parent had already been pulled out of.
+  It is measured from the **bind pose** (`hinge_x(knee, -150, 0)` describes a leg
+  that is straight at rest and flexes backwards), applied by swing-twist
+  decomposition about the single free axis, and spelled in
+  `patan2_64` / `psin64` / `pcos64` because the result is folded into
+  `state_bytes` and compared between Simulate and the shipped player.
+  `IkReport::clamped` counts joints the clamp actually **moved**, so "the elbow
+  does not bend backwards" is assertable rather than inferable — a clamp that did
+  nothing and a chain that never needed one are different numbers.
+  Mutation-measured: severing the clamp fails
+  `a_hinge_elbow_will_not_bend_backwards` and
+  `the_range_is_measured_from_the_bind_pose` by name.
+
+  **Carried forward from this closure (P24.3): a limit free on MORE THAN ONE AXIS
+  is not applied.** Swing-twist is canonical about one axis only; three
+  independent Euler clamps depend on the order chosen and gimbal-lock at the
+  poles, so a cone limit is left alone rather than approximated.
+  `a_multi_axis_limit_is_not_applied` asserts it is byte-identical to no limit at
+  all, so the day a real cone solve lands the test fails and this entry gets
+  rewritten instead of forgotten. `build_template` emits hinges and nothing else,
+  so nothing the engine currently produces falls in the gap.
+
+**Closed in P24.3 — the hot-reload fixture race.** `loading_is_content_addressed` failed
+macOS CI twice with `copy fixture dylib … No such file or directory`, and two earlier fixes had
+narrowed the window without closing it: `d01c3e8` gave each test process a private stash to
+*load* from (which protects a file already open, not one being copied), and `f2828e3` gave the
+fixtures a dedicated `target/hotreload-fixtures` (which removes *foreign* relinking, not the
+three sibling test processes relinking each other's artifact). What was left, measured:
+**nextest runs every test in its own process**, so `reload.rs`'s three tests are three
+processes each running `cargo build`; cargo's build-directory lock serializes the builds and is
+**released when `cargo build` exits, before `fs::copy` runs**; and cargo publishes an artifact
+by *uplifting* it — `remove_file` then `hard_link`, not atomic — so process A can be
+mid-copy of `debug/libfoo.dylib` when process B's cargo unlinks it.
+
+The fix is `.config/nextest.toml` (the repository's first): a **test group with
+`max-threads = 1`**, which removes the concurrency rather than the symptom — at most one member
+runs at a time, and the group's members are the only writers of that directory, so a copy can
+never overlap a relink because there is never a second process to relink. Under plain
+`cargo test` the same three are *threads in one process* and `reload.rs`'s `OnceLock` already
+collapses them to a single build, so both runners are covered by construction. The
+`samples/mods/spinner` pair (`spinner_e2e` + `mods_e2e`, in two different crates) has the
+identical structure and is grouped too — latent rather than observed, and "we have not seen it
+fail yet" is not a reason to leave it.
+
+A config file is invisible to every test in the repository, so
+`crates/inf-hotreload/tests/fixture_serialization.rs` is the forcing function: it reads the
+config **and the workspace**, and fails when a test file that shells out to `cargo build` (or
+goes through `build_mod_wasm`) is not in a group, with the remedy in the message. It carries
+its own anti-vacuity arms (the scan must walk >20 files and must identify `reload.rs`, the file
+the race was measured on). Mutation-measured: renaming the filter off `binary(reload)` fails
+both arms and names `crates::reload`; raising `max-threads` to 2 fails the config arm.
 
 **Also carried from P24.1 — the decode allowlist covers `simulate.rs` and not `pie.rs`.**
 `every_asset_decode_in_simulate_flows_through_the_reporting_door` reads a **module** scope
