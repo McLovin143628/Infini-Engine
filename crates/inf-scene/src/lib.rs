@@ -280,15 +280,18 @@ use uuid::Uuid;
 ///   two bumps carrying one and two, and the empty slots cost a `None`
 ///   discriminant byte each — the price every additive slot since v8 has paid.
 ///   Stated plainly because a reserved slot is exactly the kind of thing that
-///   rots: as of P24.3 **nothing simulates cloth or hair**. Both components are
-///   authored, reflected, persisted and spawned; P24.4 is what gives them a
-///   reader. `ik_target` is read on the day it lands.
+///   rots — and this is the update that keeps it from rotting: **P24.4 gave
+///   `cloth_sim` its reader** (`inf_ecs::cloth::step_cloth_simulation`, the ONE
+///   Ring-0 rule both fixed steps call, whose result is folded into
+///   `cloth_state_bytes` and compared between the two hosts). `hair_guides` is
+///   still authored, reflected, persisted and spawned with no reader; the same
+///   P24.4 batch is what gives it one. `ik_target` was read on the day it landed.
 ///
 ///   **Two of the three reference an asset, and one does not.** `ClothSim` and
 ///   `HairGuides` each carry an `Option<Uuid>` naming a `.inf_cloth` / `.inf_hair`
-///   — asset kinds P24.4 defines, which is an `AssetKind` addition and touches no
-///   scene wire. Until then the slots are authored with `None` and the cook's
-///   dependency closure is unchanged. `IkTarget` references no asset at all: a
+///   — asset kinds P24.4 defined (`AssetKind::Cloth` / `AssetKind::Hair`), which
+///   was an append-only `AssetKind` addition and touched no scene wire. A slot
+///   left at `None` still costs the cook's dependency closure nothing. `IkTarget` references no asset at all: a
 ///   chain is joint indices into the skeleton the entity's `SkeletalMesh` already
 ///   names, so v21 adds no edge for it and there is nothing to dangle.
 ///

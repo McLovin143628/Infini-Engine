@@ -93,6 +93,11 @@ pub async fn sim_start(
     let audio_clips = inf_editor_core::simulate::resolve_audio_assets(&doc, |guid| {
         assets.load_audio_bytes(inf_asset::AssetId(guid))
     });
+    // Resolve the scene's referenced `.inf_cloth` garments (P24.4) so a `ClothSim`
+    // wearer folds the same coat in Simulate as in the shipped player.
+    let cloths = inf_editor_core::simulate::resolve_cloth_assets(&doc, |guid| {
+        assets.load_cloth_bytes(inf_asset::AssetId(guid))
+    });
     // Resolve the scene's referenced `.inf_voxel` volumes (P21.2) so a Blueprint
     // calling `terrain.height_at` over a carved hole reads the cave floor beneath
     // it — the same map the shipped player seeds through `attach_voxel_volumes`.
@@ -150,6 +155,7 @@ pub async fn sim_start(
     session.set_skeletons(skeletons);
     session.set_pose_clips(pose_clips);
     session.set_audio_clips(audio_clips);
+    session.set_cloths(cloths);
     session.set_voxel_volumes(voxel_volumes);
     // P22.3: what this level's destructible actors break into. DERIVED here, from
     // each actor's own mesh, by the same `inf_mesh::fracture_mesh` the cook runs

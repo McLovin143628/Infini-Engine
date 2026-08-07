@@ -1382,6 +1382,14 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
                 );
                 // P12.4: an AudioSource pulls its referenced `.inf_audio` clip.
                 deps.extend(e.audio_source.as_ref().and_then(|a| a.clip).map(AssetId));
+                // P24.4: a ClothSim pulls its `.inf_cloth` garment. Without this
+                // edge a shipped character wears a component nothing can resolve
+                // and simulates no cloth at all — while the editor's Simulate,
+                // which reads the project's content root directly, folds the coat
+                // perfectly. That asymmetry is exactly the shape the P22 "one
+                // door for three paths" law was written about, so the edge lands
+                // in the same pass as every other component reference.
+                deps.extend(e.cloth_sim.as_ref().and_then(|c| c.asset).map(AssetId));
             }
             deps
         }

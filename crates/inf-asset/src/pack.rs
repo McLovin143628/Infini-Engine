@@ -160,6 +160,9 @@ fn kind_code(kind: AssetKind) -> u16 {
         // P22.2. Appended, never inserted: a kind code is a WIRE value and every
         // pack ever cooked reads its index by it.
         AssetKind::Fracture => 21,
+        // P24.4. Appended, never inserted — same rule, same reason.
+        AssetKind::Cloth => 22,
+        AssetKind::Hair => 23,
     }
 }
 
@@ -187,6 +190,8 @@ fn kind_from_code(code: u16) -> AssetKind {
         19 => AssetKind::BiomeSet,
         20 => AssetKind::VoxelVolume,
         21 => AssetKind::Fracture,
+        22 => AssetKind::Cloth,
+        23 => AssetKind::Hair,
         _ => AssetKind::Unknown,
     }
 }
@@ -322,7 +327,14 @@ impl PackWriter {
             // cheaper load but a hole in a wall. There is nothing to sub-slice,
             // so the raw-blob trade (ship size for streaming latency) would be
             // paid for nothing. It stays compressed.
-            | AssetKind::Fracture => true,
+            | AssetKind::Fracture
+            // P24.4: a `.inf_cloth` / `.inf_hair` is read WHOLE, once, when its
+            // wearer spawns — the fracture argument above, met again. Half a
+            // constraint set is not a cheaper load but a coat that tears, and
+            // half a guide set is a bald patch, so there is nothing to sub-slice
+            // and no streaming latency to buy. They compress.
+            | AssetKind::Cloth
+            | AssetKind::Hair => true,
         }
     }
 

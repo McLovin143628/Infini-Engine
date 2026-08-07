@@ -1873,6 +1873,28 @@ impl EngineHost {
             // Host-local: `translation` (the editor has no fixed-step interpolation
             // to do) and `id`/`mesh` (each host numbers from its own counter over
             // its own iteration order).
+            // ── P24.4 cloth ── the garment the sim folded on this entity this
+            //    step, drawn beside whatever else it draws. NOT inside the
+            //    `MeshRef`-absent branch below: a garment is worn by an entity,
+            //    not instead of its geometry, so a character with a static mesh
+            //    and a cloak draws both. Its own affine, because the branch below
+            //    computes one only when the entity is skeletal. (MIRROR of the
+            //    other host's call.)
+            if visible {
+                let affine = w
+                    .get::<GlobalTransform>(entity)
+                    .map(|g| g.0)
+                    .unwrap_or(glam::DAffine3::IDENTITY);
+                let (cloth_scale, cloth_rot, cloth_t) = affine.to_scale_rotation_translation();
+                project_cloth(
+                    &mut self.scene,
+                    world,
+                    guid,
+                    cloth_t,
+                    cloth_rot.as_quat(),
+                    cloth_scale.as_vec3(),
+                );
+            }
             if w.get::<MeshRef>(entity).is_none() {
                 if let (true, Some(sm)) = (visible, w.get::<SkeletalMesh>(entity).copied()) {
                     let affine = w
@@ -6674,6 +6696,63 @@ impl EngineHost {
         self.gpu.queue.present(frame);
         Ok(true)
     }
+}
+
+/// **A simulated garment, as a skinned draw** (P24.4).
+///
+/// The sim's `inf_ecs::cloth` store already holds this wearer's particle
+/// positions *and* the garment's triangle list, so a projector needs no asset
+/// store and no mesh lookup at all: it reads the sim world, the way it reads an
+/// evaluated pose, and builds the vertex stream through the one Ring-0 function
+/// `inf_render::deformed_skinned_mesh`.
+///
+/// It rides the **skinned** path rather than a pass of its own, because that pass
+/// applies its palette before the model matrix — so a model-space garment with a
+/// one-entry identity palette lands exactly where the sim put it. No new node, no
+/// new shader, no golden re-blessed.
+///
+/// The instance carries `ID_NONE`, so a garment is not separately pickable:
+/// clicking a coat selects nothing and clicking the character selects the
+/// character, which is the v1 answer and is ledgered. Its geometry is a fresh
+/// `Arc` every projection, which is correct for a surface that moves every step
+/// and is the reason a garment costs one vertex-buffer upload per frame.
+///
+/// Emits nothing for a wearer the sim is not simulating, and nothing for a
+/// garment whose triangles all dropped out — an empty draw is a draw call for no
+/// pixels.
+///
+/// **MIRROR** of the other host's `project_cloth` — keep the two byte-identical,
+/// **this doc block included** (the P21.2 lesson: the mirror gate compares the
+/// comment too). Side-neutral wording on purpose.
+fn project_cloth(
+    scene: &mut inf_render::RenderScene,
+    world: &inf_ecs::EcsWorld,
+    guid: uuid::Uuid,
+    translation: glam::DVec3,
+    rotation: glam::Quat,
+    scale: glam::Vec3,
+) {
+    let Some(live) = inf_ecs::cloth::live_cloth(world, guid) else {
+        return;
+    };
+    let mesh = inf_render::deformed_skinned_mesh(&live.state.x, &live.state.indices);
+    if mesh.indices.len() < 3 {
+        return;
+    }
+    scene.skinned_meshes.push(std::sync::Arc::new(mesh));
+    let slot = scene.skinned_meshes.len() - 1;
+    scene.skinned.push(inf_render::SkinnedInstance {
+        translation,
+        rotation,
+        scale,
+        color: inf_render::CLOTH_TINT,
+        metallic: 0.0,
+        roughness: 0.85,
+        emissive: [0.0; 3],
+        id: inf_render::ID_NONE,
+        mesh: slot,
+        palette: vec![glam::Mat4::IDENTITY],
+    });
 }
 
 #[cfg(test)]

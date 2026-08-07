@@ -398,6 +398,96 @@ pub struct SkinnedMeshData {
     pub indices: Vec<u32>,
 }
 
+/// The tint a simulated garment or hair ribbon draws in (linear rgba).
+///
+/// **v1 has no per-garment material.** A `.inf_cloth` / `.inf_hair` carries no
+/// material slot and `SkinnedVertex` has no UV channel, so there is nothing to
+/// sample a texture with; giving the garment the *wearer's* `Material` would draw
+/// a coat in exactly the body's colour, which is worse than useless for telling
+/// them apart. So both draw in one neutral cloth tint, defined once here so the
+/// two projectors cannot disagree about it. Ledgered in ROADMAP §12's P24 block.
+pub const CLOTH_TINT: [f32; 4] = [0.42, 0.46, 0.58, 1.0];
+
+/// **A CPU-deformed mesh, as something the skinned pass can draw** (P24.4).
+///
+/// # Why cloth and hair reuse the skinned path instead of getting a pass
+///
+/// [`SkinnedInstance`]'s palette is applied in the vertex shader **before** the
+/// model matrix, so a skinned vertex stream is exactly "model-space positions,
+/// transformed by the instance". A simulated garment is model-space positions.
+/// So a garment is a skinned mesh with a **one-entry identity palette** and every
+/// vertex pinned to joint 0 at weight 1 — no new render node, no new shader, no
+/// `SHADER_TABLE` entry, and no golden re-blessed. The alternative was a cloth
+/// pass that would have been the skinned pass with the palette deleted.
+///
+/// # Normals are recomputed, and must be
+///
+/// A deforming surface's normals are not a property of its topology. They are
+/// area-weighted face normals accumulated per vertex (the cross product is
+/// area-weighted by construction — no normalization per face, which is both
+/// cheaper and the correct weighting), then normalized once. A degenerate or
+/// unreferenced vertex keeps `+Y` rather than a zero normal, because a zero
+/// normal is a black pixel and a wrong-but-unit one is a shading artefact.
+///
+/// # The `Arc` discipline does NOT apply here, and that is deliberate
+///
+/// The skinned pass caches its GPU upload by the pointer identity of the
+/// `Arc<SkinnedMeshData>` (see [`RenderScene::skinned_meshes`]). A garment's
+/// vertices change **every step**, so a fresh `Arc` per projection is not a bug
+/// to be fixed but the honest statement that this geometry has to be re-uploaded.
+/// Ledgered: a garment costs one vertex-buffer upload per frame, which is what
+/// bounds how many characters can wear one.
+///
+/// `indices` is passed through unchanged. An index out of range is **dropped**
+/// with its whole triangle rather than clamped, so a malformed garment draws less
+/// instead of drawing a spike to the origin.
+pub fn deformed_skinned_mesh(positions: &[[f32; 3]], indices: &[u32]) -> SkinnedMeshData {
+    let n = positions.len();
+    let mut accum = vec![glam::Vec3::ZERO; n];
+    let mut kept: Vec<u32> = Vec::with_capacity(indices.len());
+    for tri in indices.chunks_exact(3) {
+        let (i, j, k) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+        if i >= n || j >= n || k >= n {
+            continue;
+        }
+        let (a, b, c) = (
+            glam::Vec3::from_array(positions[i]),
+            glam::Vec3::from_array(positions[j]),
+            glam::Vec3::from_array(positions[k]),
+        );
+        let face = (b - a).cross(c - a);
+        if !face.is_finite() {
+            continue;
+        }
+        accum[i] += face;
+        accum[j] += face;
+        accum[k] += face;
+        kept.extend_from_slice(&[tri[0], tri[1], tri[2]]);
+    }
+    let vertices = positions
+        .iter()
+        .zip(&accum)
+        .map(|(p, acc)| {
+            let len = acc.length();
+            let normal = if len > 1.0e-12 && acc.is_finite() {
+                *acc / len
+            } else {
+                glam::Vec3::Y
+            };
+            SkinnedVertex {
+                pos: *p,
+                normal: normal.to_array(),
+                joints: [0; 4],
+                weights: [1.0, 0.0, 0.0, 0.0],
+            }
+        })
+        .collect();
+    SkinnedMeshData {
+        vertices,
+        indices: kept,
+    }
+}
+
 /// One skinned draw: a [`SkinnedMeshData`] (by index into
 /// [`RenderScene::skinned_meshes`]) placed by a world transform and deformed by a
 /// per-instance **skinning palette** (`global · inverse_bind` per joint, computed

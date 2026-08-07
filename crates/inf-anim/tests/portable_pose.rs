@@ -30,7 +30,7 @@
 
 /// Files whose **whole item text** must be free of `std` transcendentals, with
 /// the reason each one is on the list.
-const SIM_PATH: [(&str, &str, &str); 5] = [
+const SIM_PATH: [(&str, &str, &str); 6] = [
     (
         "pose.rs",
         include_str!("../src/pose.rs"),
@@ -55,6 +55,11 @@ const SIM_PATH: [(&str, &str, &str); 5] = [
         "state_machine.rs",
         include_str!("../src/state_machine.rs"),
         "eval_pose chooses and cross-fades the poses the two above produce",
+    ),
+    (
+        "cloth.rs",
+        include_str!("../src/cloth.rs"),
+        "the XPBD solver's particle positions are folded into state_bytes beside the pose, and its whole numerical vocabulary was chosen to be sqrt-only for exactly this reason (see its module docs on why bending is a cross spring rather than a dihedral angle)",
     ),
 ];
 

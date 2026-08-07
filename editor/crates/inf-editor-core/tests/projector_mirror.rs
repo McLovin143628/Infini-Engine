@@ -1818,3 +1818,179 @@ fn both_fixed_steps_run_the_fracture_slots() {
         );
     }
 }
+
+// ── cloth (P24.4) ───────────────────────────────────────────────────────────
+
+/// Both fixed steps must run the **cloth slot**, must run it through the ONE
+/// Ring-0 rule, and must run it in the same place relative to the pose and the
+/// attachments.
+///
+/// This is the sim half of the P24.4 mirror and it is the half that decides
+/// whether PIE matches shipping: a preview that folded a coat against last step's
+/// arm would diverge from the shipped build on the first step a character moved.
+///
+/// Scoped to `fn fixed_step(` for the reason the fracture gate below records —
+/// both hosts also mention their registries in setters, and a whole-file search
+/// finds those first.
+#[test]
+fn both_fixed_steps_run_the_cloth_slot() {
+    const RUNTIME_SIM: &str = "runtime/inf-player/src/runtime_sim.rs";
+    const SIMULATE: &str = "editor/crates/inf-editor-core/src/simulate.rs";
+    for (label, path, call) in [
+        ("shipped player", RUNTIME_SIM, "self.step_cloth(dt);"),
+        ("editor Simulate", SIMULATE, "self.step_cloth(doc, dt);"),
+    ] {
+        let whole = read(path).replace("\r\n", "\n");
+        let start = whole
+            .find("fn fixed_step(")
+            .expect("both hosts have a `fixed_step`");
+        let src = whole[start..].to_string();
+        assert!(
+            src.contains(call),
+            "the {label} fixed step does not call the P24.4 cloth slot (`{call}`) \
+             — the two hosts would disagree about how a garment falls"
+        );
+        // ORDER: after the attachments (which are after the pose), so the capsules
+        // are read off the pose THIS step published and the model frame off a
+        // settled `GlobalTransform`.
+        let at = src.find(call).expect("call present");
+        let attach = src[..at]
+            .rfind("update_attachments(")
+            .expect("the attachment pass must precede the cloth slot");
+        let propagate = src[attach..at]
+            .find("propagate();")
+            .map(|i| i + attach)
+            .expect("a propagate must sit between the attachments and the cloth");
+        assert!(
+            attach < propagate && propagate < at,
+            "the {label} folds cloth before the pose/attachment propagate settled \
+             — a coat would collide against last step's body"
+        );
+    }
+
+    // …and the rule itself lives ONCE: neither host may spell the solve inline.
+    for (label, path) in [
+        ("shipped player", RUNTIME_SIM),
+        ("editor Simulate", SIMULATE),
+    ] {
+        let src = read(path).replace("\r\n", "\n");
+        assert!(
+            src.contains("inf_ecs::cloth::step_cloth_simulation("),
+            "the {label} does not reach the Ring-0 cloth rule"
+        );
+        assert!(
+            !src.contains("inf_anim::cloth::step_cloth("),
+            "the {label} calls the XPBD solver DIRECTLY — the binding (capsules, \
+             model-space gravity, seeding) would then exist twice, which is the \
+             shape `inf_ecs::deform` was written to retire"
+        );
+    }
+}
+
+/// The cloth trace is **appended to `state_bytes`, last, in a frozen position**.
+///
+/// Every committed trace hash in the tree was taken over the concatenation
+/// `snapshot ++ deform ++ pose`; P24.4 appends `cloth` after it. Inserting a
+/// section anywhere but the tail would change every one of those hashes silently,
+/// so the order is pinned here rather than trusted to a comment.
+#[test]
+fn the_cloth_trace_is_appended_last_to_the_state_bytes() {
+    let src = read("runtime/inf-player/src/runtime_sim.rs").replace("\r\n", "\n");
+    let start = src
+        .find("pub fn state_bytes(")
+        .expect("the player folds a trace");
+    let body = &src[start..];
+    let end = body.find("\n    }\n").expect("the fn ends");
+    let body = &body[..end];
+    let deform = body
+        .find("deform::deform_state_bytes")
+        .expect("the deform section");
+    let pose = body
+        .find("pose::pose_state_bytes")
+        .expect("the pose section");
+    let cloth = body
+        .find("cloth::cloth_state_bytes")
+        .expect("the cloth section is not appended at all");
+    assert!(
+        deform < pose && pose < cloth,
+        "the trace sections moved: every committed hash was folded over \
+         snapshot ++ deform ++ pose ++ cloth, in that order"
+    );
+}
+
+/// The two `project_cloth` projectors must be **byte-identical, doc block
+/// included**.
+///
+/// The rule they share is small — read the sim's cloth store, build one deformed
+/// skinned mesh through the Ring-0 builder, push one instance — and that is
+/// exactly the kind of rule that drifts: a tint changed on one side, a roughness
+/// on the other, and PIE stops matching shipping in a way no scene-level
+/// comparison can see.
+#[test]
+fn project_cloth_is_identical_in_both_projectors() {
+    let mine = extract_fn(&read(VIEWPORT), "project_cloth");
+    let theirs = extract_fn(&read(PLAYER), "project_cloth");
+    assert_eq!(
+        mine, theirs,
+        "the two `project_cloth` projectors have drifted — a garment would be \
+         drawn differently in the editor viewport than in the shipped player"
+    );
+}
+
+/// …and it is **not a stub**: the shared body really does everything the doc
+/// claims, through the doors it claims.
+#[test]
+fn the_shared_cloth_projector_is_not_a_stub() {
+    let src = extract_item(&read(PLAYER), "project_cloth");
+    for fragment in [
+        // It reads the SIM, not an asset store.
+        "inf_ecs::cloth::live_cloth(world, guid)",
+        // …through the ONE Ring-0 vertex builder.
+        "inf_render::deformed_skinned_mesh(&live.state.x, &live.state.indices)",
+        // …onto the skinned path, with the identity palette that makes a
+        // model-space garment land where the sim put it.
+        "scene.skinned_meshes.push(std::sync::Arc::new(mesh))",
+        "palette: vec![glam::Mat4::IDENTITY]",
+        "color: inf_render::CLOTH_TINT",
+        "id: inf_render::ID_NONE",
+        // …and it refuses an empty garment rather than emitting a draw for no
+        // pixels.
+        "if mesh.indices.len() < 3 {",
+    ] {
+        assert!(
+            src.contains(fragment),
+            "`project_cloth` no longer contains `{fragment}` — {src}"
+        );
+    }
+    // A garment's geometry MOVES, so it may never be memoized behind the
+    // `Arc`-pointer cache the static skinned path uses: a store lookup here would
+    // hand out last step's fold for ever.
+    assert!(
+        !src.contains("skinned_slots"),
+        "`project_cloth` deduplicates through `skinned_slots` — a garment's \
+         vertices change every step, so a shared slot would freeze it"
+    );
+}
+
+/// Both projectors must call it, **outside** the `MeshRef`-absent branch, so a
+/// garment is drawn beside its wearer's geometry rather than instead of it.
+#[test]
+fn both_projectors_draw_cloth_beside_the_wearer() {
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let src = read(path);
+        let call = src
+            .find("project_cloth(")
+            .expect("both projectors must call the cloth projector");
+        // The call comes BEFORE the skeletal branch's `MeshRef` probe, which is
+        // what puts it outside that branch.
+        let probe = src
+            .find("w.get::<MeshRef>(entity).is_none()")
+            .expect("both projectors probe MeshRef");
+        assert!(
+            call < probe,
+            "the {label} calls `project_cloth` inside (or after) the \
+             `MeshRef`-absent branch — a character with a static mesh and a cloak \
+             would draw the mesh and lose the cloak"
+        );
+    }
+}

@@ -38,6 +38,8 @@
 pub mod asset;
 pub mod blend_space;
 pub mod clip;
+// P24.4 secondary animation: XPBD cloth over the posed skeleton.
+pub mod cloth;
 // P24.2 inverse kinematics: the post-pass over an evaluated pose.
 pub mod ik;
 // P24.3 modular rigging: assembling one skeleton out of parts.
@@ -59,6 +61,10 @@ pub use blend_space::{
     BlendEntry2D, BlendSpace1D, BlendSpace2D, ClipRef,
 };
 pub use clip::{AnimClip, Interpolation, JointTrack, QuatTrack, Vec3Track};
+pub use cloth::{
+    capsules_for, step_cloth, Capsule, ClothAsset, ClothCapsule, ClothEdge, ClothError,
+    ClothMaterial, ClothState, GRAVITY_M_S2,
+};
 pub use ik::{
     fabrik, rotation_between, solve_chain, two_bone_positions, IkError, IkReport,
     FABRIK_ITERATIONS, MIN_BONE_LENGTH_M, REACH_TOLERANCE_M,

@@ -191,12 +191,14 @@ fn build_world(args: &Args) -> Result<(BuiltWorld, TerrainContent), String> {
             let biome_sets = level::load_biome_sets_by_guid_from_dir(&content_dir);
             let (skeletons, clips, machines) = level::load_anim_assets_from_dir(&content_dir);
             let audio = level::load_audio_assets_from_dir(&content_dir);
+            let cloths = level::load_cloth_assets_from_dir(&content_dir);
             let terrains = level::terrain_paths_by_guid_from_dir(&content_dir);
             let builder = InfSceneWorldBuilder::with_defaults(actors)
                 .with_bindings(by_guid)
                 .with_pcgs(pcgs)
                 .with_biome_sets(biome_sets)
                 .with_anim_assets(skeletons, clips, machines)
+                .with_cloth_assets(cloths)
                 .with_audio(audio);
             Ok((
                 level::load(&source, &builder)?,
@@ -262,11 +264,13 @@ pub fn build_world_from_pack(source: &PackLevelSource) -> Result<BuiltWorld, Str
     let biome_sets = source.biome_sets_by_guid()?;
     let (skeletons, clips, machines) = source.anim_assets()?;
     let audio = source.audio_assets()?;
+    let cloths = source.cloth_assets()?;
     let builder = InfSceneWorldBuilder::with_defaults(actors)
         .with_bindings(by_guid)
         .with_pcgs(pcgs)
         .with_biome_sets(biome_sets)
         .with_anim_assets(skeletons, clips, machines)
+        .with_cloth_assets(cloths)
         .with_audio(audio)
         // P16.5: a partitioned cooked level resolves its derived `.inf_part` out
         // of this same (already-open) pack mapping.
@@ -563,6 +567,7 @@ pub fn sim_from_built(built: BuiltWorld) -> RuntimeSim {
         skeletons,
         pose_clips,
         audio_clips,
+        cloths,
         ..
     } = built;
     let mut sim = RuntimeSim::new(world, actors, gravity, hz);
@@ -579,6 +584,11 @@ pub fn sim_from_built(built: BuiltWorld) -> RuntimeSim {
     sim.set_skeletons(skeletons);
     sim.set_pose_clips(pose_clips);
     sim.set_audio_clips(audio_clips);
+    // P24.4: the garments a `ClothSim` wearer simulates. Seeded HERE for the same
+    // reason as the two lines above — this is the one function every sim call site
+    // goes through, and a boot path that forgets an attachment does not crash, it
+    // agrees with itself (the P21.4 law).
+    sim.set_cloths(cloths);
     sim
 }
 

@@ -184,6 +184,11 @@ pub struct RuntimeSim {
     /// Distinct from [`clips`](Self::clips), which keys a clip *with the skeleton
     /// it animates* because `root_delta` needs both.
     pose_clips: BTreeMap<Uuid, AnimClip>,
+    /// Resolvable `.inf_cloth` garments keyed by asset GUID (P24.4) — the runtime
+    /// mirror of `SimSession::cloths`. An entity whose `ClothSim.asset` resolves
+    /// here simulates; one whose does not keeps its component and simulates
+    /// nothing (`inf_ecs::cloth`'s rule 2).
+    cloths: BTreeMap<Uuid, inf_anim::ClothAsset>,
     stepper: FixedStep,
     /// Actors keyed by `Guid` (deterministic iteration).
     actors: BTreeMap<Uuid, ActorState>,
@@ -336,6 +341,7 @@ impl RuntimeSim {
             state_machines: BTreeMap::new(),
             skeletons: BTreeMap::new(),
             pose_clips: BTreeMap::new(),
+            cloths: BTreeMap::new(),
             stepper: FixedStep::from_hz(hz),
             actors: states,
             entities,
@@ -418,6 +424,17 @@ impl RuntimeSim {
     /// (P24.1) — the runtime mirror of `SimSession::set_pose_clips`.
     pub fn set_pose_clips(&mut self, clips: BTreeMap<Uuid, AnimClip>) {
         self.pose_clips = clips;
+    }
+
+    /// Seed the resolvable `.inf_cloth` garments (P24.4) — the runtime mirror of
+    /// `SimSession::set_cloths`.
+    pub fn set_cloths(&mut self, cloths: BTreeMap<Uuid, inf_anim::ClothAsset>) {
+        self.cloths = cloths;
+    }
+
+    /// The garments this sim can resolve (a read for tests and gates).
+    pub fn cloths(&self) -> &BTreeMap<Uuid, inf_anim::ClothAsset> {
+        &self.cloths
     }
 
     /// Register a resolvable `.inf_audio` clip payload by asset GUID (P12.3) — the
@@ -725,6 +742,15 @@ impl RuntimeSim {
     /// [`inf_ecs::deform::deform_state_bytes`] returns an empty vec and every
     /// pre-P22.1 trace is byte-identical.
     ///
+    /// P24.4 appends the **simulated garments** last, on the same argument again:
+    /// a settled coat is a pure function of the step history, so folding it here
+    /// makes the replay fold, `step_state_hash` and the PIE `Frame::state_hash`
+    /// cover cloth at once. The **position is frozen**: cloth bytes come after
+    /// the pose bytes and nothing may be inserted before them, because every
+    /// committed trace hash in the tree was taken over this concatenation in this
+    /// order. A level with no `ClothSim` produces an empty vec, so every
+    /// pre-P24.4 trace is byte-identical.
+    ///
     /// This buffer is **hashed, never decoded**, which is why appending a second
     /// section needs no version and no reader change.
     pub fn state_bytes(&mut self) -> Vec<u8> {
@@ -733,6 +759,7 @@ impl RuntimeSim {
             .expect("sim snapshot is always encodable");
         out.extend_from_slice(&inf_ecs::deform::deform_state_bytes(&self.world));
         out.extend_from_slice(&inf_ecs::pose::pose_state_bytes(&self.world));
+        out.extend_from_slice(&inf_ecs::cloth::cloth_state_bytes(&self.world));
         out
     }
 
@@ -843,6 +870,16 @@ impl RuntimeSim {
         // ── P11.3 attachments ── entities ride their target's socket, post-anim.
         update_attachments(&mut self.world);
         self.world.propagate();
+        // ── P24.4 cloth ── garments fall on the body the pose just put them on.
+        //    HERE, and not earlier: the capsules are read off the pose this step
+        //    published and the model frame off a `GlobalTransform` the propagate
+        //    above has settled, so a coat collides against THIS step's arm rather
+        //    than the last one's. ONE Ring-0 call (`inf_ecs::cloth`) rather than a
+        //    loop spelled twice — the deform doctrine's shape — so the editor
+        //    preview and the shipped player cannot disagree about how a garment
+        //    falls. Inert (one empty query, no allocation) on every level with no
+        //    `ClothSim`. (MIRROR of `SimSession::fixed_step`.)
+        self.step_cloth(dt);
         // ── P14.5 WASM mods ── tick sandboxed mods against the world (after
         //    gameplay/physics/anim), then propagate their transform edits.
         self.tick_mods(dt);
@@ -1037,6 +1074,32 @@ impl RuntimeSim {
                 .unwrap_or_default()
         };
         inf_ecs::pose::step_pose_evaluation(world, dt, &machines, &skels, &clips, &vars);
+    }
+
+    /// Advance every worn garment (P24.4) through the ONE Ring-0 rule both hosts
+    /// call ([`inf_ecs::cloth::step_cloth_simulation`]) — the runtime mirror of
+    /// `SimSession::step_cloth`.
+    ///
+    /// Only *which registries answer* is host-local: the player resolves them out
+    /// of a cooked pack (or a `--level` dev dir), the editor out of the project's
+    /// asset DB. The rule itself lives once.
+    ///
+    /// Returns immediately on a level with no resolvable garment, so a world that
+    /// wears nothing pays one `is_empty` branch per step.
+    fn step_cloth(&mut self, dt: f64) {
+        if self.cloths.is_empty() {
+            return;
+        }
+        let Self {
+            world,
+            cloths,
+            skeletons,
+            ..
+        } = self;
+        let (cloths, skeletons) = (&*cloths, &*skeletons);
+        let garments = |g: Uuid| cloths.get(&g);
+        let skels = |g: Uuid| skeletons.get(&g);
+        inf_ecs::cloth::step_cloth_simulation(world, dt, &garments, &skels);
     }
 
     /// Snapshot the play-head `t` of every root-motion-driven playing entity

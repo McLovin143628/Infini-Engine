@@ -13,6 +13,8 @@
 
 pub mod anim;
 pub mod attach;
+// P24.4: the fixed-step slot that turns a `ClothSim` into moving cloth.
+pub mod cloth;
 pub mod components;
 pub mod deform;
 pub mod hierarchy;

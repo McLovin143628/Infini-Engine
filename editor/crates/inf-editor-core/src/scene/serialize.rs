@@ -340,11 +340,14 @@ use crate::scene::SceneDoc;
 ///   both follow the [`VoxelVolume`] law — *a reference plus its authored knobs,
 ///   so the component can never be the reason a future schema has to move* — with
 ///   every XPBD / strand parameter living in the `.inf_cloth` / `.inf_hair` those
-///   references name. Those asset kinds are P24.4's to define, which is an
-///   `AssetKind` addition and touches no scene wire. **Stated plainly because a
-///   reserved slot is exactly the kind of thing that rots: as of P24.3 nothing
-///   simulates cloth or hair.** Both are authored, reflected, persisted and
-///   spawned onto the entity; P24.4 is what gives them a reader.
+///   references name. Those asset kinds are P24.4's, which was an append-only
+///   `AssetKind` addition and touched no scene wire. **Stated plainly because a
+///   reserved slot is exactly the kind of thing that rots** — and this is the
+///   update that keeps it from rotting: P24.4 gave `cloth_sim` its reader
+///   (`inf_ecs::cloth::step_cloth_simulation`, called from both fixed steps, its
+///   result folded into the compared trace). `hair_guides` is still authored,
+///   reflected, persisted and spawned with no reader; the same batch gives it
+///   one.
 ///
 ///   The wire price to a level with no rigged character is **three discriminant
 ///   bytes per entity** — one per slot, the same price every additive slot since

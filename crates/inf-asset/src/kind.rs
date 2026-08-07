@@ -96,6 +96,31 @@ pub enum AssetKind {
     /// [`inf_mesh::fracture::FractureAsset`]: the mesh crate's `.inf_fracture`
     /// payload.
     Fracture,
+    /// A **simulated garment** (`.inf_cloth`) — the XPBD particle set, constraint
+    /// lists, material and collision capsules a [`ClothSim`] component wears
+    /// (P24.4, [`inf_anim::cloth::ClothAsset`]).
+    ///
+    /// Authored (derived from a garment `.inf_mesh` by the Model Editor's cloth
+    /// door, then saved), not cook-derived: an author tunes stiffness and pins
+    /// hems, and re-deriving those at cook would throw the tuning away.
+    ///
+    /// **Not** a streaming-class kind: a garment is loaded whole, at the instant
+    /// its wearer spawns, and half a constraint set is not a cheaper load but a
+    /// coat that tears. So it compresses like every other bincode payload — see
+    /// `PackWriter::compresses_kind`.
+    ///
+    /// [`ClothSim`]: the ECS component (scene v21).
+    /// [`inf_anim::cloth::ClothAsset`]: the animation crate's `.inf_cloth` payload.
+    Cloth,
+    /// **Strand hair** (`.inf_hair`) — guide strands rooted on a scalp mesh, their
+    /// segment lists, ribbon parameters and collision capsules (P24.4,
+    /// [`inf_anim::hair::HairAsset`]).
+    ///
+    /// The [`Cloth`](AssetKind::Cloth) shape for the [`Cloth`](AssetKind::Cloth)
+    /// reasons: authored, loaded whole, compressed.
+    ///
+    /// [`inf_anim::hair::HairAsset`]: the animation crate's `.inf_hair` payload.
+    Hair,
     /// Anything else living under the content root.
     Unknown,
 }
@@ -125,6 +150,8 @@ impl AssetKind {
             AssetKind::BiomeSet => "inf_biomes",
             AssetKind::VoxelVolume => "inf_voxel",
             AssetKind::Fracture => "inf_fracture",
+            AssetKind::Cloth => "inf_cloth",
+            AssetKind::Hair => "inf_hair",
             AssetKind::Unknown => return None,
         })
     }
@@ -153,6 +180,8 @@ impl AssetKind {
             "inf_biomes" => AssetKind::BiomeSet,
             "inf_voxel" => AssetKind::VoxelVolume,
             "inf_fracture" => AssetKind::Fracture,
+            "inf_cloth" => AssetKind::Cloth,
+            "inf_hair" => AssetKind::Hair,
             _ => AssetKind::Unknown,
         }
     }
@@ -189,6 +218,8 @@ impl AssetKind {
             AssetKind::BiomeSet => "biome_set",
             AssetKind::VoxelVolume => "voxel_volume",
             AssetKind::Fracture => "fracture",
+            AssetKind::Cloth => "cloth",
+            AssetKind::Hair => "hair",
             AssetKind::Unknown => "unknown",
         }
     }
@@ -217,6 +248,8 @@ impl AssetKind {
             AssetKind::BiomeSet => "Biome Set",
             AssetKind::VoxelVolume => "Voxel Volume",
             AssetKind::Fracture => "Fracture",
+            AssetKind::Cloth => "Cloth",
+            AssetKind::Hair => "Hair",
             AssetKind::Unknown => "File",
         }
     }
@@ -246,6 +279,8 @@ impl AssetKind {
             AssetKind::BiomeSet,
             AssetKind::VoxelVolume,
             AssetKind::Fracture,
+            AssetKind::Cloth,
+            AssetKind::Hair,
         ]
     }
 }
@@ -266,6 +301,107 @@ pub fn importable_source_kind(ext: &str) -> Option<AssetKind> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// **THE WIRE FREEZE** (P24.4): every kind's serde token, extension and slug,
+    /// written down once.
+    ///
+    /// [`AssetKind`] is `Serialize`/`Deserialize` and rides **two** persisted
+    /// surfaces: the TOML sidecar every asset carries next to it
+    /// ([`crate::AssetSidecar`]) and the `.inf_pack` index a shipped build reads
+    /// ([`crate::PackReader`]). So a variant renamed — or reordered under a codec
+    /// that is positional — is a content-compatibility break in files that are
+    /// already on users' disks, and nothing else in the tree would notice.
+    ///
+    /// The rule this pins is therefore **append-only**: a new kind goes at the
+    /// tail of the enum and gets a new row here; an existing row never moves and
+    /// never changes. P24.4 appended `Cloth` and `Hair` under exactly that rule.
+    ///
+    /// It is a table of *literals* on purpose. Deriving the expected token from
+    /// the variant (`format!("{k:?}").to_snake_case()`) would agree with any
+    /// rename by construction, which is the shape of gate this repository keeps
+    /// having to repair.
+    const FROZEN_WIRE: [(AssetKind, &str, &str, &str); 23] = [
+        (AssetKind::Level, "level", "inf_lvl", "level"),
+        (AssetKind::Mesh, "mesh", "inf_mesh", "mesh"),
+        (
+            AssetKind::MeshletMesh,
+            "meshlet_mesh",
+            "inf_vmesh",
+            "meshlet_mesh",
+        ),
+        (AssetKind::Texture, "texture", "inf_tex", "texture"),
+        (AssetKind::Material, "material", "inf_mat", "material"),
+        (
+            AssetKind::MaterialInstance,
+            "material_instance",
+            "inf_mati",
+            "material_instance",
+        ),
+        (AssetKind::Blueprint, "blueprint", "inf_act", "blueprint"),
+        (AssetKind::FunctionLib, "function_lib", "inf_fn", "function"),
+        (AssetKind::Struct, "struct", "inf_struct", "struct"),
+        (AssetKind::Enum, "enum", "inf_enum", "enum"),
+        (AssetKind::Table, "table", "inf_table", "table"),
+        (AssetKind::Audio, "audio", "inf_audio", "audio"),
+        (AssetKind::Pcg, "pcg", "inf_pcg", "pcg"),
+        (AssetKind::Skeleton, "skeleton", "inf_skel", "skeleton"),
+        (AssetKind::AnimClip, "anim_clip", "inf_anim", "anim_clip"),
+        (
+            AssetKind::StateMachine,
+            "state_machine",
+            "inf_sm",
+            "state_machine",
+        ),
+        (AssetKind::Terrain, "terrain", "inf_terrain", "terrain"),
+        (AssetKind::Partition, "partition", "inf_part", "partition"),
+        (AssetKind::BiomeSet, "biome_set", "inf_biomes", "biome_set"),
+        (
+            AssetKind::VoxelVolume,
+            "voxel_volume",
+            "inf_voxel",
+            "voxel_volume",
+        ),
+        (AssetKind::Fracture, "fracture", "inf_fracture", "fracture"),
+        // ── P24.4 append ────────────────────────────────────────────────────
+        (AssetKind::Cloth, "cloth", "inf_cloth", "cloth"),
+        (AssetKind::Hair, "hair", "inf_hair", "hair"),
+    ];
+
+    #[test]
+    fn the_wire_tokens_are_frozen_and_append_only() {
+        // `all()` is what the Content Drawer enumerates, so the table and the
+        // list must be the same set in the same order — otherwise a kind could be
+        // appended to one and not the other and this test would still pass.
+        assert_eq!(
+            AssetKind::all().len(),
+            FROZEN_WIRE.len(),
+            "a kind was added to `all()` without a frozen wire row (or the other \
+             way round)"
+        );
+        for (i, (kind, token, ext, slug)) in FROZEN_WIRE.into_iter().enumerate() {
+            assert_eq!(AssetKind::all()[i], kind, "row {i} moved");
+            assert_eq!(kind.extension(), Some(ext), "{kind:?}");
+            assert_eq!(AssetKind::from_extension(ext), kind, "{kind:?}");
+            assert_eq!(kind.slug(), slug, "{kind:?}");
+            // The serde token is what a sidecar on a user's disk actually holds.
+            let json = serde_json::to_string(&kind).expect("kinds serialize");
+            assert_eq!(json, format!("\"{token}\""), "{kind:?} serde token moved");
+            let back: AssetKind = serde_json::from_str(&json).expect("and decode");
+            assert_eq!(back, kind);
+        }
+        // ANTI-VACUITY: the table would notice a rename. `Unknown` is deliberately
+        // absent above (it has no extension), so it is checked separately here
+        // rather than being the one variant nothing looks at.
+        assert_eq!(AssetKind::Unknown.extension(), None);
+        assert_eq!(
+            serde_json::to_string(&AssetKind::Unknown).unwrap(),
+            "\"unknown\""
+        );
+        assert!(
+            FROZEN_WIRE.iter().all(|(_, t, _, _)| *t != "unknown"),
+            "`Unknown` must not be in the editable-kind table"
+        );
+    }
 
     #[test]
     fn extension_round_trips_for_all_known_kinds() {

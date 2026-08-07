@@ -206,6 +206,11 @@ pub struct SimSession {
     /// two overlap only when one clip is both an `AnimPlayer` clip on a
     /// root-motion entity and a machine state's motion.
     pose_clips: BTreeMap<Uuid, AnimClip>,
+    /// Resolvable `.inf_cloth` garments keyed by asset GUID (P24.4) — the editor
+    /// mirror of `RuntimeSim::cloths`. An entity whose `ClothSim.asset` resolves
+    /// here simulates; one whose does not keeps its component and simulates
+    /// nothing (`inf_ecs::cloth`'s rule 2).
+    cloths: BTreeMap<Uuid, inf_anim::ClothAsset>,
     /// Currently-held keys/actions.
     input: SimInput,
     /// Keys/actions held the previous tick (for rising-edge detection).
@@ -354,6 +359,10 @@ impl SimSession {
         //    the evaluated-pose store is a resource too, so nothing above
         //    captures it and nothing below would clear it.
         inf_ecs::pose::clear_poses(doc.world_mut());
+        // ── P24.4 ── …and on an UNFOLDED garment, third time the same reason.
+        //    Without it run 2 would start from run 1's settled coat and its trace
+        //    would not match the shipped player's, which seeds from rest.
+        inf_ecs::cloth::clear_cloth(doc.world_mut());
         let bridge = PhysicsBridge2D::new(gravity);
         // P11.3: a 3D bridge alongside the 2D one. The 2D vertical gravity maps to
         // world −Y; a character applies its own gravity through move_and_slide.
@@ -383,6 +392,7 @@ impl SimSession {
             state_machines: BTreeMap::new(),
             skeletons: BTreeMap::new(),
             pose_clips: BTreeMap::new(),
+            cloths: BTreeMap::new(),
             input: SimInput::default(),
             prev_down: BTreeSet::new(),
             just_pressed: BTreeSet::new(),
@@ -491,6 +501,9 @@ impl SimSession {
         //    leave the author's viewport drawing the last frame of a run's
         //    animation over the document's own rest pose.
         inf_ecs::pose::clear_poses(doc.world_mut());
+        // ── P24.4 ── and the settled garment with it, for the same reason: a
+        //    coat draped by a run is a Simulate artefact, not authored content.
+        inf_ecs::cloth::clear_cloth(doc.world_mut());
     }
 
     /// Seed the resolvable `.inf_sm` state machines (P11.2). An entity carrying an
@@ -519,6 +532,17 @@ impl SimSession {
     /// root-motion registry.
     pub fn set_pose_clips(&mut self, clips: BTreeMap<Uuid, AnimClip>) {
         self.pose_clips = clips;
+    }
+
+    /// Seed the resolvable `.inf_cloth` garments (P24.4) — the editor mirror of
+    /// `RuntimeSim::set_cloths`.
+    pub fn set_cloths(&mut self, cloths: BTreeMap<Uuid, inf_anim::ClothAsset>) {
+        self.cloths = cloths;
+    }
+
+    /// The garments this session can resolve (a read for tests and gates).
+    pub fn cloths(&self) -> &BTreeMap<Uuid, inf_anim::ClothAsset> {
+        &self.cloths
     }
 
     /// Seed the simulation's fracture states (P22.3), keyed by entity `Guid`.
@@ -741,6 +765,16 @@ impl SimSession {
         //    post-anim-tick; propagate again so followers' own globals settle.
         update_attachments(doc.world_mut());
         doc.world_mut().propagate();
+        // ── P24.4 cloth ── garments fall on the body the pose just put them on.
+        //    HERE, and not earlier: the capsules are read off the pose this step
+        //    published and the model frame off a `GlobalTransform` the propagate
+        //    above has settled, so a coat collides against THIS step's arm rather
+        //    than the last one's. ONE Ring-0 call (`inf_ecs::cloth`) rather than a
+        //    loop spelled twice — the deform doctrine's shape — so the editor
+        //    preview and the shipped player cannot disagree about how a garment
+        //    falls. Inert (one empty query, no allocation) on every level with no
+        //    `ClothSim`. (MIRROR of `RuntimeSim::fixed_step`.)
+        self.step_cloth(doc, dt);
         // ── P22.3 runtime destruction ── advance the fracture states: age the
         //    debris, run the structural solve, apply the level's budget, latch
         //    `Destroyed`. HERE, and not earlier: the support probes read where
@@ -895,6 +929,27 @@ impl SimSession {
                 .unwrap_or_default()
         };
         inf_ecs::pose::step_pose_evaluation(doc.world_mut(), dt, &machines, &skels, &clips, &vars);
+    }
+
+    /// Advance every worn garment (P24.4) through the ONE Ring-0 rule both hosts
+    /// call ([`inf_ecs::cloth::step_cloth_simulation`]) — the editor mirror of
+    /// `RuntimeSim::step_cloth`.
+    ///
+    /// Only *which registries answer* is host-local: the editor resolves them out
+    /// of the project's asset DB, the player out of a cooked pack (or a `--level`
+    /// dev dir). The rule itself lives once.
+    ///
+    /// Returns immediately on a level with no resolvable garment, so a world that
+    /// wears nothing pays one `is_empty` branch per step.
+    fn step_cloth(&mut self, doc: &mut SceneDoc, dt: f64) {
+        if self.cloths.is_empty() {
+            return;
+        }
+        let cloths = &self.cloths;
+        let skeletons = &self.skeletons;
+        let garments = |g: Uuid| cloths.get(&g);
+        let skels = |g: Uuid| skeletons.get(&g);
+        inf_ecs::cloth::step_cloth_simulation(doc.world_mut(), dt, &garments, &skels);
     }
 
     /// Fire `event` (no args) on every actor.
@@ -2796,6 +2851,55 @@ where
         }
     }
     clips
+}
+
+/// Resolve every `.inf_cloth` garment a [`ClothSim`] entity in `doc` references,
+/// keyed by **asset** GUID (P24.4) — the editor Simulate twin of the player's
+/// `InfSceneWorldBuilder::with_cloth_assets`, so preview == shipped.
+///
+/// `resolve_cloth` yields the asset's raw payload bytes by GUID (backed by the
+/// project DB / the pack). A garment whose bytes do not decode is skipped with a
+/// warning and its wearer simulates nothing, which is `inf_ecs::cloth`'s rule 2.
+/// Deterministic (`BTreeMap` / document order).
+///
+/// **Keyed by asset, not by entity**, unlike [`resolve_voxel_volumes`]: two
+/// characters can wear the same garment and each gets its own *state* while
+/// sharing one *description*, so the description is resolved once. The per-entity
+/// half is `ClothStateRes`, which lives in the sim world.
+///
+/// A `ClothSim` with `enabled == false` is still resolved. Disabling a garment is
+/// a per-frame gameplay decision the fixed step makes, and re-loading an asset the
+/// moment it is re-enabled would put a file read inside a fixed step.
+pub fn resolve_cloth_assets<H>(
+    doc: &SceneDoc,
+    mut resolve_cloth: H,
+) -> BTreeMap<Uuid, inf_anim::ClothAsset>
+where
+    H: FnMut(Uuid) -> Option<Vec<u8>>,
+{
+    use std::collections::btree_map::Entry;
+    let mut out: BTreeMap<Uuid, inf_anim::ClothAsset> = BTreeMap::new();
+    let world = doc.world();
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let Some(asset_guid) = world
+            .world()
+            .get::<inf_ecs::components::ClothSim>(e)
+            .and_then(|c| c.asset)
+        else {
+            continue;
+        };
+        if let Entry::Vacant(v) = out.entry(asset_guid) {
+            if let Some(asset) = resolve_cloth(asset_guid)
+                .and_then(|b| decode_anim::<inf_anim::ClothAsset>(asset_guid, &b))
+            {
+                v.insert(asset);
+            }
+        }
+    }
+    out
 }
 
 /// Resolve every `.inf_voxel` volume a [`VoxelVolume`] entity in `doc` references,

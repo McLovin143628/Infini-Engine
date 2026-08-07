@@ -111,6 +111,12 @@ pub struct BuiltWorld {
     /// GUID (P24.1) — the caller seeds
     /// [`RuntimeSim::set_pose_clips`](crate::runtime_sim::RuntimeSim::set_pose_clips).
     pub pose_clips: BTreeMap<Uuid, AnimClip>,
+    /// Resolved `.inf_cloth` garments keyed by asset GUID (P24.4) — the caller
+    /// seeds
+    /// [`RuntimeSim::set_cloths`](crate::runtime_sim::RuntimeSim::set_cloths) so a
+    /// `ClothSim` wearer simulates in the shipped build exactly as it does in the
+    /// editor's Simulate.
+    pub cloths: BTreeMap<Uuid, inf_anim::ClothAsset>,
     /// Resolved `.inf_audio` clips keyed by asset GUID (P12.3) — the caller seeds
     /// [`RuntimeSim::set_audio_clips`](crate::runtime_sim::RuntimeSim::set_audio_clips)
     /// so a scene `AudioSource` plays the same clip as in the editor Simulate.
@@ -309,6 +315,8 @@ pub struct InfSceneWorldBuilder {
     machines: HashMap<Uuid, StateMachineAsset>,
     /// `.inf_audio` clip payloads keyed by asset GUID (P12.3).
     audio: HashMap<Uuid, inf_audio::AudioAsset>,
+    /// `.inf_cloth` garment payloads keyed by asset GUID (P24.4).
+    cloths: HashMap<Uuid, inf_anim::ClothAsset>,
     /// Gravity/rate used only when the level predates settings (v1/v2) — a v3
     /// level's own [`LevelSettings`](inf_scene::RuntimeSettings) always wins.
     gravity: DVec2,
@@ -331,6 +339,7 @@ impl InfSceneWorldBuilder {
             clips: HashMap::new(),
             machines: HashMap::new(),
             audio: HashMap::new(),
+            cloths: HashMap::new(),
             gravity,
             hz,
             partition_pack: None,
@@ -379,6 +388,14 @@ impl InfSceneWorldBuilder {
         self.skeletons = skeletons;
         self.clips = clips;
         self.machines = machines;
+        self
+    }
+
+    /// Attach the `.inf_cloth` garments (asset GUID → payload) used to seed the
+    /// [`RuntimeSim`](crate::runtime_sim::RuntimeSim)'s cloth registry (P24.4).
+    /// Builder style, wired by `build_world` from the source's cloth index.
+    pub fn with_cloth_assets(mut self, cloths: HashMap<Uuid, inf_anim::ClothAsset>) -> Self {
+        self.cloths = cloths;
         self
     }
 
@@ -554,6 +571,7 @@ impl WorldBuilder for InfSceneWorldBuilder {
             skeletons: self.resolve_skeletons(),
             pose_clips: self.resolve_pose_clips(),
             audio_clips: self.resolve_audio_clips(),
+            cloths: self.cloths.iter().map(|(g, c)| (*g, c.clone())).collect(),
             partition,
         })
     }
@@ -800,9 +818,12 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
             // `IkTarget` is the one with a reader today: `step_pose_evaluation`
             // walks it every fixed step, which is what makes a real `--pie`
             // subprocess engage IK through the door it always used rather than
-            // through a test-only injection hook. `ClothSim` and `HairGuides` are
-            // authored in v21 and read by P24.4; spawning them here costs nothing
-            // and means the components are on the entity before anything can ask.
+            // through a test-only injection hook. `ClothSim` joined it at P24.4
+            // (`inf_ecs::cloth::step_cloth_simulation` folds the garment named by
+            // its `asset`, resolved out of this level's `.inf_cloth` entries);
+            // `HairGuides` gets its reader in the same batch. Spawning them here
+            // costs nothing and means the components are on the entity before
+            // anything can ask.
             if let Some(c) = ik_target {
                 em.insert(c);
             }
@@ -1285,6 +1306,13 @@ pub fn load_audio_assets_from_dir(dir: &Path) -> HashMap<Uuid, inf_audio::AudioA
     load_anim_assets_by_guid_from_dir(dir, "inf_audio")
 }
 
+/// The dev-dir `.inf_cloth` payload map keyed by asset GUID (P24.4) — the cloth
+/// mirror of [`load_anim_assets_from_dir`], seeded into the runtime sim so a
+/// `ClothSim` wearer simulates the same garment it does in the editor Simulate.
+pub fn load_cloth_assets_from_dir(dir: &Path) -> HashMap<Uuid, inf_anim::ClothAsset> {
+    load_anim_assets_by_guid_from_dir(dir, "inf_cloth")
+}
+
 /// Bind actor classes to controllable entities (the P8/P9 heuristic mirrored from
 /// the editor's `samples::character_actors`): every entity carrying a
 /// `CharacterController2D` — in `Guid` order — is ticked with the first discovered
@@ -1586,6 +1614,13 @@ impl PackLevelSource {
     /// ships every clip a scene `AudioSource` references.
     pub fn audio_assets(&self) -> Result<HashMap<Uuid, inf_audio::AudioAsset>, String> {
         self.anim_assets_by_guid(AssetKind::Audio)
+    }
+
+    /// Every `.inf_cloth` payload in the pack keyed by asset GUID (P24.4) — the
+    /// cloth mirror of [`anim_assets`](Self::anim_assets). The cook's dep closure
+    /// ships every garment a scene `ClothSim` references.
+    pub fn cloth_assets(&self) -> Result<HashMap<Uuid, inf_anim::ClothAsset>, String> {
+        self.anim_assets_by_guid(AssetKind::Cloth)
     }
 
     /// Every `.inf_biomes` payload in the pack keyed by asset GUID (P19.3) — what

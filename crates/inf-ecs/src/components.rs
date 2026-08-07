@@ -4343,7 +4343,8 @@ pub struct IkTarget {
     pub goals: Vec<IkGoalRecord>,
 }
 
-/// **A simulated garment on this character** (scene v21, P24.3 — read by P24.4).
+/// **A simulated garment on this character** (scene v21, P24.3 — **read since
+/// P24.4**).
 ///
 /// # The reference-plus-knobs shape, and why the parameters are NOT here
 ///
@@ -4364,10 +4365,17 @@ pub struct IkTarget {
 /// `None` discriminant byte per entity, the price every additive slot since v8
 /// has paid, and the alternative is a forbidden second bump inside one phase.
 ///
-/// **Stated plainly, because a reserved slot is exactly the kind of thing that
-/// rots**: as of P24.3 nothing simulates cloth. The component is authored,
-/// reflected, persisted, round-tripped and spawned onto the entity; no system
-/// reads it. P24.4 is what gives it a reader.
+/// # Its reader (P24.4)
+///
+/// [`crate::cloth::step_cloth_simulation`], the ONE Ring-0 rule both hosts' fixed
+/// steps call. It seeds a particle set from the `.inf_cloth` this names, places
+/// that garment's collision capsules on the pose the sim evaluated this step, and
+/// advances an XPBD solve whose result is folded into
+/// [`crate::cloth::cloth_state_bytes`] — so a coat is sim state, compared between
+/// the editor's Simulate and the shipped player like everything else.
+///
+/// P24.3 recorded here, plainly, that *"as of P24.3 nothing simulates cloth"*.
+/// That sentence is retired: the component is read.
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[reflect(Component, Default)]
 pub struct ClothSim {
@@ -4391,13 +4399,25 @@ pub struct ClothSim {
     /// deleting the authoring.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Per-wearer quality lever. `0` follows the machine's capability tier (the
-    /// P13 doctrine, and the only correct default); `1..=255` pins a substep
-    /// budget so a hero's coat can out-simulate a crowd's.
+    /// Per-wearer quality lever: `0` takes the **garment's own** authored substep
+    /// budget ([`inf_anim::ClothMaterial::substeps`]); `1..=255` pins one, so a
+    /// hero's coat can out-simulate a crowd's.
     ///
     /// Per-**entity** and not in the asset precisely because two characters
     /// wearing the same garment can afford different budgets, which is the test
     /// for whether something belongs on the component at all.
+    ///
+    /// # `0` is NOT "follow the machine's capability tier" — a P24.4 correction
+    ///
+    /// This field was written at P24.3 saying it was. Reading it that way would
+    /// put the *machine's* tier into the substep count, into the particle
+    /// positions, into `cloth_state_bytes` and therefore into the trace two hosts
+    /// are compared on — which is precisely the P22.4 finding (*a preview must
+    /// run what it previews*: the debris budget was tier-clamped in embedded PIE
+    /// and not in Simulate, and the two ran different simulations on any Medium
+    /// machine). A **render** budget may follow the tier; a **sim** budget may
+    /// not. Both readings of `0` are now properties of the content, so two
+    /// machines fold the same coat.
     #[serde(default)]
     pub quality: u8,
 }

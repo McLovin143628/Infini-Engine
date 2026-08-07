@@ -175,6 +175,22 @@ impl AssetState {
         std::fs::read(&entry.path).ok()
     }
 
+    /// Raw payload bytes of a `.inf_cloth` asset (P24.4), for seeding a Simulate
+    /// session's garments. Kind-checked exactly like
+    /// [`load_audio_bytes`](Self::load_audio_bytes), for the same reason: a
+    /// mistyped reference must miss rather than feed arbitrary bytes to the cloth
+    /// decoder.
+    pub fn load_cloth_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        let entry = proj.db().get(id)?;
+        if entry.kind() != inf_asset::AssetKind::Cloth {
+            return None;
+        }
+        std::fs::read(&entry.path).ok()
+    }
+
     /// Raw payload bytes of a `.inf_voxel` asset (P21.2), for seeding a Simulate
     /// session's voxel volumes. `None` when the id is unknown or names another
     /// kind — the kind check is what stops a mistyped reference feeding arbitrary
