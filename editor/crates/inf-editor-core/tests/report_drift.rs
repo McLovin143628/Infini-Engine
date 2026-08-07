@@ -318,22 +318,12 @@ fn every_report_field_reaches_the_panel() {
             if NOT_SHOWN.contains(&js.as_str()) {
                 continue;
             }
-            // **The PROPERTY-ACCESS form** (G3), not a bare substring. Two
-            // fields were nominally enforced and actually not: `id` stayed green
-            // after its only reader was deleted, because "id" occurs inside
-            // ordinary code — measured, 39 bare hits against 3 real readers
-            // (`strokeWidth`, `void`, `unmatchedSided` all contain "id"); and
-            // `name` was masked by `renameJoint`. `.id` matches none of those and
-            // `.name` matches no `renameJoint`,
-            // so both are genuinely enforced now — measured: all nineteen fields
-            // are readable in this form, so tightening cost no exemptions.
-            //
-            // The bound, stated: this is a NAME search, so three different DTOs'
-            // `name` fields are one needle. It cannot tell which was deleted,
-            // only that none of them is read any more.
             assert!(
-                panel.contains(&format!(".{js}")),
-                "`{f}` (`.{js}`) reaches the DTO and the TS binding but is never                  READ by the Skeleton Editor's code — by this gate's own law it is                  a field that does not exist. Give it a row, or add it to                  `SKEL_NOT_SHOWN` with a reason. (A comment naming it does not                  count, and neither does a bare mention: the search is for the                  property access `.{js}`.)"
+                panel.contains(&js),
+                "{what}: `{f}` (`{js}`) reaches the DTO and the TS binding but is \
+                 never referenced by the Model Editor's CODE — by this gate's own \
+                 law it is a field that does not exist. Add a row for it. (A \
+                 comment naming it does not count, and used to.)"
             );
         }
     }
@@ -472,10 +462,26 @@ fn every_skeleton_dto_field_reaches_the_panel() {
     // reader "present". Measured when this landed — zero of the nineteen names
     // are masked, so the list below stays empty and this only guards the future.
     let panel = code_and_no_strings(SKEL_PANEL);
-    for decl in [
-        "pub struct SkelJointDto {",
-        "pub struct SkelSocketDto {",
-        "pub struct SkelDocDto {",
+    // **The needle carries its RECEIVER** (G3), because a bare substring was
+    // enforcing two of these in name only. Measured on this panel: a bare `id`
+    // search is satisfied 39 times against 3 real readers (`strokeWidth`, `void`
+    // and `unmatchedSided` all contain "id"), and a bare `name` search by
+    // `renameJoint`. (The audit named `className` as `name`'s masker; it is not
+    // one — `className` carries a capital N and the search is case-sensitive. The
+    // finding was right, the mechanism was `renameJoint`.)
+    //
+    // `.field` fixes `name` outright. It does NOT fix `id`: the mesh picker
+    // renders `<option value={a.id}>` where `a` is an `AssetDto`, so a
+    // *type-blind* `.id` is satisfied by a different type's field — measured by
+    // deleting `doc.id` and watching the gate stay green. The document binds to
+    // exactly one name in this panel, so requiring `doc.` makes the search
+    // type-aware where it can be. Joint and socket rows bind to several receivers
+    // (`j`, `sel`, `p.joint`, `s`), so they keep the plain property-access form;
+    // every one of their fields falsifies under it.
+    for (decl, receivers) in [
+        ("pub struct SkelJointDto {", &[".", "?."][..]),
+        ("pub struct SkelSocketDto {", &[".", "?."][..]),
+        ("pub struct SkelDocDto {", &["doc.", "doc?."][..]),
     ] {
         let fields = fields_of(DTOS, decl);
         assert!(
@@ -490,12 +496,16 @@ fn every_skeleton_dto_field_reaches_the_panel() {
                 continue;
             }
             assert!(
-                panel.contains(&js),
-                "`{f}` (`{js}`) reaches the DTO and the TS binding but is never \
-                 referenced by the Skeleton Editor's CODE — by this gate's own law \
+                receivers
+                    .iter()
+                    .any(|r| panel.contains(&format!("{r}{js}"))),
+                "`{f}` reaches the DTO and the TS binding but the Skeleton \
+                 Editor's code never READS it as `{}{js}` — by this gate's own law \
                  it is a field that does not exist. Give it a row, or add it to \
-                 `SKEL_NOT_SHOWN` with a reason. (A comment naming it does not \
-                 count.)"
+                 `SKEL_NOT_SHOWN` with a reason. (A comment or a string naming it \
+                 does not count, and neither does a bare mention: the search is \
+                 for the property access on the right receiver.)",
+                receivers[0]
             );
         }
     }
