@@ -9694,104 +9694,176 @@ mod tests {
         assert!(!t.goals[1].enabled);
     }
 
-    /// **A v21 payload decodes consuming EVERY byte** — the shape pin.
+    /// **The v21 wire shape, pinned against an INDEPENDENT declaration.**
     ///
-    /// `decode_from_slice` ignores trailing bytes by contract, so a field
-    /// *removed* from the live record silently leaves a tail. Checked here on the
-    /// current schema, and paired with the asymmetric arm below, which is the
-    /// half that catches the opposite mistake.
+    /// The `SkeletonAssetV2Wire` idiom (`inf-anim`), applied to the scene. The
+    /// pair this replaces proved nothing: one encoded *and* decoded with
+    /// `SceneFileV21`, which is true of any struct whatsoever, and the other
+    /// appended a `None` byte to a **live** encoding and asserted the **live**
+    /// decoder ignored it — true of every bincode struct at every version. Both
+    /// were tautologies wearing the vocabulary of a wire pin.
+    ///
+    /// This shape is independent where it matters. `EntityRecordV20` is a FROZEN
+    /// declaration whose whole purpose is not to drift with the live record, and
+    /// bincode encodes a tuple as its elements concatenated with no framing — so
+    /// the tuple below is byte-for-byte the live record's layout, assembled from
+    /// 44 frozen fields plus the three tails **named here by type**. A 48th slot
+    /// appended to the live record leaves bytes this shape cannot account for; a
+    /// tail whose type changes fails to decode.
+    #[derive(serde::Deserialize)]
+    struct SceneFileV21Wire {
+        schema_version: u32,
+        title: String,
+        entities: Vec<(
+            EntityRecordV20,
+            Option<IkTarget>,
+            Option<ClothSim>,
+            Option<HairGuides>,
+        )>,
+        settings: RuntimeSettings,
+    }
+
+    /// A **shadow v22** — the wire shape above plus one appended tail slot,
+    /// exactly what an author adding a component would write.
+    #[derive(serde::Serialize)]
+    struct SceneFileV22Shadow<'a> {
+        schema_version: u32,
+        title: &'a str,
+        entities: Vec<(
+            &'a EntityRecordV20,
+            &'a Option<IkTarget>,
+            &'a Option<ClothSim>,
+            &'a Option<HairGuides>,
+            Option<u8>,
+        )>,
+        settings: RuntimeSettings,
+    }
+
     #[test]
-    fn a_v21_payload_decodes_consuming_every_byte() {
+    fn the_v21_wire_shape_is_pinned_against_an_independent_declaration() {
         let level = RuntimeLevel {
-            title: "Shape".into(),
+            title: "Pinned".into(),
             entities: vec![
                 RuntimeEntity {
                     ik_target: Some(v21_fixture_ik_target()),
-                    ..v9_rec(Uuid::from_u128(0xFD01), "A", None).into_runtime()
+                    cloth_sim: Some(v21_fixture_cloth()),
+                    hair_guides: Some(v21_fixture_hair()),
+                    ..v9_rec(Uuid::from_u128(0xFD10), "Hero", None).into_runtime()
                 },
-                v9_rec(Uuid::from_u128(0xFD02), "B", None).into_runtime(),
+                v9_rec(Uuid::from_u128(0xFD11), "Prop", None).into_runtime(),
             ],
             settings: RuntimeSettings::default(),
         };
         let bytes = encode(&level).unwrap();
-        let (_, consumed): (SceneFileV21, usize) =
-            bincode::serde::decode_from_slice(&bytes, bincode_config()).unwrap();
+
+        let (wire, consumed): (SceneFileV21Wire, usize) =
+            bincode::serde::decode_from_slice(&bytes, bincode_config())
+                .expect("the pinned v21 shape decodes the v21 wire");
         assert_eq!(
             consumed,
             bytes.len(),
-            "the v21 decoder left {} bytes on the floor",
+            "the encoding carries {} bytes the pinned shape does not account for \
+             — a slot was appended to the entity record without bumping \
+             SCHEMA_VERSION",
             bytes.len() - consumed
         );
+        assert_eq!(wire.schema_version, SCHEMA_VERSION);
+        assert_eq!(wire.entities.len(), 2);
+        // The three tails really landed in the three tail positions — a shape
+        // that decoded but mis-assigned them would still consume every byte.
+        assert!(
+            wire.entities[0].1.is_some(),
+            "the IkTarget is not in slot 45"
+        );
+        assert!(
+            wire.entities[0].2.is_some(),
+            "the ClothSim is not in slot 46"
+        );
+        assert!(
+            wire.entities[0].3.is_some(),
+            "the HairGuides is not in slot 47"
+        );
+        assert!(wire.entities[1].1.is_none() && wire.entities[1].3.is_none());
+        let _ = &wire.title;
+        let _ = &wire.settings;
     }
 
-    /// **Appending a tail slot without bumping must be CATCHABLE** — the
-    /// asymmetric half (the P24.2 audit's M-BUMP lesson, applied to the scene
-    /// wire the batch after it was learned).
+    /// **An appended tail slot without a bump is CAUGHT** — measured against the
+    /// SHADOW, which is what the previous arm got wrong.
     ///
-    /// The shape pin next door is *symmetric*: it decodes today's payload and
-    /// checks every byte is consumed. That catches a slot REMOVED and it does not
-    /// catch one ADDED — the added bytes are simply trailing, and
-    /// `decode_from_slice` ignores trailing bytes by contract. So nothing in
-    /// either codec forced the NEXT bump, on the very format this batch just
-    /// bumped, and every scene bump from v8 to v21 has relied on an author
-    /// remembering.
-    ///
-    /// A **shadow v22** — today's record plus one tail slot, exactly what an
-    /// author appending a component would write — must not be readable as a v21.
-    /// Two claims, and the second is the one with teeth:
-    ///
-    ///  1. the v22 bytes are LONGER, so a slot really was added;
-    ///  2. decoding them as a `SceneFileV21` leaves bytes on the floor, which is
-    ///     the signature the shape pin refuses. If a future append ever came out
-    ///     byte-compatible, this says so before the ladder is quietly wrong.
+    /// The old version appended a byte to a live encoding and asked the live
+    /// decoder about it; `decode_from_slice` ignores trailing bytes by contract,
+    /// so it asserted a property of bincode rather than of this ladder. Here the
+    /// v22 bytes come from an independently declared struct that really has a
+    /// fifth tail, and the claim is that the **pinned v21 shape** cannot account
+    /// for them — which is the signal the arm above refuses.
     #[test]
-    fn a_tail_slot_appended_without_a_bump_is_caught_by_the_shape_pin() {
-        // Bytes rather than a shadow RECORD: the record's 47 fields would have
-        // to be re-declared to append one, and a re-declaration that drifted from
-        // the live shape is exactly what this test exists to catch. Appending the
-        // encoded `None` discriminant produces the same byte sequence a new
-        // `Option<T>` slot on the last entity would — which is the whole content
-        // of "an appended slot".
+    fn a_tail_slot_appended_without_a_bump_leaves_bytes_the_pin_refuses() {
         let level = RuntimeLevel {
-            title: "Shadow".into(),
-            entities: vec![v9_rec(Uuid::from_u128(0xFE01), "A", None).into_runtime()],
+            title: "Pinned".into(),
+            entities: vec![
+                RuntimeEntity {
+                    ik_target: Some(v21_fixture_ik_target()),
+                    cloth_sim: Some(v21_fixture_cloth()),
+                    hair_guides: Some(v21_fixture_hair()),
+                    ..v9_rec(Uuid::from_u128(0xFD10), "Hero", None).into_runtime()
+                },
+                v9_rec(Uuid::from_u128(0xFD11), "Prop", None).into_runtime(),
+            ],
             settings: RuntimeSettings::default(),
         };
         let v21 = encode(&level).unwrap();
-        let mut v22 = v21.clone();
-        // One `None` discriminant — the cheapest possible appended slot, and
-        // therefore the hardest case for a pin to notice.
-        v22.extend_from_slice(
-            &bincode::serde::encode_to_vec(Option::<u8>::None, bincode_config()).unwrap(),
+        let rec = EntityRecordV20::from_current(level.entities[0].clone());
+        let (ik, cloth, hair) = (
+            level.entities[0].ik_target.clone(),
+            level.entities[0].cloth_sim,
+            level.entities[0].hair_guides,
         );
+        let v22 = bincode::serde::encode_to_vec(
+            &SceneFileV22Shadow {
+                schema_version: SCHEMA_VERSION,
+                title: &level.title,
+                entities: vec![(&rec, &ik, &cloth, &hair, Some(7u8))],
+                settings: RuntimeSettings::default(),
+            },
+            bincode_config(),
+        )
+        .unwrap();
 
+        // 1. A slot really was added.
+        let one_entity = encode(&RuntimeLevel {
+            entities: vec![level.entities[0].clone()],
+            ..level.clone()
+        })
+        .unwrap();
         assert!(
-            v22.len() > v21.len(),
+            v22.len() > one_entity.len(),
             "the shadow v22 is not longer than v21, so nothing was appended and \
              this test is measuring nothing"
         );
-        // The asymmetric claim: v22 bytes decode as a v21 file — that is what
-        // makes an un-bumped append silent — and the decoder does NOT consume
-        // them all, which is what the shape pin refuses.
-        let (back, consumed): (SceneFileV21, usize) =
-            bincode::serde::decode_from_slice(&v22, bincode_config())
-                .expect("a longer payload still decodes");
-        assert_eq!(
-            back.entities.len(),
-            1,
-            "the appended bytes changed the prefix; then it was not an append"
-        );
+        // 2. …and the pinned v21 shape CANNOT READ THEM AT ALL.
+        //
+        // Stronger than the trailing-byte signal the first draft looked for, and
+        // the difference is instructive: an entity slot is appended in the
+        // MIDDLE of the file (the entity vector precedes `settings`), so it does
+        // not leave a tail — it shifts every byte after it and the decoder walks
+        // off into the settings block. That is exactly why a positional format
+        // needs a version bump rather than a `#[serde(default)]`, and it is the
+        // failure this pin exists to produce.
+        let err =
+            bincode::serde::decode_from_slice::<SceneFileV21Wire, _>(&v22, bincode_config()).err();
         assert!(
-            consumed < v22.len(),
-            "an appended tail slot left NO trailing bytes, so \
-             `a_v21_payload_decodes_consuming_every_byte` could not see it either — \
-             the ladder has no forcing function at all"
+            err.is_some(),
+            "the pinned v21 shape read a payload with an extra entity slot as if              nothing had changed — the shape pin has no forcing function at all"
         );
-        assert_eq!(
-            v22.len() - consumed,
-            v22.len() - v21.len(),
-            "the unconsumed tail is not exactly the appended slot"
+        // …and the SAME bytes minus the appended slot decode cleanly, so the
+        // refusal above is the slot's doing and not a broken fixture.
+        assert!(
+            bincode::serde::decode_from_slice::<SceneFileV21Wire, _>(&one_entity, bincode_config())
+                .is_ok(),
+            "the control payload does not decode either — the fixture is wrong,              not the pin"
         );
+        let _ = v21;
     }
 
     /// A payload from a **newer** build is refused by name, with both versions in
