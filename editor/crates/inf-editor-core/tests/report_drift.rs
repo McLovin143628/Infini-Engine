@@ -132,7 +132,67 @@ fn the_drift_pin_would_notice_a_missing_field() {
 /// is laid out correctly, only that the field is referenced at all. That bound is
 /// the honest one, and it is exactly the bound that would have caught all three
 /// of this batch's misses.
+///
+/// # The search reads code, never comments
+///
+/// The first cut searched the panel's raw text, and the panel — like every file
+/// in this repository — explains itself in comments *directly above the row it is
+/// about*. The comment above the `meshopt` row contains the word `optimized`
+/// three times, so **deleting that row entirely left this gate green**: measured,
+/// not reasoned about. A grep across a language boundary that reads comments is
+/// the P24.1 F1 finding once more — a check satisfied by the sentence explaining
+/// why the check exists.
+///
+/// **A correction to the round that landed this arm.** Its mutation matrix listed
+/// seven severings and reported all seven firing, and each row is true as written
+/// — but the severing that matters most to *this* arm was not among them. The one
+/// tested was "a **new** DTO field with no panel row", which fires because a new
+/// name appears nowhere in the file. Deleting an **existing** row is the severing
+/// an author will actually commit, and pre-fix it did not fire: the comment above
+/// it kept the name alive. Seven of seven fired; the eighth was not run. That is
+/// the difference between a matrix that covers a gate and one that samples it.
 const PANEL: &str = include_str!("../../../studio/src/panels/model/ModelEditor.tsx");
+
+/// The panel's **code**, with every comment blanked out.
+///
+/// One stripper, used by every read of the panel in this file, because a second
+/// reader that skipped it would be exactly the hole described above with a
+/// different line number.
+///
+/// * **Block comments** — JSX's `{/* … */}` and TypeScript's `/** … */` are the
+///   same lexical form, so a single pass removes both. Newlines inside a comment
+///   are kept so the stripped text still has the shape of the original.
+/// * **Line comments** — blanked only when the comment is the *whole* line, which
+///   is the conservative reading: `//` also occurs mid-line inside string literals
+///   (a URL), and blanking from there would delete real code. Measured on this
+///   panel: it has no mid-line `//` at all, and every whole-line one is a comment.
+///
+/// Line endings are normalized first — the P22 CRLF law, met on every gate here
+/// that reads a file. Carriage returns are *filtered out* rather than rewritten as
+/// a pair: a char filter carries no escape sequence for a scripted edit to mangle.
+fn code_only(src: &str) -> String {
+    let src: String = src.chars().filter(|c| *c != '\r').collect();
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src.as_str();
+    while let Some(at) = rest.find("/*") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 2..];
+        let end = after.find("*/").map_or(after.len(), |e| e + 2);
+        out.extend(after[..end].chars().filter(|c| *c == '\n'));
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out.lines()
+        .map(|l| {
+            if l.trim_start().starts_with("//") {
+                ""
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 fn camel(snake: &str) -> String {
     let mut out = String::new();
@@ -180,7 +240,7 @@ const NOT_SHOWN: [&str; 10] = [
 
 #[test]
 fn every_report_field_reaches_the_panel() {
-    let panel = PANEL.replace("\r\n", "\n");
+    let panel = code_only(PANEL);
     for (what, decl) in [
         ("import", "pub struct DccImportDto {"),
         ("export", "pub struct DccExportDto {"),
@@ -195,16 +255,27 @@ fn every_report_field_reaches_the_panel() {
             assert!(
                 panel.contains(&js),
                 "{what}: `{f}` (`{js}`) reaches the DTO and the TS binding but is \
-                 never referenced by the Model Editor — by this gate's own law it \
-                 is a field that does not exist. Add a row for it."
+                 never referenced by the Model Editor's CODE — by this gate's own \
+                 law it is a field that does not exist. Add a row for it. (A \
+                 comment naming it does not count, and used to.)"
             );
         }
     }
     // NOT VACUOUS: the panel really is the file this thinks it is, and the
-    // camelCase conversion really converts.
+    // camelCase conversion really converts. Read through the same stripper as
+    // everything above — a vacuity arm satisfied by a comment certifies nothing.
     assert!(
         panel.contains("Verdict"),
         "the panel has no readout rows at all"
+    );
+    // …and the stripper is not idle on this file: the panel really does explain
+    // itself in comments, which is the whole reason the searches above go through
+    // `code_only`.
+    let raw: String = PANEL.chars().filter(|c| *c != '\r').collect();
+    assert!(
+        panel.len() < raw.len(),
+        "nothing was stripped from the panel — either it has no comments any more \
+         or `code_only` has stopped working; the arm below says which"
     );
     // Every frozen exemption must name a field that still EXISTS — an entry for
     // a field somebody deleted is a hole the next field can fall through.
@@ -222,4 +293,43 @@ fn every_report_field_reaches_the_panel() {
     assert_eq!(camel("skin_conflicts"), "skinConflicts");
     assert_eq!(camel("optimize_skipped_skinned"), "optimizeSkippedSkinned");
     assert_eq!(camel("optimized"), "optimized");
+}
+
+/// **The stripper removes what the search must not read, and nothing else.**
+///
+/// The shape under test is the one that was actually measured in the panel: a JSX
+/// comment naming a field, sitting directly above the row that renders it. Before
+/// `code_only`, deleting the row left the field's name behind in the comment and
+/// the gate stayed green; the count below is the difference.
+#[test]
+fn the_panel_search_cannot_be_satisfied_by_a_comment() {
+    let sample = "\
+{/* `optimized` reached the DTO and the
+    binding and stopped there. */}
+// optimized
+<Verdict label=\"meshopt\" value={save.export.optimized ? \"ran\" : \"off\"} />
+";
+    let stripped = code_only(sample);
+    assert_eq!(
+        sample.matches("optimized").count(),
+        3,
+        "the fixture no longer poses the problem it was written for"
+    );
+    assert_eq!(
+        stripped.matches("optimized").count(),
+        1,
+        "a comment naming a field still satisfies the panel search: {stripped:?}"
+    );
+    // The row is what survives, unmangled.
+    assert!(stripped.contains("<Verdict label=\"meshopt\""));
+    // …and with the row deleted, the comment alone does NOT satisfy it. This is
+    // the exact severing the P24.2 mutation matrix did not perform.
+    let row_deleted =
+        code_only("{/* `optimized` reached the DTO and the binding and stopped there. */}\n");
+    assert!(
+        !row_deleted.contains("optimized"),
+        "deleting the row while keeping its comment leaves the field 'present'"
+    );
+    // Line structure survives, so a stripped panel is still readable in a failure.
+    assert_eq!(stripped.lines().count(), sample.lines().count());
 }

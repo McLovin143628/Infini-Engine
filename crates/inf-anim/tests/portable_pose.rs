@@ -64,7 +64,7 @@ const SIM_PATH: [(&str, &str, &str); 5] = [
 /// is `.abs()`, `.floor()` or `.clamp()`, for the same reason. `.cbrt()` IS here
 /// — the P22.4 widening: on `wasm32` the standard library routes it through the
 /// `libm` crate, so a browser client and a native one differ by an ulp.
-const BANNED_CALLS: [&str; 24] = [
+const BANNED_CALLS: [&str; 36] = [
     ".sin()",
     ".cos()",
     ".tan()",
@@ -81,6 +81,14 @@ const BANNED_CALLS: [&str; 24] = [
     // ban, so `f64::sin(x)` -- the same call, written the other way -- walked
     // straight past it. A ban that enumerates one spelling is the P24.1 F1
     // finding in miniature.
+    //
+    // The first cut of this half enumerated twelve entries against twelve method
+    // forms and covered only SIX of the functions -- `atan`, `sin_cos`, `cbrt`,
+    // `powf`, `exp` and `ln` had a method ban and no UFCS twin, so `f64::cbrt(x)`
+    // on the rubble path (the P22.4 widening, met again) walked past exactly as
+    // `f64::sin` had. Every method form above now has BOTH width spellings below,
+    // which is the only version of this list that is a rule rather than a sample:
+    // twelve functions x two widths, checked by a test.
     "f32::sin(",
     "f64::sin(",
     "f32::cos(",
@@ -91,8 +99,20 @@ const BANNED_CALLS: [&str; 24] = [
     "f64::acos(",
     "f32::asin(",
     "f64::asin(",
+    "f32::atan(",
+    "f64::atan(",
     "f32::atan2(",
     "f64::atan2(",
+    "f32::sin_cos(",
+    "f64::sin_cos(",
+    "f32::cbrt(",
+    "f64::cbrt(",
+    "f32::powf(",
+    "f64::powf(",
+    "f32::exp(",
+    "f64::exp(",
+    "f32::ln(",
+    "f64::ln(",
 ];
 
 /// glam constructors that reach `sin_cos` **inside another crate**, where no grep
@@ -141,6 +161,17 @@ fn production_code(src: &str) -> String {
     //
     // A module is skipped from its attribute to the closing brace at ITS OWN
     // indentation, so a nested one inside an `impl` is handled too.
+    //
+    // **A brace-block item and a one-line item are told apart first** (P24.2
+    // micro-round). `#[cfg(test)]` also decorates `use super::*;`, a `const`
+    // fixture or a `mod tests;` declaration -- items with no block at all. Hunting
+    // a closing brace from one of those runs on until it finds the NEXT item's
+    // closing brace and discards every production line in between, which is a
+    // silent shrink of what the ban scans: the gate would still pass, on less. So
+    // the item's first line decides. A line ending in `{` opens a block and the
+    // brace hunt runs; a line ending in `;` is the whole item and only it is cut.
+    // Trailing `//` comments are cut off before that reading, since `mod tests {
+    // // why` is otherwise classified as neither.
     let lines: Vec<&str> = src.lines().collect();
     let mut keep = vec![true; lines.len()];
     let mut i = 0;
@@ -150,12 +181,27 @@ fn production_code(src: &str) -> String {
             let close = format!("{}}}", " ".repeat(indent));
             keep[i] = false;
             let mut j = i + 1;
+            let mut opens_a_block = false;
             while j < lines.len() {
                 keep[j] = false;
-                if lines[j] == close {
+                let head = lines[j].split("//").next().unwrap_or("").trim_end();
+                if head.ends_with('{') {
+                    opens_a_block = true;
+                    break;
+                }
+                if head.ends_with(';') {
                     break;
                 }
                 j += 1;
+            }
+            if opens_a_block {
+                while j < lines.len() {
+                    keep[j] = false;
+                    if lines[j] == close {
+                        break;
+                    }
+                    j += 1;
+                }
             }
             i = j + 1;
             continue;
@@ -266,5 +312,86 @@ fn the_trig_ban_is_looking_at_real_code() {
     assert!(
         BANNED_GLAM.iter().any(|b| decoy.contains(b)),
         "the ban list would not catch a literal `slerp` call"
+    );
+}
+
+/// **Both spellings of every banned function, at both widths** — the structural
+/// property the list claims, rather than a count somebody kept in their head.
+///
+/// Six functions had a method ban and no UFCS twin until this test was written,
+/// which is how the list was *sampled* rather than ruled. Adding a method form
+/// without its twins now fails here instead of failing silently in five years.
+#[test]
+fn the_ban_covers_both_spellings_of_every_function() {
+    let methods: Vec<&str> = BANNED_CALLS
+        .iter()
+        .copied()
+        .filter(|b| b.starts_with('.'))
+        .collect();
+    assert_eq!(
+        methods.len(),
+        12,
+        "the method half of the ban changed size: {methods:?}"
+    );
+    for m in &methods {
+        let name = m.trim_start_matches('.').trim_end_matches(['(', ')']);
+        for width in ["f32", "f64"] {
+            let ufcs = format!("{width}::{name}(");
+            assert!(
+                BANNED_CALLS.contains(&ufcs.as_str()),
+                "`{m}` is banned as a method and `{ufcs}` is not banned at all — \
+                 the same call written the other way walks straight past this \
+                 gate, which is exactly the P24.2 minor-3 finding"
+            );
+        }
+    }
+    // …and there is nothing else in the list: 12 methods x (1 method + 2 UFCS).
+    assert_eq!(BANNED_CALLS.len(), methods.len() * 3);
+}
+
+/// **`#[cfg(test)]` on a one-line item cuts that item, not the rest of the file.**
+///
+/// The stripper hunts a closing brace at the attribute's own indentation. Applied
+/// to `#[cfg(test)] use super::*;` — an item with no block — that hunt used to run
+/// on to the next item's brace and discard every production line in between. The
+/// gate would have stayed green while scanning less, which is the failure mode
+/// this whole file exists to prevent.
+#[test]
+fn a_test_gated_one_line_item_does_not_swallow_the_code_after_it() {
+    let src = "\
+#[cfg(test)]
+use super::*;
+
+pub fn on_the_sim_path(q: DQuat) -> f64 {
+    q.to_euler(EulerRot::YXZ).0
+}
+
+#[cfg(test)]
+mod tests {
+    fn fixture() -> f64 {
+        (1.0f64).sin()
+    }
+}
+
+pub fn also_on_it(x: f64) -> f64 {
+    x.sqrt()
+}
+";
+    let code = production_code(src);
+    assert!(
+        code.contains("q.to_euler(EulerRot::YXZ)"),
+        "the production violation between the two test regions was stripped away \
+         with them — the ban is scanning less than the file: {code:?}"
+    );
+    assert!(code.contains("pub fn also_on_it"), "{code:?}");
+    // The block-form region is still removed in full, fixture and all.
+    assert!(!code.contains("mod tests"), "{code:?}");
+    assert!(!code.contains("(1.0f64).sin()"), "{code:?}");
+    // …and the `use` line itself really did go.
+    assert!(!code.contains("use super::*;"), "{code:?}");
+    // The ban therefore fires on the violation, which is the point of all of it.
+    assert!(
+        BANNED_GLAM.iter().any(|b| code.contains(b)),
+        "the surviving violation is invisible to the ban: {code:?}"
     );
 }
