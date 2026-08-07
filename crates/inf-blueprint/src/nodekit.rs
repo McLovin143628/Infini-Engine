@@ -1538,6 +1538,67 @@ mod tests {
     /// output the lowerer can bind to a `Stmt::Let` — the `voxel.carve_*` shape,
     /// for the reason that kit's test records (a second output fans into
     /// `ik::<op>::<field>`, which the hosts' two-segment match cannot see).
+    /// **Both hosts dispatch exactly the `ik.*` ids the registry declares**
+    /// (P24.3 audit F6).
+    ///
+    /// The two Blueprint dispatches are a hand-maintained MIRROR pair and their
+    /// `ik.*` blocks are character-identical, so a *text* mirror gate cannot see
+    /// the failure that matters: a node id spelled wrong in BOTH — a registration
+    /// the registry has and neither host matches, or an arm neither the registry
+    /// nor any author knows about. That falls through to the "unknown engine
+    /// call" logger and the node silently does nothing.
+    ///
+    /// So the comparison is registry-versus-hosts, not host-versus-host: the set
+    /// of `(Some("ik"), Some(x))` arms in each host must EQUAL the set of `ik.*`
+    /// ids `blueprint_registry` declares.
+    ///
+    /// **The bound, stated.** This is a source check, so it proves the arms are
+    /// written and named correctly, not that dispatching one has the effect it
+    /// should. The effects are covered where they are implemented — the five
+    /// Ring-0 doors in `inf_ecs::pose` have execution tests, and
+    /// `pie_skinned.rs`'s `the_ik_kits_doors_edit_the_authored_goal_and_refuse_by_value`
+    /// exercises them against a real world. Driving a `#[tauri::command]`-adjacent
+    /// host `call` would need its whole context struct built in a test; that gap
+    /// is ledgered in ROADMAP §12 rather than papered over.
+    #[test]
+    fn both_hosts_dispatch_exactly_the_registered_ik_nodes() {
+        let reg = blueprint_registry();
+        let declared: std::collections::BTreeSet<String> = reg
+            .ordered()
+            .map(|d| d.type_id.clone())
+            .filter(|id| id.starts_with("ik."))
+            .map(|id| id["ik.".len()..].to_string())
+            .collect();
+        assert_eq!(declared.len(), 5, "the ik kit changed size: {declared:?}");
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        for host in [
+            "editor/crates/inf-editor-core/src/simulate.rs",
+            "runtime/inf-player/src/runtime_sim.rs",
+        ] {
+            let src = std::fs::read_to_string(root.join(host))
+                .unwrap_or_else(|e| panic!("read {host}: {e}"))
+                .replace(
+                    "
+", "
+",
+                );
+            let mut arms: std::collections::BTreeSet<String> = Default::default();
+            for (i, _) in src.match_indices("(Some(\"ik\"), Some(\"") {
+                let rest = &src[i + "(Some(\"ik\"), Some(\"".len()..];
+                if let Some(end) = rest.find('"') {
+                    arms.insert(rest[..end].to_string());
+                }
+            }
+            assert_eq!(
+                arms, declared,
+                "{host} dispatches a different set of `ik.*` nodes than the                  registry declares. An id in the registry and in neither host                  falls through to the unknown-call logger and the node silently                  does nothing; an id in a host and not the registry is an arm no                  author can reach."
+            );
+        }
+    }
+
     #[test]
     fn ik_kit_is_registered() {
         let reg = blueprint_registry();
