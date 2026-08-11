@@ -77,9 +77,10 @@
 //! * The bundle adjuster's rotation retraction is the **normalized-quaternion**
 //!   one, `q <- normalize((1, w/2)) * q`, not the exponential map, so it calls no
 //!   trig either.
-//! * The only transcendental in the crate is [`inf_math::patan2_64`] in
-//!   [`align::rotation_angle_deg`] — the *portable* one — and that is a
-//!   reporting metric.
+//! * The only transcendental on any path a reconstruction takes is
+//!   [`inf_math::patan2_64`] in [`align::rotation_angle_deg`] — the *portable*
+//!   one — and that is a reporting metric. (One `hypot` lives in a `#[cfg(test)]`
+//!   error metric in [`features`]; it is not code a caller can reach.)
 //!
 //! **The day a reconstruction is serialized into an asset** (P25.3 bakes, P25.4
 //! imports) the portable family applies to everything that touches those bytes,

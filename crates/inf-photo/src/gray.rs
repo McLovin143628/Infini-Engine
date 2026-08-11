@@ -11,8 +11,10 @@
 //! * **Luma conversion** is the `image` crate's `to_luma8`, which is an integer
 //!   Rec.601 weighting — the same bytes on every platform.
 //! * **The blur is integer**: a separable `[1, 4, 6, 4, 1] / 16` kernel with
-//!   clamp-to-edge and a `+8` round-to-nearest, evaluated in `u32`. No float
-//!   rounding mode can touch it.
+//!   clamp-to-edge, evaluated in `u32`. Both passes are accumulated unnormalised
+//!   and divided once at the end — `(acc + 128) / 256`, a round-to-nearest over
+//!   the two `/16` passes together, so the intermediate is exact rather than
+//!   rounded twice. No float rounding mode can touch it.
 //! * **Downsampling is bilinear in `f64`** with `round()` (round-half-away-from-
 //!   zero, an exact operation) at the end.
 //!

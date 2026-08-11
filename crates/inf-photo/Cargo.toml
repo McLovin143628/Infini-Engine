@@ -17,7 +17,10 @@ glam = { workspace = true }
 # `parallel_map`/`parallel_map_ref`, which are in-order pure maps, so a
 # reconstruction is a function of its input alone and not of the worker count.
 inf-core = { workspace = true }
-# `pacos64` for the angle metrics in `align`. Ring-0 -> Ring-0, no cycle.
+# `patan2_64` for the rotation-angle metric in `align` — the portable one, and
+# the crate's only transcendental. `acos` of a quaternion dot product was tried
+# first and loses half its digits near the limit; see `align::rotation_angle_deg`.
+# Ring-0 -> Ring-0, no cycle.
 inf-math = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

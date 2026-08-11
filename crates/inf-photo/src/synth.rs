@@ -614,7 +614,8 @@ mod tests {
         let scene = SynthScene::alcove();
         for i in 0..STATIONS.len() {
             let pose = cfg.pose(i);
-            let dir = pose.rotation.inverse() * DVec3::Z;
+            // Through `Pose::forward`, not through a second spelling of it.
+            let dir = pose.forward();
             let hit = scene
                 .planes
                 .iter()

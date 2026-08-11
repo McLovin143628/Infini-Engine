@@ -514,11 +514,18 @@ mod tests {
             DVec2::new(w as f64 - 1.0, h as f64 - 1.0),
         ];
         let centroid = corners.iter().fold(DVec2::ZERO, |a, b| a + *b) / 4.0;
-        assert_eq!(DVec2::new(k.cx, k.cy), centroid, "principal point off centre");
+        assert_eq!(
+            DVec2::new(k.cx, k.cy),
+            centroid,
+            "principal point off centre"
+        );
         // The principal ray lands on it, and it is not the `w/2` answer — the
         // half pixel this is about.
         let axis = k.to_pixel(DVec2::ZERO);
-        assert!((axis - centroid).length() < 1e-12, "principal ray at {axis}");
+        assert!(
+            (axis - centroid).length() < 1e-12,
+            "principal ray at {axis}"
+        );
         assert!(
             (k.cx - w as f64 * 0.5).abs() > 0.4,
             "the principal point is still the pixel-interval answer"

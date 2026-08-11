@@ -690,6 +690,41 @@ mod tests {
     }
 
     #[test]
+    fn the_ring_is_the_circle_its_radius_names() {
+        // `FAST_RADIUS` and `FAST_RING` are two spellings of one fact, and
+        // nothing read the first — so the constant could drift away from the
+        // table it describes without a single test noticing. Every offset must
+        // sit on the radius-3 Bresenham circle, the sixteen must be distinct,
+        // and consecutive entries must be adjacent, which is what makes the
+        // contiguity test above mean "an arc" rather than "sixteen samples".
+        let r = FAST_RADIUS;
+        assert_eq!(FAST_RING.len(), 16);
+        let mut seen = FAST_RING.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 16, "the ring repeats a pixel");
+        for (k, &(dx, dy)) in FAST_RING.iter().enumerate() {
+            let d2 = dx * dx + dy * dy;
+            assert!(
+                (r * r - 1..=r * r + 1).contains(&d2),
+                "ring entry {k} ({dx},{dy}) is not on the radius-{r} circle (d2 = {d2})"
+            );
+            let (nx, ny) = FAST_RING[(k + 1) % 16];
+            assert!(
+                (nx - dx).abs() <= 1 && (ny - dy).abs() <= 1,
+                "ring entries {k} and {} are not adjacent",
+                (k + 1) % 16
+            );
+        }
+        // Clockwise from straight up, which is the order the compass-point
+        // early reject at indices 0, 4, 8, 12 depends on.
+        assert_eq!(FAST_RING[0], (0, -r));
+        assert_eq!(FAST_RING[4], (r, 0));
+        assert_eq!(FAST_RING[8], (0, r));
+        assert_eq!(FAST_RING[12], (-r, 0));
+    }
+
+    #[test]
     fn contiguity_wraps_around_the_ring() {
         // Nine bright entries straddling index 0.
         let mut ring = [0i32; 16];

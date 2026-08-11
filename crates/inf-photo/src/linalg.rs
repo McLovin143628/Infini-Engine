@@ -787,8 +787,14 @@ mod tests {
             ("all zero", DMat3::ZERO),
             ("rank one", planted(DVec3::new(2.5, 0.0, 0.0))),
             ("rank two", planted(DVec3::new(3.0, 1.25, 0.0))),
-            ("two equal singular values", planted(DVec3::new(2.0, 2.0, 0.5))),
-            ("three equal singular values", planted(DVec3::new(1.5, 1.5, 1.5))),
+            (
+                "two equal singular values",
+                planted(DVec3::new(2.0, 2.0, 0.5)),
+            ),
+            (
+                "three equal singular values",
+                planted(DVec3::new(1.5, 1.5, 1.5)),
+            ),
             (
                 "near-degenerate across eight orders",
                 planted(DVec3::new(1.0, 1e-8, 1e-16)),

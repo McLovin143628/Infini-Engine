@@ -338,21 +338,45 @@ fn the_canonical_bytes_cover_every_field_they_claim_to() {
         }};
     }
 
-    mutate!("report.views", r, { r.report.views += 1; });
-    mutate!("report.registered", r, { r.report.registered += 1; });
-    mutate!("report.features_per_view", r, { r.report.features_per_view[0] += 1; });
-    mutate!("report.pairs", r, { r.report.pairs += 1; });
-    mutate!("report.matches", r, { r.report.matches += 1; });
-    mutate!("report.tracks", r, { r.report.tracks += 1; });
-    mutate!("report.points", r, { r.report.points += 1; });
-    mutate!("report.observations", r, { r.report.observations += 1; });
+    mutate!("report.views", r, {
+        r.report.views += 1;
+    });
+    mutate!("report.registered", r, {
+        r.report.registered += 1;
+    });
+    mutate!("report.features_per_view", r, {
+        r.report.features_per_view[0] += 1;
+    });
+    mutate!("report.pairs", r, {
+        r.report.pairs += 1;
+    });
+    mutate!("report.matches", r, {
+        r.report.matches += 1;
+    });
+    mutate!("report.tracks", r, {
+        r.report.tracks += 1;
+    });
+    mutate!("report.points", r, {
+        r.report.points += 1;
+    });
+    mutate!("report.observations", r, {
+        r.report.observations += 1;
+    });
     mutate!("report.reprojection_rms_px", r, {
         r.report.reprojection_rms_px = f64::from_bits(r.report.reprojection_rms_px.to_bits() + 1);
     });
-    mutate!("report.initial_pair", r, { r.report.initial_pair.1 += 1; });
-    mutate!("report.final_bundle.iterations", r, { r.report.final_bundle.iterations += 1; });
-    mutate!("report.final_bundle.accepted", r, { r.report.final_bundle.accepted += 1; });
-    mutate!("report.final_bundle.observations", r, { r.report.final_bundle.observations += 1; });
+    mutate!("report.initial_pair", r, {
+        r.report.initial_pair.1 += 1;
+    });
+    mutate!("report.final_bundle.iterations", r, {
+        r.report.final_bundle.iterations += 1;
+    });
+    mutate!("report.final_bundle.accepted", r, {
+        r.report.final_bundle.accepted += 1;
+    });
+    mutate!("report.final_bundle.observations", r, {
+        r.report.final_bundle.observations += 1;
+    });
     mutate!("report.final_bundle.final_rms_px", r, {
         let v = &mut r.report.final_bundle.final_rms_px;
         *v = f64::from_bits(v.to_bits() + 1);
@@ -362,7 +386,10 @@ fn the_canonical_bytes_cover_every_field_they_claim_to() {
         *v = f64::from_bits(v.to_bits() + 1);
     });
     mutate!("an advisory", r, {
-        r.advisories.push(inf_photo::Advisory::ThinRegistration { view: 0, inliers: 1 });
+        r.advisories.push(inf_photo::Advisory::ThinRegistration {
+            view: 0,
+            inliers: 1,
+        });
     });
     mutate!("a camera pose", r, {
         let view = *r.cameras.keys().next().expect("a camera");
@@ -608,8 +635,13 @@ fn the_final_bundle_is_the_only_one_a_three_view_capture_gets() {
     println!(
         "three-view capture: {} points, {} observations, bundle {} accepted of {} iterations \
          over {} observations, rms {:.4} -> {:.4} px",
-        r.report.points, r.report.observations, b.accepted, b.iterations, b.observations,
-        b.initial_rms_px, b.final_rms_px
+        r.report.points,
+        r.report.observations,
+        b.accepted,
+        b.iterations,
+        b.observations,
+        b.initial_rms_px,
+        b.final_rms_px
     );
     assert!(
         b.observations > 0 && b.iterations > 0,

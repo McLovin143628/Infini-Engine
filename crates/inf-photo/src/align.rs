@@ -310,6 +310,30 @@ mod tests {
                 "mapping disagrees at {p}"
             );
         }
+        // A cloud onto itself is the identity, and the identity is the one this
+        // module hands out — otherwise `Similarity::identity` is a constructor
+        // nothing has ever executed.
+        let same = similarity_from_points(&src, &src).expect("a similarity");
+        let id = Similarity::identity();
+        assert!(
+            (same.scale - id.scale).abs() < 1e-12,
+            "scale {}",
+            same.scale
+        );
+        assert!(
+            (same.translation - id.translation).length() < 1e-12,
+            "translation {}",
+            same.translation
+        );
+        for r in 0..3 {
+            for c in 0..3 {
+                assert!(
+                    (mat3_at(&same.rotation, r, c) - mat3_at(&id.rotation, r, c)).abs() < 1e-12,
+                    "a cloud fitted to itself is not the identity: {}",
+                    similarity_debug(&same)
+                );
+            }
+        }
     }
 
     #[test]
