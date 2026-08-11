@@ -1700,3 +1700,142 @@ fn the_bvh_surface_answers_the_same_questions_the_brute_force_does() {
     println!("P25.3 BVH: {compared} probes, worst closest distance {worst:.5}");
     assert!(compared > 50, "only {compared} probes ran");
 }
+
+// ── (n) the remedies, measured rather than written ──────────────────────────
+
+/// **Every prescription a `FinishAdvisory` makes is a claim about this
+/// pipeline**, and the P23 law is that a prescription is measured before it
+/// lands. P25.3's ledger declined to write any for exactly that reason; P25.4
+/// wrote eight, and three of them named a lever. This arm is what makes those
+/// three claims falsifiable — the day the unwrap or the packer changes and a
+/// remedy stops being true, this fails instead of the user.
+///
+/// Directions only, and every comparison is between two runs in this process
+/// (the header's rule): `meshopt` is in the chain, so the *counts* are a
+/// property of the platform and only their ordering is a property of the code.
+/// The bounds each state why the comparison is not vacuous.
+///
+/// Deliberately cheap: a 128-texel atlas and four occlusion rays, because
+/// nothing here reads a bake.
+#[test]
+fn the_remedies_the_advisories_prescribe_point_the_way_the_pipeline_moves() {
+    let cheap = |f: &dyn Fn(&mut FinishConfig)| -> FinishedAsset {
+        let mut cfg = finish_config();
+        cfg.bake.size = 128;
+        cfg.bake.ao_rays = 4;
+        f(&mut cfg);
+        finish_reconstruction(dense_on_truth(), exact(), photographs(), &cfg, &pool())
+            .expect("the finish runs")
+    };
+    let overlaps = |a: &FinishedAsset| -> usize {
+        a.advisories
+            .iter()
+            .find_map(|x| match x {
+                FinishAdvisory::AtlasOverlaps { texels } => Some(*texels),
+                _ => None,
+            })
+            .unwrap_or(0)
+    };
+    let fallback_fraction = |a: &FinishedAsset| -> f64 {
+        a.advisories
+            .iter()
+            .find_map(|x| match x {
+                FinishAdvisory::NormalTransferFallbacks { fallbacks, texels } => {
+                    Some(*fallbacks as f64 / (*texels).max(1) as f64)
+                }
+                _ => None,
+            })
+            .unwrap_or(0.0)
+    };
+
+    // 1. `UvChartsFlipped` prescribes a LOWER `min_chart_faces`. It also used to
+    //    prescribe more seam smoothing, which is withdrawn: the committed 3 is
+    //    already the minimum on this fixture and raising it folds MORE.
+    let base = cheap(&|_| {});
+    let small_charts = cheap(&|c| c.min_chart_faces = 8);
+    let smoother = cheap(&|c| c.seam_smoothing_passes = 10);
+    println!(
+        "P25.3 remedies, folds: {} at min_chart_faces 64, {} at 8, {} at ten smoothing passes \
+         (charts {} / {} / {})",
+        base.report.flipped,
+        small_charts.report.flipped,
+        smoother.report.flipped,
+        base.report.charts,
+        small_charts.report.charts,
+        smoother.report.charts
+    );
+    assert!(
+        base.report.flipped > 0,
+        "the fixture folds nothing, so this arm would pass on any pipeline at all"
+    );
+    assert!(
+        small_charts.report.flipped < base.report.flipped,
+        "lowering min_chart_faces did not reduce folds ({} against {}), and the UvChartsFlipped \
+         remedy says it does",
+        small_charts.report.flipped,
+        base.report.flipped
+    );
+    assert!(
+        smoother.report.flipped >= base.report.flipped,
+        "more seam smoothing reduced folds ({} against {}) — the remedy withdrawn from \
+         UvChartsFlipped should be re-measured and put back",
+        smoother.report.flipped,
+        base.report.flipped
+    );
+    // …and it costs charts, which is the half of the remedy a reader acts on.
+    assert!(
+        small_charts.report.charts > base.report.charts,
+        "the small-chart remedy cost no charts, so its stated price is wrong"
+    );
+
+    // 2. `AtlasOverlaps` says a BIGGER atlas does not help. The packer works in
+    //    normalized UV and never sees `BakeConfig::size`, so the count can only
+    //    grow with the texels — the arm asserts it never falls.
+    let bigger = cheap(&|c| c.bake.size = 256);
+    println!(
+        "P25.3 remedies, atlas overlaps: {} at 128 texels, {} at 256",
+        overlaps(&base),
+        overlaps(&bigger)
+    );
+    assert!(
+        overlaps(&base) > 0,
+        "the fixture overlaps nothing at 128 texels, so the comparison below is vacuous"
+    );
+    assert!(
+        overlaps(&bigger) >= overlaps(&base),
+        "a bigger atlas reduced the overlap count ({} against {}) — AtlasOverlaps says it cannot, \
+         and one of the two is now wrong",
+        overlaps(&bigger),
+        overlaps(&base)
+    );
+
+    // 3. `NormalTransferFallbacks` prescribes a RAISED triangle budget. The
+    //    first version of the remedy said "lower", which is backwards: a coarser
+    //    retopologized surface sits FURTHER from the fused one it samples. Held
+    //    at a search radius tight enough to fall back at all.
+    let tight = |budget: usize| {
+        cheap(&move |c| {
+            c.bake.normal_search_voxels = 0.5;
+            c.target_triangles = budget;
+        })
+    };
+    let coarse = tight(5_000);
+    let fine = tight(60_000);
+    println!(
+        "P25.3 remedies, normal fallbacks at a 0.5-voxel radius: {:.4} of texels at a 5 000 \
+         budget, {:.4} at 60 000",
+        fallback_fraction(&coarse),
+        fallback_fraction(&fine)
+    );
+    assert!(
+        fallback_fraction(&coarse) > 0.0,
+        "nothing fell back even at half a voxel, so this arm measures nothing"
+    );
+    assert!(
+        fallback_fraction(&fine) < fallback_fraction(&coarse),
+        "a HIGHER triangle budget did not reduce the normal-transfer fallbacks ({:.4} against \
+         {:.4}), and NormalTransferFallbacks now says it does",
+        fallback_fraction(&fine),
+        fallback_fraction(&coarse)
+    );
+}

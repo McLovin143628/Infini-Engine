@@ -304,6 +304,13 @@ pub enum FinishAdvisory {
     /// The fused surface had edges shared by more than two faces (or by two
     /// faces wound the same way), and those triangles were dropped so the mesh
     /// could enter the half-edge kernel at all.
+    ///
+    /// **MEASURED** (P25.4 audit, the committed fixture): the count is 18 646 /
+    /// 18 688 / 19 073 / 20 331 at a triangle budget of 2 000 / 5 000 / 20 000 /
+    /// 60 000 — a thirtyfold move in the only exposed setting that touches it at
+    /// all shifts it by under a tenth, because the first manifold filter runs on
+    /// the fused mesh and only the second sees the budget. Hence the remedy says
+    /// no setting here is the lever, and stops there.
     NonManifoldDropped {
         /// Triangles dropped.
         dropped: usize,
@@ -325,6 +332,12 @@ pub enum FinishAdvisory {
     },
     /// Decimation could not reach the budget. meshopt stops when the topology
     /// stops it; this is that, said out loud.
+    ///
+    /// **MEASURED** (P25.4 audit): asking for 5 000 triangles gives 9 746 and
+    /// asking for 2 000 gives 9 767 — lowering the budget 2.5× moved the result
+    /// the wrong way by 21 triangles. That is why the remedy names the lever
+    /// that does **not** work rather than prescribing one that was never
+    /// measured.
     DecimationShortOfBudget {
         /// The budget.
         asked: usize,
@@ -341,6 +354,21 @@ pub enum FinishAdvisory {
     },
     /// UV charts whose parameterization folded. Their texels are sampled from
     /// the wrong place.
+    ///
+    /// **MEASURED** (P25.4 audit, the committed fixture, everything else held):
+    ///
+    /// | `min_chart_faces` | folded | charts | atlas coverage |
+    /// |---|---|---|---|
+    /// | 256 | 1 456 | 644 | 0.320 |
+    /// | 64 (default) | 1 225 | 656 | 0.297 |
+    /// | 16 | 1 012 | 712 | 0.221 |
+    /// | 8 | 845 | 891 | 0.175 |
+    /// | 2 | 441 | 2 118 | 0.203 |
+    ///
+    /// Monotone, and it costs what the remedy says it costs. `seam_smoothing_passes`
+    /// is **not** a lever here and was withdrawn from the remedy: 0 / 1 / 3 / 6 /
+    /// 10 passes fold 1 605 / 1 367 / 1 225 / 1 299 / 1 321 triangles, so the
+    /// committed 3 already sits at the minimum and raising it makes folds worse.
     UvChartsFlipped {
         /// Folded triangles, summed over charts.
         flipped: usize,
@@ -349,6 +377,15 @@ pub enum FinishAdvisory {
     },
     /// Two triangles claimed the same texel — a chart overlapping itself or
     /// another in the atlas.
+    ///
+    /// **MEASURED** (P25.4 audit, the committed fixture): a bigger atlas is the
+    /// obvious lever and it is the wrong one. At 128 / 256 / 512 / 1 024 texels
+    /// the count is 152 / 597 / 2 243 / 9 047 — it grows with the texels,
+    /// because [`inf_dcc::unwrap`] packs the charts in **normalized UV** and
+    /// never sees [`BakeConfig::size`], so the gutter is a constant share of the
+    /// square whatever the square is (0.93 / 0.91 / 0.86 / 0.86 % of it).
+    /// `min_chart_faces` is a real lever: 256 / 64 / 16 / 8 / 2 give 703 / 597 /
+    /// 351 / 177 / 156.
     AtlasOverlaps {
         /// Texels claimed twice.
         texels: usize,
@@ -367,6 +404,14 @@ pub enum FinishAdvisory {
     },
     /// Texels whose normal could not be transferred because the dense surface
     /// was out of search range; they kept the retopologized mesh's own normal.
+    ///
+    /// **MEASURED** (P25.4 audit, the committed fixture). The search radius does
+    /// what it says — at 0.25 / 0.5 / 1 / 2 voxels the fallbacks are 6 713 /
+    /// 1 656 / 19 / 0 of ~19 500 texels. The triangle budget does the **opposite**
+    /// of what the first version of this remedy said: held at a 0.5-voxel radius,
+    /// budgets of 2 000 / 5 000 / 20 000 / 60 000 fall back on 25.7 / 28.0 / 8.5 /
+    /// 0.35 % of their texels, because a *coarser* retopologized surface sits
+    /// further from the fused one it is sampling, not nearer.
     NormalTransferFallbacks {
         /// Texels that fell back.
         fallbacks: usize,
@@ -391,8 +436,8 @@ impl std::fmt::Display for FinishAdvisory {
                 f,
                 "{dropped} of {examined} fused triangles shared an edge with two others and were \
                  dropped so the mesh could be unwrapped; the surface has holes where they were — \
-                 this is a property of the fused surface rather than of a setting, and what \
-                 reduces it is more overlapping photographs of the thin or doubled regions"
+                 the count is the fused surface's own topology and none of the settings here is a \
+                 lever on it"
             ),
             FinishAdvisory::UnphotographedTrimmed { dropped, examined } => write!(
                 f,
@@ -404,8 +449,8 @@ impl std::fmt::Display for FinishAdvisory {
             FinishAdvisory::DecimationShortOfBudget { asked, got } => write!(
                 f,
                 "decimation asked for {asked} triangles and stopped at {got} — the topology would \
-                 not collapse further; nothing needs doing unless {got} is itself too many, and \
-                 then the fix is a coarser fusion rather than a lower budget"
+                 not collapse further, so a LOWER budget is not the lever; it already stopped \
+                 above the one it was given"
             ),
             FinishAdvisory::BelowVirtualizationThreshold {
                 triangles,
@@ -419,15 +464,16 @@ impl std::fmt::Display for FinishAdvisory {
             FinishAdvisory::UvChartsFlipped { flipped, corners } => write!(
                 f,
                 "{flipped} triangles folded during UV unwrap over {corners} corners; those texels \
-                 are sampled from the wrong side of the surface — raise the seam smoothing passes \
-                 so a bent chart is cut instead of stretched, or lower the small-chart merge \
-                 threshold so it is not folded into a neighbour"
+                 are sampled from the wrong side of the surface — lower `min_chart_faces` so a \
+                 bent region is cut into a chart of its own instead of folded into a neighbour, \
+                 which costs charts and atlas density"
             ),
             FinishAdvisory::AtlasOverlaps { texels } => write!(
                 f,
                 "{texels} atlas texels were claimed by two triangles; the first won and the second \
-                 is textured from somewhere else — raise the atlas size, which widens the gutter \
-                 every chart is packed with"
+                 is textured from somewhere else — a BIGGER atlas does not help, because the \
+                 charts are packed in UV space and the count grows with the texels; lower \
+                 `min_chart_faces` instead, which cuts the charts smaller"
             ),
             FinishAdvisory::UnseenTexels { unseen, covered } => write!(
                 f,
@@ -439,9 +485,9 @@ impl std::fmt::Display for FinishAdvisory {
             FinishAdvisory::NormalTransferFallbacks { fallbacks, texels } => write!(
                 f,
                 "{fallbacks} of {texels} texels found no dense surface within the search radius and \
-                 kept the retopologized normal; detail is missing there, not wrong — raise the \
-                 normal search radius, or lower the triangle budget so the retopologized surface \
-                 stays nearer the fused one"
+                 kept the retopologized normal; detail is missing there, not wrong — raise \
+                 `normal_search_voxels`, or RAISE the triangle budget so the retopologized \
+                 surface stays nearer the fused one it is sampling"
             ),
             FinishAdvisory::DelightRefused {
                 explained_percent,
