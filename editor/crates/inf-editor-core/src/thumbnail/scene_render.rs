@@ -1720,6 +1720,27 @@ fn cs_bake(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// driver warm-up, the shader toolchain and the first allocation of every
     /// pool, none of which recur. So the GPU is primed first and discarded, and
     /// the process-cold figure is reported separately rather than folded in.
+    ///
+    /// # Both sides are sampled the same way, and they were not (P24.5 audit F6)
+    ///
+    /// `cold` used to be **one** sample and `warm` the best of five. Best-of-N is
+    /// biased downward, so the comparison was tilted against `cold` by
+    /// construction — and at the *second* size there is nothing left to tilt it
+    /// back with. The loop's printed numbers say so outright: across two failing
+    /// runs the 512² "session-cold" came in at **2.09 ms** and **9.51 ms** against
+    /// a 256² session-cold of **8.99 ms** and **55.80 ms** — a render with four
+    /// times the pixels measured as *cheaper* than the smaller one, every time,
+    /// because the shader compile and the pipeline build happen once per process
+    /// and the first iteration already paid them. By 512² the only cold cost left
+    /// is a target allocation, so the assert was comparing two warm frames and
+    /// deciding on whichever scheduler slice the single sample landed in.
+    ///
+    /// Measured: it failed 2 of 2 full-battery runs (where a dozen other test
+    /// binaries share the GPU) and passed 3 of 3 in isolation. So `cold` is now
+    /// best-of-five too — a **fresh session each attempt**, the noise treated
+    /// identically on both sides. No tolerance and no millisecond bound: cold
+    /// does strictly more work than warm, and once the two are sampled alike that
+    /// is what the numbers show.
     #[test]
     fn preview_session_cold_versus_warm_latency() {
         let Some(gpu) = gpu_or_skip() else { return };
@@ -1739,13 +1760,21 @@ fn cs_bake(@builtin(global_invocation_id) gid: vec3<u32>) {
         for size in [256u32, 512] {
             // Session-cold: a NEW session on a warm process — a fresh target,
             // depth, buffers, shader and pipeline. What opening a Model Editor
-            // on a new asset costs.
-            let t0 = std::time::Instant::now();
+            // on a new asset costs. Five fresh sessions, best-of, for the reason
+            // in the doc comment: the warm side is best-of-five, and comparing a
+            // best-of-five against a single sample is a comparison of sampling
+            // methods rather than of work.
+            let mut cold = std::time::Duration::MAX;
             let mut session = PreviewSession::new(&gpu, size);
-            let _ = session
-                .render(&gpu, MIN_SURFACE, 0, PreviewView::default())
-                .expect("cold render");
-            let cold = t0.elapsed();
+            for _ in 0..5 {
+                let t = std::time::Instant::now();
+                let mut fresh = PreviewSession::new(&gpu, size);
+                let _ = fresh
+                    .render(&gpu, MIN_SURFACE, 0, PreviewView::default())
+                    .expect("cold render");
+                cold = cold.min(t.elapsed());
+                session = fresh;
+            }
 
             // Warm: camera only, five frames, best-of (an orbit is judged by the
             // frame it usually delivers, not by the one that hit a scheduler).
