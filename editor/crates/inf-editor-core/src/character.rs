@@ -22,9 +22,19 @@
 //!
 //! [`build_character`] validates the plan, builds the rig, fits it, solves the
 //! weights and generates all three clips *in memory*, and only then starts
-//! writing assets. A refusal therefore never leaves a half-built character in
-//! the Content Drawer — the `skel_create_template` rule, applied to a job that
+//! writing assets — the `skel_create_template` rule, applied to a job that
 //! writes six assets instead of one.
+//!
+//! Generating first is **not enough on its own**, and the difference is what
+//! [`roll_back`] is for: the sixth `write_asset` can still fail on a full disk,
+//! a path the platform refuses or a sidecar that cannot be created, long after
+//! the first five have landed. Measured before it was fixed — a blocked fourth
+//! write left three registered assets and a payload with no sidecar, which the
+//! content watcher promotes under a *fresh* GUID. So a failed write takes back
+//! everything this call wrote, and
+//! `a_write_that_fails_halfway_takes_back_what_it_wrote` checks that against the
+//! **filesystem** rather than against the build's own verdict (the P23 lesson
+//! that made `SaveError::Torn` reachable at all).
 //!
 //! # The body
 //!
@@ -50,9 +60,11 @@
 //! module are [`inf_anim::GaitParams`]' angles and [`inf_anim::JointLimit`]'s,
 //! which are the authoring convention.
 
+use std::path::Path;
+
 use inf_anim::locomotion::{build_locomotion, locomotion_machine, GaitParams};
 use inf_anim::{AnimClipAsset, BodyParams, BodyPlan, SkeletonAsset, StateMachineAsset};
-use inf_asset::{AssetId, AssetKind};
+use inf_asset::{AssetId, AssetKind, AssetPayload};
 use inf_mesh::{MeshAsset, MeshVertex, SubMesh, VertexSkin};
 
 use crate::assets::AssetProject;
@@ -326,12 +338,54 @@ pub fn preview_character(
     })
 }
 
+/// Take back the assets a failed build had already written.
+///
+/// Newest first, and with `force`: the dependency edges point *into* this set —
+/// the machine names the clips, the clips and the body name the rig — so a
+/// reference-guarded delete would refuse the rig and leave half of a half-built
+/// character behind, which is the state this exists to prevent.
+///
+/// Failures are ignored on purpose. This runs on a path that is *already*
+/// failing, and the caller is about to report the write error that started it;
+/// a second io error reported over the top of the first would replace the
+/// diagnosis with its own consequence.
+fn roll_back(project: &mut AssetProject, written: &[AssetId]) {
+    for id in written.iter().rev() {
+        let _ = project.delete(*id, true);
+    }
+}
+
+/// One write, remembered — so [`roll_back`] can undo it if a later one fails.
+fn write_one<T: AssetPayload>(
+    project: &mut AssetProject,
+    written: &mut Vec<AssetId>,
+    dir: &Path,
+    name: &str,
+    payload: &T,
+    dependencies: Vec<AssetId>,
+) -> Result<AssetId, CharacterError> {
+    match project.write_asset(dir, name, payload, None, dependencies, None) {
+        Ok(id) => {
+            written.push(id);
+            Ok(id)
+        }
+        Err(e) => {
+            roll_back(project, written);
+            Err(CharacterError::Write(e.to_string()))
+        }
+    }
+}
+
 /// Generate a character's six assets into `project` and return their ids.
 ///
 /// Writing order is a dependency order and not a convenience: the skeleton is
 /// written first because the mesh's skin binding and every clip's `skeleton`
 /// field name its GUID, and the machine is written last because it names all
 /// four of the others.
+///
+/// **All six or none of them.** Every write goes through [`write_one`], which
+/// hands a failure to [`roll_back`] before returning it — see the module docs on
+/// why generating everything up front is necessary and not sufficient.
 pub fn build_character(
     project: &mut AssetProject,
     spec: &CharacterSpec,
@@ -366,55 +420,63 @@ pub fn build_character(
         .content_dir(CHARACTER_FOLDER)
         .map_err(|e| CharacterError::Write(e.to_string()))?;
 
+    // Every id this call has put in the database, for `roll_back`.
+    let mut written: Vec<AssetId> = Vec::new();
+
     // ── the rig ────────────────────────────────────────────────────────────
-    let skeleton = project
-        .write_asset(&dir, name, &rig, None, vec![], None)
-        .map_err(|e| CharacterError::Write(e.to_string()))?;
+    let skeleton = write_one(project, &mut written, &dir, name, &rig, vec![])?;
 
     // ── the body ───────────────────────────────────────────────────────────
     let (body, weights, mannequin) = match source.as_ref() {
-        Some(payload) => {
-            let (asset, summary) = skinned_copy(payload, &rig, skeleton)?;
-            if summary.unreached > 0 {
-                warnings.push(format!(
-                    "{} vertices could not see any bone and kept the root's weights \
-                     — paint them, or check that the rig is inside the mesh",
-                    summary.unreached
-                ));
+        Some(payload) => match skinned_copy(payload, &rig, skeleton) {
+            Ok((asset, summary)) => {
+                if summary.unreached > 0 {
+                    warnings.push(format!(
+                        "{} vertices could not see any bone and kept the root's weights \
+                         — paint them, or check that the rig is inside the mesh",
+                        summary.unreached
+                    ));
+                }
+                (asset, Some(summary), false)
             }
-            (asset, Some(summary), false)
-        }
+            // The rig is already on disk, and the skin solve is the one door in
+            // the write section that can still refuse.
+            Err(e) => {
+                roll_back(project, &written);
+                return Err(e);
+            }
+        },
         None => (block_body_mesh(&rig), None, true),
     };
-    let mesh = project
-        .write_asset(
-            &dir,
-            &format!("{name} Body"),
-            &body,
-            None,
-            vec![skeleton],
-            None,
-        )
-        .map_err(|e| CharacterError::Write(e.to_string()))?;
+    let mesh = write_one(
+        project,
+        &mut written,
+        &dir,
+        &format!("{name} Body"),
+        &body,
+        vec![skeleton],
+    )?;
 
     // ── the clips ──────────────────────────────────────────────────────────
     let skel_bytes = *skeleton.0.as_bytes();
-    let mut clip = |suffix: &str, clip: &inf_anim::AnimClip| -> Result<AssetId, CharacterError> {
+    let clip = |project: &mut AssetProject,
+                written: &mut Vec<AssetId>,
+                suffix: &str,
+                clip: &inf_anim::AnimClip|
+     -> Result<AssetId, CharacterError> {
         let payload = AnimClipAsset::new(clip.clone(), Some(skel_bytes));
-        project
-            .write_asset(
-                &dir,
-                &format!("{name} {suffix}"),
-                &payload,
-                None,
-                vec![skeleton],
-                None,
-            )
-            .map_err(|e| CharacterError::Write(e.to_string()))
+        write_one(
+            project,
+            written,
+            &dir,
+            &format!("{name} {suffix}"),
+            &payload,
+            vec![skeleton],
+        )
     };
-    let idle = clip("Idle", &set.idle)?;
-    let walk = clip("Walk", &set.walk)?;
-    let run = clip("Run", &set.run)?;
+    let idle = clip(project, &mut written, "Idle", &set.idle)?;
+    let walk = clip(project, &mut written, "Walk", &set.walk)?;
+    let run = clip(project, &mut written, "Run", &set.run)?;
 
     // ── the machine ────────────────────────────────────────────────────────
     let machine_asset = StateMachineAsset::new(
@@ -426,16 +488,14 @@ pub fn build_character(
         ),
         Some(skel_bytes),
     );
-    let machine = project
-        .write_asset(
-            &dir,
-            &format!("{name} Locomotion"),
-            &machine_asset,
-            None,
-            vec![skeleton, idle, walk, run],
-            None,
-        )
-        .map_err(|e| CharacterError::Write(e.to_string()))?;
+    let machine = write_one(
+        project,
+        &mut written,
+        &dir,
+        &format!("{name} Locomotion"),
+        &machine_asset,
+        vec![skeleton, idle, walk, run],
+    )?;
 
     Ok(CharacterBuild {
         skeleton,
@@ -1044,6 +1104,67 @@ mod tests {
             Err(CharacterError::EmptyName)
         );
         assert_eq!(p.db().len(), 0, "a refusal left assets behind");
+    }
+
+    /// **A TORN BUILD, checked against the filesystem.**
+    ///
+    /// The pre-write refusals above cannot see this: they leave the content root
+    /// clean because nothing has been written *yet*. The case that matters is the
+    /// one where five assets are already on disk and the sixth cannot be —
+    /// induced here by putting a **directory** where the walk clip's sidecar has
+    /// to go, so the payload lands and `AssetSidecar::save` fails.
+    ///
+    /// Measured before it was fixed: the build left **three** registered assets
+    /// and a fourth payload with **no sidecar** — which the content watcher
+    /// promotes under a freshly-minted GUID, so the author is left with orphans
+    /// they cannot tell from their own work. The verdict is asserted against
+    /// `read_dir`, not against the build's return value, because a build that
+    /// *said* it had cleaned up was exactly what the first version did.
+    #[test]
+    fn a_write_that_fails_halfway_takes_back_what_it_wrote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project(tmp.path());
+        let dir = p.content_dir(CHARACTER_FOLDER).unwrap();
+        let blocker = dir.join("Hero_Walk.inf_anim.toml");
+        std::fs::create_dir_all(&blocker).unwrap();
+
+        let err = build_character(
+            &mut p,
+            &CharacterSpec {
+                name: "Hero".into(),
+                ..CharacterSpec::default()
+            },
+        )
+        .expect_err("the blocked sidecar refuses the walk clip");
+        assert!(matches!(err, CharacterError::Write(_)), "{err:?}");
+
+        assert_eq!(p.db().len(), 0, "a torn build left assets registered");
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n != "Hero_Walk.inf_anim.toml")
+            .collect();
+        assert!(
+            left.is_empty(),
+            "a torn build left files behind: {left:?} — an orphaned payload is \
+             re-registered by the watcher under a GUID nothing references"
+        );
+
+        // …and the folder still works: the same name builds cleanly once the
+        // blocker is gone, which is what says the rollback removed files rather
+        // than leaving the directory in a state the next write trips over.
+        std::fs::remove_dir(&blocker).unwrap();
+        let out = build_character(
+            &mut p,
+            &CharacterSpec {
+                name: "Hero".into(),
+                ..CharacterSpec::default()
+            },
+        )
+        .expect("the second build succeeds");
+        assert_eq!(p.db().len(), 6);
+        let sm: StateMachineAsset = p.load_payload(out.machine).unwrap();
+        assert_eq!(sm.machine.states.len(), 3);
     }
 
     /// A refusal from a door *inside* the build leaves the content root clean —

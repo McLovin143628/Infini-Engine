@@ -95,6 +95,17 @@ impl AssetProject {
 
     /// Write a payload + sidecar under `dir`, register it, and return its id.
     /// `dir` should be inside the content root.
+    ///
+    /// # The half-written pair, here too
+    ///
+    /// The payload lands before the sidecar, so a sidecar that cannot be written
+    /// would leave a payload with **no sidecar** — which the content watcher
+    /// later promotes into the database under a *freshly minted* GUID, so every
+    /// reference the caller was about to write points at nothing. That is the
+    /// hazard [`register_written_asset`](Self::register_written_asset) has
+    /// spelled out since P16.3, and the rule is the same one: if the sidecar
+    /// fails, the payload is removed again, so the pair is all-or-nothing and a
+    /// failed write leaves the content root as it found it.
     pub fn write_asset<T: AssetPayload>(
         &mut self,
         dir: &Path,
@@ -116,7 +127,10 @@ impl AssetProject {
         sidecar.source = source;
         sidecar.dependencies = dependencies;
         sidecar.import = import;
-        sidecar.save(&path)?;
+        if let Err(e) = sidecar.save(&path) {
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
 
         let name = path
             .file_stem()
