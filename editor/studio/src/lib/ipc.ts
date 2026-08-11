@@ -27,6 +27,10 @@ import type { BiomeDefDto } from "../bindings/BiomeDefDto";
 import type { BiomeSetDto } from "../bindings/BiomeSetDto";
 import type { BiomeSettingsDto } from "../bindings/BiomeSettingsDto";
 import type { CollectionDto } from "../bindings/CollectionDto";
+import type { CaptureImportDto } from "../bindings/CaptureImportDto";
+import type { CapturePreviewDto } from "../bindings/CapturePreviewDto";
+import type { CaptureSettingsDto } from "../bindings/CaptureSettingsDto";
+import type { CaptureStatusDto } from "../bindings/CaptureStatusDto";
 import type { MaterialInstanceDto } from "../bindings/MaterialInstanceDto";
 import type { MatOverridesDto } from "../bindings/MatOverridesDto";
 import type { MixerConfigDto } from "../bindings/MixerConfigDto";
@@ -1224,6 +1228,66 @@ export const character = {
 
   /** The content sub-folder generated characters land in. */
   folder: (): Promise<string> => invoke<string>("character_folder"),
+};
+
+/**
+ * The capture wizard (P25.4): photographs -> reconstruct with progress ->
+ * preview through the offscreen path -> import.
+ *
+ * One session per process. `load` and `setSettings` are cheap and reconstruct
+ * nothing; `start` and `refinish` return immediately and report on
+ * `photogrammetry://progress` (see lib/events.ts). Everything that can refuse
+ * refuses before a run begins, so a rejected promise here is a pre-flight, not
+ * a solver.
+ *
+ * UNITS: `metresPerUnit` is the SCALE STEP — metres per reconstruction unit.
+ * `1.0` leaves the result in the reconstruction's own baseline units, which is
+ * honest rather than metric (structure from motion is scale-ambiguous).
+ */
+export const photogrammetry = {
+  /** The whole panel state. Cheap; call it after anything that changes it. */
+  status: (): Promise<CaptureStatusDto> => invoke<CaptureStatusDto>("photo_status"),
+
+  /** Load a photograph set, replacing whatever was loaded. Runs the pre-flight. */
+  load: (paths: string[]): Promise<CaptureStatusDto> =>
+    invoke<CaptureStatusDto>("photo_load", { paths }),
+
+  /** Replace the settings. Takes effect on the next `start` or `refinish`. */
+  setSettings: (settings: CaptureSettingsDto): Promise<CaptureStatusDto> =>
+    invoke<CaptureStatusDto>("photo_set_settings", { settings }),
+
+  /** Start a reconstruction. Rejects when the pre-flight blocks. */
+  start: (): Promise<CaptureStatusDto> => invoke<CaptureStatusDto>("photo_start"),
+
+  /**
+   * Re-run the FINISH stage alone over the reconstruction already in hand — how
+   * the scale step, the triangle budget and the atlas size are changed without
+   * paying for structure from motion and the dense solve again.
+   */
+  refinish: (): Promise<CaptureStatusDto> => invoke<CaptureStatusDto>("photo_refinish"),
+
+  /**
+   * Ask an in-flight run to stop. Resolves to whether one was running.
+   *
+   * It stops BETWEEN stages: a stage is one blocking solve, so Cancel during a
+   * dense pass lands when that pass returns. Nothing is written either way.
+   */
+  cancel: (): Promise<boolean> => invoke<boolean>("photo_cancel"),
+
+  /** Forget the photographs, the reconstruction and the state. */
+  reset: (): Promise<CaptureStatusDto> => invoke<CaptureStatusDto>("photo_reset"),
+
+  /**
+   * Preview the finished scan: the geometry rendered offscreen, the baked base
+   * colour beside it. Either may be absent — the render needs a GPU adapter and
+   * the atlas does not.
+   */
+  preview: (yaw: number, pitch: number, size?: number): Promise<CapturePreviewDto> =>
+    invoke<CapturePreviewDto>("photo_preview", { yaw, pitch, size: size ?? null }),
+
+  /** Write the five assets under `Content/<folder>` and re-sync the drawer. */
+  import: (name: string): Promise<CaptureImportDto> =>
+    invoke<CaptureImportDto>("photo_import", { name }),
 };
 
 /**

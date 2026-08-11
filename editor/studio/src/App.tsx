@@ -12,6 +12,7 @@ import LayoutDialog from "./shell/LayoutDialog";
 import SortingLayersDialog from "./shell/SortingLayersDialog";
 import PackageDialog from "./shell/PackageDialog";
 import ErodeDialog from "./shell/ErodeDialog";
+import CaptureWizardDialog from "./shell/CaptureWizardDialog";
 import CharacterWizardDialog from "./shell/CharacterWizardDialog";
 import TerrainImportDialog from "./shell/TerrainImportDialog";
 import ContentDrawer from "./shell/ContentDrawer";
@@ -28,6 +29,7 @@ import { focusViewport, handleViewportChord, VIEWPORT_PANEL_ID } from "./lib/vie
 import { startLogListener } from "./stores/logStore";
 import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
 import { initAssetSync, registerAssetCommands } from "./stores/assetStore";
+import { initCaptureSync } from "./stores/captureWizardStore";
 import { initTerrainImportSync } from "./stores/terrainImportStore";
 import { initProjectSync, registerProjectCommands, useProjectStore } from "./stores/projectStore";
 import { useTourStore } from "./stores/tourStore";
@@ -99,6 +101,19 @@ export default function App() {
     let dispose: (() => void) | undefined;
     let disposed = false;
     initTerrainImportSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
+  }, []);
+
+  // The capture wizard folds `photogrammetry://progress` (P25.4). Subscribed at
+  // the shell rather than in the dialog, so a reconstruction started and left
+  // running keeps reporting while the dialog is closed. StrictMode-safe.
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    let disposed = false;
+    initCaptureSync().then((fn) => (disposed ? fn() : (dispose = fn)));
     return () => {
       disposed = true;
       dispose?.();
@@ -263,6 +278,7 @@ export default function App() {
       <ErodeDialog />
       <TerrainImportDialog />
       <CharacterWizardDialog />
+      <CaptureWizardDialog />
       <CommandPalette />
       <StartScreen />
       <FirstRunTour />

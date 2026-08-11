@@ -148,6 +148,12 @@ export function bootstrapShellCommands(): void {
     useShellStore.getState().setTerrainImportOpen(true);
   });
 
+  // The capture wizard (P25.4): File ▸ Capture from Photographs… — photographs
+  // in, a textured, retopologized asset out, entirely in-engine.
+  setCommandHandler("file.captureFromPhotos", () => {
+    useShellStore.getState().setCaptureWizardOpen(true);
+  });
+
   // The New Character wizard (P24.5): Actor ▸ New Character from Template… — its
   // own entry rather than a Place Actor row, because it GENERATES six assets and
   // then places an actor wearing them.

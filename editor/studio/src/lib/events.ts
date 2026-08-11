@@ -12,6 +12,7 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { AssetChanged } from "../bindings/AssetChanged";
+import type { CaptureProgressDto } from "../bindings/CaptureProgressDto";
 import type { ImportEventDto } from "../bindings/ImportEventDto";
 import type { LogLine } from "../bindings/LogLine";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
@@ -83,6 +84,16 @@ export interface EventPayloads {
   "assets://changed": AssetChanged;
   /** Import-job progress (P4.2.4). */
   "assets://import": ImportEventDto;
+  /**
+   * Capture-wizard stage progress (P25.4).
+   *
+   * Its own channel rather than a case of `assets://import`: an import job is
+   * one unit of work with a source file, and a capture is FIVE stages with
+   * different progress models (per photograph, per finish step, and two that
+   * honestly report none). Folding it in would have made every existing reader
+   * of that channel learn a shape it has no use for.
+   */
+  "photogrammetry://progress": CaptureProgressDto;
   /** A named content collection changed (create/rename/delete/add/remove) → re-fetch (E-P8). */
   "collections://changed": null;
   /** The project audio mixer was saved → re-fetch the Audio Mixer panel (E-P9). */
