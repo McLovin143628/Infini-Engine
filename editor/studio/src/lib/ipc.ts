@@ -85,6 +85,9 @@ import type { GizmoModeDto } from "../bindings/GizmoModeDto";
 import type { GizmoSpaceDto } from "../bindings/GizmoSpaceDto";
 import type { SortingLayerDto } from "../bindings/SortingLayerDto";
 import type { TerrainBiomesDto } from "../bindings/TerrainBiomesDto";
+import type { CharacterCreateDto } from "../bindings/CharacterCreateDto";
+import type { CharacterPreviewDto } from "../bindings/CharacterPreviewDto";
+import type { CharacterSpecDto } from "../bindings/CharacterSpecDto";
 import type { TerrainImportPlanDto } from "../bindings/TerrainImportPlanDto";
 import type { TerrainImportResultDto } from "../bindings/TerrainImportResultDto";
 import type { TerrainImportSettingsDto } from "../bindings/TerrainImportSettingsDto";
@@ -1189,6 +1192,39 @@ export const skel = {
  * with the list of what it does.
  */
 export type BodyPlanName = "biped" | "quadruped" | "hexapod" | "npedal";
+
+/**
+ * **New Character from Template** (P24.5) — the wizard's two doors.
+ *
+ * `preview` writes nothing and is called on every edit, so a refusal comes back
+ * INSIDE the DTO (`refusal` set, `rig` null) rather than as a rejected promise:
+ * half the intermediate states of a proportion drag are invalid and an error
+ * toast per keystroke is not a wizard. `create` is the explicit action and does
+ * reject, because by then the user has pressed a button.
+ */
+export const character = {
+  /** What this spec would produce. Writes nothing. */
+  preview: (spec: CharacterSpecDto): Promise<CharacterPreviewDto> =>
+    invoke<CharacterPreviewDto>("character_preview", { spec }),
+
+  /**
+   * Generate the rig, body, three clips and the state machine under
+   * `Content/<folder>`, and optionally add a ready actor to the open level.
+   * `at` is the actor's world position in **metres** (units doctrine).
+   */
+  create: (
+    spec: CharacterSpecDto,
+    opts: { addToScene?: boolean; at?: [number, number, number] } = {},
+  ): Promise<CharacterCreateDto> =>
+    invoke<CharacterCreateDto>("character_create", {
+      spec,
+      addToScene: opts.addToScene ?? false,
+      at: opts.at ?? null,
+    }),
+
+  /** The content sub-folder generated characters land in. */
+  folder: (): Promise<string> => invoke<string>("character_folder"),
+};
 
 /**
  * Cook / Package (P9.2 item 3). Runs `inf_packager::cook` against the open

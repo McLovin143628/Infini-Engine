@@ -201,6 +201,10 @@ export const MENU_BAR: TopMenu[] = [
         act("actor.place.directionalLight", "Directional Light"),
         act("actor.place.camera", "Camera"),
       ]),
+      // The P24.5 wizard. Its own entry rather than a Place Actor row, for the
+      // Terrain Import wizard's reason: it does not place a primitive, it
+      // GENERATES six assets and then places an actor wearing them.
+      act("actor.newCharacter", "New Character from Template…"),
       sep,
       act("actor.duplicate", "Duplicate", "Ctrl+W"),
       act("actor.delete", "Delete", "Del"),

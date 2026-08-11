@@ -75,7 +75,13 @@ fn parse_guids(v: &[String]) -> Vec<Uuid> {
     v.iter().filter_map(|s| Uuid::parse_str(s).ok()).collect()
 }
 
-fn lock(doc: &Arc<Mutex<SceneDoc>>) -> Result<std::sync::MutexGuard<'_, SceneDoc>, String> {
+/// `pub(super)` since P24.5: the New Character wizard's command spawns its actor
+/// through `SceneDoc::edit_create_character` and then emits the delta, which is
+/// exactly what `scene_create` does one module over. A second lock helper would
+/// be a second place the poison-to-`String` mapping could drift.
+pub(super) fn lock(
+    doc: &Arc<Mutex<SceneDoc>>,
+) -> Result<std::sync::MutexGuard<'_, SceneDoc>, String> {
     doc.lock().map_err(|e| e.to_string())
 }
 

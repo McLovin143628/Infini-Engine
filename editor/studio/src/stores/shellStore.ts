@@ -22,6 +22,8 @@ interface ShellState {
   erodeOpen: boolean;
   /** Terrain Import wizard open (File ▸ Import Terrain…, P16.4a). */
   terrainImportOpen: boolean;
+  /** New Character wizard open (Actor ▸ New Character from Template…, P24.5). */
+  characterWizardOpen: boolean;
   /** Content Drawer slide-up (P1.4.3). */
   drawerOpen: boolean;
   /** Command palette overlay (P1.4.5). */
@@ -34,6 +36,7 @@ interface ShellState {
   setPackageDialogOpen: (open: boolean) => void;
   setErodeOpen: (open: boolean) => void;
   setTerrainImportOpen: (open: boolean) => void;
+  setCharacterWizardOpen: (open: boolean) => void;
   setDrawerOpen: (open: boolean) => void;
   toggleDrawer: () => void;
   setPaletteOpen: (open: boolean) => void;
@@ -48,6 +51,7 @@ export const useShellStore = create<ShellState>((set) => ({
   packageDialogOpen: false,
   erodeOpen: false,
   terrainImportOpen: false,
+  characterWizardOpen: false,
   drawerOpen: false,
   paletteOpen: false,
   pushStatus: (message, ttlMs = 4000) => {
@@ -65,6 +69,7 @@ export const useShellStore = create<ShellState>((set) => ({
   setPackageDialogOpen: (packageDialogOpen) => set({ packageDialogOpen }),
   setErodeOpen: (erodeOpen) => set({ erodeOpen }),
   setTerrainImportOpen: (terrainImportOpen) => set({ terrainImportOpen }),
+  setCharacterWizardOpen: (characterWizardOpen) => set({ characterWizardOpen }),
   setDrawerOpen: (drawerOpen) => set({ drawerOpen }),
   toggleDrawer: () => set((s) => ({ drawerOpen: !s.drawerOpen })),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),

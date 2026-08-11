@@ -5,6 +5,8 @@
 mod app;
 mod assets;
 mod audio;
+// P24.5 New Character from Template: the wizard's Ring-2 door.
+mod character;
 mod collections;
 mod collision_layers;
 mod dcc;
@@ -128,6 +130,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         pcg::pcg_save,
         pcg::pcg_evaluate,
         pcg::pcg_evaluate_biomes,
+        character::character_preview,
+        character::character_create,
+        character::character_folder,
         skel::skel_create_template,
         skel::skel_open,
         skel::skel_close,

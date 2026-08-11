@@ -12,6 +12,7 @@ import LayoutDialog from "./shell/LayoutDialog";
 import SortingLayersDialog from "./shell/SortingLayersDialog";
 import PackageDialog from "./shell/PackageDialog";
 import ErodeDialog from "./shell/ErodeDialog";
+import CharacterWizardDialog from "./shell/CharacterWizardDialog";
 import TerrainImportDialog from "./shell/TerrainImportDialog";
 import ContentDrawer from "./shell/ContentDrawer";
 import CommandPalette from "./shell/CommandPalette";
@@ -261,6 +262,7 @@ export default function App() {
       <PackageDialog />
       <ErodeDialog />
       <TerrainImportDialog />
+      <CharacterWizardDialog />
       <CommandPalette />
       <StartScreen />
       <FirstRunTour />

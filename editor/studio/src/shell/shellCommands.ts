@@ -148,6 +148,13 @@ export function bootstrapShellCommands(): void {
     useShellStore.getState().setTerrainImportOpen(true);
   });
 
+  // The New Character wizard (P24.5): Actor ▸ New Character from Template… — its
+  // own entry rather than a Place Actor row, because it GENERATES six assets and
+  // then places an actor wearing them.
+  setCommandHandler("actor.newCharacter", () => {
+    useShellStore.getState().setCharacterWizardOpen(true);
+  });
+
   // Layout persistence (P1.2.5).
   setCommandHandler("window.layout.default", () => {
     useDockLayout.getState().resetLayout();
