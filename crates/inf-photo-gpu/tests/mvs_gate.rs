@@ -18,17 +18,23 @@
 //! the floor; no dense stage over these photographs can beat it, and the claim
 //! about the pipeline is that it lands near it rather than above it.
 //!
-//! # The two tiers, for the GPU
+//! # The three tiers, for the GPU
 //!
 //! The golden harness's doctrine, applied to compute:
 //!
 //! * **Same-adapter determinism is asserted hard** — the GPU pipeline run twice
 //!   in one process must be byte-identical, no tolerance.
-//! * **CPU against GPU is measured**, because a driver may contract a
-//!   multiply-add and a Vulkan `f32` divide is allowed 2.5 ULP. The census stage
-//!   is bit-exact by construction (integers only) and *is* asserted hard; the
-//!   sweep is held to a bound that was measured, is stated in the arm, and is
-//!   proved non-vacuous.
+//! * **Structural CPU/GPU claims are asserted hard on every adapter**: the
+//!   census stage is bit-exact *by construction* (integers only, nothing for a
+//!   driver to decide), the two backends may not disagree about whether a pixel
+//!   has a depth beyond a fraction a last-ULP story can produce, and a kernel
+//!   dispatched over an empty volume must cast exactly zero votes.
+//! * **The measured numbers are a property of this code AND that adapter**, so
+//!   they are asserted on the class of adapter they were measured on and
+//!   *reported* everywhere else — see [`parity_is_strict`]. A back end is
+//!   permitted to contract a multiply-add and a Vulkan `f32` divide is allowed
+//!   2.5 ULP; `plane_sweep.wgsl`'s own header names that operation as the one
+//!   parity risk in the crate.
 //! * Every GPU arm **skips cleanly** with no adapter.
 //!
 //! Every arm here is mutation-verified; the batch report records which arms go
@@ -84,12 +90,17 @@ use inf_photo_gpu::{
 // 3-voxel truncation); 76.2% of 5 825 visible truth samples have a vertex within
 // 4 voxels.
 //
-// MEASURED, GPU against CPU on an RTX 4070 Ti / Vulkan: census **0 of 460 800**
-// words differ; TSDF fusion casts an identical 5 058 votes with **0 weight
-// words** differing and 404 of 40 800 distance words differing by at most
-// 3.6e-6 of a truncation; the sweep agrees on **validity for every pixel**, is
-// bit-identical for 83.4% of them, is inside 1e-6 relative for 99.998%, and its
-// worst disagreement is 3.94e-3 relative — under half of one plane step.
+// MEASURED, GPU against CPU **on an RTX 4070 Ti / Vulkan**: census 0 of 460 800
+// words differ; TSDF fusion casts an identical 5 058 votes with 0 weight words
+// differing and 404 of 40 800 distance words differing by at most 3.6e-6 of a
+// truncation; the sweep agrees on validity for every pixel, is bit-identical for
+// 83.4% of them, is inside 1e-6 relative for 99.998%, and its worst
+// disagreement is 3.94e-3 relative — under half of one plane step.
+//
+// That last paragraph names an adapter because those numbers ARE a property of
+// one, and they are asserted only where they were measured — see
+// `parity_is_strict`. Everything above it is a property of the fixture and the
+// CPU reference alone, and is asserted everywhere.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Every station must get a depth map.
@@ -131,11 +142,31 @@ const MIN_COMPLETENESS: f64 = 0.55;
 const COMPLETENESS_VOXELS: f64 = 4.0;
 
 /// Share of both-valid pixels that must be **bit-identical** between the CPU and
-/// the GPU.
+/// the GPU. Measured tier only — see [`parity_is_strict`].
 const MIN_BITWISE_PARITY: f64 = 0.75;
 /// Share that must agree to within one part in a million — a last-ULP
-/// difference and nothing more.
+/// difference and nothing more. Measured tier only.
 const MIN_ULP_PARITY: f64 = 0.999;
+/// The same share, on **any** adapter.
+///
+/// This is the mechanism-justified bound rather than a measured one, and it is
+/// the sharper of the two claims. A contraction or a 2.5-ULP divide moves a
+/// depth by a *last ULP*, which is `~6e-8` relative and therefore inside `1e-6`
+/// by construction; the only way a pixel lands outside `1e-6` is if its `argmin`
+/// moved to a different plane, and a plane step here is `1.3e-2`. So this
+/// fraction is not "how exact is the adapter" — it is **the share of pixels
+/// whose winning plane the two backends agree on**, which no rounding rule can
+/// touch. MEASURED: 99.998% on an RTX 4070 Ti; 98.19% with the `argmin`
+/// tie-break inverted, which is the divergence class this bound exists to catch.
+const MIN_ULP_PARITY_ANY_ADAPTER: f64 = 0.99;
+/// Share of comparable pixels allowed to disagree about **whether** there is a
+/// depth at all, on any adapter.
+///
+/// A last-ULP difference flips a pixel's validity only where its winning cost
+/// sits exactly on the `max_cost` or `min_confidence` boundary — a coincidence,
+/// not a rate. MEASURED: zero on an RTX 4070 Ti; 3.4% with the tie-break
+/// inverted.
+const MAX_VALIDITY_DISAGREEMENT: f64 = 0.005;
 /// The worst relative depth disagreement allowed between the two backends.
 /// A plane step is about 1.3e-2 relative here, so this is under half a plane.
 const MAX_PARITY_RELATIVE: f64 = 6.0e-3;
@@ -143,8 +174,18 @@ const MAX_PARITY_RELATIVE: f64 = 6.0e-3;
 /// fraction of the **truncation band** — the only scale a TSDF distance has.
 /// A last-ULP difference in the voxel-to-camera multiply-add is `~1e-7`.
 const MAX_FUSION_DISTANCE_GAP: f64 = 1.0e-5;
-/// Share of fused distance words allowed to differ at all.
+/// Share of fused distance words allowed to differ at all. Measured tier only.
 const MAX_FUSION_DISTANCE_DIFFERING: f64 = 0.05;
+/// Share of fused distance words that must be inside [`MAX_FUSION_DISTANCE_GAP`]
+/// on **any** adapter. The tail this leaves is the voxels whose
+/// `floor(px + 0.5)` landed on a different depth sample — a coincidence at a
+/// half-integer, not a rate.
+const MIN_FUSION_DISTANCE_WITHIN_GAP: f64 = 0.99;
+/// Share of votes the two backends may disagree about on any adapter, for the
+/// same reason.
+const MAX_FUSION_VOTE_DISAGREEMENT: f64 = 0.01;
+/// Share of accumulated weight words allowed to differ on any adapter.
+const MAX_FUSION_WEIGHT_DIFFERING: f64 = 0.01;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixtures, rendered and solved once
@@ -214,6 +255,51 @@ fn gpu_or_skip(name: &str) -> Option<DenseGpu> {
             None
         }
     }
+}
+
+/// Whether this adapter is the class the **measured** CPU-against-GPU numbers in
+/// the header were taken on, and so whether they are asserted or reported.
+///
+/// The numbers are a property of *this code and that adapter*, not of this code
+/// alone. `plane_sweep.wgsl`'s header names the one reason: a back end's
+/// compiler may **contract** a multiply-add into an fma, which is a different
+/// `f32` by up to one ULP — and Metal's compiler contracts by default where the
+/// Vulkan back end these bounds were measured on does not. Hard-gating an
+/// 83.4%-measured, 75%-floored fraction on every adapter would make the one CI
+/// leg that has an adapter at all red for something that is not a regression:
+/// Linux and Windows have no Vulkan ICD (and the dx12 back end, whose WARP is
+/// the Windows software fallback, is compiled out), so they skip; **macOS runs
+/// these arms**, on the "Apple Paravirtual device" `inf-render`'s `frame_budget`
+/// gate already names by that string for the same class of reason.
+///
+/// So: the structural claims are hard everywhere, and the measured ones are hard
+/// on a real discrete card. `INF_PHOTO_GPU_STRICT=1` forces the measured tier on
+/// anywhere — which is what to do after touching a shader on a machine whose
+/// adapter is not discrete — and `=0` forces it off.
+fn parity_is_strict(gpu: &DenseGpu) -> bool {
+    if let Ok(v) = std::env::var("INF_PHOTO_GPU_STRICT") {
+        return v != "0";
+    }
+    let info = gpu.gpu.adapter.get_info();
+    let name = info.name.to_ascii_lowercase();
+    let virtualized =
+        name.contains("paravirtual") || name.contains("virtualbox") || name.contains("vmware");
+    info.device_type == wgpu::DeviceType::DiscreteGpu && !virtualized
+}
+
+/// Announce which tier an arm is running in, so a green log says which claims
+/// were actually made.
+fn announce_tier(name: &str, gpu: &DenseGpu, strict: bool) -> bool {
+    if strict {
+        println!("P25.2 {name}: MEASURED tier on {}", gpu.adapter_name());
+    } else {
+        println!(
+            "P25.2 {name}: STRUCTURAL tier on {} — the measured cross-backend bounds are reported \
+             above, not asserted; set INF_PHOTO_GPU_STRICT=1 to assert them here",
+            gpu.adapter_name()
+        );
+    }
+    strict
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -847,12 +933,53 @@ fn the_gpu_sweep_agrees_with_the_cpu_within_a_measured_bound() {
     let bitwise = identical as f64 / both as f64;
     let ulp = relative.iter().filter(|r| **r <= 1e-6).count() as f64 / both as f64;
     let worst = relative.iter().copied().fold(0.0f64, f64::max);
+    let validity_share = validity as f64 / (both + validity) as f64;
     println!(
-        "P25.2 sweep parity: {both} comparable pixels, {validity} validity disagreements, \
-         {:.3}% bit-identical, {:.4}% within 1e-6 relative, worst {worst:.3e} relative",
+        "P25.2 sweep parity: {both} comparable pixels, {validity} validity disagreements \
+         ({:.4}%), {:.3}% bit-identical, {:.4}% within 1e-6 relative, worst {worst:.3e} relative",
+        100.0 * validity_share,
         100.0 * bitwise,
         100.0 * ulp
     );
+
+    // ── structural, on every adapter ────────────────────────────────────────
+    // Anti-vacuity: a shader that wrote zeros everywhere would have zero
+    // validity disagreements only if the CPU also did. The reports have to
+    // describe the same reconstruction.
+    assert!(
+        on_gpu.report.vertices > 20_000 && on_gpu.report.votes > 1_000_000,
+        "the GPU run produced {} vertices from {} votes",
+        on_gpu.report.vertices,
+        on_gpu.report.votes
+    );
+    // These two are the divergence gate, and they are mechanism-justified rather
+    // than measured: a contraction moves a depth by a last ULP, which is inside
+    // `1e-6` relative by construction, so a pixel OUTSIDE `1e-6` is a pixel whose
+    // winning plane the two backends chose differently. MEASURED, with the
+    // `argmin` tie-break inverted on the CPU: 3.4% validity disagreements and
+    // 98.19% inside `1e-6` — both red here, and note that 82.1% of pixels were
+    // still bit-identical under that mutation, which is why the bit-identical
+    // fraction is the *measured* tier's claim and not this one's.
+    assert!(
+        validity_share <= MAX_VALIDITY_DISAGREEMENT,
+        "{validity} of {} comparable pixels ({:.3}%) have a depth on one backend and not the \
+         other (bound {:.1}%) — that is a different winning plane, not a rounding difference",
+        both + validity,
+        100.0 * validity_share,
+        100.0 * MAX_VALIDITY_DISAGREEMENT
+    );
+    assert!(
+        ulp >= MIN_ULP_PARITY_ANY_ADAPTER,
+        "only {:.4}% of pixels agree to 1e-6 relative (floor {:.0}%) — the two backends are \
+         choosing different planes, which no rounding rule can do",
+        100.0 * ulp,
+        100.0 * MIN_ULP_PARITY_ANY_ADAPTER
+    );
+
+    // ── the measured tier ───────────────────────────────────────────────────
+    if !announce_tier("sweep parity", &gpu, parity_is_strict(&gpu)) {
+        return;
+    }
     assert_eq!(
         validity, 0,
         "{validity} pixels have a depth on one backend and not the other"
@@ -872,15 +999,6 @@ fn the_gpu_sweep_agrees_with_the_cpu_within_a_measured_bound() {
     assert!(
         worst <= MAX_PARITY_RELATIVE,
         "the worst backend disagreement is {worst:.3e} relative (bound {MAX_PARITY_RELATIVE:.0e})"
-    );
-    // Anti-vacuity: a shader that wrote zeros everywhere would have zero
-    // validity disagreements only if the CPU also did. The reports have to
-    // describe the same reconstruction.
-    assert!(
-        on_gpu.report.vertices > 20_000 && on_gpu.report.votes > 1_000_000,
-        "the GPU run produced {} vertices from {} votes",
-        on_gpu.report.vertices,
-        on_gpu.report.votes
     );
 }
 
@@ -924,37 +1042,74 @@ fn the_gpu_fusion_agrees_with_the_cpu_on_identical_inputs() {
         .count();
     // The distances that DO differ, as a fraction of the truncation band — the
     // only scale a signed distance in a TSDF has.
-    let worst = a
+    let gaps: Vec<f64> = a
         .distance
         .iter()
         .zip(&b.distance)
         .map(|(x, y)| ((x - y).abs() / a.truncation) as f64)
-        .fold(0.0f64, f64::max);
+        .collect();
+    let worst = gaps.iter().copied().fold(0.0f64, f64::max);
+    let within = gaps
+        .iter()
+        .filter(|g| **g <= MAX_FUSION_DISTANCE_GAP)
+        .count() as f64
+        / gaps.len() as f64;
+    let vote_share = votes_a.abs_diff(votes_b) as f64 / votes_a.max(1) as f64;
     println!(
         "P25.2 fusion parity: votes {votes_a} vs {votes_b}; {distance} of {} distance words and \
-         {weight} weight words differ; worst distance gap {worst:.3e} of a truncation",
-        a.len()
+         {weight} weight words differ; worst distance gap {worst:.3e} of a truncation, {:.3}% \
+         inside {MAX_FUSION_DISTANCE_GAP:.0e}",
+        a.len(),
+        100.0 * within
     );
+
+    // ── structural, on every adapter ────────────────────────────────────────
     // Anti-vacuity first: a grid nothing voted into would agree perfectly.
     assert!(
         votes_a > 200,
         "only {votes_a} votes were cast — this arm is comparing two empty grids"
     );
-    // The vote count and the weight field are **integer-selected**: which depth
-    // sample a voxel reads is `floor(px + 0.5)` and what it adds is a value read
-    // straight out of a buffer. Both are asserted hard, because a difference in
-    // either means the two backends disagreed about WHICH pixel a voxel sees,
-    // not about the last bit of an arithmetic result.
+    // A CORRECTION to the reasoning this arm shipped with. The vote count and the
+    // weight field were called "integer-selected, therefore asserted hard": the
+    // weight a voxel adds is indeed read straight out of a buffer, but WHICH word
+    // it reads is `floor(px + 0.5)` over `px`, and `px` is the end of the very
+    // chain of `f32` multiply-adds `tsdf.wgsl`'s header names as contractible. So
+    // being integer-selected does not make a vote adapter-independent — it makes
+    // a disagreement LARGE (a whole different pixel) rather than small. What is
+    // adapter-independent is the RATE: a contracted ULP moves `px` across a
+    // half-integer only by coincidence, so a percent-scale disagreement is a
+    // different kernel and not a different rounding rule.
+    assert!(
+        vote_share <= MAX_FUSION_VOTE_DISAGREEMENT,
+        "the two backends cast {votes_a} and {votes_b} votes ({:.2}% apart, bound {:.0}%) — they \
+         disagree about which depth samples a voxel can see",
+        100.0 * vote_share,
+        100.0 * MAX_FUSION_VOTE_DISAGREEMENT
+    );
+    assert!(
+        weight as f64 <= a.len() as f64 * MAX_FUSION_WEIGHT_DIFFERING,
+        "{weight} of {} accumulated weights differ (bound {:.0}%)",
+        a.len(),
+        100.0 * MAX_FUSION_WEIGHT_DIFFERING
+    );
+    assert!(
+        within >= MIN_FUSION_DISTANCE_WITHIN_GAP,
+        "only {:.2}% of fused distances are inside {MAX_FUSION_DISTANCE_GAP:.0e} of a truncation \
+         (floor {:.0}%) — that is a different field, not a different last bit",
+        100.0 * within,
+        100.0 * MIN_FUSION_DISTANCE_WITHIN_GAP
+    );
+
+    // ── the measured tier ───────────────────────────────────────────────────
+    if !announce_tier("fusion parity", &gpu, parity_is_strict(&gpu)) {
+        return;
+    }
     assert_eq!(
         votes_a, votes_b,
         "the two backends cast different numbers of votes — they disagree about which depth \
          samples a voxel can see"
     );
-    assert_eq!(
-        weight, 0,
-        "{weight} accumulated weights differ; the weight a voxel adds is read from a buffer, so a \
-         difference here is a different sample, not a different sum"
-    );
+    assert_eq!(weight, 0, "{weight} accumulated weights differ");
     // The distance is `w * (observed - qz)`, and `qz` is the end of a chain of
     // `f32` multiply-adds a driver may contract. THAT is the named operation.
     // Measured on an RTX 4070 Ti / Vulkan: 404 of 40 800 words differ (1.0%),
