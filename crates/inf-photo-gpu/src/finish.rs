@@ -492,7 +492,10 @@ pub fn hemisphere_basis(count: usize) -> Vec<DVec3> {
     let mut out = Vec::with_capacity(count);
     let base = inf_photo::hash::Hash64::new(0x50_25_03_A0_1E_5A_11_07);
     let mut draw = 0u64;
-    while out.len() < count {
+    // The cap is checked **before** the draw, not after the push. Written the
+    // other way round a `continue` skips it, so the one regime it exists for —
+    // a hash that rejects every sample — is the one regime it cannot stop.
+    while out.len() < count && draw <= 1_000_000 {
         let h = base.mix_u64(draw);
         draw += 1;
         let x = h.unit() * 2.0 - 1.0;
@@ -506,9 +509,6 @@ pub fn hemisphere_basis(count: usize) -> Vec<DVec3> {
             continue;
         }
         out.push(v / l2.sqrt());
-        if draw > 1_000_000 {
-            break;
-        }
     }
     out
 }
@@ -973,12 +973,19 @@ pub struct DelightConfig {
     ///
     /// **0.25, and the number is a measurement.** On the P25.3 fixture — a
     /// textured scene under a light the renderer applied exactly, so the answer
-    /// is known — the best directional fit explains **8.2%** of the brightness
-    /// variation and recovers a directional term **seven times too small**
-    /// (0.078 against a true 0.59 in luma). The other 92% is the dot texture and
-    /// the plane tints. Applied anyway it made the albedo error **worse**: p50
-    /// 0.068 to 0.255 against the known albedo. A threshold under 0.10 would
-    /// have accepted that. See `docs/memos/p25-delighting-v1.md`.
+    /// is known — the best directional fit explains **6.4%** of the brightness
+    /// variation and recovers a directional term **more than eight times too
+    /// small** (0.070 against a true 0.600 in luma). The other 93.6% is the dot
+    /// texture and the plane tints. Applied anyway it made the albedo error
+    /// **worse**: p50 0.0680 to 0.0700 against the known albedo. A threshold
+    /// under 0.064 would have accepted that.
+    ///
+    /// The move is small because the fit is small — a directional term of 0.070
+    /// against an ambient of 0.260 makes the mean-preserving divide nearly the
+    /// identity — so the case for the guard is that the number is *noise*, not
+    /// that trusting it ruins a texture. See
+    /// `docs/memos/p25-delighting-v1.md`, whose closing section records that the
+    /// figures here were once 8.2% / 0.078 / 0.255 and why they were wrong.
     pub min_explained: f64,
 }
 
@@ -1413,6 +1420,49 @@ mod tests {
         assert!(
             far > 0.05 && near < 0.99,
             "ao is saturated: near {near}, far {far}"
+        );
+    }
+
+    #[test]
+    fn the_ao_ray_length_is_read_rather_than_decorative() {
+        // `ao_distance_voxels` is documented as the knob that chooses what the
+        // bake measures — "short rays measure creases; long ones measure the
+        // room" — and until this arm existed **nothing anywhere asserted that it
+        // is read at all**. MEASURED: replacing the ray length with infinity
+        // left the whole battery green, the P25.3 gate included, because a
+        // uniformly darker ambient-occlusion map is still ordered and still
+        // unsaturated. An order assertion cannot see a scale.
+        //
+        // So this is the scale assertion: one texel, far from the only occluder
+        // there is, with a ray too short to reach it and a ray long enough.
+        let surface = PlaneAndWall { wall_x: 1.0 };
+        let (p, n, uv, i) = quad();
+        let atlas = rasterize_atlas(&p, &n, &uv, &i, 16);
+        let bake = |voxels: f64| {
+            let cfg = BakeConfig {
+                size: 16,
+                ao_rays: 64,
+                ao_distance_voxels: voxels,
+                ao_bias_voxels: 0.02,
+                ..BakeConfig::default()
+            };
+            bake_ao(&atlas, &surface, 0.1, &cfg, &pool())
+        };
+        // Column 0 sits 0.97 units from the wall, and the only other surface is
+        // the floor the texel is *on* — which a cosine hemisphere above it never
+        // fires below. So 0.4 units of ray reach nothing at all, and 4.0 units
+        // reach the wall.
+        let far = 8 * 16;
+        let short = bake(4.0).data[far][0];
+        let long = bake(40.0).data[far][0];
+        assert_eq!(
+            short, 1.0,
+            "a 0.4-unit ray found geometry 0.97 units away ({short}) — the length is not bounding \
+             the occlusion query"
+        );
+        assert!(
+            long < 0.9,
+            "a 4.0-unit ray did not reach a wall 0.97 units away: {long}"
         );
     }
 
