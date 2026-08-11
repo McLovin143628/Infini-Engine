@@ -192,6 +192,15 @@ pub struct RuntimeSim {
     /// Resolvable `.inf_hair` hairstyles keyed by asset GUID (P24.4) - the
     /// runtime mirror of `SimSession::hairs`.
     hairs: BTreeMap<Uuid, inf_anim::HairAsset>,
+    /// **How densely this session's hair DRAWS** (P24.4) - a render budget, and
+    /// the only tier-derived number on the hair path.
+    ///
+    /// Deliberately not `ClothSim::quality`'s twin: a substep budget is folded
+    /// into `state_bytes` and must therefore be content, while ribbon geometry is
+    /// not folded at all and may therefore follow the machine. `inf-ecs`'
+    /// `the_detail_draws_differently_and_traces_identically` is what keeps those
+    /// two sentences true of the code.
+    hair_detail: inf_anim::HairDetail,
     stepper: FixedStep,
     /// Actors keyed by `Guid` (deterministic iteration).
     actors: BTreeMap<Uuid, ActorState>,
@@ -346,6 +355,7 @@ impl RuntimeSim {
             pose_clips: BTreeMap::new(),
             cloths: BTreeMap::new(),
             hairs: BTreeMap::new(),
+            hair_detail: inf_anim::HairDetail::GUIDES,
             stepper: FixedStep::from_hz(hz),
             actors: states,
             entities,
@@ -450,6 +460,21 @@ impl RuntimeSim {
     /// The hairstyles this sim can resolve (a read for tests and gates).
     pub fn hairs(&self) -> &BTreeMap<Uuid, inf_anim::HairAsset> {
         &self.hairs
+    }
+
+    /// Set how densely hair draws (P24.4).
+    ///
+    /// The `set_debris_budget` seam, one system over: the *tier -> detail*
+    /// mapping lives at the host (`inf_render::hair_detail_for`), because Ring 0
+    /// must not know what a GPU is, and the value arrives here as data. A session
+    /// nobody tells runs on `HairDetail::GUIDES`, which is what P24.4 v1 drew.
+    pub fn set_hair_detail(&mut self, detail: inf_anim::HairDetail) {
+        self.hair_detail = detail;
+    }
+
+    /// The hair detail this session draws at (a read for tests and gates).
+    pub fn hair_detail(&self) -> inf_anim::HairDetail {
+        self.hair_detail
     }
 
     /// Register a resolvable `.inf_audio` clip payload by asset GUID (P12.3) — the
@@ -1129,6 +1154,7 @@ impl RuntimeSim {
         if self.hairs.is_empty() {
             return;
         }
+        let detail = self.hair_detail;
         let Self {
             world,
             hairs,
@@ -1138,7 +1164,7 @@ impl RuntimeSim {
         let (hairs, skeletons) = (&*hairs, &*skeletons);
         let styles = |g: Uuid| hairs.get(&g);
         let skels = |g: Uuid| skeletons.get(&g);
-        inf_ecs::hair::step_hair_simulation(world, dt, &styles, &skels);
+        inf_ecs::hair::step_hair_simulation(world, dt, &styles, &skels, detail);
     }
 
     /// Snapshot the play-head `t` of every root-motion-driven playing entity

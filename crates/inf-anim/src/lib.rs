@@ -64,11 +64,13 @@ pub use blend_space::{
 };
 pub use clip::{AnimClip, Interpolation, JointTrack, QuatTrack, Vec3Track};
 pub use cloth::{
-    capsules_for, step_cloth, Capsule, ClothAsset, ClothCapsule, ClothEdge, ClothError,
+    body_capsules, capsules_for, step_cloth, Capsule, ClothAsset, ClothCapsule, ClothEdge,
+    ClothError,
     ClothMaterial, ClothState, GRAVITY_M_S2,
 };
 pub use hair::{
-    ribbon_mesh, roots_for, step_hair, HairAsset, HairMaterial, HairRoot, HairState, HairStrand,
+    render_mesh, ribbon_mesh, roots_for, step_hair, HairAsset, HairDetail, HairGroom, HairMaterial,
+    HairRoot, HairState, HairStrand,
 };
 pub use ik::{
     fabrik, rotation_between, solve_chain, two_bone_positions, IkError, IkReport,

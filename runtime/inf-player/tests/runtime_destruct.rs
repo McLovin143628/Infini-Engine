@@ -884,3 +884,42 @@ fn the_windowed_player_exempts_pie_from_the_tier_budget() {
         "nothing in the windowed player sets a debris budget any more"
     );
 }
+
+/// **THE HAIR DETAIL IS THE OTHER ANSWER, DELIBERATELY** (P24.4).
+///
+/// The arm above pins that debris is asked through the *session* door, so an
+/// embedded PIE does **not** clamp: its budget changes the simulation. Hair is
+/// the opposite case and must therefore be wired the opposite way — ribbon
+/// geometry is never folded into `state_bytes`
+/// (`inf_ecs::hair::the_detail_draws_differently_and_traces_identically` is the
+/// measurement), so the right answer is that PIE draws what the shipped player
+/// would draw on this machine.
+///
+/// Two behaviours that read as one convention are how a mirror quietly acquires a
+/// bug, so both are pinned in the same file, next to each other, with the reason
+/// each is what it is.
+#[test]
+fn the_windowed_player_applies_the_tier_hair_detail_to_pie_too() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/window.rs"),
+    )
+    .expect("window.rs is readable")
+    .replace("\r\n", "\n");
+
+    assert!(
+        src.contains("inf_render::hair_detail_for(host.tier())"),
+        "the windowed player no longer maps its detected tier onto a hair detail — \
+         every machine would draw the same guide count and `HairDetail::CARDS` \
+         would have no production caller at all"
+    );
+    assert!(
+        src.contains("set_hair_detail("),
+        "nothing in the windowed player applies a hair detail to its session"
+    );
+    assert!(
+        !src.contains("hair_detail_for_session("),
+        "the hair detail acquired a PIE exemption — it must NOT have one (see this \
+         test's docs: the exemption exists for budgets that change the sim, and \
+         this one does not)"
+    );
+}

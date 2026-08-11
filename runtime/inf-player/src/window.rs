@@ -412,6 +412,23 @@ impl ApplicationHandler for PlayerApp {
                         lifetime_s: spec.lifetime_s,
                     });
                 }
+                // P24.4 — THE PER-TIER HAIR DETAIL, the second `RenderTier` → budget
+                // mapping and the only one that reaches animation.
+                //
+                // Asked through `hair_detail_for` and **not** through a
+                // `…_for_session(tier, pie)` twin, which is the deliberate
+                // difference from the line above: the debris budget is read by
+                // `step_fractures` and therefore *changes the simulation*, so an
+                // embedded PIE must run the same budget the editor's Simulate does.
+                // Ribbon geometry changes nothing in `state_bytes` (asserted by
+                // `inf-ecs`' `the_detail_draws_differently_and_traces_identically`),
+                // so here the right answer is the other one: PIE draws what the
+                // shipped player would draw on this machine.
+                let hair = inf_render::hair_detail_for(host.tier());
+                self.sim.set_hair_detail(inf_anim::HairDetail {
+                    guide_stride: hair.guide_stride,
+                    strands_per_guide: hair.strands_per_guide,
+                });
                 // Report our native window handle so the editor can reparent us
                 // into the viewport slot (embedded PIE).
                 if let Some(pie) = self.pie.as_mut() {

@@ -42,7 +42,10 @@ pub use atmosphere::{
 pub use camera::{
     ortho_reverse_z, OrthoParams, RenderView, DEPTH_CLEAR, DEPTH_COMPARE, DEPTH_FORMAT,
 };
-pub use caps::{choose_tier, detect_and_clamp, detect_tier, AdapterCaps, RenderTier};
+pub use caps::{
+    choose_tier, detect_and_clamp, detect_tier, hair_detail_for, AdapterCaps, HairDetailSpec,
+    RenderTier,
+};
 pub use clouds::{
     detail_texel, shape_texel, wind_offset, CloudParams, CloudQuality, CloudVolumes,
     CPU_GPU_EXACT_FRACTION, CPU_GPU_SHADOW_TOLERANCE, CPU_GPU_TEXEL_TOLERANCE,

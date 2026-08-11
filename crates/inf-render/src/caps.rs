@@ -184,6 +184,56 @@ impl RenderTier {
     }
 }
 
+/// **How densely hair draws on this tier** (P24.4) — the second place a
+/// [`RenderTier`] is mapped onto a budget, and the twin of
+/// [`crate::debris_budget_for`] down to the reason it lives here.
+///
+/// The renderer owns the *mapping* because it is the crate that knows what a GPU
+/// is; the *value* is applied by the host, which calls `set_hair_detail` on its
+/// sim session. `inf-anim` (which owns hair) must stay tier-blind for the same
+/// reason `inf-physics` does: a Ring-0 simulation crate that could read a tier is
+/// one edit away from putting the machine into `state_bytes`.
+///
+/// Two numbers rather than a named quality enum, because a projector needs the
+/// geometry and a gate needs to measure it:
+///
+/// * **High** — three interpolated render strands around every guide.
+/// * **Medium** — the guides themselves (what P24.4 v1 always drew).
+/// * **Low** — **cards**: one strip per three guides, three guides wide, which is
+///   a third of the vertices for the same silhouette.
+pub fn hair_detail_for(tier: RenderTier) -> HairDetailSpec {
+    match tier {
+        RenderTier::High => HairDetailSpec {
+            guide_stride: 1,
+            strands_per_guide: 3,
+        },
+        RenderTier::Medium => HairDetailSpec {
+            guide_stride: 1,
+            strands_per_guide: 1,
+        },
+        RenderTier::Low => HairDetailSpec {
+            guide_stride: 3,
+            strands_per_guide: 1,
+        },
+    }
+}
+
+/// The hair render budget a tier maps to — the transport for
+/// [`hair_detail_for`], carried as plain numbers so this crate never names
+/// `inf_anim::HairDetail` (which it cannot: `inf-anim` is a **dev**-dependency
+/// here, deliberately, so the shipping renderer links no animation code).
+///
+/// The host copies the two fields across. That is the same two-type arrangement
+/// [`crate::DebrisBudgetSpec`] and `inf_physics::d3::DebrisBudget` already have,
+/// and the reason is the same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HairDetailSpec {
+    /// Draw every `n`-th guide, widening it by `n` (`0` is read as `1`).
+    pub guide_stride: u8,
+    /// Interpolated render strands per drawn guide (`0` is read as `1`).
+    pub strands_per_guide: u8,
+}
+
 /// The portable subset of adapter capabilities the tier decision reads. Captured
 /// as a plain struct so [`choose_tier`] is a pure, GPU-free, unit-testable
 /// function (synthetic caps in the tests).
@@ -575,6 +625,36 @@ mod tests {
             wanted,
             "a capable GPU keeps it"
         );
+    }
+
+    /// **The hair mapping is monotone and every tier is distinct** (P24.4).
+    ///
+    /// Distinct because a mapping that answered the same numbers for two tiers
+    /// would make "cards for lower tiers" a sentence with no consequence;
+    /// monotone because a *lower* tier must never ask for *more* geometry, which
+    /// is the whole point of a budget. Both are asserted rather than read off the
+    /// literals, so a future re-tune that inverts a pair fails here.
+    #[test]
+    fn the_hair_detail_falls_with_the_tier() {
+        let (high, medium, low) = (
+            hair_detail_for(RenderTier::High),
+            hair_detail_for(RenderTier::Medium),
+            hair_detail_for(RenderTier::Low),
+        );
+        assert_ne!(high, medium);
+        assert_ne!(medium, low);
+        // Cost per hairstyle is copies / stride: strictly falling.
+        let cost = |d: HairDetailSpec| {
+            f32::from(d.strands_per_guide.max(1)) / f32::from(d.guide_stride.max(1))
+        };
+        assert!(cost(high) > cost(medium), "High must draw more than Medium");
+        assert!(cost(medium) > cost(low), "Medium must draw more than Low");
+        // Medium is exactly "the guides" — the byte-stable v1 geometry, so a
+        // machine in the middle draws what every committed hair test compares.
+        assert_eq!(medium.guide_stride, 1);
+        assert_eq!(medium.strands_per_guide, 1);
+        // Low is a CARD: fewer strips, not fewer particles.
+        assert!(low.guide_stride > 1 && low.strands_per_guide == 1);
     }
 
     #[test]

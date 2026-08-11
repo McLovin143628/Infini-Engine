@@ -214,6 +214,15 @@ pub struct SimSession {
     /// Resolvable `.inf_hair` hairstyles keyed by asset GUID (P24.4) - the editor
     /// mirror of `RuntimeSim::hairs`.
     hairs: BTreeMap<Uuid, inf_anim::HairAsset>,
+    /// **How densely this session's hair DRAWS** (P24.4) - a render budget, and
+    /// the only tier-derived number on the hair path.
+    ///
+    /// Deliberately not `ClothSim::quality`'s twin: a substep budget is folded
+    /// into `state_bytes` and must therefore be content, while ribbon geometry is
+    /// not folded at all and may therefore follow the machine. `inf-ecs`'
+    /// `the_detail_draws_differently_and_traces_identically` is what keeps those
+    /// two sentences true of the code.
+    hair_detail: inf_anim::HairDetail,
     /// Currently-held keys/actions.
     input: SimInput,
     /// Keys/actions held the previous tick (for rising-edge detection).
@@ -398,6 +407,7 @@ impl SimSession {
             pose_clips: BTreeMap::new(),
             cloths: BTreeMap::new(),
             hairs: BTreeMap::new(),
+            hair_detail: inf_anim::HairDetail::GUIDES,
             input: SimInput::default(),
             prev_down: BTreeSet::new(),
             just_pressed: BTreeSet::new(),
@@ -560,6 +570,21 @@ impl SimSession {
     /// The hairstyles this session can resolve (a read for tests and gates).
     pub fn hairs(&self) -> &BTreeMap<Uuid, inf_anim::HairAsset> {
         &self.hairs
+    }
+
+    /// Set how densely hair draws (P24.4).
+    ///
+    /// The `set_debris_budget` seam, one system over: the *tier -> detail*
+    /// mapping lives at the host (`inf_render::hair_detail_for`), because Ring 0
+    /// must not know what a GPU is, and the value arrives here as data. A session
+    /// nobody tells runs on `HairDetail::GUIDES`, which is what P24.4 v1 drew.
+    pub fn set_hair_detail(&mut self, detail: inf_anim::HairDetail) {
+        self.hair_detail = detail;
+    }
+
+    /// The hair detail this session draws at (a read for tests and gates).
+    pub fn hair_detail(&self) -> inf_anim::HairDetail {
+        self.hair_detail
     }
 
     /// Seed the simulation's fracture states (P22.3), keyed by entity `Guid`.
@@ -984,7 +1009,7 @@ impl SimSession {
         let skeletons = &self.skeletons;
         let styles = |g: Uuid| hairs.get(&g);
         let skels = |g: Uuid| skeletons.get(&g);
-        inf_ecs::hair::step_hair_simulation(doc.world_mut(), dt, &styles, &skels);
+        inf_ecs::hair::step_hair_simulation(doc.world_mut(), dt, &styles, &skels, self.hair_detail);
     }
 
     /// Fire `event` (no args) on every actor.

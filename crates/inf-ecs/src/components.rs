@@ -4465,8 +4465,18 @@ pub struct HairGuides {
     /// it just does not move — which is the lower tiers' behaviour anyway.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Per-wearer quality lever, exactly [`ClothSim::quality`]: `0` follows the
-    /// capability tier, `1..=255` pins a strand budget.
+    /// Per-wearer quality lever, exactly [`ClothSim::quality`]: `0` takes the
+    /// **hairstyle's own** authored substep budget
+    /// ([`inf_anim::hair::HairMaterial::substeps`]), `1..=255` pins one.
+    ///
+    /// **Not the machine's capability tier**, for the reason written out at
+    /// length on [`ClothSim::quality`] — a sim budget that followed the tier would
+    /// put the machine into `state_bytes`. The tier reaches hair in exactly one
+    /// place, and it is a *render* budget: [`inf_anim::hair::HairDetail`], which
+    /// decides how many ribbons are drawn and is never folded into the trace.
+    /// (This field's own doc said "follows the capability tier" when the slot was
+    /// reserved at P24.3; that sentence was corrected on `ClothSim` when cloth
+    /// landed and is corrected here for the same reason.)
     #[serde(default)]
     pub quality: u8,
 }

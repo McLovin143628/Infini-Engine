@@ -98,15 +98,31 @@ fn hairstyle() -> HairAsset {
             joint: 2,
             offset: [i as f32 * 0.02 - 0.05, 0.0, 0.0],
             direction: [0.0, -1.0, 0.0],
+            clump: i as u16 / 3,
         })
         .collect();
-    HairAsset::grow(*SKEL.as_bytes(), &roots, 0.25, 5, HairMaterial::default())
-        .expect("the fixture hairstyle grows")
-        .with_capsules(vec![ClothCapsule {
-            joint_a: 1,
-            joint_b: 2,
-            radius_m: 0.15,
-        }])
+    // A real groom, not the identity: two clumps of three with a loose wave, so
+    // the parity arms compare hosts on a hairstyle that is actually SHAPED. A
+    // straight, unclumped fixture would agree between the two hosts for reasons
+    // that have nothing to do with the groom being applied the same way twice.
+    HairAsset::grow(
+        *SKEL.as_bytes(),
+        &roots,
+        0.25,
+        5,
+        HairMaterial::default(),
+        inf_anim::HairGroom {
+            clump_strength: 0.5,
+            curl_radius_m: 0.01,
+            curl_turns: 1.5,
+        },
+    )
+    .expect("the fixture hairstyle grows")
+    .with_capsules(vec![ClothCapsule {
+        joint_a: 1,
+        joint_b: 2,
+        radius_m: 0.15,
+    }])
 }
 
 fn skeletons() -> BTreeMap<Uuid, SkeletonAsset> {

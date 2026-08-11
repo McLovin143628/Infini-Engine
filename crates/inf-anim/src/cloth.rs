@@ -434,6 +434,44 @@ pub struct Capsule {
     pub radius_m: f32,
 }
 
+/// **The body's collision proxy, derived from its skeleton** (P24.4 authoring):
+/// one capsule per bone, at a single authored radius.
+///
+/// This is the ONE derivation door, so a garment and a hairstyle fitted to the
+/// same character collide against the same body. It is what turns "author a
+/// garment" into two numbers instead of a joint-pair table nobody can type:
+/// every joint with a parent contributes the capsule `parent → self`, in joint
+/// order, so the result is a pure function of the skeleton.
+///
+/// # The bound, stated
+///
+/// A **uniform** radius, in metres. Real bodies are not uniform — a wrist is not
+/// a thigh — and per-bone radii are the obvious upgrade, wanting either a radius
+/// column in the Skeleton Editor or a fit against the character mesh's own
+/// extent about each bone. The spec calls this "SDF collision"; a capsule set is
+/// the approximation, and it is the same one the runtime solver already speaks
+/// ([`Capsule`]). Neither is hidden: this returns capsules and says so.
+///
+/// A root-only skeleton has no bones and therefore no capsules — an empty list,
+/// which the solver reads as "nothing stops the cloth", not as an error.
+pub fn body_capsules(skeleton: &crate::Skeleton, radius_m: f32) -> Vec<ClothCapsule> {
+    if !radius_m.is_finite() || radius_m <= 0.0 {
+        return Vec::new();
+    }
+    skeleton
+        .joints()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, j)| {
+            j.parent.map(|p| ClothCapsule {
+                joint_a: p,
+                joint_b: i as u16,
+                radius_m,
+            })
+        })
+        .collect()
+}
+
 /// **Place a garment's capsules on the pose the sim just evaluated.**
 ///
 /// `joint_globals` is [`crate::global_transforms`] over the evaluated pose, so

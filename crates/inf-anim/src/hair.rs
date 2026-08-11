@@ -25,11 +25,25 @@
 //!   is dominated by it, and the structures that model it (spatial hashing,
 //!   position-based friction) are a phase of their own.
 //! * **No grooming brush.** Guides are *generated* — [`HairAsset::grow`] from a
-//!   set of scalp roots — and then simulated. There is no interactive comb, so
-//!   "authored in the Model Editor" is true of the generator and not of a brush.
-//! * **No interpolated render strands and no cards.** What draws is the guides
-//!   themselves, as ribbons. A hairstyle is therefore as dense as its guide count,
-//!   and the lower-tier card path the phase plan names is not built.
+//!   set of scalp roots, shaped by a [`HairGroom`] — and then simulated. There is
+//!   no interactive comb, so "authored in the Model Editor" is true of the
+//!   generator and its parameters, not of a brush.
+//! * **The groom RECIPE is not persisted.** `HairGroom` is a generator input and
+//!   the grown guides are what the `.inf_hair` carries, so re-grooming means
+//!   re-entering the numbers rather than re-opening them. That is the P23
+//!   `Op::Unwrap` doctrine (journal the *result*, so a later build replays a fact
+//!   rather than its own opinion of the recipe) and it is what keeps the wire
+//!   frozen at v1.
+//!
+//! # Detail is a RENDER budget
+//!
+//! [`render_mesh`] takes a [`HairDetail`] — a guide stride and an interpolation
+//! count — so the lower tiers draw **cards** (one wide strip per three guides)
+//! and the top tier draws interpolated strands around each guide. It is the only
+//! place the machine's capability tier reaches hair, and it may reach here
+//! precisely because ribbons are *not* folded into `state_bytes`; the substep
+//! budget beside it is content and never the tier (see [`HairDetail`] and the
+//! P22.4 finding it cites).
 //!
 //! # The ribbons are STRAND-FRAMED, not camera-facing
 //!
@@ -61,6 +75,26 @@ const RIBBON_REFERENCE: Vec3 = Vec3::Y;
 /// uninitialized — the same discipline `resolve_capsule` applies to a particle on
 /// a capsule's axis.
 const RIBBON_FALLBACK: Vec3 = Vec3::X;
+
+/// A right-handed orthonormal pair spanning the plane perpendicular to `dir`
+/// (which must already be unit length).
+///
+/// Deterministic by construction: the seed axis is chosen by comparing `dir`'s
+/// components, so the same direction always produces the same pair on every
+/// machine, and `sqrt` is the only non-arithmetic operation involved. Used by
+/// both the curl generator and the interpolated render strands, so a curl and the
+/// strands drawn around it share one idea of "sideways".
+fn perpendicular_basis(dir: Vec3) -> (Vec3, Vec3) {
+    let seed = if dir.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let u = dir.cross(seed);
+    let len = u.length();
+    let u = if len > MIN_CONSTRAINT_LEN_M {
+        u / len
+    } else {
+        RIBBON_FALLBACK
+    };
+    (u, dir.cross(u))
+}
 
 /// One guide strand: where it is rooted and the points it runs through.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,6 +136,123 @@ pub struct HairRoot {
     /// The direction the strand grows in, model space. Normalized by
     /// [`HairAsset::grow`]; a zero or non-finite direction refuses the root.
     pub direction: [f32; 3],
+    /// **Which clump this root belongs to** (P24.4 grooming). Roots sharing a
+    /// number are drawn toward their common axis by
+    /// [`HairGroom::clump_strength`]; a groom with no clumping ignores it
+    /// entirely, so `0` on every root is the honest "one clump, or none".
+    ///
+    /// An authored grouping rather than one the generator derives, for the
+    /// [`crate::cloth::ClothAsset::from_garment`] reason: a derived grouping is
+    /// "whatever this build's clustering rule says", and the day the rule changes
+    /// every committed hairstyle changes with it. The sampler that places the
+    /// roots decides, and the grown strands are the fact.
+    pub clump: u16,
+}
+
+/// **How a hairstyle is groomed** — the shape parameters
+/// [`HairAsset::grow`] applies to the straight strands it walks out of the scalp.
+///
+/// These are *generator inputs*, not payload fields, and that is the P23
+/// `Op::Unwrap` doctrine applied to hair: what the `.inf_hair` carries is the
+/// grown guides themselves, so re-opening a hairstyle on a later build replays a
+/// fact rather than re-running whatever this build's curl model happens to be.
+/// The consequence is stated rather than glossed: **the recipe is not persisted**,
+/// so re-grooming means re-entering the numbers (ledgered).
+///
+/// [`Default`] is a **straight** groom — every parameter zero — so a hairstyle
+/// grown without one is byte-identical to the pre-groom generator.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HairGroom {
+    /// How hard a strand is pulled onto its clump's axis at the tip, `0..=1`
+    /// (dimensionless). Clamped, and applied as `strength · t²` along the strand
+    /// so the root never leaves the scalp — a root that moved would no longer be
+    /// on the head the pose carries it with.
+    pub clump_strength: f32,
+    /// Curl radius, metres: how far the strand spirals off its own growth axis.
+    /// `0` is straight hair.
+    pub curl_radius_m: f32,
+    /// Curl turns over the strand's whole length (dimensionless revolutions).
+    /// `2.0` is a loose wave; `6.0` is a tight coil.
+    pub curl_turns: f32,
+}
+
+impl Default for HairGroom {
+    /// Straight, unclumped hair — the identity groom.
+    fn default() -> Self {
+        Self {
+            clump_strength: 0.0,
+            curl_radius_m: 0.0,
+            curl_turns: 0.0,
+        }
+    }
+}
+
+/// **How densely a hairstyle draws** — a *render* budget, and the one place the
+/// machine's capability tier is allowed to reach hair (P24.4).
+///
+/// # It is a render budget, and that is load-bearing
+///
+/// [`crate::cloth::ClothMaterial::substeps`] and `ClothSim::quality` are
+/// deliberately **content**, never the tier, because a sim budget folded into
+/// `state_bytes` diverges the editor's Simulate from the shipped player on any
+/// Medium machine (the P22.4 finding). This is the other half of that ruling: the
+/// ribbon geometry is a pure function of the strand positions and is *not* folded
+/// into [`inf_ecs::hair::hair_state_bytes`], so it may follow the tier — and the
+/// gate that keeps the two halves apart asserts exactly that (changing the detail
+/// changes what is drawn and leaves the trace byte-identical).
+///
+/// # The three levels are two numbers
+///
+/// An enum would name the tiers; two numbers name the *geometry*, which is what a
+/// projector needs and what a gate can measure:
+///
+/// * `guide_stride` — draw every `n`-th guide, widening its ribbon by `n` so the
+///   head keeps its silhouette. `3` is a **card**: one wide quad strip standing
+///   for three guides, which is the lower-tier path the phase plan names.
+/// * `strands_per_guide` — how many *interpolated* render strands surround each
+///   drawn guide, spaced by the hairstyle's own measured guide spacing
+///   ([`HairState::spacing_m`]). `1` draws the guide alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HairDetail {
+    /// Draw every `n`-th guide (`0` is read as `1`).
+    pub guide_stride: u8,
+    /// Render strands per drawn guide (`0` is read as `1`).
+    pub strands_per_guide: u8,
+}
+
+impl HairDetail {
+    /// **Cards**: one wide strip per three guides, no interpolation. The lower
+    /// tiers' hair.
+    pub const CARDS: Self = Self {
+        guide_stride: 3,
+        strands_per_guide: 1,
+    };
+    /// **Guides**: one ribbon per guide — what P24.4 v1 drew, and the default.
+    pub const GUIDES: Self = Self {
+        guide_stride: 1,
+        strands_per_guide: 1,
+    };
+    /// **Interpolated**: three render strands around every guide.
+    pub const INTERPOLATED: Self = Self {
+        guide_stride: 1,
+        strands_per_guide: 3,
+    };
+
+    /// The stride, read (`0` means `1`).
+    pub fn stride(self) -> usize {
+        self.guide_stride.max(1) as usize
+    }
+
+    /// The interpolation count, read (`0` means `1`).
+    pub fn copies(self) -> usize {
+        self.strands_per_guide.max(1) as usize
+    }
+}
+
+impl Default for HairDetail {
+    fn default() -> Self {
+        Self::GUIDES
+    }
 }
 
 /// The hairstyle's simulation and ribbon parameters.
@@ -125,8 +276,9 @@ pub struct HairMaterial {
 
 impl Default for HairMaterial {
     /// A shoulder-length head of hair at 60 Hz. The 4 mm ribbon is a *clump* of
-    /// hair, not one fibre: a guide stands for the strands interpolated around it,
-    /// and v1 draws the guide.
+    /// hair, not one fibre: a guide stands for the strands interpolated around it
+    /// ([`HairDetail::INTERPOLATED`] draws them; [`HairDetail::GUIDES`] draws the
+    /// guide alone).
     fn default() -> Self {
         Self {
             segment_compliance: 0.0,
@@ -200,12 +352,21 @@ impl HairAsset {
     /// A root whose direction is zero or non-finite is **refused** by name rather
     /// than grown along an arbitrary axis; a `segments` of zero, or a
     /// non-positive length, is the same refusal.
+    ///
+    /// `groom` shapes what would otherwise be a straight walk — see [`HairGroom`].
+    /// [`HairGroom::default`] is the identity, and the clump/curl arithmetic is
+    /// spelled in [`inf_math::psin64`] / [`inf_math::pcos64`] rather than `std`
+    /// because the grown points are **committed content**: they land in a
+    /// `.inf_hair`, are seeded into the solver and ride `state_bytes` from there.
+    /// (`hair.rs` is on the `portable_pose` ban list precisely so this cannot
+    /// regress.)
     pub fn grow(
         scalp: [u8; 16],
         roots: &[HairRoot],
         length_m: f32,
         segments: u16,
         material: HairMaterial,
+        groom: HairGroom,
     ) -> Result<Self, ClothError> {
         if roots.is_empty() || segments == 0 || !length_m.is_finite() || length_m <= 0.0 {
             return Err(ClothError::Degenerate {
@@ -213,7 +374,44 @@ impl HairAsset {
                 indices: segments as usize,
             });
         }
+        if ![groom.clump_strength, groom.curl_radius_m, groom.curl_turns]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err(ClothError::NonFinite {
+                what: "a hair groom parameter",
+            });
+        }
         let seg_len = length_m / segments as f32;
+        // Each clump's axis: the mean of its roots' origins and of their
+        // directions, in a `BTreeMap` so the walk order is the clump-number order
+        // and not a hash order — the determinism `from_garment` rests on, applied
+        // to the same problem one module over.
+        let mut sums: std::collections::BTreeMap<u16, (Vec3, Vec3, f32)> =
+            std::collections::BTreeMap::new();
+        for r in roots {
+            let e = sums.entry(r.clump).or_insert((Vec3::ZERO, Vec3::ZERO, 0.0));
+            e.0 += Vec3::from_array(r.offset);
+            e.1 += Vec3::from_array(r.direction);
+            e.2 += 1.0;
+        }
+        let clumps: std::collections::BTreeMap<u16, (Vec3, Vec3)> = sums
+            .into_iter()
+            .map(|(k, (o, d, n))| {
+                let dir = d / n;
+                let len = dir.length();
+                // A clump whose roots point in opposing directions has no axis;
+                // it keeps its own strands' directions rather than collapsing
+                // them onto an arbitrary one.
+                let dir = if len > MIN_CONSTRAINT_LEN_M {
+                    dir / len
+                } else {
+                    Vec3::ZERO
+                };
+                (k, (o / n, dir))
+            })
+            .collect();
+        let strength = groom.clump_strength.clamp(0.0, 1.0);
         let mut strands = Vec::with_capacity(roots.len());
         for r in roots {
             let dir = Vec3::from_array(r.direction);
@@ -230,13 +428,55 @@ impl HairAsset {
                     what: "a hair root offset",
                 });
             }
+            let (u, v) = perpendicular_basis(dir);
+            let (clump_origin, clump_dir) = clumps
+                .get(&r.clump)
+                .copied()
+                .unwrap_or((origin, Vec3::ZERO));
             let points: Vec<[f32; 3]> = (0..=segments)
-                .map(|k| (origin + dir * (seg_len * k as f32)).to_array())
+                .map(|k| {
+                    let t = k as f32 / segments as f32;
+                    let along = seg_len * k as f32;
+                    let mut p = origin + dir * along;
+                    // Clumping: toward the clump's own axis, quadratically along
+                    // the strand so the ROOT never moves (t = 0 → no pull).
+                    if strength > 0.0 && clump_dir != Vec3::ZERO {
+                        let target = clump_origin + clump_dir * along;
+                        p += (target - p) * (strength * t * t);
+                    }
+                    // Curl: a helix about the growth axis, phase-shifted so the
+                    // root sits ON the axis (cos(0) - 1 = 0) rather than a radius
+                    // away from the scalp it grew out of.
+                    // `k > 0` rather than a phase that happens to vanish: the
+                    // root must be on the axis EXACTLY, and a minimax polynomial
+                    // at θ = 0 is off by an ulp of the radius (measured: 1.1 nm,
+                    // which is small and is not zero).
+                    if k > 0 && groom.curl_radius_m != 0.0 && groom.curl_turns != 0.0 {
+                        // The **f64** portable pair, cast per point: `psin`/`pcos`
+                        // are demo-grade (~5e-3) by their own module docs, and
+                        // these points are committed content, not a displacement
+                        // nobody stores. Same rule the primitive generators
+                        // follow.
+                        let theta = std::f64::consts::TAU * groom.curl_turns as f64 * t as f64;
+                        let (cos, sin) = (inf_math::pcos64(theta), inf_math::psin64(theta));
+                        p += u * (((cos - 1.0) as f32) * groom.curl_radius_m)
+                            + v * ((sin as f32) * groom.curl_radius_m);
+                    }
+                    p.to_array()
+                })
+                .collect();
+            // Measured from the shaped points rather than assumed to be
+            // `seg_len`: a curled strand's chord is SHORTER than its arc, and a
+            // solver told otherwise would stretch every segment on the first
+            // step. (A straight groom measures back to `seg_len`, which is what
+            // keeps the identity groom byte-identical.)
+            let rest_m: Vec<f32> = (0..segments as usize)
+                .map(|k| (Vec3::from_array(points[k + 1]) - Vec3::from_array(points[k])).length())
                 .collect();
             strands.push(HairStrand {
                 root_joint: r.joint,
                 root_offset: r.offset,
-                rest_m: vec![seg_len; segments as usize],
+                rest_m,
                 points,
             });
         }
@@ -327,6 +567,19 @@ pub struct HairState {
     /// `starts[i]` is where strand `i` begins in `x`; `starts` has
     /// `strand_count + 1` entries, so `starts[i+1]` is its end.
     pub starts: Vec<u32>,
+    /// **How far apart this hairstyle's guides are**, metres — the mean distance
+    /// from a guide's rest root to its nearest neighbour's.
+    ///
+    /// Measured once, here, because it is a property of the *hairstyle* and the
+    /// thing that needs it ([`render_mesh`]'s interpolated strands) runs every
+    /// frame: an O(n²) sweep per seed is cheap, and per projection is not.
+    ///
+    /// Derived rather than authored, so it costs no wire field and cannot drift
+    /// from the guides it describes — a hairstyle whose guides were re-grown
+    /// closer together interpolates closer together with nothing to re-author.
+    /// A single-guide hairstyle has no neighbour and reads `0`, which
+    /// [`render_mesh`] takes as "draw the guide alone".
+    pub spacing_m: f32,
 }
 
 impl HairState {
@@ -343,6 +596,7 @@ impl HairState {
         starts.push(x.len() as u32);
         Ok(Self {
             v: vec![[0.0; 3]; x.len()],
+            spacing_m: guide_spacing(asset),
             x,
             starts,
         })
@@ -361,6 +615,44 @@ impl HairState {
     /// How many strands.
     pub fn strand_count(&self) -> usize {
         self.starts.len().saturating_sub(1)
+    }
+}
+
+/// The mean nearest-neighbour distance between guide roots, metres — see
+/// [`HairState::spacing_m`], which is the only caller and the reason this exists.
+///
+/// `0` for a hairstyle with fewer than two guides, and for one whose guides are
+/// all coincident: both mean "there is no space between the guides to fill".
+fn guide_spacing(asset: &HairAsset) -> f32 {
+    let roots: Vec<Vec3> = asset
+        .strands
+        .iter()
+        .filter_map(|s| s.points.first().map(|p| Vec3::from_array(*p)))
+        .collect();
+    if roots.len() < 2 {
+        return 0.0;
+    }
+    let mut total = 0.0f32;
+    for (i, a) in roots.iter().enumerate() {
+        let mut nearest = f32::INFINITY;
+        for (j, b) in roots.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let d = (*a - *b).length();
+            if d < nearest {
+                nearest = d;
+            }
+        }
+        if nearest.is_finite() {
+            total += nearest;
+        }
+    }
+    let mean = total / roots.len() as f32;
+    if mean.is_finite() {
+        mean
+    } else {
+        0.0
     }
 }
 
@@ -560,43 +852,97 @@ fn solve_segment(x: &mut [Vec3], w: &[f32], e: &ClothEdge, alpha: f32, lambda: &
 /// A strand shorter than two particles contributes nothing; a degenerate segment
 /// inherits the previous particle's width axis, so a strand that folds onto itself
 /// produces a thin ribbon rather than a NaN.
+///
+/// This is [`render_mesh`] at [`HairDetail::GUIDES`] and nothing else — kept as a
+/// name because "draw the guides" is what a hairstyle means at full detail.
 pub fn ribbon_mesh(asset: &HairAsset, state: &HairState) -> (Vec<[f32; 3]>, Vec<u32>) {
-    let mut pos: Vec<[f32; 3]> = Vec::with_capacity(state.len() * 2);
+    render_mesh(asset, state, HairDetail::GUIDES)
+}
+
+/// **Ribbon geometry at a chosen detail** (P24.4) — [`ribbon_mesh`]'s rule with
+/// the guide stride and the interpolation count of a [`HairDetail`].
+///
+/// Three levels out of two numbers, each a pure function of the same sim state:
+///
+/// * `guide_stride > 1` — **cards**. Every `n`-th guide is drawn, widened by `n`,
+///   so a third of the geometry covers the same head. The widening is what makes
+///   this a card rather than a bald patch, and it is why the lower tiers get a
+///   silhouette instead of a haircut.
+/// * `strands_per_guide > 1` — **interpolated render strands**. Each drawn guide
+///   is accompanied by `n - 1` copies of itself, displaced around it in the plane
+///   perpendicular to the strand at each particle, at the hairstyle's own measured
+///   [`HairState::spacing_m`]. They follow the guide exactly, which is what "the
+///   guide stands for the strands around it" means geometrically.
+/// * both `1` — the guides themselves, byte-identical to what P24.4 v1 drew.
+///
+/// The displacement angles are [`inf_math::psin64`] / [`inf_math::pcos64`]: the
+/// two hosts' projectors compare this geometry byte for byte, so `std` trig here
+/// would make the mirror gate a statement about the target triple.
+pub fn render_mesh(
+    asset: &HairAsset,
+    state: &HairState,
+    detail: HairDetail,
+) -> (Vec<[f32; 3]>, Vec<u32>) {
+    let stride = detail.stride();
+    let copies = detail.copies();
+    let mut pos: Vec<[f32; 3]> = Vec::with_capacity(state.len() * 2 * copies);
     let mut idx: Vec<u32> = Vec::new();
-    let half = (asset.material.ribbon_width_m.max(0.0)) * 0.5;
-    for s in 0..state.strand_count() {
+    // A card stands for the guides it replaced, so it carries their width.
+    let half = (asset.material.ribbon_width_m.max(0.0)) * 0.5 * stride as f32;
+    // Interpolated strands fill the space BETWEEN the guides; one strand has no
+    // space to fill and is drawn where it is.
+    let spread = if copies > 1 {
+        state.spacing_m.max(0.0) * 0.5
+    } else {
+        0.0
+    };
+    for s in (0..state.strand_count()).step_by(stride) {
         let (from, to) = (state.starts[s] as usize, state.starts[s + 1] as usize);
         let count = to - from;
         if count < 2 {
             continue;
         }
-        let base = pos.len() as u32;
-        let mut axis = RIBBON_FALLBACK;
-        for k in 0..count {
-            let p = Vec3::from_array(state.x[from + k]);
-            // The tangent at this particle: forward for the root, backward for the
-            // tip, so every particle has one without a special case in the middle.
-            let next = Vec3::from_array(state.x[from + (k + 1).min(count - 1)]);
-            let prev = Vec3::from_array(state.x[from + k.saturating_sub(1)]);
-            let tangent = next - prev;
-            let candidate = tangent.cross(RIBBON_REFERENCE);
-            let len = candidate.length();
-            if len > MIN_CONSTRAINT_LEN_M {
-                axis = candidate / len;
-            } else if tangent.length() > MIN_CONSTRAINT_LEN_M {
-                // The strand runs along the reference: a fixed fallback, so the
-                // degenerate case is deterministic across runs and hosts.
-                axis = RIBBON_FALLBACK;
+        for c in 0..copies {
+            let theta = std::f64::consts::TAU * (c as f64) / (copies as f64);
+            let (cos, sin) = (
+                inf_math::pcos64(theta) as f32,
+                inf_math::psin64(theta) as f32,
+            );
+            let base = pos.len() as u32;
+            let mut axis = RIBBON_FALLBACK;
+            let mut binormal = Vec3::Y;
+            for k in 0..count {
+                let p = Vec3::from_array(state.x[from + k]);
+                // The tangent at this particle: forward for the root, backward for the
+                // tip, so every particle has one without a special case in the middle.
+                let next = Vec3::from_array(state.x[from + (k + 1).min(count - 1)]);
+                let prev = Vec3::from_array(state.x[from + k.saturating_sub(1)]);
+                let tangent = next - prev;
+                let candidate = tangent.cross(RIBBON_REFERENCE);
+                let len = candidate.length();
+                if len > MIN_CONSTRAINT_LEN_M {
+                    axis = candidate / len;
+                    binormal = tangent.cross(axis).normalize_or_zero();
+                } else if tangent.length() > MIN_CONSTRAINT_LEN_M {
+                    // The strand runs along the reference: a fixed fallback, so the
+                    // degenerate case is deterministic across runs and hosts.
+                    axis = RIBBON_FALLBACK;
+                    binormal = tangent.cross(axis).normalize_or_zero();
+                }
+                let taper = 1.0 - (k as f32 / (count - 1) as f32);
+                let w = axis * (half * taper);
+                // Copy 0 sits ON the guide (cos 0 = 1, sin 0 = 0 scaled by a
+                // spread of zero when there is one copy), so a single-copy detail
+                // is the guide and not a strand beside it.
+                let off = (axis * cos + binormal * sin) * spread;
+                pos.push((p + off - w).to_array());
+                pos.push((p + off + w).to_array());
             }
-            let taper = 1.0 - (k as f32 / (count - 1) as f32);
-            let w = axis * (half * taper);
-            pos.push((p - w).to_array());
-            pos.push((p + w).to_array());
-        }
-        for k in 0..count as u32 - 1 {
-            let (a, b) = (base + k * 2, base + k * 2 + 1);
-            let (c, d) = (a + 2, b + 2);
-            idx.extend_from_slice(&[a, b, c, b, d, c]);
+            for k in 0..count as u32 - 1 {
+                let (a, b) = (base + k * 2, base + k * 2 + 1);
+                let (c, d) = (a + 2, b + 2);
+                idx.extend_from_slice(&[a, b, c, b, d, c]);
+            }
         }
     }
     (pos, idx)
@@ -607,18 +953,26 @@ mod tests {
     use super::*;
     use inf_asset::{decode, encode};
 
-    /// Four strands hanging straight down from joint 1, 20 cm long, 4 segments.
-    fn hairstyle() -> HairAsset {
-        let roots: Vec<HairRoot> = (0..4)
+    /// The fixture's four roots: 2 cm apart along x, two per clump, so a clumped
+    /// groom has two axes to pull toward rather than one that every strand is
+    /// already on (a single-clump fixture would satisfy a clump assertion by
+    /// having nowhere to go).
+    fn fixture_roots() -> Vec<HairRoot> {
+        (0..4)
             .map(|i| HairRoot {
                 joint: 1,
                 offset: [i as f32 * 0.02 - 0.03, 0.0, 0.0],
                 direction: [0.0, -1.0, 0.0],
+                clump: i / 2,
             })
-            .collect();
+            .collect()
+    }
+
+    /// Four strands hanging straight down from joint 1, 20 cm long, 4 segments.
+    fn hairstyle() -> HairAsset {
         HairAsset::grow(
             [11; 16],
-            &roots,
+            &fixture_roots(),
             0.2,
             4,
             HairMaterial {
@@ -626,6 +980,7 @@ mod tests {
                 // arm could see anything move; these are the shipped defaults.
                 ..HairMaterial::default()
             },
+            HairGroom::default(),
         )
         .expect("the fixture hairstyle grows")
         .with_capsules(vec![ClothCapsule {
@@ -671,10 +1026,12 @@ mod tests {
                     joint: 0,
                     offset: [0.0; 3],
                     direction,
+                    clump: 0,
                 }],
                 0.1,
                 2,
                 HairMaterial::default(),
+                HairGroom::default(),
             )
         };
         assert!(matches!(
@@ -688,12 +1045,44 @@ mod tests {
             Err(ClothError::NonFinite { .. })
         ));
         assert!(matches!(
-            HairAsset::grow([0; 16], &[], 0.1, 2, HairMaterial::default()),
+            HairAsset::grow(
+                [0; 16],
+                &[],
+                0.1,
+                2,
+                HairMaterial::default(),
+                HairGroom::default()
+            ),
             Err(ClothError::Degenerate { .. })
         ));
         assert!(matches!(
-            bad([0.0, -1.0, 0.0]).map(|a| HairAsset::grow([0; 16], &[], 0.0, 0, a.material)),
+            bad([0.0, -1.0, 0.0]).map(|a| HairAsset::grow(
+                [0; 16],
+                &[],
+                0.0,
+                0,
+                a.material,
+                HairGroom::default()
+            )),
             Ok(Err(ClothError::Degenerate { .. }))
+        ));
+        // A non-finite groom parameter is refused by name too, rather than
+        // producing a hairstyle of NaNs the solver would freeze on for ever.
+        assert!(matches!(
+            HairAsset::grow(
+                [0; 16],
+                &fixture_roots(),
+                0.1,
+                2,
+                HairMaterial::default(),
+                HairGroom {
+                    curl_radius_m: f32::NAN,
+                    ..HairGroom::default()
+                }
+            ),
+            Err(ClothError::NonFinite {
+                what: "a hair groom parameter"
+            })
         ));
     }
 
@@ -918,6 +1307,232 @@ mod tests {
         st.starts = vec![0, 1, 6, 11, 16];
         let (p2, i2) = ribbon_mesh(&short, &st);
         assert!(p2.len() < pos.len() && !i2.is_empty());
+    }
+
+    // ── grooming: clump and curl ────────────────────────────────────────────
+
+    /// Grow the fixture's roots under an arbitrary groom.
+    fn groomed(groom: HairGroom) -> HairAsset {
+        HairAsset::grow(
+            [11; 16],
+            &fixture_roots(),
+            0.2,
+            8,
+            HairMaterial::default(),
+            groom,
+        )
+        .expect("the groomed hairstyle grows")
+    }
+
+    /// **The identity groom changes nothing.** The control for every arm below:
+    /// a groom whose parameters are all zero must produce the guides the
+    /// pre-groom generator produced, or "clumping moved the tips" would be a
+    /// statement about the generator rather than about clumping.
+    #[test]
+    fn the_default_groom_is_the_straight_generator() {
+        let straight = groomed(HairGroom::default());
+        for s in &straight.strands {
+            let root = Vec3::from_array(s.points[0]);
+            let tip = Vec3::from_array(s.points[s.len() - 1]);
+            // Straight down, 20 cm, and along nothing else.
+            assert!((tip.x - root.x).abs() < 1e-6, "x drifted: {tip:?}");
+            assert!((tip.z - root.z).abs() < 1e-6, "z drifted: {tip:?}");
+            assert!((root.y - tip.y - 0.2).abs() < 1e-5, "length: {tip:?}");
+            for rest in &s.rest_m {
+                assert!((rest - 0.025).abs() < 1e-6, "0.2 m over 8 segments");
+            }
+        }
+    }
+
+    /// **Clumping pulls the TIPS together and leaves the ROOTS alone.** Measured
+    /// against the straight control on the same roots: within a clump the tips
+    /// converge, and every root is where it was — a strand whose root moved would
+    /// no longer be on the scalp the pose carries it with.
+    #[test]
+    fn clumping_converges_the_tips_and_never_moves_a_root() {
+        let straight = groomed(HairGroom::default());
+        let clumped = groomed(HairGroom {
+            clump_strength: 1.0,
+            ..HairGroom::default()
+        });
+        let tip_gap = |a: &HairAsset, i: usize, j: usize| {
+            let ti = Vec3::from_array(a.strands[i].points[a.strands[i].len() - 1]);
+            let tj = Vec3::from_array(a.strands[j].points[a.strands[j].len() - 1]);
+            (ti - tj).length()
+        };
+        // Roots 0 and 1 share clump 0; 2 and 3 share clump 1.
+        assert!(
+            tip_gap(&clumped, 0, 1) < tip_gap(&straight, 0, 1) * 0.25,
+            "clump 0's tips did not converge: {} vs {}",
+            tip_gap(&clumped, 0, 1),
+            tip_gap(&straight, 0, 1)
+        );
+        assert!(
+            tip_gap(&clumped, 2, 3) < tip_gap(&straight, 2, 3) * 0.25,
+            "clump 1's tips did not converge"
+        );
+        // …and the two clumps stay APART. A clump strength that merged the whole
+        // head into one strand would pass the arm above and be wrong.
+        assert!(
+            tip_gap(&clumped, 1, 2) > tip_gap(&straight, 1, 2) * 0.5,
+            "the two clumps merged into one: {}",
+            tip_gap(&clumped, 1, 2)
+        );
+        for (s, c) in straight.strands.iter().zip(&clumped.strands) {
+            assert_eq!(s.points[0], c.points[0], "a root moved");
+        }
+    }
+
+    /// **Curl leaves the axis and comes back to it**, and the segment rest
+    /// lengths are measured from the curled points rather than assumed.
+    ///
+    /// The second half is the one that bites: a helix is LONGER than the straight
+    /// walk it wraps, so a solver handed the straight `length / segments` would
+    /// compress every segment on the first step and the curl would shake out.
+    #[test]
+    fn curl_leaves_the_axis_and_its_rest_lengths_are_measured() {
+        let straight = groomed(HairGroom::default());
+        let curly = groomed(HairGroom {
+            curl_radius_m: 0.02,
+            curl_turns: 2.0,
+            ..HairGroom::default()
+        });
+        let s = &curly.strands[0];
+        assert_eq!(s.points[0], straight.strands[0].points[0], "the root moved");
+        let axis_distance = |p: [f32; 3]| {
+            let root = Vec3::from_array(s.points[0]);
+            let v = Vec3::from_array(p) - root;
+            // The growth axis is -Y, so the off-axis distance is the XZ radius.
+            Vec3::new(v.x, 0.0, v.z).length()
+        };
+        let max_off = s
+            .points
+            .iter()
+            .map(|p| axis_distance(*p))
+            .fold(0.0f32, f32::max);
+        assert!(
+            (max_off - 0.04).abs() < 5e-3,
+            "a 2 cm curl radius swings 4 cm across the axis, measured {max_off}"
+        );
+        // Two full turns: the strand returns to the axis at the halfway point and
+        // at the tip.
+        assert!(axis_distance(s.points[4]) < 1e-3, "half-way off axis");
+        assert!(axis_distance(s.points[8]) < 1e-3, "the tip is off axis");
+        let curled_chord: f32 = s.rest_m.iter().sum();
+        let straight_chord: f32 = straight.strands[0].rest_m.iter().sum();
+        assert!(
+            curled_chord > straight_chord,
+            "a curl is LONGER end to end than the straight walk it wraps: \
+             {curled_chord} vs {straight_chord}"
+        );
+        for (k, rest) in s.rest_m.iter().enumerate() {
+            let d = (Vec3::from_array(s.points[k + 1]) - Vec3::from_array(s.points[k])).length();
+            assert!((d - rest).abs() < 1e-6, "segment {k} rest is not measured");
+        }
+    }
+
+    /// The groom is deterministic — the same roots and the same numbers grow the
+    /// same guides, twice.
+    #[test]
+    fn a_groom_is_deterministic() {
+        let g = HairGroom {
+            clump_strength: 0.6,
+            curl_radius_m: 0.01,
+            curl_turns: 3.0,
+        };
+        assert_eq!(groomed(g).strands, groomed(g).strands);
+    }
+
+    // ── detail: cards, guides, interpolated strands ─────────────────────────
+
+    /// **The measured guide spacing is the fixture's own 2 cm.** Derived, not
+    /// authored, so it cannot drift from the guides it describes.
+    #[test]
+    fn the_guide_spacing_is_measured_from_the_guides() {
+        let a = hairstyle();
+        let s = HairState::seed(&a).unwrap();
+        assert!(
+            (s.spacing_m - 0.02).abs() < 1e-6,
+            "the fixture's roots are 2 cm apart, measured {}",
+            s.spacing_m
+        );
+        // One guide has no neighbour, and reads zero rather than infinity.
+        let mut lone = a.clone();
+        lone.strands.truncate(1);
+        assert_eq!(HairState::seed(&lone).unwrap().spacing_m, 0.0);
+    }
+
+    /// **Cards draw a third of the geometry and stay as wide as what they
+    /// replaced.** The lower-tier path, measured rather than asserted to exist.
+    #[test]
+    fn cards_decimate_the_guides_and_widen_what_is_left() {
+        let a = hairstyle();
+        let s = HairState::seed(&a).unwrap();
+        let (guides, gi) = render_mesh(&a, &s, HairDetail::GUIDES);
+        let (cards, ci) = render_mesh(&a, &s, HairDetail::CARDS);
+        // 4 guides at stride 3 draw strands 0 and 3.
+        assert_eq!(cards.len(), guides.len() / 2, "4 guides → 2 cards");
+        assert_eq!(ci.len(), gi.len() / 2);
+        assert!(ci.iter().all(|i| (*i as usize) < cards.len()));
+        let width = |p: &[[f32; 3]]| (Vec3::from_array(p[1]) - Vec3::from_array(p[0])).length();
+        assert!(
+            (width(&cards) - width(&guides) * 3.0).abs() < 1e-6,
+            "a card standing for three guides is three guides wide: {} vs {}",
+            width(&cards),
+            width(&guides)
+        );
+    }
+
+    /// **Interpolated strands surround the guide** — three times the geometry,
+    /// each copy displaced by the hairstyle's own measured spacing and none of
+    /// them sitting on top of another.
+    #[test]
+    fn interpolated_strands_surround_each_guide() {
+        let a = hairstyle();
+        let s = HairState::seed(&a).unwrap();
+        let (guides, _) = render_mesh(&a, &s, HairDetail::GUIDES);
+        let (interp, ii) = render_mesh(&a, &s, HairDetail::INTERPOLATED);
+        assert_eq!(interp.len(), guides.len() * 3);
+        assert!(ii.iter().all(|i| (*i as usize) < interp.len()));
+        assert!(interp.iter().all(|p| p.iter().all(|c| c.is_finite())));
+        // The three copies of strand 0's root are distinct, and each is within
+        // half the guide spacing of where the guide itself is.
+        let per_copy = a.strands[0].len() * 2;
+        let root_of = |c: usize| Vec3::from_array(interp[c * per_copy]);
+        let guide_root = Vec3::from_array(guides[0]);
+        for c in 0..3 {
+            let d = (root_of(c) - guide_root).length();
+            assert!(
+                d > 1e-4 && d < s.spacing_m,
+                "copy {c} sits {d} m from its guide"
+            );
+        }
+        assert!(
+            (root_of(0) - root_of(1)).length() > 1e-4,
+            "copies 0 and 1 coincide"
+        );
+        assert!(
+            (root_of(1) - root_of(2)).length() > 1e-4,
+            "copies 1 and 2 coincide"
+        );
+    }
+
+    /// A zeroed [`HairDetail`] is read as the guides rather than as "draw
+    /// nothing" — the `0 is 1` rule the material's substep budget already has.
+    #[test]
+    fn a_zeroed_detail_reads_as_the_guides() {
+        let a = hairstyle();
+        let s = HairState::seed(&a).unwrap();
+        let zero = HairDetail {
+            guide_stride: 0,
+            strands_per_guide: 0,
+        };
+        assert_eq!(
+            render_mesh(&a, &s, zero),
+            render_mesh(&a, &s, HairDetail::GUIDES)
+        );
+        assert_eq!(HairDetail::default(), HairDetail::GUIDES);
+        assert_eq!(ribbon_mesh(&a, &s), render_mesh(&a, &s, HairDetail::GUIDES));
     }
 
     // ── the schema ladder ───────────────────────────────────────────────────

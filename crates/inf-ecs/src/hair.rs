@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use bevy_ecs::prelude::{Entity, Resource};
 use glam::Vec3;
-use inf_anim::hair::{HairAsset, HairState};
+use inf_anim::hair::{HairAsset, HairDetail, HairState};
 use inf_anim::SkeletonAsset;
 use uuid::Uuid;
 
@@ -36,6 +36,10 @@ pub struct LiveHair {
     /// sim state** and there are two projectors: computed once, in the fixed step,
     /// it cannot be computed two different ways. (Its *positions* are rebuilt with
     /// it — see [`step_hair_simulation`].)
+    ///
+    /// Its *density* is the host's [`inf_anim::hair::HairDetail`], which is the
+    /// one tier-derived number on this path — cards on a weak GPU, interpolated
+    /// strands on a strong one, and the same particles either way.
     pub ribbon_positions: Vec<[f32; 3]>,
     /// The ribbon index list, shared across steps when the topology has not
     /// changed. Rebuilt with the positions; an `Arc` so a projector clones a
@@ -117,6 +121,7 @@ pub fn step_hair_simulation<'c>(
     dt: f64,
     hairs: &dyn Fn(Uuid) -> Option<&'c HairAsset>,
     skeletons: &dyn Fn(Uuid) -> Option<&'c SkeletonAsset>,
+    detail: HairDetail,
 ) {
     let mut wearers: Vec<(Entity, Uuid, HairGuides)> = Vec::new();
     {
@@ -225,7 +230,13 @@ pub fn step_hair_simulation<'c>(
         // The ribbons, rebuilt HERE rather than in each projector: they are a pure
         // function of the state above, and two projectors computing them
         // separately is the mirror pair this doctrine exists to retire.
-        let (pos, idx) = inf_anim::hair::ribbon_mesh(asset, &live.state);
+        //
+        // `detail` is the ONE tier-derived quantity on this path (P24.4). It is
+        // safe here — and only here — because the ribbons are not folded into
+        // `hair_state_bytes`: the geometry changes with the machine, the trace
+        // does not, which `the_detail_draws_differently_and_traces_identically`
+        // measures rather than asserts.
+        let (pos, idx) = inf_anim::hair::render_mesh(asset, &live.state, detail);
         if *live.ribbon_indices != idx {
             live.ribbon_indices = std::sync::Arc::new(idx);
         }
@@ -248,7 +259,7 @@ mod tests {
     use super::*;
     use crate::components::Transform;
     use crate::math::Vec3d;
-    use inf_anim::hair::{HairMaterial, HairRoot};
+    use inf_anim::hair::{HairGroom, HairMaterial, HairRoot};
 
     const WEARER: Uuid = Uuid::from_u128(0x24_4101);
     const STYLE: Uuid = Uuid::from_u128(0x24_4102);
@@ -259,10 +270,18 @@ mod tests {
                 joint: 0,
                 offset: [i as f32 * 0.02, 0.0, 0.0],
                 direction: [1.0, 0.0, 0.0],
+                clump: i as u16 / 2,
             })
             .collect();
-        HairAsset::grow(*STYLE.as_bytes(), &roots, 0.2, 4, HairMaterial::default())
-            .expect("the fixture hairstyle grows")
+        HairAsset::grow(
+            *STYLE.as_bytes(),
+            &roots,
+            0.2,
+            4,
+            HairMaterial::default(),
+            HairGroom::default(),
+        )
+        .expect("the fixture hairstyle grows")
     }
 
     fn world_with_wearer(enabled: bool) -> EcsWorld {
@@ -285,9 +304,13 @@ mod tests {
     }
 
     fn step(world: &mut EcsWorld, asset: &HairAsset) {
+        step_at(world, asset, HairDetail::GUIDES);
+    }
+
+    fn step_at(world: &mut EcsWorld, asset: &HairAsset, detail: HairDetail) {
         let hairs = |g: Uuid| (g == STYLE).then_some(asset);
         let skels = |_: Uuid| None;
-        step_hair_simulation(world, 1.0 / 60.0, &hairs, &skels);
+        step_hair_simulation(world, 1.0 / 60.0, &hairs, &skels, detail);
     }
 
     /// **The headline gate**: a `HairGuides` component is READ — the strands move,
@@ -380,6 +403,56 @@ mod tests {
             step(&mut w, &a);
         }
         assert_ne!(hair_state_bytes(&w), first, "the trace is a constant");
+    }
+
+    /// **THE TIER LAW, measured** (P24.4): the render detail changes what is
+    /// DRAWN and leaves the TRACE byte-identical.
+    ///
+    /// This is the whole reason a tier-derived number is allowed inside a fixed
+    /// step at all. `ClothSim::quality` is content and never the machine, because
+    /// a substep budget lands in `state_bytes`; the ribbon detail is the machine
+    /// and never content, because ribbons do not. If a future edit folded the
+    /// ribbons into `hair_state_bytes` — which would look like a harmless
+    /// completeness fix — this arm goes red and says why.
+    ///
+    /// Both halves are asserted: the *cards* arm must differ from the *guides*
+    /// arm (or "the detail changed nothing" would satisfy the trace half
+    /// vacuously), and the two traces must be equal.
+    #[test]
+    fn the_detail_draws_differently_and_traces_identically() {
+        let a = style();
+        let run = |detail: HairDetail| {
+            let mut w = world_with_wearer(true);
+            for _ in 0..20 {
+                step_at(&mut w, &a, detail);
+            }
+            let live = live_hair(&w, WEARER).expect("the wearer simulates").clone();
+            (
+                hair_state_bytes(&w),
+                live.ribbon_positions,
+                live.ribbon_indices,
+            )
+        };
+        let (guide_trace, guide_pos, guide_idx) = run(HairDetail::GUIDES);
+        let (card_trace, card_pos, card_idx) = run(HairDetail::CARDS);
+        let (interp_trace, interp_pos, _) = run(HairDetail::INTERPOLATED);
+        assert!(!guide_trace.is_empty(), "the fixture must simulate");
+        assert!(!guide_pos.is_empty() && !guide_idx.is_empty());
+        // Drawn differently…
+        assert!(
+            card_pos.len() < guide_pos.len(),
+            "cards must draw less: {} vs {}",
+            card_pos.len(),
+            guide_pos.len()
+        );
+        assert!(
+            interp_pos.len() > guide_pos.len(),
+            "interpolation must draw more"
+        );
+        assert!(card_idx.len() < guide_idx.len());
+        // …and traced identically.
+        assert_eq!(card_trace, guide_trace, "a card changed the SIM");
+        assert_eq!(interp_trace, guide_trace, "interpolation changed the SIM");
     }
 
     #[test]
