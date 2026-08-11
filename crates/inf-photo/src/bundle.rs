@@ -868,6 +868,55 @@ mod tests {
     }
 
     #[test]
+    fn the_bundle_weights_its_residuals_through_the_shared_kernel() {
+        // The hole the P25.1 mutation matrix admitted: `huber_weight` returning
+        // 1.0 is caught by `geometry`'s own arm, but severing this module's
+        // **call site** — `let weight = ...` replaced by `1.0` — was invisible
+        // to every arm, because `BundleConfig::huber_delta_px` still robustifies
+        // the *acceptance* cost, so a least-squares step accepted on a Huber
+        // criterion still walks toward roughly the Huber answer. This arm asks
+        // the door directly instead of asking the solve.
+        let (cams, intr, pts, obs) = scene();
+        let huber = 2.0f64;
+
+        // An observation exactly where the point projects: at zero residual the
+        // weight is one, and any kernel that is not one there is broken in the
+        // other direction.
+        let clean = obs[3];
+        let e = evaluate(&clean, &cams, &intr, &pts, huber);
+        assert!(e.valid, "the fixture's observation does not project");
+        assert_eq!(
+            e.weight.to_bits(),
+            1.0f64.to_bits(),
+            "a residual inside the knee was not weighted 1"
+        );
+
+        // The same observation dragged well past the knee. The weight must be
+        // the shared function's answer, bit for bit, and it must actually bite.
+        let mut outlier = clean;
+        outlier.pixel += DVec2::new(90.0, -60.0);
+        let e = evaluate(&outlier, &cams, &intr, &pts, huber);
+        assert!(e.valid);
+        let norm = (e.residual[0] * e.residual[0] + e.residual[1] * e.residual[1]).sqrt();
+        assert!(
+            norm > 10.0 * huber,
+            "the fixture's outlier is only {norm} px out — not past the knee"
+        );
+        assert_eq!(
+            e.weight.to_bits(),
+            crate::geometry::huber_weight(norm, huber).to_bits(),
+            "the bundle's weight is not the shared kernel's: {} vs {}",
+            e.weight,
+            crate::geometry::huber_weight(norm, huber)
+        );
+        assert!(
+            e.weight < 0.02,
+            "a residual {norm} px past a {huber} px knee kept weight {}",
+            e.weight
+        );
+    }
+
+    #[test]
     fn an_empty_problem_reports_rather_than_panicking() {
         let mut cams: Vec<Pose> = vec![Pose::IDENTITY];
         let intr = vec![Intrinsics::centred(64, 48, 50.0)];
