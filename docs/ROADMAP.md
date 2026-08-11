@@ -8772,6 +8772,15 @@ path and decodes, not the writer's handles.
   `min_chart_faces` when charts fold, raise `seam_smoothing_passes` when the atlas overlaps — would
   be exactly the thing P23 made a law about: **measure the prescription before landing it.** So the
   advisories are left saying what happened, and the claim is withdrawn instead.
+  > **RESOLVED by the P25.4 audit (2026-08-11), and the withdrawal was right for the wrong
+  > reason.** P25.4 wrote all eight anyway and called the claim made true. Nobody measured them,
+  > and **three of the eight named a lever that moves the wrong way** — see the P25.4 audit
+  > ledger below for the numbers. The remedies that survived measurement are kept, the ones that
+  > did not are gone, and `photogrammetry_gate` now has an arm that fails the day one goes stale.
+  > The paragraph above was right that a prescription must be measured; what it got wrong is that
+  > the measurement was cheap — six extra `finish_reconstruction` calls on the committed fixture,
+  > 15 s in the gate — and refusing to spend it left a sentence in the product that told users to
+  > lower a triangle budget when raising it is the fix.
 
 **THE macOS RED (2026-08-11, CI run 31540901959 — the ledger's own warning, met within hours).**
 The paragraph above ends by noting the gate's committed numbers "behave like goldens on a chain
@@ -8789,6 +8798,94 @@ somewhere in the P23.5 seam/LSCM/packing chain as this pipeline drives it (656 c
 `min_chart_faces` 64); the split is kept as a diagnostic and stays ungated until the collapse
 is diagnosed, because its own halves move with meshopt through the same door. The day it is
 fixed, tighten `MAX_DEGENERATE_UV_FRACTION` toward the sliver floor the split will then reveal.
+
+**P25.4 — the capture wizard.** `PhotogrammetrySession` (Ring 1) drives the P25.1-3 pipeline
+from files on disk to five assets in a project: five stages on one worker thread, a progress
+channel with per-photograph and per-`FinishStep` granularity where the orchestrator is ours and
+start-and-finish where it is Ring 0's, cancellation between stages, and typed `CaptureIssue`
+diagnostics with a severity, a stage and a remedy. Ring 2 is nine commands, eleven DTOs and one
+`photogrammetry://progress` channel; the dialog is four steps (pick / configure / running /
+review) with a coverage overlay, the known-size scale helper driving a finish-only re-run, and an
+import that reveals the scan in the drawer. Schema untouched, no new dependency, goldens 50.
+
+**THE P25.4 AUDIT (2026-08-11, adversarial, fresh eyes).** Full battery, frontend, fmt, clippy,
+`cargo deny` and the bindings drift check were green as landed, and every headline number the
+batch claimed reproduced exactly. Six findings, all fixed:
+
+- **F1-F5, and the resolution of F14b above: three of the eight new advisory remedies named a
+  lever that moves the wrong way.** MEASURED on the committed fixture, everything else held.
+  `NormalTransferFallbacks` said *lower* the triangle budget "so the retopologized surface stays
+  nearer the fused one" — at a 0.5-voxel search radius, budgets of 2 000 / 5 000 / 20 000 /
+  60 000 fall back on **25.7 / 28.0 / 8.5 / 0.35 %** of their texels, so a user following that
+  sentence made the thing it names worse; a coarser surface sits *further* from the one it
+  samples. `AtlasOverlaps` said raise the atlas size, "which widens the gutter every chart is
+  packed with" — there is no such gutter: `inf_dcc::unwrap` packs in normalized UV and never sees
+  `BakeConfig::size`, so the count grows with the texels (**152 / 597 / 2 243 / 9 047** at 128 /
+  256 / 512 / 1 024, and 0.93 / 0.91 / 0.86 / 0.86 % of the square). `UvChartsFlipped` said raise
+  the seam smoothing passes — the committed 3 is already the minimum (**1 605 / 1 367 / 1 225 /
+  1 299 / 1 321** at 0 / 1 / 3 / 6 / 10). Its *other* clause survives and is the one real lever
+  found: `min_chart_faces` at 256 / 64 / 16 / 8 / 2 folds **1 456 / 1 225 / 1 012 / 845 / 441**
+  triangles and overlaps **703 / 597 / 351 / 177 / 156** texels, monotone in both — at a price
+  the remedy now states, because the charts go 644 → 2 118 and the atlas coverage 0.320 → 0.203,
+  which is the mostly-gutter failure `merge_small_charts` exists to prevent. Two more said
+  something unmeasured and now say what was measured: `NonManifoldDropped` claimed to be "a
+  property of the fused surface rather than of a setting" (it moves 18 646 → 20 331 over a
+  thirtyfold budget range, because the second manifold filter runs *after* decimation) and
+  `DecimationShortOfBudget` prescribed a coarser fusion, which is not a knob this wizard offers
+  (what is measured is the other half: 5 000 → 9 746 triangles, 2 000 → 9 767). The three
+  surviving prescriptions are a gate arm now, directions only, each with a bound saying why it is
+  not vacuous.
+- **F6, a stage that panicked stranded the session for the life of the process.** The worker is
+  the only thing that publishes a terminal state, so an unwind out of a Ring-0 solver — rayon
+  re-raises one from the pool on the calling thread — skipped every publish: `state()` kept
+  saying running, `cancel()` set a flag nothing would read and answered `true`, `start()` refused
+  `Busy` for ever, and the dialog disables Close, Escape, the backdrop and "Choose other
+  photographs" *while running*. The only way out was restarting the editor. `run_guarded` settles
+  the run `Failed` with the stage and the panic's own words.
+- **F8, a failed run dropped every finding the stages before it produced.** No product means no
+  `CaptureProduct::issues`, and the panel fell back to the pre-flight — which by construction
+  cannot know that a view never registered, because it runs before the solve. So the one moment a
+  user most needs the diagnostics was the one moment the wizard could not show them. `findings()`
+  is now one Ring-1 rule for which of the three places a finding lives in, and Ring 2's `status`
+  is a projection of it. **Honest remainder:** no configuration of the committed fixture reaches a
+  refusal *after* structure from motion has produced advisories, so the end-to-end half is unit-
+  gated rather than gated.
+- **F9, `load_photos` reached around a run in flight.** It replaces the published state as well as
+  the photographs, so a load during a solve left the session reading `Idle` over a live worker:
+  Cancel answered `false`, and minutes later that worker published a product for photographs
+  nobody had loaded. Refuses `Busy` by name now, like `start` always has. `CaptureError::Busy`
+  existed and **no test constructed it**; a gate arm pushes all three doors.
+- **F10, the second `JobPool` was justified in writing and its thread count was not.** The pool
+  itself is sanctioned (`JobPool::new`'s own docs carve out an isolated pool for a subsystem, and
+  a minutes-long batch in front of the glTF importer's `parallel_map` is what that is for) — this
+  is the editor's only explicit pool. But both it and `global()` are sized to
+  `available_parallelism`, so an overlapping capture and import give the process **2N runnable
+  workers**. Ruled at the field: the trade is deliberate, and because nothing here is measured it
+  must not be *tuned* without measuring.
+- **F11, a gate hole, mutation-proven.** `measure_coverage` divides triangle centroids back into
+  baseline units before projecting them against depth maps that never went through the scale step,
+  and every arm ran at `metres_per_unit = 1.0` where that division is the identity. Fixing the
+  divisor at 1.0 **passed all thirteen arms**; the re-finish arm now asserts the overlap does not
+  move when only the scale does (it fails the mutation at 0.810 against 0.891) and is not zero,
+  which is what its own docs say a wrong scale looks like.
+
+**Mutations run against the batch:** (1) the coverage divisor above — *survived*, hole closed,
+now fails by name; (2) `import` writing to a **relative** `Scans/` instead of
+`AssetProject::content_dir` — the P25.3 verbatim-directory trap, reopened — *caught*, and it
+proved the trap live by writing five assets into the source tree.
+
+**Withdrawn suspicions, measured or read rather than assumed:** the preview invents no second
+offscreen path (`render_geometry_view` is the Model Editor's own door and `texture_preview_rgba`
+is a twelve-line wrapper over the Content Drawer's `texture_thumbnail`), it degrades genuinely
+per half (the atlas is CPU-decoded before the render is attempted), and `Thumbnailer::new` is
+lazy, so the wizard's GPU device is not created until a preview is asked for — the fourth
+process-lived `Thumbnailer` in Ring 2, on the established per-panel-`PreviewSession` pattern. The
+progress tick is one thread for the process behind an `AtomicBool`, not one per run. No stale
+worker can write into a new run's state, because `begin` joins before it spawns. The frontend
+calls only `lib/ipc.ts` wrappers, `events.ts` is the single `listen` site, and no `useEffect`
+sets state directly. **Carried, not fixed:** `reset` cancels and *waits*, so a Ring-2 caller holds
+the session mutex for the rest of the stage in flight — documented for what it costs, and the
+dialog disables every path to it while a run is running.
 
 ### Phase 26 — Streaming Virtual Texturing (SVT)
 
