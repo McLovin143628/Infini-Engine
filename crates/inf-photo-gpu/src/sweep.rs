@@ -314,6 +314,20 @@ impl SweepGeometry {
             neighbours.len() <= MAX_NEIGHBOURS,
             "at most {MAX_NEIGHBOURS} neighbour views"
         );
+        // The plane stack's DIRECTION is load-bearing and was, until this line,
+        // assumed. `sweep_view` breaks an `argmin` tie toward the lower plane
+        // index and documents that as "the nearer surface, the conservative
+        // answer when a ray grazes two surfaces"; the parabola's end guards read
+        // `best_p == 0` as the near end. Handed `(far, near)` this function
+        // builds the same SET of planes in the opposite order, so every one of
+        // those claims silently inverts and the reconstruction barely moves —
+        // measured: swapping the two arguments at the call site left all 47 tests
+        // in this crate green. A precondition is what makes the direction a fact.
+        assert!(
+            far > near && near > 0.0,
+            "a sweep runs from a NEAR plane to a FAR one, both in front of the camera; got \
+             near = {near}, far = {far}"
+        );
         let k = &reference.intrinsics;
         let (w, h) = (k.width, k.height);
         let n_px = w as usize * h as usize;
@@ -408,12 +422,6 @@ impl DepthMap {
             depth: vec![0.0; n],
             confidence: vec![0.0; n],
         }
-    }
-
-    /// Is there a depth at this index?
-    #[inline]
-    pub fn is_valid(&self, index: usize) -> bool {
-        self.depth[index] > 0.0
     }
 
     /// How many pixels carry a depth.
@@ -739,7 +747,14 @@ pub fn neighbours_for(
             required: cfg.min_neighbours,
         });
     }
-    let take = cfg.neighbours.min(MAX_NEIGHBOURS).max(cfg.min_neighbours);
+    // The cap comes LAST. `min_neighbours` is a caller's field, and raising it
+    // past `MAX_NEIGHBOURS` used to lift `take` past the cap with it — which is
+    // an abort inside `SweepGeometry::build`'s own assertion, and would be a
+    // nine-deep write into the shader's `array<u32, 8>` if it ever got there.
+    let take = cfg
+        .neighbours
+        .max(cfg.min_neighbours)
+        .clamp(1, MAX_NEIGHBOURS);
     Ok(ranked.into_iter().take(take).map(|(v, _)| v).collect())
 }
 
@@ -918,6 +933,60 @@ mod tests {
         let wide = census_transform(&img, &CensusConfig { dilation: 3 });
         assert!(wide.iter().all(|c| c >> CENSUS_TAPS == 0));
         assert_ne!(tight, wide, "dilation changed nothing");
+    }
+
+    fn reference_camera() -> RegisteredCamera {
+        RegisteredCamera {
+            view: 0,
+            pose: Pose::IDENTITY,
+            intrinsics: Intrinsics::centred(8, 6, 10.0),
+            observations: 0,
+        }
+    }
+
+    #[test]
+    fn the_plane_stack_runs_from_near_to_far_and_refuses_to_run_backwards() {
+        // The direction the `argmin` tie-break's meaning rests on. Plane 0 must be
+        // the NEAREST plane, or "ties go to the lower index, which is the nearer
+        // surface" is the opposite of what the code does — and nothing else in
+        // this crate could tell, because the plane SET is the same either way.
+        let g = SweepGeometry::build(&reference_camera(), &[], 2.0, 6.0, 8);
+        assert_eq!(g.depths.len(), 8);
+        assert!(
+            g.inv_step < 0.0,
+            "inverse depth must FALL across the stack; step {}",
+            g.inv_step
+        );
+        for pair in g.depths.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "the plane depths are not ascending: {:?}",
+                g.depths
+            );
+        }
+        assert!(
+            (g.depths[0] - 2.0).abs() < 1e-5,
+            "plane 0 is {}",
+            g.depths[0]
+        );
+        assert!(
+            (g.depths[7] - 6.0).abs() < 1e-5,
+            "the last plane is {}",
+            g.depths[7]
+        );
+        // Refining by zero must land exactly on the plane it started from, which
+        // is the reason the depths are derived from the same `f32` scalars the
+        // refinement uses rather than from `near`/`far` directly.
+        for (p, d) in g.depths.iter().enumerate() {
+            let inv = g.inv_near + g.inv_step * p as f32;
+            assert_eq!(1.0f32 / inv, *d, "plane {p} does not reproduce itself");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "a sweep runs from a NEAR plane to a FAR one")]
+    fn a_backwards_depth_range_is_a_refusal_not_a_reversed_stack() {
+        SweepGeometry::build(&reference_camera(), &[], 6.0, 2.0, 8);
     }
 
     #[test]
