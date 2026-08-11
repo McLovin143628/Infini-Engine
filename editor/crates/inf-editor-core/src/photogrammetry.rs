@@ -1814,35 +1814,92 @@ mod tests {
     }
 
     #[test]
-    fn the_bvh_surface_reports_the_dense_normal_not_the_face_one() {
-        // Two triangles of a smooth fan whose vertex normals differ: the
-        // interpolated answer must sit between them, which a per-face transfer
-        // cannot produce.
+    fn the_bvh_surface_maps_a_leaf_back_to_the_triangle_it_came_from() {
+        // The one thing this wrapper adds over `inf_dcc::Bvh` (which is
+        // mutation-hardened where it lives): the normal it reports. `Bvh`
+        // reorders triangles into leaves, so `ClosestHit::triangle` is a LEAF
+        // index and reading the index buffer with it lands on somebody else's
+        // vertices. On a smooth mesh that is invisible; here every triangle
+        // faces a different way, so it is not.
+        //
+        // Two things about the construction are load-bearing. The triangles
+        // share **no vertices**, which keeps `geometric_normals`' smoothing out
+        // of the measurement — an isolated triangle has no neighbour to average
+        // with. And they are laid out in an order that is **not** their spatial
+        // order, because a median-split hierarchy over triangles already sorted
+        // along an axis leaves them where they were and `source_index` is then
+        // the identity: measured, with the mapping severed and the triangles in
+        // a row, all 24 probes still passed.
+        //
+        // (An earlier version used ONE triangle and asserted an interpolation
+        // between three hand-picked vertex normals. Four rounds of smoothing
+        // collapse a lone triangle's normals onto its face normal — the smoother
+        // working — and the arm failed for a reason that had nothing to do with
+        // the BVH.)
+        const N: u32 = 24;
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut indices = Vec::new();
+        let mut faces: Vec<(DVec3, DVec3)> = Vec::new();
+        for i in 0..N {
+            // A deterministic spread of orientations, no trig: the normal is a
+            // normalized lattice vector.
+            let n = DVec3::new(
+                ((i % 5) as f64) - 2.0,
+                ((i % 3) as f64) + 1.0,
+                ((i % 7) as f64) - 3.0,
+            )
+            .normalize();
+            let t = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Z };
+            let u = n.cross(t).normalize();
+            let v = n.cross(u);
+            // Spatially scrambled against the index order.
+            let centre = DVec3::new(
+                ((i * 7) % N) as f64 * 4.0,
+                ((i * 11) % 5) as f64 * 4.0,
+                ((i * 13) % 7) as f64 * 4.0,
+            );
+            let base = positions.len() as u32;
+            for corner in [u, v, -u - v] {
+                positions.push(centre + corner);
+                normals.push([n.x as f32, n.y as f32, n.z as f32]);
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2]);
+            faces.push((centre, n));
+        }
         let mesh = DenseMesh {
+            positions,
+            normals,
+            confidence: vec![1.0; (N * 3) as usize],
+            indices,
+        };
+        let surface = BvhSurface::new(&mesh);
+        for (i, (centre, want)) in faces.iter().enumerate() {
+            let hit = surface
+                .closest(*centre + *want * 0.35)
+                .expect("a mesh with triangles has a closest point");
+            assert!((hit.normal.length() - 1.0).abs() < 1e-9, "not unit");
+            assert!(
+                hit.normal.dot(*want) > 0.99,
+                "triangle {i}: the hierarchy reported {} where {want} lives — the leaf index was                  not mapped back through `source_index`",
+                hit.normal
+            );
+        }
+        // And the occlusion query is a distance in the units it was given.
+        let flat = DenseMesh {
             positions: vec![
                 DVec3::new(0.0, 0.0, 0.0),
-                DVec3::new(1.0, 0.0, 0.0),
-                DVec3::new(1.0, 0.0, 1.0),
+                DVec3::new(2.0, 0.0, 0.0),
+                DVec3::new(2.0, 0.0, 2.0),
             ],
-            normals: vec![[0.0, 1.0, 0.0], [0.6, 0.8, 0.0], [0.0, 0.8, 0.6]],
+            normals: vec![[0.0, 1.0, 0.0]; 3],
             confidence: vec![1.0; 3],
             indices: vec![0, 1, 2],
         };
-        let surface = BvhSurface::new(&mesh);
-        let hit = surface
-            .closest(DVec3::new(0.5, 0.5, 0.25))
-            .expect("a mesh with a triangle has a closest point");
-        assert!(hit.distance > 0.0);
-        assert!((hit.normal.length() - 1.0).abs() < 1e-9);
-        assert!(
-            hit.normal.x > 0.05 && hit.normal.y > 0.5,
-            "the normal {} is not an interpolation of the three",
-            hit.normal
-        );
-        // And the occlusion query is a distance in the same units.
-        assert!(surface.occluded(DVec3::new(0.5, 1.0, 0.25), DVec3::NEG_Y, 2.0));
-        assert!(!surface.occluded(DVec3::new(0.5, 1.0, 0.25), DVec3::NEG_Y, 0.5));
-        assert!(!surface.occluded(DVec3::new(0.5, 1.0, 0.25), DVec3::Y, 100.0));
+        let flat = BvhSurface::new(&flat);
+        assert!(flat.occluded(DVec3::new(1.5, 1.0, 0.5), DVec3::NEG_Y, 2.0));
+        assert!(!flat.occluded(DVec3::new(1.5, 1.0, 0.5), DVec3::NEG_Y, 0.5));
+        assert!(!flat.occluded(DVec3::new(1.5, 1.0, 0.5), DVec3::Y, 100.0));
     }
 
     #[test]
