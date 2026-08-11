@@ -8762,6 +8762,16 @@ path and decodes, not the writer's handles.
   in the gate is a committed number compared against a freshly-solved one, which is the thing the
   batch's own ruling permits only for tolerances — the thinner they get, the more they behave like
   goldens on a chain that contains `meshopt`.
+- **F14b, a claim corrected rather than a defect fixed: "every `FinishAdvisory` `Display` carries a
+  remedy" is not true, and should not be made true.** One of nine does —
+  `BelowVirtualizationThreshold` names "raise the triangle budget or lower `[vgeom]
+  min_triangles`", and the gate asserts that string. The other eight state the **consequence**
+  ("the surface has holes where they were", "that part of the albedo is invented, not
+  photographed", "the topology would not collapse further"), which is what a reader needs and is
+  the only thing that has been measured. Writing prescriptions for the rest — lower
+  `min_chart_faces` when charts fold, raise `seam_smoothing_passes` when the atlas overlaps — would
+  be exactly the thing P23 made a law about: **measure the prescription before landing it.** So the
+  advisories are left saying what happened, and the claim is withdrawn instead.
 
 ### Phase 26 — Streaming Virtual Texturing (SVT)
 
