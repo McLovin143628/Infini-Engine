@@ -96,11 +96,28 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   crossed. See [`ScenePayload::meshes`].
 ///
 /// **The only payload bump of P24.1**, and deliberately audited against the rest
-/// of the phase before freezing. P24.4's cloth is *sim state* over a garment that
-/// is itself an `.inf_mesh`, so it needs a GUID added to the **collector** and
-/// nothing added to the wire; hair guides that ride a mesh or a skeleton are the
-/// same. A distinct `.inf_hair` asset kind — which P24.4 has not chosen — would
-/// be a v8, and would be the honest reason for one.
+/// of the phase before freezing.
+///
+/// # That audit's prediction about P24.4 was wrong, and v8 is owed
+///
+/// It read: *"P24.4's cloth is sim state over a garment that is itself an
+/// `.inf_mesh`, so it needs a GUID added to the **collector** and nothing added
+/// to the wire; hair guides that ride a mesh or a skeleton are the same. A
+/// distinct `.inf_hair` asset kind — which P24.4 has not chosen — would be a v8,
+/// and would be the honest reason for one."*
+///
+/// P24.4 **did** choose distinct `.inf_cloth` and `.inf_hair` kinds (pack kind
+/// codes 22 and 23), because a garment is self-contained for the sim and the draw
+/// — rest positions, inverse masses, precomputed edge and hinge lists — and none
+/// of that is in the mesh. So by this note's own words the honest reason for a v8
+/// now exists, and it is unspent: the phase's schema budget went to scene v21, so
+/// **a character previewed in PIE wears nothing** while the same character in
+/// Simulate and in a cooked pack wears both.
+///
+/// That is not left to be rediscovered.
+/// `phase24_gate::the_pie_payload_carries_no_garment_and_that_is_measured` reads
+/// this struct's own declaration and **fails the day it grows `cloths` / `hairs`**,
+/// naming the remedy; the bound is written out in ROADMAP §12's P24.4 block.
 pub const SCENE_PAYLOAD_VERSION: u32 = 7;
 
 /// Upper bound on a single frame; anything larger means a desynced or

@@ -7833,6 +7833,29 @@ end-of-stream. The gate that would prove it: hand the real `--pie` subprocess a 
 a decremented `schema_version` and assert a `PlayerToEditor::Error` naming the schema, not a
 successful exit.
 
+  **CLOSED (P24.4).** The reader thread tells `UnexpectedEof` (the editor went away — the
+  ordinary end of a session) from every other error; a fault goes over its own channel and
+  `report_stream_end` answers it with a `PlayerToEditor::Error` **naming the schema**, then
+  exits non-zero. `runtime/inf-player/tests/pie_schema_skew.rs` is the arm this entry asked
+  for, against the real `--pie` subprocess, with a **hand-written** v6 shadow of the payload
+  (derived from the current type it would grow with it and stop being stale) inside a shadow
+  enum that holds `LoadScene` on its real discriminant.
+
+  Four arms, because the first two were not enough: a stale payload draws a named `Error` and
+  a failing exit; a CURRENT payload is `Loaded` ("the player errors at everything" would
+  satisfy arm one); a `Stop`ped session exits 0 ("the player fails at everything" would satisfy
+  both); and — the P24.4 audit's F2 — **a pipe that simply closes exits 0 and says nothing**.
+  `Stop` leaves the loop through its own arm and never reaches `report_stream_end`, so with
+  only the first three the entire `UnexpectedEof` classification could be deleted (every
+  ordinary editor disconnect answered with a bogus schema refusal and a failing exit) and the
+  full battery stayed green. Measured, then written.
+
+  **The bound this closure leaves, stated rather than glossed:** `rx` is handed to
+  `run_pie_window` for the embedded path, so a decode fault **after** the handoff to the
+  windowed player keeps the old behaviour — a window loop cannot answer one. The fault that
+  matters, the `LoadScene` frame itself, arrives before any handoff. Widening the message type
+  to a `Result` is the fix the day an embedded session needs it.
+
 **Also carried from P24.1 — the bound of "both directions are named errors".** `inf_asset`'s
 codec now reports a stale payload as `SchemaTooOld` with a remedy, and `peek_schema_version`
 refuses to invent a version for bytes that carry none (`v >= 1`, and no further than
@@ -8248,6 +8271,107 @@ must be reported", and the door does not exist yet. Until it does, `pie.rs`'s ad
 kept honest one at a time: `the_stale_mesh_advisory_is_pinned_to_what_it_says` (P24.2) pins
 the warning text itself, because the behavioural test beside it stays green with the warning
 deleted.
+
+**P24.4 (cloth & hair authoring) — the ledger its modules cite.**
+
+`inf_anim::cloth`, `inf_anim::hair` and `inf_editor_core::groom` each say "ledgered in
+ROADMAP §12's P24 block" about a bound they decline to hide. Until the P24.4 audit the block
+did not exist, so eight sentences pointed at nothing — a reference to a ledger is only worth
+what the ledger says. Here it is, grouped by what a reader would be looking for.
+
+*The wire, and why nothing moved.* `.inf_cloth` and `.inf_hair` are **v1**, the scene stays
+**v21**, `ScenePayload` **v7**, `SessionSave` v2, `MeshAsset` v2, `SkeletonAsset` v2, goldens
+**50**. The garment asset is self-contained for both the sim and the draw (rest positions,
+inverse masses, triangles, precomputed edge + hinge lists, material, capsules) and the
+`.inf_mesh` reference is provenance plus the cook edge — which is what lets a shipped player
+fold and draw a garment with the mesh absent, and what keeps the PIE wire frozen. The groom
+**recipe** (clump strength, curl radius, curl turns) is a *generator input*, never a payload
+field: the grown guides are the fact, per the P23 `Op::Unwrap` doctrine. The consequence, which
+is the bound: **re-grooming means re-entering the numbers** — a `.inf_hair` cannot be re-opened
+in the panel with its knobs where the author left them.
+
+*The gap PIE leaves.* **A character previewed in PIE wears nothing.** `ScenePayload` v7 has no
+`cloths`/`hairs` slot and `build_world_from_payload` calls `with_anim_assets` and neither cloth
+door, so the same character folds a coat and a head of hair in the editor's Simulate and in a
+cooked pack, and neither in PIE. P24.1's note on `SCENE_PAYLOAD_VERSION` predicted this would
+not happen ("a GUID added to the collector and nothing added to the wire"); P24.4 then chose
+distinct `.inf_cloth` / `.inf_hair` kinds, which by that note's own words is "the honest reason
+for" a **v8**. The phase's schema budget is spent, so the gap is **measured** rather than
+described: `phase24_gate`'s `the_pie_payload_carries_no_garment_and_that_is_measured` reads the
+struct's own scope (with a self-check that it found `meshes`, so the absence cannot pass
+vacuously) and **fails the day the payload learns to carry them**, with the remedy in the
+message. Retire this paragraph then, not before.
+
+*What the solvers do not model.* Stated on `step_cloth` and repeated here because a bound
+nobody can find is a bound nobody knows about:
+
+* **Pinned particles are frozen in MODEL space, for the whole session.** `inv_mass == 0` is
+  skipped by integration, by every constraint and by collision, and its velocity is held at
+  zero — so a collar pinned "on a shoulder" stays at the shoulder's *bind* position while the
+  shoulder moves under it. Pins anchor a garment to the character's origin, not to a bone.
+  Skinned pins (a pin carried by a joint's skinning matrix, which is what P24.4's audit gave
+  the hair roots) are the upgrade, and they need a per-pin joint on the asset — a v2.
+* **No inertial coupling.** The garment simulates in the wearer's model frame, so a sprinting
+  character does not stream their coat; what moves the cloth is the capsules moving under it.
+  Feeding the frame's acceleration in needs the previous global transform kept per garment.
+* **No friction and no self-collision.** A particle leaves a capsule along the surface normal
+  with its tangential velocity intact, and two folds of one skirt pass through each other.
+* **Gravity is `inf_anim::GRAVITY_M_S2`, not the level's.** The sim's 3D gravity is a
+  `PhysicsBridge3D` detail the pose path has no route to. Only the *direction* is live —
+  `inf_ecs::cloth` rotates world-down into the wearer's model frame every step, so a character
+  lying on their back has their coat fall the right way.
+* **The body proxy is capsules at ONE uniform radius.** `inf_anim::body_capsules` is the one
+  derivation door (so a garment and a hairstyle fitted to the same character collide against
+  the same body) and a wrist is not a thigh. Per-bone radii want either a radius column in the
+  Skeleton Editor or a fit against the character mesh's extent about each bone. The spec says
+  "SDF collision"; a capsule set is the approximation, and it says so.
+* **Hair v1 has no strand–strand interaction and no grooming brush.** Guides pass through each
+  other, and they are *generated* (a `HairGroom` over a face selection), not combed — so
+  "authored in the Model Editor" is true of the generator and its parameters.
+* **Ribbons are STRAND-FRAMED, not camera-facing** — a deliberate deviation from the phase
+  plan. `project_scene_full` takes no camera and the two projectors have *different* ones, so
+  camera-facing geometry could not be compared between hosts at all, only asserted to exist. A
+  view-aligned ribbon wants a hair *pass* that orients in the vertex shader.
+
+*The authoring UI's bounds.* The Model Editor's rig field is a **raw GUID text box** — the
+asset picker is the missing UI, exactly as it is for `skel_merge_part` (P24.3). Leaving it
+empty is legal and derives no capsules, which is a garment that hangs through its wearer; the
+panel says so in words. `HairMaterial::iterations` is not exposed and is sent as `1`.
+
+**Findings of the P24.4 audit, fixed in this phase.** Three, all measured:
+
+* **F1 — the shipped player's one new user-facing string was mangled.** `report_stream_end`'s
+  refusal carried two eighteen-space runs where a `\` continuation belonged (the P22 law: a
+  scripted edit to a non-raw Rust string literal eats the continuation), and the arm asserting
+  it "names the schema" was perfectly happy with that. `.inf_cloth`/`.inf_hair` both pin their
+  `UPGRADE_REMEDY` against a run of spaces; the message the *editor* prints now does too.
+  `phase24_gate`'s `pack_trace` guard carried the same mangling.
+* **F2 — the `UnexpectedEof` half of the skew fix was unmeasured** (see the P24.1 closure
+  above).
+* **F3 — a hairstyle came off the head it was grown on.** `HairRoot::offset` /
+  `HairStrand::root_offset` had two readers that disagree: `HairAsset::grow` uses it as the
+  MODEL-space origin of the strand walk (`points[0] == root_offset` by construction) and
+  `roots_for` composed it with the raw joint **global**, i.e. read it as joint-local. They
+  agree only when the joint's bind global is the identity. Measured through the authoring door:
+  a scalp face at the model origin on a joint bound 1 m up seeded at (0,0,0) and was pinned at
+  (0,1,0) by the first step; on `hair_parity`'s own fixture it is **two metres**. Fixed by
+  using each matrix for what it is — joint globals for the capsules (a capsule is a bone),
+  `skinning_matrices` for the roots (a root is a point on the bind surface, carried as a
+  skinned vertex is). *Why no gate saw it:* both hosts were wrong identically, so the parity
+  arms agreed; "the pose moves the hair" is a **relative** arm that any pose-varying transform
+  satisfies; and the Ring-1 authoring arm never seeds the asset, so it never meets `roots_for`.
+  `the_authored_roots_start_on_the_scalp` is the absolute half and is mutation-measured.
+
+**The mutation the P24.4 batch found by running its own matrix** — worth keeping, because it is
+the P21.4 law in a third place. Severing the cook's `ClothSim.asset` dependency edge failed
+gate arm (c) and left arm (d), the real-subprocess one, **green**: with no garment in the pack
+both sides simulated nothing and agreed perfectly, and the anti-vacuity arm (wearing vs not)
+still differed on the *hair*. A hash comparison between two hosts says they run the same world;
+it cannot say the world has a coat in it. `pack_trace` now steps the reference once and asserts
+a non-empty cloth section **and** a non-empty hair section before anything is compared. Re-
+measured by the audit: with the guard the same severing fails (c) and (d) together, and so does
+severing the shared seeding door (`sim_from_built`'s `set_cloths`), which is the case where
+*both* sides skip for one reason.
 
 ### Phase 25 — Photogrammetry: photos → asset
 

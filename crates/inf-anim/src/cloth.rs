@@ -195,9 +195,22 @@ pub struct ClothAsset {
     /// Bind/model-space rest positions, one per particle, index-aligned to the
     /// garment's vertices.
     pub rest: Vec<[f32; 3]>,
-    /// Inverse mass per particle, kg⁻¹. **`0` pins the particle** — a hem
-    /// stitched to a belt, a collar on a shoulder — and pinned particles are
-    /// never integrated, never moved by a constraint and never collided.
+    /// Inverse mass per particle, kg⁻¹. **`0` pins the particle** — and pinned
+    /// particles are never integrated, never moved by a constraint and never
+    /// collided.
+    ///
+    /// # A pin is anchored to the MODEL, not to a bone (v1 bound)
+    ///
+    /// Read literally: a pinned particle never moves for the whole session. It
+    /// holds its rest position in the wearer's model frame, so "a collar on a
+    /// shoulder" pins the collar where the shoulder was **at bind**, and the
+    /// shoulder then moves out from under it. What a garment is attached to today
+    /// is the character's origin.
+    ///
+    /// The upgrade is a pin carried by a joint's skinning matrix — the same
+    /// formulation `inf_anim::hair::roots_for` uses for a strand root — which
+    /// needs a per-pin joint on this asset and is therefore a v2. Ledgered in
+    /// ROADMAP §12's P24.4 block.
     pub inv_mass: Vec<f32>,
     /// The garment's triangle list (3 indices per triangle) — what the projectors
     /// draw the simulated positions with.
