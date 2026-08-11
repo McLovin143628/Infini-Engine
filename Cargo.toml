@@ -18,6 +18,7 @@ members = [
     "crates/inf-voxel",
     "crates/inf-water",
     "crates/inf-photo",
+    "crates/inf-photo-gpu",
     "crates/inf-pcg",
     "crates/inf-physics",
     "crates/inf-audio",
@@ -364,6 +365,14 @@ inf-water = { path = "crates/inf-water" }
 # (symmetric Jacobi eigen, 3x3 SVD, LDL^T) is hand-rolled and unit-tested rather
 # than pulled from nalgebra — see `inf_photo::linalg`.
 inf-photo = { path = "crates/inf-photo" }
+# inf-photo-gpu = the photogrammetry DENSE stage (P25.2): plane-sweep depth maps
+# with a CPU reference and a WGSL mirror, and TSDF fusion that writes into
+# `inf-voxel` and extracts through the mesher that is already there. Ring 0 —
+# `wgpu` is legal in Ring 0 (inf-render is the precedent), Tauri is not. It adds
+# NO new external crate: inf-photo + inf-voxel + inf-render + inf-core + wgpu +
+# glam + bytemuck + thiserror are all pinned above already. It is a LEAF: nothing
+# depends on it yet, and P25.3's finish pipeline is its first consumer.
+inf-photo-gpu = { path = "crates/inf-photo-gpu" }
 inf-pcg = { path = "crates/inf-pcg" }
 inf-physics = { path = "crates/inf-physics" }
 inf-audio = { path = "crates/inf-audio" }

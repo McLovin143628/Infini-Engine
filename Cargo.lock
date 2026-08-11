@@ -3254,6 +3254,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "inf-photo-gpu"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.2",
+ "inf-core",
+ "inf-photo",
+ "inf-render",
+ "inf-voxel",
+ "naga",
+ "thiserror 2.0.19",
+ "wgpu",
+]
+
+[[package]]
 name = "inf-physics"
 version = "0.1.0"
 dependencies = [

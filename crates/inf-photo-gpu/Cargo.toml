@@ -1,0 +1,38 @@
+[package]
+name = "inf-photo-gpu"
+description = "Photogrammetry dense stage: plane-sweep depth maps (CPU reference + WGSL mirror), deterministic filtering, and TSDF fusion into inf-voxel's Surface-Nets mesher."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+# The sparse half of Phase 25: poses, intrinsics, the camera model, the
+# `GrayImage`, and `synth`'s analytic renderer the fixture builds a scene for.
+# `inf-photo` is deliberately GPU-free and stays that way — this crate is where
+# `wgpu` enters photogrammetry.
+inf-photo = { workspace = true }
+# The SDF chunk volume TSDF fusion writes into, and the DETERMINISTIC watertight
+# Surface-Nets mesher that extracts the dense mesh out of it. This crate does not
+# own a second marching-cubes; see `tsdf`'s module docs for the ruling.
+inf-voxel = { workspace = true }
+# `GpuContext::headless()` — the ONE adapter door in this workspace, with its
+# software-adapter fallback and its device-lost callback. A second copy of that
+# 30-line constructor would be a second door with its own answer to "is there a
+# GPU", which is exactly the arrangement the house rules forbid. Ring 0 -> Ring 0.
+inf-render = { workspace = true }
+# The deterministic job pool. Every parallel stage here is an in-order pure map,
+# like `inf-photo`'s.
+inf-core = { workspace = true }
+wgpu = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Validates every `.wgsl` in `src/shaders/` with NO adapter, so a shader that
+# cannot compile is a red test on every CI platform rather than a skip. The
+# `SHADER_TABLE` law, applied to a standalone compute crate.
+naga = { workspace = true }
