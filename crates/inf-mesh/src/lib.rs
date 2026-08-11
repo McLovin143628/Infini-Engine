@@ -32,4 +32,4 @@ pub use gltf_import::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use obj_import::import_obj;
 #[cfg(not(target_arch = "wasm32"))]
-pub use optimize::optimize;
+pub use optimize::{optimize, simplify, Simplified};
