@@ -1,0 +1,1071 @@
+//! **New Character from Template** (P24.5) — the wizard's Ring-1 half.
+//!
+//! *Pick a plan → shape it → auto-rig → a default locomotion set wired to a
+//! state machine.* The anti-pain headline, and it is a **composition** of doors
+//! that already existed rather than new simulation:
+//!
+//! | step | door | landed |
+//! |---|---|---|
+//! | pick a plan | [`inf_anim::BodyPlan`] | P24.1 |
+//! | shape it | [`inf_anim::BodyParams`] → [`inf_anim::build_template`] | P24.1 |
+//! | auto-rig to a mesh | [`inf_dcc::fit_template`] | P24.2 |
+//! | solve weights | [`inf_dcc::solve_heat_weights`] | P24.2 |
+//! | clips + machine | [`inf_anim::build_locomotion`] / [`inf_anim::locomotion_machine`] | P24.5 |
+//! | the assets | [`AssetProject::write_asset`] | P4 |
+//! | the actor | [`crate::scene::SceneDoc::edit_create_character`] | P24.5 |
+//!
+//! The two new things are the last row of that table and the row above it. The
+//! rest is wiring, and saying so is the point: a wizard that reimplemented any
+//! of the middle rows would be a second spelling of a rule that already has one.
+//!
+//! # Everything is generated BEFORE anything is written
+//!
+//! [`build_character`] validates the plan, builds the rig, fits it, solves the
+//! weights and generates all three clips *in memory*, and only then starts
+//! writing assets. A refusal therefore never leaves a half-built character in
+//! the Content Drawer — the `skel_create_template` rule, applied to a job that
+//! writes six assets instead of one.
+//!
+//! # The body
+//!
+//! Two paths, and which one runs is decided by whether the author brought a mesh:
+//!
+//! * **They did** — the rig is *fitted* to it ([`inf_dcc::fit_template`]),
+//!   the mesh is bound to that rig and its weights are solved
+//!   ([`inf_dcc::solve_heat_weights`]), and the result is written as a **new**
+//!   `.inf_mesh` beside the character. The author's own asset is never rewritten:
+//!   a wizard that silently reskinned an imported mesh would be destroying the
+//!   thing it was given.
+//! * **They did not** — [`block_body_mesh`] builds a blocky mannequin, one box
+//!   per bone, each box rigid to the bone it wraps. It is not a model; it is the
+//!   difference between a character you can see walking in PIE and an empty
+//!   transform, and it is deliberately obvious about being a placeholder. The
+//!   alternative considered and rejected was `SkeletalMesh { mesh: None }`, which
+//!   draws the renderer's placeholder **cube** — one cube for a whole creature,
+//!   which tells an author nothing about whether their rig moves.
+//!
+//! # Units
+//!
+//! Metres and seconds throughout (the units doctrine). The only degrees in this
+//! module are [`inf_anim::GaitParams`]' angles and [`inf_anim::JointLimit`]'s,
+//! which are the authoring convention.
+
+use inf_anim::locomotion::{build_locomotion, locomotion_machine, GaitParams};
+use inf_anim::{AnimClipAsset, BodyParams, BodyPlan, SkeletonAsset, StateMachineAsset};
+use inf_asset::{AssetId, AssetKind};
+use inf_mesh::{MeshAsset, MeshVertex, SubMesh, VertexSkin};
+
+use crate::assets::AssetProject;
+
+/// The content sub-folder a generated character's assets land in.
+pub const CHARACTER_FOLDER: &str = "Characters";
+
+/// How wide a mannequin box is, as a fraction of the bone it wraps.
+const BOX_RADIUS_OF_BONE: f64 = 0.22;
+/// …clamped into this fraction of the whole rig's height, so a 5 cm finger bone
+/// is not invisible and a 1 m spine segment is not a barrel.
+const BOX_RADIUS_MIN_OF_HEIGHT: f64 = 0.012;
+const BOX_RADIUS_MAX_OF_HEIGHT: f64 = 0.070;
+
+/// Why a character refused to generate.
+///
+/// Every variant carries the *underlying* door's own message rather than a
+/// rewritten one, because those messages name the offending parameter, joint or
+/// asset and that text is what reaches the author.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum CharacterError {
+    /// The template generator refused the proportions.
+    #[error("{0}")]
+    Template(String),
+    /// The locomotion generator refused the gait, or the rig.
+    #[error("{0}")]
+    Locomotion(String),
+    /// The auto-fit refused the mesh.
+    #[error("{0}")]
+    Fit(String),
+    /// The weight solve refused.
+    #[error("{0}")]
+    Weights(String),
+    /// The named mesh asset is missing, of the wrong kind, or unreadable.
+    #[error("{0}")]
+    Mesh(String),
+    /// An asset could not be written.
+    #[error("{0}")]
+    Write(String),
+    /// A name that would produce no file.
+    #[error("a character needs a name")]
+    EmptyName,
+}
+
+/// Everything the wizard collects. One struct, so a preview and a build are the
+/// **same** input and a preview cannot describe a character the build would not
+/// make.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CharacterSpec {
+    /// Base name for every generated asset (`"Hero"` → `Hero.inf_skel`,
+    /// `Hero Walk.inf_anim`, `Hero Locomotion.inf_sm`, …).
+    pub name: String,
+    pub plan: BodyPlan,
+    pub params: BodyParams,
+    pub gait: GaitParams,
+    /// An existing `.inf_mesh` to fit the rig to and skin. `None` builds a blocky
+    /// mannequin from the rig instead (see the module docs).
+    pub mesh: Option<AssetId>,
+}
+
+impl Default for CharacterSpec {
+    fn default() -> Self {
+        Self {
+            name: "Character".to_string(),
+            plan: BodyPlan::Biped,
+            params: BodyParams::default(),
+            gait: GaitParams::default(),
+            mesh: None,
+        }
+    }
+}
+
+/// One joint, as the wizard's live preview draws it. The same three numbers the
+/// Skeleton Editor's SVG diagram projects from, deliberately — the wizard's
+/// preview and the editor's are the same picture of the same rig.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviewJoint {
+    pub name: String,
+    pub parent: Option<u16>,
+    /// Local rest translation, metres.
+    pub translation: [f32; 3],
+}
+
+/// What the wizard can say about a spec **without writing anything**.
+///
+/// Recomputed on every slider drag, so it is the whole feedback loop of the
+/// "shape it" step: the rig really is generated, the clips really are generated,
+/// and the numbers below are read off them rather than predicted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CharacterPreview {
+    pub joints: Vec<PreviewJoint>,
+    pub sockets: Vec<String>,
+    /// How many joints carry a rotation limit — the IK input P24.1 emits.
+    pub limits: usize,
+    /// The rig's actual extent along Y in the bind pose (metres). Not
+    /// `params.height_m`: a fitted rig's height comes from the mesh, and reading
+    /// it back is how an author sees that the fit worked.
+    pub height_m: f64,
+    /// Each driven leg's `(name, length_m, gait phase)`.
+    pub legs: Vec<(String, f64, f64)>,
+    /// The generated cycles' durations, seconds: idle, walk, run.
+    pub durations_s: [f32; 3],
+    /// The speeds the machine's thresholds are derived from (m/s).
+    pub walk_speed_m_s: f64,
+    pub run_speed_m_s: f64,
+    pub walk_threshold_m_s: f64,
+    pub run_threshold_m_s: f64,
+    /// Vertices and triangles of the mannequin body the build would generate.
+    /// `None` when the spec brings its own mesh.
+    pub body: Option<(usize, usize)>,
+}
+
+/// What an auto-fit did, when one ran.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FitSummary {
+    pub height_m: f64,
+    pub joints_inside: usize,
+    pub joints: usize,
+    pub symmetry_score: f64,
+}
+
+/// What the weight solve did, when one ran.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WeightSummary {
+    /// Vertices whose weights the solve wrote.
+    pub assigned: usize,
+    /// Vertices no bone could see — they keep "all of joint 0", which is the
+    /// state an author needs told about rather than left to notice.
+    pub unreached: usize,
+    pub worst_residual: f64,
+}
+
+/// The assets a build produced, and what happened on the way.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CharacterBuild {
+    pub skeleton: AssetId,
+    pub mesh: AssetId,
+    pub idle: AssetId,
+    pub walk: AssetId,
+    pub run: AssetId,
+    pub machine: AssetId,
+    /// Whether `mesh` is the generated mannequin (`true`) or a skinned copy of
+    /// the author's own mesh (`false`).
+    pub mannequin: bool,
+    pub fit: Option<FitSummary>,
+    pub weights: Option<WeightSummary>,
+    /// Things that happened and are not refusals — an unreached region, a fit
+    /// that placed joints outside the mesh. The panel shows them; nothing here
+    /// is a failure.
+    pub warnings: Vec<String>,
+}
+
+/// **Fit a template rig to a model** — `MeshAsset` → kernel → tessellation →
+/// BVH → [`inf_dcc::fit_template`], as one door.
+///
+/// P24.3 opened this hop inside the Ring-2 `skel_fit_to_mesh` command; the wizard
+/// needs the identical four lines, and two spellings of "how you turn an asset
+/// into something the fit can see" is the shape the P22 *one door for three
+/// paths* law is about. So it lives here and the Skeleton Editor's command calls
+/// it.
+///
+/// The **whole** [`inf_dcc::FitReport`] comes back rather than a projection,
+/// because the Skeleton Editor's readout names `steps_rejected` and the wizard's
+/// does not; a shared door that returned only the intersection would make the
+/// panel poorer to make the wizard tidier.
+pub fn fit_rig_to_mesh(
+    plan: BodyPlan,
+    params: &BodyParams,
+    payload: &MeshAsset,
+) -> Result<(SkeletonAsset, inf_dcc::FitReport), CharacterError> {
+    let imported =
+        inf_dcc::from_mesh_asset(payload).map_err(|e| CharacterError::Mesh(e.to_string()))?;
+    let geo = crate::dcc::tessellate(&imported.mesh);
+    let bvh = inf_dcc::Bvh::new(crate::dcc::triangle_soup(&geo));
+    let opts = inf_dcc::FitOptions {
+        plan,
+        params: *params,
+        ..inf_dcc::FitOptions::default()
+    };
+    inf_dcc::fit_template(&bvh, &opts).map_err(|e| CharacterError::Fit(e.to_string()))
+}
+
+/// The rig a spec produces, plus what fitting it cost. Shared by the preview and
+/// the build so the two cannot disagree about what rig they are describing.
+fn rig_for(
+    spec: &CharacterSpec,
+    fit_source: Option<&MeshAsset>,
+) -> Result<(SkeletonAsset, Option<FitSummary>), CharacterError> {
+    let Some(payload) = fit_source else {
+        let asset = inf_anim::build_template(spec.plan, &spec.params)
+            .map_err(|e| CharacterError::Template(e.to_string()))?;
+        return Ok((asset, None));
+    };
+    let (asset, report) = fit_rig_to_mesh(spec.plan, &spec.params, payload)?;
+    Ok((
+        asset,
+        Some(FitSummary {
+            height_m: report.height_m,
+            joints_inside: report.joints_inside,
+            joints: report.joints,
+            symmetry_score: report.symmetry_score,
+        }),
+    ))
+}
+
+/// The rig's bind-pose extent along Y, metres — its real standing height.
+fn rig_height_m(rig: &SkeletonAsset) -> f64 {
+    let mut mats: Vec<glam::Mat4> = Vec::with_capacity(rig.skeleton.len());
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for j in rig.skeleton.joints() {
+        let local = j.local_bind.to_mat4();
+        let m = match j.parent {
+            Some(p) => mats[p as usize] * local,
+            None => local,
+        };
+        let y = m.w_axis.y;
+        lo = lo.min(y);
+        hi = hi.max(y);
+        mats.push(m);
+    }
+    if lo.is_finite() && hi.is_finite() {
+        (hi - lo) as f64
+    } else {
+        0.0
+    }
+}
+
+/// Describe what [`build_character`] would produce, without touching the disk.
+///
+/// `fit_source` is the decoded `.inf_mesh` when the spec names one; the Ring-2
+/// caller loads it, because Ring 1 taking an [`AssetProject`] here would make a
+/// slider drag a database read.
+pub fn preview_character(
+    spec: &CharacterSpec,
+    fit_source: Option<&MeshAsset>,
+) -> Result<CharacterPreview, CharacterError> {
+    let (rig, _fit) = rig_for(spec, fit_source)?;
+    let set = build_locomotion(spec.plan, &rig, &spec.gait)
+        .map_err(|e| CharacterError::Locomotion(e.to_string()))?;
+    let body = fit_source.is_none().then(|| {
+        let m = block_body_mesh(&rig);
+        let verts: usize = m.submeshes.iter().map(|s| s.vertices.len()).sum();
+        let tris: usize = m.submeshes.iter().map(|s| s.triangle_count()).sum();
+        (verts, tris)
+    });
+    Ok(CharacterPreview {
+        joints: rig
+            .skeleton
+            .joints()
+            .iter()
+            .map(|j| PreviewJoint {
+                name: j.name.clone(),
+                parent: j.parent,
+                translation: j.local_bind.translation,
+            })
+            .collect(),
+        sockets: rig.sockets.iter().map(|s| s.name.clone()).collect(),
+        limits: rig.limits.len(),
+        height_m: rig_height_m(&rig),
+        legs: set
+            .legs
+            .iter()
+            .map(|l| (l.name.clone(), l.length_m, l.phase))
+            .collect(),
+        durations_s: [set.idle.duration, set.walk.duration, set.run.duration],
+        walk_speed_m_s: set.walk_speed_m_s,
+        run_speed_m_s: set.run_speed_m_s,
+        walk_threshold_m_s: set.walk_threshold_m_s(),
+        run_threshold_m_s: set.run_threshold_m_s(),
+        body,
+    })
+}
+
+/// Generate a character's six assets into `project` and return their ids.
+///
+/// Writing order is a dependency order and not a convenience: the skeleton is
+/// written first because the mesh's skin binding and every clip's `skeleton`
+/// field name its GUID, and the machine is written last because it names all
+/// four of the others.
+pub fn build_character(
+    project: &mut AssetProject,
+    spec: &CharacterSpec,
+) -> Result<CharacterBuild, CharacterError> {
+    let name = spec.name.trim();
+    if name.is_empty() {
+        return Err(CharacterError::EmptyName);
+    }
+
+    // ── everything that can refuse, before anything is written ─────────────
+    let source: Option<MeshAsset> = match spec.mesh {
+        Some(id) => Some(load_mesh(project, id)?),
+        None => None,
+    };
+    let (rig, fit) = rig_for(spec, source.as_ref())?;
+    let set = build_locomotion(spec.plan, &rig, &spec.gait)
+        .map_err(|e| CharacterError::Locomotion(e.to_string()))?;
+
+    let mut warnings: Vec<String> = Vec::new();
+    if let Some(f) = fit {
+        if f.joints_inside < f.joints {
+            warnings.push(format!(
+                "{} of {} joints landed outside the mesh — check the proportions \
+                 against the model's pose",
+                f.joints - f.joints_inside,
+                f.joints
+            ));
+        }
+    }
+
+    let dir = project
+        .content_dir(CHARACTER_FOLDER)
+        .map_err(|e| CharacterError::Write(e.to_string()))?;
+
+    // ── the rig ────────────────────────────────────────────────────────────
+    let skeleton = project
+        .write_asset(&dir, name, &rig, None, vec![], None)
+        .map_err(|e| CharacterError::Write(e.to_string()))?;
+
+    // ── the body ───────────────────────────────────────────────────────────
+    let (body, weights, mannequin) = match source.as_ref() {
+        Some(payload) => {
+            let (asset, summary) = skinned_copy(payload, &rig, skeleton)?;
+            if summary.unreached > 0 {
+                warnings.push(format!(
+                    "{} vertices could not see any bone and kept the root's weights \
+                     — paint them, or check that the rig is inside the mesh",
+                    summary.unreached
+                ));
+            }
+            (asset, Some(summary), false)
+        }
+        None => (block_body_mesh(&rig), None, true),
+    };
+    let mesh = project
+        .write_asset(
+            &dir,
+            &format!("{name} Body"),
+            &body,
+            None,
+            vec![skeleton],
+            None,
+        )
+        .map_err(|e| CharacterError::Write(e.to_string()))?;
+
+    // ── the clips ──────────────────────────────────────────────────────────
+    let skel_bytes = *skeleton.0.as_bytes();
+    let mut clip = |suffix: &str, clip: &inf_anim::AnimClip| -> Result<AssetId, CharacterError> {
+        let payload = AnimClipAsset::new(clip.clone(), Some(skel_bytes));
+        project
+            .write_asset(
+                &dir,
+                &format!("{name} {suffix}"),
+                &payload,
+                None,
+                vec![skeleton],
+                None,
+            )
+            .map_err(|e| CharacterError::Write(e.to_string()))
+    };
+    let idle = clip("Idle", &set.idle)?;
+    let walk = clip("Walk", &set.walk)?;
+    let run = clip("Run", &set.run)?;
+
+    // ── the machine ────────────────────────────────────────────────────────
+    let machine_asset = StateMachineAsset::new(
+        locomotion_machine(
+            &set,
+            *idle.0.as_bytes(),
+            *walk.0.as_bytes(),
+            *run.0.as_bytes(),
+        ),
+        Some(skel_bytes),
+    );
+    let machine = project
+        .write_asset(
+            &dir,
+            &format!("{name} Locomotion"),
+            &machine_asset,
+            None,
+            vec![skeleton, idle, walk, run],
+            None,
+        )
+        .map_err(|e| CharacterError::Write(e.to_string()))?;
+
+    Ok(CharacterBuild {
+        skeleton,
+        mesh,
+        idle,
+        walk,
+        run,
+        machine,
+        mannequin,
+        fit,
+        weights,
+        warnings,
+    })
+}
+
+fn load_mesh(project: &AssetProject, id: AssetId) -> Result<MeshAsset, CharacterError> {
+    let entry = project
+        .db()
+        .get(id)
+        .ok_or_else(|| CharacterError::Mesh(format!("no asset {id}")))?;
+    if entry.kind() != AssetKind::Mesh {
+        return Err(CharacterError::Mesh(format!(
+            "{} is not a mesh asset",
+            entry.name
+        )));
+    }
+    project
+        .load_payload::<MeshAsset>(id)
+        .map_err(|e| CharacterError::Mesh(e.to_string()))
+}
+
+/// Bind `payload` to `rig`, solve its weights, and hand back a **new** skinned
+/// mesh — the author's asset is untouched.
+fn skinned_copy(
+    payload: &MeshAsset,
+    rig: &SkeletonAsset,
+    skeleton: AssetId,
+) -> Result<(MeshAsset, WeightSummary), CharacterError> {
+    let imported =
+        inf_dcc::from_mesh_asset(payload).map_err(|e| CharacterError::Mesh(e.to_string()))?;
+    let mut mesh = imported.mesh;
+    let geo = crate::dcc::tessellate(&mesh);
+    let bvh = inf_dcc::Bvh::new(crate::dcc::triangle_soup(&geo));
+
+    // The bind comes first: the solve refuses an unbound mesh by design (a joint
+    // index means nothing without a skeleton to index), and re-binding an already
+    // bound mesh is the supported way a rig change lands.
+    inf_dcc::ops::apply(
+        &mut mesh,
+        &inf_dcc::Op::BindSkin {
+            skeleton: Some(*skeleton.0.as_bytes()),
+            joints: rig.skeleton.len() as u32,
+        },
+    )
+    .map_err(|e| CharacterError::Weights(e.to_string()))?;
+
+    let (op, report) = inf_dcc::solve_heat_weights(&mesh, &bvh, &rig.skeleton)
+        .map_err(|e| CharacterError::Weights(e.to_string()))?;
+    if let Some(op) = op {
+        inf_dcc::ops::apply(&mut mesh, &op).map_err(|e| CharacterError::Weights(e.to_string()))?;
+    }
+    let (asset, _export) = inf_dcc::to_mesh_asset(&mesh, &inf_dcc::ExportOptions::default());
+    Ok((
+        asset,
+        WeightSummary {
+            assigned: report.assigned,
+            unreached: report.unreached,
+            worst_residual: report.worst_residual,
+        },
+    ))
+}
+
+// ── the mannequin ───────────────────────────────────────────────────────────
+
+/// A blocky body for `rig`: one box per bone, each box **rigid** to the joint at
+/// its top.
+///
+/// # Why rigid and not solved
+///
+/// A box built around a bone is *already* the answer a weight solve would
+/// converge to for that box, and running a heat diffusion over geometry this
+/// generator authored would be asking a solver to rediscover the thing it was
+/// told. Rigid also makes the mannequin legible as a *diagnostic*: every box
+/// moves with exactly one bone, so a bone that is not moving is visibly not
+/// moving, which is the whole reason to draw one.
+///
+/// # Determinism
+///
+/// Joint order is the skeleton's, box corners are generated in a fixed order,
+/// and the only non-arithmetic operation is `sqrt` (inside `normalize`), which
+/// IEEE-754 specifies exactly. No trigonometry: the box's frame is built from a
+/// cross product against a reference axis chosen by comparison, not by an angle.
+pub fn block_body_mesh(rig: &SkeletonAsset) -> MeshAsset {
+    let joints = rig.skeleton.joints();
+    // Bind-pose globals, composed down the chain (the joint list is topological
+    // by `Skeleton::new`'s own invariant).
+    let mut mats: Vec<glam::Mat4> = Vec::with_capacity(joints.len());
+    for j in joints {
+        let local = j.local_bind.to_mat4();
+        let m = match j.parent {
+            Some(p) => mats[p as usize] * local,
+            None => local,
+        };
+        mats.push(m);
+    }
+    let globals: Vec<glam::Vec3> = mats.iter().map(|m| m.w_axis.truncate()).collect();
+    let height = rig_height_m(rig).max(1.0e-3) as f32;
+    let radius_min = height * BOX_RADIUS_MIN_OF_HEIGHT as f32;
+    let radius_max = height * BOX_RADIUS_MAX_OF_HEIGHT as f32;
+
+    let mut vertices: Vec<MeshVertex> = Vec::new();
+    let mut skin: Vec<VertexSkin> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for (index, joint) in joints.iter().enumerate() {
+        // A bone is a joint and its PARENT: the box wraps the segment between
+        // them and rides the parent, which is the bone that moves it.
+        let Some(parent) = joint.parent else {
+            continue;
+        };
+        let a = globals[parent as usize];
+        let b = globals[index];
+        let axis = b - a;
+        let len = axis.length();
+        if !(len.is_finite() && len > 1.0e-4) {
+            continue;
+        }
+        let dir = axis / len;
+        // A reference that is never parallel to `dir`, chosen by comparison so
+        // no angle is involved.
+        let reference = if dir.y.abs() < 0.9 {
+            glam::Vec3::Y
+        } else {
+            glam::Vec3::X
+        };
+        let right = dir.cross(reference).normalize();
+        let up = right.cross(dir);
+        let radius = (len * BOX_RADIUS_OF_BONE as f32).clamp(radius_min, radius_max);
+        let centre = (a + b) * 0.5;
+
+        let corner =
+            |base: glam::Vec3, i: f32, j: f32| base + right * (i * radius) + up * (j * radius);
+        let a00 = corner(a, -1.0, -1.0);
+        let a10 = corner(a, 1.0, -1.0);
+        let a11 = corner(a, 1.0, 1.0);
+        let a01 = corner(a, -1.0, 1.0);
+        let b00 = corner(b, -1.0, -1.0);
+        let b10 = corner(b, 1.0, -1.0);
+        let b11 = corner(b, 1.0, 1.0);
+        let b01 = corner(b, -1.0, 1.0);
+
+        for quad in [
+            [a00, a01, a11, a10],
+            [b00, b10, b11, b01],
+            [a00, a10, b10, b00],
+            [a10, a11, b11, b10],
+            [a11, a01, b01, b11],
+            [a01, a00, b00, b01],
+        ] {
+            push_quad(&mut vertices, &mut indices, quad, centre);
+        }
+        // 6 faces × 4 corners, all riding the parent joint.
+        let rigid = VertexSkin {
+            joints: [parent, 0, 0, 0],
+            weights: [1.0, 0.0, 0.0, 0.0],
+        };
+        skin.resize(vertices.len(), rigid);
+    }
+
+    MeshAsset::new(
+        vec![SubMesh {
+            name: "body".to_string(),
+            vertices,
+            indices,
+            material_slot: None,
+            skin,
+        }],
+        vec![],
+    )
+}
+
+/// Append one quad as two triangles, **wound so its normal points away from
+/// `centre`**.
+///
+/// The winding is decided by measurement rather than by getting the corner order
+/// right six times: the normal is taken from the winding, and if it faces the box
+/// interior the quad is reversed. A face wound inward is invisible under backface
+/// culling and correct under lighting, which is exactly the kind of defect that
+/// survives review.
+fn push_quad(
+    vertices: &mut Vec<MeshVertex>,
+    indices: &mut Vec<u32>,
+    quad: [glam::Vec3; 4],
+    centre: glam::Vec3,
+) {
+    let mut q = quad;
+    let mut normal = (q[1] - q[0]).cross(q[2] - q[0]);
+    let centroid = (q[0] + q[1] + q[2] + q[3]) * 0.25;
+    if normal.dot(centroid - centre) < 0.0 {
+        q.reverse();
+        normal = (q[1] - q[0]).cross(q[2] - q[0]);
+    }
+    let normal = if normal.length_squared() > 0.0 {
+        normal.normalize()
+    } else {
+        glam::Vec3::Y
+    };
+    let base = vertices.len() as u32;
+    for (k, p) in q.iter().enumerate() {
+        vertices.push(MeshVertex {
+            position: p.to_array(),
+            normal: normal.to_array(),
+            uv: [(k == 1 || k == 2) as u8 as f32, (k >= 2) as u8 as f32],
+            ..Default::default()
+        });
+    }
+    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn biped() -> SkeletonAsset {
+        inf_anim::build_template(BodyPlan::Biped, &BodyParams::default()).unwrap()
+    }
+
+    fn project(dir: &std::path::Path) -> AssetProject {
+        AssetProject::open(dir.join("Content")).expect("open project")
+    }
+
+    #[test]
+    fn a_preview_describes_the_rig_the_build_would_make() {
+        let spec = CharacterSpec::default();
+        let p = preview_character(&spec, None).unwrap();
+        assert_eq!(p.joints.len(), biped().skeleton.len());
+        assert_eq!(p.joints[0].name, "hips");
+        assert_eq!(p.legs.len(), 2);
+        assert!(p.limits >= 4, "knees and elbows carry hinges");
+        assert!((p.height_m - 1.75).abs() < 0.2, "{} m", p.height_m);
+        assert!(p.walk_threshold_m_s < p.run_threshold_m_s);
+        let (verts, tris) = p.body.expect("a mannequin is previewed");
+        assert!(verts > 100 && tris > 50, "{verts} verts / {tris} tris");
+    }
+
+    /// **A proportion reaches the preview.** The "shape it" step is only a step
+    /// if moving a slider moves the answer.
+    #[test]
+    fn shaping_the_body_changes_what_the_preview_reports() {
+        let short = preview_character(&CharacterSpec::default(), None).unwrap();
+        let tall = preview_character(
+            &CharacterSpec {
+                params: BodyParams {
+                    height_m: 2.6,
+                    ..BodyParams::default()
+                },
+                ..CharacterSpec::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert!(tall.height_m > short.height_m * 1.3);
+        assert!(tall.walk_speed_m_s > short.walk_speed_m_s);
+        assert_ne!(tall.joints, short.joints);
+    }
+
+    #[test]
+    fn the_mannequin_rides_real_bones_and_has_no_degenerate_triangle() {
+        let rig = biped();
+        let body = block_body_mesh(&rig);
+        let sub = &body.submeshes[0];
+        assert_eq!(
+            sub.skin.len(),
+            sub.vertices.len(),
+            "every vertex is skinned"
+        );
+        // Every box rides ONE joint at full weight, and never joint 0 by
+        // accident: a mannequin whose every vertex named the root would animate
+        // as a single rigid lump and look almost right.
+        let mut used: std::collections::BTreeSet<u16> = Default::default();
+        for w in &sub.skin {
+            assert_eq!(w.weights, [1.0, 0.0, 0.0, 0.0]);
+            used.insert(w.joints[0]);
+        }
+        assert!(
+            used.len() > 8,
+            "the mannequin rides only {} joints of {}",
+            used.len(),
+            rig.skeleton.len()
+        );
+        // No zero-area triangle: a box built on a degenerate frame would still
+        // count vertices and draw nothing.
+        for tri in sub.indices.chunks_exact(3) {
+            let p = |i: u32| glam::Vec3::from_array(sub.vertices[i as usize].position);
+            let area = (p(tri[1]) - p(tri[0]))
+                .cross(p(tri[2]) - p(tri[0]))
+                .length();
+            assert!(area > 1.0e-9, "degenerate triangle at {tri:?}");
+        }
+        // Deterministic to the byte.
+        assert_eq!(
+            inf_asset::encode(&body).unwrap(),
+            inf_asset::encode(&block_body_mesh(&rig)).unwrap()
+        );
+    }
+
+    /// **Every mannequin face points OUT.** Wound by measurement, checked by
+    /// measurement — a box whose faces face inward is invisible under culling.
+    #[test]
+    fn the_mannequin_faces_point_away_from_their_own_bone() {
+        let body = block_body_mesh(&biped());
+        let sub = &body.submeshes[0];
+        for tri in sub.indices.chunks_exact(3) {
+            let v = |i: u32| &sub.vertices[i as usize];
+            let p = |i: u32| glam::Vec3::from_array(v(i).position);
+            let geometric = (p(tri[1]) - p(tri[0]))
+                .cross(p(tri[2]) - p(tri[0]))
+                .normalize();
+            let stored = glam::Vec3::from_array(v(tri[0]).normal);
+            assert!(
+                geometric.dot(stored) > 0.99,
+                "the stored normal disagrees with the winding: {geometric} vs {stored}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_build_writes_six_assets_and_wires_them_together() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project(tmp.path());
+        let out = build_character(&mut p, &CharacterSpec::default()).expect("builds");
+        assert!(out.mannequin);
+        assert!(out.fit.is_none() && out.weights.is_none());
+
+        // Every id resolves, at the kind it claims.
+        for (id, kind) in [
+            (out.skeleton, AssetKind::Skeleton),
+            (out.mesh, AssetKind::Mesh),
+            (out.idle, AssetKind::AnimClip),
+            (out.walk, AssetKind::AnimClip),
+            (out.run, AssetKind::AnimClip),
+            (out.machine, AssetKind::StateMachine),
+        ] {
+            assert_eq!(p.db().get(id).expect("registered").kind(), kind);
+        }
+
+        // The machine names the three clips that were just written — the wiring
+        // the whole wizard exists to do, read back off the payload rather than
+        // assumed from the call.
+        let sm: StateMachineAsset = p.load_payload(out.machine).unwrap();
+        assert_eq!(sm.skeleton, Some(*out.skeleton.0.as_bytes()));
+        let refs: Vec<Uuid> = sm
+            .machine
+            .states
+            .iter()
+            .map(|s| match &s.motion {
+                inf_anim::Motion::Clip(c) => Uuid::from_bytes(*c),
+                _ => panic!("a generated state plays a single clip"),
+            })
+            .collect();
+        assert_eq!(refs, vec![out.idle.0, out.walk.0, out.run.0]);
+
+        // …and the dependency edges are real, so a delete warns and a cook ships
+        // them.
+        assert!(p.db().referenced_by(out.idle).contains(&out.machine));
+        assert!(p.db().referenced_by(out.skeleton).contains(&out.mesh));
+    }
+
+    #[test]
+    fn a_quadruped_builds_too_and_differs_from_the_biped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project(tmp.path());
+        let biped = build_character(&mut p, &CharacterSpec::default()).unwrap();
+        let quad = build_character(
+            &mut p,
+            &CharacterSpec {
+                name: "Beast".into(),
+                plan: BodyPlan::Quadruped,
+                ..CharacterSpec::default()
+            },
+        )
+        .unwrap();
+        let a: SkeletonAsset = p.load_payload(biped.skeleton).unwrap();
+        let b: SkeletonAsset = p.load_payload(quad.skeleton).unwrap();
+        let feet = |s: &SkeletonAsset| {
+            s.skeleton
+                .joints()
+                .iter()
+                .filter(|j| j.name.starts_with("foot_"))
+                .count()
+        };
+        assert_eq!((feet(&a), feet(&b)), (2, 4), "two legs against four");
+        // …and the quadruped has NO arms, which is the other half of the plan.
+        assert!(a.skeleton.index_of("hand_l").is_some());
+        assert!(b.skeleton.index_of("hand_l").is_none());
+        let aw: AnimClipAsset = p.load_payload(biped.walk).unwrap();
+        let bw: AnimClipAsset = p.load_payload(quad.walk).unwrap();
+        assert_ne!(aw.clip, bw.clip, "two plans, two walks");
+    }
+
+    /// **The last row of the table**: the built assets become an actor that is
+    /// wearing them, in one undo step.
+    #[test]
+    fn the_built_character_becomes_one_undoable_actor() {
+        use crate::scene::SceneDoc;
+        use inf_ecs::components::{AnimStateMachine, SkeletalMesh};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project(tmp.path());
+        let out = build_character(&mut p, &CharacterSpec::default()).unwrap();
+
+        let mut doc = SceneDoc::new();
+        let before = doc.order().len();
+        let guid = doc.edit_create_character(
+            "Hero",
+            out.skeleton.0,
+            out.mesh.0,
+            out.machine.0,
+            glam::DVec3::new(1.0, 0.0, -2.0),
+        );
+        let e = doc.world().entity_of(guid).expect("spawned");
+        let sk = doc.world().world().get::<SkeletalMesh>(e).expect("rigged");
+        assert_eq!(
+            (sk.skeleton, sk.mesh),
+            (Some(out.skeleton.0), Some(out.mesh.0))
+        );
+        assert_eq!(
+            doc.world()
+                .world()
+                .get::<AnimStateMachine>(e)
+                .expect("machine assigned")
+                .sm,
+            Some(out.machine.0)
+        );
+
+        // ONE step, and it takes the components with it — a wizard that spawned
+        // and then assigned would leave a rigless entity behind on undo.
+        doc.undo();
+        assert_eq!(doc.order().len(), before);
+        assert!(doc.world().entity_of(guid).is_none());
+        doc.redo();
+        let e = doc.world().entity_of(guid).expect("redone");
+        assert_eq!(
+            doc.world()
+                .world()
+                .get::<AnimStateMachine>(e)
+                .expect("the machine came back with it")
+                .sm,
+            Some(out.machine.0)
+        );
+    }
+
+    /// A 1.8 m "tube man" — the fixture `inf_dcc::autofit`'s own gate uses,
+    /// rebuilt as a `MeshAsset` because that is what an author's imported model
+    /// is and what the wizard is handed.
+    fn tube_man() -> MeshAsset {
+        let mut vertices: Vec<MeshVertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        let mut part = |min: [f32; 3], max: [f32; 3]| {
+            let lo = glam::Vec3::from_array(min);
+            let hi = glam::Vec3::from_array(max);
+            let c = (lo + hi) * 0.5;
+            let p = |x: bool, y: bool, z: bool| {
+                glam::Vec3::new(
+                    if x { hi.x } else { lo.x },
+                    if y { hi.y } else { lo.y },
+                    if z { hi.z } else { lo.z },
+                )
+            };
+            for quad in [
+                [
+                    p(false, false, false),
+                    p(true, false, false),
+                    p(true, true, false),
+                    p(false, true, false),
+                ],
+                [
+                    p(false, false, true),
+                    p(true, false, true),
+                    p(true, true, true),
+                    p(false, true, true),
+                ],
+                [
+                    p(false, false, false),
+                    p(false, true, false),
+                    p(false, true, true),
+                    p(false, false, true),
+                ],
+                [
+                    p(true, false, false),
+                    p(true, true, false),
+                    p(true, true, true),
+                    p(true, false, true),
+                ],
+                [
+                    p(false, false, false),
+                    p(true, false, false),
+                    p(true, false, true),
+                    p(false, false, true),
+                ],
+                [
+                    p(false, true, false),
+                    p(true, true, false),
+                    p(true, true, true),
+                    p(false, true, true),
+                ],
+            ] {
+                push_quad(&mut vertices, &mut indices, quad, c);
+            }
+        };
+        part([-0.20, 0.90, -0.12], [0.20, 1.50, 0.12]); // torso
+        part([-0.10, 1.48, -0.10], [0.10, 1.80, 0.10]); // head + neck
+        part([-0.30, 0.66, -0.08], [-0.16, 1.48, 0.08]); // left arm
+        part([0.16, 0.66, -0.08], [0.30, 1.48, 0.08]); // right arm
+        part([-0.18, 0.0, -0.09], [-0.02, 0.98, 0.09]); // left leg
+        part([0.02, 0.0, -0.09], [0.18, 0.98, 0.09]); // right leg
+        MeshAsset::new(
+            vec![SubMesh {
+                name: "tube".into(),
+                vertices,
+                indices,
+                material_slot: None,
+                skin: vec![],
+            }],
+            vec![],
+        )
+    }
+
+    /// **The imported-mesh path, end to end**: the rig is fitted to the model,
+    /// the model is bound and solved, and the author's own asset is left alone.
+    #[test]
+    fn a_supplied_mesh_is_fitted_skinned_and_never_rewritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project(tmp.path());
+        let source = tube_man();
+        let dir = p.content_dir("Meshes").unwrap();
+        let mesh_id = p
+            .write_asset(&dir, "TubeMan", &source, None, vec![], None)
+            .unwrap();
+
+        let out = build_character(
+            &mut p,
+            &CharacterSpec {
+                name: "Fitted".into(),
+                mesh: Some(mesh_id),
+                ..CharacterSpec::default()
+            },
+        )
+        .expect("the tube man is a character");
+
+        assert!(!out.mannequin);
+        let fit = out.fit.expect("a fit ran");
+        assert!(
+            (fit.height_m - 1.80).abs() < 0.01,
+            "the rig took the MESH's height, not the spec's: {fit:?}"
+        );
+        let weights = out.weights.expect("a solve ran");
+        assert!(
+            weights.assigned > 0,
+            "the solve wrote no weights: {weights:?}"
+        );
+
+        // The written body is a DIFFERENT asset from the author's, and it is
+        // skinned where the author's was rigid.
+        assert_ne!(out.mesh, mesh_id);
+        let untouched: MeshAsset = p.load_payload(mesh_id).unwrap();
+        assert_eq!(untouched, source, "the author's own mesh was rewritten");
+        let skinned: MeshAsset = p.load_payload(out.mesh).unwrap();
+        assert!(skinned.submeshes.iter().all(|s| s.is_skinned()));
+        // …and the weights name more than one bone, which is what says a solve
+        // happened rather than a bind (a bare bind leaves every vertex rigid to
+        // joint 0 and would satisfy `is_skinned` perfectly).
+        let named: std::collections::BTreeSet<u16> = skinned
+            .submeshes
+            .iter()
+            .flat_map(|s| s.skin.iter())
+            .flat_map(|w| {
+                w.joints
+                    .iter()
+                    .zip(w.weights.iter())
+                    .filter(|(_, weight)| **weight > 0.0)
+                    .map(|(j, _)| *j)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            named.len() > 4,
+            "the skinned copy rides {} joints — a bare bind, not a solve",
+            named.len()
+        );
+    }
+
+    #[test]
+    fn an_empty_name_is_refused_before_anything_is_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project(tmp.path());
+        assert_eq!(
+            build_character(
+                &mut p,
+                &CharacterSpec {
+                    name: "   ".into(),
+                    ..CharacterSpec::default()
+                }
+            ),
+            Err(CharacterError::EmptyName)
+        );
+        assert_eq!(p.db().len(), 0, "a refusal left assets behind");
+    }
+
+    /// A refusal from a door *inside* the build leaves the content root clean —
+    /// the rule the module docs claim, driven through a gait the generator
+    /// rejects rather than through the name check above (which refuses before it
+    /// has done anything at all).
+    #[test]
+    fn a_refused_gait_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project(tmp.path());
+        let err = build_character(
+            &mut p,
+            &CharacterSpec {
+                gait: GaitParams {
+                    walk_cadence_hz: 0.0,
+                    ..GaitParams::default()
+                },
+                ..CharacterSpec::default()
+            },
+        )
+        .expect_err("a zero cadence is refused");
+        assert!(matches!(err, CharacterError::Locomotion(_)), "{err:?}");
+        assert_eq!(p.db().len(), 0);
+    }
+}

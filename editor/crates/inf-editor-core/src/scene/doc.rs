@@ -12,10 +12,10 @@
 
 use glam::{DVec2, DVec3};
 use inf_ecs::components::{
-    AtlasRect, Camera, Collider3D, ColliderShape3DKind, Foliage, FoliageInstance,
+    AnimStateMachine, AtlasRect, Camera, Collider3D, ColliderShape3DKind, Foliage, FoliageInstance,
     FoliagePaletteEntry, GlobalTransform, Light, Light2D, LightKind, Material, MeshRef, NineSlice,
-    Primitive, Spline, SplineInterp, Sprite, Terrain, Text2D, Tilemap, TimeOfDay, Transform,
-    Visibility, Volume, VolumeKind, WaterBody, WaterKind,
+    Primitive, SkeletalMesh, Spline, SplineInterp, Sprite, Terrain, Text2D, Tilemap, TimeOfDay,
+    Transform, Visibility, Volume, VolumeKind, WaterBody, WaterKind,
 };
 use inf_ecs::{Color, ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d, Vec3d};
 use inf_terrain::{
@@ -1552,6 +1552,47 @@ impl SceneDoc {
             );
         }
         self.touch();
+        guid
+    }
+
+    /// Create a **character**: an entity carrying the `SkeletalMesh` +
+    /// `AnimStateMachine` pair a generated character needs (P24.5).
+    ///
+    /// One `Create` undo step, on the `edit_create_lake` pattern — the components
+    /// are attached *before* the record is snapshotted, so undo removes a
+    /// character and redo restores one that is still wearing its rig. A wizard
+    /// that spawned the entity and then set the components through three separate
+    /// calls would put three steps on the stack for one button.
+    ///
+    /// Placed at `at` (world metres). The whole point of the pair is that neither
+    /// half is useful alone: a `SkeletalMesh` with no machine draws a bind pose
+    /// forever, and a machine with no skeleton steps its states and poses nothing
+    /// (`inf_ecs::pose`'s rule 3).
+    pub fn edit_create_character(
+        &mut self,
+        name: &str,
+        skeleton: Uuid,
+        mesh: Uuid,
+        machine: Uuid,
+        at: DVec3,
+    ) -> Uuid {
+        let guid = self.create(SpawnKind::Empty, name, None);
+        if let Some(entity) = self.world.entity_of(guid) {
+            let mut t = Transform::IDENTITY;
+            t.translation = Vec3d::new(at.x, at.y, at.z);
+            self.world.world_mut().entity_mut(entity).insert((
+                SkeletalMesh {
+                    mesh: Some(mesh),
+                    skeleton: Some(skeleton),
+                },
+                AnimStateMachine {
+                    sm: Some(machine),
+                    ..Default::default()
+                },
+                t,
+            ));
+        }
+        self.record_create(guid, "Create Character");
         guid
     }
 

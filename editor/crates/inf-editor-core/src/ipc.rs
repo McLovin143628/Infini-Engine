@@ -2686,6 +2686,269 @@ pub struct SkelApplyDto {
     pub doc: SkelDocDto,
 }
 
+// ── P24.5: New Character from Template ──────────────────────────────────────
+//
+// The wizard's whole wire. Two mirrors (`BodyParamsDto`, `GaitParamsDto`) carry
+// EVERY field of the Ring-0 structs rather than the subset today's panel exposes:
+// a wire that carried only the exposed knobs would have to move the day a slider
+// is added, and `the_wizard_dtos_carry_every_field_of_their_models` fails the day
+// either model grows a field this does not.
+
+/// [`inf_anim::BodyParams`] on the wire. Every length is **metres** and every
+/// ratio is a fraction of `height_m` (SI, units doctrine); nothing here is
+/// degrees.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct BodyParamsDto {
+    pub height_m: f64,
+    pub hip_height_ratio: f64,
+    pub shoulder_height_ratio: f64,
+    pub head_height_ratio: f64,
+    pub spine_segments: u16,
+    pub neck_segments: u16,
+    pub shoulder_width_m: f64,
+    pub hip_width_m: f64,
+    pub upper_limb_ratio: f64,
+    pub arm_length_ratio: f64,
+    /// Multi-girdle plans only; a biped's torso is vertical.
+    pub body_length_m: f64,
+    /// Multi-girdle plans only.
+    pub head_forward_m: f64,
+}
+
+/// [`inf_anim::locomotion::GaitParams`] on the wire. Angles are **degrees** (the
+/// authoring boundary), rates are hertz, and the two `*_ratio` fields are
+/// fractions of the rig's own hip height.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GaitParamsDto {
+    pub walk_cadence_hz: f64,
+    pub run_cadence_hz: f64,
+    pub hip_swing_deg: f64,
+    pub knee_flex_deg: f64,
+    pub arm_swing_deg: f64,
+    pub run_stride_scale: f64,
+    pub bob_ratio: f64,
+    pub idle_period_s: f64,
+    pub idle_bob_ratio: f64,
+    pub idle_pitch_deg: f64,
+    pub keys_per_cycle: u32,
+}
+
+/// Everything the wizard collects, in one message — so a preview and a create
+/// are the *same* input and a preview cannot describe a character the create
+/// would not make.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterSpecDto {
+    pub name: String,
+    /// `"biped"` | `"quadruped"` | `"hexapod"` | `"npedal"`. A **string** for
+    /// `skel_create_template`'s stated reason: the plan set is the part of this
+    /// API most likely to grow, and a name that fails loudly with the list of
+    /// what it does know is kinder to a stale frontend than a generated union
+    /// that silently loses a variant.
+    pub plan: String,
+    /// Leg count for `"npedal"`; ignored by the named plans.
+    pub legs: Option<u16>,
+    pub params: BodyParamsDto,
+    pub gait: GaitParamsDto,
+    /// An existing `.inf_mesh` GUID to fit the rig to and skin. Absent → the
+    /// wizard generates a blocky mannequin from the rig.
+    pub mesh_asset: Option<String>,
+}
+
+/// One joint of the previewed rig — the three numbers the Skeleton Editor's SVG
+/// diagram projects from, so the wizard and the editor draw the same picture.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterJointDto {
+    pub name: String,
+    pub parent: Option<u16>,
+    /// Local rest translation, metres.
+    pub translation: [f32; 3],
+}
+
+/// One driven leg and where it falls in the gait cycle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterLegDto {
+    pub name: String,
+    pub length_m: f64,
+    /// Position in the cycle, `[0, 1)`.
+    pub phase: f64,
+}
+
+/// What a spec *would* produce — recomputed on every slider drag, with nothing
+/// written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterRigDto {
+    pub joints: Vec<CharacterJointDto>,
+    pub sockets: Vec<String>,
+    /// Joints carrying a rotation limit — the IK input the template emits.
+    pub limits: u32,
+    /// The rig's real bind-pose extent along Y (metres). **Not** the requested
+    /// height: a fitted rig takes the mesh's, and reading it back is how an
+    /// author sees the fit worked.
+    pub height_m: f64,
+    pub legs: Vec<CharacterLegDto>,
+    /// idle / walk / run cycle lengths, seconds.
+    pub durations_s: [f32; 3],
+    pub walk_speed_m_s: f64,
+    pub run_speed_m_s: f64,
+    pub walk_threshold_m_s: f64,
+    pub run_threshold_m_s: f64,
+    /// Mannequin vertex + triangle count, absent when the spec brings its own
+    /// mesh.
+    pub body_vertices: Option<u32>,
+    pub body_triangles: Option<u32>,
+}
+
+/// The preview answer. A refusal is a **value**, not a command error: half the
+/// intermediate states of a proportion drag are invalid (hips above shoulders,
+/// for one), and an error toast per keystroke is not a wizard.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterPreviewDto {
+    /// The generator's own message, naming the offending parameter. `None` when
+    /// `rig` is present.
+    pub refusal: Option<String>,
+    pub rig: Option<CharacterRigDto>,
+}
+
+/// What a create produced. Every id is a GUID string, in the order the assets
+/// were written (which is their dependency order).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterCreateDto {
+    pub skeleton: String,
+    pub mesh: String,
+    pub idle: String,
+    pub walk: String,
+    pub run: String,
+    pub machine: String,
+    /// The spawned actor's entity GUID, when the wizard was asked to add one.
+    pub actor: Option<String>,
+    /// Whether `mesh` is the generated mannequin.
+    pub mannequin: bool,
+    /// The auto-fit's readout, when one ran.
+    pub fit: Option<String>,
+    /// The weight solve's readout, when one ran.
+    pub weights: Option<String>,
+    /// Things that happened and are not refusals.
+    pub warnings: Vec<String>,
+}
+
+impl BodyParamsDto {
+    /// The Ring-0 params this describes.
+    pub fn to_params(&self) -> inf_anim::BodyParams {
+        inf_anim::BodyParams {
+            height_m: self.height_m,
+            hip_height_ratio: self.hip_height_ratio,
+            shoulder_height_ratio: self.shoulder_height_ratio,
+            head_height_ratio: self.head_height_ratio,
+            spine_segments: self.spine_segments,
+            neck_segments: self.neck_segments,
+            shoulder_width_m: self.shoulder_width_m,
+            hip_width_m: self.hip_width_m,
+            upper_limb_ratio: self.upper_limb_ratio,
+            arm_length_ratio: self.arm_length_ratio,
+            body_length_m: self.body_length_m,
+            head_forward_m: self.head_forward_m,
+        }
+    }
+
+    /// The DTO form.
+    pub fn from_params(p: &inf_anim::BodyParams) -> Self {
+        Self {
+            height_m: p.height_m,
+            hip_height_ratio: p.hip_height_ratio,
+            shoulder_height_ratio: p.shoulder_height_ratio,
+            head_height_ratio: p.head_height_ratio,
+            spine_segments: p.spine_segments,
+            neck_segments: p.neck_segments,
+            shoulder_width_m: p.shoulder_width_m,
+            hip_width_m: p.hip_width_m,
+            upper_limb_ratio: p.upper_limb_ratio,
+            arm_length_ratio: p.arm_length_ratio,
+            body_length_m: p.body_length_m,
+            head_forward_m: p.head_forward_m,
+        }
+    }
+}
+
+impl GaitParamsDto {
+    /// The Ring-0 gait this describes.
+    pub fn to_gait(&self) -> inf_anim::locomotion::GaitParams {
+        inf_anim::locomotion::GaitParams {
+            walk_cadence_hz: self.walk_cadence_hz,
+            run_cadence_hz: self.run_cadence_hz,
+            hip_swing_deg: self.hip_swing_deg,
+            knee_flex_deg: self.knee_flex_deg,
+            arm_swing_deg: self.arm_swing_deg,
+            run_stride_scale: self.run_stride_scale,
+            bob_ratio: self.bob_ratio,
+            idle_period_s: self.idle_period_s,
+            idle_bob_ratio: self.idle_bob_ratio,
+            idle_pitch_deg: self.idle_pitch_deg,
+            keys_per_cycle: self.keys_per_cycle,
+        }
+    }
+
+    /// The DTO form.
+    pub fn from_gait(g: &inf_anim::locomotion::GaitParams) -> Self {
+        Self {
+            walk_cadence_hz: g.walk_cadence_hz,
+            run_cadence_hz: g.run_cadence_hz,
+            hip_swing_deg: g.hip_swing_deg,
+            knee_flex_deg: g.knee_flex_deg,
+            arm_swing_deg: g.arm_swing_deg,
+            run_stride_scale: g.run_stride_scale,
+            bob_ratio: g.bob_ratio,
+            idle_period_s: g.idle_period_s,
+            idle_bob_ratio: g.idle_bob_ratio,
+            idle_pitch_deg: g.idle_pitch_deg,
+            keys_per_cycle: g.keys_per_cycle,
+        }
+    }
+}
+
+impl CharacterRigDto {
+    /// Project a Ring-1 preview onto the wire.
+    pub fn from_preview(p: &crate::character::CharacterPreview) -> Self {
+        Self {
+            joints: p
+                .joints
+                .iter()
+                .map(|j| CharacterJointDto {
+                    name: j.name.clone(),
+                    parent: j.parent,
+                    translation: j.translation,
+                })
+                .collect(),
+            sockets: p.sockets.clone(),
+            limits: p.limits as u32,
+            height_m: p.height_m,
+            legs: p
+                .legs
+                .iter()
+                .map(|(name, length_m, phase)| CharacterLegDto {
+                    name: name.clone(),
+                    length_m: *length_m,
+                    phase: *phase,
+                })
+                .collect(),
+            durations_s: p.durations_s,
+            walk_speed_m_s: p.walk_speed_m_s,
+            run_speed_m_s: p.run_speed_m_s,
+            walk_threshold_m_s: p.walk_threshold_m_s,
+            run_threshold_m_s: p.run_threshold_m_s,
+            body_vertices: p.body.map(|(v, _)| v as u32),
+            body_triangles: p.body.map(|(_, t)| t as u32),
+        }
+    }
+}
+
 /// The result of a tool press: what it did, or why it refused.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -3121,5 +3384,69 @@ mod mixer_tests {
         ]);
         let dto = MixerConfigDto::from_config(&c);
         assert_eq!(dto.to_config(), c);
+    }
+}
+
+#[cfg(test)]
+mod character_wire_tests {
+    use super::*;
+
+    /// **The two wizard mirrors carry every field, in the right slot.**
+    ///
+    /// Totality is already a *compile-time* property — both conversions build the
+    /// target with an exhaustive struct literal, so a field added to either model
+    /// breaks the build rather than silently defaulting. What a literal cannot
+    /// catch is a **transposition**: two fields of the same type crossed on the
+    /// way out and crossed back on the way in round-trip perfectly against a
+    /// default value, and against any value where the two happen to agree. So
+    /// every number here is distinct.
+    #[test]
+    fn the_wizard_dtos_carry_every_field_of_their_models() {
+        let params = inf_anim::BodyParams {
+            height_m: 1.11,
+            hip_height_ratio: 0.22,
+            shoulder_height_ratio: 0.33,
+            head_height_ratio: 0.44,
+            spine_segments: 5,
+            neck_segments: 6,
+            shoulder_width_m: 0.77,
+            hip_width_m: 0.88,
+            upper_limb_ratio: 0.99,
+            arm_length_ratio: 0.10,
+            body_length_m: 1.21,
+            head_forward_m: 1.32,
+        };
+        assert_eq!(BodyParamsDto::from_params(&params).to_params(), params);
+
+        let gait = inf_anim::locomotion::GaitParams {
+            walk_cadence_hz: 1.1,
+            run_cadence_hz: 2.2,
+            hip_swing_deg: 3.3,
+            knee_flex_deg: 4.4,
+            arm_swing_deg: 5.5,
+            run_stride_scale: 6.6,
+            bob_ratio: 7.7,
+            idle_period_s: 8.8,
+            idle_bob_ratio: 9.9,
+            idle_pitch_deg: 10.1,
+            keys_per_cycle: 11,
+        };
+        assert_eq!(GaitParamsDto::from_gait(&gait).to_gait(), gait);
+    }
+
+    /// The preview projection carries what the panel draws, off a real generated
+    /// rig rather than a hand-built one.
+    #[test]
+    fn the_rig_projection_describes_a_real_generated_rig() {
+        let preview =
+            crate::character::preview_character(&crate::character::CharacterSpec::default(), None)
+                .expect("the default spec previews");
+        let dto = CharacterRigDto::from_preview(&preview);
+        assert_eq!(dto.joints.len(), preview.joints.len());
+        assert_eq!(dto.joints[0].name, "hips");
+        assert_eq!(dto.legs.len(), 2);
+        assert!(dto.limits >= 4);
+        assert!(dto.body_vertices.is_some_and(|v| v > 0));
+        assert!(dto.durations_s.iter().all(|d| *d > 0.0));
     }
 }

@@ -11,25 +11,27 @@ use inf_editor_core::ipc::CollisionLayerDto;
 use inf_editor_core::ipc::HeightmapProbeDto;
 use inf_editor_core::ipc::{
     AddableComponentDto, AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot,
-    BiomeDefDto, BiomeSetDto, BiomeSettingsDto, ComponentDto, DataAssetDto, DataFieldDto,
-    DataMapExportDto, DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto,
-    DccGarmentDto, DccGizmoModeDto, DccGroomDto, DccGroomResultDto, DccGroomStatDto, DccImportDto,
-    DccModeDto, DccPaintModeDto, DccPreviewDto, DccSaveDto, DccSculptModeDto, DccSelectDto,
-    DccToolDto, DccUnwrapDto, DeleteResult, DetailsDto, ErosionParamsDto, ErosionReportDto,
-    FileEntryDto, FoliageSettingsDto, GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto,
-    ImportEventDto, LakePreviewDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto,
-    PackageKindCountDto, PackageResultDto, PartitionSettingsDto, ProjectInfoDto,
-    ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto, RecentProjectDto,
-    RiverBedConflictDto, RiverClimbDto, RiverReportDto, SaveResultDto, SceneDelta, SceneNode,
-    SceneSnapshot, SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto,
-    SeqInterpDto, SeqKeyDto, SeqTrackDto, SequenceDto, SkelApplyDto, SkelDocDto, SkelJointDto,
-    SkelSocketDto, SkyAtmosphereDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind,
-    SpoilModeDto, SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto,
-    TerrainImportPlanDto, TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto,
-    TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto, ViewportDrop, ViewportGizmoDto,
-    ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto, VoxelOpModeDto,
-    VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto, WaterDefaultsDto, WaterSettingsDto,
-    WaterToolKindDto, WeatherDto, WeatherPresetDto,
+    BiomeDefDto, BiomeSetDto, BiomeSettingsDto, BodyParamsDto, CharacterCreateDto,
+    CharacterJointDto, CharacterLegDto, CharacterPreviewDto, CharacterRigDto, CharacterSpecDto,
+    ComponentDto, DataAssetDto, DataFieldDto, DataMapExportDto, DccApplyDto, DccDocDto,
+    DccDragBeginDto, DccDragDto, DccExportDto, DccGarmentDto, DccGizmoModeDto, DccGroomDto,
+    DccGroomResultDto, DccGroomStatDto, DccImportDto, DccModeDto, DccPaintModeDto, DccPreviewDto,
+    DccSaveDto, DccSculptModeDto, DccSelectDto, DccToolDto, DccUnwrapDto, DeleteResult, DetailsDto,
+    ErosionParamsDto, ErosionReportDto, FileEntryDto, FoliageSettingsDto, GaitParamsDto,
+    GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto, ImportEventDto, LakePreviewDto,
+    LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto, PackageKindCountDto,
+    PackageResultDto, PartitionSettingsDto, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto,
+    PropFieldDto, PropValueDto, RecentProjectDto, RiverBedConflictDto, RiverClimbDto,
+    RiverReportDto, SaveResultDto, SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto,
+    SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto,
+    SeqTrackDto, SequenceDto, SkelApplyDto, SkelDocDto, SkelJointDto, SkelSocketDto,
+    SkyAtmosphereDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpoilModeDto,
+    SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto, TerrainImportPlanDto,
+    TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto, TilemapDto, TimeOfDayDto,
+    ToolModeDto, ViewModeDto, ViewportDrop, ViewportGizmoDto, ViewportKey, ViewportModeDto,
+    ViewportRect, ViewportToolStatusDto, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto,
+    VoxelToolKindDto, WaterDefaultsDto, WaterSettingsDto, WaterToolKindDto, WeatherDto,
+    WeatherPresetDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -78,6 +80,16 @@ fn export_bindings() {
     SkelDocDto::export_all(&cfg).expect("export SkelDocDto");
     SkelJointDto::export_all(&cfg).expect("export SkelJointDto");
     SkelSocketDto::export_all(&cfg).expect("export SkelSocketDto");
+    // The New Character wizard (P24.5). Same rule: every type it names is rooted,
+    // even the ones `CharacterSpecDto`/`CharacterPreviewDto` already pull in.
+    BodyParamsDto::export_all(&cfg).expect("export BodyParamsDto");
+    GaitParamsDto::export_all(&cfg).expect("export GaitParamsDto");
+    CharacterSpecDto::export_all(&cfg).expect("export CharacterSpecDto");
+    CharacterJointDto::export_all(&cfg).expect("export CharacterJointDto");
+    CharacterLegDto::export_all(&cfg).expect("export CharacterLegDto");
+    CharacterRigDto::export_all(&cfg).expect("export CharacterRigDto");
+    CharacterPreviewDto::export_all(&cfg).expect("export CharacterPreviewDto");
+    CharacterCreateDto::export_all(&cfg).expect("export CharacterCreateDto");
     LayoutSummary::export_all(&cfg).expect("export LayoutSummary");
     SceneNode::export_all(&cfg).expect("export SceneNode");
     SceneSnapshot::export_all(&cfg).expect("export SceneSnapshot");

@@ -6,6 +6,9 @@ pub mod assets;
 // The grammar → mesh bake (P23.6). Docs live in `bake.rs`, for the same
 // intra-doc-link reason `dcc` states below.
 pub mod bake;
+// P24.5 "New Character from Template": the wizard's Ring-1 half. Docs live in
+// `character.rs`, for the intra-doc-link reason `dcc` states below.
+pub mod character;
 pub mod collision_layers;
 // The Model Editor's Ring-1 half (P23.4). Its docs live in `dcc.rs`: a `///`
 // here is resolved in THIS module's scope, so every intra-doc link into the

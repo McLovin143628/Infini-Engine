@@ -657,18 +657,17 @@ pub async fn skel_fit_to_mesh(
     })?;
     // Everything that can fail does so BEFORE the session is touched, so a
     // refusal never leaves a half-fitted rig behind.
-    let imported = inf_dcc::from_mesh_asset(&payload).map_err(|e| e.to_string())?;
-    let geo = inf_editor_core::dcc::tessellate(&imported.mesh);
-    let bvh = inf_dcc::Bvh::new(inf_editor_core::dcc::triangle_soup(&geo));
-    let opts = inf_dcc::FitOptions {
-        plan,
-        params: BodyParams {
-            height_m: height_m.unwrap_or(BodyParams::default().height_m),
-            ..BodyParams::default()
-        },
-        ..inf_dcc::FitOptions::default()
+    //
+    // **Through `inf_editor_core::character::fit_rig_to_mesh`** (P24.5), which is
+    // the four-line `MeshAsset` → kernel → tessellation → BVH hop this command
+    // opened at P24.3 — now shared with the New Character wizard, because two
+    // spellings of it is the P22 *one door for three paths* law waiting to be
+    // paid for again.
+    let params = BodyParams {
+        height_m: height_m.unwrap_or(BodyParams::default().height_m),
+        ..BodyParams::default()
     };
-    let fitted = inf_dcc::fit_template(&bvh, &opts);
+    let fitted = inf_editor_core::character::fit_rig_to_mesh(plan, &params, &payload);
 
     edit(&app, &id, &state, &assets, |s| match fitted {
         Ok((asset, report)) => {
