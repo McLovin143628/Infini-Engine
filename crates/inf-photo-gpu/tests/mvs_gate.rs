@@ -98,6 +98,10 @@ const REQUIRED_MAPS: usize = 6;
 /// fixture's upper frame is genuinely empty background, so this can never be
 /// near one.
 const MIN_VALID_FRACTION: f64 = 0.30;
+/// A floor on the **weakest** station's share, not the average — see the arm
+/// for the mutation that made this necessary. Measured: the six stations keep
+/// 47.4, 46.6, 40.1, 30.7, 44.7 and 32.0 percent of their pixels.
+const MIN_VALID_FRACTION_PER_VIEW: f64 = 0.15;
 /// Median absolute depth error against the analytic truth, in **metres**.
 const MAX_MEDIAN_DEPTH_ERROR_M: f64 = 0.070;
 /// 90th-percentile absolute depth error, in **metres**.
@@ -301,6 +305,40 @@ fn the_depth_maps_land_on_the_analytic_truth() {
         "only {:.1}% of pixels carry a depth (floor {:.0}%)",
         100.0 * fraction,
         100.0 * MIN_VALID_FRACTION
+    );
+    // **The weakest station, not the average.** Found by mutation: reverting the
+    // depth-range prior to "points this view was MATCHED against" rather than
+    // "points that project into this view's frame" leaves the total valid
+    // fraction at 34.2% — comfortably over the floor above — while the one
+    // station whose sparse share is thinnest collapses from 30.7% of its pixels
+    // to 1.0%. An average hides a whole camera going dark. This is the arm that
+    // does not, and it is joined by the advisory record asserted EMPTY, because
+    // `SparseDepthMap` is precisely the finding that station would earn.
+    let weakest = dense
+        .depth_maps
+        .iter()
+        .map(|m| (m.valid_count() as f64 / m.pixels() as f64, m.view))
+        .fold((1.0f64, u32::MAX), |a, b| if b.0 < a.0 { b } else { a });
+    println!(
+        "P25.2 weakest station: view {} keeps {:.1}% of its pixels",
+        weakest.1,
+        100.0 * weakest.0
+    );
+    assert!(
+        weakest.0 >= MIN_VALID_FRACTION_PER_VIEW,
+        "view {} keeps only {:.1}% of its pixels (floor {:.0}%) — one station is dark",
+        weakest.1,
+        100.0 * weakest.0,
+        100.0 * MIN_VALID_FRACTION_PER_VIEW
+    );
+    let sparse_maps: Vec<&DenseAdvisory> = dense
+        .advisories
+        .iter()
+        .filter(|a| matches!(a, DenseAdvisory::SparseDepthMap { .. }))
+        .collect();
+    assert!(
+        sparse_maps.is_empty(),
+        "a station came back sparse on the committed fixture: {sparse_maps:?}"
     );
     assert!(
         q.p50 <= MAX_MEDIAN_DEPTH_ERROR_M,
