@@ -79,9 +79,9 @@ use inf_mesh::asset::{MeshAsset, MeshVertex, SubMesh};
 use inf_photo::rgb::RgbImage;
 use inf_photo::sfm::Reconstruction;
 use inf_photo_gpu::finish::{
-    bake_albedo, bake_ao, bake_normals, delight, dilate, rasterize_atlas, AlbedoBakeReport,
-    AlbedoView, BakeConfig, Channel, DelightConfig, DelightReport, DenseSurface, NormalBakeReport,
-    SurfacePoint,
+    bake_albedo, bake_ao, bake_normals, delight, dilate, geometric_normals, rasterize_atlas,
+    AlbedoBakeReport, AlbedoView, BakeConfig, Channel, DelightConfig, DelightReport, DenseSurface,
+    NormalBakeReport, SurfacePoint,
 };
 use inf_photo_gpu::tsdf::DenseMesh;
 use inf_photo_gpu::DenseReconstruction;
@@ -101,6 +101,17 @@ pub const SCAN_SLOT: &str = "Scan";
 /// exactly the kind of silent hazard the cook-advisory doctrine exists for.
 pub const VGEOM_MIN_TRIANGLES: usize = 2048;
 
+/// How many rounds of neighbour averaging the dense mesh's geometric normals get
+/// before anything reads them.
+///
+/// A constant rather than a config knob because both readers — [`retopo`], which
+/// writes them into the mesh, and [`BvhSurface`], which transfers them into the
+/// normal map — **must use the same number**. Two different smoothings would
+/// bake a normal map that disagrees with the mesh it is applied to, and the
+/// disagreement would look exactly like a lighting bug. See
+/// [`geometric_normals`] for the measurement behind the value.
+pub const NORMAL_SMOOTHING_ROUNDS: usize = 4;
+
 /// How the finish pipeline is tuned.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FinishConfig {
@@ -109,9 +120,15 @@ pub struct FinishConfig {
     /// The default clears [`VGEOM_MIN_TRIANGLES`] with room to spare, because a
     /// scan that decimates *below* it ships as a placeholder cube.
     pub target_triangles: usize,
-    /// How many majority-vote passes smooth the normal buckets the seams are cut
-    /// from. See [`seam_edges`].
+    /// How many low-pass rounds smooth the normal field the seams are cut from.
+    /// See [`seam_edges`].
     pub seam_smoothing_passes: usize,
+    /// Charts smaller than this are folded into a neighbour, so an atlas is not
+    /// mostly gutter. See [`merge_small_charts`](seam_edges).
+    pub min_chart_faces: usize,
+    /// Whether to drop geometry no camera photographed — the TSDF slab's far
+    /// sheet. See [`trim_unseen`].
+    pub trim_unseen: bool,
     /// Atlas size and the three bakes.
     pub bake: BakeConfig,
     /// De-lighting. Off by default.
@@ -135,6 +152,8 @@ impl Default for FinishConfig {
         Self {
             target_triangles: 20_000,
             seam_smoothing_passes: 3,
+            min_chart_faces: 64,
+            trim_unseen: true,
             bake: BakeConfig::default(),
             delight: DelightConfig::default(),
             metres_per_unit: 1.0,
@@ -241,6 +260,19 @@ pub enum FinishAdvisory {
         /// Triangles examined.
         examined: usize,
     },
+    /// Triangles **no camera photographed** were removed before unwrapping —
+    /// the TSDF slab's far sheet, and anything the capture never faced.
+    ///
+    /// Not a fault: it is the honest boundary of what the photographs contain.
+    /// It is an advisory because it is also the number that says how *closed*
+    /// the result is — a scan trimmed of half its triangles is a shell, not a
+    /// solid, and a caller placing it in a scene needs to know which.
+    UnphotographedTrimmed {
+        /// Triangles dropped.
+        dropped: usize,
+        /// Triangles the retopology produced.
+        examined: usize,
+    },
     /// Decimation could not reach the budget. meshopt stops when the topology
     /// stops it; this is that, said out loud.
     DecimationShortOfBudget {
@@ -310,6 +342,10 @@ impl std::fmt::Display for FinishAdvisory {
                 "{dropped} of {examined} fused triangles shared an edge with two others and were \
                  dropped so the mesh could be unwrapped; the surface has holes where they were"
             ),
+            FinishAdvisory::UnphotographedTrimmed { dropped, examined } => write!(
+                f,
+                "{dropped} of {examined} retopologized triangles were seen by no camera and were                  removed; the result is the surface the photographs cover, which is a SHELL rather                  than a closed solid"
+            ),
             FinishAdvisory::DecimationShortOfBudget { asked, got } => write!(
                 f,
                 "decimation asked for {asked} triangles and stopped at {got} — the topology would \
@@ -366,6 +402,8 @@ pub struct FinishReport {
     pub non_manifold_dropped: usize,
     /// Triangles after decimation, before the kernel round trip.
     pub decimated_triangles: usize,
+    /// Triangles removed because no camera photographed them.
+    pub unphotographed_dropped: usize,
     /// Triangles in the finished asset.
     pub final_triangles: usize,
     /// Vertices in the finished asset (split at UV seams, so above the
@@ -454,6 +492,10 @@ pub struct FinishedIds {
 pub struct BvhSurface<'a> {
     bvh: Bvh,
     mesh: &'a DenseMesh,
+    /// Per-vertex normals read off the **triangulation**, not off the mesher's
+    /// SDF gradient — see [`geometric_normals`] for the measurement that made
+    /// that necessary.
+    normals: Vec<DVec3>,
 }
 
 impl<'a> BvhSurface<'a> {
@@ -470,6 +512,12 @@ impl<'a> BvhSurface<'a> {
             .collect();
         Self {
             bvh: Bvh::new(tris),
+            normals: geometric_normals(
+                &mesh.positions,
+                &mesh.indices,
+                &mesh.normals,
+                NORMAL_SMOOTHING_ROUNDS,
+            ),
             mesh,
         }
     }
@@ -499,10 +547,7 @@ impl DenseSurface for BvhSurface<'_> {
             self.mesh.positions[i1],
             self.mesh.positions[i2],
         );
-        let n = |i: usize| {
-            let v = self.mesh.normals[i];
-            DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64)
-        };
+        let n = |i: usize| self.normals[i];
         let (w0, w1, w2) = barycentric(hit.point, a, b, c);
         let normal = n(i0) * w0 + n(i1) * w1 + n(i2) * w2;
         let len = normal.length();
@@ -648,15 +693,21 @@ pub fn retopo(dense: &DenseMesh, cfg: &FinishConfig) -> Result<RetopoOutput, Fin
     let origin = (lo + hi) * 0.5;
 
     // ── the named narrowing seam: f64 baseline units -> f32, once ───────────
+    let normals = geometric_normals(
+        &dense.positions,
+        &dense.indices,
+        &dense.normals,
+        NORMAL_SMOOTHING_ROUNDS,
+    );
     let vertices: Vec<MeshVertex> = dense
         .positions
         .iter()
-        .zip(&dense.normals)
+        .zip(&normals)
         .map(|(p, n)| {
             let local = *p - origin;
             MeshVertex {
                 position: [local.x as f32, local.y as f32, local.z as f32],
-                normal: *n,
+                normal: [n.x as f32, n.y as f32, n.z as f32],
                 uv: [0.0, 0.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
             }
@@ -744,7 +795,7 @@ pub fn retopo(dense: &DenseMesh, cfg: &FinishConfig) -> Result<RetopoOutput, Fin
 /// face keeps its own normal however many rounds run. The rule is therefore
 /// "features wider than a few faces survive; pinpricks do not", and
 /// `seam_smoothing_passes` is the knob that says how few.
-pub fn seam_edges(mesh: &Mesh, passes: usize) -> Vec<inf_dcc::HalfId> {
+pub fn seam_edges(mesh: &Mesh, passes: usize, min_chart_faces: usize) -> Vec<inf_dcc::HalfId> {
     use std::collections::BTreeMap;
     const AXES: [DVec3; 6] = [
         DVec3::X,
@@ -801,6 +852,7 @@ pub fn seam_edges(mesh: &Mesh, passes: usize) -> Vec<inf_dcc::HalfId> {
         }
         bucket.insert(f, best.1);
     }
+    merge_small_charts(&faces, &neighbours, &mut bucket, min_chart_faces);
     let mut out = Vec::new();
     for &f in &faces {
         let Some(loop_halfs) = mesh.face_loop(f) else {
@@ -828,6 +880,184 @@ pub fn seam_edges(mesh: &Mesh, passes: usize) -> Vec<inf_dcc::HalfId> {
     out
 }
 
+/// Fold every chart smaller than `min_faces` into whichever neighbouring chart
+/// it shares the most edges with.
+///
+/// # Why this is not optional either
+///
+/// Bucketing plus smoothing still leaves a scan full of small islands — a
+/// handful of faces that agreed on a bucket their surroundings did not. Each one
+/// is a **chart**, each chart is packed with a margin around it, and the packer's
+/// shelf is sized by the widest chart. **MEASURED on the committed fixture
+/// before this step existed: 9 412 triangles became 2 081 charts — 4.5 triangles
+/// each — packed into 19.9% of the atlas.** The texture was mostly gutter, and
+/// every island's own gutter is a seam an artist would see.
+///
+/// The rule is a fixed point rather than one pass: absorbing an island can make
+/// its host large enough to absorb the next, so rounds run until nothing moves
+/// or `MAX_MERGE_ROUNDS` is spent. Ties go to the lowest bucket index, and
+/// components are visited in face order, so the result is a pure function of the
+/// mesh.
+fn merge_small_charts(
+    faces: &[inf_dcc::FaceId],
+    neighbours: &std::collections::BTreeMap<inf_dcc::FaceId, Vec<inf_dcc::FaceId>>,
+    bucket: &mut std::collections::BTreeMap<inf_dcc::FaceId, usize>,
+    min_faces: usize,
+) {
+    use std::collections::{BTreeMap, BTreeSet};
+    /// A cap, so a pathological mesh cannot spin here.
+    const MAX_MERGE_ROUNDS: usize = 8;
+    if min_faces < 2 {
+        return;
+    }
+    for _ in 0..MAX_MERGE_ROUNDS {
+        // Connected components of same-bucket faces, in face order.
+        let mut component: BTreeMap<inf_dcc::FaceId, usize> = BTreeMap::new();
+        let mut members: Vec<Vec<inf_dcc::FaceId>> = Vec::new();
+        for &f in faces {
+            if component.contains_key(&f) {
+                continue;
+            }
+            let id = members.len();
+            let mut group = Vec::new();
+            let mut stack = vec![f];
+            component.insert(f, id);
+            while let Some(g) = stack.pop() {
+                group.push(g);
+                for n in &neighbours[&g] {
+                    if bucket[n] == bucket[&g] && !component.contains_key(n) {
+                        component.insert(*n, id);
+                        stack.push(*n);
+                    }
+                }
+            }
+            group.sort();
+            members.push(group);
+        }
+        let mut changed = false;
+        for group in &members {
+            if group.len() >= min_faces {
+                continue;
+            }
+            let own = bucket[&group[0]];
+            let inside: BTreeSet<inf_dcc::FaceId> = group.iter().copied().collect();
+            let mut shared: BTreeMap<usize, usize> = BTreeMap::new();
+            for f in group {
+                for n in &neighbours[f] {
+                    if inside.contains(n) {
+                        continue;
+                    }
+                    *shared.entry(bucket[n]).or_insert(0) += 1;
+                }
+            }
+            // `max_by_key` over a BTreeMap returns the LAST maximum; the fold is
+            // explicit so the tie-break is the lowest bucket index and is
+            // readable as such.
+            let mut best: Option<(usize, usize)> = None;
+            for (b, count) in &shared {
+                if best.map(|(bc, _)| *count > bc).unwrap_or(true) {
+                    best = Some((*count, *b));
+                }
+            }
+            if let Some((_, target)) = best {
+                if target != own {
+                    for f in group {
+                        bucket.insert(*f, target);
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Drop every triangle **no camera can see**, and say how many.
+///
+/// # Why a scan has geometry nobody photographed
+///
+/// A TSDF only carries a signed distance within its truncation band, so fusing
+/// one-sided observations of a wall produces a **slab**: the surface that was
+/// photographed, and a second sheet a few voxels behind it where the band runs
+/// out. Surface Nets extracts both, because both are zero crossings.
+///
+/// That far sheet is real geometry, and it is geometry no photograph contains.
+/// Left in, it takes half the atlas — **MEASURED on the fixture: 6 505 of
+/// 13 076 covered texels seen by no camera** — and every one of those texels is
+/// filled by dilation, which makes invented colour look exactly like
+/// photographed colour.
+///
+/// So it goes, by the same test the albedo bake uses: project the triangle's
+/// centroid into every view and ask whether any of them has a depth there that
+/// agrees. A triangle is kept if **any** camera sees it.
+pub fn trim_unseen(
+    asset: &MeshAsset,
+    origin: DVec3,
+    views: &[AlbedoView<'_>],
+    tolerance: f32,
+) -> (MeshAsset, usize) {
+    let mut out = asset.clone();
+    let mut dropped = 0usize;
+    for sm in &mut out.submeshes {
+        let mut kept = Vec::with_capacity(sm.indices.len());
+        for tri in sm.indices.chunks_exact(3) {
+            let centre = tri
+                .iter()
+                .map(|&i| {
+                    let p = sm.vertices[i as usize].position;
+                    DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)
+                })
+                .fold(DVec3::ZERO, |a, b| a + b)
+                / 3.0
+                + origin;
+            if views.iter().any(|v| view_sees(v, centre, tolerance)) {
+                kept.extend_from_slice(tri);
+            } else {
+                dropped += 1;
+            }
+        }
+        sm.indices = kept;
+    }
+    (out, dropped)
+}
+
+/// Whether one view's depth map agrees that `p` is its nearest surface along
+/// that ray — the albedo bake's visibility test, without the colour.
+///
+/// Public because it is the one question a diagnostics panel and a gate both
+/// need to ask, and because a second spelling of it would be a second answer to
+/// "did a camera see this", which is the whole basis of the unseen-texel
+/// advisory.
+///
+/// The `!(x > 0.0)` guards are the `inf-photo-gpu` rule, allowed here for the
+/// same one reason and only here: a `NaN` compares false against everything, so
+/// `!(x > 0.0)` **rejects** it and `x <= 0.0` **accepts** it. Rewriting these to
+/// read more smoothly would make a `NaN` depth count as a visible surface.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+pub fn view_sees(view: &AlbedoView<'_>, p: DVec3, tolerance: f32) -> bool {
+    let camera_space = view.camera.pose.transform(p);
+    if !(camera_space.z > 0.0) {
+        return false;
+    }
+    let Some(px) = view.camera.intrinsics.project(camera_space) else {
+        return false;
+    };
+    if !view.camera.intrinsics.contains(px) {
+        return false;
+    }
+    let w = view.depth.width as usize;
+    let h = view.depth.height as usize;
+    let ix = (px.x.round() as i64).clamp(0, w as i64 - 1) as usize;
+    let iy = (px.y.round() as i64).clamp(0, h as i64 - 1) as usize;
+    let d = view.depth.depth[iy * w + ix];
+    if !(d > 0.0) {
+        return false;
+    }
+    (camera_space.z as f32 - d) <= tolerance * d
+}
+
 /// Mark the seams, unwrap, and write the result back — the P23.5 door, used
 /// exactly as the Model Editor uses it.
 ///
@@ -836,13 +1066,13 @@ pub fn seam_edges(mesh: &Mesh, passes: usize) -> Vec<inf_dcc::HalfId> {
 /// the reason the finished asset has tangents at all) and the unwrap's report.
 fn unwrap_in_place(
     asset: &MeshAsset,
-    passes: usize,
+    cfg: &FinishConfig,
 ) -> Result<(MeshAsset, inf_dcc::UnwrapReport), FinishError> {
     let import = inf_dcc::from_mesh_asset(asset).map_err(|e| FinishError::Kernel {
         message: e.to_string(),
     })?;
     let mut mesh = import.mesh;
-    for h in seam_edges(&mesh, passes) {
+    for h in seam_edges(&mesh, cfg.seam_smoothing_passes, cfg.min_chart_faces) {
         inf_dcc::ops::apply(
             &mut mesh,
             &Op::SetEdgeSeam {
@@ -918,8 +1148,56 @@ pub fn finish_reconstruction(
         });
     }
 
+    // ── the views, built once ───────────────────────────────────────────────
+    //
+    // Before the unwrap rather than after, because the trim runs on them and
+    // trimming geometry after parameterizing it would leave charts with holes
+    // the packer had already made room for.
+    let views: Vec<AlbedoView<'_>> = reconstruction
+        .cameras
+        .values()
+        .enumerate()
+        .map(|(slot, camera)| AlbedoView {
+            camera,
+            image: &photos[camera.view as usize],
+            // `depth_maps` and `surface` are in ASCENDING REGISTERED-VIEW order,
+            // which is the order a `BTreeMap`'s values come out in — not indexed
+            // by view id. Reading them with `camera.view` would silently pair a
+            // camera with another view's depth on any reconstruction that failed
+            // to register a view.
+            depth: &dense.depth_maps[slot],
+            hints: &dense.surface[slot],
+        })
+        .collect();
+
+    // ── 1b. trim what nobody photographed ───────────────────────────────────
+    let mut trimmed = retopo_out.asset.clone();
+    let mut trimmed_triangles = 0usize;
+    if cfg.trim_unseen {
+        let (out, dropped) = trim_unseen(
+            &retopo_out.asset,
+            retopo_out.origin,
+            &views,
+            cfg.bake.occlusion_tolerance,
+        );
+        if out.triangle_count() > 0 {
+            trimmed = out;
+            trimmed_triangles = dropped;
+        }
+        // A trim that removes EVERYTHING is a trim that was wrong about the
+        // cameras, not a scan nobody photographed. Keeping the untrimmed mesh
+        // in that case turns a silent empty asset into a visible bad one, which
+        // is the direction this codebase errs in.
+    }
+    if trimmed_triangles > 0 {
+        advisories.push(FinishAdvisory::UnphotographedTrimmed {
+            dropped: trimmed_triangles,
+            examined: retopo_out.triangles,
+        });
+    }
+
     // ── 2. unwrap ───────────────────────────────────────────────────────────
-    let (mut asset, unwrap_report) = unwrap_in_place(&retopo_out.asset, cfg.seam_smoothing_passes)?;
+    let (mut asset, unwrap_report) = unwrap_in_place(&trimmed, cfg)?;
     if unwrap_report.flipped > 0 {
         advisories.push(FinishAdvisory::UvChartsFlipped {
             flipped: unwrap_report.flipped,
@@ -949,23 +1227,6 @@ pub fn finish_reconstruction(
         });
     }
     let ao_channel = bake_ao(&atlas, &surface, voxel_size, &cfg.bake, pool);
-
-    let views: Vec<AlbedoView<'_>> = reconstruction
-        .cameras
-        .values()
-        .enumerate()
-        .map(|(slot, camera)| AlbedoView {
-            camera,
-            image: &photos[camera.view as usize],
-            // `depth_maps` and `surface` are in ASCENDING REGISTERED-VIEW order,
-            // which is the order a `BTreeMap`'s values come out in — not indexed
-            // by view id. Reading them with `camera.view` would silently pair a
-            // camera with another view's depth on any reconstruction that failed
-            // to register a view.
-            depth: &dense.depth_maps[slot],
-            hints: &dense.surface[slot],
-        })
-        .collect();
     let (albedo_channel, weight_channel, albedo_report) =
         bake_albedo(&atlas, &views, &cfg.bake, pool);
     if albedo_report.unseen > 0 {
@@ -1051,6 +1312,7 @@ pub fn finish_reconstruction(
         dense_triangles: dense.mesh.triangle_count(),
         non_manifold_dropped: retopo_out.dropped,
         decimated_triangles: retopo_out.triangles,
+        unphotographed_dropped: trimmed_triangles,
         final_triangles,
         final_vertices: asset.vertex_count(),
         seams: unwrap_report.seams,
@@ -1377,7 +1639,7 @@ mod tests {
         // says the rule is doing what it claims: a cube's six faces are six
         // buckets, so every one of its twelve edges is a seam.
         let cube = inf_dcc::cube(1.0);
-        let seams = seam_edges(&cube, 0);
+        let seams = seam_edges(&cube, 0, 0);
         assert_eq!(seams.len(), 12, "a cube did not cut into six charts");
         // AND SMOOTHING MUST NOT UNDO IT. A cube is the adversarial case for
         // any smoother: every face disagrees with all four of its neighbours.
@@ -1387,7 +1649,7 @@ mod tests {
         // averaging survives it for a better reason than a tie-break: the four
         // neighbours of a cube face are two opposed pairs and cancel exactly.
         assert_eq!(
-            seam_edges(&cube, 3).len(),
+            seam_edges(&cube, 3, 0).len(),
             12,
             "smoothing dissolved a cube's own faces"
         );
@@ -1449,7 +1711,7 @@ mod tests {
             .expect("a grid is manifold")
             .mesh;
         assert!(
-            seam_edges(&mesh, 3).is_empty(),
+            seam_edges(&mesh, 3, 0).is_empty(),
             "a flat plane was cut into charts"
         );
     }
@@ -1463,8 +1725,8 @@ mod tests {
         let mesh = inf_dcc::from_mesh_asset(&grid_asset(12, None, 0.14))
             .expect("a jittered grid is still manifold")
             .mesh;
-        let raw = seam_edges(&mesh, 0).len();
-        let smoothed = seam_edges(&mesh, 3).len();
+        let raw = seam_edges(&mesh, 0, 0).len();
+        let smoothed = seam_edges(&mesh, 3, 0).len();
         assert!(
             raw > 40,
             "the noise did not speckle the buckets: {raw} seams"
@@ -1489,8 +1751,8 @@ mod tests {
         let mesh = inf_dcc::from_mesh_asset(&grid_asset(8, Some(2.0), 0.0))
             .expect("a tent is still manifold")
             .mesh;
-        let raw = seam_edges(&mesh, 0).len();
-        let smoothed = seam_edges(&mesh, 3).len();
+        let raw = seam_edges(&mesh, 0, 0).len();
+        let smoothed = seam_edges(&mesh, 3, 0).len();
         assert!(raw > 0, "the fold did not create a bucket boundary at all");
         assert!(
             smoothed * 2 >= raw,

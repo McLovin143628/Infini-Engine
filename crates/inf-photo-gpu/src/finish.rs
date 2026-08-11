@@ -361,6 +361,118 @@ impl Channel {
     }
 }
 
+/// **Area-weighted vertex normals from the triangulation**, oriented to agree
+/// with `hint`.
+///
+/// # Why the fused mesh's own normals are not used
+///
+/// [`crate::DenseMesh::normals`] come from the Surface-Nets mesher, which takes
+/// them as the central-difference gradient of the fused field. That field is a
+/// **projective** TSDF — each view writes the difference between a voxel's depth
+/// and the depth it measured *along that view's ray* — so its gradient points
+/// along the rays that wrote it rather than along the surface. Fusing several
+/// views averages the bias down but does not remove it, and all six stations of
+/// a normal capture look at the subject from roughly one side.
+///
+/// **MEASURED on the committed fixture**, against the analytic scene: the fused
+/// mesh's own normals are **50.6° from the truth at the median** and 81.2° at
+/// p90 — which is not a normal map, it is noise with a normal's type. The
+/// vertex *positions* from the same mesher are good (P25.2 measured them at 1.59
+/// voxels of the truth surface at the mean), so the triangulation knows the
+/// shape even where the gradient does not, and this reads the normals off the
+/// triangulation instead.
+///
+/// The cross product is left **unnormalized** before accumulation, which
+/// area-weights each face's contribution — the standard construction, and the
+/// one that keeps a sliver from counting as much as the quad beside it.
+///
+/// `smoothing` then runs that many rounds of neighbour averaging over the mesh's
+/// own edges. A fused surface is **rough at the scale of a voxel** — P25.2's
+/// depth error is 0.87 voxels at the median, so a triangle one voxel across can
+/// be tilted tens of degrees by noise alone — and a normal read off it inherits
+/// every bit of that. MEASURED on the fixture: **45.1° at the median raw, 36.4°
+/// after two rounds, 33.2° after four, 31.8° after six.** It converges because
+/// averaging removes noise and not shape; four rounds is where the return stops
+/// paying for the detail it costs.
+///
+/// `hint` supplies only the **sign**: a fused scan is a slab with two sheets
+/// whose normals genuinely oppose, so a global orientation would be wrong on one
+/// of them. The gradient's *direction* is unreliable and its *sign* — inside
+/// versus outside — is not, which is exactly the part this uses. The smoothing
+/// carries the same care: a neighbour's normal is flipped onto the vertex's own
+/// side before it is added, so averaging across the slab's rim does not cancel
+/// two correct normals into nothing.
+pub fn geometric_normals(
+    positions: &[DVec3],
+    indices: &[u32],
+    hint: &[[f32; 3]],
+    smoothing: usize,
+) -> Vec<DVec3> {
+    let mut acc = vec![DVec3::ZERO; positions.len()];
+    for tri in indices.chunks_exact(3) {
+        let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+        if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
+            continue;
+        }
+        let n = (positions[i1] - positions[i0]).cross(positions[i2] - positions[i0]);
+        if !n.is_finite() {
+            continue;
+        }
+        acc[i0] += n;
+        acc[i1] += n;
+        acc[i2] += n;
+    }
+    let mut out: Vec<DVec3> = acc
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let h = hint
+                .get(i)
+                .map(|v| DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64))
+                .unwrap_or(DVec3::ZERO);
+            let g = n.normalize_or_zero();
+            if g == DVec3::ZERO {
+                // An isolated vertex, or one whose faces cancelled exactly.
+                return h.normalize_or(DVec3::Y);
+            }
+            if h.length_squared() > 0.0 && g.dot(h) < 0.0 {
+                -g
+            } else {
+                g
+            }
+        })
+        .collect();
+    for _ in 0..smoothing {
+        let previous = out.clone();
+        let mut sum = previous.clone();
+        for tri in indices.chunks_exact(3) {
+            let idx = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+            if idx.iter().any(|i| *i >= previous.len()) {
+                continue;
+            }
+            for a in 0..3 {
+                for b in 0..3 {
+                    if a == b {
+                        continue;
+                    }
+                    let (i, j) = (idx[a], idx[b]);
+                    // Flipped onto the vertex's own side first — see the docs.
+                    let n = if previous[j].dot(previous[i]) < 0.0 {
+                        -previous[j]
+                    } else {
+                        previous[j]
+                    };
+                    sum[i] += n;
+                }
+            }
+        }
+        for (i, n) in sum.iter().enumerate() {
+            out[i] = n.normalize_or(previous[i]);
+        }
+    }
+    out
+}
+
 /// A fixed set of unit vectors on the sphere, built without a transcendental.
 ///
 /// # Why not a spiral
@@ -855,9 +967,18 @@ pub struct DelightConfig {
     /// residual a constant model leaves, or the solve reports **no light found**
     /// and divides nothing out.
     ///
-    /// This is the guard that stops de-lighting from "correcting" a scene that
-    /// was flatly lit — where the best fit is noise and dividing by it stamps
-    /// that noise into the albedo.
+    /// This is the guard that stops de-lighting from "correcting" a scene whose
+    /// brightness variation is mostly *albedo*, where the best fit is noise and
+    /// dividing by it stamps that noise into the texture.
+    ///
+    /// **0.25, and the number is a measurement.** On the P25.3 fixture — a
+    /// textured scene under a light the renderer applied exactly, so the answer
+    /// is known — the best directional fit explains **8.2%** of the brightness
+    /// variation and recovers a directional term **seven times too small**
+    /// (0.078 against a true 0.59 in luma). The other 92% is the dot texture and
+    /// the plane tints. Applied anyway it made the albedo error **worse**: p50
+    /// 0.068 to 0.255 against the known albedo. A threshold under 0.10 would
+    /// have accepted that. See `docs/memos/p25-delighting-v1.md`.
     pub min_explained: f64,
 }
 
@@ -867,7 +988,7 @@ impl Default for DelightConfig {
             enabled: false,
             input_is_srgb: true,
             directions: 64,
-            min_explained: 0.05,
+            min_explained: 0.25,
         }
     }
 }

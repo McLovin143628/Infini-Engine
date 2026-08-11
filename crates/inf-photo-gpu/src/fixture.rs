@@ -38,8 +38,11 @@
 use glam::{DVec2, DVec3};
 use inf_photo::align::similarity_from_points;
 use inf_photo::camera::{Intrinsics, Pose};
+use inf_photo::rgb::RgbImage;
 use inf_photo::sfm::Reconstruction;
-use inf_photo::synth::{DotField, SynthConfig, SynthDataset, SynthScene, TexturedPlane, STATIONS};
+use inf_photo::synth::{
+    DotField, Lighting, SynthConfig, SynthDataset, SynthScene, TexturedPlane, STATIONS,
+};
 
 /// The fixture's render settings.
 ///
@@ -86,6 +89,38 @@ fn dots(seed: u64, cell: f64, background: u8, dark: u8, light: u8) -> DotField {
 /// The world position of the dihedral's ridge, at mid height.
 pub const RIDGE: DVec3 = DVec3::new(0.25, 2.0, 2.05);
 
+/// The committed illumination for the **colour** renders.
+///
+/// Ambient plus one directional, linear, and sized so nothing clips: the
+/// brightest possible observation is `255 * 0.85` (the largest tint) times
+/// `0.92` (the largest irradiance), which is 199. That matters because P25.3's
+/// albedo bake is measured against the scene's own albedo, and a clipped pixel
+/// is one the observation is no longer a linear function of — no de-lighting and
+/// no blend can recover what the clamp threw away.
+///
+/// The direction is deliberately not axis-aligned and not the view direction of
+/// any station, so a de-lighting solve that "finds" the camera rig instead of
+/// the light is visibly wrong.
+pub fn light() -> Lighting {
+    Lighting {
+        ambient: [0.30, 0.32, 0.36],
+        directional: [0.62, 0.60, 0.54],
+        direction: DVec3::new(-0.35, 0.86, -0.37).normalize(),
+    }
+}
+
+/// The fixture's **colour photographs**, one per committed station.
+///
+/// The grayscale [`dataset`] is what structure from motion and the plane sweep
+/// consume; this is the "original file" P25.3's albedo bake re-reads for colour,
+/// which is exactly the arrangement `inf_photo::gray` describes for a real
+/// capture. It is a second render of the *same* scene from the *same* poses —
+/// `TexturedPlane::tint` is read only by the colour shader, so adding it moved
+/// no grayscale byte and no P25.1 or P25.2 number.
+pub fn photographs() -> Vec<RgbImage> {
+    SynthDataset::render_rgb(&dihedral_scene(), &config(), &light())
+}
+
 /// The scene: a floor, a convex dihedral, and a raised block that occludes part
 /// of the floor from every station.
 ///
@@ -93,6 +128,14 @@ pub const RIDGE: DVec3 = DVec3::new(0.25, 2.0, 2.05);
 /// wall B (the short one), then the block's top, front, left, right and back.
 /// The order is committed — [`surface_distance`] and the completeness sampler
 /// both index it.
+///
+/// # The tints
+///
+/// Every plane carries a different colour, and no two are near-parallel *and*
+/// similarly coloured. That is the lopsidedness law applied to albedo: a bake
+/// that mixed up two views, or projected a texel into the wrong camera, has to
+/// produce a visibly wrong colour rather than a plausible grey. The tints are
+/// read by [`SynthScene::shade_rgb`] alone.
 pub fn dihedral_scene() -> SynthScene {
     // The dihedral's two in-plane directions away from the ridge, and the
     // normals that follow from them. Written as literals rather than derived so
@@ -113,7 +156,8 @@ pub fn dihedral_scene() -> SynthScene {
         4.0,
         4.2,
         dots(0x5f10_0f00, 0.170, 205, 30, 250),
-    );
+    )
+    .with_tint([0.82, 0.62, 0.40]);
     let wall_a = TexturedPlane::new(
         RIDGE + dir_a * len_a,
         normal_a,
@@ -121,7 +165,8 @@ pub fn dihedral_scene() -> SynthScene {
         2.0,
         len_a,
         dots(0x0bac_c001, 0.205, 190, 25, 245),
-    );
+    )
+    .with_tint([0.45, 0.60, 0.85]);
     let wall_b = TexturedPlane::new(
         RIDGE + dir_b * len_b,
         normal_b,
@@ -129,7 +174,8 @@ pub fn dihedral_scene() -> SynthScene {
         2.0,
         len_b,
         dots(0x5aa1_7ee0, 0.145, 215, 35, 255),
-    );
+    )
+    .with_tint([0.55, 0.80, 0.48]);
 
     // The block: five faces, since its underside is on the floor and no station
     // can see it. Off-centre in x on purpose.
@@ -142,7 +188,8 @@ pub fn dihedral_scene() -> SynthScene {
         hx,
         hz,
         dots(0x00b0_1770, 0.098, 200, 20, 250),
-    );
+    )
+    .with_tint([0.85, 0.78, 0.35]);
     let front = TexturedPlane::new(
         DVec3::new(bx, hy, bz - hz),
         DVec3::NEG_Z,
@@ -150,7 +197,8 @@ pub fn dihedral_scene() -> SynthScene {
         hx,
         hy,
         dots(0x00b0_1771, 0.086, 225, 40, 255),
-    );
+    )
+    .with_tint([0.70, 0.42, 0.45]);
     let left = TexturedPlane::new(
         DVec3::new(bx - hx, hy, bz),
         DVec3::NEG_X,
@@ -158,7 +206,8 @@ pub fn dihedral_scene() -> SynthScene {
         hy,
         hz,
         dots(0x00b0_1772, 0.112, 185, 22, 240),
-    );
+    )
+    .with_tint([0.40, 0.72, 0.75]);
     let right = TexturedPlane::new(
         DVec3::new(bx + hx, hy, bz),
         DVec3::X,
@@ -166,7 +215,8 @@ pub fn dihedral_scene() -> SynthScene {
         hy,
         hz,
         dots(0x00b0_1773, 0.104, 210, 28, 252),
-    );
+    )
+    .with_tint([0.78, 0.55, 0.72]);
     let back = TexturedPlane::new(
         DVec3::new(bx, hy, bz + hz),
         DVec3::Z,
@@ -174,7 +224,8 @@ pub fn dihedral_scene() -> SynthScene {
         hx,
         hy,
         dots(0x00b0_1774, 0.092, 195, 33, 248),
-    );
+    )
+    .with_tint([0.58, 0.60, 0.62]);
 
     SynthScene {
         planes: vec![floor, wall_a, wall_b, top, front, left, right, back],

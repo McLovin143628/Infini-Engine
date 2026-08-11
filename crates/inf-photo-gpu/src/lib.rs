@@ -151,9 +151,9 @@ pub use dense::{
 };
 pub use filter::FilterConfig;
 pub use finish::{
-    bake_albedo, bake_ao, bake_normals, delight, dilate, rasterize_atlas, AlbedoBakeReport,
-    AlbedoView, AtlasSamples, BakeConfig, Channel, DelightConfig, DelightReport, DenseSurface,
-    NormalBakeReport, SurfacePoint,
+    bake_albedo, bake_ao, bake_normals, delight, dilate, geometric_normals, rasterize_atlas,
+    AlbedoBakeReport, AlbedoView, AtlasSamples, BakeConfig, Channel, DelightConfig, DelightReport,
+    DenseSurface, NormalBakeReport, SurfacePoint,
 };
 pub use gpu::{DenseGpu, GpuBackend};
 pub use sweep::{CensusConfig, DepthMap, SweepConfig, SweepGeometry};
