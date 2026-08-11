@@ -54,7 +54,7 @@ use inf_photo::rgb::RgbImage;
 use inf_photo::synth::SynthScene;
 use inf_photo::{reconstruct, Reconstruction, SfmConfig};
 use inf_photo_gpu::{
-    bake_normals, fixture, rasterize_atlas, reconstruct_dense, AlbedoView, BakeConfig,
+    bake_albedo, bake_normals, fixture, rasterize_atlas, reconstruct_dense, AlbedoView, BakeConfig,
     DelightConfig, DenseConfig, DenseReconstruction, DenseSurface, SurfacePoint,
 };
 
@@ -96,10 +96,12 @@ use inf_photo_gpu::{
 // error against the known albedo-times-irradiance is p50 0.068, p90 0.187,
 // p99 0.358 — in units where 1.0 is the whole range, so p50 is 17 of 255.
 //
-// MEASURED, de-lighting: the best directional fit explains 8.2% of the
-// brightness variation and recovers a directional term seven times too small, so
-// it REFUSES (ambient 0.253 against a true 0.32, directional 0.078 against 0.59).
-// See `docs/memos/p25-delighting-v1.md`.
+// MEASURED, de-lighting: the best directional fit explains 6.4% of the
+// brightness variation and recovers a directional term more than eight times too
+// small, so it REFUSES (ambient 0.260 against a true 0.319, directional 0.070
+// against 0.600). Applied anyway it moves the albedo p50 from 0.0680 to 0.0700 —
+// worse, and only slightly, because a fit that found nothing divides out almost
+// nothing. See `docs/memos/p25-delighting-v1.md`.
 //
 // MEASURED, ambient occlusion: the floor where the block meets it reads 0.592 and
 // the open floor 0.812 — an ORDER, which is what the arm asserts, with neither
@@ -118,6 +120,19 @@ const MAX_NON_MANIFOLD_FRACTION: f64 = 0.20;
 /// UV charts must not fold more than this share of their corners. Measured
 /// 1 225 folds over 45 303 corners = 2.7%.
 const MAX_FLIPPED_FRACTION: f64 = 0.08;
+/// Triangles the unwrap left with **zero UV area**, as a share of the mesh.
+///
+/// Its own constant because it is its own quantity: it was reading
+/// [`MAX_FLIPPED_FRACTION`] — a bound documented against a measurement of 2.7% —
+/// while measuring **995 of 15 101 = 6.6%**, so the arm looked as though it had
+/// five points of margin and had one and a half. Folds and degeneracies are not
+/// the same defect (a fold is a chart turned inside out; a degeneracy is a
+/// triangle whose three corners map onto a line), and they do not move together.
+///
+/// The 6.6% is an honest remainder rather than a target — those triangles carry
+/// no direction for a tangent — and the ceiling is set where a regression is
+/// visible without the arm going red on the number it already has.
+const MAX_DEGENERATE_UV_FRACTION: f64 = 0.09;
 /// Every chart's conjugate-gradient solve must actually converge. P23.6's own
 /// number, met again.
 const MAX_CONVERGENCE: f64 = 1.0e-9;
@@ -140,7 +155,40 @@ const MAX_OVERLAP_FRACTION: f64 = 0.02;
 /// the thing it exists to replace — measured **34.7 and the gate stayed
 /// green**. A bound with room for the defect it was written against is not a
 /// bound.
+///
+/// # What this number is a property OF, measured rather than assumed
+///
+/// It is a property of the fixture **at [`finish_config`]'s pinned 20 000
+/// triangle budget**, and the arm may not be run at another one. MEASURED by
+/// varying one innocent knob at a time:
+///
+/// | knob | value | p50 |
+/// |---|---|---|
+/// | atlas size | 128 / 256 / 512 | 29.50 / 29.86 / 29.73 |
+/// | triangle budget | 12 000 / 20 000 / 30 000 | 25.46 / **29.86** / **31.78** |
+///
+/// The atlas is irrelevant to it, as it should be — the error is the fused
+/// surface's, and sampling it more finely does not make it rougher. The
+/// **budget is not**: a denser retopology follows the fused surface's own noise
+/// more closely, and 30 000 triangles lands at 31.78, which is 0.22 degrees
+/// under this bound. So a future change that raises the budget reds this arm for
+/// a reason that is not a regression, and the honest response then is to
+/// re-measure the whole table above rather than to nudge the constant.
+///
+/// The mechanism claims that do **not** move with the budget are asserted
+/// separately and are what actually falsify a broken transfer:
+/// `normals.fallbacks == 0` (every texel found a dense surface) and
+/// [`the_baked_normals_beat_the_mesh_they_are_written_onto`].
 const MAX_MEDIAN_NORMAL_ERROR_DEG: f64 = 32.0;
+/// How much better the baked normal map must be than the retopologized mesh's
+/// **own** interpolated normals, in degrees at the median.
+///
+/// The relative form of the claim above, and the one that is not a property of
+/// the triangle budget: a normal map exists to carry detail the mesh it is
+/// applied to has lost, so a bake that is no better than that mesh has
+/// transferred nothing. MEASURED at the pinned config: baked 29.86 against the
+/// mesh's own 34.23, a gap of 4.4 degrees.
+const MIN_NORMAL_IMPROVEMENT_DEG: f64 = 2.0;
 /// The **bake's own** error when the surface it transfers from is analytic. This
 /// is the arm that says the machinery is right and the input is rough.
 const MAX_ANALYTIC_NORMAL_ERROR_DEG: f64 = 1.0;
@@ -484,7 +532,7 @@ fn no_uv_triangle_is_degenerate_and_every_corner_is_in_the_unit_square() {
     println!("P25.3 UV: {degenerate} degenerate of {triangles} triangles");
     let fraction = degenerate as f64 / triangles as f64;
     assert!(
-        fraction < MAX_FLIPPED_FRACTION,
+        fraction < MAX_DEGENERATE_UV_FRACTION,
         "{degenerate} of {triangles} triangles have zero UV area ({:.1}%) — they carry no \
          direction for a tangent and nothing for a texture to follow",
         fraction * 100.0
@@ -708,6 +756,69 @@ fn the_baked_normals_land_near_the_analytic_truth() {
     );
 }
 
+#[test]
+fn the_baked_normals_beat_the_mesh_they_are_written_onto() {
+    // THE RELATIVE ARM. `MAX_MEDIAN_NORMAL_ERROR_DEG` is a property of the
+    // fixture at one triangle budget (its docs carry the table); this one is
+    // not, because both sides move together when the retopology does.
+    //
+    // The claim is the whole reason a normal map exists: it carries detail the
+    // mesh it is applied to has lost. A bake that quietly kept the target's own
+    // normals — or transferred from the wrong place — is no better than the
+    // surface it is written onto, and that is what this measures.
+    let f = finished();
+    let cfg = finish_config();
+    let (positions, normals, uvs, indices) = streams(&f.mesh, f.origin_units);
+    let atlas = rasterize_atlas(&positions, &normals, &uvs, &indices, cfg.bake.size);
+    let scene = fixture::dihedral_scene();
+    let level = f.normal.level_rgba8(0).expect("the normal map has a mip 0");
+    let mut baked: Vec<f64> = Vec::new();
+    let mut own: Vec<f64> = Vec::new();
+    for i in 0..atlas.covered.len() {
+        if !atlas.covered[i] {
+            continue;
+        }
+        let (distance, mut truth, _) = nearest_analytic(&scene, atlas.position[i]);
+        if distance > 0.10 {
+            continue;
+        }
+        if truth.dot(atlas.normal[i]) < 0.0 {
+            truth = -truth;
+        }
+        let got = DVec3::new(
+            level[i * 4] as f64 / 255.0 * 2.0 - 1.0,
+            level[i * 4 + 1] as f64 / 255.0 * 2.0 - 1.0,
+            level[i * 4 + 2] as f64 / 255.0 * 2.0 - 1.0,
+        )
+        .normalize_or(DVec3::Y);
+        baked.push(got.dot(truth).clamp(-1.0, 1.0).acos().to_degrees());
+        own.push(
+            atlas.normal[i]
+                .dot(truth)
+                .clamp(-1.0, 1.0)
+                .acos()
+                .to_degrees(),
+        );
+    }
+    baked.sort_by(f64::total_cmp);
+    own.sort_by(f64::total_cmp);
+    println!(
+        "P25.3 normal transfer: baked p50 {:.2} against the retopologized mesh's own {:.2} deg, \
+         over {} texels",
+        percentile(&baked, 0.5),
+        percentile(&own, 0.5),
+        baked.len()
+    );
+    assert!(baked.len() > 4_000, "only {} texels measured", baked.len());
+    assert!(
+        percentile(&own, 0.5) - percentile(&baked, 0.5) >= MIN_NORMAL_IMPROVEMENT_DEG,
+        "the bake is {:.2} degrees out and the mesh it is written onto is {:.2} — the transfer \
+         bought nothing",
+        percentile(&baked, 0.5),
+        percentile(&own, 0.5)
+    );
+}
+
 // ── (d) the albedo bake ─────────────────────────────────────────────────────
 
 #[test]
@@ -755,14 +866,27 @@ fn the_baked_albedo_is_the_colour_the_photographs_hold() {
         //
         // AND IT IS A BOUND, NOT A FALSIFIER, which is worth saying plainly.
         // MEASURED with the occlusion test severed entirely: this number does
-        // not move either (0.1275 both ways), because the fixture's occlusions
-        // are mostly the block hiding *its own* far faces, where the colour the
-        // wrong sample brings is another face of the same block. What DOES go
-        // red for that severing is the engagement counter in
-        // `the_texels_no_camera_saw_and_said_out_loud` — 2 213 rejections to
-        // zero. Engagement counters over pixels (P20's law), met again: the
-        // mechanism is asserted where it can be seen, and this bound is a
-        // regression ceiling beside it.
+        // not move either (0.1275 both ways). What DOES go red for that severing
+        // is the engagement counter in
+        // `the_texels_no_camera_saw_are_counted_and_said_out_loud` — 2 213
+        // rejections to zero. Engagement counters over pixels (P20's law), met
+        // again: the mechanism is asserted where it can be seen, and this bound
+        // is a regression ceiling beside it.
+        //
+        // WHY it does not move, measured rather than guessed, because the first
+        // explanation written here was wrong. It is not that the wrong sample
+        // brings another face of the same block: a block's far face is rejected
+        // by the INCIDENCE test (`n · to_camera > 0`) long before the occlusion
+        // test sees it, and `facing(v)` above rejects it here too. It is that
+        // this set is dominated by texels whose occluded view was a small share
+        // of their blend weight. Split by surface, the occlusion test IS
+        // visible: the contested texels on the **floor** — the ones the block
+        // genuinely stands in front of — measure p50 0.1176 with the test and
+        // **0.1384** without it, against an uncontested floor of 0.1344. That is
+        // real movement and it is still not gatable: a ceiling between 0.1176
+        // and 0.1384 would sit inside the spread of the uncontested floor beside
+        // it, which is a knife-edge and not a bound. Recorded here so the next
+        // person does not re-derive it, and left to the engagement counter.
         let contested = view_list.iter().any(|v| {
             facing(v) && occluded_in_view(v, atlas.position[i], cfg.bake.occlusion_tolerance)
         });
@@ -830,7 +954,8 @@ fn the_baked_albedo_is_the_colour_the_photographs_hold() {
     );
     assert!(
         percentile(&occluded_from_some, 0.5) <= MAX_MEDIAN_CONTESTED_ALBEDO_ERROR,
-        "a texel some camera cannot see is {:.4} off at the median; the occlusion test is letting          an occluder's colour through",
+        "a texel some camera cannot see is {:.4} off at the median; the occlusion test is letting \
+         an occluder's colour through",
         percentile(&occluded_from_some, 0.5)
     );
     assert!(
@@ -878,6 +1003,55 @@ fn the_texels_no_camera_saw_are_counted_and_said_out_loud() {
             .iter()
             .any(|x| matches!(x, FinishAdvisory::UnphotographedTrimmed { .. })),
         "geometry was trimmed and no advisory says so"
+    );
+}
+
+#[test]
+fn the_texels_no_camera_saw_are_filled_rather_than_left_black() {
+    // The other half of the sentence above, and the half nothing asserted. The
+    // unseen advisory says invented colour LOOKS like photographed colour — but
+    // that is only true if `dilate` ran, and MEASURED, an identity `dilate` was
+    // invisible to every colour arm in this file: they all measure texels a
+    // camera saw, which dilation never touches.
+    //
+    // So this is the arm that measures the other set. A texel the bake left
+    // unwritten holds `Channel::new`'s fill, which is pure black; after
+    // dilation it holds a neighbour's colour. MEASURED: 9 638 covered texels are
+    // unseen and NONE of them is black in the finished texture.
+    let f = finished();
+    let cfg = finish_config();
+    let (positions, normals, uvs, indices) = streams(&f.mesh, f.origin_units);
+    let atlas = rasterize_atlas(&positions, &normals, &uvs, &indices, cfg.bake.size);
+    let view_list = views(exact(), dense_on_truth(), photographs());
+    let (raw, _, report) = bake_albedo(&atlas, &view_list, &cfg.bake, &pool());
+    let level = f.albedo.level_rgba8(0).expect("the albedo has a mip 0");
+
+    let unseen: Vec<usize> = (0..atlas.covered.len())
+        .filter(|i| atlas.covered[*i] && !raw.valid[*i])
+        .collect();
+    assert_eq!(
+        unseen.len(),
+        report.unseen,
+        "the mask and the report disagree about how many texels were unseen"
+    );
+    assert!(
+        unseen.len() > 1_000,
+        "only {} covered texels were unseen — this arm is measuring nothing",
+        unseen.len()
+    );
+    let black = unseen
+        .iter()
+        .filter(|i| level[*i * 4] == 0 && level[*i * 4 + 1] == 0 && level[*i * 4 + 2] == 0)
+        .count();
+    println!(
+        "P25.3 dilation: {} covered texels unseen, {black} still black in the finished texture",
+        unseen.len()
+    );
+    assert_eq!(
+        black,
+        0,
+        "{black} of {} unseen texels are still the bake's black fill — dilation did not run",
+        unseen.len()
     );
 }
 
@@ -987,9 +1161,17 @@ fn ambient_occlusion_is_darker_where_the_scene_is_concave() {
 #[test]
 fn de_lighting_refuses_this_capture_and_names_what_it_found() {
     // The measurement `docs/memos/p25-delighting-v1.md` records, asserted rather
-    // than remembered: on a textured scene the directional fit explains 8.2% of
+    // than remembered: on a textured scene the directional fit explains 6.4% of
     // the brightness variation, which is under the 25% it needs, so nothing is
     // divided out and the advisory carries both numbers.
+    //
+    // BOUNDED FROM BOTH SIDES, and that is the audit's correction. Asserting
+    // only `explained < min_explained` is true at 6.4% and equally true at 8.2%
+    // and at 0.1%, so the memo's figures could drift away from the code without
+    // an arm noticing — and they did: the block tints were re-saturated in
+    // `97777df` and nothing re-ran the numbers, leaving the memo, this file's
+    // header and `DelightConfig::min_explained`'s own doc all quoting a fit that
+    // no longer happens. A window reds when the fixture moves.
     let cfg = FinishConfig {
         delight: DelightConfig {
             enabled: true,
@@ -1017,6 +1199,32 @@ fn de_lighting_refuses_this_capture_and_names_what_it_found() {
         d.explained < cfg.delight.min_explained,
         "it explained {:.4} yet still refused — the guard is not what refused it",
         d.explained
+    );
+    // MEASURED 0.0637. The window is wide enough that ordinary drift does not
+    // red it and narrow enough that a fixture whose albedo variance changed
+    // does.
+    assert!(
+        (0.03..0.12).contains(&d.explained),
+        "the fit explains {:.4}, outside the 0.03..0.12 the memo records — re-measure \
+         `docs/memos/p25-delighting-v1.md` rather than widening this",
+        d.explained
+    );
+    // And the reason it must not be believed, asserted: it recovers a directional
+    // term a fraction of the one the renderer actually applied. The truth is
+    // computed here from the committed light rather than written down.
+    let l = fixture::light();
+    let truth_directional =
+        0.2126 * l.directional[0] + 0.7152 * l.directional[1] + 0.0722 * l.directional[2];
+    println!(
+        "P25.3 de-light recovery: directional {:.4} against a true {:.4}",
+        d.directional, truth_directional
+    );
+    assert!(
+        d.directional < truth_directional * 0.35,
+        "the fit recovered {:.4} of a true {:.4} directional term — it is no longer the \
+         hopeless fit this refusal was measured against",
+        d.directional,
+        truth_directional
     );
     assert!(
         lit.advisories
@@ -1202,6 +1410,16 @@ fn the_written_assets_reopen_through_the_standard_loaders_and_their_refs_resolve
         "the base colour deleted with no complaint — the material's reference is not an edge"
     );
     assert!(refused.contains(&ids.material));
+    // The OTHER edge, which nothing asserted: a `.inf_mesh` names its material
+    // by SLOT NAME and not by GUID, so mesh → material exists only as a sidecar
+    // dependency. If it were dropped the material would be an orphan the
+    // delete-with-references check would happily remove out from under the scan.
+    let refused = project.delete(ids.material, false).expect("delete answers");
+    assert!(
+        refused.contains(&ids.mesh),
+        "the material deleted with no complaint from the mesh — a `.inf_mesh` carries slot NAMES, \
+         so the sidecar edge is the only thing that ties them"
+    );
 }
 
 #[test]
@@ -1284,7 +1502,8 @@ fn photographs_become_an_asset_with_no_truth_anywhere_in_the_chain() {
     let f = finish_reconstruction(&dense, sparse, photographs(), &finish_config(), &pool())
         .expect("the finish runs on solved poses");
     println!(
-        "P25.3 end to end: {} triangles, {} charts, coverage {:.3}, u-span {:.3}, v-span {:.3},          {} advisories",
+        "P25.3 end to end: {} triangles, {} charts, coverage {:.3}, u-span {:.3}, v-span {:.3}, \
+         {} advisories",
         f.report.final_triangles,
         f.report.charts,
         f.report.atlas_coverage,
@@ -1297,7 +1516,7 @@ fn photographs_become_an_asset_with_no_truth_anywhere_in_the_chain() {
     // Area rather than each span. The packer's shelf is sized by the widest
     // chart, so which axis a solved-pose run fills more of is a property of the
     // chart set and not of the pipeline — MEASURED, the truth-pose run fills
-    // 0.996 x 0.895 and the solved-pose one 0.639 x 0.997. Asserting the product
+    // 0.996 x 0.895 and the solved-pose one 0.718 x 1.000. Asserting the product
     // says "the atlas is used" without pretending to know which way round.
     let area = f.report.atlas_u_span * f.report.atlas_v_span;
     assert!(
@@ -1343,6 +1562,67 @@ fn a_reconstruction_with_no_photographs_refuses_by_name() {
         matches!(err, FinishError::PhotoMismatch { .. }),
         "the refusal is {err}"
     );
+}
+
+#[test]
+fn the_three_ways_a_caller_can_hand_over_nonsense_are_refused_by_name() {
+    // The sparse reconstruction and the dense one arrive as TWO arguments, and
+    // `depth_maps`/`surface` are indexed by slot rather than by view id — so a
+    // caller pairing a reconstruction with somebody else's dense stage used to
+    // be an index panic, which is a refusal no wizard can show.
+    let mut empty = exact().clone();
+    empty.cameras.clear();
+    let err = finish_reconstruction(
+        dense_on_truth(),
+        &empty,
+        photographs(),
+        &finish_config(),
+        &pool(),
+    )
+    .expect_err("a reconstruction with no cameras must refuse");
+    assert!(
+        matches!(err, FinishError::NoCameras),
+        "the refusal is {err}"
+    );
+
+    // One camera dropped: six depth maps against five cameras.
+    let mut short = exact().clone();
+    let victim = *short.cameras.keys().next().expect("six cameras");
+    short.cameras.remove(&victim);
+    let err = finish_reconstruction(
+        dense_on_truth(),
+        &short,
+        photographs(),
+        &finish_config(),
+        &pool(),
+    )
+    .expect_err("a mismatched pair must refuse");
+    assert!(
+        matches!(
+            err,
+            FinishError::ViewsMismatch {
+                cameras: 5,
+                depth_maps: 6,
+                ..
+            }
+        ),
+        "the refusal is {err}"
+    );
+
+    // And a scale that is not one: zero collapses the mesh onto its origin, a
+    // negative one mirrors it while the baked normals keep facing the other way.
+    for bad in [0.0, -2.5, f64::NAN] {
+        let cfg = FinishConfig {
+            metres_per_unit: bad,
+            ..finish_config()
+        };
+        let err = finish_reconstruction(dense_on_truth(), exact(), photographs(), &cfg, &pool())
+            .expect_err("a non-positive scale must refuse");
+        assert!(
+            matches!(err, FinishError::BadScale { .. }),
+            "metres_per_unit {bad} produced {err}"
+        );
+    }
 }
 
 #[test]
