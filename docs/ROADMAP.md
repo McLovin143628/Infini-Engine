@@ -8548,6 +8548,97 @@ present as writing.
   than refusing — unreachable today because every caller guards its own output, and written
   down so the next caller knows to.
 
+**P25.2 AUDIT LEDGER (2026-08-11, adversarial pass over `crates/inf-photo-gpu` before push).**
+Nine findings, all fixed in the batch; no schema, no golden, no dependency and no `inf-photo`
+file moved (goldens stay **50**; the batch touches zero files under `crates/inf-photo`). What
+was checked and *held*: the `inf-voxel` adapter (`SDF_BAND` honoured — `extract` clamps to it and
+`VoxelChunk::set_sample` clamps again to the same number, so nothing is silently re-clamped; no
+residency, stamp or streaming machinery engaged beyond the chunk allocation a fresh `VoxelData`
+makes; the weld's exact-equality premise **verified at the source** — `mesh_chunk` emits a vertex
+per active cell over the owned cells *plus a one-cell apron*, every corner of an apron cell lies
+inside the padded gather, so both sides of a seam read the same eight samples and
+`cell_vertex_offset` is bit-identical by construction, which is exactly what `inf-voxel`'s own
+`seam_vertices_are_bit_identical_from_both_sides` asserts with `assert_eq!` on `f64`); the
+CPU/GPU transcription line by line (the `argmin`, the insertion sort, `(valid + 1) / 2`,
+`select`'s argument order for `abs_diff`, the parabola's associativity, the `floor(x + 0.5)` rule
+and the `!(x > 0)` NaN guards all match); the pool-size arm (1/2/8) exists and is real; no
+`HashMap`/`HashSet` on any path; every bind group inside the default 8-storage-buffer limit;
+`.gitattributes`' `*.wgsl text eol=lf` present and the three shaders LF in the index; and the
+source-fact gate mutation-verified three ways (`fma(` in code → red, `round(` in code → red, both
+in a *comment* → green).
+
+- **F1, the push blocker: eight numbers measured on one adapter, gated on every one.**
+  `GpuContext::headless` falls back to `force_fallback_adapter`, so "no adapter" is not the only
+  CI outcome. Traced leg by leg: **ubuntu** installs no Vulkan ICD (its one apt line is Tauri's
+  webkit/gtk set) and skips; **windows** has none either and the dx12 back end — whose WARP is
+  the Windows software fallback — is compiled out of the wgpu pin, so it skips; **macOS runs
+  them**, on the "Apple Paravirtual device" `inf-render`'s `frame_budget` gate already names by
+  that string. Metal's compiler **contracts a multiply-add by default**, which is the one
+  operation `plane_sweep.wgsl`'s header names as the parity risk — and 83.4%-bit-identical
+  against a 75% floor, `validity == 0`, `votes_a == votes_b`, `weight == 0` and four more were
+  asserted hard. **LAW: a cross-implementation number is a property of the code AND the adapter;
+  hard-gate it only where it was measured.** Two tiers now, split by `parity_is_strict` (a
+  non-virtualized discrete card; `INF_PHOTO_GPU_STRICT=1|0` forces either way), with every number
+  printed beside the tier it ran in.
+- **And the structural tier turned out to be the sharper one.** What replaced the measured
+  fractions is mechanism-justified: a contraction moves a depth by a *last ULP*, which is inside
+  `1e-6` relative **by construction**, so the share of pixels outside `1e-6` is not "how exact is
+  this adapter" — it is *the share of pixels whose winning plane the two backends disagree
+  about*, which no rounding rule can touch. MEASURED with the `argmin` tie-break inverted: 3.334%
+  validity disagreements and 98.19% inside `1e-6`, both red — while **82.1% of pixels stayed
+  bit-identical**, comfortably over the 75% floor. The most adapter-dependent bound was also the
+  weakest one.
+- **F2, the fusion reasoning was backwards.** The vote count and the weight field were asserted
+  hard as "integer-selected". The weight a voxel adds *is* read straight from a buffer — but
+  **which** word it reads is `floor(px + 0.5)`, and `px` ends the very chain of `f32`
+  multiply-adds the file names as contractible. Being integer-selected does not make a vote
+  adapter-independent; it makes a disagreement **large** (a whole different pixel) instead of
+  small. Corrected in place, and the rate — not the equality — is what the structural tier
+  asserts.
+- **F7, the mutation that should not have passed.** Swapping `near`/`far` at
+  `SweepGeometry::build`'s call site — reversing the entire plane stack — left **all 47 tests in
+  the crate green**. The plane *set* is identical either way, so only the tie-break's direction
+  ("ties go to the lower index, which is the nearer surface — the conservative answer when a ray
+  grazes two surfaces") and the parabola's end guards invert, and nothing measured either. `build`
+  now refuses a backwards range by name, and two arms pin the stack itself: plane 0 is the near
+  plane, the depths ascend, `inv_step` is negative, and every plane reproduces itself under a zero
+  refinement.
+- **F8, mutation 4 closed rather than carried.** The batch recorded the incidence weight as
+  unit-only and it is — re-measured: `incidence = 1.0` fails one unit test and moves no gate arm,
+  because a fused zero-crossing hardly shifts when all six views are reweighted by a factor they
+  share the shape of. So the end-to-end observable is the **weight**, not the mesh:
+  `weight / confidence` *is* the incidence a real surface normal produced. MEASURED on the
+  committed fixture: 176 146 weighted pixels, **109 177 distinct ratios**, 20.5% graded strictly
+  between the fallback and one; with the factor dropped, exactly **two** ratios and 0.0% graded.
+- **F3, F4, F5, F6, F9.** An empty `# Units` section in the crate root (two headings, the first
+  with no body, a duplicate rustdoc anchor); all three "the second `f64` → `f32` seam" pointers
+  named `TsdfGrid::new`, which stores an `f64` origin and narrows nothing — it is `fuse_params`,
+  and `extract` a second time; `extract` hands back a `VoxelData` whose `voxel_size_m` field says
+  metres while its contents are in **baseline units**, wrong by exactly the gauge (0.8782 on this
+  fixture) for any consumer that believes it; the every-field byte-image arm perturbed `width` and
+  not `height` (24 fields now, and dropping `height` from `write_canonical` reds it by name); and
+  `neighbours_for` applied the `MAX_NEIGHBOURS` cap *before* taking the max with `min_neighbours`,
+  so a caller raising that field past eight lifted the count past the cap with it — an abort in
+  `build`'s own assertion, and a nine-deep write into the shader's `array<u32, 8>` if it ever got
+  past one. Plus one dead `pub` removed (`DepthMap::is_valid`) and one deliberately *not*
+  (`DenseGpu::from_context`, whose Ring-2 consumer is now named in writing: a host that already
+  owns a `GpuContext` must not open a second adapter beside it).
+- **The audit's own mutation matrix** (commit, sever, run, restore): near/far swapped → green
+  everywhere before, reds every pipeline arm after; the `argmin` tie-break `<` → `<=` → red on the
+  sweep-parity arm **only**, and still red with the measured tier switched off; incidence → `1.0`
+  → one unit test before, the new weight arm after; `height` dropped from `write_canonical` → red
+  by name; `k2` dropped from `tsdf.wgsl` alone → 734 of 40 800 weight words differing and 98.196%
+  inside the gap, red on two of the three structural fusion bounds; `fma(`/`round(` in shader code
+  → red, in a comment → green.
+- **Honest remainders, carried:** the measured parity numbers now run **only** on a discrete card
+  or under `INF_PHOTO_GPU_STRICT=1` — CI's macOS leg exercises the structural tier and nothing in
+  CI exercises the measured one, which is the golden harness's arrangement and its known cost; a
+  *real* Apple-silicon card (`IntegratedGpu`, not virtualized) takes the structural tier too, so
+  the contraction question there is unmeasured rather than answered; `observed_bounds` sorts every
+  valid sample three times and is called twice per reconstruction; and the weld drops the second
+  chunk's copy of a shared apron vertex without asserting the two agree — safe because `inf-voxel`
+  gates that property itself, but this crate takes it on the neighbour's word.
+
 ### Phase 26 — Streaming Virtual Texturing (SVT)
 
 **Goal:** material textures reach the interactive renderer for the first time — and they are
