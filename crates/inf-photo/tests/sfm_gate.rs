@@ -56,9 +56,9 @@ fn solve(threads: usize) -> Reconstruction {
 // much better should tighten them rather than leave slack nobody notices.
 //
 // Measured 2026-08-11 (six 320x240 views, four pyramid levels, 512 features per
-// view): 6/6 cameras, 413 points, 1249 observations, 0.36 px RMS, worst camera
-// centre 0.012 m over a 4.2 m station spread, worst *relative* camera rotation
-// 0.24 deg, worst centre-aligned rotation 0.31 deg.
+// view): 6/6 cameras, 430 points, 1280 observations (mean track 2.98), 0.364 px
+// RMS, worst camera centre 0.0161 m over a 4.2 m station spread, worst
+// *relative* camera rotation 0.305 deg, worst centre-aligned rotation 0.412 deg.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Every station must get a pose.
@@ -364,6 +364,12 @@ fn a_wrong_intrinsic_measurably_moves_the_reconstruction() {
     assert!(
         wrong.canonical_bytes() != baseline.canonical_bytes(),
         "a 4% focal-length error produced a byte-identical reconstruction"
+    );
+    assert!(
+        err.max_relative_rotation_deg > base_err.max_relative_rotation_deg * 2.0,
+        "a 4% focal-length error barely moved the rotation error: {:.5} deg vs {:.5} deg",
+        err.max_relative_rotation_deg,
+        base_err.max_relative_rotation_deg
     );
     assert!(
         err.max_center > MAX_CENTER_ERROR_M

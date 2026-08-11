@@ -431,9 +431,21 @@ fn camera_rays(intrinsics: &Intrinsics, supersample: u32) -> Vec<DVec3> {
         for x in 0..intrinsics.width {
             for sy in 0..s {
                 for sx in 0..s {
+                    // The **pixel-centre** convention, the same one
+                    // `GrayImage::resample` and the detector's level-0
+                    // conversion use: pixel `x` is centred at the continuous
+                    // coordinate `x`, so its sub-samples straddle it. Writing
+                    // `x + (sx + 0.5)/s` instead — pixel `x` covering `[x, x+1)`
+                    // — renders the whole dataset **half a pixel** off from
+                    // where the detector will report its features, which is a
+                    // principal-point shift of (0.5, 0.5) that no camera
+                    // rotation can absorb once radial distortion is in play. It
+                    // was: the truth poses explained the detected features only
+                    // to 0.39 px, and the reconstruction's relative rotations
+                    // were 0.28 degrees out.
                     let px = DVec2::new(
-                        x as f64 + (sx as f64 + 0.5) / s as f64,
-                        y as f64 + (sy as f64 + 0.5) / s as f64,
+                        x as f64 + (sx as f64 + 0.5) / s as f64 - 0.5,
+                        y as f64 + (sy as f64 + 0.5) / s as f64 - 0.5,
                     );
                     let n = intrinsics.to_normalized(px);
                     out.push(DVec3::new(n.x, n.y, 1.0).normalize());

@@ -812,6 +812,79 @@ mod tests {
         );
     }
 
+    /// One antialiased dark disc on a light field, at an exactly known
+    /// sub-pixel centre. 4x4 box sampling per pixel, so the edge carries real
+    /// sub-pixel information rather than a staircase.
+    fn disc_image(cx: f64, cy: f64, radius: f64) -> GrayImage {
+        let mut img = GrayImage::new(64, 64).unwrap();
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                let mut inside = 0u32;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        // Pixel-centre convention: pixel `x` is centred at `x`.
+                        let px = x as f64 + (sx as f64 + 0.5) / 4.0 - 0.5;
+                        let py = y as f64 + (sy as f64 + 0.5) / 4.0 - 0.5;
+                        if (px - cx).powi(2) + (py - cy).powi(2) <= radius * radius {
+                            inside += 1;
+                        }
+                    }
+                }
+                let t = inside as f64 / 16.0;
+                img.set(x, y, (215.0 + (25.0 - 215.0) * t).round() as u8);
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn sub_pixel_localisation_tracks_a_disc_between_pixels() {
+        // A detector reporting integer coordinates is off by up to half a pixel
+        // by construction, and that error is *correlated* across a textured
+        // surface rather than independent — so it does not average away with
+        // more points, it comes out as camera-pose error. This arm measures the
+        // mechanism directly, because the end-to-end pose bounds have too much
+        // margin to feel it: severing the refinement moves the P25.1 gate's
+        // reprojection RMS only from 0.36 px to 0.42 px.
+        let cfg = FeatureConfig {
+            levels: 1,
+            max_features: 8,
+            ..FeatureConfig::default()
+        };
+        let truth_y = 32.3;
+        let mut worst = 0.0f64;
+        let mut total = 0.0f64;
+        let mut samples = 0usize;
+        for i in 0..10 {
+            let truth_x = 31.55 + 0.1 * i as f64;
+            let img = disc_image(truth_x, truth_y, 2.2);
+            let set = detect_and_describe(&img, &cfg).unwrap();
+            let best = set
+                .features
+                .iter()
+                .min_by(|a, b| {
+                    let da = (a.x - truth_x).hypot(a.y - truth_y);
+                    let db = (b.x - truth_x).hypot(b.y - truth_y);
+                    da.total_cmp(&db)
+                })
+                .unwrap_or_else(|| panic!("no feature found for a disc at ({truth_x}, {truth_y})"));
+            let err = (best.x - truth_x).hypot(best.y - truth_y);
+            worst = worst.max(err);
+            total += err;
+            samples += 1;
+        }
+        let mean = total / samples as f64;
+        // Half a pixel is what an integer report costs at its worst; a quarter is
+        // a bound only sub-pixel refinement can hold across a sweep that steps
+        // straight through a pixel boundary.
+        assert!(
+            worst < 0.30,
+            "worst sub-pixel error over the sweep is {worst:.4} px (mean {mean:.4}) — an \
+             integer-coordinate detector reaches 0.5 by construction"
+        );
+        assert!(mean < 0.18, "mean sub-pixel error is {mean:.4} px");
+    }
+
     #[test]
     fn detection_is_bit_identical_across_runs() {
         let img = checkerboard(128, 96, 5);
