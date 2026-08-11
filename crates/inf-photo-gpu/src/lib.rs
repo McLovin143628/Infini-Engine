@@ -58,9 +58,14 @@
 //!    translation `t_rel`, computed in `f64` from the reconstruction's poses and
 //!    narrowed once. Undistortion (a fixed-point iteration) never runs on the
 //!    GPU: it is folded into the ray here.
-//! 2. [`tsdf::TsdfGrid::new`] — the grid's world origin stays `f64`; every voxel
-//!    centre is an `f32` offset *from that origin*, which is the engine's
-//!    floating-origin doctrine applied to a scan volume.
+//! 2. [`tsdf::TsdfGrid::fuse_params`] — [`tsdf::TsdfGrid`] keeps its world
+//!    origin in `f64` and never narrows it; what crosses is the camera-space
+//!    position of voxel `(0, 0, 0)` and the three per-axis voxel steps, so every
+//!    voxel centre the kernel builds is an `f32` offset *from that origin*. That
+//!    is the engine's floating-origin doctrine applied to a scan volume. (The
+//!    resolved distances narrow a second time on the way out, in
+//!    [`tsdf::TsdfGrid::extract`], where `1.0 / voxel_size` converts units into
+//!    `inf-voxel`'s voxels.)
 //!
 //! Everything downstream of those two points is `f32` on both sides, so "the CPU
 //! reference" and "the shader" are comparable at all.
@@ -98,8 +103,6 @@
 //! **The day a dense reconstruction is serialized** — P25.3's bakes, P25.4's
 //! import — the portable family applies to everything that touches those bytes,
 //! and this paragraph is the notice that it was a line rather than an oversight.
-//!
-//! # Units
 //!
 //! # One lint, allowed once, for one reason
 //!

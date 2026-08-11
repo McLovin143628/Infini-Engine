@@ -140,6 +140,12 @@ impl DenseGpu {
     }
 
     /// Build the pipelines on a context the caller already has.
+    ///
+    /// Not dead API waiting for a purpose: a Ring-2 host — the editor viewport,
+    /// which owns a [`GpuContext`] for the frame it is drawing — must reach the
+    /// dense stage through *its* device rather than opening a second adapter
+    /// beside it, and P25.4's wizard is that caller. [`DenseGpu::new`] is the
+    /// headless path and is this function with the door in front of it.
     pub fn from_context(gpu: GpuContext) -> Self {
         let device = &gpu.device;
         let build = |label: &str, entries: Vec<wgpu::BindGroupLayoutEntry>, entry_point: &str| {

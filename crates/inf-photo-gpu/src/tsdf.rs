@@ -297,12 +297,15 @@ pub struct FuseParams {
 /// The dense `(distance, weight)` accumulator a fusion runs in.
 #[derive(Clone, Debug)]
 pub struct TsdfGrid {
-    /// World position of voxel `(0, 0, 0)`'s **centre**, in `f64`.
+    /// World position of voxel `(0, 0, 0)`'s **centre**, in `f64` and in
+    /// **reconstruction units**.
     ///
-    /// **This is the crate's second `f64` -> `f32` seam** (the first is
-    /// [`crate::sweep::SweepGeometry::build`]). The origin stays `f64`; every
-    /// voxel is an `f32` offset from it. That is the engine's floating-origin
-    /// doctrine, applied to a scan volume.
+    /// This field is what makes [`TsdfGrid::fuse_params`] the crate's second
+    /// `f64` -> `f32` seam (the first is
+    /// [`crate::sweep::SweepGeometry::build`]): the origin stays `f64` here and
+    /// is never narrowed, and what crosses into the kernel is a camera-space
+    /// position relative to it. That is the engine's floating-origin doctrine,
+    /// applied to a scan volume.
     pub origin: DVec3,
     /// Edge length of one voxel, in **reconstruction units**.
     pub voxel_size: f64,
@@ -441,6 +444,16 @@ impl TsdfGrid {
     /// this module already accumulates in. Voxels below `min_weight` are left
     /// **absent**, which `inf-voxel` reads as `EMPTY_SDF`: outside, unknown, and
     /// costing nothing.
+    ///
+    /// **The returned volume's scale is NOT metric, and its field says it is.**
+    /// [`inf_voxel::VoxelData::new`] names its argument `voxel_size_m` and means
+    /// metres, because everything else in this engine does (architecture rule 6);
+    /// a dense reconstruction is in the sparse stage's **baseline units**, and
+    /// the metric scale arrives with P25.4's one `metres_per_unit` multiplier.
+    /// So the volume handed back here is in reconstruction units throughout —
+    /// origin, voxel size and all — and a consumer that treats it as metres gets
+    /// a scene wrong by exactly the gauge (0.8782 on the gate fixture). Scale it,
+    /// or keep it out of a scene until P25.4 does.
     pub fn extract(&self, min_weight: f32) -> (VoxelData, DenseMesh) {
         let mut data = VoxelData::new(self.voxel_size).with_origin(self.origin);
         let inv_voxel = 1.0 / self.voxel_size as f32;

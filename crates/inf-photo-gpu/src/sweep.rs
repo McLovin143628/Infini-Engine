@@ -258,11 +258,11 @@ pub struct NeighbourView {
 /// `f32`.
 ///
 /// **This is one of the two `f64` -> `f32` seams in the crate** (the other is
-/// [`crate::tsdf::TsdfGrid::new`]). Poses, intrinsics and the undistortion — a
-/// fixed-point iteration that must never run on the GPU, because it would be a
-/// second implementation of a loop whose convergence is the whole point — are
-/// all `f64` up to [`SweepGeometry::build`] and `f32` after it. Nothing
-/// downstream widens back.
+/// [`crate::tsdf::TsdfGrid::fuse_params`]). Poses, intrinsics and the
+/// undistortion — a fixed-point iteration that must never run on the GPU,
+/// because it would be a second implementation of a loop whose convergence is
+/// the whole point — are all `f64` up to [`SweepGeometry::build`] and `f32`
+/// after it. Nothing downstream widens back.
 #[derive(Clone, Debug)]
 pub struct SweepGeometry {
     /// The reference view index.
