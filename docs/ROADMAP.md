@@ -8639,6 +8639,130 @@ in a *comment* → green).
   chunk's copy of a shared apron vertex without asserting the two agree — safe because `inf-voxel`
   gates that property itself, but this crate takes it on the neighbour's word.
 
+**P25.3 AUDIT LEDGER (2026-08-11, adversarial pass over the finish pipeline before push.)**
+Fourteen findings; the code ones fixed, the rest recorded where a reader meets them. No schema,
+no golden (**50**), no dependency (`Cargo.lock` moves two workspace path edges and nothing else),
+no frontend file and no `docs/` file but the de-lighting memo. The gate goes **20 arms → 23**.
+What was checked and *held*: the ring arrows (`cargo tree -p inf-player -e normal` reaches neither
+`inf-photo` nor `inf-photo-gpu` nor `inf-dcc`; `inf-dcc` is a dev edge and only that; `inf-runtime`
+and `inf-packager` the same, and `photogrammetry.rs` names no Tauri); the meshopt claim (the only
+call sites in the workspace are `inf-mesh` and `inf-vgeom`, and `inf-dcc`'s `determinism_law`
+source gate still bans the spelling in its own crate); `inf-mesh`'s public surface **additive**
+(`optimize` unchanged, `simplify`/`Simplified` added) and `inf-dcc` untouched, both suites green;
+the write path's five-or-none against the **filesystem** including the sidecar-fails-after-payload
+case (the blocker is a *directory* at `Scan.inf_mat.toml`, which `unique_path` cannot rename around
+— the arm is armed at exactly the point `write_asset`'s own micro-rollback exists for); and the
+round trip re-opening through `AssetProject::load_payload`, which reads the **database entry's**
+path and decodes, not the writer's handles.
+
+- **F2, the push blocker: the de-lighting memo's headline does not reproduce.** The memo, the
+  `DelightConfig::min_explained` doc and the gate's header block all record **8.2% explained,
+  ambient 0.253, directional 0.078, and an applied albedo error of 0.068 → 0.255 ("nearly four
+  times worse")**. Re-measured against the committed code: **6.4%, 0.260, 0.070, and 0.0680 →
+  0.0700**. The direction of the ruling survives — applying it *is* worse, and 6.4% is far under
+  the 0.25 floor — but the size of the damage was overstated by two orders of magnitude, and for a
+  reason the code makes obvious once measured: a directional term of 0.070 against an ambient of
+  0.260 makes the mean-preserving divide scale texels by 0.87…1.11. A fit that found nothing
+  applies nearly nothing. The cause is an ordering — the memo and the doc were written in `dce0655`
+  and `4d6cb92`, the mutation pass in `97777df` then re-saturated the block's five face tints to
+  make the occlusion test falsifiable, and nothing re-ran de-lighting afterwards. **The gate could
+  not see it**: it asserted only `explained < min_explained`, which is equally true at 8.2%, at
+  6.4% and at 0.1%. **LAW, met again: a measurement quoted in prose is a measurement nothing
+  re-derives — bound it from BOTH sides.** `explained` is now windowed at `0.03..0.12` and the
+  recovered directional term is asserted under a third of the committed light's own luma, computed
+  in the arm from `fixture::light()` rather than written down.
+- **F9, a bound that is a property of the triangle budget, not of the pipeline.**
+  `MAX_MEDIAN_NORMAL_ERROR_DEG` was tightened 40 → **32.0** in the batch's mutation pass against a
+  measured 29.9, on the reasoning that a bound with room for the defect it was written against
+  (the SDF-gradient normals, 34.7) is not a bound. Correct as far as it goes — but nothing said
+  what the 29.9 is a property *of*. MEASURED, one innocent knob at a time: atlas 128/256/512 →
+  **29.50 / 29.86 / 29.73** (irrelevant, as it should be), triangle budget 12 000/20 000/30 000 →
+  **25.46 / 29.86 / 31.78**. A denser retopology follows the fused surface's own noise more
+  closely, so a perfectly legitimate budget change lands **0.22 degrees** under the bound. The
+  table is now written at the constant, with the rule that the honest response to a red there is
+  to re-measure the table rather than nudge the number — and the claim is backed by a **relative**
+  arm that does not move with the budget: the baked map must beat the mesh it is written onto by
+  two degrees at the median (MEASURED 29.86 against **34.23**), which is the whole reason a normal
+  map exists.
+- **F3, a documented knob nothing read.** `BakeConfig::ao_distance_voxels` — "short rays measure
+  creases; long ones measure the room" — was **not asserted anywhere**. MEASURED: replacing the ray
+  length with `f64::INFINITY` left the entire battery green, the twenty-arm gate included, because
+  a uniformly darker occlusion map is still ordered and still unsaturated. **An order assertion
+  cannot see a scale.** Closed at the module that owns the parameter: one texel 0.97 units from the
+  only occluder there is, a 0.4-unit ray that must reach nothing (`== 1.0`) and a 4.0-unit ray that
+  must reach the wall — which reds by name under the mutation (`0.890625`, "the length is not
+  bounding the occlusion query").
+- **F13, dilation closed rather than carried.** The batch recorded "dilate-identity is invisible to
+  the colour arms" as a measured hole, and it was: every colour arm measures texels a camera *saw*,
+  which dilation never touches. The other set is cheap to measure — a texel the bake left unwritten
+  holds `Channel::new`'s black fill — and the arm now takes it: **9 638** covered-but-unseen texels,
+  **0** still black. Mutation-verified: an identity `dilate` reds it at **9 638 of 9 638** and reds
+  nothing else, which is the recording confirmed as well as closed.
+- **F1, the eighteen-space advisory.** Four string literals in the batch carry runs of 10–18 spaces
+  where a `\` line continuation was eaten — P22's law, met a **fourth** time. One of them is
+  `FinishAdvisory::UnphotographedTrimmed`'s `Display`, which is user-facing *and* enters the gate's
+  determinism byte image, so the run of spaces is a committed artefact. Fixed, and a permanent arm
+  built where the text is: every variant of `FinishAdvisory` is rendered and refused if it contains
+  a double space (mutation-verified — one injected space reds it by name).
+- **F4 + F5, three ways a caller could hand over nonsense.** The sparse reconstruction and the dense
+  one arrive as **two arguments** and nothing checked they came from one solve, while
+  `depth_maps`/`surface` are indexed by **slot**: a mismatch was an index panic, which is a refusal
+  no wizard can show. A reconstruction with **zero cameras** ran the whole pipeline and wrote an
+  asset whose albedo is entirely dilation. And `metres_per_unit` accepted **0** (collapses the mesh
+  onto its own origin) and **negatives** (mirrors it, reversing every winding while the vertex
+  normals and the baked normal map keep facing the other way). Three named refusals now —
+  `NoCameras`, `ViewsMismatch`, `BadScale` — with an arm each. `FinishError` drops `Eq` for the one
+  that carries an `f64`, the standing `inf_dcc::HeatError` already has.
+- **F6, a cap that could not fire.** `hemisphere_basis`'s `draw > 1_000_000` guard sat *after* the
+  push, so a rejected sample skipped it — the one regime it exists for (a hash that rejects
+  everything) is the one it could not stop. Moved into the loop condition. The table is a
+  committed-bytes function, so this was checked for byte movement rather than assumed: the AO
+  numbers are unchanged (crease 0.592, open floor 0.812) and the byte-identity arms still pass.
+- **F8, one constant doing two jobs.** `MAX_FLIPPED_FRACTION` is documented against folded corners
+  (measured 1 225 of 45 303 = 2.7%) and was *also* bounding degenerate UV triangles — measured **995
+  of 15 101 = 6.6%**, so an arm that looked as though it had five points of margin had one and a
+  half, under a constant whose doc describes a different quantity. Split, with its own measurement
+  and its own name.
+- **F7, F10, F11, F12 — the writing.** The P25.2 notice at `DenseReconstruction::canonical_bytes`
+  still read absolute ("that exemption ends and every function that touched these numbers comes
+  under the portable family") after the batch settled the ruling in the two crate-level docs; it
+  now points at the ruling like the others. The "`dir` is taken **verbatim**" trap — the one that
+  left `Scan.inf_*` in a source tree on the gate's first run — lived only in a test comment and a
+  commit message; it is stated on `AssetProject::write_asset`, where a caller meets the parameter,
+  and on `write_finished`. The gate cited the solved-pose atlas span as both `0.718 x 1.000`
+  (correct) and `0.639 x 0.997` (not) in one file. And the contested-albedo arm's recorded
+  no-movement carried a **wrong explanation** — "the block hiding its own far faces" is rejected by
+  the *incidence* test long before occlusion sees it; re-measured, the occlusion test **is** visible
+  once the set is split by surface (contested **floor** texels move 0.1176 → **0.1384** when it is
+  severed, against an uncontested floor of 0.1344) and is still not gatable, because a ceiling in
+  that gap sits inside the spread of the uncontested floor beside it. Recorded on the arm so the
+  next person does not re-derive it.
+- **The audit's own mutation matrix** (commit, sever, run, restore): `trim_unseen`'s `any` → `all`
+  → **six** arms red including the trim's own; the ORM pack's AO moved from red to green (a
+  plausible glTF-packing slip) → the occlusion arm red by name ("the crease (0.800) is not darker
+  than the open floor (0.800)"); `BvhSurface::occluded` ignoring `max_distance` → **green across
+  the whole gate**, red only in the crate's own unit test — which is the right place, and is why
+  the gate-only run that found it green is reported here rather than filed as a hole; `bake_ao`
+  ignoring `ao_distance_voxels` → **green everywhere** (F3, closed); the occlusion test in
+  `sample_view` severed → red on the engagement counter alone, 2 213 rejections to zero, with the
+  contested-albedo ceiling unmoved (F12, measured and recorded); an identity `dilate` → red on the
+  new arm alone (F13); one space injected into an advisory → red by name (F1).
+- **Honest remainders, carried:** `write_finished` writes five assets and **no `.inf_vmesh`**, so a
+  finished scan draws as a **placeholder cube** in the editor viewport whatever its triangle count
+  — the editor's only real-geometry path is a meshlet DAG, derived beside every glTF import and
+  every modelling save and beside nothing here; this is a stronger version of the hazard
+  `BelowVirtualizationThreshold` names for shipped builds, raising the budget does not fix it, and
+  P25.4's wizard is the door where the derivation belongs (stated on `write_finished`). **995 of
+  15 101 finished triangles (6.6%) have zero UV area** and therefore no direction for a tangent.
+  The analytic-surface "floor" arm measures the bake at 0.000 degrees *by construction* — its
+  surface returns the query point and a normal from the same `nearest_analytic` the truth uses — so
+  what it actually proves is that the indexing and the encoding are exact, not that the
+  closest-point transfer is; the BVH arm and the `source_index` unit test carry that half. The
+  torn-write arm compares two `read_dir` listings as **ordered vectors**. And every accuracy bound
+  in the gate is a committed number compared against a freshly-solved one, which is the thing the
+  batch's own ruling permits only for tolerances — the thinner they get, the more they behave like
+  goldens on a chain that contains `meshopt`.
+
 ### Phase 26 — Streaming Virtual Texturing (SVT)
 
 **Goal:** material textures reach the interactive renderer for the first time — and they are
