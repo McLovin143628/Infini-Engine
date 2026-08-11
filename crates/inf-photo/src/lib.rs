@@ -11,28 +11,33 @@
 //! ship, and cannot put behind a wizard. Everything here is owned math with
 //! tests against it.
 //!
-//! There is deliberately **no `wgpu` dependency**: dense stereo arrives with
-//! P25.2, and the sparse core has no business linking a graphics API.
+//! This crate is the *first* half of that promise and only the first half: it
+//! produces **poses + a sparse cloud**. Dense depth (plane-sweep MVS in WGSL),
+//! fusion, retopology, bake and the capture wizard are P25.2–P25.4 and are not
+//! here. There is deliberately **no `wgpu` dependency** in this batch.
 //!
-//! # What is here so far
+//! # The pipeline
 //!
-//! The **front end** and the linear algebra it stands on:
+//! [`reconstruct`] runs, in order:
 //!
-//! * [`linalg`] — symmetric Jacobi eigen, a one-sided-Jacobi 3x3 SVD, `LDLᵀ`.
-//!   Four small routines, hand-rolled, in place of a linear-algebra dependency.
-//! * [`hash`] — the counter-based mixer that is this crate's only source of
-//!   pseudo-randomness.
-//! * [`camera`] — pinhole plus radial `k1`/`k2`, `f64`, with the analytic
-//!   projection Jacobian a bundle adjuster needs.
-//! * [`gray`] — 8-bit images and the scale pyramid the detector runs on.
-//! * [`features`] — multi-scale FAST-9 ranked by Harris, oriented by intensity
-//!   centroid, described by a 256-bit BRIEF-class descriptor over a
-//!   *compile-time constant* sampling pattern. ORB-class.
-//! * [`matching`] — brute-force Hamming matching with Lowe's ratio test and a
-//!   mutual-best check, then tracks across views by union-find.
+//! 1. **[`features`]** — a multi-scale FAST-9 detector ranked by Harris
+//!    response, oriented by intensity centroid, described by a 256-bit
+//!    BRIEF-class binary descriptor over a *compile-time constant* sampling
+//!    pattern. ORB-class. Its bounds are documented on the module.
+//! 2. **[`matching`]** — brute-force Hamming matching with Lowe's ratio test and
+//!    a mutual-best check, then tracks across views by union-find.
+//! 3. **[`geometry`]** — a normalized eight-point essential matrix under
+//!    seeded RANSAC for the initial pair, cheirality-disambiguated relative
+//!    pose, multi-view DLT triangulation, and DLT-PnP under RANSAC for each
+//!    subsequent view.
+//! 4. **[`bundle`]** — Levenberg–Marquardt bundle adjustment with the Schur
+//!    complement over 6-DOF camera blocks and 3-DOF point blocks, robustified by
+//!    a Huber kernel.
 //!
-//! The geometry (essential matrix, triangulation, PnP), bundle adjustment and
-//! the incremental loop that drives them land in the next commit.
+//! [`synth`] is the known-truth dataset the gates run on: an analytic scene and
+//! a small deterministic software renderer, so the whole pipeline can be
+//! measured against poses that are *given*, not estimated, with no GPU and no
+//! committed image fixtures.
 //!
 //! # Determinism is the headline requirement, not a nicety
 //!
@@ -43,47 +48,112 @@
 //!   / `parallel_map_ref`, which are in-order pure maps. **No floating-point sum
 //!   is ever accumulated in parallel** — parallel work produces per-item results
 //!   which a serial loop then folds in index order.
-//! * There is no stateful RNG. Every pseudo-random draw is a pure function of
-//!   the integers folded into [`hash::Hash64`].
+//! * RANSAC uses a **counter-based** hash ([`hash::Hash64`]), never a stateful
+//!   RNG: the sample drawn by iteration `i` is a pure function of
+//!   `(seed, stage, iteration)`. Iteration counts are **fixed**; there is no
+//!   early exit on an inlier ratio and none on elapsed time.
 //! * Every collection that feeds a result is a `BTreeMap` or a vector sorted by
-//!   a total order with integer tie-breaks. There is no `HashMap` anywhere.
+//!   a total order with integer tie-breaks. There is no `HashMap` on any path
+//!   that reaches [`Reconstruction`].
 //! * Every float comparison used for sorting goes through [`f64::total_cmp`].
+//!
+//! [`Reconstruction::canonical_bytes`] is the assertion surface: two runs, and
+//! runs on pools of one / two / eight workers, produce **byte-identical** output.
+//! `crates/inf-photo/tests/sfm_gate.rs` gates exactly that.
 //!
 //! # Transcendentals, and the line this crate sits on
 //!
 //! The P14 law is that `f32`/`f64` `std` trigonometry is **not bit-portable
 //! across platforms**, so anything that lands in *committed bytes* must use
-//! [`inf_math`]'s portable family. This crate's outputs are intermediate
-//! in-memory results and test data; nothing here is serialized into an asset.
-//! `std` transcendentals are therefore permitted **inside the solvers**, and in
-//! practice almost none are used: `sqrt` is IEEE-754 correctly rounded and
-//! identical everywhere, and feature orientation carries `(cos, sin)` **directly
-//! from the intensity centroid** as a normalized 2-vector, so the detector calls
-//! no trigonometry at all.
+//! [`inf_math`]'s portable family. P25.1's outputs — poses, points, tracks — are
+//! intermediate in-memory results and test data; nothing here is serialized into
+//! an asset. `std` transcendentals are therefore permitted **inside the
+//! solvers**, and in practice almost none are used:
+//!
+//! * `sqrt` is IEEE-754 correctly rounded and identical everywhere. It is used
+//!   freely.
+//! * Feature orientation carries `(cos, sin)` **directly from the intensity
+//!   centroid** (a normalized 2-vector), so the detector calls no trig at all.
+//! * The bundle adjuster's rotation retraction is the **normalized-quaternion**
+//!   one, `q <- normalize((1, w/2)) * q`, not the exponential map, so it calls no
+//!   trig either.
+//! * The only transcendental in the crate is [`inf_math::patan2_64`] in
+//!   [`align::rotation_angle_deg`] — the *portable* one — and that is a
+//!   reporting metric.
 //!
 //! **The day a reconstruction is serialized into an asset** (P25.3 bakes, P25.4
 //! imports) the portable family applies to everything that touches those bytes,
 //! and this paragraph is the notice that it was a deliberate line rather than an
 //! oversight.
 //!
-//! # Units
+//! # Gauge, and where SI comes back
 //!
-//! [`camera::Intrinsics`] is in **pixels**; `k1`/`k2` are dimensionless.
-//! Residuals and thresholds are in **pixels**. Structure from motion is
-//! scale-ambiguous, so reconstruction coordinates will be **baseline units, not
-//! metres** — the gauge ruling lands with the pipeline.
+//! Structure from motion is **scale-ambiguous**: photographs of a doll's house
+//! and of a house are the same photographs. The reconstruction therefore fixes
+//! its gauge by convention:
+//!
+//! * The **world frame is the first registered camera** — its pose is exactly
+//!   the identity and it is held fixed through every bundle adjustment (it
+//!   contributes residuals, never parameters).
+//! * The **scale is one unit of baseline to the second registered camera**:
+//!   `|C1 - C0| == 1` exactly, re-imposed after each solve. Scale is an exact
+//!   null direction of reprojection cost (scaling all points and all camera
+//!   centres about the origin leaves every projection untouched), so pinning it
+//!   costs the fit nothing.
+//!
+//! Consequently **[`Reconstruction`] positions are NOT metres.** They are
+//! baseline units. Architecture rule 6 (1 world unit = 1 metre, SI everywhere)
+//! is not violated: this type never reaches world space. The metric scale is
+//! recovered by the capture wizard's scale step (P25.4) — a known distance, a
+//! marker, or camera EXIF — which multiplies the whole reconstruction by one
+//! `metres_per_unit` factor. Any field here whose unit *is* physical says so on
+//! its doc comment ([`camera::Intrinsics`] is in **pixels**; residuals and
+//! thresholds are in **pixels**).
+//!
+//! # What this is not
+//!
+//! Honest bounds, so nobody discovers them by being surprised:
+//!
+//! * **Intrinsics are an input and are held fixed.** Nothing here does
+//!   self-calibration; `fx, fy, cx, cy, k1, k2` come from the caller and come out
+//!   unchanged. Refining them is a bundle-parameter block that does not exist yet.
+//! * **The initial pair uses the eight-point algorithm**, not the five-point.
+//!   Eight-point needs more correspondences, is more noise-sensitive, and
+//!   **degenerates on a purely planar scene**; five-point does not. It is a
+//!   fraction of the code, and the incremental loop plus bundle adjustment
+//!   absorbs its extra noise. Stated, measured, and the upgrade path if a planar
+//!   capture ever needs it.
+//! * **PnP is DLT-based** (linear, six correspondences minimum) rather than P3P,
+//!   and inherits the same planar degeneracy. It is always followed by a
+//!   nonlinear pose refinement.
+//! * **Pair selection is exhaustive** below [`matching::MatchConfig::exhaustive_view_cap`]
+//!   views and falls back to a sliding window above it, with an advisory. There
+//!   is no vocabulary tree and no image retrieval.
+//! * **Descriptors are BRIEF-class**: rotation-invariant by construction, and
+//!   invariant to scale only across the pyramid's span. Strong affine or
+//!   perspective foreshortening between two photographs will lose matches.
 
+pub mod align;
+pub mod bundle;
 pub mod camera;
 pub mod features;
+pub mod geometry;
 pub mod gray;
 pub mod hash;
 pub mod linalg;
 pub mod matching;
+pub mod sfm;
+pub mod synth;
 
+pub use align::{rotation_angle_deg, similarity_from_points, Similarity};
+pub use bundle::{bundle_adjust, BundleConfig, BundleObservation, BundleReport};
 pub use camera::{Intrinsics, Pose};
 pub use features::{detect_and_describe, Feature, FeatureConfig, FeatureSet};
 pub use gray::{GrayImage, Pyramid};
 pub use matching::{Match, MatchConfig, Observation, PairMatches, Track};
+pub use sfm::{
+    reconstruct, Reconstruction, RegisteredCamera, ScenePoint, SfmConfig, SfmReport, View,
+};
 
 use thiserror::Error;
 
@@ -128,13 +198,84 @@ pub enum PhotoError {
     },
 }
 
+/// Why a reconstruction **refused**. Every variant names the shortfall and the
+/// bound it fell under, because a reconstruction that quietly returns garbage is
+/// worse than one that stops.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SfmError {
+    /// Fewer photographs than [`SfmConfig::min_views`] were handed in.
+    ///
+    /// Two views *are* geometrically solvable — that is a stereo pair, not a
+    /// photogrammetric capture: one baseline gives no redundancy, no way to
+    /// detect a bad pose, and a dense stage nothing to cross-check. The pipeline
+    /// refuses rather than returning a result the rest of Phase 25 cannot use.
+    #[error("photogrammetry needs at least {required} views, {given} given")]
+    TooFewViews {
+        /// How many views the caller supplied.
+        given: usize,
+        /// [`SfmConfig::min_views`].
+        required: usize,
+    },
+    /// An input view's declared intrinsics do not match its image.
+    #[error("view {view} has {img_w}x{img_h} pixels but intrinsics declare {int_w}x{int_h}")]
+    IntrinsicsMismatch {
+        /// The offending view index.
+        view: usize,
+        /// Image width.
+        img_w: u32,
+        /// Image height.
+        img_h: u32,
+        /// Declared intrinsics width.
+        int_w: u32,
+        /// Declared intrinsics height.
+        int_h: u32,
+    },
+    /// No pair of views survived essential-matrix RANSAC with enough inliers and
+    /// enough parallax to start from.
+    #[error(
+        "no viable initial pair: {examined} candidate pairs examined, best had {best_inliers} \
+         inliers (need {required}) — the photographs may not overlap, or may all be taken from \
+         one position"
+    )]
+    NoViableInitialPair {
+        /// How many candidate pairs were scored.
+        examined: usize,
+        /// The best inlier count seen.
+        best_inliers: usize,
+        /// The minimum required.
+        required: usize,
+    },
+    /// The initial pair produced no usable triangulated points.
+    #[error("initial pair ({a}, {b}) triangulated {points} points, need {required}")]
+    InitializationFailed {
+        /// First view of the pair.
+        a: u32,
+        /// Second view of the pair.
+        b: u32,
+        /// How many points survived cheirality and parallax.
+        points: usize,
+        /// The minimum required.
+        required: usize,
+    },
+    /// The incremental loop registered fewer views than the minimum.
+    #[error("only {registered} of {given} views registered, need {required}")]
+    TooFewRegistered {
+        /// How many views got a pose.
+        registered: usize,
+        /// How many were supplied.
+        given: usize,
+        /// [`SfmConfig::min_views`].
+        required: usize,
+    },
+}
+
 /// A non-fatal observation about a reconstruction: something the caller (and,
 /// in P25.4, the wizard's diagnostics panel) should be told, that did not stop
 /// the solve.
 ///
-/// The list is ordered and canonical, and lands inside the reconstruction's
-/// byte image — so an advisory appearing or disappearing is a visible change,
-/// not a log line nobody reads.
+/// The list is ordered and canonical — it is part of
+/// [`Reconstruction::canonical_bytes`], so an advisory appearing or disappearing
+/// is a visible change, not a log line nobody reads.
 #[derive(Debug, Clone)]
 pub enum Advisory {
     /// Too many views for exhaustive pairing, so a sliding window was used.
