@@ -17,6 +17,7 @@ members = [
     "crates/inf-terrain",
     "crates/inf-voxel",
     "crates/inf-water",
+    "crates/inf-photo",
     "crates/inf-pcg",
     "crates/inf-physics",
     "crates/inf-audio",
@@ -356,6 +357,13 @@ inf-terrain = { path = "crates/inf-terrain" }
 # volumetric terrain adds NO new external crate to the tree or to cargo-deny.
 inf-voxel = { path = "crates/inf-voxel" }
 inf-water = { path = "crates/inf-water" }
+# inf-photo = the photogrammetry SfM core (P25.1). Ring 0, and dependency-light
+# on purpose: glam + serde + thiserror + image + inf-core + inf-math, every one
+# already pinned above, so classical structure-from-motion adds NO new external
+# crate to the tree or to cargo-deny. The linear algebra it needs beyond glam
+# (symmetric Jacobi eigen, 3x3 SVD, LDL^T) is hand-rolled and unit-tested rather
+# than pulled from nalgebra — see `inf_photo::linalg`.
+inf-photo = { path = "crates/inf-photo" }
 inf-pcg = { path = "crates/inf-pcg" }
 inf-physics = { path = "crates/inf-physics" }
 inf-audio = { path = "crates/inf-audio" }

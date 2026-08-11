@@ -3242,6 +3242,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "inf-photo"
+version = "0.1.0"
+dependencies = [
+ "glam 0.33.2",
+ "image",
+ "inf-core",
+ "inf-math",
+ "serde",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "inf-physics"
 version = "0.1.0"
 dependencies = [

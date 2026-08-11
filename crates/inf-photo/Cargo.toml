@@ -1,0 +1,26 @@
+[package]
+name = "inf-photo"
+description = "Photogrammetry: classical structure-from-motion (features, matching, incremental SfM, bundle adjustment) in deterministic f64."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+# f64 vector/matrix/quaternion types. The 3x3 and 4x4 algebra this crate needs
+# beyond glam (symmetric eigen, SVD, LDL^T) is hand-rolled in `linalg` — see the
+# crate docs for why there is no linear-algebra dependency.
+glam = { workspace = true }
+# The deterministic job pool. Every stage that parallelizes goes through
+# `parallel_map`/`parallel_map_ref`, which are in-order pure maps, so a
+# reconstruction is a function of its input alone and not of the worker count.
+inf-core = { workspace = true }
+# `pacos64` for the angle metrics in `align`. Ring-0 -> Ring-0, no cycle.
+inf-math = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+# Photo decode (JPEG/PNG/TGA/BMP) for `GrayImage::load`. Already the workspace
+# image codec; nothing here reaches for a second one.
+image = { workspace = true }
