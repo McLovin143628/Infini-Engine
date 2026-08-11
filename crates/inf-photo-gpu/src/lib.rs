@@ -10,10 +10,14 @@
 //! second half and is where the GPU enters. It consumes an
 //! [`inf_photo::Reconstruction`] and produces a [`DenseReconstruction`].
 //!
-//! Serialization is **not** here. P25.3 owns the finish pipeline (decimation,
-//! UV unwrap, bakes) and P25.4 the wizard; everything this crate produces is an
-//! in-memory structure. See "transcendentals" below for the notice that attaches
-//! to the day those bytes get committed.
+//! Serialization is **not** here, and neither is the pipeline that does it: the
+//! P25.3 orchestrator lives in `inf_editor_core::photogrammetry`, because
+//! retopology needs `inf-mesh`, the unwrapper is `inf-dcc`'s (a crate the
+//! shipped player must not link) and the writer is `AssetProject`'s. What P25.3
+//! *did* add here is [`finish`] — the texel-space half, which is pure
+//! photogrammetry and knows about neither the editor nor the modelling kernel.
+//! See "transcendentals" below for how the notice about committed bytes was
+//! settled.
 //!
 //! # The CPU is the definition; the GPU is a mirror
 //!
@@ -100,9 +104,16 @@
 //! correctly rounded and identical everywhere. The parabola, the projection, the
 //! distortion polynomial and the TSDF blend are `+ - * /`.
 //!
-//! **The day a dense reconstruction is serialized** — P25.3's bakes, P25.4's
-//! import — the portable family applies to everything that touches those bytes,
-//! and this paragraph is the notice that it was a line rather than an oversight.
+//! **That day arrived with P25.3**, which bakes these numbers into a `.inf_mesh`
+//! and three `.inf_tex`. The notice is therefore settled rather than repeated,
+//! and it is settled **once**, in [`inf_photo`]'s crate docs under "The line, as
+//! P25.3 settled it". In short: a photogrammetry import is the glTF-import class
+//! — one shot, on the author's machine, content-addressed, re-derived by nothing
+//! — so the P14 law does not reach back into these solvers; it still governs
+//! anything a *gate* re-derives and compares, and any table the committed bytes
+//! are a function of. [`finish`] is where that second clause bites, and its
+//! ambient-occlusion direction set is built out of `sqrt` and a counter hash for
+//! exactly that reason.
 //!
 //! # One lint, allowed once, for one reason
 //!
@@ -128,6 +139,7 @@
 
 pub mod dense;
 pub mod filter;
+pub mod finish;
 pub mod fixture;
 pub mod gpu;
 pub mod sweep;
@@ -138,6 +150,11 @@ pub use dense::{
     DenseReconstruction, DenseReport,
 };
 pub use filter::FilterConfig;
+pub use finish::{
+    bake_albedo, bake_ao, bake_normals, delight, dilate, rasterize_atlas, AlbedoBakeReport,
+    AlbedoView, AtlasSamples, BakeConfig, Channel, DelightConfig, DelightReport, DenseSurface,
+    NormalBakeReport, SurfacePoint,
+};
 pub use gpu::{DenseGpu, GpuBackend};
 pub use sweep::{CensusConfig, DepthMap, SweepConfig, SweepGeometry};
 pub use tsdf::{DenseMesh, SurfaceHints, TsdfConfig, TsdfGrid};
