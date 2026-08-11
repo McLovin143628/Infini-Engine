@@ -325,6 +325,11 @@ pub fn reconstruct(
 
     // ── 4. Grow ────────────────────────────────────────────────────────────
     let mut since_bundle = 0usize;
+    // Every prune pass, not only the last one. The advisory says what the solve
+    // dropped; reporting only the final pass makes it a function of whether the
+    // *last* bundle happened to push a tail observation over the bound, which
+    // is fixture luck rather than a property of the reconstruction.
+    let mut pruned_total = 0usize;
     while let Some((next, correspondences)) = state.best_unregistered() {
         if correspondences < cfg.ransac.min_pnp_inliers {
             for view in state.unregistered() {
@@ -354,7 +359,7 @@ pub fn reconstruct(
                 since_bundle += 1;
                 if since_bundle >= cfg.bundle_every {
                     state.bundle(views, cfg, pool);
-                    state.prune(views, cfg);
+                    pruned_total += state.prune(views, cfg);
                     since_bundle = 0;
                 }
             }
@@ -378,10 +383,10 @@ pub fn reconstruct(
 
     // ── 5. Finish ──────────────────────────────────────────────────────────
     let final_bundle = state.bundle(views, cfg, pool);
-    let pruned = state.prune(views, cfg);
-    if pruned > 0 {
+    pruned_total += state.prune(views, cfg);
+    if pruned_total > 0 {
         advisories.push(Advisory::PrunedObservations {
-            dropped: pruned,
+            dropped: pruned_total,
             threshold_px: cfg.max_reprojection_px,
         });
     }

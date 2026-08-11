@@ -303,9 +303,11 @@ pub enum Advisory {
         /// How many observations were dropped in total.
         dropped: usize,
     },
-    /// Observations pruned for reprojection error after the final bundle.
+    /// Observations pruned for reprojection error, summed over **every** prune
+    /// pass the solve made — the incremental ones after each intermediate
+    /// bundle as well as the final one.
     PrunedObservations {
-        /// How many were dropped.
+        /// How many were dropped, over the whole solve.
         dropped: usize,
         /// The threshold in **pixels**.
         threshold_px: f64,
@@ -396,7 +398,8 @@ impl std::fmt::Display for Advisory {
                 threshold_px,
             } => write!(
                 f,
-                "{dropped} observations pruned above {threshold_px} px reprojection error"
+                "{dropped} observations pruned above {threshold_px} px reprojection error over the \
+                 whole solve"
             ),
             Advisory::ThinRegistration { view, inliers } => write!(
                 f,

@@ -55,10 +55,20 @@ fn solve(threads: usize) -> Reconstruction {
 // reconstruction worse than this is a regression, and a change that makes it
 // much better should tighten them rather than leave slack nobody notices.
 //
-// Measured 2026-08-11 (six 320x240 views, four pyramid levels, 512 features per
-// view): 6/6 cameras, 430 points, 1280 observations (mean track 2.98), 0.364 px
-// RMS, worst camera centre 0.0161 m over a 4.2 m station spread, worst
-// *relative* camera rotation 0.305 deg, worst centre-aligned rotation 0.412 deg.
+// Measured 2026-08-11, re-measured after the audit moved the default principal
+// point onto the sensor centre (six 320x240 views, four pyramid levels, 512
+// features per view): 6/6 cameras, 413 points, 1249 observations (mean track
+// 3.02), 0.3605 px RMS, worst camera centre 0.01157 m over a 4.2 m station
+// spread, worst *relative* camera rotation 0.235 deg, worst centre-aligned
+// rotation 0.341 deg, data noise floor 0.3868 px, initial pair (4, 5), and the
+// only advisory is `ConflictingTrackViews { tracks: 63, dropped: 359 }` — the
+// prune drops nothing at the default 4 px bound, which is why the arm below
+// tightens it.
+//
+// The half-pixel move is *not* an accuracy claim: the synthetic fixture renders
+// and solves through the same intrinsics either way, so shifting the principal
+// point re-rolls which sub-pixel phases the dots land on and nothing more. The
+// numbers above are that new realisation, not a better solver.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Every station must get a pose.
@@ -111,7 +121,7 @@ fn the_fixture_reconstructs_within_bounds() {
     println!(
         "P25.1 gate: {} cameras, {} points, {} observations (mean track {:.2}), \
          rms {:.4} px, centre max {:.5} m mean {:.5} m, relative rotation max {:.5} deg \
-         mean {:.5} deg, aligned rotation max {:.5} deg, init pair {:?}",
+         mean {:.5} deg, aligned rotation max {:.5} deg, init pair {:?}, advisories {:?}",
         r.cameras.len(),
         r.report.points,
         r.report.observations,
@@ -123,6 +133,7 @@ fn the_fixture_reconstructs_within_bounds() {
         err.mean_relative_rotation_deg,
         err.max_aligned_rotation_deg,
         r.report.initial_pair,
+        r.advisories,
     );
 
     assert!(
@@ -386,13 +397,20 @@ fn a_wrong_intrinsic_measurably_moves_the_reconstruction() {
 #[test]
 fn tightening_the_reprojection_bound_prunes_and_says_so() {
     // Outlier pruning has nothing to do on the alcove at the default 4 px bound
-    // — the fixture is clean and the final `PrunedObservations` advisory never
-    // fires, so severing the prune leaves every other arm green. Measured.
+    // — the fixture is clean and the `PrunedObservations` advisory never fires,
+    // so severing the prune leaves every other arm green. Measured.
     //
     // This arm makes the mechanism load-bearing by asking for a bound the
     // reconstruction cannot meet without pruning: 0.6 px against a 0.36 px RMS.
     // It then asserts the two halves of the contract that matter — the advisory
     // *counts* what went, and nothing above the bound survived.
+    //
+    // The advisory counts **every** prune pass, not only the one after the final
+    // bundle. It used to count only the last, which made this arm a question
+    // about whether the final bundle happened to push a tail observation over
+    // the bound — fixture luck. It did on one noise realisation of the alcove
+    // and did not on the next, with 8 observations pruned by the incremental
+    // passes either way.
     let data = dataset();
     let tight = 0.6f64;
     let cfg = SfmConfig {

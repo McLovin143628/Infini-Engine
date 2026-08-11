@@ -97,14 +97,24 @@ impl Intrinsics {
 
     /// A centred pinhole with a square pixel and the given focal length in
     /// **pixels** — the honest default when nothing is known but the image size.
+    ///
+    /// The principal point is `((w - 1) / 2, (h - 1) / 2)`, **not** `(w/2,
+    /// h/2)`, because this crate is on the **pixel-centre** convention: pixel
+    /// `x` is centred at the continuous coordinate `x`, so a `w`-wide sensor
+    /// occupies `[-0.5, w - 0.5]` and its centre is `(w - 1) / 2`. Writing
+    /// `w/2` puts the optical axis half a pixel off the sensor centre in both
+    /// axes, which is the same principal-point shift the synthetic renderer
+    /// carried before it was corrected — and with radial distortion in the
+    /// model, which is centred on the principal point, no camera rotation can
+    /// absorb it.
     pub fn centred(width: u32, height: u32, focal_px: f64) -> Self {
         Self::pinhole(
             width,
             height,
             focal_px,
             focal_px,
-            width as f64 * 0.5,
-            height as f64 * 0.5,
+            (width as f64 - 1.0) * 0.5,
+            (height as f64 - 1.0) * 0.5,
         )
     }
 
@@ -211,9 +221,18 @@ impl Intrinsics {
     }
 
     /// Is this pixel inside the image?
+    ///
+    /// On the **pixel-centre** convention a `w`-wide sensor occupies the
+    /// continuous interval `[-0.5, w - 0.5]`: pixel `0` reaches half a pixel to
+    /// the left of its own centre, and pixel `w - 1` half a pixel to the right.
+    /// Testing `0 <= x < w` instead would reject real coverage at the left edge
+    /// and accept half a pixel of nothing at the right one.
     #[inline]
     pub fn contains(&self, px: DVec2) -> bool {
-        px.x >= 0.0 && px.y >= 0.0 && px.x < self.width as f64 && px.y < self.height as f64
+        px.x >= -0.5
+            && px.y >= -0.5
+            && px.x <= self.width as f64 - 0.5
+            && px.y <= self.height as f64 - 0.5
     }
 
     /// Canonical bytes, for the reconstruction's determinism surface.
@@ -472,6 +491,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_default_principal_point_is_the_sensor_centre_on_the_pixel_centre_convention() {
+        // The crate's convention, asserted where it is easiest to get wrong.
+        // Pixel `x` is centred at the continuous coordinate `x`, so the four
+        // corner *pixels* of a w x h sensor are (0,0), (w-1,0), (0,h-1) and
+        // (w-1,h-1), and the sensor's centre is their centroid.
+        let (w, h) = (640u32, 480u32);
+        let k = Intrinsics::centred(w, h, 500.0);
+        let corners = [
+            DVec2::new(0.0, 0.0),
+            DVec2::new(w as f64 - 1.0, 0.0),
+            DVec2::new(0.0, h as f64 - 1.0),
+            DVec2::new(w as f64 - 1.0, h as f64 - 1.0),
+        ];
+        let centroid = corners.iter().fold(DVec2::ZERO, |a, b| a + *b) / 4.0;
+        assert_eq!(DVec2::new(k.cx, k.cy), centroid, "principal point off centre");
+        // The principal ray lands on it, and it is not the `w/2` answer — the
+        // half pixel this is about.
+        let axis = k.to_pixel(DVec2::ZERO);
+        assert!((axis - centroid).length() < 1e-12, "principal ray at {axis}");
+        assert!(
+            (k.cx - w as f64 * 0.5).abs() > 0.4,
+            "the principal point is still the pixel-interval answer"
+        );
+        // And `contains` agrees with it: the sensor reaches half a pixel past
+        // the outermost pixel centres and no further.
+        assert!(k.contains(DVec2::new(-0.5, -0.5)));
+        assert!(k.contains(DVec2::new(w as f64 - 0.5, h as f64 - 0.5)));
+        assert!(!k.contains(DVec2::new(-0.51, 0.0)));
+        assert!(!k.contains(DVec2::new(w as f64 - 0.49, 0.0)));
     }
 
     #[test]
