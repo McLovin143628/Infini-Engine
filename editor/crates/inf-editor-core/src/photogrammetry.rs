@@ -390,18 +390,22 @@ impl std::fmt::Display for FinishAdvisory {
             FinishAdvisory::NonManifoldDropped { dropped, examined } => write!(
                 f,
                 "{dropped} of {examined} fused triangles shared an edge with two others and were \
-                 dropped so the mesh could be unwrapped; the surface has holes where they were"
+                 dropped so the mesh could be unwrapped; the surface has holes where they were — \
+                 this is a property of the fused surface rather than of a setting, and what \
+                 reduces it is more overlapping photographs of the thin or doubled regions"
             ),
             FinishAdvisory::UnphotographedTrimmed { dropped, examined } => write!(
                 f,
                 "{dropped} of {examined} retopologized triangles were seen by no camera and were \
                  removed; the result is the surface the photographs cover, which is a SHELL rather \
-                 than a closed solid"
+                 than a closed solid — photograph the missing side, or turn the unphotographed \
+                 trim off to keep the geometry with invented colour on it"
             ),
             FinishAdvisory::DecimationShortOfBudget { asked, got } => write!(
                 f,
                 "decimation asked for {asked} triangles and stopped at {got} — the topology would \
-                 not collapse further"
+                 not collapse further; nothing needs doing unless {got} is itself too many, and \
+                 then the fix is a coarser fusion rather than a lower budget"
             ),
             FinishAdvisory::BelowVirtualizationThreshold {
                 triangles,
@@ -415,22 +419,29 @@ impl std::fmt::Display for FinishAdvisory {
             FinishAdvisory::UvChartsFlipped { flipped, corners } => write!(
                 f,
                 "{flipped} triangles folded during UV unwrap over {corners} corners; those texels \
-                 are sampled from the wrong side of the surface"
+                 are sampled from the wrong side of the surface — raise the seam smoothing passes \
+                 so a bent chart is cut instead of stretched, or lower the small-chart merge \
+                 threshold so it is not folded into a neighbour"
             ),
             FinishAdvisory::AtlasOverlaps { texels } => write!(
                 f,
                 "{texels} atlas texels were claimed by two triangles; the first won and the second \
-                 is textured from somewhere else"
+                 is textured from somewhere else — raise the atlas size, which widens the gutter \
+                 every chart is packed with"
             ),
             FinishAdvisory::UnseenTexels { unseen, covered } => write!(
                 f,
                 "{unseen} of {covered} textured texels were seen by no camera and were filled from \
-                 their neighbours; that part of the albedo is invented, not photographed"
+                 their neighbours; that part of the albedo is invented, not photographed — \
+                 photograph the object from the directions the coverage panel shows empty, \
+                 because a larger atlas cannot add colour nobody captured"
             ),
             FinishAdvisory::NormalTransferFallbacks { fallbacks, texels } => write!(
                 f,
                 "{fallbacks} of {texels} texels found no dense surface within the search radius and \
-                 kept the retopologized normal; detail is missing there, not wrong"
+                 kept the retopologized normal; detail is missing there, not wrong — raise the \
+                 normal search radius, or lower the triangle budget so the retopologized surface \
+                 stays nearer the fused one"
             ),
             FinishAdvisory::DelightRefused {
                 explained_percent,
@@ -439,7 +450,8 @@ impl std::fmt::Display for FinishAdvisory {
                 f,
                 "de-lighting found a light explaining {explained_percent}% of the brightness \
                  variation, under the {required_percent}% it needs to be believed, so nothing was \
-                 divided out"
+                 divided out — leave it off unless the capture really was lit by one dominant \
+                 light, because dividing out a light that was not found makes the albedo worse"
             ),
         }
     }
@@ -1152,6 +1164,73 @@ fn unwrap_in_place(
 
 // ── 3 + 4. the whole pipeline ───────────────────────────────────────────────
 
+/// A step of [`finish_reconstruction_with_progress`], reported as it **starts**.
+///
+/// The finish is the longest stage of a capture and it is the one stage whose
+/// orchestrator is ours, so it is the one that can say where it has got to.
+/// P25.4's wizard reports the two Ring-0 stages either side of it (structure
+/// from motion, and the dense solve) as whole stages, because their entry points
+/// are single blocking calls in crates this module does not own.
+///
+/// Ordered, and [`ALL`](FinishStep::ALL) is the order — a progress bar divides
+/// by its length rather than by a number written down twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FinishStep {
+    /// Decimating the fused mesh and filtering it into the half-edge kernel.
+    Retopology,
+    /// Dropping triangles no camera photographed.
+    Trim,
+    /// Seams and the LSCM unwrap.
+    Unwrap,
+    /// Rasterizing the atlas.
+    Atlas,
+    /// The normal transfer.
+    NormalBake,
+    /// The ambient-occlusion bake (the ray-cast one — usually the longest).
+    OcclusionBake,
+    /// The albedo bake, which re-reads every photograph.
+    AlbedoBake,
+    /// The de-lighting solve, the dilation, and encoding the three textures.
+    Finalize,
+}
+
+impl FinishStep {
+    /// Every step, in the order [`finish_reconstruction_with_progress`] reports
+    /// them.
+    pub const ALL: [FinishStep; 8] = [
+        FinishStep::Retopology,
+        FinishStep::Trim,
+        FinishStep::Unwrap,
+        FinishStep::Atlas,
+        FinishStep::NormalBake,
+        FinishStep::OcclusionBake,
+        FinishStep::AlbedoBake,
+        FinishStep::Finalize,
+    ];
+
+    /// A short label for a progress readout.
+    pub fn label(self) -> &'static str {
+        match self {
+            FinishStep::Retopology => "retopology",
+            FinishStep::Trim => "trimming unphotographed geometry",
+            FinishStep::Unwrap => "UV unwrap",
+            FinishStep::Atlas => "atlas",
+            FinishStep::NormalBake => "normal bake",
+            FinishStep::OcclusionBake => "occlusion bake",
+            FinishStep::AlbedoBake => "albedo bake",
+            FinishStep::Finalize => "de-lighting and encoding",
+        }
+    }
+
+    /// Its position in [`ALL`](FinishStep::ALL).
+    pub fn index(self) -> usize {
+        FinishStep::ALL
+            .iter()
+            .position(|s| *s == self)
+            .expect("every step is in ALL")
+    }
+}
+
 /// **Run the finish pipeline.** Everything that can refuse refuses here;
 /// nothing is written.
 ///
@@ -1164,6 +1243,30 @@ pub fn finish_reconstruction(
     photos: &[RgbImage],
     cfg: &FinishConfig,
     pool: &JobPool,
+) -> Result<FinishedAsset, FinishError> {
+    finish_reconstruction_with_progress(dense, reconstruction, photos, cfg, pool, &mut |_| {})
+}
+
+/// [`finish_reconstruction`], with `on_step` called **as each step begins**.
+///
+/// One function with a callback rather than two orchestrators: P25.4's wizard
+/// needs a progress bar, and the way this codebase has paid for a second copy of
+/// a pipeline is well enough documented that driving the public per-stage
+/// functions from the session would have been a second answer to "what is a
+/// finish". The callback runs on the calling thread, between steps, and does not
+/// see anything the returned [`FinishedAsset`] does not.
+///
+/// It is **not** a cancellation seam. Every step is one blocking call into a
+/// pool-parallel kernel, so the finest granularity anything here can stop at is
+/// a whole step — and a caller that stopped between steps would still hold no
+/// result. The wizard's Cancel is therefore between *stages*, and says so.
+pub fn finish_reconstruction_with_progress(
+    dense: &DenseReconstruction,
+    reconstruction: &Reconstruction,
+    photos: &[RgbImage],
+    cfg: &FinishConfig,
+    pool: &JobPool,
+    on_step: &mut dyn FnMut(FinishStep),
 ) -> Result<FinishedAsset, FinishError> {
     // ── refusals first ──────────────────────────────────────────────────────
     //
@@ -1208,6 +1311,7 @@ pub fn finish_reconstruction(
     let mut advisories: Vec<FinishAdvisory> = Vec::new();
 
     // ── 1. retopo ───────────────────────────────────────────────────────────
+    on_step(FinishStep::Retopology);
     let retopo_out = retopo(&dense.mesh, cfg)?;
     if retopo_out.dropped > 0 {
         advisories.push(FinishAdvisory::NonManifoldDropped {
@@ -1245,6 +1349,7 @@ pub fn finish_reconstruction(
         .collect();
 
     // ── 1b. trim what nobody photographed ───────────────────────────────────
+    on_step(FinishStep::Trim);
     let mut trimmed = retopo_out.asset.clone();
     let mut trimmed_triangles = 0usize;
     if cfg.trim_unseen {
@@ -1271,6 +1376,7 @@ pub fn finish_reconstruction(
     }
 
     // ── 2. unwrap ───────────────────────────────────────────────────────────
+    on_step(FinishStep::Unwrap);
     let (mut asset, unwrap_report) = unwrap_in_place(&trimmed, cfg)?;
     if unwrap_report.flipped > 0 {
         advisories.push(FinishAdvisory::UvChartsFlipped {
@@ -1283,6 +1389,7 @@ pub fn finish_reconstruction(
     //
     // Back into the reconstruction's frame: the atlas positions have to be
     // where the depth maps and the BVH think they are, and the mesh is local.
+    on_step(FinishStep::Atlas);
     let (positions, normals, uvs, indices) = streams(&asset, retopo_out.origin);
     let atlas = rasterize_atlas(&positions, &normals, &uvs, &indices, cfg.bake.size);
     if atlas.overlaps > 0 {
@@ -1292,6 +1399,7 @@ pub fn finish_reconstruction(
     }
     let surface = BvhSurface::new(&dense.mesh);
     let voxel_size = dense.report.voxel_size;
+    on_step(FinishStep::NormalBake);
     let (normal_channel, normal_report) =
         bake_normals(&atlas, &surface, voxel_size, &cfg.bake, pool);
     if normal_report.fallbacks > 0 {
@@ -1300,7 +1408,9 @@ pub fn finish_reconstruction(
             texels: normal_report.texels,
         });
     }
+    on_step(FinishStep::OcclusionBake);
     let ao_channel = bake_ao(&atlas, &surface, voxel_size, &cfg.bake, pool);
+    on_step(FinishStep::AlbedoBake);
     let (albedo_channel, weight_channel, albedo_report) =
         bake_albedo(&atlas, &views, &cfg.bake, pool);
     if albedo_report.unseen > 0 {
@@ -1312,6 +1422,7 @@ pub fn finish_reconstruction(
 
     // De-lighting fits on the WELL-SEEN texels only: a texel one camera glanced
     // at contributes as much noise as signal to a global illumination estimate.
+    on_step(FinishStep::Finalize);
     let well_seen: Vec<bool> = weight_channel
         .data
         .iter()
