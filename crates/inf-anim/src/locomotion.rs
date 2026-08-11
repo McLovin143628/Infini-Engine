@@ -932,12 +932,73 @@ mod tests {
         );
     }
 
+    /// **Byte-reproducible**, which is what the module docs claim and a stronger
+    /// property than `PartialEq` can see.
+    ///
+    /// `assert_eq!` on an `AnimClip` compares `f32`s, and `-0.0 == 0.0` is *true*
+    /// while their bytes differ — so a generator that flipped a zero's sign on
+    /// alternate runs would satisfy a structural comparison and write two
+    /// different `.inf_anim` files. These keyframes go on disk, into a cook and
+    /// into a pack, so the claim has to be measured on
+    /// [`inf_asset::encode`] — the same door
+    /// `AssetProject::write_asset` puts them through, and the same shape
+    /// [`crate::template`]'s `the_same_params_generate_the_same_bytes` uses.
     #[test]
     fn the_same_rig_generates_the_same_clips() {
         let rig = biped();
         let a = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default()).unwrap();
         let b = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default()).unwrap();
         assert_eq!(a, b);
+
+        let bytes = |set: &LocomotionSet| -> Vec<Vec<u8>> {
+            [&set.idle, &set.walk, &set.run]
+                .iter()
+                .map(|c| {
+                    inf_asset::encode(&crate::asset::AnimClipAsset::new((*c).clone(), None))
+                        .unwrap()
+                })
+                .collect()
+        };
+        assert_eq!(bytes(&a), bytes(&b), "a generated clip is not byte-stable");
+
+        // …and the comparison is a filter rather than a formality: a different
+        // rig writes different bytes. Without this the assertion above would pass
+        // for a generator that emitted the same three clips for everything.
+        let tall = build_template(
+            BodyPlan::Biped,
+            &BodyParams {
+                height_m: 2.4,
+                ..BodyParams::default()
+            },
+        )
+        .unwrap();
+        let c = build_locomotion(BodyPlan::Biped, &tall, &GaitParams::default()).unwrap();
+        assert_ne!(bytes(&a), bytes(&c));
+
+        // **And the two comparisons really are different checks.** Written out
+        // rather than asserted about the generator, because the whole point is
+        // that no generated value has to have this shape for the structural
+        // comparison to be the weaker one.
+        let key = |x: f32| {
+            AnimClip::new(
+                "k",
+                vec![JointTrack {
+                    rotation: Some(QuatTrack::new(
+                        vec![0.0],
+                        vec![[x, 0.0, 0.0, 1.0]],
+                        Interpolation::Linear,
+                    )),
+                    ..JointTrack::new(0)
+                }],
+            )
+        };
+        let (plus, minus) = (key(0.0), key(-0.0));
+        assert_eq!(plus, minus, "`-0.0 == 0.0`, which is the whole problem");
+        assert_ne!(
+            inf_asset::encode(&crate::asset::AnimClipAsset::new(plus, None)).unwrap(),
+            inf_asset::encode(&crate::asset::AnimClipAsset::new(minus, None)).unwrap(),
+            "the byte comparison above adds nothing over `PartialEq`"
+        );
     }
 
     /// **Proportions reach the animation, not only the skeleton.** The whole
