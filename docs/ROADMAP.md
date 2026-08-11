@@ -8773,6 +8773,23 @@ path and decodes, not the writer's handles.
   be exactly the thing P23 made a law about: **measure the prescription before landing it.** So the
   advisories are left saying what happened, and the claim is withdrawn instead.
 
+**THE macOS RED (2026-08-11, CI run 31540901959 — the ledger's own warning, met within hours).**
+The paragraph above ends by noting the gate's committed numbers "behave like goldens on a chain
+that contains `meshopt`". The first CI run proved it: the degenerate-UV arm, bounded at 9%
+against a local measurement of 6.6%, measured **10.1% on the macOS leg** — meshopt's decimation
+differs per platform (the P18 law), so the unwrap sees different geometry and the count moves.
+The P25.2 audit F1 class (measured on one adapter, gated on every one), met again for CPUs.
+Fixed from the main session: the ceiling is now a **wholesale** catch at 20% (the P23 all-zeros
+class still fails it at 100%) with both platform measurements written at the constant. The
+diagnosis that came free: a new `uv_degenerate_by_area` split, written expecting the
+degeneracies to be decimation slivers, **disproved itself — 953 of the 995 local degenerate
+triangles have healthy 3D area** (≥ a tenth of the median). The unwrap path is collapsing
+geometry that gave it room to work. **Undiagnosed defect, carried**: the mechanism lives
+somewhere in the P23.5 seam/LSCM/packing chain as this pipeline drives it (656 charts,
+`min_chart_faces` 64); the split is kept as a diagnostic and stays ungated until the collapse
+is diagnosed, because its own halves move with meshopt through the same door. The day it is
+fixed, tighten `MAX_DEGENERATE_UV_FRACTION` toward the sliver floor the split will then reveal.
+
 ### Phase 26 — Streaming Virtual Texturing (SVT)
 
 **Goal:** material textures reach the interactive renderer for the first time — and they are

@@ -197,6 +197,62 @@ pub fn uv_degenerate_triangles(asset: &MeshAsset) -> usize {
     n
 }
 
+/// [`uv_degenerate_triangles`], split by whether the triangle's GEOMETRY gave
+/// the unwrap room to work with.
+///
+/// Returns `(healthy, sliver)`: zero-UV-area triangles whose 3D area is at
+/// least a tenth of the mesh's median triangle area, and the rest.
+///
+/// Written expecting the degeneracies to be decimation slivers meeting LSCM's
+/// tolerance; the measurement said otherwise — on the P25.3 gate fixture,
+/// **953 of 995** zero-UV-area triangles are healthy-area. So this is a
+/// DIAGNOSTIC: it localizes the defect to the unwrap path (a healthy triangle
+/// collapsing in UV is the unwrap's failure, not the decimator's), which is
+/// ledgered and undiagnosed. Both halves still vary across platforms with
+/// meshopt's output (the P18 law), so neither half is gated with a tight
+/// constant — see the gate's `MAX_DEGENERATE_UV_FRACTION` for the story.
+pub fn uv_degenerate_by_area(asset: &MeshAsset) -> (usize, usize) {
+    let tri_area = |sm: &inf_mesh::SubMesh, tri: &[u32]| -> f64 {
+        let p = |i: u32| {
+            let v = sm.vertices[i as usize].position;
+            DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64)
+        };
+        let (a, b, c) = (p(tri[0]), p(tri[1]), p(tri[2]));
+        (b - a).cross(c - a).length() * 0.5
+    };
+    let mut areas: Vec<f64> = Vec::new();
+    for sm in &asset.submeshes {
+        for tri in sm.indices.chunks_exact(3) {
+            areas.push(tri_area(sm, tri));
+        }
+    }
+    if areas.is_empty() {
+        return (0, 0);
+    }
+    areas.sort_by(f64::total_cmp);
+    let median = areas[areas.len() / 2];
+    let healthy_floor = median * 0.1;
+    let (mut healthy, mut sliver) = (0, 0);
+    for sm in &asset.submeshes {
+        for tri in sm.indices.chunks_exact(3) {
+            let uv = |i: u32| {
+                let t = sm.vertices[i as usize].uv;
+                (t[0] as f64, t[1] as f64)
+            };
+            let (a, b, c) = (uv(tri[0]), uv(tri[1]), uv(tri[2]));
+            let det = (b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1);
+            if det.abs() < 1e-12 {
+                if tri_area(sm, tri) >= healthy_floor {
+                    healthy += 1;
+                } else {
+                    sliver += 1;
+                }
+            }
+        }
+    }
+    (healthy, sliver)
+}
+
 /// A baked building.
 #[derive(Debug, Clone)]
 pub struct BakedMesh {
