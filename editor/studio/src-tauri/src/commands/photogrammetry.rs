@@ -98,26 +98,20 @@ impl PhotogrammetryState {
 fn status(session: &PhotogrammetrySession) -> CaptureStatusDto {
     let state = session.state();
     let settings = CaptureSettingsDto::from_config(session.config());
-    let (issues, result) = match state {
-        // Before a run the findings are the pre-flight's; after one they are the
-        // product's, which already contains everything the pre-flight said that
-        // still matters.
-        CaptureState::Ready | CaptureState::Imported => session
-            .with_product(|p| {
-                (
-                    p.issues.iter().map(CaptureIssueDto::from_issue).collect(),
-                    Some(CaptureResultDto::from_product(p, settings.metres_per_unit)),
-                )
-            })
-            .unwrap_or_default(),
-        _ => (
-            session
-                .preflight()
-                .iter()
-                .map(CaptureIssueDto::from_issue)
-                .collect(),
-            None,
-        ),
+    // Which of the three places a finding lives in is a rule, so it lives in
+    // Ring 1: `findings` is the pre-flight's before a run, the product's after
+    // one, and a FAILED run's own — which this used to drop on the floor at the
+    // one moment they matter most.
+    let issues: Vec<CaptureIssueDto> = session
+        .findings()
+        .iter()
+        .map(CaptureIssueDto::from_issue)
+        .collect();
+    let result = match state {
+        CaptureState::Ready | CaptureState::Imported => {
+            session.with_product(|p| CaptureResultDto::from_product(p, settings.metres_per_unit))
+        }
+        _ => None,
     };
     CaptureStatusDto {
         state: state.name().to_string(),

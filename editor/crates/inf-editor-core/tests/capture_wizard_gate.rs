@@ -549,6 +549,14 @@ fn the_import_writes_five_assets_under_the_project_root_and_says_so() {
         has_note,
         "the wizard imported a scan and did not say it draws as a placeholder cube"
     );
+    // …and it is what the PANEL reads, which is a different question: `findings`
+    // is the one rule deciding whether a caller sees the pre-flight, a failed
+    // run's own, or the product's, and this is the branch where a product wins.
+    assert!(
+        session.findings().contains(&CaptureIssue::NoMeshletDag),
+        "the placeholder-cube note is on the product and not on the door a panel reads: {:?}",
+        session.findings()
+    );
 }
 
 // ── (c) cancellation ────────────────────────────────────────────────────────

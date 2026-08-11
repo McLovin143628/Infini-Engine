@@ -812,6 +812,13 @@ struct Shared {
     state: Option<CaptureState>,
     product: Option<Box<CaptureProduct>>,
     error: Option<String>,
+    /// Findings collected by a run that **did not reach a product**.
+    ///
+    /// A successful run carries its findings on [`CaptureProduct::issues`]; a
+    /// failed one has no product, and the advisories the stages before the
+    /// refusal produced are exactly what a user needs to read next. Published by
+    /// the worker on the way out rather than dropped with the stack.
+    issues: Vec<CaptureIssue>,
 }
 
 /// **The capture wizard's session.** One per editor process; the wizard opens
@@ -973,6 +980,8 @@ impl PhotogrammetrySession {
             shared.product = None;
             shared.error = None;
             shared.state = None;
+            // The last run's findings are about the last run's photographs.
+            shared.issues.clear();
         }
         Ok(self.preflight())
     }
@@ -1070,6 +1079,7 @@ impl PhotogrammetrySession {
                 message: e.to_string(),
             })?;
             guard.error = None;
+            guard.issues.clear();
             guard.state = Some(CaptureState::Running(if finish_only {
                 CaptureStage::Finish
             } else {
@@ -1149,6 +1159,36 @@ impl PhotogrammetrySession {
     /// The run's refusal, when it failed.
     pub fn error(&self) -> Option<String> {
         self.shared.lock().ok().and_then(|g| g.error.clone())
+    }
+
+    /// **Everything the wizard has to say right now**, in one rule, so a panel
+    /// does not have to know which of three places a finding lives in.
+    ///
+    /// * A finished run's are on its product, which already contains everything
+    ///   the pre-flight said that still matters.
+    /// * A **failed** run's are the ones the stages before the refusal produced.
+    ///   They used to be dropped with the worker's stack, which meant the one
+    ///   moment a user most needs "station3.png never got a pose" was the one
+    ///   moment they could not see it — the pre-flight cannot know it, and there
+    ///   is no product to carry it.
+    /// * Otherwise they are the pre-flight's, recomputed rather than remembered
+    ///   (the `min_views` reason, on [`preflight`](Self::preflight)).
+    ///
+    /// A failed run's list is followed by the pre-flight, because what is loaded
+    /// is still loaded and a mixed-resolution set is still mixed.
+    pub fn findings(&self) -> Vec<CaptureIssue> {
+        if let Ok(guard) = self.shared.lock() {
+            if let Some(product) = guard.product.as_ref() {
+                return product.issues.clone();
+            }
+            if !guard.issues.is_empty() {
+                let mut out = guard.issues.clone();
+                drop(guard);
+                out.extend(self.preflight());
+                return out;
+            }
+        }
+        self.preflight()
     }
 
     /// **Write the finished scan into a project** — the fifth stage, and the one
@@ -1425,7 +1465,11 @@ fn run_capture(
         );
         publish(CaptureState::Cancelled, None);
     };
-    let fail = |stage: CaptureStage, message: String| {
+    // A refusal, said once, in one shape — and carrying the findings the stages
+    // BEFORE it produced, because a run that fails at the dense solve is exactly
+    // when "station3.png never got a pose" is the sentence a user needs, and
+    // there is no product to hang it on.
+    let fail = |stage: CaptureStage, message: String, collected: &[CaptureIssue]| {
         emit(
             stage,
             CapturePhase::Failed,
@@ -1434,6 +1478,9 @@ fn run_capture(
             String::new(),
             Some(message.clone()),
         );
+        if let Ok(mut guard) = shared.lock() {
+            guard.issues = collected.to_vec();
+        }
         publish(CaptureState::Failed, Some(message));
     };
 
@@ -1499,7 +1546,7 @@ fn run_capture(
             let reconstruction = match reconstruct(&views, &cfg.sfm, pool) {
                 Ok(r) => r,
                 Err(e) => {
-                    fail(CaptureStage::Sfm, e.to_string());
+                    fail(CaptureStage::Sfm, e.to_string(), &issues);
                     return;
                 }
             };
@@ -1540,7 +1587,7 @@ fn run_capture(
             let dense = match reconstruct_dense(&views, &reconstruction, &cfg.dense, pool) {
                 Ok(d) => d,
                 Err(e) => {
-                    fail(CaptureStage::Dense, e.to_string());
+                    fail(CaptureStage::Dense, e.to_string(), &issues);
                     return;
                 }
             };
@@ -1604,7 +1651,7 @@ fn run_capture(
     let finished = match finished {
         Ok(f) => f,
         Err(e) => {
-            fail(CaptureStage::Finish, e.to_string());
+            fail(CaptureStage::Finish, e.to_string(), &issues);
             return;
         }
     };
@@ -2030,6 +2077,62 @@ mod tests {
         let literal =
             std::panic::catch_unwind(|| panic!("index out of bounds")).expect_err("it panicked");
         assert_eq!(panic_message(&*literal), "index out of bounds");
+    }
+
+    #[test]
+    fn a_failed_run_keeps_the_findings_the_stages_before_it_produced() {
+        // The diagnostics clause's worst case: a run that refuses at the dense
+        // solve has no product, so the solver advisories it already collected
+        // used to go out with the worker's stack and the panel fell back to a
+        // pre-flight that cannot know any of them. `findings` is the one rule
+        // that decides which of the three places a finding lives in.
+        let mut session = PhotogrammetrySession::new();
+        // Nothing loaded, so the pre-flight blocks — the third branch.
+        assert!(session.findings().iter().any(|i| i.blocks()));
+
+        let collected = vec![
+            CaptureIssue::ViewNotRegistered {
+                view: 3,
+                photo: "station3.png".into(),
+                correspondences: 4,
+            },
+            CaptureIssue::Dense {
+                message: "two views agreed on nothing".into(),
+            },
+        ];
+        {
+            let mut guard = session.shared.lock().expect("fresh");
+            guard.state = Some(CaptureState::Failed);
+            guard.error = Some("dense failed: no depth".into());
+            guard.issues = collected.clone();
+        }
+        let findings = session.findings();
+        for issue in &collected {
+            assert!(
+                findings.contains(issue),
+                "a failed run dropped {issue:?}: {findings:?}"
+            );
+        }
+        // …and what is loaded is still said, because it is still loaded.
+        assert!(
+            findings
+                .iter()
+                .any(|i| matches!(i, CaptureIssue::TooFewPhotos { .. })),
+            "{findings:?}"
+        );
+
+        // A new photograph set retires them: they are about the last set. (The
+        // remaining branch — a product wins over both — is asserted through the
+        // session door in `capture_wizard_gate`, because building a
+        // `CaptureProduct` means running the pipeline.)
+        session.load_photos(&[]).expect("nothing is running");
+        assert!(
+            !session
+                .findings()
+                .iter()
+                .any(|i| matches!(i, CaptureIssue::ViewNotRegistered { .. })),
+            "a new load kept the last run's findings"
+        );
     }
 
     #[test]
