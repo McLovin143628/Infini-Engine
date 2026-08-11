@@ -8485,6 +8485,69 @@ in-engine, with no external reconstruction dependency.
 - **P25.4 Capture wizard** — 1. drop photos → reconstruct with progress → preview through the
   offscreen path → import; 2. failure diagnostics (coverage and overlap warnings).
 
+**P25.1 AUDIT LEDGER (2026-08-11, adversarial pass over `crates/inf-photo` before push).**
+Eight findings, all fixed in the batch; no schema, no golden and no dependency moved (goldens
+stay **50**, `Cargo.lock` gains only the path entry). What was checked and *held*: the
+hand-rolled `linalg` under rank-deficient, all-zero, negative-definite, near-degenerate and
+non-finite input (the small-singular-value claim measures **5.9e-9 relative** eight orders
+down); no `HashMap`/`HashSet` anywhere; every parallel stage an in-order pure map with the
+folds serial; the `(seed, stage, iteration)` separation; and all four documented bounds
+present as writing.
+
+- **F2, the one that would have shipped.** `bb3884e` fixed the synthetic renderer onto the
+  **pixel-centre** convention and stated it once — but `Intrinsics::centred` still put the
+  principal point at `(w/2, h/2)` where the convention says `((w-1)/2, (h-1)/2)`, and
+  `Intrinsics::contains` still tested `0 <= x < w`. The fixture could not see it (it renders
+  and solves through the same intrinsics either way); the **real-photo** path could, because
+  `View::assumed` is what an uncalibrated capture and the P25.4 wizard get, and a half-pixel
+  principal-point shift is exactly what `bb3884e` records that no camera rotation can absorb
+  once radial distortion is in the model. **LAW: fixing a convention at the seam that hurt is
+  not fixing the convention** — the arm now asserts the principal point against the
+  corner-pixel centroid, and that it is *not* the `w/2` answer.
+- **F4, the mutation the batch's own matrix did not run.** Deleting the finish step's bundle
+  entirely left **101 unit tests and all nine gate arms green**. Six views with
+  `bundle_every = 2` means a growth bundle always runs over the state the final bundle would
+  see. **Three** views is the case that cannot hide it — no growth bundle runs at all, so the
+  final bundle is the only one — and it is now an arm (measured: 6 accepted of 6 iterations,
+  RMS 0.3712 → 0.2689 px). **LAW: a fixture whose size is a multiple of the cadence cannot
+  see the step after the last cadence.**
+- **F5, the determinism surface itself.** `canonical_bytes` wrote one field of `SfmReport`, so
+  both byte-identity arms were comparing an image that omitted `initial_pair` — a *branch
+  point* of the algorithm — and the whole `final_bundle` record. Now complete, with an arm
+  that perturbs twenty fields one at a time and insists the bytes notice.
+- **F3** closes the batch's own admitted hole (severing the Huber weight at `bundle`'s call
+  site) by asking the door rather than the solve — the end-to-end arms cannot close it,
+  because `huber_delta_px` still robustifies the *acceptance* cost, so least-squares steps
+  accepted on a Huber criterion still walk toward roughly the Huber answer. **F6**: `w < 0.0`
+  cannot canonicalise `-0.0`, so a half-turn had two byte strings in the type whose bytes get
+  compared. **F1, F7, F8**: `linalg` property arms (and the finding that `solve_ldlt` reads
+  only the lower triangle, which matters because `bundle`'s Schur matrix is symmetric only to
+  rounding); three doc claims that did not point at the code; three `pub` items nothing had
+  ever executed, two of them second spellings of an existing rule.
+- **The audit's own mutation matrix**, run against the arms above (sever, run, restore):
+  the Huber weight at `bundle`'s **call site** → red on the new `the_bundle_weights_its_
+  residuals_through_the_shared_kernel` and, measured, on **nothing else in the workspace**,
+  which is the batch's admitted remainder confirmed and closed; the finish step's bundle
+  deleted → green everywhere before, red on `the_final_bundle_is_the_only_one_a_three_view_
+  capture_gets` after; `canonical_bytes` restored to its one-field write → red on
+  `the_canonical_bytes_cover_every_field_they_claim_to`, on its first field; the camera
+  rotation Jacobian `-[p]_x` flipped to `[p]_x` → red on four arms; the **point**-block
+  Jacobian negated → red on five. The two Jacobian severings are well covered; the first three
+  were not covered at all.
+- **Also fixed while red:** `Advisory::PrunedObservations` counted only the prune after the
+  *final* bundle, which made `tightening_the_reprojection_bound_prunes_and_says_so` a question
+  about fixture luck. It counts every pass now; measured, the default 4 px bound still prunes
+  zero, so no reconstruction's advisory list changed.
+- **Honest remainders, carried:** the noise-floor arm filters tracks at 3 px while the solver's
+  own set is pruned at 4, so the two RMS numbers are over slightly different observation sets;
+  `max_features` is a **soft** budget — the per-level quota is a rounded share plus the
+  unfilled carry, and the rounds can sum over the total (at four levels and factor 1.2, a
+  budget of 50 admits 51); `Pyramid::build` **panics** on
+  `scale_factor <= 1.0` rather than refusing by name, and `reconstruct` does not validate the
+  config it is handed; and `svd3` on a non-finite matrix returns a silent decomposition rather
+  than refusing — unreachable today because every caller guards its own output, and written
+  down so the next caller knows to.
+
 ### Phase 26 — Streaming Virtual Texturing (SVT)
 
 **Goal:** material textures reach the interactive renderer for the first time — and they are
