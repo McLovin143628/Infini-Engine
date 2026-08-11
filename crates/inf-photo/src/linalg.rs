@@ -388,6 +388,14 @@ pub fn project_to_essential(m: &DMat3) -> DMat3 {
 /// `LDLᵀ` rather than Cholesky because the Schur complement of a
 /// gauge-constrained system is positive *semi*-definite before damping, and a
 /// `sqrt` of a whisker-negative pivot is a `NaN` that propagates silently.
+///
+/// **Only the diagonal and the strict lower triangle of `a` are read.** The
+/// upper triangle is never touched, so a matrix that is symmetric only up to
+/// rounding — [`crate::bundle`]'s Schur complement is exactly that, since
+/// `W V⁻¹ Wᵀ` and its transpose are two different sums of the same products — is
+/// resolved by its lower half. That is deterministic and it is the intended
+/// reading; it is written down because it means a defect confined to the upper
+/// triangle is invisible here, including a `NaN`.
 pub fn solve_ldlt(a: &mut [f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
     assert_eq!(a.len(), n * n);
     assert_eq!(b.len(), n);
@@ -722,6 +730,223 @@ mod tests {
         let singular = mat3_from_rows([1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]);
         assert!(invert_sym3(&singular).is_none());
         assert!(invert_sym3(&DMat3::ZERO).is_none());
+    }
+
+    /// Orthonormalise three vectors in a fixed order, for building planted
+    /// decompositions.
+    fn frame(a: DVec3, b: DVec3) -> DMat3 {
+        let c0 = a.normalize();
+        let c1 = (b - c0 * c0.dot(b)).normalize();
+        DMat3::from_cols(c0, c1, c0.cross(c1))
+    }
+
+    fn worst_element(a: &DMat3, b: &DMat3) -> f64 {
+        let mut worst = 0.0f64;
+        for r in 0..3 {
+            for c in 0..3 {
+                worst = worst.max((mat3_at(a, r, c) - mat3_at(b, r, c)).abs());
+            }
+        }
+        worst
+    }
+
+    fn assert_orthonormal(m: &DMat3, what: &str) {
+        let g = m.transpose().mul_mat3(m);
+        for r in 0..3 {
+            for c in 0..3 {
+                let want = if r == c { 1.0 } else { 0.0 };
+                assert!(
+                    (mat3_at(&g, r, c) - want).abs() < 1e-12,
+                    "{what} is not orthonormal at ({r},{c}): {}",
+                    mat3_at(&g, r, c)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn svd3_survives_rank_deficient_and_degenerate_inputs() {
+        // The reconstruction test above uses three well-conditioned matrices. A
+        // structure-from-motion SVD meets worse: an essential matrix's third
+        // singular value is *supposed* to be zero, a point seen from one place
+        // makes a rank-one block, and a mirrored fit makes a negative
+        // determinant. Every one of them must still come back with an
+        // orthonormal `u`, an orthonormal `v`, singular values sorted
+        // descending and non-negative, and a product that is the input again.
+        let u = frame(DVec3::new(0.4, -1.0, 0.3), DVec3::new(1.0, 0.2, -0.7));
+        let v = frame(DVec3::new(-0.9, 0.2, 0.5), DVec3::new(0.1, 1.0, 0.4));
+        let planted = |s: DVec3| {
+            u.mul_mat3(&DMat3::from_cols(
+                DVec3::new(s.x, 0.0, 0.0),
+                DVec3::new(0.0, s.y, 0.0),
+                DVec3::new(0.0, 0.0, s.z),
+            ))
+            .mul_mat3(&v.transpose())
+        };
+        let cases: [(&str, DMat3); 7] = [
+            ("all zero", DMat3::ZERO),
+            ("rank one", planted(DVec3::new(2.5, 0.0, 0.0))),
+            ("rank two", planted(DVec3::new(3.0, 1.25, 0.0))),
+            ("two equal singular values", planted(DVec3::new(2.0, 2.0, 0.5))),
+            ("three equal singular values", planted(DVec3::new(1.5, 1.5, 1.5))),
+            (
+                "near-degenerate across eight orders",
+                planted(DVec3::new(1.0, 1e-8, 1e-16)),
+            ),
+            (
+                "negative determinant",
+                mat3_from_rows([1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, -3.0]),
+            ),
+        ];
+        for (name, m) in cases {
+            let (su, s, sv) = svd3(&m);
+            assert_orthonormal(&su, &format!("u of the {name} case"));
+            assert_orthonormal(&sv, &format!("v of the {name} case"));
+            assert!(
+                s.x >= s.y && s.y >= s.z && s.z >= 0.0,
+                "{name}: singular values are not sorted non-negative: {s}"
+            );
+            let rebuilt = su
+                .mul_mat3(&DMat3::from_cols(
+                    DVec3::new(s.x, 0.0, 0.0),
+                    DVec3::new(0.0, s.y, 0.0),
+                    DVec3::new(0.0, 0.0, s.z),
+                ))
+                .mul_mat3(&sv.transpose());
+            let worst = worst_element(&rebuilt, &m);
+            assert!(
+                worst < 1e-12,
+                "{name}: u diag(s) vT differs from its input by {worst}"
+            );
+        }
+    }
+
+    #[test]
+    fn svd3_delivers_a_small_singular_value_to_full_relative_accuracy() {
+        // The reason this is a one-sided Jacobi and not an eigen-decomposition
+        // of mTm: forming mTm squares the condition number, so a singular value
+        // eight orders below the largest comes back at sqrt(eps) — around 1e-8
+        // relative — instead of at its own value. That is the defect the crate
+        // docs record having measured, and this is the arm that would see it
+        // come back.
+        let u = frame(DVec3::new(0.4, -1.0, 0.3), DVec3::new(1.0, 0.2, -0.7));
+        let v = frame(DVec3::new(-0.9, 0.2, 0.5), DVec3::new(0.1, 1.0, 0.4));
+        // Measured 2026-08-11: the worst of the three is the smallest, at
+        // 5.9e-9 relative — an absolute error of about a quarter of an `eps`
+        // against the largest singular value, which is all a matrix stored in
+        // `f64` can carry. The `mTm` route would return the smallest as the
+        // square root of an eigenvalue whose own absolute error is `eps`, i.e.
+        // wrong by of order 100%, so the bound below separates the two by seven
+        // orders of magnitude rather than splitting hairs.
+        let want = DVec3::new(1.0, 1e-4, 1e-8);
+        let m = u
+            .mul_mat3(&DMat3::from_cols(
+                DVec3::new(want.x, 0.0, 0.0),
+                DVec3::new(0.0, want.y, 0.0),
+                DVec3::new(0.0, 0.0, want.z),
+            ))
+            .mul_mat3(&v.transpose());
+        let (_, s, _) = svd3(&m);
+        for k in 0..3 {
+            let rel = (s[k] - want[k]).abs() / want[k];
+            assert!(
+                rel < 1e-6,
+                "singular value {k} is {} vs {} ({rel:e} relative)",
+                s[k],
+                want[k]
+            );
+        }
+    }
+
+    #[test]
+    fn jacobi_eigen_handles_zero_negative_definite_and_rank_deficient_input() {
+        // A homogeneous system's normal matrix is positive *semi*-definite, and
+        // a Schur complement before damping can carry a whisker-negative
+        // eigenvalue. Both must decompose, with an orthonormal basis and
+        // eigenvalues in ascending order.
+        let n = 4;
+        let mut rank_two = vec![0.0f64; n * n];
+        for row in [
+            [1.0f64, -0.5, 0.25, 2.0],
+            [0.3, 1.4, -0.7, 0.1],
+            [1.3, 0.9, -0.45, 2.1], // the sum of the two above: rank 2
+        ] {
+            accumulate_normal(&mut rank_two, &row);
+        }
+        let mut negative_definite = vec![0.0f64; n * n];
+        for (i, v) in rank_two.iter().enumerate() {
+            negative_definite[i] = -v;
+        }
+        for (name, a) in [
+            ("all zero", vec![0.0f64; n * n]),
+            ("rank two of four", rank_two.clone()),
+            ("negative semi-definite", negative_definite),
+        ] {
+            let (e, v) = jacobi_eigen_sym(&a, n);
+            for k in 1..n {
+                assert!(
+                    e[k - 1] <= e[k],
+                    "{name}: eigenvalues are not ascending: {e:?}"
+                );
+            }
+            // V is orthonormal: VT V == I.
+            for i in 0..n {
+                for j in 0..n {
+                    let dot: f64 = (0..n).map(|k| v[k * n + i] * v[k * n + j]).sum();
+                    let want = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (dot - want).abs() < 1e-12,
+                        "{name}: eigenvector basis is not orthonormal at ({i},{j}): {dot}"
+                    );
+                }
+            }
+            // And it is a decomposition, not just a basis: A v == lambda v.
+            for k in 0..n {
+                for i in 0..n {
+                    let av: f64 = (0..n).map(|j| a[i * n + j] * v[j * n + k]).sum();
+                    assert!(
+                        (av - e[k] * v[i * n + k]).abs() < 1e-10,
+                        "{name}: A v != lambda v at ({k},{i})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_dense_solvers_refuse_non_finite_input_rather_than_returning_garbage() {
+        // Hand-rolled numerics that meet a `NaN` and carry on are how a
+        // reconstruction ends up quietly wrong instead of loudly refused. Both
+        // doors that a bundle step goes through must answer `None`.
+        let n = 3;
+        let base = [4.0f64, 1.0, 0.5, 1.0, 3.0, -0.25, 0.5, -0.25, 2.0];
+        // `solve_ldlt` reads the diagonal and the strict lower triangle only —
+        // that is its documented contract — so those are the elements a poison
+        // has to be caught in.
+        for (name, poison) in [("NaN", f64::NAN), ("+inf", f64::INFINITY)] {
+            for slot in [0usize, 3, 4, 6, 7, 8] {
+                let mut a = base;
+                a[slot] = poison;
+                assert!(
+                    solve_ldlt(&mut a, &[1.0, 1.0, 1.0], n).is_none(),
+                    "solve_ldlt accepted {name} at element {slot}"
+                );
+            }
+            // `invert_sym3` reads the whole 3x3, so every element must be seen.
+            for slot in 0..9 {
+                let mut b = base;
+                b[slot] = poison;
+                let m = mat3_from_rows([b[0], b[1], b[2]], [b[3], b[4], b[5]], [b[6], b[7], b[8]]);
+                assert!(
+                    invert_sym3(&m).is_none(),
+                    "invert_sym3 accepted {name} at element {slot}"
+                );
+            }
+            // A finite matrix with a non-finite right-hand side must not come
+            // back with a finite-looking answer either.
+            let mut a = base;
+            assert!(solve_ldlt(&mut a, &[1.0, poison, 1.0], n).is_none());
+        }
     }
 
     #[test]
