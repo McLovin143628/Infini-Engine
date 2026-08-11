@@ -28,7 +28,8 @@
 //! Two radial terms fit ordinary rectilinear lenses to well under a pixel across
 //! the frame. Tangential (`p1`/`p2`) terms model sensor–lens misalignment, and a
 //! third radial term matters mostly for wide angles; both are additions to this
-//! struct plus rows in [`project_with_jacobian`], and neither is here. A
+//! struct plus rows in [`Intrinsics::project_with_jacobian`], and neither is
+//! here. A
 //! fisheye needs a *different* model (equidistant, not polynomial-radial) and is
 //! not expressible by adding coefficients — that is a `CameraModel` enum, and
 //! this crate does not have one yet.

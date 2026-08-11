@@ -56,6 +56,7 @@ use crate::camera::{Intrinsics, Pose};
 use crate::gray::GrayImage;
 use crate::hash::Hash64;
 use crate::linalg::normalize_or;
+use crate::rgb::RgbImage;
 use crate::sfm::View;
 
 /// A field of jittered discs on a plane, defined by arithmetic rather than by
@@ -157,6 +158,16 @@ pub struct TexturedPlane {
     pub v_extent: f64,
     /// The texture.
     pub texture: DotField,
+    /// Per-channel multiplier over [`DotField::sample`], used only by the
+    /// **colour** renderer ([`SynthScene::shade_rgb`]).
+    ///
+    /// White (`[1, 1, 1]`) by default, which is what keeps the grayscale render
+    /// this field was added underneath bit-identical: [`SynthScene::shade`] does
+    /// not read it at all. A P25.3 albedo bake needs surfaces whose *colours*
+    /// differ, not only whose textures do — a scene of grey dots on grey
+    /// backgrounds cannot tell a bake that mixed up two views from one that did
+    /// not.
+    pub tint: [f64; 3],
 }
 
 impl TexturedPlane {
@@ -180,7 +191,29 @@ impl TexturedPlane {
             u_extent,
             v_extent,
             texture,
+            tint: [1.0, 1.0, 1.0],
         }
+    }
+
+    /// The same plane with a colour.
+    pub fn with_tint(mut self, tint: [f64; 3]) -> Self {
+        self.tint = tint;
+        self
+    }
+
+    /// The plane's albedo at texture coordinates `(u, v)`, in the renderer's
+    /// `0..255` scale, **unlit**.
+    ///
+    /// This is the truth an albedo bake is measured against, so it is one
+    /// function rather than a formula repeated in the renderer and in the gate.
+    #[inline]
+    pub fn albedo(&self, u: f64, v: f64) -> [f64; 3] {
+        let base = self.texture.sample(u, v);
+        [
+            base * self.tint[0],
+            base * self.tint[1],
+            base * self.tint[2],
+        ]
     }
 
     /// Ray-plane intersection. Returns the ray parameter and the texture
@@ -302,6 +335,133 @@ impl SynthScene {
         }
         value
     }
+
+    /// The nearest hit along a world-space ray, with its texture coordinates:
+    /// `(plane index, ray parameter, u, v)`.
+    ///
+    /// [`SynthScene::nearest_hit`] answers *where*; this answers *where on
+    /// what*, which is what a colour shade and an albedo truth both need. Kept
+    /// separate rather than widening `nearest_hit`, whose two-tuple is already
+    /// read in four places across two crates.
+    pub fn nearest_textured_hit(
+        &self,
+        origin: DVec3,
+        dir: DVec3,
+    ) -> Option<(usize, f64, f64, f64)> {
+        let mut best: Option<(usize, f64, f64, f64)> = None;
+        for (i, plane) in self.planes.iter().enumerate() {
+            if let Some((t, u, v)) = plane.intersect(origin, dir) {
+                if best.map(|(_, bt, _, _)| t < bt).unwrap_or(true) {
+                    best = Some((i, t, u, v));
+                }
+            }
+        }
+        best
+    }
+
+    /// The **colour** along a world-space ray, in the renderer's `0..255`
+    /// scale: the surface's albedo multiplied by the irradiance `light` puts on
+    /// it.
+    ///
+    /// A ray that hits nothing reports the background in all three channels,
+    /// **unlit** — the background is not a surface, it has no normal, and
+    /// shading it would invent geometry the reconstruction is right not to find.
+    pub fn shade_rgb(&self, origin: DVec3, dir: DVec3, light: &Lighting) -> [f64; 3] {
+        let Some((index, _, u, v)) = self.nearest_textured_hit(origin, dir) else {
+            let bg = self.background as f64;
+            return [bg, bg, bg];
+        };
+        let plane = &self.planes[index];
+        // The geometric normal, oriented back along the ray: a `TexturedPlane`
+        // is two-sided and its stored normal may point away from the camera,
+        // which would shade the visible face by the irradiance on its back.
+        let normal = if plane.normal.dot(dir) > 0.0 {
+            -plane.normal
+        } else {
+            plane.normal
+        };
+        let e = light.irradiance(normal);
+        let a = plane.albedo(u, v);
+        [a[0] * e[0], a[1] * e[1], a[2] * e[2]]
+    }
+
+    /// The **unlit** albedo of the scene surface nearest to a world point, in
+    /// the renderer's `0..255` scale, or `None` when nothing is within
+    /// `tolerance` metres.
+    ///
+    /// The truth an albedo bake is measured against. Every primitive is a
+    /// finite rectangle, so the closest point on one is found by clamping the
+    /// in-plane coordinates to the extents — exact, with no iteration and no
+    /// sampling, exactly as `inf_photo_gpu::fixture::surface_distance` does it.
+    pub fn albedo_at(&self, p: DVec3, tolerance: f64) -> Option<[f64; 3]> {
+        let mut best: Option<(f64, [f64; 3])> = None;
+        for plane in &self.planes {
+            let d = p - plane.origin;
+            let u = d.dot(plane.u_axis).clamp(-plane.u_extent, plane.u_extent);
+            let v = d.dot(plane.v_axis).clamp(-plane.v_extent, plane.v_extent);
+            let closest = plane.origin + plane.u_axis * u + plane.v_axis * v;
+            let distance = (p - closest).length();
+            if best.map(|(bd, _)| distance < bd).unwrap_or(true) {
+                best = Some((distance, plane.albedo(u, v)));
+            }
+        }
+        match best {
+            Some((d, albedo)) if d <= tolerance => Some(albedo),
+            _ => None,
+        }
+    }
+}
+
+/// A **linear** ambient-plus-one-directional illumination model — the exact
+/// model P25.3's de-lighting v1 tries to estimate and divide out.
+///
+/// # Linear, and stated once
+///
+/// The renderer works in **linear light**: `observed = albedo * irradiance`,
+/// with no transfer function anywhere. A real camera writes sRGB-encoded bytes
+/// and a real de-lighting pass has to linearize them first; this fixture does
+/// not, on purpose. Putting a transfer function in the fixture would measure
+/// the *encoding* as well as the algorithm, and the two failures look identical
+/// from the outside. The pipeline's own sRGB handling is a separate,
+/// separately-tested step.
+///
+/// Keep `ambient + directional <= 1` per channel unless clipping is the point:
+/// beyond that the render saturates at 255, the observation stops being a
+/// linear function of the albedo, and no de-lighting can recover what the clamp
+/// threw away.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lighting {
+    /// Uniform irradiance on every surface, per channel.
+    pub ambient: [f64; 3],
+    /// Irradiance from the directional source at full incidence, per channel.
+    pub directional: [f64; 3],
+    /// Unit direction from a surface **toward** the light.
+    pub direction: DVec3,
+}
+
+impl Default for Lighting {
+    /// Flat white ambient and nothing else — the unlit case, so a caller who
+    /// wants pure albedo does not have to spell out three zeroes.
+    fn default() -> Self {
+        Self {
+            ambient: [1.0; 3],
+            directional: [0.0; 3],
+            direction: DVec3::Y,
+        }
+    }
+}
+
+impl Lighting {
+    /// The irradiance on a surface with unit normal `n`, per channel.
+    #[inline]
+    pub fn irradiance(&self, n: DVec3) -> [f64; 3] {
+        let ndotl = n.dot(self.direction).max(0.0);
+        [
+            self.ambient[0] + self.directional[0] * ndotl,
+            self.ambient[1] + self.directional[1] * ndotl,
+            self.ambient[2] + self.directional[2] * ndotl,
+        ]
+    }
 }
 
 /// One committed camera station: eye, look-at target, and the "up" that sets
@@ -402,6 +562,30 @@ impl SynthDataset {
         Self::render(&SynthScene::alcove(), cfg)
     }
 
+    /// Render the same scene from the same stations **in colour**, under
+    /// `light`.
+    ///
+    /// Returns only the images: the poses and intrinsics are the ones
+    /// [`SynthDataset::render`] already produced for the same `cfg`, and
+    /// handing back a second copy of them would be two records of one truth.
+    ///
+    /// # Why this is a second render rather than the first one
+    ///
+    /// The reconstruction pipeline never sees these pixels. Structure from
+    /// motion and the plane sweep both run on luma, and P25.1's committed
+    /// numbers — and P25.2's, which are measured on the *same* grayscale bytes
+    /// — would move if the gray images became a conversion of a lit colour
+    /// render. So the gray dataset stays exactly what it was, and this is the
+    /// "original file" the albedo bake re-reads for colour, which is precisely
+    /// the arrangement [`crate::gray`] describes for real photographs.
+    pub fn render_rgb(scene: &SynthScene, cfg: &SynthConfig, light: &Lighting) -> Vec<RgbImage> {
+        let intrinsics = cfg.intrinsics();
+        let rays = camera_rays(&intrinsics, cfg.supersample);
+        (0..cfg.stations.min(STATIONS.len()))
+            .map(|i| render_view_rgb(scene, cfg, &rays, &cfg.pose(i), light))
+            .collect()
+    }
+
     /// Render an arbitrary scene from the committed stations.
     pub fn render(scene: &SynthScene, cfg: &SynthConfig) -> Self {
         let intrinsics = cfg.intrinsics();
@@ -473,6 +657,45 @@ fn render_view(scene: &SynthScene, cfg: &SynthConfig, rays: &[DVec3], pose: &Pos
             index += per_pixel;
             let v = (acc / per_pixel as f64).round().clamp(0.0, 255.0) as u8;
             image.set(x, y, v);
+        }
+    }
+    image
+}
+
+fn render_view_rgb(
+    scene: &SynthScene,
+    cfg: &SynthConfig,
+    rays: &[DVec3],
+    pose: &Pose,
+    light: &Lighting,
+) -> RgbImage {
+    let s = cfg.supersample.max(1);
+    let per_pixel = (s * s) as usize;
+    let eye = pose.center();
+    let inverse = pose.rotation.inverse();
+    let mut image = RgbImage::new(cfg.width, cfg.height).expect("non-zero dimensions");
+    let mut index = 0usize;
+    for y in 0..cfg.height {
+        for x in 0..cfg.width {
+            let mut acc = [0.0f64; 3];
+            for k in 0..per_pixel {
+                let dir = inverse * rays[index + k];
+                let c = scene.shade_rgb(eye, dir, light);
+                acc[0] += c[0];
+                acc[1] += c[1];
+                acc[2] += c[2];
+            }
+            index += per_pixel;
+            let n = per_pixel as f64;
+            image.set(
+                x,
+                y,
+                [
+                    (acc[0] / n).round().clamp(0.0, 255.0) as u8,
+                    (acc[1] / n).round().clamp(0.0, 255.0) as u8,
+                    (acc[2] / n).round().clamp(0.0, 255.0) as u8,
+                ],
+            );
         }
     }
     image
@@ -627,6 +850,145 @@ mod tests {
                 "station {i}'s principal ray hits nothing (t = {hit})"
             );
         }
+    }
+
+    /// The alcove with three distinct tints and one directional light — the
+    /// shape a colour test needs, built here so no test invents its own.
+    fn tinted_alcove() -> SynthScene {
+        let mut scene = SynthScene::alcove();
+        scene.planes[0].tint = [0.95, 0.72, 0.45];
+        scene.planes[1].tint = [0.55, 0.78, 0.98];
+        scene.planes[2].tint = [0.80, 0.95, 0.60];
+        scene
+    }
+
+    fn lit() -> Lighting {
+        Lighting {
+            ambient: [0.34, 0.36, 0.40],
+            directional: [0.62, 0.60, 0.55],
+            direction: DVec3::new(-0.35, 0.86, -0.37).normalize(),
+        }
+    }
+
+    #[test]
+    fn the_gray_render_never_reads_the_tint() {
+        // The additive-field law: `tint` was added under a committed fixture
+        // whose bytes two other gates measure. If `shade` ever learns to read
+        // it, P25.1's and P25.2's numbers move for a reason nobody wrote down.
+        let cfg = small();
+        let plain = SynthDataset::render(&SynthScene::alcove(), &cfg);
+        let tinted = SynthDataset::render(&tinted_alcove(), &cfg);
+        for (i, (a, b)) in plain.views.iter().zip(&tinted.views).enumerate() {
+            assert_eq!(
+                a.image.pixels(),
+                b.image.pixels(),
+                "the grayscale render of station {i} changed when a tint was set"
+            );
+        }
+    }
+
+    #[test]
+    fn a_colour_render_is_bit_identical_across_calls_and_carries_real_colour() {
+        let cfg = small();
+        let scene = tinted_alcove();
+        let light = lit();
+        let a = SynthDataset::render_rgb(&scene, &cfg, &light);
+        let b = SynthDataset::render_rgb(&scene, &cfg, &light);
+        assert_eq!(a.len(), 3);
+        for (i, (va, vb)) in a.iter().zip(&b).enumerate() {
+            assert_eq!(va.pixels(), vb.pixels(), "colour view {i} differed");
+        }
+        // Not a grey image dressed as a colour one: some pixel's channels must
+        // genuinely disagree, or the tints are not reaching the render.
+        let mut chromatic = 0usize;
+        for y in 0..a[0].height() {
+            for x in 0..a[0].width() {
+                let p = a[0].at(x, y);
+                let lo = p.iter().copied().min().unwrap() as i32;
+                let hi = p.iter().copied().max().unwrap() as i32;
+                if hi - lo > 20 {
+                    chromatic += 1;
+                }
+            }
+        }
+        let total = (a[0].width() * a[0].height()) as usize;
+        assert!(
+            chromatic * 4 > total,
+            "only {chromatic} of {total} pixels carry real colour"
+        );
+    }
+
+    #[test]
+    fn the_light_is_visible_in_the_render_and_the_model_is_the_one_documented() {
+        // `observed = albedo * irradiance`, exactly, with no transfer function.
+        // Measured at one ray rather than asserted in prose: shade the same ray
+        // unlit and lit, and the ratio must be the irradiance on that surface.
+        let scene = tinted_alcove();
+        let light = lit();
+        let cfg = SynthConfig::default();
+        let pose = cfg.pose(0);
+        let eye = pose.center();
+        let dir = pose.forward();
+        let (index, _, u, v) = scene
+            .nearest_textured_hit(eye, dir)
+            .expect("the principal ray hits the scene");
+        let plane = &scene.planes[index];
+        let normal = if plane.normal.dot(dir) > 0.0 {
+            -plane.normal
+        } else {
+            plane.normal
+        };
+        let expected_e = light.irradiance(normal);
+        let albedo = plane.albedo(u, v);
+        let observed = scene.shade_rgb(eye, dir, &light);
+        for c in 0..3 {
+            assert!(
+                (observed[c] - albedo[c] * expected_e[c]).abs() < 1e-9,
+                "channel {c}: {} is not albedo {} times irradiance {}",
+                observed[c],
+                albedo[c],
+                expected_e[c]
+            );
+        }
+        // And the light actually does something: a flat ambient would make the
+        // directional term untestable.
+        assert!(
+            expected_e.iter().any(|e| (*e - 1.0).abs() > 0.05),
+            "the committed light is indistinguishable from flat white"
+        );
+    }
+
+    #[test]
+    fn the_albedo_truth_agrees_with_what_the_renderer_shaded() {
+        // The gate measures a baked albedo against `albedo_at`. If that door
+        // and the renderer disagree, the gate measures the disagreement.
+        let scene = tinted_alcove();
+        let cfg = SynthConfig::default();
+        let pose = cfg.pose(2);
+        let eye = pose.center();
+        let mut compared = 0usize;
+        for i in 0..40 {
+            let t = -0.5 + 0.025 * i as f64;
+            let dir = DVec3::new(t, -0.12, 1.0).normalize();
+            let Some((index, hit_t, u, v)) = scene.nearest_textured_hit(eye, dir) else {
+                continue;
+            };
+            let world = eye + dir * hit_t;
+            let truth = scene
+                .albedo_at(world, 1e-6)
+                .expect("a point on a surface is within a micron of one");
+            let shaded = scene.planes[index].albedo(u, v);
+            for c in 0..3 {
+                assert!(
+                    (truth[c] - shaded[c]).abs() < 1e-6,
+                    "albedo_at disagrees with the plane it landed on: {truth:?} vs {shaded:?}"
+                );
+            }
+            compared += 1;
+        }
+        assert!(compared > 20, "only {compared} rays hit the scene");
+        // Away from every surface it refuses rather than guessing.
+        assert!(scene.albedo_at(DVec3::new(0.0, 40.0, 0.0), 0.01).is_none());
     }
 
     #[test]

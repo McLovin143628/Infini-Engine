@@ -82,10 +82,50 @@
 //!   one — and that is a reporting metric. (One `hypot` lives in a `#[cfg(test)]`
 //!   error metric in [`features`]; it is not code a caller can reach.)
 //!
-//! **The day a reconstruction is serialized into an asset** (P25.3 bakes, P25.4
-//! imports) the portable family applies to everything that touches those bytes,
-//! and this paragraph is the notice that it was a deliberate line rather than an
-//! oversight.
+//! ## The line, as P25.3 settled it
+//!
+//! P25.1 and P25.2 both closed with the same notice: *"the day a reconstruction
+//! is serialized into an asset, the portable family applies to everything that
+//! touched those bytes."* That day is P25.3 — it writes a `.inf_mesh`, three
+//! `.inf_tex` and a `.inf_mat` derived from exactly these numbers — so the
+//! notice has to be settled rather than repeated, and this is where it is
+//! settled.
+//!
+//! Read literally, the notice forbids committing anything these solvers
+//! touched. That is not what the P14 law protects. The law exists because two
+//! machines that **re-derive** the same content must agree about it: a cook that
+//! rebuilds procedural rubble, a gate that re-runs a generator on CI and
+//! compares against a committed golden, a client that reproduces a server's
+//! placement with nothing sent over the wire. `std::f32::sin` is not
+//! bit-portable, so any of those would drift apart. The ruling that follows from
+//! *that* reason, rather than from the sentence:
+//!
+//! * **Photogrammetry import is the glTF-import class.** It runs **once**, on
+//!   the author's machine, over photographs the author supplies, and produces
+//!   content-addressed assets that are thereafter committed like any other
+//!   imported model. Nothing re-derives them — no cook re-runs bundle
+//!   adjustment, no second machine re-solves the scene and diffs the result.
+//!   This is the same standing the workspace already grants `meshopt`, whose
+//!   output is *known* not to be cross-platform (P18's law) and which the glTF
+//!   importer uses anyway, for exactly this reason.
+//! * **The portable family still governs anything a GATE re-derives.** A
+//!   photogrammetry gate must therefore compare within one run, or across runs
+//!   on one machine — never a committed number against a freshly-solved one on
+//!   whatever CI happens to be. `tests/sfm_gate.rs` and
+//!   `inf-photo-gpu`'s `tests/mvs_gate.rs` were already written that way (they
+//!   solve the fixture in-process and measure it against *analytic* truth, not
+//!   against committed bytes), and P25.3's gate is held to the same rule.
+//! * **And it governs any table the committed bytes are a function of.** A
+//!   sampling pattern, a kernel, a direction set: those are part of the *rule*
+//!   an asset was baked by, they are read the same way by every machine that
+//!   reads the code, and a machine that computed them differently would be
+//!   running a different bake. P25.3's ambient-occlusion hemisphere is
+//!   constructed from `sqrt` and a counter hash for that reason, with no
+//!   transcendental in it at all.
+//!
+//! What does *not* follow is that the solvers must be rewritten. They stay as
+//! they are, and in practice they call almost nothing anyway — see the bullets
+//! above.
 //!
 //! # Gauge, and where SI comes back
 //!
@@ -143,6 +183,7 @@ pub mod gray;
 pub mod hash;
 pub mod linalg;
 pub mod matching;
+pub mod rgb;
 pub mod sfm;
 pub mod synth;
 
@@ -152,6 +193,7 @@ pub use camera::{Intrinsics, Pose};
 pub use features::{detect_and_describe, Feature, FeatureConfig, FeatureSet};
 pub use gray::{GrayImage, Pyramid};
 pub use matching::{Match, MatchConfig, Observation, PairMatches, Track};
+pub use rgb::RgbImage;
 pub use sfm::{
     reconstruct, Reconstruction, RegisteredCamera, ScenePoint, SfmConfig, SfmReport, View,
 };

@@ -4,7 +4,9 @@
 //! on intensity, and carrying three channels through the pyramid triples the
 //! memory for nothing — so a photograph becomes an 8-bit [`GrayImage`] the
 //! moment it is decoded, and colour is re-read from the original file later,
-//! when P25.3 bakes albedo.
+//! when P25.3 bakes albedo. That sibling door is [`crate::rgb::RgbImage`], and
+//! the two share one luma rule rather than two spellings of one — see its
+//! module docs.
 //!
 //! # Determinism
 //!
@@ -71,23 +73,34 @@ impl GrayImage {
         })
     }
 
+    /// Decode an in-memory photograph and convert it to grayscale.
+    ///
+    /// `name` is used only to name the file in a refusal. Split out from
+    /// [`GrayImage::load`] so the luma rule can be measured against
+    /// [`crate::rgb::RgbImage::to_gray`] without a filesystem.
+    pub fn from_bytes(bytes: &[u8], name: &str) -> Result<Self, PhotoError> {
+        let decoded = image::load_from_memory(bytes).map_err(|e| PhotoError::Decode {
+            path: name.to_string(),
+            message: e.to_string(),
+        })?;
+        let luma = decoded.to_luma8();
+        let (width, height) = (luma.width(), luma.height());
+        Self::from_luma(width, height, luma.into_raw())
+    }
+
     /// Decode a photograph from disk and convert it to grayscale.
     ///
-    /// This is the crate's only filesystem door. Formats are whatever the
-    /// workspace `image` pin enables (PNG, JPEG, TGA, BMP, HDR, EXR).
+    /// Formats are whatever the workspace `image` pin enables (PNG, JPEG, TGA,
+    /// BMP, HDR, EXR). Colour is not lost, only deferred:
+    /// [`crate::rgb::RgbImage::load`] is the door P25.3's albedo bake re-reads
+    /// the same file through.
     pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, PhotoError> {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(|source| PhotoError::Read {
             path: path.display().to_string(),
             source,
         })?;
-        let decoded = image::load_from_memory(&bytes).map_err(|e| PhotoError::Decode {
-            path: path.display().to_string(),
-            message: e.to_string(),
-        })?;
-        let luma = decoded.to_luma8();
-        let (width, height) = (luma.width(), luma.height());
-        Self::from_luma(width, height, luma.into_raw())
+        Self::from_bytes(&bytes, &path.display().to_string())
     }
 
     /// Width in pixels.
