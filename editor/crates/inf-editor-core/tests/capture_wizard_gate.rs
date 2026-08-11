@@ -859,11 +859,13 @@ fn the_scale_step_is_a_refinish_and_costs_only_the_finish_stage() {
         session.error()
     );
 
-    let (extent, first_vertex) = session
+    let (extent, first_vertex, overlap, seen_by_none) = session
         .with_product(|p| {
             (
                 p.extent_units,
                 p.finished.mesh.submeshes[0].vertices[0].position,
+                p.coverage.overlap_fraction(),
+                p.coverage.seen_by_none,
             )
         })
         .expect("a product");
@@ -917,6 +919,32 @@ fn the_scale_step_is_a_refinish_and_costs_only_the_finish_stage() {
         (scaled_extent - extent).abs() < 1e-6,
         "the extent readout is in metres, so a user who scales once cannot scale again: \
          {scaled_extent} against {extent}"
+    );
+
+    // THE COVERAGE SURVIVES THE SCALE, which is the other thing a re-finish is
+    // the only path to. `measure_coverage` projects triangle centroids against
+    // depth maps that never went through the scale step, so it divides them back
+    // into baseline units first — and every other arm runs at 1.0, where that
+    // division is the identity and a dropped one is invisible. Its own docs name
+    // the symptom: a report computed against the wrong scale says every camera
+    // saw nothing. MUTATION-VERIFIED (P25.4 audit): fixing the divisor at 1.0
+    // passed all thirteen arms before this one existed, and fails here.
+    let (scaled_overlap, scaled_none) = session
+        .with_product(|p| (p.coverage.overlap_fraction(), p.coverage.seen_by_none))
+        .expect("a product");
+    println!(
+        "P25.4 scale, coverage: overlap {scaled_overlap:.3} at {scale:.5} m/unit against \
+         {overlap:.3} at 1.0, unseen {scaled_none} against {seen_by_none}"
+    );
+    assert!(
+        (scaled_overlap - overlap).abs() < 0.02,
+        "the overlap moved from {overlap:.3} to {scaled_overlap:.3} when only the SCALE changed — \
+         the coverage measurement is reading the mesh in the wrong units"
+    );
+    assert!(
+        scaled_overlap > 0.0,
+        "no triangle is seen by two cameras at {scale:.5} m/unit, which is what a coverage report \
+         computed against the wrong scale looks like"
     );
 }
 
