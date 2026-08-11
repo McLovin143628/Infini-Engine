@@ -30,7 +30,7 @@
 
 /// Files whose **whole item text** must be free of `std` transcendentals, with
 /// the reason each one is on the list.
-const SIM_PATH: [(&str, &str, &str); 7] = [
+const SIM_PATH: [(&str, &str, &str); 8] = [
     (
         "pose.rs",
         include_str!("../src/pose.rs"),
@@ -65,6 +65,11 @@ const SIM_PATH: [(&str, &str, &str); 7] = [
         "hair.rs",
         include_str!("../src/hair.rs"),
         "strand positions ride state_bytes beside the cloth's, and the ribbon builder runs in the projector on both hosts — a cross product and a length, and nothing that is not one of those",
+    ),
+    (
+        "locomotion.rs",
+        include_str!("../src/locomotion.rs"),
+        "the P24.5 generator writes the KEYFRAMES of a committed `.inf_anim`, which is a strictly stronger claim than the rest of this list: everything above produces values that ride state_bytes for one session, and this produces bytes that go on disk, into a cook, into a pack, and are compared by a golden. `Quat::from_rotation_x` is `f32::sin_cos`, so the whole clip is written out through the half-angle identity by hand",
     ),
 ];
 

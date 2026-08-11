@@ -44,6 +44,8 @@ pub mod cloth;
 pub mod hair;
 // P24.2 inverse kinematics: the post-pass over an evaluated pose.
 pub mod ik;
+// P24.5 the default locomotion set: clips and a machine derived from a body plan.
+pub mod locomotion;
 // P24.3 modular rigging: assembling one skeleton out of parts.
 pub mod merge;
 pub mod pose;
@@ -75,6 +77,10 @@ pub use ik::{
     fabrik, rotation_between, solve_chain, two_bone_positions, IkError, IkReport,
     FABRIK_ITERATIONS, MIN_BONE_LENGTH_M, REACH_TOLERANCE_M,
 };
+pub use locomotion::{
+    build_locomotion, locomotion_machine, GaitParams, LegSummary, LocomotionError, LocomotionSet,
+    MAX_KEYS_PER_CYCLE, SPEED_VAR, STATE_NAMES,
+};
 pub use merge::{
     merge_skeletons, mirror_joint_map, mirrored_joint_name, unmatched_sided_joints, SkeletonMerge,
     SkeletonMergeError,
@@ -90,4 +96,7 @@ pub use state_machine::{
     eval_pose, sample_motion, step, CmpOp, Motion, SmCondition, SmContext, SmRuntime, SmState,
     SmTransition, StateMachine,
 };
-pub use template::{build_template, BodyParams, BodyPlan, JointLimit, TemplateError, MAX_LEGS};
+pub use template::{
+    build_template, girdle_name, leg_suffix, BodyParams, BodyPlan, JointLimit, TemplateError,
+    MAX_LEGS,
+};

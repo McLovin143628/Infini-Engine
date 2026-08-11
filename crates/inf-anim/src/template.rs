@@ -410,7 +410,13 @@ pub fn build_template(plan: BodyPlan, params: &BodyParams) -> Result<SkeletonAss
 /// girdle joint name to spare from the canonical vocabulary, so its legs hang off
 /// a `pelvis` node that is *not* one of the nineteen — the nineteen name the
 /// joints an animation drives, and a girdle anchor is structure.
-fn girdle_name(g: usize, girdles: usize) -> String {
+///
+/// **Public because it is the naming CONTRACT, not an implementation detail.**
+/// [`crate::locomotion`] (P24.5) has to find the legs of a rig this generator
+/// made, and re-deriving the rule there would be a second spelling of it — which
+/// is exactly how P24.3's mirror ended up keyed on `l_`/`r_` prefixes that this
+/// generator has never emitted.
+pub fn girdle_name(g: usize, girdles: usize) -> String {
     if girdles == 1 {
         "pelvis".to_string()
     } else {
@@ -421,7 +427,11 @@ fn girdle_name(g: usize, girdles: usize) -> String {
 /// The `{side}` / `{side}{girdle}` suffix a leg's joints carry. A single-girdle
 /// body uses the canonical unindexed `l` / `r` so a biped's legs are exactly
 /// `upper_leg_l`, `lower_leg_l`, `foot_l`, … — the retarget vocabulary.
-fn leg_suffix(side: &str, g: usize, girdles: usize) -> String {
+///
+/// Public for [`girdle_name`]'s reason: the locomotion generator addresses these
+/// joints by name, and one spelling of the rule is the only way both stay true
+/// of each other.
+pub fn leg_suffix(side: &str, g: usize, girdles: usize) -> String {
     if girdles == 1 {
         side.to_string()
     } else {
