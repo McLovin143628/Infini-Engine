@@ -398,6 +398,12 @@ impl Pose {
 }
 
 /// Normalize and force `w >= 0`, so a rotation has exactly one representation.
+///
+/// The sign test is on the **sign bit**, not on `w < 0.0`. A half-turn has
+/// `w == 0`, and `-0.0 < 0.0` is false — so a comparison would leave `-0.0`
+/// alone and let one rotation have two byte strings, which is the whole thing
+/// this function exists to prevent and the whole reason
+/// [`Pose::write_canonical`] can be compared at all.
 #[inline]
 pub fn canonical_quat(q: DQuat) -> DQuat {
     let q = if q.length_squared() > 0.0 {
@@ -405,7 +411,7 @@ pub fn canonical_quat(q: DQuat) -> DQuat {
     } else {
         DQuat::IDENTITY
     };
-    if q.w < 0.0 {
+    if q.w.is_sign_negative() {
         DQuat::from_xyzw(-q.x, -q.y, -q.z, -q.w)
     } else {
         q
@@ -610,6 +616,33 @@ mod tests {
             "{via} vs {}",
             b.transform(x)
         );
+    }
+
+    #[test]
+    fn a_half_turn_has_exactly_one_byte_string() {
+        // `w == 0` is the case a `w < 0.0` test cannot canonicalise, because
+        // `-0.0 < 0.0` is false. A half-turn about any axis lands there, and
+        // `q` and `-q` are the same rotation — so without a sign-*bit* test the
+        // same rotation has two byte strings and `write_canonical` stops being
+        // comparable.
+        let axis = DVec3::new(0.3, -0.8, 0.5).normalize();
+        let plus = DQuat::from_xyzw(axis.x, axis.y, axis.z, 0.0);
+        let minus = DQuat::from_xyzw(-axis.x, -axis.y, -axis.z, -0.0);
+        let (a, b) = (canonical_quat(plus), canonical_quat(minus));
+        assert_eq!(
+            a.to_array().map(f64::to_bits),
+            b.to_array().map(f64::to_bits),
+            "q and -q canonicalised to different bytes: {a} vs {b}"
+        );
+        assert!(!a.w.is_sign_negative(), "w kept a negative sign bit");
+        // And it is still the same rotation, not a mangled one.
+        let v = DVec3::new(0.2, 0.4, -0.7);
+        assert!((a * v - plus * v).length() < 1e-12);
+        // The poses built from either spelling agree byte for byte too.
+        let (mut ba, mut bb) = (Vec::new(), Vec::new());
+        Pose::from_qt(plus, DVec3::new(1.0, 2.0, 3.0)).write_canonical(&mut ba);
+        Pose::from_qt(minus, DVec3::new(1.0, 2.0, 3.0)).write_canonical(&mut bb);
+        assert_eq!(ba, bb, "one rotation, two canonical byte strings");
     }
 
     #[test]

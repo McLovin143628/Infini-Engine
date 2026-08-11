@@ -197,11 +197,21 @@ impl Reconstruction {
     /// The reconstruction's **canonical byte image**: the assertion surface for
     /// determinism.
     ///
-    /// Everything that defines the result is written, in a fixed order, as
-    /// little-endian IEEE bit patterns — never as formatted decimals, which
-    /// would hide a one-ULP difference. Two runs of [`reconstruct`] on the same
-    /// input produce identical bytes here, and so do runs on pools of different
-    /// sizes.
+    /// Everything that defines the result is written, in a fixed order:
+    /// cameras, points, advisories and **the whole report**. Floats go in as
+    /// little-endian IEEE bit patterns rather than as formatted decimals, so a
+    /// one-ULP difference cannot hide behind a rounded digit. Two runs of
+    /// [`reconstruct`] on the same input produce identical bytes here, and so do
+    /// runs on pools of different sizes.
+    ///
+    /// The one thing written as text is an advisory, through its `Display`. That
+    /// is deliberate — the advisory's *wording* is part of what a caller sees —
+    /// and it is safe for the one `f64` an advisory carries because Rust's
+    /// `Display` for `f64` emits the shortest decimal that round-trips, so two
+    /// distinct values never format alike.
+    ///
+    /// `crates/inf-photo/tests/sfm_gate.rs` asserts the coverage field by field
+    /// rather than trusting this list to stay complete.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(b"INF_PHOTO_SFM\x01");
@@ -229,7 +239,52 @@ impl Reconstruction {
             out.extend_from_slice(format!("{a}").as_bytes());
             out.push(0);
         }
-        out.extend_from_slice(&self.report.reprojection_rms_px.to_bits().to_le_bytes());
+        // The report, in full. Only the reprojection RMS used to be written,
+        // which left the rest of it outside the surface this crate calls its
+        // determinism assertion — including `initial_pair`, which is a **branch
+        // point** of the algorithm (a scored search over `init_candidates`), and
+        // `final_bundle`, whose iteration and acceptance counts are the record
+        // of a solve that has to be a pure function of its input like everything
+        // else here.
+        let r = &self.report;
+        for v in [
+            r.views as u64,
+            r.registered as u64,
+            r.features_per_view.len() as u64,
+        ] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for n in &r.features_per_view {
+            out.extend_from_slice(&(*n as u64).to_le_bytes());
+        }
+        for v in [
+            r.pairs as u64,
+            r.matches as u64,
+            r.tracks as u64,
+            r.points as u64,
+            r.observations as u64,
+        ] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&r.reprojection_rms_px.to_bits().to_le_bytes());
+        out.extend_from_slice(&r.initial_pair.0.to_le_bytes());
+        out.extend_from_slice(&r.initial_pair.1.to_le_bytes());
+        let b = &r.final_bundle;
+        for v in [
+            b.iterations as u64,
+            b.accepted as u64,
+            b.observations as u64,
+        ] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [
+            b.initial_cost,
+            b.final_cost,
+            b.initial_rms_px,
+            b.final_rms_px,
+        ] {
+            out.extend_from_slice(&v.to_bits().to_le_bytes());
+        }
         out
     }
 

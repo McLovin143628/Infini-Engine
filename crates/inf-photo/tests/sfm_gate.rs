@@ -309,6 +309,94 @@ fn the_same_input_gives_the_same_bytes_twice() {
 }
 
 #[test]
+fn the_canonical_bytes_cover_every_field_they_claim_to() {
+    // A byte-identity gate is only as good as what its byte image contains.
+    // `canonical_bytes` used to write the cameras, the points, the advisories
+    // and exactly one field of the report — so a drift in the initial pair the
+    // search chose, or in the final bundle's iteration count, would have been
+    // invisible to both determinism arms. This arm changes one field at a time
+    // and insists the bytes notice.
+    let base = solve(1);
+    let bytes = base.canonical_bytes();
+
+    let mut changed: Vec<&str> = Vec::new();
+    let mut check = |name: &'static str, r: Reconstruction| {
+        assert_ne!(
+            r.canonical_bytes(),
+            bytes,
+            "changing {name} left the canonical bytes identical"
+        );
+        changed.push(name);
+    };
+
+    macro_rules! mutate {
+        ($name:literal, $r:ident, $body:block) => {{
+            #[allow(unused_mut)]
+            let mut $r = base.clone();
+            $body
+            check($name, $r);
+        }};
+    }
+
+    mutate!("report.views", r, { r.report.views += 1; });
+    mutate!("report.registered", r, { r.report.registered += 1; });
+    mutate!("report.features_per_view", r, { r.report.features_per_view[0] += 1; });
+    mutate!("report.pairs", r, { r.report.pairs += 1; });
+    mutate!("report.matches", r, { r.report.matches += 1; });
+    mutate!("report.tracks", r, { r.report.tracks += 1; });
+    mutate!("report.points", r, { r.report.points += 1; });
+    mutate!("report.observations", r, { r.report.observations += 1; });
+    mutate!("report.reprojection_rms_px", r, {
+        r.report.reprojection_rms_px = f64::from_bits(r.report.reprojection_rms_px.to_bits() + 1);
+    });
+    mutate!("report.initial_pair", r, { r.report.initial_pair.1 += 1; });
+    mutate!("report.final_bundle.iterations", r, { r.report.final_bundle.iterations += 1; });
+    mutate!("report.final_bundle.accepted", r, { r.report.final_bundle.accepted += 1; });
+    mutate!("report.final_bundle.observations", r, { r.report.final_bundle.observations += 1; });
+    mutate!("report.final_bundle.final_rms_px", r, {
+        let v = &mut r.report.final_bundle.final_rms_px;
+        *v = f64::from_bits(v.to_bits() + 1);
+    });
+    mutate!("report.final_bundle.final_cost", r, {
+        let v = &mut r.report.final_bundle.final_cost;
+        *v = f64::from_bits(v.to_bits() + 1);
+    });
+    mutate!("an advisory", r, {
+        r.advisories.push(inf_photo::Advisory::ThinRegistration { view: 0, inliers: 1 });
+    });
+    mutate!("a camera pose", r, {
+        let view = *r.cameras.keys().next().expect("a camera");
+        let t = &mut r.cameras.get_mut(&view).expect("a camera").pose.translation;
+        t.x = f64::from_bits(t.x.to_bits() + 1);
+    });
+    mutate!("a camera's observation count", r, {
+        let view = *r.cameras.keys().next().expect("a camera");
+        r.cameras.get_mut(&view).expect("a camera").observations += 1;
+    });
+    mutate!("a point position", r, {
+        let p = &mut r.points[0].position;
+        p.z = f64::from_bits(p.z.to_bits() + 1);
+    });
+    mutate!("a point's observation list", r, {
+        r.points[0].observations.pop();
+    });
+
+    // Anti-vacuity from the other side: an untouched clone must still match, or
+    // the arm above would pass for a `canonical_bytes` that simply differed
+    // every call.
+    assert_eq!(
+        base.clone().canonical_bytes(),
+        bytes,
+        "canonical_bytes is not a function of the reconstruction"
+    );
+    assert!(
+        changed.len() >= 20,
+        "only {} fields were exercised: {changed:?}",
+        changed.len()
+    );
+}
+
+#[test]
 fn the_result_does_not_depend_on_the_worker_count() {
     // The P16.4 law. Every parallel stage in this crate goes through an in-order
     // pure map and every float sum is folded serially, so this is a structural
