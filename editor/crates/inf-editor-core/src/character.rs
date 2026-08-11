@@ -429,7 +429,7 @@ pub fn build_character(
     // ── the body ───────────────────────────────────────────────────────────
     let (body, weights, mannequin) = match source.as_ref() {
         Some(payload) => match skinned_copy(payload, &rig, skeleton) {
-            Ok((asset, summary)) => {
+            Ok((asset, summary, export)) => {
                 if summary.unreached > 0 {
                     warnings.push(format!(
                         "{} vertices could not see any bone and kept the root's weights \
@@ -437,6 +437,7 @@ pub fn build_character(
                         summary.unreached
                     ));
                 }
+                warnings.extend(export_advisories(&export));
                 (asset, Some(summary), false)
             }
             // The rig is already on disk, and the skin solve is the one door in
@@ -527,13 +528,76 @@ fn load_mesh(project: &AssetProject, id: AssetId) -> Result<MeshAsset, Character
         .map_err(|e| CharacterError::Mesh(e.to_string()))
 }
 
+/// What the writer had to do to the author's mesh, in words an author can act
+/// on — empty when it had to do nothing.
+///
+/// [`inf_dcc::ExportReport`] is **advisory**, and its own docs say so field by
+/// field: the writer counts these rather than refusing, because refusing would
+/// mean an author who opened a bad file cannot save their work at all. The
+/// P23.6 save path surfaces them; the wizard is the *second* caller that writes
+/// a committed `.inf_mesh` out of this door, and it discarded the whole report —
+/// so a NaN that was already in someone's glTF reached a shipped body with
+/// nothing said about it.
+///
+/// Every field is mapped, including the ones that are structurally zero on this
+/// path, because "which of these can happen here" is a property of today's code
+/// and not of the rule: `from_mesh_asset` welds exactly and the wizard runs no
+/// geometry op, so `coincident_vertices` and `reused_diagonals` are zero *by
+/// construction* today and would stop being the day a cleanup op joins the
+/// chain. Measured on the fixture: a well-formed mesh reports nothing at all, a
+/// mesh with no UVs reports all 144 of its vertices.
+fn export_advisories(r: &inf_dcc::ExportReport) -> Vec<String> {
+    let mut out = Vec::new();
+    if r.non_finite_written > 0 {
+        out.push(format!(
+            "{} vertices of the body carry a non-finite position, normal or UV — \
+             they came in that way from the source mesh, and they will render as \
+             holes",
+            r.non_finite_written
+        ));
+    }
+    if r.non_unit_normals_written > 0 {
+        out.push(format!(
+            "{} vertices of the body carry a normal that is not unit length, from \
+             the source mesh — lighting on those faces will be wrong",
+            r.non_unit_normals_written
+        ));
+    }
+    if r.fallback_tangents > 0 {
+        out.push(format!(
+            "{} vertices of the body took a fallback tangent because no triangle \
+             around them carries a usable UV gradient — unwrap the source mesh \
+             before using a normal map on it",
+            r.fallback_tangents
+        ));
+    }
+    if r.coincident_vertices > 0 || r.reused_diagonals > 0 {
+        out.push(format!(
+            "the body was written with {} coincident vertices and {} repeated \
+             triangulation diagonals — it may not read back as the same mesh",
+            r.coincident_vertices, r.reused_diagonals
+        ));
+    }
+    if r.fan_fallbacks > 0 {
+        out.push(format!(
+            "{} faces of the source mesh had no ear and were fanned — they are \
+             self-intersecting or collinear",
+            r.fan_fallbacks
+        ));
+    }
+    out
+}
+
 /// Bind `payload` to `rig`, solve its weights, and hand back a **new** skinned
 /// mesh — the author's asset is untouched.
+///
+/// The [`inf_dcc::ExportReport`] comes back with it rather than being dropped:
+/// see [`export_advisories`].
 fn skinned_copy(
     payload: &MeshAsset,
     rig: &SkeletonAsset,
     skeleton: AssetId,
-) -> Result<(MeshAsset, WeightSummary), CharacterError> {
+) -> Result<(MeshAsset, WeightSummary, inf_dcc::ExportReport), CharacterError> {
     let imported =
         inf_dcc::from_mesh_asset(payload).map_err(|e| CharacterError::Mesh(e.to_string()))?;
     let mut mesh = imported.mesh;
@@ -557,7 +621,7 @@ fn skinned_copy(
     if let Some(op) = op {
         inf_dcc::ops::apply(&mut mesh, &op).map_err(|e| CharacterError::Weights(e.to_string()))?;
     }
-    let (asset, _export) = inf_dcc::to_mesh_asset(&mesh, &inf_dcc::ExportOptions::default());
+    let (asset, export) = inf_dcc::to_mesh_asset(&mesh, &inf_dcc::ExportOptions::default());
     Ok((
         asset,
         WeightSummary {
@@ -565,6 +629,7 @@ fn skinned_copy(
             unreached: report.unreached,
             worst_residual: report.worst_residual,
         },
+        export,
     ))
 }
 
@@ -1087,6 +1152,95 @@ mod tests {
             "the skinned copy rides {} joints — a bare bind, not a solve",
             named.len()
         );
+    }
+
+    /// **The writer's advisories reach the author** (audit F3).
+    ///
+    /// A source mesh with no usable UVs writes a body whose every tangent is the
+    /// `[1,0,0,1]` fallback. That is not a refusal — the character is fine to
+    /// look at and wrong to put a normal map on — so it is a warning, and the
+    /// whole `ExportReport` used to be dropped on the floor at `let (asset,
+    /// _export) = to_mesh_asset(..)`.
+    ///
+    /// The well-formed half is the anti-vacuity: a check that fires on every
+    /// mesh is not a check, and would train an author to ignore the panel's
+    /// Warnings section.
+    #[test]
+    fn a_source_mesh_with_no_uvs_says_so_and_a_good_one_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project(tmp.path());
+        let dir = p.content_dir("Meshes").unwrap();
+
+        let good = tube_man();
+        let mut bare = good.clone();
+        for v in &mut bare.submeshes[0].vertices {
+            v.uv = [0.0, 0.0];
+        }
+        let good_id = p
+            .write_asset(&dir, "Good", &good, None, vec![], None)
+            .unwrap();
+        let bare_id = p
+            .write_asset(&dir, "Bare", &bare, None, vec![], None)
+            .unwrap();
+
+        let build = |p: &mut AssetProject, name: &str, mesh: AssetId| {
+            build_character(
+                p,
+                &CharacterSpec {
+                    name: name.into(),
+                    mesh: Some(mesh),
+                    ..CharacterSpec::default()
+                },
+            )
+            .expect("builds")
+        };
+
+        let bad = build(&mut p, "Bare", bare_id);
+        assert!(
+            bad.warnings.iter().any(|w| w.contains("fallback tangent")),
+            "a body with no usable UVs said nothing: {:?}",
+            bad.warnings
+        );
+
+        let ok = build(&mut p, "Good", good_id);
+        assert!(
+            !ok.warnings.iter().any(|w| w.contains("fallback tangent")),
+            "a well-formed mesh was warned about anyway: {:?}",
+            ok.warnings
+        );
+    }
+
+    /// Every field of the report maps to a sentence, checked on a value rather
+    /// than on whatever the fixture happens to produce — `non_finite_written`
+    /// needs a NaN in someone's glTF, and manufacturing one to prove a `format!`
+    /// runs would be a worse test than reading the mapping directly.
+    #[test]
+    fn every_export_advisory_has_words() {
+        assert!(export_advisories(&inf_dcc::ExportReport::default()).is_empty());
+        let all = inf_dcc::ExportReport {
+            non_finite_written: 1,
+            non_unit_normals_written: 2,
+            fallback_tangents: 3,
+            coincident_vertices: 4,
+            reused_diagonals: 5,
+            fan_fallbacks: 6,
+            ..inf_dcc::ExportReport::default()
+        };
+        let out = export_advisories(&all);
+        assert_eq!(out.len(), 5, "{out:?}");
+        for (n, needle) in [
+            (1, "non-finite"),
+            (2, "not unit length"),
+            (3, "fallback tangent"),
+            (4, "coincident"),
+            (6, "fanned"),
+        ] {
+            assert!(
+                out.iter()
+                    .any(|w| w.contains(needle) && w.contains(&n.to_string())),
+                "no advisory names `{needle}` with its count: {out:?}"
+            );
+        }
     }
 
     #[test]
