@@ -523,6 +523,21 @@ fn arms_of(plan: BodyPlan, skeleton: &Skeleton) -> Result<Vec<Arm>, LocomotionEr
 /// one knee is tighter than the others describes a creature that cannot flex
 /// that one further, and a set that flexed the others further would be internally
 /// inconsistent.
+///
+/// # The bound this leaves, stated rather than glossed
+///
+/// The flex direction is **fixed negative**, so a knee whose authored range lies
+/// entirely on the positive side (`min = 0`, `max = 150` — an inverted hinge)
+/// yields a ceiling of zero and a leg that walks with a **straight knee**,
+/// silently. Nothing this engine generates falls in the gap:
+/// `build_template` emits `hinge_x(knee, -150, 0)` and nothing else, and the
+/// Skeleton Editor is the only way to author the other sign. The fix is to pick
+/// the side of zero the limit permits and sign the flex with it, which changes
+/// what the generator emits for a rig class that does not exist yet;
+/// `an_inverted_knee_hinge_walks_stiff_legged_and_that_is_ledgered` asserts the
+/// current behaviour, so the day that lands the test fails and this paragraph is
+/// rewritten instead of forgotten (the `a_multi_axis_limit_is_not_applied`
+/// discipline, P24.3).
 fn knee_flex_ceiling(rig: &SkeletonAsset, legs: &[Leg]) -> Option<f64> {
     let mut ceiling: Option<f64> = None;
     for leg in legs {
@@ -857,6 +872,64 @@ mod tests {
                 "a knee key flexes past the rig's own limit: {v:?}"
             );
         }
+    }
+
+    /// **The bound `knee_flex_ceiling` documents, measured.**
+    ///
+    /// A knee whose authored range is entirely positive — an inverted hinge, which
+    /// only the Skeleton Editor can produce — walks with a straight knee, because
+    /// the flex direction is fixed negative. Asserted as it is, so the day the
+    /// generator learns to sign the flex from the limit this test fails and the
+    /// paragraph on `knee_flex_ceiling` gets rewritten rather than forgotten.
+    #[test]
+    fn an_inverted_knee_hinge_walks_stiff_legged_and_that_is_ledgered() {
+        let mut rig = biped();
+        let knees: Vec<u16> = rig
+            .skeleton
+            .joints()
+            .iter()
+            .enumerate()
+            .filter(|(_, j)| j.name.starts_with("lower_leg_"))
+            .map(|(i, _)| i as u16)
+            .collect();
+        assert_eq!(knees.len(), 2, "the fixture must have knees to invert");
+        for limit in &mut rig.limits {
+            if knees.contains(&limit.joint) {
+                // The same range, the other way round.
+                *limit = crate::template::JointLimit::hinge_x(limit.joint, 0.0, 150.0);
+            }
+        }
+        let set = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default()).unwrap();
+        for knee in knees {
+            let track = set.walk.tracks.iter().find(|t| t.joint == knee).unwrap();
+            let rot = track.rotation.as_ref().unwrap();
+            // Every key is the same rotation, and that rotation is (numerically)
+            // the identity. Not `== [0,0,0,1]`: `pcos64(0)` is 0.999_999_94, which
+            // is the polynomial's documented ~1e-7 and what every key in every
+            // generated clip carries — `QuatTrack::sample` normalizes.
+            assert!(
+                rot.values.iter().all(|v| v[0].abs() < 1.0e-6
+                    && v[1] == 0.0
+                    && v[2] == 0.0
+                    && (v[3] - 1.0).abs() < 1.0e-6),
+                "the knee moved; the generator now signs the flex from the limit — \
+                 delete this test and rewrite `knee_flex_ceiling`'s bound paragraph"
+            );
+        }
+        // …and the hips still swing, so the straight knee is the *limit's* doing
+        // and not a clip that came out empty.
+        let hip = rig.skeleton.index_of("upper_leg_l").unwrap();
+        let hip_track = set.walk.tracks.iter().find(|t| t.joint == hip).unwrap();
+        assert!(
+            hip_track
+                .rotation
+                .as_ref()
+                .unwrap()
+                .values
+                .iter()
+                .any(|v| v[0] != 0.0),
+            "the whole walk is inert — this arm is measuring an empty clip"
+        );
     }
 
     #[test]
