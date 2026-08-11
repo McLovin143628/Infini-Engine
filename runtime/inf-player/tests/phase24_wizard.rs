@@ -298,13 +298,15 @@ fn the_wizard_generates_a_biped_and_a_quadruped_wired_to_their_clips() {
         }
         let walk: AnimClipAsset =
             inf_asset::decode(&made.bytes[&made.build.walk.0]).expect("walk decodes");
+        // The hips, plus an upper and a lower bone per leg. Spelled as a
+        // `floor` so an ARM track (which only the biped has) is not a failure.
         let expected_legs = spec.plan.legs() as usize;
+        let floor = 1 + expected_legs * 2;
         assert!(
-            walk.clip.tracks.len() >= 1 + expected_legs * 2,
-            "a {:?} walk drives {} tracks; {expected_legs} legs need {} at least",
+            walk.clip.tracks.len() >= floor,
+            "a {:?} walk drives {} tracks; {expected_legs} legs need {floor} at least",
             spec.plan,
             walk.clip.tracks.len(),
-            1 + expected_legs * 2
         );
     }
 }
