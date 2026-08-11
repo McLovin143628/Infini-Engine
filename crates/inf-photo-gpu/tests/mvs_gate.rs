@@ -758,6 +758,9 @@ fn the_canonical_bytes_cover_every_field_they_claim_to() {
     mutate!("a depth map's width", r, {
         r.depth_maps[3].width += 1;
     });
+    mutate!("a depth map's height", r, {
+        r.depth_maps[4].height += 1;
+    });
     mutate!("a surface normal", r, {
         r.surface[0].normals[0][1] = 0.25;
     });
@@ -834,8 +837,12 @@ fn the_canonical_bytes_cover_every_field_they_claim_to() {
         bytes,
         "canonical_bytes is not a function of the reconstruction"
     );
+    // Twenty-four: every field of `DepthMap`, `SurfaceHints`, `DenseMesh`,
+    // `DenseReconstruction` and all twelve of `DenseReport`. `height` was the one
+    // the first spelling of this arm missed — `width` was perturbed and its twin
+    // was not, which is how "every field" arms go one field short.
     assert!(
-        changed.len() >= 22,
+        changed.len() >= 24,
         "only {} fields were exercised: {changed:?}",
         changed.len()
     );
@@ -1400,6 +1407,56 @@ fn the_reconstruction_reports_what_it_did() {
             );
         }
     }
+
+    // The INCIDENCE FACTOR, end to end, on the committed fixture.
+    //
+    // The batch's own mutation matrix recorded this one as unit-only, and it was:
+    // replacing `incidence` with `1.0` failed exactly one unit test
+    // (`a_grazing_surface_is_weighted_below_a_face_on_one`) and moved no arm in
+    // this file — the fused zero-crossing hardly shifts when every view's opinion
+    // is reweighted by a factor all six views share the shape of. So the
+    // observable is not the mesh, it is the WEIGHT ITSELF: `weight` is
+    // `confidence * incidence`, so the ratio of the two IS the incidence a real
+    // surface normal produced. Dropped, that ratio collapses onto exactly two
+    // values — `1.0` where a normal was estimated and `FALLBACK_INCIDENCE` where
+    // one could not be — and both assertions below go red.
+    let mut ratios: Vec<f32> = Vec::new();
+    for (hints, map) in dense.surface.iter().zip(&dense.depth_maps) {
+        for j in 0..map.pixels() {
+            if map.confidence[j] > 0.0 && hints.weights[j] > 0.0 {
+                ratios.push(hints.weights[j] / map.confidence[j]);
+            }
+        }
+    }
+    let distinct: std::collections::BTreeSet<u32> = ratios.iter().map(|r| r.to_bits()).collect();
+    let graded = ratios
+        .iter()
+        .filter(|r| **r > inf_photo_gpu::tsdf::FALLBACK_INCIDENCE && **r < 0.999)
+        .count();
+    println!(
+        "P25.2 incidence: {} weighted pixels, {} distinct weight/confidence ratios, {} ({:.1}%) \
+         graded strictly between the fallback and one",
+        ratios.len(),
+        distinct.len(),
+        graded,
+        100.0 * graded as f64 / ratios.len() as f64
+    );
+    assert!(
+        distinct.len() > 100,
+        "the fusion weight takes only {} distinct fractions of its confidence — the incidence \
+         factor is not being applied",
+        distinct.len()
+    );
+    // MEASURED: 176 146 weighted pixels, 109 177 distinct ratios, 20.5% graded.
+    // The floor is 10%, because 20.5% is a measurement and not a margin; the
+    // mutation this catches puts it at exactly zero.
+    assert!(
+        graded * 10 > ratios.len(),
+        "only {graded} of {} weighted pixels are discounted by a real surface normal; a weight \
+         that is either the confidence or half of it is a fallback, not an incidence",
+        ratios.len()
+    );
+
     // Every index in the mesh addresses a vertex that exists, and every vertex
     // carries all three of its channels.
     assert_eq!(dense.mesh.normals.len(), dense.mesh.positions.len());

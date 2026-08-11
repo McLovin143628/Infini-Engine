@@ -878,6 +878,54 @@ mod tests {
     }
 
     #[test]
+    fn a_nan_never_reaches_an_index_or_a_resolved_distance() {
+        // The crate-wide `neg_cmp_op_on_partial_ord` allow, exercised on this
+        // module's guards rather than argued for in the crate root. Both are
+        // written `!(x > 0.0)` and not `x <= 0.0`, and the difference is a `NaN`
+        // that would otherwise be cast to a `usize` index or divided by.
+        let cam = camera(0, DVec3::ZERO);
+        let map = plane_map(&cam, 3.0);
+        let hints = surface_hints(&cam, &map, 0.02);
+        let grid = TsdfGrid::new(DVec3::new(-0.1, -0.1, 2.5), 0.05, [4, 4, 40], 0.15);
+        let good = grid.fuse_params(&cam, &map);
+        assert!(
+            voxel_vote(&good, &map, &hints.weights, 2, 2, 10).is_some(),
+            "the control vote was refused, so this arm proves nothing"
+        );
+        // A `NaN` anywhere in the grid-to-camera chain makes `qz` a `NaN`, and the
+        // guard must reject it rather than let `floor(px + 0.5) as usize` decide.
+        for poison in [
+            FuseParams {
+                tz: f32::NAN,
+                ..good
+            },
+            FuseParams {
+                cz_: f32::NAN,
+                ..good
+            },
+            FuseParams {
+                fx: f32::NAN,
+                ..good
+            },
+        ] {
+            assert_eq!(
+                voxel_vote(&poison, &map, &hints.weights, 2, 2, 10),
+                None,
+                "a NaN parameter produced a vote"
+            );
+        }
+        // And the same on the resolve side: a `NaN` weight is "not seen well
+        // enough", not "seen infinitely well".
+        let mut poisoned = grid.clone();
+        poisoned.weight[0] = f32::NAN;
+        poisoned.distance[0] = 1.0;
+        assert_eq!(poisoned.resolved(0, 0.1), None);
+        poisoned.weight[1] = 0.5;
+        poisoned.distance[1] = 0.25;
+        assert_eq!(poisoned.resolved(1, 0.1), Some(0.5));
+    }
+
+    #[test]
     fn the_grid_index_is_x_fastest_and_total() {
         let g = TsdfGrid::new(DVec3::ZERO, 1.0, [3, 4, 5], 1.0);
         assert_eq!(g.len(), 60);
