@@ -75,11 +75,42 @@ fn run_pie(tick_hz: u32) -> ExitCode {
     use std::time::Duration;
 
     let (tx, rx) = mpsc::channel::<EditorToPlayer>();
+    // **A DECODE FAULT IS NOT AN END OF STREAM** (P24.4, closing the P24.1
+    // carried entry).
+    //
+    // The loop below used to be `while let Ok(msg) = read_msg(..)`, which treated
+    // every error the same: a cleanly closed pipe and a frame this build cannot
+    // read both broke the loop, dropped the channel, and produced "editor closed
+    // the channel; exiting" plus `ExitCode::SUCCESS`. That is exactly what a
+    // version-skewed editor produces — an OLDER build writes a positional
+    // `ScenePayload` with fewer tail fields, `decode_from_slice` runs off the end
+    // *inside* `read_msg`, and `check_version` (which lives one call further in,
+    // in `build_world_from_payload`) never runs. To the editor the refusal looked
+    // like the user pressing Stop.
+    //
+    // A second channel rather than a `Result` element type, deliberately: `rx` is
+    // handed to `run_pie_window` for the embedded path, and widening the message
+    // type would put a fault arm into a window loop that cannot answer one.
+    // Bound, stated: a decode fault AFTER the handoff to the windowed player
+    // keeps the old behaviour. The fault that matters — the `LoadScene` frame
+    // itself — arrives before any handoff, which is where this reports it.
+    let (fault_tx, fault_rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin().lock();
-        while let Ok(msg) = read_msg::<EditorToPlayer>(&mut stdin) {
-            if tx.send(msg).is_err() {
-                break;
+        loop {
+            match read_msg::<EditorToPlayer>(&mut stdin) {
+                Ok(msg) => {
+                    if tx.send(msg).is_err() {
+                        break;
+                    }
+                }
+                // The editor went away: the ordinary end of a session.
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                // Anything else is a stream this build cannot read.
+                Err(e) => {
+                    let _ = fault_tx.send(e.to_string());
+                    break;
+                }
             }
         }
     });
@@ -128,8 +159,7 @@ fn run_pie(tick_hz: u32) -> ExitCode {
             }
         }
         if disconnected {
-            eprintln!("inf-player: editor closed the channel; exiting");
-            return ExitCode::SUCCESS;
+            return report_stream_end(&fault_rx, &mut stdout);
         }
 
         // Auto-advance a running runtime (toy streams; real is step-driven so it
@@ -157,10 +187,46 @@ fn run_pie(tick_hz: u32) -> ExitCode {
                 },
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    eprintln!("inf-player: editor closed the channel; exiting");
-                    return ExitCode::SUCCESS;
+                    return report_stream_end(&fault_rx, &mut stdout);
                 }
             }
+        }
+    }
+}
+
+/// **Why the stream ended**, and what to tell the editor about it (P24.4).
+///
+/// Two outcomes, and telling them apart is the whole of the P24.1 carried entry:
+///
+/// * the reader thread posted a **fault** — a frame arrived that this build
+///   could not decode. Almost always a version-skewed pair: the envelope is
+///   positional bincode, so an older editor's `ScenePayload` is a short read.
+///   The editor gets a `PlayerToEditor::Error` **naming the schema**, and the
+///   process exits non-zero, because a refusal that exits 0 is indistinguishable
+///   from the user pressing Stop.
+/// * no fault — the pipe closed cleanly. The editor went away; exit 0, exactly
+///   as before.
+///
+/// The fault is posted *before* the reader drops its sender, so by the time this
+/// observes a disconnected channel the fault (if there is one) is already in its
+/// own queue.
+fn report_stream_end(
+    faults: &std::sync::mpsc::Receiver<String>,
+    stdout: &mut impl std::io::Write,
+) -> ExitCode {
+    match faults.try_recv() {
+        Ok(detail) => {
+            let message = format!(
+                "cannot decode a PIE frame ({detail}) — the editor and the player                  disagree about the message SCHEMA (this build speaks scene payload                  v{}); rebuild both from the same commit",
+                inf_runtime::pie::SCENE_PAYLOAD_VERSION
+            );
+            eprintln!("inf-player: {message}");
+            let _ = write_msg(stdout, &PlayerToEditor::Error { message });
+            ExitCode::FAILURE
+        }
+        Err(_) => {
+            eprintln!("inf-player: editor closed the channel; exiting");
+            ExitCode::SUCCESS
         }
     }
 }
