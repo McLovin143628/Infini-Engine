@@ -1270,7 +1270,9 @@ export const photogrammetry = {
    * Ask an in-flight run to stop. Resolves to whether one was running.
    *
    * It stops BETWEEN stages: a stage is one blocking solve, so Cancel during a
-   * dense pass lands when that pass returns. Nothing is written either way.
+   * dense pass lands when that pass returns — and `finish` is the last automatic
+   * stage, so a Cancel that lands inside IT finds nothing left to skip and the
+   * run completes into `ready`. Nothing is written either way.
    */
   cancel: (): Promise<boolean> => invoke<boolean>("photo_cancel"),
 

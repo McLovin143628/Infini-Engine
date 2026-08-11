@@ -64,10 +64,28 @@ pub struct PhotogrammetryState {
     /// uploaded geometry — sharing one with the Model Editor would have the two
     /// overwrite each other's vertex buffer on every alternation.
     preview: Mutex<Thumbnailer>,
-    /// **The capture's own workers.** A reconstruction is a minutes-long batch;
-    /// giving it its own pool keeps it from sitting in front of every
-    /// `parallel_map` the editor makes while it runs. Created once, with the
-    /// state.
+    /// **The capture's own workers — the process's SECOND [`JobPool`], and the
+    /// ruling that allows one.**
+    ///
+    /// P7.0's doctrine is a single process-wide [`inf_core::job::global`] pool
+    /// and the reason it gives for it is "no oversubscription".
+    /// [`JobPool::new`]'s own docs carve out the exception this takes —
+    /// "construct one explicitly for a subsystem that wants an isolated pool" —
+    /// and a reconstruction is what that exception is for: a **minutes-long**
+    /// batch, on the only path in the editor that has one, which would otherwise
+    /// sit in front of every `parallel_map` the editor makes while it runs (the
+    /// glTF importer's among them). This is the only explicit pool in the editor.
+    ///
+    /// The thread COUNT is the part that costs something, and it is a choice
+    /// rather than an oversight. Both pools are sized to
+    /// `available_parallelism`, so while a capture and an import are running at
+    /// once the process has **2N runnable workers**. The alternative to
+    /// oversubscribing for the length of one batch is starving the editor for
+    /// the length of one batch, and an editor operation is seconds where a
+    /// capture is minutes. Nothing here has been measured, which is exactly why
+    /// it should not be *tuned* without measuring: a smaller capture pool would
+    /// be a number somebody guessed, and P23's law covers prescriptions like
+    /// that one too.
     pool: Arc<JobPool>,
     /// Whether the progress tick has been spawned.
     ticking: AtomicBool,
@@ -208,7 +226,10 @@ pub async fn photo_refinish(
 ///
 /// It stops **between stages** — the granularity is documented on the session
 /// and said in the panel, because a Cancel that looks instant and is not is
-/// worse than one that says what it costs.
+/// worse than one that says what it costs. `true` means the flag was set, not
+/// that the run will stop: `Finish` is the last automatic stage, so a Cancel
+/// that lands inside it finds nothing left to skip and the run completes into
+/// `Ready`. Nothing is written either way, which is the guarantee.
 #[tauri::command]
 pub async fn photo_cancel(state: State<'_, PhotogrammetryState>) -> Result<bool, String> {
     state.with(|s| Ok(s.cancel()))

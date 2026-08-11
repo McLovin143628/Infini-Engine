@@ -344,8 +344,10 @@ export default function CaptureWizardDialog() {
               </ol>
               <div className="mt-3 text-(--ink-text-faint)">
                 Cancel stops the run at the end of the current stage — a stage is one
-                solve and cannot be interrupted part-way. Nothing is written until you
-                press Import, so a cancelled run leaves no assets behind.
+                solve and cannot be interrupted part-way. If that stage is the last one
+                (the bakes) there is nothing left to skip and the run finishes. Nothing
+                is written until you press Import either way, so a cancelled run leaves
+                no assets behind.
               </div>
             </div>
           )}
