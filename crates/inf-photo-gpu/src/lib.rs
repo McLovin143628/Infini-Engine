@@ -126,6 +126,7 @@
 pub mod dense;
 pub mod filter;
 pub mod fixture;
+pub mod gpu;
 pub mod sweep;
 pub mod tsdf;
 
@@ -134,6 +135,7 @@ pub use dense::{
     DenseReconstruction, DenseReport,
 };
 pub use filter::FilterConfig;
+pub use gpu::{DenseGpu, GpuBackend};
 pub use sweep::{CensusConfig, DepthMap, SweepConfig, SweepGeometry};
 pub use tsdf::{DenseMesh, SurfaceHints, TsdfConfig, TsdfGrid};
 

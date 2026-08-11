@@ -43,3 +43,12 @@
 # regardless) — it fixes what is written to the working tree, so a Windows checkout
 # and a Linux one hand a test the same bytes.
 *.rs text eol=lf
+
+# WGSL is read by tests for the same reason (P25.2). `inf-photo-gpu`'s parity
+# gate strips comment lines out of every shader in its `SHADERS` table and then
+# asserts what the CODE contains — that it never calls `fma()` (which would
+# guarantee the contraction the CPU reference does not perform) and never calls
+# `round()` (round-half-to-even in WGSL against Rust's round-half-away-from-zero).
+# `str::lines()` happens to tolerate a trailing `\r`, so today the check survives
+# a CRLF checkout by luck rather than by rule. The rule is cheaper than the luck.
+*.wgsl text eol=lf
