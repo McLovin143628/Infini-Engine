@@ -27,13 +27,20 @@
 //! channel, and the loop answers with a `PlayerToEditor::Error` naming the
 //! schema before exiting **non-zero**.
 //!
-//! Three arms, and the third is the one that keeps the first two honest:
+//! Four arms, and the last two are what keep the first two honest:
 //!
 //! * a stale payload gets a named `Error` and a failing exit;
 //! * a **current** payload does not (or "the player always errors" would satisfy
 //!   the first arm);
-//! * a clean close still exits **0** (or "the player always fails" would satisfy
-//!   both).
+//! * a session ended with `Stop` still exits **0** (or "the player always fails"
+//!   would satisfy both);
+//! * **a pipe that simply CLOSES still exits 0, silently** — the other half of
+//!   the split, and the one the `Stop` arm cannot see. `Stop` returns from the
+//!   loop through its own arm and never reaches `report_stream_end`, so with
+//!   only the three arms above the whole `UnexpectedEof` classification could be
+//!   deleted — every clean editor disconnect answered with a bogus schema
+//!   `Error` and a failing exit — and every test in this repository stayed
+//!   green. Measured (P24.4 audit F2), not reasoned about.
 
 use std::io::{BufReader, Write};
 use std::path::PathBuf;
@@ -173,6 +180,15 @@ fn a_stale_payload_is_refused_by_name_rather_than_exiting_cleanly() {
         "the refusal does not name the SCHEMA, so an author reading it learns \
          nothing about why: {message}"
     );
+    // …and it is READABLE. The B1 law, which this repository has paid for twice:
+    // a scripted edit to a Rust string literal eats the `\` continuation and
+    // leaves the indentation in the message. `contains("schema")` is perfectly
+    // happy with that, so the assertion has to be its own (P24.4 audit F1).
+    assert!(
+        !message.contains("  "),
+        "the refusal carries a run of spaces — the continuation was eaten: \
+         {message:?}"
+    );
 
     let status = wait_bounded(&mut child, 10);
     assert!(
@@ -212,8 +228,13 @@ fn a_current_payload_is_loaded_and_not_refused() {
         "a payload of this build's own version was not loaded: {ev:?}"
     );
 
-    // …and a clean close still exits ZERO. The third arm, in the same session:
-    // "the player always fails" would satisfy both of the others.
+    // …and a `Stop`ped session still exits ZERO. The third arm, in the same
+    // session: "the player always fails" would satisfy both of the others.
+    //
+    // Note what this does NOT cover, which is why the fourth arm exists: `Stop`
+    // leaves the loop through `Control::Exit` and never reaches
+    // `report_stream_end`, so the `UnexpectedEof` classification is untouched by
+    // it.
     write_msg(&mut stdin, &EditorToPlayer::Stop).ok();
     drop(stdin);
     let status = wait_bounded(&mut child, 10);
@@ -221,5 +242,46 @@ fn a_current_payload_is_loaded_and_not_refused() {
         status.success(),
         "a well-formed session no longer exits 0 — the fault path is firing on a \
          clean shutdown"
+    );
+}
+
+/// **A pipe that simply closes is not a fault** (P24.4 audit F2).
+///
+/// The other half of the split the fix introduced, and the half nothing was
+/// measuring. `report_stream_end` reads a fault queue and answers `SUCCESS` when
+/// it is empty; the arm above never reaches it, because `Stop` returns through
+/// its own arm. So deleting the `UnexpectedEof` case from the reader thread —
+/// making every ordinary editor disconnect a "schema" refusal with a failing
+/// exit — left the whole battery green. Measured that way, then this was
+/// written; with it, the same severing fails here by name.
+///
+/// The editor closing the pipe is how a PIE session normally ends, so the
+/// regression this catches is not exotic: it is every Stop-by-window-close.
+#[test]
+fn a_closed_pipe_with_no_fault_exits_zero_and_says_nothing() {
+    use std::io::Read;
+
+    let (mut child, mut reader) = spawn_ready();
+    // No `Stop`, no frame at all: the editor just went away.
+    drop(child.stdin.take().expect("stdin piped"));
+
+    let status = wait_bounded(&mut child, 10);
+    assert!(
+        status.success(),
+        "a closed pipe exited {:?} — an ordinary editor disconnect is being \
+         reported as a decode fault",
+        status.code()
+    );
+
+    // …and it said nothing on the protocol stream. A refusal the editor never
+    // asked for is worse than the silent exit this batch retired: it would put a
+    // schema error in front of a user who simply pressed Stop.
+    let mut rest = Vec::new();
+    reader.read_to_end(&mut rest).expect("drain stdout");
+    assert!(
+        rest.is_empty(),
+        "the player wrote {} bytes after a clean close — an `Error` frame on a \
+         disconnect that had no fault in it",
+        rest.len()
     );
 }

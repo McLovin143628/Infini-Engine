@@ -553,7 +553,8 @@ fn pack_trace(pack: &Path) -> u128 {
     sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
     assert!(
         !inf_ecs::cloth::cloth_state_bytes(sim.world()).is_empty(),
-        "the cooked pack's character simulates NO garment — the comparison below          would be two empty worlds agreeing"
+        "the cooked pack's character simulates NO garment — the comparison below \
+         would be two empty worlds agreeing"
     );
     assert!(
         !inf_ecs::hair::hair_state_bytes(sim.world()).is_empty(),

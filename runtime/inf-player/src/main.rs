@@ -217,7 +217,9 @@ fn report_stream_end(
     match faults.try_recv() {
         Ok(detail) => {
             let message = format!(
-                "cannot decode a PIE frame ({detail}) — the editor and the player                  disagree about the message SCHEMA (this build speaks scene payload                  v{}); rebuild both from the same commit",
+                "cannot decode a PIE frame ({detail}) — the editor and the player \
+                 disagree about the message SCHEMA (this build speaks scene payload \
+                 v{}); rebuild both from the same commit",
                 inf_runtime::pie::SCENE_PAYLOAD_VERSION
             );
             eprintln!("inf-player: {message}");
