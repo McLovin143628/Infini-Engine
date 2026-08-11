@@ -185,9 +185,22 @@ pub fn step_hair_simulation<'c>(
             .and_then(|p| skeletons(p.skeleton).map(|sk| (sk, p)));
         let (roots, capsules) = match posed {
             Some((sk, p)) => {
+                // TWO different matrices, on purpose (P24.4 audit F3):
+                //
+                // * a **capsule** is a bone — where joints `a` and `b` ARE this
+                //   step — so it wants the joint globals;
+                // * a **root** is a point on the scalp the generator sampled in
+                //   MODEL space, so what carries it is the joint's *skinning*
+                //   matrix (global × inverse bind), exactly as it carries a
+                //   skinned vertex. At rest that is the identity and the root
+                //   stays where it was grown; the raw global would move every
+                //   root by the joint's bind transform on the first step, and
+                //   both hosts would do it identically, so no parity gate could
+                //   see it.
                 let globals = inf_anim::global_transforms(&sk.skeleton, &p.pose);
+                let skins = inf_anim::skinning_matrices(&sk.skeleton, &p.pose);
                 (
-                    inf_anim::hair::roots_for(asset, &globals),
+                    inf_anim::hair::roots_for(asset, &skins),
                     inf_anim::hair::capsules_for_hair(asset, &globals),
                 )
             }

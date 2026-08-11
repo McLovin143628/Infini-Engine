@@ -81,9 +81,13 @@ const RIBBON_FALLBACK: Vec3 = Vec3::X;
 ///
 /// Deterministic by construction: the seed axis is chosen by comparing `dir`'s
 /// components, so the same direction always produces the same pair on every
-/// machine, and `sqrt` is the only non-arithmetic operation involved. Used by
-/// both the curl generator and the interpolated render strands, so a curl and the
-/// strands drawn around it share one idea of "sideways".
+/// machine, and `sqrt` is the only non-arithmetic operation involved.
+///
+/// The **curl generator** is its caller. [`render_mesh`]'s interpolated strands
+/// build their own frame per particle out of the strand's live tangent (a ribbon
+/// axis and its binormal), because the frame they need moves with the simulated
+/// strand while this one is a property of the root's growth direction — an
+/// earlier version of this line claimed both, and only one is true.
 fn perpendicular_basis(dir: Vec3) -> (Vec3, Vec3) {
     let seed = if dir.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
     let u = dir.cross(seed);
@@ -103,9 +107,27 @@ pub struct HairStrand {
     /// joint moves the root, the root drags the strand — which is the whole of
     /// "hair follows the head".
     pub root_joint: u16,
-    /// The root's offset from that joint, in the joint's own space, metres. Kept
-    /// separately from `points` so a strand can be re-anchored without re-growing
-    /// it.
+    /// The root's **bind position, in model space**, metres — the point on the
+    /// scalp the strand grew out of, carried by [`root_joint`](Self::root_joint)'s
+    /// *skinning* matrix (see [`roots_for`]). Kept separately from `points` so a
+    /// strand can be re-anchored without re-growing it.
+    ///
+    /// # It is model space, and that had to be measured (P24.4 audit F3)
+    ///
+    /// It said "in the joint's own space" and [`roots_for`] composed it with the
+    /// raw joint global — while [`HairAsset::grow`], the ONE generator, uses the
+    /// same number as the model-space origin of the strand walk (`points[0] ==
+    /// root_offset`, by construction). Two readings of one field, which agree
+    /// only when the joint's bind global happens to be the identity. Measured on
+    /// the authoring door's own fixture: a scalp face at the model origin, rooted
+    /// on a joint bound one metre up, seeded at `(0, 0, 0)` and was pinned by the
+    /// first step at `(0, 1, 0)` — the hairstyle came off the head it was grown
+    /// on before anything animated.
+    ///
+    /// A bind position carried by a skinning matrix is the formulation the rest
+    /// of the engine already uses for a point attached to a joint, and it makes
+    /// the rest pose exact: at rest a skinning matrix is the identity, so the
+    /// root is where the author put it.
     pub root_offset: [f32; 3],
     /// The strand's rest points in **model space**, root first. Two or more.
     pub points: Vec<[f32; 3]>,
@@ -131,7 +153,10 @@ impl HairStrand {
 pub struct HairRoot {
     /// The joint the root rides.
     pub joint: u16,
-    /// Where it sits in that joint's space, metres.
+    /// Where it sits, **in model space**, metres — the point on the scalp. It
+    /// becomes both the strand walk's origin and
+    /// [`HairStrand::root_offset`](crate::hair::HairStrand::root_offset), which is
+    /// why the two must mean the same thing (P24.4 audit F3).
     pub offset: [f32; 3],
     /// The direction the strand grows in, model space. Normalized by
     /// [`HairAsset::grow`]; a zero or non-finite direction refuses the root.
@@ -658,17 +683,26 @@ fn guide_spacing(asset: &HairAsset) -> f32 {
 
 /// **Where each strand's root is this step**, in model space.
 ///
+/// `joint_skins` is [`crate::skinning_matrices`] over the evaluated pose — a
+/// joint global times its inverse bind — **not** [`crate::global_transforms`].
+/// [`HairStrand::root_offset`] is a *bind position in model space*, so what
+/// carries it is the same matrix that carries a skinned vertex; at the rest pose
+/// that matrix is the identity and the root stays exactly where the generator
+/// grew it. Composing a raw joint global with it instead moves every root by the
+/// joint's bind transform on the first step (the P24.4 audit F3 measurement, on
+/// [`HairStrand::root_offset`]).
+///
 /// One entry per strand, in the asset's own order. A strand whose `root_joint` is
 /// not in the skeleton keeps its **rest** root — the honest answer, because a
 /// hairstyle fitted to another rig must not have its whole scalp collapse onto
 /// joint 0.
-pub fn roots_for(asset: &HairAsset, joint_globals: &[Mat4]) -> Vec<Vec3> {
+pub fn roots_for(asset: &HairAsset, joint_skins: &[Mat4]) -> Vec<Vec3> {
     asset
         .strands
         .iter()
         .map(|s| {
             let offset = Vec3::from_array(s.root_offset);
-            match joint_globals.get(s.root_joint as usize) {
+            match joint_skins.get(s.root_joint as usize) {
                 Some(m) => {
                     let p = m.transform_point3(offset);
                     if p.is_finite() {

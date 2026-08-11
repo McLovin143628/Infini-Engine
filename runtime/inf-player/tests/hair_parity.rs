@@ -226,6 +226,59 @@ fn both_hosts_simulate_the_same_hair_byte_for_byte() {
     assert_eq!(bare, editor_trace(false));
 }
 
+/// **A hairstyle starts ON the scalp it was grown from** (P24.4 audit F3).
+///
+/// The absolute half of the arm below, which is a *relative* one: "the pose moves
+/// the hair" is satisfied by any transform that varies with the pose, including
+/// one that puts the whole head of hair a bone-length away from the head. So this
+/// holds the rig at its **bind pose** (a machine with one state and no
+/// transitions, playing a clip whose only key is the identity rotation the rig is
+/// already in) and asserts that after a step every strand's particle 0 is where
+/// the generator grew it.
+///
+/// It was not: `roots_for` was fed `global_transforms` while
+/// `HairStrand::root_offset` is a model-space bind position, so every root was
+/// displaced by its joint's bind transform on the first step — two metres, on
+/// this fixture, whose strands ride joint 2 of a chain of 1 m bones. Both hosts
+/// did it identically, which is why `both_hosts_simulate_the_same_hair_byte_for_byte`
+/// could not see it, and the anti-vacuity arms could not either: an unworn
+/// hairstyle is still empty and a swung joint still moves.
+#[test]
+fn the_authored_roots_start_on_the_scalp() {
+    // One state, no transitions, holding the bind rotation: the pose IS the bind
+    // pose, so a correctly-carried root cannot have moved at all.
+    let still = StateMachine {
+        states: vec![SmState::clip("idle", *IDLE.as_bytes())],
+        transitions: vec![],
+        entry: 0,
+    };
+    let mut world = EcsWorld::new();
+    let e = world.spawn_with_guid(HERO, "Hero", None);
+    world.world_mut().entity_mut(e).insert(character(true));
+    world.mark_dirty();
+    let mut sim = RuntimeSim::new(world, Vec::new(), DVec2::ZERO, HZ);
+    sim.set_state_machines(BTreeMap::from([(SM, still)]));
+    sim.set_skeletons(skeletons());
+    sim.set_pose_clips(BTreeMap::from([(IDLE, hold(0.0))]));
+    sim.set_hairs(hairs());
+    sim.step_once(RuntimeInput::default());
+
+    let asset = hairstyle();
+    let live =
+        inf_ecs::hair::live_hair(sim.world(), HERO).expect("the wearer is simulating a hairstyle");
+    assert_eq!(live.state.strand_count(), asset.strand_count());
+    for (i, strand) in asset.strands.iter().enumerate() {
+        let grown = Vec3::from_array(strand.points[0]);
+        let pinned = Vec3::from_array(live.state.x[live.state.starts[i] as usize]);
+        assert!(
+            (pinned - grown).length() < 1e-4,
+            "strand {i} was grown at {grown:?} and the first step pinned it at \
+             {pinned:?} — {:.3} m off the scalp, at the BIND pose",
+            (pinned - grown).length()
+        );
+    }
+}
+
 /// **The roots ride the POSE**: a machine that swings the head swings the hair.
 /// The arm that fails if `roots_for` were fed the bind pose.
 #[test]
