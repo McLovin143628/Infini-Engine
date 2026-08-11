@@ -24,7 +24,7 @@
 //! |---|---|---|---|
 //! | census transform | [`sweep::census_transform`] | `census.wgsl` | **bit-exact by construction** — integer comparisons of `u8` intensities packed into a `u32`. No float anywhere. |
 //! | cost volume + depth selection | [`sweep::sweep_view`] | `plane_sweep.wgsl` | bit-exact **when the adapter does not contract**; measured, not assumed. See below. |
-//! | TSDF integration | [`tsdf::integrate_view`] | `tsdf.wgsl` | same story as the sweep: the arithmetic is a fixed `f32` sequence written twice. |
+//! | TSDF integration | [`tsdf::TsdfGrid::integrate_view`] | `tsdf.wgsl` | same story as the sweep: the arithmetic is a fixed `f32` sequence written twice. |
 //!
 //! The costs themselves are **integers** — a census Hamming distance — which is
 //! the single most load-bearing choice in this crate. It means the cost volume,
@@ -88,7 +88,7 @@
 //! # Transcendentals
 //!
 //! The P14 law: `std` trigonometry is not bit-portable, so anything that lands
-//! in committed bytes uses [`inf_math`](https://docs.rs/)'s portable family.
+//! in committed bytes uses `inf_math`'s portable family.
 //! P25.2's outputs are in-memory, exactly as P25.1's were, so the exemption
 //! carries — and in practice this crate calls **no** transcendental at all. The
 //! only non-arithmetic function on any path is `sqrt`, which is IEEE-754

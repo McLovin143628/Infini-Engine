@@ -31,7 +31,7 @@
 //! *different* lengths and *different* angles to the ridge, the block is off to
 //! one side, none of the six dot fields share a seed or a pitch, and the camera
 //! stations were already lopsided in position, target and roll.
-//! [`tests::the_fixture_geometry_has_no_mirror_symmetry`] measures it on the
+//! `the_fixture_geometry_has_no_mirror_symmetry` measures it on the
 //! **geometry** rather than the texture, because two hash-jittered dot fields
 //! disagree pixel by pixel whatever the shape of the room.
 
