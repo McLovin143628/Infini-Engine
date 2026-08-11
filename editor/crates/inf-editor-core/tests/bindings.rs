@@ -13,22 +13,23 @@ use inf_editor_core::ipc::{
     AddableComponentDto, AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot,
     BiomeDefDto, BiomeSetDto, BiomeSettingsDto, ComponentDto, DataAssetDto, DataFieldDto,
     DataMapExportDto, DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto,
-    DccGizmoModeDto, DccImportDto, DccModeDto, DccPaintModeDto, DccPreviewDto, DccSaveDto,
-    DccSculptModeDto, DccSelectDto, DccToolDto, DccUnwrapDto, DeleteResult, DetailsDto,
-    ErosionParamsDto, ErosionReportDto, FileEntryDto, FoliageSettingsDto, GitFileDto, GitStatusDto,
-    GizmoModeDto, GizmoSpaceDto, ImportEventDto, LakePreviewDto, LayoutSummary, LevelSettingsDto,
-    LogLine, PackageErrorDto, PackageKindCountDto, PackageResultDto, PartitionSettingsDto,
-    ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto,
-    RecentProjectDto, RiverBedConflictDto, RiverClimbDto, RiverReportDto, SaveResultDto,
-    SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto, SculptOpDto, SculptSettingsDto,
-    SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto, SeqTrackDto, SequenceDto, SkelApplyDto,
-    SkelDocDto, SkelJointDto, SkelSocketDto, SkyAtmosphereDto, Snap2DDto, Snap3DDto,
-    SortingLayerDto, SpawnKind, SpoilModeDto, SpriteGridDto, SpriteRectDto, SpriteSheetDto,
-    TerrainBiomesDto, TerrainImportPlanDto, TerrainImportResultDto, TerrainImportSettingsDto,
-    TilemapCellDto, TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto, ViewportDrop,
-    ViewportGizmoDto, ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto,
-    VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto, WaterDefaultsDto,
-    WaterSettingsDto, WaterToolKindDto, WeatherDto, WeatherPresetDto,
+    DccGarmentDto, DccGizmoModeDto, DccGroomDto, DccGroomResultDto, DccGroomStatDto, DccImportDto,
+    DccModeDto, DccPaintModeDto, DccPreviewDto, DccSaveDto, DccSculptModeDto, DccSelectDto,
+    DccToolDto, DccUnwrapDto, DeleteResult, DetailsDto, ErosionParamsDto, ErosionReportDto,
+    FileEntryDto, FoliageSettingsDto, GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto,
+    ImportEventDto, LakePreviewDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto,
+    PackageKindCountDto, PackageResultDto, PartitionSettingsDto, ProjectInfoDto,
+    ProjectSettingsDto, ProjectTemplateDto, PropFieldDto, PropValueDto, RecentProjectDto,
+    RiverBedConflictDto, RiverClimbDto, RiverReportDto, SaveResultDto, SceneDelta, SceneNode,
+    SceneSnapshot, SculptFalloffDto, SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto,
+    SeqInterpDto, SeqKeyDto, SeqTrackDto, SequenceDto, SkelApplyDto, SkelDocDto, SkelJointDto,
+    SkelSocketDto, SkyAtmosphereDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind,
+    SpoilModeDto, SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto,
+    TerrainImportPlanDto, TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto,
+    TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto, ViewportDrop, ViewportGizmoDto,
+    ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto, VoxelOpModeDto,
+    VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto, WaterDefaultsDto, WaterSettingsDto,
+    WaterToolKindDto, WeatherDto, WeatherPresetDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -54,6 +55,10 @@ fn export_bindings() {
     DccModeDto::export_all(&cfg).expect("export DccModeDto");
     DccPreviewDto::export_all(&cfg).expect("export DccPreviewDto");
     DccSaveDto::export_all(&cfg).expect("export DccSaveDto");
+    DccGarmentDto::export_all(&cfg).expect("export DccGarmentDto");
+    DccGroomDto::export_all(&cfg).expect("export DccGroomDto");
+    DccGroomResultDto::export_all(&cfg).expect("export DccGroomResultDto");
+    DccGroomStatDto::export_all(&cfg).expect("export DccGroomStatDto");
     DccSelectDto::export_all(&cfg).expect("export DccSelectDto");
     DccToolDto::export_all(&cfg).expect("export DccToolDto");
     // P23.5's drag surface: the sculpt brush and the component gizmo.

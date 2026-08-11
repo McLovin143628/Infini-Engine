@@ -7,8 +7,10 @@
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { afterEach, expect, test } from "vitest";
 
-import { app, assets, layouts, pcg, sim, terrain, viewport } from "../ipc";
+import { app, assets, dcc, layouts, pcg, sim, terrain, viewport } from "../ipc";
 import type { BiomeSetDto } from "../ipc";
+import type { DccGarmentDto } from "../../bindings/DccGarmentDto";
+import type { DccGroomDto } from "../../bindings/DccGroomDto";
 
 afterEach(() => {
   clearMocks();
@@ -224,4 +226,66 @@ test("biome wrappers invoke the P19.2 commands with typed payloads", async () =>
   expect(calls[3][1]).toEqual({ entity: "e-1", asset: null });
   expect(calls[4][1]).toEqual({ id: "bs-1" });
   expect(calls[5][1]).toEqual({ id: "bs-1", set });
+});
+
+/**
+ * **The cloth & hair authoring wrappers reach their registered commands**
+ * (P24.4), with the panel's knobs in the payload and NOTHING about the
+ * selection in it.
+ *
+ * The second half is the load-bearing one. The garment's pin list is the
+ * document's vertex selection and the hairstyle's scalp is its face selection,
+ * both resolved backend-side from the session the command already holds. A panel
+ * that sent its own copy would be a second opinion about what is selected, and
+ * the two would disagree exactly when a tool press had just changed it — so this
+ * pins that the payload is `{ id, spec }` and that `spec` carries no component
+ * list at all.
+ */
+test("the cloth and hair wrappers send knobs and never a selection", async () => {
+  const calls: Array<[string, unknown]> = [];
+  mockIPC((cmd, args) => {
+    calls.push([cmd, args]);
+    return { ok: true, refusal: null, asset: "a", path: "Content/Cloth/x.inf_cloth", stats: [] };
+  });
+
+  const garment: DccGarmentDto = {
+    stretchCompliance: 0,
+    bendCompliance: 0.001,
+    damping: 0.5,
+    thicknessM: 0.005,
+    substeps: 8,
+    iterations: 1,
+    bodyRadiusM: 0.08,
+    skeleton: null,
+    name: null,
+  };
+  const groom: DccGroomDto = {
+    lengthM: 0.25,
+    segments: 6,
+    segmentCompliance: 0,
+    damping: 2,
+    thicknessM: 0.004,
+    substeps: 8,
+    ribbonWidthM: 0.004,
+    clumpStrength: 0.4,
+    clumpSpacingM: 0.02,
+    curlRadiusM: 0,
+    curlTurns: 2,
+    fallbackJoint: 0,
+    bodyRadiusM: 0.08,
+    skeleton: null,
+    name: null,
+  };
+  await dcc.makeGarment("dcc:1", garment);
+  await dcc.growHair("dcc:1", groom);
+
+  expect(calls.map(([cmd]) => cmd)).toEqual(["dcc_make_garment", "dcc_grow_hair"]);
+  expect(calls[0][1]).toEqual({ id: "dcc:1", spec: garment });
+  expect(calls[1][1]).toEqual({ id: "dcc:1", spec: groom });
+  for (const [, args] of calls) {
+    const spec = (args as { spec: Record<string, unknown> }).spec;
+    for (const key of ["selection", "verts", "faces", "pinned", "scalp"]) {
+      expect(spec).not.toHaveProperty(key);
+    }
+  }
 });

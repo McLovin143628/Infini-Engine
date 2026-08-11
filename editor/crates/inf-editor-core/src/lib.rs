@@ -11,6 +11,8 @@ pub mod collision_layers;
 // here is resolved in THIS module's scope, so every intra-doc link into the
 // module would dangle (seven of the nine doc warnings the audit counted).
 pub mod dcc;
+// P24.4 cloth & hair authoring: the Model Editor's two payload doors.
+pub mod groom;
 // P24.3: the Skeleton Editor's Ring-1 half — an editing session over a
 // `SkeletonAsset`, snapshot-undone (see the module docs for why not a journal).
 pub mod diagnostics;

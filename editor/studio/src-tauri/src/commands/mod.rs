@@ -89,6 +89,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         dcc::dcc_preview,
         dcc::dcc_save,
         dcc::dcc_merge_asset,
+        // P24.4 cloth & hair authoring: the Model Editor mints the payloads.
+        dcc::dcc_make_garment,
+        dcc::dcc_grow_hair,
         dcc::dcc_set_gizmo,
         dcc::dcc_drag_begin,
         dcc::dcc_drag_move,

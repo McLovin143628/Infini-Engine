@@ -65,8 +65,7 @@ pub use blend_space::{
 pub use clip::{AnimClip, Interpolation, JointTrack, QuatTrack, Vec3Track};
 pub use cloth::{
     body_capsules, capsules_for, step_cloth, Capsule, ClothAsset, ClothCapsule, ClothEdge,
-    ClothError,
-    ClothMaterial, ClothState, GRAVITY_M_S2,
+    ClothError, ClothMaterial, ClothState, GRAVITY_M_S2,
 };
 pub use hair::{
     render_mesh, ribbon_mesh, roots_for, step_hair, HairAsset, HairDetail, HairGroom, HairMaterial,

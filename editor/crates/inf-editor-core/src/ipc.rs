@@ -2723,6 +2723,104 @@ pub struct DccSaveDto {
     pub advisories: Vec<String>,
 }
 
+/// **The Cloth section's knobs** (P24.4) — what the panel sends to
+/// `dcc_make_garment`.
+///
+/// Compliance is m/N and not a 0..1 "stiffness", because XPBD compliance is
+/// timestep-independent and this engine compares traces across hosts that may
+/// tick at different rates (see `inf_anim::ClothMaterial`). Everything else is
+/// metres, `1/s` or a count. The *operand* — which vertices are pinned — is the
+/// document's own selection, resolved backend-side, exactly like a tool press.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DccGarmentDto {
+    /// Stretch compliance, m/N. `0` is inextensible.
+    pub stretch_compliance: f32,
+    /// Bend compliance, m/N. Two orders above the stretch one is a skirt.
+    pub bend_compliance: f32,
+    /// Velocity damping, 1/s.
+    pub damping: f32,
+    /// Collision thickness, metres.
+    pub thickness_m: f32,
+    /// Substeps per fixed step (`0` reads as `1`).
+    pub substeps: u8,
+    /// Constraint sweeps per substep (`0` reads as `1`).
+    pub iterations: u8,
+    /// Uniform body-capsule radius, metres. `0` derives none.
+    pub body_radius_m: f32,
+    /// The `.inf_skel` whose bones become the collision capsules, or `None` for a
+    /// garment that collides against nothing.
+    pub skeleton: Option<String>,
+    /// Asset name for the new `.inf_cloth`.
+    pub name: Option<String>,
+}
+
+/// **The Hair section's knobs** (P24.4) — what the panel sends to
+/// `dcc_grow_hair`. The *operand* is the face selection: the scalp.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DccGroomDto {
+    /// Strand length, metres.
+    pub length_m: f32,
+    /// Segments per strand.
+    pub segments: u16,
+    /// Segment compliance, m/N.
+    pub segment_compliance: f32,
+    /// Velocity damping, 1/s.
+    pub damping: f32,
+    /// Collision thickness, metres.
+    pub thickness_m: f32,
+    /// Substeps per fixed step (`0` reads as `1`).
+    pub substeps: u8,
+    /// Ribbon width at the root, metres.
+    pub ribbon_width_m: f32,
+    /// Clump strength, `0..=1` (dimensionless).
+    pub clump_strength: f32,
+    /// Clump cell size, metres. `0` puts every root in its own clump.
+    pub clump_spacing_m: f32,
+    /// Curl radius, metres. `0` is straight hair.
+    pub curl_radius_m: f32,
+    /// Curl turns over the strand's length (revolutions).
+    pub curl_turns: f32,
+    /// The joint a root rides when the scalp carries no skin weights.
+    pub fallback_joint: u16,
+    /// Uniform body-capsule radius, metres.
+    pub body_radius_m: f32,
+    /// The `.inf_skel` whose bones become the collision capsules.
+    pub skeleton: Option<String>,
+    /// Asset name for the new `.inf_hair`.
+    pub name: Option<String>,
+}
+
+/// The verdict on an authoring press — the `DccSaveDto` readout pattern, for
+/// cloth and hair (P24.4).
+///
+/// A refusal is a **value** with the builder's own words in it, never a thrown
+/// error: every one of them is reachable from a mesh somebody modelled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DccGroomResultDto {
+    pub ok: bool,
+    /// Why not, in the refusing layer's own words.
+    pub refusal: Option<String>,
+    /// The new asset's GUID.
+    pub asset: Option<String>,
+    /// Where it was written, relative to the content root.
+    pub path: Option<String>,
+    /// What was derived — the counters the panel prints, so an author can see
+    /// that a garment has constraints and a hairstyle has strands without
+    /// re-opening the file.
+    pub stats: Vec<DccGroomStatDto>,
+}
+
+/// One labelled counter in a [`DccGroomResultDto`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DccGroomStatDto {
+    pub label: String,
+    pub value: u32,
+}
+
 /// A modelling tool press. Parameters arrive from the toolbar popovers; the
 /// *operands* are the document's current selection, resolved backend-side.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

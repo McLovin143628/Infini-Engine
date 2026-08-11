@@ -55,9 +55,10 @@ use inf_editor_core::dcc::{
     Projector, VertTransform,
 };
 use inf_editor_core::ipc::{
-    DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto, DccGizmoModeDto,
-    DccImportDto, DccModeDto, DccPaintModeDto, DccPreviewDto, DccSaveDto, DccSculptModeDto,
-    DccSelectDto, DccToolDto, DccUnwrapDto, SculptFalloffDto,
+    DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto, DccGarmentDto,
+    DccGizmoModeDto, DccGroomDto, DccGroomResultDto, DccGroomStatDto, DccImportDto, DccModeDto,
+    DccPaintModeDto, DccPreviewDto, DccSaveDto, DccSculptModeDto, DccSelectDto, DccToolDto,
+    DccUnwrapDto, SculptFalloffDto,
 };
 use inf_editor_core::thumbnail::{encode_png_fast, PreviewView, Thumbnailer};
 use tauri::{AppHandle, Emitter, State};
@@ -1539,6 +1540,251 @@ pub async fn dcc_merge_asset(
     Ok(out)
 }
 
+/// The content sub-folders authored garments and hairstyles land in.
+const CLOTH_FOLDER: &str = "Cloth";
+const HAIR_FOLDER: &str = "Hair";
+
+/// Resolve an optional `.inf_skel` id into the skeleton whose bones become the
+/// collision capsules.
+///
+/// A missing or mistyped id is a **refusal by name**, not a silent `None`: a
+/// garment authored against "the character" and quietly given no capsules would
+/// fall straight through its wearer the first time it ran, and nothing would have
+/// said so.
+fn resolve_rig(
+    assets: &State<'_, super::assets::AssetState>,
+    id: Option<&String>,
+) -> Result<Option<inf_anim::Skeleton>, String> {
+    let Some(id) = id else { return Ok(None) };
+    let guid: AssetId = id.parse().map_err(|e| format!("bad skeleton id: {e}"))?;
+    let asset = assets.with_project(|proj| {
+        let entry = proj
+            .db()
+            .get(guid)
+            .ok_or_else(|| format!("no asset {guid}"))?;
+        if entry.kind() != AssetKind::Skeleton {
+            return Err(format!("{} is not a skeleton asset", entry.name));
+        }
+        proj.load_payload::<inf_anim::SkeletonAsset>(guid)
+            .map_err(|e| e.to_string())
+    })?;
+    Ok(Some(asset.skeleton))
+}
+
+/// A refusal, as a value the panel prints (the P21 law).
+fn groom_refusal(message: String) -> DccGroomResultDto {
+    DccGroomResultDto {
+        ok: false,
+        refusal: Some(message),
+        asset: None,
+        path: None,
+        stats: Vec::new(),
+    }
+}
+
+fn stat(label: &str, value: usize) -> DccGroomStatDto {
+    DccGroomStatDto {
+        label: label.to_string(),
+        value: value.min(u32::MAX as usize) as u32,
+    }
+}
+
+/// **Make a garment** out of the open mesh (P24.4): write a `.inf_cloth` under
+/// `Content/Cloth` and return its GUID.
+///
+/// Four lines of Ring 2 around one Ring-1 call, for the reason this module's docs
+/// give: the rule that decides what a garment IS lives in
+/// `inf_editor_core::groom`, where a test on any CI leg can drive it.
+///
+/// The **selected vertices are the pins**, and they are resolved backend-side
+/// from the document's own selection — a tool press's shape, not a second copy of
+/// the selection in the panel.
+///
+/// The new asset depends on the source `.inf_mesh` (and on the `.inf_skel` when
+/// one was named), so the cook's dependency closure carries them and deleting one
+/// warns.
+#[tauri::command]
+pub async fn dcc_make_garment(
+    app: AppHandle,
+    id: String,
+    spec: DccGarmentDto,
+    state: State<'_, DccState>,
+    assets: State<'_, super::assets::AssetState>,
+) -> Result<DccGroomResultDto, String> {
+    let rig = match resolve_rig(&assets, spec.skeleton.as_ref()) {
+        Ok(r) => r,
+        Err(e) => return Ok(groom_refusal(e)),
+    };
+    let (source, mesh, selection, doc_name) = state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        settle(doc, session);
+        Ok((
+            doc.asset,
+            session.mesh().clone(),
+            doc.selection.clone(),
+            doc.name.clone(),
+        ))
+    })?;
+
+    let built = inf_editor_core::groom::garment_from_session(
+        &mesh,
+        &selection,
+        *source.0.as_bytes(),
+        inf_editor_core::groom::GarmentSpec {
+            material: inf_anim::ClothMaterial {
+                stretch_compliance: spec.stretch_compliance,
+                bend_compliance: spec.bend_compliance,
+                damping: spec.damping,
+                thickness_m: spec.thickness_m,
+                substeps: spec.substeps,
+                iterations: spec.iterations,
+            },
+            body_radius_m: spec.body_radius_m,
+        },
+        rig.as_ref(),
+    );
+    let (asset, report) = match built {
+        Ok(v) => v,
+        Err(e) => return Ok(groom_refusal(e.to_string())),
+    };
+
+    let name = spec.name.unwrap_or_else(|| format!("{doc_name} Garment"));
+    let mut deps = vec![source];
+    if let Some(sk) = spec
+        .skeleton
+        .as_ref()
+        .and_then(|s| s.parse::<AssetId>().ok())
+    {
+        deps.push(sk);
+    }
+    let (new_id, path) = assets.with_project(|proj| {
+        let dir = proj.content_dir(CLOTH_FOLDER).map_err(|e| e.to_string())?;
+        let id = proj
+            .write_asset(&dir, &name, &asset, None, deps, None)
+            .map_err(|e| e.to_string())?;
+        let path = proj
+            .db()
+            .get(id)
+            .map(|e| e.path.display().to_string())
+            .unwrap_or_default();
+        Ok((id, path))
+    })?;
+    super::assets::emit_changed(&app, &assets);
+
+    Ok(DccGroomResultDto {
+        ok: true,
+        refusal: None,
+        asset: Some(new_id.to_string()),
+        path: Some(path),
+        stats: vec![
+            stat("particles", report.particles),
+            stat("triangles", report.triangles),
+            stat("stretch", report.stretch),
+            stat("bend", report.bend),
+            stat("pinned", report.pinned),
+            stat("capsules", report.capsules),
+        ],
+    })
+}
+
+/// **Grow guides** out of the open mesh's face selection (P24.4): write an
+/// `.inf_hair` under `Content/Hair` and return its GUID.
+///
+/// This is the control `HairAsset::UPGRADE_REMEDY` has been naming since the
+/// strand batch landed — "Model Editor ▸ Hair ▸ Grow Guides" — and until now it
+/// did not exist.
+#[tauri::command]
+pub async fn dcc_grow_hair(
+    app: AppHandle,
+    id: String,
+    spec: DccGroomDto,
+    state: State<'_, DccState>,
+    assets: State<'_, super::assets::AssetState>,
+) -> Result<DccGroomResultDto, String> {
+    let rig = match resolve_rig(&assets, spec.skeleton.as_ref()) {
+        Ok(r) => r,
+        Err(e) => return Ok(groom_refusal(e)),
+    };
+    let (source, mesh, selection, doc_name) = state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        settle(doc, session);
+        Ok((
+            doc.asset,
+            session.mesh().clone(),
+            doc.selection.clone(),
+            doc.name.clone(),
+        ))
+    })?;
+
+    let built = inf_editor_core::groom::groom_from_session(
+        &mesh,
+        &selection,
+        *source.0.as_bytes(),
+        inf_editor_core::groom::GroomSpec {
+            length_m: spec.length_m,
+            segments: spec.segments,
+            material: inf_anim::HairMaterial {
+                segment_compliance: spec.segment_compliance,
+                damping: spec.damping,
+                thickness_m: spec.thickness_m,
+                substeps: spec.substeps,
+                iterations: 1,
+                ribbon_width_m: spec.ribbon_width_m,
+            },
+            groom: inf_anim::HairGroom {
+                clump_strength: spec.clump_strength,
+                curl_radius_m: spec.curl_radius_m,
+                curl_turns: spec.curl_turns,
+            },
+            clump_spacing_m: spec.clump_spacing_m,
+            fallback_joint: spec.fallback_joint,
+            body_radius_m: spec.body_radius_m,
+        },
+        rig.as_ref(),
+    );
+    let (asset, report) = match built {
+        Ok(v) => v,
+        Err(e) => return Ok(groom_refusal(e.to_string())),
+    };
+
+    let name = spec.name.unwrap_or_else(|| format!("{doc_name} Hair"));
+    let mut deps = vec![source];
+    if let Some(sk) = spec
+        .skeleton
+        .as_ref()
+        .and_then(|s| s.parse::<AssetId>().ok())
+    {
+        deps.push(sk);
+    }
+    let (new_id, path) = assets.with_project(|proj| {
+        let dir = proj.content_dir(HAIR_FOLDER).map_err(|e| e.to_string())?;
+        let id = proj
+            .write_asset(&dir, &name, &asset, None, deps, None)
+            .map_err(|e| e.to_string())?;
+        let path = proj
+            .db()
+            .get(id)
+            .map(|e| e.path.display().to_string())
+            .unwrap_or_default();
+        Ok((id, path))
+    })?;
+    super::assets::emit_changed(&app, &assets);
+
+    Ok(DccGroomResultDto {
+        ok: true,
+        refusal: None,
+        asset: Some(new_id.to_string()),
+        path: Some(path),
+        stats: vec![
+            stat("strands", report.strands),
+            stat("particles", report.particles),
+            stat("clumps", report.clumps),
+            stat("skinnedRoots", report.skinned_roots),
+            stat("capsules", report.capsules),
+        ],
+    })
+}
+
 fn refusal_text(e: &OpError) -> String {
     e.to_string()
 }
@@ -1856,7 +2102,7 @@ mod tests {
     /// Hand-written on purpose: a table derived from the code would agree with the
     /// code by construction and prove nothing. This is the decision, written down
     /// once, and the gate holds the code to it.
-    const DRAG_POLICY: [(&str, DragPolicy); 20] = [
+    const DRAG_POLICY: [(&str, DragPolicy); 22] = [
         ("dcc_open", DragPolicy::NoJournal),
         ("dcc_close", DragPolicy::Abandons),
         ("dcc_list", DragPolicy::NoJournal),
@@ -1877,6 +2123,12 @@ mod tests {
         ("dcc_merge_asset", DragPolicy::Settles),
         ("dcc_unwrap", DragPolicy::Settles),
         ("dcc_uv_preview", DragPolicy::NoJournal),
+        // P24.4. Both SETTLE: an authored garment is built out of the mesh as the
+        // author sees it, and a sculpt stroke still in flight is part of what they
+        // see. A door that read the journal past an unsettled drag would mint a
+        // .inf_cloth of the shape the mesh had one gesture ago.
+        ("dcc_make_garment", DragPolicy::Settles),
+        ("dcc_grow_hair", DragPolicy::Settles),
     ];
 
     /// The lines of a function body, from its signature until its braces balance.

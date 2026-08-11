@@ -40,8 +40,10 @@ import {
   Redo2,
   Save,
   Scissors,
+  Shirt,
   Shrink,
   Slice,
+  Sparkles,
   Spline,
   Square,
   Triangle,
@@ -173,7 +175,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   // time; a store read that did not name the asset gave both of them whichever
   // document was opened last, and every tool press went to the wrong mesh.
   const assetId = params;
-  const { doc, image, previewError, refusal, lastSave, lastUnwrap, uvImage, status, busy } =
+  const { doc, image, previewError, refusal, lastSave, lastGroom, lastUnwrap, uvImage, status, busy } =
     useDccEntry(assetId);
   const open = useDccStore((s) => s.open);
   const close = useDccStore((s) => s.close);
@@ -185,6 +187,8 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const frame = useDccStore((s) => s.frame);
   const save = useDccStore((s) => s.save);
   const mergeAsset = useDccStore((s) => s.mergeAsset);
+  const makeGarment = useDccStore((s) => s.makeGarment);
+  const growHair = useDccStore((s) => s.growHair);
   const setGizmo = useDccStore((s) => s.setGizmo);
   const dragBegin = useDccStore((s) => s.dragBegin);
   const dragMove = useDccStore((s) => s.dragMove);
@@ -225,6 +229,33 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const [softRadius, setSoftRadius] = useState(0);
   /** The 2D UV view, shown beside the 3D one rather than instead of it. */
   const [showUv, setShowUv] = useState(false);
+
+  // ── P24.4 cloth & hair knobs ─────────────────────────────────────────────
+  //
+  // Local, like every other tool parameter here: they are the section's state,
+  // and nothing outside this panel has an opinion about them. The OPERANDS are
+  // not here at all — the vertex selection is the garment's pin list and the face
+  // selection is the hairstyle's scalp, both resolved backend-side, so there is
+  // no second copy of the selection to drift.
+  //
+  // The defaults mirror `inf_anim`'s shipped materials and
+  // `inf_editor_core::groom`'s spec defaults; the units are on the labels
+  // because a compliance is m/N and a damping is 1/s, and a number box with no
+  // unit is a number box that gets guessed at.
+  const [bendCompliance, setBendCompliance] = useState(0.001);
+  const [clothDamping, setClothDamping] = useState(0.5);
+  const [clothThickness, setClothThickness] = useState(0.005);
+  const [clothSubsteps, setClothSubsteps] = useState(8);
+  const [bodyRadius, setBodyRadius] = useState(0.08);
+  const [rigId, setRigId] = useState("");
+  const [hairLength, setHairLength] = useState(0.25);
+  const [hairSegments, setHairSegments] = useState(6);
+  const [ribbonWidth, setRibbonWidth] = useState(0.004);
+  const [clumpStrength, setClumpStrength] = useState(0.4);
+  const [clumpSpacing, setClumpSpacing] = useState(0.02);
+  const [curlRadius, setCurlRadius] = useState(0);
+  const [curlTurns, setCurlTurns] = useState(2);
+  const [hairJoint, setHairJoint] = useState(0);
 
   // The panel instance is `model:<assetId>` — a singleton per asset, like the
   // material editor's per-graph tab.
@@ -951,6 +982,118 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
             {lastUnwrap.refusal && (
               <p className="rounded bg-(--ink-warn-bg,#3a2a12) p-1 text-[10px] leading-snug text-(--ink-warn,#ffb454)">
                 {lastUnwrap.refusal}
+              </p>
+            )}
+          </>
+        )}
+
+
+        {/* ── P24.4 cloth & hair authoring ──────────────────────────────
+            The two buttons that give `ClothAsset::from_garment` and
+            `HairAsset::grow` a caller outside a test. Each writes a NEW asset
+            (Content/Cloth, Content/Hair) rather than editing this one, so
+            neither is a save and neither touches the journal. */}
+        <div className="mt-1 text-[10px] font-semibold tracking-wide text-(--ink-text-dim)">
+          CLOTH &amp; HAIR
+        </div>
+        <label className="flex items-center justify-between gap-2 text-[11px]">
+          <span className="text-(--ink-text-dim)">Rig (.inf_skel)</span>
+          <input
+            type="text"
+            value={rigId}
+            placeholder="asset GUID"
+            onChange={(e) => setRigId(e.target.value)}
+            className="w-28 rounded border border-(--ink-border) bg-(--ink-bg-2) px-1.5 py-0.5 text-right font-mono text-[10px] outline-none focus:border-(--ink-accent)"
+          />
+        </label>
+        <p className="text-[10px] leading-snug text-(--ink-text-dim)">
+          The rig&apos;s bones become the collision capsules a garment and a
+          hairstyle are held outside — one radius for all of them, which is the
+          v1 bound. Leave it empty and the cloth hangs through its wearer.
+        </p>
+        <Num label="Body radius (m)" value={bodyRadius} step={0.01} onChange={setBodyRadius} />
+
+        <Num label="Bend compliance (m/N)" value={bendCompliance} step={0.0005} onChange={setBendCompliance} />
+        <Num label="Cloth damping (1/s)" value={clothDamping} step={0.05} onChange={setClothDamping} />
+        <Num label="Thickness (m)" value={clothThickness} step={0.001} onChange={setClothThickness} />
+        <Num label="Substeps" value={clothSubsteps} step={1} onChange={(v) => setClothSubsteps(Math.round(v))} />
+        <ToolButton
+          label="Make garment"
+          icon={<Shirt size={12} />}
+          disabled={busy}
+          onClick={() =>
+            assetId &&
+            void makeGarment(assetId, {
+              stretchCompliance: 0,
+              bendCompliance,
+              damping: clothDamping,
+              thicknessM: clothThickness,
+              substeps: clothSubsteps,
+              iterations: 1,
+              bodyRadiusM: bodyRadius,
+              skeleton: rigId.trim() ? rigId.trim() : null,
+              name: null,
+            })
+          }
+          title="Write this mesh as a .inf_cloth. The SELECTED VERTICES become the pins."
+        />
+        <p className="text-[10px] leading-snug text-(--ink-text-dim)">
+          Select the vertices that should stay put — a collar, a waistband — and
+          they are pinned. Nothing selected is a garment that falls.
+        </p>
+
+        <Num label="Hair length (m)" value={hairLength} step={0.05} onChange={setHairLength} />
+        <Num label="Segments" value={hairSegments} step={1} onChange={(v) => setHairSegments(Math.round(v))} />
+        <Num label="Ribbon width (m)" value={ribbonWidth} step={0.001} onChange={setRibbonWidth} />
+        <Num label="Clump strength" value={clumpStrength} step={0.1} onChange={setClumpStrength} />
+        <Num label="Clump cell (m)" value={clumpSpacing} step={0.005} onChange={setClumpSpacing} />
+        <Num label="Curl radius (m)" value={curlRadius} step={0.005} onChange={setCurlRadius} />
+        <Num label="Curl turns" value={curlTurns} step={0.5} onChange={setCurlTurns} />
+        <Num label="Root joint" value={hairJoint} step={1} onChange={(v) => setHairJoint(Math.max(0, Math.round(v)))} />
+        <ToolButton
+          label="Grow guides"
+          icon={<Sparkles size={12} />}
+          disabled={busy || mode !== "face"}
+          onClick={() =>
+            assetId &&
+            void growHair(assetId, {
+              lengthM: hairLength,
+              segments: hairSegments,
+              segmentCompliance: 0,
+              damping: 2,
+              thicknessM: 0.004,
+              substeps: 8,
+              ribbonWidthM: ribbonWidth,
+              clumpStrength,
+              clumpSpacingM: clumpSpacing,
+              curlRadiusM: curlRadius,
+              curlTurns,
+              fallbackJoint: hairJoint,
+              bodyRadiusM: bodyRadius,
+              skeleton: rigId.trim() ? rigId.trim() : null,
+              name: null,
+            })
+          }
+          title="Grow one guide out of each SELECTED FACE, along its normal."
+        />
+        <p className="text-[10px] leading-snug text-(--ink-text-dim)">
+          Switch to face mode and select the scalp. One guide grows out of each
+          face, from its centre, along its normal. &quot;Root joint&quot; is only
+          used where the mesh carries no skin weights of its own.
+        </p>
+        {lastGroom && (
+          <>
+            {lastGroom.stats.map((s) => (
+              <Verdict key={s.label} label={s.label} value={s.value} good={s.value > 0} />
+            ))}
+            {lastGroom.path && (
+              <p className="text-[10px] leading-snug break-all text-(--ink-text-dim)">
+                {lastGroom.path}
+              </p>
+            )}
+            {lastGroom.refusal && (
+              <p className="rounded bg-(--ink-warn-bg,#3a2a12) p-1 text-[10px] leading-snug text-(--ink-warn,#ffb454)">
+                {lastGroom.refusal}
               </p>
             )}
           </>

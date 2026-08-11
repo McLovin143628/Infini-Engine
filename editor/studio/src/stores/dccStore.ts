@@ -40,7 +40,10 @@ import { dcc as dccIpc, DCC_PREVIEW_SIZE } from "../lib/ipc";
 import type { DccApplyDto } from "../bindings/DccApplyDto";
 import type { DccDocDto } from "../bindings/DccDocDto";
 import type { DccDragDto } from "../bindings/DccDragDto";
+import type { DccGarmentDto } from "../bindings/DccGarmentDto";
 import type { DccGizmoModeDto } from "../bindings/DccGizmoModeDto";
+import type { DccGroomDto } from "../bindings/DccGroomDto";
+import type { DccGroomResultDto } from "../bindings/DccGroomResultDto";
 import type { DccModeDto } from "../bindings/DccModeDto";
 import type { DccSaveDto } from "../bindings/DccSaveDto";
 import type { DccSelectDto } from "../bindings/DccSelectDto";
@@ -70,6 +73,13 @@ export interface DccEntry {
   uvImage: string | null;
   /** The last unwrap's verdict, kept until the NEXT unwrap — like `lastSave`. */
   lastUnwrap: DccUnwrapDto | null;
+  /**
+   * The last cloth/hair authoring verdict (P24.4), kept until the NEXT one —
+   * `lastSave`'s rule, for `lastSave`'s reason: it names a file that was written
+   * outside this document, and an author who pressed the button and moved the
+   * mouse would otherwise never learn where it went.
+   */
+  lastGroom: DccGroomResultDto | null;
 }
 
 interface DccState {
@@ -88,6 +98,10 @@ interface DccState {
   redo: (assetId: string) => Promise<void>;
   save: (assetId: string) => Promise<void>;
   mergeAsset: (assetId: string, dropped: string) => Promise<void>;
+  /** P24.4: mint a `.inf_cloth` from this mesh; the vertex selection is pinned. */
+  makeGarment: (assetId: string, spec: DccGarmentDto) => Promise<void>;
+  /** P24.4: grow guides out of the face selection into a `.inf_hair`. */
+  growHair: (assetId: string, spec: DccGroomDto) => Promise<void>;
   refresh: (assetId: string) => void;
 
   // ── pointer drags (P23.5) ───────────────────────────────────────────────
@@ -114,6 +128,7 @@ const EMPTY: DccEntry = {
   status: null,
   uvImage: null,
   lastUnwrap: null,
+  lastGroom: null,
 };
 
 /**
@@ -361,6 +376,44 @@ export const useDccStore = create<DccState>((set, get) => {
         applyResult(assetId, await dccIpc.mergeAsset(doc.id, dropped));
       } catch (e) {
         patch(assetId, { refusal: String(e) });
+      } finally {
+        patch(assetId, { busy: false });
+      }
+    },
+
+    makeGarment: async (assetId, spec) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      patch(assetId, { busy: true, status: null });
+      try {
+        const lastGroom = await dccIpc.makeGarment(doc.id, spec);
+        patch(assetId, {
+          lastGroom,
+          status: lastGroom.ok
+            ? `Wrote ${lastGroom.path ?? "a garment"}.`
+            : `Garment refused: ${lastGroom.refusal ?? "unknown"}`,
+        });
+      } catch (e) {
+        patch(assetId, { status: `Garment failed: ${String(e)}` });
+      } finally {
+        patch(assetId, { busy: false });
+      }
+    },
+
+    growHair: async (assetId, spec) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      patch(assetId, { busy: true, status: null });
+      try {
+        const lastGroom = await dccIpc.growHair(doc.id, spec);
+        patch(assetId, {
+          lastGroom,
+          status: lastGroom.ok
+            ? `Wrote ${lastGroom.path ?? "a hairstyle"}.`
+            : `Groom refused: ${lastGroom.refusal ?? "unknown"}`,
+        });
+      } catch (e) {
+        patch(assetId, { status: `Groom failed: ${String(e)}` });
       } finally {
         patch(assetId, { busy: false });
       }

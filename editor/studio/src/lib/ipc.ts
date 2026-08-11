@@ -38,6 +38,9 @@ import type { DccDragDto } from "../bindings/DccDragDto";
 import type { DccGizmoModeDto } from "../bindings/DccGizmoModeDto";
 import type { DccPreviewDto } from "../bindings/DccPreviewDto";
 import type { DccSaveDto } from "../bindings/DccSaveDto";
+import type { DccGarmentDto } from "../bindings/DccGarmentDto";
+import type { DccGroomDto } from "../bindings/DccGroomDto";
+import type { DccGroomResultDto } from "../bindings/DccGroomResultDto";
 import type { DccSelectDto } from "../bindings/DccSelectDto";
 import type { DccToolDto } from "../bindings/DccToolDto";
 import type { DccUnwrapDto } from "../bindings/DccUnwrapDto";
@@ -889,6 +892,20 @@ export const dcc = {
   /** Drop another mesh asset in as a second component. */
   mergeAsset: (id: string, assetId: string): Promise<DccApplyDto> =>
     invoke<DccApplyDto>("dcc_merge_asset", { id, assetId }),
+
+  // ── P24.4 cloth & hair authoring ────────────────────────────────────────
+  //
+  // Both take their OPERAND from the document's own selection, backend-side —
+  // the vertex selection is the garment's pin list, the face selection is the
+  // hairstyle's scalp — so the panel sends knobs and never a component list.
+  // Both refuse as a VALUE (`ok: false` + `refusal`), never by throwing.
+
+  /** Turn the open mesh into a `.inf_cloth`; the selected vertices are pinned. */
+  makeGarment: (id: string, spec: DccGarmentDto): Promise<DccGroomResultDto> =>
+    invoke<DccGroomResultDto>("dcc_make_garment", { id, spec }),
+  /** Grow guides out of the selected faces into a `.inf_hair`. */
+  growHair: (id: string, spec: DccGroomDto): Promise<DccGroomResultDto> =>
+    invoke<DccGroomResultDto>("dcc_grow_hair", { id, spec }),
 
   // ── pointer drags (P23.5): the sculpt brush and the component gizmo ──────
   //
