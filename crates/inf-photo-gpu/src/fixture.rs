@@ -91,12 +91,19 @@ pub const RIDGE: DVec3 = DVec3::new(0.25, 2.0, 2.05);
 
 /// The committed illumination for the **colour** renders.
 ///
-/// Ambient plus one directional, linear, and sized so nothing clips: the
-/// brightest possible observation is `255 * 0.85` (the largest tint) times
-/// `0.92` (the largest irradiance), which is 199. That matters because P25.3's
-/// albedo bake is measured against the scene's own albedo, and a clipped pixel
-/// is one the observation is no longer a linear function of — no de-lighting and
-/// no blend can recover what the clamp threw away.
+/// Ambient plus one directional, linear, and sized so nothing clips. The
+/// headroom is per channel, because both the tint and the irradiance are:
+/// `red` is the tightest at `255 × 0.90` (the left face's tint) `× 0.92`
+/// (`0.30` ambient plus `0.62` directional) **= 211**, then blue at 207 and
+/// green at 202. That matters because P25.3's albedo bake is measured against
+/// the scene's own albedo, and a clipped pixel is one the observation is no
+/// longer a linear function of — no de-lighting and no blend can recover what
+/// the clamp threw away.
+///
+/// (This read `255 × 0.85 = 199` until the P25.3 audit. The largest tint became
+/// 0.90 when the block's faces were re-saturated in `97777df` and the arithmetic
+/// here was not re-run — the same drift the de-lighting memo's correction
+/// records. The conclusion held; the number did not.)
 ///
 /// The direction is deliberately not axis-aligned and not the view direction of
 /// any station, so a de-lighting solve that "finds" the camera rig instead of

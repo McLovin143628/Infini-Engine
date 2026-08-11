@@ -257,9 +257,14 @@ impl Intrinsics {
 /// impls under the workspace pin (adding the feature would put serde in every
 /// crate that touches glam), and nothing in P25.1 writes a pose to a file. The
 /// byte surface that matters is [`Pose::write_canonical`], which is explicit
-/// about its layout. When P25.3 starts persisting reconstructions this becomes a
-/// schema decision, with a `schema_version` and a migration, like every other
-/// asset in the engine.
+/// about its layout.
+///
+/// P25.3 has since landed and this is **still** true: what it persists is the
+/// *derived* asset — a `.inf_mesh`, three `.inf_tex` and a `.inf_mat` — and no
+/// pose reaches a file at any point. The schema decision (a `schema_version` and
+/// a migration, like every other asset in the engine) belongs to whoever first
+/// writes a **reconstruction** down, which would be a wizard caching a solve
+/// rather than re-running it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
     /// Unit quaternion taking world directions into camera directions.
