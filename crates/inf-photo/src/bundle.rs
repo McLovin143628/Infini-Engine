@@ -203,11 +203,12 @@ fn evaluate(
         }
     }
 
-    let weight = if norm <= huber || !norm.is_finite() {
-        1.0
-    } else {
-        huber / norm
-    };
+    // One door for the robust kernel. The motion-only refinement in
+    // `crate::geometry` weights its residuals the same way, and a second inline
+    // copy here would be two implementations of one rule that can drift — the
+    // house has been bitten by that shape before. The shared function is where
+    // the kernel's own arm points.
+    let weight = crate::geometry::huber_weight(norm, huber);
     ObsEval {
         valid: true,
         residual: [r.x, r.y],

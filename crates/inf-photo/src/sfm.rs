@@ -973,6 +973,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_committed_defaults_are_the_ones_the_gate_measured() {
+        // `SfmConfig::default()` is not a convenience — it is the configuration
+        // `crates/inf-photo/tests/sfm_gate.rs` states its numbers for, and every
+        // field of it changes reconstructions. Pinned field by field, including
+        // the nested configs, so a "harmless" default tweak is a red test with
+        // the gate's measured block beside it rather than a silent drift in
+        // every number this crate has ever reported.
+        //
+        // Measured: turning `matching.mutual` off — a plausible speed-up —
+        // leaves every arm of the gate green. This is the arm that sees it.
+        let c = SfmConfig::default();
+        assert_eq!(c.seed, 0x494e_465f_5044_4d47);
+        assert_eq!(c.min_views, 3);
+        assert_eq!(c.min_track_length, 2);
+        assert_eq!(c.init_candidates, 4);
+        assert_eq!(c.max_parallax_cos, 0.999_390);
+        assert_eq!(c.max_reprojection_px, 4.0);
+        assert_eq!(c.bundle_every, 2);
+        assert_eq!(c.thin_registration_inliers, 25);
+
+        assert_eq!(c.features.levels, 4);
+        assert_eq!(c.features.scale_factor, 1.2);
+        assert_eq!(c.features.min_level_side, 64);
+        assert_eq!(c.features.fast_threshold, 18);
+        assert_eq!(c.features.harris_k, 0.04);
+        assert_eq!(c.features.max_features, 512);
+
+        assert_eq!(c.matching.ratio, 0.8);
+        assert_eq!(c.matching.max_distance, 80);
+        assert!(
+            c.matching.mutual,
+            "the mutual-best check is part of the default"
+        );
+        assert_eq!(c.matching.min_pair_matches, 16);
+        assert_eq!(c.matching.exhaustive_view_cap, 60);
+        assert_eq!(c.matching.window, 8);
+
+        assert_eq!(c.ransac.essential_iterations, 384);
+        assert_eq!(c.ransac.essential_threshold_px, 1.5);
+        assert_eq!(c.ransac.pnp_iterations, 192);
+        assert_eq!(c.ransac.pnp_threshold_px, 3.0);
+        assert_eq!(c.ransac.min_essential_inliers, 30);
+        assert_eq!(c.ransac.min_pnp_inliers, 12);
+        assert_eq!(c.ransac.refine_iterations, 20);
+        assert_eq!(c.ransac.refine_huber_px, 2.0);
+
+        assert_eq!(c.bundle.max_iterations, 25);
+        assert_eq!(c.bundle.max_damping_retries, 8);
+        assert_eq!(c.bundle.initial_lambda, 1e-4);
+        assert_eq!(c.bundle.huber_delta_px, 2.0);
+        assert_eq!(c.bundle.relative_tolerance, 1e-10);
+        assert_eq!(c.bundle.fixed_cameras, 1);
+    }
+
+    #[test]
     fn too_few_views_is_a_named_refusal() {
         let img = GrayImage::new(64, 64).unwrap();
         let views = vec![View::assumed(img.clone(), 50.0), View::assumed(img, 50.0)];

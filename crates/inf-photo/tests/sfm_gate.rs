@@ -384,6 +384,82 @@ fn a_wrong_intrinsic_measurably_moves_the_reconstruction() {
 }
 
 #[test]
+fn tightening_the_reprojection_bound_prunes_and_says_so() {
+    // Outlier pruning has nothing to do on the alcove at the default 4 px bound
+    // — the fixture is clean and the final `PrunedObservations` advisory never
+    // fires, so severing the prune leaves every other arm green. Measured.
+    //
+    // This arm makes the mechanism load-bearing by asking for a bound the
+    // reconstruction cannot meet without pruning: 0.6 px against a 0.36 px RMS.
+    // It then asserts the two halves of the contract that matter — the advisory
+    // *counts* what went, and nothing above the bound survived.
+    let data = dataset();
+    let tight = 0.6f64;
+    let cfg = SfmConfig {
+        max_reprojection_px: tight,
+        ..SfmConfig::default()
+    };
+    let r = reconstruct(&data.views, &cfg, &JobPool::new(2))
+        .expect("a tighter bound still reconstructs");
+
+    let pruned = r.advisories.iter().find_map(|a| match a {
+        inf_photo::Advisory::PrunedObservations { dropped, .. } => Some(*dropped),
+        _ => None,
+    });
+    let dropped = pruned.unwrap_or_else(|| {
+        panic!(
+            "a {tight} px bound pruned nothing at all; advisories: {:?}",
+            r.advisories
+        )
+    });
+    assert!(dropped > 0, "the advisory fired with a count of zero");
+
+    // And what survived really is inside the bound. Feature positions come from
+    // the same detector the pipeline used, so this is the pipeline's own claim
+    // re-derived rather than re-read.
+    let fcfg = cfg.features;
+    let pixels: Vec<Vec<DVec2>> = data
+        .views
+        .iter()
+        .map(|v| {
+            detect_and_describe(&v.image, &fcfg)
+                .expect("features")
+                .features
+                .iter()
+                .map(|f| DVec2::new(f.x, f.y))
+                .collect()
+        })
+        .collect();
+    let mut worst = 0.0f64;
+    let mut checked = 0usize;
+    for p in &r.points {
+        for o in &p.observations {
+            let cam = &r.cameras[&o.view];
+            let projected = cam
+                .intrinsics
+                .project(cam.pose.transform(p.position))
+                .expect("a surviving observation is in front of its camera");
+            worst = worst.max((projected - pixels[o.view as usize][o.feature as usize]).length());
+            checked += 1;
+        }
+    }
+    println!("tightened to {tight} px: {dropped} pruned, {checked} kept, worst {worst:.4} px");
+    assert!(
+        checked > 200,
+        "only {checked} observations survived the tightening"
+    );
+    assert!(
+        worst <= tight,
+        "an observation {worst:.4} px out survived a {tight} px bound"
+    );
+    assert!(
+        worst > 0.05,
+        "no surviving observation has any residual at all ({worst:.5} px) — this arm is \
+         measuring nothing"
+    );
+}
+
+#[test]
 fn too_few_views_refuses_by_name() {
     let data = dataset();
     let two = data.views[..2].to_vec();
