@@ -7794,6 +7794,86 @@ animatable characters. **Done when:** a biped and a quadruped generate from temp
 biped rig auto-fits an imported humanoid mesh, weights solve, cloth and hair attach, and both
 run under existing state machines in PIE.
 
+> **STATUS: Phase 24 COMPLETE** (2026-08-11) — P24.1–P24.4 pushed and CI-green; P24.5 local
+> gates green at the completion commit, CI pending push (this block is written with the
+> commit, and says so). The done-when, reckoned honestly: a biped and a quadruped generate
+> from templates through the wizard and **run under generated state machines in the real
+> `--pie` subprocess** (`phase24_wizard.rs`, 5 tests / 6 arms); auto-fit + heat weights solve
+> through the one `fit_rig_to_mesh` door; cloth and hair attach and fold in Simulate **and in
+> a cooked pack** — but **PIE previews neither** (the `ScenePayload` v8 gap, measured by an
+> arm that fails the day it closes — see the P24.4 ledger below). That is the one clause of
+> the done-when carried rather than met, and it is carried loudly.
+>
+> **P24.5 (character pipeline UX), what landed.** `inf_anim::locomotion` — the default
+> locomotion set is **derived from the rig it drives**: nothing in this repo ships stock
+> clips, and a clip addresses joints by index (it fits exactly one skeleton), so the wizard
+> generates idle/walk/run from the body plan — legs found through `template::leg_suffix`
+> (the ONE spelling of the naming contract), one phase rule (`side/2 + girdle/(2·girdles)`)
+> that yields exact antiphase on a biped, a lateral-sequence walk on a quadruped and a
+> metachronal wave on a hexapod, machine thresholds computed from *these* legs
+> (`2·L·sin θ × cadence` on the mean leg). Pose cycles, no root motion (a machine-driven
+> entity has no `AnimPlayer`, so root translation would slide it). The clips are committed
+> `.inf_anim` bytes, so the quaternions are written out by hand through `psin64`/`pcos64`
+> (`locomotion.rs` is on the `portable_pose` ban list, 8 files, and the registration is
+> mutation-verified). `inf_editor_core::character` — spec → preview → `build_character`:
+> six assets (skeleton, three clips, machine, mesh) + one actor
+> (`SceneDoc::edit_create_character`, `SkeletalMesh` + `AnimStateMachine` as ONE undo step);
+> with a mesh, auto-fit + bind + heat-solve into a **new** `.inf_mesh` (the author's is never
+> rewritten, asserted); without, a box-per-bone mannequin wound by measurement. Ring 2:
+> three typed commands; the panel is a dialog off `actor.newCharacter` with a live SVG rig
+> preview. Names collide into `unique_path` suffixes; building twice clobbers nothing.
+>
+> **The P24.5 audit (six findings, all fixed, each mutation-measured).** (F1) **A torn build
+> is a build**: five `write_asset` calls could land and the sixth fail, leaving five assets
+> and an orphan payload the watcher promotes under a fresh GUID — the claimed "a refusal
+> never leaves a half-built character" was generation-order reasoning, not a filesystem
+> measurement. `roll_back` (newest-first, `force`) + `write_asset` now removes the payload
+> when the sidecar fails (the rule `register_written_asset` has had since P16.3); the test
+> asserts against `read_dir`, never the build's verdict. (F2) **`==` cannot see ±0.0**:
+> "byte-identical" clips were asserted by `PartialEq`; now `inf_asset::encode` bytes, with
+> the blindness written out as its own permanent pair. (F3) the mesh writer's
+> `ExportReport` advisories were discarded — a UV-less mesh fits 144/144 fallback tangents
+> silently; now surfaced as `CharacterBuild.warnings` with an anti-vacuity half (a good mesh
+> warns about nothing). (F4) the panel labelled the **joint span** "Height" (a template's top
+> joint is `head` at 93 % of height) and the gate's ±0.2 band was four times the systematic
+> error — replaced by the identity on three heights. (F5) `preview_character` is an uncached
+> whole-payload read per keystroke on the fitted path (decode + kernel + BVH + fit per
+> character typed) — ledgered in code with three fix shapes, not chosen. (F6) *pre-existing,
+> found blocking the battery*: the P23.2a preview latency gate compared a best-of-five warm
+> against a **single** cold sample, so the process's once-per-process pipeline build made a
+> 4×-bigger render measure cheaper twice in a row; cold is now best-of-five with a fresh
+> session per attempt.
+>
+> **P24.5's bounds, ledgered.** The wizard emits **no `.inf_act`** — the generated machine
+> reads one `speed` variable and nothing sets it, so a wizard character *idles* until
+> gameplay drives it (the gate hands it a class fixture); generating a starter movement
+> Blueprint means choosing an input scheme for the author, a game-design decision the wizard
+> refuses. The mannequin is a diagnostic, not a model (box per bone, planar UVs, no material
+> slot). Cloth and hair are not part of the wizard (their doors exist one panel over; the
+> PIE gap stands). The fit-to-mesh field is the same raw-GUID text box as `skel_merge_part`
+> (P24.3) and the groom rig field (P24.4). Five of eleven gait knobs are exposed — the wire
+> carries all eleven, so exposing another is a panel change and never a wire move.
+> `build_locomotion` understands template-named rigs only (an alien rig gets a named
+> refusal — consistent with retarget v1, which pairs by the same canonical names). The rig
+> diagram still does not compose joint rotations (inherited from the Skeleton Editor).
+> An inverted knee hinge walks stiff-legged (`knee_flex_ceiling`, with a test that fails the
+> day the generator signs the flex from the limit). Generated identity quaternions are
+> `0.999_999_94` (inside `psin64`'s ~1e-7, normalized by `QuatTrack::sample`) — visible in
+> any byte comparison of a generated clip. The wizard neither opens the Skeleton Editor on
+> the new rig nor reveals the six assets in the drawer (it emits `assets://changed` and
+> selects the actor). And `AssetProject::duplicate` carries the same payload-then-sidecar
+> half-written-pair hazard `write_asset` now guards — no P24.5 caller, carried to the next
+> writer that touches it.
+>
+> **Laws bought in P24.5** (each now standard): **a torn write is measured against the
+> FILESYSTEM, never against the writer's verdict** (third of its class: P23's
+> `SaveError::Torn`, P24.4's pack guard, now the six-asset build); **a byte claim needs a
+> byte comparison** (`==` is blind to `-0.0`); **a cold-latency gate takes best-of-N with a
+> fresh session per attempt**, or it measures pipeline warm-up and blocks unrelated
+> batteries; and the P21.4 law met a fourth time — the wizard gate's subprocess arm engages
+> the shipped binary through the payload it already carries, no injection hooks, proven by
+> mutating the *subprocess-only* step path and watching the interleaved hashes diverge.
+
 Starting point: `inf-anim` already provides validated skeletons, poses and skinning palettes,
 clips, blend spaces, state machines, retarget v1, sockets and root motion, with a GPU skinning
 pass. Missing for rigging: IK solvers, weight painting, in-viewport bone manipulation, and a
