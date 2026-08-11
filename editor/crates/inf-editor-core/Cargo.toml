@@ -32,6 +32,14 @@ inf-asset = { workspace = true }
 # The embedded DCC's half-edge mesh kernel (P23.3/P23.4): the Model Editor edits
 # a `MeshSession` and previews it through `crate::dcc`. Ring 1 -> Ring 0.
 inf-dcc = { workspace = true }
+# The photogrammetry pipeline (P25.3). `inf-photo` is the SfM core (poses,
+# intrinsics, the colour decoder the albedo bake re-reads photographs through);
+# `inf-photo-gpu` is the dense stage and the texel-space bake half. The finish
+# orchestrator lives here rather than in either of them because it needs
+# `inf-dcc`'s unwrapper (a crate the shipped player must never link) and
+# `AssetProject`'s writer, and neither is reachable from Ring 0.
+inf-photo = { workspace = true }
+inf-photo-gpu = { workspace = true }
 inf-mesh = { workspace = true }
 inf-material = { workspace = true }
 # Audio depth (P12.3): the `.inf_audio` importer builds an `AudioAsset` payload,

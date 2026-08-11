@@ -24,6 +24,10 @@ pub mod hydro;
 pub mod ipc;
 pub mod layouts;
 pub mod mods;
+/// The P25.3 finish pipeline: a dense photogrammetric reconstruction in, a
+/// standard textured `.inf_mesh` + `.inf_tex` + `.inf_mat` out. Ring 1 because
+/// it needs the modelling kernel's unwrapper and `AssetProject`'s writer.
+pub mod photogrammetry;
 pub mod pie;
 pub mod project_settings;
 /// The interactive viewport's loose-file render-asset store (P18.3): real

@@ -3063,6 +3063,8 @@ dependencies = [
  "inf-math",
  "inf-mesh",
  "inf-pcg",
+ "inf-photo",
+ "inf-photo-gpu",
  "inf-physics",
  "inf-render",
  "inf-runtime",
