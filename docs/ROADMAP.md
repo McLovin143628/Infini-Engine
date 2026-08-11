@@ -8336,7 +8336,20 @@ nobody can find is a bound nobody knows about:
 *The authoring UI's bounds.* The Model Editor's rig field is a **raw GUID text box** — the
 asset picker is the missing UI, exactly as it is for `skel_merge_part` (P24.3). Leaving it
 empty is legal and derives no capsules, which is a garment that hangs through its wearer; the
-panel says so in words. `HairMaterial::iterations` is not exposed and is sent as `1`.
+panel says so in words. `HairMaterial::iterations` is not exposed and is sent as `1`. And the
+one rule the batch put in Ring 2 rather than Ring 1 — *a named `.inf_skel` that is missing or
+of the wrong kind is a refusal, not a silent `None`* — lives inside `#[tauri::command]`
+`resolve_rig`, which is by the module's own stated law the place a rule no gate can see lives.
+
+*`SimSession::set_hair_detail` has no production caller* (P24.4 audit F4). The windowed player
+calls its twin and is pinned doing it; the editor's Simulate is told by tests only, so the
+editor viewport draws `HairDetail::GUIDES` on every machine. The batch's report says "the host
+applies it: `set_hair_detail` on **both** sessions", and one of the two is not wired. It costs
+correctness nothing — ribbons are not folded into `hair_state_bytes`, which
+`the_detail_draws_differently_and_traces_identically` measures — and it costs the preview its
+fidelity on a Low-tier machine, which is the exact thing hair's ruling (unlike the debris
+budget's) says should follow the tier. Wiring it wants a tier read in `inf_viewport::host`, a
+`cfg`-gated file no Linux CI leg compiles, so it is stated rather than done.
 
 **Findings of the P24.4 audit, fixed in this phase.** Three, all measured:
 

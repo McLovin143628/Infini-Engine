@@ -578,6 +578,23 @@ impl SimSession {
     /// mapping lives at the host (`inf_render::hair_detail_for`), because Ring 0
     /// must not know what a GPU is, and the value arrives here as data. A session
     /// nobody tells runs on `HairDetail::GUIDES`, which is what P24.4 v1 drew.
+    ///
+    /// # No production caller yet (P24.4 audit F4)
+    ///
+    /// The windowed player calls its twin (`window.rs`, pinned by
+    /// `the_windowed_player_applies_the_tier_hair_detail_to_pie_too`); **this one
+    /// is called by tests only**, so the editor viewport's Simulate always draws
+    /// `HairDetail::GUIDES` whatever the machine is. That is the same "nobody
+    /// tells it" state `set_debris_budget` is in on this side, and there it is the
+    /// P22.4 *ruling* (a budget that changes the sim must not be clamped in a
+    /// preview) rather than an omission — hair's ruling is the opposite one, so
+    /// the editor is the host that does not yet honour it. It costs correctness
+    /// nothing (ribbons are not folded into `hair_state_bytes`, which
+    /// `inf_ecs::hair`'s
+    /// `the_detail_draws_differently_and_traces_identically` measures) and it
+    /// costs the *preview* its fidelity on a Low-tier machine. Wiring it belongs
+    /// with a tier read in `inf_viewport::host`, which is a `cfg`-gated file no
+    /// Linux CI leg compiles. Ledgered in ROADMAP §12's P24.4 block.
     pub fn set_hair_detail(&mut self, detail: inf_anim::HairDetail) {
         self.hair_detail = detail;
     }
