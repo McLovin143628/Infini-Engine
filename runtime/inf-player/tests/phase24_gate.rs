@@ -543,6 +543,26 @@ fn the_cooked_pack_carries_the_authored_garment_and_hairstyle() {
 fn pack_trace(pack: &Path) -> u128 {
     let source = inf_player::level::PackLevelSource::open(pack).expect("open pack");
     let built = inf_player::build_world_from_pack(&source).expect("build world from pack");
+    let mut sim = inf_player::sim_from_built(built);
+    // **ASSERT THE WORLD BEFORE COMPARING TWO OF THEM** (P21.4, measured again
+    // here). Severing the cook's `ClothSim.asset` dependency edge left this arm
+    // GREEN: the pack shipped no garment, so the reference and the subprocess
+    // both simulated nothing and agreed perfectly. A hash comparison between two
+    // hosts says they run the same world; it cannot say the world has a coat in
+    // it. This can, and it is what makes the mutation fail here too.
+    sim.step_once(inf_player::runtime_sim::RuntimeInput::default());
+    assert!(
+        !inf_ecs::cloth::cloth_state_bytes(sim.world()).is_empty(),
+        "the cooked pack's character simulates NO garment — the comparison below          would be two empty worlds agreeing"
+    );
+    assert!(
+        !inf_ecs::hair::hair_state_bytes(sim.world()).is_empty(),
+        "the cooked pack's character simulates NO hair — same hazard"
+    );
+    // Re-built rather than continued, so the fold starts at step 0 exactly as the
+    // shipped `--run-frames` boot does.
+    let source = inf_player::level::PackLevelSource::open(pack).expect("re-open pack");
+    let built = inf_player::build_world_from_pack(&source).expect("re-build world from pack");
     inf_player::fold_trace_sim(inf_player::sim_from_built(built), STEPS, None)
 }
 
