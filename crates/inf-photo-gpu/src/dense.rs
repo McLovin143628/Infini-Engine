@@ -140,11 +140,21 @@ impl DenseReconstruction {
     /// therefore asserts the coverage field by field rather than trusting this
     /// list to stay complete.
     ///
-    /// **Note for P25.3.** These bytes are in-memory and the P14 portable-
-    /// transcendental exemption applies to them exactly as it applied to
-    /// P25.1's. The day a dense reconstruction is written into an asset, that
-    /// exemption ends and every function that touched these numbers comes under
-    /// the portable family.
+    /// **The P25.3 ruling, which this note used to pre-empt.** It read "the day
+    /// a dense reconstruction is written into an asset, that exemption ends and
+    /// every function that touched these numbers comes under the portable
+    /// family". That day arrived — P25.3 bakes these numbers into a `.inf_mesh`
+    /// and three `.inf_tex` — and the notice was settled rather than executed:
+    /// a photogrammetry import is the glTF-import class, so the solvers keep
+    /// their exemption, and what the portable family still governs is anything a
+    /// **gate** re-derives and any **table the committed bytes are a function
+    /// of**. The whole ruling is written once, in [`inf_photo`]'s crate docs
+    /// under "The line, as P25.3 settled it"; the two crate-level notices point
+    /// at it and so does this one.
+    ///
+    /// What survives unchanged is the practical rule for *these* bytes: they are
+    /// in-memory and compared within one run or within one machine, never
+    /// against a committed number.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(b"INF_PHOTO_DENSE\x01");

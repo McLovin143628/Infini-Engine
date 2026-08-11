@@ -1,6 +1,7 @@
 # De-lighting v1: implemented, measured, and refusing (P25.3)
 
 **Date:** 2026-08-11 · **Scope:** `inf_photo_gpu::finish::delight`, `DelightConfig`
+· **Numbers re-measured 2026-08-11 by the P25.3 audit** — see "A correction" at the end.
 
 The Phase 25 plan calls P25.3's fourth item "**optional** de-lighting v1". This memo
 records what "optional" was allowed to mean, because the licence to defer runs only as
@@ -45,18 +46,29 @@ plane a different colour, lit by an ambient-plus-directional model the renderer 
 
 | quantity | truth | recovered |
 |---|---|---|
-| ambient (luma) | ≈ 0.32 | 0.253 |
-| directional (luma) | ≈ 0.59 | **0.078** |
-| variance explained by the directional term | — | **8.2%** |
-| albedo error vs the known albedo, p50 | — | 0.068 → **0.255** |
+| ambient (luma) | 0.319 | 0.260 |
+| directional (luma) | 0.600 | **0.070** |
+| variance explained by the directional term | — | **6.4%** |
+| albedo error vs the known albedo, p50 | — | 0.0680 → **0.0700** |
+| the same, p90 | — | 0.1884 → **0.1916** |
 
-The directional term comes back **seven times too small**, the fit explains 8.2% of the
-brightness variation, and applying it makes the albedo error nearly four times worse.
+The truths are the Rec.709 luma of `inf_photo_gpu::fixture::light()`. The directional term
+comes back **more than eight times too small**, the fit explains 6.4% of the brightness
+variation, and applying it makes the albedo error worse rather than better.
 
-The reason is visible in that 8.2%: the other 91.8% of the brightness variation on this
+The reason is visible in that 6.4%: the other 93.6% of the brightness variation on this
 fixture is the **dot texture and the plane tints**. Albedo variance swamps shading
 variance, the least squares has almost nothing to lock onto, and the best direction it
-finds is fitting noise. Dividing by that noise stamps it into the texture.
+finds is fitting noise.
+
+**And the size of the damage is worth being exact about, because it is small.** Applying
+the fit moves p50 from 0.0680 to 0.0700 — three per cent worse, not a ruined texture. That
+is a *consequence* of the same defect, not a separate fact: the recovered directional term
+is 0.070 against an ambient of 0.260, so `s(n)` ranges over 0.260…0.330 and the
+mean-preserving divide scales texels by 0.87…1.11. A fit that has found nothing applies
+almost nothing. The case against trusting it is therefore not "it will destroy the
+albedo" — it is that the number it would divide out is noise, and the measured direction
+of the change is the wrong one every time it has been measured.
 
 ## The ruling
 
@@ -64,8 +76,10 @@ finds is fitting noise. Dividing by that noise stamps it into the texture.
 
 `DelightConfig::min_explained` — the fraction of the constant model's residual the
 directional term must beat to be believed — is set to **0.25** because of the numbers
-above. A threshold under 0.10 would have accepted an 8.2% fit and shipped a worse
-texture than it started with. The refusal is a value, not a failure:
+above. A threshold under 0.064 would have accepted this fit and shipped a worse texture
+than it started with; the gap between 0.064 and 0.25 is the margin, and it is deliberately
+wide because nothing here can tell a weak-but-real light from a strong-but-imaginary one
+except the fraction it explains. The refusal is a value, not a failure:
 `DelightReport::applied` comes back false, the albedo is returned untouched, and
 `FinishAdvisory::DelightRefused` carries what it explained against what it needed.
 
@@ -87,3 +101,23 @@ The spec's "optional" would have licensed shipping nothing. What is shipped inst
 working estimator, a guard tuned by a measurement rather than by taste, a refusal that
 names its own shortfall, and this memo. The next person to raise `min_explained`'s
 question has the number to argue with.
+
+## A correction
+
+The first draft of this memo, and the `DelightConfig::min_explained` doc comment and the
+P25.3 gate's header block that quoted it, all carried **8.2% explained, an ambient of
+0.253, a directional of 0.078, and an applied albedo error of 0.255**. Only the shape of
+those figures survives re-measurement; the applied error does not survive at all.
+
+The cause is an ordering: the memo and the doc comment were written in `dce0655` and
+`4d6cb92`, and the mutation pass in `97777df` then **re-saturated the block's five face
+tints** to make the occlusion test falsifiable. That changed the albedo variance the
+directional term is competing against, and nothing re-ran the de-lighting numbers
+afterwards. The gate only ever asserted `explained < min_explained`, which is true at 6.4%
+exactly as it was at 8.2%, so no arm noticed.
+
+The lesson is the older one, met again: **a measurement quoted in prose is a measurement
+nothing re-derives.** The figures above are now asserted rather than remembered —
+`de_lighting_refuses_this_capture_and_names_what_it_found` bounds `explained` from *both*
+sides, so a fixture change that moves it materially reds the gate instead of quietly
+invalidating this page.

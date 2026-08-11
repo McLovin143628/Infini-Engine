@@ -94,7 +94,18 @@ impl AssetProject {
     // ── writing assets (dual-format) ──────────────────────────────────────
 
     /// Write a payload + sidecar under `dir`, register it, and return its id.
-    /// `dir` should be inside the content root.
+    ///
+    /// # `dir` is taken VERBATIM
+    ///
+    /// It is **not** joined onto [`root`](Self::root) — it is passed to
+    /// `std::fs::create_dir_all` and `unique_path` as given. So a caller must
+    /// hand over an absolute path (or one already rooted with
+    /// [`content_dir`](Self::content_dir)); a relative `dir` resolves against
+    /// the *process's* working directory, and `""` writes into it. That is not
+    /// hypothetical: the first run of P25.3's photogrammetry gate left five
+    /// `Scan.inf_*` files in the crate it lives in. Written here rather than in
+    /// the report that found it, because this is where a caller meets the
+    /// parameter.
     ///
     /// # The half-written pair, here too
     ///
