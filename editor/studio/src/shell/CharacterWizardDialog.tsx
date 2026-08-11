@@ -47,6 +47,7 @@ export default function CharacterWizardDialog() {
   const refusal = useCharacterWizardStore((s) => s.refusal);
   const addToScene = useCharacterWizardStore((s) => s.addToScene);
   const result = useCharacterWizardStore((s) => s.result);
+  const folder = useCharacterWizardStore((s) => s.folder);
   const error = useCharacterWizardStore((s) => s.error);
   const busy = useCharacterWizardStore((s) => s.busy);
 
@@ -370,7 +371,7 @@ export default function CharacterWizardDialog() {
           {/* ── 3. done ─────────────────────────────────────────────────── */}
           {step === "done" && result && (
             <div className="py-2">
-              <Section title="Written to Content/Characters">
+              <Section title={`Written to Content${folder ? `/${folder}` : ""}`}>
                 <Row label="Skeleton" value={result.skeleton} />
                 <Row
                   label="Body"

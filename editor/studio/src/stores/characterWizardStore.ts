@@ -37,6 +37,17 @@ export interface CharacterWizardMachine {
   /** Add the actor to the open level when the character is created. */
   addToScene: boolean;
   result: CharacterCreateDto | null;
+  /**
+   * The content sub-folder the backend writes into, fetched once a character has
+   * been created.
+   *
+   * Asked rather than hard-coded: `CHARACTER_FOLDER` is a Ring-1 constant and a
+   * frontend copy of it is a second spelling that goes stale silently — the
+   * panel would keep saying "Content/Characters" long after the backend moved.
+   * `null` until the answer arrives, and the panel says "Content" alone rather
+   * than guessing.
+   */
+  folder: string | null;
   /** A command failed outright (not a spec refusal — those live in `refusal`). */
   error: string | null;
   busy: boolean;
@@ -99,6 +110,7 @@ export function initialMachine(): CharacterWizardMachine {
     refusal: null,
     addToScene: true,
     result: null,
+    folder: null,
     error: null,
     busy: false,
   };
@@ -251,6 +263,15 @@ export const useCharacterWizardStore = create<CharacterWizardState>((set, get) =
     try {
       const result = await characterIpc.create(spec, { addToScene });
       set({ busy: false, result, step: "done" });
+      // Where it went, from the backend that put it there. A failure here is not
+      // a failure of the create — the character exists either way — so it costs
+      // the readout a word and nothing else.
+      try {
+        const folder = await characterIpc.folder();
+        if (typeof folder === "string") set({ folder });
+      } catch {
+        /* the readout falls back to "Content" */
+      }
       return result;
     } catch (e) {
       set({ busy: false, error: String(e) });

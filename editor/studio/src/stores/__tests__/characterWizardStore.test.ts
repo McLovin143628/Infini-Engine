@@ -170,6 +170,7 @@ describe("the store", () => {
       warnings: [],
     };
     vi.mocked(characterIpc.create).mockResolvedValue(made);
+    vi.mocked(characterIpc.folder).mockResolvedValue("Characters");
     useCharacterWizardStore.setState({ addToScene: false });
     const out = await useCharacterWizardStore.getState().createCharacter();
     expect(out).toBe(made);
@@ -177,6 +178,32 @@ describe("the store", () => {
     const s = useCharacterWizardStore.getState();
     expect(s.step).toBe("done");
     expect(s.busy).toBe(false);
+    // The destination is ASKED for, not hard-coded — a frontend copy of
+    // `CHARACTER_FOLDER` goes stale silently.
+    expect(s.folder).toBe("Characters");
+  });
+
+  it("a folder the backend cannot answer costs the readout a word and nothing else", async () => {
+    const made = {
+      skeleton: "s",
+      mesh: "m",
+      idle: "i",
+      walk: "w",
+      run: "r",
+      machine: "sm",
+      actor: null,
+      mannequin: true,
+      fit: null,
+      weights: null,
+      warnings: [],
+    };
+    vi.mocked(characterIpc.create).mockResolvedValue(made);
+    vi.mocked(characterIpc.folder).mockRejectedValue("no project open");
+    expect(await useCharacterWizardStore.getState().createCharacter()).toBe(made);
+    const s = useCharacterWizardStore.getState();
+    expect(s.step).toBe("done");
+    expect(s.folder).toBeNull();
+    expect(s.error).toBeNull();
   });
 
   it("a failed create leaves an error and clears busy", async () => {
