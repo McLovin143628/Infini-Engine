@@ -500,6 +500,66 @@ fn too_few_views_refuses_by_name() {
 }
 
 #[test]
+fn the_final_bundle_is_the_only_one_a_three_view_capture_gets() {
+    // Found by severing `state.bundle` at the finish step and watching the whole
+    // suite stay green. The six-view fixture cannot see it: four views register
+    // after the initial pair, `bundle_every` is 2, so a growth bundle always
+    // runs over the *same* state the final bundle would, and deleting the final
+    // one changes nothing worth a bound.
+    //
+    // Three views is the case that cannot hide it. The initial pair registers
+    // two, one more view registers, `since_bundle` reaches 1 and never 2 — so no
+    // growth bundle runs at all and the final bundle is the only bundle the
+    // reconstruction ever gets. Sever it and the poses are raw PnP over raw
+    // triangulation.
+    let data = dataset();
+    let three = data.views[..3].to_vec();
+    let r = reconstruct(&three, &SfmConfig::default(), &JobPool::new(2))
+        .expect("three views reconstructs");
+    let b = r.report.final_bundle;
+    println!(
+        "three-view capture: {} points, {} observations, bundle {} accepted of {} iterations \
+         over {} observations, rms {:.4} -> {:.4} px",
+        r.report.points, r.report.observations, b.accepted, b.iterations, b.observations,
+        b.initial_rms_px, b.final_rms_px
+    );
+    assert!(
+        b.observations > 0 && b.iterations > 0,
+        "the finish step's bundle never ran on a three-view capture"
+    );
+    assert!(
+        b.accepted > 0,
+        "the only bundle a three-view capture gets accepted no step"
+    );
+    // And it did real work, not a rounding-sized step: the un-robustified RMS
+    // must fall materially. This is the claim severing the call kills.
+    assert!(
+        b.final_rms_px < b.initial_rms_px * 0.9,
+        "the only bundle moved the RMS {:.4} -> {:.4} px, which is not a solve",
+        b.initial_rms_px,
+        b.final_rms_px
+    );
+    // The reconstruction that comes out of it still has to be a reconstruction.
+    let truth: Vec<_> = r
+        .registered_views()
+        .iter()
+        .map(|&v| data.truth[v as usize])
+        .collect();
+    let err = pose_error(&r.poses(), &truth).expect("the poses align");
+    assert_eq!(r.cameras.len(), 3, "advisories: {:?}", r.advisories);
+    assert!(
+        err.max_relative_rotation_deg <= MAX_RELATIVE_ROTATION_DEG,
+        "three-view relative rotation is {:.5} deg out (bound {MAX_RELATIVE_ROTATION_DEG} deg)",
+        err.max_relative_rotation_deg
+    );
+    assert!(
+        r.report.reprojection_rms_px <= MAX_REPROJECTION_RMS_PX,
+        "three-view reprojection RMS is {:.4} px",
+        r.report.reprojection_rms_px
+    );
+}
+
+#[test]
 fn the_reconstruction_reports_what_it_did() {
     let r = solve(1);
     assert_eq!(r.report.views, 6);
