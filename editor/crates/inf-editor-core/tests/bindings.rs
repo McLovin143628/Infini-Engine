@@ -11,27 +11,28 @@ use inf_editor_core::ipc::CollisionLayerDto;
 use inf_editor_core::ipc::HeightmapProbeDto;
 use inf_editor_core::ipc::{
     AddableComponentDto, AssetChanged, AssetDto, AssetFolderDto, AssetRefDto, AssetSnapshot,
-    BiomeDefDto, BiomeSetDto, BiomeSettingsDto, BodyParamsDto, CharacterCreateDto,
-    CharacterJointDto, CharacterLegDto, CharacterPreviewDto, CharacterRigDto, CharacterSpecDto,
-    ComponentDto, DataAssetDto, DataFieldDto, DataMapExportDto, DccApplyDto, DccDocDto,
-    DccDragBeginDto, DccDragDto, DccExportDto, DccGarmentDto, DccGizmoModeDto, DccGroomDto,
-    DccGroomResultDto, DccGroomStatDto, DccImportDto, DccModeDto, DccPaintModeDto, DccPreviewDto,
-    DccSaveDto, DccSculptModeDto, DccSelectDto, DccToolDto, DccUnwrapDto, DeleteResult, DetailsDto,
-    ErosionParamsDto, ErosionReportDto, FileEntryDto, FoliageSettingsDto, GaitParamsDto,
-    GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto, ImportEventDto, LakePreviewDto,
-    LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto, PackageKindCountDto,
-    PackageResultDto, PartitionSettingsDto, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto,
-    PropFieldDto, PropValueDto, RecentProjectDto, RiverBedConflictDto, RiverClimbDto,
-    RiverReportDto, SaveResultDto, SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto,
-    SculptOpDto, SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto,
-    SeqTrackDto, SequenceDto, SkelApplyDto, SkelDocDto, SkelJointDto, SkelSocketDto,
-    SkyAtmosphereDto, Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpoilModeDto,
-    SpriteGridDto, SpriteRectDto, SpriteSheetDto, TerrainBiomesDto, TerrainImportPlanDto,
-    TerrainImportResultDto, TerrainImportSettingsDto, TilemapCellDto, TilemapDto, TimeOfDayDto,
-    ToolModeDto, ViewModeDto, ViewportDrop, ViewportGizmoDto, ViewportKey, ViewportModeDto,
-    ViewportRect, ViewportToolStatusDto, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto,
-    VoxelToolKindDto, WaterDefaultsDto, WaterSettingsDto, WaterToolKindDto, WeatherDto,
-    WeatherPresetDto,
+    BiomeDefDto, BiomeSetDto, BiomeSettingsDto, BodyParamsDto, CaptureCameraDto, CaptureImportDto,
+    CaptureIssueDto, CapturePreviewDto, CaptureProgressDto, CaptureResultDto, CaptureSettingsDto,
+    CaptureStatusDto, CharacterCreateDto, CharacterJointDto, CharacterLegDto, CharacterPreviewDto,
+    CharacterRigDto, CharacterSpecDto, ComponentDto, CoverageDto, CoverageViewDto, DataAssetDto,
+    DataFieldDto, DataMapExportDto, DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto,
+    DccExportDto, DccGarmentDto, DccGizmoModeDto, DccGroomDto, DccGroomResultDto, DccGroomStatDto,
+    DccImportDto, DccModeDto, DccPaintModeDto, DccPreviewDto, DccSaveDto, DccSculptModeDto,
+    DccSelectDto, DccToolDto, DccUnwrapDto, DeleteResult, DetailsDto, ErosionParamsDto,
+    ErosionReportDto, FileEntryDto, FoliageSettingsDto, GaitParamsDto, GitFileDto, GitStatusDto,
+    GizmoModeDto, GizmoSpaceDto, ImportEventDto, LakePreviewDto, LayoutSummary, LevelSettingsDto,
+    LogLine, PackageErrorDto, PackageKindCountDto, PackageResultDto, PartitionSettingsDto,
+    PhotoEntryDto, ProjectInfoDto, ProjectSettingsDto, ProjectTemplateDto, PropFieldDto,
+    PropValueDto, RecentProjectDto, RiverBedConflictDto, RiverClimbDto, RiverReportDto,
+    SaveResultDto, SceneDelta, SceneNode, SceneSnapshot, SculptFalloffDto, SculptOpDto,
+    SculptSettingsDto, SearchHitDto, SearchOptsDto, SeqInterpDto, SeqKeyDto, SeqTrackDto,
+    SequenceDto, SkelApplyDto, SkelDocDto, SkelJointDto, SkelSocketDto, SkyAtmosphereDto,
+    Snap2DDto, Snap3DDto, SortingLayerDto, SpawnKind, SpoilModeDto, SpriteGridDto, SpriteRectDto,
+    SpriteSheetDto, TerrainBiomesDto, TerrainImportPlanDto, TerrainImportResultDto,
+    TerrainImportSettingsDto, TilemapCellDto, TilemapDto, TimeOfDayDto, ToolModeDto, ViewModeDto,
+    ViewportDrop, ViewportGizmoDto, ViewportKey, ViewportModeDto, ViewportRect,
+    ViewportToolStatusDto, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto,
+    WaterDefaultsDto, WaterSettingsDto, WaterToolKindDto, WeatherDto, WeatherPresetDto,
 };
 use inf_editor_core::ipc::{CollectionDto, MatOverridesDto, MatValuesDto, MaterialInstanceDto};
 use inf_editor_core::ipc::{MixerBusDto, MixerConfigDto, MixerEffectDto};
@@ -90,6 +91,20 @@ fn export_bindings() {
     CharacterRigDto::export_all(&cfg).expect("export CharacterRigDto");
     CharacterPreviewDto::export_all(&cfg).expect("export CharacterPreviewDto");
     CharacterCreateDto::export_all(&cfg).expect("export CharacterCreateDto");
+    // The capture wizard (P25.4). Same rule: every type it names is rooted, even
+    // the ones `CaptureStatusDto` already pulls in, so a panel importing one
+    // directly cannot drift.
+    CaptureCameraDto::export_all(&cfg).expect("export CaptureCameraDto");
+    CaptureSettingsDto::export_all(&cfg).expect("export CaptureSettingsDto");
+    PhotoEntryDto::export_all(&cfg).expect("export PhotoEntryDto");
+    CaptureIssueDto::export_all(&cfg).expect("export CaptureIssueDto");
+    CoverageViewDto::export_all(&cfg).expect("export CoverageViewDto");
+    CoverageDto::export_all(&cfg).expect("export CoverageDto");
+    CaptureResultDto::export_all(&cfg).expect("export CaptureResultDto");
+    CaptureStatusDto::export_all(&cfg).expect("export CaptureStatusDto");
+    CaptureProgressDto::export_all(&cfg).expect("export CaptureProgressDto");
+    CapturePreviewDto::export_all(&cfg).expect("export CapturePreviewDto");
+    CaptureImportDto::export_all(&cfg).expect("export CaptureImportDto");
     LayoutSummary::export_all(&cfg).expect("export LayoutSummary");
     SceneNode::export_all(&cfg).expect("export SceneNode");
     SceneSnapshot::export_all(&cfg).expect("export SceneSnapshot");

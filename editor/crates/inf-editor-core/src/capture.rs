@@ -926,25 +926,22 @@ impl PhotogrammetrySession {
                 }
             }
         }
-        if loaded.len() < self.cfg.sfm.min_views {
-            issues.push(CaptureIssue::TooFewPhotos {
-                given: loaded.len(),
-                required: self.cfg.sfm.min_views,
-            });
-        }
-        if let Some(issue) = resolution_issue(&loaded) {
-            issues.push(issue);
-        }
         self.entries = entries;
         self.photos = Arc::new(loaded);
-        self.load_issues = issues.clone();
+        // ONLY the per-file findings are remembered: a file that would not
+        // decode is a fact about that file and cannot be recomputed once it is
+        // out of the list. Everything else the pre-flight says is a function of
+        // what is loaded AND of the configuration, so it is computed on demand —
+        // `min_views` is a config field, and a cached "too few photographs"
+        // would keep saying three after a caller lowered it.
+        self.load_issues = issues;
         self.state = CaptureState::Idle;
         if let Ok(mut shared) = self.shared.lock() {
             shared.product = None;
             shared.error = None;
             shared.state = None;
         }
-        issues
+        self.preflight()
     }
 
     /// Everything the pre-flight has to say about what is loaded **and** the
@@ -958,6 +955,15 @@ impl PhotogrammetrySession {
     /// reasoning rather than inventing a second rule.
     pub fn preflight(&self) -> Vec<CaptureIssue> {
         let mut out = self.load_issues.clone();
+        if self.photos.len() < self.cfg.sfm.min_views {
+            out.push(CaptureIssue::TooFewPhotos {
+                given: self.photos.len(),
+                required: self.cfg.sfm.min_views,
+            });
+        }
+        if let Some(issue) = resolution_issue(&self.photos) {
+            out.push(issue);
+        }
         let scale = self.cfg.finish.metres_per_unit;
         if !(scale.is_finite() && scale > 0.0) {
             out.push(CaptureIssue::BadScale {

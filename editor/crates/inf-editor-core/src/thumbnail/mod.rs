@@ -401,6 +401,18 @@ fn mesh_base_color(project: &AssetProject, deps: &[AssetId]) -> [f32; 4] {
 
 // ── texture (CPU) thumbnail ────────────────────────────────────────────────
 
+/// A flat, letterboxed square preview of a texture that is **not in a project
+/// yet** — the same door [`Thumbnailer::render_rgba`] uses for an `.inf_tex`,
+/// reached with a payload in hand instead of an [`AssetId`].
+///
+/// P25.4's capture wizard shows the baked base colour beside the offscreen
+/// geometry preview *before* the scan is imported, so there is no asset to ask
+/// for. It needs no GPU, which is the other reason it is separate: the atlas is
+/// visible on a machine where the geometry preview is not.
+pub fn texture_preview_rgba(tex: &TextureAsset, size: u32) -> Vec<u8> {
+    texture_thumbnail(tex, size)
+}
+
 /// A flat, letterboxed square preview of a texture (decodes the smallest mip
 /// that still covers the thumbnail, for speed).
 fn texture_thumbnail(tex: &TextureAsset, size: u32) -> Vec<u8> {

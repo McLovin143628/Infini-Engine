@@ -3299,6 +3299,435 @@ pub struct DccDragBeginDto {
     pub doc: DccDocDto,
 }
 
+// ── the capture wizard (P25.4) ──────────────────────────────────────────────
+//
+// Photographs in, a standard asset out. Every rule lives in
+// `inf_editor_core::capture`; these are the wire shapes of what it already
+// computed, and nothing here decides anything. Strings where Ring 1 has enums,
+// on the standing wire-enum rule: a frontend built against an older backend gets
+// a name it does not know rather than a deserialization failure.
+
+/// The assumed lens a capture is reconstructed with.
+///
+/// Structure from motion never refines intrinsics, so this is the one thing the
+/// wizard has to be told. `focal_ratio` is a fraction of the image's longer side
+/// so one setting covers a whole shoot at any resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureCameraDto {
+    /// Focal length over `max(width, height)`.
+    pub focal_ratio: f64,
+    /// First radial-distortion coefficient (`0` is a pinhole).
+    pub k1: f64,
+    /// Second radial coefficient.
+    pub k2: f64,
+}
+
+/// The knobs the capture wizard exposes.
+///
+/// A **subset** of `CaptureConfig`, deliberately: the sparse and dense solvers'
+/// constants are committed numbers whose defaults every measurement in Phase 25
+/// was taken at, and a dialog that let them be typed would make every one of
+/// those numbers a claim about somebody's session.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSettingsDto {
+    pub camera: CaptureCameraDto,
+    /// **The scale step.** Metres per reconstruction unit; `1.0` leaves the
+    /// result in the reconstruction's own baseline units.
+    pub metres_per_unit: f64,
+    /// Triangle budget for the retopologized mesh.
+    pub target_triangles: u32,
+    /// Atlas side, in texels.
+    pub atlas_size: u32,
+    /// Ambient-occlusion rays per texel.
+    pub ao_rays: u32,
+    /// Drop geometry no camera photographed.
+    pub trim_unseen: bool,
+    /// Attempt de-lighting (it refuses on its own when the fit is not
+    /// believable).
+    pub delight: bool,
+    /// Roughness written into the material and the ORM map.
+    pub roughness: f32,
+    /// Metallic, likewise.
+    pub metallic: f32,
+}
+
+/// One row of the wizard's photograph table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoEntryDto {
+    pub path: String,
+    pub name: String,
+    /// `0` when the file did not decode.
+    pub width: u32,
+    pub height: u32,
+    /// Why it did not decode.
+    pub error: Option<String>,
+}
+
+/// One finding, with the severity and stage that decide where it is shown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureIssueDto {
+    /// `"blocking" | "warning" | "note"`.
+    pub severity: String,
+    /// `"load" | "sfm" | "dense" | "finish" | "write"`.
+    pub stage: String,
+    /// The sentence, carrying its own remedy.
+    pub message: String,
+}
+
+/// What one camera saw of the finished mesh — a row of the coverage overlay.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageViewDto {
+    pub view: u32,
+    pub photo: String,
+    /// Whether it got a pose at all.
+    pub registered: bool,
+    pub triangles_seen: u32,
+    /// That, over the finished triangle count.
+    pub fraction: f64,
+}
+
+/// The coverage and overlap readout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageDto {
+    pub triangles: u32,
+    pub views: Vec<CoverageViewDto>,
+    pub seen_by_none: u32,
+    pub seen_by_one: u32,
+    pub seen_by_two_or_more: u32,
+    pub unseen_texels: u32,
+    pub covered_texels: u32,
+    /// Seen by at least one camera, as a fraction.
+    pub covered_fraction: f64,
+    /// Seen by two or more — the redundancy the method rests on.
+    pub overlap_fraction: f64,
+}
+
+/// The numbers a finished run produced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureResultDto {
+    pub registered: u32,
+    pub views: u32,
+    pub points: u32,
+    pub reprojection_rms_px: f64,
+    pub dense_triangles: u32,
+    pub voxel_size: f64,
+    pub triangles: u32,
+    pub vertices: u32,
+    pub charts: u32,
+    pub atlas_coverage: f64,
+    /// The longest side in **baseline units** — what a known real-world length
+    /// is divided by to get [`CaptureSettingsDto::metres_per_unit`]. It does
+    /// **not** move when the scale does, so a second correction is computed
+    /// against the same number as the first.
+    pub extent_units: f64,
+    /// The same side at the scale the run used, in metres.
+    pub extent_metres: f64,
+    pub coverage: CoverageDto,
+    /// Wall clock per stage, in `load, sfm, dense, finish, write` order.
+    #[ts(type = "number[]")]
+    pub elapsed_ms: Vec<u64>,
+}
+
+/// Everything the capture panel renders.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureStatusDto {
+    /// `"idle" | "running" | "ready" | "imported" | "failed" | "cancelled"`.
+    pub state: String,
+    /// The stage in flight, when one is.
+    pub stage: Option<String>,
+    /// The run these events belong to.
+    #[ts(type = "number")]
+    pub run: u64,
+    pub photos: Vec<PhotoEntryDto>,
+    pub settings: CaptureSettingsDto,
+    /// The pre-flight before a run, the product's findings after one.
+    pub issues: Vec<CaptureIssueDto>,
+    pub result: Option<CaptureResultDto>,
+    /// The refusal that ended a run.
+    pub error: Option<String>,
+    /// Where an import will write, relative to the content root.
+    pub folder: String,
+}
+
+/// One `photogrammetry://progress` event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureProgressDto {
+    #[ts(type = "number")]
+    pub run: u64,
+    /// `"load" | "sfm" | "dense" | "finish" | "write"`.
+    pub stage: String,
+    /// Its position in the pipeline, so a bar can show overall progress without
+    /// a second copy of the stage order.
+    pub stage_index: u32,
+    /// How many stages there are.
+    pub stages: u32,
+    /// `"started" | "progress" | "finished" | "failed" | "cancelled"`.
+    pub phase: String,
+    #[ts(type = "number")]
+    pub done: u64,
+    #[ts(type = "number")]
+    pub total: u64,
+    pub detail: String,
+    pub error: Option<String>,
+}
+
+/// The preview, as data-URL PNGs.
+///
+/// Two images because the offscreen path draws **geometry**: binding a real
+/// base-colour texture in the preview session is the standing P7 follow-up, so
+/// the atlas is shown beside the render through the CPU texture door the Content
+/// Drawer already uses. Either may be absent — the geometry needs a GPU adapter
+/// and the atlas does not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CapturePreviewDto {
+    /// The shaded mesh, rendered offscreen.
+    pub geometry: Option<String>,
+    /// The baked base-colour atlas, decoded on the CPU.
+    pub albedo: Option<String>,
+    /// Why the geometry preview is absent.
+    pub error: Option<String>,
+    pub size: u32,
+}
+
+/// What an import wrote.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureImportDto {
+    pub mesh: String,
+    pub albedo: String,
+    pub normal: String,
+    pub orm: String,
+    pub material: String,
+    /// The content sub-folder they landed in.
+    pub folder: String,
+    /// The asset name they were written under.
+    pub name: String,
+    /// Things a caller needs to know now that the scan is on disk — the
+    /// placeholder-cube note among them.
+    pub notes: Vec<String>,
+}
+
+impl CaptureSettingsDto {
+    /// The wire form of a Ring-1 configuration.
+    pub fn from_config(cfg: &crate::capture::CaptureConfig) -> Self {
+        Self {
+            camera: CaptureCameraDto {
+                focal_ratio: cfg.camera.focal_ratio,
+                k1: cfg.camera.k1,
+                k2: cfg.camera.k2,
+            },
+            metres_per_unit: cfg.finish.metres_per_unit,
+            target_triangles: cfg.finish.target_triangles as u32,
+            atlas_size: cfg.finish.bake.size,
+            ao_rays: cfg.finish.bake.ao_rays as u32,
+            trim_unseen: cfg.finish.trim_unseen,
+            delight: cfg.finish.delight.enabled,
+            roughness: cfg.finish.roughness,
+            metallic: cfg.finish.metallic,
+        }
+    }
+
+    /// Overlay these settings onto `base`, leaving every field the wizard does
+    /// not expose exactly where it was.
+    ///
+    /// An overlay rather than a construction, because the solvers' committed
+    /// constants are not on the wire and a `CaptureConfig::default()` here would
+    /// silently reset any that a future caller had set.
+    pub fn to_config(&self, base: &crate::capture::CaptureConfig) -> crate::capture::CaptureConfig {
+        let mut cfg = base.clone();
+        cfg.camera.focal_ratio = self.camera.focal_ratio;
+        cfg.camera.k1 = self.camera.k1;
+        cfg.camera.k2 = self.camera.k2;
+        cfg.finish.metres_per_unit = self.metres_per_unit;
+        cfg.finish.target_triangles = self.target_triangles as usize;
+        cfg.finish.bake.size = self.atlas_size;
+        cfg.finish.bake.ao_rays = self.ao_rays as usize;
+        cfg.finish.trim_unseen = self.trim_unseen;
+        cfg.finish.delight.enabled = self.delight;
+        cfg.finish.roughness = self.roughness;
+        cfg.finish.metallic = self.metallic;
+        cfg
+    }
+}
+
+impl CaptureIssueDto {
+    /// The wire form of a finding — its severity, its stage and its own words.
+    pub fn from_issue(issue: &crate::capture::CaptureIssue) -> Self {
+        Self {
+            severity: issue.severity().name().to_string(),
+            stage: issue.stage().name().to_string(),
+            message: issue.to_string(),
+        }
+    }
+}
+
+impl CoverageDto {
+    /// The wire form of a coverage report.
+    pub fn from_report(report: &crate::capture::CoverageReport) -> Self {
+        Self {
+            triangles: report.triangles as u32,
+            views: report
+                .views
+                .iter()
+                .map(|v| CoverageViewDto {
+                    view: v.view,
+                    photo: v.photo.clone(),
+                    registered: v.registered,
+                    triangles_seen: v.triangles_seen as u32,
+                    fraction: v.fraction,
+                })
+                .collect(),
+            seen_by_none: report.seen_by_none as u32,
+            seen_by_one: report.seen_by_one as u32,
+            seen_by_two_or_more: report.seen_by_two_or_more as u32,
+            unseen_texels: report.unseen_texels as u32,
+            covered_texels: report.covered_texels as u32,
+            covered_fraction: report.covered_fraction(),
+            overlap_fraction: report.overlap_fraction(),
+        }
+    }
+}
+
+impl CaptureResultDto {
+    /// The wire form of a finished product, at the scale it was finished with.
+    pub fn from_product(product: &crate::capture::CaptureProduct, metres_per_unit: f64) -> Self {
+        let sfm = &product.reconstruction.report;
+        let finish = &product.finished.report;
+        Self {
+            registered: sfm.registered as u32,
+            views: sfm.views as u32,
+            points: sfm.points as u32,
+            reprojection_rms_px: sfm.reprojection_rms_px,
+            dense_triangles: finish.dense_triangles as u32,
+            voxel_size: finish.voxel_size,
+            triangles: finish.final_triangles as u32,
+            vertices: finish.final_vertices as u32,
+            charts: finish.charts as u32,
+            atlas_coverage: finish.atlas_coverage,
+            extent_units: product.extent_units,
+            extent_metres: product.extent_units * metres_per_unit,
+            coverage: CoverageDto::from_report(&product.coverage),
+            elapsed_ms: product.elapsed_ms.to_vec(),
+        }
+    }
+}
+
+impl CaptureProgressDto {
+    /// The wire form of one progress event.
+    pub fn from_progress(event: &crate::capture::CaptureProgress) -> Self {
+        Self {
+            run: event.run,
+            stage: event.stage.name().to_string(),
+            stage_index: event.stage.index() as u32,
+            stages: crate::capture::CaptureStage::ALL.len() as u32,
+            phase: event.phase.name().to_string(),
+            done: event.done,
+            total: event.total,
+            detail: event.detail.clone(),
+            error: event.error.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod capture_ipc_tests {
+    use super::*;
+    use crate::capture::CaptureConfig;
+
+    /// Every knob the panel offers survives the round trip, and every one it
+    /// does NOT offer is left exactly where the base config had it.
+    #[test]
+    fn the_settings_overlay_carries_what_it_shows_and_moves_nothing_else() {
+        let mut base = CaptureConfig::default();
+        // A field the wizard deliberately does not expose.
+        base.sfm.max_reprojection_px = 3.25;
+        base.dense.min_cameras = 5;
+        base.finish.seam_smoothing_passes = 7;
+
+        let mut dto = CaptureSettingsDto::from_config(&base);
+        dto.camera.focal_ratio = 0.9375;
+        dto.camera.k1 = -0.09;
+        dto.camera.k2 = 0.02;
+        dto.metres_per_unit = 0.25;
+        dto.target_triangles = 12_345;
+        dto.atlas_size = 512;
+        dto.ao_rays = 8;
+        dto.trim_unseen = false;
+        dto.delight = true;
+        dto.roughness = 0.4;
+        dto.metallic = 0.6;
+
+        let cfg = dto.to_config(&base);
+        assert_eq!(cfg.camera.focal_ratio, 0.9375);
+        assert_eq!((cfg.camera.k1, cfg.camera.k2), (-0.09, 0.02));
+        assert_eq!(cfg.finish.metres_per_unit, 0.25);
+        assert_eq!(cfg.finish.target_triangles, 12_345);
+        assert_eq!(cfg.finish.bake.size, 512);
+        assert_eq!(cfg.finish.bake.ao_rays, 8);
+        assert!(!cfg.finish.trim_unseen);
+        assert!(cfg.finish.delight.enabled);
+        assert_eq!((cfg.finish.roughness, cfg.finish.metallic), (0.4, 0.6));
+        // The unexposed three are untouched.
+        assert_eq!(cfg.sfm.max_reprojection_px, 3.25);
+        assert_eq!(cfg.dense.min_cameras, 5);
+        assert_eq!(cfg.finish.seam_smoothing_passes, 7);
+        // …and the round trip is a fixed point.
+        assert_eq!(CaptureSettingsDto::from_config(&cfg), dto);
+    }
+
+    /// A finding's wire form is its own severity, stage and sentence — three
+    /// strings the panel groups by, and none of them re-derived.
+    #[test]
+    fn a_finding_crosses_the_wire_with_its_severity_and_its_stage() {
+        let issue = crate::capture::CaptureIssue::SingleCoverage {
+            triangles: 12,
+            examined: 100,
+        };
+        let dto = CaptureIssueDto::from_issue(&issue);
+        assert_eq!(dto.severity, "warning");
+        assert_eq!(dto.stage, "finish");
+        assert_eq!(dto.message, issue.to_string());
+
+        let blocking = crate::capture::CaptureIssue::TooFewPhotos {
+            given: 1,
+            required: 3,
+        };
+        assert_eq!(CaptureIssueDto::from_issue(&blocking).severity, "blocking");
+        assert_eq!(CaptureIssueDto::from_issue(&blocking).stage, "load");
+    }
+
+    /// The progress event carries the stage's position and the pipeline's
+    /// length, so a bar does not need a second copy of the stage order.
+    #[test]
+    fn a_progress_event_carries_where_it_is_in_the_pipeline() {
+        let event = crate::capture::CaptureProgress {
+            run: 3,
+            stage: crate::capture::CaptureStage::Dense,
+            phase: crate::capture::CapturePhase::Progress,
+            done: 2,
+            total: 5,
+            detail: "depth maps".into(),
+            error: None,
+        };
+        let dto = CaptureProgressDto::from_progress(&event);
+        assert_eq!(dto.stage, "dense");
+        assert_eq!(dto.stage_index, 2);
+        assert_eq!(dto.stages, 5);
+        assert_eq!(dto.phase, "progress");
+        assert_eq!((dto.done, dto.total), (2, 5));
+    }
+}
+
 #[cfg(test)]
 mod mixer_tests {
     use super::*;

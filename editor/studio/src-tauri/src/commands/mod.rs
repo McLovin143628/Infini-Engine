@@ -19,6 +19,8 @@ mod lsp;
 mod material;
 mod package;
 mod pcg;
+// P25.4 the capture wizard: photographs to a standard asset.
+mod photogrammetry;
 mod pie;
 mod project;
 mod scene;
@@ -42,6 +44,7 @@ pub use graph::GraphState;
 pub use lsp::LspState;
 pub use material::MaterialState;
 pub use pcg::PcgState;
+pub use photogrammetry::PhotogrammetryState;
 pub use pie::PieState;
 pub use project::ProjectState;
 pub use scene::{recover_scene_on_boot, SceneState};
@@ -133,6 +136,17 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         character::character_preview,
         character::character_create,
         character::character_folder,
+        // P25.4 the capture wizard: photographs -> reconstruct with progress ->
+        // preview through the offscreen path -> import.
+        photogrammetry::photo_status,
+        photogrammetry::photo_load,
+        photogrammetry::photo_set_settings,
+        photogrammetry::photo_start,
+        photogrammetry::photo_refinish,
+        photogrammetry::photo_cancel,
+        photogrammetry::photo_reset,
+        photogrammetry::photo_preview,
+        photogrammetry::photo_import,
         skel::skel_create_template,
         skel::skel_open,
         skel::skel_close,

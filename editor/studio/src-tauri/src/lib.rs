@@ -58,6 +58,7 @@ pub fn run() {
         .manage(commands::SmEditorState::default())
         .manage(commands::ErosionState::default())
         .manage(commands::SequencerState::default())
+        .manage(commands::PhotogrammetryState::default())
         .invoke_handler(commands::invoke_handler())
         .setup(|app| {
             logging::attach_app(app.handle().clone());
