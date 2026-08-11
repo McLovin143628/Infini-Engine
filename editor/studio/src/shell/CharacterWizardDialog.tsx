@@ -140,8 +140,16 @@ export default function CharacterWizardDialog() {
                 <Section title="Rig">
                   <RigDiagram />
                   <Row label="Joints" value={rig ? String(rig.joints.length) : "—"} />
+                  {/*
+                    NOT "Height": this is the span between the lowest and highest
+                    JOINT, and a template rig's topmost joint is the head, at 93 %
+                    of the requested height. "Height: 1.63" beside a field the
+                    author typed 1.75 into reads as a bug. On the fitted path it
+                    is the number worth reading — it comes from the mesh.
+                  */}
                   <Row
-                    label="Height"
+                    label="Joint span"
+                    title="Lowest to highest joint in the bind pose. A template rig's top joint is the head, so this is short of the requested height; a fitted rig takes the mesh's."
                     value={rig ? `${rig.heightM.toFixed(2)} m` : "—"}
                   />
                   <Row label="Sockets" value={rig ? String(rig.sockets.length) : "—"} />

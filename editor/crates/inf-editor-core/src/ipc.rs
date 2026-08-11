@@ -2787,9 +2787,12 @@ pub struct CharacterRigDto {
     pub sockets: Vec<String>,
     /// Joints carrying a rotation limit — the IK input the template emits.
     pub limits: u32,
-    /// The rig's real bind-pose extent along Y (metres). **Not** the requested
-    /// height: a fitted rig takes the mesh's, and reading it back is how an
-    /// author sees the fit worked.
+    /// The span between the rig's lowest and highest **joint** in the bind pose
+    /// (metres). **Not** the requested height and not the creature's: a template
+    /// rig's topmost joint is `head`, at `head_height_ratio × height_m`, so a
+    /// 1.75 m biped reads 1.6275. A fitted rig takes the mesh's, which is what
+    /// makes this the fit's readout. The panel labels it "Joint span" for that
+    /// reason.
     pub height_m: f64,
     pub legs: Vec<CharacterLegDto>,
     /// idle / walk / run cycle lengths, seconds.

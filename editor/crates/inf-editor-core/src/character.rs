@@ -270,7 +270,21 @@ fn rig_for(
     ))
 }
 
-/// The rig's bind-pose extent along Y, metres — its real standing height.
+/// The rig's bind-pose extent along Y, metres — the span between its lowest and
+/// highest **joint**.
+///
+/// **Not the creature's standing height**, and the difference is not noise: a
+/// template rig's topmost joint is `head`, which
+/// [`inf_anim::build_template`] places at `head_height_ratio × height_m`, so a
+/// 1.75 m biped measures **1.6275** here. The skull above that joint is geometry
+/// and geometry has no joints. A fitted rig measures whatever the fit put in the
+/// mesh, which is the number worth reading — it is how an author sees the fit
+/// took the model's proportions rather than the spec's.
+///
+/// Pinned as that identity rather than with a tolerance by
+/// `the_previewed_height_is_the_joint_span_and_not_the_requested_height`; the
+/// panel labels the row accordingly, because "Height: 1.63" beside a field the
+/// author typed 1.75 into reads as a bug.
 fn rig_height_m(rig: &SkeletonAsset) -> f64 {
     let mut mats: Vec<glam::Mat4> = Vec::with_capacity(rig.skeleton.len());
     let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
@@ -801,10 +815,44 @@ mod tests {
         assert_eq!(p.joints[0].name, "hips");
         assert_eq!(p.legs.len(), 2);
         assert!(p.limits >= 4, "knees and elbows carry hinges");
-        assert!((p.height_m - 1.75).abs() < 0.2, "{} m", p.height_m);
         assert!(p.walk_threshold_m_s < p.run_threshold_m_s);
         let (verts, tris) = p.body.expect("a mannequin is previewed");
         assert!(verts > 100 && tris > 50, "{verts} verts / {tris} tris");
+    }
+
+    /// **The previewed height is the JOINT SPAN, and it is not what was asked
+    /// for** (audit F4).
+    ///
+    /// The first version of this asserted `(height_m - 1.75).abs() < 0.2`, which
+    /// is a tolerance wide enough to hide the whole relationship: the answer is
+    /// systematically 7 % low, because the topmost joint of a template rig is
+    /// `head` at `head_height_ratio × height_m` and the skull above it carries no
+    /// joint. Pinned as that identity, on three heights, so the number is
+    /// explained rather than approximated — and so a generator that started
+    /// emitting a joint above the head fails here instead of drifting inside a
+    /// band.
+    #[test]
+    fn the_previewed_height_is_the_joint_span_and_not_the_requested_height() {
+        for h in [0.9, 1.75, 2.6] {
+            let spec = CharacterSpec {
+                params: BodyParams {
+                    height_m: h,
+                    ..BodyParams::default()
+                },
+                ..CharacterSpec::default()
+            };
+            let p = preview_character(&spec, None).unwrap();
+            let want = h * BodyParams::default().head_height_ratio;
+            assert!(
+                (p.height_m - want).abs() < 1.0e-4,
+                "a {h} m spec previews {} m; the head joint sits at {want} m",
+                p.height_m
+            );
+            assert!(
+                p.height_m < h,
+                "the joint span cannot reach the standing height"
+            );
+        }
     }
 
     /// **A proportion reaches the preview.** The "shape it" step is only a step
