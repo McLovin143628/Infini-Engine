@@ -237,6 +237,17 @@ export const useCharacterWizardStore = create<CharacterWizardState>((set, get) =
 
   setAddToScene: (addToScene) => set({ addToScene }),
 
+  /**
+   * Re-preview the current spec.
+   *
+   * **Not debounced, and that is a cost on one of the two paths.** With no mesh
+   * the backend generates a template rig and three clips, which is arithmetic.
+   * With a mesh it also decodes the whole `.inf_mesh` off disk (uncached), builds
+   * the kernel, tessellates, builds a BVH and runs the fit — per keystroke. The
+   * bound is written up on `inf_editor_core::character::preview_character`, with
+   * the three shapes a fix could take; it is not decided here because it is the
+   * wizard's interaction model rather than a repair.
+   */
   refresh: async () => {
     const spec = get().spec;
     const local = specIssue(spec);

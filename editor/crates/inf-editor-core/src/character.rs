@@ -308,9 +308,25 @@ fn rig_height_m(rig: &SkeletonAsset) -> f64 {
 
 /// Describe what [`build_character`] would produce, without touching the disk.
 ///
-/// `fit_source` is the decoded `.inf_mesh` when the spec names one; the Ring-2
-/// caller loads it, because Ring 1 taking an [`AssetProject`] here would make a
-/// slider drag a database read.
+/// `fit_source` is the decoded `.inf_mesh` when the spec names one. Taking the
+/// payload rather than an [`AssetProject`] is a **ring** decision — this function
+/// has no business holding a database — and it is worth saying plainly that it is
+/// not a performance one, because the first version of this sentence claimed it
+/// was.
+///
+/// # What a slider drag actually costs, stated rather than implied
+///
+/// The panel re-previews on every edit and nothing debounces it, so on the
+/// **fitted** path one keystroke is: `AssetProject::load_payload` (a `read` plus
+/// a decode of the whole mesh, uncached), then [`fit_rig_to_mesh`] — a kernel
+/// build, a tessellation, a BVH and the fit itself — and then all three clips.
+/// The mannequin path is cheap and is the default; the fitted path is linear in
+/// the author's model and will be felt on a real one.
+///
+/// Ledgered rather than fixed because the fix is a design decision with more than
+/// one shape (debounce the panel, cache the decode by id, or cache the BVH by
+/// content hash), and picking one inside an audit would be choosing the wizard's
+/// interaction model on the way past.
 pub fn preview_character(
     spec: &CharacterSpec,
     fit_source: Option<&MeshAsset>,
