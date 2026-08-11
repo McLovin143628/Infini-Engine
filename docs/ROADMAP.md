@@ -23,7 +23,7 @@ interchangeably, because graphs transpile to real Rust source and stay bidirecti
 9. [Platform strategy](#9-platform-strategy)
 10. [Porting inventory](#10-porting-inventory)
 11. [Post-plan status — UE-Parity Wave 1](#11-post-plan-status--ue-parity-wave-1-2026-07-22-complete)
-12. [Next-Gen Wave — Phases 16–25](#12-next-gen-wave--phases-1625-planned-2026-07-31) — 10 phases
+12. [Next-Gen Wave — Phases 16–28](#12-next-gen-wave--phases-1625-planned-2026-07-31) — 13 phases
 
 ---
 
@@ -1109,7 +1109,7 @@ material functions, multi-viewport, PIE player options.
 
 ---
 
-## 12. Next-Gen Wave — Phases 16–25 (planned 2026-07-31; **P16–P20 COMPLETE**)
+## 12. Next-Gen Wave — Phases 16–28 (planned 2026-07-31, extended 2026-08-10; **P16–P23 COMPLETE**)
 
 The 16-phase master plan (§6) and UE-Parity Wave 1 (§11) are complete and CI-green: the engine
 now does what a mature traditional engine does. This wave pushes past that workflow —
@@ -1118,6 +1118,11 @@ with a structure grammar and fully enterable furnished buildings, realistic wate
 (diggable) terrain, deformation and destruction, an embedded DCC suite, and in-engine
 photogrammetry. Foundation-first order, one phase in flight at a time, each sub-phase ≈ one
 reviewable commit.
+
+**Extended 2026-08-10 (user decision):** Phases 26–28 append the **Virtualize Everything**
+arc — Streaming Virtual Texturing, Virtual Shadow Maps, and the unified Nanite-native
+streamer — per the external direction document, grounded and ruled in
+`docs/memos/p26-28-virtualization-direction.md`.
 
 **Execution doctrine:** every phase keeps the house gates — determinism (replay traces),
 goldens, PIE == shipping, CI on three OSes; schema bumps land at most one per phase via the
@@ -8262,6 +8267,154 @@ in-engine, with no external reconstruction dependency.
   4. optional de-lighting v1.
 - **P25.4 Capture wizard** — 1. drop photos → reconstruct with progress → preview through the
   offscreen path → import; 2. failure diagnostics (coverage and overlap warnings).
+
+### Phase 26 — Streaming Virtual Texturing (SVT)
+
+**Goal:** material textures reach the interactive renderer for the first time — and they are
+virtual from day one. Texture VRAM cost scales with *screen pixels sampled*, not with scene
+texture bytes; a scene referencing far more texture data than the physical pool renders
+inside a fixed budget. **Done when:** a gate scene whose referenced texture bytes exceed the
+physical pool severalfold renders through the VT path with the pool inside budget, sampled
+detail refines under camera approach on a scripted path with a **bit-exact residency trace**
+(twice per run, and PIE == shipping), missing-tile fallback always lands on the finest
+resident ancestor (asserted as state, never pixels alone), and Low tier degrades through the
+same door (`RenderTier::apply` clamps, never enables).
+
+Grounding (measured 2026-08-10, `docs/memos/p26-28-virtualization-direction.md`): nothing
+binds `.inf_tex` in the interactive renderer today — material data is per-instance vertex
+attributes; `.inf_tex` is a bincode payload with no byte-addressable tiles; no BC format is
+uploaded anywhere and `TEXTURE_COMPRESSION_BC` is not requested. SVT is greenfield, and it
+closes the Phase-7 "bind real referenced textures" follow-up through the virtual door — one
+door for editor viewport, PIE and shipping.
+
+- **P26.1 Tiled container + BC upload** — 1. `.inf_tex` **v2 raw-image sectioned container**
+  (the `.inf_vmesh` v2 precedent: magic + aligned tile directory + 16-byte-aligned BC1/BC3
+  tile blobs, 128×128-texel tiles with border texels baked per tile for filtering; never
+  through `inf_asset::encode`; v1 payloads keep loading via sniff); 2. cook/import emits v2
+  with a full tile pyramid; 3. `TEXTURE_COMPRESSION_BC` requested as adapter-probed optional
+  feature + `caps.rs` clamp + tier tests (absent → CPU transcode to RGBA8 pages through the
+  same residency door).
+- **P26.2 Physical pool + indirection (Ring 0, GPU-free first)** — 1. `inf-vt` residency:
+  page-slot suballocator + LRU eviction under a byte budget, per-texture virtual→physical
+  page table with finest-resident-ancestor fallback pointers, global monotone stamps (the
+  vgeom/terrain pattern), unit-tested with no adapter; 2. the GPU mirror: one physical page
+  atlas (BC) + one indirection texture per pool, transactional upload/evict.
+- **P26.3 VT sampling in the lit passes** — 1. `vt_sample()` in WGSL (virtual UV →
+  indirection → atlas UV, gradient-corrected mip, border-texel filtering); 2. mesh + vgeom +
+  skinned fragment paths gain albedo/normal/ORM through VT (per-instance texture-set id
+  replaces nothing — the scalar attributes remain the no-texture fallback); 3. the bind-group
+  budget ruling executed (fold VT bindings into the env group past index 13, or a probed
+  limit raise — measured, memo'd); 4. `.inf_mat` texture references finally resolve in the
+  interactive viewport and the player identically.
+- **P26.4 Deterministic feedback + streaming loop** — 1. the feedback pass: per-tile
+  coverage as an **order-independent bitmask** (atomicOr, fixed layout — content is a pure
+  function of camera/scene/residency, the ruling that reconciles GPU feedback with the
+  replay doctrine in `inf-vgeom/src/stream.rs:57-68`); 2. the codebase's first non-blocking
+  readback ring with a **pinned N=2 frame latency**, built once as a reusable `inf-render`
+  primitive; 3. CPU request scan in virtual-address order; async tile loads on the job pool
+  from mmap packs; 4. the analytic want-set floor (camera + bounds → conservative tile set)
+  computed every frame — feedback refines and can never regress residency below it; a
+  dropped feedback frame degrades to the floor, deterministically; 5. pop-in instrumented:
+  frames-at-fallback counters per tile class, budgeted in the gate.
+- **P26.5 Editor, tiers & the gate** — 1. VT residency heatmap debug view mode + pool budget
+  knobs per tier; 2. missing-tile fill v1: deterministic edge-directed upscale of the finest
+  resident ancestor (the NTC intent, measured before adoption; memo on the outcome);
+  3. `phase26_gate` arms in house style: (a) scripted-path residency trace bit-exact twice,
+  (b) PIE == shipping on the trace, (c) over-budget scene stays under pool budget and every
+  sample lands on the finest resident ancestor (assert the WORLD), (d) engagement counters
+  nonzero on VT scenes and zero encoder touches on textureless scenes, (e) inside
+  `FRAME_BUDGET_MS`, (f) golden set pinned (additive goldens only). Mutation-verified per the
+  house law.
+
+### Phase 27 — Virtual Shadow Maps (VSM)
+
+**Goal:** shadow resolution becomes virtual — 16k-equivalent per light paid only for pages
+that shadow visible pixels; every caster path casts (vgeom's "casts no shadows" hole closes
+here); point/spot lights get shadows at last; static pages cache across frames. **Done
+when:** directional + spot + point shadows render through the page atlas at ≥8k effective on
+High tier, a static scene re-rasterizes **zero** pages after warm-up (engagement-counter
+proven, falsifiable), moving one object invalidates exactly the pages its bounds touch,
+vgeom/skinned/terrain/rigid all cast, the page-allocation trace is deterministic and
+PIE == shipping holds, and Low tier keeps CSM through `RenderTier::apply`.
+
+Grounding: today's shadows are a compile-time 3×2048² forward-Z CSM, off by default,
+re-rendered every frame, rigid+scatter casters only, no caching, no point/spot, and no
+scissor use anywhere in the pass tree. VSM reuses P26's machinery: page tables, monotone
+stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency shape.
+
+- **P27.1 Page marking + allocation** — 1. screen-driven page marking: depth buffer →
+  light-space page coords → needed-page bitmask (order-independent, deterministic content);
+  2. virtual quadtree per light — clipmap levels for the directional sun, face quadtrees for
+  point, single quadtree for spot; 3. physical `Depth32Float` page atlas + Ring-0 free-list
+  allocator with stamps, unit-tested with no adapter; 4. the depth-convention ruling: pages
+  adopt the camera's reverse-Z unless measurement defends keeping the forward-Z exception
+  (memo either way).
+- **P27.2 Casters into pages** — 1. per-page culling on GPU (instances and meshlets against
+  page frusta) into per-page visible lists; one `draw_indirect` per dirty page (no
+  `MULTI_DRAW_INDIRECT` — the two-buffer vgeom precedent), `set_viewport`/`set_scissor` per
+  page (the tree's first scissor use); 2. all caster paths: rigid, **vgeom meshlets**,
+  skinned, terrain, scatter — masked materials keep alpha-test in the page raster.
+- **P27.3 Page caching + invalidation** — 1. cached pages keyed on (light, page, content
+  stamp); static pages survive frames untouched; 2. movement invalidates exactly the pages
+  the mover's light-space bounds touch (page-exact, engagement-counter proven); light
+  moves/rotations invalidate their own tree only; origin rebase and camera cuts invalidate
+  via the `is_camera_cut` precedent; 3. the sun's slow arc: clipmap-level time-slicing so a
+  moving sun re-rasterizes coarse levels lazily inside budget (measured policy, not a magic
+  constant).
+- **P27.4 Receivers + filtering** — 1. `shadow_factor` reads through the page table with
+  PCF that respects page borders (border texels or clamped kernels — measured); 2. clipmap
+  level blend replaces cascade blend; 3. point/spot receiver terms in the lit passes; 4. the
+  bias story re-derived for page-resolution shadows and pinned by goldens.
+- **P27.5 Tiers, retirement & the gate** — 1. High/Medium run VSM; Low keeps CSM (the clamp
+  law); CSM code stays as the fallback, demoted not deleted; 2. GI keeps its own voxel
+  occlusion (the P18 law: camera-driven residency never feeds lighting — VSM pages are
+  camera-driven and stay out of GI); 3. `phase27_gate` arms: (a) deterministic
+  page-allocation trace twice + PIE == shipping, (b) zero page re-rasters on a static scene
+  after warm-up — and the arm FAILS if the counter is dead (a no-op cache also re-rasters
+  zero; the counter must first prove rasters happened), (c) page-exact invalidation on a
+  scripted mover, (d) point/spot engagement, (e) budget, (f) goldens pinned additive.
+
+### Phase 28 — Nanite-native unification: one virtual streamer
+
+**Goal:** the three virtual systems become one system — visibility-buffer shading for
+meshlets, geometry and its texture tiles interleaved in the same disk pages so desync is
+structurally impossible, a single residency brain with predictive prefetch. This is the
+direction document's "better than UE5" headline: UE5 runs three separate page systems and a
+reactive-only streamer. **Done when:** the VisBuffer path shades meshlets with materials
+resolved from per-pixel primitive IDs at golden-parity with the forward path, a cluster page
+carries its texture tiles in one aligned pack page and a single transaction admits both (the
+"high-poly mesh with a blurry texture" artifact is asserted impossible as a state invariant),
+one streamer arbitrates vgeom + SVT + VSM under one budget with one feedback ring, and a
+scripted 360° whip-pan shows measurably fewer fallback-frames with the predictor on than off
+(A/B inside the gate, counters not pixels).
+
+- **P28.1 Visibility buffer** — 1. single-sample `R32Uint` VisBuffer (instance⊕meshlet⊕tri
+  packing; depth-tested last-writer-wins keeps determinism by the same argument as today's
+  opaque raster) rendered by the meshlet path; 2. the material-resolve pass: reconstruct
+  barycentrics + analytic UV gradients from IDs, shade in screen-space material bins;
+  3. the MSAA ruling measured and memo'd: VisBuffer+TAA becomes the High-tier default or
+  stays behind a setting — decided by goldens and frame budget, not taste; the forward
+  meshlet path remains as the fallback and the parity control.
+- **P28.2 Interleaved cluster pages** — 1. cook emits mesh-page + referenced-texture-tile
+  sections interleaved per virtual cluster page (`.inf_vmesh` v3 sections or a pack-layout
+  extension — decided at cook, raw-image law holds); 2. one page-in transaction feeds both
+  the geometry pools and the VT atlas; partial admission is impossible by construction and
+  the gate asserts the invariant (a resident cluster's tiles are resident, always).
+- **P28.3 One streamer** — 1. `inf-stream`: the vgeom planner, VT residency and VSM page
+  cache become consumers of one budget arbiter + one feedback/readback ring + one stamp
+  domain + one want pipeline (analytic floor ∪ feedback refinement ∪ predictor); 2. per-tier
+  unified budgets replace the three local ones (ratchets keep CI honest); 3. eviction is
+  cross-system aware (a cluster's tiles and pages age together).
+- **P28.4 Predictive prefetch** — 1. deterministic dead-reckoning over committed input
+  history (camera velocity + angular momentum, 200–500 ms horizon — a pure function, the
+  memo's neural-predictor deviation); 2. speculative wants enter at strictly lower priority
+  than the analytic floor and feedback; 3. the A/B whip-pan gate arm: predictor off vs on,
+  fallback-frame counters strictly reduced, bit-exact trace per arm.
+- **P28.5 Ray-query shadow experiment (never load-bearing)** — 1. adapter/feature probe for
+  ray queries in the pinned wgpu; where present, BLAS over meshlet clusters + per-frame TLAS,
+  sun shadows via ray query compared against VSM output on goldens; 2. a memo with the
+  measured verdict (quality, cost, coverage); VSM remains the shipped path on every tier;
+  the experiment lands behind a default-off setting with a `caps.rs` clamp.
 
 ---
 
