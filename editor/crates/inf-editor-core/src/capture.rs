@@ -40,6 +40,29 @@
 //! matters: a cancelled run has written **nothing**, because writing is a
 //! separate stage the user starts.
 //!
+//! `Finish` is the last **automatic** stage, so a Cancel arriving while it runs
+//! finds no stage left to skip: the run completes and settles
+//! [`CaptureState::Ready`] with its product in hand. Same for a
+//! [`refinish`](PhotogrammetrySession::refinish), which is that stage alone.
+//! The guarantee is unchanged — `Write` is the user's — and throwing away
+//! minutes of finished work to honour a button that arrived at the end would be
+//! the expensive kind of literalism. It is written here, gated in
+//! `capture_wizard_gate`, and said in the panel, because a Cancel whose effect
+//! depends on when it lands has to say so.
+//!
+//! # The worker is the only thing that can end a run, so it may not die quietly
+//!
+//! Every terminal state is published by the worker, which means a worker that
+//! **panics** would leave the session `Running` for the life of the process,
+//! with Cancel answering `true` to nobody and Start refusing `Busy` for ever.
+//! [`run_guarded`] catches the unwind and settles the run `Failed` carrying the
+//! panic's own words, so a bug in a solver reaches a user in the same shape a
+//! refusal does. The doors that do not go through the worker
+//! ([`PhotogrammetrySession::load_photos`],
+//! [`PhotogrammetrySession::reset`]) refuse or wait rather than reaching around
+//! a run in flight, for the same reason: two things that each believe they own
+//! the session is how a Cancel button stops working.
+//!
 //! # Diagnostics are the second half of the spec, not a log
 //!
 //! Everything that can be said about a capture is a typed [`CaptureIssue`] with
@@ -892,7 +915,17 @@ impl PhotogrammetrySession {
     /// Decoding is what makes this the pre-flight rather than a guess: a file
     /// that cannot be decoded is named here, at the moment it is dropped on the
     /// dialog, rather than three minutes into a solve.
-    pub fn load_photos(&mut self, paths: &[PathBuf]) -> Vec<CaptureIssue> {
+    ///
+    /// **Refuses [`CaptureError::Busy`] while a run is in flight**, by name,
+    /// like [`start`](Self::start) does. Not a formality: this replaces the
+    /// published state as well as the photographs, so a load during a solve used
+    /// to leave the session reading `Idle` over a worker still running — Cancel
+    /// would answer `false`, and minutes later that worker would publish a
+    /// product for photographs nobody has loaded any more.
+    pub fn load_photos(&mut self, paths: &[PathBuf]) -> Result<Vec<CaptureIssue>, CaptureError> {
+        if matches!(self.state(), CaptureState::Running(_)) {
+            return Err(CaptureError::Busy);
+        }
         let mut entries = Vec::with_capacity(paths.len());
         let mut loaded = Vec::new();
         let mut issues = Vec::new();
@@ -941,7 +974,7 @@ impl PhotogrammetrySession {
             shared.error = None;
             shared.state = None;
         }
-        self.preflight()
+        Ok(self.preflight())
     }
 
     /// Everything the pre-flight has to say about what is loaded **and** the
@@ -1054,7 +1087,9 @@ impl PhotogrammetrySession {
         let handle = std::thread::Builder::new()
             .name("photogrammetry".into())
             .spawn(move || {
-                run_capture(run, photos, cfg, seed, &pool, &cancel, &tx, &shared);
+                run_guarded(run, &tx, &shared, || {
+                    run_capture(run, photos, cfg, seed, &pool, &cancel, &tx, &shared);
+                });
             })
             .map_err(|e| CaptureError::Stage {
                 stage: "start",
@@ -1201,6 +1236,15 @@ impl PhotogrammetrySession {
     }
 
     /// Forget everything: photographs, product, state.
+    ///
+    /// Cancels and then **waits**, rather than refusing like
+    /// [`load_photos`](Self::load_photos) does: a caller resetting is throwing
+    /// the session away, and the only coherent way to do that is to outlive the
+    /// worker that is writing into it. Named after what it costs — cancellation
+    /// is between stages, so this blocks for the rest of the stage in flight, and
+    /// a Ring-2 caller holding a session mutex across it holds it for that long
+    /// too. P25.4's dialog therefore disables every path to it while a run is
+    /// running.
     pub fn reset(&mut self) {
         self.cancel.cancel();
         self.join_worker();
@@ -1259,6 +1303,77 @@ fn resolution_issue(photos: &[LoadedPhoto]) -> Option<CaptureIssue> {
         odd,
         sizes: sizes.len(),
     })
+}
+
+/// Run the worker body and turn a **panic** into a failed run.
+///
+/// # Why a session needs this and an import job does not
+///
+/// Every terminal state a session can reach is published by the worker itself,
+/// so a worker that unwinds publishes nothing and the session stays
+/// `Running(stage)` for ever: [`state`](PhotogrammetrySession::state) keeps
+/// saying running, [`cancel`](PhotogrammetrySession::cancel) sets a flag no
+/// thread will read again and answers `true`, and
+/// [`start`](PhotogrammetrySession::start) refuses `Busy` for the rest of the
+/// process. The wizard on top of it disables Close, Escape, the backdrop and
+/// "Choose other photographs" *while running*, so the only way out of a panicked
+/// stage would be restarting the editor.
+///
+/// The stages are four blocking calls into Ring-0 solvers over real photographs.
+/// A refusal there is an `Err` and is reported; a panic there is a bug, and the
+/// thing a user is owed when a bug happens is the same shape as a refusal —
+/// a failed run, carrying what went wrong, with nothing written. That is all
+/// this does. It does **not** make the session panic-safe in any deeper sense:
+/// the product is not published, so nothing half-built survives.
+///
+/// The lock is taken through the poison, deliberately: the invariant [`Shared`]
+/// carries is "the last thing the worker published", and this is the worker
+/// publishing that it died.
+fn run_guarded(
+    run: u64,
+    tx: &Sender<CaptureProgress>,
+    shared: &Arc<Mutex<Shared>>,
+    body: impl FnOnce(),
+) {
+    let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) else {
+        return;
+    };
+    let message = panic_message(&*payload);
+    let mut guard = match shared.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    // The stage that was in flight is the one that panicked, because the worker
+    // publishes `Running(stage)` as it enters each one.
+    let stage = match guard.state {
+        Some(CaptureState::Running(stage)) => stage,
+        _ => CaptureStage::Load,
+    };
+    let message = format!("{} panicked: {message}", stage.name());
+    guard.state = Some(CaptureState::Failed);
+    guard.error = Some(message.clone());
+    guard.product = None;
+    drop(guard);
+    let _ = tx.send(CaptureProgress {
+        run,
+        stage,
+        phase: CapturePhase::Failed,
+        done: 0,
+        total: 0,
+        detail: String::new(),
+        error: Some(message),
+    });
+}
+
+/// What a caught panic's payload says, for the two shapes `panic!` produces.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "a panic with no message".to_string()
 }
 
 /// The whole worker body: four stages, cancellable between them.
@@ -1736,7 +1851,7 @@ mod tests {
     #[test]
     fn a_session_with_no_photographs_refuses_to_start_and_names_the_shortfall() {
         let mut session = PhotogrammetrySession::new();
-        let issues = session.load_photos(&[]);
+        let issues = session.load_photos(&[]).expect("nothing is running");
         assert!(issues
             .iter()
             .any(|i| matches!(i, CaptureIssue::TooFewPhotos { given: 0, .. })));
@@ -1758,7 +1873,9 @@ mod tests {
         let missing = dir.path().join("gone.png");
 
         let mut session = PhotogrammetrySession::new();
-        let issues = session.load_photos(&[good.clone(), bad.clone(), missing.clone()]);
+        let issues = session
+            .load_photos(&[good.clone(), bad.clone(), missing.clone()])
+            .expect("nothing is running");
         let unreadable: Vec<&CaptureIssue> = issues
             .iter()
             .filter(|i| matches!(i, CaptureIssue::Unreadable { .. }))
@@ -1792,7 +1909,7 @@ mod tests {
         write_test_png(&b, 16, 12);
         write_test_png(&c, 8, 8);
         let mut session = PhotogrammetrySession::new();
-        let issues = session.load_photos(&[a, b, c]);
+        let issues = session.load_photos(&[a, b, c]).expect("nothing is running");
         let issue = issues
             .iter()
             .find(|i| matches!(i, CaptureIssue::MixedResolutions { .. }))
@@ -1810,7 +1927,7 @@ mod tests {
         for p in [&x, &y, &z] {
             write_test_png(p, 16, 12);
         }
-        let issues = session.load_photos(&[x, y, z]);
+        let issues = session.load_photos(&[x, y, z]).expect("nothing is running");
         assert!(
             !issues
                 .iter()
@@ -1856,11 +1973,94 @@ mod tests {
                 p
             })
             .collect();
-        session.load_photos(&paths);
+        session.load_photos(&paths).expect("nothing is running");
         let err = session
             .refinish(Arc::new(JobPool::new(1)))
             .expect_err("nothing to re-finish");
         assert!(matches!(err, CaptureError::NoProduct("re-finish")), "{err}");
+    }
+
+    #[test]
+    fn a_stage_that_panics_settles_the_run_failed_rather_than_running_for_ever() {
+        // The worker is the ONLY thing that publishes a terminal state, so an
+        // unwind out of a solver used to leave the session `Running` for the
+        // life of the process — Cancel answering `true` to nobody, Start
+        // refusing `Busy` for ever, and a dialog whose Close button is disabled
+        // exactly while that is true. This drives `run_guarded` itself, which is
+        // the wrapper `begin` spawns, rather than a copy of it.
+        let (tx, rx) = channel();
+        let shared: Arc<Mutex<Shared>> = Arc::new(Mutex::new(Shared::default()));
+        shared.lock().expect("fresh").state = Some(CaptureState::Running(CaptureStage::Dense));
+        run_guarded(7, &tx, &shared, || panic!("the plane sweep tripped"));
+
+        let guard = shared
+            .lock()
+            .expect("the mutex is taken through the poison");
+        assert_eq!(guard.state, Some(CaptureState::Failed));
+        let error = guard
+            .error
+            .clone()
+            .expect("a failed run carries its refusal");
+        // Named with the stage that was in flight AND the panic's own words.
+        assert!(error.contains("dense panicked"), "{error}");
+        assert!(error.contains("the plane sweep tripped"), "{error}");
+        // Nothing half-built survives.
+        assert!(guard.product.is_none());
+        drop(guard);
+
+        // …and it reaches the stream, on the stage that raised it, for the run
+        // that raised it — the shape the panel already knows how to show.
+        let events: Vec<CaptureProgress> = rx.try_iter().collect();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].phase, CapturePhase::Failed);
+        assert_eq!(events[0].stage, CaptureStage::Dense);
+        assert_eq!(events[0].run, 7);
+        assert!(events[0].error.is_some());
+    }
+
+    #[test]
+    fn a_panic_with_a_formatted_message_keeps_its_words() {
+        // `panic!("{}", x)` boxes a `String` and `panic!("literal")` boxes a
+        // `&'static str`; both are what a solver actually produces, and a
+        // downcast that only handles one reports "a panic with no message" for
+        // the other.
+        let owned =
+            std::panic::catch_unwind(|| panic!("{} views registered", 0)).expect_err("it panicked");
+        assert_eq!(panic_message(&*owned), "0 views registered");
+        let literal =
+            std::panic::catch_unwind(|| panic!("index out of bounds")).expect_err("it panicked");
+        assert_eq!(panic_message(&*literal), "index out of bounds");
+    }
+
+    #[test]
+    fn a_load_during_a_run_is_refused_by_name_rather_than_reaching_around_it() {
+        // Loading replaces the PUBLISHED state as well as the photographs, so a
+        // load during a solve used to leave the session reading `Idle` over a
+        // worker still running: Cancel would answer `false`, and minutes later
+        // that worker would publish a product for photographs nobody has loaded.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let p = dir.path().join(format!("p{i}.png"));
+                write_test_png(&p, 24, 24);
+                p
+            })
+            .collect();
+        let mut session = PhotogrammetrySession::new();
+        session.load_photos(&paths).expect("an idle session loads");
+        // Pretend a run owns the session, which is what the worker publishes as
+        // it enters its first stage.
+        session.shared.lock().expect("fresh").state =
+            Some(CaptureState::Running(CaptureStage::Sfm));
+
+        let err = session
+            .load_photos(&paths[..1])
+            .expect_err("a load during a run must refuse");
+        assert!(matches!(err, CaptureError::Busy), "{err}");
+        // …and it refused rather than half-applying: the three are still loaded
+        // and the run still owns the session.
+        assert_eq!(session.photos().len(), 3);
+        assert_eq!(session.state(), CaptureState::Running(CaptureStage::Sfm));
     }
 
     /// A tiny valid PNG, written through the `png` encoder this crate already

@@ -1,5 +1,5 @@
 //! **The capture wizard's Ring-2 door** (P25.4): photographs to a standard
-//! asset, in ten commands and one event channel.
+//! asset, in nine commands and one event channel.
 //!
 //! Every rule lives in [`inf_editor_core::capture`] (see its module docs);
 //! everything here is the string-to-enum hop at the wire, the two `State`
@@ -162,7 +162,10 @@ pub async fn photo_load(
 ) -> Result<CaptureStatusDto, String> {
     let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
     state.with(|s| {
-        s.load_photos(&paths);
+        // The findings are read back off `status` a line later, so the return
+        // value is dropped and the REFUSAL is not: a load during a run is
+        // `Busy`, by name, exactly as a second `photo_start` is.
+        s.load_photos(&paths).map_err(|e| e.to_string())?;
         Ok(status(s))
     })
 }

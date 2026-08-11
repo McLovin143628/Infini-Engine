@@ -4,11 +4,15 @@
 //!
 //! # What this is a gate over, and what it is not
 //!
-//! It drives [`PhotogrammetrySession`] — the same Ring-1 object the two Tauri
+//! It drives [`PhotogrammetrySession`] — the same Ring-1 object all nine Tauri
 //! commands drive — and nothing else. It does **not** drive the UI: a
 //! `#[tauri::command]` cannot be run from a test on any CI leg, so every rule
 //! worth gating lives on this side of the wire and the command layer is the
-//! string hop the typed-IPC law makes it (P23.4's ruling, met again).
+//! string hop the typed-IPC law makes it (P23.4's ruling, met again). The nine
+//! commands themselves are therefore **untested by design**, and the two rules
+//! that live in them anyway — the status projection and the settings overlay —
+//! have unit tests beside them in `commands/photogrammetry.rs` and
+//! `ipc.rs`.
 //!
 //! The photographs are the P25.2/P25.3 fixture's six renders, **written to a
 //! temporary directory as PNG files** and re-read through `RgbImage::load` —
@@ -79,8 +83,9 @@ use inf_photo_gpu::{fixture, BakeConfig};
 // 225 564 fused triangles, 14 882 finished triangles over 624 charts, an extent
 // of 8.2638 baseline units, and **twenty** findings. Stage wall clock, 4 job
 // workers: load 0 ms, structure from motion 95 ms, dense 991 ms, finish 1844 ms
-// — the whole eleven-arm gate runs in 8.4 s and never skips, because every
-// stage of it is CPU (P25.3's ruling, inherited).
+// — the eleven-arm gate ran in 8.4 s, and the thirteen the P25.4 audit left
+// behind still never skip, because every stage of it is CPU (P25.3's ruling,
+// inherited).
 //
 // MEASURED, coverage: **1.000** of the finished mesh seen by some camera (the
 // unphotographed trim is why), **0.891** seen by two or more, 1 618 triangles
@@ -229,7 +234,7 @@ fn write_png(path: &Path, width: u32, height: u32, colour: png::ColorType, pixel
 fn loaded_session(paths: &[PathBuf]) -> PhotogrammetrySession {
     let mut session = PhotogrammetrySession::new();
     session.set_config(capture_config());
-    let issues = session.load_photos(paths);
+    let issues = session.load_photos(paths).expect("an idle session loads");
     assert!(
         !issues.iter().any(|i| i.blocks()),
         "the fixture's own photographs did not pass the pre-flight: {issues:?}"
@@ -618,7 +623,9 @@ fn the_preflight_refuses_by_name_before_a_run_is_ever_started() {
     // Too few.
     let mut session = PhotogrammetrySession::new();
     session.set_config(capture_config());
-    let issues = session.load_photos(&files[..2]);
+    let issues = session
+        .load_photos(&files[..2])
+        .expect("an idle session loads");
     let too_few = issues
         .iter()
         .find(|i| matches!(i, CaptureIssue::TooFewPhotos { given: 2, .. }))
@@ -635,7 +642,7 @@ fn the_preflight_refuses_by_name_before_a_run_is_ever_started() {
     std::fs::write(&broken, b"this is not a png").expect("write");
     let mut paths = files.to_vec();
     paths.push(broken);
-    let issues = session.load_photos(&paths);
+    let issues = session.load_photos(&paths).expect("an idle session loads");
     let unreadable = issues
         .iter()
         .find(|i| matches!(i, CaptureIssue::Unreadable { .. }))
@@ -668,7 +675,9 @@ fn the_wizard_reports_a_solver_refusal_by_name_and_writes_nothing() {
 
     let mut session = PhotogrammetrySession::new();
     session.set_config(capture_config());
-    let issues = session.load_photos(colour_files());
+    let issues = session
+        .load_photos(colour_files())
+        .expect("an idle session loads");
     assert!(
         !issues.iter().any(|i| i.blocks()),
         "the pre-flight cannot see an exposure problem and must not pretend to: {issues:?}"
@@ -916,7 +925,9 @@ fn an_uncalibrated_lens_is_measured_beside_the_calibrated_one() {
     let mut cfg = capture_config();
     cfg.camera = AssumedCamera::default();
     session.set_config(cfg);
-    session.load_photos(photo_files());
+    session
+        .load_photos(photo_files())
+        .expect("an idle session loads");
     let _ = run_to_completion(&mut session);
 
     let full = full_run();
@@ -991,4 +1002,118 @@ fn every_finding_a_run_produces_carries_a_stage_a_severity_and_a_remedy() {
             "a finished run carries a blocking finding: {issue}"
         );
     }
+}
+
+// ── (i) the session has ONE owner, and says so by name ──────────────────────
+
+#[test]
+fn a_run_in_flight_refuses_every_door_that_would_reach_around_it() {
+    // `CaptureError::Busy` existed and nothing asserted it. The three doors that
+    // can be pushed while a solve is running are a second start, a re-finish and
+    // a LOAD — and the load is the one that mattered, because it replaces the
+    // published state as well as the photographs: before P25.4's audit it left
+    // the session reading `Idle` over a worker still running, which makes Cancel
+    // answer `false` and lets that worker publish, minutes later, a product for
+    // photographs nobody has loaded any more.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = AssetProject::open(dir.path()).expect("a project");
+    let before = project.db().len();
+
+    let files = photo_files();
+    let mut session = loaded_session(files);
+    session.start(pool()).expect("the run starts");
+    assert!(matches!(session.state(), CaptureState::Running(_)));
+
+    let busy = |err: inf_editor_core::capture::CaptureError| {
+        let text = err.to_string();
+        assert!(
+            text.contains("already running"),
+            "a door refused with something other than Busy: {text}"
+        );
+    };
+    busy(session.start(pool()).expect_err("a second run must refuse"));
+    busy(
+        session
+            .refinish(pool())
+            .expect_err("a re-finish must refuse"),
+    );
+    busy(
+        session
+            .load_photos(&files[..3])
+            .expect_err("a load must refuse"),
+    );
+    // The refusals refused rather than half-applying: the six are still loaded
+    // and the run still owns the session.
+    assert_eq!(session.photos().len(), 6);
+    assert!(matches!(session.state(), CaptureState::Running(_)));
+
+    assert!(
+        session.cancel(),
+        "the run is still the one that was started"
+    );
+    let _ = drain_until_done(&mut session);
+    assert_eq!(session.state(), CaptureState::Cancelled);
+    assert_eq!(project.db().len(), before, "a refused door wrote assets");
+    assert!(!dir.path().join(SCAN_FOLDER).exists());
+}
+
+// ── (j) the Cancel that arrives with nothing left to cancel ─────────────────
+
+#[test]
+fn a_cancel_with_no_stage_left_to_skip_lets_the_run_finish_and_settles_ready() {
+    // Cancellation is read BETWEEN stages, and `Finish` is the last automatic
+    // one — so a Cancel pressed while it runs finds no stage left to skip. This
+    // pins the outcome the docs and the panel now state: the run COMPLETES and
+    // settles `Ready` rather than pretending to have stopped, and the guarantee
+    // that is actually worth something is untouched, because `Write` is the
+    // user's and nothing was written.
+    //
+    // A re-finish is that stage on its own, so the cancel lands inside it
+    // deterministically rather than on a timer.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = AssetProject::open(dir.path()).expect("a project");
+    let before = project.db().len();
+
+    let mut session = PhotogrammetrySession::new();
+    let mut cfg = capture_config();
+    // Nothing here reads a bake; the state machine is the subject.
+    cfg.finish.bake.size = 128;
+    cfg.finish.bake.ao_rays = 4;
+    session.set_config(cfg);
+    session
+        .load_photos(photo_files())
+        .expect("an idle session loads");
+    let _ = run_to_completion(&mut session);
+    assert_eq!(
+        session.state(),
+        CaptureState::Ready,
+        "{:?}",
+        session.error()
+    );
+
+    session.refinish(pool()).expect("the re-finish starts");
+    assert!(session.cancel(), "the re-finish is running");
+    let events = drain_until_done(&mut session);
+    println!(
+        "P25.4 late cancel: settled {:?} after {} events",
+        session.state(),
+        events.len()
+    );
+    assert_eq!(
+        session.state(),
+        CaptureState::Ready,
+        "a cancel with no stage left to skip did not let the finish complete"
+    );
+    assert!(
+        !events.iter().any(|e| e.phase == CapturePhase::Cancelled),
+        "the run reported a stop it did not make: {events:?}"
+    );
+    // The product is there and is a real one…
+    let triangles = session
+        .with_product(|p| p.finished.report.final_triangles)
+        .expect("a completed re-finish has a product");
+    assert!(triangles >= MIN_FINAL_TRIANGLES, "{triangles} triangles");
+    // …and the thing the button actually guarantees still holds.
+    assert_eq!(project.db().len(), before, "a cancelled run wrote assets");
+    assert!(!dir.path().join(SCAN_FOLDER).exists());
 }
