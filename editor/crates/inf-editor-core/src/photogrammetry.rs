@@ -136,6 +136,11 @@ pub struct FinishConfig {
     /// Metres per reconstruction unit — **the scale step**. `1.0` means "leave
     /// it in baseline units", which is honest rather than metric and is what a
     /// caller gets until P25.4's wizard measures something.
+    ///
+    /// Must be finite and strictly positive;
+    /// [`finish_reconstruction`] refuses anything else by name
+    /// ([`FinishError::BadScale`]) rather than scaling by it. A wizard reading a
+    /// distance out of a text field is exactly where a `0` comes from.
     pub metres_per_unit: f64,
     /// Roughness written into the material and into the ORM texture's green
     /// channel. A photographed surface has no measured roughness; this is the
@@ -164,7 +169,10 @@ impl Default for FinishConfig {
 }
 
 /// Why a finish **refused**.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+///
+/// `PartialEq` without `Eq`, the same standing `inf_dcc::HeatError` has: one
+/// variant carries the scale the caller asked for, and a scale is an `f64`.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum FinishError {
     /// The dense stage produced nothing to retopologize.
     #[error("the dense reconstruction has {vertices} vertices and {triangles} triangles — there is nothing to finish")]
@@ -186,6 +194,48 @@ pub enum FinishError {
         after: usize,
         /// Triangles the manifold filter dropped.
         dropped: usize,
+    },
+    /// The reconstruction registered no cameras at all.
+    ///
+    /// Reachable because the sparse reconstruction and the dense one arrive as
+    /// two arguments: a caller can hand over a reconstruction that registered
+    /// nothing. Without this the pipeline runs, trims every triangle for want of
+    /// a camera, keeps the untrimmed mesh, and writes an asset whose albedo is
+    /// entirely dilation — a plausible-looking texture nobody photographed.
+    #[error("the reconstruction registered no cameras — there is nothing to bake colour from")]
+    NoCameras,
+    /// The dense reconstruction was not built from the sparse one it was handed
+    /// with.
+    ///
+    /// [`DenseReconstruction::depth_maps`] and `surface` are **parallel to the
+    /// registered cameras, in ascending view order** — they are indexed by slot,
+    /// not by view id. Two arguments that disagree about how many cameras there
+    /// are is a caller pairing a reconstruction with somebody else's dense
+    /// stage, and it used to be an index panic rather than a refusal.
+    #[error(
+        "the dense reconstruction has {depth_maps} depth maps and {surface} surface hints for a \
+         reconstruction with {cameras} registered cameras — they were not solved together"
+    )]
+    ViewsMismatch {
+        /// Registered cameras in the sparse reconstruction.
+        cameras: usize,
+        /// Depth maps in the dense reconstruction.
+        depth_maps: usize,
+        /// Surface-hint images in the dense reconstruction.
+        surface: usize,
+    },
+    /// [`FinishConfig::metres_per_unit`] is not a scale.
+    ///
+    /// Zero collapses the mesh onto its own origin; a negative multiplier
+    /// mirrors it, which reverses every triangle's winding while leaving the
+    /// vertex normals and the baked normal map facing the way they were.
+    #[error(
+        "metres_per_unit is {metres_per_unit}, which is not a scale — zero collapses the mesh to a \
+         point and a negative value mirrors it away from its own normals"
+    )]
+    BadScale {
+        /// What the caller asked for.
+        metres_per_unit: f64,
     },
     /// A photograph is missing for a registered camera.
     #[error("registered camera {view} has no photograph in the {given} supplied")]
@@ -344,7 +394,9 @@ impl std::fmt::Display for FinishAdvisory {
             ),
             FinishAdvisory::UnphotographedTrimmed { dropped, examined } => write!(
                 f,
-                "{dropped} of {examined} retopologized triangles were seen by no camera and were                  removed; the result is the surface the photographs cover, which is a SHELL rather                  than a closed solid"
+                "{dropped} of {examined} retopologized triangles were seen by no camera and were \
+                 removed; the result is the surface the photographs cover, which is a SHELL rather \
+                 than a closed solid"
             ),
             FinishAdvisory::DecimationShortOfBudget { asked, got } => write!(
                 f,
@@ -1114,6 +1166,28 @@ pub fn finish_reconstruction(
     pool: &JobPool,
 ) -> Result<FinishedAsset, FinishError> {
     // ── refusals first ──────────────────────────────────────────────────────
+    //
+    // The two reconstructions arrive as two arguments and nothing has ever
+    // checked that they came from one solve. `depth_maps` and `surface` are
+    // indexed by SLOT below, so a disagreement was an index panic — which is a
+    // refusal nobody can read and a wizard cannot show.
+    if reconstruction.cameras.is_empty() {
+        return Err(FinishError::NoCameras);
+    }
+    if dense.depth_maps.len() != reconstruction.cameras.len()
+        || dense.surface.len() != reconstruction.cameras.len()
+    {
+        return Err(FinishError::ViewsMismatch {
+            cameras: reconstruction.cameras.len(),
+            depth_maps: dense.depth_maps.len(),
+            surface: dense.surface.len(),
+        });
+    }
+    if !(cfg.metres_per_unit.is_finite() && cfg.metres_per_unit > 0.0) {
+        return Err(FinishError::BadScale {
+            metres_per_unit: cfg.metres_per_unit,
+        });
+    }
     for camera in reconstruction.cameras.values() {
         let Some(photo) = photos.get(camera.view as usize) else {
             return Err(FinishError::MissingPhoto {
@@ -1452,6 +1526,30 @@ fn uv_span(asset: &MeshAsset) -> (f64, f64) {
 /// half a scan behind.
 ///
 /// Write order is dependency order: textures, material, mesh.
+///
+/// # `dir` is taken verbatim, and so is the name
+///
+/// It goes straight to [`AssetProject::write_asset`], which does **not** join it
+/// onto the project root — a relative path resolves against the process's
+/// working directory. Callers pass an absolute path, or one from
+/// `AssetProject::content_dir`.
+///
+/// # What this does NOT write
+///
+/// A **`.inf_vmesh`**. The editor's interactive viewport has exactly one door
+/// for real geometry — a meshlet DAG — and derives one beside every mesh the
+/// glTF importer writes (`assets::vmesh::ensure_vmesh`, P18.3) and every mesh a
+/// modelling session saves (`dcc::save`). A finished scan therefore lands in the
+/// content root as a correct, re-openable asset that the viewport draws as a
+/// **placeholder cube**, whatever its triangle count — which is a stronger
+/// version of the hazard [`FinishAdvisory::BelowVirtualizationThreshold`] names
+/// for shipped builds, and one raising the triangle budget does not fix.
+///
+/// It is not done here because `ensure_vmesh` runs for seconds on a
+/// fifteen-thousand-triangle mesh and would put a sixth asset outside this
+/// function's all-or-none set. P25.4's wizard is the door that places a finish in
+/// a scene and is where the derivation belongs, on the pattern the import
+/// orchestrator already uses.
 pub fn write_finished(
     project: &mut crate::assets::AssetProject,
     dir: &Path,
@@ -1881,7 +1979,8 @@ mod tests {
             assert!((hit.normal.length() - 1.0).abs() < 1e-9, "not unit");
             assert!(
                 hit.normal.dot(*want) > 0.99,
-                "triangle {i}: the hierarchy reported {} where {want} lives — the leaf index was                  not mapped back through `source_index`",
+                "triangle {i}: the hierarchy reported {} where {want} lives — the leaf index was \
+                 not mapped back through `source_index`",
                 hit.normal
             );
         }
@@ -1916,6 +2015,42 @@ mod tests {
         ));
     }
 
+    /// Every variant, once, so a text assertion below cannot miss one.
+    fn every_advisory() -> Vec<FinishAdvisory> {
+        vec![
+            FinishAdvisory::NonManifoldDropped {
+                dropped: 1,
+                examined: 2,
+            },
+            FinishAdvisory::UnphotographedTrimmed {
+                dropped: 3,
+                examined: 4,
+            },
+            FinishAdvisory::DecimationShortOfBudget { asked: 5, got: 6 },
+            FinishAdvisory::BelowVirtualizationThreshold {
+                triangles: 7,
+                threshold: VGEOM_MIN_TRIANGLES,
+            },
+            FinishAdvisory::UvChartsFlipped {
+                flipped: 8,
+                corners: 9,
+            },
+            FinishAdvisory::AtlasOverlaps { texels: 10 },
+            FinishAdvisory::UnseenTexels {
+                unseen: 11,
+                covered: 12,
+            },
+            FinishAdvisory::NormalTransferFallbacks {
+                fallbacks: 13,
+                texels: 14,
+            },
+            FinishAdvisory::DelightRefused {
+                explained_percent: 15,
+                required_percent: 25,
+            },
+        ]
+    }
+
     #[test]
     fn the_advisories_are_ordered_and_say_what_happened() {
         let mut list = vec![
@@ -1942,5 +2077,26 @@ mod tests {
         .to_string();
         assert!(below.contains("min_triangles"), "no remedy: {below}");
         assert!(below.contains("PLACEHOLDER") || below.contains("placeholder"));
+    }
+
+    #[test]
+    fn no_advisory_carries_a_mangled_continuation() {
+        // P22's law, met a fourth time: a scripted edit that eats the `\` before
+        // a newline leaves the source indentation *inside* the literal, and the
+        // reader gets eighteen spaces in the middle of a sentence. It compiles,
+        // it formats, and nothing but a human reading the rendered string sees
+        // it — which is why this is asserted rather than reviewed.
+        //
+        // These strings are also read by the P25.3 gate's determinism byte
+        // image, so a run of spaces is a committed artefact and not only a
+        // cosmetic one.
+        for a in every_advisory() {
+            let text = a.to_string();
+            assert!(
+                !text.contains("  "),
+                "{a:?} renders a run of spaces — a line continuation was eaten: {text}"
+            );
+            assert!(text.len() > 30, "an advisory says almost nothing: {text}");
+        }
     }
 }
