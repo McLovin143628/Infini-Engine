@@ -129,9 +129,18 @@ const MIN_UV_SPAN: f64 = 0.77;
 const MIN_ATLAS_COVERAGE: f64 = 0.20;
 /// Charts, capped so chart merging cannot silently stop working. Measured 656.
 const MAX_CHARTS: usize = 1_200;
+/// Atlas texels two triangles may both claim. Measured 597 of 65 536 (0.9%).
+const MAX_OVERLAP_FRACTION: f64 = 0.02;
 /// Baked normals against the analytic scene, median degrees. The floor is the
-/// fused mesh's own roughness (33.2 degrees at its vertices), not the bake's.
-const MAX_MEDIAN_NORMAL_ERROR_DEG: f64 = 40.0;
+/// fused mesh's own roughness (33.2 degrees at its vertices), not the bake's —
+/// the analytic-surface arm below measures the bake at 0.000.
+///
+/// **32.0, and the margin is deliberately thin.** Measured 29.9. At the 40 this
+/// started as, reverting `geometric_normals` to the mesher's own SDF gradient —
+/// the thing it exists to replace — measured **34.7 and the gate stayed
+/// green**. A bound with room for the defect it was written against is not a
+/// bound.
+const MAX_MEDIAN_NORMAL_ERROR_DEG: f64 = 32.0;
 /// The **bake's own** error when the surface it transfers from is analytic. This
 /// is the arm that says the machinery is right and the input is rough.
 const MAX_ANALYTIC_NORMAL_ERROR_DEG: f64 = 1.0;
@@ -140,6 +149,11 @@ const MAX_ANALYTIC_NORMAL_ERROR_DEG: f64 = 1.0;
 const MAX_MEDIAN_ALBEDO_ERROR: f64 = 0.12;
 /// And at p90. Measured 0.187.
 const MAX_P90_ALBEDO_ERROR: f64 = 0.30;
+/// The same, for texels an occluder stands in front of from at least one camera
+/// — the ones the occlusion test protects. Measured p50 0.128 over 1 065
+/// channels; it is a ceiling and not the occlusion test's falsifier — see the
+/// arm.
+const MAX_MEDIAN_CONTESTED_ALBEDO_ERROR: f64 = 0.18;
 /// A floor on the texels a camera actually contributed to, so the albedo arm is
 /// not measuring six texels.
 const MIN_SEEN_TEXELS: usize = 4_000;
@@ -279,6 +293,33 @@ fn views<'a>(
         .collect()
 }
 
+/// Whether one view projects `p` onto a pixel whose depth is **valid and
+/// nearer** — an occluder standing between the camera and the point.
+///
+/// The gate's own copy of the rule, deliberately: a truth a gate shares with the
+/// code it measures is not a truth, and this one has to keep answering while the
+/// pipeline's version is severed.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+fn occluded_in_view(view: &AlbedoView<'_>, p: DVec3, tolerance: f32) -> bool {
+    let camera_space = view.camera.pose.transform(p);
+    if !(camera_space.z > 0.0) {
+        return false;
+    }
+    let Some(px) = view.camera.intrinsics.project(camera_space) else {
+        return false;
+    };
+    if !view.camera.intrinsics.contains(px) {
+        return false;
+    }
+    let w = view.depth.width as usize;
+    let h = view.depth.height as usize;
+    let ix = (px.x.round() as i64).clamp(0, w as i64 - 1) as usize;
+    let iy = (px.y.round() as i64).clamp(0, h as i64 - 1) as usize;
+    let d = view.depth.depth[iy * w + ix];
+    // A valid depth that is NEARER than the point: something is in the way.
+    d > 0.0 && (camera_space.z as f32 - d) > tolerance * d
+}
+
 fn percentile(sorted: &[f64], q: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -409,6 +450,25 @@ fn the_atlas_is_used_rather_than_merely_written_to() {
         r.worst_convergence <= MAX_CONVERGENCE,
         "a chart's conformal solve did not converge: {:.3e}",
         r.worst_convergence
+    );
+    // Overlaps: two triangles claiming one texel. MEASURED 597 of 65 536. The
+    // ceiling is here because it is what notices if the rasterizer's top-left
+    // fill rule is ever reverted to inclusive barycentrics — then every shared
+    // edge in the mesh is a double cover, and `overlaps` stops being a signal
+    // about folded charts and becomes a count of the mesh's diagonals.
+    let overlaps = f
+        .advisories
+        .iter()
+        .find_map(|a| match a {
+            FinishAdvisory::AtlasOverlaps { texels } => Some(*texels),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let texels = (finish_config().bake.size as f64).powi(2);
+    println!("P25.3 atlas overlaps: {overlaps} of {texels}");
+    assert!(
+        overlaps as f64 <= texels * MAX_OVERLAP_FRACTION,
+        "{overlaps} of {texels} texels were claimed twice"
     );
 }
 
@@ -622,6 +682,15 @@ fn the_baked_normals_land_near_the_analytic_truth() {
         "only {} texels measured",
         errors.len()
     );
+    // EVERY texel found a dense surface within the search radius. Measured 0
+    // fallbacks — so a bake that quietly stopped transferring and kept the
+    // target mesh's own normals would be caught here, which the error bound
+    // below cannot do (the retopologized normals are themselves inside it).
+    assert_eq!(
+        f.report.normals.fallbacks, 0,
+        "{} of {} texels kept the retopologized normal instead of a transferred one",
+        f.report.normals.fallbacks, f.report.normals.texels
+    );
     assert!(
         percentile(&errors, 0.5) <= MAX_MEDIAN_NORMAL_ERROR_DEG,
         "the baked normals are {:.2} degrees out at the median; the floor arm says the bake is \
@@ -654,6 +723,7 @@ fn the_baked_albedo_is_the_colour_the_photographs_hold() {
 
     let mut errors: Vec<f64> = Vec::new();
     let mut mismatched: Vec<f64> = Vec::new();
+    let mut occluded_from_some: Vec<f64> = Vec::new();
     let mut seen = 0usize;
     for i in 0..atlas.covered.len() {
         if !atlas.covered[i] {
@@ -662,15 +732,40 @@ fn the_baked_albedo_is_the_colour_the_photographs_hold() {
         // Front-facing AND photographed: the texels the bake actually had
         // evidence for. The rest are dilation, and dilation is asserted by the
         // unseen-fraction arm rather than by a colour bound.
-        let photographed = view_list.iter().any(|v| {
-            view_sees(v, atlas.position[i], cfg.bake.occlusion_tolerance)
-                && atlas.normal[i]
-                    .dot((v.camera.pose.center() - atlas.position[i]).normalize_or_zero())
-                    > 0.0
-        });
+        let facing = |v: &AlbedoView<'_>| {
+            atlas.normal[i].dot((v.camera.pose.center() - atlas.position[i]).normalize_or_zero())
+                > 0.0
+        };
+        let photographed = view_list
+            .iter()
+            .any(|v| view_sees(v, atlas.position[i], cfg.bake.occlusion_tolerance) && facing(v));
         if !photographed {
             continue;
         }
+        // **Contested**: some camera faces this texel and something REAL stands
+        // between them — the block. Separating these is what makes this arm able
+        // to notice when the occlusion test stops running.
+        //
+        // "Cannot see it" is not the right classifier and was tried first:
+        // `view_sees` also answers false when a view simply has no depth at that
+        // pixel, which on this fixture is most of them, and those samples are
+        // dropped for want of evidence whether the occlusion test runs or not.
+        // Measured, with the test severed: the contested error moved from 0.0764
+        // to 0.0767 — an arm about nothing. This asks the sharper question.
+        //
+        // AND IT IS A BOUND, NOT A FALSIFIER, which is worth saying plainly.
+        // MEASURED with the occlusion test severed entirely: this number does
+        // not move either (0.1275 both ways), because the fixture's occlusions
+        // are mostly the block hiding *its own* far faces, where the colour the
+        // wrong sample brings is another face of the same block. What DOES go
+        // red for that severing is the engagement counter in
+        // `the_texels_no_camera_saw_and_said_out_loud` — 2 213 rejections to
+        // zero. Engagement counters over pixels (P20's law), met again: the
+        // mechanism is asserted where it can be seen, and this bound is a
+        // regression ceiling beside it.
+        let contested = view_list.iter().any(|v| {
+            facing(v) && occluded_in_view(v, atlas.position[i], cfg.bake.occlusion_tolerance)
+        });
         let (distance, _, plane) = nearest_analytic(&scene, atlas.position[i]);
         if distance > 0.15 {
             continue;
@@ -682,7 +777,11 @@ fn the_baked_albedo_is_the_colour_the_photographs_hold() {
         let e = light.irradiance(atlas.normal[i]);
         for c in 0..3 {
             let got = level[i * 4 + c] as f64 / 255.0;
-            errors.push((got - truth[c] * e[c] / 255.0).abs());
+            let err = (got - truth[c] * e[c] / 255.0).abs();
+            errors.push(err);
+            if contested {
+                occluded_from_some.push(err);
+            }
             // ANTI-VACUITY: the same texel measured against a DIFFERENT plane's
             // colour. If the bound passes on that too, the bound is measuring
             // nothing but the fixture's overall brightness.
@@ -693,6 +792,7 @@ fn the_baked_albedo_is_the_colour_the_photographs_hold() {
     }
     errors.sort_by(f64::total_cmp);
     mismatched.sort_by(f64::total_cmp);
+    occluded_from_some.sort_by(f64::total_cmp);
     println!(
         "P25.3 albedo: p50 {:.4} p90 {:.4} p99 {:.4} over {} texels ({} channels); against the \
          WRONG plane's colour p50 {:.4}",
@@ -716,6 +816,22 @@ fn the_baked_albedo_is_the_colour_the_photographs_hold() {
         percentile(&errors, 0.9) <= MAX_P90_ALBEDO_ERROR,
         "the baked albedo is {:.4} off at p90",
         percentile(&errors, 0.9)
+    );
+    println!(
+        "P25.3 albedo (contested by an occluder): p50 {:.4} p90 {:.4} over {} channels",
+        percentile(&occluded_from_some, 0.5),
+        percentile(&occluded_from_some, 0.9),
+        occluded_from_some.len()
+    );
+    assert!(
+        occluded_from_some.len() > 300,
+        "only {} channels are contested — the block is not occluding anything",
+        occluded_from_some.len()
+    );
+    assert!(
+        percentile(&occluded_from_some, 0.5) <= MAX_MEDIAN_CONTESTED_ALBEDO_ERROR,
+        "a texel some camera cannot see is {:.4} off at the median; the occlusion test is letting          an occluder's colour through",
+        percentile(&occluded_from_some, 0.5)
     );
     assert!(
         percentile(&mismatched, 0.5) > percentile(&errors, 0.5) * 1.5,

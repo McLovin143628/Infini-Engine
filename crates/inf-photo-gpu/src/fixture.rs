@@ -136,6 +136,16 @@ pub fn photographs() -> Vec<RgbImage> {
 /// that mixed up two views, or projected a texel into the wrong camera, has to
 /// produce a visibly wrong colour rather than a plausible grey. The tints are
 /// read by [`SynthScene::shade_rgb`] alone.
+///
+/// **The block's five faces are saturated and the floor's is warm and muted, and
+/// that is a correction rather than a preference.** The block exists to occlude
+/// the floor, so the thing the albedo bake's occlusion test protects against is
+/// *the block's colour landing on floor texels behind it*. The first tints made
+/// the block top `[0.85, 0.78, 0.35]` against a floor of `[0.82, 0.62, 0.40]` —
+/// so similar that removing the occlusion test entirely moved the measured
+/// albedo error on contested texels from **0.0764 to 0.0767**, and the gate arm
+/// that names the test could not fail when the test was gone. A gate must be
+/// built to falsify (P22's law); the fixture has to make the failure visible.
 pub fn dihedral_scene() -> SynthScene {
     // The dihedral's two in-plane directions away from the ridge, and the
     // normals that follow from them. Written as literals rather than derived so
@@ -189,7 +199,7 @@ pub fn dihedral_scene() -> SynthScene {
         hz,
         dots(0x00b0_1770, 0.098, 200, 20, 250),
     )
-    .with_tint([0.85, 0.78, 0.35]);
+    .with_tint([0.28, 0.34, 0.90]);
     let front = TexturedPlane::new(
         DVec3::new(bx, hy, bz - hz),
         DVec3::NEG_Z,
@@ -198,7 +208,7 @@ pub fn dihedral_scene() -> SynthScene {
         hy,
         dots(0x00b0_1771, 0.086, 225, 40, 255),
     )
-    .with_tint([0.70, 0.42, 0.45]);
+    .with_tint([0.24, 0.82, 0.30]);
     let left = TexturedPlane::new(
         DVec3::new(bx - hx, hy, bz),
         DVec3::NEG_X,
@@ -207,7 +217,7 @@ pub fn dihedral_scene() -> SynthScene {
         hz,
         dots(0x00b0_1772, 0.112, 185, 22, 240),
     )
-    .with_tint([0.40, 0.72, 0.75]);
+    .with_tint([0.90, 0.26, 0.28]);
     let right = TexturedPlane::new(
         DVec3::new(bx + hx, hy, bz),
         DVec3::X,
@@ -216,7 +226,7 @@ pub fn dihedral_scene() -> SynthScene {
         hz,
         dots(0x00b0_1773, 0.104, 210, 28, 252),
     )
-    .with_tint([0.78, 0.55, 0.72]);
+    .with_tint([0.86, 0.32, 0.82]);
     let back = TexturedPlane::new(
         DVec3::new(bx, hy, bz + hz),
         DVec3::Z,
@@ -225,7 +235,7 @@ pub fn dihedral_scene() -> SynthScene {
         hy,
         dots(0x00b0_1774, 0.092, 195, 33, 248),
     )
-    .with_tint([0.58, 0.60, 0.62]);
+    .with_tint([0.26, 0.86, 0.84]);
 
     SynthScene {
         planes: vec![floor, wall_a, wall_b, top, front, left, right, back],
