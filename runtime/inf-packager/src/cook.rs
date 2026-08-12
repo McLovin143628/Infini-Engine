@@ -326,6 +326,15 @@ enum CookInput {
 
 /// The result of cooking one asset, folded back into the pack serially in
 /// closure order.
+// `Skipped` is a rare, one-line warning; `Cooked` is what every asset in the
+// closure produces. clippy's `large_enum_variant` costs the argument it usually
+// wins — the P22.3 boxing of `EditorToPlayer::LoadScene` was right because the
+// CHEAP variants (`Pause`, `Step`) are sent every frame and would each have paid
+// a scene payload's worth of stack. Here the large variant is the common one and
+// the small one is the exception, so boxing would add an allocation per asset to
+// shrink a value that is moved exactly once, into a `Vec` the pack writer drains.
+// Measured trade, written down rather than silenced.
+#[allow(clippy::large_enum_variant)]
 enum CookOutput {
     Skipped(String),
     Cooked {

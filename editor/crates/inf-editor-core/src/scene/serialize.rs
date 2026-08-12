@@ -12973,7 +12973,7 @@ mod tests {
 
     #[test]
     fn the_v22_wire_shape_is_pinned_against_an_independent_declaration() {
-        let bound = uuid::Uuid::from_u128(0xF_A7E_0026);
+        let bound = uuid::Uuid::from_u128(0xFA7E_0026);
         let level = SceneFile {
             schema_version: SCHEMA_VERSION,
             title: "Pinned".into(),
@@ -13135,7 +13135,7 @@ mod tests {
     /// The `.inf_mat` the v22 tests bind. A fixed GUID so the two codec mirrors
     /// can be byte-compared.
     fn v22_fixture_material_binding() -> uuid::Uuid {
-        uuid::Uuid::from_u128(0xF_A7E_0026)
+        uuid::Uuid::from_u128(0xFA7E_0026)
     }
 
     /// The **v21** material the fixture's wall carries: every scalar away from

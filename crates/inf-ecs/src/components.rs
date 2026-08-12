@@ -5223,11 +5223,11 @@ mod tests {
             alpha_cutoff: 0.25,
             // v22 (P26.3b): the persisted `.inf_mat` binding, round-tripped here
             // beside the scalars it does not replace.
-            asset: Some(Uuid::from_u128(0xF_A7E_0026)),
+            asset: Some(Uuid::from_u128(0xFA7E_0026)),
         };
         let back: Material = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
         assert_eq!(m, back);
-        assert_eq!(back.asset, Some(Uuid::from_u128(0xF_A7E_0026)));
+        assert_eq!(back.asset, Some(Uuid::from_u128(0xFA7E_0026)));
         // Defaults for the v8 fields — and for v22's, which is the no-texture
         // path and must stay `None` so a fresh surface renders off its scalars.
         let d = Material::default();

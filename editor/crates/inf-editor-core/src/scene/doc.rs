@@ -3336,7 +3336,7 @@ mod tests {
         let cube = doc.create(SpawnKind::Cube, "Cube", None);
         let tp = doc.world().registry().type_path_for("Material").unwrap();
 
-        let bound = Uuid::from_u128(0xF_A7E_0026);
+        let bound = Uuid::from_u128(0xFA7E_0026);
         let applied = doc.edit_apply_material(
             &[cube],
             Some(bound),

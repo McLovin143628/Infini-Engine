@@ -10167,7 +10167,7 @@ mod tests {
 
     #[test]
     fn the_v22_wire_shape_is_pinned_against_an_independent_declaration() {
-        let bound = Uuid::from_u128(0xF_A7E12);
+        let bound = Uuid::from_u128(0x00FA_7E12);
         let level = RuntimeLevel {
             title: "Pinned".into(),
             entities: vec![
@@ -10309,7 +10309,7 @@ mod tests {
     /// The `.inf_mat` the v22 tests bind. A fixed GUID so the two codec mirrors
     /// can be byte-compared.
     fn v22_fixture_material_binding() -> Uuid {
-        Uuid::from_u128(0xF_A7E_0026)
+        Uuid::from_u128(0xFA7E_0026)
     }
 
     /// The **v21** material the fixture's wall carries: every scalar away from
