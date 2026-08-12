@@ -169,6 +169,15 @@ inf-project = { workspace = true }
 # feature, with bit-portable trig (the P14 LAW). Dev-only — the shipped player's
 # `inf-vgeom` is unchanged.
 inf-vgeom = { workspace = true, features = ["test-support"] }
+# P26.3b: `phase26_gate` writes a real `.inf_tex` v2 container and a real
+# `.inf_mat` for its fixture, and reads the pack's textures back through
+# `inf_vt::TiledTextureReader` — the door the player itself pages tiles with.
+# **Dev-only for `inf-material`, on purpose**: the shipped player must never link
+# the material crate (P26.2's dependency inversion), and a normal dependency here
+# would silently undo it. `inf-vt` IS a normal dependency of the player through
+# `inf-render`; naming it here only makes the test's import legal.
+inf-material = { workspace = true }
+inf-vt = { workspace = true }
 # `water_projection` asserts the P20.4 flow-foam curve against the ONE definition
 # of it rather than restating `1.6` in a test. Dev-only: the shipped player never
 # names `inf-water` — it consumes the derived `RenderWater` its projector builds.
