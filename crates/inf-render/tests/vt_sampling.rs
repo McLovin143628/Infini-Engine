@@ -1014,3 +1014,281 @@ fn a_geometry_mismatch_is_refused_at_the_door() {
         Err(inf_vt::VtError::PoolGeometryMismatch { .. })
     ));
 }
+
+// ── (f) THE MISSING LEG: the WGSL walk, on the GPU, with a non-zero trip count
+
+/// **The fallback-residency GPU arm** — the P26.3 ledger's named remainder,
+/// carried into P26.4 and closed here.
+///
+/// That ledger is explicit about what was missing and why it mattered: *"the
+/// batch's claim that this 'runs the correct walk on the GPU' is not what
+/// happens … the twin is CPU, the WGSL is pinned to the twin's spelling by the
+/// source gate, and no test executes the WGSL tile-tree loop with a non-zero
+/// trip count on a GPU (the lit-pixel arms make the whole pyramid resident, so
+/// `got == m` and the loop body never runs). A fallback-residency GPU arm —
+/// floor-only, every address resolving several levels up — is the missing leg."*
+///
+/// This runs `vt_resolve` — the **shipped function**, composed out of
+/// `vt_sample.wgsl` exactly as the lit passes compose it, not a copy — over
+/// every tile of mip 0 of a **1023² pyramid**, under a residency in which mip 0
+/// is entirely absent. Every address therefore resolves several levels up, the
+/// loop body runs on every thread, and the answer is compared with
+/// `VtTextureDesc::ancestor` address by address.
+///
+/// 1023² is the extent, not 1024², because that is where the two derivations
+/// PART: the container halves with `w / 2`, so 1023 sits over 511 sits over 255,
+/// and `uv × 255` is not `texel / 4`. On a power-of-two pyramid the forbidden
+/// derivation and the correct one agree everywhere and the arm would certify
+/// nothing. The P26.2 audit measured 50 disagreeing addresses on 1023².
+#[test]
+fn the_wgsl_walk_runs_on_the_gpu_with_a_non_zero_trip_count() {
+    let Some(gpu) = gpu_or_skip("the VT fallback walk") else {
+        return;
+    };
+    // A pool with room for the coarse levels and nothing like enough for mip 0
+    // (a 1023² pyramid's mip 0 is 8×8 = 64 tiles).
+    let desc = full_pyramid(1023, 1023, 128, 4, false);
+    let (mut res, _) = inf_vt::VtResidency::new(pool_cfg(PageFormat::Bc1, 24));
+    let h = res.register_texture(desc.clone()).expect("registers");
+    // Resident: levels 2 and coarser. Level 2 is 255 texels — TWO tiles a side —
+    // so the walk lands on one of four tiles rather than being clamped to tile 0
+    // by a one-tile level, which is the shape that hides every disagreement.
+    let mut wants = Vec::new();
+    for mip in 2..desc.mip_count() {
+        let m = desc.mips[mip as usize];
+        for y in 0..m.tiles_y {
+            for x in 0..m.tiles_x {
+                wants.push(inf_vt::VtWant::new(h, TileCoord::new(mip, x, y)));
+            }
+        }
+    }
+    let txn = res.apply_wants(&wants);
+    assert_eq!(
+        txn.deferred,
+        0,
+        "the coarse set did not fit: {}",
+        txn.trace()
+    );
+    assert!(
+        desc.mips[2].tiles_x > 1,
+        "the resolved level is one tile wide, so the clamp hides every disagreement and this arm certifies nothing"
+    );
+    for y in 0..desc.mips[0].tiles_y {
+        for x in 0..desc.mips[0].tiles_x {
+            assert!(
+                !res.is_resident(h, TileCoord::new(0, x, y)),
+                "mip 0 is resident, so `got == m` and the loop body never runs"
+            );
+        }
+    }
+
+    // ── the shader: the shipped `vt_resolve`, composed the way a lit pass
+    // composes it, plus a compute entry that writes what it returned.
+    let vt = include_str!("../src/shaders/vt_sample.wgsl").replace("GROUP_ENV", "0");
+    let src = format!(
+        "{vt}
+struct Probe {{ uvx: f32, uvy: f32, m: u32, pad: u32 }};
+@group(0) @binding(0) var<storage, read> probes: array<Probe>;
+@group(0) @binding(1) var<storage, read_write> walked: array<vec4<u32>>;
+@compute @workgroup_size(64)
+fn cs_probe(@builtin(global_invocation_id) gid: vec3<u32>) {{
+    let i = gid.x;
+    if (i >= arrayLength(&probes)) {{ return; }}
+    let p = probes[i];
+    let b = vt_table[VT_HEADER_WORDS + 0u];
+    let r = vt_resolve(b, vec2<f32>(p.uvx, p.uvy), p.m);
+    walked[i] = vec4<u32>(r.page, r.got, r.gtx, r.gty);
+}}
+"
+    );
+
+    // Every tile of mip 0, probed at its own centre.
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Probe {
+        uvx: f32,
+        uvy: f32,
+        m: u32,
+        pad: u32,
+    }
+    let m0 = desc.mips[0];
+    let mut probes = Vec::new();
+    let mut addrs = Vec::new();
+    // Three texels per tile per axis: its FIRST, its centre and its LAST.
+    //
+    // The first texel is the one that matters and the centre alone is not
+    // enough — measured, in this arm's own first draft. The two derivations
+    // agree comfortably inside a tile and part at its EDGE: mip 0's texel 512 is
+    // the first texel of tile 4, and at the resolved level (255 texels) it is
+    // 127.75, i.e. tile 0, while the clamped chain walks 4 → 2 → 1. A sweep of
+    // centres alone passes with the forbidden derivation in place, which is
+    // exactly the vacuity this arm exists to avoid.
+    const WITHIN: [u32; 3] = [0, 64, 127];
+    for y in 0..m0.tiles_y {
+        for x in 0..m0.tiles_x {
+            for oy in WITHIN {
+                for ox in WITHIN {
+                    let px = (x * 128 + ox).min(m0.width - 1) as f32 + 0.5;
+                    let py = (y * 128 + oy).min(m0.height - 1) as f32 + 0.5;
+                    probes.push(Probe {
+                        uvx: px / m0.width as f32,
+                        uvy: py / m0.height as f32,
+                        m: 0,
+                        pad: 0,
+                    });
+                    addrs.push(TileCoord::new(0, x, y));
+                }
+            }
+        }
+    }
+
+    let pools = VtPools::new(&gpu.device, &gpu.queue, &res, false);
+    let module = gpu
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vt-walk-probe"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+    let probe_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("probes"),
+        size: (probes.len() * std::mem::size_of::<Probe>()) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    gpu.queue
+        .write_buffer(&probe_buf, 0, bytemuck::cast_slice(&probes));
+    let out_size = (probes.len() * 16) as u64;
+    let out_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("walk-out"),
+        size: out_size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let rb = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("walk-rb"),
+        size: out_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let storage = |read_only: bool| wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Storage { read_only },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let mut entries = vec![
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: storage(true),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: storage(false),
+            count: None,
+        },
+    ];
+    // The atlas / sampler / table at 14/15/16 — the same three bindings the env
+    // group carries, visible to COMPUTE here.
+    for mut e in VtPools::bind_group_layout_entries(14) {
+        e.visibility = wgpu::ShaderStages::COMPUTE;
+        entries.push(e);
+    }
+    let bgl = gpu
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vt-walk-probe"),
+            entries: &entries,
+        });
+    let mut bg_entries = vec![
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: probe_buf.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: out_buf.as_entire_binding(),
+        },
+    ];
+    bg_entries.extend(pools.bind_group_entries(14));
+    let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vt-walk-probe"),
+        layout: &bgl,
+        entries: &bg_entries,
+    });
+    let layout = gpu
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vt-walk-probe"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+    let pipeline = gpu
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("vt-walk-probe"),
+            layout: Some(&layout),
+            module: &module,
+            entry_point: Some("cs_probe"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let mut enc = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("vt-walk-probe"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.dispatch_workgroups((probes.len() as u32).div_ceil(64).max(1), 1, 1);
+    }
+    enc.copy_buffer_to_buffer(&out_buf, 0, &rb, 0, out_size);
+    gpu.queue.submit([enc.finish()]);
+    let slice = rb.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let mapped = slice.get_mapped_range().expect("map walk readback");
+    let got: Vec<[u32; 4]> = bytemuck::cast_slice::<u8, [u32; 4]>(&mapped).to_vec();
+    drop(mapped);
+    rb.unmap();
+
+    // ── the comparison: every address, against `ancestor` and the residency.
+    let mut trips = 0u32;
+    for (i, at) in addrs.iter().enumerate() {
+        let [page, resolved_mip, gtx, gty] = got[i];
+        assert!(
+            resolved_mip > 0,
+            "{at:?}: the GPU resolved to mip 0, which is not resident"
+        );
+        trips += resolved_mip;
+        let want = desc
+            .ancestor(*at, resolved_mip)
+            .unwrap_or_else(|| panic!("{at:?} has no ancestor at {resolved_mip}"));
+        assert_eq!(
+            (gtx, gty),
+            (want.x, want.y),
+            "{at:?} resolved at mip {resolved_mip}: the GPU walked to tile ({gtx},{gty}) and `VtTextureDesc::ancestor` says ({},{})",
+            want.x,
+            want.y
+        );
+        // …and the page it named is the page the residency put that tile in, so
+        // the walk and the table agree about the atlas as well as the tile.
+        let r = res.resolve(h, *at).expect("resolves");
+        assert_eq!(page, r.slot, "{at:?}: wrong page");
+        assert_eq!(want, r.tile, "{at:?}: the CPU twin disagrees with itself");
+    }
+    // ANTI-VACUITY, and the whole point of the arm: the loop body really ran,
+    // several times per address. Zero here is the state the P26.3 ledger
+    // described — the loop present and never executed.
+    assert!(
+        trips >= 2 * addrs.len() as u32,
+        "the tile-tree loop ran {trips} times over {} addresses — it is not being exercised",
+        addrs.len()
+    );
+}

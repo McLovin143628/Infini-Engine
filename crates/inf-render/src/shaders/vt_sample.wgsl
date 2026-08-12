@@ -148,26 +148,34 @@ fn vt_mip(block: u32, ddx: vec2<f32>, ddy: vec2<f32>) -> u32 {
     return min(u32(lod), mip_count - 1u);
 }
 
-/// **Sample a virtual texture.** `slot` is `handle + 1` (0 = none, guarded by
-/// [`vt_bound`] at the call site); `uv` is the virtual uv, which may leave
-/// `[0,1]` and wraps; `ddx`/`ddy` are its screen derivatives.
+/// What an address resolved to: the physical page, the mip it was actually
+/// served at, and the TILE of that mip the walk landed on.
+struct VtResolved {
+    page: u32,
+    got: u32,
+    gtx: u32,
+    gty: u32,
+    // The tile at the mip that was ASKED for, kept so a caller can see the walk's
+    // start as well as its end.
+    tx: u32,
+    ty: u32,
+};
+
+/// **The address walk** — virtual uv + wanted mip → the page and the tile that
+/// serves it (P26.3, factored out in P26.4).
 ///
-/// Returns the raw stored value — sRGB is NOT decoded here, because a caller
-/// that wants a normal or an ORM triple must not have it decoded and a caller
-/// that wants a base colour must. `vt_sample_color` below is the decoded face.
-fn vt_sample(slot: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f32> {
-    let b = vt_table[VT_HEADER_WORDS + (slot - 1u)];
+/// Its own function so that the compute arm in `tests/vt_sampling.rs` can
+/// execute *this* code with a non-zero trip count and compare it against
+/// `VtTextureDesc::ancestor` address by address. Before that arm the loop below
+/// had never run on a GPU at all: every lit-pixel test makes the whole pyramid
+/// resident, so `got == m` and the body never executes. A twin that agrees with
+/// a shader nobody ran is a twin that agrees with itself.
+///
+/// `b` is the texture's block offset, `w_uv` the WRAPPED virtual uv, `m` the mip
+/// the gradient asked for.
+fn vt_resolve(b: u32, w_uv: vec2<f32>, m: u32) -> VtResolved {
     let tsz = vt_table[b + 1u];
     let tile_sz = f32(tsz);
-    let border = f32(vt_table[b + 2u]);
-
-    // A virtual texture's address space is [0,1)²; a tiling material wraps into
-    // it. `uv - floor(uv)` is `fract` with the sign behaviour repeat wants, and
-    // the gradients above were taken BEFORE the wrap, so the seam does not
-    // collapse to mip 0.
-    let w_uv = uv - floor(uv);
-
-    let m = vt_mip(b, ddx, ddy);
     let rec = b + VT_TEX_HEADER_WORDS + m * VT_MIP_REC_WORDS;
     let mw = vt_table[rec];
     let mh = vt_table[rec + 1u];
@@ -191,15 +199,39 @@ fn vt_sample(slot: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f
         gtx = min(gtx / 2u, vt_table[r + 2u] - 1u);
         gty = min(gty / 2u, vt_tiles_y(vt_table[r + 1u], tsz) - 1u);
     }
+    return VtResolved(page, got, gtx, gty, tx, ty);
+}
 
-    let grec = b + VT_TEX_HEADER_WORDS + got * VT_MIP_REC_WORDS;
+/// **Sample a virtual texture.** `slot` is `handle + 1` (0 = none, guarded by
+/// [`vt_bound`] at the call site); `uv` is the virtual uv, which may leave
+/// `[0,1]` and wraps; `ddx`/`ddy` are its screen derivatives.
+///
+/// Returns the raw stored value — sRGB is NOT decoded here, because a caller
+/// that wants a normal or an ORM triple must not have it decoded and a caller
+/// that wants a base colour must. `vt_sample_color` below is the decoded face.
+fn vt_sample(slot: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f32> {
+    let b = vt_table[VT_HEADER_WORDS + (slot - 1u)];
+    let tsz = vt_table[b + 1u];
+    let tile_sz = f32(tsz);
+    let border = f32(vt_table[b + 2u]);
+
+    // A virtual texture's address space is [0,1)²; a tiling material wraps into
+    // it. `uv - floor(uv)` is `fract` with the sign behaviour repeat wants, and
+    // the gradients above were taken BEFORE the wrap, so the seam does not
+    // collapse to mip 0.
+    let w_uv = uv - floor(uv);
+
+    let m = vt_mip(b, ddx, ddy);
+    let r = vt_resolve(b, w_uv, m);
+
+    let grec = b + VT_TEX_HEADER_WORDS + r.got * VT_MIP_REC_WORDS;
     let gp = w_uv * vec2<f32>(f32(vt_table[grec]), f32(vt_table[grec + 1u]));
     // In [-1, tile_size) — the border ring covers the slack four times over.
-    let local = gp - vec2<f32>(f32(gtx), f32(gty)) * tile_sz;
+    let local = gp - vec2<f32>(f32(r.gtx), f32(r.gty)) * tile_sz;
 
     let slots_x = vt_table[2];
     let stored = f32(vt_table[3]);
-    let origin = vec2<f32>(f32(page % slots_x), f32(page / slots_x)) * stored;
+    let origin = vec2<f32>(f32(r.page % slots_x), f32(r.page / slots_x)) * stored;
     let dims = vec2<f32>(textureDimensions(vt_atlas, 0));
     let atlas_uv = (origin + vec2<f32>(border) + local) / dims;
     return textureSampleLevel(vt_atlas, vt_smp, atlas_uv, 0.0);
