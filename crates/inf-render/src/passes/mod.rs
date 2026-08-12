@@ -1140,6 +1140,37 @@ mod gen_cache_tests {
         assert_eq!(base, (7, 11, 13, 17));
     }
 
+    /// …and that the **constructor actually reads all four**, which the arm above
+    /// cannot see.
+    ///
+    /// A tuple that is injective in four components proves nothing about a
+    /// [`resource_key`] that passes a constant for one of them. Measured (P26.3
+    /// audit): replacing `frame.vt_generation()` with `0` left the entire
+    /// `inf-render` suite green, and the same hole stood over the three older
+    /// components. Read as a SCOPE — the function's own body — on the P23 law
+    /// that a byte pin cannot see a semantic change.
+    #[test]
+    fn resource_key_reads_every_generation_it_names() {
+        let src = include_str!("mod.rs");
+        let at = src
+            .find("pub(crate) fn resource_key(")
+            .expect("resource_key moved; this gate scopes on its definition");
+        let body = &src[at..at + src[at..].find('}').expect("a body") + 1];
+        for field in [
+            "targets.generation",
+            "atmosphere.generation",
+            "gi.generation",
+            "vt_generation()",
+        ] {
+            assert!(
+                body.contains(field),
+                "`resource_key` no longer reads `frame.{field}` — a bind group \
+                 cached across that resource's re-creation keeps the old \
+                 allocation alive, which wgpu refcounts and never validates"
+            );
+        }
+    }
+
     /// The cloud bake's key type, given the same pointer-identity treatment as
     /// [`ResourceKey`] above — GPU-free and deterministic, so it runs on every CI
     /// leg rather than only where an adapter exists.

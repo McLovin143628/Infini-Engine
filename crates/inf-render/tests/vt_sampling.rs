@@ -297,6 +297,17 @@ fn the_wgsl_implements_the_twin_above() {
              addresses of a 4095² pyramid"
         );
     }
+    // **The border offset**, the other half of the walk's contract. The twin
+    // above proves `local` reaches -1 on a real pyramid; that is only safe
+    // because the shader adds the border ring back before it addresses the
+    // atlas. Dropping `+ vec2<f32>(border)` was measured invisible to every
+    // other arm in this crate — a negative `local` then addresses the slot
+    // BEFORE this one, i.e. another texture's texels.
+    assert!(
+        code.contains("origin + vec2<f32>(border) + local"),
+        "the border offset is gone from vt_sample.wgsl's atlas address — a \
+         sample whose `local` is negative now reads the previous slot"
+    );
     // Anti-vacuity: the stripper left the code, not only the comments.
     assert!(
         code.contains("fn vt_sample(") && code.contains("textureSampleLevel(vt_atlas"),
@@ -602,30 +613,256 @@ fn read_page(gpu: &GpuContext, pools: &VtPools, slot: u32) -> Vec<u8> {
     out
 }
 
-/// **The textureless no-op, and the engagement counter.** A renderer that was
-/// never handed a pool must report zero engaged frames however many frames it
-/// draws, and one that was handed a pool must report every frame — otherwise
-/// "the goldens did not change" is an expectation rather than a measurement.
+// ── (e) the lit path: a virtual texture reaches a PIXEL ─────────────────────
+//
+// Everything above proves the bytes reach the atlas and that the address
+// arithmetic agrees with `inf-vt`. Nothing above renders a fragment, and the
+// audit measured what that costs: severing the sRGB decode, swapping the albedo
+// and ORM words in `InstanceRaw::pack`, collapsing `vt_box_uv` to a constant and
+// dropping the border offset were all invisible to the whole `inf-render` test
+// suite. The arms below close that: they draw a real frame through the real
+// `EngineRenderer` and read the colour back.
+
+const FW: u32 = 320;
+const FH: u32 = 180;
+
+/// One cube, scaled ×2 at the origin, whose +Z face fills the frame at the view
+/// below — so every pixel read back is a fragment of one textured surface and no
+/// arm needs a mask to find it.
+fn face_scene(set: inf_render::VtTextureSet) -> inf_render::RenderScene {
+    let mut scene = inf_render::RenderScene::default();
+    scene.instances.push(inf_render::MeshInstance {
+        vt: set,
+        translation: glam::DVec3::ZERO,
+        rotation: glam::Quat::IDENTITY,
+        scale: glam::Vec3::splat(2.0),
+        color: [1.0, 1.0, 1.0, 1.0],
+        metallic: 0.0,
+        roughness: 0.5,
+        emissive: [0.0; 3],
+        id: 1,
+        mesh: inf_render::PrimMesh::Cube,
+        blend: 0,
+        cutoff: 0.5,
+    });
+    scene.mark_dirty();
+    scene
+}
+
+/// Head-on at the +Z face, close enough that the face overfills 320×180 on both
+/// axes. `vt_box_uv` maps that face onto uv ≈ [0.09, 0.91] × [0.27, 0.73], and
+/// the footprint works out under one texel of a 256² texture per pixel, so the
+/// gradient mip resolves to **mip 0** — the level the arms below make resident.
+fn face_view() -> inf_render::RenderView {
+    inf_render::RenderView {
+        origin: inf_math::FloatingOrigin::new(glam::DVec3::ZERO),
+        eye_world: glam::DVec3::new(0.0, 0.0, 1.8),
+        forward: glam::Vec3::new(0.0, 0.0, -1.0),
+        up: glam::Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 0.05,
+        width: FW,
+        height: FH,
+        ortho: None,
+    }
+}
+
+/// Draw one frame of [`face_scene`] and return `(rgba, engaged frames)`.
+fn render_face(
+    gpu: &GpuContext,
+    pools: Option<VtPools>,
+    set: inf_render::VtTextureSet,
+) -> (Vec<u8>, u64) {
+    let target = inf_render::HeadlessTarget::new(gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(gpu, inf_render::HEADLESS_FORMAT);
+    renderer.set_vt_pools(pools);
+    renderer.render(gpu, &face_scene(set), &face_view(), &target.view, (FW, FH));
+    (
+        target.read_rgba(gpu).expect("readback"),
+        renderer.vt_engaged_frames(),
+    )
+}
+
+/// The red channel's `(min, max, mean)` over a frame.
+fn red_stats(rgba: &[u8]) -> (u8, u8, f64) {
+    let r: Vec<u8> = rgba.chunks_exact(4).map(|p| p[0]).collect();
+    let sum: u64 = r.iter().map(|&v| u64::from(v)).sum();
+    (
+        *r.iter().min().expect("a frame"),
+        *r.iter().max().expect("a frame"),
+        sum as f64 / r.len() as f64,
+    )
+}
+
+/// A registry holding one 256² texture whose **whole pyramid** is resident, so a
+/// mip-0 sample resolves to mip 0 and the frame shows the texels rather than the
+/// pyramid's tail. Returns the library, its synced pools, and the warm set.
+fn resident_library(
+    gpu: &GpuContext,
+    srgb: bool,
+) -> (VtTextures, VtPools, inf_render::VtTextureSet) {
+    let (mut lib, _) = VtTextures::new(pool_cfg(PageFormat::Rgba8, 64));
+    lib.register_or_record(1, Arc::new(ramp_container(256, srgb)))
+        .expect("the fixture registers");
+    let mut pools = VtPools::new(&gpu.device, &gpu.queue, lib.residency(), false);
+    // Every tile of every level — the floor alone stops three levels from the
+    // top, which on a 256² pyramid is a 4×4 texel image and would make every
+    // assertion below a statement about a blur.
+    let desc = lib
+        .residency()
+        .desc(VtTextureHandle(0))
+        .expect("registered");
+    let wants: Vec<_> = (0..desc.mip_count())
+        .flat_map(|m| {
+            let g = desc.mips[m as usize];
+            (0..g.tiles_y).flat_map(move |y| {
+                (0..g.tiles_x)
+                    .map(move |x| inf_vt::VtWant::new(VtTextureHandle(0), TileCoord::new(m, x, y)))
+            })
+        })
+        .collect();
+    let (txn, report) = lib.sync(&gpu.device, &gpu.queue, &mut pools, &wants);
+    assert_eq!(txn.deferred, 0, "the fixture pyramid did not fit");
+    assert!(
+        report.missing.is_empty(),
+        "{} pages missing",
+        report.missing.len()
+    );
+    let set = lib.set_for(Some(1), None, None);
+    assert!(!set.is_none(), "the fixture never went warm");
+    (lib, pools, set)
+}
+
+/// A square texture whose **red channel ramps left to right** and whose green and
+/// blue are constant. The ramp is what makes "the uv varies across the surface" a
+/// measurable claim rather than a hope: a projection collapsed to a constant, or
+/// an address that lands on one texel, flattens the frame.
+fn ramp_container(n: u32, srgb: bool) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((n * n * 4) as usize);
+    for _y in 0..n {
+        for x in 0..n {
+            rgba.extend_from_slice(&[(x * 255 / (n - 1)) as u8, 40, 200, 255]);
+        }
+    }
+    inf_material::build_tiled_texture(
+        rgba,
+        n,
+        n,
+        inf_material::TextureImportSettings {
+            srgb,
+            generate_mips: true,
+            compression: inf_material::TextureCompression::None,
+        },
+    )
+    .expect("the fixture tiles")
+    .into_bytes()
+}
+
+/// **A virtual texture reaches a pixel, and the engagement counter says so.**
+///
+/// The claim the batch's headline makes — "material textures appear in the
+/// interactive renderer for the first time" — asserted on the frame rather than
+/// on the atlas. Three things have to hold at once, and each falsifies a
+/// different way of shipping a feature that does nothing:
+///
+/// * the textured frame differs from the textureless one (something sampled);
+/// * the textured frame **varies across the surface** while the textureless one
+///   does not (the uv is a projection, not a constant — a `vt_box_uv` that
+///   returns one value passes every other arm in this file);
+/// * `vt_engaged_frames` is 1 after one frame with a pool and **0** after one
+///   frame without, which is what makes "the 50 goldens did not change" a
+///   measurement of the command stream rather than an expectation.
 #[test]
-fn the_engagement_counter_separates_the_two_worlds() {
-    let Some(gpu) = gpu_or_skip("the VT engagement counter") else {
+fn a_virtual_texture_reaches_the_lit_pixel() {
+    let Some(gpu) = gpu_or_skip("the VT lit path") else {
         return;
     };
-    let mut renderer = inf_render::EngineRenderer::new(&gpu, wgpu::TextureFormat::Rgba8UnormSrgb);
-    assert_eq!(renderer.vt_engaged_frames(), 0);
-    assert!(renderer.vt_pools().is_none());
+    let (_lib, pools, set) = resident_library(&gpu, false);
 
-    let lib = library(256, 256);
-    let pools = VtPools::new(&gpu.device, &gpu.queue, lib.residency(), false);
-    renderer.set_vt_pools(Some(pools));
-    assert!(renderer.vt_pools().is_some());
-    // Taking it away restores the textureless world exactly.
-    renderer.set_vt_pools(None);
-    assert!(renderer.vt_pools().is_none());
+    let (bare, bare_engaged) = render_face(&gpu, None, inf_render::VtTextureSet::NONE);
+    let (textured, engaged) = render_face(&gpu, Some(pools), set);
+
     assert_eq!(
-        renderer.vt_engaged_frames(),
-        0,
-        "handing a pool over is not drawing a frame with it"
+        bare_engaged, 0,
+        "a frame drawn with no pool engaged virtual texturing"
+    );
+    assert_eq!(engaged, 1, "the frame drawn with a pool did not engage");
+
+    let (blo, bhi, bmean) = red_stats(&bare);
+    let (tlo, thi, tmean) = red_stats(&textured);
+    let bare_spread = u32::from(bhi) - u32::from(blo);
+    let tex_spread = u32::from(thi) - u32::from(tlo);
+
+    // Anti-vacuity first: the untextured face must be ON SCREEN and lit, or both
+    // frames are a comparison between two skies.
+    assert!(
+        bmean > 20.0,
+        "the untextured face never reached the frame (mean red {bmean:.1})"
+    );
+    assert_ne!(bare, textured, "the texture changed no pixel at all");
+    // The ramp spans the face; a flat white one does not. Floors under the
+    // measured numbers, not at them.
+    assert!(
+        tex_spread > 100,
+        "the textured face spans only {tex_spread} of red — the uv is not varying \
+         across the surface (a constant projection looks exactly like this)"
+    );
+    assert!(
+        bare_spread < tex_spread / 2,
+        "the untextured face already spans {bare_spread} of red against the \
+         texture's {tex_spread}, so the spread test proves nothing"
+    );
+    assert!(
+        (tmean - bmean).abs() > 5.0,
+        "textured mean {tmean:.1} vs untextured {bmean:.1}"
+    );
+}
+
+/// **The three slots are three different slots, and the sRGB flag is read.**
+///
+/// Two mutations this arm exists for, both measured invisible to every other arm
+/// in the crate before it: swapping the albedo and ORM words in
+/// `InstanceRaw::pack` (occlusion would silently become base colour), and
+/// deleting the `vt_srgb_to_linear` call in `vt_sample_color` (a base colour
+/// would ship gamma-encoded).
+#[test]
+fn the_slot_routing_and_the_srgb_flag_reach_the_pixel() {
+    let Some(gpu) = gpu_or_skip("the VT slot routing") else {
+        return;
+    };
+    // Same texels, same handle, different SLOT.
+    let (_lin, lin_pools, lin_set) = resident_library(&gpu, false);
+    let (albedo, _) = render_face(&gpu, Some(lin_pools), lin_set);
+
+    let (_orm_lib, orm_pools, warm) = resident_library(&gpu, false);
+    let orm_set = inf_render::VtTextureSet {
+        albedo: 0,
+        normal: 0,
+        orm: warm.albedo,
+    };
+    let (orm, _) = render_face(&gpu, Some(orm_pools), orm_set);
+    assert_ne!(
+        albedo, orm,
+        "the same texture in the albedo slot and the ORM slot rendered the same \
+         frame — the three per-instance words are not three different maps"
+    );
+
+    // Same texels, same slot, different SRGB FLAG. The atlas bytes are identical
+    // (srgb is a flag in the container header, not a transform on the texels), so
+    // any difference here is the shader's transfer function and nothing else.
+    let (_srgb_lib, srgb_pools, srgb_set) = resident_library(&gpu, true);
+    let (decoded, _) = render_face(&gpu, Some(srgb_pools), srgb_set);
+    let (_, _, lin_mean) = red_stats(&albedo);
+    let (_, _, srgb_mean) = red_stats(&decoded);
+    assert!(
+        (lin_mean - srgb_mean).abs() > 5.0,
+        "an sRGB base colour and a linear one rendered the same mean red \
+         ({lin_mean:.1} vs {srgb_mean:.1}) — the per-texture transfer function \
+         in `vt_sample_color` is not being applied"
+    );
+    assert!(
+        srgb_mean < lin_mean,
+        "sRGB→linear must DARKEN a mid-tone ramp: {srgb_mean:.1} vs {lin_mean:.1}"
     );
 }
 
