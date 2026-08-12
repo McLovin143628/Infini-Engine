@@ -104,31 +104,42 @@
 //! the wants; there is deliberately no camera, no radius and no budget policy in
 //! Ring 0") and it keeps residency testable as a pure set operation.
 //!
-//! It also does not rank wants. Until P26.4 there is no priority signal, so wants
-//! are served in payload order — which is also the order their bytes lie in, so a
-//! batch of admits is a forward scan of the mmap rather than a scatter. When
-//! feedback arrives, priority becomes the primary key and payload order stays as
-//! the tie-break.
+//! It does not *choose* a rank either, but since P26.4 it **honours** one: a
+//! [`VtWant`] carries a [`VtPriority`], the sort is priority-primary with payload
+//! order as the tie-break, and the two ranks that exist are
+//! [`VT_PRIORITY_FLOOR`] and [`VT_PRIORITY_FEEDBACK`]. That is what makes the
+//! caller's analytic floor a **floor**: a whole priority class is seated before
+//! the next is offered a slot, and `apply_wants` never evicts what it has
+//! already touched, so a refinement cannot take a floor tile's page. Payload
+//! order still holds *inside* a class, so each class is one forward scan of the
+//! mmap rather than a scatter.
+//!
+//! The feedback signal itself is `inf_render`'s — the GPU produces an
+//! order-independent coverage bitmask whose **layout** is [`feedback`]'s, and
+//! [`VtFeedbackLayout::wants`] is the CPU request scan that turns it back into
+//! wants in virtual-address order.
 
 pub mod address;
 pub mod container;
+pub mod feedback;
 pub mod pool;
 pub mod residency;
 pub mod table;
 
 pub use address::{full_pyramid, DescError, TileCoord, VtMipDesc, VtTextureDesc, MAX_VT_MIPS};
 pub use container::{
-    decode_bc1, decode_bc3, is_v2, stored_tile_bytes, TexMipEntry, TexTileEntry, TiledTextureError,
-    TiledTextureHeader, TiledTextureReader, TiledTextureView, STORED_TILE_SIZE, TEX_ASSET_MAGIC,
-    TEX_ASSET_SCHEMA_VERSION, TILE_BORDER, TILE_SIZE,
+    decode_bc1, decode_bc3, is_v2, stored_page_format, stored_tile_bytes, TexMipEntry, TexTileEntry,
+    TiledTextureError, TiledTextureHeader, TiledTextureReader, TiledTextureView, STORED_TILE_SIZE,
+    TEX_ASSET_MAGIC, TEX_ASSET_SCHEMA_VERSION, TILE_BORDER, TILE_SIZE,
 };
 pub use pool::{
     plan_pool, PageFormat, VtAdvisory, VtPoolConfig, VtPoolGeometry, DEFAULT_MAX_TEXTURE_DIM,
     DEFAULT_VT_BUDGET_BYTES,
 };
+pub use feedback::{VtFeedbackLayout, FEEDBACK_BITS_PER_WORD};
 pub use residency::{
-    resolved_table, VtAdmit, VtError, VtEvict, VtResidency, VtResolved, VtStats, VtTextureHandle,
-    VtTransaction, VtWant,
+    resolved_table, VtAdmit, VtError, VtEvict, VtPriority, VtResidency, VtResolved, VtStats,
+    VtTextureHandle, VtTransaction, VtWant, VT_PRIORITY_FEEDBACK, VT_PRIORITY_FLOOR,
 };
 pub use table::{
     pack_entry, unpack_entry, VtEntry, TABLE_HEADER_WORDS, TABLE_MAGIC, TABLE_MIP_REC_WORDS,

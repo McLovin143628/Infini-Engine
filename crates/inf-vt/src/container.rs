@@ -554,6 +554,23 @@ pub fn is_v2(bytes: &[u8]) -> bool {
     bytes.len() >= 8 && bytes[0..8] == TEX_ASSET_MAGIC
 }
 
+/// The format `bytes` **stores** its pages in, without building a reader
+/// (P26.4).
+///
+/// A pool holds one page size for every tile of every texture in it, so a host
+/// registering a level's textures has to know what it is about to be handed
+/// *before* it can plan the pool. This is that question and only that question:
+/// it parses the header and throws the directories away, so asking it of every
+/// bound texture at load costs one pass over a few hundred bytes each.
+///
+/// `None` for anything that is not a readable v2 container — which is the same
+/// answer [`TiledTextureReader::new`] will give the registration a moment later,
+/// through [`VtRefusal`](../../inf_render/vt_library/enum.VtRefusal.html), so a
+/// caller does not have to decide what a refusal means twice.
+pub fn stored_page_format(bytes: &[u8]) -> Option<PageFormat> {
+    parse(bytes).ok().map(|(h, _, _)| h.format)
+}
+
 // ── BC decoders ─────────────────────────────────────────────────────────────
 //
 // Moved down from `inf_material::bc` with the reader (see the module docs): the

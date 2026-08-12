@@ -70,17 +70,61 @@ impl VtTextureHandle {
     }
 }
 
+/// How badly a tile is wanted — **the primary sort key**, lower first.
+///
+/// P26.2 shipped an unranked want set and said so: *"When feedback arrives,
+/// priority becomes the primary key and payload order stays as the tie-break."*
+/// This is that, and it is what makes the P26.4 floor a **floor**: floor wants
+/// are [`VT_PRIORITY_FLOOR`] and feedback refinements are
+/// [`VT_PRIORITY_FEEDBACK`], so a transaction seats every floor tile it can
+/// before a refinement is offered a slot — and a refinement can never take a
+/// slot from a floor tile the same transaction just admitted, because
+/// [`VtResidency::apply_wants`] protects what it has touched.
+pub type VtPriority = u8;
+
+/// The analytic floor: residency may never drop below it while the budget
+/// allows. `0` so [`VtWant::new`]'s existing callers keep their exact behaviour.
+pub const VT_PRIORITY_FLOOR: VtPriority = 0;
+
+/// A refinement the GPU feedback asked for. Served after the whole floor.
+pub const VT_PRIORITY_FEEDBACK: VtPriority = 1;
+
 /// "This tile, please." The whole input language of residency — deliberately no
-/// priority, no camera and no budget: see the crate docs.
+/// camera and no budget: see the crate docs. Since P26.4 it carries a
+/// [`priority`](Self::priority), which is a *rank*, not a policy — the caller
+/// still decides what to want and how badly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VtWant {
     pub texture: VtTextureHandle,
     pub tile: TileCoord,
+    /// Lower is served first. See [`VtPriority`].
+    pub priority: VtPriority,
 }
 
 impl VtWant {
+    /// A **floor** want ([`VT_PRIORITY_FLOOR`]) — the pre-P26.4 meaning of every
+    /// existing call site, unchanged.
     pub const fn new(texture: VtTextureHandle, tile: TileCoord) -> Self {
-        Self { texture, tile }
+        Self {
+            texture,
+            tile,
+            priority: VT_PRIORITY_FLOOR,
+        }
+    }
+
+    /// A **refinement** want ([`VT_PRIORITY_FEEDBACK`]) — what a decoded
+    /// feedback mask produces.
+    pub const fn refine(texture: VtTextureHandle, tile: TileCoord) -> Self {
+        Self {
+            texture,
+            tile,
+            priority: VT_PRIORITY_FEEDBACK,
+        }
+    }
+
+    /// The same want at an explicit rank.
+    pub const fn with_priority(self, priority: VtPriority) -> Self {
+        Self { priority, ..self }
     }
 }
 
@@ -140,6 +184,17 @@ pub struct VtTransaction {
     /// Wants naming a tile outside their texture's grid — a caller bug, counted
     /// rather than panicked on, because a want set is computed from a camera.
     pub out_of_range: u32,
+    /// Wants naming a texture handle this residency does not have (P26.4; the
+    /// P26.3 ledger's *"a want naming an unknown texture handle is dropped
+    /// silently rather than counted, unlike an out-of-range tile"*).
+    ///
+    /// It is a different defect from [`out_of_range`](Self::out_of_range) and
+    /// deserves its own number: an out-of-range tile is a want set computed
+    /// against the wrong extent, while an unknown handle is a want set computed
+    /// against **a different registry** — a stale feedback mask decoded after a
+    /// level switch, or a projector holding handles from the pool it had before
+    /// a re-registration. Counted after dedup, exactly as `out_of_range` is.
+    pub unknown_texture: u32,
 }
 
 impl VtTransaction {
@@ -179,6 +234,9 @@ impl VtTransaction {
         if self.out_of_range > 0 {
             s.push_str(&format!("oor {}\n", self.out_of_range));
         }
+        if self.unknown_texture > 0 {
+            s.push_str(&format!("unk {}\n", self.unknown_texture));
+        }
         s
     }
 }
@@ -203,6 +261,11 @@ pub struct VtStats {
     pub evicts: u64,
     /// Whether the last transaction had to defer a want for want of a slot.
     pub budget_clamped: bool,
+    /// Wants naming an unknown texture handle since the residency was created
+    /// (P26.4). Cumulative, unlike [`VtTransaction::unknown_texture`], because
+    /// the interesting reading is "has this ever happened" — one stale mask is
+    /// a bug however few frames it lasted.
+    pub unknown_texture: u64,
 }
 
 impl VtStats {
@@ -231,7 +294,11 @@ impl VtStats {
             } else {
                 ""
             }
-        )
+        ) + &if self.unknown_texture > 0 {
+            format!(" [{} unknown-handle wants]", self.unknown_texture)
+        } else {
+            String::new()
+        }
     }
 }
 
@@ -492,19 +559,37 @@ impl VtResidency {
 
         // ── 2. normalize the want set ──
         //
-        // Sorted by (texture, PAYLOAD order) and deduplicated, so the result does
-        // not depend on how the caller assembled the frame — and so a batch of
-        // admits is a forward scan of the container rather than a scatter. The
-        // derived `Ord` on `TileCoord` would sort (mip, x, y) and walk the file
-        // sideways; that is the P26.1 audit's finding, used rather than merely
-        // recorded.
-        let mut sorted: Vec<VtWant> = wants
-            .iter()
-            .copied()
-            .filter(|w| w.texture.index() < self.textures.len())
-            .collect();
-        sorted.sort_by_key(|w| (w.texture.0, w.tile.payload_order()));
-        sorted.dedup();
+        // **Priority first, payload order as the tie-break** (P26.4) — the exact
+        // arrangement P26.2's crate docs promised for the day feedback arrived.
+        // Two passes, and the order of the two is the whole point:
+        //
+        // 1. sort by `(texture, PAYLOAD order, priority)` and dedup on
+        //    `(texture, tile)`. `dedup_by` keeps the FIRST of a run, which after
+        //    that sort is the **lowest** priority — so a tile the floor and the
+        //    feedback both ask for is a floor want, not two wants.
+        //    Payload order rather than `TileCoord`'s derived `Ord`, which sorts
+        //    (mip, x, y) while the tile directory is (mip, y, x) and would walk
+        //    the file sideways: the P26.1 audit's finding, used rather than
+        //    merely recorded.
+        // 2. **stable** sort by priority alone. Rust's `sort_by_key` is stable,
+        //    so the payload order established above survives inside each
+        //    priority class — one sequential scan of the container per class,
+        //    with the floor's scan first.
+        let mut sorted: Vec<VtWant> = wants.to_vec();
+        sorted.sort_by_key(|w| (w.texture.0, w.tile.payload_order(), w.priority));
+        sorted.dedup_by(|a, b| a.texture == b.texture && a.tile == b.tile);
+        sorted.sort_by_key(|w| w.priority);
+        // An unknown handle is counted here rather than filtered in silence
+        // (P26.4): see `VtTransaction::unknown_texture`. After the dedup, so one
+        // stale tile asked for twice is one number.
+        sorted.retain(|w| {
+            let known = w.texture.index() < self.textures.len();
+            if !known {
+                txn.unknown_texture += 1;
+            }
+            known
+        });
+        self.stats.unknown_texture += u64::from(txn.unknown_texture);
         self.stats.wanted = sorted.len();
 
         // ── 3. touch what is already there, collect the misses ──
@@ -983,11 +1068,92 @@ mod tests {
             VtWant::new(h, TileCoord::new(99, 0, 0)),
             VtWant::new(VtTextureHandle(7), TileCoord::new(0, 0, 0)),
         ]);
-        assert_eq!(txn.out_of_range, 2, "an unknown handle is filtered earlier");
+        assert_eq!(txn.out_of_range, 2, "an unknown handle is its own counter");
+        assert_eq!(
+            txn.unknown_texture, 1,
+            "a want naming a texture this residency does not have was dropped in \
+             silence — the P26.3 remainder"
+        );
         assert!(txn.admits.is_empty());
-        // …and it reaches the trace, which is the only place a caller watching a
-        // transaction stream would ever see it.
-        assert_eq!(txn.trace(), "oor 2\n");
+        // …and both reach the trace, which is the only place a caller watching a
+        // transaction stream would ever see them.
+        assert_eq!(txn.trace(), "oor 2\nunk 1\n");
+        assert_eq!(r.stats().unknown_texture, 1, "cumulative, and it moved");
+        assert!(
+            r.stats().summary().contains("1 unknown-handle wants"),
+            "{}",
+            r.stats().summary()
+        );
+
+        // ANTI-VACUITY: the same want against a residency that HAS the handle is
+        // not counted, so the number above measures the handle and not the call.
+        let txn = r.apply_wants(&[VtWant::new(h, TileCoord::new(0, 0, 0))]);
+        assert_eq!(txn.unknown_texture, 0);
+        assert_eq!(txn.admits.len(), 1);
+    }
+
+    /// **Priority is the primary key and payload order the tie-break** — the
+    /// arrangement P26.2's crate docs promised, and what makes the floor a floor.
+    ///
+    /// A pool of three cache slots is offered one floor want and three
+    /// refinements, all of finer tiles that sort BEFORE the floor want in payload
+    /// order (mip 0 precedes mip 1). Without the priority sort the floor tile is
+    /// the one that gets deferred, which is precisely the regression this exists
+    /// to catch: `want_floor` emits coarsest-first and `payload_order` is
+    /// ascending in mip, so the two orders are *opposed*.
+    #[test]
+    fn the_floor_is_served_before_a_refinement_however_the_payload_sorts() {
+        let mut r = pool(4);
+        let h = r
+            .register_texture(full_pyramid(512, 512, 128, 4, true))
+            .expect("one root");
+        // 4 slots: 1 pinned root + 3 cache slots.
+        assert_eq!(r.apply_wants(&[]).admits.len(), 1);
+
+        let floor = VtWant::new(h, TileCoord::new(1, 1, 1));
+        let refines = [
+            VtWant::refine(h, TileCoord::new(0, 0, 0)),
+            VtWant::refine(h, TileCoord::new(0, 1, 0)),
+            VtWant::refine(h, TileCoord::new(0, 2, 0)),
+        ];
+        let mut wants = refines.to_vec();
+        wants.push(floor);
+        let txn = r.apply_wants(&wants);
+
+        assert_eq!(txn.deferred, 1, "four wants into three cache slots");
+        assert_eq!(
+            txn.admits[0].tile, floor.tile,
+            "the floor tile was not admitted first: {}",
+            txn.trace()
+        );
+        assert!(
+            r.is_resident(h, floor.tile),
+            "a refinement outranked the floor: {}",
+            txn.trace()
+        );
+        // ANTI-VACUITY: the refinements really do sort before the floor tile in
+        // payload order, so the assertion above is about the priority and not
+        // about an order that happened to agree.
+        assert!(
+            refines[0].tile.payload_order() < floor.tile.payload_order(),
+            "the fixture's refinements do not precede its floor want"
+        );
+    }
+
+    /// One tile asked for by both the floor and the feedback is **one** want, at
+    /// the floor's rank — otherwise a refinement's copy could be the one that
+    /// survives dedup and the tile would be served late.
+    #[test]
+    fn a_tile_wanted_twice_keeps_the_stronger_rank() {
+        let mut r = pool(8);
+        let h = r
+            .register_texture(full_pyramid(512, 512, 128, 4, true))
+            .unwrap();
+        r.apply_wants(&[]);
+        let at = TileCoord::new(1, 0, 0);
+        let txn = r.apply_wants(&[VtWant::refine(h, at), VtWant::new(h, at)]);
+        assert_eq!(txn.admits.len(), 1, "one tile, one admit: {}", txn.trace());
+        assert_eq!(r.stats().wanted, 1, "the duplicate survived normalization");
     }
 
     /// A block generation moves when a page of that texture is seated or
