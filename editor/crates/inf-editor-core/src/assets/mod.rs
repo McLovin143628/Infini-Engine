@@ -204,7 +204,17 @@ impl AssetProject {
         import: Option<toml::Table>,
         reuse: Option<AssetId>,
     ) -> Result<AssetId> {
-        let id = reuse.unwrap_or_else(AssetId::new);
+        // Spelled as a `match` on purpose. `reuse.unwrap_or_else(AssetId::new)`
+        // is what this wants to say, and `clippy::unwrap_or_default` rewrites it
+        // to `unwrap_or_default()` — because the lint assumes `T::new()` and
+        // `T::default()` agree, which for `AssetId` is precisely the assumption
+        // that produced the defect: `default()` is the NIL "no asset" sentinel
+        // and `new()` mints a v4 UUID. Taking clippy's advice here reintroduces
+        // it.
+        let id = match reuse {
+            Some(existing) => existing,
+            None => AssetId::new(),
+        };
         let mut sidecar = AssetSidecar::new(id, kind, content_hash);
         sidecar.source = source;
         sidecar.import = import;

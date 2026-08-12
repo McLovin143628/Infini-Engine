@@ -36,6 +36,17 @@ impl AssetId {
     }
 }
 
+/// **`AssetId::default()` is [`NIL`](AssetId::NIL), not a fresh id** — the
+/// sentinel for "no asset", so `#[derive(Default)]` on a struct holding an
+/// optional reference means *unset* rather than *unnamed*.
+///
+/// It is therefore never the right way to mint one. `AssetProject::
+/// register_written_asset` wrote `reuse.unwrap_or_default()` for two phases and
+/// gave every asset it created the same NIL guid, so the second one replaced the
+/// first in the database and orphaned its payload (P26.1 audit). Use
+/// [`AssetId::new`], and note that `clippy::unwrap_or_default` will offer to
+/// undo that — the lint assumes `new()` and `default()` agree, and here they
+/// deliberately do not.
 impl Default for AssetId {
     fn default() -> Self {
         Self::NIL
