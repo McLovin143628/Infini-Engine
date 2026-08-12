@@ -8981,7 +8981,7 @@ door for editor viewport, PIE and shipping.
 > **STATUS — P26.1 Tiled container + BC upload: COMPLETE (2026-08-11)** — four
 > implementation commits (`c4df446` container, `e7bbf1b` import + the one read door,
 > `462ea1f` the BC probe/clamp, `b668cef` the upload proof) plus an adversarial audit
-> (eight commits). Battery green: **223 binaries, 4 031 passed, 0 failed, 8 ignored**
+> (eleven commits). Battery green: **223 binaries, 4 031 passed, 0 failed, 8 ignored**
 > (the batch landed at 4 022; the audit added nine arms).
 > Goldens stay **50**. No schema moved (`ScenePayload`, scene, `TextureAsset` all
 > untouched — this versions the *container*). No new external dependency:
@@ -8999,8 +8999,13 @@ door for editor viewport, PIE and shipping.
 > with no decode and no re-compression. `.inf_tex` joins the streaming class and cooks
 > uncompressed.
 >
-> **What the audit found** (all fixed in this batch; findings F1–F10 with mechanisms in
-> the commit bodies):
+> **What the audit found** (all fixed in this batch; findings F1–F11 with mechanisms in
+> the commit bodies). **A LAW out of the first one:** `AssetId::default()` is the NIL
+> sentinel and `AssetId::new()` mints a UUID, so the two disagree — and
+> `clippy::unwrap_or_default` fires on the *fix*, offering the defect back, because
+> the lint assumes `T::new() == T::default()`. That assumption is what wrote the bug.
+> A tool repeating a wrong assumption is the strongest argument there is for writing
+> it down where the next person will stand: the `impl Default for AssetId`.
 >
 > * **Every imported texture was written under the NIL guid, and the second one
 >   evicted the first.** `AssetProject::register_written_asset` — the specialized
