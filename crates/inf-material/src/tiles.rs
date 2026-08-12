@@ -116,9 +116,20 @@ use crate::texture::{TextureAsset, TextureFormat, TextureMip};
 /// still does.
 ///
 /// The split is not a tidy-up: a shipped player samples virtual textures, so it
-/// must *read* tiles, and it does not link this crate (`image` + `naga` are not
-/// in a player's dependency graph and must never be). The writer below — which
-/// needs the mip chain, the format choice and the BC encoder — stays. See
+/// must *read* tiles, and **it does not link this crate** — `inf-material` is a
+/// *dev* dependency of `inf-render`. Measured rather than asserted:
+/// `cargo tree -p inf-player -e normal` shows `inf-vt` and no `inf-material`.
+///
+/// What that buys is that this crate's own code — the BC *encoder*, the
+/// naga-validating material compiler, the `image`-backed importer — stays out of
+/// a shipped build. It is **not** that `image` and `naga` are absent from a
+/// player: they are there anyway, `image` through `gltf`/`inf-terrain` and `naga`
+/// through `wgpu-core`. The claim worth defending is the dependency *direction*,
+/// which makes "`inf-vt` reaches for the importer" a compile error rather than a
+/// review question.
+///
+/// The writer below — which needs the mip chain, the format choice and the BC
+/// encoder — stays. See
 /// [`inf_vt::container`]'s module docs for the table of what went and what
 /// stayed, and for the one deliberate deviation (the BC *decoder* went with the
 /// reader; the encoder did not).
