@@ -222,6 +222,9 @@ pub struct CookReport {
     pub levels_rewritten: usize,
     /// How many `.inf_vmesh` meshlet DAGs were derived from meshes (P13.1).
     pub meshlet_meshes_derived: usize,
+    /// How many `.inf_matd` runtime material records the cook derived (P26.3b) —
+    /// one per `.inf_mat` in the dependency closure.
+    pub materials_derived: usize,
     /// How many `.inf_fracture` chunk sets were derived from destructible
     /// meshes (P22.2).
     pub fractures_derived: usize,
@@ -339,6 +342,10 @@ enum CookOutput {
         /// A derived world partition `(part_id, bytes, streamed_cell_count)` for
         /// a partitioned level (P16.5).
         partition: Option<(AssetId, Vec<u8>, usize)>,
+        /// A derived material record `(derived_id, bytes)` for a `.inf_mat`
+        /// (P26.3b). Derived rather than carried because the shipped player
+        /// cannot decode a `.inf_mat` at all.
+        derived_material: Option<(AssetId, Vec<u8>)>,
         /// Cook advisories raised while cooking this asset (today: cross-cell
         /// references in a partitioned level). Folded into the report in closure
         /// order so it stays deterministic.
@@ -484,6 +491,36 @@ fn cook_one(
         _ => raw,
     };
 
+    // ── derive the runtime material record for a `.inf_mat` (P26.3b) ───────
+    //
+    // Through `inf_material::derive_material_bytes` — the ONE door the PIE
+    // payload builder and the editor projector also call — so the pack, the
+    // preview and the viewport cannot flatten a material three ways. Keyed by
+    // `derived_material_id`, the same salted id the payload uses, so a runtime
+    // has one lookup rule rather than two.
+    //
+    // A `.inf_mat` this build cannot decode is an **advisory**, not a failure:
+    // the level still ships, and every surface bound to that material renders
+    // off its scalar attributes — which is exactly what a pre-v22 level did, and
+    // is the permanent no-texture path rather than a hole.
+    let derived_material = if kind == AssetKind::Material {
+        match inf_material::derive_material_bytes(&cooked) {
+            Ok(rec) => match inf_asset::encode(&rec) {
+                Ok(bytes) => Some((inf_asset::derived_material_id(guid), bytes)),
+                Err(e) => {
+                    advisories.push(undecodable_material_advisory(guid, &name, &e.to_string()));
+                    None
+                }
+            },
+            Err(e) => {
+                advisories.push(undecodable_material_advisory(guid, &name, &e.to_string()));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // ── derive virtualized geometry for dense meshes (for a mesh cooked == raw) ─
     let vmesh = if kind == AssetKind::Mesh && opts.vgeom.enabled {
         let _span = tracing::info_span!("derive_vmesh", %guid).entered();
@@ -544,6 +581,7 @@ fn cook_one(
         vmesh,
         fracture,
         partition,
+        derived_material,
         advisories,
     })
 }
@@ -939,6 +977,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     // simply cannot follow that edge, which would ship a level whose ground never
     // streams — silently. Say so.
     warnings.extend(dangling_terrain_refs(&db, &closure));
+    warnings.extend(dangling_material_refs(&db, &closure));
     warnings.extend(voxel_scale_mismatches(&db, &closure));
     warnings.extend(see_through_pits(&db, &closure));
     warnings.extend(dangling_biome_set_refs(&db, &closure));
@@ -1006,6 +1045,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     let mut blueprints_validated = 0usize;
     let mut levels_rewritten = 0usize;
     let mut meshlet_meshes_derived = 0usize;
+    let mut materials_derived = 0usize;
     let mut fractures_derived = 0usize;
     let mut fracture_chunks = 0usize;
     let mut fracture_chunks_dropped = 0usize;
@@ -1014,6 +1054,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     // Meshlet DAGs derived alongside their meshes, added after the closure so a
     // derived id never shadows a real closure asset processed later.
     let mut derived_vmeshes: Vec<(AssetId, Vec<u8>)> = Vec::new();
+    let mut derived_materials: Vec<(AssetId, Vec<u8>)> = Vec::new();
     // Fracture chunk sets derived alongside their meshes, added after the closure
     // for the same reason.
     let mut derived_fractures: Vec<(AssetId, Vec<u8>, usize, u32)> = Vec::new();
@@ -1033,6 +1074,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
                 vmesh,
                 fracture,
                 partition,
+                derived_material,
                 advisories,
             } => {
                 writer.add_bytes(guid, kind, &cooked)?;
@@ -1073,6 +1115,21 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
                         derived_fractures.push((frac_id, frac_bytes, chunks, requested));
                     }
                 }
+                // P26.3b: the derived material record. Same collision guard as
+                // the vmesh above, and the same degradation — a record that
+                // cannot be packed means every surface bound to that material
+                // renders off its scalars, which is a warning rather than a
+                // reason to fail an otherwise-valid build.
+                if let Some((mat_id, mat_bytes)) = derived_material {
+                    if db.contains(mat_id) || derived_materials.iter().any(|(id, _)| *id == mat_id)
+                    {
+                        warnings.push(format!(
+                            "skipped derived material for {guid}: derived id {mat_id} collides"
+                        ));
+                    } else {
+                        derived_materials.push((mat_id, mat_bytes));
+                    }
+                }
                 warnings.extend(advisories);
                 if let Some((part_id, part_bytes, cells)) = partition {
                     // A collision here would make the partition unreachable (the
@@ -1092,6 +1149,17 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
                 }
             }
         }
+    }
+
+    // Pack the derived material records (P26.3b). `AssetKind::DerivedMaterial` is
+    // NOT streaming-class, so these compress like any other payload — a record is
+    // a handful of GUIDs and scalars, read whole when a level loads.
+    for (mat_id, bytes) in &derived_materials {
+        writer.add_bytes(*mat_id, AssetKind::DerivedMaterial, bytes)?;
+        *kinds
+            .entry(AssetKind::DerivedMaterial.slug().to_string())
+            .or_default() += 1;
+        materials_derived += 1;
     }
 
     // Pack the derived meshlet DAGs (order-independent — the writer sorts by GUID).
@@ -1171,6 +1239,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
         blueprints_validated,
         levels_rewritten,
         meshlet_meshes_derived,
+        materials_derived,
         fractures_derived,
         fracture_chunks,
         fracture_chunks_dropped,
@@ -1178,6 +1247,44 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
         partition_cells,
         warnings,
     })
+}
+
+/// The advisory for a `.inf_mat` the cook could not flatten into its runtime
+/// record (P26.3b).
+///
+/// **Why this is worth a line of output.** A shipped player cannot decode a
+/// `.inf_mat` — that is the whole reason the derived record exists — so a
+/// material that fails here ships as *nothing*, and every surface bound to it
+/// renders off its per-instance scalar attributes. That is the same picture a
+/// pre-v22 level draws, which is exactly what makes it invisible: the build
+/// succeeds, the level loads, the geometry is right, and one prop is a flat
+/// colour that nobody can tell from an authored flat colour. The editor viewport
+/// meanwhile reads the project's content root directly and can still show it
+/// textured, so the divergence is visible only to whoever compares the two.
+///
+/// Pure, so the wording and the trigger are unit-tested — the
+/// `sub_threshold_advisory` / `dangling_terrain_refs` precedent.
+pub fn undecodable_material_advisory(guid: AssetId, name: &str, detail: &str) -> String {
+    format!(
+        "material {guid} ({name}) did not decode ({detail}), so no .inf_matd was derived \
+         and every surface bound to it renders off its SCALAR attributes in the shipped \
+         build — textureless, and indistinguishable from an authored flat colour. \
+         Re-import or re-save the material."
+    )
+}
+
+/// The advisory for a `Material.asset` binding that names an asset the project
+/// does not have (P26.3b) — the `dangling_terrain_refs` shape, for materials.
+///
+/// Raised from the closure rather than from `cook_one`, because a dangling ref is
+/// a fact about the *level* and its database, and `cook_one` sees one asset's
+/// bytes.
+pub fn dangling_material_advisory(level: AssetId, entity: &str, missing: AssetId) -> String {
+    format!(
+        "level {level}: entity '{entity}' is bound to material {missing}, which is not in \
+         the project — the surface ships with its scalar attributes only. Re-apply a \
+         material, or clear the binding."
+    )
 }
 
 /// Why a `.inf_mesh` did not get a derived `.inf_vmesh`.
@@ -1393,9 +1500,29 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
                 // P24.4: and a HairGuides pulls its `.inf_hair`, same edge, same
                 // reason.
                 deps.extend(e.hair_guides.as_ref().and_then(|h| h.asset).map(AssetId));
+                // P26.3b (scene v22): a `Material.asset` pulls its `.inf_mat`
+                // into the closure — and the `AssetKind::Material` arm below
+                // pulls that material's `.inf_tex` maps in after it. Without
+                // this edge a shipped level would name a material nothing can
+                // resolve and every surface would render off its scalar
+                // attributes, silently, while the editor — reading the project's
+                // content root directly — showed it textured. That asymmetry is
+                // the shape the P22 "one door for three paths" law is about, so
+                // the edge lands in the same pass as every other component
+                // reference.
+                deps.extend(e.material.as_ref().and_then(|m| m.asset).map(AssetId));
             }
             deps
         }
+        // P26.3b: a `.inf_mat` references the `.inf_tex` maps it samples, and it
+        // is the ONLY thing that does — a level names the material, the material
+        // names the textures. The edge is read through the same
+        // `derive_material_bytes` door the derived record is written with, so the
+        // set the cook PACKS and the set the runtime ASKS FOR cannot differ.
+        AssetKind::Material => match inf_material::derive_material_bytes(&raw) {
+            Ok(d) => d.texture_dependencies(),
+            Err(_) => Vec::new(),
+        },
         AssetKind::StateMachine => {
             let Ok(sm) = inf_asset::decode::<inf_anim::StateMachineAsset>(&raw) else {
                 return Vec::new();
@@ -1479,6 +1606,41 @@ fn grammar_module_refs(raw: &[u8]) -> Vec<uuid::Uuid> {
         return Vec::new();
     };
     inf_pcg::grammar_mesh_refs(&graph, &inf_pcg::pcg_registry())
+}
+/// Every `Material.asset` binding in the closure's levels that names an asset the
+/// project does not have (P26.3b) — the [`dangling_terrain_refs`] shape, for
+/// materials.
+///
+/// A dangling binding is not a build failure: the surface ships with its scalar
+/// attributes, which is the permanent no-texture path and exactly what a pre-v22
+/// level did. It IS a level that quietly stopped being textured, which is the
+/// class of hazard the advisory doctrine exists for. Deduplicated + sorted, like
+/// every other advisory here, so the report stays deterministic.
+fn dangling_material_refs(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
+    let mut missing: BTreeSet<(AssetId, String, AssetId)> = BTreeSet::new();
+    for &id in closure {
+        let Some(entry) = db.get(id) else { continue };
+        if entry.kind() != AssetKind::Level {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&entry.path) else {
+            continue;
+        };
+        let Ok(level) = inf_scene::decode(&raw) else {
+            continue;
+        };
+        for e in &level.entities {
+            if let Some(asset) = e.material.as_ref().and_then(|m| m.asset) {
+                if !db.contains(AssetId(asset)) {
+                    missing.insert((id, e.name.clone(), AssetId(asset)));
+                }
+            }
+        }
+    }
+    missing
+        .into_iter()
+        .map(|(level, name, asset)| dangling_material_advisory(level, &name, asset))
+        .collect()
 }
 
 /// Advisory: `Terrain.asset` references, in the levels being cooked, that name an

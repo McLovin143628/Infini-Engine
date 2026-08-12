@@ -41,6 +41,13 @@ inf-pcg = { workspace = true }
 # come from the SAME frames rather than from two guesses. Pure math, no GPU.
 inf-water = { workspace = true }
 inf-math = { workspace = true }
+# P26.3b: the ONE door that flattens a `.inf_mat` into the `.inf_matd` a runtime
+# binds from (`inf_material::derive_material_bytes`). The cook, the PIE payload
+# builder and the editor projector all call it, so "PIE == shipping" for
+# materials is a property of the code rather than of three collectors agreeing —
+# the P22.2 "one door for three paths" law. Decode + flatten only: the cook never
+# compiles a material graph and never touches an image.
+inf-material = { workspace = true }
 # P22.2: the cook asks the physics facade whether a fracture chunk's hull point
 # set can actually become a collider, BEFORE writing the bytes — the same parry
 # path the collider build runs, so a "yes" here is a guarantee rather than an
