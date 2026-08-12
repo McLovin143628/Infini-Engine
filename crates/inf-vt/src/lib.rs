@@ -128,15 +128,15 @@ pub mod table;
 
 pub use address::{full_pyramid, DescError, TileCoord, VtMipDesc, VtTextureDesc, MAX_VT_MIPS};
 pub use container::{
-    decode_bc1, decode_bc3, is_v2, stored_page_format, stored_tile_bytes, TexMipEntry, TexTileEntry,
-    TiledTextureError, TiledTextureHeader, TiledTextureReader, TiledTextureView, STORED_TILE_SIZE,
-    TEX_ASSET_MAGIC, TEX_ASSET_SCHEMA_VERSION, TILE_BORDER, TILE_SIZE,
+    decode_bc1, decode_bc3, is_v2, stored_page_format, stored_tile_bytes, TexMipEntry,
+    TexTileEntry, TiledTextureError, TiledTextureHeader, TiledTextureReader, TiledTextureView,
+    STORED_TILE_SIZE, TEX_ASSET_MAGIC, TEX_ASSET_SCHEMA_VERSION, TILE_BORDER, TILE_SIZE,
 };
+pub use feedback::{VtFeedbackLayout, FEEDBACK_BITS_PER_WORD};
 pub use pool::{
     plan_pool, PageFormat, VtAdvisory, VtPoolConfig, VtPoolGeometry, DEFAULT_MAX_TEXTURE_DIM,
     DEFAULT_VT_BUDGET_BYTES,
 };
-pub use feedback::{VtFeedbackLayout, FEEDBACK_BITS_PER_WORD};
 pub use residency::{
     resolved_table, VtAdmit, VtError, VtEvict, VtPriority, VtResidency, VtResolved, VtStats,
     VtTextureHandle, VtTransaction, VtWant, VT_PRIORITY_FEEDBACK, VT_PRIORITY_FLOOR,

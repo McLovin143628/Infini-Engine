@@ -1122,7 +1122,8 @@ mod tests {
 
         assert_eq!(txn.deferred, 1, "four wants into three cache slots");
         assert_eq!(
-            txn.admits[0].tile, floor.tile,
+            txn.admits[0].tile,
+            floor.tile,
             "the floor tile was not admitted first: {}",
             txn.trace()
         );

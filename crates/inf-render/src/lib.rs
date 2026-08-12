@@ -28,6 +28,10 @@ pub mod pick;
 pub mod pipeline;
 pub mod precip;
 pub mod primitives;
+/// The non-blocking GPU→CPU readback ring at a pinned frame latency (P26.4).
+/// Not a virtual-texturing detail: P27's shadow-page marking and P28's unified
+/// streamer read through this same primitive.
+pub mod readback;
 pub mod renderer;
 pub mod scene;
 pub mod settings;
@@ -86,6 +90,7 @@ pub use precip::{
     PRECIP_BOX_Y_M, RAIN_FALL_SPEED, SNOW_FALL_SPEED,
 };
 pub use primitives::{PrimGpu, PrimMesh, PrimRange};
+pub use readback::{ReadbackRing, READBACK_LATENCY_FRAMES};
 pub use renderer::{
     EngineRenderer, ViewMode, AO_FORMAT, HDR_FORMAT, LDR_FORMAT, MASK_FORMAT, SCENE_FORMAT,
     SCENE_SAMPLES,

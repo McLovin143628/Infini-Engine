@@ -267,8 +267,12 @@ mod tests {
     #[test]
     fn the_scan_emits_wants_in_payload_order() {
         let mut r = residency(64);
-        let a = r.register_texture(full_pyramid(320, 192, 128, 4, true)).unwrap();
-        let b = r.register_texture(full_pyramid(256, 256, 128, 4, true)).unwrap();
+        let a = r
+            .register_texture(full_pyramid(320, 192, 128, 4, true))
+            .unwrap();
+        let b = r
+            .register_texture(full_pyramid(256, 256, 128, 4, true))
+            .unwrap();
         let layout = VtFeedbackLayout::for_residency(&r);
         let mut mask = vec![0u32; layout.words()];
 
@@ -307,7 +311,9 @@ mod tests {
     #[test]
     fn the_mask_is_order_independent_and_idempotent() {
         let mut r = residency(64);
-        let h = r.register_texture(full_pyramid(320, 192, 128, 4, true)).unwrap();
+        let h = r
+            .register_texture(full_pyramid(320, 192, 128, 4, true))
+            .unwrap();
         let layout = VtFeedbackLayout::for_residency(&r);
         let tiles = [
             TileCoord::new(0, 0, 0),
@@ -340,7 +346,9 @@ mod tests {
     #[test]
     fn a_short_or_stale_mask_is_truncated_rather_than_invented() {
         let mut r = residency(64);
-        let a = r.register_texture(full_pyramid(320, 192, 128, 4, true)).unwrap();
+        let a = r
+            .register_texture(full_pyramid(320, 192, 128, 4, true))
+            .unwrap();
         let old = VtFeedbackLayout::for_residency(&r);
         let mut mask = vec![0u32; old.words()];
         assert!(old.mark(&r, &mut mask, a, TileCoord::new(0, 0, 0)));
@@ -349,7 +357,10 @@ mod tests {
         r.register_texture(full_pyramid(2048, 2048, 128, 4, true))
             .unwrap();
         let now = VtFeedbackLayout::for_residency(&r);
-        assert!(now.words() > mask.len(), "the fixture did not grow the mask");
+        assert!(
+            now.words() > mask.len(),
+            "the fixture did not grow the mask"
+        );
         let wants = now.wants(&r, &mask);
         assert!(
             wants.iter().all(|w| w.texture == a),
