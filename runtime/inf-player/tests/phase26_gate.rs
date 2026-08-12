@@ -10,14 +10,16 @@
 //!
 //! This file holds the arms for that wire. They are deliberately about **bytes
 //! and worlds**, not pixels: what P26.3b built is the path from an authored
-//! `.inf_mat` to a runtime record, along three routes that must not disagree.
+//! `.inf_mat` to a runtime record, along routes that must not disagree.
 //!
-//! * **(a) ONE DOOR, three paths.** The `.inf_matd` bytes a cooked pack carries
-//!   are byte-identical to the ones the PIE payload carries, for the same
-//!   project. The P22.2 law made executable: the cook and the payload builder
-//!   both call `inf_material::derive_material_bytes` and are compared on their
-//!   OUTPUT rather than trusted on their comment. (`fracture_equivalence.rs` is
-//!   the precedent, one asset kind over.)
+//! * **(a) ONE DOOR.** The `.inf_matd` bytes a cooked pack carries are
+//!   byte-identical to the ones the PIE payload carries, for the same project.
+//!   The P22.2 law made executable: the cook and the payload builder both call
+//!   `inf_material::derive_material_bytes` and are compared on their OUTPUT
+//!   rather than trusted on their comment. (`fracture_equivalence.rs` is the
+//!   precedent, one asset kind over.) **Two producers, not three** — the P26.3b
+//!   audit's count: the editor viewport resolves no material at all yet and
+//!   `render_assets` does not call the door, so the third path is P26.4's.
 //! * **(b) The dependency edges are real.** A level binds a material, the
 //!   material names a texture, and the cooked pack contains both — at exact
 //!   counts, because `!is_empty()` would pass on a pack that lost the second of
@@ -29,7 +31,20 @@
 //! * **(d) PIE == shipping on a textured, clothed scene**, with the anti-vacuity
 //!   control the P24.4 mutation matrix earned: the same level with nothing bound
 //!   must fold a **different** trace, or the equality above is a statement about
-//!   two empty worlds agreeing.
+//!   two empty worlds agreeing. A **real `--pie` subprocess** folds it too, since
+//!   a boot path that drops an attachment does not crash, it agrees with itself
+//!   (P21.4).
+//! * **(e) The two hosts build the same material content** (P26.3b audit) — the
+//!   maps a host binds and pages FROM, not just the bytes on the wire, and the
+//!   registration order that the residency is a pure function of.
+//! * **(f) Every silent material hazard raises its advisory** (P26.3b audit): a
+//!   missing material, a **material instance**, a missing `.inf_tex` and a **v1**
+//!   `.inf_tex` — four fixtures, plus the healthy control.
+//!
+//! The fixture carries an **unbound** material and texture on purpose, reached
+//! through a mesh's own sidecar edges the way a glTF import writes them. Without
+//! it (e) cannot tell a walk of the pack index from a walk of the level's
+//! bindings, which is exactly the defect it found.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};

@@ -12934,7 +12934,12 @@ mod tests {
     /// slot more than the current wire.
     type V23EntityShadow<'a> = (&'a EntityRecord, Option<u8>);
 
-    /// **The v21 wire shape, pinned against an INDEPENDENT declaration.**
+    /// **The v22 wire shape, pinned against an INDEPENDENT declaration.**
+    ///
+    /// (Titled v21 until the P26.3b audit; the type, the test and the runtime
+    /// mirror's twin all said v22, so the heading was the only thing that was
+    /// wrong — and the only thing a reader looking for the current pin would
+    /// search for.)
     ///
     /// The `SkeletonAssetV2Wire` idiom (`inf-anim`), applied to the scene. The
     /// pair this replaces proved nothing: one encoded *and* decoded with

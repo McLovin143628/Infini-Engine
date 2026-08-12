@@ -9,19 +9,30 @@
 //! One walked ECS archetype order while the others walked document order, and
 //! one skipped a refusal entirely.
 //!
-//! Material resolution has the same three paths and the same trap:
+//! Material resolution has the same trap. **Two producers call this door today**
+//! — that is the measured count, not three (P26.3b audit; the first draft of this
+//! table named `inf_editor_core::render_assets`, which does not call it and does
+//! not resolve a material at all):
 //!
 //! | path | who calls | what it produces |
 //! |---|---|---|
-//! | editor viewport | `inf_editor_core::render_assets` | the set the projector puts on each instance |
 //! | PIE payload | `inf_editor_core::pie` | `ScenePayload::materials` bytes |
-//! | cook | `inf_packager::cook` | the `.inf_matd` entries of a pack |
+//! | cook | `inf_packager::cook` | the `.inf_matd` entries of a pack, and the `.inf_mat` → `.inf_tex` closure edge |
 //!
-//! If those were three flattenings, "PIE == shipping" would be a claim about
-//! three functions agreeing rather than about one function running three times.
-//! So they call [`derive_material`], and the phase gate compares the **bytes**
-//! out of a real pack against a real editor derivation — the shape
-//! `fracture_equivalence.rs` established.
+//! If those were two flattenings, "PIE == shipping" would be a claim about two
+//! functions agreeing rather than about one function running twice. So they call
+//! [`derive_material`], and the phase gate compares the **bytes** out of a real
+//! pack against a real editor derivation — the shape `fracture_equivalence.rs`
+//! established.
+//!
+//! **The third path is the open one.** The editor viewport and the shipped
+//! player's render projector both still fill `vt: Default::default()` and neither
+//! registers a texture outside tests, so nothing SAMPLES a material on either
+//! host yet — P26.3b is the wire, and P26.4 is what makes this a door for three.
+//! When it lands it must arrive through here rather than beside it; the grep that
+//! finds a second spelling is for a read of `MaterialAsset`'s three texture slots
+//! outside this crate, and today it finds only WRITERS (glTF import, the
+//! photogrammetry finish, this crate's own tests).
 //!
 //! # Why the record's type is not in this crate
 //!

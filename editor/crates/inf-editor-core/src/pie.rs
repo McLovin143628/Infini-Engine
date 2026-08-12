@@ -727,7 +727,13 @@ where
     // build.
     let mut cloths: Vec<(Uuid, Vec<u8>)> = Vec::new();
     let mut hairs: Vec<(Uuid, Vec<u8>)> = Vec::new();
-    let mut seen_garment: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    // Two dedup sets, not one (P26.3b audit). `.inf_cloth` and `.inf_hair` are
+    // two id spaces, and a single `seen` set makes a hairstyle whose GUID
+    // collides with a garment's silently absent from the wire — an impossible
+    // state that costs nothing to make structurally impossible instead of
+    // arguing about.
+    let mut seen_cloth: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    let mut seen_hair: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     for &guid in doc.order() {
         let Some(e) = world.entity_of(guid) else {
             continue;
@@ -737,7 +743,7 @@ where
             .get::<inf_ecs::components::ClothSim>(e)
             .and_then(|c| c.asset)
         {
-            if seen_garment.insert(a) {
+            if seen_cloth.insert(a) {
                 if let Some(bytes) = resolve_bytes(a) {
                     cloths.push((a, bytes));
                 }
@@ -747,7 +753,7 @@ where
             .get::<inf_ecs::components::HairGuides>(e)
             .and_then(|h| h.asset)
         {
-            if seen_garment.insert(a) {
+            if seen_hair.insert(a) {
                 if let Some(bytes) = resolve_bytes(a) {
                     hairs.push((a, bytes));
                 }
@@ -813,8 +819,21 @@ where
         for tex in derived.texture_dependencies() {
             let g = tex.uuid();
             if seen_texture.insert(g) {
-                if let Some(bytes) = resolve_bytes(g) {
-                    textures.push((g, bytes));
+                match resolve_bytes(g) {
+                    Some(bytes) => textures.push((g, bytes)),
+                    // Reported, not discarded (P26.3b audit — the same doctrine
+                    // the material decode ten lines up already follows, and the
+                    // hazard the `ScenePayload::textures` doc names in so many
+                    // words). The record still ships, naming a texture with no
+                    // bytes behind it: the preview is untextured while the
+                    // COOKED build — which packs through its own closure and
+                    // raises `missing_material_texture_advisory` — may not be.
+                    // A comparison between two such worlds passes (P21.4).
+                    None => tracing::warn!(
+                        "pie: material {asset} references texture {g}, which did not \
+                         resolve — this surface previews UNTEXTURED, and the cooked \
+                         build is where the advisory for it is raised"
+                    ),
                 }
             }
         }

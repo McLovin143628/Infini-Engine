@@ -251,6 +251,17 @@ impl AssetState {
     /// by the same `inf_mesh::fracture_mesh` the cook runs, so what the caller
     /// needs from here is the MESH. Kind-checked exactly like
     /// [`load_voxel_bytes`](Self::load_voxel_bytes), for the same reason.
+    pub fn load_mesh_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        let entry = proj.db().get(id)?;
+        if entry.kind() != inf_asset::AssetKind::Mesh {
+            return None;
+        }
+        std::fs::read(&entry.path).ok()
+    }
+
     /// Raw payload bytes of the four kinds `ScenePayload` v8 carries (P26.3b):
     /// `.inf_cloth`, `.inf_hair`, `.inf_mat` and `.inf_tex`.
     ///
@@ -273,17 +284,6 @@ impl AssetState {
                 | inf_asset::AssetKind::Material
                 | inf_asset::AssetKind::Texture
         ) {
-            return None;
-        }
-        std::fs::read(&entry.path).ok()
-    }
-
-    pub fn load_mesh_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
-        let guard = self.inner.lock().ok()?;
-        let inner = guard.as_ref()?;
-        let proj = inner.project.lock().ok()?;
-        let entry = proj.db().get(id)?;
-        if entry.kind() != inf_asset::AssetKind::Mesh {
             return None;
         }
         std::fs::read(&entry.path).ok()
