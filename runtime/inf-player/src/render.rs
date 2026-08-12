@@ -746,6 +746,7 @@ pub fn project_scene_full(
                             scene.skinned_meshes.len() - 1
                         });
                         scene.skinned.push(SkinnedInstance {
+                            vt: Default::default(),
                             translation,
                             rotation: rot.as_quat(),
                             scale: scale.as_vec3(),
@@ -762,6 +763,7 @@ pub fn project_scene_full(
                     // its slate tint, so the two hosts also agree about content
                     // whose assets are missing.
                     None => scene.instances.push(MeshInstance {
+                        vt: Default::default(),
                         translation,
                         rotation: rot.as_quat(),
                         scale: scale.as_vec3(),
@@ -856,6 +858,7 @@ pub fn project_scene_full(
                     scene.vgeom_assets.push(VgeomAsset::new(asset_id, source));
                 }
                 scene.vgeom_instances.push(VgeomInstance {
+                    vt: Default::default(),
                     asset: asset_id,
                     translation,
                     rotation: rot.as_quat(),
@@ -870,6 +873,7 @@ pub fn project_scene_full(
                 // R-P1: an unresolved / primitive-only MeshRef draws its built-in
                 // primitive kind (Sphere/Plane/Cylinder/Cone), not always a cube.
                 scene.instances.push(MeshInstance {
+                    vt: Default::default(),
                     translation,
                     rotation: rot.as_quat(),
                     scale: scale.as_vec3(),
@@ -2022,6 +2026,7 @@ fn project_cloth(
     scene.skinned_meshes.push(std::sync::Arc::new(mesh));
     let slot = scene.skinned_meshes.len() - 1;
     scene.skinned.push(inf_render::SkinnedInstance {
+        vt: Default::default(),
         translation,
         rotation,
         scale,
@@ -2066,6 +2071,7 @@ fn project_hair(
     scene.skinned_meshes.push(std::sync::Arc::new(mesh));
     let slot = scene.skinned_meshes.len() - 1;
     scene.skinned.push(inf_render::SkinnedInstance {
+        vt: Default::default(),
         translation,
         rotation,
         scale,

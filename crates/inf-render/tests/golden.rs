@@ -335,6 +335,7 @@ fn golden_primitives() {
     ];
     for (i, (&kind, c)) in kinds.iter().zip(colors).enumerate() {
         scene.instances.push(MeshInstance {
+            vt: Default::default(),
             translation: DVec3::new(-4.0 + i as f64 * 2.0, 0.5, 0.0),
             rotation: Quat::from_rotation_y(0.3),
             scale: Vec3::ONE,
@@ -439,6 +440,7 @@ fn golden_pbr_materials() {
     .enumerate()
     {
         scene.instances.push(MeshInstance {
+            vt: Default::default(),
             translation: DVec3::new(x, 0.5, 0.0),
             rotation: Quat::from_rotation_y(0.4),
             scale: Vec3::ONE,
@@ -522,6 +524,7 @@ fn golden_translucency() {
     // → the mesh fs discards every fragment (the visible cutout: when drawn opaque
     // it would occlude the panes + cubes behind it; masked, it vanishes).
     scene.instances.push(MeshInstance {
+        vt: Default::default(),
         translation: DVec3::new(0.0, 0.9, 3.2),
         rotation: Quat::from_rotation_y(0.3),
         scale: Vec3::splat(1.3),
@@ -537,6 +540,7 @@ fn golden_translucency() {
     // Two overlapping translucent panes (thin cubes) in front (+z, toward the
     // camera), tinted blue then orange at 50% alpha. The farther one draws first.
     scene.instances.push(MeshInstance {
+        vt: Default::default(),
         translation: DVec3::new(-0.4, 0.9, 1.2),
         rotation: Quat::IDENTITY,
         scale: Vec3::new(2.4, 2.4, 0.06),
@@ -550,6 +554,7 @@ fn golden_translucency() {
         cutoff: 0.5,
     });
     scene.instances.push(MeshInstance {
+        vt: Default::default(),
         translation: DVec3::new(0.5, 0.7, 2.1),
         rotation: Quat::IDENTITY,
         scale: Vec3::new(2.4, 2.4, 0.06),
@@ -622,6 +627,7 @@ fn golden_spot_lights() {
     };
     // A large ground plane to catch the cone.
     scene.instances.push(MeshInstance {
+        vt: Default::default(),
         translation: DVec3::new(0.0, 0.0, 0.0),
         rotation: Quat::IDENTITY,
         scale: Vec3::new(20.0, 1.0, 20.0),
@@ -1949,6 +1955,7 @@ fn golden_skinned_mesh() {
     let (sk, clip, mesh) = skinned_cylinder();
 
     let make = |palette: Vec<Mat4>| SkinnedInstance {
+        vt: Default::default(),
         translation: DVec3::ZERO,
         rotation: Quat::IDENTITY,
         scale: Vec3::ONE,
@@ -2024,6 +2031,7 @@ fn golden_hdr_bloom() {
     .enumerate()
     {
         scene.instances.push(MeshInstance {
+            vt: Default::default(),
             translation: DVec3::new(x, 0.5, 0.0),
             rotation: Quat::from_rotation_y(0.3),
             scale: Vec3::splat(0.6),
@@ -3579,6 +3587,7 @@ fn gi_sees_skinned_and_vgeom_geometry() {
         };
         s.instances.push(floor);
         s.skinned.push(SkinnedInstance {
+            vt: Default::default(),
             translation: DVec3::new(-2.2, 0.0, -1.5),
             rotation: Quat::IDENTITY,
             scale: Vec3::splat(2.4),
@@ -4504,6 +4513,7 @@ fn golden_editor_default() {
     // Ground plane + the three props, at the default scene's placements/colours.
     let mut push = |mesh, t: DVec3, s: Vec3, c: [f32; 3], id| {
         scene.instances.push(MeshInstance {
+            vt: Default::default(),
             translation: t,
             rotation: Quat::IDENTITY,
             scale: s,

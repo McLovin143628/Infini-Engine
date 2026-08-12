@@ -28,6 +28,11 @@ struct VsOut {
     @location(3) @interpolate(flat) id: u32,
     @location(4) @interpolate(flat) pbr: vec4<f32>,
     @location(5) @interpolate(flat) emissive: vec3<f32>,
+    // P26.3: the object-space frame the box-projected uv is derived from, and
+    // the instance's virtual-texture set (albedo, normal, ORM slots).
+    @location(6) obj_pos: vec3<f32>,
+    @location(7) obj_nrm: vec3<f32>,
+    @location(8) @interpolate(flat) vt: vec3<u32>,
 };
 
 @vertex
@@ -43,7 +48,38 @@ fn vs(in: VsIn) -> VsOut {
     out.id = in.misc.x;
     out.pbr = in.pbr;
     out.emissive = in.emissive.rgb;
+    out.obj_pos = in.pos;
+    out.obj_nrm = in.normal;
+    out.vt = in.misc.yzw;
     return out;
+}
+
+// ── the UV a built-in primitive samples with (P26.3, v1) ─────────────────────
+//
+// `MeshVertex` is position + normal and carries NO uv, and neither does
+// `SkinnedVertex`. The built-in primitives have no authored parameterization at
+// all, so this path projects one: the dominant-axis box projection below, in
+// OBJECT space, which maps a unit primitive centred on the origin onto [0,1]²
+// per face with a consistent winding.
+//
+// **This is a v1 and it is named as one.** A skinned character's `.inf_mesh`
+// DOES carry authored uvs (`SubMesh` has had them since P4) and this path does
+// not read them, because doing so means a `uv` on `MeshVertex` at @location(2)
+// and on `SkinnedVertex` at @location(15), a matching change in
+// `inf_editor_core::render_assets::skinned_mesh_data` and its player mirror, and
+// a re-bless of nothing but a widened vertex buffer. The meshlet path — which is
+// what a real imported mesh actually draws through — reads its REAL uv, because
+// `VgeomVertex` has always stored one (8 floats per vertex, the last two unused
+// until now).
+fn vt_box_uv(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
+    let a = abs(n);
+    if (a.x >= a.y && a.x >= a.z) {
+        return vec2<f32>(-p.z * sign(n.x), -p.y) + vec2<f32>(0.5);
+    }
+    if (a.y >= a.z) {
+        return vec2<f32>(p.x, -p.z * sign(n.y)) + vec2<f32>(0.5);
+    }
+    return vec2<f32>(p.x * sign(n.z), -p.y) + vec2<f32>(0.5);
 }
 
 // ── Lights (must match LightsUniform / MAX_LIGHTS in passes/mesh.rs) ──
@@ -136,11 +172,38 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (view.flags.x > 0.5) {
         return vec4<f32>(in.color.rgb + in.emissive, in.color.a);
     }
-    let n = normalize(in.normal);
+    var n = normalize(in.normal);
     let v = normalize(view.eye.xyz - in.world_pos);
     var albedo = in.color.rgb;
-    let metallic = clamp(in.pbr.x, 0.0, 1.0);
+    var metallic = clamp(in.pbr.x, 0.0, 1.0);
     var rough = clamp(in.pbr.y, 0.04, 1.0);
+    // P26.3 VIRTUAL TEXTURES. `in.vt` is all zeros on every instance that names
+    // no texture — which is every instance before this batch and every instance
+    // of every committed golden — so `vt_surface` returns its arguments
+    // unchanged and the arithmetic below is byte-identical.
+    // The box-projected uv (see `vt_box_uv`): object space, so it rides the
+    // instance rather than the camera.
+    let uv = vt_box_uv(in.obj_pos, in.obj_nrm);
+    // The screen derivatives, taken in UNIFORM control flow — a fragment shader
+    // may only difference against its neighbours outside a divergent branch, and
+    // the VT branch below is per instance. Cheap when nothing samples: a
+    // derivative of an interpolated value is two subtractions.
+    let vt_ddx = dpdx(uv);
+    let vt_ddy = dpdy(uv);
+    let vt_dpx = dpdx(in.world_pos);
+    let vt_dpy = dpdy(in.world_pos);
+    var vt_ao = 1.0;
+    if (in.vt.x != 0u || in.vt.y != 0u || in.vt.z != 0u) {
+        let s = vt_surface(in.vt, uv, vt_ddx, vt_ddy,
+                           albedo, in.color.a, metallic, rough);
+        albedo = s.albedo;
+        metallic = clamp(s.metallic, 0.0, 1.0);
+        rough = clamp(s.roughness, 0.04, 1.0);
+        vt_ao = s.occlusion;
+        if (s.has_normal) {
+            n = vt_apply_normal(n, vt_dpx, vt_dpy, vt_ddx, vt_ddy, s.normal_ts);
+        }
+    }
     // P20.3 SHORELINE WETNESS: the same band the terrain takes, so a jetty, a
     // rock and the beach they sit on darken together at the waterline instead of
     // the ground alone changing colour. Applied before `f0` so a wet metal's
@@ -221,7 +284,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (gi.params.x > 0.5) {
         amb = gi_irradiance(in.world_pos, n);
     }
-    let ao = textureSampleLevel(ao_tex, ao_smp, in.pos.xy / view.grid_axis_viewport.zw, 0.0).r;
+    // The material's own occlusion map multiplies the screen-space AO: both
+    // modulate the AMBIENT term only, never the direct light above.
+    let ao = textureSampleLevel(ao_tex, ao_smp, in.pos.xy / view.grid_axis_viewport.zw, 0.0).r
+        * vt_ao;
     lo += amb * albedo * (1.0 - metallic) * ao;
     // P18.4: the ambient specular becomes a real directional term when GI is on
     // (SH radiance along the reflection vector, optionally re-anchored at an SSR

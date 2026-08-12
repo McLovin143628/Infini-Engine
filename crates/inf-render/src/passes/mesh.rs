@@ -37,7 +37,13 @@ pub struct InstanceRaw {
     /// Normal matrix (inverse-transpose of the model 3×3), 3 padded columns.
     pub normal_mat: [f32; 12],
     pub color: [f32; 4],
-    /// x = pick id.
+    /// x = pick id; **y/z/w = the P26.3 virtual-texture set** (albedo, normal,
+    /// ORM), each a `VtTextureHandle + 1` with 0 meaning "no texture".
+    ///
+    /// These three words have been reserved and uploaded as ZERO since P7.1, so
+    /// an instance that samples no virtual texture packs to exactly the bytes it
+    /// always did — the byte-stability guarantee every pre-P26.3 golden rests
+    /// on, and the reason the no-texture fallback needs no flag.
     pub misc: [u32; 4],
     /// PBR + blend params: x = metallic, y = roughness, z = alpha_cutoff (R-P5),
     /// w = blend code (R-P5: 0 opaque, 1 masked, 2 translucent). z/w were reserved
@@ -63,7 +69,7 @@ impl InstanceRaw {
                 n[2][0], n[2][1], n[2][2], 0.0,
             ],
             color: inst.color,
-            misc: [inst.id, 0, 0, 0],
+            misc: [inst.id, inst.vt.albedo, inst.vt.normal, inst.vt.orm],
             pbr: [
                 inst.metallic,
                 inst.roughness,

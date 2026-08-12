@@ -291,11 +291,21 @@ fn vt_surface(
 ///
 /// A degenerate uv patch (both derivatives zero — a fragment whose uv does not
 /// vary) leaves the geometric normal alone rather than producing a NaN basis.
-fn vt_apply_normal(n: vec3<f32>, world_pos: vec3<f32>, uv: vec2<f32>, ts: vec3<f32>) -> vec3<f32> {
-    let dp1 = dpdx(world_pos);
-    let dp2 = dpdy(world_pos);
-    let duv1 = dpdx(uv);
-    let duv2 = dpdy(uv);
+///
+/// **The four derivatives are PARAMETERS, not taken here.** `dpdx`/`dpdy` are
+/// only meaningful in uniform control flow — a helper lane inside a divergent
+/// branch has no neighbour to difference against — so every caller computes
+/// them at the top of its fragment stage, outside the "does this instance have
+/// a texture" branch, and hands them in. The same reason `vt_surface` takes
+/// `ddx`/`ddy` rather than deriving them.
+fn vt_apply_normal(
+    n: vec3<f32>,
+    dp1: vec3<f32>,
+    dp2: vec3<f32>,
+    duv1: vec2<f32>,
+    duv2: vec2<f32>,
+    ts: vec3<f32>,
+) -> vec3<f32> {
     let det = duv1.x * duv2.y - duv2.x * duv1.y;
     if (abs(det) < 1e-12) {
         return n;

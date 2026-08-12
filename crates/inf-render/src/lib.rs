@@ -33,6 +33,9 @@ pub mod scene;
 pub mod settings;
 pub mod surface;
 pub mod vt;
+/// The P26.3 registration door: `.inf_tex` v2 payloads become virtual
+/// textures here, for both hosts, through one rule.
+pub mod vt_library;
 pub mod water;
 pub mod wetness;
 
@@ -98,7 +101,7 @@ pub use scene::{
 pub use scene::{
     terrain_id_from_guid, Ambient2D, LightKind, MeshInstance, PrebatchedRun, RenderChunk,
     RenderLight, RenderLight2D, RenderScene, RenderTerrain, RenderTerrainLayer, RenderTerrainTile,
-    SeamSample, DEFAULT_SEAM_BAND_M,
+    SeamSample, VtTextureSet, DEFAULT_SEAM_BAND_M,
 };
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,

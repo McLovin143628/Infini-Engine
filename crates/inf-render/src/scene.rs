@@ -32,6 +32,60 @@ pub struct SpriteTextureUpload {
 /// Reserved instance id meaning "nothing" (ID buffer clear value).
 pub const ID_NONE: u32 = 0;
 
+/// **The per-instance virtual-texture set** (P26.3): which registered virtual
+/// textures a surface samples for base colour, tangent-space normal and ORM.
+///
+/// # Why a `handle + 1` and not an `Option`
+///
+/// Because the wire form has to be a plain `u32` — these three ride in words
+/// that have shipped as **zero** since P7.1 (`InstanceRaw::misc.yzw`, and
+/// `VgeomInstanceGpu`'s three padding words), so an instance that names no
+/// texture packs to exactly the bytes it always did and the no-texture fallback
+/// is *structural* rather than a flag somebody has to remember to clear.
+/// `VtTextureHandle(0)` is a perfectly good texture, so the biased encoding is
+/// what makes 0 mean "nothing" without a second field.
+///
+/// # Why per-instance words and not a texture-set table
+///
+/// The alternative — one index into a per-frame table of sets — was weighed and
+/// costs a fourth VT binding (a storage buffer of sets) to save eight bytes per
+/// instance that were **already reserved and already uploaded**. It buys nothing
+/// until a surface wants more than three maps, which is where it becomes the
+/// right answer; recorded rather than taken. **No vertex-stream budget moves in
+/// this batch**: `InstanceRaw` stays 176 bytes and the vgeom instance record
+/// stays 176, both pinned by their existing layout arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VtTextureSet {
+    /// Base colour, sRGB-decoded on sample. `0` = none.
+    pub albedo: u32,
+    /// Tangent-space normal map, never sRGB-decoded. `0` = none.
+    pub normal: u32,
+    /// Occlusion (R) / roughness (G) / metallic (B) — the glTF packing the
+    /// importer already writes. `0` = none.
+    pub orm: u32,
+}
+
+impl VtTextureSet {
+    /// Samples nothing — the scalar per-instance attributes stand alone.
+    pub const NONE: Self = Self {
+        albedo: 0,
+        normal: 0,
+        orm: 0,
+    };
+
+    /// Whether this instance samples any virtual texture at all.
+    #[inline]
+    pub fn is_none(&self) -> bool {
+        *self == Self::NONE
+    }
+
+    /// The three slots as the GPU reads them.
+    #[inline]
+    pub fn slots(&self) -> [u32; 3] {
+        [self.albedo, self.normal, self.orm]
+    }
+}
+
 /// Instance ids at or above this are gizmo parts, not scene objects
 /// (see `gizmo.rs`).
 pub const ID_GIZMO_BASE: u32 = 0xffff_ff00;
@@ -66,6 +120,10 @@ pub struct MeshInstance {
     /// color alpha below this are discarded. Defaults to `0.5`. Packed into
     /// `pbr.z`.
     pub cutoff: f32,
+    /// P26.3: the virtual textures this instance samples. [`VtTextureSet::NONE`]
+    /// on every instance that names none, which is every instance before this
+    /// batch — and then the fragment shader runs the arithmetic it always ran.
+    pub vt: VtTextureSet,
 }
 
 impl MeshInstance {
@@ -73,6 +131,7 @@ impl MeshInstance {
     /// opaque) — the common case for tests and simple callers.
     pub fn lit(translation: DVec3, rotation: Quat, scale: Vec3, color: [f32; 4], id: u32) -> Self {
         Self {
+            vt: Default::default(),
             translation,
             rotation,
             scale,
@@ -163,6 +222,10 @@ pub struct VgeomInstance {
     pub emissive: [f32; 3],
     /// Stable pick id (`ID_NONE` reserved).
     pub id: u32,
+    /// P26.3: the virtual textures this instance samples. [`VtTextureSet::NONE`]
+    /// on every instance that names none, which is every instance before this
+    /// batch — and then the fragment shader runs the arithmetic it always ran.
+    pub vt: VtTextureSet,
 }
 
 impl VgeomInstance {
@@ -176,6 +239,7 @@ impl VgeomInstance {
         id: u32,
     ) -> Self {
         Self {
+            vt: Default::default(),
             asset,
             translation,
             rotation,
@@ -521,6 +585,10 @@ pub struct SkinnedInstance {
     /// The skinning palette: one matrix per skeleton joint, indexed by the
     /// vertex `joints`. Bound as a `@group(3)` storage buffer.
     pub palette: Vec<Mat4>,
+    /// P26.3: the virtual textures this instance samples. [`VtTextureSet::NONE`]
+    /// on every instance that names none, which is every instance before this
+    /// batch — and then the fragment shader runs the arithmetic it always ran.
+    pub vt: VtTextureSet,
 }
 
 /// Directional, point, or spot light (R-P3). Spot is a point light with a cone

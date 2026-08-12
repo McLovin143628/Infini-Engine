@@ -222,7 +222,11 @@ struct VgeomInstanceGpu {
     roughness: f32,
     max_scale: f32,
     pick_id: u32,
-    _p: [u32; 3],
+    /// P26.3: the virtual-texture set (albedo, normal, ORM), each a
+    /// `VtTextureHandle + 1`. These were `_p` — three words of alignment padding
+    /// uploaded as zero since P13.1b — so a meshlet instance that samples
+    /// nothing packs to the bytes it always did and the record stays 176 B.
+    vt: [u32; 3],
 }
 
 /// Cull uniform block. Mirrors `struct CullParams`.
@@ -432,7 +436,7 @@ fn pack_instance(
         roughness: inst.roughness,
         max_scale,
         pick_id: inst.id,
-        _p: [0; 3],
+        vt: inst.vt.slots(),
     }
 }
 

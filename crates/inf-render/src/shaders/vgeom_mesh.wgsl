@@ -44,9 +44,13 @@ struct Instance {
     roughness: f32,
     max_scale: f32,
     pick_id: u32,
-    p0: u32,
-    p1: u32,
-    p2: u32,
+    // P26.3: the virtual-texture set (albedo, normal, ORM slots), each a
+    // handle + 1. These three words were `p0`/`p1`/`p2` — alignment padding
+    // uploaded as zero since P13.1b — so a meshlet instance that samples
+    // nothing packs to the bytes it always did.
+    vt0: u32,
+    vt1: u32,
+    vt2: u32,
 };
 
 // Group 3: the virtualized-geometry storage buffers.
@@ -78,6 +82,11 @@ struct VsOut {
     @location(4) @interpolate(flat) pbr: vec4<f32>,
     @location(5) @interpolate(flat) emissive: vec3<f32>,
     @location(6) @interpolate(flat) meshlet: u32,
+    // P26.3: the meshlet path reads the mesh's REAL uv. `v_positions` has
+    // carried 8 floats per vertex since P13.1b — position, normal, and a uv
+    // pair nothing read until now.
+    @location(7) uv: vec2<f32>,
+    @location(8) @interpolate(flat) vt: vec3<u32>,
 };
 
 fn read_tri_byte(byte_addr: u32) -> u32 {
@@ -120,6 +129,7 @@ fn vs(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> V
     let base = global_v * 8u;
     let position = vec3<f32>(v_positions[base], v_positions[base + 1u], v_positions[base + 2u]);
     let normal = vec3<f32>(v_positions[base + 3u], v_positions[base + 4u], v_positions[base + 5u]);
+    let uv = vec2<f32>(v_positions[base + 6u], v_positions[base + 7u]);
 
     let nrm = mat3x3<f32>(inst.n0.xyz, inst.n1.xyz, inst.n2.xyz);
     let wp = inst.model * vec4<f32>(position, 1.0);
@@ -131,6 +141,8 @@ fn vs(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> V
     out.pbr = vec4<f32>(inst.metallic, inst.roughness, 0.0, 0.0);
     out.emissive = inst.emissive.rgb;
     out.meshlet = pair.y;
+    out.uv = uv;
+    out.vt = vec3<u32>(inst.vt0, inst.vt1, inst.vt2);
     return out;
 }
 
@@ -229,11 +241,34 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(in.color.rgb + in.emissive, in.color.a);
     }
 
-    let n = normalize(in.normal);
+    var n = normalize(in.normal);
     let v = normalize(view.eye.xyz - in.world_pos);
-    let albedo = in.color.rgb;
-    let metallic = clamp(in.pbr.x, 0.0, 1.0);
-    let rough = clamp(in.pbr.y, 0.04, 1.0);
+    var albedo = in.color.rgb;
+    var metallic = clamp(in.pbr.x, 0.0, 1.0);
+    var rough = clamp(in.pbr.y, 0.04, 1.0);
+    // P26.3 VIRTUAL TEXTURES. Zero on every instance that names no texture, so
+    // the branch is present-and-false for every scene that predates this batch
+    // and the arithmetic below is byte-identical.
+    // The screen derivatives, taken in UNIFORM control flow — a fragment shader
+    // may only difference against its neighbours outside a divergent branch, and
+    // the VT branch below is per instance. Cheap when nothing samples: a
+    // derivative of an interpolated value is two subtractions.
+    let vt_ddx = dpdx(in.uv);
+    let vt_ddy = dpdy(in.uv);
+    let vt_dpx = dpdx(in.world_pos);
+    let vt_dpy = dpdy(in.world_pos);
+    var vt_ao = 1.0;
+    if (in.vt.x != 0u || in.vt.y != 0u || in.vt.z != 0u) {
+        let s = vt_surface(in.vt, in.uv, vt_ddx, vt_ddy,
+                           albedo, in.color.a, metallic, rough);
+        albedo = s.albedo;
+        metallic = clamp(s.metallic, 0.0, 1.0);
+        rough = clamp(s.roughness, 0.04, 1.0);
+        vt_ao = s.occlusion;
+        if (s.has_normal) {
+            n = vt_apply_normal(n, vt_dpx, vt_dpy, vt_ddx, vt_ddy, s.normal_ts);
+        }
+    }
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
 
     var lo = vec3<f32>(0.0);
@@ -276,7 +311,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (gi.params.x > 0.5) {
         amb = gi_irradiance(in.world_pos, n);
     }
-    let ao = textureSampleLevel(ao_tex, ao_smp, in.pos.xy / view.grid_axis_viewport.zw, 0.0).r;
+    // The material's own occlusion map multiplies the screen-space AO: both
+    // modulate the AMBIENT term only, never the direct light above.
+    let ao = textureSampleLevel(ao_tex, ao_smp, in.pos.xy / view.grid_axis_viewport.zw, 0.0).r
+        * vt_ao;
     lo += amb * albedo * (1.0 - metallic) * ao;
     lo += gi_ambient_specular(in.world_pos, n, v, rough, f0, amb) * ao;
 

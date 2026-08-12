@@ -1953,6 +1953,7 @@ impl EngineHost {
                                 self.scene.skinned_meshes.len() - 1
                             });
                             self.scene.skinned.push(inf_render::SkinnedInstance {
+                                vt: Default::default(),
                                 translation,
                                 rotation: rot.as_quat(),
                                 scale: scale.as_vec3(),
@@ -1969,6 +1970,7 @@ impl EngineHost {
                         // unchanged down to its slate tint, so authoring a skeletal
                         // entity before its assets exist looks exactly as it did.
                         None => self.scene.instances.push(MeshInstance {
+                            vt: Default::default(),
                             translation,
                             rotation: rot.as_quat(),
                             scale: scale.as_vec3(),
@@ -2089,6 +2091,7 @@ impl EngineHost {
                             .push(inf_render::VgeomAsset::new(loaded.id, loaded.source));
                     }
                     self.scene.vgeom_instances.push(inf_render::VgeomInstance {
+                        vt: Default::default(),
                         asset: loaded.id,
                         translation,
                         rotation: rot.as_quat(),
@@ -2105,6 +2108,7 @@ impl EngineHost {
                 // R-P1: an unresolved / primitive-only MeshRef draws its built-in
                 // primitive kind (Sphere/Plane/Cylinder/Cone), not always a cube.
                 None => self.scene.instances.push(MeshInstance {
+                    vt: Default::default(),
                     translation,
                     rotation: rot.as_quat(),
                     scale: scale.as_vec3(),
@@ -6750,6 +6754,7 @@ fn project_cloth(
     scene.skinned_meshes.push(std::sync::Arc::new(mesh));
     let slot = scene.skinned_meshes.len() - 1;
     scene.skinned.push(inf_render::SkinnedInstance {
+        vt: Default::default(),
         translation,
         rotation,
         scale,
@@ -6794,6 +6799,7 @@ fn project_hair(
     scene.skinned_meshes.push(std::sync::Arc::new(mesh));
     let slot = scene.skinned_meshes.len() - 1;
     scene.skinned.push(inf_render::SkinnedInstance {
+        vt: Default::default(),
         translation,
         rotation,
         scale,

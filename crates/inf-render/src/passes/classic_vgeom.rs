@@ -70,6 +70,7 @@ fn pack_vgeom_instance(origin: &FloatingOrigin, inst: &VgeomInstance) -> Instanc
     InstanceRaw::pack(
         origin,
         &MeshInstance {
+            vt: Default::default(),
             translation: inst.translation,
             rotation: inst.rotation,
             scale: inst.scale,

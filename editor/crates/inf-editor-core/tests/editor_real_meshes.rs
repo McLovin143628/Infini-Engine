@@ -107,6 +107,7 @@ fn project(scene: &mut RenderScene, store: &mut EditorRenderAssets, placed: &[Pl
                         .push(VgeomAsset::new(loaded.id, loaded.source));
                 }
                 scene.vgeom_instances.push(VgeomInstance {
+                    vt: Default::default(),
                     asset: loaded.id,
                     translation,
                     rotation: rot.as_quat(),
@@ -119,6 +120,7 @@ fn project(scene: &mut RenderScene, store: &mut EditorRenderAssets, placed: &[Pl
                 });
             }
             None => scene.instances.push(MeshInstance {
+                vt: Default::default(),
                 translation,
                 rotation: rot.as_quat(),
                 scale: scale.as_vec3(),
