@@ -229,6 +229,21 @@ struct VgeomInstanceGpu {
     vt: [u32; 3],
 }
 
+/// The record's size and the offset of the P26.3 words, pinned the way
+/// [`inf_vgeom::MeshletRec`] above is — and for a sharper reason.
+///
+/// `v_instances` is a **storage buffer** (`@group(3) @binding(4)`), not a vertex
+/// buffer: `wgpu` validates nothing about a storage struct's field layout, so a
+/// Rust record that stops matching `struct Instance` in `vgeom_mesh.wgsl` is
+/// silent corruption rather than a pipeline error. P26.3 claimed "the record
+/// stays 176 B, pinned by its existing layout arm"; `InstanceRaw` has one and
+/// this had none. 64 (mat4) + 5 × 16 (vec4) + 4 × 4 (scalars) + 4 × 4 (pick_id +
+/// the three VT words) = 176, and WGSL's std430 lays `struct Instance` out the
+/// same way.
+const _: () = assert!(std::mem::size_of::<VgeomInstanceGpu>() == 176);
+const _: () = assert!(std::mem::offset_of!(VgeomInstanceGpu, pick_id) == 160);
+const _: () = assert!(std::mem::offset_of!(VgeomInstanceGpu, vt) == 164);
+
 /// Cull uniform block. Mirrors `struct CullParams`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
