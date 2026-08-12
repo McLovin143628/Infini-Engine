@@ -11,6 +11,12 @@ publish = false
 [dependencies]
 inf-asset = { workspace = true }
 inf-graph = { workspace = true }
+# P26.2: the virtual address space the `.inf_tex` v2 container addresses tiles in
+# — `TileCoord` lives there and is re-exported here, and `TiledTextureReader`
+# hands a residency its `VtTextureDesc`. The direction is deliberate: `inf-vt`
+# must never name THIS crate, because a shipped player samples virtual textures
+# and must not link `image` + `naga` to do it. See `inf_vt`'s crate docs.
+inf-vt = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

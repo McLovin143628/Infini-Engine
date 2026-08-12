@@ -1,0 +1,17 @@
+[package]
+name = "inf-vt"
+description = "Streaming virtual texturing: the virtual address space, the physical page pool and its residency (GPU-free)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+# Deliberately the SHORTEST dependency list in the workspace, and the shape of it
+# is load-bearing rather than frugal — see the crate docs. `inf-vt` names no
+# asset crate, no math crate and above all no `wgpu`: it is the bookkeeping half
+# of virtual texturing, unit-testable with no adapter on every CI leg.
+thiserror = { workspace = true }
+tracing = { workspace = true }

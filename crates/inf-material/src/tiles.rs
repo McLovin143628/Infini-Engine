@@ -264,31 +264,19 @@ pub struct TexTileEntry {
 /// Address of one tile in a virtual texture — the key P26.2's residency table is
 /// built on.
 ///
-/// **Its derived `Ord` is `(mip, x, y)`; the tile directory is sorted
-/// `(mip, y, x)`.** The two orders are different and neither is wrong, but a
-/// `BTreeSet<TileCoord>` iterates in *its* order rather than the file's, so a
-/// residency pass that wants to walk a request set in payload order — which is
-/// the point of a sorted directory, and the difference between one sequential
-/// read and a scatter — has to sort on `(mip, y, x)` itself. Pinned by
+/// **It lives in [`inf_vt`], and is re-exported here.** The address of a tile is
+/// more primitive than the file that stores it, so it belongs to the crate that
+/// owns the virtual address space; this crate consumes it. The direction is not a
+/// preference — `inf-vt` must never name `inf-material` (which pulls `image` and
+/// `naga`, neither of which a shipped player links to sample a texture), and
+/// making `inf-material` the *upper* crate turns that mistake into a dependency
+/// cycle instead of a review question. See `inf_vt`'s crate docs.
+///
+/// Its derived `Ord` is `(mip, x, y)` while the tile directory is sorted
+/// `(mip, y, x)`; [`TileCoord::payload_order`] is the key to sort a request set
+/// on. Pinned against a real directory by
 /// [`tests::the_tile_coord_order_is_not_the_payload_order`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TileCoord {
-    pub mip: u32,
-    pub x: u32,
-    pub y: u32,
-}
-
-impl TileCoord {
-    pub const fn new(mip: u32, x: u32, y: u32) -> Self {
-        Self { mip, x, y }
-    }
-
-    /// This address as the tile directory sorts it — the key to order a request
-    /// set by, when the order that matters is where the bytes are.
-    pub const fn payload_order(&self) -> (u32, u32, u32) {
-        (self.mip, self.y, self.x)
-    }
-}
+pub use inf_vt::TileCoord;
 
 // ── builder ─────────────────────────────────────────────────────────────────
 
@@ -567,6 +555,32 @@ impl<B: AsRef<[u8]>> TiledTextureReader<B> {
     #[inline]
     pub fn mips(&self) -> &[TexMipEntry] {
         &self.mips
+    }
+
+    /// **The residency door**: this container's address space, as
+    /// [`inf_vt::VtResidency::register_texture`] wants it.
+    ///
+    /// The whole of what crosses the seam between the file and the streamer —
+    /// the tile geometry and the grid of every level, and no bytes. What the
+    /// streamer asks for *back* is one tile, through [`tile`](Self::tile) (or
+    /// [`tile_rgba8`](Self::tile_rgba8) when the adapter has no BC): the same
+    /// door, one format decision earlier.
+    pub fn vt_desc(&self) -> inf_vt::VtTextureDesc {
+        inf_vt::VtTextureDesc {
+            tile_size: self.header.tile_size,
+            border: self.header.border,
+            srgb: self.header.srgb,
+            mips: self
+                .mips
+                .iter()
+                .map(|m| inf_vt::VtMipDesc {
+                    width: m.width,
+                    height: m.height,
+                    tiles_x: m.tiles_x,
+                    tiles_y: m.tiles_y,
+                })
+                .collect(),
+        }
     }
 
     /// The tile directory, sorted by `(mip, y, x)`.
@@ -897,6 +911,25 @@ fn parse(data: &[u8]) -> Result<(TiledTextureHeader, Vec<TexMipEntry>, Vec<TexTi
         tiles.push(e);
     }
     Ok((header, mips, tiles))
+}
+
+/// The page format a container's tiles upload as **when the adapter can take
+/// them whole**.
+///
+/// The other arm — an adapter without `TEXTURE_COMPRESSION_BC` — does not use
+/// this: it pages [`TiledTextureReader::tile_rgba8`] into an
+/// [`inf_vt::PageFormat::Rgba8`] pool, at 8× the bytes for BC1 and 4× for BC3.
+/// So the two enums are not mirrors of one another and cannot drift: this one
+/// says what is *on disk*, [`inf_vt::PageFormat`] says what the *pool* is, and
+/// on that arm they deliberately differ.
+impl From<TextureFormat> for inf_vt::PageFormat {
+    fn from(f: TextureFormat) -> Self {
+        match f {
+            TextureFormat::Rgba8 => inf_vt::PageFormat::Rgba8,
+            TextureFormat::Bc1 => inf_vt::PageFormat::Bc1,
+            TextureFormat::Bc3 => inf_vt::PageFormat::Bc3,
+        }
+    }
 }
 
 /// Whether `bytes` look like a v2 tiled image (as opposed to a v1 bincode
