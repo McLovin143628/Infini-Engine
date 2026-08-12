@@ -182,11 +182,11 @@ pub fn plan_pool(cfg: VtPoolConfig) -> (VtPoolGeometry, Vec<VtAdvisory>) {
     let stored = cfg.stored_tile_size.max(4);
     let page_bytes = cfg.format.page_bytes(stored);
     let per_side = (cfg.max_texture_dim / stored).max(1);
-    let wanted = if page_bytes == 0 {
-        0
-    } else {
-        cfg.budget_bytes / page_bytes
-    };
+    // `checked_div` rather than a guarded `/`: `stored` is clamped to at least 4
+    // and every format's page is at least one block, so a zero page size is
+    // unreachable — but "unreachable" is a claim about today's formats, and a
+    // budget divided by nothing buys nothing is a claim about arithmetic.
+    let wanted = cfg.budget_bytes.checked_div(page_bytes).unwrap_or(0);
 
     if wanted == 0 {
         advisories.push(VtAdvisory::BudgetBelowOnePage {
