@@ -480,4 +480,108 @@ mod tests {
         assert!(db.get(id).is_some());
         assert!(db.get_by_path(&without).is_some());
     }
+    /// **A sidecar this crate cannot parse still declares two things** (P26.4):
+    /// the asset's own `guid` and its `dependencies` — and one written before the
+    /// field existed still scans, keeps its id, and simply has no edges.
+    ///
+    /// Both behaviours shipped without a unit arm (the P26.4 audit). The gate
+    /// that covers them lives in `inf-player`'s `phase26_gate`, needs a cooked
+    /// project, and exercises only the PRESENT field: nothing anywhere loaded a
+    /// level sidecar written before this batch, and every committed
+    /// `.inf_lvl.toml` under `samples/` and `templates/` is exactly that.
+    /// Measured: deleting `#[serde(default)]` from the writer's field survived
+    /// `-p inf-editor-core` entirely.
+    ///
+    /// The id half is the defect the batch found rather than a convenience: the
+    /// content-hash fallback made a level's asset id churn with its CONTENTS, so
+    /// every save re-registered it under a new one and every edge into it went
+    /// stale — which is asserted here directly, by rewriting the payload.
+    #[test]
+    fn an_unparsable_sidecar_still_declares_its_guid_and_its_edges() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let level = dir.path().join("A.inf_lvl");
+        let guid = AssetId::new();
+        let mat = AssetId::new();
+        let write = |payload: &[u8], deps: Option<AssetId>| {
+            std::fs::write(&level, payload).unwrap();
+            let deps = match deps {
+                Some(d) => format!("dependencies = [\"{d}\"]
+"),
+                None => String::new(),
+            };
+            // The LEVEL's own schema, which `AssetSidecar::load` cannot parse (no
+            // `kind`, and a `content_hash` of a different shape) — the whole
+            // reason `read_entry` synthesizes one.
+            std::fs::write(
+                format!("{}.toml", level.display()),
+                format!(
+                    "schema_version = 22
+guid = \"{guid}\"
+title = \"A\"
+                     entity_count = 3
+content_hash = \"0\"
+{deps}"
+                ),
+            )
+            .unwrap();
+        };
+
+        write(b"payload-one", Some(mat));
+        let mut db = AssetDb::new(dir.path());
+        assert_eq!(db.scan().expect("scan"), 1);
+        assert!(db.contains(guid), "the declared guid was not honoured");
+        assert_eq!(
+            db.references_of(guid),
+            Some(&[mat][..]),
+            "the level's declared edge was not read"
+        );
+        assert_eq!(
+            db.referenced_by(mat),
+            vec![guid],
+            "the declared edge did not reach the delete-with-references guard"
+        );
+
+        // THE ID DOES NOT CHURN WITH THE CONTENT. Before P26.4 it was
+        // `Uuid::from_u128(content_hash)`, so every save minted a new one.
+        write(b"payload-two-which-is-a-different-length", Some(mat));
+        let mut moved = AssetDb::new(dir.path());
+        moved.scan().expect("scan");
+        assert!(
+            moved.contains(guid),
+            "the level's asset id moved when its contents did, so every edge into              it goes stale on the next save"
+        );
+
+        // MIGRATION: a sidecar written before the field existed still scans,
+        // keeps its id, and declares no edges — the status quo ante, not an error.
+        write(b"payload-three", None);
+        let mut old = AssetDb::new(dir.path());
+        assert_eq!(old.scan().expect("a field-less sidecar still scans"), 1);
+        assert!(old.contains(guid), "the migration lost the declared guid");
+        assert!(
+            old.referenced_by(mat).is_empty(),
+            "a sidecar with no `dependencies` key invented an edge"
+        );
+
+        // …and a MALFORMED key is skipped rather than failing the scan, which is
+        // what `declared_sidecar`'s doc promises ("a sidecar that already failed
+        // to parse once has earned no more trust than 'take what is legible from
+        // it'"). Measured: replacing the `as_array` guard with an `expect`
+        // survived every other arm in this crate.
+        std::fs::write(&level, b"payload-four").unwrap();
+        std::fs::write(
+            format!("{}.toml", level.display()),
+            format!(
+                "schema_version = 22\nguid = \"{guid}\"\ntitle = \"A\"\n\
+                 entity_count = 3\ncontent_hash = \"0\"\ndependencies = \"nope\"\n"
+            ),
+        )
+        .unwrap();
+        let mut bad = AssetDb::new(dir.path());
+        assert_eq!(
+            bad.scan().expect("a malformed dependencies key still scans"),
+            1
+        );
+        assert!(bad.contains(guid));
+        assert!(bad.referenced_by(mat).is_empty());
+    }
 }

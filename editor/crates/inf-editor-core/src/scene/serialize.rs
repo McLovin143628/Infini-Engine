@@ -6448,6 +6448,41 @@ mod tests {
     use super::*;
     use crate::ipc::SpawnKind;
 
+    /// **A level sidecar written before `dependencies` existed still loads**
+    /// (P26.4 audit) — the migration arm the field shipped without.
+    ///
+    /// `#[serde(default)]` is the whole mechanism, and nothing exercised it:
+    /// `serialize::load` reads only the payload, and the one place anything
+    /// deserializes a `Sidecar` is `inf-player`'s `phase26_gate`, on a sidecar
+    /// the same test has just written *with* the field. Measured: deleting the
+    /// attribute survived `-p inf-editor-core` entirely. It matters because all
+    /// sixteen committed `.inf_lvl.toml` files under `samples/` and `templates/`
+    /// are exactly this shape, and none of them is rewritten by this batch.
+    #[test]
+    fn a_sidecar_written_before_the_dependencies_field_still_loads() {
+        let old = "schema_version = 22\n\
+                   guid = \"6c1cf9ea-0000-4000-8000-000000000001\"\n\
+                   title = \"Wire\"\n\
+                   entity_count = 3\n\
+                   content_hash = \"deadbeef\"\n";
+        let side: Sidecar = toml::from_str(old).expect(
+            "a level sidecar written before P26.4 no longer parses — every \
+             committed sample level is this shape",
+        );
+        assert_eq!(side.title, "Wire");
+        assert_eq!(side.entity_count, 3);
+        assert!(
+            side.dependencies.is_empty(),
+            "an absent key became edges out of nowhere"
+        );
+        // ANTI-VACUITY: the field is really carried when it IS present, so the
+        // default above is a migration and not a field that never round-trips.
+        let dep = Uuid::from_u128(0x2604);
+        let now = format!("{old}dependencies = [\"{dep}\"]\n");
+        let side: Sidecar = toml::from_str(&now).expect("parse");
+        assert_eq!(side.dependencies, vec![dep]);
+    }
+
     fn transform_path(doc: &SceneDoc) -> &'static str {
         doc.world()
             .registry()

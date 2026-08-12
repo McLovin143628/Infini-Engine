@@ -187,6 +187,19 @@ pub struct EditorRenderAssets {
     skeletons: HashMap<Uuid, Option<Arc<Skeleton>>>,
     /// Decoded clips by GUID.
     clips: HashMap<Uuid, Option<Arc<AnimClip>>>,
+    /// **Bumped whenever the bytes behind a GUID might have moved** (P26.4
+    /// audit): the index was rebuilt, or the content root changed.
+    ///
+    /// A consumer that caches something *derived* from this store — the
+    /// viewport's virtual-texture level is the one that exists — cannot gate on
+    /// the document version (a gizmo drag bumps that per input event, and
+    /// building a VT level creates an atlas) and cannot gate on the binding SET
+    /// alone: re-importing a `.inf_tex`, or editing a material's graph, changes
+    /// neither. Before this counter, `sync_vt_bindings` did exactly that and its
+    /// own doc claimed otherwise — *"`refresh_asset_index` forces a
+    /// re-projection and clears the set"*, which nothing did — so the viewport's
+    /// atlas held the bytes it read the first time for the rest of the session.
+    index_generation: u64,
 }
 
 impl EditorRenderAssets {
@@ -206,11 +219,23 @@ impl EditorRenderAssets {
         };
         self.rescanned_for.clear();
         self.content_root = root;
+        self.index_generation += 1;
     }
 
     /// The active content root.
     pub fn content_root(&self) -> Option<&Path> {
         self.content_root.as_deref()
+    }
+
+    /// **How many times the bytes behind a GUID might have moved** — see
+    /// [`index_generation`](Self::index_generation)'s field docs (P26.4 audit).
+    ///
+    /// Monotone, and the only correct third term for a consumer caching a
+    /// *derived* GPU object: the document version is too noisy and the binding
+    /// set is too coarse.
+    #[inline]
+    pub fn index_generation(&self) -> u64 {
+        self.index_generation
     }
 
     /// Number of indexed loose assets.
@@ -239,6 +264,9 @@ impl EditorRenderAssets {
     /// referenced asset — a few hundred bytes each — which is the price of never
     /// rendering stale geometry.
     pub fn refresh_index(&mut self) {
+        // Bumped before the early-out, because "there is no root" is itself a
+        // state a derived cache has to be told about (P26.4 audit).
+        self.index_generation += 1;
         let Some(dir) = self.content_root.clone() else {
             return;
         };
@@ -1397,6 +1425,44 @@ mod tests {
             lib.handle(orm.uuid().as_u128()).map(|h| h.0 + 1),
             Some(set.orm)
         );
+
+        // **THE INVALIDATION** (P26.4 audit). The viewport's VT level is gated on
+        // the binding SET, and a re-imported `.inf_tex` changes neither that set
+        // nor the document version — so before `index_generation` existed the
+        // atlas held the bytes it read the first time for the rest of the
+        // session, while `sync_vt_bindings`'s own doc claimed
+        // `refresh_asset_index` "clears the set". Nothing cleared it; nothing in
+        // the codebase ever had.
+        //
+        // Asserted on the BYTES, not on the counter: a monotone number that
+        // tracks nothing is exactly as useless as no number.
+        let before = store.index_generation();
+        let first = store
+            .material_content([mat.uuid()])
+            .source(albedo.uuid().as_u128())
+            .map(|s| s.payload().to_vec())
+            .expect("the albedo resolved");
+        let reimported = tiled(64, true);
+        assert_ne!(first, reimported, "the fixture re-imported the same bytes");
+        std::fs::write(proj.db().get(albedo).unwrap().path.clone(), &reimported).unwrap();
+        store.refresh_index();
+        assert!(
+            store.index_generation() > before,
+            "a re-import did not move the index generation, so a consumer caching \
+             a derived GPU object has nothing to notice it by"
+        );
+        assert_eq!(
+            store
+                .material_content([mat.uuid()])
+                .source(albedo.uuid().as_u128())
+                .map(|s| s.payload().to_vec()),
+            Some(reimported),
+            "the store served the pre-import bytes"
+        );
+        // …and a root change is the same event.
+        let gen_before_root = store.index_generation();
+        store.set_content_root(store.content_root().map(Path::to_path_buf));
+        assert!(store.index_generation() > gen_before_root);
 
         // ANTI-VACUITY: an unbound level resolves nothing, so the counts above
         // measure the bindings and not the content root.

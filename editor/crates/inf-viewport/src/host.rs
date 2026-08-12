@@ -276,6 +276,11 @@ pub struct EngineHost {
     /// VT level creates an atlas, so the rebuild is gated on this set changing —
     /// the `terrain_slots` pattern, for materials.
     vt_bindings: BTreeSet<Uuid>,
+    /// …and the `EditorRenderAssets::index_generation` it was built AT (P26.4
+    /// audit). A re-imported `.inf_tex` changes neither the document version nor
+    /// the binding set, so without this the atlas kept the bytes it read the
+    /// first time for the rest of the session.
+    vt_index_generation: u64,
     /// The last tool-rejection message, for a Ring-2 caller to surface. Drained by
     /// [`take_tool_status`](Self::take_tool_status).
     tool_status: Option<String>,
@@ -953,6 +958,7 @@ impl EngineHost {
             fractures: inf_editor_core::simulate::shared_fractures(),
             render_assets: inf_editor_core::render_assets::EditorRenderAssets::new(),
             vt_bindings: BTreeSet::new(),
+            vt_index_generation: 0,
             tool_status: None,
             stream_log_countdown: STREAM_LOG_INTERVAL_FRAMES,
             sculpt_drag: None,
@@ -3921,14 +3927,23 @@ impl EngineHost {
     /// anything is projected, because the per-instance sets the projection reads
     /// come out of the registry this builds.
     ///
-    /// **Gated on the binding SET, not on the document version.** A projection
-    /// runs on every version bump — a gizmo drag bumps it per input event — and
-    /// building a VT level creates an atlas texture and an indirection buffer. So
-    /// the work happens when the set of `Material.asset` GUIDs changes and not
-    /// otherwise; changing a material's *contents* is an asset-index refresh
-    /// (`refresh_asset_index` forces a re-projection and clears the set), which
-    /// is the same invalidation contract `render_assets` uses for a re-imported
-    /// mesh.
+    /// **Gated on the binding SET *and* the asset-index generation**, not on the
+    /// document version. A projection runs on every version bump — a gizmo drag
+    /// bumps it per input event — and building a VT level creates an atlas
+    /// texture and an indirection buffer, so the work must not happen per frame.
+    ///
+    /// The generation is the second half, and it was missing (P26.4 audit). This
+    /// gate read the binding set alone, and its own doc claimed
+    /// `refresh_asset_index` "forces a re-projection and clears the set" — it
+    /// forces the re-projection and clears nothing: **nothing in the codebase
+    /// ever cleared `vt_bindings`**. So re-importing a `.inf_tex`, or editing a
+    /// material's graph, changed neither the version-independent set nor
+    /// anything else this early-out reads, and the viewport kept the atlas it
+    /// built the first time for the rest of the session.
+    /// `EditorRenderAssets::index_generation` moves on exactly the two events
+    /// that can put different bytes behind a GUID — an index refresh and a root
+    /// change — and `the_asset_index_generation_moves_when_a_binding_could_have_changed`
+    /// pins it against the bytes rather than against the counter.
     ///
     /// Bindings are collected in **document order** and handed to the registry,
     /// which sorts them (`inf_render::registration_order`). The P26.3 LAW says
@@ -3946,10 +3961,12 @@ impl EngineHost {
                 bound.insert(asset);
             }
         }
-        if bound == self.vt_bindings {
+        let generation = self.render_assets.index_generation();
+        if bound == self.vt_bindings && generation == self.vt_index_generation {
             return;
         }
         self.vt_bindings = bound.clone();
+        self.vt_index_generation = generation;
         if bound.is_empty() {
             self.renderer.set_vt_level(None);
             return;

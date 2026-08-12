@@ -546,6 +546,27 @@ fn both_projectors_resolve_a_surface_texture_set_the_same_way() {
              it draws is textureless while the other host's are not"
         );
     }
+
+    // …and the EDITOR's rebuild is gated on the asset-index generation as well
+    // as the binding set (P26.4 audit). Only the editor: the player's material
+    // content arrives once, from a pack or a payload, and cannot be re-imported
+    // under it.
+    //
+    // A source pin because the behaviour needs a live `EngineHost`, which needs a
+    // window and a device; what it is pinning is the CALL, and the rule the call
+    // implements is asserted on the bytes in
+    // `render_assets::tests::a_levels_bindings_resolve_to_registrable_material_content`.
+    // Without the generation term, re-importing a `.inf_tex` changes neither the
+    // document version nor the binding set and the viewport keeps the atlas it
+    // built the first time — which is what shipped, under a doc comment saying
+    // the opposite.
+    let src = support::strip_comments_and_strings(&read(VIEWPORT).replace("\r\n", "\n"));
+    assert!(
+        src.contains("index_generation()"),
+        "the editor viewport's virtual-texture rebuild does not consult \
+         `EditorRenderAssets::index_generation`, so a re-imported texture never \
+         reaches the atlas"
+    );
 }
 
 // ── P18.5: the GPU-instanced scatter (PCG + foliage) projection ──────────────
