@@ -9370,6 +9370,187 @@ door for editor viewport, PIE and shipping.
 >   **50** and none was re-blessed — the textureless command stream is unchanged, and
 >   `vt_engaged_frames` is what measures it rather than an expectation.
 
+> **STATUS — P26.3b Spec clause 4, the WIRE: COMPLETE (2026-08-12)** — six
+> implementation commits (`1d8c63d` scene v22, `17c9339` the one door + the
+> `.inf_matd` record, `077d963` `ScenePayload` v8, `74f904b` the cook closure,
+> `3f82159` the phase-26 gate, `c413f46` the lint) plus an adversarial audit
+> (`9bae223`, `8df0f1d`, `e623d68`, `99d6100` and this ledger). Battery green:
+> **229 binaries, 4 133 passed, 0 failed, 8 ignored** (the batch landed at
+> **4 123**; the audit added ten arms). Goldens stay **50** and none was
+> re-blessed — nothing in this batch renders. Schemas moved twice and no further:
+> `.inf_lvl` **v21 → v22** and `ScenePayload` **v7 → v8**, plus a new `.inf_matd`
+> (`DerivedMaterial` v1, pack kind code **24**, appended). No new external
+> dependency: `inf-material` becomes a normal dependency of `inf-packager`
+> (decode + flatten only) and a **dev** dependency of `inf-player`, deliberately,
+> because a normal one would silently undo the P26.2 inversion and put the
+> material compiler in a shipped player.
+>
+> **What it is.** The persisted binding the P26.3 ledger named as the missing
+> leg. `inf_ecs::Material` gains `asset: Option<Uuid>`, so a level records which
+> `.inf_mat` a surface uses — a fact apply-material has thrown away since P7.1,
+> which is why the whole SVT stack had nothing to sample. The scalars STAY: the
+> binding adds the texture edge and never becomes the only copy of the numbers,
+> so `None` is the permanent no-texture path and an unresolvable binding renders
+> exactly as a pre-v22 level did, structurally rather than by a branch someone
+> must remember. `inf_material::derive_material` flattens a `.inf_mat` into an
+> `inf_asset::DerivedMaterial` — three texture GUIDs plus those scalars — and the
+> record's type lives in `inf-asset` because a shipped player must read it and
+> must never link `inf-material`. The cook walks `Material.asset` → `.inf_mat` →
+> its `.inf_tex` maps into the pack closure and writes a `.inf_matd` under a
+> salted, involutive `derived_material_id`; the PIE payload computes the same
+> record through the same door under the same id. **`ScenePayload` v8 carries four
+> slots in one bump** — `cloths`, `hairs`, `materials`, `textures` — which pays
+> the P24.4 debt: `phase24_gate`'s trip-wire was built to fail the day the
+> envelope grew `cloths`, it fired verbatim, and it is GONE rather than disabled.
+>
+> **What the audit found** (all fixed in this batch; mechanisms in the commit
+> bodies).
+>
+> * **THE FINDING: a material INSTANCE could be bound, and nothing anywhere
+>   resolved it.** `scene_apply_material` persisted the GUID of whatever asset was
+>   dropped, and the shipped UI drops a `.inf_mati` on two paths —
+>   `ContentDrawer.tsx` routes `asset.kind === "material_instance"` straight to
+>   `applyMaterial`, and `MaterialInstanceEditor.tsx` has its own "Apply to
+>   Selection". A binding naming an instance resolves **nowhere**: the cook
+>   derives a `.inf_matd` for `AssetKind::Material` only and closes the texture
+>   edge for `AssetKind::Material` only, `load_binding_bytes` is kind-checked to
+>   the four v8 kinds and `.inf_mati` is not one, and **neither raises an
+>   advisory** — because the asset *is* in the project, so nothing looks dangling.
+>   The surface silently loses its maps on both wires at once, through the two
+>   buttons the feature ships with, which is the exact state the batch exists to
+>   abolish. The fix is not a workaround: `MatOverrides` has **no texture slots**,
+>   so an instance's maps ARE its parent's — the scalars keep coming from the
+>   resolved instance and the binding names the root `.inf_mat` they were resolved
+>   against. `material_binding_root` lives in Ring 1 beside the `resolve_material`
+>   it mirrors, so it is testable rather than a Ring-2 command's private opinion.
+> * **The pack path and the payload path built different material content.**
+>   `PackLevelSource::material_content` walked the pack INDEX and took every
+>   `.inf_matd` and every `.inf_tex` it found; `materials_from_payload` takes what
+>   the level binds. The gap is the ordinary case, not a contrivance: the glTF
+>   importer writes mesh → its materials → their textures as sidecar edges, so
+>   **placing an imported mesh drags a material and its maps into the closure with
+>   no `Material.asset` binding at all**. A superset is harmless for a lookup and
+>   fatal for the residency — `registration_order` is what a host registers in and
+>   `want_floor` is a pure function of that SEQUENCE, so one extra material moves
+>   every page after it, on the same level, from the same pack. Measured on the
+>   gate's fixture: **2 materials and 3 textures in the pack, 1 and 2 bound.**
+>   Both producers are keyed on the level's bindings now. Compounding it: **none
+>   of `MaterialContent`, `materials_from_payload`, `material_content`,
+>   `registration_order` or `is_empty` had a caller OR a test anywhere in the
+>   tree** — the P26.2 house rule for API that ships before its caller says
+>   declared *and pinned*, and the claim they carried ("one lookup rule for both
+>   wires") was the batch's headline.
+> * **The P16 advisory law's own two cases were the two this batch left silent.**
+>   A `.inf_mat` naming a **missing** `.inf_tex` cooked with no message; so did
+>   one naming a **v1** `.inf_tex`, and that second class is worse. A cook copies
+>   a `.inf_tex` through verbatim, so a texture imported before P26.1 packs
+>   perfectly and `inf_vt::TiledTextureReader` — the door a runtime pages tiles
+>   with — refuses it (`BadMagic`). Present, valid, unusable, textureless, in
+>   every project that predates P26.1, which is every project that exists; and
+>   invisible before this batch because nothing sampled a texture at all.
+> * **All four cook advisories had no arm.** The P26.3b commit says its two are
+>   "both pure and both unit-testable"; neither was unit-*tested*, and
+>   `dangling_material_refs` had no test either — one returning `Vec::new()`
+>   unconditionally was invisible, the same shape as the counter that never moves.
+>   Five are pinned now against the `sub_threshold_advisory` bar (asset,
+>   consequence, remedy), pairwise distinct, with the eaten-backslash assertion of
+>   its own (guarded; none found), and four fixtures drive them through a **real
+>   cook** with the healthy control first.
+> * **`edit_apply_material` could not clear a binding.** It wrote only `Some`, so
+>   applying a material the caller cannot name left the PREVIOUS binding standing
+>   over the NEW scalars — a surface whose numbers come from one material and
+>   whose textures come from another, which is precisely what putting the binding
+>   in the same undo transaction was for. `edit_apply_sprite_slice`'s
+>   `texture: Option<Uuid>` is the in-tree shape one door over. And the arm that
+>   introduced the feature passed `Some(bound)` and **never looked at it**: the
+>   binding, its collapse into the single undo step and its redo are asserted now.
+> * **`derive.rs`'s "one door for three paths" table cites a caller that does not
+>   exist** (`inf_editor_core::render_assets`) — the P26.2 `resolved_table`
+>   finding, one crate over. Measured: two non-test call sites, and both
+>   projectors still fill `vt: Default::default()`. The third path is P26.4's, and
+>   the table says so now, with the grep that would catch a second spelling
+>   written beside it.
+> * **`phase24_gate`'s retirement note promises an arm that did not exist** ("a
+>   real `--pie` subprocess folds them"); every arm in `phase26_gate` ran
+>   in-process. P21.4's finding was a `--pie` binary that built its sim with a
+>   bare `RuntimeSim::new` and therefore agreed with itself about a world missing
+>   an attachment, with no gate running the binary. The subprocess arm exists now,
+>   and the note is true.
+> * **A `.inf_tex` the payload builder cannot resolve was dropped in silence**
+>   while the record naming it still shipped — the hazard `ScenePayload::textures`
+>   documents in so many words, ten lines below a material decode that already
+>   follows "reported, not discarded". Also: `load_mesh_bytes` lost its doc
+>   comment to the newly inserted `load_binding_bytes` (so a paragraph about
+>   `Destructible` and `fracture_mesh` documented a loader for cloth, hair,
+>   materials and textures); the editor mirror's v22 wire pin is titled "The v21
+>   wire shape"; and cloths and hairs shared one dedup set across two id spaces.
+>
+> **Mutation matrix: twelve mutations, zero survivors**, each failing at least one
+> arm BY NAME — the pack-index walk restored, the level→material edge cut, the
+> material→texture edge cut, the `.inf_matd` derivation disabled, the payload's
+> materials dropped / unsalted / its textures dropped, `derive_material`'s normal
+> and ORM slots swapped, `registration_order` walking the hash map, the id salt
+> removed, the texture advisory silenced, the wrong-kind branch deleted. Two more
+> on the audit's own arms: the `Some`-only binding write and a
+> `material_binding_root` that returns the instance id each fail exactly one arm
+> and disturb no other.
+>
+> **Withdrawn on measurement.** There is **no second flattening spelling**: every
+> read of `MaterialAsset`'s three texture slots outside `inf-material` is a
+> WRITER (glTF import, the photogrammetry finish). The two codec mirrors agree
+> field-for-field where it matters — `EntityRecordV20Gen` 44, `EntityRecordV21`
+> and the live record 47, `MaterialV21` 6 — and the two committed
+> `scene_v21.inf_lvl` fixtures are byte-identical, which is the pin that matters
+> more than any field list. `.inf_tex` and `.inf_mat` ride the cook **verbatim**
+> (`_ => raw`), so the pack's texture bytes ARE the content root's and the
+> payload/pack byte comparison is meaningful rather than a comparison of two
+> re-encodings. A cloth or hair that will not decode is **fatal on both** the pack
+> and the payload path while a material that will not decode **warns on both** —
+> asymmetric between kinds, symmetric between hosts, which is the property that
+> matters. No `skip_serializing_if` was added anywhere (the bincode LAW, checked
+> across the whole batch diff), and no `unwrap_or_default` on an id (the P26.1
+> NIL law). A scene that binds the **NIL** guid is not a half-state: the cook
+> names it in `dangling_material_advisory` and every runtime path falls to the
+> scalar surface. The retired P24.4 trip-wire was **removed, not disabled**, and
+> `pie_schema_skew`'s stale fixture moved v6 → v7 to stay exactly one rung behind
+> a v8 wire, which strengthens it. `AssetKind::DerivedMaterial` is appended at
+> code 24 and `FROZEN_WIRE` grew to 24 entries; the ladder's v22 arm and the
+> `SchemaTooNew` ceiling are pinned in both mirrors.
+>
+> **Honest remainders carried into P26.4.**
+> * **Spec clause 4 is the WIRE, not the picture.** Both projectors still fill
+>   `vt: Default::default()` and **no host calls `VtTextures::register` outside
+>   tests**, so a `.inf_mat`'s textures reach a runtime *record* on all paths and
+>   are sampled by nothing. `MaterialContent` is the input P26.4 registers from,
+>   and its `registration_order` is the contract both hosts must walk.
+> * **P26.3's own carried items stand**: the **fallback-residency GPU arm** for
+>   the WGSL tile-tree walk is still missing (the lit-pixel arms make the whole
+>   pyramid resident, so the loop body never runs on a GPU), the rigid and skinned
+>   paths still **box-project their uv** (`vt_box_uv` — visibly wrong on a
+>   character; the asset has carried `uv` and `tangent` since P4), there is **no
+>   tangent stream** so `vt_apply_normal` derives a cotangent frame from
+>   screen-space derivatives, and there is **no feedback** — the want set is
+>   `want_floor`'s camera-free three coarsest levels.
+> * **`material_content` copies container bytes out of the mmap.** `PackReader`
+>   has `read_ref` and the terrain precedent slices the mapping through an
+>   `Arc<PackReader>`; this reads whole, so a pack path's RAM scales with the
+>   texture bytes a level binds — the cost SVT exists to avoid, bounded now to the
+>   bound set but not removed. The owned `VtTileSource` the registry wants is
+>   P26.4's to shape.
+> * **A cooked pack still carries the `.inf_mat` beside the `.inf_matd`**, and
+>   nothing at runtime can read the former. Small (a `.inf_mat` is scalars and
+>   three GUIDs) and inherent to a cook with no "derived replaces source" rule.
+> * **Level sidecars carry no `dependencies`**, so `AssetDb::has_referrers` — the
+>   delete-with-refs guard — does not know the level→material edge, exactly as it
+>   does not know level→terrain, level→cloth or level→mesh. The material→texture
+>   edge IS known (the importer writes it), so deleting a bound texture warns and
+>   deleting a bound material does not.
+> * **The three-variant blend enum is spelled four times** — `inf_ecs::BlendMode`,
+>   `inf_material::MatBlend`, `inf_asset::DerivedBlend` and the Ring-2 string map
+>   in `scene_apply_material`. Only the middle pair is pinned against each other.
+> * The `1d8c63d` commit body says "16 samples + 2 templates re-blessed"; the tree
+>   holds **14 samples + 2 templates = 16** `.inf_lvl` files, all now stamped 22.
+
 - **P26.4 Deterministic feedback + streaming loop** — 1. the feedback pass: per-tile
   coverage as an **order-independent bitmask** (atomicOr, fixed layout — content is a pure
   function of camera/scene/residency, the ruling that reconciles GPU feedback with the
