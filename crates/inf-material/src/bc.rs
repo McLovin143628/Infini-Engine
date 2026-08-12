@@ -1,15 +1,24 @@
 //! Pure-Rust BC1 / BC3 (DXT1 / DXT5) block compression.
 //!
-//! GPU-native block-compressed textures are ~4-6× smaller than RGBA8 and sample
+//! GPU-native block-compressed textures are 4-8× smaller than RGBA8 and sample
 //! for free, so imported textures are compressed at import time. We hand-roll
-//! BC1 (opaque, 4:1) and BC3 (full alpha, 4:1) rather than pull `intel_tex_2`,
-//! whose ISPC build is a cross-OS CI liability (BC7 via intel_tex_2 is the
-//! documented follow-up). The encoder uses the standard bounding-box endpoint
-//! selection with per-pixel nearest-index assignment — correct, GPU-decodable
-//! output; endpoint refinement (PCA/cluster fit) is a future quality pass.
+//! BC1 (opaque, 4 bits per texel — **8:1** against RGBA8's 32) and BC3 (full
+//! alpha, 8 bits per texel — 4:1) rather than pull `intel_tex_2`, whose ISPC
+//! build is a cross-OS CI liability (BC7 via intel_tex_2 is the documented
+//! follow-up). The encoder uses the standard bounding-box endpoint selection
+//! with per-pixel nearest-index assignment — correct, GPU-decodable output;
+//! endpoint refinement (PCA/cluster fit) is a future quality pass.
 //!
 //! Blocks are 4×4; images whose dimensions aren't multiples of 4 are padded by
-//! clamping edge texels (the standard approach), so any size compresses.
+//! clamping edge texels (the standard approach), so any size compresses. The
+//! same clamp rule fills a virtual-texture tile's border ring and its partial
+//! right/bottom remainder (`crate::tiles`), which is what makes a v2 tile's
+//! block grid the level's own block grid, byte for byte.
+//!
+//! **Everything here is integer arithmetic and must stay that way** — a `.inf_tex`
+//! is content-hashed and cooked into a reproducible pack, so a float would make a
+//! texture's bytes a property of the machine that imported it. Enforced by
+//! `tests::the_encoder_never_touches_a_float`.
 
 /// Compress an RGBA8 image to BC1 (color only; alpha discarded). 8 bytes/block.
 pub fn compress_bc1(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
@@ -302,6 +311,60 @@ fn blit_block(
 
 #[cfg(test)]
 mod tests {
+
+    /// **The BC encoder never touches a float, and that is a LAW** (P26.1 audit).
+    ///
+    /// P26.1 makes this encoder the writer of every tile in every shipped
+    /// `.inf_tex`, and the batch's upload proof rests out loud on "hand-rolled
+    /// integer arithmetic with no floating point anywhere, so its output is the
+    /// same bytes on every target". That is exactly the shape of P14's trig LAW —
+    /// `f32` transcendentals are not bit-portable, and neither is `a * b + c`
+    /// under a target's contraction rules — and it was a sentence in a commit
+    /// message with nothing enforcing it.
+    ///
+    /// What one `as f32` in an endpoint fit would cost: a texture's content hash
+    /// becomes machine-dependent, so two developers importing one PNG write
+    /// different bytes, the import cache disagrees with itself, `.inf_pack` stops
+    /// being reproducible, and every "re-import is byte-identical" arm in this
+    /// repository passes on each machine separately while being false between
+    /// them. Nothing here would fail; the CI is one machine per job.
+    ///
+    /// Scoped to the code ABOVE this test module — a ban list has to be able to
+    /// name the tokens it bans.
+    #[test]
+    fn the_encoder_never_touches_a_float() {
+        let whole = include_str!("bc.rs");
+        let marker = "#[cfg(test)]";
+        let (code, _) = whole
+            .split_once(marker)
+            .expect("the test module marker moved; this gate scopes on it");
+        let code: String = code
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for banned in ["f32", "f64", "sqrt", "powf", "powi", "as f"] {
+            assert!(
+                !code.contains(banned),
+                "`{banned}` reached the BC encoder: its output is no longer the \
+                 same bytes on every target, and a texture's content hash becomes \
+                 a property of the machine that imported it"
+            );
+        }
+        // A bare `0.5` is an f64 with no annotation to grep for.
+        let chars: Vec<char> = code.chars().collect();
+        assert!(
+            !chars
+                .windows(3)
+                .any(|w| w[0].is_ascii_digit() && w[1] == '.' && w[2].is_ascii_digit()),
+            "a decimal literal reached the BC encoder"
+        );
+        // Anti-vacuity: the filter left the code behind, not only the comments.
+        assert!(
+            code.contains("fn compress_bc1") && code.contains("fn decode_bc3"),
+            "the source filter ate the encoder"
+        );
+    }
     use super::*;
 
     #[test]
