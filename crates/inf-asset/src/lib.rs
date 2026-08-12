@@ -20,6 +20,7 @@
 
 pub mod data;
 pub mod db;
+pub mod derived_material;
 pub mod error;
 pub mod hash;
 pub mod id;
@@ -35,6 +36,9 @@ pub mod watch;
 
 pub use data::{CellValue, EnumAsset, FieldDef, FieldType, StructAsset, TableAsset};
 pub use db::{AssetDb, AssetEntry};
+pub use derived_material::{
+    derived_material_id, DerivedBlend, DerivedMaterial, DERIVED_MATERIAL_ID_SALT,
+};
 pub use error::{AssetError, Result};
 pub use hash::ContentHash;
 pub use id::AssetId;

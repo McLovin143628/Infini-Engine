@@ -11,6 +11,7 @@
 //! substrate and compiled to a naga-validated `material_surface` WGSL function.
 
 pub mod bc;
+pub mod derive;
 pub mod error;
 pub mod graph;
 pub mod instance;
@@ -19,6 +20,7 @@ pub mod texture;
 pub mod tiles;
 
 pub use bc::{decode_bc1, decode_bc3};
+pub use derive::{derive_material, derive_material_bytes};
 pub use error::MaterialError;
 pub use graph::{
     analyze_complexity, analyze_with_budget, emit_texture_compute, emit_wgsl, material_registry,

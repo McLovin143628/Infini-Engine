@@ -163,6 +163,8 @@ fn kind_code(kind: AssetKind) -> u16 {
         // P24.4. Appended, never inserted — same rule, same reason.
         AssetKind::Cloth => 22,
         AssetKind::Hair => 23,
+        // P26.3b. Appended, never inserted — same rule, same reason.
+        AssetKind::DerivedMaterial => 24,
     }
 }
 
@@ -192,6 +194,7 @@ fn kind_from_code(code: u16) -> AssetKind {
         21 => AssetKind::Fracture,
         22 => AssetKind::Cloth,
         23 => AssetKind::Hair,
+        24 => AssetKind::DerivedMaterial,
         _ => AssetKind::Unknown,
     }
 }
@@ -356,7 +359,12 @@ impl PackWriter {
             // half a guide set is a bald patch, so there is nothing to sub-slice
             // and no streaming latency to buy. They compress.
             | AssetKind::Cloth
-            | AssetKind::Hair => true,
+            | AssetKind::Hair
+            // P26.3b: a `.inf_matd` is a handful of GUIDs and scalars, read whole
+            // when a level loads. There is no unit to page and nothing to
+            // sub-slice; the `.inf_tex` payloads it POINTS AT are the streaming
+            // half, and those are already raw.
+            | AssetKind::DerivedMaterial => true,
         }
     }
 

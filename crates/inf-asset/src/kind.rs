@@ -126,6 +126,24 @@ pub enum AssetKind {
     ///
     /// [`inf_anim::hair::HairAsset`]: the animation crate's `.inf_hair` payload.
     Hair,
+    /// A `.inf_mat` **flattened for a runtime** (`.inf_matd`) — three texture
+    /// GUIDs plus the scalars that are the no-texture fallback (P26.3b,
+    /// [`crate::DerivedMaterial`]).
+    ///
+    /// Like [`MeshletMesh`](AssetKind::MeshletMesh) and
+    /// [`Fracture`](AssetKind::Fracture) it is *derived at cook time*, never
+    /// authored: its GUID is a pure function of its material's
+    /// ([`crate::derived_material_id`]), so a runtime finds it without an index.
+    ///
+    /// **It exists because a shipped player cannot read a `.inf_mat`** — the
+    /// P26.2 dependency inversion, which keeps `image` and the naga-validating
+    /// material compiler out of the player, also keeps `MaterialAsset` out. The
+    /// answer crosses instead of the question.
+    ///
+    /// **Not** a streaming-class kind: it is a few dozen bytes read whole when a
+    /// level loads, and there is nothing to page. So it compresses like every
+    /// other bincode payload — see `PackWriter::compresses_kind`.
+    DerivedMaterial,
     /// Anything else living under the content root.
     Unknown,
 }
@@ -157,6 +175,7 @@ impl AssetKind {
             AssetKind::Fracture => "inf_fracture",
             AssetKind::Cloth => "inf_cloth",
             AssetKind::Hair => "inf_hair",
+            AssetKind::DerivedMaterial => "inf_matd",
             AssetKind::Unknown => return None,
         })
     }
@@ -187,6 +206,7 @@ impl AssetKind {
             "inf_fracture" => AssetKind::Fracture,
             "inf_cloth" => AssetKind::Cloth,
             "inf_hair" => AssetKind::Hair,
+            "inf_matd" => AssetKind::DerivedMaterial,
             _ => AssetKind::Unknown,
         }
     }
@@ -225,6 +245,7 @@ impl AssetKind {
             AssetKind::Fracture => "fracture",
             AssetKind::Cloth => "cloth",
             AssetKind::Hair => "hair",
+            AssetKind::DerivedMaterial => "derived_material",
             AssetKind::Unknown => "unknown",
         }
     }
@@ -255,6 +276,7 @@ impl AssetKind {
             AssetKind::Fracture => "Fracture",
             AssetKind::Cloth => "Cloth",
             AssetKind::Hair => "Hair",
+            AssetKind::DerivedMaterial => "Derived Material",
             AssetKind::Unknown => "File",
         }
     }
@@ -286,6 +308,7 @@ impl AssetKind {
             AssetKind::Fracture,
             AssetKind::Cloth,
             AssetKind::Hair,
+            AssetKind::DerivedMaterial,
         ]
     }
 }
@@ -325,7 +348,7 @@ mod tests {
     /// the variant (`format!("{k:?}").to_snake_case()`) would agree with any
     /// rename by construction, which is the shape of gate this repository keeps
     /// having to repair.
-    const FROZEN_WIRE: [(AssetKind, &str, &str, &str); 23] = [
+    const FROZEN_WIRE: [(AssetKind, &str, &str, &str); 24] = [
         (AssetKind::Level, "level", "inf_lvl", "level"),
         (AssetKind::Mesh, "mesh", "inf_mesh", "mesh"),
         (
@@ -370,6 +393,13 @@ mod tests {
         // ── P24.4 append ────────────────────────────────────────────────────
         (AssetKind::Cloth, "cloth", "inf_cloth", "cloth"),
         (AssetKind::Hair, "hair", "inf_hair", "hair"),
+        // ── P26.3b append ───────────────────────────────────────────────────
+        (
+            AssetKind::DerivedMaterial,
+            "derived_material",
+            "inf_matd",
+            "derived_material",
+        ),
     ];
 
     #[test]
