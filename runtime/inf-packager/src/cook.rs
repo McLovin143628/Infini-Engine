@@ -987,6 +987,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     // streams — silently. Say so.
     warnings.extend(dangling_terrain_refs(&db, &closure));
     warnings.extend(dangling_material_refs(&db, &closure));
+    warnings.extend(unshippable_material_textures(&db, &closure));
     warnings.extend(voxel_scale_mismatches(&db, &closure));
     warnings.extend(see_through_pits(&db, &closure));
     warnings.extend(dangling_biome_set_refs(&db, &closure));
@@ -1293,6 +1294,77 @@ pub fn dangling_material_advisory(level: AssetId, entity: &str, missing: AssetId
         "level {level}: entity '{entity}' is bound to material {missing}, which is not in \
          the project — the surface ships with its scalar attributes only. Re-apply a \
          material, or clear the binding."
+    )
+}
+
+/// The advisory for a `Material.asset` binding that names an asset which **is**
+/// in the project and is **not a `.inf_mat`** (P26.3b audit).
+///
+/// Its own advisory rather than a branch of [`dangling_material_advisory`],
+/// because the remedy is different and the first one's wording would be a lie: a
+/// `.inf_mati` binding is not missing, it is present and unresolvable. Nothing
+/// downstream can follow it — a `.inf_matd` is derived for `AssetKind::Material`
+/// only, and the `.inf_mat` → `.inf_tex` edge closes for `AssetKind::Material`
+/// only — so the surface loses its maps in the shipped build *and* in a PIE
+/// preview, and the level looks perfectly healthy from every direction. That is
+/// the whole shape of a silent hazard.
+///
+/// `scene_apply_material` now resolves an instance chain to its root before
+/// writing (`inf_editor_core::assets::material_instance::material_binding_root`),
+/// so a fresh binding cannot be one of these. This is the advisory for the levels
+/// already on disk and for any future writer that skips the door.
+pub fn material_kind_advisory(level: AssetId, entity: &str, asset: AssetId, kind: &str) -> String {
+    format!(
+        "level {level}: entity '{entity}' is bound to {asset}, which is a {kind} and not a \
+         material — nothing derives a runtime record for it, so the surface ships \
+         TEXTURELESS on every path while the project still contains the asset. \
+         Re-apply the material (a material instance now binds its root .inf_mat)."
+    )
+}
+
+/// The advisory for a `.inf_mat` naming a `.inf_tex` the project does not have
+/// (P26.3b audit) — the missing half of the edge this batch introduced.
+///
+/// [`dependency_closure`] can only follow edges it can resolve, so the texture is
+/// simply absent from the pack while the derived record still names it. The
+/// runtime then asks for a GUID no pack entry answers and the surface falls back
+/// to its scalars — the permanent no-texture path, and indistinguishable from an
+/// authored flat colour. The P16 advisory doctrine, applied to the edge P26.3b
+/// added: a level naming a `.inf_tex` the build cannot ship must say so.
+pub fn missing_material_texture_advisory(
+    material: AssetId,
+    name: &str,
+    missing: AssetId,
+) -> String {
+    format!(
+        "material {material} ({name}) references texture {missing}, which is not in the \
+         project — it cannot be packed, so every surface bound to this material draws \
+         that map's slot from its SCALAR attributes. Re-import the texture, or clear \
+         the slot."
+    )
+}
+
+/// The advisory for a `.inf_mat` whose `.inf_tex` **is** in the project but is a
+/// **v1 bincode payload**, not a P26.1 v2 tiled container (P26.3b audit).
+///
+/// A cook copies a `.inf_tex` through verbatim, so a texture imported before
+/// P26.1 ships exactly as it sits on disk — and `inf_vt::TiledTextureReader`,
+/// the door a runtime pages tiles with, refuses it (`BadMagic`). The pack is
+/// bigger, the level loads, the geometry is right, and the surface is
+/// textureless: the same picture as a missing texture, from a file that is
+/// present and valid. Reachable in every project that predates P26.1, which is
+/// every project that exists, and invisible until this batch made a texture
+/// reachable at runtime at all.
+pub fn unpageable_material_texture_advisory(
+    material: AssetId,
+    name: &str,
+    texture: AssetId,
+) -> String {
+    format!(
+        "material {material} ({name}) references texture {texture}, which is a v1 \
+         .inf_tex payload and not a tiled container — a runtime cannot page it, so the \
+         surface ships TEXTURELESS. Re-import the texture to emit the v2 tiled \
+         container (P26.1)."
     )
 }
 
@@ -1626,7 +1698,13 @@ fn grammar_module_refs(raw: &[u8]) -> Vec<uuid::Uuid> {
 /// class of hazard the advisory doctrine exists for. Deduplicated + sorted, like
 /// every other advisory here, so the report stays deterministic.
 fn dangling_material_refs(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
-    let mut missing: BTreeSet<(AssetId, String, AssetId)> = BTreeSet::new();
+    // `(level, entity, asset, wrong_kind)` — ONE set so the two classes stay
+    // deduplicated and sorted together rather than concatenating two orderings
+    // (the `dangling_terrain_refs` arrangement, which carries voxels the same
+    // way).
+    // The wrong kind travels as its `slug` (a `&'static str`) rather than as an
+    // `AssetKind`, which has no `Ord` — and the slug is what the message prints.
+    let mut missing: BTreeSet<(AssetId, String, AssetId, Option<&'static str>)> = BTreeSet::new();
     for &id in closure {
         let Some(entry) = db.get(id) else { continue };
         if entry.kind() != AssetKind::Level {
@@ -1640,15 +1718,89 @@ fn dangling_material_refs(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
         };
         for e in &level.entities {
             if let Some(asset) = e.material.as_ref().and_then(|m| m.asset) {
-                if !db.contains(AssetId(asset)) {
-                    missing.insert((id, e.name.clone(), AssetId(asset)));
+                match db.get(AssetId(asset)).map(|a| a.kind()) {
+                    None => {
+                        missing.insert((id, e.name.clone(), AssetId(asset), None));
+                    }
+                    // P26.3b audit: present and NOT a material — a `.inf_mati`
+                    // is the reachable case. Nothing derives a record for it and
+                    // nothing closes its texture edge, so the surface ships
+                    // textureless while every check that looks for a *dangling*
+                    // reference reports a healthy level.
+                    Some(AssetKind::Material) => {}
+                    Some(k) => {
+                        missing.insert((id, e.name.clone(), AssetId(asset), Some(k.slug())));
+                    }
                 }
             }
         }
     }
     missing
         .into_iter()
-        .map(|(level, name, asset)| dangling_material_advisory(level, &name, asset))
+        .map(|(level, name, asset, wrong_kind)| match wrong_kind {
+            None => dangling_material_advisory(level, &name, asset),
+            Some(slug) => material_kind_advisory(level, &name, asset, slug),
+        })
+        .collect()
+}
+
+/// Every `.inf_tex` a closure `.inf_mat` names that the build cannot ship as a
+/// pageable texture (P26.3b audit): **missing** from the project, or present as a
+/// **v1** payload the runtime's tile reader refuses.
+///
+/// The P16 advisory doctrine applied to the edge P26.3b introduced. Both classes
+/// end in the same picture — a surface drawing that map's slot from its scalars —
+/// and both are invisible to every other check: a missing texture leaves the
+/// closure quietly short, and a v1 texture packs perfectly and fails only inside
+/// `inf_vt::TiledTextureReader`, in a runtime, with no message. The v1 class is
+/// reachable in every project that predates P26.1.
+///
+/// Read through the SAME `derive_material_bytes` door the record is written with,
+/// so the set advised on and the set packed cannot differ. Deduplicated + sorted,
+/// like every other advisory here.
+fn unshippable_material_textures(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
+    // `(material, name, texture, is_v1)` — one set, one ordering.
+    let mut bad: BTreeSet<(AssetId, String, AssetId, bool)> = BTreeSet::new();
+    for &id in closure {
+        let Some(entry) = db.get(id) else { continue };
+        if entry.kind() != AssetKind::Material {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&entry.path) else {
+            continue;
+        };
+        // An undecodable `.inf_mat` is `undecodable_material_advisory`'s to
+        // report — it is raised in `cook_one` for the same asset, and saying it
+        // twice in two voices is how advisories stop being read.
+        let Ok(derived) = inf_material::derive_material_bytes(&raw) else {
+            continue;
+        };
+        for tex in derived.texture_dependencies() {
+            match db.get(tex) {
+                None => {
+                    bad.insert((id, entry.name.clone(), tex, false));
+                }
+                Some(t) => {
+                    // Read the first 8 bytes only: the v1/v2 sniff is the magic,
+                    // and a texture can be hundreds of megabytes.
+                    let Ok(head) = std::fs::read(&t.path) else {
+                        continue;
+                    };
+                    if !inf_material::tiles::is_v2(&head) {
+                        bad.insert((id, entry.name.clone(), tex, true));
+                    }
+                }
+            }
+        }
+    }
+    bad.into_iter()
+        .map(|(mat, name, tex, is_v1)| {
+            if is_v1 {
+                unpageable_material_texture_advisory(mat, &name, tex)
+            } else {
+                missing_material_texture_advisory(mat, &name, tex)
+            }
+        })
         .collect()
 }
 
@@ -2438,6 +2590,111 @@ fn dangling_grammar_modules(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// **The four material advisories (P26.3b + this audit).** Pure functions, so the
+/// wording is pinned without running a cook — the `sub_threshold_advisory` /
+/// `dangling_terrain_refs` precedent, which the P26.3b commit invoked ("both pure
+/// and both unit-testable") and then did not carry out: none of them had a caller
+/// in any test, so nothing said whether they were readable, whether they named a
+/// remedy, or whether two of them were the same sentence twice.
+#[cfg(test)]
+mod material_advisories {
+    use super::{
+        dangling_material_advisory, material_kind_advisory, missing_material_texture_advisory,
+        undecodable_material_advisory, unpageable_material_texture_advisory, AssetId,
+    };
+
+    /// Every one of the four names the asset, says what the player will actually
+    /// SEE, and names a remedy — the `sub_threshold_advisory` bar. The
+    /// consequence is the part that makes an advisory worth reading, and all four
+    /// of these end in the same picture (a surface drawing off its scalars),
+    /// which is exactly why each has to say so.
+    #[test]
+    fn each_advisory_names_the_asset_the_consequence_and_a_remedy() {
+        let a = AssetId::new();
+        let b = AssetId::new();
+        let all = [
+            undecodable_material_advisory(a, "Brick", "bad magic"),
+            dangling_material_advisory(a, "Wall", b),
+            material_kind_advisory(a, "Wall", b, "material_instance"),
+            missing_material_texture_advisory(a, "Brick", b),
+            unpageable_material_texture_advisory(a, "Brick", b),
+        ];
+        for msg in &all {
+            assert!(msg.contains(&a.to_string()), "names the asset: {msg}");
+            let lower = msg.to_lowercase();
+            assert!(
+                lower.contains("scalar") || lower.contains("textureless"),
+                "states the consequence — the part that makes it worth reading: {msg}"
+            );
+            assert!(
+                lower.contains("re-import")
+                    || lower.contains("re-apply")
+                    || lower.contains("re-save")
+                    || lower.contains("clear"),
+                "states a remedy: {msg}"
+            );
+            // The eaten-`\` law (five prior catches): a scripted edit to a Rust
+            // string literal swallows the continuation and leaves the source
+            // indentation in the user-visible message. `contains()` is perfectly
+            // happy with that, so it needs its own assertion.
+            assert!(
+                !msg.contains("  "),
+                "the advisory carries a run of spaces — a continuation was eaten: {msg:?}"
+            );
+        }
+        // …and the five are five distinct sentences. Two advisories that print
+        // the same thing are one advisory with two triggers, and the reader
+        // cannot tell which fired.
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                assert_ne!(all[i], all[j], "two material advisories read identically");
+            }
+        }
+    }
+
+    /// The two that are easiest to conflate must not be: a binding of the WRONG
+    /// KIND is present and unresolvable, a DANGLING one is absent. The remedies
+    /// differ, so the sentences must, and the wrong-kind one must name the kind
+    /// it found or an author cannot tell what they dropped.
+    #[test]
+    fn a_wrong_kind_binding_does_not_read_as_a_missing_one() {
+        let level = AssetId::new();
+        let asset = AssetId::new();
+        let missing = dangling_material_advisory(level, "Wall", asset);
+        let wrong = material_kind_advisory(level, "Wall", asset, "material_instance");
+        assert!(missing.contains("not in \nthe project") || missing.contains("not in the project"));
+        assert!(
+            wrong.contains("material_instance"),
+            "the wrong-kind advisory does not say WHAT was bound: {wrong}"
+        );
+        assert!(
+            !wrong.contains("not in the project"),
+            "the wrong-kind advisory claims the asset is missing, and it is not: {wrong}"
+        );
+    }
+
+    /// A v1 texture and a missing one produce the same picture and must not
+    /// produce the same sentence: one is re-imported, the other is re-imported
+    /// *for a different reason*, and only the v1 message can tell an author that
+    /// the file they are looking at is fine and still unusable.
+    #[test]
+    fn a_v1_texture_advisory_says_the_file_is_present_and_unpageable() {
+        let mat = AssetId::new();
+        let tex = AssetId::new();
+        let v1 = unpageable_material_texture_advisory(mat, "Brick", tex);
+        assert!(v1.contains("v1"), "does not name the version: {v1}");
+        assert!(
+            v1.contains("P26.1"),
+            "does not name what emits a v2 container: {v1}"
+        );
+        assert!(
+            !v1.contains("not in the project"),
+            "the v1 advisory claims the texture is missing, and it is not: {v1}"
+        );
+        assert!(missing_material_texture_advisory(mat, "Brick", tex).contains("not in the"));
+    }
 }
 
 /// The sub-threshold vmesh advisory (P18.3 audit). Pure rules, so the trigger and
