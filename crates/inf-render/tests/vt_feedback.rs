@@ -476,3 +476,155 @@ fn a_request_is_one_entry_per_bound_map() {
         layout.texture_base(VtTextureHandle(0)).unwrap()
     );
 }
+
+// ── (d) end to end: the RENDERER runs the loop ──────────────────────────────
+
+/// **The whole loop, through `EngineRenderer::render`** — the arm that fails if
+/// the renderer never calls any of it (P26.4).
+///
+/// Everything above drives `VtFeedback`, `analytic_floor` and the residency
+/// directly, which is where the rules live. What none of them can say is whether
+/// the renderer *runs* them: a `vt_stream` that returned early on every frame
+/// would leave every arm above green, the goldens green, and the feature dead —
+/// which is the exact shape the P26.3 audit found when the batch that bound VT
+/// into the lit passes had never rendered a fragment.
+///
+/// So this renders real frames and asserts on the WORLD afterwards: the loop ran
+/// once per frame, it admitted pages, the ring landed, and residency reached a
+/// level the camera-free floor never asks for. Plus the control that makes all
+/// four measurements of the loop rather than of a renderer: a textureless
+/// renderer's counters stay at zero.
+#[test]
+fn the_renderer_runs_the_streaming_loop_every_frame() {
+    let Some(gpu) = gpu_or_skip("the VT streaming loop") else {
+        return;
+    };
+    const FW: u32 = 320;
+    const FH: u32 = 180;
+    const FRAMES: u64 = 8;
+
+    let mut lib = library(1024, 512);
+    let mut pools = VtPools::new(&gpu.device, &gpu.queue, lib.residency(), false);
+    // The transaction that carries the roots, so `set_for` may name the texture.
+    let _ = lib.sync(&gpu.device, &gpu.queue, &mut pools, &[]);
+    let set = lib.set_for(Some(7), None, None);
+    assert!(!set.is_none(), "the fixture never went warm");
+    // The camera-free floor's finest level — what residency would stop at if the
+    // camera-driven half and the feedback both did nothing.
+    let floor_finest = lib
+        .want_floor()
+        .iter()
+        .map(|w| w.tile.mip)
+        .min()
+        .expect("a floor");
+
+    let mut scene = inf_render::RenderScene::default();
+    scene.instances.push(inf_render::MeshInstance {
+        vt: set,
+        translation: glam::DVec3::ZERO,
+        rotation: glam::Quat::IDENTITY,
+        scale: glam::Vec3::splat(2.0),
+        color: [1.0, 1.0, 1.0, 1.0],
+        metallic: 0.0,
+        roughness: 0.5,
+        emissive: [0.0; 3],
+        id: 1,
+        mesh: inf_render::PrimMesh::Cube,
+        blend: 0,
+        cutoff: 0.5,
+    });
+    scene.mark_dirty();
+    let v = view(FW, FH, 1.8);
+
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    renderer.set_vt_level(Some((lib, pools)));
+    for _ in 0..FRAMES {
+        renderer.render(&gpu, &scene, &v, &target.view, (FW, FH));
+        // A host's frame pacing; here, the poll that lets the ring's maps fire.
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
+    let stats = renderer.vt_pop_in();
+    assert_eq!(
+        stats.frames,
+        FRAMES,
+        "the renderer did not run the streaming loop once per frame: {}",
+        stats.summary()
+    );
+    assert!(
+        stats.admits > 0,
+        "the loop admitted no page at all: {}",
+        stats.summary()
+    );
+    assert!(
+        stats.feedback_frames > 0,
+        "the feedback ring never landed in {FRAMES} frames, so every frame took \
+         the floor and the GPU pass is unobserved: {}",
+        stats.summary()
+    );
+    assert_eq!(
+        stats.feedback_frames + stats.feedback_misses,
+        FRAMES,
+        "a frame neither read a mask nor recorded a miss"
+    );
+    assert!(
+        stats.floor_wants > 0 && stats.refine_wants > 0,
+        "one of the two want classes is empty, so the per-class pop-in counters \
+         are measuring one thing: {}",
+        stats.summary()
+    );
+
+    // ASSERT THE WORLD: residency reached a level the camera-free floor never
+    // asks for, which is the whole claim — a camera-driven floor plus feedback
+    // is sharper than a pyramid tail.
+    let lib = renderer.vt_textures().expect("the level is live");
+    let desc = lib
+        .residency()
+        .desc(VtTextureHandle(0))
+        .expect("registered")
+        .clone();
+    let mut finest = u32::MAX;
+    for mip in 0..desc.mip_count() {
+        let m = desc.mips[mip as usize];
+        for y in 0..m.tiles_y {
+            for x in 0..m.tiles_x {
+                if lib
+                    .residency()
+                    .is_resident(VtTextureHandle(0), TileCoord::new(mip, x, y))
+                {
+                    finest = finest.min(mip);
+                }
+            }
+        }
+    }
+    assert!(
+        finest < floor_finest,
+        "residency stopped at mip {finest} and the camera-free floor already \
+         reaches {floor_finest} — nothing refined it"
+    );
+
+    // THE CONTROL: the same renderer with no VT level runs none of it. This is
+    // what makes "the 50 goldens did not change" a measurement of the command
+    // stream rather than an expectation.
+    let mut bare = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let mut plain = inf_render::RenderScene::default();
+    plain.instances.push(inf_render::MeshInstance::lit(
+        glam::DVec3::ZERO,
+        glam::Quat::IDENTITY,
+        glam::Vec3::splat(2.0),
+        [1.0, 1.0, 1.0, 1.0],
+        1,
+    ));
+    plain.mark_dirty();
+    for _ in 0..FRAMES {
+        bare.render(&gpu, &plain, &v, &target.view, (FW, FH));
+    }
+    assert_eq!(
+        bare.vt_pop_in(),
+        inf_render::VtPopIn::default(),
+        "a textureless frame entered the streaming loop: {}",
+        bare.vt_pop_in().summary()
+    );
+    assert_eq!(bare.vt_engaged_frames(), 0);
+}

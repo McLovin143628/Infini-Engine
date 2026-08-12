@@ -9563,6 +9563,152 @@ door for editor viewport, PIE and shipping.
   computed every frame — feedback refines and can never regress residency below it; a
   dropped feedback frame degrades to the floor, deterministically; 5. pop-in instrumented:
   frames-at-fallback counters per tile class, budgeted in the gate.
+
+> **STATUS — P26.4 Deterministic feedback + streaming loop: COMPLETE
+> (2026-08-12)** — nine commits (`76fd90c` the Ring-0 rank + mask layout,
+> `0ca2be1` the readback ring, `00d7c94` the registration order,
+> `853fd4b` the player's registration, `24e171f` the editor's, `5e167b6` the
+> streaming loop, `8d19123` the GPU walk arm, `cae8259` the level's dependency
+> edges, `91c3b4b` the carried-debts memo). Battery green:
+> **BATTERY_NUMBERS**. Goldens stay **50** and none was re-blessed —
+> a textureless frame does not enter the streaming loop at all, which is a
+> claim about the command stream that `vt_engaged_frames` and `VtPopIn::frames`
+> both measure. No schema moved. No new external dependency: `inf-core` became
+> a **normal** dependency of `inf-render` (it is already one of `inf-terrain`,
+> `inf-vgeom` and `inf-player`, so no shipped tree grew).
+>
+> **Clause 0 first, because it is what makes textures appear.** The P26.3b
+> ledger closed on the glue — *"both projectors still fill
+> `vt: Default::default()` and no host calls `VtTextures::register` outside
+> tests"* — so a `.inf_mat`'s textures reached a runtime record on all paths
+> and were sampled by nothing. Both hosts now register a level's bound
+> materials through **one door** (`inf_render::build_vt_level`) walking **one
+> order** (`inf_render::registration_order`), and fill every instance's set
+> through **one expression** (`inf_render::vt_set_for`, spelled identically on
+> both sides because `projector_mirror` compares them token for token). They
+> resolve differently and must: the player reads derived `.inf_matd` records
+> out of a pack, the editor reads authored `.inf_mat` files, because a derived
+> record is a cook product and the editor is what authors its source.
+>
+> **The pool-format ruling.** One slot is one size for every tile of every
+> texture, so a BC1 pool cannot hold a BC3 tile — the fetch is the wrong length,
+> the mirror writes its deterministic zero page, and the surface is silently
+> wrong. Decided once, in `build_vt_level`: no BC on the adapter → RGBA8 (the
+> P26.1 transcode tier); one BC format across the level → that format; a level
+> that MIXES them (which an importer produces routinely, since BC3 is chosen per
+> texture by whether it has alpha) → RGBA8, the one format every container
+> transcodes into, at 8×/4× the page bytes, reported rather than inferred.
+>
+> **The rank makes the floor a floor.** P26.2 shipped an unranked want set and
+> named the day this would change; `VtWant` now carries a `VtPriority`, the sort
+> is priority-primary with payload order as the tie-break inside each class, and
+> the dedup keeps the STRONGER rank. The two orders were genuinely opposed
+> before it — `want_floor` emits coarsest-first while `payload_order` ascends in
+> mip — so under budget pressure the floor was the thing being deferred.
+> Measured by an arm that puts three mip-0 refinements and one mip-1 floor want
+> into three cache slots.
+>
+> **The ring is not a virtual-texturing detail.** Every GPU→CPU read in this
+> renderer was blocking (`vgeom::map_u32`, `pick`, `headless`, the GI and sky
+> LUTs). `inf_render::readback` is the shared primitive, and P27.1's shadow-page
+> marking and P28.3's unified streamer are named as its consumers.
+> `take(frame)` returns the bytes recorded at exactly `frame − 2` **or
+> nothing** — never the newest ready slot — which is what answers
+> `inf_vgeom::stream`'s ruling: that objection is about *"whatever arrived"*,
+> not about readback. `READBACK_LATENCY_FRAMES` is a `const` and not a setting,
+> because it is the offset a trace is a pure function of.
+>
+> **DEVIATION, memo'd** (`docs/memos/p26-4-feedback-mechanism.md`): the feedback
+> marks per **surface**, not per fragment. A fragment-side mark needs a writable
+> storage buffer in the FRAGMENT stage; the renderer has four bind groups and
+> all four are spoken for, so it would go in the SHARED env layout and make
+> `FRAGMENT_WRITABLE_STORAGE` a requirement of every lit pass on every adapter —
+> a capability this machine cannot fail and CI cannot exercise (the P25
+> one-platform law). What is lost is occlusion and uv-extent precision; every
+> determinism property the clause names is kept. P28.1's visibility buffer makes
+> the per-fragment producer a compute-stage write with no new capability, and
+> nothing but the producer changes when it lands. Because the signal is
+> coarser-grained, the **floor carries more weight** and is built accordingly:
+> camera-driven, `VT_FLOOR_MAX_TILES` per visible surface at the level the
+> footprint justifies, rather than P26.3's camera-free three coarsest levels
+> (which on a 4096² texture are 4×4, 2×2 and 1×1 *texels*).
+>
+> **What the debts cost.** Four of the six carried into this batch are closed.
+> The **fallback-residency GPU arm** exists: `vt_sample.wgsl`'s walk is factored
+> into `vt_resolve` and a compute arm runs the SHIPPED function over every tile
+> of mip 0 of a 1023² pyramid with mip 0 absent, comparing against
+> `VtTextureDesc::ancestor` and against the residency's own page, with the trip
+> count asserted ≥ 2 per address. `material_content` **slices the mmap**
+> (`PackTexture` holds the reader and the GUID; a compressed entry — which
+> `.inf_tex` never is — degrades to a `OnceLock` copy rather than to a blank
+> texture). An **unknown texture handle is counted** (`VtTransaction::
+> unknown_texture` + a `unk N` trace line), which is a different defect from
+> `out_of_range`: that is a want computed against the wrong extent, this one is
+> a want computed against a different REGISTRY. And a **level's sidecar declares
+> its bindings**, read back by `AssetDb` as a schema-blind TOML key, so the
+> delete-with-refs guard finally sees level→material.
+>
+> **What the batch found on the way.**
+>
+> * **A level's asset id churned with its contents.** `AssetDb::read_entry`
+>   synthesizes a sidecar for any payload whose sidecar it cannot parse, and a
+>   `.inf_lvl`'s never parses (it has its own schema) — so the id was derived
+>   from the CONTENT HASH and every save re-registered the level under a new
+>   one. Invisible for as long as nothing had edges into a level, which is
+>   exactly what this batch changed. The declared `guid` is honoured now.
+> * **A sweep of tile CENTRES cannot see the forbidden walk.** The first cut of
+>   the GPU arm passed with `uv`-at-the-resolved-mip in place: the two
+>   derivations agree comfortably inside a tile and part at its EDGE (mip 0's
+>   texel 512 is the first texel of tile 4; at the resolved 255-texel level it
+>   is 127.75, i.e. tile 0, while the clamped chain walks 4 → 2 → 1). Three
+>   texels per tile per axis now.
+> * **The source gate did not catch that mutation either.** Its ban list is
+>   enumerative — `floor(gp`, `gp / tile_sz`, `gp / f32(tsz)` — and the same
+>   defect spelled `f32(vt_table[gr]) / tile_sz` sails through. A ban enumerates
+>   what you thought of (the P22.4 law); the GPU arm is what closes it.
+> * **"Behind the camera" and "beside the frustum" are two different branches.**
+>   Deleting the feedback pass's NDC test left the behind-the-camera fixture
+>   passing, because `clip.w <= 0` catches that one three lines earlier. Two
+>   fixtures now.
+> * **The eaten-`\` law, fifth catch**, in this batch's own assertion message.
+> * **`map_async` beside `copy_buffer_to_buffer` is a validation error** —
+>   *"Buffer 'gate-readback-0' is still mapped"*, on the first run. The map is
+>   requested in `poll`, after the caller's submit, and the ring's
+>   `Recorded → InFlight` split exists for that reason.
+>
+> **Mutation-verified**: an `atomicOr` that never fires fails the feedback arm
+> by name; a "newest ready slot" ring fails the latency arm at frame 3 (read
+> 1003, wanted 1001) and the two-ring arm; the forbidden uv re-derivation fails
+> the GPU walk arm at tile 4; swapping albedo and ORM in the player's
+> `vt_materials` fails the new set arm and the P26.3b content arm and nothing
+> else.
+>
+> **Honest remainders carried into P26.5.**
+> * **Real uv/tangent streams are still not wired** — memo'd
+>   (`docs/memos/p26-4-carried-debts.md`) rather than done: the change moves
+>   `MeshVertex`'s layout, five primitive parametrizations, `SkinnedVertex`'s
+>   layout, `skinned_mesh_data` in BOTH hosts (pinned character-for-character),
+>   two shaders and then the tangent stream, and landing it beside the streaming
+>   brain gives one batch two headline changes. The streaming loop is unaffected
+>   either way — the floor and the feedback derive their level from a screen
+>   FOOTPRINT, not from a uv.
+> * **The blend enum is still spelled four times**, and the same memo measures
+>   why: the three enums are in three crates none of which may depend on
+>   another, so "one spelling" means a new Ring-0 crate plus a simultaneous
+>   schema migration on `.inf_lvl`, `.inf_mat` and `.inf_matd`. The cheap half —
+>   pinning the two pairs that are not pinned — is P26.5's.
+> * **A `--level` dev boot has no material content**, structurally: a `.inf_matd`
+>   is derived by the cook and by the payload builder, both of which link
+>   `inf-material`, and a shipped player must not.
+> * **The feedback's own budget is a page cap, not a millisecond cap.**
+>   `VT_FEEDBACK_MAX_TILES` and `VT_FEEDBACK_REQUEST_CAP` bound the work; what
+>   the sync costs in LOAD-class milliseconds is not yet ratcheted, and the
+>   `phase26_gate` budget arm (P26.5 (e)) is where that lands.
+> * **`VtPopIn` has no reader outside a gate** — P26.5's residency heat-map and
+>   the Output Log line beside it are its callers, on the house rule for API
+>   that ships before its caller (`summary()` is pinned meanwhile).
+> * The pool budget is still `DEFAULT_VT_BUDGET_BYTES` on both hosts; per-tier
+>   knobs are P26.5 (1).
 - **P26.5 Editor, tiers & the gate** — 1. VT residency heatmap debug view mode + pool budget
   knobs per tier; 2. missing-tile fill v1: deterministic edge-directed upscale of the finest
   resident ancestor (the NTC intent, measured before adoption; memo on the outcome);
