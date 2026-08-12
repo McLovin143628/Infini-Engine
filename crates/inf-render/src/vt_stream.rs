@@ -578,7 +578,10 @@ impl VtFeedback {
     /// table and its **generation** travel together on purpose: a bind group
     /// cached across a re-creation of the indirection buffer marks bits against
     /// a table from before the new texture existed, which is the same hazard
-    /// `passes::ResourceKey` carries a `table_generation` component for. A
+    /// `passes::ResourceKey` carries its fourth component for (that key is a
+    /// bare `(u64, u64, u64, u64)` and the component is fed by
+    /// `VtPools::table_generation` — named precisely here because the P26.4
+    /// audit found the field-style citation ungreppable). A
     /// struct is exactly where a field like that becomes easy to forget to fill
     /// (the P21.4 note on `run_pie`, one crate over).
     #[allow(clippy::too_many_arguments)]
@@ -622,8 +625,8 @@ impl VtFeedback {
         // The indirection buffer is RE-CREATED on a registration, so a bind group
         // cached across one keeps the old allocation alive and the pass would mark
         // bits against a table from before the new texture existed — the same
-        // hazard `passes::ResourceKey`'s `table_generation` component exists for,
-        // one pass over.
+        // hazard `passes::ResourceKey`'s fourth component — fed by
+        // `VtPools::table_generation` — exists for, one pass over.
         if self.bind.as_ref().map(|(g, _)| *g) != Some(table_generation) {
             let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("vt-feedback"),

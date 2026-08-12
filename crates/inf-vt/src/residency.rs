@@ -191,9 +191,19 @@ pub struct VtTransaction {
     /// It is a different defect from [`out_of_range`](Self::out_of_range) and
     /// deserves its own number: an out-of-range tile is a want set computed
     /// against the wrong extent, while an unknown handle is a want set computed
-    /// against **a different registry** — a stale feedback mask decoded after a
-    /// level switch, or a projector holding handles from the pool it had before
-    /// a re-registration. Counted after dedup, exactly as `out_of_range` is.
+    /// against **a different registry**. Counted after dedup, exactly as
+    /// `out_of_range` is.
+    ///
+    /// **It has no producer in this tree, and that is deliberate rather than
+    /// hopeful** (P26.4 audit; the first write-up claimed a stale feedback mask
+    /// after a level switch produced one, and none can). Every want-emitting path
+    /// filters an unknown handle before this sees it:
+    /// `VtFeedbackLayout::wants_at` resolves each handle through `res.desc()` and
+    /// skips what it cannot, `inf_render::analytic_floor` does the same, and
+    /// `want_floor` iterates the registry itself. So the number is a **tripwire
+    /// for a future caller** — P28.3's unified streamer keeps want sets across a
+    /// level boundary by design — and it reads zero today because nothing can
+    /// make it read anything else, not because nothing has gone wrong.
     pub unknown_texture: u32,
 }
 

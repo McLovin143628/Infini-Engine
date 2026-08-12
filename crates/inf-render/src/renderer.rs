@@ -624,8 +624,10 @@ impl EngineRenderer {
     /// passing it per frame — for the same reason it already owns the mirror:
     /// the streaming step runs at the frame's sync point, inside `render`, and a
     /// projector that held the registry would have to be handed the camera to do
-    /// it. Projectors ask [`vt_set_for_material`](Self::vt_set_for_material)
-    /// instead, which is a lookup and needs nothing.
+    /// it. Projectors ask [`crate::vt_set_for`] instead — the free function, over
+    /// [`vt_textures`](Self::vt_textures) — which is a lookup and needs nothing,
+    /// and which `projector_mirror` compares between the two hosts token for
+    /// token.
     pub fn set_vt_level(&mut self, level: Option<(crate::VtTextures, crate::vt::VtPools)>) {
         match level {
             Some((textures, pools)) => {
@@ -642,18 +644,13 @@ impl EngineRenderer {
         self.vt_feedback = None;
     }
 
-    /// **The per-instance texture set for a surface bound to `material`** — what
-    /// a projector writes into `MeshInstance::vt` (P26.4, clause 0).
-    ///
-    /// `VtTextureSet::NONE` when there is no level, no such material, or the
-    /// texture is not yet warm — every one of which is the scalar surface, which
-    /// is exactly what the same entity rendered as before P26.
-    #[inline]
-    pub fn vt_set_for_material(&self, material: u128) -> crate::VtTextureSet {
-        self.vt_textures
-            .as_ref()
-            .map_or(crate::VtTextureSet::NONE, |t| t.set_for_material(material))
-    }
+    // `vt_set_for_material` lived here and was **removed by the P26.4 audit**: it
+    // was a second spelling of `crate::vt_set_for` — reaching past the door into
+    // `VtTextures::set_for_material` — with ZERO callers, and its doc block (and
+    // `set_vt_level`'s, above) asserted a projector usage that did not exist.
+    // Clause 0's whole claim is that there is one expression, so a public one
+    // beside it that nobody calls is a rule waiting to be written twice. A host
+    // that wants the set asks `vt_set_for(renderer.vt_textures(), material)`.
 
     /// The live registry, for a host or a gate that wants to assert the WORLD
     /// (the resident set) rather than a report.

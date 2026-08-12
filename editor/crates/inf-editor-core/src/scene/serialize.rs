@@ -6219,8 +6219,10 @@ pub fn sidecar(doc: &SceneDoc, guid: Uuid, payload: &[u8]) -> Sidecar {
 /// an `Option<Uuid>` asset binding today. A component that grows one and is not
 /// added here contributes no edge, exactly as every component did before this
 /// function existed — so the failure mode of forgetting is the status quo ante
-/// rather than a wrong answer, and `the_level_sidecar_records_what_it_binds`
-/// pins the edge P26.4 needs (level → material) against a real save.
+/// rather than a wrong answer, and
+/// `a_levels_sidecar_records_its_bindings_and_the_delete_guard_sees_them`
+/// (`inf-player`'s `phase26_gate`) pins the edge P26.4 needs (level → material)
+/// against a real save and a real scan.
 ///
 /// Deliberately NOT transitive: a level names its `.inf_mat`, and the
 /// material's own sidecar names its `.inf_tex`es. `AssetDb` composes the two —

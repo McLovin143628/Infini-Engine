@@ -9556,7 +9556,7 @@ door for editor viewport, PIE and shipping.
 - **P26.4 Deterministic feedback + streaming loop** — 1. the feedback pass: per-tile
   coverage as an **order-independent bitmask** (atomicOr, fixed layout — content is a pure
   function of camera/scene/residency, the ruling that reconciles GPU feedback with the
-  replay doctrine in `inf-vgeom/src/stream.rs:57-68`); 2. the codebase's first non-blocking
+  replay doctrine in `inf-vgeom/src/stream.rs:52-62`); 2. the codebase's first non-blocking
   readback ring with a **pinned N=2 frame latency**, built once as a reusable `inf-render`
   primitive; 3. CPU request scan in virtual-address order; async tile loads on the job pool
   from mmap packs; 4. the analytic want-set floor (camera + bounds → conservative tile set)
