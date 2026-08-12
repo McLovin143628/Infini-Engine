@@ -271,6 +271,11 @@ pub struct EngineHost {
     ///
     /// [`EditorRenderAssets::retain_only`]: inf_editor_core::render_assets::EditorRenderAssets::retain_only
     render_assets: inf_editor_core::render_assets::EditorRenderAssets,
+    /// The `Material.asset` bindings the live virtual-texture level was built
+    /// from (P26.4). A projection runs on every document version and building a
+    /// VT level creates an atlas, so the rebuild is gated on this set changing —
+    /// the `terrain_slots` pattern, for materials.
+    vt_bindings: BTreeSet<Uuid>,
     /// The last tool-rejection message, for a Ring-2 caller to surface. Drained by
     /// [`take_tool_status`](Self::take_tool_status).
     tool_status: Option<String>,
@@ -947,6 +952,7 @@ impl EngineHost {
             debris_cache: inf_render::DebrisCache::default(),
             fractures: inf_editor_core::simulate::shared_fractures(),
             render_assets: inf_editor_core::render_assets::EditorRenderAssets::new(),
+            vt_bindings: BTreeSet::new(),
             tool_status: None,
             stream_log_countdown: STREAM_LOG_INTERVAL_FRAMES,
             sculpt_drag: None,
@@ -1393,7 +1399,17 @@ impl EngineHost {
         // reason `water_env` is — the rule for "which terrain answers" is Ring-0
         // (`inf_ecs::hydro`) so the two MIRROR projectors cannot each invent one.
         let water_flow = inf_ecs::hydro::terrain_flow(world);
+        // P26.4, clause 0 — THE REGISTRATION, before anything is projected.
+        // Every `Material.asset` the document binds becomes a virtual-texture
+        // registry + atlas, and the per-instance sets below are looked up out of
+        // it. Rebuilt only when the BINDING SET changes, because building it
+        // creates GPU resources and a projection runs on every document version.
+        self.sync_vt_bindings(doc);
         let w = world.world();
+        // The live registry, borrowed for the whole projection: every instance's
+        // texture set is a lookup in it (P26.4). `None` on a level with no
+        // bindings, and then every set below is `VtTextureSet::NONE`.
+        let vt = self.renderer.vt_textures();
         let mut next_id: u32 = 1;
         // Which vgeom assets this projection has already listed (the render node
         // caches GPU geometry by id, but the asset list must not duplicate), and
@@ -1922,27 +1938,36 @@ impl EngineHost {
                     // state, folded into the trace, and a projector that re-evaluated
                     // it would be a second opinion about what the character is doing.
                     let posed = inf_ecs::pose::evaluated_pose(world, guid);
+                    // PBR params come from the entity's `Material` exactly as they do
+                    // on the rigid path; an unmaterialed character gets the renderer's
+                    // neutral. Read BEFORE the match, so the placeholder branch below
+                    // carries the same virtual-texture set the real geometry would —
+                    // a character whose skeleton has not resolved is still a surface
+                    // bound to a material (P26.4).
+                    let (color, metallic, roughness, emissive, vt) = w
+                        .get::<Material>(entity)
+                        .map(|m| {
+                            let e = m.emissive.to_array();
+                            (
+                                m.base_color.to_array(),
+                                m.metallic,
+                                m.roughness,
+                                [e[0], e[1], e[2]],
+                                inf_render::vt_set_for(vt, m.asset.map(|a| a.as_u128())),
+                            )
+                        })
+                        .unwrap_or((
+                            [0.8, 0.8, 0.8, 1.0],
+                            0.0,
+                            0.5,
+                            [0.0; 3],
+                            inf_render::VtTextureSet::NONE,
+                        ));
                     match self
                         .render_assets
                         .resolve_skinned(&sm, player.as_ref(), posed)
                     {
                         Some(draw) => {
-                            // Real skinned geometry. PBR params come from the
-                            // entity's `Material` exactly as they do on the rigid
-                            // path (`Material` is what the Details panel edits);
-                            // an unmaterialed character gets the renderer's neutral.
-                            let (color, metallic, roughness, emissive) = w
-                                .get::<Material>(entity)
-                                .map(|m| {
-                                    let e = m.emissive.to_array();
-                                    (
-                                        m.base_color.to_array(),
-                                        m.metallic,
-                                        m.roughness,
-                                        [e[0], e[1], e[2]],
-                                    )
-                                })
-                                .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3]));
                             // One `skinned_meshes` entry per (mesh, skeleton)
                             // pair, and the entry is the store's own `Arc` — no
                             // copy here, and the pass keys its GPU upload on that
@@ -1953,7 +1978,7 @@ impl EngineHost {
                                 self.scene.skinned_meshes.len() - 1
                             });
                             self.scene.skinned.push(inf_render::SkinnedInstance {
-                                vt: Default::default(),
+                                vt,
                                 translation,
                                 rotation: rot.as_quat(),
                                 scale: scale.as_vec3(),
@@ -1970,7 +1995,7 @@ impl EngineHost {
                         // unchanged down to its slate tint, so authoring a skeletal
                         // entity before its assets exist looks exactly as it did.
                         None => self.scene.instances.push(MeshInstance {
-                            vt: Default::default(),
+                            vt,
                             translation,
                             rotation: rot.as_quat(),
                             scale: scale.as_vec3(),
@@ -2002,7 +2027,7 @@ impl EngineHost {
             // MIRROR: this Material→MeshInstance projection is duplicated in the
             // player's `render.rs` (inf-player) — keep the two in sync, R-P5 blend
             // + cutoff included.
-            let (color, metallic, roughness, emissive, blend, cutoff) = w
+            let (color, metallic, roughness, emissive, blend, cutoff, vt) = w
                 .get::<Material>(entity)
                 .map(|m| {
                     let e = m.emissive.to_array();
@@ -2013,9 +2038,18 @@ impl EngineHost {
                         [e[0], e[1], e[2]],
                         blend_code(m.blend),
                         m.alpha_cutoff,
+                        inf_render::vt_set_for(vt, m.asset.map(|a| a.as_u128())),
                     )
                 })
-                .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3], 0, 0.5));
+                .unwrap_or((
+                    [0.8, 0.8, 0.8, 1.0],
+                    0.0,
+                    0.5,
+                    [0.0; 3],
+                    0,
+                    0.5,
+                    inf_render::VtTextureSet::NONE,
+                ));
             let mesh_ref = w.get::<MeshRef>(entity).copied().unwrap_or_default();
             let id = next_id;
             next_id += 1;
@@ -2091,7 +2125,7 @@ impl EngineHost {
                             .push(inf_render::VgeomAsset::new(loaded.id, loaded.source));
                     }
                     self.scene.vgeom_instances.push(inf_render::VgeomInstance {
-                        vt: Default::default(),
+                        vt,
                         asset: loaded.id,
                         translation,
                         rotation: rot.as_quat(),
@@ -2108,7 +2142,7 @@ impl EngineHost {
                 // R-P1: an unresolved / primitive-only MeshRef draws its built-in
                 // primitive kind (Sphere/Plane/Cylinder/Cone), not always a cube.
                 None => self.scene.instances.push(MeshInstance {
-                    vt: Default::default(),
+                    vt,
                     translation,
                     rotation: rot.as_quat(),
                     scale: scale.as_vec3(),
@@ -3877,6 +3911,81 @@ impl EngineHost {
         self.render_assets.set_content_root(root);
         self.terrain_slots.clear();
         self.synced_version = None; // force a re-projection
+    }
+
+    /// **Register the document's bound materials as virtual textures** (P26.4,
+    /// clause 0) — the editor half of `PlayerRenderHost::set_material_content`,
+    /// and the reason a `.inf_mat`'s maps appear on a surface in the viewport.
+    ///
+    /// Run once at the top of [`rebuild_scene`](Self::rebuild_scene), before
+    /// anything is projected, because the per-instance sets the projection reads
+    /// come out of the registry this builds.
+    ///
+    /// **Gated on the binding SET, not on the document version.** A projection
+    /// runs on every version bump — a gizmo drag bumps it per input event — and
+    /// building a VT level creates an atlas texture and an indirection buffer. So
+    /// the work happens when the set of `Material.asset` GUIDs changes and not
+    /// otherwise; changing a material's *contents* is an asset-index refresh
+    /// (`refresh_asset_index` forces a re-projection and clears the set), which
+    /// is the same invalidation contract `render_assets` uses for a re-imported
+    /// mesh.
+    ///
+    /// Bindings are collected in **document order** and handed to the registry,
+    /// which sorts them (`inf_render::registration_order`). The P26.3 LAW says
+    /// the handles this mints differ from the player's, and the sort is what
+    /// keeps the *pages* the same anyway.
+    fn sync_vt_bindings(&mut self, doc: &SceneDoc) {
+        let mut bound: BTreeSet<Uuid> = BTreeSet::new();
+        let world = doc.world();
+        let w = world.world();
+        for &guid in doc.order() {
+            let Some(entity) = world.entity_of(guid) else {
+                continue;
+            };
+            if let Some(asset) = w.get::<Material>(entity).and_then(|m| m.asset) {
+                bound.insert(asset);
+            }
+        }
+        if bound == self.vt_bindings {
+            return;
+        }
+        self.vt_bindings = bound.clone();
+        if bound.is_empty() {
+            self.renderer.set_vt_level(None);
+            return;
+        }
+        let content = self.render_assets.material_content(bound);
+        if content.is_empty() {
+            self.renderer.set_vt_level(None);
+            return;
+        }
+        // THE DOOR, and it is the player's: same materials, same order, same
+        // pool-format ruling, same floor.
+        let level = inf_render::build_vt_level(
+            &self.gpu.device,
+            &self.gpu.queue,
+            self.renderer.settings(),
+            inf_render::DEFAULT_VT_BUDGET_BYTES,
+            &content.materials,
+            |g| content.source(g),
+        );
+        match level {
+            Some((textures, pools, report)) => {
+                for a in &report.advisories {
+                    tracing::warn!("inf-viewport: virtual textures: {a}");
+                }
+                tracing::info!(
+                    "inf-viewport: {} virtual texture(s) registered for {} bound material(s) \
+                     ({:?} pages, {} refused)",
+                    report.textures,
+                    content.materials.len(),
+                    report.pool_format,
+                    report.refused
+                );
+                self.renderer.set_vt_level(Some((textures, pools)));
+            }
+            None => self.renderer.set_vt_level(None),
+        }
     }
 
     /// Bind, place, page (and release) voxel volumes to match the document — the

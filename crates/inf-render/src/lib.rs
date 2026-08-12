@@ -121,9 +121,14 @@ pub use vt_library::{
     build_vt_level, registration_order, vt_set_for, VtLevelReport, VtMaterialMaps, VtRefusal,
     VtTextures, VtTileSource, VT_FLOOR_LEVELS,
 };
-// The page-pool budget, re-exported so a host that builds a VT level does not
-// have to name `inf-vt` (which is this crate's dependency, not a player's).
-pub use inf_vt::DEFAULT_VT_BUDGET_BYTES;
+// The pool's own vocabulary, re-exported so a host that builds a VT level does
+// not have to depend on `inf-vt` itself: `VtTextures::new` takes a
+// `VtPoolConfig`, so a caller that cannot name one cannot call it, and adding
+// the crate to two hosts' manifests to spell four constants would put the
+// GPU-free half in dependency graphs that have no other use for it.
+pub use inf_vt::{
+    PageFormat, VtPoolConfig, DEFAULT_MAX_TEXTURE_DIM, DEFAULT_VT_BUDGET_BYTES, STORED_TILE_SIZE,
+};
 pub use water::{
     camera_underwater, RenderWater, RiverFrame, RiverPath, RiverProfile, Underwater, WaterFrame,
     WaterKindGpu, WaterQuality, WaterSettings, WaterSurface, Wave, WaveField, WaveSpec, MAX_WAVES,

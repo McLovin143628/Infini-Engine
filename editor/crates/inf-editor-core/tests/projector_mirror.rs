@@ -500,6 +500,54 @@ fn both_hosts_request_the_meshlet_path() {
     }
 }
 
+/// **Both projectors resolve a surface's virtual textures through the ONE
+/// expression** (P26.4, clause 0).
+///
+/// The three instance literals already compare field-for-field above, and every
+/// one of them now spells `vt` by shorthand — which is exactly why this arm has
+/// to exist: a shorthand field comparison cannot see how the local was computed.
+/// A host that read a different component, or reached past
+/// `inf_render::vt_set_for` into `VtTextures::set_for` with its own slot order,
+/// would satisfy the literal comparison perfectly and texture a surface
+/// differently from the other side.
+///
+/// Read through the comment/string stripper for the reason the meshlet arm above
+/// records: a prose sentence naming a call satisfies a raw `contains` as well as
+/// the call does, and that has happened here before.
+#[test]
+fn both_projectors_resolve_a_surface_texture_set_the_same_way() {
+    for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
+        let src = support::strip_comments_and_strings(&read(path).replace("\r\n", "\n"));
+        // The ONE door — not `set_for`, not a hand-built `VtTextureSet`.
+        assert!(
+            src.contains("inf_render::vt_set_for("),
+            "the {label} does not resolve its texture sets through \
+             `inf_render::vt_set_for`, so the two hosts have two rules for \
+             whether a surface is textured"
+        );
+        // …fed by the SCENE's own binding (`Material.asset`, scene v22) and not
+        // by anything the host resolved for itself.
+        assert!(
+            src.contains("m.asset.map(|a| a.as_u128())"),
+            "the {label} does not feed `vt_set_for` from `Material.asset`"
+        );
+        // …and the absent-material fallback is the scalar surface, spelled the
+        // same way on both sides.
+        assert!(
+            src.contains("inf_render::VtTextureSet::NONE"),
+            "the {label} has no explicit no-material fallback"
+        );
+        // …and the level itself is built through the same door, in the same
+        // file as the projection that reads it, so a host cannot texture its
+        // surfaces from a registry the other one never builds.
+        assert!(
+            src.contains("build_vt_level("),
+            "the {label} never builds a virtual-texture level, so every surface \
+             it draws is textureless while the other host's are not"
+        );
+    }
+}
+
 // ── P18.5: the GPU-instanced scatter (PCG + foliage) projection ──────────────
 
 /// The source of ONE component branch in a projector's entity loop: from the

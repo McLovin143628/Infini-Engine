@@ -92,7 +92,20 @@ use uuid::Uuid;
 const MAX_CONTENT_DEPTH: u32 = 16;
 
 /// The loose asset extensions this store indexes.
-const INDEXED_EXTENSIONS: [&str; 4] = ["inf_vmesh", "inf_mesh", "inf_skel", "inf_anim"];
+///
+/// P26.4 added the three material kinds: the viewport resolves a level's
+/// `Material.asset` bindings out of this same index, so a `.inf_mat` (or the
+/// `.inf_mati` a binding may name, which resolves to its root) and the
+/// `.inf_tex` containers behind it have to be findable by GUID here.
+const INDEXED_EXTENSIONS: [&str; 7] = [
+    "inf_vmesh",
+    "inf_mesh",
+    "inf_skel",
+    "inf_anim",
+    "inf_mat",
+    "inf_mati",
+    "inf_tex",
+];
 
 /// One indexed, opened `.inf_vmesh`.
 #[derive(Clone)]
@@ -103,6 +116,37 @@ pub struct LoadedVgeom {
     /// need.
     pub id: u128,
     pub source: Arc<VgeomSource>,
+}
+
+/// **A level's virtual-texture content as the editor resolves it** (P26.4) — the
+/// viewport's counterpart to `inf_player::MaterialContent`.
+///
+/// Two hosts, two resolutions, **one order**: the shipped player reads derived
+/// `.inf_matd` records out of a pack and this reads authored `.inf_mat` files off
+/// disk, because a derived record is a cook product and the editor is what
+/// authors its source. What must not differ is the sequence the textures are
+/// registered in, and that is `inf_render::registration_order` over
+/// [`materials`](Self::materials) on both sides.
+#[derive(Debug, Default, Clone)]
+pub struct EditorMaterialContent {
+    /// Root `.inf_mat` GUID → its three texture GUIDs.
+    pub materials: std::collections::BTreeMap<u128, inf_render::VtMaterialMaps>,
+    /// `.inf_tex` v2 container bytes by GUID. Owned (a loose file has no mapping
+    /// to slice) and `Arc`-shared, so re-resolving a level does not re-copy them.
+    pub textures: std::collections::BTreeMap<u128, Arc<Vec<u8>>>,
+}
+
+impl EditorMaterialContent {
+    /// One texture's bytes as the registration door takes them.
+    pub fn source(&self, guid: u128) -> Option<Arc<dyn inf_render::VtTileSource>> {
+        let bytes = self.textures.get(&guid)?.clone();
+        Some(bytes as Arc<dyn inf_render::VtTileSource>)
+    }
+
+    /// Whether this level binds any material with any texture at all.
+    pub fn is_empty(&self) -> bool {
+        self.materials.is_empty()
+    }
 }
 
 /// A skeletal mesh resolved to something the skinned pass can draw.
@@ -396,6 +440,90 @@ impl EditorRenderAssets {
             .map(Arc::new);
         self.skinned.insert(key, built.clone());
         built
+    }
+
+    // ── virtual textures (P26.4, clause 0) ──────────────────────────────────
+
+    /// **Resolve a level's `Material.asset` bindings into virtual-texture
+    /// content** — the editor half of what a cooked pack's
+    /// `PackLevelSource::material_content` is for the shipped player.
+    ///
+    /// The two hosts *must* resolve differently and *must not* order
+    /// differently. Differently, because the editor has loose authored files and
+    /// no `.inf_matd` (a derived record is a cook product); identically, because
+    /// `inf_render::registration_order` is the one walk both then hand to the
+    /// registry, and `VtTextures::want_floor` is a pure function of it.
+    ///
+    /// **A binding that does not name a `.inf_mat` contributes nothing**, and
+    /// that is a mirror decision rather than a limitation. A `.inf_mati` binding
+    /// resolves *nowhere* on the shipped path — the cook derives a `.inf_matd`
+    /// for `AssetKind::Material` only and raises its own advisory for the
+    /// wrong-kind case (the P26.3b audit's finding) — so a viewport that walked
+    /// the instance chain and textured the surface would show the author
+    /// something the shipped build does not. `scene_apply_material` persists the
+    /// ROOT since P26.3b, so this is the pre-existing-content case only, and the
+    /// honest picture of it is the untextured surface the cook already warns
+    /// about.
+    ///
+    /// A binding that resolves to nothing likewise contributes nothing: the
+    /// surface renders off its scalar attributes, the permanent no-texture path.
+    pub fn material_content(
+        &mut self,
+        bindings: impl IntoIterator<Item = Uuid>,
+    ) -> EditorMaterialContent {
+        let mut out = EditorMaterialContent::default();
+        let mut seen: HashSet<Uuid> = HashSet::new();
+        for bound in bindings {
+            if !seen.insert(bound) {
+                continue;
+            }
+            let Some(root) = self.material_root(bound) else {
+                continue;
+            };
+            let Some(mat) = self.load_payload::<inf_material::MaterialAsset>(root) else {
+                continue;
+            };
+            // THE ONE DOOR (P22.2's law): the same flattening the cook and the
+            // PIE payload builder call, so the viewport cannot resolve a
+            // material's maps differently from the two wires.
+            let rec = inf_material::derive_material(&mat);
+            out.materials.insert(
+                root.as_u128(),
+                inf_render::VtMaterialMaps {
+                    albedo: rec.albedo.map(|t| t.uuid().as_u128()),
+                    normal: rec.normal.map(|t| t.uuid().as_u128()),
+                    orm: rec.orm.map(|t| t.uuid().as_u128()),
+                },
+            );
+            for tex in rec.texture_dependencies() {
+                let g = tex.uuid();
+                if out.textures.contains_key(&g.as_u128()) {
+                    continue;
+                }
+                let Some(path) = self.resolve_path(g) else {
+                    continue;
+                };
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        out.textures.insert(g.as_u128(), Arc::new(bytes));
+                    }
+                    Err(e) => {
+                        tracing::warn!("inf-editor-core: .inf_tex {}: {e}", path.display())
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The `.inf_mat` a binding names, or `None` for anything else.
+    ///
+    /// The kind comes from the FILE EXTENSION rather than from a sidecar field:
+    /// this store indexes GUID → path and never opens a sidecar twice, and the
+    /// extension is what an `AssetKind` is written from in the first place.
+    fn material_root(&mut self, id: Uuid) -> Option<Uuid> {
+        let path = self.resolve_path(id)?;
+        (path.extension().and_then(|s| s.to_str()) == Some("inf_mat")).then_some(id)
     }
 
     fn load_payload<T: inf_asset::AssetPayload>(&mut self, id: Uuid) -> Option<T> {
@@ -1118,5 +1246,164 @@ mod tests {
             "the short pose evaluates to the rest palette, so refusing it is \
              indistinguishable from accepting it"
         );
+    }
+
+    // ── virtual textures (P26.4, clause 0) ──────────────────────────────────
+
+    /// A real `.inf_tex` **v2 tiled container** of `n × n`, through the one
+    /// writer — so the bytes the store hands the registry are bytes a runtime
+    /// pages, not a plausible blob.
+    fn tiled(n: u32, srgb: bool) -> Vec<u8> {
+        inf_material::build_tiled_texture(
+            vec![180u8; (n * n * 4) as usize],
+            n,
+            n,
+            inf_material::TextureImportSettings {
+                srgb,
+                generate_mips: true,
+                compression: inf_material::TextureCompression::None,
+            },
+        )
+        .expect("the fixture tiles")
+        .into_bytes()
+    }
+
+    /// **The editor resolves a level's bindings into virtual-texture content, in
+    /// the ONE registration order** (P26.4, clause 0).
+    ///
+    /// The viewport half of the gap the P26.3b ledger named: before this, no
+    /// projector called `VtTextures::register` and every instance shipped
+    /// `vt: Default::default()`. What is asserted here is the *decision* — which
+    /// `.inf_mat`s resolve, which `.inf_tex` bytes come with them, and in what
+    /// sequence — because that sequence IS the residency, and it is the one
+    /// thing the two hosts must agree on exactly.
+    #[test]
+    fn a_levels_bindings_resolve_to_registrable_material_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut proj = AssetProject::open(&root).unwrap();
+        let d = proj.content_dir("Materials").unwrap();
+
+        // The RAW-IMAGE door (P26.1): a v2 container is never written through
+        // `inf_asset::encode`, so a fixture that used the generic writer would be
+        // a fixture the reader refuses.
+        let put_tex = |proj: &mut AssetProject, name: &str, bytes: Vec<u8>| {
+            let path = proj.unique_asset_path(&d, name, "inf_tex").unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            proj.register_written_asset(
+                path,
+                inf_asset::AssetKind::Texture,
+                inf_asset::ContentHash::of(&bytes),
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let albedo = put_tex(&mut proj, "Albedo", tiled(128, true));
+        let orm = put_tex(&mut proj, "Orm", tiled(64, false));
+        let mat = proj
+            .write_asset(
+                &d,
+                "Wall",
+                &inf_material::MaterialAsset {
+                    base_color_texture: Some(albedo),
+                    normal_texture: None,
+                    metallic_roughness_texture: Some(orm),
+                    ..Default::default()
+                },
+                None,
+                vec![albedo, orm],
+                None,
+            )
+            .unwrap();
+        // A second material naming ONE of the same textures — the dedupe case,
+        // and what makes "first sight wins" a claim that can fail.
+        let mat2 = proj
+            .write_asset(
+                &d,
+                "Trim",
+                &inf_material::MaterialAsset {
+                    base_color_texture: Some(orm),
+                    ..Default::default()
+                },
+                None,
+                vec![orm],
+                None,
+            )
+            .unwrap();
+
+        let mut store = EditorRenderAssets::new();
+        store.set_content_root(Some(root));
+        // Bindings arrive in DOCUMENT order — deliberately the reverse of GUID
+        // order here, so the sort below is measuring the rule.
+        let mut bound = [mat.uuid(), mat2.uuid()];
+        bound.sort();
+        bound.reverse();
+        let content = store.material_content(bound);
+
+        assert_eq!(content.materials.len(), 2, "a binding did not resolve");
+        assert_eq!(
+            content.textures.len(),
+            2,
+            "the shared texture was loaded twice or one was lost"
+        );
+        assert!(content.source(albedo.uuid().as_u128()).is_some());
+        assert!(content.source(orm.uuid().as_u128()).is_some());
+        assert!(content.source(0).is_none());
+
+        // THE ORDER: materials by GUID, then albedo → normal → ORM, first sight
+        // wins — the same `inf_render::registration_order` the player walks.
+        let mut want: Vec<u128> = Vec::new();
+        let (a, b) = if mat.uuid() < mat2.uuid() {
+            (mat, mat2)
+        } else {
+            (mat2, mat)
+        };
+        for m in [a, b] {
+            for t in if m == mat {
+                vec![albedo, orm]
+            } else {
+                vec![orm]
+            } {
+                if !want.contains(&t.uuid().as_u128()) {
+                    want.push(t.uuid().as_u128());
+                }
+            }
+        }
+        assert_eq!(inf_render::registration_order(&content.materials), want);
+
+        // …and the content REGISTERS: the door takes it, the floor fits, and a
+        // surface bound to the material names two of its three slots.
+        let (mut lib, _) = inf_render::VtTextures::new(inf_render::VtPoolConfig {
+            format: inf_render::PageFormat::Rgba8,
+            stored_tile_size: inf_render::STORED_TILE_SIZE,
+            budget_bytes: inf_render::DEFAULT_VT_BUDGET_BYTES,
+            max_texture_dim: 8192,
+        });
+        let n = lib.register_materials(&content.materials, |g| content.source(g));
+        assert_eq!(n, 2);
+        assert!(lib.refusals().is_empty(), "{:?}", lib.refusals());
+        let floor = lib.want_floor();
+        assert_eq!(lib.residency_mut().apply_wants(&floor).deferred, 0);
+        let set = lib.set_for_material(mat.uuid().as_u128());
+        assert!(!set.is_none());
+        assert_eq!(set.normal, 0, "the empty slot must stay empty");
+        assert_eq!(
+            lib.handle(albedo.uuid().as_u128()).map(|h| h.0 + 1),
+            Some(set.albedo)
+        );
+        assert_eq!(
+            lib.handle(orm.uuid().as_u128()).map(|h| h.0 + 1),
+            Some(set.orm)
+        );
+
+        // ANTI-VACUITY: an unbound level resolves nothing, so the counts above
+        // measure the bindings and not the content root.
+        assert!(store.material_content([]).is_empty());
+        // …and a binding naming something that is not a `.inf_mat` resolves to
+        // nothing, which is the MIRROR of the shipped path (the cook derives a
+        // record for `AssetKind::Material` only and warns about the rest).
+        assert!(store.material_content([albedo.uuid()]).is_empty());
     }
 }
