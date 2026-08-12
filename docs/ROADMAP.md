@@ -9374,7 +9374,9 @@ door for editor viewport, PIE and shipping.
 > implementation commits (`1d8c63d` scene v22, `17c9339` the one door + the
 > `.inf_matd` record, `077d963` `ScenePayload` v8, `74f904b` the cook closure,
 > `3f82159` the phase-26 gate, `c413f46` the lint) plus an adversarial audit
-> (`9bae223`, `8df0f1d`, `e623d68`, `99d6100` and this ledger). Battery green:
+> (`9bae223` the instance binding, `8df0f1d` the advisories, `e623d68` the
+> material content + four arms, `99d6100` the corrected claims, `ee5489a` fmt +
+> the build-time anti-vacuity constant, and this ledger). Battery green:
 > **229 binaries, 4 133 passed, 0 failed, 8 ignored** (the batch landed at
 > **4 123**; the audit added ten arms). Goldens stay **50** and none was
 > re-blessed — nothing in this batch renders. Schemas moved twice and no further:
