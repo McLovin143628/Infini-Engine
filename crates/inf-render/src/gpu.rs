@@ -81,11 +81,19 @@ impl GpuContext {
 
     fn from_adapter(instance: wgpu::Instance, adapter: wgpu::Adapter) -> Result<Self, String> {
         tracing::info!("inf-render adapter: {:?}", adapter.get_info());
-        // Request POLYGON_MODE_LINE *only when the adapter exposes it* (R-P2
-        // wireframe view mode). Request-if-available: device creation NEVER fails
-        // for lack of it — the renderer degrades wireframe to unlit instead — so
-        // headless/test/downlevel contexts keep working unchanged.
-        let optional_features = adapter.features() & wgpu::Features::POLYGON_MODE_LINE;
+        // Request the optional features *only where the adapter exposes them*.
+        // Request-if-available is the standing rule: device creation NEVER fails
+        // for lack of one, so headless/test/downlevel contexts keep working
+        // unchanged and every consumer has a documented fallback.
+        //
+        //  * `POLYGON_MODE_LINE` (R-P2 wireframe view mode) — absent, the
+        //    renderer degrades wireframe to unlit.
+        //  * `TEXTURE_COMPRESSION_BC` (P26.1) — absent, virtual-texture tiles are
+        //    CPU-transcoded to RGBA8 pages before upload, through the same
+        //    residency door at 4× the page bytes. `caps::AdapterCaps` probes it
+        //    and `clamp_bc_tiles` turns the setting off; no tier ever turns it on.
+        let optional_features = adapter.features()
+            & (wgpu::Features::POLYGON_MODE_LINE | wgpu::Features::TEXTURE_COMPRESSION_BC);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: optional_features,
             ..Default::default()
@@ -127,6 +135,19 @@ impl GpuContext {
         self.device
             .features()
             .contains(wgpu::Features::POLYGON_MODE_LINE)
+    }
+
+    /// Whether BC1/BC2/BC3/BC4/BC5/BC6H/BC7 texture formats can be created and
+    /// sampled on this device (P26.1), i.e. `TEXTURE_COMPRESSION_BC` was
+    /// requested-and-granted at creation.
+    ///
+    /// Read at the **device**, not at the adapter, on purpose: what matters is
+    /// what this device was created with, and a context built elsewhere (a
+    /// thumbnailer, a headless test) must be able to answer for itself.
+    pub fn supports_texture_compression_bc(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
     }
 
     /// Install a lenient uncaptured-error handler for interactive/editor

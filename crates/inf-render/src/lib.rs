@@ -102,7 +102,7 @@ pub use scene::{
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
     BloomSettings, GiSettings, RenderSettings, ScatterSettings, ShadowSettings, SsaoSettings,
-    VgeomSettings,
+    VgeomSettings, VirtualTextureSettings,
 };
 pub use water::{
     camera_underwater, RenderWater, RiverFrame, RiverPath, RiverProfile, Underwater, WaterFrame,

@@ -256,6 +256,17 @@ pub struct AdapterCaps {
     /// (WARP/lavapipe) — never High even if the limits nominally qualify, since
     /// the meshlet path would be unusably slow.
     pub is_cpu: bool,
+    /// Whether the adapter exposes `TEXTURE_COMPRESSION_BC` (P26.1) — i.e.
+    /// whether a `.inf_tex` tile's BC1/BC3 blocks can be uploaded as-is into a
+    /// physical page, with no decode anywhere.
+    ///
+    /// Independent of the render tier, exactly like
+    /// [`polygon_mode_line`](AdapterCaps::polygon_mode_line): it is a *format*
+    /// capability, not a measure of how much GPU there is, and a machine can
+    /// easily have one without the other (BC is universal on desktop and absent
+    /// on most mobile). So [`choose_tier`] ignores it, and the clamp that reads
+    /// it is [`clamp_bc_tiles`](AdapterCaps::clamp_bc_tiles).
+    pub texture_compression_bc: bool,
     /// Whether the adapter exposes `POLYGON_MODE_LINE` (R-P2 wireframe view mode).
     /// Independent of the render tier — a low-tier GPU may still raster lines, and
     /// a high-tier one may lack the feature — so [`choose_tier`] ignores it; it is
@@ -282,6 +293,10 @@ impl AdapterCaps {
             max_compute_workgroups_per_dim: limits.max_compute_workgroups_per_dimension,
             max_storage_textures_per_stage: limits.max_storage_textures_per_shader_stage,
             is_cpu: info.device_type == wgpu::DeviceType::Cpu,
+            texture_compression_bc: gpu
+                .adapter
+                .features()
+                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
             polygon_mode_line: gpu
                 .adapter
                 .features()
@@ -322,6 +337,24 @@ impl AdapterCaps {
             settings.vgeom.two_pass = false;
         }
         settings = self.clamp_scatter(settings);
+        settings = self.clamp_bc_tiles(settings);
+        settings
+    }
+
+    /// Clamp the virtual-texture **page format** to what this adapter supports
+    /// (P26.1). Like every other clamp on this type it **never turns a feature
+    /// on** — an adapter with BC does not enable `bc_tiles` for a caller who
+    /// asked for RGBA8 pages — and it is idempotent, so it composes with the tier
+    /// clamp in any order.
+    ///
+    /// Losing BC costs page *bytes*, never content: a tile is CPU-transcoded to
+    /// RGBA8 (`inf_material::TiledTextureReader::tile_rgba8`, the decoder the
+    /// thumbnailer has used since P4) and uploaded through the same residency
+    /// door, at 4× the size for BC1 and 4× for BC3.
+    pub fn clamp_bc_tiles(&self, mut settings: RenderSettings) -> RenderSettings {
+        if !self.texture_compression_bc {
+            settings.vt.bc_tiles = false;
+        }
         settings
     }
 
@@ -420,6 +453,10 @@ pub fn detect_tier(gpu: &GpuContext, settings: &RenderSettings) -> RenderTier {
         caps.max_storage_buffer_binding_size >> 20,
         caps.supports_vgeom_occlusion(),
     );
+    tracing::info!(
+        "inf-render: texture_compression_bc={} (absent -> virtual-texture tiles transcode to RGBA8 pages)",
+        caps.texture_compression_bc,
+    );
     tier
 }
 
@@ -437,6 +474,7 @@ mod tests {
             max_compute_workgroups_per_dim: VGEOM_MIN_WORKGROUPS_PER_DIM,
             max_storage_textures_per_stage: VGEOM_OCCLUSION_MIN_STORAGE_TEXTURES_PER_STAGE,
             is_cpu: false,
+            texture_compression_bc: true,
             polygon_mode_line: true,
         }
     }
@@ -477,6 +515,7 @@ mod tests {
             max_compute_workgroups_per_dim: 0,
             max_storage_textures_per_stage: 0,
             is_cpu: false,
+            texture_compression_bc: false,
             polygon_mode_line: false,
         };
         assert_eq!(choose_tier(&c), RenderTier::Low);
@@ -500,6 +539,7 @@ mod tests {
             max_compute_workgroups_per_dim: 0,
             max_storage_textures_per_stage: 0,
             is_cpu: false,
+            texture_compression_bc: false,
             polygon_mode_line: true,
         };
         assert_eq!(choose_tier(&low), RenderTier::Low);
@@ -655,6 +695,84 @@ mod tests {
         assert_eq!(medium.strands_per_guide, 1);
         // Low is a CARD: fewer strips, not fewer particles.
         assert!(low.guide_stride > 1 && low.strands_per_guide == 1);
+    }
+
+    /// **P26.1: BC page format is orthogonal to the tier, and the clamp obeys
+    /// the two standing laws.**
+    ///
+    /// Orthogonal because `TEXTURE_COMPRESSION_BC` says what *formats* exist,
+    /// not how much GPU there is — a High-tier desktop card without it (a
+    /// hypothetical, but the tier decision must not care) is still High, and a
+    /// Low-tier one with it is still Low. Asserted in both directions, like
+    /// `polygon_mode_line`, because "ignored" is a claim about a function and a
+    /// claim is testable.
+    #[test]
+    fn bc_texture_support_is_orthogonal_to_tier() {
+        let mut high = high_caps();
+        high.texture_compression_bc = false;
+        assert_eq!(choose_tier(&high), RenderTier::High);
+
+        let low = AdapterCaps {
+            compute_shaders: false,
+            indirect_execution: false,
+            max_storage_buffers_per_stage: 0,
+            max_storage_buffer_binding_size: 0,
+            max_compute_workgroups_per_dim: 0,
+            max_storage_textures_per_stage: 0,
+            is_cpu: false,
+            texture_compression_bc: true,
+            polygon_mode_line: false,
+        };
+        assert_eq!(choose_tier(&low), RenderTier::Low);
+
+        // And no tier touches the knob — a Low machine WITH BC still uploads BC
+        // pages, because the reason to drop them is the absent feature, not a
+        // small GPU.
+        let s = RenderSettings::default();
+        assert!(s.vt.bc_tiles, "BC pages are the default");
+        for tier in [RenderTier::High, RenderTier::Medium, RenderTier::Low] {
+            assert!(tier.apply(s).vt.bc_tiles, "{tier:?} clamped a format knob");
+        }
+        // The mobile preset does not touch it either: a phone without BC is
+        // handled by the adapter clamp, and a phone WITH it should use it.
+        assert!(RenderTier::clamp_mobile(s).vt.bc_tiles);
+    }
+
+    /// The clamp never enables, is idempotent, and composes with the tier clamp
+    /// in either order — the three properties every capability clamp here owes.
+    #[test]
+    fn the_bc_clamp_only_turns_pages_off() {
+        let with_bc = high_caps();
+        let mut without = high_caps();
+        without.texture_compression_bc = false;
+
+        let wanted = RenderSettings::default();
+        assert!(wanted.vt.bc_tiles);
+
+        // Absent → off, and it stays off.
+        let c = without.clamp_bc_tiles(wanted);
+        assert!(!c.vt.bc_tiles);
+        assert_eq!(without.clamp_bc_tiles(c), c, "not idempotent");
+        // Present → untouched.
+        assert_eq!(with_bc.clamp_bc_tiles(wanted), wanted);
+        // NEVER turns it on: a caller that asked for RGBA8 pages on a BC-capable
+        // adapter keeps RGBA8 pages.
+        let mut asked_off = RenderSettings::default();
+        asked_off.vt.bc_tiles = false;
+        assert!(!with_bc.clamp_bc_tiles(asked_off).vt.bc_tiles);
+
+        // Composes with the tier clamp in either order.
+        for tier in [RenderTier::High, RenderTier::Medium, RenderTier::Low] {
+            assert_eq!(
+                without.clamp_bc_tiles(tier.apply(wanted)),
+                tier.apply(without.clamp_bc_tiles(wanted)),
+                "{tier:?}"
+            );
+        }
+        // And `clamp_occlusion` — the door a host actually calls — carries it,
+        // so a host cannot apply one clamp and forget this one.
+        assert!(!without.clamp_occlusion(wanted).vt.bc_tiles);
+        assert!(with_bc.clamp_occlusion(wanted).vt.bc_tiles);
     }
 
     #[test]

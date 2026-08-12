@@ -106,6 +106,12 @@ pub struct RenderSettings {
     /// property of the *scene*, not of the renderer. Defaults to
     /// [`crate::water::WaterQuality::High`]; the tier clamps it **down**.
     pub water: crate::water::WaterSettings,
+    /// Streaming virtual texturing (P26). The knobs are inert until P26.3 binds
+    /// a VT sampler; what exists today is the **page format** decision, which is
+    /// a capability question and therefore lives with the other capability
+    /// knobs. Inert on a scene with no virtual textures, so every existing
+    /// golden is untouched.
+    pub vt: VirtualTextureSettings,
     /// GPU-capability auto-tier override (P13.4.2). `None` → the host probes the
     /// adapter and picks a [`RenderTier`](crate::caps::RenderTier)
     /// ([`detect_tier`](crate::caps::detect_tier)); `Some(tier)` forces it
@@ -450,6 +456,38 @@ impl Default for AtmosphereSettings {
     }
 }
 
+/// Streaming virtual texturing (P26).
+///
+/// One knob so far, and it is a *format* knob rather than an on/off switch —
+/// whether a scene has virtual textures is a property of its content, not of the
+/// renderer, the same reasoning [`AtmosphereSettings`] and
+/// [`crate::water::WaterSettings`] are shaped by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VirtualTextureSettings {
+    /// Upload tiles as **block-compressed** pages (`TEXTURE_COMPRESSION_BC`).
+    ///
+    /// `true` by default: a `.inf_tex` cooks its tiles as BC1/BC3 blocks, so a
+    /// BC-capable adapter uploads the stored bytes with no decode at all — the
+    /// whole point of the container's format design.
+    ///
+    /// An adapter that does not expose the feature has this **clamped off** by
+    /// [`AdapterCaps::clamp_bc_tiles`](crate::caps::AdapterCaps::clamp_bc_tiles),
+    /// and the residency door transcodes each tile to RGBA8 on the CPU
+    /// (`TiledTextureReader::tile_rgba8`) before uploading it — the same door,
+    /// one format decision earlier, at 4× the page bytes.
+    ///
+    /// This is not a tier knob and [`RenderTier::apply`](crate::caps::RenderTier::apply)
+    /// deliberately does not touch it: BC support is orthogonal to how much GPU
+    /// there is, exactly as `POLYGON_MODE_LINE` is.
+    pub bc_tiles: bool,
+}
+
+impl Default for VirtualTextureSettings {
+    fn default() -> Self {
+        Self { bc_tiles: true }
+    }
+}
+
 impl Default for RenderSettings {
     fn default() -> Self {
         Self {
@@ -465,6 +503,7 @@ impl Default for RenderSettings {
             gi: GiSettings::default(),
             atmosphere: AtmosphereSettings::default(),
             water: crate::water::WaterSettings::default(),
+            vt: VirtualTextureSettings::default(),
             tier_override: None,
         }
     }
