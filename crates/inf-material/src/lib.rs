@@ -16,6 +16,7 @@ pub mod graph;
 pub mod instance;
 pub mod material;
 pub mod texture;
+pub mod tiles;
 
 pub use bc::{decode_bc1, decode_bc3};
 pub use error::MaterialError;
@@ -29,4 +30,9 @@ pub use material::{MatBlend, MaterialAsset};
 pub use texture::{
     import_texture_bytes, texture_from_rgba8, TextureAsset, TextureCompression, TextureFormat,
     TextureImportSettings, TextureMip,
+};
+pub use tiles::{
+    build_tiled_texture, decode_texture_payload, lift_texture_asset, stored_tile_bytes, TileCoord,
+    TiledTextureError, TiledTextureImage, TiledTextureReader, TiledTextureView, STORED_TILE_SIZE,
+    TEX_ASSET_MAGIC, TEX_ASSET_SCHEMA_VERSION, TILE_BORDER, TILE_SIZE,
 };

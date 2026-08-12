@@ -18,7 +18,12 @@ pub enum AssetKind {
     /// Meshlet LOD DAG for virtualized geometry (`.inf_vmesh`) — derived at cook
     /// time from a [`Mesh`](AssetKind::Mesh) (P13.1).
     MeshletMesh,
-    /// 2D texture (`.inf_tex`).
+    /// 2D texture (`.inf_tex`) — since P26.1 a **tiled** container: a header +
+    /// mip/tile directories + 16-byte-aligned 136² tile blobs, the unit streaming
+    /// virtual texturing pages. A **streaming-class** kind for the same reason
+    /// [`Terrain`](AssetKind::Terrain) is (`PackWriter::compresses_kind`).
+    /// v1 (bincode `inf_material::TextureAsset`) payloads keep loading forever,
+    /// sniffed on the magic by `TextureAsset::from_payload`.
     Texture,
     /// Material graph (`.inf_mat`).
     Material,

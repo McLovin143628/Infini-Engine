@@ -295,11 +295,26 @@ impl PackWriter {
             // exactly like a `.inf_terrain` tile — 16-byte-aligned blobs a reader
             // sub-slices with no decode and no copy. Compressing it would defeat
             // the entire container layout.
-            | AssetKind::VoxelVolume => false,
+            | AssetKind::VoxelVolume
+            // P26.1: a `.inf_tex` is a **tiled** container now — header +
+            // directories + 16-byte-aligned 136² tile blobs — and streaming
+            // virtual texturing pages ONE of those tiles per request, inside a
+            // frame. A zstd frame would force a whole-texture decode to reach one
+            // tile, which is precisely the CPU-decompression bottleneck the SVT
+            // direction memo says to design out of existence rather than optimise.
+            //
+            // The trade is ship size, and it is deliberate and known: BC payloads
+            // barely compress, but an uncompressed-format texture
+            // (`TextureCompression::None`, the normal-map default) does. Same
+            // trade, same reasoning, as the four kinds above.
+            //
+            // A v1 (bincode) `.inf_tex` from an older cook rides along raw too.
+            // That costs a little size and nothing else — it is read whole either
+            // way, through `TextureAsset::from_payload`.
+            | AssetKind::Texture => false,
             AssetKind::Unknown
             | AssetKind::Level
             | AssetKind::Mesh
-            | AssetKind::Texture
             | AssetKind::Material
             | AssetKind::MaterialInstance
             | AssetKind::Blueprint
@@ -1244,6 +1259,9 @@ mod tests {
             // P21.1: a `.inf_voxel` is paged chunk-at-a-time out of the mapping,
             // exactly like a `.inf_terrain` tile.
             AssetKind::VoxelVolume,
+            // P26.1: a `.inf_tex` is a tiled container paged one 136² tile at a
+            // time by streaming virtual texturing.
+            AssetKind::Texture,
         ];
         for &k in STREAMING {
             assert!(!PackWriter::compresses_kind(k), "{k:?} must stay raw");

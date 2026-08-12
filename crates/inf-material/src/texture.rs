@@ -65,6 +65,20 @@ impl TextureAsset {
         self.mips.len()
     }
 
+    /// Decode a `.inf_tex` payload of **either container version** (P26.1).
+    ///
+    /// v1 is the bincode record this struct serializes to; v2 is the tiled image
+    /// [`crate::tiles`] writes, and it is reconstructed here into the identical
+    /// record. Sniffed on the magic — a v1 payload begins with
+    /// `schema_version = 1` and cannot collide with `b"INFVTEX\0"`.
+    ///
+    /// Every consumer that wants **whole levels** goes through this instead of
+    /// `inf_asset::decode`, which sees only v1. A consumer that wants one tile at
+    /// a time uses [`crate::tiles::TiledTextureReader`] directly.
+    pub fn from_payload(bytes: &[u8]) -> Result<Self, MaterialError> {
+        crate::tiles::decode_texture_payload(bytes)
+    }
+
     /// Decode a mip level to RGBA8 regardless of storage format (decompressing
     /// BC1/BC3 on the CPU). Used by the thumbnailer. Returns `None` for an
     /// out-of-range level.
@@ -150,36 +164,8 @@ pub fn texture_from_rgba8(
     height: u32,
     settings: TextureImportSettings,
 ) -> Result<TextureAsset, MaterialError> {
-    if width == 0 || height == 0 {
-        return Err(MaterialError::Image("zero-sized texture".into()));
-    }
-    if rgba.len() < (width * height * 4) as usize {
-        return Err(MaterialError::Image("truncated pixel buffer".into()));
-    }
-
-    // Build the RGBA8 mip chain first (compression is applied per level after).
-    let mut levels: Vec<(u32, u32, Vec<u8>)> = vec![(width, height, rgba)];
-    if settings.generate_mips {
-        while levels.last().unwrap().0 > 1 || levels.last().unwrap().1 > 1 {
-            let (pw, ph, ref prev) = *levels.last().unwrap();
-            let (nw, nh) = ((pw / 2).max(1), (ph / 2).max(1));
-            let down = downsample_box(prev, pw, ph, nw, nh);
-            levels.push((nw, nh, down));
-        }
-    }
-
-    let format = match settings.compression {
-        TextureCompression::None => TextureFormat::Rgba8,
-        TextureCompression::Bc1 => TextureFormat::Bc1,
-        TextureCompression::Bc3 => TextureFormat::Bc3,
-        TextureCompression::Auto => {
-            if is_fully_opaque(&levels[0].2) {
-                TextureFormat::Bc1
-            } else {
-                TextureFormat::Bc3
-            }
-        }
-    };
+    let levels = rgba_mip_chain(rgba, width, height, settings.generate_mips)?;
+    let format = choose_format(settings.compression, &levels[0].2);
 
     let mips = levels
         .into_iter()
@@ -205,6 +191,52 @@ pub fn texture_from_rgba8(
         srgb: settings.srgb,
         mips,
     })
+}
+
+/// The RGBA8 mip chain of a source image, largest first, down to 1×1.
+///
+/// Shared by the v1 writer above and the v2 tiler ([`crate::tiles`]) so the two
+/// containers cannot disagree about how many levels there are or what is in
+/// them — the premise of "a v2 image reconstructs its v1 byte for byte".
+pub(crate) fn rgba_mip_chain(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    generate_mips: bool,
+) -> Result<Vec<(u32, u32, Vec<u8>)>, MaterialError> {
+    if width == 0 || height == 0 {
+        return Err(MaterialError::Image("zero-sized texture".into()));
+    }
+    if rgba.len() < (width * height * 4) as usize {
+        return Err(MaterialError::Image("truncated pixel buffer".into()));
+    }
+    let mut levels: Vec<(u32, u32, Vec<u8>)> = vec![(width, height, rgba)];
+    if generate_mips {
+        while levels.last().unwrap().0 > 1 || levels.last().unwrap().1 > 1 {
+            let (pw, ph, ref prev) = *levels.last().unwrap();
+            let (nw, nh) = ((pw / 2).max(1), (ph / 2).max(1));
+            let down = downsample_box(prev, pw, ph, nw, nh);
+            levels.push((nw, nh, down));
+        }
+    }
+    Ok(levels)
+}
+
+/// The storage format an import setting resolves to for a given level-0 image.
+/// Shared with the v2 tiler for the same reason [`rgba_mip_chain`] is.
+pub(crate) fn choose_format(compression: TextureCompression, level0: &[u8]) -> TextureFormat {
+    match compression {
+        TextureCompression::None => TextureFormat::Rgba8,
+        TextureCompression::Bc1 => TextureFormat::Bc1,
+        TextureCompression::Bc3 => TextureFormat::Bc3,
+        TextureCompression::Auto => {
+            if is_fully_opaque(level0) {
+                TextureFormat::Bc1
+            } else {
+                TextureFormat::Bc3
+            }
+        }
+    }
 }
 
 fn is_fully_opaque(rgba: &[u8]) -> bool {

@@ -1,0 +1,1219 @@
+//! The `.inf_tex` **v2 tiled container** (P26.1): a texture leaves its single
+//! bincode blob for a random-access, tile-at-a-time image.
+//!
+//! ```text
+//! ┌ header (128 B, little-endian) ────────────────────────────────────┐
+//! │  magic        [u8; 8]  b"INFVTEX\0"                               │
+//! │  schema_ver   u32      TEX_ASSET_SCHEMA_VERSION (2)               │
+//! │  width · height  u32   the VIRTUAL extent (mip 0)                 │
+//! │  format       u32      0 Rgba8 · 1 Bc1 · 2 Bc3 (freeze-pinned)    │
+//! │  flags        u32      bit 0 = srgb                               │
+//! │  tile_size    u32      PAYLOAD texels per tile side (128)         │
+//! │  border       u32      border texels per side (4)                 │
+//! │  mip_count · tile_count  u32                                      │
+//! │  tile_bytes   u32      bytes of ONE stored tile (uniform)         │
+//! │  mip_dir_off · tile_dir_off · tile_base · total_len  (u64 each)   │
+//! │  reserved     [u8; 48] zeros (room for v3 without a re-length)    │
+//! ├ mip directory (mip_count × 32 B, FINEST FIRST) ───────────────────┤
+//! │  width u32 · height u32 · tiles_x u32 · tiles_y u32 ·             │
+//! │  first_tile u32 · tile_count u32 · pad[8]                         │
+//! ├ tile directory (tile_count × 32 B, sorted by (mip, y, x)) ────────┤
+//! │  mip u32 · x u32 · y u32 · pad u32 · offset u64 · len u64         │
+//! ├ tile blobs ───────────────────────────────────────────────────────┤
+//! │  … each 16-byte aligned, zero-padded up to the next boundary …    │
+//! └───────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Why a sectioned v2 and not a range-read of v1
+//!
+//! v1 is `inf_asset::encode(&TextureAsset)` — one bincode stream whose `mips`
+//! field is a length prefix followed by **varint-packed** records, so there is no
+//! byte offset for "the tile at (3, 2) of mip 1" that does not require decoding
+//! everything before it. Virtual texturing needs exactly that byte offset, on the
+//! hot path, per frame. This is the same shape, and the same reasoning, as
+//! [`inf_vgeom`'s `.inf_vmesh` v2](../../inf_vgeom/asset/index.html) and
+//! `.inf_terrain` (P16.3): header + sorted directory + 16-byte-aligned blobs,
+//! cooked uncompressed so a resident tile is a borrowed slice of an mmap.
+//!
+//! **v1 keeps loading forever.** [`TextureAsset::from_payload`] sniffs the magic;
+//! a payload without it is decoded as a v1 `TextureAsset`. A bincode
+//! `TextureAsset` begins with `schema_version: u32 = 1` (`01 00 00 00`), which
+//! cannot collide with `b"INFVTEX\0"`.
+//!
+//! # There is exactly one writer: [`TiledTextureImage::as_bytes`]
+//!
+//! Like `.inf_vmesh` and `.inf_terrain`, the bytes on disk and in a `.inf_pack`
+//! are the **raw image**, never `inf_asset::encode` output — a bincode length
+//! prefix would shift every tile off its 16-byte boundary and defeat the whole
+//! layout, silently. So [`TiledTextureImage`] deliberately implements neither
+//! `AssetPayload` nor `Serialize`, which makes the generic asset-writing doors a
+//! type error rather than a subtly wrong file.
+//!
+//! # The tile, and the arithmetic of its border
+//!
+//! A tile carries [`TILE_SIZE`] = 128 texels of **payload** per side. Filtering a
+//! texel at the payload edge reads its neighbours, which live in the *next* tile
+//! — possibly not resident, possibly at a different atlas address — so each tile
+//! also stores a **border ring** of [`TILE_BORDER`] = 4 texels on every side,
+//! baked at cook time from the neighbouring texels of the same mip:
+//!
+//! ```text
+//!   stored tile side = border + TILE_SIZE + border = 4 + 128 + 4 = 136 texels
+//! ```
+//!
+//! The border width is 4 and not 1 or 2 because **a BC block is 4×4**: a stored
+//! tile is compressed as one block grid, so its side must be a multiple of 4 or
+//! the block grid would not tile it. 136 = 4 × 34, so a stored tile is exactly
+//! **34 × 34 blocks** — 9 248 B in BC1, 18 496 B in BC3, 73 984 B as RGBA8.
+//!
+//! That choice buys a property the whole v1-compatibility story rests on. Stored
+//! texel `i` of tile `tx` is source texel `tx·128 + i − 4`, so stored block `b`
+//! begins at source texel `tx·128 + 4b − 4`, which is a multiple of 4 for every
+//! `b`. **The stored block grid is the level's own block grid, offset by whole
+//! blocks** — stored block `b ∈ [1, 33)` *is* level block `tx·32 + (b − 1)`, byte
+//! for byte. Reconstructing a whole level from tiles is therefore a re-gather of
+//! block bytes with no decode and no re-compression, and it reproduces exactly
+//! what v1 would have written from the same source.
+//!
+//! # Clamp padding, at the border and at the edge
+//!
+//! One rule covers both: a stored texel whose source coordinate falls outside the
+//! mip level is taken from the nearest texel that is inside
+//! (`clamp(x, 0, w−1)`). That is what fills the border ring of a tile on the
+//! level's boundary, and it is what fills the right/bottom remainder of a tile
+//! when the level is not a multiple of 128 — the same edge-clamp rule
+//! [`crate::bc`] already applies to partial blocks.
+//!
+//! # The pyramid
+//!
+//! Every mip of the full chain (down to 1×1, exactly the levels v1 stores) is
+//! tiled at `ceil(w/128) × ceil(h/128)` tiles. Once a level fits inside one tile
+//! that is one tile, and it stays one tile all the way down. **Every stored tile
+//! is the same size**, which is what lets a physical page pool be a flat array of
+//! interchangeable slots (P26.2). The cost is the tail: a 1×1 mip still occupies
+//! a 136² tile, so a full chain adds ~8 tail tiles (~74 KB in BC1) to any
+//! texture. Packing the tail mips into a single shared page is the documented
+//! follow-up; it is a size optimisation, not a correctness one.
+
+use inf_asset::AssetKind;
+
+use crate::bc;
+use crate::error::MaterialError;
+use crate::texture::{TextureAsset, TextureFormat, TextureMip};
+
+/// Magic at the head of every v2 `.inf_tex` payload.
+pub const TEX_ASSET_MAGIC: [u8; 8] = *b"INFVTEX\0";
+
+/// Current `.inf_tex` **container** schema version.
+///
+/// v1 is the bare bincode [`TextureAsset`] (no magic) and keeps loading forever;
+/// v2 is the tiled image this module writes. This versions the *container* and is
+/// independent of [`TextureAsset::CURRENT_VERSION`], which versions the in-memory
+/// record and is unchanged by this batch.
+pub const TEX_ASSET_SCHEMA_VERSION: u32 = 2;
+
+/// Tile blobs start on multiples of this many bytes — the same constant, and the
+/// same reasoning, as [`inf_asset::BLOB_ALIGN`] and `.inf_vmesh`'s `SECTION_ALIGN`.
+pub const SECTION_ALIGN: u64 = 16;
+
+/// Bytes of the fixed header.
+pub const HEADER_LEN: u64 = 128;
+
+/// Bytes of one mip-directory entry.
+pub const MIP_ENTRY_LEN: u64 = 32;
+
+/// Bytes of one tile-directory entry.
+pub const TILE_ENTRY_LEN: u64 = 32;
+
+/// **Payload** texels per tile side. The addressable unit of a virtual texture.
+pub const TILE_SIZE: u32 = 128;
+
+/// Border texels baked on **each** side of a tile's payload, so filtering across
+/// a tile edge never needs the neighbouring tile to be resident. A multiple of 4
+/// because a BC block is 4×4 (see the module docs).
+pub const TILE_BORDER: u32 = 4;
+
+/// Texels per side of a tile **as stored**: `border + payload + border`.
+pub const STORED_TILE_SIZE: u32 = TILE_SIZE + 2 * TILE_BORDER;
+
+// The two invariants every other piece of arithmetic in this module assumes.
+const _: () = assert!(TILE_BORDER.is_multiple_of(4));
+const _: () = assert!(TILE_SIZE.is_multiple_of(4));
+const _: () = assert!(STORED_TILE_SIZE.is_multiple_of(4));
+
+/// A failure building or reading a v2 `.inf_tex` payload.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TiledTextureError {
+    #[error("payload is shorter than the fixed header")]
+    TooShort,
+    #[error("bad .inf_tex v2 magic")]
+    BadMagic,
+    #[error("payload schema v{found} is newer than this build's v{current}")]
+    SchemaTooNew { found: u32, current: u32 },
+    #[error("malformed tiled .inf_tex payload: {0}")]
+    Malformed(String),
+    #[error("tile {index} is out of bounds or misaligned")]
+    TileOutOfBounds { index: usize },
+}
+
+type Result<T> = std::result::Result<T, TiledTextureError>;
+
+/// Round `n` up to the next multiple of [`SECTION_ALIGN`].
+#[inline]
+const fn align_up(n: u64) -> u64 {
+    n.next_multiple_of(SECTION_ALIGN)
+}
+
+/// The **freeze-pinned** wire code of a storage format. Append-only: a code is
+/// never reused and never renumbered, because it is written into shipped files.
+fn format_code(f: TextureFormat) -> u32 {
+    match f {
+        TextureFormat::Rgba8 => 0,
+        TextureFormat::Bc1 => 1,
+        TextureFormat::Bc3 => 2,
+    }
+}
+
+fn format_from_code(c: u32) -> Option<TextureFormat> {
+    match c {
+        0 => Some(TextureFormat::Rgba8),
+        1 => Some(TextureFormat::Bc1),
+        2 => Some(TextureFormat::Bc3),
+        _ => None,
+    }
+}
+
+/// Bytes one **stored tile** occupies in `format` — uniform across the whole
+/// image, which is what makes a physical page a fixed-size slot.
+pub fn stored_tile_bytes(format: TextureFormat) -> usize {
+    format.level_size(STORED_TILE_SIZE, STORED_TILE_SIZE)
+}
+
+/// The decoded fixed header of a v2 `.inf_tex` payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TiledTextureHeader {
+    pub schema_version: u32,
+    /// The virtual extent (mip 0).
+    pub width: u32,
+    pub height: u32,
+    pub format: TextureFormat,
+    /// Whether the data is sRGB-encoded (base colour) vs linear (normal/data).
+    pub srgb: bool,
+    /// Payload texels per tile side ([`TILE_SIZE`] as written).
+    pub tile_size: u32,
+    /// Border texels per side ([`TILE_BORDER`] as written).
+    pub border: u32,
+    pub mip_count: u32,
+    pub tile_count: u32,
+    /// Bytes of one stored tile (uniform).
+    pub tile_bytes: u32,
+    pub mip_dir_off: u64,
+    pub tile_dir_off: u64,
+    /// Absolute offset of the first tile blob.
+    pub tile_base: u64,
+    /// Payload length as written.
+    pub total_len: u64,
+}
+
+impl TiledTextureHeader {
+    /// Texels per side of a stored tile, as this payload declares them.
+    #[inline]
+    pub fn stored_tile_size(&self) -> u32 {
+        self.tile_size + 2 * self.border
+    }
+}
+
+/// One mip level's grid — everything a streamer needs about a level **before**
+/// any of its bytes are touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TexMipEntry {
+    /// The level's virtual extent.
+    pub width: u32,
+    pub height: u32,
+    /// Tiles across / down (`ceil(width / tile_size)` etc.).
+    pub tiles_x: u32,
+    pub tiles_y: u32,
+    /// Index of this level's first tile in the tile directory.
+    pub first_tile: u32,
+    /// `tiles_x * tiles_y`.
+    pub tile_count: u32,
+}
+
+/// One tile-directory entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TexTileEntry {
+    pub mip: u32,
+    pub x: u32,
+    pub y: u32,
+    /// Absolute byte offset of the blob (16-byte aligned).
+    pub offset: u64,
+    /// Blob length in bytes.
+    pub len: u64,
+}
+
+/// Address of one tile in a virtual texture — the key P26.2's residency table is
+/// built on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TileCoord {
+    pub mip: u32,
+    pub x: u32,
+    pub y: u32,
+}
+
+impl TileCoord {
+    pub const fn new(mip: u32, x: u32, y: u32) -> Self {
+        Self { mip, x, y }
+    }
+}
+
+// ── builder ─────────────────────────────────────────────────────────────────
+
+/// Lay an RGBA8 source out as a v2 tiled image.
+///
+/// Pure and byte-deterministic: the mip chain, the format choice, the tile order
+/// and the padding are all functions of `(rgba, width, height, settings)` alone,
+/// so two builds of one source are byte-identical (the cook's guarantee, and the
+/// reason a re-import produces the same content hash).
+pub fn build_tiled_texture(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    settings: crate::texture::TextureImportSettings,
+) -> std::result::Result<TiledTextureImage, MaterialError> {
+    let levels = crate::texture::rgba_mip_chain(rgba, width, height, settings.generate_mips)?;
+    let format = crate::texture::choose_format(settings.compression, &levels[0].2);
+    Ok(tile_levels(&levels, format, settings.srgb))
+}
+
+/// Lay an **already-imported v1 [`TextureAsset`]** out as a v2 tiled image — the
+/// lift path, the twin of `VgeomSource::from_payload`'s v1 branch.
+///
+/// Every payload written before this batch is a v1 record, and the residency door
+/// must be able to page one. Rather than teach the streamer a second shape, a v1
+/// asset is lifted here: each level is CPU-decoded to RGBA8 (the door
+/// [`TextureAsset::level_rgba8`] already is, for the thumbnailer) and re-tiled in
+/// **the asset's own format**.
+///
+/// **Honest cost:** for a BC asset that is a decode→re-encode round trip, so a
+/// lifted tile is not guaranteed bit-identical to the v1 block it came from
+/// (bounding-box endpoints are re-derived from already-quantised colours). It is
+/// stable — the same input always gives the same output — and it is only ever
+/// reached by content that predates the tiled container. Content imported from
+/// here on is tiled from the *original* pixels and never takes this path.
+pub fn lift_texture_asset(
+    tex: &TextureAsset,
+) -> std::result::Result<TiledTextureImage, MaterialError> {
+    if tex.mips.is_empty() {
+        return Err(MaterialError::Image("texture has no mip levels".into()));
+    }
+    let mut levels: Vec<(u32, u32, Vec<u8>)> = Vec::with_capacity(tex.mips.len());
+    for (i, mip) in tex.mips.iter().enumerate() {
+        let rgba = tex
+            .level_rgba8(i)
+            .ok_or_else(|| MaterialError::Image(format!("mip {i} will not decode")))?;
+        if rgba.len() < (mip.width as usize * mip.height as usize * 4) {
+            return Err(MaterialError::Image(format!("mip {i} is truncated")));
+        }
+        levels.push((mip.width, mip.height, rgba));
+    }
+    Ok(tile_levels(&levels, tex.format, tex.srgb))
+}
+
+/// The one tiler. `levels` are RGBA8, largest first.
+fn tile_levels(
+    levels: &[(u32, u32, Vec<u8>)],
+    format: TextureFormat,
+    srgb: bool,
+) -> TiledTextureImage {
+    let stored = STORED_TILE_SIZE;
+    let tile_bytes = stored_tile_bytes(format);
+
+    // ── 1. The grids, finest first ──
+    let mut mips: Vec<TexMipEntry> = Vec::with_capacity(levels.len());
+    let mut first_tile = 0u32;
+    for &(w, h, _) in levels {
+        let tiles_x = w.div_ceil(TILE_SIZE).max(1);
+        let tiles_y = h.div_ceil(TILE_SIZE).max(1);
+        mips.push(TexMipEntry {
+            width: w,
+            height: h,
+            tiles_x,
+            tiles_y,
+            first_tile,
+            tile_count: tiles_x * tiles_y,
+        });
+        first_tile += tiles_x * tiles_y;
+    }
+    let tile_count = first_tile as usize;
+
+    // ── 2. Offsets ──
+    let mip_dir_off = HEADER_LEN;
+    let tile_dir_off = mip_dir_off + MIP_ENTRY_LEN * mips.len() as u64;
+    let tile_base = align_up(tile_dir_off + TILE_ENTRY_LEN * tile_count as u64);
+    let stride = align_up(tile_bytes as u64);
+    let total_len = tile_base + stride * tile_count as u64;
+
+    // ── 3. Emit the header ──
+    let mut out: Vec<u8> = Vec::with_capacity(total_len as usize);
+    out.extend_from_slice(&TEX_ASSET_MAGIC);
+    out.extend_from_slice(&TEX_ASSET_SCHEMA_VERSION.to_le_bytes());
+    out.extend_from_slice(&levels[0].0.to_le_bytes());
+    out.extend_from_slice(&levels[0].1.to_le_bytes());
+    out.extend_from_slice(&format_code(format).to_le_bytes());
+    out.extend_from_slice(&u32::from(srgb).to_le_bytes());
+    out.extend_from_slice(&TILE_SIZE.to_le_bytes());
+    out.extend_from_slice(&TILE_BORDER.to_le_bytes());
+    out.extend_from_slice(&(mips.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(tile_count as u32).to_le_bytes());
+    out.extend_from_slice(&(tile_bytes as u32).to_le_bytes());
+    debug_assert_eq!(out.len(), 48, "the u64 lane starts at 48");
+    out.extend_from_slice(&mip_dir_off.to_le_bytes());
+    out.extend_from_slice(&tile_dir_off.to_le_bytes());
+    out.extend_from_slice(&tile_base.to_le_bytes());
+    out.extend_from_slice(&total_len.to_le_bytes());
+    debug_assert!(out.len() as u64 <= HEADER_LEN);
+    out.resize(HEADER_LEN as usize, 0);
+
+    // ── 4. The mip directory ──
+    for m in &mips {
+        out.extend_from_slice(&m.width.to_le_bytes());
+        out.extend_from_slice(&m.height.to_le_bytes());
+        out.extend_from_slice(&m.tiles_x.to_le_bytes());
+        out.extend_from_slice(&m.tiles_y.to_le_bytes());
+        out.extend_from_slice(&m.first_tile.to_le_bytes());
+        out.extend_from_slice(&m.tile_count.to_le_bytes());
+        out.extend_from_slice(&[0u8; 8]);
+    }
+    debug_assert_eq!(out.len() as u64, tile_dir_off);
+
+    // ── 5. The tile directory, sorted by (mip, y, x) ──
+    for (mip, m) in mips.iter().enumerate() {
+        for y in 0..m.tiles_y {
+            for x in 0..m.tiles_x {
+                let index = m.first_tile + y * m.tiles_x + x;
+                out.extend_from_slice(&(mip as u32).to_le_bytes());
+                out.extend_from_slice(&x.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
+                out.extend_from_slice(&0u32.to_le_bytes());
+                out.extend_from_slice(&(tile_base + stride * index as u64).to_le_bytes());
+                out.extend_from_slice(&(tile_bytes as u64).to_le_bytes());
+            }
+        }
+    }
+    out.resize(tile_base as usize, 0);
+
+    // ── 6. The blobs, in directory order ──
+    for (mip, m) in mips.iter().enumerate() {
+        let (lw, lh, ref rgba) = levels[mip];
+        for y in 0..m.tiles_y {
+            for x in 0..m.tiles_x {
+                let gathered = gather_stored_tile(rgba, lw, lh, x, y);
+                let blob = match format {
+                    TextureFormat::Rgba8 => gathered,
+                    TextureFormat::Bc1 => bc::compress_bc1(&gathered, stored, stored),
+                    TextureFormat::Bc3 => bc::compress_bc3(&gathered, stored, stored),
+                };
+                debug_assert_eq!(blob.len(), tile_bytes);
+                out.extend_from_slice(&blob);
+                out.resize(
+                    (tile_base + stride * (m.first_tile + y * m.tiles_x + x) as u64 + stride)
+                        as usize,
+                    0,
+                );
+            }
+        }
+    }
+    debug_assert_eq!(out.len() as u64, total_len);
+
+    TiledTextureImage { bytes: out }
+}
+
+/// Gather one stored tile's `STORED_TILE_SIZE²` RGBA8 texels out of a level,
+/// clamping every coordinate that falls outside it (the border ring and the
+/// right/bottom remainder alike — see the module docs).
+fn gather_stored_tile(rgba: &[u8], lw: u32, lh: u32, tx: u32, ty: u32) -> Vec<u8> {
+    let stored = STORED_TILE_SIZE as usize;
+    let mut out = vec![0u8; stored * stored * 4];
+    let x0 = tx * TILE_SIZE;
+    let y0 = ty * TILE_SIZE;
+    for j in 0..stored {
+        let sy = (y0 as i64 + j as i64 - TILE_BORDER as i64).clamp(0, lh as i64 - 1) as u32;
+        for i in 0..stored {
+            let sx = (x0 as i64 + i as i64 - TILE_BORDER as i64).clamp(0, lw as i64 - 1) as u32;
+            let si = ((sy * lw + sx) * 4) as usize;
+            let di = (j * stored + i) * 4;
+            out[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+        }
+    }
+    out
+}
+
+// ── the image ───────────────────────────────────────────────────────────────
+
+/// A validated v2 `.inf_tex` payload image. Owns its bytes; this — not
+/// `inf_asset::encode` — is what goes on disk and into a pack.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TiledTextureImage {
+    bytes: Vec<u8>,
+}
+
+impl TiledTextureImage {
+    /// The asset kind + container schema version this image owes the database (it
+    /// implements no `AssetPayload` on purpose — see the module docs).
+    pub const KIND: AssetKind = AssetKind::Texture;
+    pub const SCHEMA_VERSION: u32 = TEX_ASSET_SCHEMA_VERSION;
+
+    /// Validate + adopt already-serialized bytes.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        parse(&bytes)?;
+        Ok(Self { bytes })
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    /// A random-access view over the image.
+    pub fn reader(&self) -> TiledTextureView<'_> {
+        TiledTextureReader::new(self.bytes.as_slice()).expect("image validated at construction")
+    }
+}
+
+impl std::fmt::Debug for TiledTextureImage {
+    /// Summarizes; never dumps the (possibly hundred-MB) payload.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let r = self.reader();
+        f.debug_struct("TiledTextureImage")
+            .field("bytes", &self.bytes.len())
+            .field("extent", &(r.header().width, r.header().height))
+            .field("format", &r.header().format)
+            .field("mips", &r.mips().len())
+            .field("tiles", &r.tiles().len())
+            .finish()
+    }
+}
+
+// ── reader ──────────────────────────────────────────────────────────────────
+
+/// Random access over a v2 `.inf_tex` payload.
+///
+/// Generic over the byte source so one reader serves every backing: an owned
+/// `Vec<u8>` (a loose file), a `&[u8]` borrowed from
+/// [`PackReader::read_ref`](inf_asset::PackReader::read_ref)'s mapping, or a `Cow`
+/// straight off it. The header + directories are parsed once at construction;
+/// every [`tile`](Self::tile) after that is one sub-slice.
+#[derive(Debug, Clone)]
+pub struct TiledTextureReader<B> {
+    bytes: B,
+    header: TiledTextureHeader,
+    mips: Vec<TexMipEntry>,
+    tiles: Vec<TexTileEntry>,
+}
+
+/// A [`TiledTextureReader`] borrowing its bytes (the pack-mapping case).
+pub type TiledTextureView<'a> = TiledTextureReader<&'a [u8]>;
+
+impl<B: AsRef<[u8]>> TiledTextureReader<B> {
+    /// Parse + validate a payload image.
+    pub fn new(bytes: B) -> Result<Self> {
+        let (header, mips, tiles) = parse(bytes.as_ref())?;
+        Ok(Self {
+            bytes,
+            header,
+            mips,
+            tiles,
+        })
+    }
+
+    #[inline]
+    pub fn bytes(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
+
+    #[inline]
+    pub fn header(&self) -> &TiledTextureHeader {
+        &self.header
+    }
+
+    /// The mip directory, **finest first**.
+    #[inline]
+    pub fn mips(&self) -> &[TexMipEntry] {
+        &self.mips
+    }
+
+    /// The tile directory, sorted by `(mip, y, x)`.
+    #[inline]
+    pub fn tiles(&self) -> &[TexTileEntry] {
+        &self.tiles
+    }
+
+    /// The directory index of `(mip, x, y)`, or `None` if it is outside the grid.
+    pub fn tile_index(&self, mip: u32, x: u32, y: u32) -> Option<usize> {
+        let m = self.mips.get(mip as usize)?;
+        if x >= m.tiles_x || y >= m.tiles_y {
+            return None;
+        }
+        Some((m.first_tile + y * m.tiles_x + x) as usize)
+    }
+
+    /// **The tile read door** (what P26.2's residency pages): the stored blob of
+    /// `(mip, x, y)` as a borrowed slice, whose offset is 16-byte aligned inside
+    /// the payload.
+    ///
+    /// The bytes are `STORED_TILE_SIZE²` texels in [`TiledTextureHeader::format`]
+    /// — payload plus border ring — ready to `write_texture` into a physical page
+    /// with no decode and no copy.
+    pub fn tile(&self, mip: u32, x: u32, y: u32) -> Option<&[u8]> {
+        let e = self.tiles.get(self.tile_index(mip, x, y)?)?;
+        // Bounds were validated in `parse`.
+        Some(&self.bytes.as_ref()[e.offset as usize..(e.offset + e.len) as usize])
+    }
+
+    /// [`tile`](Self::tile) by address.
+    pub fn tile_at(&self, at: TileCoord) -> Option<&[u8]> {
+        self.tile(at.mip, at.x, at.y)
+    }
+
+    /// **The CPU transcode door**: one stored tile decoded to RGBA8, still
+    /// `STORED_TILE_SIZE²` with its border ring intact.
+    ///
+    /// This is the fallback an adapter without `TEXTURE_COMPRESSION_BC` takes —
+    /// the *same* residency door, one page-format decision earlier. It reuses
+    /// [`crate::bc`]'s decoders, which the thumbnailer has depended on since P4.
+    pub fn tile_rgba8(&self, mip: u32, x: u32, y: u32) -> Option<Vec<u8>> {
+        let blob = self.tile(mip, x, y)?;
+        let n = self.header.stored_tile_size();
+        Some(match self.header.format {
+            TextureFormat::Rgba8 => blob.to_vec(),
+            TextureFormat::Bc1 => bc::decode_bc1(blob, n, n),
+            TextureFormat::Bc3 => bc::decode_bc3(blob, n, n),
+        })
+    }
+
+    /// One whole mip level, **borders stripped**, in the stored format — the
+    /// bytes v1 keeps in `TextureMip::data`.
+    ///
+    /// A re-gather, not a re-encode: a payload block of a tile *is* a block of
+    /// the level (see the module docs), so this copies block bytes straight
+    /// across for BC and texel rows for RGBA8.
+    pub fn level_bytes(&self, mip: u32) -> Option<Vec<u8>> {
+        let m = *self.mips.get(mip as usize)?;
+        let stored = self.header.stored_tile_size();
+        let border = self.header.border;
+        let tile_size = self.header.tile_size;
+        match self.header.format {
+            TextureFormat::Rgba8 => {
+                let mut out = vec![0u8; (m.width as usize) * (m.height as usize) * 4];
+                for ty in 0..m.tiles_y {
+                    for tx in 0..m.tiles_x {
+                        let blob = self.tile(mip, tx, ty)?;
+                        for j in 0..tile_size {
+                            let dy = ty * tile_size + j;
+                            if dy >= m.height {
+                                break;
+                            }
+                            let sj = (j + border) as usize;
+                            for i in 0..tile_size {
+                                let dx = tx * tile_size + i;
+                                if dx >= m.width {
+                                    break;
+                                }
+                                let si = (sj * stored as usize + (i + border) as usize) * 4;
+                                let di = ((dy * m.width + dx) * 4) as usize;
+                                out[di..di + 4].copy_from_slice(&blob[si..si + 4]);
+                            }
+                        }
+                    }
+                }
+                Some(out)
+            }
+            f => {
+                let block = if f == TextureFormat::Bc3 { 16usize } else { 8 };
+                let lbx = m.width.div_ceil(4);
+                let lby = m.height.div_ceil(4);
+                let sbx = (stored / 4) as usize; // blocks per stored tile row
+                let border_blocks = (border / 4) as usize;
+                let tile_blocks = (tile_size / 4) as usize;
+                let mut out = vec![0u8; lbx as usize * lby as usize * block];
+                for by in 0..lby {
+                    for bx in 0..lbx {
+                        let (tx, ty) = (bx as usize / tile_blocks, by as usize / tile_blocks);
+                        let blob = self.tile(mip, tx as u32, ty as u32)?;
+                        let si = ((by as usize % tile_blocks + border_blocks) * sbx
+                            + (bx as usize % tile_blocks + border_blocks))
+                            * block;
+                        let di = (by as usize * lbx as usize + bx as usize) * block;
+                        out[di..di + block].copy_from_slice(&blob[si..si + block]);
+                    }
+                }
+                Some(out)
+            }
+        }
+    }
+
+    /// The **v1 view**: the whole texture rebuilt as the record every consumer
+    /// written before P26.1 already knows how to read.
+    ///
+    /// Byte-identical to what v1 import would have written from the same source
+    /// (the block-grid property in the module docs), which is what lets the
+    /// thumbnailer, the sprite-sheet slicer and the PCG mask reader keep their
+    /// existing code with one call changed.
+    pub fn to_texture_asset(&self) -> Option<TextureAsset> {
+        let mips = (0..self.mips.len() as u32)
+            .map(|l| {
+                let m = self.mips[l as usize];
+                Some(TextureMip {
+                    width: m.width,
+                    height: m.height,
+                    data: self.level_bytes(l)?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(TextureAsset {
+            schema_version: TextureAsset::CURRENT_VERSION,
+            width: self.header.width,
+            height: self.header.height,
+            format: self.header.format,
+            srgb: self.header.srgb,
+            mips,
+        })
+    }
+}
+
+/// Parse + validate the header and both directories of a payload image.
+fn parse(data: &[u8]) -> Result<(TiledTextureHeader, Vec<TexMipEntry>, Vec<TexTileEntry>)> {
+    if (data.len() as u64) < HEADER_LEN {
+        return Err(TiledTextureError::TooShort);
+    }
+    if data[0..8] != TEX_ASSET_MAGIC {
+        return Err(TiledTextureError::BadMagic);
+    }
+    let u32_at = |o: usize| u32::from_le_bytes(data[o..o + 4].try_into().unwrap());
+    let u64_at = |o: usize| u64::from_le_bytes(data[o..o + 8].try_into().unwrap());
+
+    let schema_version = u32_at(8);
+    if schema_version > TEX_ASSET_SCHEMA_VERSION {
+        return Err(TiledTextureError::SchemaTooNew {
+            found: schema_version,
+            current: TEX_ASSET_SCHEMA_VERSION,
+        });
+    }
+    let format = format_from_code(u32_at(20)).ok_or_else(|| {
+        TiledTextureError::Malformed(format!("unknown format code {}", u32_at(20)))
+    })?;
+    let header = TiledTextureHeader {
+        schema_version,
+        width: u32_at(12),
+        height: u32_at(16),
+        format,
+        srgb: u32_at(24) & 1 != 0,
+        tile_size: u32_at(28),
+        border: u32_at(32),
+        mip_count: u32_at(36),
+        tile_count: u32_at(40),
+        tile_bytes: u32_at(44),
+        mip_dir_off: u64_at(48),
+        tile_dir_off: u64_at(56),
+        tile_base: u64_at(64),
+        total_len: u64_at(72),
+    };
+    if header.tile_size == 0
+        || !header.tile_size.is_multiple_of(4)
+        || !header.border.is_multiple_of(4)
+    {
+        return Err(TiledTextureError::Malformed(format!(
+            "tile geometry {}+2×{} is not a whole number of BC blocks",
+            header.tile_size, header.border
+        )));
+    }
+    let stored = header.stored_tile_size();
+    if header.tile_bytes as usize != format.level_size(stored, stored) {
+        return Err(TiledTextureError::Malformed(format!(
+            "tile_bytes {} does not match a {stored}² {:?} tile",
+            header.tile_bytes, format
+        )));
+    }
+    // Every record the header claims has to be *stored*, so the payload length
+    // bounds the counts from above — the `.inf_vmesh` discipline: a doctored
+    // header must never make a `Vec::with_capacity` ask the allocator for
+    // gigabytes from a file the process merely opened.
+    let payload_len = data.len() as u64;
+    let dir_end = HEADER_LEN
+        + MIP_ENTRY_LEN * header.mip_count as u64
+        + TILE_ENTRY_LEN * header.tile_count as u64;
+    if payload_len < dir_end {
+        return Err(TiledTextureError::TooShort);
+    }
+    if header.mip_dir_off != HEADER_LEN
+        || header.tile_dir_off != HEADER_LEN + MIP_ENTRY_LEN * header.mip_count as u64
+        || header.tile_base < header.tile_dir_off + TILE_ENTRY_LEN * header.tile_count as u64
+        || !header.tile_base.is_multiple_of(SECTION_ALIGN)
+    {
+        return Err(TiledTextureError::Malformed(
+            "directory offsets do not describe this payload".into(),
+        ));
+    }
+
+    let mut mips = Vec::with_capacity(header.mip_count as usize);
+    let mut next_tile = 0u32;
+    for i in 0..header.mip_count as usize {
+        let b = HEADER_LEN as usize + i * MIP_ENTRY_LEN as usize;
+        let e = TexMipEntry {
+            width: u32_at(b),
+            height: u32_at(b + 4),
+            tiles_x: u32_at(b + 8),
+            tiles_y: u32_at(b + 12),
+            first_tile: u32_at(b + 16),
+            tile_count: u32_at(b + 20),
+        };
+        if e.tiles_x == 0
+            || e.tiles_y == 0
+            || e.tiles_x != e.width.div_ceil(header.tile_size).max(1)
+            || e.tiles_y != e.height.div_ceil(header.tile_size).max(1)
+            || e.tile_count != e.tiles_x.saturating_mul(e.tiles_y)
+            || e.first_tile != next_tile
+        {
+            return Err(TiledTextureError::Malformed(format!(
+                "mip {i}'s grid does not tile its {}×{} extent",
+                e.width, e.height
+            )));
+        }
+        next_tile = e
+            .first_tile
+            .checked_add(e.tile_count)
+            .ok_or_else(|| TiledTextureError::Malformed("tile block overflows".into()))?;
+        mips.push(e);
+    }
+    if next_tile != header.tile_count {
+        return Err(TiledTextureError::Malformed(
+            "the mip directory does not account for exactly the header's tiles".into(),
+        ));
+    }
+
+    let mut tiles = Vec::with_capacity(header.tile_count as usize);
+    let end = payload_len;
+    for index in 0..header.tile_count as usize {
+        let b = header.tile_dir_off as usize + index * TILE_ENTRY_LEN as usize;
+        let e = TexTileEntry {
+            mip: u32_at(b),
+            x: u32_at(b + 4),
+            y: u32_at(b + 8),
+            offset: u64_at(b + 16),
+            len: u64_at(b + 24),
+        };
+        let m = mips
+            .get(e.mip as usize)
+            .ok_or(TiledTextureError::TileOutOfBounds { index })?;
+        // The directory's order IS its index: entry n must be the tile the
+        // (mip, y, x) walk puts at n. A reader computes an index arithmetically
+        // (`tile_index`), so a directory that merely *contains* the right entries
+        // in the wrong order would hand back the wrong bytes silently.
+        if m.first_tile + e.y * m.tiles_x + e.x != index as u32
+            || e.x >= m.tiles_x
+            || e.y >= m.tiles_y
+        {
+            return Err(TiledTextureError::Malformed(format!(
+                "tile directory entry {index} is labelled (mip {}, {}, {})",
+                e.mip, e.x, e.y
+            )));
+        }
+        if e.len != header.tile_bytes as u64
+            || !e.offset.is_multiple_of(SECTION_ALIGN)
+            || e.offset < header.tile_base
+            || e.offset.checked_add(e.len).is_none_or(|x| x > end)
+        {
+            return Err(TiledTextureError::TileOutOfBounds { index });
+        }
+        tiles.push(e);
+    }
+    Ok((header, mips, tiles))
+}
+
+/// Whether `bytes` look like a v2 tiled image (as opposed to a v1 bincode
+/// [`TextureAsset`], whose first four bytes are `schema_version = 1`).
+pub fn is_v2(bytes: &[u8]) -> bool {
+    bytes.len() >= 8 && bytes[0..8] == TEX_ASSET_MAGIC
+}
+
+/// Decode a `.inf_tex` payload of **either** version into the v1 record.
+///
+/// The one door every consumer that wants whole levels goes through; the
+/// tile-at-a-time readers use [`TiledTextureReader`] directly.
+pub fn decode_texture_payload(bytes: &[u8]) -> std::result::Result<TextureAsset, MaterialError> {
+    if is_v2(bytes) {
+        let r = TiledTextureReader::new(bytes).map_err(|e| MaterialError::Image(e.to_string()))?;
+        r.to_texture_asset()
+            .ok_or_else(|| MaterialError::Image("tiled .inf_tex will not reconstruct".into()))
+    } else {
+        inf_asset::decode::<TextureAsset>(bytes).map_err(|e| MaterialError::Image(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::texture::{texture_from_rgba8, TextureCompression, TextureImportSettings};
+
+    /// **The asymmetric fixture.** Four distinct corner colours plus a per-texel
+    /// gradient, so a transposed tile coordinate, a mirrored border or a swapped
+    /// row/column stride cannot pass by symmetry. Deliberately NOT a checkerboard:
+    /// a checkerboard is invariant under exactly the transforms this must catch.
+    fn corners(w: u32, h: u32) -> Vec<u8> {
+        let mut v = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let left = x * 2 < w;
+                let top = y * 2 < h;
+                let base: [u8; 3] = match (left, top) {
+                    (true, true) => [220, 20, 20],    // TL red
+                    (false, true) => [20, 200, 20],   // TR green
+                    (true, false) => [20, 20, 210],   // BL blue
+                    (false, false) => [230, 210, 30], // BR yellow
+                };
+                // A small gradient so no two texels inside a quadrant are equal.
+                let g = ((x % 8) as u8) << 1;
+                v.extend_from_slice(&[
+                    base[0].saturating_sub(g),
+                    base[1].saturating_sub(g),
+                    base[2].saturating_sub(g),
+                    255,
+                ]);
+            }
+        }
+        v
+    }
+
+    fn settings(c: TextureCompression) -> TextureImportSettings {
+        TextureImportSettings {
+            srgb: true,
+            generate_mips: true,
+            compression: c,
+        }
+    }
+
+    #[test]
+    fn the_tile_geometry_is_a_whole_number_of_bc_blocks() {
+        assert_eq!(STORED_TILE_SIZE, 136);
+        assert_eq!(STORED_TILE_SIZE % 4, 0);
+        assert_eq!(STORED_TILE_SIZE / 4, 34);
+        assert_eq!(stored_tile_bytes(TextureFormat::Bc1), 34 * 34 * 8);
+        assert_eq!(stored_tile_bytes(TextureFormat::Bc3), 34 * 34 * 16);
+        assert_eq!(stored_tile_bytes(TextureFormat::Rgba8), 136 * 136 * 4);
+        // Every stored tile is 16-byte aligned by its own size, so the blob
+        // stride never has to pad — the property the atlas slot count rests on.
+        for f in [TextureFormat::Rgba8, TextureFormat::Bc1, TextureFormat::Bc3] {
+            assert_eq!(stored_tile_bytes(f) % SECTION_ALIGN as usize, 0, "{f:?}");
+        }
+    }
+
+    /// The wire codes are written into shipped files: append-only, never
+    /// renumbered.
+    #[test]
+    fn format_codes_are_freeze_pinned() {
+        assert_eq!(format_code(TextureFormat::Rgba8), 0);
+        assert_eq!(format_code(TextureFormat::Bc1), 1);
+        assert_eq!(format_code(TextureFormat::Bc3), 2);
+        for f in [TextureFormat::Rgba8, TextureFormat::Bc1, TextureFormat::Bc3] {
+            assert_eq!(format_from_code(format_code(f)), Some(f));
+        }
+        assert_eq!(format_from_code(3), None);
+    }
+
+    #[test]
+    fn the_grid_tiles_every_level_of_the_full_pyramid() {
+        let img = build_tiled_texture(
+            corners(320, 192),
+            320,
+            192,
+            settings(TextureCompression::Bc1),
+        )
+        .unwrap();
+        let r = img.reader();
+        assert_eq!(r.header().width, 320);
+        assert_eq!(r.header().height, 192);
+        // 320,192 → 160,96 → 80,48 → 40,24 → 20,12 → 10,6 → 5,3 → 2,1 → 1,1
+        assert_eq!(r.mips().len(), 9);
+        assert_eq!(r.mips()[0].tiles_x, 3);
+        assert_eq!(r.mips()[0].tiles_y, 2);
+        assert_eq!(r.mips()[1].tiles_x, 2);
+        assert_eq!(r.mips()[1].tiles_y, 1);
+        for m in r.mips().iter().skip(2) {
+            assert_eq!((m.tiles_x, m.tiles_y), (1, 1), "a small level is one tile");
+        }
+        assert_eq!(r.tiles().len(), 6 + 2 + 7);
+        assert_eq!(r.header().tile_count as usize, r.tiles().len());
+    }
+
+    #[test]
+    fn every_tile_blob_is_aligned_sorted_and_the_declared_size() {
+        let img = build_tiled_texture(
+            corners(300, 260),
+            300,
+            260,
+            settings(TextureCompression::Bc3),
+        )
+        .unwrap();
+        let r = img.reader();
+        let mut previous: Option<(u32, u32, u32)> = None;
+        for (i, e) in r.tiles().iter().enumerate() {
+            assert_eq!(e.offset % SECTION_ALIGN, 0, "tile {i} is misaligned");
+            assert_eq!(e.len, r.header().tile_bytes as u64);
+            let key = (e.mip, e.y, e.x);
+            if let Some(p) = previous {
+                assert!(
+                    p < key,
+                    "tile directory is not sorted at {i}: {p:?} !< {key:?}"
+                );
+            }
+            previous = Some(key);
+            assert_eq!(r.tile_index(e.mip, e.x, e.y), Some(i));
+            assert_eq!(r.tile(e.mip, e.x, e.y).unwrap().len(), e.len as usize);
+        }
+        assert_eq!(r.tile(0, 99, 0), None, "outside the grid");
+        assert_eq!(r.tile(99, 0, 0), None, "outside the pyramid");
+    }
+
+    /// **The load-bearing claim**: a v2 image reconstructs, byte for byte, the
+    /// v1 record the same source would have produced — for every level and every
+    /// format. Everything downstream (the thumbnailer, the slicer, the PCG mask)
+    /// rests on this being exact rather than approximate.
+    #[test]
+    fn the_v1_view_is_byte_identical_to_v1() {
+        for c in [
+            TextureCompression::None,
+            TextureCompression::Bc1,
+            TextureCompression::Bc3,
+        ] {
+            for (w, h) in [(320u32, 192u32), (300, 260), (64, 64), (5, 3), (1, 1)] {
+                let s = settings(c);
+                let v1 = texture_from_rgba8(corners(w, h), w, h, s).unwrap();
+                let v2 = build_tiled_texture(corners(w, h), w, h, s).unwrap();
+                let view = v2.reader().to_texture_asset().expect("reconstructs");
+                assert_eq!(view, v1, "{c:?} {w}×{h}");
+            }
+        }
+    }
+
+    /// The same claim through the public door, on the bytes a consumer actually
+    /// holds — and the v1 sniff in both directions.
+    #[test]
+    fn the_decode_door_takes_both_versions() {
+        let s = settings(TextureCompression::Bc1);
+        let v1 = texture_from_rgba8(corners(160, 160), 160, 160, s).unwrap();
+        let v1_bytes = inf_asset::encode(&v1).unwrap();
+        let v2_bytes = build_tiled_texture(corners(160, 160), 160, 160, s)
+            .unwrap()
+            .into_bytes();
+
+        assert!(!is_v2(&v1_bytes), "a bincode payload must not sniff as v2");
+        assert!(is_v2(&v2_bytes));
+        assert_eq!(decode_texture_payload(&v1_bytes).unwrap(), v1);
+        assert_eq!(decode_texture_payload(&v2_bytes).unwrap(), v1);
+    }
+
+    /// Two builds of one source are byte-identical — no timestamps, no map
+    /// iteration, deterministic padding. A re-import must produce the same
+    /// content hash or the import cache is a lie.
+    #[test]
+    fn the_encode_is_a_pure_function_of_its_source() {
+        let s = settings(TextureCompression::Auto);
+        let a = build_tiled_texture(corners(300, 260), 300, 260, s).unwrap();
+        let b = build_tiled_texture(corners(300, 260), 300, 260, s).unwrap();
+        assert_eq!(a.as_bytes(), b.as_bytes());
+        // And re-parsing the bytes yields the same image.
+        let c = TiledTextureImage::from_bytes(a.as_bytes().to_vec()).unwrap();
+        assert_eq!(c, a);
+    }
+
+    /// **Per-corner, per-tile.** A transposed tile coordinate would put the
+    /// green corner where the blue one belongs; a symmetric fixture would never
+    /// notice. Asserted on the decoded PAYLOAD centre of each corner tile, so
+    /// the border ring cannot mask a mistake either.
+    #[test]
+    fn each_corner_tile_holds_its_own_corner() {
+        let (w, h) = (320u32, 192u32);
+        let img =
+            build_tiled_texture(corners(w, h), w, h, settings(TextureCompression::None)).unwrap();
+        let r = img.reader();
+        let m = r.mips()[0];
+        assert_eq!((m.tiles_x, m.tiles_y), (3, 2));
+        let centre = |tx: u32, ty: u32| -> [u8; 3] {
+            let t = r.tile_rgba8(0, tx, ty).unwrap();
+            let n = STORED_TILE_SIZE as usize;
+            // The payload centre: border + 64 in both axes.
+            let i = (((TILE_BORDER + 64) as usize) * n + (TILE_BORDER + 64) as usize) * 4;
+            [t[i], t[i + 1], t[i + 2]]
+        };
+        let dominant = |c: [u8; 3]| -> usize { (0..3).max_by_key(|&i| c[i]).unwrap() };
+        // (0,0) is inside the red top-left quadrant; (2,0) the green top-right;
+        // (0,1) the blue bottom-left; (2,1) the yellow bottom-right (R≈G > B).
+        assert_eq!(dominant(centre(0, 0)), 0, "top-left tile is not red");
+        assert_eq!(dominant(centre(2, 0)), 1, "top-right tile is not green");
+        assert_eq!(dominant(centre(0, 1)), 2, "bottom-left tile is not blue");
+        let br = centre(2, 1);
+        assert!(
+            br[0] > 150 && br[1] > 150 && br[2] < 80,
+            "bottom-right tile is not yellow: {br:?}"
+        );
+        // Anti-vacuity: the four corners are genuinely different from each other.
+        let all = [centre(0, 0), centre(2, 0), centre(0, 1), centre(2, 1)];
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                assert_ne!(all[i], all[j], "corners {i} and {j} are the same colour");
+            }
+        }
+    }
+
+    /// The border ring is the **neighbour's** texels, not a repeat of the tile's
+    /// own edge — which is the entire reason it exists. Measured on the seam
+    /// between tile (0,0) and tile (1,0) of an uncompressed image, where the
+    /// comparison is exact.
+    #[test]
+    fn the_border_ring_carries_the_neighbouring_texels() {
+        let (w, h) = (320u32, 192u32);
+        let src = corners(w, h);
+        let img =
+            build_tiled_texture(src.clone(), w, h, settings(TextureCompression::None)).unwrap();
+        let r = img.reader();
+        let n = STORED_TILE_SIZE as usize;
+        let t0 = r.tile_rgba8(0, 0, 0).unwrap();
+        let at = |t: &[u8], i: u32, j: u32| -> [u8; 4] {
+            let o = ((j as usize) * n + i as usize) * 4;
+            [t[o], t[o + 1], t[o + 2], t[o + 3]]
+        };
+        let source = |x: u32, y: u32| -> [u8; 4] {
+            let o = ((y * w + x) * 4) as usize;
+            [src[o], src[o + 1], src[o + 2], src[o + 3]]
+        };
+        // Tile (0,0)'s RIGHT border columns are source columns 128..132 — the
+        // first four columns of tile (1,0)'s payload.
+        for k in 0..TILE_BORDER {
+            let stored_i = TILE_BORDER + TILE_SIZE + k;
+            assert_eq!(
+                at(&t0, stored_i, TILE_BORDER + 40),
+                source(TILE_SIZE + k, 40),
+                "right border column {k} is not the neighbour's texel"
+            );
+        }
+        // And it is NOT a repeat of the tile's own last payload column.
+        assert_ne!(
+            at(&t0, TILE_BORDER + TILE_SIZE, TILE_BORDER + 40),
+            at(&t0, TILE_BORDER + TILE_SIZE - 1, TILE_BORDER + 40),
+            "the border merely repeats the edge — nothing was baked"
+        );
+        // On the level's own boundary the rule is clamp: tile (0,0)'s LEFT
+        // border is column 0 repeated.
+        for k in 0..TILE_BORDER {
+            assert_eq!(
+                at(&t0, k, TILE_BORDER + 40),
+                source(0, 40),
+                "left border is not clamped"
+            );
+        }
+    }
+
+    /// A lifted v1 asset is a legal tiled image with the same geometry — and for
+    /// an uncompressed one it is exact, which is what proves the lift is a
+    /// re-layout rather than a re-render.
+    #[test]
+    fn a_v1_asset_lifts_into_the_tiled_container() {
+        let s = settings(TextureCompression::None);
+        let v1 = texture_from_rgba8(corners(300, 260), 300, 260, s).unwrap();
+        let lifted = lift_texture_asset(&v1).unwrap();
+        assert_eq!(lifted.reader().to_texture_asset().unwrap(), v1);
+        // Identical to tiling the original pixels directly.
+        let direct = build_tiled_texture(corners(300, 260), 300, 260, s).unwrap();
+        assert_eq!(lifted.as_bytes(), direct.as_bytes());
+        // Deterministic for the BC case too, even though it is a re-encode.
+        let s = settings(TextureCompression::Bc1);
+        let v1 = texture_from_rgba8(corners(160, 160), 160, 160, s).unwrap();
+        let a = lift_texture_asset(&v1).unwrap();
+        let b = lift_texture_asset(&v1).unwrap();
+        assert_eq!(a.as_bytes(), b.as_bytes());
+        assert_eq!(a.reader().header().format, TextureFormat::Bc1);
+    }
+
+    #[test]
+    fn parse_refuses_a_doctored_payload() {
+        let img = build_tiled_texture(
+            corners(160, 160),
+            160,
+            160,
+            settings(TextureCompression::Bc1),
+        )
+        .unwrap();
+        let good = img.into_bytes();
+
+        assert_eq!(
+            TiledTextureImage::from_bytes(vec![0u8; 8]).unwrap_err(),
+            TiledTextureError::TooShort
+        );
+        let mut bad = good.clone();
+        bad[3] = b'X';
+        assert_eq!(
+            TiledTextureImage::from_bytes(bad).unwrap_err(),
+            TiledTextureError::BadMagic
+        );
+        let mut bad = good.clone();
+        bad[8..12].copy_from_slice(&99u32.to_le_bytes());
+        assert_eq!(
+            TiledTextureImage::from_bytes(bad).unwrap_err(),
+            TiledTextureError::SchemaTooNew {
+                found: 99,
+                current: 2
+            }
+        );
+        // A tile offset dragged off its 16-byte boundary.
+        let mut bad = good.clone();
+        let dir = u64::from_le_bytes(bad[56..64].try_into().unwrap()) as usize;
+        let off = u64::from_le_bytes(bad[dir + 16..dir + 24].try_into().unwrap());
+        bad[dir + 16..dir + 24].copy_from_slice(&(off + 1).to_le_bytes());
+        assert_eq!(
+            TiledTextureImage::from_bytes(bad).unwrap_err(),
+            TiledTextureError::TileOutOfBounds { index: 0 }
+        );
+        // A mip grid that does not tile its own extent.
+        let mut bad = good.clone();
+        bad[HEADER_LEN as usize + 8..HEADER_LEN as usize + 12].copy_from_slice(&7u32.to_le_bytes());
+        assert!(matches!(
+            TiledTextureImage::from_bytes(bad).unwrap_err(),
+            TiledTextureError::Malformed(_)
+        ));
+        // An unknown format code.
+        let mut bad = good.clone();
+        bad[20..24].copy_from_slice(&9u32.to_le_bytes());
+        assert!(matches!(
+            TiledTextureImage::from_bytes(bad).unwrap_err(),
+            TiledTextureError::Malformed(_)
+        ));
+        // Truncation past the directory.
+        let mut bad = good.clone();
+        bad.truncate(good.len() - 16);
+        assert!(TiledTextureImage::from_bytes(bad).is_err());
+        // The good one still parses (anti-vacuity: the doctoring is what failed).
+        assert!(TiledTextureImage::from_bytes(good).is_ok());
+    }
+
+    /// The tail of the pyramid is measured rather than assumed — the honest cost
+    /// of a uniform page size, recorded where a future packing pass will find it.
+    #[test]
+    fn the_uniform_tail_cost_is_what_the_docs_claim() {
+        let img = build_tiled_texture(
+            corners(256, 256),
+            256,
+            256,
+            settings(TextureCompression::Bc1),
+        )
+        .unwrap();
+        let r = img.reader();
+        // 256² → 4 tiles at mip 0, 1 at mip 1, then 7 single-tile tail levels.
+        assert_eq!(r.mips().len(), 9);
+        let tail: usize = r.mips()[2..].iter().map(|m| m.tile_count as usize).sum();
+        assert_eq!(tail, 7);
+        assert_eq!(tail * stored_tile_bytes(TextureFormat::Bc1), 64_736);
+    }
+}
