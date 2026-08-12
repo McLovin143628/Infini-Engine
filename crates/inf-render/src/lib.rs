@@ -32,6 +32,7 @@ pub mod renderer;
 pub mod scene;
 pub mod settings;
 pub mod surface;
+pub mod vt;
 pub mod water;
 pub mod wetness;
 
