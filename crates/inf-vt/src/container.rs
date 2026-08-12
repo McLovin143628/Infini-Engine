@@ -694,6 +694,59 @@ fn blit_block(
 mod tests {
     use super::*;
 
+    /// **The container never touches a float, decoders included, and that is a
+    /// LAW** — the encoder's P26.1 gate, followed to where P26.3 moved its other
+    /// half.
+    ///
+    /// `inf_material::bc`'s gate scopes over `bc.rs` and could never see this
+    /// file. The claim it makes reaches here all the same, and on the arm that
+    /// matters most: `tile_rgba8` transcodes a BC page for an adapter without
+    /// `TEXTURE_COMPRESSION_BC` — every mobile target — and that RGBA8 page is
+    /// what the atlas holds and the shader samples. One `as f32` in
+    /// `decode_color_block`'s palette interpolation and the same tile becomes a
+    /// different image on a phone than on a desktop, with nothing comparing the
+    /// two: the P14 trig law's shape, one tier down.
+    ///
+    /// Scoped to the code ABOVE this test module, on the encoder gate's pattern —
+    /// a ban list has to be able to name the tokens it bans, and the fixtures
+    /// below legitimately use floats.
+    #[test]
+    fn the_container_never_touches_a_float() {
+        let whole = include_str!("container.rs");
+        let marker = "#[cfg(test)]";
+        let (code, _) = whole
+            .split_once(marker)
+            .expect("the test module marker moved; this gate scopes on it");
+        let code: String = code
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for banned in ["f32", "f64", "sqrt", "powf", "powi", "as f"] {
+            assert!(
+                !code.contains(banned),
+                "`{banned}` reached the container: a decoded RGBA8 page is no \
+                 longer the same bytes on every target, so a transcoding adapter \
+                 samples a different image from a BC one"
+            );
+        }
+        // A bare `0.5` is an f64 with no annotation to grep for.
+        let chars: Vec<char> = code.chars().collect();
+        assert!(
+            !chars
+                .windows(3)
+                .any(|w| w[0].is_ascii_digit() && w[1] == '.' && w[2].is_ascii_digit()),
+            "a decimal literal reached the container"
+        );
+        // Anti-vacuity: the filter left the code behind, not only the comments —
+        // both the parser and the decoders, because a filter that ate one half
+        // would leave the other and still pass.
+        assert!(
+            code.contains("pub fn parse(") && code.contains("fn decode_color_block"),
+            "the source filter ate the container"
+        );
+    }
+
     /// The format code is written into shipped files, so it is a wire contract
     /// and not an enum's discriminant: pinned by value, both directions.
     #[test]
