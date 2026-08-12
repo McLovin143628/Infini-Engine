@@ -1050,6 +1050,87 @@ mod tests {
         }
     }
 
+    /// **The extents the matrix above does not reach** (P26.1 audit). Every one
+    /// of them is a place where the tiling arithmetic could differ from itself,
+    /// and none of `{320×192, 300×260, 64×64, 5×3, 1×1}` visits any of them:
+    ///
+    /// * `128` — exactly one tile, so *every* border texel on all four sides is
+    ///   clamp padding and none of it is a neighbour;
+    /// * `129` — one texel past, so the second tile is 1 texel of payload and 135
+    ///   of border, and `ceil(129/4) = 33` blocks means level block 32 lives in
+    ///   tile 1 (the `bx / 32` index has to land inside `tiles_x`);
+    /// * `4`, `3`, `2` — levels at and *below* the 4-texel border ring, where a
+    ///   stored texel's clamped source coordinate is the same one for most of
+    ///   the row;
+    /// * `8192×4` — a 64×1 grid whose chain runs 14 levels because the `≥1`
+    ///   floor pins the short axis while `ceil` keeps halving the long one.
+    ///
+    /// The load-bearing assertion is byte identity with v1, because it subsumes
+    /// the block-grid-offset premise the whole compatibility story rests on:
+    /// stored block `b` of tile `tx` re-gathers into level block `tx·32 + b − 1`
+    /// only if the offset is right — *including* at tile 0, where the stored
+    /// block begins at source texel −4 and is pure clamp.
+    #[test]
+    fn the_v1_view_is_byte_identical_at_the_awkward_extents() {
+        for (w, h) in [
+            (128u32, 128u32),
+            (129, 129),
+            (129, 3),
+            (255, 128),
+            (4, 4),
+            (3, 3),
+            (2, 2),
+            (2, 1),
+            (1, 7),
+        ] {
+            for c in [
+                TextureCompression::None,
+                TextureCompression::Bc1,
+                TextureCompression::Bc3,
+            ] {
+                let s = settings(c);
+                let v1 = texture_from_rgba8(corners(w, h), w, h, s).unwrap();
+                let v2 = build_tiled_texture(corners(w, h), w, h, s).unwrap();
+                let r = v2.reader();
+                assert_eq!(
+                    r.to_texture_asset().expect("reconstructs"),
+                    v1,
+                    "{c:?} {w}×{h}"
+                );
+                assert_eq!(r.mips().len(), v1.mips.len(), "{c:?} {w}×{h}: level count");
+                for (i, m) in r.mips().iter().enumerate() {
+                    assert_eq!(
+                        (m.width, m.height),
+                        (v1.mips[i].width, v1.mips[i].height),
+                        "{c:?} {w}×{h}: mip {i}"
+                    );
+                    assert_eq!(m.tiles_x, m.width.div_ceil(TILE_SIZE).max(1));
+                    assert_eq!(m.tiles_y, m.height.div_ceil(TILE_SIZE).max(1));
+                    // The last tile of the level is where the directory says.
+                    assert_eq!(
+                        r.tile_index(i as u32, m.tiles_x - 1, m.tiles_y - 1),
+                        Some((m.first_tile + m.tile_count - 1) as usize),
+                        "{c:?} {w}×{h}: mip {i}'s last tile"
+                    );
+                }
+            }
+        }
+
+        // The non-square extreme, BC1 only: an 8192×4 RGBA8 pyramid is 10 MB of
+        // tile for no coverage the BC1 one does not already give.
+        let (w, h) = (8192u32, 4u32);
+        let s = settings(TextureCompression::Bc1);
+        let v1 = texture_from_rgba8(corners(w, h), w, h, s).unwrap();
+        let r_owned = build_tiled_texture(corners(w, h), w, h, s).unwrap();
+        let r = r_owned.reader();
+        assert_eq!((r.mips()[0].tiles_x, r.mips()[0].tiles_y), (64, 1));
+        assert_eq!(r.mips().len(), 14, "the ≥1 floor holds the short axis at 1");
+        assert_eq!(r.tiles().len(), 64 + 32 + 16 + 8 + 4 + 2 + 1 + 7);
+        assert_eq!(r.to_texture_asset().unwrap(), v1);
+        // …and it is the shape the aspect-ratio advisory exists to warn about.
+        assert_eq!(crate::texture::texture_import_advisories(w, h).len(), 1);
+    }
+
     /// The same claim through the public door, on the bytes a consumer actually
     /// holds — and the v1 sniff in both directions.
     #[test]
