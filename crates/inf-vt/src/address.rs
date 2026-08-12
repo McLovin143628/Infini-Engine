@@ -12,12 +12,20 @@
 //!   same index;
 //! * the fragment shader (P26.3), which walks *down* from a `uv` and a mip.
 //!
-//! The third one never sees a [`TileCoord`] at all: it computes the tile from the
-//! `uv` directly at whatever mip the table hands it back. That the two agree —
-//! that the clamped parent chain lands on exactly the tile a `uv` lands in — is
-//! the **sampling contract**, and
-//! [`tests::the_parent_chain_agrees_with_direct_texel_addressing`] asserts it
-//! over a swept set of extents rather than assuming it.
+//! The third one gets a `uv` and a mip and must land on the tile the *table
+//! entry* names. It must therefore walk the tile tree down from the address it
+//! asked for — [`VtTextureDesc::ancestor`]'s walk, `min(t / 2, tiles - 1)` per
+//! level — and **must not re-derive the tile from `uv` at the resolved mip**. The
+//! two are not the same function: the container halves an extent with `w / 2`, so
+//! on a level whose extent is odd `uv × w_coarse` is not `texel / 2`, and at a
+//! tile boundary the two land in different tiles (measured: 1 322 addresses of a
+//! 4 095² pyramid). What *is* true, and what the shader's `+ border` rests on, is
+//! that the resolved level's texel sits inside the named tile's payload extended
+//! by the border ring — never more than one texel out. That is the **sampling
+//! contract**, asserted over a swept set of extents by
+//! [`tests::the_offset_inside_the_resolved_tile_is_covered_by_the_border`], with
+//! the forbidden alternative pinned by
+//! [`tests::the_shader_must_not_re_derive_the_tile_from_uv`].
 
 use std::ops::Range;
 
@@ -209,9 +217,10 @@ impl VtTextureDesc {
     /// The ancestor of `at` at level `target` (`target >= at.mip`), following the
     /// same clamped chain [`parent`](Self::parent) walks.
     ///
-    /// This is the CPU twin of what the fragment shader does when the table hands
-    /// it back a coarser mip than it asked for — see the sampling contract in the
-    /// module docs.
+    /// **This is the tile an indirection entry names**, and the CPU twin of the
+    /// walk the fragment shader must do when the table hands it back a coarser
+    /// mip than it asked for. It is *not* [`tile_at_texel`](Self::tile_at_texel)
+    /// at the coarser level — see the sampling contract in the module docs.
     pub fn ancestor(&self, at: TileCoord, target: u32) -> Option<TileCoord> {
         if !self.contains(at) || target < at.mip || target as usize >= self.mips.len() {
             return None;
@@ -225,10 +234,12 @@ impl VtTextureDesc {
 
     /// The tile of level `mip` that texel `(px, py)` of **that level** falls in.
     ///
-    /// The shader's arithmetic, on the CPU: it never walks a parent chain, it
-    /// converts a `uv` to the level's texel coordinates and divides. The
-    /// sampling-contract gate asserts this agrees with [`ancestor`](Self::ancestor)
-    /// for every tile of every level of a swept set of extents.
+    /// The arithmetic for the mip a sample *asks* for, where the texel and the
+    /// tile come from the same level and the answer is exact. It is **not** how a
+    /// fallback is addressed: applied at a coarser level than the one that was
+    /// asked for it disagrees with [`ancestor`](Self::ancestor) by a whole tile on
+    /// an odd chain, which
+    /// [`tests::the_shader_must_not_re_derive_the_tile_from_uv`] measures.
     pub fn tile_at_texel(&self, mip: u32, px: u32, py: u32) -> Option<TileCoord> {
         let m = self.mips.get(mip as usize)?;
         Some(TileCoord::new(
@@ -447,6 +458,9 @@ mod tests {
             (300, 260),
             (129, 3),
             (8192, 4),
+            (4, 8192),
+            (255, 255),
+            (511, 3),
             (128, 128),
             (1, 1),
         ] {
@@ -479,27 +493,54 @@ mod tests {
         }
     }
 
-    /// **The sampling contract**, on the CPU: the clamped parent chain lands on
-    /// exactly the tile a texel of the coarser level falls in. P26.3's shader
-    /// computes the right-hand side; this crate computes the left-hand side.
+    /// **The sampling contract**, on the CPU — the arithmetic P26.3's shader has
+    /// to implement, and the one it must not.
+    ///
+    /// The tile an entry names is [`ancestor`](VtTextureDesc::ancestor)'s, walked
+    /// down the tile tree from the address that was asked for. The *offset inside
+    /// that tile* is then the resolved level's texel minus that tile's origin —
+    /// and this arm's real content is that the offset stays inside the tile's
+    /// payload **extended by the border ring**, because on an odd chain it does
+    /// not stay inside the payload.
+    ///
+    /// See [`the_shader_must_not_re_derive_the_tile_from_uv`] for the measurement
+    /// that forbids the obvious alternative.
     #[test]
-    fn the_parent_chain_agrees_with_direct_texel_addressing() {
+    fn the_offset_inside_the_resolved_tile_is_covered_by_the_border() {
+        // The awkward extents, swept rather than sampled: a one-texel sliver
+        // (257), a one-texel-SHORT level (255, whose last tile is 127 texels), a
+        // 14-level strip in both orientations (8192×4, 4×8192 — the only shapes
+        // where `tiles_x != tiles_y` for most of the chain), and five pyramids
+        // whose levels are ODD and wide enough to have more than one parent tile,
+        // which is the only shape where the tile tree and the uv derivation part.
+        let mut disagreements = 0u64;
+        let (mut lo, mut hi) = (i64::MAX, i64::MIN);
         for (w, h) in [
             (320u32, 192u32),
             (257, 257),
+            (255, 255),
             (300, 260),
             (129, 129),
+            (511, 3),
             (8192, 4),
+            (4, 8192),
             (1000, 1),
+            (1023, 1023),
+            (2047, 511),
+            (777, 333),
         ] {
             let d = full_pyramid(w, h, 128, 4, false);
+            let (tile, border) = (d.tile_size as i64, d.border as i64);
             for mip in 0..d.mip_count() {
                 let m = d.mips[mip as usize];
                 for ty in 0..m.tiles_y {
                     for tx in 0..m.tiles_x {
                         let at = TileCoord::new(mip, tx, ty);
                         // A texel inside this tile, in the level's own space, at
-                        // both the low corner and the last texel it owns.
+                        // both the low corner and the last texel it owns. Two
+                        // corners suffice: `tile_at_texel` is monotone in the
+                        // texel, so an interior texel cannot leave a range both
+                        // ends of which are inside it.
                         for (px, py) in [
                             (tx * d.tile_size, ty * d.tile_size),
                             (
@@ -513,17 +554,76 @@ mod tests {
                                 let t = d.mips[target as usize];
                                 let qx = ((u * t.width as f64) as u32).min(t.width - 1);
                                 let qy = ((v * t.height as f64) as u32).min(t.height - 1);
-                                assert_eq!(
-                                    d.ancestor(at, target),
-                                    d.tile_at_texel(target, qx, qy),
-                                    "{w}×{h}: {at:?} → mip {target} disagrees with uv ({u}, {v})"
-                                );
+                                let anc = d.ancestor(at, target).expect("an ancestor exists");
+                                disagreements +=
+                                    u64::from(Some(anc) != d.tile_at_texel(target, qx, qy));
+                                for (q, a) in [(qx, anc.x), (qy, anc.y)] {
+                                    let local = q as i64 - a as i64 * tile;
+                                    lo = lo.min(local);
+                                    hi = hi.max(local);
+                                    assert!(
+                                        (-border..tile + border).contains(&local),
+                                        "{w}×{h}: {at:?} → mip {target} lands {local} texels \
+                                         into a {tile}-texel tile with a {border}-texel border \
+                                         — outside the page {anc:?} occupies"
+                                    );
+                                }
                             }
                         }
                     }
                 }
             }
         }
+        // Anti-vacuity, both halves. The bound above is satisfied trivially by a
+        // sweep where the two derivations never part, and that is exactly what
+        // the first version of this arm was: every odd extent it swept had a
+        // ONE-TILE parent level, where the clamp hides the disagreement.
+        assert!(
+            disagreements > 0,
+            "no address in the sweep disagreed with its uv derivation — the extents \
+             stopped reaching the case the border is here for"
+        );
+        assert!(
+            lo < 0,
+            "the offset never went negative ({lo}..={hi}), so the border was never load-bearing"
+        );
+    }
+
+    /// **The shader may not re-derive the tile from `uv` at the resolved mip.**
+    ///
+    /// The tempting line is `floor(gp / tile_size)`, and it is wrong wherever a
+    /// level's extent is odd: the container halves with `w / 2`, dropping the odd
+    /// texel, so `uv × w_coarse` is not `texel / 2` and the two land in different
+    /// tiles at a tile boundary. The tile tree has no answer to that — a tile of
+    /// a 511-texel level straddles two tiles of the 255-texel level above it, so
+    /// it cannot have two parents — which is precisely why the offset is taken
+    /// against the tile the *entry* names and the border ring absorbs the texel
+    /// of slack.
+    ///
+    /// Measured, so the class is a number rather than an anecdote: 1 address of a
+    /// 511×3 pyramid, 50 of 1023², 51 of 2047×511 and **1 322 of 4095²**. Each one
+    /// is a sample fetched a whole tile — 128 texels — from where it belongs.
+    #[test]
+    fn the_shader_must_not_re_derive_the_tile_from_uv() {
+        let d = full_pyramid(511, 3, 128, 4, false);
+        assert_eq!((d.mips[0].tiles_x, d.mips[1].tiles_x), (4, 2));
+        assert_eq!(d.mips[1].width, 255, "511 halves to 255, not to 256");
+
+        let at = TileCoord::new(0, 2, 0);
+        // The tile tree: tile 2 of mip 0 hangs under tile 1 of mip 1.
+        assert_eq!(d.ancestor(at, 1), Some(TileCoord::new(1, 1, 0)));
+        // The uv derivation, at this tile's very first texel: mip 0's texel 256
+        // is 127.999 of mip 1 — tile 0.
+        let u = (256.0 + 0.5) / 511.0;
+        let qx = (u * 255.0) as u32;
+        assert_eq!(qx, 127);
+        assert_eq!(d.tile_at_texel(1, qx, 0), Some(TileCoord::new(1, 0, 0)));
+        // One texel of slack against the tile the entry names — inside the border
+        // ring, which the container fills from this level's own texels under the
+        // same clamp. A whole tile of slack against the tile uv would have named.
+        let local = |tile_x: u32| qx as i64 - tile_x as i64 * d.tile_size as i64;
+        assert_eq!(local(1), -1, "against the tile the entry names");
+        assert_eq!(local(0), 127, "against the tile uv would have named");
     }
 
     #[test]

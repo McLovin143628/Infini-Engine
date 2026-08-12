@@ -58,31 +58,41 @@
 //! The entry an address resolves to is never "the tile you asked for": it is the
 //! **finest resident ancestor** of the tile you asked for, which is why the entry
 //! carries a mip as well as a slot. The shader therefore re-derives its texel
-//! position at the mip it was given, rather than at the mip it wanted:
+//! position at the mip it was given, rather than at the mip it wanted — and walks
+//! the **tile tree** to find out which tile that page is:
 //!
 //! ```wgsl
 //! // uv: virtual UV in [0,1]²; want_mip: from the gradient
 //! let b        = vt_table[VT_DIR + tex_id];          // this texture's block
-//! let tile_sz  = f32(vt_table[b + 1u]);
+//! let tsz      =      vt_table[b + 1u];              // payload texels per side
+//! let tile_sz  = f32(tsz);
 //! let border   = f32(vt_table[b + 2u]);
 //! let m        = min(want_mip, vt_table[b + 0u] - 1u);
 //! let rec      = b + 4u + m * 4u;                    // the wanted mip's record
 //! let w        = f32(vt_table[rec + 0u]);
 //! let h        = f32(vt_table[rec + 1u]);
 //! let tiles_x  =      vt_table[rec + 2u];
+//! // Both axes clamp: uv reaching exactly 1.0 is off the end of the grid.
 //! let tx       = min(u32(uv.x * w / tile_sz), tiles_x - 1u);
-//! let ty       = u32(uv.y * h / tile_sz);
+//! let ty       = min(u32(uv.y * h / tile_sz), (vt_table[rec + 1u] + tsz - 1u) / tsz - 1u);
 //! let entry    = vt_table[vt_table[rec + 3u] + ty * tiles_x + tx];
 //!
 //! let slot     = entry & 0xFFFFu;                    // physical page
 //! let got      = (entry >> 16u) & 0xFFu;             // the mip we ACTUALLY got
 //!
-//! // Re-derive the texel at the resolved mip. This is the CPU
-//! // `VtTextureDesc::ancestor` walk, done directly from uv — the two agree, and
-//! // that agreement is the sampling contract (`address.rs`'s tests pin it).
+//! // Walk the TILE TREE down to the resolved mip — `VtTextureDesc::ancestor`,
+//! // one bounded step per level, reading only mip records. Do NOT re-derive the
+//! // tile from uv at `got`: see the warning below.
+//! var gtx = tx; var gty = ty;
+//! for (var lv = m; lv < got; lv = lv + 1u) {
+//!     let r = b + 4u + (lv + 1u) * 4u;               // the NEXT level's record
+//!     gtx = min(gtx / 2u, vt_table[r + 2u] - 1u);
+//!     gty = min(gty / 2u, (vt_table[r + 1u] + tsz - 1u) / tsz - 1u);
+//! }
+//!
 //! let grec     = b + 4u + got * 4u;
 //! let gp       = uv * vec2(f32(vt_table[grec]), f32(vt_table[grec + 1u]));
-//! let local    = gp - floor(gp / tile_sz) * tile_sz;  // in [0, tile_size)
+//! let local    = gp - vec2(f32(gtx), f32(gty)) * tile_sz;  // in [-1, tile_size)
 //!
 //! let origin   = vec2(f32((slot % slots_x) * stored), f32((slot / slots_x) * stored));
 //! let atlas_uv = (origin + vec2(border) + local) / vec2(atlas_size);
@@ -92,6 +102,23 @@
 //! The `+ border` is the whole reason the container bakes a border ring: a texel
 //! at the payload edge filters against real neighbours from the same mip, not
 //! against whatever page happens to sit beside it in the atlas.
+//!
+//! # Why `local` is not `gp - floor(gp / tile_sz) * tile_sz`
+//!
+//! Because that re-derives the tile from `uv` at the mip that was *resolved*, and
+//! the tile tree is not that function. The container halves an extent with
+//! `w / 2`, so a 511-texel level sits over a **255**-texel one and `uv × 255` is
+//! not `texel / 2`: mip 0's texel 256 — the first texel of tile 2 — is 127.999 of
+//! mip 1, which is tile **0**, while the entry it read was resolved through tile
+//! **1**. The sample then lands 128 texels from where it belongs, at exactly one
+//! column of exactly one tile boundary, which is the shape of artifact that ships.
+//! Measured across a swept pyramid set in `address.rs`: 1 of a 511×3 pyramid, 50
+//! of 1 023², 51 of 2 047×511, **1 322 of 4 095²**.
+//!
+//! Taking the offset against the tile the entry names instead leaves at most one
+//! texel of slack (measured: `local` never leaves `[-1, tile_size)`), and the
+//! border ring — filled from this level's own texels under the same clamp —
+//! covers it four times over.
 
 use crate::address::{TileCoord, VtTextureDesc};
 
