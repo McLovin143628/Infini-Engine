@@ -31,15 +31,18 @@
 //!   must fold a **different** trace, or the equality above is a statement about
 //!   two empty worlds agreeing.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use inf_asset::{AssetId, AssetKind, AssetSidecar, ContentHash, PackReader};
 use inf_ecs::components::{ClothSim, HairGuides, Material, SkeletalMesh};
+use inf_editor_core::pie::PieSession;
 use inf_editor_core::scene::{serialize, SceneDoc};
 use inf_material::{MatBlend, MaterialAsset, TextureCompression, TextureImportSettings};
 use inf_packager::{cook, CookOptions};
 use inf_project::ProjectManifest;
+use inf_runtime::pie::PlayerToEditor;
 use uuid::Uuid;
 
 // ── the fixture's stable ids ────────────────────────────────────────────────
@@ -50,13 +53,29 @@ const ALBEDO: Uuid = Uuid::from_u128(0x2603_0000_0000_0003);
 const ORM: Uuid = Uuid::from_u128(0x2603_0000_0000_0004);
 const CLOTH: Uuid = Uuid::from_u128(0x2603_0000_0000_0005);
 const HAIR: Uuid = Uuid::from_u128(0x2603_0000_0000_0006);
+/// A mesh whose SIDECAR depends on a material nothing in the level binds — the
+/// ordinary glTF-import shape (P26.3b audit). `inf_editor_core::assets::import`
+/// writes exactly these edges: mesh → its materials → their textures, and none
+/// of them is a `Material.asset` binding.
+const DECOR_MESH: Uuid = Uuid::from_u128(0x2603_0000_0000_0007);
+const DECOR_MAT: Uuid = Uuid::from_u128(0x2603_0000_0000_0008);
+const DECOR_TEX: Uuid = Uuid::from_u128(0x2603_0000_0000_0009);
 
 /// The pack must hold exactly these, and the counts are exact rather than
 /// non-zero for the P21.4 reason: a walk that lost the second texture of two
 /// still satisfies `!is_empty()`.
-const EXPECTED_MATERIALS_IN_PACK: usize = 1;
-const EXPECTED_DERIVED_MATERIALS_IN_PACK: usize = 1;
-const EXPECTED_TEXTURES_IN_PACK: usize = 2;
+///
+/// **Two materials and three textures, and only ONE of each pair is bound.** The
+/// unbound one arrives through the mesh's sidecar edges, which is how a real
+/// project gets most of its materials — and it is what makes "the two hosts
+/// build the same `MaterialContent`" a claim that can fail (P26.3b audit: the
+/// pack side walked the pack INDEX and therefore saw both).
+const EXPECTED_MATERIALS_IN_PACK: usize = 2;
+const EXPECTED_DERIVED_MATERIALS_IN_PACK: usize = 2;
+const EXPECTED_TEXTURES_IN_PACK: usize = 3;
+/// …of which the LEVEL binds exactly one material and two textures.
+const BOUND_MATERIALS: usize = 1;
+const BOUND_TEXTURES: usize = 2;
 
 // ── the fixture ─────────────────────────────────────────────────────────────
 
@@ -111,6 +130,14 @@ fn doc_with_binding(bound: bool) -> SceneDoc {
     {
         let world = doc.world_mut();
         let e = world.entity_of(cube).expect("the cube exists");
+        // A real `.inf_mesh` reference, ALWAYS (not gated on `bound`): its
+        // sidecar drags a material and a texture into the closure that nothing
+        // binds, which is how a project gets most of its materials and what makes
+        // "the two hosts build the same MaterialContent" falsifiable.
+        world.world_mut().entity_mut(e).insert(inf_ecs::components::MeshRef {
+            asset: Some(DECOR_MESH),
+            ..Default::default()
+        });
         world.world_mut().entity_mut(e).insert(Material {
             base_color: inf_ecs::math::Color::new(0.9, 0.4, 0.2, 1.0),
             metallic: 0.25,
@@ -142,11 +169,25 @@ fn doc_with_binding(bound: bool) -> SceneDoc {
 /// Write `payload` under `content` with a sidecar, so the asset database finds
 /// it at the id the level names.
 fn put(content: &Path, file: &str, guid: Uuid, bytes: &[u8], kind: AssetKind) {
+    put_with_deps(content, file, guid, bytes, kind, &[]);
+}
+
+/// [`put`] with explicit sidecar dependency edges — what the glTF importer writes
+/// (a mesh names its materials, a material names its textures) and what
+/// `dependency_closure` follows through `AssetDb::references_of`.
+fn put_with_deps(
+    content: &Path,
+    file: &str,
+    guid: Uuid,
+    bytes: &[u8],
+    kind: AssetKind,
+    deps: &[Uuid],
+) {
     let path = content.join(file);
     std::fs::write(&path, bytes).expect("write asset");
-    AssetSidecar::new(AssetId(guid), kind, ContentHash::of(bytes))
-        .save(&path)
-        .expect("write sidecar");
+    let mut side = AssetSidecar::new(AssetId(guid), kind, ContentHash::of(bytes));
+    side.dependencies = deps.iter().copied().map(AssetId).collect();
+    side.save(&path).expect("write sidecar");
 }
 
 /// A project on disk: the level plus every asset it names.
@@ -180,6 +221,36 @@ fn scaffold(tmp: &Path, bound: bool) -> (PathBuf, SceneDoc) {
         "Orm.inf_tex",
         ORM,
         &texture_bytes(128, 90),
+        AssetKind::Texture,
+    );
+    // The glTF-import shape: a mesh whose sidecar names a material, whose sidecar
+    // names a texture — and no `Material.asset` binding anywhere near them.
+    let (decor_mesh, _) = inf_dcc::to_mesh_asset(&inf_dcc::cube(0.5), &inf_dcc::ExportOptions::default());
+    put_with_deps(
+        &content,
+        "Decor.inf_mesh",
+        DECOR_MESH,
+        &inf_asset::encode(&decor_mesh).expect("encode mesh"),
+        AssetKind::Mesh,
+        &[DECOR_MAT],
+    );
+    put_with_deps(
+        &content,
+        "Decor.inf_mat",
+        DECOR_MAT,
+        &inf_asset::encode(&MaterialAsset {
+            base_color_texture: Some(AssetId(DECOR_TEX)),
+            ..Default::default()
+        })
+        .expect("encode decor material"),
+        AssetKind::Material,
+        &[DECOR_TEX],
+    );
+    put(
+        &content,
+        "Decor.inf_tex",
+        DECOR_TEX,
+        &texture_bytes(128, 200),
         AssetKind::Texture,
     );
     put(
@@ -240,6 +311,10 @@ fn hairstyle() -> inf_anim::HairAsset {
     .expect("the plane grows guides");
     assert!(report.strands > 0, "the fixture must grow strands");
     asset
+}
+
+fn player_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_inf-player"))
 }
 
 fn cook_opts() -> CookOptions {
@@ -389,20 +464,32 @@ fn the_cooked_pack_carries_the_material_and_its_textures() {
     // And the CONTROL: an unbound level pulls none of it in. Without this the
     // three counts above would pass on a cook that packed the whole content root
     // regardless of what the level references.
+    //
+    // Sharper than a count since the fixture grew its glTF-shaped decor
+    // (P26.3b audit): the unbound level still pulls the MESH's material through
+    // the mesh's own sidecar — a real edge, and not this batch's — so what must
+    // disappear is the material the LEVEL BOUND, and what must not is the one it
+    // never bound. A count of zero would now be measuring the wrong thing.
     let bare = tempfile::tempdir().expect("tempdir");
     let (bare_proj, _) = scaffold(bare.path(), false);
     let bare_report =
         cook(&bare_proj, &bare.path().join("out"), &cook_opts()).expect("the bare project cooks");
     let bare_reader = PackReader::open(&bare_report.pack_path).expect("open bare pack");
-    let bare_kinds: Vec<AssetKind> = bare_reader.index().map(|e| e.kind).collect();
-    assert_eq!(
-        bare_kinds
-            .iter()
-            .filter(|k| **k == AssetKind::DerivedMaterial)
-            .count(),
-        0,
-        "an unbound level still dragged a material into its pack — the counts \
-         above are measuring the content root, not the closure: {bare_kinds:?}"
+    assert!(
+        !bare_reader.contains(inf_asset::derived_material_id(AssetId(MAT))),
+        "an unbound level still dragged its BOUND material into the pack — the \
+         counts above are measuring the content root, not the closure"
+    );
+    assert!(
+        !bare_reader.contains(AssetId(ALBEDO)) && !bare_reader.contains(AssetId(ORM)),
+        "the bound material's textures reached a pack whose level binds no material"
+    );
+    assert!(
+        bare_reader.contains(inf_asset::derived_material_id(AssetId(DECOR_MAT)))
+            && bare_reader.contains(AssetId(DECOR_TEX)),
+        "the MESH's material and its texture vanished from the unbound pack too, \
+         so this control is measuring a cook that ships nothing rather than the \
+         level→material edge"
     );
 }
 
@@ -534,5 +621,351 @@ fn pie_equals_shipping_on_a_textured_clothed_scene() {
         previewed,
         "the same level with and without its garment folded the SAME trace — \
          nothing in the payload is being simulated"
+    );
+}
+
+/// **The REAL `--pie` subprocess folds the clothed level** — the arm
+/// `phase24_gate`'s retirement note said lived here (P26.3b audit).
+///
+/// It did not. The note claims the replacement for the retired trip-wire includes
+/// "a real `--pie` subprocess folds them", and every arm above this one runs
+/// in-process. That distinction is not pedantry in this repository: P21.4's
+/// finding was a `--pie` binary that built its sim with a bare `RuntimeSim::new`
+/// and therefore *agreed with itself* about a world missing an attachment, with
+/// no gate running the binary. `sim_from_payload` is the one seam now, and this
+/// is what keeps it that way for the four slots v8 added.
+///
+/// The anti-vacuity guard is first and the trace must MOVE, or a subprocess that
+/// folded an empty world would match a reference that folded an empty world.
+#[test]
+fn the_real_pie_subprocess_folds_the_garment_and_the_binding() {
+    const N: u32 = 8;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (proj, doc) = scaffold(tmp.path(), true);
+    let payload = payload_for(&proj, &doc);
+    assert_eq!(payload.cloths.len(), 1, "nothing to fold");
+    assert_eq!(payload.hairs.len(), 1, "nothing to fold");
+    assert_eq!(payload.materials.len(), 1, "no binding on the wire");
+
+    let mut session = PieSession::spawn_scene(&player_bin(), &payload).expect("scene session");
+    session.step(N).expect("step N");
+    let mut got = Vec::with_capacity(N as usize);
+    for _ in 0..N {
+        let ev = session
+            .wait_for(Duration::from_secs(20), |e| {
+                matches!(e, PlayerToEditor::Frame { .. })
+            })
+            .expect("a frame per step");
+        if let PlayerToEditor::Frame { state_hash, .. } = ev {
+            got.push(state_hash);
+        }
+    }
+    let want = inf_player::scene_trace(&payload, N as u64).expect("in-process trace");
+    assert_eq!(
+        got, want,
+        "the REAL --pie subprocess folded a different world from the in-process \
+         one built out of the SAME payload — a boot path is dropping one of the \
+         four slots v8 added"
+    );
+    assert!(
+        got.windows(2).any(|w| w[0] != w[1]),
+        "the trace never changed across {N} steps — the garment is not being \
+         simulated, so the equality above compares two static worlds"
+    );
+    session.stop(Duration::from_secs(10)).expect("graceful stop");
+}
+
+// ── (e) the two hosts' material content ─────────────────────────────────────
+
+/// **The pack path and the payload path hand a runtime the SAME material
+/// content** (P26.3b audit).
+///
+/// Arm (a) proves the derived BYTES agree. It cannot see the thing a residency
+/// trace is actually a function of: the *maps a host binds from*.
+/// `PackLevelSource::material_content` walks a pack index and
+/// `materials_from_payload` walks a wire vector — two collectors over two
+/// containers, which is exactly the P22.2 arrangement that did not agree. Before
+/// this arm neither function had a caller **or a test** anywhere in the tree,
+/// under a batch whose headline is that the two wires carry one answer.
+///
+/// The first version of the pack side collected **every** `.inf_tex` and every
+/// `.inf_matd` in the pack rather than what the level binds, so the two sides
+/// diverged the moment a closure contained a material no entity bound — which is
+/// the ordinary glTF-import case, since a `.inf_mesh` sidecar depends on its
+/// materials and they depend on their textures. The sets are compared here, not
+/// just their lengths.
+#[test]
+fn the_pack_and_the_payload_build_the_same_material_content() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (proj, doc) = scaffold(tmp.path(), true);
+    let report = cook(&proj, &tmp.path().join("out"), &cook_opts()).expect("the project cooks");
+
+    let source = inf_player::level::PackLevelSource::open(&report.pack_path).expect("open pack");
+    let from_pack = source.material_content();
+    let from_payload = inf_player::materials_from_payload(&payload_for(&proj, &doc));
+
+    // ANTI-VACUITY, both halves: a comparison of two empty maps passes.
+    assert!(!from_pack.is_empty(), "the pack path resolved no material");
+    assert!(
+        !from_payload.is_empty(),
+        "the payload path resolved no material"
+    );
+    // BOUND, not PACKED. The pack carries the mesh's material and its texture as
+    // well, and a host that registered those would page a set the payload side
+    // can never produce — which is exactly what the first cut did, because it
+    // walked the pack INDEX.
+    assert_eq!(from_pack.materials.len(), BOUND_MATERIALS);
+    assert_eq!(from_pack.textures.len(), BOUND_TEXTURES);
+    assert!(
+        EXPECTED_DERIVED_MATERIALS_IN_PACK > BOUND_MATERIALS
+            && EXPECTED_TEXTURES_IN_PACK > BOUND_TEXTURES,
+        "the pack holds no UNBOUND material, so this arm cannot tell a walk of \
+         the pack index from a walk of the level's bindings"
+    );
+    assert!(
+        !from_pack.materials.contains_key(&DECOR_MAT)
+            && !from_pack.textures.contains_key(&DECOR_TEX),
+        "the pack path resolved a material the level never bound — its \
+         registration order, and therefore its residency, would be a function of \
+         the pack rather than of the level"
+    );
+
+    // Keyed by the `.inf_mat` GUID on BOTH sides — the salt is inverted at the
+    // boundary, so a projector never sees it. A side that forgot to un-salt keys
+    // its map by `derived_material_id(MAT)` and fails here rather than as a
+    // lookup miss in a frame.
+    let pack_records: BTreeMap<_, _> = from_pack.materials.iter().collect();
+    let payload_records: BTreeMap<_, _> = from_payload.materials.iter().collect();
+    assert_eq!(
+        pack_records, payload_records,
+        "the pack and the payload resolved different material records for one level"
+    );
+    assert!(
+        pack_records.contains_key(&MAT),
+        "the records are not keyed by the .inf_mat GUID the scene names"
+    );
+
+    let pack_textures: BTreeMap<_, _> = from_pack.textures.iter().collect();
+    let payload_textures: BTreeMap<_, _> = from_payload.textures.iter().collect();
+    assert_eq!(
+        pack_textures, payload_textures,
+        "the pack and the payload carry different texture BYTES for one level"
+    );
+
+    // **The registration order is the residency trace.** `want_floor` is a pure
+    // function of the registration SEQUENCE (the P26.3 handle law: the handles
+    // may differ across hosts, the pages may not), so the two hosts must walk
+    // these identically — and in the fixed slot order, with the empty normal slot
+    // skipped rather than shifting the ORM into its place.
+    assert_eq!(from_pack.registration_order(), vec![ALBEDO, ORM]);
+    assert_eq!(
+        from_payload.registration_order(),
+        from_pack.registration_order()
+    );
+}
+
+/// **`registration_order` is a function of the SET, not of how the map was
+/// built** (P26.3b audit) — the property that makes cross-host agreement
+/// possible at all.
+///
+/// The P26.3 LAW says a handle is a per-registry index, so the editor (document
+/// order) and the player (`Guid` order) mint different handles for one texture
+/// and compare by GUID. It explicitly does **not** license the two hosts to page
+/// different tiles, and `want_floor` is pure in the registration *sequence* — so
+/// a `HashMap` walk would give one level two page sets on two machines, silently,
+/// and only under a pool small enough to matter.
+///
+/// Built twice from opposite insertion orders. `std`'s `RandomState` is seeded
+/// per map, so two separately-built `HashMap`s of the same keys genuinely iterate
+/// differently; six materials make an accidental agreement negligible. The
+/// anti-vacuity assertion is that the sorted answer is NOT the insertion order,
+/// or this would be a statement about a constant.
+#[test]
+fn the_registration_order_is_sorted_not_inserted() {
+    let mat = |n: u128| Uuid::from_u128(0x2603_0000_1000_0000_0000_0000_0000_0000 + n);
+    let tex = |n: u128| Uuid::from_u128(0x2603_0000_2000_0000_0000_0000_0000_0000 + n);
+    // Material `i` names texture `i` in its albedo slot, so the expected order is
+    // the materials' GUID order projected onto textures.
+    let build = |rev: bool| {
+        let mut c = inf_player::MaterialContent::default();
+        let mut ids: Vec<u128> = (0..6).collect();
+        if rev {
+            ids.reverse();
+        }
+        for i in ids {
+            c.materials.insert(
+                mat(i),
+                inf_asset::DerivedMaterial {
+                    albedo: Some(AssetId(tex(i))),
+                    ..Default::default()
+                },
+            );
+        }
+        c
+    };
+    let forward = build(false);
+    let reversed = build(true);
+    let want: Vec<Uuid> = (0..6).map(tex).collect();
+
+    assert_eq!(forward.registration_order(), want);
+    assert_eq!(
+        reversed.registration_order(),
+        want,
+        "the registration order depends on the order the map was BUILT — two \
+         hosts would page different tiles for one level"
+    );
+    // Anti-vacuity: the sorted answer is not the reversed insertion order, so the
+    // equality above is a statement about sorting rather than about a constant.
+    let mut backwards = want.clone();
+    backwards.reverse();
+    assert_ne!(want, backwards);
+}
+
+// ── (f) the advisories fire ─────────────────────────────────────────────────
+
+/// **Every silent material hazard raises a named advisory** (P26.3b audit).
+///
+/// P26.3b shipped two advisories and this audit added two more, and *none* of
+/// them had a caller in any test: a `dangling_material_refs` that returned
+/// `Vec::new()` unconditionally was invisible, which is the same shape as the
+/// counter that never moves. Four levels, four fixtures, four messages — plus the
+/// control, because an advisory list that is never empty is noise.
+///
+/// The two this audit added are the ones the P16 law names directly: a `.inf_mat`
+/// whose `.inf_tex` is **missing**, and one whose `.inf_tex` is a **v1** payload
+/// `inf_vt::TiledTextureReader` refuses. Both ship a pack that loads, renders and
+/// is textureless.
+#[test]
+fn every_silent_material_hazard_raises_its_advisory() {
+    // The healthy control FIRST: none of the four fires on the good fixture, so
+    // the four below are measuring their triggers and not a cook that warns
+    // about everything.
+    let ok = tempfile::tempdir().expect("tempdir");
+    let (ok_proj, _) = scaffold(ok.path(), true);
+    let ok_report = cook(&ok_proj, &ok.path().join("out"), &cook_opts()).expect("cooks");
+    for w in &ok_report.warnings {
+        assert!(
+            !w.contains("bound to") && !w.contains("references texture"),
+            "the healthy fixture raised a material advisory: {w}"
+        );
+    }
+
+    // 1. A binding naming an asset the project does not have.
+    let case = |mutate: &dyn Fn(&Path, &mut SceneDoc)| -> Vec<String> {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let proj = tmp.path().join("proj");
+        ProjectManifest::new("Advisory", "blank-3d").save(&proj).unwrap();
+        let content = proj.join("Content");
+        std::fs::create_dir_all(&content).unwrap();
+        let mut doc = doc_with_binding(true);
+        mutate(&content, &mut doc);
+        let level = serialize::encode(&serialize::to_scene_file(&doc)).expect("encode");
+        put(&content, "Wire.inf_lvl", LEVEL, &level, AssetKind::Level);
+        put(
+            &content,
+            "Coat.inf_cloth",
+            CLOTH,
+            &inf_asset::encode(&garment()).unwrap(),
+            AssetKind::Cloth,
+        );
+        put(
+            &content,
+            "Mane.inf_hair",
+            HAIR,
+            &inf_asset::encode(&hairstyle()).unwrap(),
+            AssetKind::Hair,
+        );
+        cook(&proj, &tmp.path().join("out"), &cook_opts())
+            .expect("an advisory is not a build failure")
+            .warnings
+    };
+
+    // (a) the binding names nothing — no `.inf_mat` is written at all.
+    let dangling = case(&|_content, _doc| {});
+    assert!(
+        dangling.iter().any(|w| w.contains("is bound to")
+            && w.contains(&MAT.to_string())
+            && w.contains("not in \nthe project".replace('\n', "").as_str())),
+        "a binding naming a missing material cooked silently: {dangling:?}"
+    );
+
+    // (b) the binding names an asset of the WRONG KIND — the `.inf_mati` case,
+    // reachable through the shipped Content Drawer before this audit.
+    let wrong_kind = case(&|content, _doc| {
+        put(
+            content,
+            "Wall.inf_mati",
+            MAT,
+            &inf_asset::encode(&inf_material::MaterialInstance::new(AssetId(ALBEDO))).unwrap(),
+            AssetKind::MaterialInstance,
+        );
+    });
+    assert!(
+        wrong_kind
+            .iter()
+            .any(|w| w.contains("material_instance") && w.contains("TEXTURELESS")),
+        "a binding naming a material INSTANCE cooked silently — the asset is in \
+         the project, so nothing looked dangling: {wrong_kind:?}"
+    );
+
+    // (c) the material names a texture the project does not have.
+    let missing_tex = case(&|content, _doc| {
+        put(
+            content,
+            "Wall.inf_mat",
+            MAT,
+            &inf_asset::encode(&material()).unwrap(),
+            AssetKind::Material,
+        );
+    });
+    assert!(
+        missing_tex
+            .iter()
+            .any(|w| w.contains("references texture") && w.contains("not in the")),
+        "a material naming a missing .inf_tex cooked silently: {missing_tex:?}"
+    );
+
+    // (d) the material names a **v1** `.inf_tex`: present, valid, and unpageable.
+    let v1 = case(&|content, _doc| {
+        put(
+            content,
+            "Wall.inf_mat",
+            MAT,
+            &inf_asset::encode(&material()).unwrap(),
+            AssetKind::Material,
+        );
+        for id in [ALBEDO, ORM] {
+            let payload = inf_asset::encode(&inf_material::TextureAsset {
+                schema_version: inf_material::TextureAsset::CURRENT_VERSION,
+                width: 4,
+                height: 4,
+                format: inf_material::TextureFormat::Rgba8,
+                srgb: true,
+                mips: vec![inf_material::TextureMip {
+                    width: 4,
+                    height: 4,
+                    data: vec![0u8; 4 * 4 * 4],
+                }],
+            })
+            .unwrap();
+            assert!(
+                !inf_material::tiles::is_v2(&payload),
+                "the v1 fixture is not v1, so this case measures nothing"
+            );
+            put(
+                content,
+                &format!("Tex{}.inf_tex", id.as_u128() & 0xF),
+                id,
+                &payload,
+                AssetKind::Texture,
+            );
+        }
+    });
+    assert!(
+        v1.iter()
+            .any(|w| w.contains("v1 \n.inf_tex".replace('\n', "").as_str())
+                || (w.contains("v1") && w.contains("tiled container"))),
+        "a material naming a v1 .inf_tex cooked silently — the pack is bigger and \
+         the surface is textureless: {v1:?}"
     );
 }

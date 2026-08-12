@@ -1663,40 +1663,84 @@ impl PackLevelSource {
     /// A record that does not decode is **skipped with a warning**: the surfaces
     /// bound to it render off their scalar attributes, which is the permanent
     /// no-texture path rather than a hole.
+    ///
+    /// # It is a function of what the LEVEL BINDS, not of what the pack holds
+    ///
+    /// (P26.3b audit.) The first cut walked the pack index and took every
+    /// `.inf_matd` and every `.inf_tex` it found. That is a superset the payload
+    /// path can never produce, and the gap is the ordinary case rather than a
+    /// contrivance: a `.inf_mesh` sidecar depends on its `.inf_mat`s and those
+    /// depend on their `.inf_tex`es, so **placing an imported glTF drags a
+    /// material and its maps into the closure with no `Material.asset` binding at
+    /// all** — the cook then derives a record for it and this walk would hand the
+    /// host a material nothing in the level uses.
+    ///
+    /// A superset is harmless for a *lookup* and fatal for the *residency*:
+    /// [`registration_order`](crate::MaterialContent::registration_order) is what
+    /// a host registers in, and `VtTextures::want_floor` is a pure function of
+    /// that sequence. One extra material moves every page after it. So both
+    /// producers are keyed on the same fact — the set of `Material.asset`
+    /// bindings in the level being played — and the textures on the set the
+    /// resolved records actually name.
     pub fn material_content(&self) -> crate::MaterialContent {
+        // The bindings this level names. A level that will not decode yields no
+        // bindings and therefore no material content, which is the same picture
+        // the world builder is about to produce for the same reason.
+        let bound: std::collections::BTreeSet<Uuid> = self
+            .level_bytes()
+            .ok()
+            .and_then(|b| inf_scene::decode(&b).ok())
+            .map(|lvl| {
+                lvl.entities
+                    .iter()
+                    .filter_map(|e| e.material.as_ref().and_then(|m| m.asset))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut materials = HashMap::new();
-        let mut textures = HashMap::new();
-        for e in self.reader.index() {
-            match e.kind {
-                AssetKind::DerivedMaterial => {
-                    let Ok(bytes) = self.reader.read(e.guid) else {
-                        continue;
-                    };
-                    match inf_asset::decode::<inf_asset::DerivedMaterial>(&bytes) {
-                        Ok(rec) => {
-                            materials.insert(inf_asset::derived_material_id(e.guid).uuid(), rec);
-                        }
-                        Err(err) => tracing::warn!(
-                            "inf-player: pack material {} did not decode, so every surface \
-                             bound to it renders off its scalar attributes: {err}",
-                            e.guid
-                        ),
-                    }
+        for mat in &bound {
+            let derived = inf_asset::derived_material_id(AssetId(*mat));
+            if !self.reader.contains(derived) {
+                continue;
+            }
+            let Ok(bytes) = self.reader.read(derived) else {
+                continue;
+            };
+            match inf_asset::decode::<inf_asset::DerivedMaterial>(&bytes) {
+                Ok(rec) => {
+                    // Keyed by the `.inf_mat` GUID: the pack stores the record
+                    // under the salted id so the two wires have one lookup rule,
+                    // and the scene names the material itself. The salt is
+                    // inverted here, at the boundary, exactly as
+                    // `materials_from_payload` inverts it — so it never reaches a
+                    // projector on either path.
+                    materials.insert(*mat, rec);
                 }
-                // The `.inf_tex` v2 containers those records name. Read whole
-                // here rather than sub-sliced because the registry needs an
-                // owned `VtTileSource` it can hold for the life of the world;
-                // the *tiles* inside are still addressed without decoding
-                // anything (`inf_vt::TiledTextureReader`), which is the part
-                // that matters.
-                AssetKind::Texture => {
-                    if let Ok(bytes) = self.reader.read(e.guid) {
-                        textures.insert(e.guid.uuid(), bytes);
-                    }
-                }
-                _ => {}
+                Err(err) => tracing::warn!(
+                    "inf-player: pack material {derived} did not decode, so every surface \
+                     bound to {mat} renders off its scalar attributes: {err}"
+                ),
             }
         }
+
+        // The `.inf_tex` v2 containers those records name — and only those.
+        // Read whole here rather than sub-sliced because the registry needs an
+        // owned `VtTileSource` it can hold for the life of the world; the *tiles*
+        // inside are still addressed without decoding anything
+        // (`inf_vt::TiledTextureReader`), which is the part that matters.
+        let mut textures = HashMap::new();
+        for rec in materials.values() {
+            for tex in rec.texture_dependencies() {
+                if textures.contains_key(&tex.uuid()) {
+                    continue;
+                }
+                if let Ok(bytes) = self.reader.read(tex) {
+                    textures.insert(tex.uuid(), bytes);
+                }
+            }
+        }
+
         crate::MaterialContent {
             materials,
             textures,
