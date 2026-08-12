@@ -545,6 +545,15 @@ impl VtFeedback {
     /// Returns the number of requests dispatched (0 = nothing recorded, and the
     /// ring gets no copy, so the read two frames later misses and the floor
     /// stands — the same degradation as a late mask).
+    ///
+    /// Nine arguments, and bundling them would hide the two that matter. The
+    /// table and its **generation** travel together on purpose: a bind group
+    /// cached across a re-creation of the indirection buffer marks bits against
+    /// a table from before the new texture existed, which is the same hazard
+    /// `passes::ResourceKey` carries a `table_generation` component for. A
+    /// struct is exactly where a field like that becomes easy to forget to fill
+    /// (the P21.4 note on `run_pie`, one crate over).
+    #[allow(clippy::too_many_arguments)]
     pub fn record(
         &mut self,
         device: &wgpu::Device,
