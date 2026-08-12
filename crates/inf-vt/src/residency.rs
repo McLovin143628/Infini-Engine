@@ -1157,6 +1157,61 @@ mod tests {
         assert_eq!(r.stats().wanted, 1, "the duplicate survived normalization");
     }
 
+    /// …and it is the FLOOR's copy that survives, which is a different claim and
+    /// the one that matters (P26.4 audit).
+    ///
+    /// The arm above asserts the two wants become ONE want — true of *either*
+    /// survivor, so it cannot see which. Measured: reversing the dedup's
+    /// tie-break so the refinement's copy wins leaves it green, and every other
+    /// arm in the workspace green, while the tile is served in the wrong class.
+    ///
+    /// The rank is only observable under budget pressure, so that is where this
+    /// looks. The shared tile is at mip 1 and every competing refinement is at
+    /// mip 0, and mip 0 sorts FIRST in payload order — so a shared tile demoted
+    /// to the refinement class falls to the end of its class and is exactly the
+    /// one that gets deferred.
+    #[test]
+    fn a_tile_wanted_twice_is_served_in_the_floors_class() {
+        let mut r = pool(6);
+        let h = r
+            .register_texture(full_pyramid(1024, 1024, 128, 4, true))
+            .expect("one root");
+        // 6 slots: 1 pinned root + 5 cache slots.
+        assert_eq!(r.apply_wants(&[]).admits.len(), 1);
+
+        let shared = TileCoord::new(1, 0, 0);
+        let mut wants = vec![VtWant::new(h, shared), VtWant::refine(h, shared)];
+        let m0 = r.desc(h).expect("registered").mips[0];
+        for y in 0..m0.tiles_y {
+            for x in 0..m0.tiles_x {
+                wants.push(VtWant::refine(h, TileCoord::new(0, x, y)));
+            }
+        }
+        let txn = r.apply_wants(&wants);
+        assert!(
+            txn.deferred > 0,
+            "the refinements fit the pool, so this arm cannot see a rank at all"
+        );
+        assert_eq!(
+            txn.admits[0].tile, shared,
+            "the shared tile was not admitted first: {}",
+            txn.trace()
+        );
+        assert!(
+            r.is_resident(h, shared),
+            "a tile the floor asked for was kept at the feedback's rank and \
+             deferred: {}",
+            txn.trace()
+        );
+        // ANTI-VACUITY: the refinements really do precede it in payload order, so
+        // the assertion above is about the rank and not about an order that
+        // happened to agree.
+        assert!(
+            TileCoord::new(0, 0, 0).payload_order() < shared.payload_order(),
+            "the fixture's refinements do not precede its shared tile"
+        );
+    }
+
     /// A block generation moves when a page of that texture is seated or
     /// unseated, and **not** when a frame merely touches it — otherwise a cache
     /// keyed on it re-uploads every block every frame and the stamp buys nothing.

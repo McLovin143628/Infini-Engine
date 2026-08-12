@@ -193,14 +193,74 @@ fn an_unready_slot_is_a_miss_and_never_a_neighbours_bytes() {
     }
     assert_eq!(ring.hits(), 0);
     assert_eq!(ring.misses(), 6);
-    // …and the ANTI-VACUITY control: the same ring, polled, does answer — so the
-    // misses above are a measurement of readiness and not of a ring that is
-    // simply broken.
+    // …and the ANTI-VACUITY control: the same slots, once polled, answer for the
+    // frame they were RECORDED at, by value.
+    //
+    // Its first spelling (P26.4 audit) was
+    // `take_eventually(…).is_some() || ring.misses() > 6`, which **cannot fail**:
+    // `take_eventually` bumps `misses` on every attempt, so the right-hand side
+    // is true precisely when the left is false. It was also asking for a frame
+    // this ring could never answer — with no poll, only frames 0–2 ever recorded
+    // at all (`record` correctly refuses an occupied slot, so 3–5 were skipped),
+    // and a read at frame 6 wants frame 4. So the control certified nothing about
+    // a ring that in fact never answered.
+    //
+    // Frame 4's read is frame 2's bytes, and frame 2 is the last one that landed.
     ring.poll(&gpu.device);
     let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
     ring.poll(&gpu.device);
+    assert_eq!(
+        ring.take(4, |b| bytemuck::cast_slice::<u8, u32>(b)[0]),
+        Some(2),
+        "a polled ring did not answer for the frame it recorded, so the misses \
+         above measure a broken ring rather than an unready slot"
+    );
+    assert_eq!(ring.hits(), 1, "the hit was not counted");
+}
+
+/// **A slot holding an OLDER congruent frame is a miss, not an answer** — the
+/// reachable form of "never a neighbour's bytes" (P26.4 audit).
+///
+/// A slot index is `frame % slots`, so a slot can be holding a frame *congruent*
+/// to the one being asked for. That is not a contrived state: `VtFeedback::record`
+/// hands the ring no copy at all on a frame whose coverage is empty — the camera
+/// turned away from every textured surface — so a textureless stretch of the
+/// streaming loop leaves slot `F % 3` holding `F − 3`'s bytes while `record`
+/// never touches it.
+///
+/// Measured: weakening the guard from `state == Ready(want)` to "any `Ready`
+/// slot at this index" survives both latency arms above, because they record on
+/// every frame and consume every answer, so the index never holds a stale one.
+/// Three frames of staleness is `inf_vgeom::stream`'s "whatever arrived" with
+/// extra steps.
+#[test]
+fn a_slot_holding_an_older_congruent_frame_is_a_miss() {
+    let Some(gpu) = gpu_or_skip("the readback ring's stale-slot guard") else {
+        return;
+    };
+    let src = source(&gpu, 4);
+    let mut ring = ReadbackRing::new(&gpu.device, "stale", 16);
+
+    // ANTI-VACUITY first: this ring does answer, and with these bytes.
+    tick(&gpu, &mut ring, &src, 0, 4242);
+    assert_eq!(
+        take_eventually(&gpu, &mut ring, 2),
+        Some(4242),
+        "the ring never delivered frame 0"
+    );
+
+    // Now leave frame 0's copy sitting in slot 0, unconsumed, and record nothing
+    // for frames 1..=4 — the textureless stretch.
+    tick(&gpu, &mut ring, &src, 0, 4242);
+    for _ in 0..8 {
+        ring.poll(&gpu.device);
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    // The read at frame 5 wants frame 3, whose slot index is frame 0's.
     assert!(
-        take_eventually(&gpu, &mut ring, 6).is_some() || ring.misses() > 6,
-        "the ring neither answered nor recorded a further miss"
+        ring.take(5, |_| ()).is_none(),
+        "the ring answered for frame 3 out of frame 0's slot — a mask three \
+         frames stale, which is exactly the 'whatever arrived' the pinned \
+         latency exists to refuse"
     );
 }
