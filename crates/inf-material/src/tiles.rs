@@ -49,6 +49,16 @@
 //! `AssetPayload` nor `Serialize`, which makes the generic asset-writing doors a
 //! type error rather than a subtly wrong file.
 //!
+//! Because there is one writer, the v2 layout is **pinned rather than merely
+//! described**: `parse` requires the payload to be exactly `total_len` bytes,
+//! `total_len` to be exactly `tile_base + stride × tile_count`, and tile `n`'s
+//! blob to sit at exactly `tile_base + stride × n`. So a tile's byte offset is
+//! *arithmetic* — P26.2's hot path never has to read 32 bytes of directory to
+//! find one — and a directory can neither describe more tiles than the file
+//! stores nor point two entries at one blob. A v3 that lays its bytes out
+//! differently changes `schema_ver` and is refused here as
+//! [`TiledTextureError::SchemaTooNew`], so pinning v2 costs nothing.
+//!
 //! # The tile, and the arithmetic of its border
 //!
 //! A tile carries [`TILE_SIZE`] = 128 texels of **payload** per side. Filtering a
@@ -757,6 +767,30 @@ fn parse(data: &[u8]) -> Result<(TiledTextureHeader, Vec<TexMipEntry>, Vec<TexTi
             "directory offsets do not describe this payload".into(),
         ));
     }
+    // **The payload must CONTAIN the tiles it declares**, and be exactly as long
+    // as it says it is. Bounding each tile's own range (below) is not the same
+    // claim: every entry may legally point at the *same* blob, and then a
+    // directory — 32 B per tile — describes 73 984 B of tile each. Measured
+    // before this check existed: a 584 KiB payload whose 16 384 entries all
+    // aliased one blob made `level_bytes` ask for 1 GiB, 1 794× amplification,
+    // from a file the thumbnailer opens the moment it appears in the Content
+    // Drawer. Pinning `total_len` to the uniform-stride layout collapses it to
+    // ~1×, because a level's texels can never outweigh the tiles that store
+    // them. Free to pin: v2 has exactly one writer, and a v3 with a different
+    // layout is refused above as `SchemaTooNew`.
+    let stride = align_up(header.tile_bytes as u64);
+    let laid_out = stride
+        .checked_mul(header.tile_count as u64)
+        .and_then(|n| header.tile_base.checked_add(n));
+    if header.mip_count == 0
+        || laid_out != Some(header.total_len)
+        || header.total_len != payload_len
+    {
+        return Err(TiledTextureError::Malformed(format!(
+            "a {payload_len}-byte payload does not hold {} tiles of {} B from {}",
+            header.tile_count, header.tile_bytes, header.tile_base
+        )));
+    }
 
     let mut mips = Vec::with_capacity(header.mip_count as usize);
     let mut next_tile = 0u32;
@@ -793,6 +827,17 @@ fn parse(data: &[u8]) -> Result<(TiledTextureHeader, Vec<TexMipEntry>, Vec<TexTi
             "the mip directory does not account for exactly the header's tiles".into(),
         ));
     }
+    // The header's extent IS mip 0's. Two fields carry the virtual extent and
+    // nothing made them agree: `to_texture_asset` reads the header's, while
+    // `level_bytes` reads the directory's, so a payload could hand a consumer a
+    // `TextureAsset` whose `width` disagreed with `mips[0].width` — which is
+    // what the sprite-sheet slicer cuts cells with.
+    if (mips[0].width, mips[0].height) != (header.width, header.height) {
+        return Err(TiledTextureError::Malformed(format!(
+            "the header's {}×{} extent is not mip 0's {}×{}",
+            header.width, header.height, mips[0].width, mips[0].height
+        )));
+    }
 
     let mut tiles = Vec::with_capacity(header.tile_count as usize);
     let end = payload_len;
@@ -821,9 +866,16 @@ fn parse(data: &[u8]) -> Result<(TiledTextureHeader, Vec<TexMipEntry>, Vec<TexTi
                 e.mip, e.x, e.y
             )));
         }
+        // …and so is its BLOB. The same argument the label check above makes,
+        // applied to the other half of the entry: entry n's offset must be the
+        // one the uniform stride puts at n, not merely some 16-aligned offset
+        // inside the payload. Without it a permuted or self-aliased directory
+        // parses and hands back the wrong tile's bytes silently, and P26.2's
+        // hot path — which computes a byte offset arithmetically rather than
+        // reading 32 bytes of directory per request — would disagree with the
+        // file it is reading. `end` is `total_len`, pinned above.
         if e.len != header.tile_bytes as u64
-            || !e.offset.is_multiple_of(SECTION_ALIGN)
-            || e.offset < header.tile_base
+            || e.offset != header.tile_base + stride * index as u64
             || e.offset.checked_add(e.len).is_none_or(|x| x > end)
         {
             return Err(TiledTextureError::TileOutOfBounds { index });
@@ -1195,6 +1247,139 @@ mod tests {
         bad.truncate(good.len() - 16);
         assert!(TiledTextureImage::from_bytes(bad).is_err());
         // The good one still parses (anti-vacuity: the doctoring is what failed).
+        assert!(TiledTextureImage::from_bytes(good).is_ok());
+    }
+
+    /// **The payload must contain the tiles it declares** (P26.1 audit).
+    ///
+    /// Bounding each tile's own range is a weaker claim than it looks: every
+    /// entry may point at the *same* blob, and then a 32-byte directory entry
+    /// describes 73 984 B of tile. Measured before the check existed: 16 384
+    /// aliased entries in a 584 KiB payload made `level_bytes` ask the allocator
+    /// for 1 GiB — 1 794× — from a file the thumbnailer opens the moment it
+    /// appears in the Content Drawer. Three lies, all now refused.
+    #[test]
+    fn parse_refuses_a_payload_that_does_not_hold_its_own_tiles() {
+        let good = build_tiled_texture(
+            corners(160, 160),
+            160,
+            160,
+            settings(TextureCompression::Bc1),
+        )
+        .unwrap()
+        .into_bytes();
+        let hdr_u64 = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+
+        // (a) `total_len` that disagrees with the bytes actually present — in
+        // either direction, so neither an over- nor an under-claim survives.
+        for lie in [1u64 << 40, 16] {
+            let mut bad = good.clone();
+            bad[72..80].copy_from_slice(&lie.to_le_bytes());
+            assert!(
+                matches!(
+                    TiledTextureImage::from_bytes(bad).unwrap_err(),
+                    TiledTextureError::Malformed(_)
+                ),
+                "total_len = {lie} was accepted"
+            );
+        }
+        // (b) Trailing bytes. The payload is a whole file / a whole pack entry,
+        // never a prefix of one, so anything past `total_len` means this is not
+        // the image it says it is.
+        let mut bad = good.clone();
+        bad.extend_from_slice(&[0xAB; 4096]);
+        assert!(matches!(
+            TiledTextureImage::from_bytes(bad).unwrap_err(),
+            TiledTextureError::Malformed(_)
+        ));
+        // (c) Every entry aliased onto the first blob. The labels are still
+        // perfectly ordered, which is exactly why the label check cannot see it.
+        let mut bad = good.clone();
+        let dir = hdr_u64(&bad, 56) as usize;
+        let base = hdr_u64(&bad, 64);
+        let n = u32::from_le_bytes(bad[40..44].try_into().unwrap()) as usize;
+        for i in 0..n {
+            let o = dir + i * 32 + 16;
+            bad[o..o + 8].copy_from_slice(&base.to_le_bytes());
+        }
+        assert_eq!(
+            TiledTextureImage::from_bytes(bad).unwrap_err(),
+            TiledTextureError::TileOutOfBounds { index: 1 },
+            "a self-aliased tile directory was accepted"
+        );
+        // Anti-vacuity: the undoctored payload still parses.
+        assert!(TiledTextureImage::from_bytes(good).is_ok());
+    }
+
+    /// The header's extent and mip 0's are two fields carrying one fact, and
+    /// nothing made them agree: `to_texture_asset` reads the header's while
+    /// `level_bytes` reads the directory's, so a payload could hand back a
+    /// `TextureAsset` whose `width` is not the width of `mips[0]` — which is
+    /// what the sprite-sheet slicer cuts cells with.
+    #[test]
+    fn parse_refuses_a_header_extent_that_is_not_mip_zero() {
+        let good = build_tiled_texture(
+            corners(160, 160),
+            160,
+            160,
+            settings(TextureCompression::Bc1),
+        )
+        .unwrap()
+        .into_bytes();
+        for (off, value) in [(12usize, 65535u32), (16, 65535), (12, 159), (16, 161)] {
+            let mut bad = good.clone();
+            bad[off..off + 4].copy_from_slice(&value.to_le_bytes());
+            assert!(
+                matches!(
+                    TiledTextureImage::from_bytes(bad).unwrap_err(),
+                    TiledTextureError::Malformed(_)
+                ),
+                "extent field at {off} set to {value} was accepted"
+            );
+        }
+        assert!(TiledTextureImage::from_bytes(good).is_ok());
+    }
+
+    /// Truncation at **every section boundary**, not only past the end. Each one
+    /// is a different arm of `parse` reaching for bytes that are not there, and
+    /// a payload arrives from a file or a pack mapping — both of which can be
+    /// short.
+    #[test]
+    fn parse_refuses_truncation_at_every_section_boundary() {
+        let good = build_tiled_texture(
+            corners(300, 260),
+            300,
+            260,
+            settings(TextureCompression::Bc3),
+        )
+        .unwrap()
+        .into_bytes();
+        let tile_dir = u64::from_le_bytes(good[56..64].try_into().unwrap()) as usize;
+        let tile_base = u64::from_le_bytes(good[64..72].try_into().unwrap()) as usize;
+        let tile_bytes = u32::from_le_bytes(good[44..48].try_into().unwrap()) as usize;
+        for (what, len) in [
+            ("nothing at all", 0usize),
+            ("shorter than the magic", 4),
+            ("the magic alone", 8),
+            ("one byte short of the header", HEADER_LEN as usize - 1),
+            ("the header alone", HEADER_LEN as usize),
+            (
+                "mid mip directory",
+                HEADER_LEN as usize + MIP_ENTRY_LEN as usize / 2,
+            ),
+            ("the mip directory alone", tile_dir),
+            ("mid tile directory", tile_dir + TILE_ENTRY_LEN as usize + 8),
+            ("the directories alone", tile_base),
+            ("one tile short", good.len() - tile_bytes),
+            ("one byte short", good.len() - 1),
+        ] {
+            let mut bad = good.clone();
+            bad.truncate(len);
+            assert!(
+                TiledTextureImage::from_bytes(bad).is_err(),
+                "{what} ({len} B) parsed as a whole image"
+            );
+        }
         assert!(TiledTextureImage::from_bytes(good).is_ok());
     }
 
