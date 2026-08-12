@@ -135,9 +135,24 @@ impl VtTextures {
     ///
     /// Returns the handle it already had when it is already registered, so a
     /// host may call this for every material it projects without keeping its own
-    /// side index — and, more importantly, so the handle a texture gets depends
-    /// only on the ORDER OF FIRST SIGHT, which is the property the two projectors
-    /// have to share for their sets to compare equal.
+    /// side index, and so one texture costs one atlas copy however many materials
+    /// name it.
+    ///
+    /// **A handle is a per-registry index, not a shared name.** It is the order
+    /// of first sight, and the two projectors do not share that order: the P16.6
+    /// mirror law has the editor walking DOCUMENT order and the player walking
+    /// `Guid` order, so one level mints different handles on the two sides. That
+    /// is correct and must stay correct — each host's own indirection table maps
+    /// its own handle to the same texture. What it forbids is a cross-host
+    /// comparison of [`VtTextureSet`] numbers: **two projectors compare by GUID**,
+    /// which is what [`handle`](Self::handle) is for, and
+    /// `two_projectors_in_different_orders_agree_by_guid_and_not_by_handle` pins.
+    ///
+    /// The same caveat reaches [`want_floor`](Self::want_floor): it is a pure
+    /// function of the registration *sequence*, so two orders emit the same wants
+    /// in different orders. Slot assignment then differs — harmless, since the
+    /// table is per host — but a budget too small for the whole floor would defer
+    /// a different tail on each side. P26.4's wiring is where that gets a rule.
     pub fn register(
         &mut self,
         guid: u128,
@@ -221,11 +236,12 @@ impl VtTextures {
     /// of every registered texture, in registration order and payload order
     /// within a texture.
     ///
-    /// Camera-free and history-free on purpose. It is a pure function of what is
-    /// registered, so two runs of one scene produce one want sequence and
-    /// therefore one residency trace — the property the phase gate pins — and
-    /// P26.4's feedback becomes an addition to it rather than a replacement for
-    /// it.
+    /// Camera-free and history-free on purpose. It is a pure function of the
+    /// registration *sequence*, so two runs of one scene **that registered in one
+    /// order** produce one want sequence and therefore one residency trace — the
+    /// property the phase gate pins — and P26.4's feedback becomes an addition to
+    /// it rather than a replacement for it. Two different orders are the caveat
+    /// on [`register`](Self::register), not a second guarantee.
     pub fn want_floor(&self) -> Vec<VtWant> {
         let mut out = Vec::new();
         for t in 0..self.residency.texture_count() {

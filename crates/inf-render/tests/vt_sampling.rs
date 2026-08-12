@@ -450,11 +450,16 @@ fn gpu_or_skip(what: &str) -> Option<GpuContext> {
 /// floor → `sync` → read the atlas back and compare every admitted page against
 /// the tile it claims to hold, texel for texel.
 ///
-/// Runs on **both** adapter tiers through one call shape: with
+/// Written to run on **either** adapter tier through one call shape: with
 /// `TEXTURE_COMPRESSION_BC` the page is the stored BC blob, without it the pool
 /// is RGBA8 and the same tile arrives through `tile_rgba8` — the same door, one
 /// format decision earlier. The comparison is exact either way: a
 /// texture→buffer copy is a copy.
+///
+/// It takes the tier the *machine* has, so one run exercises one of them. The
+/// transcode tier is covered on every adapter by `vt_pools.rs`'s
+/// `the_transcode_fallback_uploads_on_any_adapter`, which forces `bc_tiles` off
+/// rather than waiting for a BC-less machine.
 #[test]
 fn every_admitted_page_holds_the_tile_it_names() {
     let Some(gpu) = gpu_or_skip("the VT page upload") else {
@@ -907,6 +912,76 @@ fn two_registries_resolve_one_material_identically() {
         inf_render::VtTextureSet::NONE,
         "the registry resolved nothing — this arm compared two absences"
     );
+}
+
+/// **A handle is a per-registry index, and two projectors must compare by GUID.**
+///
+/// The arm above builds both registries in the SAME order, which is the case the
+/// two hosts do not have. The P16.6 mirror law is explicit that **the editor
+/// walks document order and the player walks `Guid` order** (see the MIRROR block
+/// on `project_sky` in both hosts), so the day a projector registers textures as
+/// it meets them, the same level mints DIFFERENT handles on the two sides — and
+/// `VtTextureSet` is handles, so the two sets are unequal integers naming one
+/// texture.
+///
+/// That is not a defect, and this arm exists so nobody fixes it into one. A
+/// handle indexes the registry that minted it; each host's own indirection table
+/// maps its own handle to the same content. What must hold — and what is asserted
+/// here — is that **a GUID resolves to the same texture in both**, and what must
+/// never be written is a cross-host comparison of handle NUMBERS.
+///
+/// Nothing registers today (no projector calls `VtTextures::register` outside
+/// tests — the persisted material binding is P26.4's), so this is a pin placed
+/// ahead of the wiring rather than a bug found behind it.
+#[test]
+fn two_projectors_in_different_orders_agree_by_guid_and_not_by_handle() {
+    let build = |order: [u128; 2]| {
+        let (mut lib, _) = VtTextures::new(pool_cfg(PageFormat::Rgba8, 256));
+        for guid in order {
+            // Extents differ per GUID, so a texture is identifiable by its own
+            // descriptor and a mixed-up registry cannot pass by symmetry.
+            let (w, h) = if guid == 11 { (256, 256) } else { (128, 64) };
+            lib.register_or_record(
+                guid,
+                Arc::new(container(
+                    w,
+                    h,
+                    guid == 11,
+                    inf_material::TextureCompression::None,
+                )),
+            )
+            .expect("registers");
+        }
+        let wants = lib.want_floor();
+        let _ = lib.residency_mut().apply_wants(&wants);
+        lib
+    };
+    let editor = build([11, 22]);
+    let player = build([22, 11]);
+
+    // The handles genuinely differ — without this the assertions below are the
+    // same-order arm again under another name.
+    assert_eq!(editor.handle(11).expect("registered").0, 0);
+    assert_eq!(player.handle(11).expect("registered").0, 1);
+    assert_ne!(
+        editor.set_for(Some(11), None, None),
+        player.set_for(Some(11), None, None),
+        "the two orders minted the same handle — this arm is not testing two \
+         orders any more, and the comment above it is now wrong"
+    );
+
+    // …and yet each names the same TEXTURE, which is the invariant that matters.
+    for guid in [11u128, 22] {
+        let (ha, hb) = (
+            editor.handle(guid).expect("registered"),
+            player.handle(guid).expect("registered"),
+        );
+        assert_eq!(
+            editor.residency().desc(ha),
+            player.residency().desc(hb),
+            "GUID {guid} resolves to different textures in the two projectors"
+        );
+    }
 }
 
 /// A handle is `slot - 1`, and the encoding leaves 0 free for "nothing". Pinned

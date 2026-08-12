@@ -281,10 +281,13 @@ fn vt_surface(
 /// Re-anchor a tangent-space normal onto an interpolated geometric normal
 /// **without a tangent stream**.
 ///
-/// The engine's vertex formats carry position + normal + uv and no tangent
-/// (`MeshVertex`, `VgeomVertex`, `SkinnedVertex`), and adding one is a change to
-/// three vertex layouts, the meshlet builder and the `.inf_mesh` schema — out of
-/// this batch's scope and named as such in the ledger. Until then the basis is
+/// The engine's *render* vertex formats carry no tangent — `MeshVertex` and
+/// `SkinnedVertex` are position + normal, `VgeomVertex` adds a uv — so there is
+/// no basis to re-anchor onto. Adding one is a change to three vertex layouts and
+/// the meshlet builder, and it is **not** a schema change: `inf_mesh::MeshVertex`
+/// has carried `tangent: [f32; 4]` (xyz + handedness) since P4, so the data
+/// already exists on disk and only the upload path drops it. Out of this batch's
+/// scope and named as such in the ledger. Until then the basis is
 /// derived per fragment from the screen-space derivatives of the world position
 /// and the uv, which is the standard cotangent-frame construction: exact for a
 /// planar patch, and correct to first order everywhere else.
