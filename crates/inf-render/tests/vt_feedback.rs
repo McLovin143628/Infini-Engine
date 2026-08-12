@@ -753,7 +753,12 @@ fn the_feedback_and_the_floor_agree_about_what_is_on_screen() {
 
     let cases: [(&str, glam::Vec3, f32, bool); 5] = [
         ("head-on", glam::Vec3::ZERO, 1.0, true),
-        ("far behind the eye", glam::Vec3::new(0.0, 0.0, 500.0), 1.0, false),
+        (
+            "far behind the eye",
+            glam::Vec3::new(0.0, 0.0, 500.0),
+            1.0,
+            false,
+        ),
         (
             "beside the frustum",
             glam::Vec3::new(400.0, 0.0, -20.0),

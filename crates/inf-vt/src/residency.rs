@@ -1203,7 +1203,8 @@ mod tests {
             "the refinements fit the pool, so this arm cannot see a rank at all"
         );
         assert_eq!(
-            txn.admits[0].tile, shared,
+            txn.admits[0].tile,
+            shared,
             "the shared tile was not admitted first: {}",
             txn.trace()
         );

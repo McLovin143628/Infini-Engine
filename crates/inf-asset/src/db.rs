@@ -505,8 +505,10 @@ mod tests {
         let write = |payload: &[u8], deps: Option<AssetId>| {
             std::fs::write(&level, payload).unwrap();
             let deps = match deps {
-                Some(d) => format!("dependencies = [\"{d}\"]
-"),
+                Some(d) => format!(
+                    "dependencies = [\"{d}\"]
+"
+                ),
                 None => String::new(),
             };
             // The LEVEL's own schema, which `AssetSidecar::load` cannot parse (no
@@ -578,7 +580,8 @@ content_hash = \"0\"
         .unwrap();
         let mut bad = AssetDb::new(dir.path());
         assert_eq!(
-            bad.scan().expect("a malformed dependencies key still scans"),
+            bad.scan()
+                .expect("a malformed dependencies key still scans"),
             1
         );
         assert!(bad.contains(guid));

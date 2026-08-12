@@ -1376,7 +1376,10 @@ fn the_registration_door_decides_the_pool_format_from_the_level() {
 
     // 1. ONE BC format across the level → that format, clamped by the adapter.
     let (_uniform, _uniform_pools, uniform) = level(vec![
-        (1, container(256, 256, true, inf_material::TextureCompression::Bc1)),
+        (
+            1,
+            container(256, 256, true, inf_material::TextureCompression::Bc1),
+        ),
         (
             2,
             container(128, 128, false, inf_material::TextureCompression::Bc1),
@@ -1393,7 +1396,10 @@ fn the_registration_door_decides_the_pool_format_from_the_level() {
 
     // 2. A level that MIXES BC1 and BC3 → RGBA8, on EVERY adapter.
     let (mut mixed_lib, mut mixed_pools, mixed) = level(vec![
-        (1, container(256, 256, true, inf_material::TextureCompression::Bc1)),
+        (
+            1,
+            container(256, 256, true, inf_material::TextureCompression::Bc1),
+        ),
         (
             2,
             container(128, 128, true, inf_material::TextureCompression::Bc3),
@@ -1407,7 +1413,10 @@ fn the_registration_door_decides_the_pool_format_from_the_level() {
          other format's fetch is the wrong length and the mirror writes a zero page"
     );
     assert_eq!(mixed.textures, 2);
-    assert_eq!(mixed.refused, 0, "the transcode tier refused a bound texture");
+    assert_eq!(
+        mixed.refused, 0,
+        "the transcode tier refused a bound texture"
+    );
 
     // …and ASSERT THE WORLD: the floor pages and NOT ONE page is missing, which
     // is what "RGBA8 is the format every container transcodes into" has to mean.
