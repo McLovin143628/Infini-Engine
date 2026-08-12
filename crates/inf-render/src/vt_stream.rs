@@ -191,13 +191,41 @@ pub fn projection_scale(view: &RenderView) -> f32 {
     }
 }
 
+/// **The NDC margin a bounding sphere earns** — the ONE expression [`on_screen`]
+/// and `vt_feedback.wgsl`'s frustum test are both handed (P26.4 audit).
+///
+/// `screen_px` is the sphere's projected **diameter** (what
+/// [`screen_diameter_px`] returns) and `half_height_px` is half the viewport
+/// height, so the result is the sphere's screen extent in NDC units — generous
+/// by a factor of two against a strict radius, deliberately, because a
+/// conservative test wants to keep too much.
+///
+/// It is a named function rather than an inline division because the two sides
+/// had *drifted*: the shader used `r_px / half_height`, half of this, so there
+/// was a band at the edge of the frustum the floor claimed and the feedback
+/// dropped — a surface at the screen edge paid for its floor pages and was never
+/// refined, with no counter moving. The shader spells this
+/// `2.0 * r_px / max(f32(params.counts.w), 1.0)`, where `r_px` is the RADIUS in
+/// pixels, and `the_feedback_and_the_floor_agree_about_what_is_on_screen` sweeps
+/// the two against each other on a real device.
+#[inline]
+pub fn ndc_margin(screen_px: f32, half_height_px: f32) -> f32 {
+    screen_px / half_height_px.max(1.0)
+}
+
 /// **Is this surface on screen?** — the camera term of the analytic floor, and
 /// the CPU twin of the shader's frustum test.
 ///
 /// A conservative sphere-vs-frustum test in clip space: behind the eye is out,
-/// and outside the NDC box by more than the sphere's own projected margin is
-/// out. Conservative in the "keeps too much" direction, which is the correct
-/// direction for a floor.
+/// **unless the sphere still straddles it**, and outside the NDC box by more than
+/// [`ndc_margin`] is out. Conservative in the "keeps too much" direction, which is
+/// the correct direction for a floor.
+///
+/// The straddle case is not a nicety and the shader used to lack it (P26.4
+/// audit): a camera standing on a terrain-sized quad is *inside* that quad's
+/// bounding sphere, so a bare `clip.w <= 0` return means the largest surface on
+/// screen is the one that never gets refined. `vt_feedback.wgsl` mirrors both
+/// branches now.
 pub fn on_screen(view_proj: &Mat4, centre: Vec3, radius: f32, ndc_margin: f32) -> bool {
     let clip = *view_proj * centre.extend(1.0);
     if clip.w <= 0.0 {
@@ -299,7 +327,7 @@ pub fn analytic_floor(lib: &VtTextures, view: &RenderView, coverage: &[VtCoverag
     let half_h = (view.height as f32 * 0.5).max(1.0);
     for c in coverage {
         let px = screen_diameter_px(c.centre, c.radius, eye, proj_scale);
-        if !on_screen(&view_proj, c.centre, c.radius, px / half_h) {
+        if !on_screen(&view_proj, c.centre, c.radius, ndc_margin(px, half_h)) {
             continue;
         }
         for slot in c.set.slots() {

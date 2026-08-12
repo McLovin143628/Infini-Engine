@@ -628,3 +628,340 @@ fn the_renderer_runs_the_streaming_loop_every_frame() {
     );
     assert_eq!(bare.vt_engaged_frames(), 0);
 }
+
+// ── (e) the audit's arms ────────────────────────────────────────────────────
+
+/// Record one feedback frame over `coverage` and read its mask back at the
+/// pinned latency, pumping the device to completion so the arrival pattern is a
+/// constant rather than a race. `frame` must advance by at least the ring's slot
+/// count between calls.
+fn run_feedback(
+    gpu: &GpuContext,
+    feedback: &mut VtFeedback,
+    lib: &VtTextures,
+    pools: &VtPools,
+    v: &inf_render::RenderView,
+    coverage: &[VtCoverage],
+    frame: u64,
+) -> Vec<inf_vt::VtWant> {
+    let requests = feedback_requests(lib, feedback.layout(), coverage);
+    assert!(!requests.is_empty(), "the fixture's coverage binds no map");
+    let mut enc = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let n = feedback.record(
+        &gpu.device,
+        &gpu.queue,
+        &mut enc,
+        pools.table(),
+        pools.table_generation(),
+        v,
+        &requests,
+        frame,
+    );
+    assert_eq!(
+        n as usize,
+        requests.len(),
+        "the pass dispatched {n} of {} requests",
+        requests.len()
+    );
+    gpu.queue.submit([enc.finish()]);
+    for _ in 0..64 {
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        if let Some(w) = feedback.take_wants(
+            &gpu.device,
+            lib,
+            frame + inf_render::readback::READBACK_LATENCY_FRAMES,
+        ) {
+            return w;
+        }
+    }
+    panic!("the ring never delivered frame {frame}'s mask");
+}
+
+/// **The feedback's camera term IS the floor's**, position by position (P26.4
+/// audit).
+///
+/// `vt_stream::on_screen` is documented as *"the CPU twin of the shader's
+/// frustum test"* and was not one. Two divergences, both measured on the shipped
+/// pair, and both invisible to every arm the batch shipped because both are in
+/// the *"the floor keeps more than the feedback does"* direction — which is
+/// never a crash, never a wrong pixel, and always a surface that is quietly
+/// stuck at the floor's level:
+///
+///  * the shader's NDC margin was `r_px / (height/2)` where the floor's is
+///    `2·r_px / (height/2)`, so there is a band at the edge of the frustum the
+///    floor claims and the feedback dropped;
+///  * the shader returned unconditionally on `clip.w <= 0`, where `on_screen`
+///    keeps a sphere that **straddles** the eye. That is the ordinary state of
+///    the terrain-sized quad `docs/memos/p26-4-feedback-mechanism.md` names as
+///    this signal's worst case: a camera standing on a 200 m ground plane is
+///    *inside* its bounding sphere, so that surface was never refined at all.
+///
+/// Five positions, the last of them **bisected** into the old margin band rather
+/// than guessed, so the fixture cannot drift into agreement as the projection
+/// changes.
+#[test]
+fn the_feedback_and_the_floor_agree_about_what_is_on_screen() {
+    let Some(gpu) = gpu_or_skip("the VT frustum twin") else {
+        return;
+    };
+    let mut lib = library(1024, 512);
+    let mut pools = VtPools::new(&gpu.device, &gpu.queue, lib.residency(), false);
+    let _ = lib.sync(&gpu.device, &gpu.queue, &mut pools, &[]);
+    let set = lib.set_for(Some(7), None, None);
+    assert!(!set.is_none(), "the fixture never went warm");
+
+    let v = view(1920, 1080, 2.0);
+    let vp = v.view_proj();
+    let eye = v.eye_local();
+    let ps = projection_scale(&v);
+    let half_h = v.height as f32 * 0.5;
+    let layout = VtFeedbackLayout::for_residency(lib.residency());
+    let mut feedback = VtFeedback::new(&gpu.device, layout, 64);
+
+    // The position inside the margin band the two used to disagree about: NDC x
+    // three quarters of the way from the shader's old half-margin to the floor's
+    // full one. Bisected, because `ndc.x` is monotone in world x.
+    let z = -18.0f32;
+    let (mut lo, mut hi) = (0.0f32, 400.0f32);
+    for _ in 0..60 {
+        let mid = 0.5 * (lo + hi);
+        let c = glam::Vec3::new(mid, 0.0, z);
+        let clip = vp * c.extend(1.0);
+        let px = screen_diameter_px(c, 1.0, eye, ps);
+        let target = 1.0 + 0.75 * (px / half_h);
+        if clip.x / clip.w < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let band = glam::Vec3::new(0.5 * (lo + hi), 0.0, z);
+    let band_px = screen_diameter_px(band, 1.0, eye, ps);
+    // ANTI-VACUITY on the fixture: this position really is inside the band — the
+    // floor keeps it and the shader's OLD margin would have dropped it.
+    assert!(
+        inf_render::on_screen(&vp, band, 1.0, band_px / half_h),
+        "the bisection left the floor's frustum"
+    );
+    assert!(
+        !inf_render::on_screen(&vp, band, 1.0, 0.5 * band_px / half_h),
+        "the bisected position is not inside the margin the shader used to use, \
+         so this arm cannot see that half of the divergence"
+    );
+
+    let cases: [(&str, glam::Vec3, f32, bool); 5] = [
+        ("head-on", glam::Vec3::ZERO, 1.0, true),
+        ("far behind the eye", glam::Vec3::new(0.0, 0.0, 500.0), 1.0, false),
+        (
+            "beside the frustum",
+            glam::Vec3::new(400.0, 0.0, -20.0),
+            1.0,
+            false,
+        ),
+        // The ground the camera stands on: centre behind, sphere containing the
+        // eye. `clip.w < 0` and `radius > -clip.w`.
+        (
+            "straddling the eye",
+            glam::Vec3::new(0.0, 0.0, 40.0),
+            60.0,
+            true,
+        ),
+        ("inside the old margin band", band, 1.0, true),
+    ];
+    let mut marked_any = false;
+    let mut dropped_any = false;
+    for (i, (label, centre, radius, want)) in cases.into_iter().enumerate() {
+        // The floor's own verdict, from the same numbers the shader is handed.
+        let px = screen_diameter_px(centre, radius, eye, ps);
+        assert_eq!(
+            inf_render::on_screen(&vp, centre, radius, px / half_h),
+            want,
+            "{label}: the CPU floor does not agree with the fixture"
+        );
+        let coverage = [VtCoverage {
+            centre,
+            radius,
+            set,
+        }];
+        let wants = run_feedback(
+            &gpu,
+            &mut feedback,
+            &lib,
+            &pools,
+            &v,
+            &coverage,
+            i as u64 * 3,
+        );
+        assert_eq!(
+            !wants.is_empty(),
+            want,
+            "{label}: the GPU marked {} tiles and the floor says on-screen = {want} — \
+             the two disagree about which surfaces exist, so one of them is paying \
+             for pages the other will not refine",
+            wants.len()
+        );
+        marked_any |= !wants.is_empty();
+        dropped_any |= wants.is_empty();
+    }
+    // ANTI-VACUITY: the sweep contains both answers, so it is not five copies of
+    // one verdict.
+    assert!(marked_any && dropped_any);
+}
+
+/// **The mask is order-independent on the GPU, not only in its CPU twin**
+/// (P26.4 audit).
+///
+/// `inf_vt::feedback`'s own arm reorders `mark` calls on the CPU. What it cannot
+/// say is whether the *pass* is order-independent: the request list is uploaded
+/// in coverage order, the threads that read it run in whatever order the device
+/// chooses, and the claim the whole replay-doctrine reconciliation rests on is
+/// that neither matters. Reversing the list is the cheapest way to falsify it,
+/// and it is a permutation the scene genuinely produces (the coverage list is
+/// built from the render scene's own instance order).
+#[test]
+fn the_coverage_mask_does_not_depend_on_the_request_order() {
+    let Some(gpu) = gpu_or_skip("the VT mask's order independence") else {
+        return;
+    };
+    let mut lib = library(1024, 512);
+    let mut pools = VtPools::new(&gpu.device, &gpu.queue, lib.residency(), false);
+    let _ = lib.sync(&gpu.device, &gpu.queue, &mut pools, &[]);
+    let set = lib.set_for(Some(7), None, None);
+    let v = view(1920, 1080, 2.0);
+    let layout = VtFeedbackLayout::for_residency(lib.residency());
+    let mut feedback = VtFeedback::new(&gpu.device, layout, 64);
+
+    // Three surfaces at three distances, so three different levels are marked
+    // and the mask is the OR of three threads rather than one thread's word.
+    let mut coverage = vec![
+        VtCoverage {
+            centre: glam::Vec3::new(0.0, 0.0, -1.0),
+            radius: 0.5,
+            set,
+        },
+        VtCoverage {
+            centre: glam::Vec3::new(0.0, 0.0, -12.0),
+            radius: 1.0,
+            set,
+        },
+        VtCoverage {
+            centre: glam::Vec3::new(0.5, 0.0, -60.0),
+            radius: 2.0,
+            set,
+        },
+    ];
+    let forward = run_feedback(&gpu, &mut feedback, &lib, &pools, &v, &coverage, 0);
+    coverage.reverse();
+    let reversed = run_feedback(&gpu, &mut feedback, &lib, &pools, &v, &coverage, 3);
+    assert_eq!(
+        forward, reversed,
+        "the coverage mask depends on the order the requests were uploaded in, \
+         so the want set is a function of the scene's traversal and not of the \
+         camera"
+    );
+    // ANTI-VACUITY: more than one thread wrote, at more than one level — an
+    // agreement between two single-writer masks is an agreement about nothing.
+    let levels: std::collections::BTreeSet<u32> = forward.iter().map(|w| w.tile.mip).collect();
+    assert!(
+        levels.len() > 1,
+        "the fixture's three surfaces justify one level ({levels:?})"
+    );
+    // …and the scan is in virtual-address order whichever order they arrived in.
+    let keys: Vec<_> = forward
+        .iter()
+        .map(|w| (w.texture.0, w.tile.payload_order()))
+        .collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(keys, sorted, "the scan is not in virtual-address order");
+}
+
+/// **Residency contains the floor after EVERY transaction of a scripted path,
+/// and the path's floors repeat exactly** (P26.4 audit).
+///
+/// The batch's floor arm applies ONE transaction. The property the ledger claims
+/// is stronger and is the one a streaming loop can violate: over a path, with a
+/// refinement set that overflows the pool on every frame, residency never falls
+/// below *that frame's* floor. And the determinism half — the floor is a pure
+/// function of `(camera, bounds, registry)` — is asserted as sequence equality
+/// over the whole path rather than inferred from the absence of a clock.
+///
+/// GPU-free: the floor is CPU arithmetic and the residency is a set operation,
+/// which is exactly the split `inf-vt` exists to keep.
+#[test]
+fn the_floor_holds_across_a_whole_scripted_path_and_repeats_exactly() {
+    // 48 pages: enough for any step's floor (21 camera-free + at most
+    // `VT_FLOOR_MAX_TILES`) and nowhere near enough for it plus all 64 tiles of
+    // mip 0, so every transaction below runs under real pressure.
+    let mut lib = library(1024, 48);
+    let _ = lib.residency_mut().apply_wants(&[]);
+    let set = lib.set_for(Some(7), None, None);
+    assert!(!set.is_none(), "the fixture never went warm");
+    let desc = lib
+        .residency()
+        .desc(VtTextureHandle(0))
+        .expect("registered")
+        .clone();
+
+    let path = |lib: &VtTextures| -> Vec<Vec<inf_vt::VtWant>> {
+        (0..12)
+            .map(|i| {
+                let v = view(1920, 1080, 2.0 + f64::from(i) * 6.0);
+                analytic_floor(
+                    lib,
+                    &v,
+                    &[VtCoverage {
+                        centre: glam::Vec3::ZERO,
+                        radius: 1.0,
+                        set,
+                    }],
+                )
+            })
+            .collect()
+    };
+    let a = path(&lib);
+    let b = path(&lib);
+    assert_eq!(
+        a, b,
+        "two runs of one scripted camera path produced two different floors"
+    );
+    // ANTI-VACUITY: the path moves. Twelve copies of one answer would satisfy
+    // the equality above perfectly.
+    let sizes: std::collections::BTreeSet<usize> = a.iter().map(Vec::len).collect();
+    assert!(
+        sizes.len() > 1,
+        "every step of the path produced the same floor ({sizes:?})"
+    );
+
+    // …and the invariant, transaction after transaction, under pressure.
+    let mut res = lib.residency().clone();
+    let mut overflowed = false;
+    for (i, floor) in a.iter().enumerate() {
+        let mut wants = floor.clone();
+        for y in 0..desc.mips[0].tiles_y {
+            for x in 0..desc.mips[0].tiles_x {
+                wants.push(inf_vt::VtWant::refine(
+                    VtTextureHandle(0),
+                    TileCoord::new(0, x, y),
+                ));
+            }
+        }
+        let txn = res.apply_wants(&wants);
+        overflowed |= txn.deferred > 0;
+        for w in floor {
+            assert!(
+                res.is_resident(w.texture, w.tile),
+                "step {i}: residency fell below the floor at {:?} — {}",
+                w.tile,
+                txn.trace()
+            );
+        }
+    }
+    assert!(
+        overflowed,
+        "the refinement set never exhausted the pool, so the invariant above was \
+         never under the pressure that could break it"
+    );
+}

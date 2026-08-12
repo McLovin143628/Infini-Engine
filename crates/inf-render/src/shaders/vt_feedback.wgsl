@@ -84,21 +84,32 @@ fn cs_feedback(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // ── is this surface on screen at all? ──
     //
-    // The camera term. A surface behind the eye or outside the frustum
-    // contributes nothing, which is what makes the mask a function of where the
-    // camera is rather than of what the level contains.
+    // The camera term, and it is `inf_render::on_screen`'s — BRANCH FOR BRANCH,
+    // margin for margin (the P26.4 audit; `ndc_margin` names the factor on the
+    // Rust side and `the_feedback_and_the_floor_agree_about_what_is_on_screen`
+    // sweeps the two against each other on a device). A surface the floor keeps
+    // and the feedback drops is a surface that pays for its floor pages and is
+    // never refined, which no counter in this system reports.
     let clip = params.view_proj * vec4<f32>(centre, 1.0);
-    if (clip.w <= 0.0) {
-        return;
-    }
-    let ndc = clip.xyz / clip.w;
     let dist = max(length(centre - params.eye.xyz), 1e-4);
     let r_px = radius * params.eye.w / dist;
-    // The sphere's radius as an NDC margin on the shorter axis; generous on the
-    // longer one, which is the conservative direction.
-    let margin = r_px / max(f32(params.counts.w), 1.0);
-    if (abs(ndc.x) > 1.0 + margin || abs(ndc.y) > 1.0 + margin) {
-        return;
+    // The sphere's projected EXTENT as an NDC margin on the shorter axis;
+    // generous on the longer one, which is the conservative direction.
+    let margin = 2.0 * r_px / max(f32(params.counts.w), 1.0);
+    if (clip.w <= 0.0) {
+        // Behind the eye — unless the sphere still STRADDLES it. That is the
+        // ordinary state of the terrain-sized quad the memo names as this
+        // signal's worst case: a camera standing on a 200 m ground plane is
+        // inside its bounding sphere, and an unconditional return here means the
+        // largest surface on screen is the one that never gets marked.
+        if (radius <= -clip.w) {
+            return;
+        }
+    } else {
+        let ndc = clip.xyz / clip.w;
+        if (abs(ndc.x) > 1.0 + margin || abs(ndc.y) > 1.0 + margin) {
+            return;
+        }
     }
 
     // ── which level does that footprint justify? ──

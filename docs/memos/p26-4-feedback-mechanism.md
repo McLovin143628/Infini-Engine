@@ -9,7 +9,12 @@ house rule).
 ROADMAP P26.4 clause 1: *"the feedback pass: per-tile coverage as an
 **order-independent bitmask** (atomicOr, fixed layout — content is a pure
 function of camera/scene/residency, the ruling that reconciles GPU feedback with
-the replay doctrine in `inf-vgeom/src/stream.rs:57-68`)"*.
+the replay doctrine in `inf-vgeom/src/stream.rs:52-62`)"*.
+
+(The clause and the first draft of this memo both cited `57-68`, which starts
+mid-sentence and runs six lines past the doc block into `use` statements. The
+range is **52-62**, as `vt_feedback.wgsl:11` says — the same batch spelled one
+citation two ways. Corrected by the P26.4 audit.)
 
 Every property it names is delivered: the bitmask is written with `atomicOr` at a
 fixed layout addressed in the same virtual-address order the residency uses, its
@@ -63,6 +68,18 @@ pipeline the golden harness's command stream would have to grow.
 1. **Occlusion.** A wall in front of a textured floor does not stop the floor
    from asking for its tiles. The floor's pages are paid for and not sampled.
    Bounded by the frustum test, which is the larger term in practice.
+
+   The **frustum test itself** was wrong in the first cut of this pass, and the
+   P26.4 audit measured it: the shader returned unconditionally on `clip.w <= 0`
+   where the floor's `inf_render::on_screen` keeps a sphere that *straddles* the
+   eye, and its NDC margin was half the floor's. So a surface the camera stands
+   **inside** — which is the ordinary state of the terrain-sized quad in item 3
+   below — was never marked at all, and sat at `VT_FLOOR_MAX_TILES` for ever
+   while every arm stayed green, because both defects are in the "the floor
+   keeps more than the feedback" direction and nothing compared the two. The two
+   tests are now the same test, and
+   `the_feedback_and_the_floor_agree_about_what_is_on_screen` sweeps five
+   positions including one bisected into the disputed margin band.
 2. **uv extent.** A surface whose material tiles across only part of its uv space
    marks the whole level rather than the tiles a fragment reached. For a level
    chosen to match the screen footprint this is bounded by
@@ -101,6 +118,10 @@ shipped. On a 4096² texture those three levels are 4×4, 2×2 and 1×1 *texels*
 level rule (`inf_render::justified_mip`, mirrored by `vt_feedback.wgsl`), and
 differ only in the cap: the floor is bounded so it can be claimed unconditionally,
 the feedback is not so the budget decides.
+
+They now also share one **camera** rule — `inf_render::on_screen`'s branches and
+`inf_render::ndc_margin`'s factor, mirrored by the same shader. That was not true
+when this memo was first written; see item 1 above.
 
 ## When to revisit
 

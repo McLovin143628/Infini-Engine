@@ -127,8 +127,9 @@ pub use vt_library::{
 // The P26.4 streaming loop: the floor's rules (pure, unit-tested with no
 // adapter), the GPU feedback pass, and the pop-in counters a gate asserts on.
 pub use vt_stream::{
-    analytic_floor, feedback_requests, justified_mip, on_screen, projection_scale, scene_coverage,
-    screen_diameter_px, VtCoverage, VtFeedback, VtPopIn, VT_FEEDBACK_MAX_TILES, VT_FLOOR_MAX_TILES,
+    analytic_floor, feedback_requests, justified_mip, ndc_margin, on_screen, projection_scale,
+    scene_coverage, screen_diameter_px, VtCoverage, VtFeedback, VtPopIn, VT_FEEDBACK_MAX_TILES,
+    VT_FLOOR_MAX_TILES,
 };
 // The pool's own vocabulary, re-exported so a host that builds a VT level does
 // not have to depend on `inf-vt` itself: `VtTextures::new` takes a
