@@ -71,34 +71,9 @@ fn vs(in: VsIn) -> VsOut {
     return out;
 }
 
-// ── the UV a built-in primitive samples with (P26.3, v1) ─────────────────────
-//
-// `MeshVertex` is position + normal and carries NO uv, and neither does
-// `SkinnedVertex`. The built-in primitives have no authored parameterization at
-// all, so this path projects one: the dominant-axis box projection below, in
-// OBJECT space, which maps a unit primitive centred on the origin onto [0,1]²
-// per face with a consistent winding.
-//
-// **This is a v1 and it is named as one.** A skinned character's `.inf_mesh`
-// DOES carry authored uvs (`SubMesh` has had them since P4) and this path does
-// not read them, because doing so means a `uv` on `MeshVertex` at @location(2)
-// and on `SkinnedVertex` at @location(15), a matching change in
-// `inf_editor_core::render_assets::skinned_mesh_data` and its player mirror, and
-// a re-bless of nothing but a widened vertex buffer. The meshlet path — which is
-// what a real imported mesh actually draws through — reads its REAL uv, because
-// `VgeomVertex` has always stored one (8 floats per vertex, the last two unused
-// until now).
-fn vt_box_uv(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
-    let a = abs(n);
-    if (a.x >= a.y && a.x >= a.z) {
-        return vec2<f32>(-p.z * sign(n.x), -p.y) + vec2<f32>(0.5);
-    }
-    if (a.y >= a.z) {
-        return vec2<f32>(p.x, -p.z * sign(n.y)) + vec2<f32>(0.5);
-    }
-    return vec2<f32>(p.x * sign(n.z), -p.y) + vec2<f32>(0.5);
-}
-
+// The uv this path samples with is `vt_box_uv`, in `vt_sample.wgsl` — one
+// definition, shared with the rigid path, so a skinned surface and a rigid one
+// cannot texture differently.
 
 // ── Lights (must match LightsUniform / MAX_LIGHTS in passes/mesh.rs) ──
 const MAX_LIGHTS: u32 = 16u;

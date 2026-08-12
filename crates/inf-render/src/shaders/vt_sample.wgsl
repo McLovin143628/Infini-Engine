@@ -318,3 +318,43 @@ fn vt_apply_normal(
     let bitangent = cross(n, tangent);
     return normalize(tangent * ts.x + bitangent * ts.y + n * ts.z);
 }
+
+/// **The uv a path with no uv stream samples with** (P26.3, v1).
+///
+/// A dominant-axis box projection in OBJECT space, mapping a unit primitive
+/// centred on the origin onto [0,1]² per face with a consistent winding. In
+/// object space rather than world space so the projection rides the instance
+/// instead of sliding when it moves.
+///
+/// **Which paths need it, and why — this is a v1 and it is named as one.** The
+/// *render* vertex formats `inf_render::passes::mesh::MeshVertex` and
+/// `inf_render::SkinnedVertex` are position + normal and carry no uv, so the
+/// rigid and skinned fragment stages have nothing else to sample with. That is a
+/// fact about the RENDER stream and not about the asset: `inf_mesh::MeshVertex`
+/// has carried `uv` (and a `tangent`) since P4, and a skinned character's
+/// `.inf_mesh` therefore has authored uvs this path does not read. **A box
+/// projection on a character is visibly wrong** — the seams fall on the dominant
+/// axis rather than on the artist's, and a face's texture will not line up with
+/// its head. Wiring the real uv through is a widened vertex buffer rather than a
+/// new idea: a `uv` at `@location(2)` on `MeshVertex` and `@location(15)` on
+/// `SkinnedVertex`, plus the mirrored change in
+/// `inf_editor_core::render_assets::skinned_mesh_data` and its player twin.
+///
+/// The meshlet path does NOT use this: `VgeomVertex` has stored a real uv since
+/// P13.1b (8 floats a vertex, the last two unread until P26.3), and a real
+/// imported mesh draws through that path.
+///
+/// **One definition, composed into every lit shader** — it was spelled once in
+/// `mesh.wgsl` and again in `skinned_mesh.wgsl`, which is two copies of one
+/// projection that have to agree for a rigid surface and a skinned one to texture
+/// alike.
+fn vt_box_uv(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
+    let a = abs(n);
+    if (a.x >= a.y && a.x >= a.z) {
+        return vec2<f32>(-p.z * sign(n.x), -p.y) + vec2<f32>(0.5);
+    }
+    if (a.y >= a.z) {
+        return vec2<f32>(p.x, -p.z * sign(n.y)) + vec2<f32>(0.5);
+    }
+    return vec2<f32>(p.x * sign(n.z), -p.y) + vec2<f32>(0.5);
+}
