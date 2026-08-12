@@ -9261,6 +9261,108 @@ door for editor viewport, PIE and shipping.
   budget ruling executed (fold VT bindings into the env group past index 13, or a probed
   limit raise — measured, memo'd); 4. `.inf_mat` texture references finally resolve in the
   interactive viewport and the player identically.
+
+> **STATUS — P26.3 VT sampling in the lit passes: COMPLETE (2026-08-11)** — five
+> commits plus a four-commit audit. **Clauses 1–3 shipped; clause 4 did not, and that
+> is the named next step rather than a failure** (see the remainders below).
+>
+> * **The container's read half moved down into `inf_vt::container`**, leaving the
+>   writer in `inf-material`. P26.2 inverted the dependency so binding VT into the lit
+>   passes could not drag an image decoder into a shipped player; P26.3 is that
+>   binding, and it made the omission concrete — **the player has to read tiles to
+>   sample them and does not link `inf-material`** (a *dev* dependency of
+>   `inf-render`). Measured after the move: `cargo tree -p inf-player -e normal` has
+>   `inf-vt` and no `inf-material`. (`image` and `naga` are in that tree regardless,
+>   via `gltf`/`inf-terrain` and via `wgpu-core`; what the inversion buys is that
+>   `inf-material`'s own code — the encoder, the naga-validating material compiler —
+>   stays out, not that those two crates vanish.) The BC **decoders** came with the
+>   reader deliberately: `tile_rgba8` is the transcode tier, the arm every mobile
+>   target takes, and on mobile only the player runs.
+> * **Three bindings folded into the shared env group at 14/15/16**, appended from
+>   `VtPools::bind_group_layout_entries` rather than spelled a second time — measured:
+>   `Limits::default()` grants 1000 bindings per group and 4 GROUPS, and the group is
+>   the scarce one. `max_bind_groups` stays 4. Terrain's env group is 3 but the layout
+>   is one shared object, so it carries the entries inert; naga drops the unused
+>   globals. `vt_sample.wgsl` composes into every lit shader on the `wetness.wgsl`
+>   argument, and `composed_scene_shaders_validate` covers the composition (it earned
+>   its keep immediately: `set` is a reserved word in WGSL).
+> * **The walk implements the P26.2 audit's F1 contract**: the tile is carried DOWN
+>   the tile tree (`min(t / 2, tiles - 1)` per level, mip records only) rather than
+>   re-derived from `uv` at the resolved mip. Pinned by a line-for-line Rust twin over
+>   seven pyramids **with mip 1 resident and mip 0 not** — the residency the class
+>   needs, since a roots-only pool clamps the disagreement out of existence — plus a
+>   comment-stripped source gate over the WGSL. Mutation-verified: one mutation each
+>   fails exactly one arm.
+> * **sRGB is decoded in the shader**, from the flag already in the table's texture
+>   header, so the atlas stays linear and `VT_BINDING_COUNT` stays at three. Two pools
+>   (3 → 6 bindings) and a `view_formats` reinterpretation (4 bindings, and the shader
+>   still reads the flag) were both weighed. The cost is written where it lives: the
+>   transfer function lands on the FILTERED result — ordinary gamma-space filtering
+>   error. **This closes the P26.2 remainder that named it a P26.3 measurement.**
+> * **The per-instance set rides in words that were already there** —
+>   `InstanceRaw::misc.yzw` and the vgeom record's three padding words, each a
+>   `VtTextureHandle + 1` so 0 is "no texture" with no second field. Both records stay
+>   176 bytes, no vertex stream widens, and a textureless instance packs to the bytes
+>   it always did. `ResourceKey` gained a fourth component (`table_generation`),
+>   because registering a texture re-creates the indirection buffer and a bind group
+>   cached across that keeps the old allocation alive — no validation error, no black
+>   frame, just a table from before the new texture existed.
+>
+> **What the audit changed.** The batch proved the bytes reach the atlas and that the
+> WGSL address arithmetic agrees with `inf-vt`, and **never rendered a fragment**. A
+> mutation matrix of twelve found five survivors, four of them sharing that one root:
+> severing the sRGB decode, swapping the albedo and ORM words in `InstanceRaw::pack`,
+> collapsing `vt_box_uv` to a constant and dropping the border offset were each
+> invisible to the whole `inf-render` suite, under a batch whose headline is that
+> material textures appear in the renderer for the first time. Two arms now draw real
+> frames through the real `EngineRenderer` (`a_virtual_texture_reaches_the_lit_pixel`,
+> `the_slot_routing_and_the_srgb_flag_reach_the_pixel`) and all five mutations fail.
+> The fifth survivor was `resource_key` passing a constant for a generation the key
+> type is injective in — a hole that stood over the three OLDER components too, now
+> pinned by scope. Also: `vt_box_uv` was spelled **twice**, in `mesh.wgsl` and
+> `skinned_mesh.wgsl` (one definition now, in `vt_sample.wgsl`); the P26.1 no-float
+> LAW did not follow the decoders down into `inf-vt` (it does now, and it matters more
+> there — a float in decode makes the transcode tier's RGBA8 page platform-dependent);
+> and the engagement-counter arm asserted zero twice without ever drawing a frame with
+> a pool.
+>
+> **LAW — a handle is a per-registry index, not a shared name.** The batch claimed a
+> handle "depends only on order of first sight, which is what lets two projectors'
+> sets compare equal". The premise is right and the conclusion is backwards: the P16.6
+> mirror law has **the editor walking document order and the player walking `Guid`
+> order**, so one level mints different handles on the two sides and their
+> `VtTextureSet`s are unequal integers naming one texture. Both are correct — each
+> host's table maps its own handle to the same content — so **cross-host comparison is
+> by GUID**. The arm that claimed the property built both registries in the same order
+> and could never have seen it; the reversed-order arm now asserts the handles
+> genuinely differ *and* that each GUID still resolves to the same texture. The same
+> caveat reaches `want_floor`, which is pure in the registration SEQUENCE.
+>
+> **Honest remainders carried into P26.4.**
+> * **Spec clause 4 is NOT done, and it is the named next step**: `.inf_mat` texture
+>   references do not yet resolve in the viewport or the player. Both projectors fill
+>   `vt: Default::default()` and **no projector calls `VtTextures::register` outside
+>   tests**. The registration door, the material rule and the floor are all built and
+>   exercised; what is missing is the persisted binding, which needs a scene schema
+>   bump (v21 → v22) and pack dependency edges so a cooked pack carries the `.inf_tex`
+>   payloads a level names. That is a dedicated wire batch, not a line of glue.
+> * **The rigid and skinned paths box-project their uv** (`vt_box_uv`), because the
+>   RENDER vertex streams carry none — and a box projection on a character is visibly
+>   wrong. The asset does not have this problem: `inf_mesh::MeshVertex` has carried
+>   `uv` *and* `tangent` since P4, so wiring both through is a widened vertex buffer
+>   rather than a new idea (`uv` at `@location(2)` / `@location(15)`, plus
+>   `skinned_mesh_data` and its player twin). The meshlet path — what a real imported
+>   mesh draws through — reads its real uv already.
+> * **No tangent stream**, so `vt_apply_normal` derives a cotangent frame per fragment
+>   from screen-space derivatives: exact for a planar patch, first-order elsewhere.
+> * **No feedback**: the want set is `want_floor`'s deterministic camera-free three
+>   coarsest levels (≤ 21 pages per texture however large). A surface is visibly
+>   textured, not sharp. P26.4 refines it and can never regress below it.
+> * Terrain does not sample through VT (the entries are bound and inert). The
+>   occlusion map multiplies **ambient** AO only, never direct light. Goldens stay
+>   **50** and none was re-blessed — the textureless command stream is unchanged, and
+>   `vt_engaged_frames` is what measures it rather than an expectation.
+
 - **P26.4 Deterministic feedback + streaming loop** — 1. the feedback pass: per-tile
   coverage as an **order-independent bitmask** (atomicOr, fixed layout — content is a pure
   function of camera/scene/residency, the ruling that reconciles GPU feedback with the
