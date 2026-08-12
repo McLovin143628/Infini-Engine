@@ -8977,6 +8977,107 @@ door for editor viewport, PIE and shipping.
   with a full tile pyramid; 3. `TEXTURE_COMPRESSION_BC` requested as adapter-probed optional
   feature + `caps.rs` clamp + tier tests (absent → CPU transcode to RGBA8 pages through the
   same residency door).
+
+> **STATUS — P26.1 Tiled container + BC upload: COMPLETE (2026-08-11)** — four
+> implementation commits (`c4df446` container, `e7bbf1b` import + the one read door,
+> `462ea1f` the BC probe/clamp, `b668cef` the upload proof) plus an adversarial audit
+> (seven commits). Battery green: **223 binaries, 4 029 passed, 0 failed, 8 ignored**
+> (the batch landed at 4 022; the audit added seven arms).
+> Goldens stay **50**. No schema moved (`ScenePayload`, scene, `TextureAsset` all
+> untouched — this versions the *container*). No new external dependency:
+> `inf-material` became a **dev**-dependency of `inf-render` only, the arrangement
+> `inf-terrain`/`inf-voxel`/`inf-anim` already have.
+>
+> **What it is.** A texture becomes byte-addressable: header (128 B) + mip directory
+> (32 B/level, finest first) + tile directory (32 B/tile, sorted `(mip, y, x)`) +
+> uniform 16-byte-aligned tile blobs, written as a RAW IMAGE and never through
+> `inf_asset::encode` (`TiledTextureImage` implements neither `AssetPayload` nor
+> `Serialize`, so the generic writer is a type error rather than a file whose tiles
+> are all off their alignment). A tile is 128 payload texels per side plus a 4-texel
+> border ring — 136 = 34 BC blocks — chosen so a stored block grid **is** the level's
+> own block grid offset by whole blocks, which is what makes the v1 view a re-gather
+> with no decode and no re-compression. `.inf_tex` joins the streaming class and cooks
+> uncompressed.
+>
+> **What the audit found** (all fixed in this batch; findings F1–F9 with mechanisms in
+> the commit bodies):
+>
+> * **The shipped player never applied the adapter capability clamp.** P26.1 puts
+>   `vt.bc_tiles` inside `clamp_occlusion` and says that is "the door a host actually
+>   calls". The editor calls it; `inf-player`'s render host ran `tier.apply` and
+>   stopped — so `vgeom.occlusion`, `two_pass`, the scatter budget *and* the new page
+>   format were granted in shipping on adapters that cannot run them and clamped in
+>   the editor. Points straight at mobile, where BC is absent and only the player
+>   runs. Fixed; `projector_mirror`'s arm accepted `.apply(` **or**
+>   `detect_and_clamp`, so `tier.apply(` satisfied an arm whose message says the
+>   opposite — both clamps are two assertions now, **read through the comment
+>   stripper**, because the first spelling went green under mutation on the strength
+>   of a comment in the fix.
+> * **A v2 payload did not have to contain the tiles it declared.** `parse` bounded
+>   each tile's range and nothing more: entries could alias, and `total_len` was never
+>   compared with the payload. Measured — a hand-built **584 KiB** file with 16 384
+>   correctly-labelled entries all pointing at its one blob parsed clean and made
+>   `level_bytes` ask for **1 GiB**, 1 794×, through the door the thumbnailer calls on
+>   any `.inf_tex` that appears in the Content Drawer. Three equalities pin the layout
+>   (v2 has one writer; a v3 is already refused as `SchemaTooNew`), which also makes a
+>   tile's offset *arithmetic* for P26.2's hot path.
+> * **The header's extent was never checked against mip 0's** — `to_texture_asset`
+>   reads one and `level_bytes` the other, and the sprite-sheet slicer cuts cells with
+>   the first.
+> * **The transcode fallback costs 8× for BC1, not 4×.** Four docs said 4×, one of
+>   them twice for two different formats; the batch's own upload test asserts
+>   `bc_bytes * 8` two lines under a comment saying 4×. This is the number a page-pool
+>   budget gets sized from. `bc.rs`'s own "BC1 (opaque, 4:1)" corrected with it.
+> * **The ship-size trade named the wrong cost.** `compresses_kind` explains it as the
+>   lost zstd frame. Measured: a v2 payload is bigger than v1 *before any pack touches
+>   it* — **6.8× at 128² BC1**, 2.55× at 256², 1.22× at 1024², 1.16× at 2048² — and BC1
+>   and `TextureCompression::None` grow by the *same* factor, which falsifies the zstd
+>   framing directly. It is a small-texture cost (eight of a 128² texture's nine levels
+>   are one 136² tile each), it is inherent to the uniform page, and the tail-packing
+>   follow-up now has a number to be measured against.
+> * **`TileCoord`'s derived `Ord` is `(mip, x, y)`; the directory is `(mip, y, x)`.**
+>   Neither is wrong and they are not the same, so a residency table keyed on it
+>   iterates in an order that is not the order its bytes lie in. `payload_order()`
+>   added; pinned by an arm.
+> * **"The BC encoder is integer arithmetic with no floating point anywhere" was a
+>   sentence in a commit message with nothing enforcing it** — and it is now the
+>   writer of every shipped tile, whose bytes are content-hashed and cooked into a
+>   reproducible pack. One `as f32` and a texture's bytes become a property of the
+>   machine that imported it, invisibly: every "re-import is byte-identical" arm here
+>   runs on one machine. Now a source gate (mutation-verified: an f32 palette lerp
+>   fails it by name and passes every other BC test).
+> * **The eaten-`\` law, fourth catch** — `"…the round trip              would prove
+>   nothing"` in the upload proof's anti-vacuity message.
+> * **The size matrix reached none of the awkward extents** (128 exactly, 129, 4, 3, 2,
+>   a 14-level 8192×4 strip). Nothing misbehaved: all of them reconstruct v1 byte for
+>   byte in all three formats, which subsumes the block-grid-offset premise *including*
+>   at tile 0 where the stored block begins at source texel −4 and is pure clamp. Added
+>   as permanent arms — coverage, not repair.
+>
+> **Withdrawn on measurement.** Truncation was already refused at every section
+> boundary (arms added anyway, since only one point was tested); the v1/v2 magic sniff
+> cannot collide and a 4-byte file, a short header and a truncated magic all fail
+> closed; the PCG `mask.image` door cannot change a v1 payload's decoded bytes *by
+> construction* — the non-v2 branch is the identical `inf_asset::decode` call — and a
+> v2 mask decodes to the same record; old packs holding zstd'd `.inf_tex` entries still
+> load, because the reader honours the per-entry `compressed` flag, which it must
+> anyway since `compress_if_worth_it` can leave a compressible kind raw; the BC probe
+> arm is non-vacuous on **both** adapter tiers (with BC it catches a device mask that
+> dropped the feature, without BC it catches a clamp that failed to fire); and the
+> import path's `parallel_map` is the deterministic in-order map, with no map iteration
+> anywhere in the tiler.
+>
+> **Honest remainders carried into P26.2.** Nothing samples or pages a virtual texture
+> yet — `vt.bc_tiles` has no reader, and the wgpu page-format mapping lives in the
+> upload proof rather than in a crate (`inf-vt` will own it). The tail mips are still
+> one whole tile each. Photogrammetry's finish still writes v1 deliberately (its
+> five-asset transaction is generic over `AssetPayload` and its textures are already
+> BC at the write site); `lift_texture_asset` is the path its residency will take, and
+> for a BC asset that lift is a decode→re-encode — stable, not bit-identical.
+> `TileCoord`, `tile_at`, `payload_order` and `lift_texture_asset` have no non-test
+> caller until P26.2. An import advisory for the small-texture tail cost is *not*
+> raised (the two dimension advisories are); it belongs with P26.5's badging.
+
 - **P26.2 Physical pool + indirection (Ring 0, GPU-free first)** — 1. `inf-vt` residency:
   page-slot suballocator + LRU eviction under a byte budget, per-texture virtual→physical
   page table with finest-resident-ancestor fallback pointers, global monotone stamps (the
