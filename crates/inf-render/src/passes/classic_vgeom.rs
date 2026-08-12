@@ -66,11 +66,22 @@ fn instance_threshold(
 
 /// Pack a [`VgeomInstance`] into the mesh pass's [`InstanceRaw`] (the classic path
 /// reuses the rigid-mesh instance layout + shader).
+///
+/// **The virtual-texture set travels with the instance** (P26.4 audit). This
+/// literal used to spell `vt: Default::default()`, which is `VtTextureSet::NONE`
+/// — and `InstanceRaw::pack` reads exactly that field into `misc.yzw`, which is
+/// what `mesh.wgsl`'s `vt_bound()` tests. The classic node runs precisely when
+/// `RenderSettings.vgeom.enabled == false`, i.e. on the downlevel tier, so one
+/// scene rendered textured on a meshlet-capable adapter and **textureless** on
+/// one without — silently, because a `NONE` set is the scalar surface and not an
+/// error. Inert before P26.4 (every set was `NONE` on every path) and live the
+/// moment a projector started filling it, which is what this batch did. The
+/// GPU-driven twin never had it: `passes::vgeom` packs `inst.vt.slots()`.
 fn pack_vgeom_instance(origin: &FloatingOrigin, inst: &VgeomInstance) -> InstanceRaw {
     InstanceRaw::pack(
         origin,
         &MeshInstance {
-            vt: Default::default(),
+            vt: inst.vt,
             translation: inst.translation,
             rotation: inst.rotation,
             scale: inst.scale,
@@ -538,6 +549,66 @@ impl RenderNode for ClassicVgeomNode {
 /// The classic fallback's eviction rule (P18.3). Pure, so the property that was
 /// missing — *nothing is held that this frame does not list* — is pinned without
 /// an adapter.
+/// **The downlevel tier carries the surface's virtual textures** (P26.4 audit).
+///
+/// GPU-free, because the defect is one field of one literal and the whole point
+/// is that no adapter is needed to see it. `pack_vgeom_instance` used to spell
+/// `vt: Default::default()`, `InstanceRaw::pack` reads that field into
+/// `misc.yzw`, and `mesh.wgsl` tests those three words — so every real mesh on an
+/// adapter without the meshlet path drew off its scalar attributes while the same
+/// scene on a capable adapter drew textured. Two arms, because the failure is a
+/// *constant* and the zero direction of it is also the shape every pre-P26.3
+/// golden recorded.
+#[cfg(test)]
+mod packing {
+    use super::pack_vgeom_instance;
+    use crate::scene::{VgeomInstance, VtTextureSet};
+    use inf_math::FloatingOrigin;
+
+    fn instance(vt: VtTextureSet) -> VgeomInstance {
+        VgeomInstance {
+            vt,
+            ..VgeomInstance::lit(
+                7,
+                glam::DVec3::ZERO,
+                glam::Quat::IDENTITY,
+                glam::Vec3::ONE,
+                [1.0; 4],
+                3,
+            )
+        }
+    }
+
+    /// The three slots reach `InstanceRaw::misc.yzw`, in the shader's order.
+    #[test]
+    fn the_classic_tier_packs_the_instances_texture_set() {
+        let origin = FloatingOrigin::new(glam::DVec3::ZERO);
+        let set = VtTextureSet {
+            albedo: 1,
+            normal: 0,
+            orm: 3,
+        };
+        let raw = pack_vgeom_instance(&origin, &instance(set));
+        assert_eq!(
+            [raw.misc[1], raw.misc[2], raw.misc[3]],
+            [set.albedo, set.normal, set.orm],
+            "the classic vgeom node drops the surface's virtual textures, so the \
+             downlevel tier renders textureless where the meshlet tier does not"
+        );
+        assert_eq!(raw.misc[0], 3, "the pick id moved");
+    }
+
+    /// …and an unbound instance still packs the three zero words every pre-P26.3
+    /// golden recorded, so the fix above did not buy texturing with a byte the
+    /// textureless command stream did not have.
+    #[test]
+    fn an_unbound_classic_instance_still_packs_three_zeroes() {
+        let origin = FloatingOrigin::new(glam::DVec3::ZERO);
+        let raw = pack_vgeom_instance(&origin, &instance(VtTextureSet::NONE));
+        assert_eq!([raw.misc[1], raw.misc[2], raw.misc[3]], [0, 0, 0]);
+    }
+}
+
 #[cfg(test)]
 mod eviction {
     use super::{retain_live, BTreeMap, BTreeSet};
