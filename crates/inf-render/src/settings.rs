@@ -474,7 +474,8 @@ pub struct VirtualTextureSettings {
     /// [`AdapterCaps::clamp_bc_tiles`](crate::caps::AdapterCaps::clamp_bc_tiles),
     /// and the residency door transcodes each tile to RGBA8 on the CPU
     /// (`TiledTextureReader::tile_rgba8`) before uploading it — the same door,
-    /// one format decision earlier, at 4× the page bytes.
+    /// one format decision earlier, at **8×** the page bytes for BC1 and 4× for
+    /// BC3 (4 and 8 bits per texel against RGBA8's 32).
     ///
     /// This is not a tier knob and [`RenderTier::apply`](crate::caps::RenderTier::apply)
     /// deliberately does not touch it: BC support is orthogonal to how much GPU

@@ -350,7 +350,9 @@ impl AdapterCaps {
     /// Losing BC costs page *bytes*, never content: a tile is CPU-transcoded to
     /// RGBA8 (`inf_material::TiledTextureReader::tile_rgba8`, the decoder the
     /// thumbnailer has used since P4) and uploaded through the same residency
-    /// door, at 4× the size for BC1 and 4× for BC3.
+    /// door, at **8×** the size for BC1 and 4× for BC3 — BC1 is 4 bits per texel
+    /// against RGBA8's 32, BC3 is 8. (9 248 B → 73 984 B, and 18 496 B → 73 984 B;
+    /// the 8:1 is asserted in `tests/vt_bc_upload.rs`.)
     pub fn clamp_bc_tiles(&self, mut settings: RenderSettings) -> RenderSettings {
         if !self.texture_compression_bc {
             settings.vt.bc_tiles = false;

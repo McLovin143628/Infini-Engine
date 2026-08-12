@@ -90,8 +90,9 @@ impl GpuContext {
         //    renderer degrades wireframe to unlit.
         //  * `TEXTURE_COMPRESSION_BC` (P26.1) — absent, virtual-texture tiles are
         //    CPU-transcoded to RGBA8 pages before upload, through the same
-        //    residency door at 4× the page bytes. `caps::AdapterCaps` probes it
-        //    and `clamp_bc_tiles` turns the setting off; no tier ever turns it on.
+        //    residency door at 8× the page bytes for BC1 and 4× for BC3.
+        //    `caps::AdapterCaps` probes it and `clamp_bc_tiles` turns the setting
+        //    off; no tier ever turns it on.
         let optional_features = adapter.features()
             & (wgpu::Features::POLYGON_MODE_LINE | wgpu::Features::TEXTURE_COMPRESSION_BC);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {

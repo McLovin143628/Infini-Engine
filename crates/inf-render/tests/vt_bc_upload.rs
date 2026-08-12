@@ -291,7 +291,8 @@ fn one_tile_uploads_and_reads_back_byte_for_byte() {
         let distinct: std::collections::BTreeSet<&[u8]> = upload.chunks(16).collect();
         assert!(
             distinct.len() > 64,
-            "the page is nearly uniform ({} distinct 16-byte chunks) — the round trip              would prove nothing",
+            "the page is nearly uniform ({} distinct 16-byte chunks) — the round \
+             trip would prove nothing",
             distinct.len()
         );
 
@@ -342,8 +343,10 @@ fn the_transcode_fallback_uploads_on_any_adapter() {
     );
     assert!(back == rgba, "the transcoded page came back changed");
 
-    // It is 4× the BC1 page — the cost of the fallback, measured rather than
-    // asserted in a comment.
+    // It is 8× the BC1 page — the cost of the fallback, measured rather than
+    // asserted in a comment. (BC1 is 4 bits per texel against RGBA8's 32, so the
+    // ratio is 8:1; BC3's is 8 bits and 4:1. The prose in `caps.rs`,
+    // `settings.rs` and `gpu.rs` said 4× for both, contradicted by this line.)
     let bc_bytes = r.header().tile_bytes as usize;
     assert_eq!(rgba.len(), bc_bytes * 8, "BC1 is 8:1 against RGBA8");
 }
