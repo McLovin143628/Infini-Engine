@@ -8883,9 +8883,16 @@ process-lived `Thumbnailer` in Ring 2, on the established per-panel-`PreviewSess
 progress tick is one thread for the process behind an `AtomicBool`, not one per run. No stale
 worker can write into a new run's state, because `begin` joins before it spawns. The frontend
 calls only `lib/ipc.ts` wrappers, `events.ts` is the single `listen` site, and no `useEffect`
-sets state directly. **Carried, not fixed:** `reset` cancels and *waits*, so a Ring-2 caller holds
-the session mutex for the rest of the stage in flight — documented for what it costs, and the
-dialog disables every path to it while a run is running.
+sets state directly. **Carried, not fixed, both reasoned rather than measured:** `reset` cancels
+and *waits*, so a Ring-2 caller holds the session mutex for the rest of the stage in flight —
+documented for what it costs, and the dialog disables every path to it while a run is running.
+And the worker EMITS each terminal event before it publishes the state that event implies, so a
+drain landing in the microseconds between them would let the frontend read `running` off a run
+that had finished and sit there, since nothing polls. Left alone deliberately: the losing
+interleaving needs a whole webview→IPC round trip inside that window, and a `photo_status`
+arriving during it blocks on the same mutex the worker is about to take and reads the published
+value. **The day the tick's locking changes, reverse the two lines** — a terminal event should
+never be observable before the state it implies.
 
 ### Phase 26 — Streaming Virtual Texturing (SVT)
 
