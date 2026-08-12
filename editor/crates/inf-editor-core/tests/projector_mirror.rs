@@ -465,7 +465,13 @@ fn both_projectors_keep_the_real_geometry_rules() {
 #[test]
 fn both_hosts_request_the_meshlet_path() {
     for (label, path) in [("editor viewport", VIEWPORT), ("shipped player", PLAYER)] {
-        let src = read(path).replace("\r\n", "\n");
+        // Read through the comment/string stripper, not raw: every needle below
+        // is a claim about what the host *executes*, and a prose sentence about
+        // a clamp satisfies a raw `contains` exactly as well as the call does.
+        // Measured, not feared — the fix that made the player pass the capability
+        // arm carries a comment naming `clamp_occlusion`, and with that comment
+        // in place the arm went on passing after the call itself was deleted.
+        let src = support::strip_comments_and_strings(&read(path).replace("\r\n", "\n"));
         // The request itself: `VgeomSettings { enabled: true, .. }` over the
         // level's authored block.
         assert!(
