@@ -132,6 +132,30 @@ const ENV_SCENE_DEPTH: u32 = 12;
 /// resource and adds no component to [`ResourceKey`]; see the invariant comment
 /// on [`EnvBinding::bind_group`], which now says so explicitly.
 const ENV_WETNESS: u32 = 13;
+/// **The virtual-texture surface** (P26.3) — the three bindings
+/// [`crate::vt::VT_BINDING_COUNT`] promised, folded in past index 13 exactly as
+/// `docs/memos/p26-28-virtualization-direction.md` ruled.
+///
+/// The ruling was "fold VT bindings into the shared env group after index 13, or
+/// a probed limit raise — measured". Measured: `Limits::default()` grants
+/// **1000** bindings per bind group and **4** bind groups. The scarce resource is
+/// the GROUP — mesh/skinned/vgeom already spend view + lights + env + (joints |
+/// meshlet storage), and terrain spends tile + material on top — so folding costs
+/// nothing and a fourth group would cost everything. `max_bind_groups` stays 4
+/// and no limit is raised.
+///
+/// **Terrain gets them too, and inert.** The env layout is one
+/// [`EnvBinding`] shared by every lit pass, and terrain's env group is 3 rather
+/// than 2 — but the layout is the same object, so the entries exist there as
+/// well. Splitting the layout per pass class was the alternative and it is
+/// rejected: two layouts is two things to keep in step for a pass that samples
+/// nothing. `vt_sample.wgsl` is composed into every lit shader (like
+/// `wetness.wgsl`, for the identical reason), terrain never calls it, and naga
+/// drops the unused globals — so the terrain pipeline does not even acquire the
+/// bindings. Terrain sampling its splat layers through VT is a later batch.
+const ENV_VT_ATLAS: u32 = 14;
+const ENV_VT_SAMPLER: u32 = 15;
+const ENV_VT_TABLE: u32 = 16;
 
 /// The atmosphere *medium* library, bound at `group`/`binding`.
 pub(crate) fn atmosphere_source(group: u32, binding: u32) -> String {
@@ -530,6 +554,12 @@ pub(crate) fn lit_deform_shader(
     // do not call `wet_apply` simply carry a dead function.
     let wetness =
         include_str!("../shaders/wetness.wgsl").replace("GROUP_ENV", &env_group.to_string());
+    // P26.3: virtual-texture sampling. Composed into EVERY lit shader on exactly
+    // the `wetness` argument above — the bind-group layout is shared, so one
+    // declaration site is what keeps the declaration and the layout from
+    // drifting, and a pass that does not call `vt_surface` carries dead functions
+    // whose globals naga drops.
+    let vt = include_str!("../shaders/vt_sample.wgsl").replace("GROUP_ENV", &env_group.to_string());
     // P22.1: the surface-deformation window, when the pass binds one. Composed
     // last of the prelude — it declares its own bindings and needs nothing from
     // the rest — and before the pass source, because WGSL has no forward
@@ -541,7 +571,7 @@ pub(crate) fn lit_deform_shader(
         None => String::new(),
     };
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../shaders/common_view.wgsl"),
         env,
         atmosphere_source(env_group, ENV_ATMOS_UNIFORM),
@@ -554,6 +584,7 @@ pub(crate) fn lit_deform_shader(
         atmosphere_apply_source(),
         cloud_shadow,
         wetness,
+        vt,
         deform,
         source
     )
@@ -584,17 +615,27 @@ pub(crate) fn deform_source(
 
 /// The cache key every bind group that embeds a **resizable** resource is keyed
 /// on: `(frame targets generation, atmosphere resources generation, GI resources
-/// generation)`.
+/// generation, VT pool generation)`.
 ///
-/// A tuple rather than a single counter because the three resources are recreated
-/// for unrelated reasons — the targets on a viewport resize, the atmosphere LUTs on
+/// A tuple rather than a single counter because the resources are recreated for
+/// unrelated reasons — the targets on a viewport resize, the atmosphere LUTs on
 /// a render-tier / atmosphere-quality clamp, the GI voxel/SH buffers on a
-/// **GI**-quality clamp — and any one alone must invalidate.
+/// **GI**-quality clamp, the VT indirection buffer on a texture *registration* —
+/// and any one alone must invalidate.
 ///
 /// The GI component is the P18.4 addition, and it is exactly what the P13 version
 /// of the [`EnvBinding::bind_group`] comment predicted would be needed "if either
 /// ever becomes resizable". It has.
-pub(crate) type ResourceKey = (u64, u64, u64);
+///
+/// The VT component is P26.3's, and it is load-bearing rather than defensive:
+/// registering a texture relays the whole indirection image out, so
+/// [`crate::vt::VtPools::apply`] **re-creates the buffer** — a different
+/// allocation under the same name. A bind group cached across that keeps the old
+/// buffer alive (wgpu refcounts it), so there is no validation error and no black
+/// frame: every instance simply keeps sampling the table as it was before the
+/// new texture existed. Exactly the quiet failure the invariant on
+/// [`EnvBinding::bind_group`] describes.
+pub(crate) type ResourceKey = (u64, u64, u64, u64);
 
 /// The current [`ResourceKey`] for a frame.
 #[inline]
@@ -603,6 +644,7 @@ pub(crate) fn resource_key(frame: &FrameData) -> ResourceKey {
         frame.targets.generation,
         frame.atmosphere.generation,
         frame.gi.generation,
+        frame.vt_generation(),
     )
 }
 
@@ -811,7 +853,17 @@ impl EnvBinding {
                         },
                         count: None,
                     },
-                ],
+                ]
+                // ── P26.3 virtual texturing (14, 15, 16) ──
+                //
+                // Appended from the mirror's own constructor rather than spelled
+                // again here: the layout and the entries are a PAIR, and a pair
+                // written in two files is a pair that drifts into a validation
+                // error at pipeline creation — or, worse, into a bind group that
+                // is legal and wrong.
+                .into_iter()
+                .chain(crate::vt::VtPools::bind_group_layout_entries(ENV_VT_ATLAS))
+                .collect::<Vec<_>>(),
             });
         let ao_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("env-ao"),
@@ -946,6 +998,28 @@ impl EnvBinding {
                         binding: ENV_WETNESS,
                         resource: frame.wetness.uniform.as_entire_binding(),
                     },
+                    // ── P26.3 virtual texturing ──
+                    //
+                    // The live pool when the frame has one, else the renderer's
+                    // permanent EMPTY set: a 1×1 atlas, a sampler and a 4-byte
+                    // zero buffer whose first word is not the table magic, so
+                    // `vt_active()` is false and every lit shader takes the
+                    // scalar path with no memory traffic. A layout entry has to
+                    // be satisfied whether or not anything is textured, and
+                    // "satisfied by something that reads as *nothing*" is what
+                    // keeps a textureless scene's arithmetic identical.
+                    wgpu::BindGroupEntry {
+                        binding: ENV_VT_ATLAS,
+                        resource: wgpu::BindingResource::TextureView(frame.vt_atlas()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: ENV_VT_SAMPLER,
+                        resource: wgpu::BindingResource::Sampler(frame.vt_sampler()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: ENV_VT_TABLE,
+                        resource: frame.vt_table().as_entire_binding(),
+                    },
                 ],
             })
         })
@@ -992,15 +1066,15 @@ mod gen_cache_tests {
         let mut cache: GenCache<ResourceKey, Rc<u32>> = GenCache::default();
         let mut builds = 0u32;
 
-        let first = fetch(&mut cache, (1, 1, 1), &mut builds);
+        let first = fetch(&mut cache, (1, 1, 1, 1), &mut builds);
         // Same key ⇒ the SAME allocation, and the builder never ran again.
-        let again = fetch(&mut cache, (1, 1, 1), &mut builds);
+        let again = fetch(&mut cache, (1, 1, 1, 1), &mut builds);
         assert!(Rc::ptr_eq(&first, &again), "an unchanged key rebuilt");
         assert_eq!(builds, 1, "an unchanged key must not rebuild");
 
         // The atmosphere generation alone must invalidate — this is the key
         // component P17.2 added, and the one a regression would drop.
-        let after_atmos = fetch(&mut cache, (1, 2, 1), &mut builds);
+        let after_atmos = fetch(&mut cache, (1, 2, 1, 1), &mut builds);
         assert!(
             !Rc::ptr_eq(&after_atmos, &first),
             "an atmosphere-generation bump did not rebuild the bind group"
@@ -1008,7 +1082,7 @@ mod gen_cache_tests {
         assert_eq!(builds, 2);
 
         // ...and so must the frame-targets generation alone (the P13 component).
-        let after_targets = fetch(&mut cache, (2, 2, 1), &mut builds);
+        let after_targets = fetch(&mut cache, (2, 2, 1, 1), &mut builds);
         assert!(
             !Rc::ptr_eq(&after_targets, &after_atmos),
             "a targets-generation bump did not rebuild the bind group"
@@ -1018,19 +1092,31 @@ mod gen_cache_tests {
         // ...and the GI generation alone (the P18.4 component). GI resources became
         // resizable when `GiQuality` landed, which is precisely the case the P13
         // exclusion comment said would have to join this key.
-        let after_gi = fetch(&mut cache, (2, 2, 2), &mut builds);
+        let after_gi = fetch(&mut cache, (2, 2, 2, 1), &mut builds);
         assert!(
             !Rc::ptr_eq(&after_gi, &after_targets),
             "a GI-generation bump did not rebuild the bind group"
         );
         assert_eq!(builds, 4);
 
+        // ...and the VT pool generation alone (the P26.3 component). Registering
+        // a virtual texture RE-CREATES the indirection buffer, and a bind group
+        // cached across that keeps the old allocation alive — wgpu refcounts it,
+        // so there is no validation error and no black frame, only a table from
+        // before the new texture existed.
+        let after_vt = fetch(&mut cache, (2, 2, 2, 2), &mut builds);
+        assert!(
+            !Rc::ptr_eq(&after_vt, &after_gi),
+            "a VT-generation bump did not rebuild the bind group"
+        );
+        assert_eq!(builds, 5);
+
         // Returning to a previously-seen key still rebuilds: the cache is one
         // slot, not a map, so it can never hand back a handle to a resource that
         // has since been recreated under the same number.
-        let back = fetch(&mut cache, (1, 1, 1), &mut builds);
+        let back = fetch(&mut cache, (1, 1, 1, 1), &mut builds);
         assert!(!Rc::ptr_eq(&back, &first));
-        assert_eq!(builds, 5);
+        assert_eq!(builds, 6);
     }
 
     /// A key that ignores one of its inputs is exactly the regression this guards,
@@ -1038,15 +1124,20 @@ mod gen_cache_tests {
     /// the call site.
     #[test]
     fn resource_key_is_injective_in_every_component() {
-        let base: ResourceKey = (7, 11, 13);
-        assert_ne!(base, (8, 11, 13), "targets generation dropped from the key");
+        let base: ResourceKey = (7, 11, 13, 17);
         assert_ne!(
             base,
-            (7, 12, 13),
+            (8, 11, 13, 17),
+            "targets generation dropped from the key"
+        );
+        assert_ne!(
+            base,
+            (7, 12, 13, 17),
             "atmosphere generation dropped from the key"
         );
-        assert_ne!(base, (7, 11, 14), "GI generation dropped from the key");
-        assert_eq!(base, (7, 11, 13));
+        assert_ne!(base, (7, 11, 14, 17), "GI generation dropped from the key");
+        assert_ne!(base, (7, 11, 13, 18), "VT generation dropped from the key");
+        assert_eq!(base, (7, 11, 13, 17));
     }
 
     /// The cloud bake's key type, given the same pointer-identity treatment as

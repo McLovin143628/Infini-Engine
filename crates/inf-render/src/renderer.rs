@@ -264,6 +264,45 @@ pub struct FrameData<'a> {
     /// wireframe pipeline variant on [`ViewMode::wireframe`]; the unlit branch is
     /// driven by the `View.flags.x` uniform instead (so no swap for Unlit).
     pub view_mode: ViewMode,
+    /// The live virtual-texture pool (P26.3), when the host has given the
+    /// renderer one. `None` on every textureless scene — including all 50
+    /// committed goldens — and then the env bind group names
+    /// [`vt_absent`](Self::vt_absent) instead.
+    pub vt: Option<&'a crate::vt::VtPools>,
+    /// The permanent EMPTY virtual-texture surface: what the env bind group
+    /// names when [`vt`](Self::vt) is `None`. See [`crate::vt::VtEmptyPool`].
+    pub vt_absent: &'a crate::vt::VtEmptyPool,
+}
+
+impl FrameData<'_> {
+    /// The atlas the env bind group names this frame.
+    #[inline]
+    pub(crate) fn vt_atlas(&self) -> &wgpu::TextureView {
+        self.vt
+            .map_or_else(|| self.vt_absent.view(), |p| p.atlas_view())
+    }
+    /// The page sampler the env bind group names this frame.
+    #[inline]
+    pub(crate) fn vt_sampler(&self) -> &wgpu::Sampler {
+        self.vt
+            .map_or_else(|| self.vt_absent.sampler(), |p| p.sampler())
+    }
+    /// The indirection buffer the env bind group names this frame.
+    #[inline]
+    pub(crate) fn vt_table(&self) -> &wgpu::Buffer {
+        self.vt
+            .map_or_else(|| self.vt_absent.table(), |p| p.table())
+    }
+    /// The VT component of [`crate::passes::ResourceKey`].
+    ///
+    /// **0 when there is no pool, and never 0 when there is**: `inf-vt`'s stamp
+    /// counter starts at 1 and only ever rises, so "absent" cannot collide with
+    /// any live pool generation and a pool appearing or vanishing invalidates
+    /// the cached bind group on its own.
+    #[inline]
+    pub(crate) fn vt_generation(&self) -> u64 {
+        self.vt.map_or(0, |p| p.table_generation())
+    }
 }
 
 pub struct EngineRenderer {
@@ -324,6 +363,20 @@ pub struct EngineRenderer {
     /// P21.1 voxel engagement counter (see
     /// [`EngineRenderer::voxel_engaged_frames`]).
     voxel: passes::voxel::VoxelReport,
+    /// The live virtual-texture GPU mirror (P26.3), when a host has handed one
+    /// over through [`EngineRenderer::set_vt_pools`]. The renderer OWNS it —
+    /// rather than borrowing it per frame — because that is what lets the env
+    /// bind group's cache key read the pool's generation without threading a
+    /// fourth argument through `render`, and because `apply` must run before the
+    /// frame's submit, which is an ordering this type is already responsible for.
+    vt: Option<crate::vt::VtPools>,
+    /// The empty VT surface, created once and never recreated (so it adds no
+    /// `passes::ResourceKey` component, on the `wetness` precedent).
+    vt_absent: crate::vt::VtEmptyPool,
+    /// How many frames were drawn with a VT pool bound — the P26.3 **engagement
+    /// counter**. Zero on every textureless scene, which is what makes "the
+    /// goldens did not change" a measurement rather than an expectation.
+    vt_engaged_frames: u64,
 }
 
 impl EngineRenderer {
@@ -512,7 +565,42 @@ impl EngineRenderer {
             deform: crate::deform::DeformResources::new(gpu),
             underwater,
             voxel,
+            vt: None,
+            vt_absent: crate::vt::VtEmptyPool::new(&gpu.device),
+            vt_engaged_frames: 0,
         }
+    }
+
+    /// Hand the renderer the virtual-texture GPU mirror for the level it is
+    /// drawing, or take it away.
+    ///
+    /// **The one door**, called identically by the editor viewport host and by
+    /// the shipped player — the P16.6 mirror law applied to VT. Passing `None`
+    /// restores the textureless path exactly: the env bind group names the empty
+    /// surface, `vt_active()` is false in every lit shader, and the command
+    /// stream is the one every pre-P26.3 golden recorded.
+    pub fn set_vt_pools(&mut self, pools: Option<crate::vt::VtPools>) {
+        self.vt = pools;
+    }
+
+    /// The live VT mirror, for a host that needs to apply a transaction to it.
+    #[inline]
+    pub fn vt_pools_mut(&mut self) -> Option<&mut crate::vt::VtPools> {
+        self.vt.as_mut()
+    }
+
+    /// The live VT mirror.
+    #[inline]
+    pub fn vt_pools(&self) -> Option<&crate::vt::VtPools> {
+        self.vt.as_ref()
+    }
+
+    /// Frames drawn with a virtual-texture pool bound (P26.3 engagement
+    /// counter). **Zero is the assertion on a textureless scene**, not an
+    /// absence of evidence.
+    #[inline]
+    pub fn vt_engaged_frames(&self) -> u64 {
+        self.vt_engaged_frames
     }
 
     /// How many deformation-window **texture uploads** this renderer has issued
@@ -836,6 +924,8 @@ impl EngineRenderer {
             wetness: &self.wetness,
             deform: &self.deform,
             view_mode: self.view_mode,
+            vt: self.vt.as_ref(),
+            vt_absent: &self.vt_absent,
         };
         self.graph.run(gpu, &mut encoder, &frame);
         gpu.queue.submit([encoder.finish()]);
@@ -843,5 +933,11 @@ impl EngineRenderer {
         // Next frame reprojects against the matrix we actually rendered with.
         self.prev_view_proj = Some(jvp.to_cols_array());
         self.frame_index = self.frame_index.wrapping_add(1);
+        // P26.3 engagement: counted where the frame actually went out, not where
+        // a pool was handed over, so it says "a frame was drawn able to sample
+        // virtual textures" and nothing weaker.
+        if self.vt.is_some() {
+            self.vt_engaged_frames += 1;
+        }
     }
 }

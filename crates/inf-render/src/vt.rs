@@ -139,19 +139,106 @@ pub struct VtPools {
     /// The residency layout generation this buffer was built for. **A stamp, not
     /// a measurement** — the only legal operation on it is `!=`.
     layout_generation: u64,
+    /// Bumped every time [`table`](Self::table) becomes a **different buffer**.
+    ///
+    /// P26.3's `EnvBinding` caches a bind group that names that buffer, so a
+    /// re-creation it cannot see is a bind group that keeps the old allocation
+    /// alive and keeps sampling a table from before the registration —
+    /// silently, because `wgpu` refcounts the old buffer and validates nothing.
+    /// This is the component of `passes::ResourceKey` that makes it visible.
+    /// **A stamp, not a measurement.**
+    table_generation: u64,
     /// One zero page, allocated once, for the missing-fetch path.
     zero_page: Vec<u8>,
+}
+
+/// The **empty** VT surface: what the environment bind group names on a frame
+/// with no pool at all.
+///
+/// Created once in `EngineRenderer::new` and never recreated (so it contributes
+/// nothing to [`crate::passes::ResourceKey`], on the `wetness` precedent). A
+/// layout entry must be satisfied whether or not anything is textured, and the
+/// three resources here are chosen so that being satisfied reads as *nothing*:
+/// the table buffer's first word is **zero, not [`inf_vt::TABLE_MAGIC`]**, so
+/// `vt_active()` in `vt_sample.wgsl` is false and every lit shader takes the
+/// scalar path without touching the atlas. That is the structural half of "a
+/// textureless scene renders exactly as it did"; the other half is that no
+/// instance names a texture, and both have to hold.
+pub struct VtEmptyPool {
+    view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+    table: wgpu::Buffer,
+}
+
+impl VtEmptyPool {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("vt-atlas-absent"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            // Filterable float, to match the layout entry the real atlas fills.
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        Self {
+            view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("vt-sampler-absent"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
+            // Four zero bytes: never written, so word 0 is 0 and not the magic.
+            table: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vt-indirection-absent"),
+                size: 4,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
+        }
+    }
+
+    #[inline]
+    pub fn view(&self) -> &wgpu::TextureView {
+        &self.view
+    }
+    #[inline]
+    pub fn sampler(&self) -> &wgpu::Sampler {
+        &self.sampler
+    }
+    #[inline]
+    pub fn table(&self) -> &wgpu::Buffer {
+        &self.table
+    }
 }
 
 impl VtPools {
     /// Create the atlas and the indirection buffer for `residency`.
     ///
     /// `srgb` picks between the linear and sRGB view of the page format. It is a
-    /// **pool-wide** decision, not a per-texture one, because there is one atlas:
-    /// mixing colour and data textures in one pool needs either two pools or a
-    /// `view_formats` reinterpretation, and which of those is right is a P26.3
-    /// measurement, not a P26.2 guess. Recorded as a remainder rather than
-    /// silently averaged.
+    /// **pool-wide** decision, not a per-texture one, because there is one atlas.
+    ///
+    /// **P26.3 resolved that remainder, and the answer is `false`.** The renderer
+    /// always creates the LINEAR pool and `vt_sample.wgsl` applies the sRGB
+    /// transfer function per texture, from the `srgb` flag already sitting in
+    /// that texture's block of the indirection table. Two pools (3 → 6 bindings,
+    /// two budgets, two residencies) and a `view_formats` reinterpretation
+    /// (4 bindings, and the shader still has to read the flag to pick a view)
+    /// were both weighed and both cost a binding or more to express one bit that
+    /// is already in the table. The cost of the answer taken is that the transfer
+    /// function lands on the FILTERED result rather than per texel — ordinary
+    /// gamma-space filtering error, written down in the shader's header.
+    ///
+    /// The parameter stays because it is real — the mapping is total over six
+    /// format pairs and `tests/vt_pools.rs` exercises both — and because a debug
+    /// view that wants the hardware decode has somewhere to ask for it.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -209,8 +296,17 @@ impl VtPools {
             geometry,
             page_bytes: residency.page_bytes(),
             layout_generation: residency.layout_generation(),
+            table_generation: residency.layout_generation(),
             zero_page: vec![0u8; residency.page_bytes() as usize],
         }
+    }
+
+    /// The generation of the **indirection buffer allocation** — it moves iff
+    /// [`table`](Self::table) becomes a different buffer. See the field docs for
+    /// what reads it and what goes wrong without it.
+    #[inline]
+    pub fn table_generation(&self) -> u64 {
+        self.table_generation
     }
 
     /// The atlas texture (for a debug view or a readback).
@@ -382,6 +478,10 @@ impl VtPools {
             let (table, bytes) = upload_whole_table(device, queue, residency);
             self.table = table;
             self.layout_generation = residency.layout_generation();
+            // A DIFFERENT allocation, so anything caching a bind group over it
+            // has to be told. The residency's layout stamp is a global monotone
+            // counter, so this never repeats a value a stale cache may hold.
+            self.table_generation = residency.layout_generation();
             self.zero_page = vec![0u8; residency.page_bytes() as usize];
             self.page_bytes = residency.page_bytes();
             report.table_bytes = bytes;
