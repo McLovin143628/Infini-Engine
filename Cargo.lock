@@ -3373,6 +3373,7 @@ dependencies = [
  "glam 0.33.2",
  "inf-anim",
  "inf-core",
+ "inf-material",
  "inf-math",
  "inf-render-2d",
  "inf-terrain",

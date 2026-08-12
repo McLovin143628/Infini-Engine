@@ -62,6 +62,13 @@ inf-vgeom = { workspace = true, features = ["test-support"] }
 # Validates every composed WGSL variant (scene_shader / lit_scene_shader ×
 # each pass source) without a GPU — the pick-shader composition regression gate.
 naga = { workspace = true }
+# P26.1: the BC-upload proof builds a REAL `.inf_tex` v2 tiled container and
+# uploads one of its tiles, rather than a hand-written block soup that could
+# agree with nothing. DEV-ONLY — the shipping renderer must not depend on the
+# material/import crate (Ring 0 discipline, and `inf-material` pulls `image` +
+# `naga`); the residency door that will page these tiles for real is `inf-vt` in
+# P26.2. No cycle: `inf-material` names no renderer type.
+inf-material = { workspace = true }
 # Drives the skinned golden from a real clip (pose eval → skinning palette).
 # Dev-only: keeps the shipping renderer free of an anim dependency (Ring 0
 # discipline) while proving the GPU-skinning path against inf-anim end to end.
