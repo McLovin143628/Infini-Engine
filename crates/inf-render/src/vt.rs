@@ -44,6 +44,11 @@
 //! measures it again into a **sub-region** of an atlas, which is the case that
 //! actually ships.)
 //!
+//! The tight pitch is not merely *permitted* here, it is **required**: padding
+//! `bytes_per_row` to 256 without padding the data makes `wgpu` reject the write
+//! outright, because the declared layout then describes more bytes than the slice
+//! holds. Measured by mutation, not assumed.
+//!
 //! A slot origin is `slot_index × 136` texels, and 136 is a multiple of 4, so
 //! every origin is BC-block aligned — the one alignment rule `write_texture`
 //! really does enforce on a block format.
