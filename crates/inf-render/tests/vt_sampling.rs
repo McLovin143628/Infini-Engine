@@ -1292,3 +1292,154 @@ fn cs_probe(@builtin(global_invocation_id) gid: vec3<u32>) {{
         addrs.len()
     );
 }
+
+// ── (g) THE DOOR ITSELF: `build_vt_level`, which no test had ever executed ───
+
+/// **The registration door decides the pool's page format from the level, and
+/// the mixed case really transcodes** (P26.4 audit).
+///
+/// `inf_render::build_vt_level` is clause 0. Both hosts call it, the P26.4
+/// ledger spends a paragraph on its three-branch pool-format ruling, and until
+/// this arm **nothing executed it**: `projector_mirror` greps its *name* out of
+/// two source files, and `phase26_gate` deliberately spells the format decision
+/// by hand ("the same decision `build_vt_level` makes from the payload's own
+/// header, spelled here because this arm builds the registry without a device").
+///
+/// Measured before it was written: a mutation making a MIXED level take a BC
+/// pool, and one making every level take RGBA8, both survived the entire
+/// workspace. `inf_vt::stored_page_format` — the ruling's only input — shipped
+/// with one caller and no arm at all.
+///
+/// The ruling matters because one pool slot is one size for every tile of every
+/// texture in it: a BC1 pool cannot hold a BC3 tile, the fetch is the wrong
+/// length, `VtPools::apply` writes its deterministic zero page and the surface is
+/// silently wrong. So the third assertion here is not about the reported format
+/// at all — it is that every page of a mixed level's floor actually LANDS.
+///
+/// Both adapter tiers, on the P25.2 doctrine: a runner without
+/// `TEXTURE_COMPRESSION_BC` collapses branches 1 and 2 onto RGBA8, which is
+/// exactly the transcode tier this ruling exists to serve, so the discriminating
+/// assertion is guarded and says so rather than being skipped.
+#[test]
+fn the_registration_door_decides_the_pool_format_from_the_level() {
+    let Some(gpu) = gpu_or_skip("the VT registration door") else {
+        return;
+    };
+    let settings = inf_render::RenderSettings::default();
+    let has_bc = pool_format(&settings, PageFormat::Bc1) == PageFormat::Bc1;
+
+    // The ruling's input, which had no arm: the header's format, without a reader.
+    for (compression, want) in [
+        (inf_material::TextureCompression::None, PageFormat::Rgba8),
+        (inf_material::TextureCompression::Bc1, PageFormat::Bc1),
+        (inf_material::TextureCompression::Bc3, PageFormat::Bc3),
+    ] {
+        assert_eq!(
+            inf_vt::stored_page_format(&container(96, 96, true, compression)),
+            Some(want),
+            "a {compression:?} container does not declare {want:?}"
+        );
+    }
+    // Anything that is not a readable v2 container is `None` — the same answer
+    // `TiledTextureReader::new` gives the registration a moment later.
+    assert_eq!(inf_vt::stored_page_format(&[]), None);
+    assert_eq!(inf_vt::stored_page_format(&[0u8; 64]), None);
+
+    let level = |maps: Vec<(u128, Vec<u8>)>| {
+        let mut mats: std::collections::BTreeMap<u128, inf_render::VtMaterialMaps> =
+            std::collections::BTreeMap::new();
+        for (i, (g, _)) in maps.iter().enumerate() {
+            mats.insert(
+                100 + i as u128,
+                inf_render::VtMaterialMaps {
+                    albedo: Some(*g),
+                    normal: None,
+                    orm: None,
+                },
+            );
+        }
+        let by_guid: std::collections::BTreeMap<u128, Vec<u8>> = maps.into_iter().collect();
+        inf_render::build_vt_level(
+            &gpu.device,
+            &gpu.queue,
+            &settings,
+            inf_vt::DEFAULT_VT_BUDGET_BYTES,
+            &mats,
+            |g| {
+                by_guid
+                    .get(&g)
+                    .cloned()
+                    .map(|b| Arc::new(b) as Arc<dyn inf_render::VtTileSource>)
+            },
+        )
+    };
+
+    // 1. ONE BC format across the level → that format, clamped by the adapter.
+    let (_uniform, _uniform_pools, uniform) = level(vec![
+        (1, container(256, 256, true, inf_material::TextureCompression::Bc1)),
+        (
+            2,
+            container(128, 128, false, inf_material::TextureCompression::Bc1),
+        ),
+    ])
+    .expect("a bound level builds");
+    assert_eq!(uniform.textures, 2, "the door registered the wrong count");
+    assert_eq!(uniform.refused, 0, "a bound texture was refused");
+    assert_eq!(
+        uniform.pool_format,
+        Some(pool_format(&settings, PageFormat::Bc1)),
+        "a uniformly-BC1 level did not take the BC1 pool the adapter allows"
+    );
+
+    // 2. A level that MIXES BC1 and BC3 → RGBA8, on EVERY adapter.
+    let (mut mixed_lib, mut mixed_pools, mixed) = level(vec![
+        (1, container(256, 256, true, inf_material::TextureCompression::Bc1)),
+        (
+            2,
+            container(128, 128, true, inf_material::TextureCompression::Bc3),
+        ),
+    ])
+    .expect("a mixed level builds");
+    assert_eq!(
+        mixed.pool_format,
+        Some(PageFormat::Rgba8),
+        "a level mixing BC1 and BC3 took a BC pool: one slot is one size, so the \
+         other format's fetch is the wrong length and the mirror writes a zero page"
+    );
+    assert_eq!(mixed.textures, 2);
+    assert_eq!(mixed.refused, 0, "the transcode tier refused a bound texture");
+
+    // …and ASSERT THE WORLD: the floor pages and NOT ONE page is missing, which
+    // is what "RGBA8 is the format every container transcodes into" has to mean.
+    let floor = mixed_lib.want_floor();
+    assert!(!floor.is_empty(), "the mixed level's floor wanted nothing");
+    let (txn, report) = mixed_lib.sync(&gpu.device, &gpu.queue, &mut mixed_pools, &floor);
+    assert_eq!(txn.deferred, 0, "the floor did not fit: {}", txn.trace());
+    assert!(
+        report.missing.is_empty(),
+        "{} page(s) of a mixed level did not transcode into the RGBA8 pool",
+        report.missing.len()
+    );
+    assert!(report.pages > 0, "the mixed level admitted nothing");
+
+    // ANTI-VACUITY: on a BC adapter branches 1 and 2 give DIFFERENT answers, so
+    // the mixed ruling is not branch 1 wearing another name.
+    if has_bc {
+        assert_ne!(
+            uniform.pool_format, mixed.pool_format,
+            "the two branches agree, so the mixed ruling asserts nothing here"
+        );
+    } else {
+        eprintln!(
+            "NOTE: no TEXTURE_COMPRESSION_BC on this adapter, so both branches are \
+             RGBA8; the mixed ruling's transcode is still asserted above"
+        );
+    }
+
+    // 3. A level whose every bound texture is unreadable is `None` — not a panic,
+    //    and not an empty registry pretending to be a level.
+    assert!(level(vec![(1, vec![0u8; 16])]).is_none());
+    // …and a level that binds nothing at all is `None` too, which is the
+    // textureless command stream all 50 committed goldens recorded.
+    assert!(level(vec![]).is_none());
+}
