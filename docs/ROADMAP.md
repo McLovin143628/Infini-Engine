@@ -9106,6 +9106,154 @@ door for editor viewport, PIE and shipping.
   page table with finest-resident-ancestor fallback pointers, global monotone stamps (the
   vgeom/terrain pattern), unit-tested with no adapter; 2. the GPU mirror: one physical page
   atlas (BC) + one indirection texture per pool, transactional upload/evict.
+
+> **STATUS — P26.2 Physical pool + indirection: COMPLETE (2026-08-11)** — six
+> implementation commits (`3c67c8f` the address space + pool + residency, `d658c97` the
+> residency gate, `56cc0fb` the churn's reachability counters, `c1d5116` the GPU mirror,
+> `76101a5` + `f347f8e` two rulings) plus an adversarial audit (five commits and this
+> ledger). Battery green: **227 binaries, 4 075 passed, 0 failed, 8 ignored** (the batch
+> landed at 4 068; the audit added seven arms). Goldens stay **50**. No
+> schema moved and nothing renders through this yet — no pass binds it, no shader names
+> it, `renderer.rs` does not know it exists. **No new external dependency**: `inf-vt`
+> depends on `thiserror` and nothing else.
+>
+> **What it is.** `inf-vt` (Ring 0, GPU-free) owns the virtual address space, the flat
+> slot pool and the residency; `inf_render::vt` owns one atlas texture and one
+> indirection buffer and does nothing but execute a `VtTransaction`. **The dependency
+> direction is the Ring rule made structural**: `inf-material` depends on `inf-vt`
+> (`TileCoord` moved and is re-exported there), so an `inf-vt` that named `inf-material`
+> would be a cycle — a compile error rather than a review question — and P26.3 cannot
+> drag `image` + `naga` into a shipped player by binding VT into the lit passes. Three
+> laws: the coarsest mip is always resident and pinned (so a sample can be blurry and
+> never a hole, and a floor that does not fit is refused **by name** at registration); a
+> transaction is a pure function of `(state, wants)` sorted into **payload** order (the
+> P26.1 finding used, not merely recorded); a stamp is a process-global monotone counter
+> and never enters a trace. Fallbacks are **maintained, not searched** — an admit writes
+> itself into its non-resident subtree, an evict writes its parent's *resolved* entry —
+> so the shader does one read.
+>
+> **Two deviations from the plan text above, both deliberate.** The indirection is one
+> **storage buffer** holding every texture's table, not "one indirection texture per
+> pool": the renderer runs on `Limits::default()`'s 4 bind groups and the shared
+> environment group is already occupied through index 13, so a per-texture texture means
+> a bind group that changes per draw. One buffer keeps P26.3's whole VT surface at
+> **three** bindings. And the pool has **no suballocator**: a stored tile is the same
+> size for every tile of every mip (the container's uniform page), so allocation is "take
+> the lowest free index" and fragmentation cannot exist.
+>
+> **What the audit found** (all fixed in this batch; mechanisms in the commit bodies).
+>
+> * **THE FINDING: the sampling contract was true only where the clamp hid it.**
+>   `address.rs`'s gate swept six extents and asserted that the clamped parent chain
+>   lands on exactly the tile a `uv` lands in — the contract P26.3's WGSL was written
+>   against, and the sketch in `table.rs` said `local = gp - floor(gp / tile_sz) *
+>   tile_sz`. Every *odd* extent in that sweep (257², 129²) had a **one-tile** parent
+>   level, where `min(x / 2, tiles - 1)` clamps everything to tile 0 and the
+>   disagreement cannot occur. Add 511×3 and it fails on the first tile it reaches: the
+>   container halves with `w / 2`, so a 511-texel level sits over a **255**-texel one,
+>   and mip 0's texel 256 — the first texel of tile 2 — is 127.999 of mip 1, i.e. tile
+>   **0**, while the entry it reads was resolved through tile **1**. Measured: 1 address
+>   of 511×3, 50 of 1 023², 51 of 2 047×511, **1 322 of 4 095²**, each a sample fetched
+>   a whole tile (128 texels) from where it belongs, in one column of one tile boundary.
+>   The tile tree has no answer and should not: a tile of a 511-texel level straddles
+>   two tiles of the level above, so it cannot have two parents. The fix is on the other
+>   side of the seam — the shader carries the tile down (`ancestor`'s `min(t / 2,
+>   tiles - 1)` per level, reading only mip records: a bounded walk over LEVELS, not the
+>   residency-dependent walk the design rejected). The contract that IS true replaces
+>   it: the resolved level's texel sits inside the named tile's payload **extended by
+>   the border ring**, never more than one texel out (`local` never leaves
+>   `[-1, tile_size)` across twelve pyramids), and the ring is filled from the same
+>   level's texels under the same clamp, so the slack reads a real neighbour. Two
+>   anti-vacuity assertions guard it: the sweep must contain a disagreement and `local`
+>   must go negative — either at zero and the bound is a statement about nothing, which
+>   is exactly what the old arm was.
+> * **The RGBA8 transcode tier ran nowhere.** The mirror's harness takes the pool format
+>   off the clamped settings, which is right, and the consequence is that the fallback
+>   arm executes only on an adapter *without* `TEXTURE_COMPRESSION_BC` — not this
+>   machine (measured: `bc=true`), not any GPU runner we have. So `tile_rgba8`, the 8×
+>   page bytes and the 544 B row pitch had never run anywhere while the file's doctrine
+>   comment claimed both tiers were covered. `bc_tiles` is a *setting* the adapter
+>   clamps, so a caller may also turn it off — the same door one decision earlier, which
+>   is the premise — and the fallback is now reachable on every leg.
+> * **Every table patch was written at a trivial base**, and both textures' pages came
+>   out of one container. With one registered texture a block sits five words in, so the
+>   byte-vs-word class in `write_buffer(&table, base * 4, …)` is either a `wgpu`
+>   alignment refusal or invisible; with two, the second block is hundreds of words in,
+>   where a wrong offset lands inside the first texture's entries. And the fetch closure
+>   held a single reader, so an admit for the second texture was served the *first*
+>   texture's bytes — right length, wrong file, and no arm looked at texels. A ten-round
+>   two-texture burst after the layout rebuild now reads the buffer back each round and
+>   compares both textures' slots against their own containers.
+> * **`resolved_table` cited a caller that did not exist** ("the mirror's readback arm
+>   compares GPU bytes against exactly this" — the arm walked mip 0 by hand), and
+>   `residency.rs` cited `tests/churn.rs`, which is not a file. The readback now uses
+>   `resolved_table` over every tile of every level, which is where a fallback pointer
+>   goes wrong.
+> * **`page_format` was copied out of `tests/vt_bc_upload.rs`, not moved** — the test
+>   still carried its own `match` over the same six pairs, which is the drift the
+>   commit said had been removed.
+> * **A slot index is 16 bits and only a debug build said so.** `pack_entry` masks and
+>   the sole guard was a `debug_assert!` in `VtResidency::new`. The bound binds past
+>   `max_texture_dim` 34 816 and `wgpu`'s largest reported dimension is 32 768 (57 600
+>   slots, inside the field) — which is the argument for enforcing it rather than
+>   remarking on it, since the failure is the 65 537th page aliasing onto the first with
+>   no symptom but wrong texels. `plan_pool` floors against it and raises
+>   `SlotIndexCapped`, its own advisory because "raise `max_texture_dim`" is the wrong
+>   advice for a limit that is the entry format. The mip field gets a `const` assertion
+>   that `MAX_VT_MIPS` fits 8 bits.
+> * **A mandatory floor may fill the pool exactly** — `register_texture` refuses a floor
+>   *past* the slot count, so equal is admitted and the pool is all floor, a state with
+>   no evictable slot that nothing exercised. It defers by the ordinary path and every
+>   address still resolves. Arm added at the boundary.
+> * **`out_of_range` never reached a trace**, which is the only place a caller watching
+>   the stream would see it. **`tracing` was a dependency of a crate that never logs** —
+>   every refusal here is a typed `VtError` and every warning a returned `VtAdvisory`,
+>   handed back precisely so the host decides what they are. Removed, and the three
+>   places advertising "thiserror + tracing" now say what is true.
+> * **`the_table_image_is_a_function_of_the_state_not_of_the_history` did not assert
+>   that** (a gate must aim at the thing it names, the P23 law): slot assignment *is*
+>   residency state, two routes to one resident tile SET can hold different slots, and
+>   the arm compared one route with itself and the other's *length*. Renamed to what it
+>   pins, with both routes now asserted reproducible and asserted to **differ** — or the
+>   reproducibility is a statement about a constant.
+> * **`VtStats::summary` shipped with no caller and no promise.** Declared (P26.5's
+>   residency heat-map) and pinned by an arm, the house rule for API that ships before
+>   its caller — as `is_warm` and `VT_BINDING_COUNT` already were. The bind-group
+>   layout/entries pair now builds a real bind group, since that agreement is a
+>   validation `wgpu` does and a review does not.
+>
+> **Verified on measurement, not withdrawn.** The evict path writes the parent's
+> **resolved entry**, not the parent's address — mutating it to the address fails three
+> gate arms by name, including the case where the parent is itself non-resident. Admits
+> of a parent and its child in one transaction resolve correctly in either order (the
+> child wins its own subtree, because propagation stops at a resident descendant).
+> Sibling evictions cannot interfere (`every_child_range_inverts_the_parent_clamp`
+> proves the subtrees are disjoint). A registration mid-flight relays out the whole
+> image and refills it from live residency, and its evictions ride the next transaction
+> under `layout_rebuilt`. The brute-force arm walks **every entry of every texture after
+> every transaction** and rebuilds residency from the transaction stream alone, so it is
+> independent of the propagation it checks. The padded-pitch ruling (`76101a5`) is
+> re-measured on this machine: padding `bytes_per_row` to 256 makes `wgpu` refuse the
+> write outright — *"Copy at offset 0 for 17168 bytes would end up overrunning the
+> bounds of the Source buffer of size 9248"* — 5 of 6 arms fail. The LRU tie-break arm
+> does construct a real tie; the budget arm does hit its boundary exactly; the churn's
+> `pressed`/`evicting` counters are asserted nonzero, and deleting the `protected` set
+> now fails the heavy churn (which was the point of `56cc0fb`).
+>
+> **Honest remainders carried into P26.3.** Nothing samples a virtual texture yet, so
+> the WGSL sketch in `table.rs` is a specification and not a shader — P26.3 implements
+> the tile-tree walk and must pin it against `ancestor` on the odd extents above.
+> `srgb` is a **pool-wide** decision (there is one atlas): mixing colour and data
+> textures needs two pools or a `view_formats` reinterpretation, and which is right is a
+> P26.3 measurement. There is no `unregister_texture` and no way to shrink a pool: a
+> budget change means a new residency and a new mirror. Wants are unranked (payload
+> order only) until P26.4's feedback gives them a priority, and there is no analytic
+> want-set producer yet — `apply_wants` has no non-test caller. A want naming an unknown
+> texture handle is dropped silently rather than counted, unlike an out-of-range tile.
+> `VtPools` is built for one residency and does not re-plan its atlas if handed
+> another. Multi-atlas layers stay deferred; the 16-bit slot index and the 3 600-slot
+> 8 192² ceiling are the two documented walls.
+
 - **P26.3 VT sampling in the lit passes** — 1. `vt_sample()` in WGSL (virtual UV →
   indirection → atlas UV, gradient-corrected mip, border-texel filtering); 2. mesh + vgeom +
   skinned fragment paths gain albedo/normal/ORM through VT (per-instance texture-set id
