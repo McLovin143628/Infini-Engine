@@ -70,7 +70,9 @@ pub const VT_BINDING_COUNT: u32 = 3;
 /// **The P26.1 remainder, discharged.** It lived in `tests/vt_bc_upload.rs`
 /// because there was no crate to put it in; the crate is `inf-vt`, the mapping
 /// needs `wgpu`, and `inf-vt` is GPU-free — so it lands in the mirror, which is
-/// the half of the seam that owns `wgpu`.
+/// the half of the seam that owns `wgpu`. That test now *calls* this rather than
+/// keeping its copy: a mapping in two places is a mapping that drifts, and the
+/// copy in a test is the one that drifts unnoticed.
 pub fn page_format(format: PageFormat, srgb: bool) -> wgpu::TextureFormat {
     match (format, srgb) {
         (PageFormat::Rgba8, true) => wgpu::TextureFormat::Rgba8UnormSrgb,

@@ -22,7 +22,8 @@
 //!
 //! Maintained state is state that can drift, so [`VtResidency::resolve`] is
 //! checked against an independent brute-force walk after **every** transaction of
-//! a seeded churn in `tests/churn.rs` — the whole table, not a sample of it.
+//! a seeded churn in `tests/residency_gate.rs` — the whole table, not a sample of
+//! it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};

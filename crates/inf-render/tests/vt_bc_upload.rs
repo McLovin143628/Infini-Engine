@@ -94,20 +94,14 @@ fn container(compression: TextureCompression) -> TiledTextureImage {
     .expect("the fixture tiles")
 }
 
-/// The wgpu format a stored tile uploads as.
+/// The wgpu format a stored tile uploads as — **the renderer's own mapping**.
 ///
-/// Lives in the test, not in the renderer: `inf-render` does not depend on
-/// `inf-material` outside dev, and the crate that will own this mapping for real
-/// is `inf-vt` (P26.2). Written here so the shape it needs is already pinned.
+/// P26.1 parked a copy here for want of a crate to own it; P26.2 built the crate
+/// and `inf_render::vt::page_format` is the mapping. This is the call, not a
+/// second spelling of it: two matches over six format pairs are two things to
+/// keep in step, and the one in a test is the one that would drift unnoticed.
 fn page_format(stored: TextureFormat, srgb: bool) -> wgpu::TextureFormat {
-    match (stored, srgb) {
-        (TextureFormat::Rgba8, true) => wgpu::TextureFormat::Rgba8UnormSrgb,
-        (TextureFormat::Rgba8, false) => wgpu::TextureFormat::Rgba8Unorm,
-        (TextureFormat::Bc1, true) => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
-        (TextureFormat::Bc1, false) => wgpu::TextureFormat::Bc1RgbaUnorm,
-        (TextureFormat::Bc3, true) => wgpu::TextureFormat::Bc3RgbaUnormSrgb,
-        (TextureFormat::Bc3, false) => wgpu::TextureFormat::Bc3RgbaUnorm,
-    }
+    inf_render::vt::page_format(stored.into(), srgb)
 }
 
 /// Upload `bytes` as one `size × size` texture of `format` and read them back.
