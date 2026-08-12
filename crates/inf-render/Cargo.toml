@@ -28,6 +28,14 @@ inf-vgeom = { workspace = true }
 # `inf-material` (the container that writes the tiles) is a DEV dependency
 # below, and `inf-vt` deliberately does not name it either, so binding VT into
 # the lit passes at P26.3 cannot drag `image` + `naga` into a shipped player.
+# P26.4: the deterministic in-order job pool. The virtual-texture streamer
+# stages a transaction's pages through `parallel_map_ref` — which is real work
+# on the transcode tier (a BC decode per page) and free on the BC tier (a slice
+# of an mmap) — exactly as `inf_vgeom::stream` and terrain's B2 load batch
+# already do. Also the §8 composed-frame budget constant. Not a new external
+# dependency and not a new one in any shipped tree: `inf-terrain`, `inf-vgeom`
+# and `inf-player` all name `inf-core` already.
+inf-core = { workspace = true }
 inf-vt = { workspace = true }
 wgpu = { workspace = true }
 glam = { workspace = true }
@@ -57,10 +65,6 @@ inf-terrain = { workspace = true }
 # `inf-terrain`). There is no cycle: `inf-voxel` names no renderer type.
 inf-voxel = { workspace = true }
 png = { workspace = true }
-# The §8 composed-frame budget constant (`inf_core::FRAME_BUDGET_MS`) — one copy
-# of a policy number, shared with the phase gates in `inf-player`. Dev-only: the
-# shipping renderer does not need the job system.
-inf-core = { workspace = true }
 # The vgeom suites (goldens, occlusion, streaming, frame budget) all drive the
 # SAME displaced-grid fixture; it lives once in `inf_vgeom::test_support`, behind
 # this test-only feature, with bit-portable trig (the P14 LAW — `std` sin/cos

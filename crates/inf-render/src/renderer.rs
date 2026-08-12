@@ -106,6 +106,17 @@ pub const SCENE_SAMPLES: u32 = 4;
 /// Bloom downsample mip-chain depth (levels beyond half-res).
 pub const BLOOM_MAX_MIPS: u32 = 6;
 
+/// How many (surface × bound map) feedback requests one frame may dispatch
+/// (P26.4).
+///
+/// The request buffer is allocated once at this size, so it is a VRAM number
+/// (4 096 × 32 B = 128 KiB) rather than a quality one: past it, the tail of the
+/// coverage list simply does not mark, and those surfaces stay on the analytic
+/// floor — which is the correct degradation and the same one a dropped mask
+/// produces. A scene with more than four thousand textured surfaces on screen at
+/// once is a P28.3 arbitration problem, not a buffer-size one.
+pub const VT_FEEDBACK_REQUEST_CAP: u32 = 4096;
+
 /// Per-size GPU targets. Recreated when the scene size changes; `generation`
 /// lets nodes cache bind groups against the current views.
 pub struct FrameTargets {
@@ -375,6 +386,12 @@ pub struct EngineRenderer {
     /// and whenever a host set only the mirror (the P26.3 door), in which case
     /// every projector's material lookup is `VtTextureSet::NONE`.
     vt_textures: Option<crate::VtTextures>,
+    /// The P26.4 coverage-feedback pass + its readback ring. Built lazily
+    /// against the registry's bitmask layout and rebuilt when a registration
+    /// grows it (a mask sized for four textures cannot address a fifth).
+    vt_feedback: Option<crate::vt_stream::VtFeedback>,
+    /// P26.4 pop-in instruments — per tile class. See [`crate::VtPopIn`].
+    vt_pop_in: crate::VtPopIn,
     /// The empty VT surface, created once and never recreated (so it adds no
     /// `passes::ResourceKey` component, on the `wetness` precedent).
     vt_absent: crate::vt::VtEmptyPool,
@@ -572,6 +589,8 @@ impl EngineRenderer {
             voxel,
             vt: None,
             vt_textures: None,
+            vt_feedback: None,
+            vt_pop_in: crate::VtPopIn::default(),
             vt_absent: crate::vt::VtEmptyPool::new(&gpu.device),
             vt_engaged_frames: 0,
         }
@@ -588,6 +607,7 @@ impl EngineRenderer {
     pub fn set_vt_pools(&mut self, pools: Option<crate::vt::VtPools>) {
         self.vt = pools;
         self.vt_textures = None;
+        self.vt_feedback = None;
     }
 
     /// **Hand the renderer a whole level's virtual-texture surface** (P26.4) —
@@ -617,6 +637,9 @@ impl EngineRenderer {
                 self.vt_textures = None;
             }
         }
+        // A new level is a new address space: the mask layout, the ring's slot
+        // size and any mask still in flight all describe the OLD one.
+        self.vt_feedback = None;
     }
 
     /// **The per-instance texture set for a surface bound to `material`** — what
@@ -637,6 +660,94 @@ impl EngineRenderer {
     #[inline]
     pub fn vt_textures(&self) -> Option<&crate::VtTextures> {
         self.vt_textures.as_ref()
+    }
+
+    /// The P26.4 pop-in instruments — per tile class, plus the ring's hit/miss
+    /// counts. **Zero on a textureless scene**, which is what makes "the goldens
+    /// did not change" a measurement of the command stream.
+    #[inline]
+    pub fn vt_pop_in(&self) -> crate::VtPopIn {
+        self.vt_pop_in
+    }
+
+    /// **The streaming loop**, run once per frame at the sync point (P26.4).
+    ///
+    /// The five steps in `crate::vt_stream`'s module docs, in that order, and
+    /// the order is load-bearing: the floor and the *previous* frame's feedback
+    /// are applied to the residency BEFORE this frame's feedback pass is
+    /// recorded, so the pass marks coverage against a table the frame is
+    /// actually going to sample through.
+    ///
+    /// Returns immediately when there is no VT level, which is every textureless
+    /// scene and all 50 committed goldens: no buffer is written, no pass is
+    /// recorded, no counter moves.
+    fn vt_stream(
+        &mut self,
+        gpu: &GpuContext,
+        scene: &RenderScene,
+        view: &RenderView,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        let (Some(lib), Some(pools)) = (self.vt_textures.as_mut(), self.vt.as_mut()) else {
+            return;
+        };
+        let frame = self.frame_index;
+        // The feedback pass is created lazily against the registry's layout, and
+        // re-created when a registration grows it — a mask sized for four
+        // textures cannot address a fifth, and the ring's slots are sized from
+        // the same number.
+        let layout = inf_vt::VtFeedbackLayout::for_residency(lib.residency());
+        if self
+            .vt_feedback
+            .as_ref()
+            .is_none_or(|f| *f.layout() != layout)
+        {
+            self.vt_feedback = Some(crate::vt_stream::VtFeedback::new(
+                &gpu.device,
+                layout,
+                VT_FEEDBACK_REQUEST_CAP,
+            ));
+        }
+        let feedback = self.vt_feedback.as_mut().expect("just built");
+
+        // 1–2. coverage and the analytic floor.
+        let coverage = crate::vt_stream::scene_coverage(scene, &view.origin);
+        let mut wants = crate::vt_stream::analytic_floor(lib, view, &coverage);
+        let floor_len = wants.len();
+
+        // 3. frame F − 2's mask, or nothing. Never "whatever arrived".
+        match feedback.take_wants(&gpu.device, lib, frame) {
+            Some(refine) => {
+                self.vt_pop_in.feedback_frames += 1;
+                wants.extend(refine);
+            }
+            None => self.vt_pop_in.feedback_misses += 1,
+        }
+        debug_assert!(
+            wants.len() >= floor_len,
+            "the feedback removed a floor want"
+        );
+
+        // 4. apply, and upload the pages.
+        let (txn, _report) = lib.sync(&gpu.device, &gpu.queue, pools, &wants);
+        self.vt_pop_in.deferred += u64::from(txn.deferred);
+        self.vt_pop_in.admits += txn.admits.len() as u64;
+        self.vt_pop_in.frames += 1;
+        crate::vt_stream::count_fallbacks(lib, &wants, &mut self.vt_pop_in);
+
+        // 5. record the next feedback pass. The table it reads is the one the
+        // transaction above just wrote, which is why this is last.
+        let requests = crate::vt_stream::feedback_requests(lib, feedback.layout(), &coverage);
+        feedback.record(
+            &gpu.device,
+            &gpu.queue,
+            encoder,
+            pools.table(),
+            pools.table_generation(),
+            view,
+            &requests,
+            frame,
+        );
     }
 
     /// The live VT mirror, for a host that needs to apply a transaction to it.
@@ -950,6 +1061,13 @@ impl EngineRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame"),
             });
+
+        // **THE VIRTUAL-TEXTURE SYNC POINT** (P26.4). Before any pass samples
+        // the atlas, and inside the frame's own encoder, so the ordering
+        // contract in `crate::vt`'s module docs holds unchanged: a transaction
+        // is applied whole, staged on the queue, and executes before the
+        // commands of this encoder. A textureless frame does none of it.
+        self.vt_stream(gpu, scene, view, &mut encoder);
 
         let targets = self.targets.as_ref().unwrap();
         let post_hdr = if self.settings.taa {

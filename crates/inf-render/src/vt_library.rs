@@ -401,6 +401,24 @@ impl VtTextures {
     ///
     /// **Call at the frame's sync point, before the frame's `submit`** — the
     /// ordering contract `crate::vt`'s module docs state, unchanged.
+    ///
+    /// # The staging runs on the job pool (P26.4, clause 3)
+    ///
+    /// A transaction's pages are produced through
+    /// [`inf_core::parallel_map_ref`] — the **deterministic in-order pure map**,
+    /// so the output is a function of the input alone and the admits are handed
+    /// to the mirror in exactly the order the residency emitted them (payload
+    /// order, roots first). This is `inf_vgeom::stream`'s arrangement verbatim,
+    /// and its reasoning applies unchanged: *"fetches are `read_ref` slices of
+    /// an mmap — synchronous by nature — and the staging (the only real work)
+    /// runs through the deterministic in-order map"*.
+    ///
+    /// The real work here is the **transcode tier**: on an adapter without
+    /// `TEXTURE_COMPRESSION_BC` every page is a BC decode, which is the arm
+    /// mobile takes and the one worth parallelising. On the BC tier a fetch is a
+    /// sub-slice of a mapping and the pool's overhead is what it costs — so the
+    /// map is skipped entirely below one page, and the borrowed arm never leaves
+    /// the mmap.
     pub fn sync(
         &mut self,
         device: &wgpu::Device,
@@ -412,7 +430,7 @@ impl VtTextures {
         // The mutable borrow above has ended; the fetch below needs only `&`.
         let readers = &self.readers;
         let format = self.pool_format;
-        let report = pools.apply(device, queue, &self.residency, &txn, |admit| {
+        let fetch = |admit: &inf_vt::VtAdmit| -> Option<Cow<'_, [u8]>> {
             let r = readers.get(admit.texture.index())?;
             let at = admit.tile;
             if format == PageFormat::Rgba8 && r.header().format != PageFormat::Rgba8 {
@@ -421,6 +439,19 @@ impl VtTextures {
             } else {
                 r.tile_at(at).map(Cow::Borrowed)
             }
+        };
+        // Stage in parallel, apply in order. `parallel_map_ref` preserves input
+        // order by construction (the P7.0 determinism guard), so `staged[i]` is
+        // `txn.admits[i]`'s page and the mirror writes them exactly as the
+        // residency planned them.
+        let staged: Vec<Option<Cow<'_, [u8]>>> = if txn.admits.len() > 1 {
+            inf_core::parallel_map_ref(&txn.admits, fetch)
+        } else {
+            txn.admits.iter().map(fetch).collect()
+        };
+        let mut next = staged.into_iter();
+        let report = pools.apply(device, queue, &self.residency, &txn, |_| {
+            next.next().flatten()
         });
         (txn, report)
     }

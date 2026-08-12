@@ -40,6 +40,9 @@ pub mod vt;
 /// The P26.3 registration door: `.inf_tex` v2 payloads become virtual
 /// textures here, for both hosts, through one rule.
 pub mod vt_library;
+/// The P26.4 streaming loop: the analytic want floor, the GPU coverage feedback
+/// that refines it, and the pop-in instruments.
+pub mod vt_stream;
 pub mod water;
 pub mod wetness;
 
@@ -120,6 +123,12 @@ pub use settings::{
 pub use vt_library::{
     build_vt_level, registration_order, vt_set_for, VtLevelReport, VtMaterialMaps, VtRefusal,
     VtTextures, VtTileSource, VT_FLOOR_LEVELS,
+};
+// The P26.4 streaming loop: the floor's rules (pure, unit-tested with no
+// adapter), the GPU feedback pass, and the pop-in counters a gate asserts on.
+pub use vt_stream::{
+    analytic_floor, feedback_requests, justified_mip, on_screen, projection_scale, scene_coverage,
+    screen_diameter_px, VtCoverage, VtFeedback, VtPopIn, VT_FEEDBACK_MAX_TILES, VT_FLOOR_MAX_TILES,
 };
 // The pool's own vocabulary, re-exported so a host that builds a VT level does
 // not have to depend on `inf-vt` itself: `VtTextures::new` takes a

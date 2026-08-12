@@ -46,7 +46,25 @@ fn tick(gpu: &GpuContext, ring: &mut ReadbackRing, src: &wgpu::Buffer, frame: u6
         });
     ring.record(&mut enc, src, frame);
     gpu.queue.submit([enc.finish()]);
-    ring.poll(&gpu.device);
+    pump(gpu, [ring]);
+}
+
+/// Pump `rings` until this frame's copy has been mapped.
+///
+/// A test harness runs frames back to back with no vsync, so without this the
+/// slot a later frame wants can still be IN FLIGHT from an earlier one — and
+/// `record` then correctly refuses to overwrite it, which shows up as a read
+/// that misses for ever. A real host at frame pace never hits it (a 3-slot ring
+/// gives a copy two whole frames to land), and the ring's refusal is the right
+/// behaviour either way; this is the harness paying for its own speed. Measured:
+/// without it, `the_latency_is_what_decides_which_frame_is_read` fails only when
+/// the whole crate's GPU suites run at once.
+fn pump<const N: usize>(gpu: &GpuContext, rings: [&mut ReadbackRing; N]) {
+    for ring in rings {
+        ring.poll(&gpu.device);
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        ring.poll(&gpu.device);
+    }
 }
 
 /// Pump until the ring can answer for `frame`, or give up — the loop a caller
@@ -133,8 +151,7 @@ fn the_latency_is_what_decides_which_frame_is_read() {
         one.record(&mut enc, &src, frame);
         two.record(&mut enc, &src, frame);
         gpu.queue.submit([enc.finish()]);
-        one.poll(&gpu.device);
-        two.poll(&gpu.device);
+        pump(&gpu, [&mut one, &mut two]);
         if frame >= 2 {
             let a = take_eventually(&gpu, &mut one, frame).expect("l1 ready");
             let b = take_eventually(&gpu, &mut two, frame).expect("l2 ready");
