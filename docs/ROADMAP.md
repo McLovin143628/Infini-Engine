@@ -9570,7 +9570,9 @@ door for editor viewport, PIE and shipping.
 > `853fd4b` the player's registration, `24e171f` the editor's, `5e167b6` the
 > streaming loop, `8d19123` the GPU walk arm, `cae8259` the level's dependency
 > edges, `91c3b4b` the carried-debts memo). Battery green:
-> **BATTERY_NUMBERS**. Goldens stay **50** and none was re-blessed —
+> **231 binaries, 4 160 passed, 0 failed, 8 ignored** (P26.3b left it at 229 /
+> 4 133; this batch adds two test binaries and 27 arms). Goldens stay **50** and
+> none was re-blessed —
 > a textureless frame does not enter the streaming loop at all, which is a
 > claim about the command stream that `vt_engaged_frames` and `VtPopIn::frames`
 > both measure. No schema moved. No new external dependency: `inf-core` became
@@ -9684,6 +9686,21 @@ door for editor viewport, PIE and shipping.
 > else.
 >
 > **Honest remainders carried into P26.5.**
+> * **THE ONE TO READ FIRST — what "bit-exact residency trace" now requires.**
+>   The floor is bit-exact unconditionally: it is a pure function of
+>   `(camera, bounds, registry)` with no clock, no frame history and no GPU in
+>   it. The *feedback* is bit-exact **given the same arrival pattern**, and the
+>   arrival pattern is a GPU-timing fact: `take(F)` returns frame `F − 2`'s mask
+>   **or nothing**, and which frames get "or nothing" depends on how fast the
+>   device drained. So two runs of one scripted path agree on the floor always,
+>   and on the refinement only if the ring landed on the same frames. That is
+>   the honest reading of "a dropped feedback frame degrades to the floor,
+>   deterministically" — the *degradation* is deterministic, the *timing* is
+>   not. **The mechanism P26.5's gate arm (a) needs already exists**: pump the
+>   device to completion between frames (`device.poll(wait_indefinitely())`),
+>   which forces every mask to land and makes the arrival pattern a constant —
+>   `the_renderer_runs_the_streaming_loop_every_frame` does exactly this, and
+>   `VtPopIn::feedback_misses` is the number that proves it worked.
 > * **Real uv/tangent streams are still not wired** — memo'd
 >   (`docs/memos/p26-4-carried-debts.md`) rather than done: the change moves
 >   `MeshVertex`'s layout, five primitive parametrizations, `SkinnedVertex`'s
