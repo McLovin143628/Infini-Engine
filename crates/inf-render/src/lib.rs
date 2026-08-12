@@ -91,10 +91,6 @@ pub use precip::{
 };
 pub use primitives::{PrimGpu, PrimMesh, PrimRange};
 pub use readback::{ReadbackRing, READBACK_LATENCY_FRAMES};
-// The P26.3 registration door + P26.4's one registration ORDER: both projectors
-// build a level's virtual textures through exactly these, so "PIE == shipping"
-// for texture residency is a property of the code rather than of two hosts
-// agreeing by inspection.
 pub use renderer::{
     EngineRenderer, ViewMode, AO_FORMAT, HDR_FORMAT, LDR_FORMAT, MASK_FORMAT, SCENE_FORMAT,
     SCENE_SAMPLES,
@@ -117,10 +113,17 @@ pub use settings::{
     BloomSettings, GiSettings, RenderSettings, ScatterSettings, ShadowSettings, SsaoSettings,
     VgeomSettings, VirtualTextureSettings,
 };
+// The P26.3 registration door + P26.4's one registration ORDER: both projectors
+// build a level's virtual textures through exactly these, so "PIE == shipping"
+// for texture residency is a property of the code rather than of two hosts
+// agreeing by inspection.
 pub use vt_library::{
-    build_vt_level, registration_order, VtLevelReport, VtMaterialMaps, VtRefusal, VtTextures,
-    VtTileSource, VT_FLOOR_LEVELS,
+    build_vt_level, registration_order, vt_set_for, VtLevelReport, VtMaterialMaps, VtRefusal,
+    VtTextures, VtTileSource, VT_FLOOR_LEVELS,
 };
+// The page-pool budget, re-exported so a host that builds a VT level does not
+// have to name `inf-vt` (which is this crate's dependency, not a player's).
+pub use inf_vt::DEFAULT_VT_BUDGET_BYTES;
 pub use water::{
     camera_underwater, RenderWater, RiverFrame, RiverPath, RiverProfile, Underwater, WaterFrame,
     WaterKindGpu, WaterQuality, WaterSettings, WaterSurface, Wave, WaveField, WaveSpec, MAX_WAVES,

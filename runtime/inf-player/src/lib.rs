@@ -215,6 +215,27 @@ fn build_world(args: &Args) -> Result<(BuiltWorld, TerrainContent), String> {
     }
 }
 
+/// The level's **material content** for a world the player just built (P26.4).
+///
+/// Read off the already-open source in `content` rather than reopening anything:
+/// a `--pack` boot has the mapping in hand and `PackLevelSource::material_content`
+/// slices it, so this costs a level decode and no texture bytes at all.
+///
+/// **A `--level` dev boot has none, and that is structural rather than a gap in
+/// the wiring.** A `.inf_matd` is a *derived* record: it is written by the cook
+/// and by the PIE payload builder, both of which run in the authoring ring and
+/// link `inf-material`. A shipped player must not (the P26.2 inversion), so it
+/// cannot flatten a loose `.inf_mat` for itself — a dev-dir boot renders its
+/// surfaces off their scalar attributes, exactly as every pre-v22 level does.
+/// The two paths that *matter* for "PIE == shipping" — a cooked pack and a
+/// streamed payload — both have the record.
+pub fn material_content_for_world(content: &TerrainContent) -> MaterialContent {
+    match content {
+        TerrainContent::Pack(source) => source.material_content(),
+        _ => MaterialContent::default(),
+    }
+}
+
 /// Attach world-partition **cell streaming** to `sim` (P16.5).
 ///
 /// A no-op for [`PartitionContent::None`](level::PartitionContent::None) — every
@@ -354,6 +375,11 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     // and (the P18.3 follow-up) the skeletal store so a `SkeletalMesh` renders its
     // real posed geometry instead of a placeholder.
     let (vmeshes, skinned, voxel_assets) = load_render_assets(args);
+    // P26.4: the level's bound `.inf_mat` records + their `.inf_tex` containers,
+    // sliced out of the pack that is already open. This is what makes a shipped
+    // build's surfaces textured — see `material_content_for_world` for why a
+    // `--level` dev boot has none.
+    let materials = std::sync::Arc::new(material_content_for_world(&terrain_content));
     // R-P4: the level's scene-persisted render block (post/exposure/lighting),
     // captured before `built` is consumed, applied by the render host.
     let render = built.render;
@@ -374,6 +400,7 @@ pub fn run_windowed(args: &Args) -> ExitCode {
         vmeshes,
         skinned,
         voxel_assets,
+        materials,
         render,
         args.debug_cells,
     ) {
@@ -796,7 +823,122 @@ pub fn materials_from_payload(payload: &ScenePayload) -> MaterialContent {
     }
     MaterialContent {
         materials,
-        textures: payload.textures.iter().cloned().collect(),
+        textures: payload
+            .textures
+            .iter()
+            .map(|(g, b)| (*g, VtTextureBytes::owned(b.clone())))
+            .collect(),
+    }
+}
+
+/// One `.inf_tex` v2 container, **however this host holds it** (P26.4).
+///
+/// The P26.3b ledger's remainder, closed: *"`material_content` copies container
+/// bytes out of the mmap … so a pack path's RAM scales with the texture bytes a
+/// level binds — the cost SVT exists to avoid"*. A pack-backed world now holds a
+/// GUID and a shared reader and slices the mapping on demand, which is what the
+/// terrain (`inf_terrain::stream`) and meshlet (`inf_vgeom::asset`) streamers
+/// already do; a streamed PIE payload holds a `Vec`, because the wire already
+/// copied those bytes and there is no mapping to slice.
+///
+/// Both arms are one [`VtTileSource`](inf_render::VtTileSource), which is the
+/// seam `inf-render` was built with so that neither host's storage reaches the
+/// registry.
+#[derive(Clone)]
+pub enum VtTextureBytes {
+    /// A payload the wire delivered — the PIE arm. `Arc` so cloning the content
+    /// (a device-loss rebuild hands the same textures to a new host) does not
+    /// re-copy megabytes.
+    Owned(std::sync::Arc<Vec<u8>>),
+    /// A **slice of the pack mapping** — the shipping arm.
+    Pack(std::sync::Arc<PackTexture>),
+}
+
+impl VtTextureBytes {
+    pub fn owned(bytes: Vec<u8>) -> Self {
+        Self::Owned(std::sync::Arc::new(bytes))
+    }
+
+    /// The whole container.
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Owned(v) => v,
+            Self::Pack(p) => p.payload(),
+        }
+    }
+}
+
+impl inf_render::VtTileSource for VtTextureBytes {
+    fn payload(&self) -> &[u8] {
+        self.bytes()
+    }
+}
+
+/// Compared **by content**, so the phase gate's "the pack and the payload carry
+/// the same texture bytes" is a comparison of bytes rather than of how each host
+/// stores them — which is the only thing that claim could usefully mean.
+impl PartialEq for VtTextureBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes() == other.bytes()
+    }
+}
+
+impl std::fmt::Debug for VtTextureBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self {
+            Self::Owned(_) => "owned",
+            Self::Pack(_) => "pack",
+        };
+        write!(f, "VtTextureBytes::{kind}({} B)", self.bytes().len())
+    }
+}
+
+/// A `.inf_tex` entry addressed **inside** an open pack mapping (P26.4).
+///
+/// `payload` re-resolves the entry on every call rather than caching a slice,
+/// because a borrowed slice cannot outlive the `read_ref` guard that produced
+/// it. The cost is a `BTreeMap` lookup and one relaxed atomic load per call, and
+/// the call happens once per parsed reader plus once per tile fetch — not per
+/// texel and not per frame. What it buys is the property the phase exists for:
+/// a level binding 400 MB of textures costs 400 MB of *address space*, not of
+/// resident RAM.
+pub struct PackTexture {
+    reader: std::sync::Arc<inf_asset::PackReader>,
+    guid: inf_asset::AssetId,
+    /// Only ever filled for a **compressed** pack entry, where `read_ref` must
+    /// decode and therefore has nothing to borrow. `.inf_tex` is in the
+    /// streaming class and cooks uncompressed (P26.1), so this stays empty in
+    /// every pack this engine writes — it exists so an old pack, or a future
+    /// policy change, degrades to a copy rather than to a blank texture.
+    decoded: std::sync::OnceLock<Vec<u8>>,
+}
+
+impl PackTexture {
+    pub fn new(reader: std::sync::Arc<inf_asset::PackReader>, guid: inf_asset::AssetId) -> Self {
+        Self {
+            reader,
+            guid,
+            decoded: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The container's bytes, borrowed from the mapping where the entry is raw.
+    pub fn payload(&self) -> &[u8] {
+        if let Some(v) = self.decoded.get() {
+            return v;
+        }
+        match self.reader.read_ref(self.guid) {
+            Ok(std::borrow::Cow::Borrowed(s)) => s,
+            Ok(std::borrow::Cow::Owned(v)) => self.decoded.get_or_init(|| v),
+            Err(e) => {
+                tracing::warn!(
+                    "inf-player: pack texture {} is unreadable, so every surface \
+                     naming it renders off its scalar attributes: {e}",
+                    self.guid.uuid()
+                );
+                &[]
+            }
+        }
     }
 }
 
@@ -811,8 +953,10 @@ pub struct MaterialContent {
     /// Derived records keyed by the **`.inf_mat`** GUID a scene's
     /// `Material.asset` names.
     pub materials: std::collections::HashMap<uuid::Uuid, inf_asset::DerivedMaterial>,
-    /// `.inf_tex` v2 container bytes keyed by texture asset GUID.
-    pub textures: std::collections::HashMap<uuid::Uuid, Vec<u8>>,
+    /// `.inf_tex` v2 containers keyed by texture asset GUID — a **slice of the
+    /// pack mapping** on the shipping path, an owned `Vec` on the PIE one (see
+    /// [`VtTextureBytes`]).
+    pub textures: std::collections::HashMap<uuid::Uuid, VtTextureBytes>,
 }
 
 impl MaterialContent {
@@ -821,6 +965,16 @@ impl MaterialContent {
     /// surfaces were never bound.
     pub fn is_empty(&self) -> bool {
         self.materials.is_empty()
+    }
+
+    /// One texture's bytes as the registration door takes them.
+    ///
+    /// The whole seam between "where this host keeps its containers" and "what
+    /// `inf-render` registers": the pack arm hands over a mapping slicer and the
+    /// payload arm an owned buffer, and the registry cannot tell them apart.
+    pub fn source(&self, guid: u128) -> Option<std::sync::Arc<dyn inf_render::VtTileSource>> {
+        let bytes = self.textures.get(&uuid::Uuid::from_u128(guid))?;
+        Some(std::sync::Arc::new(bytes.clone()) as std::sync::Arc<dyn inf_render::VtTileSource>)
     }
 
     /// This content as the **registration door** takes it (P26.4): `.inf_mat`

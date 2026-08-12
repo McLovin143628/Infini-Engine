@@ -83,6 +83,10 @@ pub struct PlayerRenderHost {
     /// generation, so a collapse packs its instance payload when the live chunk
     /// set changes rather than on every frame.
     debris_cache: inf_render::DebrisCache,
+    /// The level's material bindings + their `.inf_tex` containers (P26.4),
+    /// kept so a device-loss rebuild can re-register them without reopening the
+    /// pack. Empty for `--demo` / primitive-only worlds.
+    materials: Arc<crate::MaterialContent>,
     /// The auto-picked capability tier itself (P22.4).
     ///
     /// Kept because the tier now decides one thing that is **not** a renderer
@@ -165,6 +169,7 @@ impl PlayerRenderHost {
             voxels: inf_voxel::VoxelVolumes::new(),
             vgeom_enabled,
             debris_cache: inf_render::DebrisCache::default(),
+            materials: Arc::new(crate::MaterialContent::default()),
             tier,
         })
     }
@@ -212,6 +217,65 @@ impl PlayerRenderHost {
         self.voxels.clear();
     }
 
+    /// **Attach the level's material bindings** (P26.4, clause 0) so a bound
+    /// `.inf_mat`'s textures reach the surfaces that name it.
+    ///
+    /// This is the shipped half of what the P26.3b ledger called the missing
+    /// glue. Everything downstream of it was already built: the registration
+    /// door, the material rule, the want floor and the WGSL sample. What did not
+    /// exist was any non-test caller, so a cooked pack carried the `.inf_matd`
+    /// records and the `.inf_tex` containers and nothing ever looked at them.
+    ///
+    /// Registration goes through `inf_render::build_vt_level` — the same call
+    /// the editor viewport makes, with the same materials in the same order — so
+    /// "PIE == shipping" for texture residency is a property of the code. A
+    /// world with no bindings hands the renderer `None`, which restores the
+    /// textureless command stream exactly.
+    pub fn set_material_content(&mut self, materials: Arc<crate::MaterialContent>) {
+        self.materials = materials;
+        self.rebuild_vt();
+    }
+
+    /// (Re)build the virtual-texture level from `self.materials`.
+    ///
+    /// Separate from the setter because a **device-loss rebuild** must do it
+    /// again: the atlas and the indirection buffer belong to the dead device,
+    /// and the registry's readers do not — they are container slices, which is
+    /// why re-registering costs a header parse per texture and no re-read.
+    fn rebuild_vt(&mut self) {
+        let mats = self.materials.vt_materials();
+        if mats.is_empty() {
+            self.renderer.set_vt_level(None);
+            return;
+        }
+        let materials = self.materials.clone();
+        let level = inf_render::build_vt_level(
+            &self.gpu.device,
+            &self.gpu.queue,
+            self.renderer.settings(),
+            inf_render::DEFAULT_VT_BUDGET_BYTES,
+            &mats,
+            |g| materials.source(g),
+        );
+        match level {
+            Some((textures, pools, report)) => {
+                for a in &report.advisories {
+                    tracing::warn!("inf-player: virtual textures: {a}");
+                }
+                tracing::info!(
+                    "inf-player: {} virtual texture(s) registered for {} bound material(s) \
+                     ({:?} pages, {} refused)",
+                    report.textures,
+                    mats.len(),
+                    report.pool_format,
+                    report.refused
+                );
+                self.renderer.set_vt_level(Some((textures, pools)));
+            }
+            None => self.renderer.set_vt_level(None),
+        }
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         self.chain.request_resize(width, height);
     }
@@ -243,6 +307,7 @@ impl PlayerRenderHost {
             &self.skinned,
             &self.voxels,
             &mut self.debris_cache,
+            self.renderer.vt_textures(),
         );
     }
 
@@ -382,6 +447,7 @@ pub fn project_scene_with_skinned(
         skinned,
         voxels,
         &mut inf_render::DebrisCache::default(),
+        None,
     );
 }
 
@@ -394,6 +460,12 @@ pub fn project_scene_with_skinned(
 /// second projection depend on the first. It is keyed by fracture generation, so
 /// a hit and a miss produce byte-identical payloads — the memo can only change
 /// how often the packing runs, never what it packs.
+///
+/// `vt` is the level's virtual-texture registry (P26.4), or `None` for a world
+/// with no material bindings — in which case every instance's set is
+/// `VtTextureSet::NONE` and the surfaces render off their scalar attributes,
+/// exactly as they did before P26.
+#[allow(clippy::too_many_arguments)]
 pub fn project_scene_full(
     scene: &mut RenderScene,
     sim: &RuntimeSim,
@@ -402,6 +474,7 @@ pub fn project_scene_full(
     skinned: &SkinnedRegistry,
     voxels: &inf_voxel::VoxelVolumes,
     debris: &mut inf_render::DebrisCache,
+    vt: Option<&inf_render::VtTextures>,
 ) {
     scene.instances.clear();
     scene.lights.clear();
@@ -717,23 +790,33 @@ pub fn project_scene_full(
                 // state, folded into the trace, and a projector that re-evaluated
                 // it would be a second opinion about what the character is doing.
                 let posed = inf_ecs::pose::evaluated_pose(world, guid);
+                // PBR params come from the entity's `Material` exactly as they do
+                // on the rigid path; an unmaterialed character gets the renderer's
+                // neutral. Read BEFORE the match, so the placeholder branch below
+                // carries the same virtual-texture set the real geometry would —
+                // a character whose skeleton has not resolved is still a surface
+                // bound to a material (P26.4).
+                let (color, metallic, roughness, emissive, vt) = w
+                    .get::<Material>(entity)
+                    .map(|m| {
+                        let e = m.emissive.to_array();
+                        (
+                            m.base_color.to_array(),
+                            m.metallic,
+                            m.roughness,
+                            [e[0], e[1], e[2]],
+                            inf_render::vt_set_for(vt, m.asset.map(|a| a.as_u128())),
+                        )
+                    })
+                    .unwrap_or((
+                        [0.8, 0.8, 0.8, 1.0],
+                        0.0,
+                        0.5,
+                        [0.0; 3],
+                        inf_render::VtTextureSet::NONE,
+                    ));
                 match skinned.resolve_skinned(&sm, player.as_ref(), posed) {
                     Some(draw) => {
-                        // Real skinned geometry. PBR params come from the entity's
-                        // `Material` exactly as they do on the rigid path; an
-                        // unmaterialed character gets the renderer's neutral.
-                        let (color, metallic, roughness, emissive) = w
-                            .get::<Material>(entity)
-                            .map(|m| {
-                                let e = m.emissive.to_array();
-                                (
-                                    m.base_color.to_array(),
-                                    m.metallic,
-                                    m.roughness,
-                                    [e[0], e[1], e[2]],
-                                )
-                            })
-                            .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3]));
                         // One `skinned_meshes` entry per (mesh, skeleton) pair,
                         // and the entry is the store's own `Arc` — no copy here,
                         // and the pass keys its GPU upload on that pointer, so
@@ -746,7 +829,7 @@ pub fn project_scene_full(
                             scene.skinned_meshes.len() - 1
                         });
                         scene.skinned.push(SkinnedInstance {
-                            vt: Default::default(),
+                            vt,
                             translation,
                             rotation: rot.as_quat(),
                             scale: scale.as_vec3(),
@@ -763,7 +846,7 @@ pub fn project_scene_full(
                     // its slate tint, so the two hosts also agree about content
                     // whose assets are missing.
                     None => scene.instances.push(MeshInstance {
-                        vt: Default::default(),
+                        vt,
                         translation,
                         rotation: rot.as_quat(),
                         scale: scale.as_vec3(),
@@ -791,7 +874,7 @@ pub fn project_scene_full(
             // editor viewport's `host.rs` (inf-viewport) — keep the two in sync,
             // R-P5 blend + cutoff included. (The vgeom path below is opaque-only —
             // vgeom translucency is deferred.)
-            let (color, metallic, roughness, emissive, blend, cutoff) = w
+            let (color, metallic, roughness, emissive, blend, cutoff, vt) = w
                 .get::<Material>(entity)
                 .map(|m| {
                     let e = m.emissive.to_array();
@@ -802,9 +885,18 @@ pub fn project_scene_full(
                         [e[0], e[1], e[2]],
                         blend_code(m.blend),
                         m.alpha_cutoff,
+                        inf_render::vt_set_for(vt, m.asset.map(|a| a.as_u128())),
                     )
                 })
-                .unwrap_or(([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, [0.0; 3], 0, 0.5));
+                .unwrap_or((
+                    [0.8, 0.8, 0.8, 1.0],
+                    0.0,
+                    0.5,
+                    [0.0; 3],
+                    0,
+                    0.5,
+                    inf_render::VtTextureSet::NONE,
+                ));
 
             // P13.4: a MeshRef.asset with a cook-derived vmesh renders REAL geometry
             // — the GPU meshlet path (vgeom on) or the classic discrete-LOD fallback
@@ -858,7 +950,7 @@ pub fn project_scene_full(
                     scene.vgeom_assets.push(VgeomAsset::new(asset_id, source));
                 }
                 scene.vgeom_instances.push(VgeomInstance {
-                    vt: Default::default(),
+                    vt,
                     asset: asset_id,
                     translation,
                     rotation: rot.as_quat(),
@@ -873,7 +965,7 @@ pub fn project_scene_full(
                 // R-P1: an unresolved / primitive-only MeshRef draws its built-in
                 // primitive kind (Sphere/Plane/Cylinder/Cone), not always a cube.
                 scene.instances.push(MeshInstance {
-                    vt: Default::default(),
+                    vt,
                     translation,
                     rotation: rot.as_quat(),
                     scale: scale.as_vec3(),

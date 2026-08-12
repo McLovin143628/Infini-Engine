@@ -450,6 +450,12 @@ fn run_pie_window(
             &payload.skeletons,
             &payload.clips,
         )),
+        // P26.4 (`ScenePayload` v8): the derived material records + the `.inf_tex`
+        // containers a PIE session's surfaces sample. Same shape, same reason as
+        // the two lines above — through `materials_from_payload`, which is the
+        // payload half of the SAME lookup rule `PackLevelSource::material_content`
+        // is the pack half of.
+        std::sync::Arc::new(inf_player::materials_from_payload(&payload)),
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

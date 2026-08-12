@@ -449,6 +449,23 @@ impl VtTextures {
     }
 }
 
+/// **The per-instance set for an optional material binding** — the one
+/// expression both projectors spell (P26.4, clause 0).
+///
+/// A free function rather than two `map_or` chains because `projector_mirror`
+/// compares the two projections *token for token*: a rule written twice is a
+/// rule that eventually differs, and this one decides whether a surface is
+/// textured. `None` for the library (no VT level) and `None` for the material
+/// (an unbound surface, i.e. every pre-v22 level) both give
+/// [`VtTextureSet::NONE`], which is the scalar path.
+#[inline]
+pub fn vt_set_for(lib: Option<&VtTextures>, material: Option<u128>) -> VtTextureSet {
+    match (lib, material) {
+        (Some(l), Some(m)) => l.set_for_material(m),
+        _ => VtTextureSet::NONE,
+    }
+}
+
 /// What building a level's virtual-texture surface produced — everything a host
 /// wants to log or a gate wants to assert, so neither has to reach inside.
 #[derive(Debug, Clone, Default)]

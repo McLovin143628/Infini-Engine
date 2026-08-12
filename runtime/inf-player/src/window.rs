@@ -115,6 +115,13 @@ pub struct PlayerApp {
     /// reason, which is why [`PlayerApp::new`] starts it empty and [`run`] /
     /// [`run_pie`] replace it.
     voxel_assets: Arc<VoxelRegistry>,
+    /// The level's material bindings + their `.inf_tex` containers (P26.4).
+    /// Attached to the render host so a bound `.inf_mat`'s maps reach the
+    /// surfaces that name it — the shipped half of clause 0, and the same shape,
+    /// for the same reason, as `voxel_assets` (P21.4) and `skinned` (P24.1):
+    /// passed in rather than defaulted, so a windowed session cannot quietly
+    /// render something the headless one does not.
+    materials: Arc<crate::MaterialContent>,
     /// The loaded level's scene-persisted render block (R-P4); the render host
     /// maps it onto the live `RenderSettings` at build (and device-loss rebuild).
     /// `default` for content with no authored block (PIE / web / android v1).
@@ -161,6 +168,7 @@ impl PlayerApp {
             vmeshes,
             skinned: Arc::new(SkinnedRegistry::new()),
             voxel_assets: Arc::new(VoxelRegistry::new()),
+            materials: Arc::new(crate::MaterialContent::default()),
             render,
             #[cfg(target_arch = "wasm32")]
             canvas: None,
@@ -329,6 +337,10 @@ impl PlayerApp {
                     host.set_vmeshes(self.vmeshes.clone());
                     host.set_skinned(self.skinned.clone());
                     host.set_voxel_assets(self.voxel_assets.clone());
+                    // P26.4: the atlas and the indirection buffer belonged to the
+                    // dead device, so the level's virtual textures are registered
+                    // again here — the same call, the same order, the same pages.
+                    host.set_material_content(self.materials.clone());
                     live.host = host;
                 }
                 Err(e) => {
@@ -390,6 +402,10 @@ impl ApplicationHandler for PlayerApp {
                 // P21.1: and the `.inf_voxel` source, so a placed cave draws its
                 // carved surface rather than nothing.
                 host.set_voxel_assets(self.voxel_assets.clone());
+                // P26.4 — clause 0. The level's bound `.inf_mat` maps become
+                // virtual textures here, through the door the editor viewport
+                // also calls, so a shipped build and a preview page identically.
+                host.set_material_content(self.materials.clone());
                 // P22.4 — THE PER-TIER DEBRIS BUDGET, and the only place in the
                 // engine where a `RenderTier` becomes a `DebrisBudget`.
                 //
@@ -525,6 +541,7 @@ pub fn run(
     vmeshes: Arc<VmeshRegistry>,
     skinned: Arc<SkinnedRegistry>,
     voxel_assets: Arc<VoxelRegistry>,
+    materials: Arc<crate::MaterialContent>,
     render: inf_scene::RenderSettingsRecord,
     debug_cells: bool,
 ) -> Result<(), String> {
@@ -533,6 +550,7 @@ pub fn run(
     let mut app = PlayerApp::new(title, width, height, sim, map, vmeshes, render);
     app.skinned = skinned;
     app.voxel_assets = voxel_assets;
+    app.materials = materials;
     app.debug_cells = debug_cells;
     event_loop
         .run_app(&mut app)
@@ -559,6 +577,7 @@ pub fn run_pie(
     out: Box<dyn Write>,
     voxel_assets: Arc<VoxelRegistry>,
     skinned: Arc<SkinnedRegistry>,
+    materials: Arc<crate::MaterialContent>,
 ) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("event loop: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -590,6 +609,12 @@ pub fn run_pie(
     // real posed geometry. The identical class P21.4 closed for voxel volumes,
     // and passed in rather than defaulted for the identical reason.
     app.skinned = skinned;
+    // P26.4: the payload's `.inf_matd` records + `.inf_tex` containers
+    // (`ScenePayload` v8). Without them a windowed PIE session renders every
+    // bound surface off its scalar attributes while the shipped build textures
+    // it — the identical class P21.4 closed for voxel volumes and P24.1 for
+    // skeletal meshes, and passed in for the identical reason.
+    app.materials = materials;
     app.pie = Some(PieLink {
         control,
         out,

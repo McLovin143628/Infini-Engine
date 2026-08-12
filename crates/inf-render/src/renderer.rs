@@ -370,6 +370,11 @@ pub struct EngineRenderer {
     /// fourth argument through `render`, and because `apply` must run before the
     /// frame's submit, which is an ordering this type is already responsible for.
     vt: Option<crate::vt::VtPools>,
+    /// The level's virtual-texture **registry** (P26.4), set beside the mirror
+    /// through [`EngineRenderer::set_vt_level`]. `None` on a textureless scene
+    /// and whenever a host set only the mirror (the P26.3 door), in which case
+    /// every projector's material lookup is `VtTextureSet::NONE`.
+    vt_textures: Option<crate::VtTextures>,
     /// The empty VT surface, created once and never recreated (so it adds no
     /// `passes::ResourceKey` component, on the `wetness` precedent).
     vt_absent: crate::vt::VtEmptyPool,
@@ -566,6 +571,7 @@ impl EngineRenderer {
             underwater,
             voxel,
             vt: None,
+            vt_textures: None,
             vt_absent: crate::vt::VtEmptyPool::new(&gpu.device),
             vt_engaged_frames: 0,
         }
@@ -581,6 +587,56 @@ impl EngineRenderer {
     /// stream is the one every pre-P26.3 golden recorded.
     pub fn set_vt_pools(&mut self, pools: Option<crate::vt::VtPools>) {
         self.vt = pools;
+        self.vt_textures = None;
+    }
+
+    /// **Hand the renderer a whole level's virtual-texture surface** (P26.4) —
+    /// the registry and the mirror it was planned against, together.
+    ///
+    /// The pair is set through one door because they are one fact: a
+    /// [`VtPools`](crate::vt::VtPools) built from a *different*
+    /// [`VtTextures`](crate::VtTextures) has the wrong atlas geometry and the
+    /// wrong table layout, and nothing downstream would notice. Passing `None`
+    /// restores the textureless path exactly (see
+    /// [`set_vt_pools`](Self::set_vt_pools)).
+    ///
+    /// The renderer owns the registry — rather than the host holding it and
+    /// passing it per frame — for the same reason it already owns the mirror:
+    /// the streaming step runs at the frame's sync point, inside `render`, and a
+    /// projector that held the registry would have to be handed the camera to do
+    /// it. Projectors ask [`vt_set_for_material`](Self::vt_set_for_material)
+    /// instead, which is a lookup and needs nothing.
+    pub fn set_vt_level(&mut self, level: Option<(crate::VtTextures, crate::vt::VtPools)>) {
+        match level {
+            Some((textures, pools)) => {
+                self.vt = Some(pools);
+                self.vt_textures = Some(textures);
+            }
+            None => {
+                self.vt = None;
+                self.vt_textures = None;
+            }
+        }
+    }
+
+    /// **The per-instance texture set for a surface bound to `material`** — what
+    /// a projector writes into `MeshInstance::vt` (P26.4, clause 0).
+    ///
+    /// `VtTextureSet::NONE` when there is no level, no such material, or the
+    /// texture is not yet warm — every one of which is the scalar surface, which
+    /// is exactly what the same entity rendered as before P26.
+    #[inline]
+    pub fn vt_set_for_material(&self, material: u128) -> crate::VtTextureSet {
+        self.vt_textures
+            .as_ref()
+            .map_or(crate::VtTextureSet::NONE, |t| t.set_for_material(material))
+    }
+
+    /// The live registry, for a host or a gate that wants to assert the WORLD
+    /// (the resident set) rather than a report.
+    #[inline]
+    pub fn vt_textures(&self) -> Option<&crate::VtTextures> {
+        self.vt_textures.as_ref()
     }
 
     /// The live VT mirror, for a host that needs to apply a transaction to it.

@@ -1724,20 +1724,30 @@ impl PackLevelSource {
             }
         }
 
-        // The `.inf_tex` v2 containers those records name — and only those.
-        // Read whole here rather than sub-sliced because the registry needs an
-        // owned `VtTileSource` it can hold for the life of the world; the *tiles*
-        // inside are still addressed without decoding anything
-        // (`inf_vt::TiledTextureReader`), which is the part that matters.
+        // The `.inf_tex` v2 containers those records name — and only those,
+        // **as slices of this pack's mapping** rather than as copies (P26.4).
+        //
+        // The P26.3b remainder said what the copy cost: "a pack path's RAM scales
+        // with the texture bytes a level binds — the cost SVT exists to avoid".
+        // `crate::PackTexture` holds the shared reader and the GUID and resolves
+        // the entry on demand, which is the arrangement `inf_terrain::stream` and
+        // `inf_vgeom::asset` already use for the two other streamed formats.
+        // Membership is still checked here, so a dangling texture is absent from
+        // the map (and named by `VtRefusal::NoBytes` at registration) rather than
+        // becoming an empty container at page time.
         let mut textures = HashMap::new();
         for rec in materials.values() {
             for tex in rec.texture_dependencies() {
-                if textures.contains_key(&tex.uuid()) {
+                if textures.contains_key(&tex.uuid()) || !self.reader.contains(tex) {
                     continue;
                 }
-                if let Ok(bytes) = self.reader.read(tex) {
-                    textures.insert(tex.uuid(), bytes);
-                }
+                textures.insert(
+                    tex.uuid(),
+                    crate::VtTextureBytes::Pack(Arc::new(crate::PackTexture::new(
+                        self.reader.clone(),
+                        tex,
+                    ))),
+                );
             }
         }
 

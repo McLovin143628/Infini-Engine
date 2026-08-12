@@ -793,6 +793,142 @@ fn the_pack_and_the_payload_build_the_same_material_content() {
     );
 }
 
+/// **THE REGISTRATION GAP, CLOSED** (P26.4, clause 0): a cooked pack's bound
+/// material becomes a per-instance texture set, and the streamed payload's
+/// becomes the same one **by GUID**.
+///
+/// Every layer under this shipped in P26.1–P26.3b and none of them had a
+/// non-test caller: the container, the residency, the WGSL sample, the
+/// registration door, the material rule and the want floor were all built and
+/// exercised while `no projector called VtTextures::register` and both filled
+/// `vt: Default::default()`. So a `.inf_mat`'s textures reached a runtime record
+/// on every path and were sampled by nothing.
+///
+/// GPU-free on purpose: what this asserts is the *decision* — which textures are
+/// registered, in what order, and which handles a surface's three slots name —
+/// and that decision is `inf-render`'s registry, which needs no adapter. The
+/// pixels are `inf-render`'s own `a_virtual_texture_reaches_the_lit_pixel`.
+///
+/// The cross-host comparison is **by GUID and never by handle**, which is the
+/// P26.3 LAW: the editor walks document order and the player walks `Guid` order,
+/// so one level mints different handles on the two sides and comparing the
+/// integers would be comparing two correct answers and calling them wrong.
+#[test]
+fn a_bound_material_becomes_a_per_instance_texture_set_on_both_wires() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (proj, doc) = scaffold(tmp.path(), true);
+    let report = cook(&proj, &tmp.path().join("out"), &cook_opts()).expect("the project cooks");
+
+    let build = |content: &inf_player::MaterialContent| {
+        let mats = content.vt_materials();
+        assert_eq!(mats.len(), BOUND_MATERIALS, "no binding to register");
+        let (mut lib, _) = inf_render::VtTextures::new(inf_vt::VtPoolConfig {
+            // The fixture's containers are written with `TextureCompression::None`,
+            // so their stored pages ARE RGBA8 — the same decision
+            // `build_vt_level` makes from the payload's own header, spelled here
+            // because this arm builds the registry without a device.
+            format: inf_vt::PageFormat::Rgba8,
+            stored_tile_size: inf_vt::STORED_TILE_SIZE,
+            budget_bytes: inf_vt::DEFAULT_VT_BUDGET_BYTES,
+            max_texture_dim: 8192,
+        });
+        let n = lib.register_materials(&mats, |g| content.source(g));
+        assert_eq!(n, BOUND_TEXTURES, "the door registered the wrong count");
+        assert!(
+            lib.refusals().is_empty(),
+            "a bound texture was refused: {:?}",
+            lib.refusals()
+        );
+        // The transaction that carries the root pages — until it runs, the warm
+        // gate correctly refuses to name anything.
+        assert!(
+            lib.set_for_material(MAT.as_u128()).is_none(),
+            "a cold registry named a texture"
+        );
+        let floor = lib.want_floor();
+        let txn = lib.residency_mut().apply_wants(&floor);
+        assert_eq!(txn.deferred, 0, "the floor did not fit: {}", txn.trace());
+        lib
+    };
+
+    let source = inf_player::level::PackLevelSource::open(&report.pack_path).expect("open pack");
+    let shipped = build(&source.material_content());
+    let previewed = build(&inf_player::materials_from_payload(&payload_for(
+        &proj, &doc,
+    )));
+
+    // The set a surface bound to MAT gets. Not `NONE` — which is what every
+    // projector produced before this batch, on every path, for every level.
+    let ship_set = shipped.set_for_material(MAT.as_u128());
+    let prev_set = previewed.set_for_material(MAT.as_u128());
+    assert!(
+        !ship_set.is_none(),
+        "the shipped path resolved no textures for a bound material"
+    );
+    assert_eq!(ship_set.normal, 0, "the empty normal slot must stay empty");
+    assert_ne!(ship_set.albedo, 0);
+    assert_ne!(ship_set.orm, 0);
+    assert_ne!(
+        ship_set.albedo, ship_set.orm,
+        "one texture is serving two slots"
+    );
+
+    // BY GUID (the P26.3 LAW), slot by slot: each side's slot must resolve to the
+    // texture the material actually names.
+    for (slot, guid) in [(ship_set.albedo, ALBEDO), (ship_set.orm, ORM)] {
+        assert_eq!(
+            shipped.handle(guid.as_u128()).map(|h| h.0 + 1),
+            Some(slot),
+            "the shipped set's slot does not name {guid}"
+        );
+    }
+    for (slot, guid) in [(prev_set.albedo, ALBEDO), (prev_set.orm, ORM)] {
+        assert_eq!(
+            previewed.handle(guid.as_u128()).map(|h| h.0 + 1),
+            Some(slot),
+            "the previewed set's slot does not name {guid}"
+        );
+    }
+
+    // …and the residency the two hosts arrive at is the same WORLD: the same
+    // tiles of the same textures, keyed by GUID. Handles may differ; pages may
+    // not.
+    let resident = |lib: &inf_render::VtTextures| {
+        let mut out: Vec<(Uuid, inf_vt::TileCoord)> = Vec::new();
+        for tex in [ALBEDO, ORM] {
+            let h = lib.handle(tex.as_u128()).expect("registered");
+            let desc = lib.residency().desc(h).expect("registered").clone();
+            for mip in 0..desc.mip_count() {
+                let m = desc.mips[mip as usize];
+                for y in 0..m.tiles_y {
+                    for x in 0..m.tiles_x {
+                        let at = inf_vt::TileCoord::new(mip, x, y);
+                        if lib.residency().is_resident(h, at) {
+                            out.push((tex, at));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    };
+    let ship_res = resident(&shipped);
+    assert!(!ship_res.is_empty(), "nothing is resident");
+    assert_eq!(
+        ship_res,
+        resident(&previewed),
+        "a cooked pack and a PIE payload paged different tiles for one level"
+    );
+
+    // ANTI-VACUITY: the same level with nothing bound registers nothing, so every
+    // equality above is a measurement of the binding rather than of two empty
+    // registries agreeing.
+    let bare = tempfile::tempdir().expect("tempdir");
+    let (bare_proj, bare_doc) = scaffold(bare.path(), false);
+    let bare_content = inf_player::materials_from_payload(&payload_for(&bare_proj, &bare_doc));
+    assert!(bare_content.vt_materials().is_empty());
+}
+
 /// **`registration_order` is a function of the SET, not of how the map was
 /// built** (P26.3b audit) — the property that makes cross-host agreement
 /// possible at all.
