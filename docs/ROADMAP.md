@@ -8476,6 +8476,63 @@ result imports as a standard asset.
 Decided 2026-07-31: **native classical SfM + GPU MVS** in Rust/WGSL — deterministic and
 in-engine, with no external reconstruction dependency.
 
+> **STATUS: Phase 25 COMPLETE** (2026-08-12) — four batches, four adversarial audits, one CI
+> red hotfixed from the main session; battery at close **4000 passed / 0 failed over 222
+> binaries**, goldens **50** (never touched), **zero new external dependencies** across the
+> whole phase (the linear algebra, features, RANSAC, bundle adjustment, plane sweep, TSDF and
+> bakes are all owned code with tests), no schema moved, and the shipped player links none of
+> it. The done-when, reckoned honestly (P25.4's reckoning, adopted): *synthetic-render
+> dataset reconstructs within error bounds deterministically* — **met** (P25.1: solver at the
+> data's measured noise floor, 0.36 px vs the detector's own 0.38; byte-identical across runs
+> and pool sizes 1/2/8); *a real photo set through the wizard* — **the flow is met and gated
+> end to end** (files on disk → five standard assets under the project root, stage sequence /
+> cancellation-writes-nothing / pre-flight refusals all filesystem-asserted), while "a REAL
+> photo set" itself stays **human-verified class** — nothing in CI photographs anything, and
+> the one real-photograph datum in hand (the un-normalized descriptor refusing half-exposed
+> captures, measured across five gains) says a bad set refuses rather than fabricates;
+> *imports as a standard asset* — **met** (`.inf_mesh` + three `.inf_tex` + `.inf_mat`, no
+> new AssetKind, five-or-none rollback asserted against the filesystem).
+>
+> **What each batch was** (the four audit ledgers below carry the full finding lists):
+> P25.1 `inf-photo` — ORB-class deterministic features, seeded fixed-count RANSAC,
+> hand-rolled Jacobi/SVD/LDLT, Schur-complement LM bundle, gauge pinned to the first pair;
+> P25.2 `inf-photo-gpu` — integer census plane-sweep (the cost is a Hamming distance, which
+> is what makes CPU/GPU parity exact where it matters), WGSL mirrors gated against CPU
+> references two-tier per adapter class, TSDF fused into `inf-voxel`'s existing Surface-Nets
+> mesher; P25.3 — meshopt retopo + P23.5 LSCM unwrap + texel-space normal/AO/albedo bakes
+> with per-view occlusion tests against the depth maps, de-lighting v1 implemented and
+> **refusing by measurement** (`docs/memos/p25-delighting-v1.md`); P25.4 — the capture
+> wizard: five stages on a worker with a progress stream, typed diagnostics with remedies
+> (the surviving, MEASURED ones — one shipped backwards and was caught by the audit),
+> coverage overlay, offscreen preview through the Model Editor's own door, scale as
+> re-finish.
+>
+> **The phase's laws** (each bought by a measured incident): **a bound measured on one
+> platform and gated on every one reds CI** — twice, once for GPU adapters (P25.2 F1, Metal
+> contracts multiply-adds), once for CPUs (the macOS meshopt red; the P18 law reaches
+> gates); **a prescription written from mechanism intuition rather than measurement can be
+> BACKWARDS** (P25.4: "lower the triangle budget" where raising it is the fix — remedies are
+> now gated with direction arms); **an average hides a station** (P25.2: aggregate valid
+> fraction green while one view collapsed to 1% — floors go on the weakest member);
+> **a worker that stops without publishing strands its session** (P25.4 F6 — terminal states
+> are settled by a guard, not by the happy path); **the fixture's own floor is the only
+> honest tolerance** (all four batches compute their bounds from truth-pose/analytic
+> baselines in-test, never as copied constants).
+>
+> **Carried out of Phase 25** (all ledgered in place): the P23.5 unwrap path collapses
+> healthy-area triangles (~6% of the fixture mesh — undiagnosed, the split diagnostic is in
+> place and the wholesale ceiling documents it); no `.inf_vmesh` is derived at import, so a
+> finished scan draws as a placeholder cube until the P18.3 project-open sweep runs (stated
+> to the user by a `CaptureIssue`); the descriptor is not contrast-normalized, so
+> half-exposed captures refuse (measured; normalizing is a Ring-0 change that moves every
+> committed number — a deliberate future batch); no image retrieval (large unordered sets
+> miss non-sequential overlap); planar scenes degenerate the 8-point init (5-point/P3P is
+> the upgrade); intrinsics are never refined (no self-calibration); the preview's geometry
+> pane is untextured (the standing P7 white-binding follow-up); `Content/Scans` is fixed,
+> not a picker; the capture's second `JobPool` can oversubscribe 2N against the global pool
+> when a capture and an import overlap (ruled at the field, unmeasured and not to be tuned
+> without measuring).
+
 - **P25.1 SfM core** — 1. feature extraction and matching with deterministic ordering;
   2. incremental SfM + bundle adjustment on the job pool, pool-size-invariant per house rules.
 - **P25.2 GPU MVS** — 1. WGSL plane-sweep depth maps; 2. TSDF fusion → dense mesh extraction.
