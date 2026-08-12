@@ -108,7 +108,9 @@ fn collect_spline_paths(
 impl MaskSource for AssetMasks<'_> {
     fn mask(&self, texture: Uuid) -> Option<(u32, u32, Vec<u8>)> {
         let bytes = self.0.load_texture_bytes(AssetId(texture))?;
-        let tex: inf_material::TextureAsset = inf_asset::decode(&bytes).ok()?;
+        // `from_payload`, not `inf_asset::decode`: since P26.1 an imported
+        // `.inf_tex` is a tiled image, and only the door sniffs both versions.
+        let tex = inf_material::TextureAsset::from_payload(&bytes).ok()?;
         let mip = tex.mips.first()?;
         let (w, h) = (mip.width, mip.height);
         let rgba = tex.level_rgba8(0)?;

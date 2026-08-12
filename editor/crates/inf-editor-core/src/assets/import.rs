@@ -26,6 +26,15 @@ pub struct ImportOutcome {
     pub primary: Option<AssetId>,
     /// True if this was served from the import cache (nothing re-decoded).
     pub cached: bool,
+    /// **Non-fatal advisories** raised while importing (P26.1) — the P16
+    /// cook-advisory shape: the import succeeded, and these say what it had to
+    /// do that the author cannot see in the result.
+    ///
+    /// Every one is also `tracing::warn!`ed at the moment it is raised, so it
+    /// reaches the Output Log panel without any frontend work. Carrying them on
+    /// the `assets://import` event (a toast, a per-asset badge) is the P26.5
+    /// editor batch's job; this is the Ring-1 record it will read.
+    pub advisories: Vec<String>,
 }
 
 /// Import one source file into `dest_dir`, routing by extension.
@@ -50,6 +59,9 @@ pub fn import_file(
                 produced: vec![existing],
                 primary: Some(existing),
                 cached: true,
+                // A cache hit re-decodes nothing, so it re-raises nothing: the
+                // advisories were said when the bytes were first imported.
+                advisories: Vec::new(),
             });
         }
     }
@@ -107,6 +119,7 @@ fn import_audio(
         produced: vec![id],
         primary: Some(id),
         cached: false,
+        advisories: Vec::new(),
     })
 }
 
@@ -118,7 +131,11 @@ fn audio_settings_table(settings: &AudioImportSettings) -> Option<toml::Table> {
         .and_then(|v| v.as_table().cloned())
 }
 
-/// A single image → one texture asset (sRGB base-color defaults).
+/// A single image → one **v2 tiled** texture asset (sRGB base-color defaults).
+///
+/// P26.1: the payload written here is the tiled container, not the bincode
+/// record — every texture imported from now on is byte-addressable by tile. v1
+/// payloads already on disk keep loading through `TextureAsset::from_payload`.
 fn import_image(
     project: &mut AssetProject,
     source: &Path,
@@ -126,23 +143,35 @@ fn import_image(
     dest_dir: &Path,
 ) -> Result<ImportOutcome> {
     let settings = TextureImportSettings::default();
-    let tex = inf_material::import_texture_bytes(bytes, settings)
+    let (rgba, w, h) =
+        inf_material::decode_image_rgba8(bytes).map_err(|e| AssetError::Import(e.to_string()))?;
+    let advisories = raise(source, inf_material::texture_import_advisories(w, h));
+    let image = inf_material::build_tiled_texture(rgba, w, h, settings)
         .map_err(|e| AssetError::Import(e.to_string()))?;
     let name = file_stem(source);
     let import_tbl = settings_table(&settings);
-    let id = project.write_asset(
+    let id = project.write_tiled_texture(
         dest_dir,
         &name,
-        &tex,
+        &image,
         Some(rel_source(project, source)),
-        vec![],
         import_tbl,
     )?;
     Ok(ImportOutcome {
         produced: vec![id],
         primary: Some(id),
         cached: false,
+        advisories,
     })
+}
+
+/// Log each advisory where it is raised and hand the list back. One place, so
+/// an advisory can never be recorded without being said (or said twice).
+fn raise(source: &Path, advisories: Vec<String>) -> Vec<String> {
+    for a in &advisories {
+        tracing::warn!("import advisory ({}): {a}", source.display());
+    }
+    advisories
 }
 
 /// glTF → textures + materials + meshes, wired by dependency edges.
@@ -197,23 +226,27 @@ fn import_mesh_container(
             }
         })
         .collect();
-    let decoded: Vec<std::result::Result<inf_material::TextureAsset, String>> = {
+    let decoded: Vec<std::result::Result<inf_material::TiledTextureImage, String>> = {
         let _span = tracing::info_span!("import_textures", images = g.images.len()).entered();
         inf_core::parallel_map((0..g.images.len()).collect(), |i| {
             let img = &g.images[i];
-            inf_material::texture_from_rgba8(img.rgba8.clone(), img.width, img.height, settings[i])
+            inf_material::build_tiled_texture(img.rgba8.clone(), img.width, img.height, settings[i])
                 .map_err(|e| e.to_string())
         })
     };
+    let mut advisories = Vec::new();
     for (i, tex) in decoded.into_iter().enumerate() {
         let tex = tex.map_err(AssetError::Import)?;
+        advisories.extend(raise(
+            source,
+            inf_material::texture_import_advisories(g.images[i].width, g.images[i].height),
+        ));
         let name = format!("{}_{}", file_stem(source), g.images[i].name);
-        let id = project.write_asset(
+        let id = project.write_tiled_texture(
             dest_dir,
             &name,
             &tex,
             Some(source_rel.clone()),
-            vec![],
             settings_table(&settings[i]),
         )?;
         image_ids[i] = Some(id);
@@ -342,6 +375,7 @@ fn import_mesh_container(
         produced,
         primary,
         cached: false,
+        advisories,
     })
 }
 
@@ -373,6 +407,104 @@ fn settings_table(settings: &TextureImportSettings) -> Option<toml::Table> {
 mod tests {
     use super::*;
     use inf_asset::AssetKind;
+
+    /// An asymmetric RGBA8 source — four distinct corner quadrants — encoded as a
+    /// PNG on disk. Asymmetric on purpose: a symmetric image cannot fail a test
+    /// about tile coordinates.
+    fn write_corner_png(dir: &Path, name: &str, w: u32, h: u32) -> std::path::PathBuf {
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let c: [u8; 3] = match (x * 2 < w, y * 2 < h) {
+                    (true, true) => [220, 20, 20],
+                    (false, true) => [20, 200, 20],
+                    (true, false) => [20, 20, 210],
+                    (false, false) => [230, 210, 30],
+                };
+                rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        let path = dir.join(format!("{name}.png"));
+        let file = std::fs::File::create(&path).unwrap();
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&rgba).unwrap();
+        path
+    }
+
+    /// P26.1: an imported image lands as the **v2 tiled container**, and the v1
+    /// view of it is byte-identical to the record the v1 importer would have
+    /// written from the same pixels.
+    #[test]
+    fn an_imported_image_is_a_tiled_container_that_still_reads_as_v1() {
+        let src = tempfile::tempdir().unwrap();
+        let proj_dir = tempfile::tempdir().unwrap();
+        let png = write_corner_png(src.path(), "Corners", 260, 132);
+
+        let mut proj = AssetProject::open(proj_dir.path()).unwrap();
+        let dest = proj.content_dir("imported").unwrap();
+        let out = proj.import_file(&png, &dest).unwrap();
+        assert!(out.advisories.is_empty(), "{:?}", out.advisories);
+
+        let id = out.primary.unwrap();
+        assert_eq!(proj.db().get(id).unwrap().kind(), AssetKind::Texture);
+        let bytes = std::fs::read(&proj.db().get(id).unwrap().path).unwrap();
+        assert!(
+            inf_material::tiles::is_v2(&bytes),
+            "the payload is not a tiled image"
+        );
+        // The v1 view equals what the v1 writer produces from the same source.
+        let rgba = inf_material::decode_image_rgba8(&std::fs::read(&png).unwrap())
+            .unwrap()
+            .0;
+        let expected =
+            inf_material::texture_from_rgba8(rgba, 260, 132, TextureImportSettings::default())
+                .unwrap();
+        assert_eq!(proj.load_texture(id).unwrap(), expected);
+
+        // The tile door works on the file as written (what P26.2 pages).
+        let r = inf_material::TiledTextureReader::new(bytes.as_slice()).unwrap();
+        assert_eq!((r.mips()[0].tiles_x, r.mips()[0].tiles_y), (3, 2));
+        assert!(r.tile(0, 2, 1).is_some());
+    }
+
+    /// The advisories reach the outcome, and an ordinary texture raises none.
+    #[test]
+    fn import_reports_the_dimension_advisories() {
+        let src = tempfile::tempdir().unwrap();
+        let proj_dir = tempfile::tempdir().unwrap();
+        let awkward = write_corner_png(src.path(), "Strip", 126, 15);
+        let mut proj = AssetProject::open(proj_dir.path()).unwrap();
+        let dest = proj.content_dir("imported").unwrap();
+
+        let out = proj.import_file(&awkward, &dest).unwrap();
+        assert_eq!(out.advisories.len(), 2, "{:?}", out.advisories);
+        assert!(out.advisories[0].contains("multiple of 4"));
+        assert!(out.advisories[1].contains("8:1"));
+        // The import still SUCCEEDED — an advisory is not a refusal.
+        assert!(proj.db().contains(out.primary.unwrap()));
+    }
+
+    /// A re-import of the same source produces the same bytes — the encode is a
+    /// pure function of its input, so the content hash is stable and the import
+    /// cache is telling the truth.
+    #[test]
+    fn re_importing_one_source_is_byte_identical() {
+        let src = tempfile::tempdir().unwrap();
+        let png = write_corner_png(src.path(), "Corners", 132, 132);
+
+        let mut bytes: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..2 {
+            let proj_dir = tempfile::tempdir().unwrap();
+            let mut proj = AssetProject::open(proj_dir.path()).unwrap();
+            let dest = proj.content_dir("imported").unwrap();
+            let out = proj.import_file(&png, &dest).unwrap();
+            let entry = proj.db().get(out.primary.unwrap()).unwrap();
+            bytes.push(std::fs::read(&entry.path).unwrap());
+        }
+        assert_eq!(bytes[0], bytes[1], "two imports of one source differ");
+    }
 
     /// Write a minimal single-triangle glTF with an external buffer.
     fn write_triangle_gltf(dir: &Path) -> std::path::PathBuf {

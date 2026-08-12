@@ -18,7 +18,7 @@ use inf_graph::{
 use inf_material::graph::MatSeverity;
 use inf_material::{
     emit_texture_compute, emit_wgsl, material_registry as build_material_registry,
-    texture_from_rgba8, TextureImportSettings,
+    TextureImportSettings,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -407,7 +407,10 @@ pub async fn material_bake(
         prev.bake_texture(&compute_wgsl, tex_count, size)
             .ok_or("no GPU adapter available to bake")?
     };
-    let tex = texture_from_rgba8(rgba, size, size, TextureImportSettings::default())
+    // A **v2 tiled** image (P26.1), not the bincode record: a texture the editor
+    // produces from pixels goes down the same container every import does, so
+    // there is one shape for the virtual-texture streamer to page.
+    let tex = inf_material::build_tiled_texture(rgba, size, size, TextureImportSettings::default())
         .map_err(|e| e.to_string())?;
     let name = if name.is_empty() {
         "Baked Texture".to_string()

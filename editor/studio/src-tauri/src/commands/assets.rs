@@ -63,14 +63,19 @@ impl AssetState {
     /// Write a baked texture as a new `.inf_tex` asset under `Content/baked`
     /// (P7.3 material bake). Returns the new asset id; the file watcher then
     /// re-syncs the Content Drawer.
+    ///
+    /// P26.1: the payload is a **v2 tiled image**, which is why this takes a
+    /// `TiledTextureImage` and goes through `write_tiled_texture` — the generic
+    /// writer would frame the raw image with a bincode length prefix and knock
+    /// every tile off its 16-byte boundary. The type makes that a compile error.
     pub fn write_texture_asset(
         &self,
         name: &str,
-        tex: &inf_material::TextureAsset,
+        tex: &inf_material::TiledTextureImage,
     ) -> Result<AssetId, String> {
         self.with_project(|proj| {
             let dir = proj.content_dir("baked").map_err(|e| e.to_string())?;
-            proj.write_asset(&dir, name, tex, None, vec![], None)
+            proj.write_tiled_texture(&dir, name, tex, None, None)
                 .map_err(|e| e.to_string())
         })
     }

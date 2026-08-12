@@ -225,7 +225,10 @@ pub fn read_slices(proj: &AssetProject, id: AssetId) -> Result<(SpriteSheetSlice
         .and_then(|t| t.get(SPRITE_SHEET_KEY))
         .and_then(|v| v.clone().try_into::<SpriteSheetSlices>().ok())
         .unwrap_or_default();
-    let tex: TextureAsset = proj.load_payload(id)?;
+    // `load_texture`, not `load_payload`: a `.inf_tex` has two container
+    // versions since P26.1 and only one of them is bincode (see
+    // `AssetProject::load_texture`).
+    let tex: TextureAsset = proj.load_texture(id)?;
     Ok((slices, tex.width, tex.height))
 }
 

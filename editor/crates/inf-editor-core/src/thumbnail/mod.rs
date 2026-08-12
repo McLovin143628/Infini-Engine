@@ -140,7 +140,11 @@ impl Thumbnailer {
         };
         match draw {
             Draw::Texture(path) => {
-                let tex: TextureAsset = load_payload(&path).ok()?;
+                // Not `load_payload`: since P26.1 a `.inf_tex` is a tiled image
+                // whose bytes are not bincode. `from_payload` sniffs the magic
+                // and reconstructs the same whole-levels record from either
+                // version, so everything below this line is unchanged.
+                let tex = TextureAsset::from_payload(&std::fs::read(&path).ok()?).ok()?;
                 Some(texture_thumbnail(&tex, self.size))
             }
             Draw::Mesh(path, base) => {
@@ -529,6 +533,71 @@ mod tests {
             .write_asset(&d, "Checker", &tex, None, vec![], None)
             .unwrap();
         (dir, Arc::new(Mutex::new(proj)), id)
+    }
+
+    /// **The v1-compatibility measurement** (P26.1). The thumbnailer is the
+    /// oldest consumer of a `.inf_tex` and the one an author sees; it must not
+    /// be able to tell which container version it was handed.
+    ///
+    /// Asserted on the PIXELS, byte for byte, from two projects holding the two
+    /// containers of the *same* source — not on "both produce something", which
+    /// two different images also satisfy. The fixture is asymmetric (four
+    /// distinct corner quadrants) so a mirrored or transposed reconstruction
+    /// cannot pass, and it is 132×132 so mip 0 spans four tiles rather than one.
+    #[test]
+    fn the_thumbnail_is_byte_identical_for_v1_and_its_v2_re_encode() {
+        const N: u32 = 132;
+        let mut rgba = Vec::with_capacity((N * N * 4) as usize);
+        for y in 0..N {
+            for x in 0..N {
+                let c: [u8; 3] = match (x * 2 < N, y * 2 < N) {
+                    (true, true) => [220, 20, 20],
+                    (false, true) => [20, 200, 20],
+                    (true, false) => [20, 20, 210],
+                    (false, false) => [230, 210, 30],
+                };
+                rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        let s = TextureImportSettings::default();
+
+        let render = |write: &dyn Fn(&mut AssetProject, &std::path::Path) -> AssetId| {
+            let dir = tempfile::tempdir().unwrap();
+            let mut proj = AssetProject::open(dir.path()).unwrap();
+            let d = proj.content_dir("tex").unwrap();
+            let id = write(&mut proj, &d);
+            let proj = Arc::new(Mutex::new(proj));
+            let mut thumb = Thumbnailer::new(64);
+            let out = thumb.render_rgba(&proj, id).expect("texture thumbnail");
+            (dir, out)
+        };
+
+        let r1 = rgba.clone();
+        let (_d1, v1) = render(&move |proj, d| {
+            let tex = texture_from_rgba8(r1.clone(), N, N, s).unwrap();
+            proj.write_asset(d, "Corners", &tex, None, vec![], None)
+                .unwrap()
+        });
+        let r2 = rgba.clone();
+        let (_d2, v2) = render(&move |proj, d| {
+            let img = inf_material::build_tiled_texture(r2.clone(), N, N, s).unwrap();
+            proj.write_tiled_texture(d, "Corners", &img, None, None)
+                .unwrap()
+        });
+
+        assert_eq!(v1.len(), 64 * 64 * 4);
+        assert_eq!(v1, v2, "the v2 thumbnail differs from the v1 thumbnail");
+        // Anti-vacuity: the thumbnail is a real image, not a uniform backdrop —
+        // two equal *blank* buffers would satisfy the assertion above.
+        let distinct: std::collections::BTreeSet<[u8; 4]> = v1
+            .chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2], p[3]])
+            .collect();
+        assert!(
+            distinct.len() >= 4,
+            "only {} distinct colours",
+            distinct.len()
+        );
     }
 
     #[test]

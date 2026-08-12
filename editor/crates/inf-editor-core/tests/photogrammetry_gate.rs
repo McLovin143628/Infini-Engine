@@ -1398,7 +1398,7 @@ fn the_written_assets_reopen_through_the_standard_loaders_and_their_refs_resolve
         (ids.orm, "ORM"),
     ] {
         let tex: TextureAsset = project
-            .load_payload(id)
+            .load_texture(id)
             .unwrap_or_else(|e| panic!("the {name} texture does not re-open: {e}"));
         assert_eq!(tex.width, finish_config().bake.size);
         assert!(tex.mip_count() > 1, "the {name} texture has no mip chain");
@@ -1419,9 +1419,9 @@ fn the_written_assets_reopen_through_the_standard_loaders_and_their_refs_resolve
         );
     }
     // The P4 convention: base colour is sRGB, data maps are linear.
-    let albedo: TextureAsset = project.load_payload(ids.albedo).expect("albedo");
-    let normal: TextureAsset = project.load_payload(ids.normal).expect("normal");
-    let orm: TextureAsset = project.load_payload(ids.orm).expect("orm");
+    let albedo: TextureAsset = project.load_texture(ids.albedo).expect("albedo");
+    let normal: TextureAsset = project.load_texture(ids.normal).expect("normal");
+    let orm: TextureAsset = project.load_texture(ids.orm).expect("orm");
     assert!(albedo.srgb, "the base colour was written as linear");
     assert!(!normal.srgb, "the normal map was written as sRGB");
     assert!(!orm.srgb, "the ORM map was written as sRGB");

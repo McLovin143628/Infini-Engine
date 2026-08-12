@@ -28,8 +28,8 @@ pub use graph::{
 pub use instance::{MatOverrides, MaterialInstance};
 pub use material::{MatBlend, MaterialAsset};
 pub use texture::{
-    import_texture_bytes, texture_from_rgba8, TextureAsset, TextureCompression, TextureFormat,
-    TextureImportSettings, TextureMip,
+    decode_image_rgba8, import_texture_bytes, texture_from_rgba8, texture_import_advisories,
+    TextureAsset, TextureCompression, TextureFormat, TextureImportSettings, TextureMip,
 };
 pub use tiles::{
     build_tiled_texture, decode_texture_payload, lift_texture_asset, stored_tile_bytes, TileCoord,

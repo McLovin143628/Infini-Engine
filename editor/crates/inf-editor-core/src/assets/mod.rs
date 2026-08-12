@@ -352,10 +352,61 @@ impl AssetProject {
     // ── payload read / rewrite (data-asset editing, P4.5) ─────────────────
 
     /// Decode an existing asset's payload as `T`.
+    ///
+    /// **Not for `.inf_tex`** — a texture payload has two container versions
+    /// since P26.1 and only one of them is bincode. Use
+    /// [`load_texture`](Self::load_texture), which sniffs.
     pub fn load_payload<T: AssetPayload>(&self, id: AssetId) -> Result<T> {
         let entry = self.db.get(id).ok_or(AssetError::UnknownAsset(id))?;
         let bytes = std::fs::read(&entry.path)?;
         inf_asset::decode(&bytes)
+    }
+
+    /// Decode a `.inf_tex` payload of **either container version** (P26.1) into
+    /// the whole-levels record — the door every consumer that wants mips goes
+    /// through, in place of [`load_payload`](Self::load_payload).
+    ///
+    /// A consumer that wants one *tile* at a time reads the bytes and builds an
+    /// `inf_material::TiledTextureReader` instead; that is what P26.2's residency
+    /// does.
+    pub fn load_texture(&self, id: AssetId) -> Result<inf_material::TextureAsset> {
+        let entry = self.db.get(id).ok_or(AssetError::UnknownAsset(id))?;
+        let bytes = std::fs::read(&entry.path)?;
+        inf_material::TextureAsset::from_payload(&bytes)
+            .map_err(|e| AssetError::Import(e.to_string()))
+    }
+
+    /// Write a **v2 tiled** `.inf_tex` image (P26.1) and register it, the way
+    /// [`write_asset`](Self::write_asset) writes a bincode payload.
+    ///
+    /// A tiled image must never go through the generic door: `inf_asset::encode`
+    /// would frame it with a bincode length prefix and knock every tile off its
+    /// 16-byte boundary, silently. `TiledTextureImage` implements no
+    /// `AssetPayload`, so that mistake does not compile — this is the matching
+    /// writer, on the `.inf_terrain` pattern
+    /// ([`register_written_asset`](Self::register_written_asset)).
+    ///
+    /// A texture has no dependencies, which is why this takes none.
+    pub fn write_tiled_texture(
+        &mut self,
+        dir: &Path,
+        name: &str,
+        image: &inf_material::TiledTextureImage,
+        source: Option<String>,
+        import: Option<toml::Table>,
+    ) -> Result<AssetId> {
+        let bytes = image.as_bytes();
+        let hash = ContentHash::of(bytes);
+        let path = self.unique_asset_path(dir, name, "inf_tex")?;
+        std::fs::write(&path, bytes)?;
+        self.register_written_asset(
+            path,
+            inf_material::TiledTextureImage::KIND,
+            hash,
+            source,
+            import,
+            None,
+        )
     }
 
     /// Rewrite an existing asset's payload in place (data-asset editors save

@@ -145,16 +145,71 @@ impl TextureImportSettings {
     }
 }
 
+/// **Import advisories** for a source image's dimensions (P26.1) — non-fatal
+/// notices in the P16 cook-advisory shape: the import always succeeds, and the
+/// caller surfaces what it had to do.
+///
+/// Two hazards are visible from the extent alone, and both are silent otherwise:
+///
+/// * **Not a multiple of 4.** A BC block is 4×4, so a partial block at the right
+///   or bottom edge is filled by repeating the last row/column of texels
+///   ([`crate::bc`]'s edge clamp). The invented texels are compressed *with* the
+///   real ones, so the endpoints of an edge block are chosen partly from data
+///   that is not in the image. It is the standard treatment and it is fine for
+///   most content; it is not fine silently for a texture whose edge matters
+///   (a tiling material, an atlas page).
+/// * **An extreme aspect ratio.** A virtual texture is tiled at 128², so a
+///   `4096×16` source is 32 tiles wide and 1 tall, and every one of them stores
+///   112 rows of clamp padding — 87 % of the payload is padding. The texture
+///   works; it costs about eight times what its pixels do.
+///
+/// Pure and deterministic (dimensions in, sorted sentences out), so it is
+/// unit-tested with no project, no GPU and no filesystem.
+pub fn texture_import_advisories(width: u32, height: u32) -> Vec<String> {
+    let mut out = Vec::new();
+    if !width.is_multiple_of(4) || !height.is_multiple_of(4) {
+        out.push(format!(
+            "{width}×{height} is not a multiple of 4, so the edge BC blocks are padded by \
+             repeating the last row/column; resize to a multiple of 4 if the edge texels matter"
+        ));
+    }
+    // 8:1 is the threshold, not a magic number: at 8:1 a 128-texel tile row is
+    // already ≥ 7/8 padding in the short axis once the source is smaller than one
+    // tile there, which is the point at which the padding outweighs the content.
+    let (long, short) = (width.max(height), width.min(height).max(1));
+    if long / short >= 8 {
+        out.push(format!(
+            "{width}×{height} is {}:1 — a virtual texture is tiled at {}², so a strip like this \
+             stores mostly clamp padding; consider an atlas instead",
+            long / short,
+            crate::tiles::TILE_SIZE
+        ));
+    }
+    out
+}
+
 /// Decode an encoded image (PNG/JPEG/…) and import it with `settings`.
 pub fn import_texture_bytes(
     bytes: &[u8],
     settings: TextureImportSettings,
 ) -> Result<TextureAsset, MaterialError> {
+    let (rgba, w, h) = decode_image_rgba8(bytes)?;
+    texture_from_rgba8(rgba, w, h, settings)
+}
+
+/// Decode an encoded image (PNG/JPEG/TGA/BMP/HDR/EXR) to `(rgba8, width,
+/// height)`.
+///
+/// The one place the `image` crate is named for a texture import, so the v1
+/// writer, the v2 tiler and [`texture_import_advisories`] all read the **same**
+/// decoded extent. An importer that decoded separately could advise about one
+/// size and tile another.
+pub fn decode_image_rgba8(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), MaterialError> {
     let img = image::load_from_memory(bytes)
         .map_err(|e| MaterialError::Image(e.to_string()))?
         .to_rgba8();
     let (w, h) = img.dimensions();
-    texture_from_rgba8(img.into_raw(), w, h, settings)
+    Ok((img.into_raw(), w, h))
 }
 
 /// Import an already-decoded RGBA8 buffer (e.g. a glTF-embedded image).
@@ -342,6 +397,42 @@ mod tests {
         assert_eq!(tex.mips[0].data.len(), 4 * 4 * 4);
         let bytes = encode(&tex).unwrap();
         assert_eq!(decode::<TextureAsset>(&bytes).unwrap(), tex);
+    }
+
+    /// P26.1: the advisories fire on exactly the two hazards they name, stay
+    /// silent on ordinary content, and are a pure function of the extent.
+    #[test]
+    fn import_advisories_name_the_two_silent_hazards() {
+        assert!(texture_import_advisories(256, 256).is_empty());
+        assert!(
+            texture_import_advisories(300, 260).is_empty(),
+            "4-multiples are fine"
+        );
+
+        let block = texture_import_advisories(255, 260);
+        assert_eq!(block.len(), 1);
+        assert!(block[0].contains("multiple of 4"), "{block:?}");
+        // Either axis is enough.
+        assert_eq!(texture_import_advisories(260, 255).len(), 1);
+
+        let strip = texture_import_advisories(4096, 16);
+        assert_eq!(strip.len(), 1);
+        assert!(strip[0].contains("256:1"), "{strip:?}");
+
+        // Both at once, both reported — never one swallowing the other.
+        let both = texture_import_advisories(4095, 15);
+        assert_eq!(both.len(), 2, "{both:?}");
+
+        // 7:1 is under the threshold, 8:1 is at it (the boundary is asserted, so
+        // a re-tune has to come here).
+        assert!(texture_import_advisories(224, 32).is_empty());
+        assert_eq!(texture_import_advisories(256, 32).len(), 1);
+
+        // Pure: same extent, same sentences.
+        assert_eq!(
+            texture_import_advisories(4095, 15),
+            texture_import_advisories(4095, 15)
+        );
     }
 
     #[test]
