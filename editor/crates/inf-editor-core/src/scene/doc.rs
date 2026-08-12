@@ -2384,10 +2384,11 @@ impl SceneDoc {
     pub fn edit_apply_material(
         &mut self,
         targets: &[Uuid],
-        // The `.inf_mat` asset these parameters came from (P26.3b). `None` keeps
-        // the pre-v22 behaviour exactly — the scalars are applied and no binding
-        // is written — which is what a caller with no asset to name should do
-        // rather than invent one.
+        // The `.inf_mat` asset these parameters came from (P26.3b). `None`
+        // CLEARS the binding rather than leaving the previous one over the new
+        // scalars (P26.3b audit) — the `edit_apply_sprite_slice(texture: Option)`
+        // shape. A caller with no asset to name must not invent one; it must also
+        // not bequeath one.
         asset: Option<Uuid>,
         base_color: [f32; 4],
         metallic: f32,
@@ -2437,20 +2438,27 @@ impl SceneDoc {
             // P26.3b — the binding, inside the SAME transaction as the scalars.
             // A separate step would let an undo leave a surface whose numbers
             // came from one material and whose textures come from another.
-            if let Some(a) = asset {
-                let before = self.raw_get_material_asset(g);
-                let after = Some(a);
-                if before != after {
-                    self.raw_set_material_asset(g, after);
-                    self.history.record(
-                        "Apply Material",
-                        EditCommand::SetMaterialAsset {
-                            guid: g,
-                            before,
-                            after,
-                        },
-                    );
-                }
+            //
+            // **Written unconditionally** (P26.3b audit): `None` CLEARS, exactly
+            // as `edit_apply_sprite_slice`'s `texture: Option<Uuid>` does one
+            // door over. The first cut wrote only `Some`, which meant applying a
+            // material this caller could not name left the PREVIOUS binding
+            // standing over the new scalars — the surface's numbers from one
+            // material and its textures from another, which is the very state
+            // the same-transaction write exists to prevent. "Do not invent a
+            // binding" and "do not leave a stale one" are not the same rule, and
+            // only the second one is structural.
+            let before = self.raw_get_material_asset(g);
+            if before != asset {
+                self.raw_set_material_asset(g, asset);
+                self.history.record(
+                    "Apply Material",
+                    EditCommand::SetMaterialAsset {
+                        guid: g,
+                        before,
+                        after: asset,
+                    },
+                );
             }
             applied += 1;
         }
@@ -3366,11 +3374,102 @@ mod tests {
             Some(PropValue::Number(0.25))
         );
 
-        // The field writes collapse into one undo step (back to defaults).
+        // P26.3b: the BINDING landed, beside the scalars it does not replace.
+        // The commit that added it asserted nothing about it — the arm passed
+        // `Some(bound)` and never looked.
+        assert_eq!(doc.material_asset_of(cube), Some(bound));
+
+        // The field writes collapse into one undo step (back to defaults) — and
+        // that ONE step takes the binding with them. A binding recorded outside
+        // the transaction would survive here, leaving a surface whose numbers
+        // came from one material and whose textures come from another.
         assert!(doc.undo());
         assert_eq!(
             doc.prop_value(cube, tp, "metallic"),
             Some(PropValue::Number(0.0))
+        );
+        assert_eq!(
+            doc.material_asset_of(cube),
+            None,
+            "one undo reverted the scalars and left the binding — the two are not \
+             in one transaction"
+        );
+        // …and redo restores both, so the command round-trips rather than only
+        // reverting.
+        assert!(doc.redo());
+        assert_eq!(doc.material_asset_of(cube), Some(bound));
+        assert_eq!(
+            doc.prop_value(cube, tp, "metallic"),
+            Some(PropValue::Number(1.0))
+        );
+    }
+
+    /// **Applying a material this caller cannot name CLEARS the binding**
+    /// (P26.3b audit), rather than leaving the previous one standing over the new
+    /// scalars.
+    ///
+    /// The state that would otherwise persist is the exact one
+    /// `EditCommand::SetMaterialAsset` was introduced to make impossible: a
+    /// surface whose numbers come from the material just applied and whose
+    /// textures come from the one before it. Reachable through the shipped UI —
+    /// `scene_apply_material` passes `None` when a dropped `.inf_mati`'s parent
+    /// chain is broken.
+    #[test]
+    fn applying_an_unnameable_material_clears_the_binding_it_replaces() {
+        let mut doc = SceneDoc::new();
+        let cube = doc.create(SpawnKind::Cube, "Cube", None);
+        let first = Uuid::from_u128(0xFA7E_0001);
+
+        assert_eq!(
+            doc.edit_apply_material(
+                &[cube],
+                Some(first),
+                [1.0, 0.0, 0.0, 1.0],
+                1.0,
+                0.25,
+                [0.0; 3],
+                "Opaque",
+                0.5,
+            ),
+            1
+        );
+        // Anti-vacuity: there is a binding to lose.
+        assert_eq!(doc.material_asset_of(cube), Some(first));
+
+        // A second material, with different scalars and no nameable asset.
+        assert_eq!(
+            doc.edit_apply_material(
+                &[cube],
+                None,
+                [0.0, 0.0, 1.0, 1.0],
+                0.0,
+                0.75,
+                [0.0; 3],
+                "Opaque",
+                0.5,
+            ),
+            1
+        );
+        let tp = doc.world().registry().type_path_for("Material").unwrap();
+        assert_eq!(
+            doc.prop_value(cube, tp, "roughness"),
+            Some(PropValue::Number(0.75)),
+            "the second material's scalars did not apply, so the clear below is \
+             measuring nothing"
+        );
+        assert_eq!(
+            doc.material_asset_of(cube),
+            None,
+            "the previous binding survived a material it did not come from — the \
+             surface's numbers and its textures are from two different materials"
+        );
+        // …and the clear is undoable as one step with the scalars it arrived
+        // with.
+        assert!(doc.undo());
+        assert_eq!(doc.material_asset_of(cube), Some(first));
+        assert_eq!(
+            doc.prop_value(cube, tp, "roughness"),
+            Some(PropValue::Number(0.25))
         );
     }
 

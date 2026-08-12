@@ -214,6 +214,17 @@ pub async fn scene_apply_material(
     let mat = assets
         .load_material(id)
         .ok_or_else(|| "asset is not a material".to_string())?;
+    // P26.3b audit: the binding names the ROOT `.inf_mat`, not necessarily the
+    // asset that was dropped. Apply-by-drag accepts a `.inf_mati` (the Content
+    // Drawer routes `material_instance` here, and so does the instance editor's
+    // "Apply to Selection"), and a binding naming an instance resolves nowhere —
+    // no `.inf_matd` is derived for it, its maps never enter the pack closure,
+    // the PIE loader's kind check misses it, and nothing raises an advisory
+    // because the asset IS in the project. `MatOverrides` carries no texture
+    // slots, so an instance's maps ARE its parent's: the scalars below still come
+    // from the resolved instance, and the binding names the material they were
+    // resolved against.
+    let binding = assets.material_binding_id(id);
     let applied = {
         let mut doc = lock(&state.doc)?;
         let targets: Vec<Uuid> = match targets {
@@ -234,8 +245,10 @@ pub async fn scene_apply_material(
             &targets,
             // P26.3b: the binding scene v22 persists. This is the ONE caller
             // that knows which `.inf_mat` the scalars below came from, which is
-            // exactly why the reference was being thrown away here.
-            Some(id.uuid()),
+            // exactly why the reference was being thrown away here. `None` when
+            // the drop was a material instance whose chain is broken — no
+            // binding at all beats one that resolves nowhere.
+            binding.map(|b| b.uuid()),
             mat.base_color,
             mat.metallic,
             mat.roughness,

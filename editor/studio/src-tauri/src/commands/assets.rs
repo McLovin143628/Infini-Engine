@@ -90,6 +90,23 @@ impl AssetState {
         resolve_material(&proj, id, 0)
     }
 
+    /// The `.inf_mat` a scene `Material.asset` binding must name for the asset an
+    /// author applied (P26.3b audit) — the instance chain walked to its root.
+    ///
+    /// Apply-by-drag accepts a `.inf_mati`, and a binding that named one resolved
+    /// **nowhere**: the cook derives a `.inf_matd` and closes the texture edge for
+    /// `AssetKind::Material` only, and the PIE loader is kind-checked to the same
+    /// set, so the surface silently lost its maps on both wires with no advisory
+    /// (the asset is in the project, so nothing looked dangling). The reasoning
+    /// lives once, in
+    /// [`inf_editor_core::assets::material_instance::material_binding_root`].
+    pub fn material_binding_id(&self, id: AssetId) -> Option<AssetId> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        inf_editor_core::assets::material_instance::material_binding_root(&proj, id, 0)
+    }
+
     /// Load a `.inf_act` blueprint **class** by its asset GUID (P9.5): decodes
     /// the committed JSON payload. `None` if the asset is missing or not a
     /// blueprint. Used by Simulate to resolve a scene's persisted `ActorClass`
