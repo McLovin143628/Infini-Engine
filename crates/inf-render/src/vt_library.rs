@@ -440,18 +440,34 @@ impl VtTextures {
                 r.tile_at(at).map(Cow::Borrowed)
             }
         };
-        // Stage in parallel, apply in order. `parallel_map_ref` preserves input
+        // Stage in parallel, apply by ADDRESS. `parallel_map_ref` preserves input
         // order by construction (the P7.0 determinism guard), so `staged[i]` is
-        // `txn.admits[i]`'s page and the mirror writes them exactly as the
-        // residency planned them.
+        // `txn.admits[i]`'s page — but the mirror is handed a map keyed on the
+        // admit's own `(texture, tile)` rather than an iterator, and that is not
+        // fastidiousness:
+        //
+        // `VtPools::apply` skips `fetch` entirely for an admit whose slot falls
+        // outside the atlas geometry (a residency and a geometry out of step —
+        // "a caller bug rather than a page fault", and it logs and reports it).
+        // A positional iterator would silently shift by one there and every
+        // page after it would be written with ANOTHER TILE'S BYTES: right
+        // length, wrong texels, no error anywhere. The P26.2 audit found
+        // exactly that class in this file's ancestor — a fetch closure holding
+        // one reader served the second texture the first one's bytes. A
+        // `BTreeMap` costs a log-n lookup per page and cannot desynchronise.
         let staged: Vec<Option<Cow<'_, [u8]>>> = if txn.admits.len() > 1 {
             inf_core::parallel_map_ref(&txn.admits, fetch)
         } else {
             txn.admits.iter().map(fetch).collect()
         };
-        let mut next = staged.into_iter();
-        let report = pools.apply(device, queue, &self.residency, &txn, |_| {
-            next.next().flatten()
+        let mut by_address: BTreeMap<(u32, TileCoord), Cow<'_, [u8]>> = txn
+            .admits
+            .iter()
+            .zip(staged)
+            .filter_map(|(a, b)| b.map(|b| ((a.texture.0, a.tile), b)))
+            .collect();
+        let report = pools.apply(device, queue, &self.residency, &txn, |admit| {
+            by_address.remove(&(admit.texture.0, admit.tile))
         });
         (txn, report)
     }
