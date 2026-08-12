@@ -149,10 +149,13 @@ fn doc_with_binding(bound: bool) -> SceneDoc {
         // sidecar drags a material and a texture into the closure that nothing
         // binds, which is how a project gets most of its materials and what makes
         // "the two hosts build the same MaterialContent" falsifiable.
-        world.world_mut().entity_mut(e).insert(inf_ecs::components::MeshRef {
-            asset: Some(DECOR_MESH),
-            ..Default::default()
-        });
+        world
+            .world_mut()
+            .entity_mut(e)
+            .insert(inf_ecs::components::MeshRef {
+                asset: Some(DECOR_MESH),
+                ..Default::default()
+            });
         world.world_mut().entity_mut(e).insert(Material {
             base_color: inf_ecs::math::Color::new(0.9, 0.4, 0.2, 1.0),
             metallic: 0.25,
@@ -240,7 +243,8 @@ fn scaffold(tmp: &Path, bound: bool) -> (PathBuf, SceneDoc) {
     );
     // The glTF-import shape: a mesh whose sidecar names a material, whose sidecar
     // names a texture — and no `Material.asset` binding anywhere near them.
-    let (decor_mesh, _) = inf_dcc::to_mesh_asset(&inf_dcc::cube(0.5), &inf_dcc::ExportOptions::default());
+    let (decor_mesh, _) =
+        inf_dcc::to_mesh_asset(&inf_dcc::cube(0.5), &inf_dcc::ExportOptions::default());
     put_with_deps(
         &content,
         "Decor.inf_mesh",
@@ -687,7 +691,9 @@ fn the_real_pie_subprocess_folds_the_garment_and_the_binding() {
         "the trace never changed across {N} steps — the garment is not being \
          simulated, so the equality above compares two static worlds"
     );
-    session.stop(Duration::from_secs(10)).expect("graceful stop");
+    session
+        .stop(Duration::from_secs(10))
+        .expect("graceful stop");
 }
 
 // ── (e) the two hosts' material content ─────────────────────────────────────
@@ -731,12 +737,20 @@ fn the_pack_and_the_payload_build_the_same_material_content() {
     // walked the pack INDEX.
     assert_eq!(from_pack.materials.len(), BOUND_MATERIALS);
     assert_eq!(from_pack.textures.len(), BOUND_TEXTURES);
-    assert!(
-        EXPECTED_DERIVED_MATERIALS_IN_PACK > BOUND_MATERIALS
-            && EXPECTED_TEXTURES_IN_PACK > BOUND_TEXTURES,
-        "the pack holds no UNBOUND material, so this arm cannot tell a walk of \
-         the pack index from a walk of the level's bindings"
-    );
+    // A `const` block on purpose (clippy's `assertions_on_constants` is right
+    // that this is constant-valued, and its remedy is the stronger one): the day
+    // someone trims the fixture back to a bound-only closure, this arm stops
+    // being able to tell a walk of the pack INDEX from a walk of the level's
+    // bindings — and that must fail the BUILD rather than pass a test that has
+    // quietly become a tautology.
+    const {
+        assert!(
+            EXPECTED_DERIVED_MATERIALS_IN_PACK > BOUND_MATERIALS
+                && EXPECTED_TEXTURES_IN_PACK > BOUND_TEXTURES,
+            "the fixture's pack holds no UNBOUND material, so this arm cannot \
+             tell a walk of the pack index from a walk of the level's bindings"
+        );
+    }
     assert!(
         !from_pack.materials.contains_key(&DECOR_MAT)
             && !from_pack.textures.contains_key(&DECOR_TEX),
@@ -869,7 +883,9 @@ fn every_silent_material_hazard_raises_its_advisory() {
     let case = |mutate: &dyn Fn(&Path, &mut SceneDoc)| -> Vec<String> {
         let tmp = tempfile::tempdir().expect("tempdir");
         let proj = tmp.path().join("proj");
-        ProjectManifest::new("Advisory", "blank-3d").save(&proj).unwrap();
+        ProjectManifest::new("Advisory", "blank-3d")
+            .save(&proj)
+            .unwrap();
         let content = proj.join("Content");
         std::fs::create_dir_all(&content).unwrap();
         let mut doc = doc_with_binding(true);
