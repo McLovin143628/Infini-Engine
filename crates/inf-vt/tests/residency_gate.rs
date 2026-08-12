@@ -175,8 +175,22 @@ fn fixtures() -> Vec<VtTextureDesc> {
     ]
 }
 
-/// Run one scripted churn and return the concatenated trace plus the final state.
-fn churn(seed: u64, pages: u64, rounds: usize) -> (String, VtResidency, Shadow) {
+/// What one scripted churn did.
+struct Churn {
+    trace: String,
+    res: VtResidency,
+    shadow: Shadow,
+    /// Rounds in which the pool ran out of slots. **The reachability counter**:
+    /// the two per-transaction laws below (never evict an admit, never evict a
+    /// root) can only be broken by a transaction that needs a slot it cannot
+    /// have, so a churn with this at zero asserts them vacuously.
+    pressed: usize,
+    /// Rounds in which something was evicted.
+    evicting: usize,
+}
+
+/// Run one scripted churn.
+fn churn(seed: u64, pages: u64, rounds: usize) -> Churn {
     let mut res = pool(pages);
     let mut handles = Vec::new();
     for d in fixtures() {
@@ -185,8 +199,18 @@ fn churn(seed: u64, pages: u64, rounds: usize) -> (String, VtResidency, Shadow) 
     let mut rng = Rng(seed);
     let mut shadow = Shadow::default();
     let mut trace = String::new();
+    let (mut pressed, mut evicting) = (0usize, 0usize);
     for round in 0..rounds {
-        let n = rng.below(12) + 1;
+        // Up to 40 wants against a pool whose free (non-root) slots number 5, 9
+        // or 17, so a round routinely asks for more than the pool can hold. That
+        // is not incidental: it is the only way the "never evict what this
+        // transaction admits" law below is ever *reachable*, and the first
+        // version of this file capped wants at 12 against a 20-slot pool — where
+        // the law held vacuously and a mutation that deleted the protected set
+        // sailed through this arm. `Churn::pressed` counts the rounds that
+        // actually ran the pool out, so "it thrashes" is a measurement here
+        // rather than a claim about the seed.
+        let n = rng.below(40) + 1;
         let mut wants = Vec::new();
         for _ in 0..n {
             let h = handles[rng.below(handles.len() as u32) as usize];
@@ -201,6 +225,8 @@ fn churn(seed: u64, pages: u64, rounds: usize) -> (String, VtResidency, Shadow) 
         let txn = res.apply_wants(&wants);
         trace.push_str(&format!("-- round {round}\n"));
         trace.push_str(&txn.trace());
+        pressed += usize::from(txn.deferred > 0);
+        evicting += usize::from(!txn.evicts.is_empty());
 
         // The two laws, per transaction.
         let admitted: BTreeSet<(u32, TileCoord)> =
@@ -227,7 +253,13 @@ fn churn(seed: u64, pages: u64, rounds: usize) -> (String, VtResidency, Shadow) 
         }
         assert_world(&res, &shadow, &format!("seed {seed}, round {round}"));
     }
-    (trace, res, shadow)
+    Churn {
+        trace,
+        res,
+        shadow,
+        pressed,
+        evicting,
+    }
 }
 
 /// **Determinism.** Two runs of one want sequence produce byte-identical
@@ -240,21 +272,26 @@ fn a_want_sequence_produces_a_byte_identical_transaction_stream() {
     // roots. A pool big enough to hold everything would make this arm agree with
     // itself for the wrong reason, which the eviction floor below catches.
     for pages in [8u64, 12, 20] {
-        let (a, _, _) = churn(0xC0FF_EE01, pages, 60);
-        let (b, _, _) = churn(0xC0FF_EE01, pages, 60);
-        assert_eq!(a, b, "{pages} pages: two runs disagree");
-        // Anti-vacuity: the trace has to be describing something. A pool this
-        // small under this churn evicts constantly; a trace with no evictions
-        // would mean the churn never filled it and the arm proves nothing.
+        let a = churn(0xC0FF_EE01, pages, 60);
+        let b = churn(0xC0FF_EE01, pages, 60);
+        assert_eq!(a.trace, b.trace, "{pages} pages: two runs disagree");
+        // Anti-vacuity, measured rather than hoped: the churn has to have
+        // actually pressed the pool, or "two runs agree" is a statement about
+        // two empty strings.
         assert!(
-            a.lines().filter(|l| l.starts_with("evict")).count() > 20,
-            "{pages} pages: only {} evictions — the churn never pressed the pool",
-            a.lines().filter(|l| l.starts_with("evict")).count()
+            a.evicting > 20 && a.pressed > 0,
+            "{pages} pages: {} evicting rounds, {} over-asked — the churn never \
+             pressed the pool",
+            a.evicting,
+            a.pressed
         );
         // A different seed must NOT produce the same stream, or the comparison
         // above is satisfied by any constant.
-        let (c, _, _) = churn(0xC0FF_EE02, pages, 60);
-        assert_ne!(a, c, "{pages} pages: two different scripts agree");
+        let c = churn(0xC0FF_EE02, pages, 60);
+        assert_ne!(
+            a.trace, c.trace,
+            "{pages} pages: two different scripts agree"
+        );
     }
 }
 
@@ -304,7 +341,13 @@ fn the_transaction_does_not_depend_on_the_order_wants_arrive_in() {
 /// lives in [`assert_world`], called from [`churn`]).
 #[test]
 fn every_address_resolves_to_the_finest_resident_ancestor_throughout() {
-    let (trace, res, shadow) = churn(0x5EED_1234, 20, 200);
+    // 12 pages, so three pinned roots leave nine for cache against 43 non-root
+    // tiles and up to 24 wants a round. Both numbers matter: nine is enough for
+    // a fallback chain to be more than one link deep (which is what makes the
+    // ancestor walk falsifiable at all), and 24 > 9 is what makes a transaction
+    // run out of slots and therefore exercise the protection law.
+    let c = churn(0x5EED_1234, 12, 200);
+    let (res, shadow) = (&c.res, &c.shadow);
     // The roots outlived all of it.
     for t in 0..res.texture_count() as u32 {
         let handle = VtTextureHandle(t);
@@ -328,7 +371,25 @@ fn every_address_resolves_to_the_finest_resident_ancestor_throughout() {
         "the churn evicted {} pages",
         res.stats().evicts
     );
-    assert!(trace.contains("evict"));
+    assert!(
+        c.pressed > 10 && c.evicting > 100,
+        "{} over-asked rounds, {} evicting rounds — the laws asserted per \
+         transaction were never reachable",
+        c.pressed,
+        c.evicting
+    );
+    // …and the fallbacks were genuinely deep: at the end of the churn some
+    // address resolves to a tile more than one level above it. A pool that held
+    // everything, or a propagation that only ever reached the first level, would
+    // satisfy every equality above and fail this.
+    let handle = VtTextureHandle(0);
+    let desc = res.desc(handle).unwrap().clone();
+    let deepest = (0..desc.mips[0].tiles_y)
+        .flat_map(|y| (0..desc.mips[0].tiles_x).map(move |x| TileCoord::new(0, x, y)))
+        .filter_map(|at| res.resolve(handle, at).map(|r| r.tile.mip))
+        .max()
+        .expect("mip 0 has tiles");
+    assert!(deepest >= 2, "the deepest fallback was only mip {deepest}");
 }
 
 /// **LRU honesty**, with the timeline written out so the expected victim is a
