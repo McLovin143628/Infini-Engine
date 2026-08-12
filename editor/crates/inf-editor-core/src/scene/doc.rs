@@ -580,6 +580,50 @@ impl SceneDoc {
             .map(|a| a.0)
     }
 
+    /// The `.inf_mat` an entity's surface is bound to (P26.3b · scene v22), if
+    /// any. Public because the Details projection reads it: the field is
+    /// `#[reflect(ignore)]`, so the reflection walker cannot.
+    pub fn material_asset_of(&self, guid: Uuid) -> Option<Uuid> {
+        self.raw_get_material_asset(guid)
+    }
+
+    /// Read an entity's `Material.asset` `.inf_mat` binding GUID, if any
+    /// (P26.3b · scene v22).
+    pub(crate) fn raw_get_material_asset(&self, guid: Uuid) -> Option<Uuid> {
+        let e = self.world.entity_of(guid)?;
+        self.world
+            .world()
+            .get::<inf_ecs::components::Material>(e)
+            .and_then(|m| m.asset)
+    }
+
+    /// Set (`Some`) or clear (`None`) an entity's `Material.asset` binding
+    /// (P26.3b · scene v22).
+    ///
+    /// **Never inserts a `Material`.** An entity with no material has no surface
+    /// to bind, and conjuring one here would give apply-material a second,
+    /// silent behaviour on exactly the targets `edit_apply_material` skips.
+    pub(crate) fn raw_set_material_asset(&mut self, guid: Uuid, asset: Option<Uuid>) {
+        let Some(e) = self.world.entity_of(guid) else {
+            return;
+        };
+        let Some(mut m) = self
+            .world
+            .world()
+            .get::<inf_ecs::components::Material>(e)
+            .copied()
+        else {
+            return;
+        };
+        if m.asset == asset {
+            return;
+        }
+        m.asset = asset;
+        self.world.world_mut().entity_mut(e).insert(m);
+        self.world.mark_dirty();
+        self.touch();
+    }
+
     /// Insert (`Some`) or remove (`None`) an entity's [`ActorClass`] binding.
     pub(crate) fn raw_set_actor(&mut self, guid: Uuid, actor: Option<Uuid>) {
         if let Some(e) = self.world.entity_of(guid) {
@@ -2318,12 +2362,33 @@ impl SceneDoc {
     /// component as one undo step (Content-Drawer apply-by-drag / "Apply to
     /// Selection", P7.1). Targets without a `Material` are skipped. Returns how
     /// many entities were updated.
+    ///
+    /// # P26.3b — it also writes the BINDING
+    ///
+    /// Since P7.1 this flattened a `.inf_mat`'s scalars onto the component and
+    /// threw the reference away, so nothing on disk recorded which material a
+    /// surface uses — which is why `.inf_mat` texture references resolved in
+    /// neither host however much virtual-texturing machinery stood behind them
+    /// (the P26.3 spec-clause-4 gap). `asset` now carries that reference into
+    /// scene v22.
+    ///
+    /// **The flattening stays**, for two reasons that are not the same reason: a
+    /// pre-v22 level's scalars are the only copy it has, and a material with no
+    /// textures must keep rendering off the per-instance attributes rather than
+    /// through a resolution that can fail. So the binding is *added* to the
+    /// scalars and never replaces them — `None` is the permanent no-texture
+    /// path, structurally, not a branch someone has to remember to write.
     // A flat PBR-block + blend forwarding seam (mirrors the ECS `Material`
     // fields); bundling them into a struct would just move the noise.
     #[allow(clippy::too_many_arguments)]
     pub fn edit_apply_material(
         &mut self,
         targets: &[Uuid],
+        // The `.inf_mat` asset these parameters came from (P26.3b). `None` keeps
+        // the pre-v22 behaviour exactly — the scalars are applied and no binding
+        // is written — which is what a caller with no asset to name should do
+        // rather than invent one.
+        asset: Option<Uuid>,
         base_color: [f32; 4],
         metallic: f32,
         roughness: f32,
@@ -2369,6 +2434,24 @@ impl SceneDoc {
                 "alpha_cutoff",
                 &PropValue::Number(alpha_cutoff as f64),
             );
+            // P26.3b — the binding, inside the SAME transaction as the scalars.
+            // A separate step would let an undo leave a surface whose numbers
+            // came from one material and whose textures come from another.
+            if let Some(a) = asset {
+                let before = self.raw_get_material_asset(g);
+                let after = Some(a);
+                if before != after {
+                    self.raw_set_material_asset(g, after);
+                    self.history.record(
+                        "Apply Material",
+                        EditCommand::SetMaterialAsset {
+                            guid: g,
+                            before,
+                            after,
+                        },
+                    );
+                }
+            }
             applied += 1;
         }
         self.commit_transaction();
@@ -3253,8 +3336,10 @@ mod tests {
         let cube = doc.create(SpawnKind::Cube, "Cube", None);
         let tp = doc.world().registry().type_path_for("Material").unwrap();
 
+        let bound = Uuid::from_u128(0xF_A7E_0026);
         let applied = doc.edit_apply_material(
             &[cube],
+            Some(bound),
             [1.0, 0.0, 0.0, 1.0],
             1.0,
             0.2,

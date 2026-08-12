@@ -89,6 +89,16 @@ pub(crate) enum EditCommand {
         before: Option<Uuid>,
         after: Option<Uuid>,
     },
+    /// The `Material.asset` `.inf_mat` binding (P26.3b · scene v22): a
+    /// `#[reflect(ignore)]` identity link, so it round-trips as a value here
+    /// exactly as [`SetActor`](Self::SetActor) does rather than through the
+    /// property path. `None` = unbound, which is the scalars-only surface every
+    /// pre-v22 level had.
+    SetMaterialAsset {
+        guid: Uuid,
+        before: Option<Uuid>,
+        after: Option<Uuid>,
+    },
     /// One terrain sculpt stroke (P10.2b): a sparse before/after height-sample
     /// record ([`HeightDelta`]). The live stroke already mutated the terrain when
     /// this is recorded, so `apply`/`revert` here are pure redo/undo — redo
@@ -221,6 +231,9 @@ impl EditCommand {
             EditCommand::SetActor { guid, after, .. } => {
                 doc.raw_set_actor(*guid, *after);
             }
+            EditCommand::SetMaterialAsset { guid, after, .. } => {
+                doc.raw_set_material_asset(*guid, *after);
+            }
             EditCommand::SetLevelSettings { new, .. } => {
                 doc.raw_set_settings(*new);
             }
@@ -303,6 +316,9 @@ impl EditCommand {
             }
             EditCommand::SetActor { guid, before, .. } => {
                 doc.raw_set_actor(*guid, *before);
+            }
+            EditCommand::SetMaterialAsset { guid, before, .. } => {
+                doc.raw_set_material_asset(*guid, *before);
             }
             EditCommand::SetLevelSettings { old, .. } => {
                 doc.raw_set_settings(*old);

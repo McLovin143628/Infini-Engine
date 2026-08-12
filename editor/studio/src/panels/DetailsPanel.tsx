@@ -24,6 +24,7 @@ import {
 } from "../components/propertyRows";
 import { AddComponentMenu } from "../components/AddComponentMenu";
 import { EntityRefField } from "../components/EntityRefField";
+import { AssetRefField } from "../components/AssetRefField";
 import type { PropValueDto } from "../bindings/PropValueDto";
 import { scene as sceneIpc } from "../lib/ipc";
 import { fuzzyMatch } from "../lib/fuzzy";
@@ -45,7 +46,7 @@ function hexToRgba(hex: string, a = 1): number[] {
 
 /** Kinds that carry nested/opaque data — read-only under a multi-selection. */
 function isComplex(kind: PropValueDto["kind"]): boolean {
-  return kind === "list" || kind === "struct" || kind === "entity_ref";
+  return kind === "list" || kind === "struct" || kind === "entity_ref" || kind === "asset_ref";
 }
 
 export default function DetailsPanel() {
@@ -217,6 +218,13 @@ export function renderControl(
           onChange={(guid) => set({ kind: "entity_ref", value: guid })}
         />
       );
+    // P26.3b: read-only. `set` is deliberately not called — the binding is
+    // written by dragging a `.inf_mat` onto the entity (`scene_apply_material`),
+    // which is the one call site that knows the parameters and the asset
+    // together. See `AssetRefField` for why a picker here would be a second
+    // write path for one fact.
+    case "asset_ref":
+      return <AssetRefField value={value.value} assetKind={value.asset_kind} />;
     case "list":
       return (
         <ListField

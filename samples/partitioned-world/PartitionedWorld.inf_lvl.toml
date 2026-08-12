@@ -1,5 +1,5 @@
-schema_version = 21
+schema_version = 22
 guid = "00000000-0000-0000-0000-000084160500"
 title = "Partitioned World"
 entity_count = 20
-content_hash = "890a2d3cd790d44c"
+content_hash = "ee70aed33a4ae39d"

@@ -243,6 +243,31 @@ pub struct Material {
     /// alpha below this are discarded (schema v8). Additive field.
     #[serde(default = "default_alpha_cutoff")]
     pub alpha_cutoff: f32,
+    /// The `.inf_mat` this surface is bound to (P26.3b · `.inf_lvl` schema v22).
+    ///
+    /// **`None` is exactly today's behaviour and stays the no-texture path**: the
+    /// scalars above are the whole material, the renderer's per-instance
+    /// attributes carry them, and the fallback is structural rather than a
+    /// runtime branch. `Some(guid)` says *these scalars came from that material,
+    /// and that material may also name textures* — which is the fact nothing on
+    /// disk recorded before this bump, and the reason `.inf_mat` texture
+    /// references resolved in neither host (the P26.3 spec-clause-4 gap).
+    ///
+    /// Apply-material still flattens the parameters onto the fields above
+    /// (P7.1), so a level whose binding cannot be resolved renders exactly as it
+    /// did: the binding *adds* the texture edge, it never becomes the only copy
+    /// of the numbers.
+    ///
+    /// Additive field: `#[serde(default)]` so a pre-v22 `.inf_lvl` loads with
+    /// `None`; `#[reflect(ignore)]` because it is assigned by drag-drop and the
+    /// apply-material command, not by the Details numeric grid — the same
+    /// arrangement [`MeshRef::asset`] and `Sprite::texture` have. Still
+    /// serde-persisted, and the cook walks it into the pack dependency closure
+    /// so a referenced material (and the `.inf_tex` containers it names) ship
+    /// with the level.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub asset: Option<Uuid>,
 }
 
 fn default_metallic() -> f32 {
@@ -267,6 +292,7 @@ impl Default for Material {
             emissive: default_emissive(),
             blend: BlendMode::Opaque,
             alpha_cutoff: default_alpha_cutoff(),
+            asset: None,
         }
     }
 }
@@ -5195,13 +5221,19 @@ mod tests {
             emissive: Color::new(0.0, 0.0, 0.0, 1.0),
             blend: BlendMode::Translucent,
             alpha_cutoff: 0.25,
+            // v22 (P26.3b): the persisted `.inf_mat` binding, round-tripped here
+            // beside the scalars it does not replace.
+            asset: Some(Uuid::from_u128(0xF_A7E_0026)),
         };
         let back: Material = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
         assert_eq!(m, back);
-        // Defaults for the v8 fields.
+        assert_eq!(back.asset, Some(Uuid::from_u128(0xF_A7E_0026)));
+        // Defaults for the v8 fields — and for v22's, which is the no-texture
+        // path and must stay `None` so a fresh surface renders off its scalars.
         let d = Material::default();
         assert_eq!(d.blend, BlendMode::Opaque);
         assert_eq!(d.alpha_cutoff, 0.5);
+        assert_eq!(d.asset, None);
         // A pre-v8 payload (no blend / alpha_cutoff) fills the additive defaults.
         let pre = r#"{ "base_color": {"r":0.8,"g":0.8,"b":0.8,"a":1.0},
             "metallic": 0.0, "roughness": 0.5,

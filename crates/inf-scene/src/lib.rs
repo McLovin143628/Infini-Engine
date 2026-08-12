@@ -298,7 +298,41 @@ use uuid::Uuid;
 ///   All three follow the [`VoxelVolume`] law — *the component is a reference
 ///   plus its authored knobs, so it can never be the reason a future schema has
 ///   to move* — and are therefore **frozen as shipped**.
-pub const SCHEMA_VERSION: u32 = 21;
+/// * **v22** — P26.3b: [`Material`] gained `asset: Option<Uuid>`, the persisted
+///   `.inf_mat` binding. **No entity slot was added or moved** and the file
+///   settings are untouched, so this is the [`EntityRecordV14`] *shape* of bump
+///   (a component that grew), not the [`EntityRecordV10`] one — the pre-v22
+///   component is frozen as [`MaterialV21`] and the pre-v22 entity record as
+///   [`EntityRecordV21`] (which carries `material` as `Option<MaterialV21>`,
+///   exactly as v1..v7 carry it as `Option<MaterialV7>`). v1..v21 payloads load
+///   unchanged, with every material lifted to `asset: None` — a surface whose
+///   scalars are the whole story, which is what every pre-v22 level was.
+///
+///   **What it buys.** P26.1–P26.3 built the whole streaming-virtual-texturing
+///   stack — the tiled container, the pool and residency, the WGSL sample — and
+///   left it with nothing to sample, because *nothing on disk said which
+///   material a surface uses*. Apply-material has flattened a `.inf_mat`'s
+///   scalars onto this component since P7.1 and thrown the reference away, so a
+///   level referenced textures only in the author's memory. That is the
+///   spec-clause-4 gap the P26.3 ledger named, and this field is it.
+///
+///   **The scalars stay.** The binding *adds* the texture edge; it never becomes
+///   the only copy of the numbers. `None` is exactly the pre-v22 behaviour and
+///   is the permanent no-texture path, so an unresolvable binding renders as it
+///   always did rather than as an error — the fallback is structural, not a
+///   runtime branch.
+///
+///   **The second freeze of one component**, and the reason bincode forces it is
+///   the v12/v13/v15/v16 law a fifth time: growing a component is a wire-format
+///   change even when the new field is `#[serde(default)]`, because the decoder
+///   reads a fixed field count positionally. Here the read would not even run
+///   past the end of the record — it would run past the end of the *material*
+///   and into the entity's `light` slot.
+///
+///   The wire cost to a level with no material bindings is **one discriminant
+///   byte per materialed entity**, the same price every additive field since v8
+///   has paid.
+pub const SCHEMA_VERSION: u32 = 22;
 
 /// File-level simulation settings (schema v3+), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -633,12 +667,25 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v21 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v22 file layout (current). `entities` reuses [`RuntimeEntity`].
+#[derive(Serialize, Deserialize)]
+struct SceneFileV22 {
+    schema_version: u32,
+    title: String,
+    entities: Vec<RuntimeEntity>,
+    #[serde(default)]
+    settings: RuntimeSettings,
+}
+
+/// A frozen schema-v21 file layout. It carried the **live** settings shape (v22
+/// did not touch [`RuntimeSettings`]), so only `entities` is repointed at the
+/// frozen [`EntityRecordV21`] — the shape this file held as [`RuntimeEntity`]
+/// until v22 grew [`Material`] its `asset` binding.
 #[derive(Serialize, Deserialize)]
 struct SceneFileV21 {
     schema_version: u32,
     title: String,
-    entities: Vec<RuntimeEntity>,
+    entities: Vec<EntityRecordV21>,
     #[serde(default)]
     settings: RuntimeSettings,
 }
@@ -845,6 +892,7 @@ impl MaterialV7 {
             emissive: self.emissive,
             blend: BlendMode::Opaque,
             alpha_cutoff: 0.5,
+            asset: None,
         }
     }
 
@@ -857,6 +905,76 @@ impl MaterialV7 {
             roughness: m.roughness,
             emissive: m.emissive,
         }
+    }
+}
+
+/// The **pre-v22** `Material` byte layout (schema v22 froze this when P26.3b
+/// gave `Material` its `asset` binding). Frozen entity records **v8..v21** carry
+/// `material` as `Option<MaterialV21>`; [`MaterialV21::into_current`] lifts it
+/// with `asset: None`.
+///
+/// The second freeze of one component, and the reason is the same one that froze
+/// [`MeshRefV6`] and [`TerrainV8`]: bincode is positional, so *growing* a
+/// component is a wire-format change even though the new field is
+/// `#[serde(default)]` — a v21 payload fed to the grown struct reads past the end
+/// of its `Material` and into the next slot of the same record. `MaterialV7`
+/// above stays exactly as it was; v1..v7 records still carry it, and they now lift
+/// straight to the live shape rather than through this one, because the two
+/// freezes describe two different byte layouts and neither is a step toward the
+/// other.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct MaterialV21 {
+    base_color: Color,
+    #[serde(default)]
+    metallic: f32,
+    #[serde(default)]
+    roughness: f32,
+    #[serde(default)]
+    emissive: Color,
+    #[serde(default)]
+    blend: BlendMode,
+    #[serde(default)]
+    alpha_cutoff: f32,
+}
+
+impl MaterialV21 {
+    /// Lift to the live [`Material`] with **no material binding** — which is
+    /// exactly what a v21 level meant: its scalars are the whole surface.
+    fn into_current(self) -> Material {
+        Material {
+            base_color: self.base_color,
+            metallic: self.metallic,
+            roughness: self.roughness,
+            emissive: self.emissive,
+            blend: self.blend,
+            alpha_cutoff: self.alpha_cutoff,
+            asset: None,
+        }
+    }
+
+    /// Downgrade a live [`Material`] to the pre-v22 layout (the
+    /// **downgrade-bless** path that regenerates the committed v21 fixture). Only
+    /// `asset` is lost, which is precisely what v22 added.
+    #[cfg(test)]
+    fn from_current(m: Material) -> Self {
+        Self {
+            base_color: m.base_color,
+            metallic: m.metallic,
+            roughness: m.roughness,
+            emissive: m.emissive,
+            blend: m.blend,
+            alpha_cutoff: m.alpha_cutoff,
+        }
+    }
+}
+
+/// The pre-v22 shape of `Material::default()`, **derived from the live default**
+/// rather than restated — so a change to the live defaults can never silently
+/// leave the frozen fixtures describing a material nobody would author.
+#[cfg(test)]
+impl Default for MaterialV21 {
+    fn default() -> Self {
+        Self::from_current(Material::default())
     }
 }
 
@@ -1958,7 +2076,7 @@ struct EntityRecordV8 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    material: Option<MaterialV21>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -2042,7 +2160,7 @@ impl EntityRecordV8 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh,
-            material: self.material,
+            material: self.material.map(MaterialV21::into_current),
             light: self.light,
             camera: self.camera,
             sprite: self.sprite,
@@ -2099,7 +2217,7 @@ struct EntityRecordV9 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    material: Option<MaterialV21>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -2182,7 +2300,7 @@ impl EntityRecordV9 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh,
-            material: self.material,
+            material: self.material.map(MaterialV21::into_current),
             light: self.light,
             camera: self.camera,
             sprite: self.sprite,
@@ -2238,7 +2356,7 @@ struct EntityRecordV10 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    material: Option<MaterialV21>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -2314,7 +2432,7 @@ impl EntityRecordV10 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh,
-            material: self.material,
+            material: self.material.map(MaterialV21::into_current),
             light: self.light,
             camera: self.camera,
             sprite: self.sprite,
@@ -2372,7 +2490,7 @@ impl EntityRecordV10 {
             transform: r.transform,
             visible: r.visible,
             mesh: r.mesh,
-            material: r.material,
+            material: r.material.map(MaterialV21::from_current),
             light: r.light,
             camera: r.camera,
             sprite: r.sprite,
@@ -2524,7 +2642,7 @@ struct EntityRecordV11 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    material: Option<MaterialV21>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -2603,7 +2721,7 @@ impl EntityRecordV11 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh,
-            material: self.material,
+            material: self.material.map(MaterialV21::into_current),
             light: self.light,
             camera: self.camera,
             sprite: self.sprite,
@@ -2660,7 +2778,7 @@ impl EntityRecordV11 {
             transform: r.transform,
             visible: r.visible,
             mesh: r.mesh,
-            material: r.material,
+            material: r.material.map(MaterialV21::from_current),
             light: r.light,
             camera: r.camera,
             sprite: r.sprite,
@@ -2883,7 +3001,7 @@ struct EntityRecordV12 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    material: Option<MaterialV21>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -2964,7 +3082,7 @@ impl EntityRecordV12 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh,
-            material: self.material,
+            material: self.material.map(MaterialV21::into_current),
             light: self.light,
             camera: self.camera,
             sprite: self.sprite,
@@ -3021,7 +3139,7 @@ impl EntityRecordV12 {
             transform: r.transform,
             visible: r.visible,
             mesh: r.mesh,
-            material: r.material,
+            material: r.material.map(MaterialV21::from_current),
             light: r.light,
             camera: r.camera,
             sprite: r.sprite,
@@ -3331,7 +3449,7 @@ struct EntityRecordV13 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    material: Option<MaterialV21>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -3412,7 +3530,7 @@ impl EntityRecordV13 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh,
-            material: self.material,
+            material: self.material.map(MaterialV21::into_current),
             light: self.light,
             camera: self.camera,
             sprite: self.sprite,
@@ -3469,7 +3587,7 @@ impl EntityRecordV13 {
             transform: r.transform,
             visible: r.visible,
             mesh: r.mesh,
-            material: r.material,
+            material: r.material.map(MaterialV21::from_current),
             light: r.light,
             camera: r.camera,
             sprite: r.sprite,
@@ -3520,7 +3638,7 @@ struct EntityRecordV14 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    material: Option<MaterialV21>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -3599,7 +3717,7 @@ impl EntityRecordV14 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh,
-            material: self.material,
+            material: self.material.map(MaterialV21::into_current),
             light: self.light,
             camera: self.camera,
             sprite: self.sprite,
@@ -3656,7 +3774,7 @@ impl EntityRecordV14 {
             transform: r.transform,
             visible: r.visible,
             mesh: r.mesh,
-            material: r.material,
+            material: r.material.map(MaterialV21::from_current),
             light: r.light,
             camera: r.camera,
             sprite: r.sprite,
@@ -3708,7 +3826,7 @@ struct EntityRecordV15 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    material: Option<MaterialV21>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -3787,7 +3905,7 @@ impl EntityRecordV15 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh,
-            material: self.material,
+            material: self.material.map(MaterialV21::into_current),
             light: self.light,
             camera: self.camera,
             sprite: self.sprite,
@@ -3845,7 +3963,7 @@ impl EntityRecordV15 {
             transform: r.transform,
             visible: r.visible,
             mesh: r.mesh,
-            material: r.material,
+            material: r.material.map(MaterialV21::from_current),
             light: r.light,
             camera: r.camera,
             sprite: r.sprite,
@@ -3896,7 +4014,7 @@ struct EntityRecordV16 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    material: Option<MaterialV21>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -3975,7 +4093,7 @@ impl EntityRecordV16 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh,
-            material: self.material,
+            material: self.material.map(MaterialV21::into_current),
             light: self.light,
             camera: self.camera,
             sprite: self.sprite,
@@ -4032,7 +4150,7 @@ impl EntityRecordV16 {
             transform: r.transform,
             visible: r.visible,
             mesh: r.mesh,
-            material: r.material,
+            material: r.material.map(MaterialV21::from_current),
             light: r.light,
             camera: r.camera,
             sprite: r.sprite,
@@ -4083,7 +4201,7 @@ struct EntityRecordV17 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    material: Option<MaterialV21>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -4169,7 +4287,7 @@ impl EntityRecordV17 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh,
-            material: self.material,
+            material: self.material.map(MaterialV21::into_current),
             light: self.light,
             camera: self.camera,
             sprite: self.sprite,
@@ -4226,7 +4344,7 @@ impl EntityRecordV17 {
             transform: r.transform,
             visible: r.visible,
             mesh: r.mesh,
-            material: r.material,
+            material: r.material.map(MaterialV21::from_current),
             light: r.light,
             camera: r.camera,
             sprite: r.sprite,
@@ -4283,7 +4401,7 @@ struct EntityRecordV18 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    material: Option<MaterialV21>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -4424,7 +4542,7 @@ impl EntityRecordV18 {
             transform: r.transform,
             visible: r.visible,
             mesh: r.mesh,
-            material: r.material,
+            material: r.material.map(MaterialV21::from_current),
             light: r.light,
             camera: r.camera,
             sprite: r.sprite,
@@ -4482,7 +4600,7 @@ struct EntityRecordV19 {
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    material: Option<MaterialV21>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -4630,7 +4748,7 @@ impl EntityRecordV19 {
             transform: r.transform,
             visible: r.visible,
             mesh: r.mesh,
-            material: r.material,
+            material: r.material.map(MaterialV21::from_current),
             light: r.light,
             camera: r.camera,
             sprite: r.sprite,
@@ -4682,15 +4800,23 @@ impl EntityRecordV19 {
 /// why the v20 decode arm now reads *this* type and lifts it: the bytes a v20
 /// player wrote have three fewer discriminants per entity than today's, and
 /// nothing but a frozen record can keep them decoding positionally forever.
+///
+/// **Generic in its material slot only** (P26.3b), and the alias below is the
+/// frozen record — `EntityRecordV20Gen<MaterialV21>` is byte-for-byte what this
+/// declaration always was. The parameter exists so the v22 wire pin can
+/// re-declare the ONE component v22 grew, independently of `inf_ecs::Material`,
+/// and still compose the other 43 fields from a frozen list rather than
+/// restating them. Nothing outside `#[cfg(test)]` ever instantiates it at
+/// anything but [`MaterialV21`].
 #[derive(Clone, Serialize, Deserialize)]
-struct EntityRecordV20 {
+struct EntityRecordV20Gen<M> {
     guid: Uuid,
     name: String,
     parent: Option<Uuid>,
     transform: Transform,
     visible: bool,
     mesh: Option<MeshRef>,
-    material: Option<Material>,
+    material: Option<M>,
     light: Option<Light>,
     camera: Option<Camera>,
     #[serde(default)]
@@ -4771,6 +4897,10 @@ struct EntityRecordV20 {
     destructible: Option<Destructible>,
 }
 
+/// **The frozen v20 record.** The generic above exists for the wire pin alone;
+/// this is the type the ladder decodes, and its bytes are unchanged.
+type EntityRecordV20 = EntityRecordV20Gen<MaterialV21>;
+
 impl EntityRecordV20 {
     /// Lift a frozen v20 record to the live (v21) [`RuntimeEntity`]. Every slot carries
     /// through unchanged; the three new slots lift to `None` — a level with no
@@ -4783,7 +4913,7 @@ impl EntityRecordV20 {
             transform: self.transform,
             visible: self.visible,
             mesh: self.mesh,
-            material: self.material,
+            material: self.material.map(MaterialV21::into_current),
             light: self.light,
             camera: self.camera,
             sprite: self.sprite,
@@ -4840,7 +4970,7 @@ impl EntityRecordV20 {
             transform: r.transform,
             visible: r.visible,
             mesh: r.mesh,
-            material: r.material,
+            material: r.material.map(MaterialV21::from_current),
             light: r.light,
             camera: r.camera,
             sprite: r.sprite,
@@ -4878,6 +5008,221 @@ impl EntityRecordV20 {
             buoyancy: r.buoyancy,
             voxel_volume: r.voxel_volume,
             destructible: r.destructible,
+        }
+    }
+}
+
+/// The **pre-v22** entity byte layout (schema v22 froze this when P26.3b grew
+/// [`Material`] its `asset` binding). Field-for-field the live [`RuntimeEntity`]
+/// except that `material` is an [`Option<MaterialV21>`](MaterialV21) — this is
+/// the [`EntityRecordV14`] *shape* of bump (a component that grew), not the
+/// [`EntityRecordV10`] one (a new slot at the tail): **no entity slot was added
+/// or moved**, and the file settings are untouched.
+///
+/// This is the shape [`SceneFileV21`] used to hold as the live record.
+#[derive(Clone, Serialize, Deserialize)]
+struct EntityRecordV21 {
+    guid: Uuid,
+    name: String,
+    parent: Option<Uuid>,
+    transform: Transform,
+    visible: bool,
+    mesh: Option<MeshRef>,
+    /// The one field that differs from the live record — and the whole of v22.
+    material: Option<MaterialV21>,
+    light: Option<Light>,
+    camera: Option<Camera>,
+    #[serde(default)]
+    sprite: Option<Sprite>,
+    #[serde(default)]
+    tilemap: Option<Tilemap>,
+    #[serde(default)]
+    nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    text2d: Option<Text2D>,
+    #[serde(default)]
+    light_2d: Option<Light2D>,
+    #[serde(default)]
+    rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    actor: Option<Uuid>,
+    #[serde(default)]
+    terrain: Option<Terrain>,
+    #[serde(default)]
+    pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    root_motion: Option<RootMotion>,
+    #[serde(default)]
+    attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    audio_source: Option<AudioSource>,
+    #[serde(default)]
+    audio_listener: Option<AudioListener>,
+    #[serde(default)]
+    decal: Option<Decal>,
+    #[serde(default)]
+    volume: Option<Volume>,
+    #[serde(default)]
+    spline: Option<Spline>,
+    #[serde(default)]
+    foliage: Option<Foliage>,
+    #[serde(default)]
+    streaming_source: Option<StreamingSource>,
+    #[serde(default)]
+    always_loaded: Option<AlwaysLoaded>,
+    #[serde(default)]
+    time_of_day: Option<TimeOfDay>,
+    #[serde(default)]
+    sky_atmosphere: Option<SkyAtmosphere>,
+    #[serde(default)]
+    water_body: Option<WaterBody>,
+    #[serde(default)]
+    buoyancy: Option<Buoyancy>,
+    #[serde(default)]
+    voxel_volume: Option<VoxelVolume>,
+    #[serde(default)]
+    destructible: Option<Destructible>,
+    /// The three v21 slots this record exists to keep carrying — a v21 level's
+    /// IK goals, garments and hair must survive the v22 hop, not merely decode.
+    #[serde(default)]
+    ik_target: Option<IkTarget>,
+    #[serde(default)]
+    cloth_sim: Option<ClothSim>,
+    #[serde(default)]
+    hair_guides: Option<HairGuides>,
+}
+
+impl EntityRecordV21 {
+    /// Lift a frozen v21 record to the live (v22) [`RuntimeEntity`]. Every slot
+    /// carries through unchanged; the material lifts with `asset: None` — a
+    /// surface whose scalars are the whole story, which is what every pre-v22
+    /// level was.
+    fn into_runtime(self) -> RuntimeEntity {
+        RuntimeEntity {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material.map(MaterialV21::into_current),
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: self.decal,
+            volume: self.volume,
+            spline: self.spline,
+            foliage: self.foliage,
+            streaming_source: self.streaming_source,
+            always_loaded: self.always_loaded,
+            time_of_day: self.time_of_day,
+            sky_atmosphere: self.sky_atmosphere,
+            water_body: self.water_body,
+            buoyancy: self.buoyancy,
+            voxel_volume: self.voxel_volume,
+            destructible: self.destructible,
+            ik_target: self.ik_target,
+            cloth_sim: self.cloth_sim,
+            hair_guides: self.hair_guides,
+        }
+    }
+
+    /// Project a live [`RuntimeEntity`] back onto the frozen v21 shape (the
+    /// **downgrade-bless** path that regenerates the committed v21 fixture).
+    /// Only `Material::asset` is lost — asserted as a property, not as a field
+    /// list, by `v21_entity_downgrade_is_lossless_except_for_the_material_binding`.
+    #[cfg(test)]
+    fn from_current(r: RuntimeEntity) -> Self {
+        Self {
+            guid: r.guid,
+            name: r.name,
+            parent: r.parent,
+            transform: r.transform,
+            visible: r.visible,
+            mesh: r.mesh,
+            material: r.material.map(MaterialV21::from_current),
+            light: r.light,
+            camera: r.camera,
+            sprite: r.sprite,
+            tilemap: r.tilemap,
+            nine_slice: r.nine_slice,
+            text2d: r.text2d,
+            light_2d: r.light_2d,
+            rigid_body_2d: r.rigid_body_2d,
+            collider_2d: r.collider_2d,
+            character_controller_2d: r.character_controller_2d,
+            rigid_body_3d: r.rigid_body_3d,
+            collider_3d: r.collider_3d,
+            character_controller_3d: r.character_controller_3d,
+            actor: r.actor,
+            terrain: r.terrain,
+            pcg_volume: r.pcg_volume,
+            skeletal_mesh: r.skeletal_mesh,
+            anim_player: r.anim_player,
+            anim_state_machine: r.anim_state_machine,
+            root_motion: r.root_motion,
+            attached_to: r.attached_to,
+            joint_2d: r.joint_2d,
+            joint_3d: r.joint_3d,
+            audio_source: r.audio_source,
+            audio_listener: r.audio_listener,
+            decal: r.decal,
+            volume: r.volume,
+            spline: r.spline,
+            foliage: r.foliage,
+            streaming_source: r.streaming_source,
+            always_loaded: r.always_loaded,
+            time_of_day: r.time_of_day,
+            sky_atmosphere: r.sky_atmosphere,
+            water_body: r.water_body,
+            buoyancy: r.buoyancy,
+            voxel_volume: r.voxel_volume,
+            destructible: r.destructible,
+            ik_target: r.ik_target,
+            cloth_sim: r.cloth_sim,
+            hair_guides: r.hair_guides,
         }
     }
 }
@@ -5176,8 +5521,22 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v21: {e}")))?;
             Ok(RuntimeLevel {
                 title: v21.title,
-                entities: v21.entities,
+                entities: v21
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV21::into_runtime)
+                    .collect(),
                 settings: v21.settings,
+            })
+        }
+        22 => {
+            let (v22, _): (SceneFileV22, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v22: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v22.title,
+                entities: v22.entities,
+                settings: v22.settings,
             })
         }
         found => Err(SceneError::SchemaTooNew {
@@ -5187,9 +5546,9 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     }
 }
 
-/// Encode a level to the current schema (v21) as a deterministic bincode payload.
+/// Encode a level to the current schema (v22) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV21 {
+    let file = SceneFileV22 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -5837,7 +6196,7 @@ mod tests {
                         primitive: Primitive::Plane,
                         asset: None,
                     }),
-                    material: Some(Material {
+                    material: Some(MaterialV21 {
                         base_color: Color::new(0.3, 0.32, 0.35, 1.0),
                         metallic: 0.0,
                         roughness: 0.5,
@@ -6094,6 +6453,7 @@ mod tests {
                 emissive: Color::new(0.0, 0.0, 0.0, 1.0),
                 blend: BlendMode::Translucent,
                 alpha_cutoff: 0.3,
+                asset: None,
             });
             cube.decal = Some(Decal {
                 size: Vec3d::new(3.0, 1.0, 3.0),
@@ -6226,7 +6586,7 @@ mod tests {
                         primitive: Primitive::Cube,
                         asset: Some(g(0x90A1)),
                     }),
-                    material: Some(Material::default()),
+                    material: Some(MaterialV21::default()),
                     ..v9_rec(g(0x9001), "Cube", None)
                 },
                 EntityRecordV9 {
@@ -6442,7 +6802,7 @@ mod tests {
                         primitive: Primitive::Cube,
                         asset: Some(g(0xA0A1)),
                     }),
-                    material: Some(Material::default()),
+                    material: Some(MaterialV21::default()),
                     streaming_source: Some(StreamingSource { radius_m: 300.0 }),
                     ..v10_rec(g(0xA001), "Player", None)
                 },
@@ -6665,7 +7025,7 @@ mod tests {
                         primitive: Primitive::Cube,
                         asset: Some(g(0xB0A1)),
                     }),
-                    material: Some(Material::default()),
+                    material: Some(MaterialV21::default()),
                     streaming_source: Some(StreamingSource { radius_m: 300.0 }),
                     ..v11_rec(g(0xB001), "Player", None)
                 },
@@ -6935,6 +7295,7 @@ mod tests {
         // P22.2 for a level with no water, nothing that floats, no volumetric
         // ground and nothing breakable.
         let entities = RuntimeLevel::decode(&v11).unwrap().entities.len();
+        let materialed = materialed_entities(&v11);
         assert_eq!(
             lifted.len(),
             v11.len()
@@ -6946,7 +7307,8 @@ mod tests {
                         + BUOYANCY_SLOT_BYTES
                         + VOXEL_SLOT_BYTES
                         + DESTRUCTIBLE_SLOT_BYTES
-                        + CHARACTER_SLOT_BYTES),
+                        + CHARACTER_SLOT_BYTES)
+                + materialed * MATERIAL_BINDING_BYTES,
             "the one entity carrying an atmosphere grew by the physical block"
         );
     }
@@ -7013,7 +7375,7 @@ mod tests {
                         primitive: Primitive::Cube,
                         asset: Some(g(0xB0A1)),
                     }),
-                    material: Some(Material::default()),
+                    material: Some(MaterialV21::default()),
                     streaming_source: Some(StreamingSource { radius_m: 300.0 }),
                     ..v12_rec(g(0xB001), "Player", None)
                 },
@@ -7386,6 +7748,7 @@ mod tests {
         // v14 weather block — priced in `v14_weather_is_wider_on_the_wire_than_v13`
         // and named here rather than folded into the number.
         let entities = RuntimeLevel::decode(&v12).unwrap().entities.len();
+        let materialed = materialed_entities(&v12);
         assert_eq!(
             lifted.len(),
             v12.len()
@@ -7396,7 +7759,8 @@ mod tests {
                         + BUOYANCY_SLOT_BYTES
                         + VOXEL_SLOT_BYTES
                         + DESTRUCTIBLE_SLOT_BYTES
-                        + CHARACTER_SLOT_BYTES),
+                        + CHARACTER_SLOT_BYTES)
+                + materialed * MATERIAL_BINDING_BYTES,
             "the one entity carrying an atmosphere grew by the cloud block"
         );
     }
@@ -7499,7 +7863,7 @@ mod tests {
                         primitive: Primitive::Cube,
                         asset: Some(g(0xC0A1)),
                     }),
-                    material: Some(Material::default()),
+                    material: Some(MaterialV21::default()),
                     streaming_source: Some(StreamingSource { radius_m: 300.0 }),
                     ..v13_rec(g(0xC001), "Player", None)
                 },
@@ -7803,6 +8167,7 @@ mod tests {
         assert_eq!(expected, 38, "the weather block is 38 bytes on the wire");
 
         let entities = RuntimeLevel::decode(&v13).unwrap().entities.len();
+        let materialed = materialed_entities(&v13);
         assert_eq!(
             lifted.len(),
             v13.len()
@@ -7812,7 +8177,8 @@ mod tests {
                         + BUOYANCY_SLOT_BYTES
                         + VOXEL_SLOT_BYTES
                         + DESTRUCTIBLE_SLOT_BYTES
-                        + CHARACTER_SLOT_BYTES),
+                        + CHARACTER_SLOT_BYTES)
+                + materialed * MATERIAL_BINDING_BYTES,
             "the one entity carrying an atmosphere grew by the weather block"
         );
     }
@@ -7926,7 +8292,7 @@ mod tests {
                         primitive: Primitive::Cube,
                         asset: Some(g(0xD0A1)),
                     }),
-                    material: Some(Material::default()),
+                    material: Some(MaterialV21::default()),
                     ..v14_rec(g(0xD001), "Cube", None)
                 },
                 EntityRecordV14 {
@@ -8131,7 +8497,7 @@ mod tests {
                         primitive: Primitive::Cube,
                         asset: Some(g(0xE0A1)),
                     }),
-                    material: Some(Material::default()),
+                    material: Some(MaterialV21::default()),
                     ..v15_rec(g(0xE001), "Cube", None)
                 },
                 EntityRecordV15 {
@@ -8383,7 +8749,7 @@ mod tests {
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {
         assert_eq!(
-            SCHEMA_VERSION, 21,
+            SCHEMA_VERSION, 22,
             "the scene schema moved. Generation-1 frozen tiles (TerrainTileFrozenV1, via \
              TerrainV14) cover .inf_lvl v1..=v14, generation-2 (TerrainTileFrozenV2, via \
              TerrainV15) covers v15, and generation-3 (TerrainTileFrozenV3, which \
@@ -8394,7 +8760,9 @@ mod tests {
              entity slot and left every tile layout alone — v19's voxel volume in \
              particular extends the ground LOCALLY, out in its own .inf_voxel, and does \
              not touch a single heightfield tile. P21.2's hole mask DID grow the tile, and \
-             the scene answered by pinning rather than bumping — see the table above.)"
+             the scene answered by pinning rather than bumping — see the table above. v22 \
+             is the latter case too: it grew the MATERIAL component, which no tile has \
+             ever contained.)"
         );
         // The mapping the pin is about, one rung at a time. Start from a terrain
         // that exercises BOTH post-v14 layers.
@@ -8563,7 +8931,7 @@ mod tests {
                         primitive: Primitive::Cube,
                         asset: Some(g(0xF0A1)),
                     }),
-                    material: Some(Material::default()),
+                    material: Some(MaterialV21::default()),
                     ..v16_rec(g(0xF001), "Cube", None)
                 },
                 EntityRecordV16 {
@@ -8719,7 +9087,7 @@ mod tests {
                         primitive: Primitive::Cube,
                         asset: Some(g(0xF1A1)),
                     }),
-                    material: Some(Material::default()),
+                    material: Some(MaterialV21::default()),
                     ..v17_rec(g(0xF101), "Cube", None)
                 },
                 EntityRecordV17 {
@@ -8954,7 +9322,7 @@ mod tests {
                         primitive: Primitive::Cube,
                         asset: Some(g(0xF2A1)),
                     }),
-                    material: Some(Material::default()),
+                    material: Some(MaterialV21::default()),
                     ..v18_rec(g(0xF201), "Cube", None)
                 },
                 EntityRecordV18 {
@@ -9203,7 +9571,7 @@ mod tests {
                         primitive: Primitive::Cube,
                         asset: Some(g(0xF2A1)),
                     }),
-                    material: Some(Material::default()),
+                    material: Some(MaterialV21::default()),
                     ..v19_rec(g(0xF201), "Cube", None)
                 },
                 EntityRecordV19 {
@@ -9417,6 +9785,22 @@ mod tests {
     /// What the three v21 slots cost an entity that has no IK, no garment and no
     /// hair: three `Option` discriminants, and nothing else.
     const CHARACTER_SLOT_BYTES: usize = 3;
+
+    /// How many entities of an encoded level carry a `Material` — the multiplier
+    /// for [`MATERIAL_BINDING_BYTES`] in the three lift-price arms.
+    ///
+    /// Counted rather than assumed, because v22's field lives **inside** a
+    /// component: an entity with no material pays nothing for it, so `entities`
+    /// is the wrong multiplier and would have made those arms wrong the moment a
+    /// fixture gained a light-only entity.
+    fn materialed_entities(bytes: &[u8]) -> usize {
+        RuntimeLevel::decode(bytes)
+            .unwrap()
+            .entities
+            .iter()
+            .filter(|e| e.material.is_some())
+            .count()
+    }
 
     /// The **v20** destructible the fixture's wall carries: every field away from
     /// its default, so a hop that produced defaults would be caught.
@@ -9697,26 +10081,54 @@ mod tests {
         assert!(!t.goals[1].enabled);
     }
 
-    /// One entity as the v21 wire lays it out: the frozen 44-field record, then
-    /// the three tails P24.3 appended. A `type` because clippy counts the tuple's
-    /// nesting, and because naming it says what it is.
-    type V21EntityWire = (
-        EntityRecordV20,
+    /// The **v22 `Material` wire**, declared here and not imported: the six
+    /// fields v8 froze plus the `asset` binding v22 appended.
+    ///
+    /// This is the independent half of the pin now, because v22 is a component
+    /// that GREW rather than a slot appended to the entity. `MaterialV21` up in
+    /// the ladder cannot serve — it is precisely the shape without `asset` — and
+    /// `inf_ecs::Material` cannot serve either, because a pin that imports the
+    /// type it is pinning asserts nothing.
+    #[derive(serde::Deserialize)]
+    struct MaterialV22Wire {
+        #[allow(dead_code)]
+        base_color: Color,
+        #[allow(dead_code)]
+        metallic: f32,
+        #[allow(dead_code)]
+        roughness: f32,
+        #[allow(dead_code)]
+        emissive: Color,
+        #[allow(dead_code)]
+        blend: BlendMode,
+        #[allow(dead_code)]
+        alpha_cutoff: f32,
+        /// What v22 added. Read by the pin, so a binding that fails to land in
+        /// the material's tail position is a decode failure rather than a
+        /// silently ignored field.
+        asset: Option<Uuid>,
+    }
+
+    /// One entity as the v22 wire lays it out: the frozen 44-field record **with
+    /// its material slot re-declared above**, then the three tails P24.3
+    /// appended. A `type` because clippy counts the tuple's nesting, and because
+    /// naming it says what it is.
+    type V22EntityWire = (
+        EntityRecordV20Gen<MaterialV22Wire>,
         Option<IkTarget>,
         Option<ClothSim>,
         Option<HairGuides>,
     );
 
-    /// The same, borrowed, plus one appended slot — the shadow v22's entity.
-    type V22EntityShadow<'a> = (
-        &'a EntityRecordV20,
-        &'a Option<IkTarget>,
-        &'a Option<ClothSim>,
-        &'a Option<HairGuides>,
-        Option<u8>,
-    );
+    /// The live entity plus one appended slot — the shadow v23's entity.
+    ///
+    /// Serialized from the **live** record rather than reassembled from frozen
+    /// parts, because the shadow's only job is to produce bytes that carry one
+    /// slot more than the current wire; reassembling it would make the fixture
+    /// depend on the very downgrade the pin is meant to be independent of.
+    type V23EntityShadow<'a> = (&'a RuntimeEntity, Option<u8>);
 
-    /// **The v21 wire shape, pinned against an INDEPENDENT declaration.**
+    /// **The v22 wire shape, pinned against an INDEPENDENT declaration.**
     ///
     /// The `SkeletonAssetV2Wire` idiom (`inf-anim`), applied to the scene. The
     /// pair this replaces proved nothing: one encoded *and* decoded with
@@ -9725,37 +10137,45 @@ mod tests {
     /// decoder ignored it — true of every bincode struct at every version. Both
     /// were tautologies wearing the vocabulary of a wire pin.
     ///
-    /// This shape is independent where it matters. `EntityRecordV20` is a FROZEN
-    /// declaration whose whole purpose is not to drift with the live record, and
+    /// This shape is independent where it matters. `EntityRecordV20Gen` is a
+    /// FROZEN declaration whose whole purpose is not to drift with the live
+    /// record, [`MaterialV22Wire`] re-declares the one component v22 grew, and
     /// bincode encodes a tuple as its elements concatenated with no framing — so
     /// the tuple below is byte-for-byte the live record's layout, assembled from
     /// 44 frozen fields plus the three tails **named here by type**. A 48th slot
     /// appended to the live record leaves bytes this shape cannot account for; a
-    /// tail whose type changes fails to decode.
+    /// tail whose type changes fails to decode; and a field appended to
+    /// `Material` without a bump shifts every byte after it, which is the case
+    /// v22 itself is.
     #[derive(serde::Deserialize)]
-    struct SceneFileV21Wire {
+    struct SceneFileV22Wire {
         schema_version: u32,
         title: String,
-        entities: Vec<V21EntityWire>,
+        entities: Vec<V22EntityWire>,
         settings: RuntimeSettings,
     }
 
-    /// A **shadow v22** — the wire shape above plus one appended tail slot,
-    /// exactly what an author adding a component would write.
+    /// A **shadow v23** — the live wire plus one appended tail slot, exactly
+    /// what an author adding a component would write.
     #[derive(serde::Serialize)]
-    struct SceneFileV22Shadow<'a> {
+    struct SceneFileV23Shadow<'a> {
         schema_version: u32,
         title: &'a str,
-        entities: Vec<V22EntityShadow<'a>>,
+        entities: Vec<V23EntityShadow<'a>>,
         settings: RuntimeSettings,
     }
 
     #[test]
-    fn the_v21_wire_shape_is_pinned_against_an_independent_declaration() {
+    fn the_v22_wire_shape_is_pinned_against_an_independent_declaration() {
+        let bound = Uuid::from_u128(0xF_A7E12);
         let level = RuntimeLevel {
             title: "Pinned".into(),
             entities: vec![
                 RuntimeEntity {
+                    material: Some(Material {
+                        asset: Some(bound),
+                        ..Material::default()
+                    }),
                     ik_target: Some(v21_fixture_ik_target()),
                     cloth_sim: Some(v21_fixture_cloth()),
                     hair_guides: Some(v21_fixture_hair()),
@@ -9767,9 +10187,9 @@ mod tests {
         };
         let bytes = encode(&level).unwrap();
 
-        let (wire, consumed): (SceneFileV21Wire, usize) =
+        let (wire, consumed): (SceneFileV22Wire, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode_config())
-                .expect("the pinned v21 shape decodes the v21 wire");
+                .expect("the pinned v22 shape decodes the v22 wire");
         assert_eq!(
             consumed,
             bytes.len(),
@@ -9780,6 +10200,14 @@ mod tests {
         );
         assert_eq!(wire.schema_version, SCHEMA_VERSION);
         assert_eq!(wire.entities.len(), 2);
+        // The v22 field really landed at the END of the material and nowhere
+        // else — a shape that decoded but mis-assigned it would still consume
+        // every byte, which is exactly what a positional format lets happen.
+        assert_eq!(
+            wire.entities[0].0.material.as_ref().and_then(|m| m.asset),
+            Some(bound),
+            "the material binding is not in the material's tail position"
+        );
         // The three tails really landed in the three tail positions — a shape
         // that decoded but mis-assigned them would still consume every byte.
         assert!(
@@ -9805,8 +10233,8 @@ mod tests {
     /// The old version appended a byte to a live encoding and asked the live
     /// decoder about it; `decode_from_slice` ignores trailing bytes by contract,
     /// so it asserted a property of bincode rather than of this ladder. Here the
-    /// v22 bytes come from an independently declared struct that really has a
-    /// fifth tail, and the claim is that the **pinned v21 shape** cannot account
+    /// v23 bytes come from an independently declared struct that really has an
+    /// extra tail, and the claim is that the **pinned v22 shape** cannot account
     /// for them — which is the signal the arm above refuses.
     #[test]
     fn a_tail_slot_appended_without_a_bump_leaves_bytes_the_pin_refuses() {
@@ -9823,18 +10251,12 @@ mod tests {
             ],
             settings: RuntimeSettings::default(),
         };
-        let v21 = encode(&level).unwrap();
-        let rec = EntityRecordV20::from_current(level.entities[0].clone());
-        let (ik, cloth, hair) = (
-            level.entities[0].ik_target.clone(),
-            level.entities[0].cloth_sim,
-            level.entities[0].hair_guides,
-        );
-        let v22 = bincode::serde::encode_to_vec(
-            &SceneFileV22Shadow {
+        let v22 = encode(&level).unwrap();
+        let v23 = bincode::serde::encode_to_vec(
+            &SceneFileV23Shadow {
                 schema_version: SCHEMA_VERSION,
                 title: &level.title,
-                entities: vec![(&rec, &ik, &cloth, &hair, Some(7u8))],
+                entities: vec![(&level.entities[0], Some(7u8))],
                 settings: RuntimeSettings::default(),
             },
             bincode_config(),
@@ -9848,11 +10270,11 @@ mod tests {
         })
         .unwrap();
         assert!(
-            v22.len() > one_entity.len(),
-            "the shadow v22 is not longer than v21, so nothing was appended and \
+            v23.len() > one_entity.len(),
+            "the shadow v23 is not longer than v22, so nothing was appended and \
              this test is measuring nothing"
         );
-        // 2. …and the pinned v21 shape CANNOT READ THEM AT ALL.
+        // 2. …and the pinned v22 shape CANNOT READ THEM AT ALL.
         //
         // Stronger than the trailing-byte signal the first draft looked for, and
         // the difference is instructive: an entity slot is appended in the
@@ -9862,26 +10284,325 @@ mod tests {
         // needs a version bump rather than a `#[serde(default)]`, and it is the
         // failure this pin exists to produce.
         let err =
-            bincode::serde::decode_from_slice::<SceneFileV21Wire, _>(&v22, bincode_config()).err();
+            bincode::serde::decode_from_slice::<SceneFileV22Wire, _>(&v23, bincode_config()).err();
         assert!(
             err.is_some(),
-            "the pinned v21 shape read a payload with an extra entity slot as if nothing had changed — the shape pin has no forcing function at all"
+            "the pinned v22 shape read a payload with an extra entity slot as if nothing had changed — the shape pin has no forcing function at all"
         );
         // …and the SAME bytes minus the appended slot decode cleanly, so the
         // refusal above is the slot's doing and not a broken fixture.
         assert!(
-            bincode::serde::decode_from_slice::<SceneFileV21Wire, _>(&one_entity, bincode_config())
+            bincode::serde::decode_from_slice::<SceneFileV22Wire, _>(&one_entity, bincode_config())
                 .is_ok(),
             "the control payload does not decode either — the fixture is wrong, not the pin"
         );
-        let _ = v21;
+        let _ = v22;
+    }
+
+    // ── v22 the persisted material binding (P26.3b) ───────────────────────
+
+    /// What the v22 field costs an entity that carries a `Material` and no
+    /// binding: one `Option` discriminant, and nothing else. An entity with no
+    /// `Material` at all pays **zero** — the field is inside the component.
+    const MATERIAL_BINDING_BYTES: usize = 1;
+
+    /// The `.inf_mat` the v22 tests bind. A fixed GUID so the two codec mirrors
+    /// can be byte-compared.
+    fn v22_fixture_material_binding() -> Uuid {
+        Uuid::from_u128(0xF_A7E_0026)
+    }
+
+    /// The **v21** material the fixture's wall carries: every scalar away from
+    /// its default, so a v22 hop that produced defaults would be caught. It is
+    /// the shape v21 could express and v22 grew — the binding is exactly what it
+    /// cannot say.
+    ///
+    /// The literals must match the editor codec's `v21_fixture_material` exactly:
+    /// the two committed fixtures are byte-compared by the editor's
+    /// `v21_fixture_matches_the_runtime_codecs_copy`, which is the whole point of
+    /// writing them twice.
+    fn v21_fixture_material() -> MaterialV21 {
+        MaterialV21 {
+            base_color: Color::new(0.42, 0.18, 0.66, 0.9),
+            metallic: 0.875,
+            roughness: 0.1875,
+            emissive: Color::new(0.05, 0.0, 0.125, 1.0),
+            blend: BlendMode::Masked,
+            alpha_cutoff: 0.3125,
+        }
+    }
+
+    /// Rebuild the exact schema-v21 file the committed v21 fixture was generated
+    /// from, out of the frozen v21 record type (the provenance lock).
+    ///
+    /// Built by downgrading the **v20** reference one rung and then authoring the
+    /// three slots v21 added, so the field list can never drift from the ladder.
+    fn v21_scene_reference() -> SceneFileV21 {
+        let v20 = v20_scene_reference();
+        let mut entities: Vec<EntityRecordV21> = v20
+            .entities
+            .into_iter()
+            .map(|e| EntityRecordV21::from_current(e.into_runtime()))
+            .collect();
+        // The hero is what only v21 could write.
+        let hero = entities
+            .iter_mut()
+            .find(|e| e.name == "Cube")
+            .expect("the v20 fixture has a Cube");
+        hero.ik_target = Some(v21_fixture_ik_target());
+        hero.cloth_sim = Some(v21_fixture_cloth());
+        hero.hair_guides = Some(v21_fixture_hair());
+        // …and a fully non-default material, which is what makes the v22 hop's
+        // "the scalars survive" claim a measurement rather than a hope.
+        hero.material = Some(v21_fixture_material());
+        SceneFileV21 {
+            schema_version: 21,
+            title: "V21 Fixture Level".into(),
+            entities,
+            settings: v20.settings,
+        }
+    }
+
+    /// Regenerate `tests/fixtures/scene_v21.inf_lvl` — the **downgrade-bless**
+    /// path, walked only under `INF_BLESS_FIXTURES=1`.
+    #[test]
+    fn bless_scene_v21_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v21_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 21);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v21.inf_lvl");
+        std::fs::write(&path, &bytes).unwrap();
+        eprintln!("blessed {} ({} bytes)", path.display(), bytes.len());
+    }
+
+    #[test]
+    fn v21_fixture_is_reproducible_and_genuinely_v21() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v21.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v21 fixture present");
+        assert_eq!(bytes[0], 21, "fixture must be a genuine schema-v21 payload");
+        let rebuilt =
+            bincode::serde::encode_to_vec(v21_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v21 fixture must match our frozen v21 writer"
+        );
+    }
+
+    /// A committed **v21** payload still loads, keeps everything v21 could
+    /// express — its wall's destructible, its cavern's volume, its hero's IK,
+    /// garment and hair — and lifts with **no material binding**, which is
+    /// exactly what a v21 level was. The "old bytes load forever" gate for the
+    /// v22 bump.
+    #[test]
+    fn v21_loads_and_lifts_without_a_material_binding() {
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v21.inf_lvl"),
+        )
+        .expect("committed v21 fixture present");
+        assert_eq!(bytes[0], 21, "the fixture must really be v21");
+        let level = decode(&bytes).unwrap();
+        assert_eq!(level.title, "V21 Fixture Level");
+        assert_eq!(level.entities.len(), 6);
+        let by_name = |n: &str| level.entities.iter().find(|e| e.name == n).unwrap();
+
+        // Everything the older rungs authored is still here after the hop …
+        assert_eq!(by_name("River").water_body, Some(v17_fixture_water()));
+        assert_eq!(by_name("Raft").buoyancy, Some(v18_fixture_buoyancy()));
+        assert_eq!(by_name("Cavern").voxel_volume, Some(v19_fixture_volume()));
+        assert_eq!(
+            by_name("Cube").destructible,
+            Some(v20_fixture_destructible())
+        );
+        // … including the three slots v21 itself added, which is the half a
+        // defaults-only fixture would never have proven …
+        assert_eq!(by_name("Cube").ik_target, Some(v21_fixture_ik_target()));
+        assert_eq!(by_name("Cube").cloth_sim, Some(v21_fixture_cloth()));
+        assert_eq!(by_name("Cube").hair_guides, Some(v21_fixture_hair()));
+        // … and the material's SCALARS survive the frozen-component hop, which
+        // is the part a bump inside a component gets wrong: every one of the six
+        // fields, compared against the frozen v21 literal rather than against a
+        // default.
+        let m = by_name("Cube").material.expect("the Cube is materialed");
+        let want = v21_fixture_material();
+        assert_eq!(m.base_color, want.base_color);
+        assert_eq!(m.metallic, want.metallic);
+        assert_eq!(m.roughness, want.roughness);
+        assert_eq!(m.emissive, want.emissive);
+        assert_eq!(m.blend, want.blend);
+        assert_eq!(m.alpha_cutoff, want.alpha_cutoff);
+
+        // … and the new field lifts to `None` on every material.
+        for e in &level.entities {
+            assert!(
+                e.material.is_none_or(|m| m.asset.is_none()),
+                "a v21 level has no material binding; the lift must not conjure one"
+            );
+        }
+
+        // Re-encoding writes the current schema and round-trips.
+        let re = encode(&level).unwrap();
+        assert_eq!(re[0], SCHEMA_VERSION as u8);
+        assert_eq!(decode(&re).unwrap(), level);
+    }
+
+    /// The v21 downgrade is lossless **except** for the material binding — the
+    /// only thing v21 cannot express. Proven as a property (round-trip a live
+    /// record through the frozen shape) rather than by listing fields, so a slot
+    /// added later cannot silently fall out of the ladder.
+    #[test]
+    fn v21_entity_downgrade_is_lossless_except_for_the_material_binding() {
+        let live = RuntimeEntity {
+            material: Some(Material {
+                blend: BlendMode::Translucent,
+                alpha_cutoff: 0.125,
+                asset: Some(v22_fixture_material_binding()),
+                ..Material::default()
+            }),
+            water_body: Some(v17_fixture_water()),
+            voxel_volume: Some(v19_fixture_volume()),
+            destructible: Some(v20_fixture_destructible()),
+            ik_target: Some(v21_fixture_ik_target()),
+            cloth_sim: Some(v21_fixture_cloth()),
+            hair_guides: Some(v21_fixture_hair()),
+            ..v9_rec(Uuid::from_u128(0xFA00), "Wall", None).into_runtime()
+        };
+        let back = EntityRecordV21::from_current(live.clone()).into_runtime();
+
+        // The binding is exactly what is lost — the material's own scalars, and
+        // the three v21 slots, which v21 *can* express, are not …
+        let m = back.material.expect("the material survives");
+        assert!(m.asset.is_none());
+        assert_eq!(m.blend, BlendMode::Translucent);
+        assert_eq!(m.alpha_cutoff, 0.125);
+        assert_eq!(back.cloth_sim, live.cloth_sim);
+        assert_eq!(back.destructible, live.destructible);
+        // … and nothing else moved: put it back and the records are equal, which
+        // is the property form of "only this field".
+        assert_eq!(
+            RuntimeEntity {
+                material: back.material.map(|m| Material {
+                    asset: live.material.and_then(|l| l.asset),
+                    ..m
+                }),
+                ..back
+            },
+            live,
+            "the v21 downgrade lost something other than the material binding"
+        );
+    }
+
+    /// **The v22 price, isolated.** A materialed entity with no binding pays
+    /// exactly one discriminant byte; an entity with no `Material` pays nothing
+    /// at all, because the field lives inside the component.
+    ///
+    /// Measured as a delta between the frozen v21 and live v22 encodings of the
+    /// very same record, so it is a *price* rather than an absolute that could
+    /// silently absorb a later bump's growth (the P22.2 lesson).
+    #[test]
+    fn v22_costs_one_byte_per_materialed_entity_and_nothing_otherwise() {
+        let bare = RuntimeEntity {
+            material: None,
+            ..v9_rec(Uuid::from_u128(0xFC02), "Marker", None).into_runtime()
+        };
+        let materialed = RuntimeEntity {
+            material: Some(Material::default()),
+            ..bare.clone()
+        };
+        let frozen = |e: &RuntimeEntity| {
+            bincode::serde::encode_to_vec(
+                &SceneFileV21 {
+                    schema_version: 21,
+                    title: "t".into(),
+                    entities: vec![EntityRecordV21::from_current(e.clone())],
+                    settings: RuntimeSettings::default(),
+                },
+                bincode_config(),
+            )
+            .unwrap()
+        };
+        let live = |e: &RuntimeEntity| {
+            encode(&RuntimeLevel {
+                title: "t".into(),
+                entities: vec![e.clone()],
+                settings: RuntimeSettings::default(),
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            live(&materialed).len(),
+            frozen(&materialed).len() + MATERIAL_BINDING_BYTES,
+            "the v22 binding must cost exactly one discriminant byte on a \
+             materialed entity"
+        );
+        assert_eq!(
+            live(&bare).len(),
+            frozen(&bare).len(),
+            "an entity with no Material must pay nothing for v22 — the field is \
+             inside the component, not on the entity record"
+        );
+
+        // A record that CARRIES a binding costs more than its discriminant.
+        let bound = RuntimeEntity {
+            material: Some(Material {
+                asset: Some(v22_fixture_material_binding()),
+                ..Material::default()
+            }),
+            ..bare.clone()
+        };
+        assert!(live(&bound).len() > live(&materialed).len());
+    }
+
+    /// The v22 addition round-trips through the whole codec — including the
+    /// **new decode arm**, which only a payload stamped v22 exercises.
+    #[test]
+    fn v22_material_binding_round_trips_through_the_codec() {
+        let level = RuntimeLevel {
+            title: "Textured".into(),
+            entities: vec![RuntimeEntity {
+                material: Some(Material {
+                    base_color: Color::new(0.9, 0.2, 0.1, 1.0),
+                    metallic: 0.75,
+                    roughness: 0.25,
+                    emissive: Color::new(0.1, 0.0, 0.0, 1.0),
+                    blend: BlendMode::Masked,
+                    alpha_cutoff: 0.375,
+                    asset: Some(v22_fixture_material_binding()),
+                }),
+                ..v9_rec(Uuid::from_u128(0xFB02), "Wall", None).into_runtime()
+            }],
+            settings: RuntimeSettings::default(),
+        };
+        let bytes = encode(&level).unwrap();
+        assert_eq!(bytes[0], SCHEMA_VERSION as u8);
+        let back = decode(&bytes).unwrap();
+        assert_eq!(back, level);
+        // Re-encoding is byte-identical.
+        assert_eq!(encode(&back).unwrap(), bytes);
+
+        // The binding survives beside every scalar — a hop that kept the GUID
+        // and defaulted the blend would still round-trip the entity count.
+        let m = back.entities[0].material.expect("material");
+        assert_eq!(m.asset, Some(v22_fixture_material_binding()));
+        assert_eq!(m.blend, BlendMode::Masked);
+        assert_eq!(m.alpha_cutoff, 0.375);
+        assert_eq!(m.metallic, 0.75);
+
+        // Clearing the binding really changes the bytes — so the field is on
+        // the wire and not merely in the struct.
+        let mut cleared = level.clone();
+        cleared.entities[0].material.as_mut().unwrap().asset = None;
+        let cleared_bytes = encode(&cleared).unwrap();
+        assert_ne!(cleared_bytes, bytes);
+        assert_eq!(decode(&cleared_bytes).unwrap(), cleared);
     }
 
     /// A payload from a **newer** build is refused by name, with both versions in
     /// the message — the [`SceneError::SchemaTooNew`] doctrine, re-checked at the
     /// new ceiling.
     #[test]
-    fn a_v22_payload_is_refused_by_name() {
+    fn a_v23_payload_is_refused_by_name() {
         let level = RuntimeLevel {
             title: "Future".into(),
             entities: vec![v9_rec(Uuid::from_u128(0xFF01), "A", None).into_runtime()],

@@ -5,4 +5,15 @@ import type { PropFieldDto } from "./PropFieldDto";
  * A typed property value crossing to the Details panel. The `kind` tag selects
  * the widget; only the matching payload field is meaningful.
  */
-export type PropValueDto = { "kind": "bool", value: boolean, } | { "kind": "number", value: number, } | { "kind": "text", value: string, } | { "kind": "vec3", value: Array<number>, } | { "kind": "color", value: Array<number>, } | { "kind": "enum", value: string, options: Array<string>, } | { "kind": "list", value: Array<PropValueDto>, } | { "kind": "struct", fields: Array<PropFieldDto>, } | { "kind": "entity_ref", value: string | null, };
+export type PropValueDto = { "kind": "bool", value: boolean, } | { "kind": "number", value: number, } | { "kind": "text", value: string, } | { "kind": "vec3", value: Array<number>, } | { "kind": "color", value: Array<number>, } | { "kind": "enum", value: string, options: Array<string>, } | { "kind": "list", value: Array<PropValueDto>, } | { "kind": "struct", fields: Array<PropFieldDto>, } | { "kind": "entity_ref", value: string | null, } | { "kind": "asset_ref", value: string | null, 
+/**
+ * [`inf_asset::AssetKind::slug`] of what may be bound here, e.g.
+ * `"material"`. Carried now so the picker, when it lands, does not need
+ * a second source of truth about which kind a row accepts.
+ *
+ * Named `asset_kind` and not `kind`: this enum is serialized
+ * **internally tagged** on `kind`, and a variant field of that name is
+ * a compile error rather than a silent collision — one of the few
+ * places serde refuses to let a wire ambiguity through.
+ */
+asset_kind: string, };

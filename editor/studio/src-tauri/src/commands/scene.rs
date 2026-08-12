@@ -232,6 +232,10 @@ pub async fn scene_apply_material(
         };
         doc.edit_apply_material(
             &targets,
+            // P26.3b: the binding scene v22 persists. This is the ONE caller
+            // that knows which `.inf_mat` the scalars below came from, which is
+            // exactly why the reference was being thrown away here.
+            Some(id.uuid()),
             mat.base_color,
             mat.metallic,
             mat.roughness,

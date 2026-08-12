@@ -195,6 +195,28 @@ pub enum PropValueDto {
     EntityRef {
         value: Option<String>,
     },
+    /// A reference to an **asset** by GUID string (`None` → unbound), with the
+    /// asset kind's slug so a picker can filter by it (P26.3b).
+    ///
+    /// **Read-only in this batch.** It exists so the Details panel can show the
+    /// `Material.asset` binding scene v22 persists — a field the reflection
+    /// walker cannot reach, because it is `#[reflect(ignore)]` exactly as
+    /// `MeshRef::asset` is. The asset-**picker** widget is the standing gap, the
+    /// same one `skel_merge_part`'s raw-GUID text box and the Model Editor's rig
+    /// field have; binding is done by dragging a `.inf_mat` onto the entity,
+    /// which is `scene_apply_material`.
+    AssetRef {
+        value: Option<String>,
+        /// [`inf_asset::AssetKind::slug`] of what may be bound here, e.g.
+        /// `"material"`. Carried now so the picker, when it lands, does not need
+        /// a second source of truth about which kind a row accepts.
+        ///
+        /// Named `asset_kind` and not `kind`: this enum is serialized
+        /// **internally tagged** on `kind`, and a variant field of that name is
+        /// a compile error rather than a silent collision — one of the few
+        /// places serde refuses to let a wire ambiguity through.
+        asset_kind: String,
+    },
 }
 
 /// One editable field row.

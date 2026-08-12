@@ -11,6 +11,14 @@ use inf_ecs::PropValue;
 use crate::ipc::{ComponentDto, DetailsDto, PropFieldDto, PropValueDto};
 use crate::scene::SceneDoc;
 
+/// The reflect type path of the ECS `Material` component — the section the
+/// binding row is appended to.
+const MATERIAL_TYPE_PATH: &str = "inf_ecs::components::Material";
+
+/// The synthetic row key for `Material::asset` (P26.3b). Named the same as the
+/// field so a future picker's write path is the obvious one.
+const MATERIAL_ASSET_FIELD: &str = "asset";
+
 /// Build the Details view for the current selection.
 pub fn build(doc: &SceneDoc) -> DetailsDto {
     let sel = doc.selection();
@@ -36,7 +44,7 @@ pub fn build(doc: &SceneDoc) -> DetailsDto {
             .all(|props| props.iter().any(|c| c.type_path == type_path))
     };
 
-    let components: Vec<ComponentDto> = primary_props
+    let mut components: Vec<ComponentDto> = primary_props
         .iter()
         .filter(|c| shared(&c.type_path))
         .map(|c| ComponentDto {
@@ -64,6 +72,34 @@ pub fn build(doc: &SceneDoc) -> DetailsDto {
                 .collect(),
         })
         .collect();
+
+    // ── P26.3b: the persisted `.inf_mat` binding ─────────────────────────────
+    //
+    // Appended rather than walked, because the reflection walker cannot see it:
+    // `Material::asset` is `#[reflect(ignore)]`, exactly as `MeshRef::asset` is,
+    // so a level could carry a binding the Details panel had no way to show. It
+    // is read-only this batch — the picker is the standing gap named on
+    // [`PropValueDto::AssetRef`] — and the row is what makes the binding
+    // *visible* rather than a fact only the cook knows.
+    if let Some(mat) = components
+        .iter_mut()
+        .find(|c| c.type_path == MATERIAL_TYPE_PATH)
+    {
+        let binding = doc.material_asset_of(primary);
+        let same = sel
+            .iter()
+            .skip(1)
+            .all(|g| doc.material_asset_of(*g) == binding);
+        mat.fields.push(PropFieldDto {
+            name: MATERIAL_ASSET_FIELD.into(),
+            label: "Material Asset".into(),
+            value: PropValueDto::AssetRef {
+                value: binding.map(|g| g.to_string()),
+                asset_kind: "material".into(),
+            },
+            same,
+        });
+    }
 
     let (name, kind) = if sel.len() == 1 {
         (doc.display_name(primary), doc.kind_of_guid(primary))
@@ -139,6 +175,12 @@ pub fn from_dto(v: &PropValueDto) -> PropValue {
         PropValueDto::EntityRef { value } => {
             PropValue::EntityRef(value.as_deref().and_then(|s| s.parse().ok()))
         }
+        // An asset-ref row is a READ of a `#[reflect(ignore)]` field, so there is
+        // no reflected field on the other side of a write: `edit_set_prop` finds
+        // nothing named `asset` and no-ops. Mapped to text rather than given a
+        // `PropValue` variant of its own for exactly that reason — a variant
+        // would advertise a write path that does not exist.
+        PropValueDto::AssetRef { value, .. } => PropValue::Text(value.clone().unwrap_or_default()),
     }
 }
 
