@@ -436,6 +436,11 @@ impl VtResidency {
             self.pending_roots.push((handle, tile));
         }
         self.stats.textures = self.textures.len();
+        // Registration seats pages, so it moves the resident count. `apply_wants`
+        // recomputes this too, and leaving it to the frame would leave a stats
+        // read between a registration and the first frame under-counting a pool
+        // that is already partly full.
+        self.stats.resident = self.slots.iter().filter(|s| s.occupant.is_some()).count() as u32;
         Ok(handle)
     }
 
@@ -624,8 +629,20 @@ impl VtResidency {
         self.layout_generation
     }
 
-    /// One texture's block generation — moves when any of its entries change.
-    /// **A stamp, not a measurement.**
+    /// One texture's block generation — moves when a page of it is seated or
+    /// unseated. **A stamp, not a measurement.**
+    ///
+    /// It does **not** move on a relayout: a registration rewrites every block in
+    /// the image and only [`layout_generation`](Self::layout_generation) records
+    /// that, which is the pair a cache has to watch — the layout stamp says "your
+    /// buffer is the wrong shape", this one says "this block's contents moved".
+    ///
+    /// **Ships before its caller.** The mirror writes exactly the blocks a
+    /// transaction names, so it has no need of a generation today; the caller is
+    /// P26.4, where several transactions may be folded before one upload and
+    /// "which blocks actually moved" stops being the transaction's own list.
+    /// Pinned by [`tests::a_block_generation_moves_only_when_its_pages_do`] until
+    /// then.
     pub fn generation(&self, tex: VtTextureHandle) -> Option<u64> {
         self.textures.get(tex.index()).map(|t| t.generation)
     }
@@ -971,6 +988,37 @@ mod tests {
         // …and it reaches the trace, which is the only place a caller watching a
         // transaction stream would ever see it.
         assert_eq!(txn.trace(), "oor 2\n");
+    }
+
+    /// A block generation moves when a page of that texture is seated or
+    /// unseated, and **not** when a frame merely touches it — otherwise a cache
+    /// keyed on it re-uploads every block every frame and the stamp buys nothing.
+    #[test]
+    fn a_block_generation_moves_only_when_its_pages_do() {
+        let mut r = pool(8);
+        let a = r
+            .register_texture(full_pyramid(320, 192, 128, 4, true))
+            .unwrap();
+        let b = r
+            .register_texture(full_pyramid(256, 256, 128, 4, false))
+            .unwrap();
+        r.apply_wants(&[]);
+        let (g0, h0) = (r.generation(a).unwrap(), r.generation(b).unwrap());
+        assert_eq!(r.generation(VtTextureHandle(9)), None, "an unknown handle");
+
+        // An admit into `a` moves a's block and leaves b's alone.
+        let tile = TileCoord::new(0, 0, 0);
+        let txn = r.apply_wants(&[VtWant::new(a, tile)]);
+        assert_eq!(txn.admits.len(), 1);
+        assert!(!txn.is_empty(), "a transaction that admits is not empty");
+        assert_ne!(r.generation(a).unwrap(), g0);
+        assert_eq!(r.generation(b).unwrap(), h0, "b's pages did not move");
+
+        // Wanting what is already resident touches a slot and changes no block.
+        let g1 = r.generation(a).unwrap();
+        let txn = r.apply_wants(&[VtWant::new(a, tile)]);
+        assert!(txn.is_empty(), "nothing moved: {}", txn.trace());
+        assert_eq!(r.generation(a).unwrap(), g1, "a touch is not a change");
     }
 
     /// The stats line names every number it carries, and the clamp flag only
