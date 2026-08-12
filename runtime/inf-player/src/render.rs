@@ -29,10 +29,10 @@ use inf_ecs::components::{
 use inf_ecs::{Guid, Vec3d};
 use inf_math::FloatingOrigin;
 use inf_render::{
-    detect_tier, expand_nine_slice, expand_text, handle_from_guid, AtmosphereParams, BloomSettings,
-    CloudParams, EngineRenderer, GiSettings, GpuContext, HAlign, HeightFog, LightKind,
-    MeshInstance, NineSliceParams, PrebatchedRun, PrecipParams, PrimMesh, RenderChunk, RenderLight,
-    RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
+    detect_tier, expand_nine_slice, expand_text, handle_from_guid, AdapterCaps, AtmosphereParams,
+    BloomSettings, CloudParams, EngineRenderer, GiSettings, GpuContext, HAlign, HeightFog,
+    LightKind, MeshInstance, NineSliceParams, PrebatchedRun, PrecipParams, PrimMesh, RenderChunk,
+    RenderLight, RenderLight2D, RenderScene, RenderSettings, RenderTerrain, RenderTerrainLayer,
     RenderTerrainTile, RenderTilemap, RenderView, RenderWater, ScatterBatch, ScatterData,
     ScatterInstance, ShadowSettings, SkinnedInstance, SkyParams, SsaoSettings, SunParams,
     SurfaceChain, TerrainTileKey, TextParams, TilemapParams, VgeomAsset, VgeomInstance,
@@ -137,7 +137,16 @@ impl PlayerRenderHost {
             },
             ..base
         };
-        let settings = tier.apply(requested);
+        // BOTH gates, not just the tier — the pair `inf_render::detect_and_clamp`
+        // is, inlined only so the adapter is probed once here rather than a
+        // second time. The editor viewport has applied both since P18.1; this
+        // host applied the tier alone, which meant every *capability* clamp
+        // (`vgeom.occlusion`/`two_pass`, scatter, and P26.1's `vt.bc_tiles`) was
+        // granted in the shipped player on adapters that cannot run it, and
+        // clamped in the editor — two different renderers on one machine.
+        // `clamp_occlusion` only ever turns things off, so this can never grant
+        // the level's block more than it asked for.
+        let settings = AdapterCaps::probe(&gpu).clamp_occlusion(tier.apply(requested));
         let vgeom_enabled = settings.vgeom.enabled;
         renderer.set_settings(settings);
 

@@ -473,11 +473,23 @@ fn both_hosts_request_the_meshlet_path() {
             "the {label} never requests `vgeom.enabled = true`, so every imported \
              mesh it carries would draw through the classic fallback"
         );
-        // …and the clamp that can still take it away, so "requesting" never
-        // becomes "forcing" on an adapter that cannot run it.
+        // …and the clamps that can still take it away, so "requesting" never
+        // becomes "forcing" on an adapter that cannot run it. There are TWO of
+        // them and a host owes both: the tier clamp says how much GPU there is,
+        // the capability clamp says which features exist. The first spelling of
+        // this arm accepted either one, and the shipped player passed it while
+        // applying only the tier — so `vgeom.occlusion`, the scatter budget and
+        // P26.1's `vt.bc_tiles` were granted there on adapters that cannot run
+        // them, and clamped in the editor. Both are named now.
         assert!(
             src.contains(".apply(") || src.contains("detect_and_clamp"),
             "the {label} applies no tier clamp to its request"
+        );
+        assert!(
+            src.contains("clamp_occlusion") || src.contains("detect_and_clamp"),
+            "the {label} applies no adapter CAPABILITY clamp, so a feature the \
+             adapter does not expose stays switched on there and is switched off \
+             in the other host"
         );
     }
 }
