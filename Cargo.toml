@@ -353,7 +353,7 @@ inf-vgeom = { path = "crates/inf-vgeom" }
 inf-dcc = { path = "crates/inf-dcc" }
 # inf-vt = streaming virtual texturing's GPU-free half (P26.2): the virtual
 # address space, the physical page pool and its residency. Ring 0, and the
-# SHORTEST dependency list in the workspace — thiserror + tracing, nothing else,
+# SHORTEST dependency list in the workspace — thiserror, nothing else,
 # no wgpu and above all no `inf-material`. The direction is deliberate and
 # load-bearing: `inf-material` depends on THIS crate (it re-exports `TileCoord`),
 # which is what makes "the shipped player must not link an image decoder and a

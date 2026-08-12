@@ -146,6 +146,17 @@ fn assert_world(res: &VtResidency, shadow: &Shadow, what: &str) {
                     // for, not merely something resident.
                     assert!(brute.tile.mip >= at.mip);
                     assert_eq!(desc.ancestor(at, brute.tile.mip), Some(brute.tile));
+                    // **The premise that makes an evict cost nothing on the GPU**,
+                    // named rather than reasoned: no live entry addresses a slot
+                    // that is not holding a page. The mirror writes nothing when a
+                    // page leaves, so the day this stops being true a frame samples
+                    // an unreachable slot's stale texels.
+                    assert_eq!(
+                        res.slot_occupant(brute.slot),
+                        Some((VtTextureHandle(t), brute.tile)),
+                        "{what}: {at:?} resolves to slot {} and nothing lives there",
+                        brute.slot
+                    );
                 }
             }
         }
@@ -568,13 +579,21 @@ fn the_mandatory_floor_is_claimed_up_front() {
     assert_eq!(txn.admits.len(), 2);
 }
 
-/// The table image is a pure function of the residency state — so two residencies
-/// that took different *routes* to one state agree word for word.
+/// The table image is **reproducible**, and its *layout* is route-independent.
 ///
-/// (Their stamps do not, and must not be compared: that is the law in the crate
-/// docs, and the reason `VtTransaction` carries none.)
+/// The name this arm used to carry — "a function of the state, not of the
+/// history" — is not what it can assert, and pretending otherwise would be the
+/// P23 law again (a gate must aim at the thing it names). Slot assignment *is*
+/// residency state, and two routes to one resident tile SET can legitimately
+/// reach it holding different slots; the images then differ in the slot bits and
+/// both are right. So what is pinned is what the mirror actually depends on: the
+/// same script twice produces the same words (either route), and adding a texture
+/// is the only thing that moves the layout.
+///
+/// (Stamps do not agree between routes and must not be compared: that is the law
+/// in the crate docs, and the reason `VtTransaction` carries none.)
 #[test]
-fn the_table_image_is_a_function_of_the_state_not_of_the_history() {
+fn the_table_image_is_reproducible_and_its_layout_is_route_independent() {
     let target = [
         TileCoord::new(0, 0, 0),
         TileCoord::new(0, 2, 1),
@@ -607,15 +626,16 @@ fn the_table_image_is_a_function_of_the_state_not_of_the_history() {
     };
     // Both routes end with the target set resident; the detour also leaves other
     // pages cached, so the states are NOT identical and the images legitimately
-    // differ. What must hold is the property the mirror depends on: the direct
-    // route's image is reproducible, and every entry of either resolves.
+    // differ. Each route is reproducible on its own, and the layout — which is
+    // what `layout_rebuilt` promises the mirror — is the same either way.
     let a = build(false);
-    let b = build(false);
-    assert_eq!(a, b, "the same route twice gave two different images");
+    assert_eq!(a, build(false), "the direct route twice gave two images");
     let detoured = build(true);
-    assert_eq!(
-        detoured.len(),
-        a.len(),
-        "the layout is not history-dependent"
+    assert_eq!(detoured, build(true), "the detour twice gave two images");
+    assert_eq!(detoured.len(), a.len(), "the layout followed the route");
+    assert_ne!(
+        detoured, a,
+        "the two routes reached the same image, so this arm is comparing a \
+         constant and the reproducibility above proves nothing"
     );
 }

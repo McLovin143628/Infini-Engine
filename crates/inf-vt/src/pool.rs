@@ -11,6 +11,8 @@
 //! the cost: a v2 payload is **6.8× larger than v1 at 128² BC1**, 1.16× at 2048²,
 //! because eight of a small texture's nine levels are one 136² tile each.
 
+use crate::table::MAX_SLOT_INDEX;
+
 /// The page's storage format — **the pool's format, not the file's**.
 ///
 /// These are not the same quantity and the difference is the whole transcode
@@ -147,6 +149,16 @@ pub enum VtAdvisory {
          no slots and every texture registration will be refused"
     )]
     BudgetBelowOnePage { budget_bytes: u64, page_bytes: u64 },
+    #[error(
+        "the {budget_bytes} B page budget asks for {wanted_slots} pages and an indirection \
+         entry addresses {granted_slots}; a slot index is 16 bits. Raising `max_texture_dim` \
+         cannot help — this is the entry format, and lifting it is the multi-atlas follow-up"
+    )]
+    SlotIndexCapped {
+        wanted_slots: u64,
+        granted_slots: u32,
+        budget_bytes: u64,
+    },
 }
 
 /// Plan a pool: how many slots the budget buys and how they lay out.
@@ -177,6 +189,15 @@ pub enum VtAdvisory {
 /// until a measurement asks for them; until then a budget past that ceiling is
 /// *reported*, not silently applied, which is the difference between a documented
 /// bound and a mystery.
+///
+/// There is a **second** ceiling behind it, and it is the entry format rather
+/// than the adapter: an indirection entry carries its slot in 16 bits
+/// ([`MAX_SLOT_INDEX`]), so 65 536 slots is the limit however large a texture the
+/// device allows. It binds only past `max_texture_dim` 34 816, which nothing
+/// reports today — and it is enforced anyway, because `pack_entry` masks and the
+/// alternative is the 65 537th page aliasing onto the first in a release build.
+/// It gets its own advisory, since "raise `max_texture_dim`" is the wrong advice
+/// for it.
 pub fn plan_pool(cfg: VtPoolConfig) -> (VtPoolGeometry, Vec<VtAdvisory>) {
     let mut advisories = Vec::new();
     let stored = cfg.stored_tile_size.max(4);
@@ -203,14 +224,30 @@ pub fn plan_pool(cfg: VtPoolConfig) -> (VtPoolGeometry, Vec<VtAdvisory>) {
         );
     }
 
-    let ceiling = u64::from(per_side) * u64::from(per_side);
+    let atlas_ceiling = u64::from(per_side) * u64::from(per_side);
+    // The second ceiling, and it is not the atlas's: an indirection entry carries
+    // its slot in 16 bits, so 65 536 slots is the format's limit whatever the
+    // adapter allows. It binds past `max_texture_dim` 34 816 (256 × 136) and no
+    // adapter reports that today — which is exactly why it has to be enforced
+    // here rather than left as a remark, since `pack_entry` masks and the
+    // 65 537th page would alias onto the first, silently, in release.
+    let entry_ceiling = u64::from(MAX_SLOT_INDEX) + 1;
+    let ceiling = atlas_ceiling.min(entry_ceiling);
     let n = wanted.min(ceiling) as u32;
     if wanted > ceiling {
-        advisories.push(VtAdvisory::AtlasCapped {
-            wanted_slots: wanted,
-            granted_slots: n,
-            max_texture_dim: cfg.max_texture_dim,
-            budget_bytes: cfg.budget_bytes,
+        advisories.push(if atlas_ceiling <= entry_ceiling {
+            VtAdvisory::AtlasCapped {
+                wanted_slots: wanted,
+                granted_slots: n,
+                max_texture_dim: cfg.max_texture_dim,
+                budget_bytes: cfg.budget_bytes,
+            }
+        } else {
+            VtAdvisory::SlotIndexCapped {
+                wanted_slots: wanted,
+                granted_slots: n,
+                budget_bytes: cfg.budget_bytes,
+            }
         });
     }
 
@@ -351,6 +388,51 @@ mod tests {
         assert!(
             capped.to_string().contains("3600"),
             "the advisory says what was granted: {capped}"
+        );
+    }
+
+    /// **The entry format is a ceiling too**, and it is a different ceiling with
+    /// different advice, so it gets a different advisory.
+    ///
+    /// The bound is unreachable on every adapter that exists: `wgpu`'s largest
+    /// reported `max_texture_dimension_2d` is 32 768, which is 240 slots a side
+    /// and 57 600 slots — inside 16 bits with room. That is precisely why it is
+    /// enforced rather than remarked on: an unreachable ceiling is one nobody
+    /// notices being crossed, `pack_entry` masks, and the failure would be one
+    /// page reading another's texels in a release build only.
+    #[test]
+    fn the_sixteen_bit_slot_index_floors_the_pool_before_it_can_alias() {
+        let page = PageFormat::Bc1.page_bytes(136);
+        // The largest device anything reports: no advisory, and inside the field.
+        let (g, advisories) = plan_pool(VtPoolConfig {
+            budget_bytes: page * 57_600,
+            max_texture_dim: 32_768,
+            ..Default::default()
+        });
+        assert_eq!(g.slot_count(), 57_600, "240 × 240");
+        assert!(
+            g.slot_count() <= MAX_SLOT_INDEX,
+            "inside the entry's 16 bits"
+        );
+        assert_eq!(advisories, Vec::new(), "32 768² is not capped by anything");
+
+        // Past it, on a device that does not exist yet: floored at 65 536, named,
+        // and NOT blamed on the atlas.
+        let (g, advisories) = plan_pool(VtPoolConfig {
+            budget_bytes: page * 200_000,
+            max_texture_dim: 65_536,
+            ..Default::default()
+        });
+        assert_eq!(g.slot_count(), 65_536, "256 × 256, the whole 16-bit range");
+        assert_eq!(g.slots_x * g.stored_tile_size, 256 * 136);
+        let a = advisories.first().expect("the cap is named");
+        assert!(
+            matches!(a, VtAdvisory::SlotIndexCapped { .. }),
+            "the atlas held 231 361 slots — the entry format is what capped it: {a}"
+        );
+        assert!(
+            a.to_string().contains("16 bits") && !a.to_string().contains("atlas holds"),
+            "and the advice must not be `raise max_texture_dim`: {a}"
         );
     }
 

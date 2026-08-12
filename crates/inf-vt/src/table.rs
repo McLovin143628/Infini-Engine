@@ -139,8 +139,19 @@ pub const TABLE_MIP_REC_WORDS: usize = 4;
 /// The largest slot index a packed entry can carry (16 bits).
 ///
 /// Far above the 3 600 slots one 8 192² atlas holds, so it is headroom for the
-/// multi-atlas follow-up rather than a live constraint.
+/// multi-atlas follow-up rather than a live constraint — but it is a **ceiling**,
+/// not a comfort: [`pack_entry`] masks, so a slot index past it would alias onto
+/// another page silently. [`crate::plan_pool`] therefore floors the pool against
+/// it and says so, which is where the bound is enforced rather than assumed.
 pub const MAX_SLOT_INDEX: u32 = 0xFFFF;
+
+/// The mip field is 8 bits, and [`crate::MAX_VT_MIPS`] is what keeps it from
+/// overflowing — checked here rather than reasoned about in a doc comment,
+/// because the two constants live in different modules and the encoder masks.
+const _: () = assert!(
+    crate::address::MAX_VT_MIPS <= 0xFF,
+    "a packed entry carries the resolved mip in 8 bits"
+);
 
 /// One decoded indirection entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

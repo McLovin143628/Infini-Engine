@@ -13,5 +13,11 @@ publish = false
 # is load-bearing rather than frugal — see the crate docs. `inf-vt` names no
 # asset crate, no math crate and above all no `wgpu`: it is the bookkeeping half
 # of virtual texturing, unit-testable with no adapter on every CI leg.
+#
+# `tracing` is NOT here, and the P26.2 audit took it back out: nothing in this
+# crate logs. Every refusal is a typed `VtError`, every warning a returned
+# `VtAdvisory`, and every count a field of `VtStats` — the advisories are handed
+# back rather than logged precisely so a host decides whether they are a warning,
+# a fatal, or a line in an import report. A dependency nothing reaches for is
+# weight, and here it would also have been a claim the crate did not honour.
 thiserror = { workspace = true }
-tracing = { workspace = true }

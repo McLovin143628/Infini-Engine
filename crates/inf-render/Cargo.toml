@@ -24,7 +24,7 @@ inf-vgeom = { workspace = true }
 # Virtual texturing's GPU-free half (P26.2): the renderer's `vt` module is the
 # MIRROR — it owns one atlas texture and one indirection buffer and does nothing
 # but execute an `inf_vt::VtTransaction`. Ring 0 → Ring 0, and cheap: `inf-vt`
-# depends on thiserror + tracing and nothing else. Note which crate this is NOT:
+# depends on thiserror and nothing else. Note which crate this is NOT:
 # `inf-material` (the container that writes the tiles) is a DEV dependency
 # below, and `inf-vt` deliberately does not name it either, so binding VT into
 # the lit passes at P26.3 cannot drag `image` + `naga` into a shipped player.

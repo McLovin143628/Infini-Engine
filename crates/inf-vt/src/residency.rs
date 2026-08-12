@@ -205,7 +205,14 @@ pub struct VtStats {
 }
 
 impl VtStats {
-    /// A one-line human summary for the Output Log / a `stats` dump.
+    /// A one-line human summary — the same dump
+    /// `inf_terrain::TerrainStreamStats` and `inf_voxel` ship, in the same shape
+    /// so three streamers read alike in one log.
+    ///
+    /// **Ships before its caller**, deliberately: P26.5's residency heat-map and
+    /// pool-budget knobs are what read it, and the Output Log line beside them.
+    /// Pinned by [`tests::the_stats_line_says_what_it_counts`] meanwhile, so it
+    /// cannot rot into a string that names none of its numbers.
     pub fn summary(&self) -> String {
         format!(
             "vt residency: {} textures, {}/{} slots resident ({} pinned roots), \
@@ -960,5 +967,65 @@ mod tests {
         ]);
         assert_eq!(txn.out_of_range, 2, "an unknown handle is filtered earlier");
         assert!(txn.admits.is_empty());
+        // …and it reaches the trace, which is the only place a caller watching a
+        // transaction stream would ever see it.
+        assert_eq!(txn.trace(), "oor 2\n");
+    }
+
+    /// The stats line names every number it carries, and the clamp flag only
+    /// when it is set.
+    #[test]
+    fn the_stats_line_says_what_it_counts() {
+        let mut r = pool(4);
+        let h = r
+            .register_texture(full_pyramid(320, 192, 128, 4, true))
+            .unwrap();
+        r.apply_wants(&[]);
+        let quiet = r.stats().summary();
+        assert!(quiet.contains("vt residency"), "{quiet}");
+        assert!(quiet.contains("1/4 slots resident"), "{quiet}");
+        assert!(quiet.contains("1 pinned roots"), "{quiet}");
+        assert!(
+            !quiet.contains("budget-clamped"),
+            "nothing was clamped: {quiet}"
+        );
+
+        let wants: Vec<VtWant> = (0..3)
+            .flat_map(|x| (0..2).map(move |y| VtWant::new(h, TileCoord::new(0, x, y))))
+            .collect();
+        r.apply_wants(&wants);
+        let clamped = r.stats().summary();
+        assert!(clamped.contains("4/4 slots resident"), "{clamped}");
+        assert!(clamped.contains("6 wanted / 3 deferred"), "{clamped}");
+        assert!(clamped.contains("[budget-clamped]"), "{clamped}");
+    }
+
+    /// **The floor may fill the pool exactly**, and then the pool is all floor.
+    ///
+    /// `register_texture` refuses a floor *past* the slot count, so a floor equal
+    /// to it is admitted — the boundary, and the specified answer. What must not
+    /// happen is a panic when the next want finds nothing evictable: every slot is
+    /// pinned, so the want is deferred by the ordinary path and the number says so.
+    #[test]
+    fn a_pool_that_is_all_floor_defers_rather_than_panics() {
+        let mut r = pool(2);
+        let a = r
+            .register_texture(full_pyramid(320, 192, 128, 4, true))
+            .expect("one root");
+        r.register_texture(full_pyramid(256, 256, 128, 4, true))
+            .expect("the second root fills the pool exactly");
+        assert_eq!(r.stats().roots, 2);
+        assert_eq!(r.geometry().slot_count(), 2, "floor == budget, to the slot");
+        assert_eq!(r.apply_wants(&[]).admits.len(), 2);
+
+        let txn = r.apply_wants(&[VtWant::new(a, TileCoord::new(0, 0, 0))]);
+        assert!(txn.admits.is_empty() && txn.evicts.is_empty());
+        assert_eq!(txn.deferred, 1);
+        assert!(r.stats().budget_clamped);
+        // The law still holds with no cache at all: the address resolves, blurrily.
+        assert_eq!(
+            r.resolve(a, TileCoord::new(0, 0, 0)).map(|x| x.tile),
+            Some(TileCoord::new(8, 0, 0))
+        );
     }
 }
