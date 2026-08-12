@@ -823,6 +823,30 @@ impl MaterialContent {
         self.materials.is_empty()
     }
 
+    /// This content as the **registration door** takes it (P26.4): `.inf_mat`
+    /// GUID → its three texture GUIDs, in a `BTreeMap` because the walk order is
+    /// the residency.
+    ///
+    /// The conversion happens *here*, at the boundary, for the same reason the
+    /// derived-id salt is inverted here: `inf-render` names no asset crate (the
+    /// P26.2 inversion), so the registry speaks `u128`s and this is where an
+    /// `inf_asset::DerivedMaterial` becomes one.
+    pub fn vt_materials(&self) -> std::collections::BTreeMap<u128, inf_render::VtMaterialMaps> {
+        self.materials
+            .iter()
+            .map(|(mat, rec)| {
+                (
+                    mat.as_u128(),
+                    inf_render::VtMaterialMaps {
+                        albedo: rec.albedo.map(|t| t.uuid().as_u128()),
+                        normal: rec.normal.map(|t| t.uuid().as_u128()),
+                        orm: rec.orm.map(|t| t.uuid().as_u128()),
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// Every `.inf_tex` GUID the records name, deduplicated and in the fixed
     /// registration order: materials by GUID, then each record's albedo → normal
     /// → ORM.
@@ -830,20 +854,19 @@ impl MaterialContent {
     /// **The order is the residency trace.** `VtTextures::want_floor` is a pure
     /// function of the registration *sequence*, so a host that walked these in
     /// hash-map order would produce a different page set from one that walked
-    /// them sorted — on the same level, from the same pack. `BTreeMap` ordering
-    /// here is what makes "PIE == shipping" a property of the code.
+    /// them sorted — on the same level, from the same pack.
+    ///
+    /// **P26.4: it delegates.** The rule itself is
+    /// `inf_render::vt_library::registration_order`, in the crate BOTH hosts
+    /// link, because the editor projector needs the identical walk and a second
+    /// spelling of it here is exactly the drift the P26.3b audit measured one
+    /// level down (a `HashMap` iteration that produced two answers for one
+    /// level). This wrapper is the `Uuid` face of it and nothing more.
     pub fn registration_order(&self) -> Vec<uuid::Uuid> {
-        let sorted: std::collections::BTreeMap<_, _> = self.materials.iter().collect();
-        let mut out: Vec<uuid::Uuid> = Vec::new();
-        for rec in sorted.values() {
-            for tex in rec.texture_dependencies() {
-                let g = tex.uuid();
-                if !out.contains(&g) {
-                    out.push(g);
-                }
-            }
-        }
-        out
+        inf_render::registration_order(&self.vt_materials())
+            .into_iter()
+            .map(uuid::Uuid::from_u128)
+            .collect()
     }
 }
 

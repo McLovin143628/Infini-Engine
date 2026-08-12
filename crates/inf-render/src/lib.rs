@@ -91,6 +91,10 @@ pub use precip::{
 };
 pub use primitives::{PrimGpu, PrimMesh, PrimRange};
 pub use readback::{ReadbackRing, READBACK_LATENCY_FRAMES};
+// The P26.3 registration door + P26.4's one registration ORDER: both projectors
+// build a level's virtual textures through exactly these, so "PIE == shipping"
+// for texture residency is a property of the code rather than of two hosts
+// agreeing by inspection.
 pub use renderer::{
     EngineRenderer, ViewMode, AO_FORMAT, HDR_FORMAT, LDR_FORMAT, MASK_FORMAT, SCENE_FORMAT,
     SCENE_SAMPLES,
@@ -112,6 +116,10 @@ pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
     BloomSettings, GiSettings, RenderSettings, ScatterSettings, ShadowSettings, SsaoSettings,
     VgeomSettings, VirtualTextureSettings,
+};
+pub use vt_library::{
+    build_vt_level, registration_order, VtLevelReport, VtMaterialMaps, VtRefusal, VtTextures,
+    VtTileSource, VT_FLOOR_LEVELS,
 };
 pub use water::{
     camera_underwater, RenderWater, RiverFrame, RiverPath, RiverProfile, Underwater, WaterFrame,

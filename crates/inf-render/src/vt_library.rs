@@ -94,6 +94,68 @@ pub enum VtRefusal {
     /// The residency refused it — a geometry mismatch, or a mandatory floor that
     /// does not fit the budget.
     Residency(VtError),
+    /// The host could not produce bytes for a GUID a bound material names
+    /// (P26.4). Its own variant because it is the only one that is *not* about
+    /// the payload: the pack or the content root simply did not have it, which
+    /// is the state the cook's `dangling_material_refs` advisory warns about at
+    /// build time and this is what it looks like at run time.
+    NoBytes,
+}
+
+/// **The three texture GUIDs one material binds** — the shape both hosts hand
+/// the registry, and deliberately not `inf_asset::DerivedMaterial`.
+///
+/// `inf-render` names no asset crate (the whole P26.2 dependency inversion), so
+/// the record it registers from is three `Option<u128>`s and nothing else. The
+/// player converts a `DerivedMaterial` into one of these at the boundary; the
+/// editor converts a resolved `.inf_mat` into one at its own; and the *order*
+/// rule below is then written once, here, where both of them link it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VtMaterialMaps {
+    pub albedo: Option<u128>,
+    pub normal: Option<u128>,
+    pub orm: Option<u128>,
+}
+
+impl VtMaterialMaps {
+    /// The GUIDs this material names, in the **fixed slot order** albedo →
+    /// normal → ORM, with absent slots skipped rather than shifting the next
+    /// one into their place.
+    pub fn texture_guids(&self) -> impl Iterator<Item = u128> + '_ {
+        [self.albedo, self.normal, self.orm].into_iter().flatten()
+    }
+
+    /// Whether this material names any texture at all — `false` is the
+    /// scalars-only surface, the permanent no-texture path.
+    pub fn is_empty(&self) -> bool {
+        self.albedo.is_none() && self.normal.is_none() && self.orm.is_none()
+    }
+}
+
+/// **THE registration order.** Materials by GUID, then each one's albedo →
+/// normal → ORM, deduplicated, first sight wins.
+///
+/// One function, in the crate both hosts link, because the order *is* the
+/// residency: [`VtTextures::want_floor`] is a pure function of the registration
+/// **sequence**, so two hosts walking one level's materials in two orders page
+/// different tiles from the same pack — silently, and only under a pool small
+/// enough for the tail to be deferred. The P26.3 LAW says a *handle* is a
+/// per-registry index and may differ between hosts; it explicitly does not
+/// license the pages to.
+///
+/// A `BTreeMap` rather than a sorted `Vec` at the call site so the ordering is
+/// structural: the P26.3b audit's finding was a `HashMap` walk that produced two
+/// answers on two machines and looked correct in review.
+pub fn registration_order(materials: &BTreeMap<u128, VtMaterialMaps>) -> Vec<u128> {
+    let mut out: Vec<u128> = Vec::new();
+    for maps in materials.values() {
+        for tex in maps.texture_guids() {
+            if !out.contains(&tex) {
+                out.push(tex);
+            }
+        }
+    }
+    out
 }
 
 /// The registry: every virtual texture this level has, and the residency behind
@@ -109,6 +171,10 @@ pub struct VtTextures {
     /// `Rgba8` and every fetch transcodes through the same door.
     pool_format: PageFormat,
     refusals: Vec<(u128, VtRefusal)>,
+    /// `.inf_mat` GUID → its three maps, for [`VtTextures::set_for_material`].
+    /// A `BTreeMap` because [`registration_order`] walks it and the walk order is
+    /// the residency.
+    materials: BTreeMap<u128, VtMaterialMaps>,
 }
 
 impl VtTextures {
@@ -126,6 +192,7 @@ impl VtTextures {
                 readers: Vec::new(),
                 pool_format: cfg.format,
                 refusals: Vec::new(),
+                materials: BTreeMap::new(),
             },
             advisories,
         )
@@ -188,6 +255,73 @@ impl VtTextures {
                 None
             }
         }
+    }
+
+    /// **Register a whole level's material content, in the one order** (P26.4).
+    ///
+    /// This is the door the P26.3b ledger named as the missing glue: *"both
+    /// projectors still fill `vt: Default::default()` and no non-test code calls
+    /// `VtTextures::register`"*. `materials` is what the level BINDS —
+    /// `Material.asset` → a flattened record — not what its pack happens to
+    /// hold, which is the distinction that audit measured (an imported `.inf_mesh`
+    /// drags its own materials into the closure through sidecar edges, and one
+    /// extra material moves every page after it).
+    ///
+    /// `fetch` resolves a texture GUID to its `.inf_tex` v2 bytes: a slice of a
+    /// pack mmap on one host, a file read on the other. A GUID it cannot serve is
+    /// **counted as a refusal** rather than skipped, so "the level is textureless"
+    /// and "the level's textures did not load" are different observable states.
+    ///
+    /// Returns how many textures were registered (existing ones included — the
+    /// registration is idempotent by GUID).
+    pub fn register_materials(
+        &mut self,
+        materials: &BTreeMap<u128, VtMaterialMaps>,
+        mut fetch: impl FnMut(u128) -> Option<Arc<dyn VtTileSource>>,
+    ) -> usize {
+        let mut registered = 0usize;
+        for guid in registration_order(materials) {
+            if self.by_guid.contains_key(&guid) {
+                registered += 1;
+                continue;
+            }
+            match fetch(guid) {
+                Some(bytes) => {
+                    if self.register_or_record(guid, bytes).is_some() {
+                        registered += 1;
+                    }
+                }
+                None => self.refusals.push((guid, VtRefusal::NoBytes)),
+            }
+        }
+        for (mat, maps) in materials {
+            self.materials.insert(*mat, *maps);
+        }
+        registered
+    }
+
+    /// **The per-instance set for a surface bound to `material`.**
+    ///
+    /// The projector's whole job, once [`register_materials`](Self::register_materials)
+    /// has run: an entity's `Material.asset` is a `.inf_mat` GUID, and this is
+    /// what its `MeshInstance::vt` becomes. A material this registry never saw —
+    /// an unresolvable binding, a pre-v22 level, a `None` — is
+    /// [`VtTextureSet::NONE`], which is the scalar surface and is exactly what
+    /// the same entity rendered as before P26.
+    ///
+    /// Routed through [`set_for`](Self::set_for) rather than reimplementing it,
+    /// so the warm gate is not written twice.
+    pub fn set_for_material(&self, material: u128) -> VtTextureSet {
+        match self.materials.get(&material) {
+            Some(m) => self.set_for(m.albedo, m.normal, m.orm),
+            None => VtTextureSet::NONE,
+        }
+    }
+
+    /// The materials this registry was built from, in GUID order.
+    #[inline]
+    pub fn materials(&self) -> &BTreeMap<u128, VtMaterialMaps> {
+        &self.materials
     }
 
     /// Payloads that did not become virtual textures, in the order they were
@@ -315,6 +449,126 @@ impl VtTextures {
     }
 }
 
+/// What building a level's virtual-texture surface produced — everything a host
+/// wants to log or a gate wants to assert, so neither has to reach inside.
+#[derive(Debug, Clone, Default)]
+pub struct VtLevelReport {
+    /// Textures registered.
+    pub textures: usize,
+    /// GUIDs a bound material named that did not become a virtual texture.
+    pub refused: usize,
+    /// The page format the pool took.
+    pub pool_format: Option<PageFormat>,
+    /// Advisories the pool planner raised (`inf-vt` returns rather than logs).
+    pub advisories: Vec<VtAdvisory>,
+}
+
+/// **Build a level's virtual-texture registry and its GPU mirror** — the one
+/// call both projectors make (P26.4, clause 0).
+///
+/// `None` when the level binds no material with any texture at all. That is not
+/// a failure and it is not a branch a host has to remember: a `None` pool means
+/// `EngineRenderer` binds the empty VT surface, `vt_active()` is false in every
+/// lit shader, and the command stream is the one all 50 goldens recorded. The
+/// textureless path stays *structural*.
+///
+/// # One pool holds one page size
+///
+/// A slot is one fixed size for every tile of every texture (P26.1's uniform
+/// page), so a pool that is BC1 cannot hold a BC3 tile — the fetch would be the
+/// wrong length, `VtPools::apply` would report it missing and write a black
+/// page, and the surface would be silently wrong. So the format is decided here,
+/// once, from what the level actually stores:
+///
+/// * the adapter has no BC (`vt.bc_tiles` clamped off) → **RGBA8**, every tile
+///   transcoded through `tile_rgba8` — the P26.1 fallback tier, unchanged;
+/// * every bound texture stores the same BC format → **that** format, and a tile
+///   uploads exactly as it lies in the mmap;
+/// * the level **mixes** formats (a BC1 albedo and a BC3 mask, which an importer
+///   writes routinely — BC3 is chosen per texture by whether it has alpha) →
+///   **RGBA8**, because that is the one format every container can transcode
+///   into. It costs 8×/4× the page bytes and it is the honest answer: the
+///   alternative is refusing half a level's textures at registration.
+///
+/// The mixed case is reported through [`VtLevelReport::pool_format`] rather than
+/// only inferred, because it is a real cost a project can avoid by importing its
+/// masks the same way.
+pub fn build_vt_level(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    settings: &crate::settings::RenderSettings,
+    budget_bytes: u64,
+    materials: &BTreeMap<u128, VtMaterialMaps>,
+    mut fetch: impl FnMut(u128) -> Option<Arc<dyn VtTileSource>>,
+) -> Option<(VtTextures, VtPools, VtLevelReport)> {
+    // Resolve once, in the registration order, so `fetch` is called exactly once
+    // per GUID and the bytes are held for the pool-format decision AND the
+    // registration that follows it.
+    let resolved: Vec<(u128, Option<Arc<dyn VtTileSource>>)> = registration_order(materials)
+        .into_iter()
+        .map(|g| (g, fetch(g)))
+        .collect();
+    if resolved.is_empty() {
+        return None;
+    }
+
+    // The stored formats present, in registration order. A payload that does not
+    // parse contributes nothing here and is refused by name a moment later.
+    let mut stored: Option<PageFormat> = None;
+    let mut mixed = false;
+    for (_, bytes) in &resolved {
+        let Some(b) = bytes else { continue };
+        let Some(f) = inf_vt::stored_page_format(b.payload()) else {
+            continue;
+        };
+        match stored {
+            None => stored = Some(f),
+            Some(s) if s != f => mixed = true,
+            Some(_) => {}
+        }
+    }
+    let pool_format = match stored {
+        Some(f) if !mixed => crate::vt::pool_format(settings, f),
+        // Mixed, or nothing parsed: RGBA8 is the format every container
+        // transcodes into, so it is the total answer.
+        _ => PageFormat::Rgba8,
+    };
+
+    let (mut lib, advisories) = VtTextures::new(VtPoolConfig {
+        format: pool_format,
+        stored_tile_size: inf_vt::STORED_TILE_SIZE,
+        budget_bytes,
+        max_texture_dim: device.limits().max_texture_dimension_2d,
+    });
+    let mut by_guid: BTreeMap<u128, Arc<dyn VtTileSource>> = BTreeMap::new();
+    for (g, bytes) in resolved {
+        if let Some(b) = bytes {
+            by_guid.insert(g, b);
+        }
+    }
+    let textures = lib.register_materials(materials, |g| by_guid.get(&g).cloned());
+    if lib.is_empty() {
+        // Every bound texture was refused. The report is lost with the registry,
+        // so it is logged here — this is the shape of "a project that predates
+        // P26.1 has v1 `.inf_tex` payloads", which the cook already advises about
+        // and which renders as a perfectly ordinary untextured level.
+        tracing::warn!(
+            "inf-render: {} bound texture(s) did not become virtual textures; every \
+             surface renders off its scalar attributes",
+            lib.refusals().len()
+        );
+        return None;
+    }
+    let pools = VtPools::new(device, queue, lib.residency(), false);
+    let report = VtLevelReport {
+        textures,
+        refused: lib.refusals().len(),
+        pool_format: Some(pool_format),
+        advisories,
+    };
+    Some((lib, pools, report))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,6 +690,161 @@ mod tests {
         assert_eq!(lib.refusals().len(), 1);
         assert_eq!(lib.refusals()[0].0, 1);
         assert!(lib.is_empty());
+    }
+
+    // ── the registration door (P26.4, clause 0) ─────────────────────────────
+
+    fn maps(a: Option<u128>, n: Option<u128>, o: Option<u128>) -> VtMaterialMaps {
+        VtMaterialMaps {
+            albedo: a,
+            normal: n,
+            orm: o,
+        }
+    }
+
+    /// **The registration order is a function of the SET**, not of how the
+    /// caller assembled it: materials by GUID, then albedo → normal → ORM, with
+    /// an absent slot skipped rather than shifting the next one into its place.
+    ///
+    /// The P26.3b audit found this defect in the player's copy of the walk (a
+    /// `HashMap` iteration, which is seeded per map and therefore genuinely
+    /// differs between two builds of the same content). Moving the rule here is
+    /// what stops the editor growing a second copy of it, so the rule itself is
+    /// pinned here rather than only at the two call sites.
+    #[test]
+    fn the_registration_order_is_materials_then_fixed_slots() {
+        let mut m = BTreeMap::new();
+        // Inserted back to front, and with a hole in the middle slot.
+        m.insert(30u128, maps(Some(300), None, Some(301)));
+        m.insert(10, maps(Some(100), Some(101), Some(102)));
+        m.insert(20, maps(None, None, Some(200)));
+        assert_eq!(
+            registration_order(&m),
+            vec![100, 101, 102, 200, 300, 301],
+            "the order is not (material GUID, albedo, normal, ORM)"
+        );
+
+        // A texture two materials share registers ONCE, at first sight.
+        let mut shared = BTreeMap::new();
+        shared.insert(2u128, maps(Some(9), None, None));
+        shared.insert(1, maps(Some(9), Some(8), None));
+        assert_eq!(registration_order(&shared), vec![9, 8]);
+
+        // Anti-vacuity: the answer is not the insertion order, so the equality
+        // above is a statement about the rule and not about a constant.
+        let mut reversed: Vec<u128> = registration_order(&m);
+        reversed.reverse();
+        assert_ne!(registration_order(&m), reversed);
+    }
+
+    /// **The door registers what the level BINDS, in that order, and counts what
+    /// it could not fetch** — the P26.3b remainder, closed.
+    #[test]
+    fn register_materials_walks_the_order_and_names_what_it_could_not_fetch() {
+        let (mut lib, _) = VtTextures::new(cfg());
+        let mut m = BTreeMap::new();
+        m.insert(2u128, maps(Some(70), None, None));
+        m.insert(1, maps(Some(50), Some(60), None));
+        // GUID 60 is bound and unavailable — a dangling `.inf_tex`, which is the
+        // state the cook's advisory warns about at build time.
+        let bytes: BTreeMap<u128, Vec<u8>> =
+            [(50u128, tiled(64, 64, true)), (70, tiled(32, 32, false))]
+                .into_iter()
+                .collect();
+        let n = lib.register_materials(&m, |g| {
+            bytes
+                .get(&g)
+                .cloned()
+                .map(|b| Arc::new(b) as Arc<dyn VtTileSource>)
+        });
+
+        assert_eq!(n, 2);
+        assert_eq!(lib.len(), 2);
+        // Handles follow the registration order — material 1's albedo first.
+        assert_eq!(lib.handle(50).map(|h| h.0), Some(0));
+        assert_eq!(lib.handle(70).map(|h| h.0), Some(1));
+        assert_eq!(lib.handle(60), None);
+        assert_eq!(
+            lib.refusals(),
+            &[(60u128, VtRefusal::NoBytes)],
+            "a bound texture the host could not serve was skipped in silence"
+        );
+
+        // The per-instance sets come out of the same registry: warm first (the
+        // transaction that carries the root pages), then the sets are real.
+        assert!(
+            lib.set_for_material(1).is_none(),
+            "a cold registry must not name a texture"
+        );
+        let _ = lib.residency_mut().apply_wants(&[]);
+        assert_eq!(
+            lib.set_for_material(1),
+            VtTextureSet {
+                albedo: 1,
+                normal: 0,
+                orm: 0
+            },
+            "the bound albedo is handle 0 + 1, and the unfetchable normal is 0"
+        );
+        assert_eq!(
+            lib.set_for_material(2),
+            VtTextureSet {
+                albedo: 2,
+                normal: 0,
+                orm: 0
+            }
+        );
+        // A material this registry never saw is the SCALAR surface, not a panic
+        // and not another material's textures.
+        assert_eq!(lib.set_for_material(999), VtTextureSet::NONE);
+    }
+
+    /// Two hosts that resolve one level's materials **in different orders** page
+    /// the same tiles, because the door sorts rather than trusting its caller.
+    ///
+    /// The P26.3 handle LAW says the two hosts mint different handles and compare
+    /// by GUID; it does not license them to page different sets. This is the
+    /// property that makes the two claims consistent, asserted on the want floor
+    /// projected back onto GUIDs.
+    #[test]
+    fn two_hosts_registering_in_opposite_orders_page_the_same_tiles() {
+        let build = |rev: bool| {
+            let (mut lib, _) = VtTextures::new(cfg());
+            let mut m = BTreeMap::new();
+            let mut ids: Vec<u128> = (0..4).collect();
+            if rev {
+                ids.reverse();
+            }
+            for i in ids {
+                m.insert(10 + i, maps(Some(100 + i), None, None));
+            }
+            let n = lib.register_materials(&m, |g| {
+                Some(Arc::new(tiled(64 + (g % 4) as u32 * 32, 64, true)) as Arc<dyn VtTileSource>)
+            });
+            assert_eq!(n, 4);
+            lib
+        };
+        let (a, b) = (build(false), build(true));
+        // The floor is a sequence of (handle, tile); projected back onto GUIDs it
+        // must be the same sequence on both sides.
+        let guids = |lib: &VtTextures| -> Vec<(u128, inf_vt::TileCoord)> {
+            lib.want_floor()
+                .into_iter()
+                .map(|w| {
+                    let g = *lib
+                        .materials()
+                        .values()
+                        .flat_map(|m| m.texture_guids())
+                        .collect::<Vec<_>>()
+                        .iter()
+                        .find(|g| lib.handle(**g) == Some(w.texture))
+                        .expect("every floor want names a registered texture");
+                    (g, w.tile)
+                })
+                .collect()
+        };
+        assert_eq!(guids(&a), guids(&b));
+        assert!(!guids(&a).is_empty(), "the floor wanted nothing");
     }
 
     /// A real v2 container of `w × h`, built by the one writer.
