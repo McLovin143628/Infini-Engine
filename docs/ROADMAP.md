@@ -9292,7 +9292,14 @@ door for editor viewport, PIE and shipping.
 >   seven pyramids **with mip 1 resident and mip 0 not** — the residency the class
 >   needs, since a roots-only pool clamps the disagreement out of existence — plus a
 >   comment-stripped source gate over the WGSL. Mutation-verified: one mutation each
->   fails exactly one arm.
+>   fails exactly one arm. **The batch's claim that this "runs the correct walk on the
+>   GPU" is not what happens** and the bound is worth stating: the twin is CPU, the
+>   WGSL is pinned to the twin's spelling by the source gate, and no test executes the
+>   WGSL tile-tree loop with a non-zero trip count on a GPU (the lit-pixel arms below
+>   make the whole pyramid resident, so `got == m` and the loop body never runs). A
+>   fallback-residency GPU arm — floor-only, every address resolving several levels up
+>   — is the missing leg, and it belongs with P26.4's feedback, which is what makes
+>   partial residency the normal case rather than a contrivance.
 > * **sRGB is decoded in the shader**, from the flag already in the table's texture
 >   header, so the atlas stays linear and `VT_BINDING_COUNT` stays at three. Two pools
 >   (3 → 6 bindings) and a `view_formats` reinterpretation (4 bindings, and the shader
