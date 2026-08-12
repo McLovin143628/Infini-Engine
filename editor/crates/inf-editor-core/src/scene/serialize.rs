@@ -5593,6 +5593,26 @@ pub struct Sidecar {
     pub entity_count: u32,
     /// xxh3 of the bincode payload — a cheap integrity + change signal.
     pub content_hash: String,
+    /// **Every asset GUID this level binds** (P26.4), sorted and deduplicated.
+    ///
+    /// A level's sidecar is not an `inf_asset::AssetSidecar` — it has its own
+    /// schema, written here — so `AssetDb` has always synthesized one for a
+    /// `.inf_lvl` and every level has therefore been an asset with **no outgoing
+    /// edges**. That made `has_referrers` — the delete-with-references guard —
+    /// blind to level → material, level → mesh, level → terrain and level →
+    /// cloth all at once: deleting a `.inf_mat` a level binds warned about
+    /// nothing. P26.4 is what makes that deletion visible, because the bound
+    /// surface loses its maps.
+    ///
+    /// `AssetDb::read_entry` reads this by KEY out of the raw TOML when it
+    /// cannot parse the file as its own sidecar, so `inf-asset` learns nothing
+    /// about levels — any payload whose sidecar declares a `dependencies` array
+    /// gets those edges.
+    ///
+    /// `#[serde(default)]` so every committed `.inf_lvl.toml` written before
+    /// this still loads; the field appears the next time the level is saved.
+    #[serde(default)]
+    pub dependencies: Vec<Uuid>,
 }
 
 fn bincode_config() -> impl bincode::config::Config {
@@ -6188,7 +6208,56 @@ pub fn sidecar(doc: &SceneDoc, guid: Uuid, payload: &[u8]) -> Sidecar {
         title: doc.title().to_string(),
         entity_count: doc.order().len() as u32,
         content_hash: hash_hex(payload),
+        dependencies: level_dependencies(doc),
     }
+}
+
+/// **Every asset GUID `doc` binds**, sorted and deduplicated (P26.4) — the
+/// level's outgoing dependency edges.
+///
+/// It is an **enumeration**, and it says so: one arm per component that carries
+/// an `Option<Uuid>` asset binding today. A component that grows one and is not
+/// added here contributes no edge, exactly as every component did before this
+/// function existed — so the failure mode of forgetting is the status quo ante
+/// rather than a wrong answer, and `the_level_sidecar_records_what_it_binds`
+/// pins the edge P26.4 needs (level → material) against a real save.
+///
+/// Deliberately NOT transitive: a level names its `.inf_mat`, and the
+/// material's own sidecar names its `.inf_tex`es. `AssetDb` composes the two —
+/// which is the whole reason the graph is a graph.
+pub fn level_dependencies(doc: &SceneDoc) -> Vec<Uuid> {
+    use inf_ecs::components as c;
+    let world = doc.world();
+    let w = world.world();
+    let mut out: std::collections::BTreeSet<Uuid> = std::collections::BTreeSet::new();
+    let mut add = |id: Option<Uuid>| {
+        if let Some(id) = id.filter(|u| !u.is_nil()) {
+            out.insert(id);
+        }
+    };
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        add(w.get::<c::MeshRef>(e).and_then(|x| x.asset));
+        add(w.get::<c::Material>(e).and_then(|x| x.asset));
+        add(w.get::<c::Sprite>(e).and_then(|x| x.texture));
+        add(w.get::<c::Tilemap>(e).and_then(|x| x.texture));
+        add(w.get::<c::NineSlice>(e).and_then(|x| x.texture));
+        add(w.get::<c::Text2D>(e).and_then(|x| x.font_texture));
+        add(w.get::<c::Terrain>(e).and_then(|x| x.asset));
+        add(w.get::<c::Terrain>(e).and_then(|x| x.biome_set));
+        add(w.get::<c::PcgVolume>(e).and_then(|x| x.graph));
+        add(w.get::<c::SkeletalMesh>(e).and_then(|x| x.mesh));
+        add(w.get::<c::SkeletalMesh>(e).and_then(|x| x.skeleton));
+        add(w.get::<c::AnimPlayer>(e).and_then(|x| x.clip));
+        add(w.get::<c::AnimStateMachine>(e).and_then(|x| x.sm));
+        add(w.get::<c::AudioSource>(e).and_then(|x| x.clip));
+        add(w.get::<c::VoxelVolume>(e).and_then(|x| x.asset));
+        add(w.get::<c::ClothSim>(e).and_then(|x| x.asset));
+        add(w.get::<c::HairGuides>(e).and_then(|x| x.asset));
+    }
+    out.into_iter().collect()
 }
 
 /// The sidecar path for a `.inf_lvl` payload path (`foo.inf_lvl` →

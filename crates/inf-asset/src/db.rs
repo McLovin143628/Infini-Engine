@@ -300,8 +300,36 @@ fn read_entry(path: &Path) -> Result<Option<AssetEntry>> {
             // content hash so a missing sidecar doesn't churn ids across scans.
             let bytes = std::fs::read(path)?;
             let hash = ContentHash::of(&bytes);
-            let guid = AssetId(uuid::Uuid::from_u128(hash.0));
-            AssetSidecar::new(guid, kind, hash)
+            let declared = declared_sidecar(path);
+            // A sidecar this crate cannot parse may still name the asset's own
+            // GUID, and a `.inf_lvl`'s does. Honouring it is not a nicety: the
+            // content-hash fallback below makes a level's asset id **churn with
+            // its contents**, so every save re-registers the level under a new id
+            // and every edge into it goes stale. Same key-not-schema reading as
+            // the dependencies below.
+            let guid = declared
+                .0
+                .unwrap_or_else(|| AssetId(uuid::Uuid::from_u128(hash.0)));
+            let mut side = AssetSidecar::new(guid, kind, hash);
+            // …but a sidecar this crate cannot parse may still DECLARE its edges,
+            // and a `.inf_lvl`'s does (P26.4).
+            //
+            // A level's sidecar is written by `inf_editor_core::scene::serialize`
+            // to its own schema — title, entity count, a 64-bit content hash —
+            // so it has never parsed as an `AssetSidecar` and every level has
+            // therefore been an asset with **no outgoing edges**. Which made
+            // `has_referrers` blind to level → material, level → mesh, level →
+            // terrain and level → cloth all at once: deleting a `.inf_mat` a
+            // level binds warned about nothing, and P26.4 is what makes that
+            // deletion visible (the surface loses its maps).
+            //
+            // Read as a TOML *key* rather than as a scene concept, so this crate
+            // learns nothing about levels: any payload whose sidecar carries a
+            // `dependencies` array of GUID strings gets those edges, whatever
+            // else that file is.
+            side.dependencies = declared.1;
+            side.normalize();
+            side
         }
     };
     Ok(Some(AssetEntry {
@@ -309,6 +337,31 @@ fn read_entry(path: &Path) -> Result<Option<AssetEntry>> {
         path: normalize(path),
         name,
     }))
+}
+
+/// What a sidecar this crate could **not** parse as an [`AssetSidecar`] still
+/// declares: its `guid`, and its `dependencies` (P26.4).
+///
+/// Deliberately schema-blind — it parses the file as a generic TOML table and
+/// reads two keys, so `inf-asset` learns nothing about the schemas other crates
+/// write. A malformed entry is skipped rather than failing the scan: a sidecar
+/// that already failed to parse once has earned no more trust than "take what is
+/// legible from it".
+fn declared_sidecar(payload_path: &Path) -> (Option<AssetId>, Vec<AssetId>) {
+    let Ok(text) = std::fs::read_to_string(crate::sidecar::sidecar_path(payload_path)) else {
+        return (None, Vec::new());
+    };
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return (None, Vec::new());
+    };
+    let id = |v: &toml::Value| v.as_str().and_then(|s| uuid::Uuid::parse_str(s).ok());
+    let guid = table.get("guid").and_then(id).map(AssetId);
+    let deps = table
+        .get("dependencies")
+        .and_then(|v| v.as_array())
+        .map(|l| l.iter().filter_map(id).map(AssetId).collect())
+        .unwrap_or_default();
+    (guid, deps)
 }
 
 /// Normalize a path for use as a map key: canonicalize when the file exists

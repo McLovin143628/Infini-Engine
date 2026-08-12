@@ -1136,3 +1136,113 @@ fn every_silent_material_hazard_raises_its_advisory() {
          the surface is textureless: {v1:?}"
     );
 }
+
+// ── (g) the level's own dependency edges ────────────────────────────────────
+
+/// **A level's sidecar records what it binds, and `has_referrers` sees it**
+/// (P26.4) — the P26.3b remainder: *"Level sidecars carry no `dependencies`, so
+/// `AssetDb::has_referrers` — the delete-with-refs guard — does not know the
+/// level→material edge … deleting a bound texture warns and deleting a bound
+/// material does not."*
+///
+/// The consequence P26.4 creates is what makes it worth closing now: before this
+/// batch a deleted `.inf_mat` cost a level nothing visible, because nothing
+/// sampled a material. Now the surface loses its maps, and the author gets no
+/// warning at the moment they can still say no.
+///
+/// Asserted through a REAL save and a REAL scan, because the two halves live in
+/// two crates that have never agreed about this file: the writer is
+/// `inf_editor_core::scene::serialize` and the reader is `inf_asset::AssetDb`,
+/// which cannot parse a level sidecar as its own and therefore reads the
+/// `dependencies` key out of the raw TOML.
+#[test]
+fn a_levels_sidecar_records_its_bindings_and_the_delete_guard_sees_them() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (proj, doc) = scaffold(tmp.path(), true);
+    let content = proj.join("Content");
+
+    // Re-save the level through the shipped writer so the sidecar this batch
+    // added is the one on disk.
+    let level_path = content.join("Wire.inf_lvl");
+    let enc = serialize::encode_scene(&doc, Some(LEVEL)).expect("encode");
+    std::fs::write(&level_path, &enc.payload).expect("write payload");
+    std::fs::write(format!("{}.toml", level_path.display()), &enc.sidecar_toml)
+        .expect("write sidecar");
+
+    // The bindings the fixture actually has: the bound material, the decor mesh,
+    // the cloth and the hair. NOT the textures — a level names its material and
+    // the material names its maps, and composing the two is what the graph is
+    // for.
+    let side: serialize::Sidecar = toml::from_str(&enc.sidecar_toml).expect("parse sidecar");
+    for (label, id) in [
+        ("the bound material", MAT),
+        ("the mesh", DECOR_MESH),
+        ("the garment", CLOTH),
+        ("the hairstyle", HAIR),
+    ] {
+        assert!(
+            side.dependencies.contains(&id),
+            "{label} is not in the level's dependencies: {:?}",
+            side.dependencies
+        );
+    }
+    assert!(
+        !side.dependencies.contains(&ALBEDO),
+        "the level named a texture directly — the edge must go through the \
+         material, or one level's sidecar becomes a transitive closure"
+    );
+    let mut sorted = side.dependencies.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        sorted, side.dependencies,
+        "the list is not sorted + deduped"
+    );
+
+    // …and the asset database reads them, so the delete guard fires.
+    let mut db = inf_asset::AssetDb::new(&content);
+    db.scan().expect("scan");
+    assert!(
+        db.has_referrers(AssetId(MAT)),
+        "deleting the bound .inf_mat would warn about nothing"
+    );
+    assert!(
+        db.referenced_by(AssetId(MAT))
+            .iter()
+            .any(|r| r.uuid() == LEVEL),
+        "the referrer is not the level"
+    );
+    // A material's OWN edges still work (they always did), so this arm is not
+    // measuring a database that thinks everything is referenced — and the pair
+    // is the point: `DECOR_TEX` is referenced through a real sidecar edge the
+    // importer writes, `MAT` through the level edge this batch added.
+    assert!(db.has_referrers(AssetId(DECOR_TEX)));
+    // …and a texture nothing declares an edge to is still unreferenced, so
+    // `has_referrers` has not become "true for everything".
+    assert!(
+        !db.has_referrers(AssetId(ALBEDO)),
+        "the fixture's Wall.inf_mat declares no sidecar dependencies, so its albedo must have no referrer; if it does, this arm is measuring a database that says yes to everything"
+    );
+
+    // ANTI-VACUITY: the unbound level does NOT refer to the material, so the
+    // assertion above is about the binding and not about the scan.
+    let bare = tempfile::tempdir().expect("tempdir");
+    let (bare_proj, bare_doc) = scaffold(bare.path(), false);
+    let bare_content = bare_proj.join("Content");
+    let bare_enc = serialize::encode_scene(&bare_doc, Some(LEVEL)).expect("encode");
+    std::fs::write(bare_content.join("Wire.inf_lvl"), &bare_enc.payload).unwrap();
+    std::fs::write(
+        format!("{}.toml", bare_content.join("Wire.inf_lvl").display()),
+        &bare_enc.sidecar_toml,
+    )
+    .unwrap();
+    let mut bare_db = inf_asset::AssetDb::new(&bare_content);
+    bare_db.scan().expect("scan");
+    assert!(
+        !bare_db
+            .referenced_by(AssetId(MAT))
+            .iter()
+            .any(|r| r.uuid() == LEVEL),
+        "an unbound level still refers to the material"
+    );
+}
