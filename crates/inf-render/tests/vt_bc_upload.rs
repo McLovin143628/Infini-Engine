@@ -38,7 +38,7 @@
 //! Skips cleanly, and says so, when the machine has no adapter at all.
 
 use inf_material::tiles::{TiledTextureImage, STORED_TILE_SIZE};
-use inf_material::{TextureCompression, TextureFormat, TextureImportSettings};
+use inf_material::{TextureCompression, TextureImportSettings};
 use inf_render::{caps::AdapterCaps, GpuContext};
 
 fn gpu_or_skip(what: &str) -> Option<GpuContext> {
@@ -100,8 +100,13 @@ fn container(compression: TextureCompression) -> TiledTextureImage {
 /// and `inf_render::vt::page_format` is the mapping. This is the call, not a
 /// second spelling of it: two matches over six format pairs are two things to
 /// keep in step, and the one in a test is the one that would drift unnoticed.
-fn page_format(stored: TextureFormat, srgb: bool) -> wgpu::TextureFormat {
-    inf_render::vt::page_format(stored.into(), srgb)
+///
+/// P26.3 note: the container's header now carries an `inf_vt::PageFormat`
+/// directly (the reader moved into `inf-vt`, which knows no `TextureFormat`), so
+/// this takes what the header holds and the `.into()` that used to sit here is
+/// gone rather than moved.
+fn page_format(stored: inf_vt::PageFormat, srgb: bool) -> wgpu::TextureFormat {
+    inf_render::vt::page_format(stored, srgb)
 }
 
 /// Upload `bytes` as one `size × size` texture of `format` and read them back.
@@ -272,7 +277,7 @@ fn one_tile_uploads_and_reads_back_byte_for_byte() {
             // The documented fallback: the SAME tile, transcoded on the CPU,
             // through the SAME call below.
             (
-                page_format(TextureFormat::Rgba8, r.header().srgb),
+                page_format(inf_vt::PageFormat::Rgba8, r.header().srgb),
                 r.tile_rgba8(0, 2, 1).expect("the tile transcodes"),
             )
         };

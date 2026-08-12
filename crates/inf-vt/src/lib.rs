@@ -26,10 +26,20 @@
 //!
 //! What crosses the seam instead is bytes and geometry: the container hands a
 //! residency its [`VtTextureDesc`](address::VtTextureDesc) (through
-//! `TiledTextureReader::vt_desc`), and the caller hands the GPU mirror one tile's
-//! stored blob (through `TiledTextureReader::tile` or, on an adapter without
-//! `TEXTURE_COMPRESSION_BC`, `tile_rgba8`) — **the same door, one format decision
-//! earlier**, which is the premise the P26.1 transcode arm was built on.
+//! [`TiledTextureReader::vt_desc`](container::TiledTextureReader::vt_desc)), and
+//! the caller hands the GPU mirror one tile's stored blob (through
+//! [`tile`](container::TiledTextureReader::tile) or, on an adapter without
+//! `TEXTURE_COMPRESSION_BC`,
+//! [`tile_rgba8`](container::TiledTextureReader::tile_rgba8)) — **the same door,
+//! one format decision earlier**, which is the premise the P26.1 transcode arm
+//! was built on.
+//!
+//! **P26.3 moved the container's READ half down here** ([`container`]), leaving
+//! the writer in `inf-material`. The reason is the same one that set the
+//! dependency direction: the shipped player has to read tiles to sample them, and
+//! it does not link `inf-material`. See the [`container`] module docs for the
+//! exact split and for the one deliberate deviation (the BC *decoder* came with
+//! the reader; the encoder did not).
 //!
 //! # The three laws
 //!
@@ -101,11 +111,17 @@
 //! the tie-break.
 
 pub mod address;
+pub mod container;
 pub mod pool;
 pub mod residency;
 pub mod table;
 
 pub use address::{full_pyramid, DescError, TileCoord, VtMipDesc, VtTextureDesc, MAX_VT_MIPS};
+pub use container::{
+    decode_bc1, decode_bc3, is_v2, stored_tile_bytes, TexMipEntry, TexTileEntry, TiledTextureError,
+    TiledTextureHeader, TiledTextureReader, TiledTextureView, STORED_TILE_SIZE, TEX_ASSET_MAGIC,
+    TEX_ASSET_SCHEMA_VERSION, TILE_BORDER, TILE_SIZE,
+};
 pub use pool::{
     plan_pool, PageFormat, VtAdvisory, VtPoolConfig, VtPoolGeometry, DEFAULT_MAX_TEXTURE_DIM,
     DEFAULT_VT_BUDGET_BYTES,

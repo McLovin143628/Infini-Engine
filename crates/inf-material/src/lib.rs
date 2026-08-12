@@ -33,6 +33,6 @@ pub use texture::{
 };
 pub use tiles::{
     build_tiled_texture, decode_texture_payload, lift_texture_asset, stored_tile_bytes, TileCoord,
-    TiledTextureError, TiledTextureImage, TiledTextureReader, TiledTextureView, STORED_TILE_SIZE,
-    TEX_ASSET_MAGIC, TEX_ASSET_SCHEMA_VERSION, TILE_BORDER, TILE_SIZE,
+    TiledTextureError, TiledTextureExt, TiledTextureImage, TiledTextureReader, TiledTextureView,
+    STORED_TILE_SIZE, TEX_ASSET_MAGIC, TEX_ASSET_SCHEMA_VERSION, TILE_BORDER, TILE_SIZE,
 };
