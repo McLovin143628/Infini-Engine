@@ -303,10 +303,17 @@ impl PackWriter {
             // tile, which is precisely the CPU-decompression bottleneck the SVT
             // direction memo says to design out of existence rather than optimise.
             //
-            // The trade is ship size, and it is deliberate and known: BC payloads
-            // barely compress, but an uncompressed-format texture
-            // (`TextureCompression::None`, the normal-map default) does. Same
-            // trade, same reasoning, as the four kinds above.
+            // The trade is ship size, it is deliberate, and it is bigger than the
+            // lost zstd frame — which is the part that is easy to say and is not
+            // where the bytes go. A v2 payload is larger than the v1 record of the
+            // same source before any pack touches it, because every tile stores a
+            // 4-texel border ring on each side (136²/128² = 1.13) and every tail
+            // mip occupies a whole 136² tile however small it is. Measured in
+            // `inf_material::tiles`: **6.8×** at 128² BC1, 2.55× at 256², 1.22× at
+            // 1024², 1.16× at 2048² — and an uncompressed-format texture grows by
+            // the same factor as a BC one, so "BC payloads barely compress" does
+            // not describe the cost either. It is a small-texture cost, and
+            // packing the tail mips into one shared page is the named follow-up.
             //
             // A v1 (bincode) `.inf_tex` from an older cook rides along raw too.
             // That costs a little size and nothing else — it is read whole either

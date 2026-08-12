@@ -263,6 +263,14 @@ pub struct TexTileEntry {
 
 /// Address of one tile in a virtual texture — the key P26.2's residency table is
 /// built on.
+///
+/// **Its derived `Ord` is `(mip, x, y)`; the tile directory is sorted
+/// `(mip, y, x)`.** The two orders are different and neither is wrong, but a
+/// `BTreeSet<TileCoord>` iterates in *its* order rather than the file's, so a
+/// residency pass that wants to walk a request set in payload order — which is
+/// the point of a sorted directory, and the difference between one sequential
+/// read and a scatter — has to sort on `(mip, y, x)` itself. Pinned by
+/// [`tests::the_tile_coord_order_is_not_the_payload_order`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TileCoord {
     pub mip: u32,
@@ -273,6 +281,12 @@ pub struct TileCoord {
 impl TileCoord {
     pub const fn new(mip: u32, x: u32, y: u32) -> Self {
         Self { mip, x, y }
+    }
+
+    /// This address as the tile directory sorts it — the key to order a request
+    /// set by, when the order that matters is where the bytes are.
+    pub const fn payload_order(&self) -> (u32, u32, u32) {
+        (self.mip, self.y, self.x)
     }
 }
 
@@ -1481,5 +1495,108 @@ mod tests {
         let tail: usize = r.mips()[2..].iter().map(|m| m.tile_count as usize).sum();
         assert_eq!(tail, 7);
         assert_eq!(tail * stored_tile_bytes(TextureFormat::Bc1), 64_736);
+    }
+
+    /// **A `TileCoord` does not sort the way the payload does** (P26.1 audit).
+    ///
+    /// The derived `Ord` is `(mip, x, y)` because that is the field order; the
+    /// directory is sorted `(mip, y, x)` because that is row-major. A residency
+    /// table keyed on `TileCoord` therefore iterates in an order that is *not*
+    /// the order its bytes lie in, which turns one sequential read into a
+    /// scatter — a quiet cost with no symptom. Recorded here rather than fixed
+    /// by renaming a field, and [`TileCoord::payload_order`] is the key to sort
+    /// on when the order that matters is where the bytes are.
+    #[test]
+    fn the_tile_coord_order_is_not_the_payload_order() {
+        let img = build_tiled_texture(
+            corners(320, 192),
+            320,
+            192,
+            settings(TextureCompression::Bc1),
+        )
+        .unwrap();
+        let r = img.reader();
+        let coords: Vec<TileCoord> = r
+            .tiles()
+            .iter()
+            .map(|e| TileCoord::new(e.mip, e.x, e.y))
+            .collect();
+        // The directory is in payload order by construction (asserted in
+        // `every_tile_blob_is_aligned_sorted_and_the_declared_size`).
+        let mut derived = coords.clone();
+        derived.sort();
+        assert_ne!(
+            derived, coords,
+            "the derived order happens to match the payload order on this grid — \
+             pick a grid where it does not, or the trap this pins has moved"
+        );
+        // …and sorting on `payload_order` reproduces the directory exactly.
+        let mut by_payload = coords.clone();
+        by_payload.sort_by_key(|c| c.payload_order());
+        assert_eq!(by_payload, coords);
+        // Every address round-trips to its own directory index.
+        for (i, c) in coords.iter().enumerate() {
+            assert_eq!(r.tile_index(c.mip, c.x, c.y), Some(i));
+            assert_eq!(r.tile_at(*c), r.tile(c.mip, c.x, c.y));
+        }
+    }
+
+    /// **What the container costs on disk, divided by something** (P26.1 audit).
+    ///
+    /// The tail cost above is a real number with no denominator, and the ship-size
+    /// note on `PackWriter::compresses_kind` names the wrong cost: it blames the
+    /// lost zstd frame and says "BC payloads barely compress", which is true and
+    /// is not where the bytes go. The bytes go into the *border ring and the
+    /// uniform tail*, and they are paid by BC textures too.
+    ///
+    /// Measured here so a future packing pass has a target and a regression has a
+    /// tripwire. The shape of the curve is the finding: the overhead is a
+    /// **small-texture** phenomenon and it is severe there — a 128² BC1 texture,
+    /// the size of a UI icon or a decal, is nearly seven times its v1 payload,
+    /// because eight of its nine levels are one 136² tile each. At 1k and up it
+    /// is the ~1.2× the border ring alone implies (136²/128² = 1.13, plus the
+    /// tail).
+    #[test]
+    fn the_container_costs_more_bytes_than_v1_and_this_is_how_many() {
+        let measure = |w: u32, h: u32, c: TextureCompression| -> (usize, usize) {
+            let s = settings(c);
+            let v1 =
+                inf_asset::encode(&texture_from_rgba8(corners(w, h), w, h, s).unwrap()).unwrap();
+            let v2 = build_tiled_texture(corners(w, h), w, h, s).unwrap();
+            (v1.len(), v2.as_bytes().len())
+        };
+        // Pinned exactly: a level's byte count is a function of its extent alone,
+        // so these do not depend on the fixture's pixels.
+        assert_eq!(measure(128, 128, TextureCompression::Bc1), (10_972, 74_624));
+        assert_eq!(
+            measure(256, 256, TextureCompression::Bc1),
+            (43_753, 111_776)
+        );
+        assert_eq!(
+            measure(1024, 1024, TextureCompression::Bc1),
+            (699_135, 854_240)
+        );
+        assert_eq!(
+            measure(1024, 1024, TextureCompression::None),
+            (5_592_483, 6_809_952)
+        );
+        // …and the claim the numbers are here to support, as a claim.
+        let ratio = |w, h, c| {
+            let (a, b) = measure(w, h, c);
+            b as f64 / a as f64
+        };
+        assert!(
+            ratio(128, 128, TextureCompression::Bc1) > 6.5,
+            "the small-texture tail got cheaper — re-write the ledger, do not \
+             re-bless the number"
+        );
+        assert!(ratio(2048, 2048, TextureCompression::Bc1) < 1.2);
+        // The cost is NOT the lost zstd frame: an uncompressed-format texture and
+        // a BC one grow by the same factor, because both pay the same geometry.
+        let (a, b) = (
+            ratio(1024, 1024, TextureCompression::Bc1),
+            ratio(1024, 1024, TextureCompression::None),
+        );
+        assert!((a - b).abs() < 0.01, "{a} vs {b}");
     }
 }
