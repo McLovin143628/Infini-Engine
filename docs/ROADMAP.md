@@ -8981,8 +8981,8 @@ door for editor viewport, PIE and shipping.
 > **STATUS — P26.1 Tiled container + BC upload: COMPLETE (2026-08-11)** — four
 > implementation commits (`c4df446` container, `e7bbf1b` import + the one read door,
 > `462ea1f` the BC probe/clamp, `b668cef` the upload proof) plus an adversarial audit
-> (seven commits). Battery green: **223 binaries, 4 029 passed, 0 failed, 8 ignored**
-> (the batch landed at 4 022; the audit added seven arms).
+> (eight commits). Battery green: **223 binaries, 4 031 passed, 0 failed, 8 ignored**
+> (the batch landed at 4 022; the audit added nine arms).
 > Goldens stay **50**. No schema moved (`ScenePayload`, scene, `TextureAsset` all
 > untouched — this versions the *container*). No new external dependency:
 > `inf-material` became a **dev**-dependency of `inf-render` only, the arrangement
@@ -8999,9 +8999,27 @@ door for editor viewport, PIE and shipping.
 > with no decode and no re-compression. `.inf_tex` joins the streaming class and cooks
 > uncompressed.
 >
-> **What the audit found** (all fixed in this batch; findings F1–F9 with mechanisms in
+> **What the audit found** (all fixed in this batch; findings F1–F10 with mechanisms in
 > the commit bodies):
 >
+> * **Every imported texture was written under the NIL guid, and the second one
+>   evicted the first.** `AssetProject::register_written_asset` — the specialized
+>   writer P26.1 routed textures through — computed `reuse.unwrap_or_default()`,
+>   and `AssetId::default()` is `AssetId::NIL`, the *"no asset"* sentinel. Measured:
+>   two PNGs imported into one project both came back `00000000-…`, the database
+>   held **one** texture entry pointing at the second file, and the first payload
+>   sat on disk with a sidecar and no owner — import reporting success throughout.
+>   The defect dates to P16.4a and was unreachable in practice: `.inf_terrain` was
+>   the only caller ever passing `None`, a project has one terrain, a reimport
+>   passes `reuse`, and a `.inf_vmesh` derivation always passes its computed id.
+>   P26.1 made it the door for the most common asset kind there is, and one glTF
+>   brings several textures at once, so the first multi-texture import after this
+>   batch would have kept one of them. Every existing import arm imports *one*
+>   image, or one image into two projects — both satisfied perfectly by a writer
+>   that hands every asset the same guid. Two arms now: kind-agnostic at the door
+>   (three terrains, three guids, three database entries) and at the import path
+>   (asserted on the database and the payloads' own extents, since an id can be
+>   distinct and still not be stored).
 > * **The shipped player never applied the adapter capability clamp.** P26.1 puts
 >   `vt.bc_tiles` inside `clamp_occlusion` and says that is "the door a host actually
 >   calls". The editor calls it; `inf-player`'s render host ran `tier.apply` and
