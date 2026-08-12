@@ -183,6 +183,8 @@ fn payload(doc: &SceneDoc, made: &Made, speed: f64) -> ScenePayload {
         |_| None,
         |_| None,
         |g| bytes.get(&g).cloned(),
+        // P26.3b: the cloth / hair / material / texture byte resolver.
+        |_| None,
         HZ,
         false,
     )

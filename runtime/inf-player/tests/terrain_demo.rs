@@ -226,6 +226,8 @@ fn pie_payload_matches_shipping_for_terrain_and_pcg() {
         |_guid| None,
         // P22.3: no destructible meshes in this fixture.
         |_| None,
+        // P26.3b: the cloth / hair / material / texture byte resolver.
+        |_| None,
         60,
         false,
     )

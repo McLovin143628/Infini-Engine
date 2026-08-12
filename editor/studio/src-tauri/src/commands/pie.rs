@@ -132,6 +132,12 @@ pub async fn pie_start(
             // have nothing to break, and PIE == shipping would be comparing an
             // empty map against a full one.
             |guid| assets.load_mesh_bytes(inf_asset::AssetId(guid)),
+            // P26.3b: the four kinds `ScenePayload` v8 added — `.inf_cloth`,
+            // `.inf_hair`, `.inf_mat` and `.inf_tex`. One resolver because all
+            // four are the same act (read this asset's committed bytes); the
+            // KIND check lives in the loader so a mistyped binding resolves to
+            // `None` here rather than shipping a garment's bytes as a texture.
+            |guid| assets.load_binding_bytes(inf_asset::AssetId(guid)),
             PIE_TICK_HZ,
             true,
         )

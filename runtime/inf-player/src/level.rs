@@ -1650,6 +1650,59 @@ impl PackLevelSource {
         self.anim_assets_by_guid(AssetKind::Hair)
     }
 
+    /// The pack's **derived material records + their texture containers**
+    /// (P26.3b) — the `--pack` half of
+    /// [`materials_from_payload`](crate::materials_from_payload).
+    ///
+    /// Keyed by the **`.inf_mat`** GUID, un-salted here exactly as the payload
+    /// path un-salts: the pack stores a record under
+    /// `inf_asset::derived_material_id(mat)` so that the two wires have one
+    /// lookup rule, and the scene names the material itself. Both ends invert it
+    /// at the same boundary, which is what keeps the salt out of the projector.
+    ///
+    /// A record that does not decode is **skipped with a warning**: the surfaces
+    /// bound to it render off their scalar attributes, which is the permanent
+    /// no-texture path rather than a hole.
+    pub fn material_content(&self) -> crate::MaterialContent {
+        let mut materials = HashMap::new();
+        let mut textures = HashMap::new();
+        for e in self.reader.index() {
+            match e.kind {
+                AssetKind::DerivedMaterial => {
+                    let Ok(bytes) = self.reader.read(e.guid) else {
+                        continue;
+                    };
+                    match inf_asset::decode::<inf_asset::DerivedMaterial>(&bytes) {
+                        Ok(rec) => {
+                            materials.insert(inf_asset::derived_material_id(e.guid).uuid(), rec);
+                        }
+                        Err(err) => tracing::warn!(
+                            "inf-player: pack material {} did not decode, so every surface \
+                             bound to it renders off its scalar attributes: {err}",
+                            e.guid
+                        ),
+                    }
+                }
+                // The `.inf_tex` v2 containers those records name. Read whole
+                // here rather than sub-sliced because the registry needs an
+                // owned `VtTileSource` it can hold for the life of the world;
+                // the *tiles* inside are still addressed without decoding
+                // anything (`inf_vt::TiledTextureReader`), which is the part
+                // that matters.
+                AssetKind::Texture => {
+                    if let Ok(bytes) = self.reader.read(e.guid) {
+                        textures.insert(e.guid.uuid(), bytes);
+                    }
+                }
+                _ => {}
+            }
+        }
+        crate::MaterialContent {
+            materials,
+            textures,
+        }
+    }
+
     /// Every `.inf_biomes` payload in the pack keyed by asset GUID (P19.3) — what
     /// the biome→PCG binding dispatches from.
     ///

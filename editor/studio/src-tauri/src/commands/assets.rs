@@ -234,6 +234,33 @@ impl AssetState {
     /// by the same `inf_mesh::fracture_mesh` the cook runs, so what the caller
     /// needs from here is the MESH. Kind-checked exactly like
     /// [`load_voxel_bytes`](Self::load_voxel_bytes), for the same reason.
+    /// Raw payload bytes of the four kinds `ScenePayload` v8 carries (P26.3b):
+    /// `.inf_cloth`, `.inf_hair`, `.inf_mat` and `.inf_tex`.
+    ///
+    /// One loader rather than four because all four are the same act — read this
+    /// asset's committed bytes — and one kind check rather than none because the
+    /// alternative is shipping a garment's bytes in the texture slot when a
+    /// binding is mistyped. A ref of the wrong kind resolves to `None`, which is
+    /// the same outcome as a dangling one: the surface renders off its scalars,
+    /// the character wears nothing, and the cook's advisory is where the author
+    /// is told.
+    pub fn load_binding_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
+        let guard = self.inner.lock().ok()?;
+        let inner = guard.as_ref()?;
+        let proj = inner.project.lock().ok()?;
+        let entry = proj.db().get(id)?;
+        if !matches!(
+            entry.kind(),
+            inf_asset::AssetKind::Cloth
+                | inf_asset::AssetKind::Hair
+                | inf_asset::AssetKind::Material
+                | inf_asset::AssetKind::Texture
+        ) {
+            return None;
+        }
+        std::fs::read(&entry.path).ok()
+    }
+
     pub fn load_mesh_bytes(&self, id: AssetId) -> Option<Vec<u8>> {
         let guard = self.inner.lock().ok()?;
         let inner = guard.as_ref()?;

@@ -272,6 +272,8 @@ fn playground_payload() -> inf_runtime::pie::ScenePayload {
             g if g == PHASE22_CHASSIS_MESH_GUID => Some(chassis.clone()),
             _ => None,
         },
+        // P26.3b: the cloth / hair / material / texture byte resolver.
+        |_| None,
         60,
         false,
     )

@@ -55,12 +55,18 @@ fn player_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_inf-player"))
 }
 
-/// **A v6 `ScenePayload`, field for field.**
+/// **A v7 `ScenePayload`, field for field.**
 ///
-/// The real envelope is v7; v7's one addition was `meshes`, at the tail. So this
-/// is exactly what an older build writes — the same fields in the same order,
-/// one short — and that is what makes it a *short read* rather than a value
-/// `check_version` could have refused.
+/// The real envelope is v8; v8's additions were `cloths` / `hairs` / `materials`
+/// / `textures`, all at the tail. So this is exactly what the previous build
+/// writes — the same fields in the same order, four short — and that is what
+/// makes it a *short read* rather than a value `check_version` could have
+/// refused.
+///
+/// **Kept at exactly one version behind** (P26.3b): the fixture was the v6 shape
+/// while the wire was v7, and it stays one rung down as the wire moves, because
+/// "an editor built from the previous commit" is the skew a user actually hits
+/// and a two-rung gap could pass for a different failure.
 ///
 /// Hand-written rather than derived from the real type on purpose: a shadow
 /// struct generated from the current one would grow with it and stop being
@@ -81,6 +87,9 @@ struct StaleScenePayload {
     voxels: Vec<(Uuid, Vec<u8>)>,
     terrains: Vec<(Uuid, Vec<u8>)>,
     fractures: Vec<(Uuid, Vec<u8>)>,
+    /// v7's one addition, at the tail. Present here because this fixture is a
+    /// **v7** payload now — v8 is the current wire.
+    meshes: Vec<(Uuid, Vec<u8>)>,
 }
 
 /// The message wrapper, with `LoadScene` at **its real discriminant**.
@@ -116,6 +125,7 @@ fn stale_payload() -> StaleScenePayload {
         voxels: Vec::new(),
         terrains: Vec::new(),
         fractures: Vec::new(),
+        meshes: Vec::new(),
     }
 }
 

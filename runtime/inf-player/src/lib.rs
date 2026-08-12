@@ -733,12 +733,118 @@ pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, St
             inf_asset::decode(bytes).map_err(|e| format!("decode biome set {guid}: {e}"))?,
         );
     }
+    // P26.3b (`ScenePayload` v8): the garments and hairstyles a v21 level's
+    // `ClothSim.asset` / `HairGuides.asset` name. **This is the P24.4 gap.**
+    // Until this batch the payload had no slot for them and this function called
+    // `with_anim_assets` and neither cloth door, so a character previewed in PIE
+    // wore nothing while the same character in the editor's Simulate and in a
+    // cooked pack wore both. Resolved through the same `InfSceneWorldBuilder`
+    // doors the `--pack` and `--level` boots use, so there is one seeding rule.
+    let mut cloths: HashMap<uuid::Uuid, inf_anim::ClothAsset> = HashMap::new();
+    for (guid, bytes) in &payload.cloths {
+        cloths.insert(
+            *guid,
+            inf_asset::decode(bytes).map_err(|e| format!("decode cloth {guid}: {e}"))?,
+        );
+    }
+    let mut hairs: HashMap<uuid::Uuid, inf_anim::HairAsset> = HashMap::new();
+    for (guid, bytes) in &payload.hairs {
+        hairs.insert(
+            *guid,
+            inf_asset::decode(bytes).map_err(|e| format!("decode hair {guid}: {e}"))?,
+        );
+    }
     let builder = InfSceneWorldBuilder::with_defaults(fallback)
         .with_bindings(by_guid)
         .with_pcgs(pcgs)
         .with_biome_sets(biome_sets)
-        .with_anim_assets(skeletons, clips, machines);
+        .with_anim_assets(skeletons, clips, machines)
+        .with_cloth_assets(cloths)
+        .with_hair_assets(hairs);
     builder.build(&payload.level_bytes)
+}
+
+/// The **derived material records + their texture containers** a streamed
+/// [`ScenePayload`] carries (P26.3b), decoded and keyed the way the render
+/// projection wants them.
+///
+/// Keyed by the **`.inf_mat` GUID** rather than by the derived one the wire uses:
+/// the wire key is `derived_material_id(mat)` so that a payload entry and a pack
+/// entry are one lookup rule, and the *scene* names the material itself
+/// (`Material.asset`), so exactly one of the two ends has to un-salt. Doing it
+/// here — once, at the boundary — is what keeps the projector from carrying the
+/// salt.
+///
+/// A record that does not decode is **reported and skipped**, not fatal: a
+/// surface with no resolvable material renders off its scalar attributes, which
+/// is the permanent no-texture path and precisely what a pre-v22 level did.
+pub fn materials_from_payload(payload: &ScenePayload) -> MaterialContent {
+    let mut materials = std::collections::HashMap::new();
+    for (derived_guid, bytes) in &payload.materials {
+        match inf_asset::decode::<inf_asset::DerivedMaterial>(bytes) {
+            Ok(rec) => {
+                // Un-salt: the wire carries the DERIVED id, the scene names the
+                // material. The salt is involutive, so one call inverts it.
+                let mat_id = inf_asset::derived_material_id(inf_asset::AssetId(*derived_guid));
+                materials.insert(mat_id.uuid(), rec);
+            }
+            Err(e) => tracing::warn!(
+                "inf-player: derived material {derived_guid} did not decode, so every \
+                 surface bound to it renders off its scalar attributes: {e}"
+            ),
+        }
+    }
+    MaterialContent {
+        materials,
+        textures: payload.textures.iter().cloned().collect(),
+    }
+}
+
+/// Where a world's material bindings and their texture bytes come from
+/// (P26.3b) — the [`TerrainContent`] shape, for materials.
+///
+/// Held beside the built world because the render host needs both halves at
+/// once: a derived record names texture GUIDs, and the registry needs the
+/// container bytes behind them to page a tile.
+#[derive(Default)]
+pub struct MaterialContent {
+    /// Derived records keyed by the **`.inf_mat`** GUID a scene's
+    /// `Material.asset` names.
+    pub materials: std::collections::HashMap<uuid::Uuid, inf_asset::DerivedMaterial>,
+    /// `.inf_tex` v2 container bytes keyed by texture asset GUID.
+    pub textures: std::collections::HashMap<uuid::Uuid, Vec<u8>>,
+}
+
+impl MaterialContent {
+    /// Whether this world has any material binding at all. `false` is the
+    /// scalars-only world — every pre-v22 level, and every v22 level whose
+    /// surfaces were never bound.
+    pub fn is_empty(&self) -> bool {
+        self.materials.is_empty()
+    }
+
+    /// Every `.inf_tex` GUID the records name, deduplicated and in the fixed
+    /// registration order: materials by GUID, then each record's albedo → normal
+    /// → ORM.
+    ///
+    /// **The order is the residency trace.** `VtTextures::want_floor` is a pure
+    /// function of the registration *sequence*, so a host that walked these in
+    /// hash-map order would produce a different page set from one that walked
+    /// them sorted — on the same level, from the same pack. `BTreeMap` ordering
+    /// here is what makes "PIE == shipping" a property of the code.
+    pub fn registration_order(&self) -> Vec<uuid::Uuid> {
+        let sorted: std::collections::BTreeMap<_, _> = self.materials.iter().collect();
+        let mut out: Vec<uuid::Uuid> = Vec::new();
+        for rec in sorted.values() {
+            for tex in rec.texture_dependencies() {
+                let g = tex.uuid();
+                if !out.contains(&g) {
+                    out.push(g);
+                }
+            }
+        }
+        out
+    }
 }
 
 /// The result of [`sim_from_payload`]: a ready-to-step sim plus the two facts a

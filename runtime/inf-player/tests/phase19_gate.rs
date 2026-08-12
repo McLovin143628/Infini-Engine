@@ -136,6 +136,8 @@ fn pie_built() -> BuiltWorld {
         |_| None,
         // P22.3: no destructible meshes in this fixture.
         |_| None,
+        // P26.3b: the cloth / hair / material / texture byte resolver.
+        |_| None,
         60,
         false,
     )

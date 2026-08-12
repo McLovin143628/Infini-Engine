@@ -204,6 +204,8 @@ fn platformer_payload() -> ScenePayload {
         |_guid| None, // no streamed terrains in the platformer scene
         // P22.3: no destructible meshes in this fixture.
         |_| None,
+        // P26.3b: the cloth / hair / material / texture byte resolver.
+        |_| None,
         0, // tick-hz 0: no per-frame sleep (step-driven determinism)
         false,
     )

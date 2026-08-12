@@ -392,7 +392,7 @@ impl Drop for PieSession {
 /// pinned by `a_payload_carries_every_referenced_asset_kind_in_its_own_field`
 /// below.)
 #[allow(clippy::too_many_arguments)]
-pub fn build_scene_payload<F, G, H, B, V, T, M>(
+pub fn build_scene_payload<F, G, H, B, V, T, M, A>(
     doc: &SceneDoc,
     mut resolve: F,
     mut resolve_pcg: G,
@@ -401,6 +401,17 @@ pub fn build_scene_payload<F, G, H, B, V, T, M>(
     mut resolve_voxel: V,
     mut resolve_terrain: T,
     mut resolve_mesh: M,
+    // P26.3b: ONE resolver for the four kinds v8 added — `.inf_cloth`,
+    // `.inf_hair`, `.inf_mat` and `.inf_tex`.
+    //
+    // One and not four, deliberately, and the reason is the arity note above
+    // turned around: the six resolvers before it each reach a *different* store
+    // with a *different* rule (a blueprint decodes to a class, a mesh is read to
+    // be DERIVED from, a terrain's inline set was stripped in its favour). These
+    // four are the same act — read this asset's committed bytes and ship them —
+    // so four parameters would be four ways to make the same call and four
+    // chances to mis-order them.
+    mut resolve_bytes: A,
     tick_hz: u32,
     windowed: bool,
 ) -> Result<ScenePayload, PieError>
@@ -412,6 +423,7 @@ where
     V: FnMut(Uuid) -> Option<Vec<u8>>,
     T: FnMut(Uuid) -> Option<Vec<u8>>,
     M: FnMut(Uuid) -> Option<Vec<u8>>,
+    A: FnMut(Uuid) -> Option<Vec<u8>>,
 {
     let level_bytes = serialize::encode(&serialize::to_scene_file(doc))
         .map_err(|e| PieError::Protocol(format!("encode scene: {e}")))?;
@@ -700,6 +712,121 @@ where
         }
     }
 
+    // Referenced garments and hairstyles (P26.3b · `ScenePayload` v8): every
+    // `ClothSim.asset` / `HairGuides.asset` ref resolved to its `.inf_cloth` /
+    // `.inf_hair` bytes.
+    //
+    // **The P24.4 debt.** The wire had no slot for these, so a character
+    // previewed in PIE wore nothing while the same character in Simulate and in
+    // a cooked pack wore both — `phase24_gate`'s trip-wire measured exactly that
+    // and fired when v8 landed.
+    //
+    // Carried, not computed: a `.inf_cloth` is authored (the Model Editor's cloth
+    // door tunes stiffness and pins hems), so re-deriving it here would throw the
+    // tuning away and give the preview a different garment from the shipped
+    // build.
+    let mut cloths: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut hairs: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut seen_garment: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let w = world.world();
+        if let Some(a) = w
+            .get::<inf_ecs::components::ClothSim>(e)
+            .and_then(|c| c.asset)
+        {
+            if seen_garment.insert(a) {
+                if let Some(bytes) = resolve_bytes(a) {
+                    cloths.push((a, bytes));
+                }
+            }
+        }
+        if let Some(a) = w
+            .get::<inf_ecs::components::HairGuides>(e)
+            .and_then(|h| h.asset)
+        {
+            if seen_garment.insert(a) {
+                if let Some(bytes) = resolve_bytes(a) {
+                    hairs.push((a, bytes));
+                }
+            }
+        }
+    }
+
+    // Referenced materials (P26.3b · scene v22 · `ScenePayload` v8): every
+    // `Material.asset` binding resolved to its `.inf_mat` bytes and **derived**
+    // through the one door, plus the `.inf_tex` containers the derived records
+    // name.
+    //
+    // **Computed, not carried**, and for a sharper reason than the fractures one
+    // rung down: the player cannot decode a `.inf_mat` at all. `MaterialAsset`
+    // lives in `inf-material`, which owns the `image` decoders and the
+    // naga-validating material compiler, and the P26.2 dependency inversion
+    // exists to keep both out of a shipped build. So this runs the SAME
+    // `inf_material::derive_material_bytes` the cook runs, keyed by the SAME
+    // `derived_material_id` the cook writes under — one deterministic function
+    // over one set of bytes, which is what makes PIE == shipping a property of
+    // the code rather than of two collectors agreeing.
+    //
+    // The textures ride along because a record that names textures with no bytes
+    // behind it previews untextured while the shipped build is textured, and a
+    // comparison between two such worlds passes (the P21.4 hazard).
+    let mut materials: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut textures: Vec<(Uuid, Vec<u8>)> = Vec::new();
+    let mut seen_material: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    let mut seen_texture: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    for &guid in doc.order() {
+        let Some(e) = world.entity_of(guid) else {
+            continue;
+        };
+        let Some(asset) = world
+            .world()
+            .get::<inf_ecs::components::Material>(e)
+            .and_then(|m| m.asset)
+        else {
+            continue;
+        };
+        if !seen_material.insert(asset) {
+            continue;
+        }
+        let Some(bytes) = resolve_bytes(asset) else {
+            continue;
+        };
+        // Reported, not discarded (the P24.1 audit's B1 shape, a third time): a
+        // `.inf_mat` an older build wrote does not decode, and this path would
+        // silently drop it while the COOK — reading the same file through the
+        // same door — still derives one. The preview would then show a scalar
+        // surface and the shipped build a textured one, with no message
+        // anywhere.
+        let derived = match inf_material::derive_material_bytes(&bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(
+                    "pie: material {asset} did not decode, so every surface bound to it \
+                     previews UNTEXTURED while the cooked build still resolves it: {e}"
+                );
+                continue;
+            }
+        };
+        for tex in derived.texture_dependencies() {
+            let g = tex.uuid();
+            if seen_texture.insert(g) {
+                if let Some(bytes) = resolve_bytes(g) {
+                    textures.push((g, bytes));
+                }
+            }
+        }
+        let Ok(encoded) = inf_asset::encode(&derived) else {
+            continue;
+        };
+        materials.push((
+            inf_asset::derived_material_id(inf_asset::AssetId(asset)).uuid(),
+            encoded,
+        ));
+    }
+
     let mut fractures: Vec<(Uuid, Vec<u8>)> = Vec::new();
     for (mesh_id, params) in destructible_mesh_params(doc) {
         let Some(bytes) = resolve_mesh(mesh_id) else {
@@ -746,7 +873,9 @@ where
             .with_voxels(voxels)
             .with_terrains(terrains)
             .with_fractures(fractures)
-            .with_meshes(meshes),
+            .with_meshes(meshes)
+            .with_garments(cloths, hairs)
+            .with_materials(materials, textures),
     )
 }
 
@@ -961,6 +1090,10 @@ mod tests {
                     None
                 }
             },
+            // P26.3b: the fourth-kind byte resolver (cloth / hair / material /
+            // texture). `None` here is the honest fixture default — this arm authors
+            // none of the four.
+            |_| None,
             60,
             false,
         )
@@ -1088,6 +1221,10 @@ mod tests {
             |_| None,
             |_| None,
             |g| (g == MESH).then(|| stale.clone()),
+            // P26.3b: the fourth-kind byte resolver (cloth / hair / material /
+            // texture). `None` here is the honest fixture default — this arm authors
+            // none of the four.
+            |_| None,
             60,
             false,
         )
@@ -1108,6 +1245,10 @@ mod tests {
             |_| None,
             |_| None,
             |g| (g == MESH).then(|| good.clone()),
+            // P26.3b: the fourth-kind byte resolver (cloth / hair / material /
+            // texture). `None` here is the honest fixture default — this arm authors
+            // none of the four.
+            |_| None,
             60,
             false,
         )
@@ -1293,6 +1434,10 @@ mod tests {
             |_| None,
             |_| None,
             |g| (g == MESH).then(|| inf_asset::encode(&fracture_cube()).expect("encodes")),
+            // P26.3b: the fourth-kind byte resolver (cloth / hair / material /
+            // texture). `None` here is the honest fixture default — this arm authors
+            // none of the four.
+            |_| None,
             60,
             false,
         )
@@ -1413,6 +1558,10 @@ mod tests {
             |_| None,
             |_| None,
             // P22.3: no destructible meshes in this fixture.
+            |_| None,
+            // P26.3b: the fourth-kind byte resolver (cloth / hair / material /
+            // texture). `None` here is the honest fixture default — this arm authors
+            // none of the four.
             |_| None,
             60,
             false,

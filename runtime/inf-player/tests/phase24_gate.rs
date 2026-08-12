@@ -632,76 +632,27 @@ fn the_shipped_player_runs_the_authored_character_from_its_pack() {
     );
 }
 
-// ── (e) THE BOUND ───────────────────────────────────────────────────────────
+// ── (e) THE BOUND — RETIRED (P26.3b) ────────────────────────────
 
-/// **PIE cannot preview a garment yet, and this is the measurement** (P24.4).
-///
-/// `ScenePayload` is frozen at v7 for this phase and has no slot for a
-/// `.inf_cloth` or an `.inf_hair`: `skeletons`, `clips`, `machines`, `voxels`,
-/// `terrains`, `fractures` and `meshes` are the whole tail. So the editor's PIE
-/// preview — the windowed and the `--pie` subprocess paths alike — builds its
-/// world through `build_world_from_payload`, which calls `with_anim_assets` and
-/// **not** `with_cloth_assets` / `with_hair_assets`, and a character previewed in
-/// PIE wears nothing while the same character in Simulate and in the shipped
-/// pack wears both.
-///
-/// The P24.1 note on `SCENE_PAYLOAD_VERSION` predicted otherwise — *"P24.4's
-/// cloth is sim state over a garment that is itself an `.inf_mesh`, so it needs a
-/// GUID added to the collector and nothing added to the wire"*. That prediction
-/// is wrong now: P24.4 **did** choose a distinct `.inf_cloth` kind (and an
-/// `.inf_hair`), which by that same note's own words is "the honest reason for" a
-/// v8.
-///
-/// So this arm asserts the gap rather than the fix, and it is written to **fail
-/// the day the payload learns to carry them** — a ledger entry that cannot be
-/// forgotten, the discipline `a_multi_axis_limit_is_not_applied` established.
-#[test]
-fn the_pie_payload_carries_no_garment_and_that_is_measured() {
-    // The wire has no slot. Read as source, because the claim is about the type
-    // and a value cannot show that a field is absent.
-    let wire = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/inf-runtime/src/pie.rs"),
-    )
-    .expect("pie.rs is readable")
-    .replace("\r\n", "\n");
-    let decl = wire
-        .split_once("pub struct ScenePayload {")
-        .and_then(|(_, rest)| rest.split_once("\n}\n"))
-        .map(|(body, _)| body.to_string())
-        .expect("ScenePayload's declaration is findable");
-    assert!(
-        decl.contains("pub meshes:"),
-        "the ScenePayload scope this arm read is not the struct — it found no \
-         `meshes` field, so every assertion below would pass vacuously"
-    );
-    for field in ["pub cloths:", "pub hairs:"] {
-        assert!(
-            !decl.contains(field),
-            "`ScenePayload` grew `{field}` — PIE can carry a garment now. Delete \
-             this arm, wire `build_world_from_payload` through \
-             `with_cloth_assets`/`with_hair_assets`, and retire the ledger entry \
-             that says a PIE preview shows a character wearing nothing."
-        );
-    }
-    // …and the payload builder really does not resolve them: the one seam every
-    // PIE boot takes calls the anim door and neither cloth door.
-    let player = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
-        .expect("lib.rs is readable")
-        .replace("\r\n", "\n");
-    let payload_fn = player
-        .split_once("pub fn build_world_from_payload(")
-        .and_then(|(_, rest)| rest.split_once("\n}\n"))
-        .map(|(body, _)| body.to_string())
-        .expect("build_world_from_payload is findable");
-    assert!(
-        payload_fn.contains("with_anim_assets("),
-        "the scope this arm read is not `build_world_from_payload` — it does not \
-         even wire the anim assets, so the absence below proves nothing"
-    );
-    assert!(
-        !payload_fn.contains("with_cloth_assets(") && !payload_fn.contains("with_hair_assets("),
-        "the PIE payload path now seeds cloth/hair — good. Replace this arm with \
-         a real `--pie` subprocess comparison over a garment-wearing character, \
-         the way `pie_skinned.rs` does for the authored IK target."
-    );
-}
+// `the_pie_payload_carries_no_garment_and_that_is_measured` lived here.
+//
+// It was written to FAIL the day `ScenePayload` learned to carry a `.inf_cloth`,
+// and on 2026-08-12 it did, verbatim:
+//
+//     `ScenePayload` grew `pub cloths:` — PIE can carry a garment now. Delete
+//     this arm, wire `build_world_from_payload` through
+//     `with_cloth_assets`/`with_hair_assets`, and retire the ledger entry that
+//     says a PIE preview shows a character wearing nothing.
+//
+// P26.3b's `ScenePayload` **v8** appended `cloths` / `hairs` (beside `materials`
+// / `textures`) and `build_world_from_payload` now seeds both through the same
+// `InfSceneWorldBuilder` doors the `--pack` and `--level` boots use. The remedy
+// the message named has been carried out in full, so the arm is GONE rather than
+// weakened — a trip-wire that is disabled instead of removed is the P24.3 hazard
+// this file's own `determinism_law` was rebuilt to avoid.
+//
+// **What replaces it is not a source read.** The positive arms live in
+// `phase26_gate.rs`: the payload carries an authored garment and hairstyle at an
+// exact count, a real `--pie` subprocess folds them, the trace CHANGES when the
+// garment changes, and PIE == shipping on a clothed, textured scene. A source
+// check could only ever have said the field exists.

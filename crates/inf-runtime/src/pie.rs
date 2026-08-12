@@ -98,7 +98,7 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 /// **The only payload bump of P24.1**, and deliberately audited against the rest
 /// of the phase before freezing.
 ///
-/// # That audit's prediction about P24.4 was wrong, and v8 is owed
+/// # That audit's prediction about P24.4 was wrong, and v8 was owed — P26.3b pays it
 ///
 /// It read: *"P24.4's cloth is sim state over a garment that is itself an
 /// `.inf_mesh`, so it needs a GUID added to the **collector** and nothing added
@@ -109,16 +109,36 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 /// P24.4 **did** choose distinct `.inf_cloth` and `.inf_hair` kinds (pack kind
 /// codes 22 and 23), because a garment is self-contained for the sim and the draw
 /// — rest positions, inverse masses, precomputed edge and hinge lists — and none
-/// of that is in the mesh. So by this note's own words the honest reason for a v8
-/// now exists, and it is unspent: the phase's schema budget went to scene v21, so
-/// **a character previewed in PIE wears nothing** while the same character in
-/// Simulate and in a cooked pack wears both.
+/// of that is in the mesh. So by that note's own words the honest reason for a v8
+/// existed, and P24.4's schema budget was already spent on scene v21: **a
+/// character previewed in PIE wore nothing** while the same character in Simulate
+/// and in a cooked pack wore both. The gap was measured rather than described —
+/// `phase24_gate::the_pie_payload_carries_no_garment_and_that_is_measured` read
+/// this struct's own declaration and was written to fail the day it grew
+/// `cloths` / `hairs`.
 ///
-/// That is not left to be rediscovered.
-/// `phase24_gate::the_pie_payload_carries_no_garment_and_that_is_measured` reads
-/// this struct's own declaration and **fails the day it grows `cloths` / `hairs`**,
-/// naming the remedy; the bound is written out in ROADMAP §12's P24.4 block.
-pub const SCENE_PAYLOAD_VERSION: u32 = 7;
+/// **It fired, and this is the batch that fired it.** The arm is retired and
+/// replaced by the positive ones (`phase26_gate`).
+///
+/// * **v8** — P26.3b, **one bump carrying four slots** (the P24.3 precedent, at
+///   the payload instead of the scene):
+///   * [`cloths`](ScenePayload::cloths) / [`hairs`](ScenePayload::hairs) — the
+///     `.inf_cloth` / `.inf_hair` payloads a v21 level's `ClothSim.asset` /
+///     `HairGuides.asset` name. The debt above.
+///   * [`materials`](ScenePayload::materials) — the **derived** material records
+///     (`inf_asset::DerivedMaterial`) a v22 level's `Material.asset` bindings
+///     imply, keyed by `inf_asset::derived_material_id`, exactly as `fractures`
+///     are keyed by `inf_mesh::derived_fracture_id` and for the same reason: one
+///     lookup rule for the pack path and the payload path rather than two.
+///   * [`textures`](ScenePayload::textures) — the `.inf_tex` v2 container bytes
+///     those records reference, which the player pages through
+///     `inf_vt::TiledTextureReader`.
+///
+///   Four slots and one bump because a phase gets one payload move and all four
+///   are the same wiring: without `materials` the level names materials nothing
+///   can resolve, and without `textures` the derived records name textures with
+///   no bytes behind them — the "two empty maps agreeing" hazard, twice.
+pub const SCENE_PAYLOAD_VERSION: u32 = 8;
 
 /// Upper bound on a single frame; anything larger means a desynced or
 /// corrupt stream and is treated as an error rather than an allocation. A
@@ -256,6 +276,61 @@ pub struct ScenePayload {
     /// count taken from its fixture before anything is compared.
     #[serde(default)]
     pub meshes: Vec<(Uuid, Vec<u8>)>,
+    /// Referenced garments: `(asset guid, .inf_cloth bincode bytes)` — keyed by a
+    /// v21 level's `ClothSim.asset` refs (schema v8, P26.3b).
+    ///
+    /// **The debt this envelope owed since P24.4.** A character previewed in PIE
+    /// wore nothing while the same character in the editor's Simulate and in a
+    /// cooked pack wore both, because `build_world_from_payload` called
+    /// `with_anim_assets` and neither cloth door — and the reason it called
+    /// neither is that there was nothing here to hand them.
+    ///
+    /// Carried, not computed: a `.inf_cloth` is authored (the Model Editor's
+    /// cloth door tunes stiffness and pins hems), so re-deriving it here would
+    /// throw the tuning away and give PIE a different garment from the shipped
+    /// build — the exact divergence this file exists to prevent.
+    #[serde(default)]
+    pub cloths: Vec<(Uuid, Vec<u8>)>,
+    /// Referenced hairstyles: `(asset guid, .inf_hair bincode bytes)` — the
+    /// [`cloths`](Self::cloths) twin, keyed by `HairGuides.asset`.
+    #[serde(default)]
+    pub hairs: Vec<(Uuid, Vec<u8>)>,
+    /// **Derived** material records: `(derived guid, .inf_matd bincode bytes)`,
+    /// keyed by `inf_asset::derived_material_id` of the `.inf_mat` — exactly the
+    /// id a cooked pack stores them under, so the player looks a material up the
+    /// same way on both paths and there is one lookup rule rather than two
+    /// (schema v8, P26.3b · scene v22's `Material.asset`).
+    ///
+    /// **Computed here rather than resolved**, like [`fractures`](Self::fractures)
+    /// and for a sharper reason: the player *cannot decode a `.inf_mat`*.
+    /// `MaterialAsset` lives in `inf-material`, which owns the `image` decoders
+    /// and the naga-validating material compiler, and the P26.2 dependency
+    /// inversion exists to keep both out of a shipped build. So the editor runs
+    /// the **same** `inf_material::derive_material` the cook runs and ships the
+    /// answer. One deterministic function over the same bytes cannot give the
+    /// preview a different surface from the shipped one.
+    ///
+    /// Empty when nothing in the level binds a material — **which is also what a
+    /// caller that does not resolve materials produces**, the P21.4 "two empty
+    /// maps agreeing" hazard, and the reason `phase26_gate` asserts an exact
+    /// expected count before it compares anything.
+    #[serde(default)]
+    pub materials: Vec<(Uuid, Vec<u8>)>,
+    /// Referenced textures: `(asset guid, .inf_tex v2 container bytes)` — the
+    /// payloads the [`materials`](Self::materials) above name (schema v8,
+    /// P26.3b).
+    ///
+    /// **Raw container bytes, not a decoded image.** The player reads tiles out
+    /// of them through `inf_vt::TiledTextureReader`, which is the same door the
+    /// pack path takes one indirection later (a pack-backed host hands the
+    /// registry a slice of its mmap; a PIE host hands it a slice of this
+    /// vector). Nothing decodes a whole texture on either path.
+    ///
+    /// Keyed by the TEXTURE asset, deduplicated: two materials naming one map
+    /// carry it once, and the registry dedupes again by GUID so the atlas holds
+    /// one copy.
+    #[serde(default)]
+    pub textures: Vec<(Uuid, Vec<u8>)>,
 }
 
 impl ScenePayload {
@@ -283,6 +358,10 @@ impl ScenePayload {
             terrains: Vec::new(),
             fractures: Vec::new(),
             meshes: Vec::new(),
+            cloths: Vec::new(),
+            hairs: Vec::new(),
+            materials: Vec::new(),
+            textures: Vec::new(),
         }
     }
 
@@ -356,6 +435,41 @@ impl ScenePayload {
     /// [`with_pcgs`](Self::with_pcgs).
     pub fn with_meshes(mut self, meshes: Vec<(Uuid, Vec<u8>)>) -> Self {
         self.meshes = meshes;
+        self
+    }
+
+    /// Attach the referenced `.inf_cloth` / `.inf_hair` payloads (P26.3b) a v21
+    /// level's `ClothSim.asset` / `HairGuides.asset` refs name. Builder-style,
+    /// exactly like [`with_pcgs`](Self::with_pcgs).
+    ///
+    /// **The two travel together on purpose.** A wearer usually has both, they
+    /// are resolved by one walk of the document, and the P24.4 mutation matrix
+    /// found that severing one alone still left the anti-vacuity arm passing on
+    /// the other. One door makes "the garments crossed" one fact.
+    pub fn with_garments(
+        mut self,
+        cloths: Vec<(Uuid, Vec<u8>)>,
+        hairs: Vec<(Uuid, Vec<u8>)>,
+    ) -> Self {
+        self.cloths = cloths;
+        self.hairs = hairs;
+        self
+    }
+
+    /// Attach the **derived** material records and the `.inf_tex` containers they
+    /// name (P26.3b). Builder-style, exactly like [`with_pcgs`](Self::with_pcgs).
+    ///
+    /// **The two travel together for the reason the doc on
+    /// [`materials`](Self::materials) states**: a record naming textures with no
+    /// bytes behind them previews as an untextured surface while the shipped
+    /// build is textured, and the comparison between two such worlds passes.
+    pub fn with_materials(
+        mut self,
+        materials: Vec<(Uuid, Vec<u8>)>,
+        textures: Vec<(Uuid, Vec<u8>)>,
+    ) -> Self {
+        self.materials = materials;
+        self.textures = textures;
         self
     }
 
@@ -654,6 +768,18 @@ mod tests {
         // records: an empty new field cannot distinguish a tail append from a
         // mid-struct insertion.
         .with_meshes(vec![(Uuid::from_u128(0x24_01_01), vec![0xDD; 96])])
+        // v8 (P26.3b) — all four NON-EMPTY and all four a DIFFERENT length, for
+        // the reason the P24.1 audit found the hard way: two empty vectors agree
+        // with each other however they are ordered, and so do two of equal
+        // length.
+        .with_garments(
+            vec![(Uuid::from_u128(0x26_03_01), vec![0x11; 40])],
+            vec![(Uuid::from_u128(0x26_03_02), vec![0x22; 48])],
+        )
+        .with_materials(
+            vec![(Uuid::from_u128(0x26_03_03), vec![0x33; 56])],
+            vec![(Uuid::from_u128(0x26_03_04), vec![0x44; 72])],
+        )
     }
 
     /// **The round trip the v5 fields never had.** Every earlier envelope test
@@ -727,15 +853,28 @@ mod tests {
             terrains: Vec<(Uuid, Vec<u8>)>,
             fractures: Vec<(Uuid, Vec<u8>)>,
             meshes: Vec<(Uuid, Vec<u8>)>,
+            cloths: Vec<(Uuid, Vec<u8>)>,
+            hairs: Vec<(Uuid, Vec<u8>)>,
+            materials: Vec<(Uuid, Vec<u8>)>,
+            textures: Vec<(Uuid, Vec<u8>)>,
         }
 
         let want = payload_with_assets();
         // Every tail field carries different bytes AND a different length, so no
         // two of them can compare equal by accident.
-        let tail_lens: Vec<usize> = [&want.voxels, &want.terrains, &want.fractures, &want.meshes]
-            .iter()
-            .map(|v| v[0].1.len())
-            .collect();
+        let tail_lens: Vec<usize> = [
+            &want.voxels,
+            &want.terrains,
+            &want.fractures,
+            &want.meshes,
+            &want.cloths,
+            &want.hairs,
+            &want.materials,
+            &want.textures,
+        ]
+        .iter()
+        .map(|v| v[0].1.len())
+        .collect();
         let mut uniq = tail_lens.clone();
         uniq.sort_unstable();
         uniq.dedup();
@@ -749,11 +888,11 @@ mod tests {
         let bytes = bincode::serde::encode_to_vec(&want, bincode::config::standard()).unwrap();
         let (wire, consumed): (WireOrder, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-                .expect("the canonical 15-field order decodes the wire");
+                .expect("the canonical 19-field order decodes the wire");
         assert_eq!(
             consumed,
             bytes.len(),
-            "the encoding carries bytes the pinned 15-field order does not account \
+            "the encoding carries bytes the pinned 19-field order does not account \
              for — a field was added to `ScenePayload` without extending this pin"
         );
 
@@ -778,6 +917,16 @@ mod tests {
             "`fractures` is not wire field 14"
         );
         assert_eq!(wire.meshes, want.meshes, "`meshes` is not wire field 15");
+        assert_eq!(wire.cloths, want.cloths, "`cloths` is not wire field 16");
+        assert_eq!(wire.hairs, want.hairs, "`hairs` is not wire field 17");
+        assert_eq!(
+            wire.materials, want.materials,
+            "`materials` is not wire field 18"
+        );
+        assert_eq!(
+            wire.textures, want.textures,
+            "`textures` is not wire field 19"
+        );
     }
 
     /// **The tail is positional, and it is at the tail.** A reader that knows only

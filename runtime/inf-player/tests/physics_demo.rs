@@ -300,6 +300,9 @@ fn pie_payload_matches_shipping_for_playground() {
         |_guid| None, // no streamed terrains
         // P22.3: no destructible meshes in this fixture.
         |_| None,
+        // P26.3b: the cloth / hair / material / texture byte resolver. This
+        // fixture authors none of the four.
+        |_| None,
         60,
         false,
     )
