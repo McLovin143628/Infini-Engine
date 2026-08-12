@@ -218,7 +218,7 @@ fn harness_as(
     if force_rgba8 {
         settings.vt.bc_tiles = false;
     }
-    let stored: PageFormat = reader.header().format.into();
+    let stored: PageFormat = reader.header().format;
     let format = pool_format(&settings, stored);
     let bc = format.needs_bc();
     assert_eq!(

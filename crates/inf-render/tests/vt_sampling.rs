@@ -52,6 +52,10 @@ fn shader_walk(words: &[u32], tex: u32, uv: (f32, f32), want_mip: u32) -> (u32, 
     let mip_count = words[b];
     let tsz = words[b + 1];
     let tile_sz = tsz as f32;
+    // Spelled as the WGSL spells it — `(h + tsz - 1u) / tsz` — because this
+    // function is a transliteration and `div_ceil` has no WGSL counterpart. The
+    // clippy lint is allowed HERE and nowhere else for exactly that reason.
+    #[allow(clippy::manual_div_ceil)]
     let tiles_y = |h: u32| ((h + tsz - 1) / tsz).max(1);
 
     let w_uv = (uv.0 - uv.0.floor(), uv.1 - uv.1.floor());
