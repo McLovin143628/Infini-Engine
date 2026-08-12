@@ -486,6 +486,54 @@ mod tests {
         assert!(proj.db().contains(out.primary.unwrap()));
     }
 
+    /// **Two images imported into one project are two assets** (P26.1 audit).
+    ///
+    /// The batch's import arms all import ONE image, or import one image into
+    /// two projects. Both are satisfied by a writer that hands every asset the
+    /// same GUID — which is what `write_tiled_texture`'s door did, because
+    /// `AssetId::default()` is the NIL sentinel. The second import replaced the
+    /// first in the database and orphaned its payload on disk, and reported
+    /// success. Asserted on the database, not on the return value alone: an id
+    /// can be distinct and still not be *stored*.
+    #[test]
+    fn two_imported_images_are_two_assets() {
+        let src = tempfile::tempdir().unwrap();
+        let proj_dir = tempfile::tempdir().unwrap();
+        let a = write_corner_png(src.path(), "Alpha", 68, 68);
+        let b = write_corner_png(src.path(), "Beta", 132, 68);
+
+        let mut proj = AssetProject::open(proj_dir.path()).unwrap();
+        let dest = proj.content_dir("imported").unwrap();
+        let ia = proj.import_file(&a, &dest).unwrap().primary.unwrap();
+        let ib = proj.import_file(&b, &dest).unwrap().primary.unwrap();
+
+        assert!(
+            !ia.is_nil() && !ib.is_nil(),
+            "an import minted the NIL guid"
+        );
+        assert_ne!(ia, ib, "two imported images share one guid");
+        assert!(proj.db().contains(ia), "the first import was evicted");
+        assert!(proj.db().contains(ib));
+        assert_eq!(
+            proj.db()
+                .iter()
+                .filter(|e| e.kind() == AssetKind::Texture)
+                .count(),
+            2
+        );
+        // Both payloads are on disk AND owned — an orphan is a file the database
+        // does not know about, which is exactly what the eviction produced.
+        for id in [ia, ib] {
+            assert!(proj.db().get(id).unwrap().path.exists());
+        }
+        // …and they really are different textures, so this cannot pass by both
+        // ids pointing at one file.
+        assert_ne!(
+            proj.load_texture(ia).unwrap().width,
+            proj.load_texture(ib).unwrap().width
+        );
+    }
+
     /// A re-import of the same source produces the same bytes — the encode is a
     /// pure function of its input, so the content hash is stable and the import
     /// cache is telling the truth.

@@ -169,7 +169,17 @@ impl AssetProject {
     /// caller writes the bytes, hands us their hash, and the database gets its
     /// sidecar exactly as it would for any other asset.
     ///
-    /// Pass `reuse` to keep an existing GUID (a reimport rewriting its own file).
+    /// Pass `reuse` to keep an existing GUID (a reimport rewriting its own file,
+    /// or a derivation whose id *is* a function of its source). Without it a
+    /// fresh GUID is minted, exactly as [`write_asset`](Self::write_asset) does
+    /// — this used to be `reuse.unwrap_or_default()`, and `AssetId::default()`
+    /// is `AssetId::NIL`, the "no asset" sentinel. Every asset written through
+    /// this door with no `reuse` therefore shared one id: the second one to
+    /// arrive replaced the first in the database and left its payload orphaned
+    /// on disk. It stayed invisible while `.inf_terrain` was the only such
+    /// caller, because a project has one terrain and a reimport passes `reuse`;
+    /// P26.1 routed every imported *texture* through here, and a glTF brings
+    /// several at once.
     ///
     /// # The half-written-pair problem
     ///
@@ -194,7 +204,7 @@ impl AssetProject {
         import: Option<toml::Table>,
         reuse: Option<AssetId>,
     ) -> Result<AssetId> {
-        let id = reuse.unwrap_or_default();
+        let id = reuse.unwrap_or_else(AssetId::new);
         let mut sidecar = AssetSidecar::new(id, kind, content_hash);
         sidecar.source = source;
         sidecar.import = import;
@@ -562,6 +572,79 @@ mod tests {
         assert_eq!(e.name, "New");
         assert!(e.path.exists());
         assert!(inf_asset::sidecar_path(&e.path).exists());
+    }
+
+    /// **Two assets through the specialized door are two assets** (P26.1 audit).
+    ///
+    /// `reuse.unwrap_or_default()` looks like "mint one" and is not:
+    /// `AssetId::default()` is `AssetId::NIL`, the *"no asset"* sentinel. So
+    /// every asset written here without a `reuse` shared one GUID — the second
+    /// to arrive replaced the first in the database and left its payload
+    /// orphaned on disk, silently, with the import reporting success.
+    ///
+    /// It hid for two phases because `.inf_terrain` was the only caller that
+    /// ever passes `None` (a project has one terrain, a reimport passes `reuse`,
+    /// and a `.inf_vmesh` derivation always passes its computed id). P26.1 sent
+    /// every imported texture through it, and one glTF brings several.
+    ///
+    /// Asserted kind-agnostically at the door rather than only on textures,
+    /// because the defect was never about textures.
+    #[test]
+    fn the_specialized_writer_mints_a_fresh_guid_per_asset() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut proj = AssetProject::open(dir.path()).unwrap();
+        let content = proj.content_dir("Terrain").unwrap();
+        let mut ids = Vec::new();
+        for name in ["North", "South", "East"] {
+            let payload = content.join(format!("{name}.inf_terrain"));
+            std::fs::write(&payload, name.as_bytes()).unwrap();
+            ids.push(
+                proj.register_written_asset(
+                    payload,
+                    AssetKind::Terrain,
+                    ContentHash::of(name.as_bytes()),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        for (i, id) in ids.iter().enumerate() {
+            assert!(!id.is_nil(), "asset {i} was registered under the NIL guid");
+        }
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            3,
+            "the specialized writer handed out one guid for three assets"
+        );
+        // …and all three are in the database, rather than the last one having
+        // evicted the other two.
+        for id in &ids {
+            assert!(proj.db().contains(*id));
+        }
+        assert_eq!(
+            proj.db()
+                .iter()
+                .filter(|e| e.kind() == AssetKind::Terrain)
+                .count(),
+            3
+        );
+        // `reuse` still pins the guid — the reimport and derivation contract.
+        let payload = content.join("North.inf_terrain");
+        std::fs::write(&payload, b"v2").unwrap();
+        assert_eq!(
+            proj.register_written_asset(
+                payload,
+                AssetKind::Terrain,
+                ContentHash::of(b"v2"),
+                None,
+                None,
+                Some(ids[0]),
+            )
+            .unwrap(),
+            ids[0]
+        );
     }
 
     /// A payload with no sidecar is worse than no asset at all: the content
