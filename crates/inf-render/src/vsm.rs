@@ -266,7 +266,7 @@ pub const VSM_PROJ_ORTHO: u32 = 0;
 /// See [`VSM_PROJ_ORTHO`].
 pub const VSM_PROJ_PERSPECTIVE: u32 = 1;
 
-/// The uniform the marking pass reads — 112 bytes.
+/// The uniform the marking pass reads — 96 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VsmMarkParams {

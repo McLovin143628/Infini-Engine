@@ -161,10 +161,21 @@ pub struct VsmLightDesc {
 
 impl VsmLightDesc {
     /// A directional light's clipmap: `levels` levels of `pages_per_side²`.
+    ///
+    /// `levels` is clamped into `1..=`[`MAX_VSM_LEVELS`] **before** the vector is
+    /// allocated, exactly as [`quadtree_levels`] clamps, and the reason is not
+    /// symmetry: `levels` reaches here from a host-set
+    /// `VsmSettings::clipmap_levels`, and a `vec![_; u32::MAX as usize]` is an
+    /// out-of-memory abort rather than the [`VsmDescError::TooManyLevels`]
+    /// refusal `validate` is there to give. A refusal has to survive being asked
+    /// for something absurd.
     pub fn clipmap(levels: u32, pages_per_side: u32) -> Self {
         Self {
             kind: VsmTreeKind::Clipmap,
-            levels: vec![VsmLevelDesc::square(pages_per_side); levels.max(1) as usize],
+            levels: vec![
+                VsmLevelDesc::square(pages_per_side);
+                levels.clamp(1, MAX_VSM_LEVELS as u32) as usize
+            ],
         }
     }
 
@@ -639,6 +650,27 @@ mod tests {
             assert_eq!(seen.len() as u32, d.page_count());
             assert_eq!(seen.iter().next_back().copied(), Some(d.page_count() - 1));
         }
+    }
+
+    /// **A constructor must survive an absurd request**, because `levels` comes
+    /// from a host setting rather than from content: `vec![_; u32::MAX as usize]`
+    /// is an out-of-memory abort, and an abort is not the refusal `validate`
+    /// exists to give.
+    #[test]
+    fn an_absurd_level_count_is_clamped_before_it_is_allocated() {
+        for levels in [u32::MAX, u32::MAX / 2, 1_000_000, MAX_VSM_LEVELS as u32 + 1] {
+            let d = VsmLightDesc::clipmap(levels, 8);
+            assert_eq!(d.level_count(), MAX_VSM_LEVELS as u32, "{levels}");
+            d.validate()
+                .expect("a clamped clipmap is still a real tree");
+            let q = VsmLightDesc::quadtree(levels);
+            assert_eq!(q.level_count(), MAX_VSM_LEVELS as u32, "{levels}");
+            q.validate()
+                .expect("a clamped quadtree is still a real tree");
+        }
+        // …and zero is clamped UP, so a tree always has a level to resolve into.
+        assert_eq!(VsmLightDesc::clipmap(0, 8).level_count(), 1);
+        assert_eq!(VsmLightDesc::quadtree(0).level_count(), 1);
     }
 
     #[test]
