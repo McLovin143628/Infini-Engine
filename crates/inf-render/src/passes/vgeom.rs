@@ -1618,7 +1618,8 @@ impl RenderNode for VgeomNode {
         } = self;
 
         // Lights (shared with the rigid pass).
-        let lights = LightsUniform::from_scene(frame.scene, &frame.view.origin);
+        let lights =
+            LightsUniform::from_scene(frame.scene, &frame.view.origin, frame.vsm_light_slots);
         gpu.queue
             .write_buffer(lights_buf, 0, bytemuck::bytes_of(&lights));
 

@@ -156,6 +156,25 @@ const ENV_WETNESS: u32 = 13;
 const ENV_VT_ATLAS: u32 = 14;
 const ENV_VT_SAMPLER: u32 = 15;
 const ENV_VT_TABLE: u32 = 16;
+/// **The virtual-shadow-map receiver** (P27.4) — four bindings past 16, on
+/// exactly the argument [`ENV_VT_ATLAS`] records: the scarce resource is the
+/// GROUP, and this spends none.
+///
+/// There is no fifth entry for a **sampler**, and that is the P27.4 filtering
+/// ruling rather than an omission: pages are borderless (`VSM_PAGE_BORDER = 0`),
+/// so a hardware comparison sampler's 2 × 2 footprint at a page edge would read
+/// the atlas slot next door — an unrelated page of a possibly unrelated light.
+/// The receiver `textureLoad`s integer texels and compares in the shader; see
+/// [`crate::vsm_receiver`].
+///
+/// The two storage entries are **read-only**, which is core wgpu in the
+/// fragment stage everywhere (binding 5, the GI probes, has been one since
+/// P13.3b). The `FRAGMENT_WRITABLE_STORAGE` objection
+/// `docs/memos/p26-4-feedback-mechanism.md` raises is about *writes*.
+const ENV_VSM_ATLAS: u32 = 17;
+const ENV_VSM_TABLE: u32 = 18;
+const ENV_VSM_PROJECTIONS: u32 = 19;
+const ENV_VSM_PARAMS: u32 = 20;
 
 /// The atmosphere *medium* library, bound at `group`/`binding`.
 pub(crate) fn atmosphere_source(group: u32, binding: u32) -> String {
@@ -542,6 +561,12 @@ pub(crate) fn lit_deform_shader(
 ) -> String {
     let env =
         include_str!("../shaders/env_lighting.wgsl").replace("GROUP_ENV", &env_group.to_string());
+    // P27.4: the virtual-shadow-map receiver. Composed **before** the
+    // environment snippet, because `shadow_factor` calls `vsm_shadow` and WGSL
+    // has no forward declarations — the same ordering constraint the cloud
+    // shadow has against the atmosphere library, in the other direction.
+    let vsm =
+        include_str!("../shaders/vsm_receive.wgsl").replace("GROUP_ENV", &env_group.to_string());
     // P17.3: the cloud-shadow receiver. It reads `atmos` (the cloud block) and
     // borrows `atmos_lut_smp`, so it must be composed AFTER both atmosphere
     // fragments — WGSL has no forward declarations.
@@ -571,8 +596,9 @@ pub(crate) fn lit_deform_shader(
         None => String::new(),
     };
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         include_str!("../shaders/common_view.wgsl"),
+        vsm,
         env,
         atmosphere_source(env_group, ENV_ATMOS_UNIFORM),
         atmosphere_lut_source(
@@ -635,7 +661,17 @@ pub(crate) fn deform_source(
 /// frame: every instance simply keeps sampling the table as it was before the
 /// new texture existed. Exactly the quiet failure the invariant on
 /// [`EnvBinding::bind_group`] describes.
-pub(crate) type ResourceKey = (u64, u64, u64, u64);
+/// The VSM component is P27.4's, and it is load-bearing for **three**
+/// resources at once: a shadow-casting light set that changes rebuilds the whole
+/// [`crate::vsm_mark::VsmSystem`], which allocates a new page atlas, a new
+/// indirection buffer and a new projections buffer under the same names. A bind
+/// group cached across that keeps all three alive (wgpu refcounts them), so
+/// there is no validation error and no black frame — every lit pixel simply
+/// keeps sampling the shadows of the light set that used to exist. One
+/// component covers all three because they are created together, by
+/// construction: `VsmPools::new` and `VsmMarker::new` are two lines of
+/// `VsmSystem::for_scene`.
+pub(crate) type ResourceKey = (u64, u64, u64, u64, u64);
 
 /// The current [`ResourceKey`] for a frame.
 #[inline]
@@ -645,6 +681,7 @@ pub(crate) fn resource_key(frame: &FrameData) -> ResourceKey {
         frame.atmosphere.generation,
         frame.gi.generation,
         frame.vt_generation(),
+        frame.vsm_generation(),
     )
 }
 
@@ -863,6 +900,15 @@ impl EnvBinding {
                 // is legal and wrong.
                 .into_iter()
                 .chain(crate::vt::VtPools::bind_group_layout_entries(ENV_VT_ATLAS))
+                // ── P27.4 virtual shadow maps (17, 18, 19, 20) ──
+                //
+                // Appended from the receiver's own module for `VtPools`'s
+                // reason: the layout and the entries are a PAIR, and a pair
+                // written in two files is a pair that drifts into a validation
+                // error — or, worse, into a bind group that is legal and wrong.
+                .chain(crate::vsm_receiver::bind_group_layout_entries(
+                    ENV_VSM_ATLAS,
+                ))
                 .collect::<Vec<_>>(),
             });
         let ao_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1020,6 +1066,32 @@ impl EnvBinding {
                         binding: ENV_VT_TABLE,
                         resource: frame.vt_table().as_entire_binding(),
                     },
+                    // ── P27.4 virtual shadow maps ──
+                    //
+                    // The live system when the frame has one, else the
+                    // renderer's permanent EMPTY surface: a 1×1 depth texture, a
+                    // 4-byte zero buffer whose first word is not the table magic
+                    // (so `vsm_active()` is false), one zeroed projection and a
+                    // zeroed uniform. Every lit shader then takes the `* 1.0`
+                    // path with no memory traffic — the same structural no-op
+                    // `vt_absent` gives virtual texturing, and the reason no
+                    // golden could move.
+                    wgpu::BindGroupEntry {
+                        binding: ENV_VSM_ATLAS,
+                        resource: wgpu::BindingResource::TextureView(frame.vsm_atlas()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: ENV_VSM_TABLE,
+                        resource: frame.vsm_table().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: ENV_VSM_PROJECTIONS,
+                        resource: frame.vsm_projections().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: ENV_VSM_PARAMS,
+                        resource: frame.vsm_params().as_entire_binding(),
+                    },
                 ],
             })
         })
@@ -1066,15 +1138,15 @@ mod gen_cache_tests {
         let mut cache: GenCache<ResourceKey, Rc<u32>> = GenCache::default();
         let mut builds = 0u32;
 
-        let first = fetch(&mut cache, (1, 1, 1, 1), &mut builds);
+        let first = fetch(&mut cache, (1, 1, 1, 1, 1), &mut builds);
         // Same key ⇒ the SAME allocation, and the builder never ran again.
-        let again = fetch(&mut cache, (1, 1, 1, 1), &mut builds);
+        let again = fetch(&mut cache, (1, 1, 1, 1, 1), &mut builds);
         assert!(Rc::ptr_eq(&first, &again), "an unchanged key rebuilt");
         assert_eq!(builds, 1, "an unchanged key must not rebuild");
 
         // The atmosphere generation alone must invalidate — this is the key
         // component P17.2 added, and the one a regression would drop.
-        let after_atmos = fetch(&mut cache, (1, 2, 1, 1), &mut builds);
+        let after_atmos = fetch(&mut cache, (1, 2, 1, 1, 1), &mut builds);
         assert!(
             !Rc::ptr_eq(&after_atmos, &first),
             "an atmosphere-generation bump did not rebuild the bind group"
@@ -1082,7 +1154,7 @@ mod gen_cache_tests {
         assert_eq!(builds, 2);
 
         // ...and so must the frame-targets generation alone (the P13 component).
-        let after_targets = fetch(&mut cache, (2, 2, 1, 1), &mut builds);
+        let after_targets = fetch(&mut cache, (2, 2, 1, 1, 1), &mut builds);
         assert!(
             !Rc::ptr_eq(&after_targets, &after_atmos),
             "a targets-generation bump did not rebuild the bind group"
@@ -1092,7 +1164,7 @@ mod gen_cache_tests {
         // ...and the GI generation alone (the P18.4 component). GI resources became
         // resizable when `GiQuality` landed, which is precisely the case the P13
         // exclusion comment said would have to join this key.
-        let after_gi = fetch(&mut cache, (2, 2, 2, 1), &mut builds);
+        let after_gi = fetch(&mut cache, (2, 2, 2, 1, 1), &mut builds);
         assert!(
             !Rc::ptr_eq(&after_gi, &after_targets),
             "a GI-generation bump did not rebuild the bind group"
@@ -1104,7 +1176,7 @@ mod gen_cache_tests {
         // cached across that keeps the old allocation alive — wgpu refcounts it,
         // so there is no validation error and no black frame, only a table from
         // before the new texture existed.
-        let after_vt = fetch(&mut cache, (2, 2, 2, 2), &mut builds);
+        let after_vt = fetch(&mut cache, (2, 2, 2, 2, 1), &mut builds);
         assert!(
             !Rc::ptr_eq(&after_vt, &after_gi),
             "a VT-generation bump did not rebuild the bind group"
@@ -1114,7 +1186,7 @@ mod gen_cache_tests {
         // Returning to a previously-seen key still rebuilds: the cache is one
         // slot, not a map, so it can never hand back a handle to a resource that
         // has since been recreated under the same number.
-        let back = fetch(&mut cache, (1, 1, 1, 1), &mut builds);
+        let back = fetch(&mut cache, (1, 1, 1, 1, 1), &mut builds);
         assert!(!Rc::ptr_eq(&back, &first));
         assert_eq!(builds, 6);
     }
@@ -1124,26 +1196,39 @@ mod gen_cache_tests {
     /// the call site.
     #[test]
     fn resource_key_is_injective_in_every_component() {
-        let base: ResourceKey = (7, 11, 13, 17);
+        let base: ResourceKey = (7, 11, 13, 17, 19);
         assert_ne!(
             base,
-            (8, 11, 13, 17),
+            (8, 11, 13, 17, 19),
             "targets generation dropped from the key"
         );
         assert_ne!(
             base,
-            (7, 12, 13, 17),
+            (7, 12, 13, 17, 19),
             "atmosphere generation dropped from the key"
         );
-        assert_ne!(base, (7, 11, 14, 17), "GI generation dropped from the key");
-        assert_ne!(base, (7, 11, 13, 18), "VT generation dropped from the key");
-        assert_eq!(base, (7, 11, 13, 17));
+        assert_ne!(
+            base,
+            (7, 11, 14, 17, 19),
+            "GI generation dropped from the key"
+        );
+        assert_ne!(
+            base,
+            (7, 11, 13, 18, 19),
+            "VT generation dropped from the key"
+        );
+        assert_ne!(
+            base,
+            (7, 11, 13, 17, 20),
+            "VSM generation dropped from the key"
+        );
+        assert_eq!(base, (7, 11, 13, 17, 19));
     }
 
     /// …and that the **constructor actually reads all four**, which the arm above
     /// cannot see.
     ///
-    /// A tuple that is injective in four components proves nothing about a
+    /// A tuple that is injective in five components proves nothing about a
     /// [`resource_key`] that passes a constant for one of them. Measured (P26.3
     /// audit): replacing `frame.vt_generation()` with `0` left the entire
     /// `inf-render` suite green, and the same hole stood over the three older
@@ -1161,6 +1246,7 @@ mod gen_cache_tests {
             "atmosphere.generation",
             "gi.generation",
             "vt_generation()",
+            "vsm_generation()",
         ] {
             assert!(
                 body.contains(field),

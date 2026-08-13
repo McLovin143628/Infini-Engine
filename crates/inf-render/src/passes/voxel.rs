@@ -558,7 +558,8 @@ impl VoxelNode {
             return draws;
         }
 
-        let lights = LightsUniform::from_scene(frame.scene, &frame.view.origin);
+        let lights =
+            LightsUniform::from_scene(frame.scene, &frame.view.origin, frame.vsm_light_slots);
         gpu.queue
             .write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lights));
 

@@ -591,6 +591,28 @@ pub struct VsmSettings {
     pub point_levels: u32,
     /// The near plane of a spot's or a cube face's projection, in metres.
     pub perspective_near_m: f32,
+    /// **The clipmap level blend band** (P27.4) — the virtual analogue of
+    /// [`ShadowSettings::cascade_blend`], as a fraction of a level's own band.
+    ///
+    /// A receiver near the edge of the level it was served additionally resolves
+    /// the **next coarser** level and lerps, so the resolution change stops
+    /// showing as a line across the ground. A clipmap level has two edges a
+    /// receiver can approach — its resolution band and its footprint ring — and
+    /// the weight is the larger of the two proximities
+    /// ([`crate::vsm_receiver::vsm_blend_weight`]).
+    ///
+    /// `0.0` restores the hard switch **exactly**: the branch is not taken and
+    /// the second resolve is never issued, which is the escape hatch
+    /// `cascade_blend` already ships. Default 0.1, the cascade's own default, so
+    /// the two paths look alike at the seam rather than only being spelled
+    /// alike.
+    ///
+    /// Deliberately a **second** knob rather than a reader of `cascade_blend`:
+    /// the ROADMAP's "clipmap level blend replaces cascade blend" is about which
+    /// blend *runs*, and a project that turned the cascade's seam fix off must
+    /// not silently turn the clipmap's off with it — nor the reverse. The CSM's
+    /// own knob is untouched by this batch.
+    pub level_blend: f32,
 }
 
 /// A [`VsmSettings`] value outside the legal set — **the settings boundary's own
@@ -640,6 +662,9 @@ pub enum VsmSettingsError {
     Budget { budget_bytes: u64, page_bytes: u64 },
     /// A distance that is not a positive finite number of metres.
     Distance { field: &'static str, value: f32 },
+    /// A [`VsmSettings::level_blend`] that is not a fraction — zero is legal
+    /// (the hard switch), a NaN is not.
+    Blend { value: f32 },
 }
 
 impl std::fmt::Display for VsmSettingsError {
@@ -678,6 +703,11 @@ impl std::fmt::Display for VsmSettingsError {
                     "`{field}` is {value}; it must be a positive finite metre"
                 )
             }
+            Self::Blend { value } => write!(
+                f,
+                "`level_blend` is {value}; it must be a fraction in 0..=1 (0 is \
+                 the hard level switch)"
+            ),
         }
     }
 }
@@ -754,6 +784,15 @@ impl VsmSettings {
                 return Err(VsmSettingsError::Distance { field, value });
             }
         }
+        // The blend band is a FRACTION, so zero is legal (the hard switch) and
+        // the refusal is only for a value that is not one — a NaN band would
+        // reach `vsm_blend_weight`'s comparisons, where every one of them is
+        // false and the seam quietly comes back.
+        if !(self.level_blend.is_finite() && (0.0..=1.0).contains(&self.level_blend)) {
+            return Err(VsmSettingsError::Blend {
+                value: self.level_blend,
+            });
+        }
         Ok(())
     }
 }
@@ -769,6 +808,7 @@ impl Default for VsmSettings {
             spot_levels: 7,
             point_levels: 6,
             perspective_near_m: 0.05,
+            level_blend: 0.1,
         }
     }
 }

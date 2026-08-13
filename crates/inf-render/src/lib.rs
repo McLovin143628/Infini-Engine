@@ -51,6 +51,10 @@ pub mod vsm_mark;
 /// the whole atlas, and the viewport/scissor pair that pins each page to its
 /// slot.
 pub mod vsm_raster;
+/// The P27.4 receiver: the address walk a lit fragment makes through the page
+/// table, the clamped PCF kernel and its measured ruling, the clipmap level
+/// blend, and the bias derived from a page's own texel density.
+pub mod vsm_receiver;
 pub mod vt;
 /// The P26.3 registration door: `.inf_tex` v2 payloads become virtual
 /// textures here, for both hosts, through one rule.
@@ -148,6 +152,18 @@ pub use vsm_raster::{
     PageGeometry, VsmCasterRaw, VsmRaster, VsmRasterStats, SKINNED_POSE_MARGIN, VSM_ARG_WORDS,
     VSM_MAX_CASTERS, VSM_MAX_GROUPS, VSM_MAX_RASTER_PAGES, VSM_PAGE_DRAW_STRIDE, VSM_RIGID_GROUPS,
     VSM_TERRAIN_CASTER_CELLS,
+};
+// P27.4 the receiver: the pure half (the address walk, the clamped kernel, the
+// level blend, the two derived bias terms) plus the resources the shared
+// environment bind group names.
+pub use vsm_receiver::{
+    clipmap_resolution_reads, is_clipmap, pcf_crossing_fraction, pcf_resolution_cost,
+    receiver_slots, sun_slot, vsm_atlas_header, vsm_bias_ndc, vsm_blend_weight, vsm_block_header,
+    vsm_cube_face, vsm_level_factor, vsm_level_ndc, vsm_ndc_per_metre, vsm_page_of, vsm_pcf_taps,
+    vsm_receiver_level, vsm_receiver_site, vsm_shadow_factor, vsm_slope_tan, vsm_table_entry,
+    vsm_to_light, VsmEmptyPool, VsmReceiverParams, VsmReceiverResources, VsmReceiverSite,
+    VsmTableEntry, VSM_DEPTH_ULP_BIAS, VSM_MAX_SLOPE, VSM_NORMAL_BIAS_TEXELS, VSM_NO_DATA,
+    VSM_PCF_RADIUS, VSM_PCF_TAPS, VSM_SLOPE_BIAS_TEXELS,
 };
 // The shadow page space's own vocabulary, re-exported on `inf_vt`'s precedent so
 // a host or a gate that reads a residency does not have to add the GPU-free

@@ -404,7 +404,8 @@ impl SkinnedMeshNode {
         self.active = !frame.scene.skinned.is_empty();
 
         // Lights (same projection as the rigid pass).
-        let lights = LightsUniform::from_scene(frame.scene, &frame.view.origin);
+        let lights =
+            LightsUniform::from_scene(frame.scene, &frame.view.origin, frame.vsm_light_slots);
         gpu.queue
             .write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lights));
 

@@ -307,6 +307,22 @@ pub struct FrameData<'a> {
     /// The permanent EMPTY virtual-texture surface: what the env bind group
     /// names when [`vt`](Self::vt) is `None`. See [`crate::vt::VtEmptyPool`].
     pub vt_absent: &'a crate::vt::VtEmptyPool,
+    /// The live virtual-shadow-map system (P27.4), when this frame has one.
+    /// `None` on every scene with virtual shadows off or with no shadow-casting
+    /// light — including all fifty committed goldens — and then the env bind
+    /// group names [`vsm_absent`](Self::vsm_absent) instead.
+    pub vsm: Option<&'a crate::vsm_mark::VsmSystem>,
+    /// The permanent EMPTY shadow surface. See
+    /// [`crate::vsm_receiver::VsmEmptyPool`].
+    pub vsm_absent: &'a crate::vsm_receiver::VsmEmptyPool,
+    /// The receiver's uniform (P27.4), packed at the frame's sync point.
+    pub vsm_receiver: &'a crate::vsm_receiver::VsmReceiverResources,
+    /// Per **scene light index**, the projection slot that light's tree starts
+    /// at **+ 1** — 0 for a light with no tree. Rides into `GpuLight::params.w`,
+    /// which every lit pass's point/spot branch reads. Empty when the frame has
+    /// no system, which is what keeps `params.w` at the `0.0` it has held since
+    /// P7.1 and every pre-P27.4 golden byte-identical.
+    pub vsm_light_slots: &'a [u32],
 }
 
 impl FrameData<'_> {
@@ -337,6 +353,49 @@ impl FrameData<'_> {
     #[inline]
     pub(crate) fn vt_generation(&self) -> u64 {
         self.vt.map_or(0, |p| p.table_generation())
+    }
+
+    /// The shadow atlas the env bind group names this frame.
+    #[inline]
+    pub(crate) fn vsm_atlas(&self) -> &wgpu::TextureView {
+        self.vsm
+            .map_or_else(|| self.vsm_absent.view(), |v| v.pools().atlas_view())
+    }
+    /// The shadow indirection buffer the env bind group names this frame.
+    #[inline]
+    pub(crate) fn vsm_table(&self) -> &wgpu::Buffer {
+        self.vsm
+            .map_or_else(|| self.vsm_absent.table(), |v| v.pools().table())
+    }
+    /// This frame's per-(light × face) projection list, on the GPU.
+    #[inline]
+    pub(crate) fn vsm_projections(&self) -> &wgpu::Buffer {
+        self.vsm.map_or_else(
+            || self.vsm_absent.projections(),
+            |v| v.marker().projection_buffer(),
+        )
+    }
+    /// The receiver's uniform — the renderer's own when a system is live, the
+    /// permanently-zero one otherwise, so a frame that switches the feature off
+    /// cannot keep last frame's blend band or sun slot.
+    #[inline]
+    pub(crate) fn vsm_params(&self) -> &wgpu::Buffer {
+        if self.vsm.is_some() {
+            &self.vsm_receiver.uniform
+        } else {
+            self.vsm_absent.params()
+        }
+    }
+    /// The VSM component of [`crate::passes::ResourceKey`].
+    ///
+    /// **0 when there is no system, and never 0 when there is**: `inf-vsm`'s
+    /// stamp counter starts at 1 and only ever rises, so "absent" cannot collide
+    /// with any live layout generation and a system appearing or vanishing
+    /// invalidates the cached bind group on its own — the `vt_generation`
+    /// argument, met again for three resources instead of one.
+    #[inline]
+    pub(crate) fn vsm_generation(&self) -> u64 {
+        self.vsm.map_or(0, |v| v.pools().table_generation())
     }
 }
 
@@ -437,6 +496,28 @@ pub struct EngineRenderer {
     /// counter from the marking one on purpose: a frame can mark pages it has no
     /// caster for, and a frame can rasterize pages while its mask misses.
     vsm_raster_frames: u64,
+    /// The empty shadow surface, created once and never recreated (so it adds no
+    /// `passes::ResourceKey` component, on the `vt_absent` precedent).
+    vsm_absent: crate::vsm_receiver::VsmEmptyPool,
+    /// The receiver's uniform, created once and only written (P27.4).
+    vsm_receiver: crate::vsm_receiver::VsmReceiverResources,
+    /// The params packed into it this frame — kept on the CPU side too, because
+    /// a gate that asserts which tree the sun reads cannot read a GPU uniform
+    /// back cheaply and must not re-derive the answer it is checking.
+    vsm_receiver_params: crate::vsm_receiver::VsmReceiverParams,
+    /// This frame's per-scene-light projection slots (+1), rebuilt at the sync
+    /// point. Held rather than passed so the borrow in `FrameData` is of a field
+    /// and not of a temporary.
+    vsm_light_slots: Vec<u32>,
+    /// Frames drawn with the shadow atlas BOUND to the lit passes — the P27.4
+    /// **engagement counter**, and the third of the phase's three.
+    ///
+    /// It is a different claim from the other two and it is the one the ROADMAP's
+    /// "the setting stops being inert" rests on: marking says a pixel asked for a
+    /// page, rastering says a caster filled one, and this says a lit fragment was
+    /// in a position to read it. Zero on every scene with virtual shadows off,
+    /// which is what makes "no golden moved" a measurement.
+    vsm_receiver_frames: u64,
 }
 
 impl EngineRenderer {
@@ -634,6 +715,11 @@ impl EngineRenderer {
             vsm: None,
             vsm_engaged_frames: 0,
             vsm_raster_frames: 0,
+            vsm_absent: crate::vsm_receiver::VsmEmptyPool::new(&gpu.device, &gpu.queue),
+            vsm_receiver: crate::vsm_receiver::VsmReceiverResources::new(&gpu.device),
+            vsm_receiver_params: crate::vsm_receiver::VsmReceiverParams::absent(),
+            vsm_light_slots: Vec::new(),
+            vsm_receiver_frames: 0,
         }
     }
 
@@ -1045,6 +1131,8 @@ impl EngineRenderer {
     fn vsm_sync(&mut self, gpu: &GpuContext, scene: &RenderScene, view: &RenderView) {
         if !self.settings.vsm.enabled {
             self.vsm = None;
+            self.vsm_light_slots.clear();
+            self.vsm_receiver_params = crate::vsm_receiver::VsmReceiverParams::absent();
             return;
         }
         if self
@@ -1057,9 +1145,33 @@ impl EngineRenderer {
             self.vsm = crate::vsm_mark::VsmSystem::for_scene(gpu, scene, &self.settings.vsm);
         }
         let frame = self.frame_index;
-        if let Some(v) = self.vsm.as_mut() {
-            v.sync(gpu, scene, view, &self.settings.vsm, frame);
-        }
+        let Some(v) = self.vsm.as_mut() else {
+            self.vsm_light_slots.clear();
+            self.vsm_receiver_params = crate::vsm_receiver::VsmReceiverParams::absent();
+            return;
+        };
+        v.sync(gpu, scene, view, &self.settings.vsm, frame);
+        // **THE RECEIVER'S SIDE OF THE SYNC POINT** (P27.4), here rather than
+        // beside the marking pass, and the placement is the whole of why the lit
+        // passes see this frame: `write_buffer` is staged on the queue and runs
+        // before the commands of any command buffer submitted afterwards, and the
+        // graph — which is where a lit fragment samples — is recorded after this.
+        // `VsmSystem::sync` uploads the projection list for the same reason.
+        self.vsm_light_slots = v.receiver_slots(scene);
+        self.vsm_receiver_params = crate::vsm_receiver::VsmReceiverParams::new(
+            &self.settings.vsm,
+            crate::vt_stream::projection_scale(view),
+            crate::vsm_receiver::sun_slot(
+                &self.vsm_light_slots,
+                scene
+                    .lights
+                    .iter()
+                    .map(|l| l.kind == crate::scene::LightKind::Directional),
+            ),
+            v.projections().len() as u32,
+        );
+        self.vsm_receiver
+            .write(&gpu.queue, &self.vsm_receiver_params);
     }
 
     /// The live virtual-shadow-map system, for a host or a gate that wants to
@@ -1098,6 +1210,30 @@ impl EngineRenderer {
     #[inline]
     pub fn vsm_raster_frames(&self) -> u64 {
         self.vsm_raster_frames
+    }
+
+    /// Frames drawn with the shadow atlas **bound to the lit passes** — the
+    /// P27.4 engagement counter, and the one that says the setting stopped being
+    /// inert. **Zero is the assertion** on a scene that does not run virtual
+    /// shadows; a non-zero value says a lit fragment was in a position to read a
+    /// page, which neither of the other two counters claims.
+    #[inline]
+    pub fn vsm_receiver_frames(&self) -> u64 {
+        self.vsm_receiver_frames
+    }
+
+    /// The receiver params this frame's lit passes were handed (P27.4) — a
+    /// gate's door, so an arm can assert the sun slot and the blend band the
+    /// shader actually read rather than the ones it expected the renderer to
+    /// pack. `None` when no system is live.
+    pub fn vsm_receiver_params(&self) -> Option<crate::vsm_receiver::VsmReceiverParams> {
+        self.vsm.as_ref().map(|_| self.vsm_receiver_params)
+    }
+
+    /// Per **scene light index**, the projection slot + 1 the lights uniform
+    /// carried this frame (P27.4). Empty when no system is live.
+    pub fn vsm_light_slots(&self) -> &[u32] {
+        &self.vsm_light_slots
     }
 
     /// The caster pass's counters (P27.2). `None` when no system is built.
@@ -1301,6 +1437,10 @@ impl EngineRenderer {
             view_mode: self.view_mode,
             vt: self.vt.as_ref(),
             vt_absent: &self.vt_absent,
+            vsm: self.vsm.as_ref(),
+            vsm_absent: &self.vsm_absent,
+            vsm_receiver: &self.vsm_receiver,
+            vsm_light_slots: &self.vsm_light_slots,
         };
         self.graph.run(gpu, &mut encoder, &frame);
 
@@ -1345,6 +1485,11 @@ impl EngineRenderer {
         // virtual textures" and nothing weaker.
         if self.vt.is_some() {
             self.vt_engaged_frames += 1;
+        }
+        // P27.4 engagement, on exactly that precedent and counted in the same
+        // place: the atlas was bound to the lit passes of a frame that went out.
+        if self.vsm.is_some() {
+            self.vsm_receiver_frames += 1;
         }
     }
 }

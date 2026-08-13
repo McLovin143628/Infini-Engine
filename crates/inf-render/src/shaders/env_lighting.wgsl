@@ -84,6 +84,20 @@ fn csm_cascade_pcf(world_pos: vec3<f32>, n: vec3<f32>, c: i32) -> f32 {
 // is `splits.w` of the cascade's own range (0 ⇒ the pre-P18.4 hard switch, and the
 // branch below is not taken at all).
 fn shadow_factor(world_pos: vec3<f32>, n: vec3<f32>) -> f32 {
+    // **P27.4: the sun's shadow through the page table, when there is one.**
+    // VSM replaces the cascades rather than adding to them — P27.5 demotes this
+    // path to the fallback it already is on Low, where `RenderTier::apply`
+    // clears `VsmSettings::enabled` and the branch below is not taken.
+    //
+    // The sun's tree is named by the receiver uniform rather than by a light
+    // record, because `terrain.wgsl` shades the sun from `view.sun_dir` and has
+    // no light index at all — one door for the sun, and `GpuLight.params.w` for
+    // every analytic light. `vsm_sun_bound()` is false on every frame without a
+    // system (the empty table's first word is not the magic), so every
+    // pre-P27.4 golden runs the identical instruction stream below.
+    if (vsm_sun_bound()) {
+        return vsm_shadow(world_pos, n, vsm.counts.x);
+    }
     if (shadow.params.x < 0.5) {
         return 1.0;
     }
@@ -122,6 +136,18 @@ fn shadow_factor(world_pos: vec3<f32>, n: vec3<f32>) -> f32 {
         }
     }
     return factor;
+}
+
+// **Is there a sun shadow term at all?** The one door every lit pass's "is it
+// worth calling `shadow_factor`" guard goes through since P27.4, because the
+// answer is now two flags rather than one and three shaders were each spelling
+// the CSM half inline.
+//
+// Both halves are uniform (a uniform buffer's field and a storage buffer's first
+// word), so this is a uniform branch and a scene with neither shadow kind on
+// takes exactly the instruction stream it always did.
+fn sun_shadowing_enabled() -> bool {
+    return shadow.params.x > 0.5 || vsm_sun_bound();
 }
 
 fn sh_basis(d: vec3<f32>) -> vec4<f32> {

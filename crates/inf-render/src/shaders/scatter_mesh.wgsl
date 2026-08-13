@@ -402,7 +402,15 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
                     let cos_dir = dot(l, -light.spot_dir.xyz);
                     cone = smoothstep(light.params.z, light.params.y, cos_dir);
                 }
-                lo += shade_light(n, v, l, radiance_base * att * cone,
+                // **P27.4: the engine's FIRST point/spot shadows.** A spot
+                // resolves through its single quadtree, a point through the
+                // cube-face quadtree its own direction selects. `params.w` is 0
+                // on every light without a page tree — which is every light of
+                // every scene with virtual shadows off — and `vsm_light_shadow`
+                // returns exactly 1.0 there, so this is a present-and-inert
+                // `* 1.0` on every committed golden.
+                let vsm_f = vsm_light_shadow(in.world_pos, n, light.params.w);
+                lo += shade_light(n, v, l, radiance_base * att * cone * vsm_f,
                                  albedo, metallic, rough, f0);
             }
         }

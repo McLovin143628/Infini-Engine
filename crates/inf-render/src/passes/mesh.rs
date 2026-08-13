@@ -263,7 +263,15 @@ pub const MAX_LIGHTS: usize = 16;
 pub(crate) struct GpuLight {
     color: [f32; 4],
     pos_dir: [f32; 4],
-    params: [f32; 4],   // x = range, y = spot inner_cos, z = spot outer_cos
+    /// x = range, y = spot inner_cos, z = spot outer_cos, **w = the light's
+    /// virtual-shadow projection slot + 1** (P27.4; 0 = this light has no page
+    /// tree, which is every light on every scene with virtual shadows off).
+    ///
+    /// `w` has shipped as `0.0` on every light of every kind since P7.1, so the
+    /// receiver's `* 1.0` is structural rather than flagged — the same trick the
+    /// per-instance virtual-texture slots use, and the reason no golden could
+    /// move.
+    params: [f32; 4],
     spot_dir: [f32; 4], // xyz = normalized spot emission direction (spot only)
 }
 
@@ -278,7 +286,16 @@ pub(crate) struct LightsUniform {
 
 impl LightsUniform {
     /// Project world-space scene lights into render-local GPU lights.
-    pub(crate) fn from_scene(scene: &RenderScene, origin: &FloatingOrigin) -> Self {
+    ///
+    /// `vsm_slots` is the per-scene-light virtual-shadow projection slot + 1
+    /// ([`crate::vsm_mark::VsmSystem::receiver_slots`]), or **empty** when the
+    /// frame has no system — which leaves `params.w` at the `0.0` it has held
+    /// since P7.1 and every pre-P27.4 golden byte-identical.
+    pub(crate) fn from_scene(
+        scene: &RenderScene,
+        origin: &FloatingOrigin,
+        vsm_slots: &[u32],
+    ) -> Self {
         let mut items = [GpuLight {
             color: [0.0; 4],
             pos_dir: [0.0; 4],
@@ -286,7 +303,12 @@ impl LightsUniform {
             spot_dir: [0.0; 4],
         }; MAX_LIGHTS];
         let count = scene.lights.len().min(MAX_LIGHTS);
-        for (slot, light) in items.iter_mut().zip(scene.lights.iter()).take(count) {
+        for (i, (slot, light)) in items
+            .iter_mut()
+            .zip(scene.lights.iter())
+            .take(count)
+            .enumerate()
+        {
             slot.color = [
                 light.color[0],
                 light.color[1],
@@ -314,6 +336,11 @@ impl LightsUniform {
                     slot.spot_dir = [emit.x, emit.y, emit.z, 0.0];
                 }
             }
+            // P27.4: the light's own page tree, written LAST so the spot branch's
+            // whole-array assignment above cannot silently drop it. `0.0` when
+            // the light has none, which is every light of every scene with
+            // virtual shadows off.
+            slot.params[3] = vsm_slots.get(i).copied().unwrap_or(0) as f32;
         }
         Self {
             count: [count as u32, 0, 0, 0],
@@ -482,7 +509,8 @@ impl MeshNode {
 
         // Lights depend on the same key (scene version + origin, since point
         // positions are render-local).
-        let lights = LightsUniform::from_scene(frame.scene, &frame.view.origin);
+        let lights =
+            LightsUniform::from_scene(frame.scene, &frame.view.origin, frame.vsm_light_slots);
         gpu.queue
             .write_buffer(&self.lights_buf, 0, bytemuck::bytes_of(&lights));
 
@@ -638,7 +666,7 @@ mod tests {
             outer_cos: 0.8,
             ..RenderLight::default()
         });
-        let u = LightsUniform::from_scene(&scene, &origin);
+        let u = LightsUniform::from_scene(&scene, &origin, &[]);
         assert_eq!(u.count[0], 3);
         // Kind codes.
         assert_eq!(u.items[0].pos_dir[3], 0.0);

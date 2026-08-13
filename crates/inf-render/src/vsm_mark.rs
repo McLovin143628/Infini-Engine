@@ -217,6 +217,47 @@ impl VsmMarker {
         &self.ring
     }
 
+    /// **The projection list on the GPU** — the buffer the marking pass reads
+    /// and, since P27.4, the buffer the *receiver* reads out of the shared
+    /// environment bind group.
+    ///
+    /// One derivation, three readers (`vsm_projections` on the CPU, this pass,
+    /// and every lit fragment), which is what makes "the page a fragment samples
+    /// is the page its own depth marked" a property of the code rather than of
+    /// two matrices agreeing.
+    #[inline]
+    pub fn projection_buffer(&self) -> &wgpu::Buffer {
+        &self.projections
+    }
+
+    /// **Upload this frame's projections**, at the frame's SYNC POINT.
+    ///
+    /// It used to happen inside [`record`](Self::record), which runs *after* the
+    /// graph — fine while the only consumer was the marking pass, and wrong the
+    /// moment a lit pass reads the same buffer: the receiver would have sampled
+    /// through the **previous** frame's matrices, one frame stale on top of the
+    /// marking ring's pinned two. Staged here, `write_buffer` executes before the
+    /// commands of the frame's encoder, so the receiver, the caster raster and
+    /// the marker all describe one frame.
+    ///
+    /// Returns the number of projections written (the list is capped).
+    pub fn upload_projections(
+        &mut self,
+        queue: &wgpu::Queue,
+        projections: &[VsmProjection],
+    ) -> u32 {
+        let count = (projections.len() as u32).min(self.projection_cap);
+        if count == 0 {
+            return 0;
+        }
+        queue.write_buffer(
+            &self.projections,
+            0,
+            bytemuck::cast_slice(&projections[..count as usize]),
+        );
+        count
+    }
+
     /// **Read frame `frame`'s mask** — the one recorded at `frame − 2`, or
     /// `None`. Never an adjacent frame: see [`crate::readback`].
     pub fn take_wants(
@@ -272,11 +313,9 @@ impl VsmMarker {
         if count == 0 {
             return 0;
         }
-        queue.write_buffer(
-            &self.projections,
-            0,
-            bytemuck::cast_slice(&projections[..count as usize]),
-        );
+        // The projection BYTES are not written here: `upload_projections` staged
+        // them at the frame's sync point, because the receiver reads the same
+        // buffer from inside the graph and this recording happens after it.
         queue.write_buffer(
             &self.params,
             0,
@@ -513,6 +552,30 @@ impl VsmSystem {
         &self.layouts
     }
 
+    /// Index of each light's first projection, in handle order (P27.4's door
+    /// onto what was a private field). A cube light owns six consecutive
+    /// entries.
+    #[inline]
+    pub fn proj_base(&self) -> &[u32] {
+        &self.proj_base
+    }
+
+    /// **Which projection each of `scene`'s lights reads, + 1** — the mapping
+    /// `GpuLight::params.w` carries (P27.4).
+    ///
+    /// Re-walks `scene.lights` exactly as [`vsm_projections`] does, through the
+    /// one rule in [`crate::vsm_receiver::receiver_slots`], so the lights uniform
+    /// and this system cannot disagree about which tree a light owns — including
+    /// about the tail of a **truncated** light list, where every light past the
+    /// refusal must have *no* slot rather than another light's.
+    pub fn receiver_slots(&self, scene: &RenderScene) -> Vec<u32> {
+        crate::vsm_receiver::receiver_slots(
+            scene.lights.iter().map(|l| l.cast_shadows),
+            self.trees.len(),
+            &self.proj_base,
+        )
+    }
+
     /// **The page matrix of one resident page**, through the shipped door — the
     /// light's own projection, its level's snapped offset, and the page's
     /// sub-rectangle.
@@ -569,6 +632,10 @@ impl VsmSystem {
         );
         self.projections = projections;
         self.layouts = layouts;
+        // On the GPU **now**, not after the graph — see
+        // `VsmMarker::upload_projections`.
+        self.marker
+            .upload_projections(&gpu.queue, &self.projections);
         // A light whose levels moved has a changed indirection block even when no
         // page was admitted, because the fallback chain was recomputed against the
         // new parent rule. Merged into the transaction's own list rather than

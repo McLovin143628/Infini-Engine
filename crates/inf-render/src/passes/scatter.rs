@@ -1149,7 +1149,11 @@ impl ScatterNode {
         gpu.queue.write_buffer(
             &self.lights_buf,
             0,
-            bytemuck::bytes_of(&LightsUniform::from_scene(frame.scene, &frame.view.origin)),
+            bytemuck::bytes_of(&LightsUniform::from_scene(
+                frame.scene,
+                &frame.view.origin,
+                frame.vsm_light_slots,
+            )),
         );
         let env_bg = self.env.bind_group(gpu, frame).clone();
         let mut pass = scene_pass(encoder, frame, "scatter-fallback");
@@ -1260,7 +1264,11 @@ impl RenderNode for ScatterNode {
         gpu.queue.write_buffer(
             &self.lights_buf,
             0,
-            bytemuck::bytes_of(&LightsUniform::from_scene(frame.scene, &frame.view.origin)),
+            bytemuck::bytes_of(&LightsUniform::from_scene(
+                frame.scene,
+                &frame.view.origin,
+                frame.vsm_light_slots,
+            )),
         );
 
         // ── 1. per-batch uniforms + the three cull dispatches ──

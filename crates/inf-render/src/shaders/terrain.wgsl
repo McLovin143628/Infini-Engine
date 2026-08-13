@@ -441,7 +441,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     // modulates only the ambient term.
     var direct = ndl * vec3<f32>(1.15, 1.10, 1.0);
     var spec_term = vec3<f32>(spec);
-    if (shadow.params.x > 0.5) {
+    if (sun_shadowing_enabled()) {
         let sf = shadow_factor(in.world_local, n);
         direct = direct * sf;
         spec_term = spec_term * sf;
