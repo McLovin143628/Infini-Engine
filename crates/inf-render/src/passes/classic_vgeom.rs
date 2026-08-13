@@ -42,7 +42,13 @@ use crate::scene::{MeshInstance, VgeomAsset, VgeomInstance};
 /// The per-instance object-space LOD threshold for `inst` of `mesh` under `view`,
 /// targeting `pixel_error` px — identical to the meshlet path's `pack_instance`
 /// projection, so the classic pick tracks the meshlet cut.
-fn instance_threshold(
+///
+/// **`pub(crate)` because the P27.2 page raster picks its caster level with it**
+/// (P27.2 audit). It had copied the five lines instead, and a second copy of an
+/// LOD derivation is the *one door* law's own example: the memo that rules vgeom
+/// casts "through the same `pick_classic_level` against the same `lod_threshold`"
+/// is only true if it is the same code, and now it is.
+pub(crate) fn instance_threshold(
     origin: &FloatingOrigin,
     view: &RenderView,
     bounds: ([f32; 3], f32),

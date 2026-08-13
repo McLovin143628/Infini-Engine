@@ -145,7 +145,8 @@ pub use vsm_atlas::{VsmApplyReport, VsmPools, VSM_PAGE_FORMAT};
 pub use vsm_mark::{VsmMarker, VsmStreamStats, VsmSystem, VSM_PROJECTION_CAP};
 pub use vsm_raster::{
     VsmCasterRaw, VsmRaster, VsmRasterStats, SKINNED_POSE_MARGIN, VSM_ARG_WORDS, VSM_MAX_CASTERS,
-    VSM_MAX_RASTER_PAGES, VSM_PAGE_DRAW_STRIDE, VSM_RIGID_GROUPS, VSM_TERRAIN_CASTER_CELLS,
+    VSM_MAX_GROUPS, VSM_MAX_RASTER_PAGES, VSM_PAGE_DRAW_STRIDE, VSM_RIGID_GROUPS,
+    VSM_TERRAIN_CASTER_CELLS,
 };
 // The shadow page space's own vocabulary, re-exported on `inf_vt`'s precedent so
 // a host or a gate that reads a residency does not have to add the GPU-free

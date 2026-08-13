@@ -69,9 +69,33 @@ use crate::vsm::{vsm_page_matrix, VsmProjection, VSM_DEPTH_CLEAR, VSM_DEPTH_COMP
 pub const VSM_MAX_RASTER_PAGES: u32 = 256;
 
 /// Caster records one frame may pack. The visible list is `pages × casters`
-/// entries, so this and [`VSM_MAX_RASTER_PAGES`] are the two factors of the one
-/// allocation that can grow without bound.
+/// entries, so this and [`VSM_MAX_RASTER_PAGES`] are two of the three factors of
+/// the allocations that grow as a product.
 pub const VSM_MAX_CASTERS: u32 = 16_384;
+
+/// Geometry groups one frame may draw with — the **third** factor, and the
+/// binding one (P27.2 audit).
+///
+/// The first write-up named the visible list (`pages × casters × 4 B`) as "the one
+/// allocation that grows as a product, and the reason both ceilings exist". It is
+/// not the one that binds. The per-(page, group) draw uniform is the same product
+/// at [`VSM_PAGE_DRAW_STRIDE`] — **64× the bytes per entry** — and its second
+/// factor is *groups*, which nothing capped: a skinned instance is one group
+/// because its palette is a bind group, and so is a resident terrain tile. So
+/// `groups ≈ casters` on any level with characters or streamed ground, and the
+/// worst case was `256 × 16 384 × 256 B` = **1 GiB** — four times `wgpu`'s default
+/// `max_buffer_size`, which is a device error at `create_buffer` and not a
+/// counted refusal.
+///
+/// At 1 024 the three worst cases are 64 MiB (draws), 5 MiB (args) and 16 MiB
+/// (visible), pinned by
+/// `the_page_rasters_worst_case_buffers_fit_the_default_device_limits`. Groups past
+/// it are refused — and **counted**, in [`VsmRasterStats::dropped_groups`], with
+/// their casters added to [`VsmRasterStats::dropped_casters`], because a cap that
+/// stops a level's characters casting must not be silent.
+pub const VSM_MAX_GROUPS: u32 = 1_024;
+
+const _: () = assert!(VSM_MAX_GROUPS as usize > PrimMesh::ALL.len());
 
 /// Words in one `DrawIndexedIndirectArgs`: `index_count, instance_count,
 /// first_index, base_vertex, first_instance`. **Word 1 is the counter** — the
@@ -350,14 +374,27 @@ pub struct VsmRasterStats {
     /// Of the packed casters, the ones that are **virtualized-geometry** instances
     /// — so "vgeom casts" is a measurement rather than a claim about a code path.
     pub vgeom_casters: u64,
+    /// The classic LOD level each of those drew at, summed over frames — so
+    /// *which* level the deviation memo's "the camera's, not the page's" ruling
+    /// actually picks is a measurement too (P27.2 audit).
+    ///
+    /// Nothing else can see it. A caster drawn from the coarsest level of the DAG's
+    /// chain lands in the same pages at almost the same depths as one drawn from
+    /// the finest, so every image-side arm in the file is satisfied by a raster
+    /// that ignores `pick_classic_level` entirely.
+    pub vgeom_level_sum: u64,
     /// Skinned casters packed, summed over frames.
     pub skinned_casters: u64,
     /// Terrain-tile casters packed, summed over frames.
     pub terrain_casters: u64,
-    /// Casters the [`VSM_MAX_CASTERS`] ceiling dropped, summed over frames.
-    /// **Never a silent cap** — a caster set that quietly stopped at 16 384 reads
-    /// as "the far half of the level stopped casting".
+    /// Casters the [`VSM_MAX_CASTERS`] and [`VSM_MAX_GROUPS`] ceilings dropped,
+    /// summed over frames. **Never a silent cap** — a caster set that quietly
+    /// stopped at 16 384 reads as "the far half of the level stopped casting".
     pub dropped_casters: u64,
+    /// Geometry groups the [`VSM_MAX_GROUPS`] ceiling refused, summed over frames.
+    /// Their casters are in [`dropped_casters`](Self::dropped_casters) too; this
+    /// says *which* ceiling refused them.
+    pub dropped_groups: u64,
 }
 
 impl VsmRasterStats {
@@ -365,7 +402,8 @@ impl VsmRasterStats {
     pub fn summary(&self) -> String {
         format!(
             "vsm raster: {} frames, {} pages, {} draws, {} casters ({} scattered, \
-             {} meshlet-asset, {} skinned, {} terrain), {} pages deferred, {}              casters dropped",
+             {} meshlet-asset, {} skinned, {} terrain), {} pages deferred, \
+             {} casters dropped, {} groups refused",
             self.frames,
             self.pages,
             self.draws,
@@ -376,6 +414,7 @@ impl VsmRasterStats {
             self.terrain_casters,
             self.deferred_pages,
             self.dropped_casters,
+            self.dropped_groups,
         )
     }
 }
@@ -440,6 +479,9 @@ pub struct VsmRaster {
     /// `(page, group)` grid and nothing else in the tree knows its order.
     last_pages: Vec<(VsmLightHandle, VsmPage, (u32, u32, u32))>,
     last_groups: usize,
+    /// The frame's packed caster records, moved out of `pack_casters` rather than
+    /// copied. See [`last_casters`](Self::last_casters).
+    last_casters: Vec<VsmCasterRaw>,
 
     stats: VsmRasterStats,
 }
@@ -693,6 +735,7 @@ impl VsmRaster {
             skinned_version: None,
             last_pages: Vec::new(),
             last_groups: 0,
+            last_casters: Vec::new(),
             stats: VsmRasterStats::default(),
         }
     }
@@ -715,6 +758,21 @@ impl VsmRaster {
     #[inline]
     pub fn last_groups(&self) -> usize {
         self.last_groups
+    }
+
+    /// **The caster records the last [`record`](Self::record) packed**, exactly as
+    /// the cull and the raster read them.
+    ///
+    /// Kept by *moving* the frame's own `Vec` rather than cloning it, so the
+    /// shipping path pays nothing for it, and kept at all for two readers: a gate
+    /// that wants the **cull sphere** a caster was culled with — the skinned pose
+    /// margin has no other observable, because a bound that is too tight deletes a
+    /// limb's shadow only in the pages that limb reached (P27.2 audit) — and
+    /// P27.3, whose invalidation has to ask "which pages did this mover touch"
+    /// about exactly this set.
+    #[inline]
+    pub fn last_casters(&self) -> &[VsmCasterRaw] {
+        &self.last_casters
     }
 
     /// **The cull's own verdict**, read back off the device: `instance_count` per
@@ -803,7 +861,15 @@ impl VsmRaster {
         self.sync_vgeom(gpu, scene);
         self.sync_skinned(gpu, scene);
         self.sync_terrain(gpu, scene, view);
-        let (casters, groups, masked, scattered, dropped) = pack_casters(
+        let CasterPack {
+            casters,
+            groups,
+            masked,
+            scattered,
+            dropped,
+            dropped_groups,
+            level_sum,
+        } = pack_casters(
             &self.prim,
             &self.vgeom,
             &self.skinned,
@@ -812,13 +878,44 @@ impl VsmRaster {
             view,
             settings,
         );
-        // A page with nothing to draw into it still has to be CLEARED, or it keeps
-        // a previous occupant's depth — a slot is reused the moment its page is
-        // evicted, and stale depth in a live page is a shadow from geometry that
-        // is not there. The pass below clears the whole atlas, so this early
-        // return is only taken when there is no pass to open at all.
+        // **A page with nothing to draw into it still has to be CLEARED.** This
+        // used to return early, and the comment that stood here argued the return
+        // was only taken when there was no pass to open — which is exactly wrong:
+        // it is taken when there are *pages* and no *casters*, and then the atlas
+        // keeps the previous frame's depth in every slot. That configuration is
+        // reachable and it is not exotic: the editor's infinite grid writes camera
+        // depth and is not a caster, so an empty level under a shadow-casting sun
+        // marks pages and packs nothing — and every object the author just deleted
+        // goes on casting out of the atlas. (P27.2 audit.)
+        //
+        // So the pass opens either way and the clear is the frame's whole output.
+        // `draws` and `casters` stay zero, which is what tells a caster-less frame
+        // apart from an empty one in the counters.
         if casters.is_empty() {
-            return 0;
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("vsm-pages-clear"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: atlas,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(VSM_DEPTH_CLEAR),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.last_pages = pages
+                .iter()
+                .map(|p| (VsmLightHandle(p.light), p.page, p.rect))
+                .collect();
+            self.last_groups = 0;
+            self.last_casters.clear();
+            self.stats.frames += 1;
+            self.stats.pages += pages.len() as u64;
+            return pages.len() as u32;
         }
 
         let page_count = pages.len() as u32;
@@ -1055,6 +1152,7 @@ impl VsmRaster {
             .map(|p| (VsmLightHandle(p.light), p.page, p.rect))
             .collect();
         self.last_groups = groups.len();
+        self.last_casters = casters;
         self.stats.frames += 1;
         self.stats.pages += u64::from(page_count);
         self.stats.draws += draws;
@@ -1072,10 +1170,15 @@ impl VsmRaster {
         self.stats.terrain_casters += of(|s| matches!(s, GroupSource::Terrain { .. }));
         self.stats.masked_frames += u64::from(masked);
         self.stats.dropped_casters += u64::from(dropped);
+        self.stats.dropped_groups += u64::from(dropped_groups);
+        self.stats.vgeom_level_sum += level_sum;
         if dropped > 0 {
             tracing::warn!(
-                "inf-render: {dropped} shadow casters past the {} this frame packs                  cast nothing; raise the ceiling or reduce the caster set",
-                VSM_MAX_CASTERS
+                "inf-render: {dropped} shadow casters past this frame's ceilings \
+                 ({} casters, {} geometry groups) cast nothing, {dropped_groups} of \
+                 them whole groups; raise a ceiling or reduce the caster set",
+                VSM_MAX_CASTERS,
+                VSM_MAX_GROUPS
             );
         }
         page_count
@@ -1481,6 +1584,21 @@ struct PageDraw {
     page: VsmPage,
 }
 
+/// **Whether one more geometry group fits this frame's ceiling** — one door for
+/// the three paths that push a group (vgeom, skinned, terrain).
+///
+/// Three copies of a four-line refusal is how two of them end up not refusing
+/// (the one-door law, P27.2 audit). `carries` is the caster count the group would
+/// have held, so a refused group's casters land in `dropped` and are never silent.
+fn admit_group(groups: usize, carries: u32, dropped: &mut u32, dropped_groups: &mut u32) -> bool {
+    if groups as u32 >= VSM_MAX_GROUPS {
+        *dropped_groups += 1;
+        *dropped += carries;
+        return false;
+    }
+    true
+}
+
 /// The first caster of group `g` — the base of that group's slice inside every
 /// page's visible list.
 fn group_first(groups: &[GroupGeom], g: usize) -> u32 {
@@ -1554,12 +1672,31 @@ pub(crate) fn page_depth_state() -> wgpu::DepthStencilState {
     }
 }
 
+/// What one frame's [`pack_casters`] produced.
+///
+/// A struct rather than a tuple because the tuple reached five members and its own
+/// doc comment described four of them (P27.2 audit) — the shape that lets a
+/// counter be added and never read.
+struct CasterPack {
+    casters: Vec<VsmCasterRaw>,
+    /// Sorted by group, which is what makes a page's visible list overflow-proof:
+    /// a group's slice is its own caster count long.
+    groups: Vec<GroupGeom>,
+    /// Any caster carries the R-P5 masked blend code, so the alpha-testing
+    /// pipeline is bound rather than the fragment-less one.
+    masked: bool,
+    /// Of the casters, the ones that came from GPU-scatter batches.
+    scattered: u32,
+    /// Casters the two ceilings refused.
+    dropped: u32,
+    /// Geometry groups [`VSM_MAX_GROUPS`] refused.
+    dropped_groups: u32,
+    /// The classic LOD level each packed vgeom caster drew at, summed.
+    level_sum: u64,
+}
+
 /// **Pack this frame's caster records** — the rigid instances and the GPU-scatter
 /// batches, through `passes::shadow`'s own doors.
-///
-/// Returns `(casters, groups, any masked, scatter casters)`. The records are
-/// sorted by group, which is what makes a page's visible list overflow-proof: a
-/// group's slice is its own caster count long.
 #[allow(clippy::too_many_arguments)]
 fn pack_casters(
     prim: &PrimGpu,
@@ -1569,7 +1706,7 @@ fn pack_casters(
     scene: &RenderScene,
     view: &RenderView,
     settings: &crate::settings::RenderSettings,
-) -> (Vec<VsmCasterRaw>, Vec<GroupGeom>, bool, u32, u32) {
+) -> CasterPack {
     let origin = &view.origin;
     // Opaque + masked only. Translucent geometry does not cast — the cascade's
     // scope, kept, so the two shadow paths agree about what a caster is.
@@ -1599,10 +1736,17 @@ fn pack_casters(
     let mut groups = Vec::with_capacity(PrimMesh::ALL.len());
     let mut masked = false;
     let mut first = 0u32;
-    // The ceiling counts what it refuses. Every `break`/`continue` on
-    // `VSM_MAX_CASTERS` below increments it, so a truncated caster set is a
-    // number in the summary rather than a level whose far half stopped casting.
+    // The ceilings count what they refuse. Every `break`/`continue` on
+    // `VSM_MAX_CASTERS` or `VSM_MAX_GROUPS` below increments one of these, so a
+    // truncated caster set is a number in the summary rather than a level whose
+    // far half stopped casting.
     let mut dropped = 0u32;
+    let mut dropped_groups = 0u32;
+    // The clipmap level each vgeom caster drew at, summed — the counter that makes
+    // "vgeom casts at the CAMERA's LOD" a measurement (P27.2 audit). Nothing else
+    // can see it: a shadow drawn from the coarsest level of the chain is still a
+    // shadow, in the same pages, at almost the same depths.
+    let mut level_sum = 0u64;
     for (k, kind) in PrimMesh::ALL.iter().enumerate() {
         let range = ranges[k].clone();
         let unit = kind.bounding_radius();
@@ -1655,7 +1799,6 @@ fn pack_casters(
     // camera's tolerance is the one that bounds how much silhouette detail the
     // shadow can possibly show. Per-page LOD is a P27.3 question and the memo says
     // so.
-    let eye = view.eye_local();
     let mut by_group: std::collections::BTreeMap<(u128, usize), Vec<usize>> =
         std::collections::BTreeMap::new();
     for (i, inst) in scene.vgeom_instances.iter().enumerate() {
@@ -1665,16 +1808,15 @@ fn pack_casters(
         if a.errors.is_empty() {
             continue;
         }
-        let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
-        let max_scale = inst.scale.abs().max_element().max(1e-6);
-        let centre = model.transform_point3(glam::Vec3::from(a.bounds.0));
-        let radius = a.bounds.1 * max_scale;
-        let threshold = crate::passes::vgeom::lod_threshold(
-            eye,
-            centre,
-            radius,
-            max_scale,
+        // **The classic tier's own door**, not a second copy of its five lines
+        // (P27.2 audit): `classic_vgeom::instance_threshold` is what
+        // `passes::classic_vgeom` picks with, so "the same rule at the same
+        // `pixel_error`" is one function rather than an agreement.
+        let threshold = crate::passes::classic_vgeom::instance_threshold(
+            origin,
             view,
+            a.bounds,
+            inst,
             settings.vgeom.pixel_error,
         );
         let level = inf_vgeom::pick_classic_level(&a.errors, threshold);
@@ -1685,6 +1827,14 @@ fn pack_casters(
         let Some(&(_, index_count)) = a.levels.get(level) else {
             continue;
         };
+        if !admit_group(
+            groups.len(),
+            members.len() as u32,
+            &mut dropped,
+            &mut dropped_groups,
+        ) {
+            continue;
+        }
         let mut count = 0u32;
         for (local, &i) in members.iter().enumerate() {
             if casters.len() as u32 >= VSM_MAX_CASTERS {
@@ -1704,6 +1854,7 @@ fn pack_casters(
                 mat: [0.0, 0.0, 1.0, 0.0],
                 ids: [groups.len() as u32, local as u32, first, 0],
             });
+            level_sum += level as u64;
             count += 1;
         }
         groups.push(GroupGeom {
@@ -1731,6 +1882,9 @@ fn pack_casters(
             continue;
         };
         if mesh.index_count == 0 {
+            continue;
+        }
+        if !admit_group(groups.len(), 1, &mut dropped, &mut dropped_groups) {
             continue;
         }
         let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
@@ -1766,6 +1920,9 @@ fn pack_casters(
             dropped += 1;
             continue;
         }
+        if !admit_group(groups.len(), 1, &mut dropped, &mut dropped_groups) {
+            continue;
+        }
         casters.push(VsmCasterRaw {
             model: glam::Mat4::IDENTITY.to_cols_array(),
             sphere: [
@@ -1789,7 +1946,15 @@ fn pack_casters(
         });
         first += 1;
     }
-    (casters, groups, masked, scattered, dropped)
+    CasterPack {
+        casters,
+        groups,
+        masked,
+        scattered,
+        dropped,
+        dropped_groups,
+        level_sum,
+    }
 }
 
 #[cfg(test)]
@@ -1831,6 +1996,137 @@ mod tests {
             .contains(&format!("const VSM_ARG_WORDS: u32 = {VSM_ARG_WORDS}u;")));
     }
 
+    /// **"The identical predicate" is one spelling, and now it is read** (P27.2
+    /// audit).
+    ///
+    /// The ledger says the page raster alpha-tests with "the identical predicate
+    /// `mesh.wgsl`, `depth_prepass.wgsl` and `shadow_depth.wgsl` all spell". That
+    /// was a claim about four *copies* of a predicate with nothing comparing them —
+    /// the one-door law's own failure shape, and the R-P5 blend code is a wire
+    /// constant that only a copy can drift from. There is no way to share a
+    /// fragment body across four standalone WGSL modules, so the door is this arm:
+    /// the three depth-only casters spell it character for character, and the lit
+    /// pass spells the same structure against its own field names.
+    #[test]
+    fn every_caster_pass_alpha_tests_with_one_predicate() {
+        const DEPTH_ONLY: &str = "if (in.blend > 0.5 && in.blend < 1.5 && in.alpha < in.cutoff) {";
+        for (label, src) in [
+            ("vsm_caster", include_str!("shaders/vsm_caster.wgsl")),
+            ("shadow_depth", include_str!("shaders/shadow_depth.wgsl")),
+            ("depth_prepass", include_str!("shaders/depth_prepass.wgsl")),
+        ] {
+            assert_eq!(
+                src.matches(DEPTH_ONLY).count(),
+                1,
+                "{label}.wgsl does not spell the masked predicate exactly once; a \
+                 cut-out that shadows as a solid is the symptom"
+            );
+        }
+        // The lit pass reads the same two words out of its own interpolants
+        // (`pbr.w` is the blend code, `pbr.z` the cutoff, `color.a` the alpha), so
+        // it is pinned by structure rather than by text — the numbers 0.5 and 1.5
+        // are the freeze-pinned R-P5 window and they are what a copy drifts on.
+        assert_eq!(
+            include_str!("shaders/mesh.wgsl")
+                .matches("if (in.pbr.w > 0.5 && in.pbr.w < 1.5 && in.color.a < in.pbr.z) {")
+                .count(),
+            1,
+            "mesh.wgsl's masked predicate moved away from the caster passes'"
+        );
+        // ANTI-VACUITY: the Rust side that decides WHICH pipeline to bind reads the
+        // same window, so a caster the CPU calls opaque cannot be discarded by a
+        // shader that calls it masked.
+        assert!(include_str!("vsm_raster.rs")
+            .contains("masked |= raw.pbr[3] > 0.5 && raw.pbr[3] < 1.5;"));
+    }
+
+    /// **The three ceilings multiply out to buffers a default device can make**
+    /// (P27.2 audit) — the arithmetic the missing group ceiling got wrong.
+    ///
+    /// `ensure` rounds every allocation up to a power of two, so the worst case is
+    /// `next_power_of_two(pages × N) × unit`, and the *draw uniform* is the one
+    /// that binds: 256 bytes an entry against the visible list's 4. The first
+    /// write-up named the visible list "the one allocation that grows as a product,
+    /// and the reason both ceilings exist" and never noticed that the draw uniform
+    /// is the same product 64× larger, with **groups** — uncapped — as its second
+    /// factor. A skinned instance is a group and a resident terrain tile is a
+    /// group, so `groups ≈ casters` on a real level, and the old worst case is
+    /// asserted below as the failure it was.
+    #[test]
+    fn the_page_rasters_worst_case_buffers_fit_the_default_device_limits() {
+        let limit = wgpu::Limits::default().max_buffer_size;
+        let pages = u64::from(VSM_MAX_RASTER_PAGES);
+        let grown = |entries: u64, unit: u64| entries.next_power_of_two().max(4) * unit;
+        let draws = grown(pages * u64::from(VSM_MAX_GROUPS), VSM_PAGE_DRAW_STRIDE);
+        let args = grown(pages * u64::from(VSM_MAX_GROUPS) * VSM_ARG_WORDS, 4);
+        let visible = grown(pages * u64::from(VSM_MAX_CASTERS), 4);
+        for (label, bytes) in [("draws", draws), ("args", args), ("visible", visible)] {
+            assert!(
+                bytes <= limit,
+                "the page raster's {label} buffer is {bytes} B at its ceilings and \
+                 `wgpu::Limits::default().max_buffer_size` is {limit} B — that is a \
+                 device error at `create_buffer`, not a counted refusal"
+            );
+        }
+        // **The defect, as arithmetic.** Without a group ceiling the second factor
+        // is the caster ceiling (one group per skinned instance, one per terrain
+        // tile), and that buffer is four times what a default device will allocate.
+        let unbounded = grown(pages * u64::from(VSM_MAX_CASTERS), VSM_PAGE_DRAW_STRIDE);
+        assert!(
+            unbounded > limit,
+            "the arm no longer describes the defect it was written for: an uncapped \
+             group count gives {unbounded} B against a {limit} B limit"
+        );
+        // …and the draw uniform really is the binding one, which is why capping
+        // casters alone did not bound it.
+        assert!(draws > visible && draws > args);
+    }
+
+    /// **The group ceiling's door refuses at the ceiling and counts what it
+    /// refuses** (P27.2 audit) — the pure half of the arm
+    /// `the_group_ceiling_counts_the_groups_it_refuses` makes on a device.
+    ///
+    /// Both halves are needed and neither is the other: the device arm proves the
+    /// *skinned* path calls the door, and this proves the door itself, for the
+    /// vgeom and terrain callers a fixture cannot reach a thousand of.
+    #[test]
+    fn the_group_door_refuses_at_the_ceiling_and_counts_it() {
+        let (mut dropped, mut groups) = (0u32, 0u32);
+        // One below the ceiling: admitted, nothing counted.
+        assert!(admit_group(
+            VSM_MAX_GROUPS as usize - 1,
+            7,
+            &mut dropped,
+            &mut groups
+        ));
+        assert_eq!((dropped, groups), (0, 0));
+        // ON it: refused, and the casters the group would have carried are counted
+        // rather than lost — so the bound is `>=` and the refusal is never silent.
+        assert!(!admit_group(
+            VSM_MAX_GROUPS as usize,
+            7,
+            &mut dropped,
+            &mut groups
+        ));
+        assert_eq!((dropped, groups), (7, 1));
+        assert!(!admit_group(
+            VSM_MAX_GROUPS as usize + 40,
+            1,
+            &mut dropped,
+            &mut groups
+        ));
+        assert_eq!((dropped, groups), (8, 2));
+        // The rigid groups are pushed unconditionally, so the ceiling must be
+        // above them or the very first frame refuses a primitive kind.
+        assert!(admit_group(
+            PrimMesh::ALL.len(),
+            1,
+            &mut dropped,
+            &mut groups
+        ));
+        assert_eq!((dropped, groups), (8, 2));
+    }
+
     /// A group's slice of a page's visible list starts at that group's first
     /// caster, so the slices tile the list and cannot overlap — which is why the
     /// cull has no bounds test.
@@ -1867,5 +2163,39 @@ mod tests {
         let total: u32 = groups.iter().map(|g| g.casters).sum();
         assert_eq!(group_first(&groups, groups.len()), total);
         assert_eq!(total, 8);
+    }
+
+    /// **The one line a host reads is one line** (P27.2 audit).
+    ///
+    /// Both of this module's user-facing literals shipped with a run of fourteen
+    /// and eighteen spaces in the middle of a sentence — the P22 shape, where a
+    /// scripted edit ate a `\` continuation and left its indentation behind. Nothing
+    /// reads a `tracing::warn!`, but the summary is returned to a caller, and a
+    /// counter nobody can read is a counter nobody checks.
+    #[test]
+    fn the_summary_is_one_line_with_no_mangled_whitespace() {
+        let s = VsmRasterStats {
+            frames: 3,
+            pages: 17,
+            draws: 51,
+            casters: 9,
+            scatter_casters: 2,
+            deferred_pages: 1,
+            masked_frames: 3,
+            vgeom_casters: 4,
+            vgeom_level_sum: 5,
+            skinned_casters: 1,
+            terrain_casters: 2,
+            dropped_casters: 6,
+            dropped_groups: 1,
+        }
+        .summary();
+        assert!(!s.contains("  "), "a run of spaces in the summary: {s:?}");
+        assert!(!s.contains('\n') && !s.contains('\t'), "{s:?}");
+        // …and every counter that can be non-zero appears in it, so a field added
+        // to the struct and forgotten in the line fails here.
+        for n in ["3", "17", "51", "9", "2", "1", "4", "6"] {
+            assert!(s.contains(n), "{n} is missing from {s:?}");
+        }
     }
 }
