@@ -52,6 +52,65 @@ pub struct AssetDb {
     by_hash: HashMap<ContentHash, HashSet<AssetId>>,
     /// Reverse dependency edges: `dep -> {assets that reference dep}`.
     reverse: HashMap<AssetId, BTreeSet<AssetId>>,
+    /// Two files under the root claiming one GUID, found by the last
+    /// [`scan`](Self::scan) (P26.5). See [`IdCollision`].
+    collisions: Vec<IdCollision>,
+}
+
+/// **Two payloads under one content root declaring the same GUID** (P26.5).
+///
+/// The path P26.4 opened and did not test. `read_entry` prefers a sidecar's own
+/// `guid` over the content hash for any payload whose sidecar this crate cannot
+/// parse — which it must, because deriving a `.inf_lvl`'s id from its content
+/// hash made that id **churn with every save** and every edge into the level go
+/// stale. The cost is that two files can now name one asset, and the realistic
+/// trigger is not exotic: copy a `.inf_lvl` beside its `.toml` in a file
+/// manager.
+///
+/// # The ruling: FIRST WINS, and the second is reported
+///
+/// Not last-writer. Three reasons, and the first is the one that decides it:
+///
+/// * **last-writer was not even deterministic.** `scan_dir` walked `read_dir`,
+///   whose order is the filesystem's, so *which* of two colliding files owned
+///   the id was a property of the volume. The walk is path-sorted now (the
+///   `content_paths_by_guid` rule, which this crate should have had first), and
+///   on a sorted walk "first" is a fact about the directory rather than about
+///   the disk;
+/// * **a copy must not steal an original's identity.** Every edge in the graph
+///   names the id, so last-writer silently re-points a level's whole dependency
+///   set at a duplicate the author made by accident;
+/// * **and it must not vanish, either.** The loser keeps its path and its
+///   bytes; what it loses is the id, and it is *named* here so a caller can say
+///   so. An asset dropped in silence is the failure mode the synthesized-sidecar
+///   rule exists to avoid.
+///
+/// An **exact** copy — identical bytes and no declared guid — collided before
+/// this and still does, at the content-hash id, which is correct: identical
+/// content is one asset. This type is for the case where the ids agree and the
+/// content does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdCollision {
+    /// The contested GUID.
+    pub id: AssetId,
+    /// The payload that keeps it — the first in the sorted walk.
+    pub kept: PathBuf,
+    /// The payload that was refused it.
+    pub refused: PathBuf,
+}
+
+impl std::fmt::Display for IdCollision {
+    /// The P16 advisory shape: asset, consequence, remedy.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} and {} both declare asset {} — the second is not registered and \
+             nothing can reference it; give it its own guid (or delete the copy)",
+            self.kept.display(),
+            self.refused.display(),
+            self.id.uuid()
+        )
+    }
 }
 
 impl AssetDb {
@@ -227,6 +286,7 @@ impl AssetDb {
         self.by_path.clear();
         self.by_hash.clear();
         self.reverse.clear();
+        self.collisions.clear();
         let root = self.root.clone();
         let mut count = 0;
         if root.exists() {
@@ -235,21 +295,50 @@ impl AssetDb {
         Ok(count)
     }
 
+    /// Walk `dir`, **path-sorted** (P26.5).
+    ///
+    /// The sort is not cosmetic: two payloads can declare one GUID since P26.4
+    /// (see [`IdCollision`]), and which of them owns it has to be a fact about
+    /// the directory rather than about `read_dir`'s order, which is the
+    /// filesystem's. `inf_editor_core::render_assets::content_paths_by_guid`
+    /// has sorted for the same reason since P18.3; this crate had not.
     fn scan_dir(&mut self, dir: &Path, count: &mut usize) -> Result<()> {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let ft = entry.file_type()?;
-            if ft.is_dir() {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
+        paths.sort();
+        for path in paths {
+            if path.is_dir() {
                 self.scan_dir(&path, count)?;
-            } else if ft.is_file() && !is_sidecar(&path) {
+            } else if !is_sidecar(&path) {
                 if let Some(e) = read_entry(&path)? {
+                    // FIRST WINS. The incumbent keeps the id and the intruder is
+                    // named, rather than the intruder silently re-pointing every
+                    // edge in the graph at itself — see `IdCollision`.
+                    let id = e.id();
+                    if let Some(prior) = self.by_id.get(&id) {
+                        if prior.path != e.path {
+                            self.collisions.push(IdCollision {
+                                id,
+                                kept: prior.path.clone(),
+                                refused: e.path.clone(),
+                            });
+                            continue;
+                        }
+                    }
                     self.insert(e);
                     *count += 1;
                 }
             }
         }
         Ok(())
+    }
+
+    /// GUID collisions the last [`scan`](Self::scan) found — empty on a healthy
+    /// content root, which is the state a caller should expect and therefore the
+    /// state worth being able to check.
+    pub fn collisions(&self) -> &[IdCollision] {
+        &self.collisions
     }
 
     /// Re-read a single asset at `path` (on a watch event). Returns the id if it
@@ -586,5 +675,130 @@ content_hash = \"0\"
         );
         assert!(bad.contains(guid));
         assert!(bad.referenced_by(mat).is_empty());
+    }
+
+    /// **Two files claiming one GUID: the first wins, and the second is named**
+    /// (P26.5) — the id-collision path the P26.4 audit opened and left untested.
+    ///
+    /// Its own words: *"Honouring a declared guid opens an id-collision path …
+    /// Two payloads declaring one guid therefore collide: `by_id` keeps the last
+    /// scanned and `by_path` keeps both paths pointing at it. An exact file copy
+    /// already collided before the batch (identical hash → identical id);
+    /// same-guid/different-content is new, and untested. The realistic trigger is
+    /// a filesystem copy of a `.inf_lvl` beside its `.toml`."*
+    ///
+    /// The ruling and why it is not last-writer are in [`IdCollision`]. What this
+    /// asserts is all three halves of it: the incumbent keeps the id, the
+    /// intruder is reported by name, and the answer does not depend on which file
+    /// the filesystem hands over first — the copy is written **first** on disk
+    /// and named so it sorts **second**, so an unsorted walk and a
+    /// last-writer rule each produce a different answer from this one.
+    #[test]
+    fn two_files_declaring_one_guid_keep_the_first_and_name_the_second() {
+        let dir = tempfile::tempdir().unwrap();
+        let guid = AssetId(uuid::Uuid::from_u128(0x2605_0000_0000_0001));
+        let level_side = |g: AssetId, title: &str| {
+            format!(
+                "schema_version = 22\nguid = \"{}\"\ntitle = \"{title}\"\n\
+                 entity_count = 1\ncontent_hash = \"0\"\n",
+                g.uuid()
+            )
+        };
+        // Written in the order a copy really happens — the duplicate exists
+        // first here — and named so the ORIGINAL sorts first. An unsorted walk
+        // would give either answer depending on the volume.
+        let dup = dir.path().join("Zebra copy.inf_lvl");
+        std::fs::write(&dup, b"the-copy").unwrap();
+        std::fs::write(format!("{}.toml", dup.display()), level_side(guid, "Copy")).unwrap();
+        let original = dir.path().join("Alpha.inf_lvl");
+        std::fs::write(&original, b"the-original").unwrap();
+        std::fs::write(
+            format!("{}.toml", original.display()),
+            level_side(guid, "Original"),
+        )
+        .unwrap();
+
+        let mut db = AssetDb::new(dir.path());
+        // Only ONE asset is registered, and `scan` counts what it registered.
+        assert_eq!(db.scan().unwrap(), 1);
+        let entry = db.get(guid).expect("the guid is registered");
+        assert!(
+            entry.path.ends_with("Alpha.inf_lvl"),
+            "the copy took the original's identity: {}",
+            entry.path.display()
+        );
+
+        // The intruder is NAMED, not swallowed.
+        assert_eq!(db.collisions().len(), 1, "{:?}", db.collisions());
+        let c = &db.collisions()[0];
+        assert_eq!(c.id, guid);
+        assert!(c.kept.ends_with("Alpha.inf_lvl"));
+        assert!(c.refused.ends_with("Zebra copy.inf_lvl"));
+        // The advisory names the asset, the consequence and the remedy — the P16
+        // shape, checked rather than assumed.
+        let said = c.to_string();
+        assert!(said.contains("Alpha.inf_lvl") && said.contains("Zebra copy.inf_lvl"));
+        assert!(said.contains(&guid.uuid().to_string()));
+        assert!(said.contains("not registered") && said.contains("own guid"));
+
+        // ANTI-VACUITY: a healthy root reports NOTHING, so the list above is a
+        // measurement of the collision and not of a scan that always complains.
+        let clean = tempfile::tempdir().unwrap();
+        let solo = clean.path().join("Alpha.inf_lvl");
+        std::fs::write(&solo, b"the-original").unwrap();
+        std::fs::write(format!("{}.toml", solo.display()), level_side(guid, "Only")).unwrap();
+        let mut ok = AssetDb::new(clean.path());
+        assert_eq!(ok.scan().unwrap(), 1);
+        assert!(ok.collisions().is_empty());
+
+        // …and an EXACT copy — same bytes, no declared guid — is still ONE asset
+        // at the content-hash id, which is correct and is not what this ruling
+        // changed. It is reported as a collision all the same, because two paths
+        // did claim one id and a caller asking "is my content root healthy" is
+        // entitled to know the second file exists.
+        let twins = tempfile::tempdir().unwrap();
+        std::fs::write(twins.path().join("A.inf_mesh"), b"identical").unwrap();
+        std::fs::write(twins.path().join("B.inf_mesh"), b"identical").unwrap();
+        let mut t = AssetDb::new(twins.path());
+        assert_eq!(t.scan().unwrap(), 1);
+        assert_eq!(t.collisions().len(), 1);
+        assert!(t.collisions()[0].kept.ends_with("A.inf_mesh"));
+    }
+
+    /// **The walk is path-sorted**, which is what makes "first" mean anything.
+    ///
+    /// Asserted through the collision above rather than by exposing the order:
+    /// four files, two pairs, and the winner of each pair is the one that sorts
+    /// first — a `read_dir` order would have to agree with `sort()` twice by
+    /// chance.
+    #[test]
+    fn the_scan_walk_is_path_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        let side = |g: AssetId| {
+            format!(
+                "schema_version = 22\nguid = \"{}\"\ntitle = \"T\"\n\
+                 entity_count = 1\ncontent_hash = \"0\"\n",
+                g.uuid()
+            )
+        };
+        let mut want = Vec::new();
+        for (n, (first, second)) in [("aaa", "zzz"), ("bbb", "yyy")].iter().enumerate() {
+            let g = AssetId(uuid::Uuid::from_u128(0x2605_0001_0000_0000 + n as u128));
+            for name in [second, first] {
+                let p = dir.path().join(format!("{name}.inf_lvl"));
+                std::fs::write(&p, format!("payload-{name}")).unwrap();
+                std::fs::write(format!("{}.toml", p.display()), side(g)).unwrap();
+            }
+            want.push((g, format!("{first}.inf_lvl")));
+        }
+        let mut db = AssetDb::new(dir.path());
+        assert_eq!(db.scan().unwrap(), 2);
+        assert_eq!(db.collisions().len(), 2);
+        for (g, first) in want {
+            assert!(
+                db.get(g).expect("registered").path.ends_with(&first),
+                "{g:?} went to the wrong file"
+            );
+        }
     }
 }

@@ -73,7 +73,7 @@
 //! `projector_mirror.rs` normalizes exactly that token — doc block included —
 //! before comparing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -472,6 +472,48 @@ impl EditorRenderAssets {
 
     // ── virtual textures (P26.4, clause 0) ──────────────────────────────────
 
+    /// **What the viewport's live virtual-texture level is a function of**
+    /// (P26.5) — the cache key its rebuild is gated on, as a value.
+    ///
+    /// The viewport projects on every document version and building a VT level
+    /// creates an atlas, so the rebuild has to be gated. Both terms are
+    /// load-bearing and the P26.4 audit found the second one missing:
+    ///
+    /// * the **binding set**, because that is what decides *which* textures are
+    ///   registered and in what order;
+    /// * the **index generation**, because a re-imported `.inf_tex` changes
+    ///   neither the binding set nor the document version — so without it the
+    ///   viewport held the bytes it read the first time for the rest of the
+    ///   session, on a path Ring 2 drives from two commands.
+    ///
+    /// It is a **value with a name** rather than two fields compared inline, and
+    /// that is the whole point of the change: the host's early-out is now one
+    /// `!=` over a type, so a third term cannot be added to the rebuild without
+    /// coming through here, and the rule is testable on every CI leg instead of
+    /// only where a window exists (`EngineHost::new` takes a real surface, so
+    /// nothing headless can execute the host's own copy — see
+    /// `tests/vt_level_key.rs`).
+    pub fn vt_level_key(&self, doc: &crate::scene::SceneDoc) -> VtLevelKey {
+        let mut bindings: BTreeSet<Uuid> = BTreeSet::new();
+        let world = doc.world();
+        let w = world.world();
+        for &guid in doc.order() {
+            let Some(entity) = world.entity_of(guid) else {
+                continue;
+            };
+            if let Some(asset) = w
+                .get::<inf_ecs::components::Material>(entity)
+                .and_then(|m| m.asset)
+            {
+                bindings.insert(asset);
+            }
+        }
+        VtLevelKey {
+            bindings,
+            index_generation: self.index_generation(),
+        }
+    }
+
     /// **Resolve a level's `Material.asset` bindings into virtual-texture
     /// content** — the editor half of what a cooked pack's
     /// `PackLevelSource::material_content` is for the shipped player.
@@ -582,6 +624,31 @@ impl EditorRenderAssets {
         }
         self.index = content_paths_by_guid(&root);
         self.index.get(&id).cloned()
+    }
+}
+
+/// **The viewport's virtual-texture cache key** (P26.5) — see
+/// [`EditorRenderAssets::vt_level_key`].
+///
+/// `BTreeSet` and not `HashSet`: the set is compared for equality here, but it
+/// is also what `material_content` is asked for, and `registration_order`'s
+/// purity in the registration SEQUENCE is the property both hosts' residency
+/// rests on (the P26.3b audit's `HashMap`-walk finding). A key that iterates
+/// differently on two runs would put that back.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VtLevelKey {
+    /// Every `Material.asset` the document binds, deduplicated and sorted.
+    pub bindings: BTreeSet<Uuid>,
+    /// `EditorRenderAssets::index_generation` when the key was taken.
+    pub index_generation: u64,
+}
+
+impl VtLevelKey {
+    /// Whether this level has any binding at all — `false` is the textureless
+    /// path, where the host hands the renderer `None` and the command stream is
+    /// the one all 50 goldens recorded.
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
     }
 }
 

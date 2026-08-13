@@ -552,20 +552,28 @@ fn both_projectors_resolve_a_surface_texture_set_the_same_way() {
     // content arrives once, from a pack or a payload, and cannot be re-imported
     // under it.
     //
-    // A source pin because the behaviour needs a live `EngineHost`, which needs a
-    // window and a device; what it is pinning is the CALL, and the rule the call
-    // implements is asserted on the bytes in
-    // `render_assets::tests::a_levels_bindings_resolve_to_registrable_material_content`.
-    // Without the generation term, re-importing a `.inf_tex` changes neither the
-    // document version nor the binding set and the viewport keeps the atlas it
-    // built the first time — which is what shipped, under a doc comment saying
-    // the opposite.
+    // **Both terms now live in one value** (P26.5): `VtLevelKey`, produced by
+    // `EditorRenderAssets::vt_level_key`. This is still a source pin — the
+    // behaviour needs a live `EngineHost`, which needs a window and a device —
+    // but it pins ONE call rather than a three-term condition, and the rule the
+    // call implements is now executed end to end, through the real registration
+    // door on a real device, by `tests/vt_level_key.rs`. Without the generation
+    // term, re-importing a `.inf_tex` changes neither the document version nor
+    // the binding set and the viewport keeps the atlas it built the first time —
+    // which is what shipped, under a doc comment saying the opposite.
     let src = support::strip_comments_and_strings(&read(VIEWPORT).replace("\r\n", "\n"));
     assert!(
-        src.contains("index_generation()"),
-        "the editor viewport's virtual-texture rebuild does not consult \
-         `EditorRenderAssets::index_generation`, so a re-imported texture never \
-         reaches the atlas"
+        src.contains("vt_level_key(doc)"),
+        "the editor viewport's virtual-texture rebuild does not take an \
+         `EditorRenderAssets::vt_level_key`, so its cache key is spelled locally \
+         again and a term can go missing from it without a test noticing — which \
+         is exactly how the index generation came to be absent"
+    );
+    // …and it compares the WHOLE key, so a term added to `VtLevelKey` cannot be
+    // ignored here by comparing one field of it.
+    assert!(
+        src.contains("if key == self.vt_level_key"),
+        "the viewport does not compare the whole virtual-texture key"
     );
 }
 

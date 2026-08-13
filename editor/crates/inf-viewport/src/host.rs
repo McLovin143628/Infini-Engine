@@ -271,16 +271,17 @@ pub struct EngineHost {
     ///
     /// [`EditorRenderAssets::retain_only`]: inf_editor_core::render_assets::EditorRenderAssets::retain_only
     render_assets: inf_editor_core::render_assets::EditorRenderAssets,
-    /// The `Material.asset` bindings the live virtual-texture level was built
-    /// from (P26.4). A projection runs on every document version and building a
-    /// VT level creates an atlas, so the rebuild is gated on this set changing —
-    /// the `terrain_slots` pattern, for materials.
-    vt_bindings: BTreeSet<Uuid>,
-    /// …and the `EditorRenderAssets::index_generation` it was built AT (P26.4
-    /// audit). A re-imported `.inf_tex` changes neither the document version nor
-    /// the binding set, so without this the atlas kept the bytes it read the
-    /// first time for the rest of the session.
-    vt_index_generation: u64,
+    /// **What the live virtual-texture level was built from** (P26.5) — the
+    /// binding set AND the asset index's generation, as one value.
+    ///
+    /// A projection runs on every document version and building a VT level
+    /// creates an atlas, so the rebuild is gated on this changing (the
+    /// `terrain_slots` pattern, for materials). It was two fields compared
+    /// inline until P26.5; the rule now lives in
+    /// [`inf_editor_core::render_assets::VtLevelKey`], where a test can execute
+    /// it — this file needs a window, so the P26.4 audit could only pin the
+    /// early-out as source text.
+    vt_level_key: inf_editor_core::render_assets::VtLevelKey,
     /// The last tool-rejection message, for a Ring-2 caller to surface. Drained by
     /// [`take_tool_status`](Self::take_tool_status).
     tool_status: Option<String>,
@@ -957,8 +958,7 @@ impl EngineHost {
             debris_cache: inf_render::DebrisCache::default(),
             fractures: inf_editor_core::simulate::shared_fractures(),
             render_assets: inf_editor_core::render_assets::EditorRenderAssets::new(),
-            vt_bindings: BTreeSet::new(),
-            vt_index_generation: 0,
+            vt_level_key: Default::default(),
             tool_status: None,
             stream_log_countdown: STREAM_LOG_INTERVAL_FRAMES,
             sculpt_drag: None,
@@ -3973,28 +3973,23 @@ impl EngineHost {
     /// the handles this mints differ from the player's, and the sort is what
     /// keeps the *pages* the same anyway.
     fn sync_vt_bindings(&mut self, doc: &SceneDoc) {
-        let mut bound: BTreeSet<Uuid> = BTreeSet::new();
-        let world = doc.world();
-        let w = world.world();
-        for &guid in doc.order() {
-            let Some(entity) = world.entity_of(guid) else {
-                continue;
-            };
-            if let Some(asset) = w.get::<Material>(entity).and_then(|m| m.asset) {
-                bound.insert(asset);
-            }
-        }
-        let generation = self.render_assets.index_generation();
-        if bound == self.vt_bindings && generation == self.vt_index_generation {
+        // **The rule is a value, and it lives in Ring 1** (P26.5). The two terms
+        // used to be two fields compared inline here, where nothing headless can
+        // execute them: `EngineHost::new` takes a real surface, so the P26.4
+        // audit could only pin this early-out as SOURCE TEXT. `VtLevelKey` moves
+        // the decision to a crate that compiles and tests on every leg, leaves
+        // this line as the call, and makes a third term impossible to add
+        // without going through the type.
+        let key = self.render_assets.vt_level_key(doc);
+        if key == self.vt_level_key {
             return;
         }
-        self.vt_bindings = bound.clone();
-        self.vt_index_generation = generation;
-        if bound.is_empty() {
+        self.vt_level_key = key.clone();
+        if key.is_empty() {
             self.renderer.set_vt_level(None);
             return;
         }
-        let content = self.render_assets.material_content(bound);
+        let content = self.render_assets.material_content(key.bindings);
         if content.is_empty() {
             self.renderer.set_vt_level(None);
             return;

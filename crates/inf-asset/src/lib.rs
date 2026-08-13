@@ -35,7 +35,7 @@ pub mod sidecar;
 pub mod watch;
 
 pub use data::{CellValue, EnumAsset, FieldDef, FieldType, StructAsset, TableAsset};
-pub use db::{AssetDb, AssetEntry};
+pub use db::{AssetDb, AssetEntry, IdCollision};
 pub use derived_material::{
     derived_material_id, DerivedBlend, DerivedMaterial, DERIVED_MATERIAL_ID_SALT,
 };

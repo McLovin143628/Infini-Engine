@@ -712,8 +712,17 @@ fn resident_library(
     gpu: &GpuContext,
     srgb: bool,
 ) -> (VtTextures, VtPools, inf_render::VtTextureSet) {
+    resident_library_of(gpu, ramp_container(256, srgb))
+}
+
+/// [`resident_library`] over any container — so an arm can hold one fixture's
+/// *shading* fixed and vary only the texture's own content (P26.5).
+fn resident_library_of(
+    gpu: &GpuContext,
+    bytes: Vec<u8>,
+) -> (VtTextures, VtPools, inf_render::VtTextureSet) {
     let (mut lib, _) = VtTextures::new(pool_cfg(PageFormat::Rgba8, 64));
-    lib.register_or_record(1, Arc::new(ramp_container(256, srgb)))
+    lib.register_or_record(1, Arc::new(bytes))
         .expect("the fixture registers");
     let mut pools = VtPools::new(&gpu.device, &gpu.queue, lib.residency(), false);
     // Every tile of every level — the floor alone stops three levels from the
@@ -1688,5 +1697,256 @@ fn the_vt_summary_is_a_line_a_host_can_log() {
         renderer.vt_pop_in().admits > 0,
         "nothing was admitted -- the anti-vacuity number `VtPopIn` carries for \
          exactly this reason"
+    );
+}
+
+// -- (f) the DOWNLEVEL tier's pixels (P26.5, the P26.4 audit's remainder) ----
+
+/// The vgeom fixture: one dense grid quad, stood up in world XY so it faces the
+/// camera and fills the frame. Its `VgeomVertex`es carry a real authored uv
+/// (`inf_vgeom::test_support` writes one per grid corner), which is what the
+/// classic tier now reads -- P26.5 -- and what the meshlet tier has read since
+/// P13.1b.
+fn vgeom_face_scene(
+    mesh: &std::sync::Arc<inf_render::VgeomMesh>,
+    set: inf_render::VtTextureSet,
+) -> inf_render::RenderScene {
+    const ASSET: u128 = 0x2605_0000_0dc1_0000;
+    let mut scene = inf_render::RenderScene {
+        grid_enabled: false,
+        vgeom_assets: vec![inf_render::VgeomAsset::from_mesh(ASSET, mesh).expect("index the vmesh")],
+        ..Default::default()
+    };
+    let mut inst = inf_render::VgeomInstance::lit(
+        ASSET,
+        glam::DVec3::ZERO,
+        glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        glam::Vec3::splat(8.0),
+        [1.0, 1.0, 1.0, 1.0],
+        1,
+    );
+    inst.vt = set;
+    scene.vgeom_instances.push(inst);
+    scene.mark_dirty();
+    scene
+}
+
+/// Draw one frame of the vgeom fixture with the meshlet path on or off.
+fn render_vgeom_face(
+    gpu: &GpuContext,
+    mesh: &std::sync::Arc<inf_render::VgeomMesh>,
+    pools: Option<VtPools>,
+    set: inf_render::VtTextureSet,
+    meshlets: bool,
+) -> Vec<u8> {
+    let target = inf_render::HeadlessTarget::new(gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(gpu, inf_render::HEADLESS_FORMAT);
+    let mut settings = inf_render::RenderSettings::default();
+    // The exact complement the two nodes are gated on: exactly one of them draws
+    // this content, so "the classic frame" and "the meshlet frame" are two
+    // rasterizers over one scene rather than two scenes.
+    settings.vgeom.enabled = meshlets;
+    settings.vgeom.occlusion = false;
+    settings.vgeom.two_pass = false;
+    renderer.set_settings(settings);
+    renderer.set_vt_pools(pools);
+    renderer.render(
+        gpu,
+        &vgeom_face_scene(mesh, set),
+        &face_view(),
+        &target.view,
+        (FW, FH),
+    );
+    target.read_rgba(gpu).expect("readback")
+}
+
+/// A flat container of one colour — the CONTROL for "does the uv vary".
+fn flat_container(n: u32, red: u8) -> Vec<u8> {
+    inf_material::build_tiled_texture(
+        std::iter::repeat_n([red, 40, 200, 255], (n * n) as usize)
+            .flatten()
+            .collect(),
+        n,
+        n,
+        inf_material::TextureImportSettings {
+            srgb: false,
+            generate_mips: true,
+            compression: inf_material::TextureCompression::None,
+        },
+    )
+    .expect("the fixture tiles")
+    .into_bytes()
+}
+
+/// The spread of the per-pixel red **RATIO** `a / b`, in 1/256ths, over the
+/// pixels where `b` carries a surface at all.
+///
+/// A texture modulates a lit surface **multiplicatively**, so the *difference*
+/// between a textured and an untextured frame varies wherever the SHADING
+/// varies — even for a texture that is one flat colour. Measured: a
+/// `uv: [0.0; 2]` mutation in `classic_vgeom` — which collapses a whole mesh
+/// onto one texel — left a delta spread of 74 and passed a difference-based arm
+/// unharmed. A ratio divides the shading out, so what is left is the texture's
+/// own spatial variation, which is the thing a uv stream is FOR.
+///
+/// Pixels where the reference is near black are skipped: a ratio against nothing
+/// is noise, and the sky is not the surface under test.
+fn red_ratio_spread(a: &[u8], b: &[u8]) -> u32 {
+    assert_eq!(a.len(), b.len());
+    let (mut lo, mut hi) = (u32::MAX, 0u32);
+    let mut n = 0u32;
+    for (x, y) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        if y[0] < 24 {
+            continue;
+        }
+        let r = (u32::from(x[0]) * 256) / u32::from(y[0]);
+        lo = lo.min(r);
+        hi = hi.max(r);
+        n += 1;
+    }
+    assert!(n > 100, "only {n} pixels carried a surface to divide by");
+    hi - lo
+}
+
+/// **The DOWNLEVEL tier draws a textured mesh, in texels** (P26.5).
+///
+/// The P26.4 audit's remainder, verbatim: *"The downlevel tier has no pixel arm.
+/// `pack_vgeom_instance`'s dropped texture set is fixed and pinned on
+/// `InstanceRaw`'s words; nothing renders a textured vgeom surface with
+/// `RenderSettings.vgeom.enabled = false`, so 'the two tiers sample the same
+/// thing' is asserted on instance bytes rather than on texels."*
+///
+/// This is that arm, and it now carries a second claim the audit could not have
+/// asked for: P26.5 gave `MeshVertex` a uv and `classic_vgeom` stopped
+/// **dropping** `VgeomVertex::uv` on the way into it. So the classic tier
+/// samples the artist's parametrization rather than a box projection, and the
+/// two tiers can be compared on the picture rather than on the intent.
+///
+/// Four frames, one scene, one camera, one lighting:
+///
+/// * classic (`vgeom.enabled = false`) with a **ramp** texture bound;
+/// * classic with a **flat** texture of the same size, format and residency —
+///   the control that separates "a texture reached the pixels" from "the uv
+///   varies across them";
+/// * classic with `VtTextureSet::NONE` — the reference to divide the shading out
+///   against;
+/// * meshlet (`vgeom.enabled = true`) with the ramp — textured too, which is the
+///   "both tiers sample the same thing" half.
+///
+/// **Measured as a ratio, not a difference**, and the flat control is why. A
+/// texture modulates a lit surface multiplicatively, so `textured − untextured`
+/// varies wherever the *shading* varies — for a flat texture as much as for a
+/// ramp. Measured: a `uv: [0.0; 2]` mutation in `classic_vgeom`, which collapses
+/// the whole mesh onto one texel, left a difference-spread of 74 and survived a
+/// difference-based arm untouched. Dividing by the untextured frame removes the
+/// shading and leaves the texture's own spatial variation, which is the thing a
+/// uv stream exists for.
+///
+/// The two tiers' frames are **not** compared pixel for pixel: they rasterize
+/// different LOD cuts of one DAG, which is the whole point of having two. What
+/// is compared is that each one carries the texture's own variation.
+#[test]
+fn the_downlevel_tier_draws_a_textured_mesh_in_texels() {
+    let Some(gpu) = gpu_or_skip("the downlevel VT pixel arm") else {
+        return;
+    };
+    // A FLAT grid (amplitude 0), deliberately: a displaced one is lit
+    // differently at every texel, and a tonemapped, sRGB-encoded frame is not a
+    // linear function of radiance — so neither a difference nor a ratio against
+    // an untextured frame divides that shading out. Measured, twice: a
+    // `uv: [0.0; 2]` mutation survived a difference-based arm (delta spread 74),
+    // and a FLAT texture scored 81/256 of ratio spread against a ramp's 112,
+    // which is not a measurement of anything. With uniform shading the frame's
+    // own spread IS the texture's, and the mesh still carries the same real
+    // authored uv per grid corner.
+    let mesh = std::sync::Arc::new(inf_vgeom::test_support::build_grid(
+        24,
+        0.0,
+        inf_vgeom::test_support::GridNormals::Analytic,
+    ));
+    assert!(
+        mesh.vertices.iter().any(|v| v.uv != [0.0, 0.0]),
+        "the fixture mesh carries no uv, so nothing below can measure one"
+    );
+
+    let (_lib, pools, set) = resident_library(&gpu, false);
+    let classic = render_vgeom_face(&gpu, &mesh, Some(pools), set, false);
+    let (_flib, fpools, fset) = resident_library_of(&gpu, flat_container(256, 128));
+    let flat = render_vgeom_face(&gpu, &mesh, Some(fpools), fset, false);
+    let bare = render_vgeom_face(&gpu, &mesh, None, inf_render::VtTextureSet::NONE, false);
+
+    let (_, _, bmean) = red_stats(&bare);
+    let (_, _, cmean) = red_stats(&classic);
+    let ramp_ratio = red_ratio_spread(&classic, &bare);
+    let flat_ratio = red_ratio_spread(&flat, &bare);
+    println!(
+        "downlevel VT: bare mean {bmean:.1}, classic mean {cmean:.1}, ratio spread \
+         ramp {ramp_ratio} vs flat {flat_ratio} (1/256ths)"
+    );
+
+    // ANTI-VACUITY FIRST: the untextured mesh is on screen and lit, or every
+    // comparison below is between two skies.
+    assert!(
+        bmean > 20.0,
+        "the untextured vgeom surface never reached the frame (mean red {bmean:.1})"
+    );
+    assert_ne!(
+        bare, classic,
+        "the texture changed no pixel on the classic tier"
+    );
+    // THE CLAIM: the ramp's modulation varies across the surface and the flat
+    // texture's does not. A dropped texture set, and a uv collapsed to a
+    // constant, both land on the right of this inequality.
+    assert!(
+        ramp_ratio > flat_ratio * 3,
+        "the classic tier's ramp modulates the surface by {ramp_ratio}/256 across \
+         it and a FLAT texture by {flat_ratio}/256 — the uv is not varying, which \
+         is what a dropped `VgeomVertex::uv` looks like from here"
+    );
+    // …and the flat control really is nearly flat, so the inequality above is a
+    // measurement rather than a comparison of two large numbers.
+    assert!(
+        flat_ratio < 24,
+        "a FLAT texture modulates the surface by {flat_ratio}/256 across it, so \
+         the ratio is not dividing the shading out and this arm measures nothing"
+    );
+    // **And the sample did not COLLAPSE onto one texel.** A ratio is a poor
+    // instrument near zero: with the uv dead, every fragment reads texel (0, 0)
+    // of a left-to-right ramp — which is black — and the surviving handful of
+    // near-black pixels quantize into a wide-looking ratio (measured: mean 5.5
+    // against the untextured 189.1, ratio spread 46, which passed the
+    // inequality above). A ramp averages to something like half its surface, so
+    // a textured frame that is 3 % of the untextured one is not a texture, it is
+    // one texel.
+    assert!(
+        cmean > bmean * 0.15,
+        "the textured surface is {cmean:.1} against the untextured {bmean:.1} — \
+         every fragment is reading ONE texel, which is what a uv stream that \
+         never arrived looks like"
+    );
+
+    // …and the MESHLET tier, over the same scene, is textured too. This is the
+    // half `projector_mirror` cannot see: the third spelling of the texture set
+    // lived inside `inf-render`, downstream of both hosts.
+    let (_lib2, pools2, set2) = resident_library(&gpu, false);
+    let meshlet = render_vgeom_face(&gpu, &mesh, Some(pools2), set2, true);
+    let (_, _, mmean) = red_stats(&meshlet);
+    let meshlet_ratio = red_ratio_spread(&meshlet, &bare);
+    if mmean <= 20.0 {
+        // The meshlet path needs compute + indirect draws; an adapter that
+        // cannot run it draws nothing here, and that is a capability fact
+        // rather than a failure. Said out loud rather than skipped silently.
+        eprintln!(
+            "NOTE: the meshlet tier drew nothing on this adapter (mean red \
+             {mmean:.1}); the classic half above still ran"
+        );
+        return;
+    }
+    assert!(
+        meshlet_ratio > flat_ratio * 3,
+        "the meshlet tier's texture modulation spans only {meshlet_ratio}/256 \
+         against a flat texture's {flat_ratio} while the classic tier's spans \
+         {ramp_ratio} — the two tiers do not sample the \
+         same thing"
     );
 }
