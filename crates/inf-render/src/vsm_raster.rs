@@ -766,8 +766,10 @@ impl VsmRaster {
         out
     }
 
-    /// The shared page-uniform layout, for the caster paths that live outside this
-    /// module's own pipelines (P27.2's skinned / terrain / meshlet rasters).
+    /// The shared page-uniform layout — the seam a caster pipeline built outside
+    /// this module would bind through. Every P27.2 path lives here, so it has no
+    /// reader yet; it is the door P27.4's receiver debug view and P28.3's merged
+    /// streamer are expected to come through, named rather than implied.
     #[inline]
     pub fn page_layout(&self) -> &wgpu::BindGroupLayout {
         &self.page_bgl

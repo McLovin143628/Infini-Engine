@@ -10723,15 +10723,23 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
   `MULTI_DRAW_INDIRECT` — the two-buffer vgeom precedent), `set_viewport`/`set_scissor` per
   page (the tree's first scissor use); 2. all caster paths: rigid, **vgeom meshlets**,
   skinned, terrain, scatter — masked materials keep alpha-test in the page raster.
-> **STATUS — P27.2 Casters into pages: COMPLETE (2026-08-13)** — **eight**
+> **STATUS — P27.2 Casters into pages: COMPLETE (2026-08-13)** — **ten**
 > commits, counted rather than remembered (`b155282` the settings boundary,
 > `2953fe5` the page matrix + the page cull, `b3bd82a` the per-page GPU cull and
 > the raster itself, `3ebef93` virtualized geometry + its deviation memo,
 > `671f566` skinned + terrain, `1550aa8` the mutation round's one survivor
-> written down, and **two fixes this batch's own review found**: `b921fd3` the
-> terrain cache key and `266acda` the caster ceiling's silent truncation), plus
-> this block. Battery green at HEAD: **BATTERY_LINE** against the P27.1
-> audit's 239 / 4 283 / 0 / 8 — **one new test binary and eighteen new arms**.
+> written down, and **three fixes this batch's own review found before the
+> battery ran to completion**: `b921fd3` the terrain cache key, `266acda` the
+> caster ceiling's silent truncation and `8860516` the P27.1 arm the new
+> settings boundary locked out), plus this block. Battery green at HEAD:
+> **240 binaries, 4 301 passed, 0 failed, 8 ignored** against the P27.1 audit's
+> 239 / 4 283 / 0 / 8 — **one new test binary and eighteen new arms**, which is
+> exactly `tests/vsm_raster.rs` and the 4 + 3 + 2 + 9 arms this batch added.
+> One provenance note, because the counts will be compared: a
+> **doc-comment-only** edit to `vsm_raster.rs` landed after `inf-render` had
+> already compiled inside that run, so `-p inf-render --release` was re-run at
+> HEAD afterwards — every binary green, 0 failed — on the P27.1 precedent for the
+> one package whose sources moved under a running battery.
 > `clippy --workspace --all-targets` under `-D warnings` and `cargo fmt --all
 > --check` clean. **Goldens stay 50 and none was re-blessed** — `git diff` over
 > `tests/goldens/` is empty across the batch. **No schema moved**, no `.inf_lvl`
@@ -10858,15 +10866,23 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
 > now have the standing the P27.1 audit gave the marking shader's
 > `contain > levels − 1` early-out.
 >
-> **Two defects this batch's own review found, both before the battery finished.**
-> `sync_terrain` keyed its per-tile caster mesh on the tile's **index in
-> `terrain.tiles`** — a streaming residency, so index 3 is a different tile from
-> one frame to the next and a tile could be handed another tile's heights whenever
-> the two shared a version stamp: the shadow of a hill that is somewhere else,
-> with no error and no counter. And `VSM_MAX_CASTERS` was a bare `break`, so a
-> level past 16 384 casters would have had its tail stop casting silently — the
-> shape the no-silent-caps doctrine forbids, and the shape the page cap beside it
-> already avoided. Both fixed; the ceiling counts what it refuses now.
+> **Three defects this batch's own review found, all before the battery ran to
+> completion.** `sync_terrain` keyed its per-tile caster mesh on the tile's
+> **index in `terrain.tiles`** — a streaming residency, so index 3 is a different
+> tile from one frame to the next and a tile could be handed another tile's
+> heights whenever the two shared a version stamp: the shadow of a hill that is
+> somewhere else, with no error and no counter. `VSM_MAX_CASTERS` was a bare
+> `break`, so a level past 16 384 casters would have had its tail stop casting
+> silently — the shape the no-silent-caps doctrine forbids, and the shape the
+> page cap beside it already avoided; the ceiling counts what it refuses now.
+> And the new settings boundary **locked a P27.1 arm out of its own fixture**:
+> `a_light_refused_at_registration_stops_the_list_it_is_in` built a
+> `clipmap_pages_per_side: 6` and handed it to the renderer, which now refuses
+> it at the door — so the arm asserts that refusal and then exercises
+> `VsmSystem::for_scene` directly, which is where the truncation lives. That
+> third one is the shape of a boundary working: closing a door closes it for the
+> tests too, and the honest response is to move the test to the mechanism rather
+> than to widen the door.
 >
 > **The settings boundary — the audit's one cheap structural change — landed, in
 > its own commit.** `VsmSettings::validate` refuses at the door a host sets, in
