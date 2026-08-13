@@ -49,6 +49,21 @@ pub enum ImportProgress {
         produced: Vec<AssetId>,
         primary: Option<AssetId>,
         cached: bool,
+        /// **Non-fatal import advisories** (P26.5) — the P26.1 dimension pair
+        /// plus the tail-cost badge, in the shape `ImportOutcome::advisories`
+        /// already carried.
+        ///
+        /// They were raised into `tracing` at the import and reached the Output
+        /// Log; nothing put them where the person who just dropped a file is
+        /// looking. That is the P26.1 ledger's deferred *badging*: an author
+        /// importing forty 128² decals is told, once, at the moment they can
+        /// still say no.
+        ///
+        /// **Empty on a cache hit**, deliberately and not by omission: the
+        /// advisories were said when the bytes were first imported, and
+        /// re-announcing them on every drop of an unchanged file is how a badge
+        /// becomes noise.
+        advisories: Vec<String>,
     },
     /// Job `id` failed (or was cancelled — the error text says which).
     Failed {
@@ -303,6 +318,7 @@ fn worker_loop(rx: Receiver<Job>, etx: Sender<ImportProgress>, project: Arc<Mute
                         produced: out.produced,
                         primary: out.primary,
                         cached: out.cached,
+                        advisories: out.advisories,
                     },
                     Err(e) => ImportProgress::Failed {
                         id,
@@ -358,6 +374,10 @@ fn worker_loop(rx: Receiver<Job>, etx: Sender<ImportProgress>, project: Arc<Mute
                         produced: vec![out.asset],
                         primary: Some(out.asset),
                         cached: false,
+                        // A heightmap is not a `.inf_tex` and takes no tile
+                        // geometry, so the three texture advisories cannot
+                        // apply to it.
+                        advisories: Vec::new(),
                     },
                     Err(e) => ImportProgress::Failed {
                         id,
@@ -458,6 +478,10 @@ fn worker_loop(rx: Receiver<Job>, etx: Sender<ImportProgress>, project: Arc<Mute
                     produced,
                     primary: None,
                     cached: false,
+                    // A derivation job re-reads assets that were already
+                    // imported; whatever they had to be advised about was said
+                    // then.
+                    advisories: Vec::new(),
                 }
             }
         };

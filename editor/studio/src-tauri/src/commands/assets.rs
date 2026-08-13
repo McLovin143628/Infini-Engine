@@ -583,6 +583,7 @@ fn import_event(ev: &ImportProgress) -> ImportEventDto {
         done: None,
         total: None,
         stage: None,
+        advisories: vec![],
     };
     match ev {
         ImportProgress::Started { id, source } => base(*id, source, "started"),
@@ -604,10 +605,12 @@ fn import_event(ev: &ImportProgress) -> ImportEventDto {
             produced,
             primary,
             cached,
+            advisories,
         } => ImportEventDto {
             produced: produced.iter().map(|a| a.to_string()).collect(),
             primary: primary.map(|a| a.to_string()),
             cached: *cached,
+            advisories: advisories.clone(),
             ..base(*id, source, "finished")
         },
         ImportProgress::Failed { id, source, error } => ImportEventDto {

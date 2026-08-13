@@ -66,6 +66,7 @@ function event(partial: Partial<ImportEventDto>): ImportEventDto {
     done: null,
     total: null,
     stage: null,
+    advisories: [],
     ...partial,
   };
 }

@@ -34,6 +34,22 @@ export interface ImportJob {
   total?: number | null;
 }
 
+/**
+ * What an import wanted the author to know (P26.5) — the P26.1 dimension pair
+ * plus the tail-cost badge.
+ *
+ * These reached `tracing` from the day they existed, so they landed in the
+ * Output Log and nowhere the person who had just dropped a file was looking.
+ * That is what the P26.1 ledger deferred as "P26.5's badging": an author
+ * importing forty 128 decals is told, once, while they can still say no.
+ * Nothing here is an error — the import succeeded — so it is dismissible and it
+ * never blocks.
+ */
+export interface ImportAdvisory {
+  source: string;
+  messages: string[];
+}
+
 interface AssetState {
   assets: Record<string, AssetDto>;
   folders: Record<string, AssetFolderDto>;
@@ -61,10 +77,14 @@ interface AssetState {
   thumbnails: Record<string, string>;
   /** Active/recent import jobs by job id. */
   imports: Record<number, ImportJob>;
+  /** Undismissed advisories from finished imports (P26.5). */
+  importAdvisories: ImportAdvisory[];
 
   applySnapshot: (s: AssetSnapshot) => void;
   refresh: () => Promise<void>;
   applyImportEvent: (e: ImportEventDto) => void;
+  /** Advisories from finished imports, newest last; dismissed as a batch. */
+  dismissImportAdvisories: () => void;
 
   setFolder: (path: string) => void;
   setSearch: (q: string) => void;
@@ -140,6 +160,7 @@ export const useAssetStore = create<AssetState>((set, get) => ({
   activeCollection: null,
   thumbnails: {},
   imports: {},
+  importAdvisories: [],
 
   applySnapshot: (s) =>
     set({
@@ -176,8 +197,21 @@ export const useAssetStore = create<AssetState>((set, get) => ({
     if (e.phase === "finished") {
       void get().refresh();
       if (e.primary) set({ selected: e.primary });
+      // …and surface whatever it had to advise about. Appended rather than
+      // replaced: dropping ten files at once produces ten finished events, and
+      // an author who imported a folder of small decals wants the count.
+      if (e.advisories.length > 0) {
+        set((state) => ({
+          importAdvisories: [
+            ...state.importAdvisories,
+            { source: e.source, messages: e.advisories },
+          ].slice(-20),
+        }));
+      }
     }
   },
+
+  dismissImportAdvisories: () => set({ importAdvisories: [] }),
 
   // Selecting a folder leaves any active collection view (they're alternate
   // scopes for the grid).

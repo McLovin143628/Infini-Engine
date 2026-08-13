@@ -21,4 +21,19 @@ done: number | null, total: number | null,
 /**
  * A short stage label on "progress" ("tiles", "lod2", …).
  */
-stage: string | null, };
+stage: string | null, 
+/**
+ * **Non-fatal import advisories** (P26.5), on "finished" — the P26.1
+ * dimension pair plus the tail-cost badge.
+ *
+ * The P26.1 audit deferred this deliberately: the advisories existed and
+ * reached `tracing`, so they landed in the Output Log and nowhere the
+ * person who had just dropped a file was looking. An author importing forty
+ * 128² decals should be told, once, at the moment they can still say no —
+ * which is what the ledger meant by *"it belongs with P26.5's badging"*.
+ *
+ * Empty on a cache hit and on every non-texture job, by construction rather
+ * than by omission: a badge re-announced on every drop of an unchanged file
+ * is noise, and a heightmap has no tile geometry to be advised about.
+ */
+advisories: Array<string>, };

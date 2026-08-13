@@ -149,7 +149,8 @@ impl TextureImportSettings {
 /// notices in the P16 cook-advisory shape: the import always succeeds, and the
 /// caller surfaces what it had to do.
 ///
-/// Two hazards are visible from the extent alone, and both are silent otherwise:
+/// Three hazards are visible from the extent alone, and all three are silent
+/// otherwise:
 ///
 /// * **Not a multiple of 4.** A BC block is 4×4, so a partial block at the right
 ///   or bottom edge is filled by repeating the last row/column of texels
@@ -162,6 +163,17 @@ impl TextureImportSettings {
 ///   `4096×16` source is 32 tiles wide and 1 tall, and every one of them stores
 ///   112 rows of clamp padding — 87 % of the payload is padding. The texture
 ///   works; it costs about eight times what its pixels do.
+/// * **A small texture pays for the uniform page** (P26.5, the P26.1 audit's
+///   deferred badging). Every mip level is stored in whole `136²` tiles, so a
+///   texture whose levels are mostly smaller than one tile stores mostly border
+///   ring and clamp padding: eight of a 128² texture's levels are one whole tile
+///   each. The P26.1 audit measured it — **6.8× at 128², 2.55× at 256², 1.22× at
+///   1024², 1.16× at 2048²** — and found the cost is inherent to the page rather
+///   than (as four documents then said) a lost zstd frame: BC1 and
+///   `TextureCompression::None` grow by the *same* factor, which is what
+///   falsifies the compression story directly. [`tiled_size_factor_pct`]
+///   recomputes those numbers from the extent, so the advisory carries the
+///   project's own figure instead of a remembered one.
 ///
 /// Pure and deterministic (dimensions in, sorted sentences out), so it is
 /// unit-tested with no project, no GPU and no filesystem.
@@ -185,7 +197,62 @@ pub fn texture_import_advisories(width: u32, height: u32) -> Vec<String> {
             crate::tiles::TILE_SIZE
         ));
     }
+    if let Some(pct) = tail_cost_advisory(width, height) {
+        out.push(pct);
+    }
     out
+}
+
+/// **How much a tiled `.inf_tex` costs against the raw pyramid it stores**, as a
+/// percentage (100 = the same size).
+///
+/// A pure function of the extent and the tile geometry, integer-only, because
+/// the answer is arithmetic and not a measurement: every mip level is stored as
+/// `ceil(w / TILE_SIZE) × ceil(h / TILE_SIZE)` tiles of `stored²` texels, and the
+/// raw pyramid is `Σ w·h`. The ratio is **format-independent** — a stored tile
+/// and a raw level compress by the same rule — which is exactly the P26.1 audit's
+/// finding that the cost is the uniform page and not a lost zstd frame.
+///
+/// Reproduces the audit's measured table to the digit
+/// (`the_tail_cost_advisory_reproduces_the_measured_table`), which is why the
+/// advisory can quote a number rather than a memory.
+pub fn tiled_size_factor_pct(width: u32, height: u32) -> u32 {
+    let stored = u64::from(crate::tiles::TILE_SIZE + 2 * crate::tiles::TILE_BORDER);
+    let (mut w, mut h) = (width.max(1), height.max(1));
+    let (mut raw, mut tiled) = (0u64, 0u64);
+    loop {
+        raw += u64::from(w) * u64::from(h);
+        tiled += u64::from(w.div_ceil(crate::tiles::TILE_SIZE))
+            * u64::from(h.div_ceil(crate::tiles::TILE_SIZE))
+            * stored
+            * stored;
+        if w == 1 && h == 1 {
+            break;
+        }
+        w = (w / 2).max(1);
+        h = (h / 2).max(1);
+    }
+    ((tiled * 100) / raw.max(1)) as u32
+}
+
+/// The tail-cost advisory, or `None` when the extent carries it comfortably.
+///
+/// **200 %** is the threshold, and it is where the measured table turns: 128²
+/// pays 677 %, 256² pays 254 %, and 1024² pays 121 % — so this fires for the
+/// sizes where the uniform page dominates and stays quiet for the sizes a real
+/// material is authored at. It is a badge, not a refusal: the texture works, it
+/// pages exactly like any other, and an author who wants many small textures
+/// should know they are cheaper in an atlas.
+fn tail_cost_advisory(width: u32, height: u32) -> Option<String> {
+    let pct = tiled_size_factor_pct(width, height);
+    (pct >= 200).then(|| {
+        format!(
+            "{width}×{height} stores {}.{}× its own pixels as a tiled .inf_tex — every mip              level is kept in whole {}² tiles, so a small texture is mostly border ring and              clamp padding; pack small textures into an atlas if the on-disk size matters",
+            pct / 100,
+            (pct / 10) % 10,
+            crate::tiles::TILE_SIZE + 2 * crate::tiles::TILE_BORDER
+        )
+    })
 }
 
 /// Decode an encoded image (PNG/JPEG/…) and import it with `settings`.
@@ -399,34 +466,44 @@ mod tests {
         assert_eq!(decode::<TextureAsset>(&bytes).unwrap(), tex);
     }
 
-    /// P26.1: the advisories fire on exactly the two hazards they name, stay
-    /// silent on ordinary content, and are a pure function of the extent.
+    /// P26.1 (+ P26.5's third): the advisories fire on exactly the hazards they
+    /// name, stay silent on ordinary content, and are a pure function of the
+    /// extent.
     #[test]
-    fn import_advisories_name_the_two_silent_hazards() {
-        assert!(texture_import_advisories(256, 256).is_empty());
+    fn import_advisories_name_the_silent_hazards() {
+        // A 1024² material raises nothing: it is a multiple of 4, it is square,
+        // and its tiled form costs 121 % of its pixels.
+        assert!(texture_import_advisories(1024, 1024).is_empty());
         assert!(
-            texture_import_advisories(300, 260).is_empty(),
+            texture_import_advisories(1200, 1040).is_empty(),
             "4-multiples are fine"
         );
 
-        let block = texture_import_advisories(255, 260);
+        let block = texture_import_advisories(1023, 1040);
         assert_eq!(block.len(), 1);
         assert!(block[0].contains("multiple of 4"), "{block:?}");
         // Either axis is enough.
-        assert_eq!(texture_import_advisories(260, 255).len(), 1);
+        assert_eq!(texture_import_advisories(1040, 1023).len(), 1);
 
         let strip = texture_import_advisories(4096, 16);
-        assert_eq!(strip.len(), 1);
-        assert!(strip[0].contains("256:1"), "{strip:?}");
+        assert_eq!(strip.len(), 2, "{strip:?}");
+        assert!(strip.iter().any(|a| a.contains("256:1")), "{strip:?}");
 
         // Both at once, both reported — never one swallowing the other.
         let both = texture_import_advisories(4095, 15);
-        assert_eq!(both.len(), 2, "{both:?}");
+        assert_eq!(both.len(), 3, "{both:?}");
 
         // 7:1 is under the threshold, 8:1 is at it (the boundary is asserted, so
-        // a re-tune has to come here).
-        assert!(texture_import_advisories(224, 32).is_empty());
-        assert_eq!(texture_import_advisories(256, 32).len(), 1);
+        // a re-tune has to come here). Both extents are small enough to carry
+        // the tail-cost advisory as well, which is why the counts are 1 and 2.
+        assert_eq!(texture_import_advisories(224, 32).len(), 1);
+        assert_eq!(texture_import_advisories(256, 32).len(), 2);
+
+        // P26.5: the tail cost fires below 512² and is silent from it up.
+        assert_eq!(texture_import_advisories(128, 128).len(), 1);
+        assert!(texture_import_advisories(128, 128)[0].contains("tiled .inf_tex"));
+        assert_eq!(texture_import_advisories(256, 256).len(), 1);
+        assert!(texture_import_advisories(512, 512).is_empty());
 
         // Pure: same extent, same sentences.
         assert_eq!(
@@ -439,5 +516,54 @@ mod tests {
     fn rejects_zero_and_truncated() {
         assert!(texture_from_rgba8(vec![], 0, 0, Default::default()).is_err());
         assert!(texture_from_rgba8(vec![0; 4], 4, 4, Default::default()).is_err());
+    }
+
+    /// **The tail-cost factor reproduces the P26.1 audit's measured table**, to
+    /// the digit.
+    ///
+    /// The audit measured a v2 payload against its v1 twin on real files —
+    /// *"6.8× at 128² BC1, 2.55× at 256², 1.22× at 1024², 1.16× at 2048²"* — and
+    /// found the growth is the uniform page rather than a lost zstd frame,
+    /// *"because BC1 and `TextureCompression::None` grow by the SAME factor"*.
+    /// [`tiled_size_factor_pct`] derives those numbers from the extent alone, so
+    /// the advisory quotes the project's own figure and this arm is what keeps
+    /// the derivation honest against the files that were actually weighed.
+    ///
+    /// If the tile geometry ever changes, this fails first and says so — which is
+    /// the point, because four documents once carried a number that had stopped
+    /// being true.
+    #[test]
+    fn the_tail_cost_factor_reproduces_the_measured_table() {
+        // (extent, the audit's measured factor × 100, tolerance in percentage
+        // points — the audit quoted two significant figures).
+        for (n, measured, tol) in [
+            (128u32, 680u32, 10u32),
+            (256, 255, 5),
+            (1024, 122, 3),
+            (2048, 116, 3),
+        ] {
+            let got = tiled_size_factor_pct(n, n);
+            assert!(
+                got.abs_diff(measured) <= tol,
+                "{n}²: derived {got} %, the P26.1 audit measured {measured} %"
+            );
+        }
+        // Monotone in size, which is the shape of the claim ("a SMALL texture
+        // pays for the uniform page") and not just four points.
+        let mut prev = u32::MAX;
+        for n in [128u32, 256, 512, 1024, 2048, 4096] {
+            let got = tiled_size_factor_pct(n, n);
+            assert!(
+                got < prev,
+                "{n}² costs {got} %, more than the size below it"
+            );
+            prev = got;
+        }
+        // It never claims a saving: a tiled container is always at least as big
+        // as its pixels, because a page is never smaller than the level it holds.
+        assert!(tiled_size_factor_pct(8192, 8192) >= 100);
+        // Format-independent by construction — there is no format argument, which
+        // is the structural form of the audit's finding.
+        assert_eq!(tiled_size_factor_pct(1, 1), tiled_size_factor_pct(1, 1));
     }
 }

@@ -445,7 +445,17 @@ mod tests {
         let mut proj = AssetProject::open(proj_dir.path()).unwrap();
         let dest = proj.content_dir("imported").unwrap();
         let out = proj.import_file(&png, &dest).unwrap();
-        assert!(out.advisories.is_empty(), "{:?}", out.advisories);
+        // 260×132 is a multiple of 4 and nowhere near 8:1 — but it IS small
+        // enough to pay for the uniform page (P26.5), so the tail-cost badge
+        // fires and it is the ONLY one. Asserted rather than counted away: the
+        // point of that advisory is that it fires here, on ordinary-looking
+        // content, which is the state the P26.1 audit measured at 6.8×.
+        assert_eq!(out.advisories.len(), 1, "{:?}", out.advisories);
+        assert!(
+            out.advisories[0].contains("tiled .inf_tex"),
+            "{:?}",
+            out.advisories
+        );
 
         let id = out.primary.unwrap();
         assert_eq!(proj.db().get(id).unwrap().kind(), AssetKind::Texture);
@@ -469,9 +479,10 @@ mod tests {
         assert!(r.tile(0, 2, 1).is_some());
     }
 
-    /// The advisories reach the outcome, and an ordinary texture raises none.
+    /// The advisories reach the outcome, all three of them, and a large
+    /// well-shaped texture raises none.
     #[test]
-    fn import_reports_the_dimension_advisories() {
+    fn import_reports_the_dimension_and_tail_cost_advisories() {
         let src = tempfile::tempdir().unwrap();
         let proj_dir = tempfile::tempdir().unwrap();
         let awkward = write_corner_png(src.path(), "Strip", 126, 15);
@@ -479,11 +490,30 @@ mod tests {
         let dest = proj.content_dir("imported").unwrap();
 
         let out = proj.import_file(&awkward, &dest).unwrap();
-        assert_eq!(out.advisories.len(), 2, "{:?}", out.advisories);
+        assert_eq!(out.advisories.len(), 3, "{:?}", out.advisories);
         assert!(out.advisories[0].contains("multiple of 4"));
         assert!(out.advisories[1].contains("8:1"));
+        // P26.5's badge, and it names its own measured factor rather than a
+        // remembered one.
+        assert!(
+            out.advisories[2].contains("tiled .inf_tex"),
+            "{:?}",
+            out.advisories
+        );
+        assert!(
+            out.advisories[2].contains("its own pixels"),
+            "{:?}",
+            out.advisories
+        );
         // The import still SUCCEEDED — an advisory is not a refusal.
         assert!(proj.db().contains(out.primary.unwrap()));
+
+        // …and the CONTROL: a 1024² material raises nothing at all, so the three
+        // above are measuring their triggers rather than an importer that warns
+        // about everything.
+        let fine = write_corner_png(src.path(), "Fine", 1024, 1024);
+        let ok = proj.import_file(&fine, &dest).unwrap();
+        assert!(ok.advisories.is_empty(), "{:?}", ok.advisories);
     }
 
     /// **Two images imported into one project are two assets** (P26.1 audit).

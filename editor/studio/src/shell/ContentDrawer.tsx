@@ -120,6 +120,9 @@ const CELL_W = 104;
 const CELL_H = 124;
 const GAP = 8;
 
+/** A newline, spelled once — a tooltip is plain text and JSX escapes are not. */
+const NL = String.fromCharCode(10);
+
 export default function ContentDrawer() {
   const open = useShellStore((s) => s.drawerOpen);
   const setOpen = useShellStore((s) => s.setDrawerOpen);
@@ -132,6 +135,9 @@ export default function ContentDrawer() {
   const selected = useAssetStore((s) => s.selected);
   const favorites = useAssetStore((s) => s.favorites);
   const imports = useAssetStore((s) => s.imports);
+  // P26.5's import badging: what the last imports wanted the author to know.
+  const importAdvisories = useAssetStore((s) => s.importAdvisories);
+  const dismissImportAdvisories = useAssetStore((s) => s.dismissImportAdvisories);
 
   const editing = useAssetStore((s) => s.editing);
   const editingInstance = useAssetStore((s) => s.editingInstance);
@@ -287,6 +293,28 @@ export default function ContentDrawer() {
           <span className="ml-2 animate-pulse text-[11px] text-(--ink-accent)">
             Importing {activeImports.length}…
           </span>
+        )}
+        {/*
+          The import BADGE (P26.5). Not an error and never blocking — the import
+          succeeded — so it is one dismissible chip carrying the count, with
+          every sentence in its tooltip. It sits beside the progress line
+          because that is where the author is already looking when a drop
+          finishes.
+        */}
+        {importAdvisories.length > 0 && (
+          <button
+            className="ml-2 flex h-5 items-center gap-1 rounded border border-(--ink-warn,--ink-border) px-1.5 text-[11px] text-(--ink-text-dim) hover:bg-(--ink-bg-3)"
+            title={importAdvisories
+              .map((a) => [a.source, ...a.messages.map((m) => "  - " + m)].join(NL))
+              .join(NL + NL)}
+            onClick={(e) => {
+              e.stopPropagation();
+              dismissImportAdvisories();
+            }}
+          >
+            ⚠ {importAdvisories.reduce((n, a) => n + a.messages.length, 0)} import
+            {importAdvisories.reduce((n, a) => n + a.messages.length, 0) === 1 ? "" : "s"} to review
+          </button>
         )}
         <div className="flex-1" />
         <div className="flex h-6 w-56 items-center gap-1 rounded border border-(--ink-border) bg-(--ink-bg-1) px-1.5 focus-within:border-(--ink-accent)">
