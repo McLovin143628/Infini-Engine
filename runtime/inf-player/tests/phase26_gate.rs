@@ -2396,15 +2396,21 @@ fn vt_free_control(gpu: &GpuContext, frames: u64) -> Vec<f64> {
 /// ledger makes about this phase.
 #[test]
 fn the_golden_set_is_pinned_and_additive() {
-    /// The count P26.1 through P26.4 each carried forward untouched.
-    const GOLDENS: usize = 50;
+    /// The count P26.1 through P26.5 each carried forward untouched, and that
+    /// P27.4 added four to — the virtual-shadow-map set (`vsm_directional`,
+    /// `vsm_spot`, `vsm_point`, `vsm_bias_grazing`). P27.1 through P27.3 moved
+    /// it by nothing, because virtual shadows were inert until a receiver
+    /// existed.
+    const GOLDENS: usize = 54;
     /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted —
     /// the CONTENT pin (P26.5 audit). Committed PNGs are `-text` in
     /// `.gitattributes`, so these bytes are the same on every checkout.
     ///
     /// **RULE: this may change only in a commit that adds a golden**, never in
-    /// one that edits an existing frame. Phase 26 re-blessed none.
-    const GOLDEN_SET_DIGEST: &str = "a07eb4adb2b49018020c6c3e9712d553";
+    /// one that edits an existing frame. Phase 26 re-blessed none, and neither
+    /// did P27.4 — `git status` over this directory across that batch reports
+    /// four additions and nothing else.
+    const GOLDEN_SET_DIGEST: &str = "23d41a61c31c28a17a20871b6c875707";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -2450,7 +2456,7 @@ fn the_golden_set_is_pinned_and_additive() {
         digest, GOLDEN_SET_DIGEST,
         "the golden set's CONTENT moved. A golden was re-blessed, deleted (the \
          harness regenerates any golden it cannot read, so the count above stays \
-         50), or replaced. Adding one is allowed and means moving both constants \
+         54), or replaced. Adding one is allowed and means moving both constants \
          in the same commit; changing an existing frame is not.\n{manifest}"
     );
 }

@@ -1908,7 +1908,11 @@ fn project_deform(scene: &mut RenderScene, field: Option<&inf_terrain::deform::D
 ///    is `−Z`, so this is the anti-emission direction); the renderer derives a
 ///    spot's beam emission as `−direction = rot · −Z`;
 ///  * cone half-angles → cosines CPU-side; `range`/`cast_shadows` pass through
-///    for all kinds (`cast_shadows` inert for point/spot — shadow maps deferred).
+///    for all kinds. `cast_shadows` stopped being inert for point and spot at
+///    **P27.4**: a virtual shadow map gives a spot its own quadtree and a point
+///    six cube-face ones, and `inf_render::vsm_light_trees` reads exactly this
+///    flag. The cascaded path still shadows the first directional light only,
+///    which is what P27.5 demotes.
 fn project_light(light: &Light, affine: &glam::DAffine3) -> RenderLight {
     let (_, rot, translation) = affine.to_scale_rotation_translation();
     let c = light.color.to_array();

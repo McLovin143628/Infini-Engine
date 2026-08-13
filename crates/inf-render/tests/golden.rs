@@ -8417,3 +8417,255 @@ fn the_incremental_window_matches_a_cold_one() {
     let _ = frame(&scene_of(&empty), &mut counted);
     assert_eq!(counted.deform_uploads(), before_empty);
 }
+
+// ── P27.4: virtual shadow maps reach pixels ─────────────────────────────────
+//
+// **Four NEW goldens, and not one existing frame moves.** `VsmSettings::enabled`
+// is `false` by default, so every other scene in this file binds the renderer's
+// permanent EMPTY shadow surface — a 1 × 1 depth texture and a four-byte table
+// whose first word is not the magic — and `vsm_active()` is false, which makes
+// `shadow_factor` take the cascaded path it always took and every analytic
+// light's term an exact `* 1.0`. Verified the P17.2/P17.3/P22.1 way: the whole
+// suite under `INF_BLESS_GOLDENS=1`, with `git status` reporting only the four
+// new PNGs.
+//
+// What each one pins:
+//
+// * `vsm_directional` — the clipmap through the page table, on the CSM golden's
+//   own caster/receiver arrangement, so the two paths can be looked at side by
+//   side;
+// * `vsm_spot` and `vsm_point` — the first spot and point shadows this engine
+//   has ever drawn. `vsm_point` is the one that pins the cube-face seam: four
+//   casters around one light send their shadows out through four different
+//   faces;
+// * `vsm_bias_grazing` — the two derived bias terms at the angle that breaks a
+//   flat constant. A slope bias that is too small stripes the floor with acne
+//   and a bias that is too large detaches every shadow from its caster; both
+//   are visible in this frame and neither is present in it.
+//
+// The residency is fed by a readback ring pinned at `frame − 2`, so a VSM
+// golden has to render a few frames before its shadows exist at all — which is
+// why these four go through `check_vsm_golden` rather than `check_golden`.
+// Six frames, on the same renderer, with the device pumped between them so
+// arrival is a constant rather than a timing fact.
+
+/// The settings the four virtual-shadow goldens render with: half the shipped
+/// clipmap (32 pages a side over a 24 m level 0, a **5.86 mm** level-0 texel),
+/// so a golden's atlas is 16 MiB rather than 64 and its levels are still real.
+fn vsm_golden_settings() -> inf_render::VsmSettings {
+    inf_render::VsmSettings {
+        enabled: true,
+        budget_bytes: 256 * 64 * 1024,
+        clipmap_pages_per_side: 32,
+        clipmap_levels: 8,
+        first_level_extent_m: 12.0,
+        spot_levels: 7,
+        point_levels: 6,
+        ..Default::default()
+    }
+}
+
+/// [`check_golden_with`] over a **warmed** renderer: the same scene rendered
+/// `VSM_GOLDEN_FRAMES` times before the frame that is compared, twice, so the
+/// determinism gate is over the whole warm-up rather than over one cold frame.
+fn check_vsm_golden(
+    gpu: &GpuContext,
+    name: &str,
+    scene: &RenderScene,
+    view: &RenderView,
+    settings: RenderSettings,
+) -> Vec<u8> {
+    let a = render_warm(gpu, scene, view, settings);
+    let b = render_warm(gpu, scene, view, settings);
+    let (mean, max) = image_diff(&a, &b, W, H);
+    assert!(
+        mean < 0.005 && max < 0.05,
+        "{name}: the virtual-shadow path is not deterministic (mean {mean}, max {max})"
+    );
+    let path = goldens_dir().join(format!("{name}.png"));
+    if std::env::var("INF_BLESS_GOLDENS").is_ok() || read_png(&path).is_none() {
+        write_png(&path, &a);
+        eprintln!("golden {name}: wrote {}", path.display());
+    } else if std::env::var("INF_GOLDEN_STRICT").is_ok() {
+        let golden = read_png(&path).expect("golden png");
+        let (mean, max) = image_diff(&a, &golden, W, H);
+        assert!(
+            within_tolerance(mean, max),
+            "{name}: differs from golden (mean {mean}, max {max})"
+        );
+    }
+    a
+}
+
+/// Frames a virtual-shadow golden warms for. The marking ring is pinned at
+/// `frame − 2`, so nothing is resident before frame 2 and nothing is rasterized
+/// before it; six leaves the residency a settled frame either side.
+const VSM_GOLDEN_FRAMES: u64 = 6;
+
+fn render_warm(
+    gpu: &GpuContext,
+    scene: &RenderScene,
+    view: &RenderView,
+    settings: RenderSettings,
+) -> Vec<u8> {
+    let target = HeadlessTarget::new(gpu, W, H);
+    let mut renderer = EngineRenderer::new(gpu, HEADLESS_FORMAT);
+    renderer.set_settings(settings);
+    for _ in 0..VSM_GOLDEN_FRAMES {
+        renderer.render(gpu, scene, view, &target.view, (W, H));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    target.read_rgba(gpu).expect("readback")
+}
+
+/// A white floor slab with its top face at `y = 0`, and boxes standing on it.
+fn vsm_floor(casters: &[(f64, f64)]) -> RenderScene {
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    scene.instances.push(MeshInstance::lit(
+        DVec3::new(0.0, -0.5, 0.0),
+        Quat::IDENTITY,
+        Vec3::new(60.0, 1.0, 60.0),
+        [0.82, 0.82, 0.84, 1.0],
+        1,
+    ));
+    for (i, (x, z)) in casters.iter().enumerate() {
+        scene.instances.push(MeshInstance::lit(
+            DVec3::new(*x, 0.75, *z),
+            Quat::from_rotation_y(0.25),
+            Vec3::new(1.4, 1.5, 1.4),
+            [0.78, 0.42, 0.32, 1.0],
+            i as u32 + 2,
+        ));
+    }
+    scene.mark_dirty();
+    scene
+}
+
+fn vsm_settings_on() -> RenderSettings {
+    RenderSettings {
+        vsm: vsm_golden_settings(),
+        ..RenderSettings::default()
+    }
+}
+
+/// **Virtual directional shadows** (P27.4): the clipmap read through the page
+/// table, on `golden_csm`'s own caster/receiver arrangement.
+///
+/// Structural gate: the virtual path DARKENS the frame against the same scene
+/// with no shadows at all, the scene stays lit, and the receiver's engagement
+/// counter moved — which is the claim no pixel comparison can make.
+#[test]
+fn golden_vsm_directional() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = vsm_floor(&[(-2.2, 0.6), (1.2, -1.4), (2.8, 1.4)]);
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.97, 0.9],
+        intensity: 3.0,
+        direction: Vec3::new(0.35, 0.86, -0.37).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        cast_shadows: true,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(0.0, 5.0, 9.5), DVec3::new(0.0, 0.4, 0.0));
+
+    let img = check_vsm_golden(&gpu, "vsm_directional", &scene, &view, vsm_settings_on());
+    let off = render_warm(&gpu, &scene, &view, RenderSettings::default());
+    let sum = |img: &[u8]| -> u64 {
+        img.chunks(4)
+            .map(|p| p[0] as u64 + p[1] as u64 + p[2] as u64)
+            .sum()
+    };
+    assert!(
+        sum(&img) < sum(&off),
+        "virtual shadows should darken the receiving floor (on {} vs off {})",
+        sum(&img),
+        sum(&off)
+    );
+    assert!(
+        img.chunks(4)
+            .any(|p| p[0] as u16 + p[1] as u16 + p[2] as u16 > 200),
+        "expected the scene to stay lit"
+    );
+}
+
+/// **The engine's first spot shadow** (P27.4), through a single quadtree.
+#[test]
+fn golden_vsm_spot() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = vsm_floor(&[(0.0, 0.0), (2.6, 1.0)]);
+    scene.lights.push(RenderLight {
+        kind: LightKind::Spot,
+        color: [1.0, 0.95, 0.88],
+        intensity: 260.0,
+        position: DVec3::new(0.0, 7.5, 5.0),
+        direction: Vec3::new(0.0, 0.83, 0.55).normalize(),
+        range: 45.0,
+        inner_cos: 30f32.to_radians().cos(),
+        outer_cos: 42f32.to_radians().cos(),
+        cast_shadows: true,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(0.0, 5.0, 9.0), DVec3::new(0.0, 0.3, -1.0));
+
+    let img = check_vsm_golden(&gpu, "vsm_spot", &scene, &view, vsm_settings_on());
+    let off = render_warm(&gpu, &scene, &view, RenderSettings::default());
+    assert_ne!(img, off, "the spot cast no shadow");
+}
+
+/// **The engine's first point shadow** (P27.4), through the cube-face
+/// quadtrees — four casters around one light, so four different faces answer.
+#[test]
+fn golden_vsm_point() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = vsm_floor(&[(-2.6, 0.0), (2.6, 0.0), (0.0, -2.6), (0.0, 2.6)]);
+    scene.lights.push(RenderLight {
+        kind: LightKind::Point,
+        color: [1.0, 0.94, 0.88],
+        intensity: 340.0,
+        position: DVec3::new(0.0, 3.4, 0.0),
+        range: 45.0,
+        cast_shadows: true,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(0.0, 8.5, 8.5), DVec3::new(0.0, 0.2, 0.0));
+
+    let img = check_vsm_golden(&gpu, "vsm_point", &scene, &view, vsm_settings_on());
+    let off = render_warm(&gpu, &scene, &view, RenderSettings::default());
+    assert_ne!(img, off, "the point light cast no shadow");
+}
+
+/// **The bias, at the angle that breaks a flat constant** (P27.4): a low sun
+/// over a large flat receiver, where a slope term that is too small stripes the
+/// floor and one that is too large lifts every shadow off its caster.
+#[test]
+fn golden_vsm_bias_grazing() {
+    let Some(gpu) = gpu_or_skip() else { return };
+    let mut scene = vsm_floor(&[(0.0, 0.0), (3.2, -1.6)]);
+    scene.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 0.95, 0.86],
+        intensity: 3.2,
+        // 34 degrees above the horizon, and the light is on the FAR side of the
+        // casters so their shadows fall toward the camera rather than behind
+        // them.
+        direction: Vec3::new(0.18, 34f32.to_radians().sin(), -34f32.to_radians().cos()).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        cast_shadows: true,
+        ..RenderLight::default()
+    });
+    scene.mark_dirty();
+    let view = look_view(DVec3::new(0.0, 3.6, 9.0), DVec3::new(0.0, 0.3, 1.0));
+
+    let img = check_vsm_golden(&gpu, "vsm_bias_grazing", &scene, &view, vsm_settings_on());
+    let off = render_warm(&gpu, &scene, &view, RenderSettings::default());
+    assert_ne!(img, off, "the grazing sun cast no shadow");
+}
