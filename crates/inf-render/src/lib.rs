@@ -36,6 +36,17 @@ pub mod renderer;
 pub mod scene;
 pub mod settings;
 pub mod surface;
+/// Virtual-shadow-map geometry (P27.1): the per-light projections, the
+/// clipmap's centring rule, the depth-convention ruling and the one level rule
+/// the marking pass mirrors.
+pub mod vsm;
+/// The P27.1 GPU mirror: one `Depth32Float` page atlas and one indirection
+/// buffer, executing an `inf_vsm::VsmTransaction`.
+pub mod vsm_atlas;
+/// The P27.1 marking loop: the screen-driven page-marking compute pass, the
+/// readback ring that reads it at a pinned latency, and the residency step
+/// that turns its bits into allocations.
+pub mod vsm_mark;
 pub mod vt;
 /// The P26.3 registration door: `.inf_tex` v2 payloads become virtual
 /// textures here, for both hosts, through one rule.
@@ -114,7 +125,25 @@ pub use scene::{
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
     BloomSettings, GiSettings, RenderSettings, ScatterSettings, ShadowSettings, SsaoSettings,
-    VgeomSettings, VirtualTextureSettings,
+    VgeomSettings, VirtualTextureSettings, VsmSettings, VSM_BUDGET_LOW_BYTES,
+    VSM_BUDGET_MEDIUM_BYTES, VSM_CLIPMAP_PAGES_MEDIUM,
+};
+// P27.1 virtual shadow maps: the projections and the level rules (pure,
+// unit-tested with no adapter), the mirror, and the marking loop's counters.
+pub use vsm::{
+    clipmap_centre, clipmap_containing_level, clipmap_matrix, clipmap_page_world, cube_face_matrix,
+    mark_page_for, spot_fov_y, spot_matrix, vsm_justified_level, vsm_light_trees, vsm_projections,
+    VsmMarkParams, VsmProjection, CUBE_FACE_BASES, VSM_DEPTH_CLEAR, VSM_DEPTH_COMPARE,
+    VSM_MAX_PROJECTIONS, VSM_PROJ_ORTHO, VSM_PROJ_PERSPECTIVE,
+};
+pub use vsm_atlas::{VsmApplyReport, VsmPools, VSM_PAGE_FORMAT};
+pub use vsm_mark::{VsmMarker, VsmStreamStats, VsmSystem, VSM_PROJECTION_CAP};
+// The shadow page space's own vocabulary, re-exported on `inf_vt`'s precedent so
+// a host or a gate that reads a residency does not have to add the GPU-free
+// crate to its own manifest to spell a page address.
+pub use inf_vsm::{
+    VsmAtlasConfig, VsmLightDesc, VsmLightHandle, VsmMarkLayout, VsmPage, VsmResidency,
+    VsmTreeKind, VsmWant, DEFAULT_VSM_BUDGET_BYTES, VSM_PAGE_SIZE,
 };
 // The P26.3 registration door + P26.4's one registration ORDER: both projectors
 // build a level's virtual textures through exactly these, so "PIE == shipping"

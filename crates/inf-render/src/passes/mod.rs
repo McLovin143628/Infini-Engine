@@ -1319,6 +1319,12 @@ mod shader_compose_tests {
             ("vgeom_hzb", include_str!("../shaders/vgeom_hzb.wgsl")),
             ("shadow_depth", include_str!("../shaders/shadow_depth.wgsl")),
             ("tonemap", include_str!("../shaders/tonemap.wgsl")),
+            // The two standalone COMPUTE modules the streamers compile. P26.4's
+            // was missing from this list — the law is "every module the tree
+            // compiles is validated here", and `vt_feedback` was validated only
+            // by a device that happened to be present.
+            ("vt_feedback", include_str!("../shaders/vt_feedback.wgsl")),
+            ("vsm_mark", include_str!("../shaders/vsm_mark.wgsl")),
         ] {
             validate(label, source);
         }

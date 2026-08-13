@@ -423,6 +423,16 @@ pub struct EngineRenderer {
     /// counter**. Zero on every textureless scene, which is what makes "the
     /// goldens did not change" a measurement rather than an expectation.
     vt_engaged_frames: u64,
+    /// The P27.1 virtual-shadow-map system: the page residency, its atlas mirror
+    /// and the marking pass. `None` unless `settings.vsm.enabled` **and** the
+    /// scene carries a shadow-casting light — which is no scene by default, so
+    /// the atlas is not even allocated on a frame that does not want it.
+    vsm: Option<crate::vsm_mark::VsmSystem>,
+    /// How many frames recorded the shadow-page marking pass — the P27.1
+    /// **engagement counter**. Zero is the assertion on every scene that does
+    /// not run VSM, and it is a claim about the command stream that no pixel
+    /// comparison can make.
+    vsm_engaged_frames: u64,
 }
 
 impl EngineRenderer {
@@ -617,6 +627,8 @@ impl EngineRenderer {
             vt_pop_in: crate::VtPopIn::default(),
             vt_absent: crate::vt::VtEmptyPool::new(&gpu.device),
             vt_engaged_frames: 0,
+            vsm: None,
+            vsm_engaged_frames: 0,
         }
     }
 
@@ -984,6 +996,55 @@ impl EngineRenderer {
         self.view_mode = effective;
     }
 
+    /// **The virtual-shadow-map sync point** (P27.1), run at the frame's sync
+    /// point beside the virtual-texture one.
+    ///
+    /// Returns immediately — building nothing, allocating nothing, counting
+    /// nothing — unless the setting is on AND the scene carries a shadow-casting
+    /// light. That is the off-path discipline every pass in this tree keeps, and
+    /// it is what makes "no golden moved" a measurement
+    /// ([`vsm_engaged_frames`](Self::vsm_engaged_frames)) rather than a hope.
+    fn vsm_sync(&mut self, gpu: &GpuContext, scene: &RenderScene, view: &RenderView) {
+        if !self.settings.vsm.enabled {
+            self.vsm = None;
+            return;
+        }
+        if self
+            .vsm
+            .as_ref()
+            .is_none_or(|v| !v.matches(scene, &self.settings.vsm))
+        {
+            // A new light set is a new address space: the mask layout, the ring's
+            // slot size and any mask still in flight all describe the old one.
+            self.vsm = crate::vsm_mark::VsmSystem::for_scene(gpu, scene, &self.settings.vsm);
+        }
+        let frame = self.frame_index;
+        if let Some(v) = self.vsm.as_mut() {
+            v.sync(gpu, scene, view, &self.settings.vsm, frame);
+        }
+    }
+
+    /// The live virtual-shadow-map system, for a host or a gate that wants to
+    /// assert the WORLD (the resident page set) rather than a report.
+    #[inline]
+    pub fn vsm(&self) -> Option<&crate::vsm_mark::VsmSystem> {
+        self.vsm.as_ref()
+    }
+
+    /// Frames that recorded the shadow-page marking pass — the P27.1 engagement
+    /// counter. **Zero is the assertion** on a scene that does not run VSM, not
+    /// an absence of evidence.
+    #[inline]
+    pub fn vsm_engaged_frames(&self) -> u64 {
+        self.vsm_engaged_frames
+    }
+
+    /// The one line a host logs about virtual shadow maps. `None` when the
+    /// system is not built, which is not the same as a line of zeros.
+    pub fn vsm_summary(&self) -> Option<String> {
+        self.vsm.as_ref().map(crate::vsm_mark::VsmSystem::summary)
+    }
+
     /// Render one frame of `scene` into `out_view` (`out_size` = the output
     /// texture's size; may briefly differ from the view size while a resize
     /// debounce is pending — the composite stretch covers the gap).
@@ -1122,6 +1183,13 @@ impl EngineRenderer {
         // commands of this encoder. A textureless frame does none of it.
         self.vt_stream(gpu, scene, view, &mut encoder);
 
+        // **THE SHADOW-PAGE SYNC POINT** (P27.1), for the same reason and at the
+        // same place: frame F − 2's needed-page mask becomes this frame's
+        // allocations and this frame's indirection table, staged on the queue
+        // before any command in this encoder runs. The marking pass itself is
+        // recorded AFTER the graph, where the depth buffer it reads exists.
+        self.vsm_sync(gpu, scene, view);
+
         let targets = self.targets.as_ref().unwrap();
         let post_hdr = if self.settings.taa {
             &targets.taa_history[cur]
@@ -1155,6 +1223,31 @@ impl EngineRenderer {
             vt_absent: &self.vt_absent,
         };
         self.graph.run(gpu, &mut encoder, &frame);
+
+        // **The shadow-page marking pass** (P27.1), recorded here and nowhere
+        // else: it consumes the scene depth, so it has to follow every pass that
+        // writes it, and it hands its buffer to a ring whose read is pinned two
+        // frames later. It is NOT a graph node because it needs `&mut` on
+        // renderer-owned state (the ring's slot bookkeeping), which a
+        // `RenderNode` is deliberately not given — the same reason `vt_stream`
+        // is a method rather than a node.
+        let depth_generation = self.targets.as_ref().map_or(0, |t| t.generation);
+        let marked = match self.vsm.as_mut() {
+            Some(v) => {
+                let depth = &self.targets.as_ref().expect("created above").depth;
+                v.mark(
+                    gpu,
+                    &mut encoder,
+                    depth,
+                    depth_generation,
+                    view,
+                    self.frame_index,
+                )
+            }
+            None => 0,
+        };
+        self.vsm_engaged_frames += u64::from(marked > 0);
+
         gpu.queue.submit([encoder.finish()]);
 
         // Next frame reprojects against the matrix we actually rendered with.

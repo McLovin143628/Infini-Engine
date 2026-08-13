@@ -45,8 +45,15 @@ type ScatterCasterKey = ([i64; 3], u32, u64);
 type CasterKey = (u64, glam::DVec3, Option<ScatterCasterKey>);
 
 /// Forward-Z shadow depth: nearest caster wins (clear to 1.0 = far, keep smaller).
-const SHADOW_DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::LessEqual;
-const SHADOW_DEPTH_CLEAR: f32 = 1.0;
+///
+/// **Public since P27.1, and unchanged by it.** The virtual-shadow-map ruling
+/// (`crate::vsm`) adopts the camera's reverse-Z for its pages and asserts that
+/// this path did NOT move with it — the CSM stays exactly as it is until P27.5
+/// demotes it, and a constant nothing outside this module could read would make
+/// that a comment rather than a check.
+pub const SHADOW_DEPTH_COMPARE: wgpu::CompareFunction = wgpu::CompareFunction::LessEqual;
+/// See [`SHADOW_DEPTH_COMPARE`].
+pub const SHADOW_DEPTH_CLEAR: f32 = 1.0;
 
 /// The shared shadow uniform block (`std140`), written by [`ShadowNode`] and read
 /// by every lit pass through [`crate::passes::EnvBinding`]. Mirrors `struct
