@@ -1307,7 +1307,6 @@ mod tests {
         assert_eq!(checked, (n * n) as usize);
     }
 
-
     /// **A floating-origin rebase does not move the clipmap's lattice** (P27.3
     /// audit) — the reason [`clipmap_layout`] takes the **f64 world** eye.
     ///
@@ -1352,19 +1351,26 @@ mod tests {
         // off the concentric default, and the offsets are not all zero.
         let half_n = i64::from(n) / 2;
         assert!(
-            a.clip_origins.iter().any(|&(x, y)| x != -half_n || y != -half_n),
+            a.clip_origins
+                .iter()
+                .any(|&(x, y)| x != -half_n || y != -half_n),
             "every level sat at the concentric origin, so 'the lattice did not \
              move' is a statement about a constant"
         );
         assert!(
-            a.level_offset[1..].iter().any(|o| o[0] != 0.0 || o[1] != 0.0),
+            a.level_offset[1..]
+                .iter()
+                .any(|o| o[0] != 0.0 || o[1] != 0.0),
             "every offset is zero — the fixture's eye is on the lattice"
         );
         // …and the centre DOES move, by exactly the rebase, because it is
         // render-local. That is the half that re-rasterizes the atlas, and it is
         // why the invariance above is about the residency and not about the cache.
         let rebase = (o_b.origin() - o_a.origin()).as_vec3();
-        assert!(rebase.length() > 1.0, "the fixture's two origins are the same");
+        assert!(
+            rebase.length() > 1.0,
+            "the fixture's two origins are the same"
+        );
         let delta = a.centre - b.centre;
         assert!(
             (delta - rebase).length() < 1e-2,

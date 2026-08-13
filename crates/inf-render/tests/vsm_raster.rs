@@ -2646,11 +2646,7 @@ fn the_skinned_caster_cache_holds_the_arc_its_pointer_key_names() {
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
     }
     assert!(
-        renderer
-            .vsm_raster_stats()
-            .expect("stats")
-            .skinned_casters
-            > 0,
+        renderer.vsm_raster_stats().expect("stats").skinned_casters > 0,
         "no skinned caster was packed, so the cache under test was never filled"
     );
     let with_vsm = std::sync::Arc::strong_count(&mesh);
@@ -2809,7 +2805,10 @@ fn a_cutout_casters_alpha_test_window_is_in_its_pages_stamp() {
     let v = view(5.0);
     let (mut renderer, marks) = run_stepped(&gpu, &[(&casting, 8)], &v, &set);
     let warm = marks[0];
-    assert!(warm.masked_frames > 0, "the fixture packed no masked caster");
+    assert!(
+        warm.masked_frames > 0,
+        "the fixture packed no masked caster"
+    );
     let pages = resident_pages(&renderer);
     let before = atlas_bits(&gpu, &renderer);
 
@@ -2907,7 +2906,10 @@ fn a_terrain_tile_whose_version_moves_invalidates_its_pages() {
         "a sculpt that moved the tile's version re-rasterized nothing — the pages \
          hold the previous surface ({warm:?} -> {after_stats:?})"
     );
-    assert!(touched <= resident, "{touched} of {resident} is not page-exact");
+    assert!(
+        touched <= resident,
+        "{touched} of {resident} is not page-exact"
+    );
 
     // …and the depth in the atlas really is the new surface.
     let after = atlas_bits(&gpu, &renderer);
@@ -3072,8 +3074,10 @@ fn a_clipmap_grid_shift_re_labels_a_page_and_the_cache_key_pays_for_it() {
     renderer.set_settings(rs);
 
     // matrix bits -> every (light, page) that ever presented it.
-    let mut seen: std::collections::BTreeMap<[u32; 16], std::collections::BTreeSet<(u32, VsmPage)>> =
-        std::collections::BTreeMap::new();
+    let mut seen: std::collections::BTreeMap<
+        [u32; 16],
+        std::collections::BTreeSet<(u32, VsmPage)>,
+    > = std::collections::BTreeMap::new();
     // slot -> (occupant, its matrix) last frame, so a refill can be classified.
     let mut occupant: std::collections::BTreeMap<u32, ((u32, VsmPage), [u32; 16])> =
         std::collections::BTreeMap::new();
