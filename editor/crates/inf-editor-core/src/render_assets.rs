@@ -795,6 +795,10 @@ mod tests {
         let v = |x: f32, y: f32| MeshVertex {
             position: [x, y, 0.0],
             normal: [0.0, 0.0, 1.0],
+            // The AUTHORED parametrization, distinct per vertex and distinct
+            // from the position, so an arm can tell "the uv crossed" from "some
+            // number crossed" (P26.5 audit).
+            uv: [x * 0.25 + 0.5, y * 0.125 + 0.25],
             ..Default::default()
         };
         MeshAsset::new(
@@ -877,6 +881,57 @@ mod tests {
             .unwrap();
         assert!(vmesh::ensure_vmesh(&mut proj, mesh_id).unwrap().rebuilt());
         (dir, root, mesh_id.uuid())
+    }
+
+    /// **A character's own uv reaches the bind-space stream** (P26.5 audit).
+    ///
+    /// P26.5's headline for the skinned path is that a character samples the
+    /// artist's parametrization rather than a box projection — *"a box projection
+    /// on a character is visibly wrong"*, carried in three ledgers since P26.3.
+    /// What pinned it was `projector_mirror`'s
+    /// `the_bind_space_rebuild_is_identical_in_both_stores`, which compares this
+    /// function's text with the player's copy of it. Measured: dropping
+    /// `uv: v.uv` in **both** copies at once is invisible to the whole of
+    /// `inf-editor-core` and `inf-player` — the mirror is satisfied, because the
+    /// two hosts agree perfectly about building the same wrong buffer. Two hosts
+    /// agreeing is not the world being right (the P24 law).
+    ///
+    /// So this asserts the world: the uv on the GPU vertex is the uv on the
+    /// asset vertex, and it VARIES, because `[0, 0]` everywhere is a uv that
+    /// satisfies "equals a function of the vertex" for a function that ignores
+    /// its argument — the same trap `every_primitive_spans_its_own_uv_square`
+    /// and the deformed-garment arm are shaped around.
+    #[test]
+    fn a_skinned_meshs_authored_uv_reaches_the_bind_space_stream() {
+        let mesh = skinned_mesh();
+        let data = skinned_mesh_data(&mesh).expect("the fixture is skinned");
+        let authored: Vec<[f32; 2]> = mesh
+            .submeshes
+            .iter()
+            .flat_map(|s| s.vertices.iter().map(|v| v.uv))
+            .collect();
+        assert_eq!(data.vertices.len(), authored.len());
+        for (i, (got, want)) in data.vertices.iter().zip(&authored).enumerate() {
+            assert_eq!(
+                got.uv, *want,
+                "vertex {i}: the bind-space stream carries {:?} and the asset says \
+                 {want:?} — the upload dropped the authored parametrization, which \
+                 is what put a box projection on a character through P26.4",
+                got.uv
+            );
+        }
+        // ANTI-VACUITY: the asset's own uvs are not all one value, so the
+        // equality above is a measurement rather than a comparison of two
+        // constants.
+        let span = |k: usize| {
+            let vals: Vec<f32> = authored.iter().map(|u| u[k]).collect();
+            vals.iter().cloned().fold(f32::MIN, f32::max)
+                - vals.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        assert!(
+            span(0) > 0.0 && span(1) > 0.0,
+            "the fixture's authored uv is flat, so a stream of zeros would pass"
+        );
     }
 
     /// **The headline gate**: an imported mesh, derived and indexed, resolves to
