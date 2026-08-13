@@ -770,8 +770,23 @@ content_hash = \"0\"
     ///
     /// Asserted through the collision above rather than by exposing the order:
     /// four files, two pairs, and the winner of each pair is the one that sorts
-    /// first — a `read_dir` order would have to agree with `sort()` twice by
-    /// chance.
+    /// first.
+    ///
+    /// # What this arm cannot see, and where the other half is
+    ///
+    /// The original claim here was that *"a `read_dir` order would have to agree
+    /// with `sort()` twice by chance"*. On **NTFS it agrees every time**: a
+    /// directory is a name-ordered B-tree and `read_dir` walks it in that order,
+    /// so this arm is satisfied by an unsorted walk on Windows — measured, by
+    /// deleting `paths.sort()` and watching every `inf-asset` arm stay green.
+    /// ext4's htree hands back hash order and APFS insertion order, so the
+    /// Linux CI leg does bite; the developer machine and the Windows leg do not.
+    /// That is the P25 one-platform law turned around: not a bound that reddens
+    /// CI on one platform, but a gate that goes *vacuous* on one.
+    ///
+    /// So the rule has a source pin beside it
+    /// ([`the_scan_walk_sorts_before_it_reads`]), on the `projector_mirror`
+    /// pattern for a rule the local machine cannot execute against.
     #[test]
     fn the_scan_walk_is_path_sorted() {
         let dir = tempfile::tempdir().unwrap();
@@ -801,5 +816,59 @@ content_hash = \"0\"
                 "{g:?} went to the wrong file"
             );
         }
+    }
+
+    /// **`scan_dir` sorts before it reads** — the half of the ruling above that
+    /// a name-ordered filesystem hides (P26.5 audit).
+    ///
+    /// `IdCollision`'s whole argument for *first wins* is that "first" is a fact
+    /// about the directory and not about the volume, and the behavioural arm
+    /// above cannot falsify the sort on NTFS. This can: it reads the function's
+    /// own source, comment-stripped (the P26.1 finding that a claim in a comment
+    /// satisfied a gate whose message said the opposite), and CRLF-normalized
+    /// (the P22 law — `.rs` is read by tests).
+    ///
+    /// A source pin rather than a behavioural one because the behaviour is the
+    /// filesystem's, and this machine's filesystem always agrees with the
+    /// answer. It is the same shape as `projector_mirror`'s pins on the viewport
+    /// host, and for the same reason: the rule is real, the local machine cannot
+    /// be made to break it.
+    #[test]
+    fn the_scan_walk_sorts_before_it_reads() {
+        let src = include_str!("db.rs").replace("\r\n", "\n");
+        let body = src
+            .split_once("fn scan_dir(")
+            .expect("`scan_dir` moved; this gate scopes on its name")
+            .1
+            .split_once("\n    }\n")
+            .expect("`scan_dir` has no end")
+            .0;
+        let code: String = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("paths.sort()"),
+            "`scan_dir` does not sort its entries, so which of two payloads \
+             declaring one guid keeps it is the filesystem's answer and not the \
+             directory's — invisible on NTFS, which enumerates in name order \
+             anyway:\n{code}"
+        );
+        // …and the sort happens BEFORE anything is read, or it is a sort of a
+        // list nobody walks.
+        let sort_at = code.find("paths.sort()").expect("checked above");
+        let read_at = code
+            .find("read_entry(")
+            .expect("`scan_dir` no longer reads entries");
+        assert!(
+            sort_at < read_at,
+            "`scan_dir` reads entries before sorting them"
+        );
+        // ANTI-VACUITY: the strip left the code, not only the comments.
+        assert!(
+            code.contains("self.scan_dir("),
+            "the source filter ate the function this gate reads"
+        );
     }
 }
