@@ -237,6 +237,14 @@ impl VsmMarker {
     /// this frame's and never an OR with the last one — which would make the
     /// signal depend on the frame history, the exact property the pinned ring
     /// exists to avoid.
+    ///
+    /// `inv_view_proj` is passed rather than taken from `view` because the two
+    /// are **not the same matrix when TAA is on**: the frame's depth was
+    /// rasterized with the sub-pixel-jittered projection, and reconstructing a
+    /// world position from it with the unjittered inverse puts every point up to
+    /// half a pixel out. The error is small at page granularity and it is still
+    /// wrong — a reconstruction has to use the matrix its depth was drawn with,
+    /// or a page-allocation trace acquires a dependence on the Halton cursor.
     #[allow(clippy::too_many_arguments)]
     pub fn record(
         &mut self,
@@ -248,6 +256,7 @@ impl VsmMarker {
         table: &wgpu::Buffer,
         table_generation: u64,
         view: &RenderView,
+        inv_view_proj: glam::Mat4,
         projections: &[VsmProjection],
         frame: u64,
     ) -> u32 {
@@ -265,7 +274,7 @@ impl VsmMarker {
             &self.params,
             0,
             bytemuck::bytes_of(&VsmMarkParams {
-                inv_view_proj: view.view_proj().inverse().to_cols_array(),
+                inv_view_proj: inv_view_proj.to_cols_array(),
                 eye: {
                     let e = view.eye_local();
                     [e.x, e.y, e.z, projection_scale(view)]
@@ -507,7 +516,10 @@ impl VsmSystem {
     }
 
     /// **Step 4**: record the marking pass over `depth`, which the graph has
-    /// already written this frame.
+    /// already written this frame. `inv_view_proj` must invert the projection
+    /// that depth was **rasterized** with — the jittered one when TAA is on; see
+    /// [`VsmMarker::record`].
+    #[allow(clippy::too_many_arguments)]
     pub fn mark(
         &mut self,
         gpu: &GpuContext,
@@ -515,6 +527,7 @@ impl VsmSystem {
         depth: &wgpu::TextureView,
         depth_generation: u64,
         view: &RenderView,
+        inv_view_proj: glam::Mat4,
         frame: u64,
     ) -> u32 {
         let table_generation = self.pools.table_generation();
@@ -527,6 +540,7 @@ impl VsmSystem {
             self.pools.table(),
             table_generation,
             view,
+            inv_view_proj,
             &self.projections,
             frame,
         );

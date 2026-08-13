@@ -249,6 +249,33 @@ fn the_marking_pass_allocates_the_pages_the_geometry_covers() {
         "the fixture's atlas is not under pressure"
     );
 
+    // The RING landed, read through its own counters rather than through the
+    // stats incremented beside them — a `mark_frames` that counted a miss as a
+    // hit would agree with itself and disagree with this.
+    assert!(
+        sys.marker().ring().hits() > 0,
+        "the ring reports no hit while the loop reports {} mask frames",
+        stats.mark_frames
+    );
+    assert_eq!(
+        sys.marker().ring().hits(),
+        stats.mark_frames,
+        "the ring and the loop disagree about how many masks arrived"
+    );
+    assert_eq!(sys.marker().ring().latency(), 2, "the pinned latency moved");
+    // …and the line a host logs names the numbers it carries — the shape
+    // `VtStats::summary` is pinned in, so the accessor is not shipped untested.
+    let line = renderer.vsm_summary().expect("a live system has a line");
+    assert!(
+        line.contains("vsm residency") && line.contains("vsm marking"),
+        "{line}"
+    );
+    assert!(line.contains("1 lights"), "{line}");
+    assert!(
+        line.contains(&format!("{} admits", stats.admits)),
+        "the marking half does not name its admits: {line}"
+    );
+
     // ASSERT THE WORLD: what is resident, page by page.
     let got = resident_pages(&renderer, 0);
     assert!(!got.is_empty(), "nothing is resident: {}", sys.summary());

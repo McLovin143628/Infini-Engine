@@ -1241,6 +1241,13 @@ impl EngineRenderer {
                     depth,
                     depth_generation,
                     view,
+                    // `jvp`, not `view.view_proj()`: this is the matrix the depth
+                    // above was rasterized with, jitter included. Reconstructing
+                    // a world position with the unjittered inverse would put
+                    // every marked pixel up to half a pixel out whenever TAA is
+                    // on, and would make the page trace a function of the Halton
+                    // cursor.
+                    jvp.inverse(),
                     self.frame_index,
                 )
             }
