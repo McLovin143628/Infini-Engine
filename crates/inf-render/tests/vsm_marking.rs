@@ -558,3 +558,90 @@ fn a_renderer_with_virtual_shadows_off_records_nothing() {
     );
     assert_eq!(renderer.vsm_engaged_frames(), 0);
 }
+
+// ── (g) the perspective lights, on the device ──
+
+/// **A point light's SIX faces mark through the device's own face arithmetic.**
+///
+/// Every arm above drives a directional clipmap, and the clipmap is the one tree
+/// kind whose bit index never touches `face_stride`: it has one face, so
+/// `face * face_stride` is zero and a shader that dropped the term entirely would
+/// be green everywhere. A point light is where that arithmetic is load-bearing —
+/// six faces sharing one table block and one bit range — and it is exactly the
+/// shape the P26.3 law names: never claim the GPU ran something it did not.
+///
+/// The fixture wraps the cube in a point light, so the face the camera is looking
+/// at is marked and the pages carry a **non-zero face index**.
+#[test]
+fn a_point_lights_faces_mark_through_their_own_stride() {
+    let Some(gpu) = gpu_or_skip("the VSM cube-face marking") else {
+        return;
+    };
+    let set = settings();
+    let v = view(6.0);
+    let mut s = scene(&[]);
+    // A point light 10 m in front of the cube's face, along the camera's own
+    // axis, so the lit face is squarely inside ONE cube face's frustum (index 5,
+    // `-Z`) and the level its footprint justifies lands in the middle of the
+    // tree. The distance is not decoration: a point light's level rule is
+    // `ceil(log2(pixel_world × 64 × 2^(levels-1) / d))`, so at 3 m the answer is
+    // the coarsest level for EVERY level count — measured, when this arm's first
+    // fixture put the light there and the anti-vacuity check below caught it.
+    s.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Point,
+        position: glam::DVec3::new(CUBE_XY.0 as f64, CUBE_XY.1 as f64, 11.0),
+        range: 0.0,
+        cast_shadows: true,
+        ..Default::default()
+    });
+    s.mark_dirty();
+    let renderer = run(&gpu, &s, &v, &set, 6);
+
+    let sys = renderer.vsm().expect("a live vsm system");
+    assert_eq!(
+        sys.trees()[0].kind,
+        inf_render::VsmTreeKind::Cube,
+        "the fixture's light is not a cube"
+    );
+    assert_eq!(
+        sys.projections().len(),
+        6,
+        "a point light is six projections: {}",
+        sys.summary()
+    );
+    assert_eq!(renderer.vsm_engaged_frames(), 6);
+
+    let got = resident_pages(&renderer, 0);
+    assert!(
+        !got.is_empty(),
+        "a point light marked no page at all: {}",
+        sys.summary()
+    );
+    // THE POINT OF THE ARM: the marked pages are on a face the stride has to
+    // reach. Face 4 is `+Z` in `CUBE_FACE_BASES`, which is the face looking back
+    // at the camera — a non-zero index, so `face * face_stride` is load-bearing.
+    let faces: BTreeSet<u32> = got.iter().map(|p| p.face).collect();
+    assert!(
+        faces.iter().any(|f| *f > 0),
+        "every marked page is on face 0, so the face stride was never exercised \
+         ({faces:?})"
+    );
+    // …and every marked page is one the CPU twin agrees a face can hold: the
+    // face index and the page grid come back consistent through the table's own
+    // `first_entry` / `face_stride` pair, which is the arithmetic under test.
+    let desc = &sys.trees()[0];
+    for page in &got {
+        assert!(page.face < 6, "{page:?}");
+        let g = desc.levels[page.level as usize];
+        assert!(page.x < g.pages_x && page.y < g.pages_y, "{page:?}");
+    }
+    // ANTI-VACUITY on the level, as everywhere else: a point light's level rule
+    // is distance-scaled, so a marked level at an end of the tree would mean the
+    // clamp answered rather than the rule.
+    let levels: BTreeSet<u32> = got.iter().map(|p| p.level).collect();
+    assert!(
+        levels.iter().all(|l| *l > 0 && *l + 1 < desc.level_count()),
+        "the marked levels {levels:?} reach an end of a {}-level tree, so a clamp          answered rather than the rule",
+        desc.level_count()
+    );
+}
