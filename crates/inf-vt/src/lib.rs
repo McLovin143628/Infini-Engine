@@ -122,6 +122,9 @@
 pub mod address;
 pub mod container;
 pub mod feedback;
+/// P26.5's missing-tile fill: the deterministic, integer-only edge-directed
+/// upscale a page takes when its own bytes cannot be produced.
+pub mod fill;
 pub mod pool;
 pub mod residency;
 pub mod table;
@@ -133,6 +136,7 @@ pub use container::{
     STORED_TILE_SIZE, TEX_ASSET_MAGIC, TEX_ASSET_SCHEMA_VERSION, TILE_BORDER, TILE_SIZE,
 };
 pub use feedback::{VtFeedbackLayout, FEEDBACK_BITS_PER_WORD};
+pub use fill::{fill_from_ancestor, replicate2x, upscale2x, MAX_FILL_STEPS};
 pub use pool::{
     plan_pool, PageFormat, VtAdvisory, VtPoolConfig, VtPoolGeometry, DEFAULT_MAX_TEXTURE_DIM,
     DEFAULT_VT_BUDGET_BYTES,

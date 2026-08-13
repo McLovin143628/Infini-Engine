@@ -264,6 +264,36 @@ impl VtTextureDesc {
         )
     }
 
+    /// **The quadrant path from an ancestor down to `at`** (P26.5), coarsest
+    /// first — the inverse of [`ancestor`](Self::ancestor), as the sequence of
+    /// half-selections [`crate::fill::fill_from_ancestor`] needs to reconstruct a
+    /// page.
+    ///
+    /// Each step is `(qx, qy)` in `{0, 1}²`: which half of the parent tile's
+    /// payload the child covers. On the clamped chain a "child" may be a sliver
+    /// several tiles past `2·parent + 1` — the same case
+    /// [`child_x_range`](Self::child_x_range) documents — and it takes the LAST
+    /// half, which is where the clamp sent it and therefore where its texels
+    /// actually live.
+    ///
+    /// `None` unless `from` really is `at`'s ancestor at its own level, so a
+    /// caller cannot reconstruct a page out of an unrelated tile: the chain is
+    /// re-walked here rather than trusted.
+    pub fn descent(&self, at: TileCoord, from: TileCoord) -> Option<Vec<(u32, u32)>> {
+        if self.ancestor(at, from.mip)? != from {
+            return None;
+        }
+        let mut steps = Vec::with_capacity((from.mip - at.mip) as usize);
+        let mut cur = at;
+        while cur.mip < from.mip {
+            let up = self.parent(cur)?;
+            steps.push(((cur.x - up.x * 2).min(1), (cur.y - up.y * 2).min(1)));
+            cur = up;
+        }
+        steps.reverse();
+        Some(steps)
+    }
+
     /// The half-open range of child rows of parent row `y` at level `mip`.
     pub fn child_y_range(&self, mip: u32, y: u32) -> Range<u32> {
         child_range(
@@ -448,6 +478,102 @@ mod tests {
         // columns, including the sliver.
         assert_eq!(d.child_x_range(1, 0), 0..3);
         assert_eq!(d.child_y_range(1, 0), 0..3);
+    }
+
+    /// **`descent` names the half of the parent the child's TEXELS are in**
+    /// (P26.5) — the clamp included, which is where the naive answer is wrong.
+    ///
+    /// A descent step is not `x & 1`. On an ordinary chain the two agree; on a
+    /// **clamped** one they do not, and the clamped one is the case the P26.2
+    /// audit's whole finding lives on. A 257-texel level is three tiles, the
+    /// third covering one texel, over a 128-texel level that is **one** tile —
+    /// so tile 2's parent is tile 0, `x & 1` says "the left half of it", and the
+    /// texel says otherwise: child texel 256 maps to `min(128, 127) = 127` of
+    /// the parent, which is the **right** end of its payload. Reconstruct that
+    /// sliver's page out of the left half and it is a page of the wrong content
+    /// with no error anywhere.
+    ///
+    /// So the sweep asserts each step against the texel map — `min(t / 2, w - 1)`,
+    /// the same clamp the container bakes its border ring with — rather than
+    /// against a re-walk, which cannot tell the two apart precisely where they
+    /// differ (every child of a clamped parent is in that parent's subtree, so a
+    /// round-trip check passes on both answers; measured).
+    #[test]
+    fn the_descent_names_the_half_the_childs_texels_are_in() {
+        let mut clamped = 0u32;
+        let mut checked = 0u32;
+        for (w, h) in [
+            (511u32, 3u32),
+            (1023, 1023),
+            (2047, 511),
+            (257, 257),
+            (4095, 4095),
+        ] {
+            let d = full_pyramid(w, h, 128, 4, false);
+            let ts = d.tile_size;
+            for mip in 0..d.mip_count() {
+                let m = d.mips[mip as usize];
+                for ty in 0..m.tiles_y {
+                    for tx in 0..m.tiles_x {
+                        let at = TileCoord::new(mip, tx, ty);
+                        for target in mip..d.mip_count() {
+                            let anc = d.ancestor(at, target).expect("an ancestor");
+                            let steps = d.descent(at, anc).expect("a descent");
+                            assert_eq!(steps.len(), (target - mip) as usize);
+                            // Walk the chain again, and check every step against
+                            // where the tile's own first texel lands in its
+                            // parent's payload.
+                            let mut cur = at;
+                            for &(qx, qy) in steps.iter().rev() {
+                                let up = d.parent(cur).expect("a parent");
+                                let pm = d.mips[up.mip as usize];
+                                let px = (cur.x * ts / 2).min(pm.width - 1);
+                                let py = (cur.y * ts / 2).min(pm.height - 1);
+                                let want = (
+                                    u32::from(px - up.x * ts >= ts / 2),
+                                    u32::from(py - up.y * ts >= ts / 2),
+                                );
+                                assert_eq!(
+                                    (qx, qy),
+                                    want,
+                                    "{w}x{h}: {cur:?} -> {up:?} descends as {:?}, but its \
+                                     first texel lands at ({px}, {py}) of the parent level",
+                                    (qx, qy)
+                                );
+                                if d.child_x_range(up.mip, up.x).len() > 2
+                                    || d.child_y_range(up.mip, up.y).len() > 2
+                                {
+                                    clamped += 1;
+                                }
+                                cur = up;
+                            }
+                            assert_eq!(cur, anc, "the chain did not arrive");
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // ANTI-VACUITY, both halves: the sweep is not empty, and it really did
+        // reach the clamped chains the odd extents exist for — without them this
+        // is a statement about power-of-two pyramids, where `x & 1` is right.
+        assert!(checked > 1000, "the sweep visited only {checked} pairs");
+        assert!(
+            clamped > 0,
+            "no clamped parent was reached, so this arm never exercised the case \
+             it names"
+        );
+
+        // A tile that is NOT a descendant is refused rather than reconstructed
+        // out of an unrelated subtree.
+        let d = full_pyramid(1023, 1023, 128, 4, false);
+        assert!(d
+            .descent(TileCoord::new(0, 7, 7), TileCoord::new(1, 0, 0))
+            .is_none());
+        // …and the zero-step case is the identity, which is what makes "no
+        // fallback" not a special case at the call site.
+        let self_ = TileCoord::new(2, 1, 1);
+        assert_eq!(d.descent(self_, self_), Some(Vec::new()));
     }
 
     #[test]
