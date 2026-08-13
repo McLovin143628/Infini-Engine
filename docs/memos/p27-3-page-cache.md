@@ -307,4 +307,56 @@ leak direction again.
   fallback pack's output. The truncating case has no arm: reaching it needs
   16 384 packed casters *and* a scatter batch, which costs a headless fixture more
   than the three lines it would arm — the same ruling the P27.2 audit made about
-  the group ceiling's vgeom and terrain call sites.
+  the group ceiling's vgeom and terrain call sites. (The *non*-truncating half is
+  armed since the P27.3 audit, in `the_caster_ceiling_counts_the_casters_it_refuses`:
+  a 16 384-instance fixture with no scatter batch reports **zero**, and a counter
+  reading the merged bucket reports all of them.)
+
+---
+
+## 6. What the P27.3 audit changed in this document
+
+**§2's list of stamp inputs was complete and its arms were not.** Of the caster
+half's terms, three were armed — `model`, the joint palette, and the terrain
+tile's *cache key*. Deleting the vgeom LOD level, `mat`, the terrain tile's
+`version`, or the whole perspective branch of the scatter each survived the entire
+tree. All four are armed now (`test(vsm)` `555a90f`), and the three terms that
+still survive — `sphere`, the terrain fold's `hole_words`, the skinned fold's mesh
+key — are rulings with their reasons written beside them in `caster_stamp`'s docs.
+
+**The cache key's aliasing argument is corrected.** §2 and the ledger justified
+`(light, page, stamp)` by "a slot re-admitted to a page it was evicted from would
+read as a hit while holding the second page's depth". The stamp's geometric half
+*is* the page's world footprint, so two pages that share a stamp share the depth
+they want, and a stamp-only hit is a **correct** hit. What the two label members
+really do is refuse a correct hit when a clipmap level's grid shifts and the world
+cell that was page `(x, y)` becomes page `(x − 1, y)` with a bit-identical matrix
+— i.e. they charge a re-raster for a re-label. That is §5's *"there is no clipmap
+scroll"* bound wearing the cache key, and a stamp-only key would recover part of
+it for free. Measured by
+`a_clipmap_grid_shift_re_labels_a_page_and_the_cache_key_pays_for_it`, which also
+carries the condition that keeps the members honest: every matrix collision is
+inside one light and one level.
+
+**§1's "invariant under a floating-origin rebase" now has an arm, and a smaller
+claim.** `a_floating_origin_rebase_does_not_move_the_clipmap_lattice` pins it —
+but what the invariance buys is the *residency*, not a cached page. A rebase
+re-writes every page matrix regardless, because the matrix is render-local, so the
+atlas is re-rasterized whole either way; it happens once per
+`inf_math::REBASE_DISTANCE` = 1 024 m of travel and drains in four frames. What
+would churn without the world-space snap is `clip_origins`, and with it the whole
+fallback chain and a table publish, for a world that had not moved. `is_camera_cut`
+does **not** fire on a rebase — it reads the f64 world eye — so the flush and the
+rebase are two separate triggers, not one.
+
+**§3's drain ratio is asserted rather than described.** The arm's own comment said
+8× where this document and the ledger said 11× and the arithmetic says 11.2. It
+asserts `10 ≤ frames_per_quantum / drain < 13` now.
+
+**One bound §5 did not carry.** The invalidation scatter's depth envelope
+(`ndc.z ∈ [−rz, 1 + rz]`, the cull's own two planes with the sphere's radius) is
+**unarmed**: tightening it to the centre alone survives the tree, because every
+caster in every fixture sits well inside the clipmap's box and reaching the case
+needs a caster at the far face of a kilometres-deep projection. The fail direction
+of a tightened test is a *stale page*, which is the wrong one, so this is a
+carried gap rather than a redundancy — P27.4's.
