@@ -171,10 +171,25 @@ struct VsmCullParamsRaw {
     counts: [u32; 4],
 }
 
+/// Which vertex + index buffers a geometry group draws out of.
+///
+/// Both sources hand the **same** pipeline the same vertex format
+/// (`passes::mesh::MeshVertex`), which is why virtualized geometry needs no second
+/// caster shader: the classic-LOD chain of a `.inf_vmesh` is a plain index buffer
+/// over a plain vertex buffer, exactly as the built-in primitives are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupSource {
+    /// The shared [`PrimGpu`] buffers, at this kind's index range.
+    Prim,
+    /// One virtualized-geometry asset at one classic LOD level.
+    Vgeom { asset: u128, level: usize },
+}
+
 /// Where one geometry group's indices live — the three constant words of its
 /// indirect args, which the CPU writes and the cull never touches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GroupGeom {
+    source: GroupSource,
     index_count: u32,
     first_index: u32,
     base_vertex: i32,
@@ -182,6 +197,27 @@ struct GroupGeom {
     /// the one thing the CPU legitimately knows about the drawn set (how many
     /// casters *could* be visible), as opposed to how many *are*.
     casters: u32,
+}
+
+/// One virtualized-geometry asset's caster geometry: the shared vertex buffer and
+/// one index buffer per classic LOD level, finest first.
+///
+/// **This is how `vgeom`'s "casts no shadows" hole closes**, and the shape is a
+/// ruling with a memo behind it (`docs/memos/p27-2-vgeom-casters.md`): a page
+/// caster draws the asset's *classic LOD chain* — the same chain
+/// `passes::classic_vgeom` draws, derived from the same meshlet DAG and picked by
+/// the same `pick_classic_level` against the same `lod_threshold` — rather than a
+/// per-page meshlet cut. So vgeom content casts, with per-page culling on the GPU
+/// at *instance* granularity; meshlet granularity is P27.3's, where page caching
+/// makes the cost of a second DAG cut per page a number rather than a guess.
+struct VgeomCasterGeom {
+    vertices: wgpu::Buffer,
+    /// `(index buffer, index count)` per level, finest first.
+    levels: Vec<(wgpu::Buffer, u32)>,
+    /// Per-level object-space error, finest first — `pick_classic_level`'s input.
+    errors: Vec<f32>,
+    /// Local-space bounding sphere: `(centre, radius)`.
+    bounds: ([f32; 3], f32),
 }
 
 /// What the page raster did — **the engagement counters**.
@@ -209,19 +245,23 @@ pub struct VsmRasterStats {
     /// Frames whose caster set contained a masked material, so the alpha-testing
     /// pipeline was bound rather than the fragment-less one.
     pub masked_frames: u64,
+    /// Of the packed casters, the ones that are **virtualized-geometry** instances
+    /// — so "vgeom casts" is a measurement rather than a claim about a code path.
+    pub vgeom_casters: u64,
 }
 
 impl VsmRasterStats {
     /// A one-line human summary, in the shape the other streamers ship.
     pub fn summary(&self) -> String {
         format!(
-            "vsm raster: {} frames, {} pages, {} draws, {} casters ({} scattered), \
-             {} pages deferred",
+            "vsm raster: {} frames, {} pages, {} draws, {} casters ({} scattered, \
+             {} meshlet-asset), {} pages deferred",
             self.frames,
             self.pages,
             self.draws,
             self.casters,
             self.scatter_casters,
+            self.vgeom_casters,
             self.deferred_pages,
         )
     }
@@ -258,6 +298,15 @@ pub struct VsmRaster {
     cull_bind: Option<wgpu::BindGroup>,
     caster_bind: Option<wgpu::BindGroup>,
     page_bind: Option<wgpu::BindGroup>,
+
+    /// Caster geometry for the scene's virtualized-geometry assets, keyed by asset
+    /// id and evicted when the asset leaves the scene. A **second** copy of a
+    /// DAG's vertices when the meshlet path is running — `passes::classic_vgeom`
+    /// drops its own copy in that case precisely to avoid the duplication, and
+    /// this one is the price of casting: the meshlet pools are streamed, paged and
+    /// owned by a render node, and a shadow caster that reached into them would
+    /// couple the page raster to residency it does not control.
+    vgeom: std::collections::BTreeMap<u128, VgeomCasterGeom>,
 
     /// The pages the last [`record`](Self::record) rasterized, in draw order, and
     /// how many geometry groups each one was drawn with. Kept so a gate can map
@@ -454,6 +503,7 @@ impl VsmRaster {
             cull_bind: None,
             caster_bind: None,
             page_bind: None,
+            vgeom: std::collections::BTreeMap::new(),
             last_pages: Vec::new(),
             last_groups: 0,
             stats: VsmRasterStats::default(),
@@ -561,7 +611,9 @@ impl VsmRaster {
         if pages.is_empty() {
             return 0;
         }
-        let (casters, groups, masked, scattered) = pack_casters(&self.prim, scene, view, settings);
+        self.sync_vgeom(gpu, scene);
+        let (casters, groups, masked, scattered) =
+            pack_casters(&self.prim, &self.vgeom, scene, view, settings);
         // A page with nothing to draw into it still has to be CLEARED, or it keeps
         // a previous occupant's depth — a slot is reused the moment its page is
         // evicted, and stale depth in a live page is a shadow from geometry that
@@ -722,7 +774,6 @@ impl VsmRaster {
             };
             pass.set_pipeline(pipeline);
             pass.set_bind_group(1, caster_bind, &[]);
-            self.prim.bind_geometry(&mut pass);
             for (i, p) in pages.iter().enumerate() {
                 // **The page rect, pinned exactly.** `slot_origin` is the atlas
                 // texel of the slot's corner and `stored_page_size` its side, so
@@ -735,6 +786,22 @@ impl VsmRaster {
                 for (g, geom) in groups.iter().enumerate() {
                     if geom.casters == 0 || geom.index_count == 0 {
                         continue;
+                    }
+                    // Bound per group rather than once per pass: the built-in
+                    // primitives share one pair of buffers, and every vgeom asset
+                    // brings its own.
+                    match geom.source {
+                        GroupSource::Prim => self.prim.bind_geometry(&mut pass),
+                        GroupSource::Vgeom { asset, level } => {
+                            let Some(a) = self.vgeom.get(&asset) else {
+                                continue;
+                            };
+                            let Some((indices, _)) = a.levels.get(level) else {
+                                continue;
+                            };
+                            pass.set_vertex_buffer(0, a.vertices.slice(..));
+                            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                        }
                     }
                     let slot = (i * groups.len() + g) as u64;
                     pass.set_bind_group(
@@ -762,6 +829,11 @@ impl VsmRaster {
         self.stats.draws += draws;
         self.stats.casters += u64::from(caster_count);
         self.stats.scatter_casters += u64::from(scattered);
+        self.stats.vgeom_casters += groups
+            .iter()
+            .filter(|g| matches!(g.source, GroupSource::Vgeom { .. }))
+            .map(|g| u64::from(g.casters))
+            .sum::<u64>();
         self.stats.masked_frames += u64::from(masked);
         page_count
     }
@@ -831,6 +903,78 @@ impl VsmRaster {
             );
         }
         out
+    }
+
+    /// Build (and evict) the caster geometry for the scene's vgeom assets.
+    ///
+    /// Content-addressed by asset id and built **once**: a `.inf_vmesh`'s classic
+    /// chain is derived from a cooked DAG, so it cannot change without the id
+    /// changing (the P18.3 derived-id discipline). Eviction is the same rule
+    /// `passes::classic_vgeom` uses — keep exactly what the scene names.
+    fn sync_vgeom(&mut self, gpu: &GpuContext, scene: &RenderScene) {
+        let live: std::collections::BTreeSet<u128> =
+            scene.vgeom_assets.iter().map(|a| a.id).collect();
+        self.vgeom.retain(|id, _| live.contains(id));
+        for asset in &scene.vgeom_assets {
+            if self.vgeom.contains_key(&asset.id) {
+                continue;
+            }
+            let Ok(mesh) = asset.source.to_mesh() else {
+                // Reported, not swallowed: a caster set that silently lost an
+                // asset reads as "that building stopped casting".
+                tracing::warn!(
+                    "inf-render: shadow casters for vmesh {:#x} could not be \
+                     decoded; it casts nothing",
+                    asset.id
+                );
+                continue;
+            };
+            let verts: Vec<crate::passes::mesh::MeshVertex> = mesh
+                .vertices
+                .iter()
+                .map(|v| crate::passes::mesh::MeshVertex {
+                    pos: v.position,
+                    normal: v.normal,
+                    uv: v.uv,
+                })
+                .collect();
+            let vertices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vsm-vgeom-verts"),
+                size: (std::mem::size_of::<crate::passes::mesh::MeshVertex>() * verts.len().max(1))
+                    as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            if !verts.is_empty() {
+                gpu.queue
+                    .write_buffer(&vertices, 0, bytemuck::cast_slice(&verts));
+            }
+            let mut errors = Vec::new();
+            let mut levels = Vec::new();
+            for l in mesh.classic_lods() {
+                errors.push(l.error);
+                let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("vsm-vgeom-indices"),
+                    size: (std::mem::size_of::<u32>() * l.indices.len().max(1)) as u64,
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                if !l.indices.is_empty() {
+                    gpu.queue
+                        .write_buffer(&buf, 0, bytemuck::cast_slice(&l.indices));
+                }
+                levels.push((buf, l.indices.len() as u32));
+            }
+            self.vgeom.insert(
+                asset.id,
+                VgeomCasterGeom {
+                    vertices,
+                    levels,
+                    errors,
+                    bounds: asset.bounds(),
+                },
+            );
+        }
     }
 
     /// Grow the buffers to hold `(pages, casters, groups)`, dropping every bind
@@ -995,6 +1139,7 @@ pub(crate) fn page_depth_state() -> wgpu::DepthStencilState {
 /// group's slice is its own caster count long.
 fn pack_casters(
     prim: &PrimGpu,
+    vgeom: &std::collections::BTreeMap<u128, VgeomCasterGeom>,
     scene: &RenderScene,
     view: &RenderView,
     settings: &crate::settings::RenderSettings,
@@ -1061,9 +1206,79 @@ fn pack_casters(
         }
         let r = prim.range(*kind);
         groups.push(GroupGeom {
+            source: GroupSource::Prim,
             index_count: r.index_count,
             first_index: r.index_start,
             base_vertex: r.base_vertex,
+            casters: count,
+        });
+        first += count;
+    }
+
+    // ── virtualized geometry ─────────────────────────────────────────
+    //
+    // One group per (asset, level), and the level is picked by the SAME rule the
+    // classic tier picks with — `lod_threshold` against the camera, then
+    // `pick_classic_level`. Against the camera and not against the page,
+    // deliberately: a VSM page exists because a visible pixel asked for it, so the
+    // camera's tolerance is the one that bounds how much silhouette detail the
+    // shadow can possibly show. Per-page LOD is a P27.3 question and the memo says
+    // so.
+    let eye = view.eye_local();
+    let mut by_group: std::collections::BTreeMap<(u128, usize), Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (i, inst) in scene.vgeom_instances.iter().enumerate() {
+        let Some(a) = vgeom.get(&inst.asset) else {
+            continue;
+        };
+        if a.errors.is_empty() {
+            continue;
+        }
+        let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
+        let max_scale = inst.scale.abs().max_element().max(1e-6);
+        let centre = model.transform_point3(glam::Vec3::from(a.bounds.0));
+        let radius = a.bounds.1 * max_scale;
+        let threshold = crate::passes::vgeom::lod_threshold(
+            eye,
+            centre,
+            radius,
+            max_scale,
+            view,
+            settings.vgeom.pixel_error,
+        );
+        let level = inf_vgeom::pick_classic_level(&a.errors, threshold);
+        by_group.entry((inst.asset, level)).or_default().push(i);
+    }
+    for ((asset, level), members) in by_group {
+        let a = &vgeom[&asset];
+        let Some(&(_, index_count)) = a.levels.get(level) else {
+            continue;
+        };
+        let mut count = 0u32;
+        for (local, &i) in members.iter().enumerate() {
+            if casters.len() as u32 >= VSM_MAX_CASTERS {
+                break;
+            }
+            let inst = &scene.vgeom_instances[i];
+            let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
+            let max_scale = inst.scale.abs().max_element().max(1e-6);
+            let centre = model.transform_point3(glam::Vec3::from(a.bounds.0));
+            casters.push(VsmCasterRaw {
+                model: model.to_cols_array(),
+                sphere: [centre.x, centre.y, centre.z, a.bounds.1 * max_scale],
+                // Opaque: virtualized geometry has no per-instance blend code, so
+                // it takes the fragment-less path exactly as it does in the classic
+                // tier.
+                mat: [0.0, 0.0, 1.0, 0.0],
+                ids: [groups.len() as u32, local as u32, first, 0],
+            });
+            count += 1;
+        }
+        groups.push(GroupGeom {
+            source: GroupSource::Vgeom { asset, level },
+            index_count,
+            first_index: 0,
+            base_vertex: 0,
             casters: count,
         });
         first += count;
@@ -1117,21 +1332,24 @@ mod tests {
     fn the_group_slices_tile_a_pages_visible_list() {
         let groups = vec![
             GroupGeom {
+                source: GroupSource::Prim,
                 index_count: 36,
                 first_index: 0,
                 base_vertex: 0,
                 casters: 3,
             },
             GroupGeom {
+                source: GroupSource::Prim,
                 index_count: 2_304,
                 first_index: 36,
                 base_vertex: 24,
                 casters: 0,
             },
             GroupGeom {
+                source: GroupSource::Vgeom { asset: 7, level: 1 },
                 index_count: 6,
-                first_index: 2_340,
-                base_vertex: 410,
+                first_index: 0,
+                base_vertex: 0,
                 casters: 5,
             },
         ];

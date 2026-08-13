@@ -580,7 +580,138 @@ fn a_masked_caster_discards_in_the_page_raster() {
     );
 }
 
-// ── (e) off path, and the settings door ─────────────────────────────────────
+// ── (e) virtualized geometry casts ────────────────────────────
+
+/// **THE HOLE THIS PHASE NAMES.** Phase 27's goal says "every caster path casts
+/// (vgeom's 'casts no shadows' hole closes here)", and before this batch it was
+/// total: `passes/shadow.rs` contains no occurrence of `vgeom` or `meshlet`, and
+/// `passes/vgeom.rs` contains no shadow pipeline, no light-space matrix and no
+/// caster registration.
+///
+/// A vmesh instance now writes depth into the pages its bounds touch. The arm is
+/// built to falsify a path that merely *compiles*: the counters prove vgeom
+/// casters were packed, and the atlas proves depth arrived where the CPU says the
+/// asset's own bounding sphere puts it.
+#[test]
+fn a_virtualized_geometry_instance_casts_into_the_pages_it_touches() {
+    let Some(gpu) = gpu_or_skip("the VSM meshlet-asset caster") else {
+        return;
+    };
+    let mesh = std::sync::Arc::new(inf_vgeom::test_support::dense_grid_mesh(24));
+    let mut s = RenderScene {
+        grid_enabled: false,
+        vgeom_assets: vec![
+            inf_render::VgeomAsset::from_mesh(0x5150, &mesh).expect("index the vmesh")
+        ],
+        ..Default::default()
+    };
+    // Standing up, so its silhouette faces the light along +Z.
+    s.vgeom_instances.push(inf_render::VgeomInstance::lit(
+        0x5150,
+        glam::DVec3::new(0.0, 0.0, 0.0),
+        glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        glam::Vec3::splat(3.0),
+        [0.8, 0.8, 0.8, 1.0],
+        1,
+    ));
+    s.instances.push(backdrop());
+    s.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Directional,
+        direction: glam::Vec3::Z,
+        cast_shadows: true,
+        ..Default::default()
+    });
+    s.mark_dirty();
+
+    let set = settings_with(64);
+    let renderer = run(&gpu, &s, &view(9.0), &set, 6);
+    let stats = renderer.vsm_raster_stats().expect("stats");
+    assert!(
+        stats.vgeom_casters > 0,
+        "no virtualized-geometry caster was packed: {stats:?}"
+    );
+
+    // The vmesh's own depth: nearer the light than the backdrop, which is the
+    // only other caster in the scene. Anything the backdrop wrote is at the
+    // backdrop's depth, so a texel past the midpoint can only be the vmesh's.
+    let atlas = read_atlas(&gpu, &renderer);
+    let sys = renderer.vsm().expect("live");
+    let mut vgeom_texels = 0usize;
+    for (light, page, rect) in resident_pages(&renderer) {
+        let desc = sys
+            .residency()
+            .desc(VsmLightHandle(light))
+            .expect("registered");
+        let g = desc.levels[page.level as usize];
+        let vp = vsm_page_matrix(
+            glam::Mat4::from_cols_array(&sys.projections()[0].view_proj),
+            desc.kind,
+            page.level,
+            g.pages_x,
+            g.pages_y,
+            page.x,
+            page.y,
+        );
+        let at = |z: f32| {
+            let c = vp * glam::Vec3::new(0.0, 0.0, z).extend(1.0);
+            c.z / c.w
+        };
+        let mid = 0.5 * (at(0.0) + at(BACKDROP_Z + BACKDROP_T));
+        vgeom_texels += written(&atlas, rect).iter().filter(|d| **d > mid).count();
+    }
+    assert!(
+        vgeom_texels > 16,
+        "the vmesh wrote {vgeom_texels} texels nearer the light than the \
+         backdrop — it is not casting"
+    );
+
+    // ANTI-VACUITY / control: the same scene with the vmesh instance removed
+    // writes NOTHING past the backdrop, so the count above is the asset's own
+    // depth and not the slab's.
+    let mut bare = s.clone();
+    bare.vgeom_instances.clear();
+    bare.mark_dirty();
+    let control = run(&gpu, &bare, &view(9.0), &set, 6);
+    let control_atlas = read_atlas(&gpu, &control);
+    let csys = control.vsm().expect("live");
+    let mut control_texels = 0usize;
+    for (light, page, rect) in resident_pages(&control) {
+        let desc = csys
+            .residency()
+            .desc(VsmLightHandle(light))
+            .expect("registered");
+        let g = desc.levels[page.level as usize];
+        let vp = vsm_page_matrix(
+            glam::Mat4::from_cols_array(&csys.projections()[0].view_proj),
+            desc.kind,
+            page.level,
+            g.pages_x,
+            g.pages_y,
+            page.x,
+            page.y,
+        );
+        let at = |z: f32| {
+            let c = vp * glam::Vec3::new(0.0, 0.0, z).extend(1.0);
+            c.z / c.w
+        };
+        let mid = 0.5 * (at(0.0) + at(BACKDROP_Z + BACKDROP_T));
+        control_texels += written(&control_atlas, rect)
+            .iter()
+            .filter(|d| **d > mid)
+            .count();
+    }
+    assert_eq!(
+        control_texels, 0,
+        "the backdrop alone wrote {control_texels} texels past its own depth"
+    );
+    assert_eq!(
+        control.vsm_raster_stats().expect("stats").vgeom_casters,
+        0,
+        "a scene with no vmesh instance packed a vmesh caster"
+    );
+}
+
+// ── (f) off path, and the settings door ─────────────────────────────────────
 
 /// With virtual shadows off, the caster pass never opens — the byte-stability
 /// guarantee every golden rests on, as a counter rather than a hope.
