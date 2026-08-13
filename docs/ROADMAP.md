@@ -11411,6 +11411,340 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
 > **`VSM_PRIORITY_SPECULATIVE` still has no producer** (P28.4 is its caller), a
 > light's `range` still does not cull a marking projection, and nothing logs
 > `vsm_summary` in a host or shows an editor surface.
+> **P27.3 AUDIT — 2026-08-13.** Adversarial pass over `f4669bb..001ad7f`. Six
+> commits appended, **none amended** (`146a037` the skinned caster cache's missing
+> `Arc`, `555a90f` seven arms and the aliasing ruling, `e53fb3a` the pre-existing
+> preview-latency flake this audit was handed, `9d32f38` rustfmt, `7b87c9f` three
+> constants and the surviving stamp terms' sentences, `7cec74f` the page-cache
+> memo's §6, and this block) — the P27.1/P27.2 precedent.
+>
+> **The battery, stated as what was measured rather than as a number this audit
+> does not have.** Green at final HEAD, run target by run target:
+> `inf-render` **lib 377 passed / 0 failed**, `tests/vsm_raster` **32 / 0** (26 in
+> the block above's tree plus this audit's six), `tests/vsm_marking` **10 / 0**;
+> `inf-vsm` green across lib and `residency_gate`; `inf-editor-core`'s
+> `preview_session_cold_versus_warm_latency` green, and green again under the
+> mutation that proves its counter half. **Seven new arms and no new binary** — the
+> **1** in `inf-render`'s lib (the rebase arm in `vsm.rs`) and the **6** in
+> `tests/vsm_raster.rs`, plus two assertions folded into arms that already existed
+> — so the block above's **240 / 4 330 / 0 / 8** should become 240 / 4 337 / 0 / 8.
+> **The whole-workspace `cargo test --workspace --release --no-fail-fast` did not
+> reach its run phase inside this audit's window** and that number is therefore
+> *not* asserted here: it is P27.4's first act to take it. Two machine causes were
+> measured rather than guessed, and both are new machine-ops laws — see the
+> closing section.
+>
+> `clippy -p inf-render -p inf-editor-core --all-targets` under `-D warnings` and
+> `cargo fmt --all --check` clean at final HEAD; the **workspace** clippy is owed
+> beside the battery, for the same reason. No source moved under any run — the
+> battery was **stopped and relaunched** twice rather than let finish over a moving
+> tree, precisely so that the last source commit landed before the final launch.
+> **Goldens stay 50**
+> and `git diff` over `tests/goldens/` is empty across the audit as it is across the
+> batch. **No schema moved**, no `.inf_lvl` payload moved, and **no new external
+> dependency**. **Seventeen deleted lines in the whole audit, counted rather than
+> remembered**: a stale comment, a wrong doc paragraph, a `contains_key` that
+> became a `ptr_eq`, and eleven lines of the preview-latency arm that were replaced
+> in place. **One assertion is deliberately loosened** and it is the flake's — the
+> strict `warm <= cold` became `warm <= cold + noise` — and two *deterministic*
+> assertions were added in exchange, which is the whole shape of that fix and is
+> written out below rather than hidden in this sentence. Nothing else was removed
+> or weakened, and no CSM file is named by the batch or by the audit.
+>
+> **The block above's own commit count is wrong, and it is a "counted rather than
+> remembered" claim.** It says **five** commits and names five (`087a10a`,
+> `32745dd`, `7df189a`, `e9e0802`, `fcb5d5f`) "plus this block". `f4669bb..001ad7f`
+> holds **seven**: those five, `1edfd5a` — the batch's own *sixteen-not-thirty-two*
+> deferral fix, which landed between `fcb5d5f` and the ledger and which the ledger
+> then describes without counting — and `001ad7f` itself. Six plus the block. The
+> P27.2 audit's "eight deleted lines → ten" finding, met again in the same phrase.
+>
+> ## The central question: is the content stamp complete?
+>
+> The batch's own invariant is that a cached page equals a fresh raster **byte for
+> byte**, which is a claim about the *completeness* of the stamp, not about the
+> cache. Every raster input, hunted and ruled:
+>
+> | raster input | in the stamp? | standing after this audit |
+> |---|---|---|
+> | the page matrix — quantized sun, per-level snapped centres, level offsets, floating origin, sub-rectangle, box settings | **yes**, folded bit for bit | armed (two offset mutations, the y-sign, the quantum, the rebase arm) |
+> | light handle, face, level | **yes**, in `geo_key` | armed by the aliasing arm's collision analysis |
+> | caster transform (`model`) | **yes** | armed (the rigid mover) |
+> | caster cull bound (`sphere`) | **yes** | **ruling**: derived from `model` + a bound the `geom` fold already carries |
+> | **alpha-test window (`mat`: cutoff, blend code, base alpha)** | **yes** | **was unarmed — armed now** |
+> | vgeom asset id | **yes** | armed through the LOD arm's fold |
+> | **vgeom LOD level (a CAMERA decision)** | **yes** | **was unarmed — armed now** |
+> | skinned mesh identity | **yes** | **ruling**: separated by `sphere` in every reachable fixture |
+> | skinned joint palette | **yes** | armed |
+> | terrain tile key / lod / coord / `index_count` | **yes** | armed through the carve arms |
+> | **terrain tile `version`** | **yes** | **was unarmed — armed now** |
+> | terrain `hole_words` | **yes** | **ruling** (the cache key's sibling, `version: 0`) |
+> | **a masked caster's cutout TEXTURE** | **not sampled at all** | see below |
+> | terrain **deformation window** | **refused** | enforced structurally, verified |
+> | the CPU scatter (foliage) pack | **yes**, through the prim path | carried exposure, see below |
+> | light/atlas settings | **yes** (matrix) or **full rebuild** (`VsmSystem::matches`) | no stale-cache-over-new-atlas hazard |
+> | the frame's `masked` pipeline choice | **no** | measured harmless, see below |
+> | the per-page clear's depth value and compare | n/a | **both armed now** |
+>
+> **The LOD answer is the one the question was really about, and it is a ruling
+> rather than an accident — but it had no arm.** `pack_casters` folds
+> `Fold::new(2).u64(asset).u64(asset >> 64).u64(level)`, so a caster that crosses a
+> LOD threshold *is* different geometry in the page and "cached == fresh" survives a
+> camera that moved. But deleting `.u64(level)` survived the entire tree, and the
+> byte-compare arm structurally cannot see it: `a_cached_pages_texels_are_what_a_
+> fresh_raster_produces` renders every frame through one `view(5.0)` and flushes
+> without moving the camera at all. So the ruling was real and the arm was absent,
+> which is the shape a ruling decays into.
+> `a_vgeom_caster_that_crosses_a_lod_threshold_invalidates_its_pages` closes it, and
+> it moves the **tolerance** rather than the camera — a camera step moves every page
+> matrix and would prove nothing about the caster — with the same settings change
+> over a scene holding no virtualized geometry as the control. The cost of the
+> alternative, stated because the deferral memo asks for it: with `level` out of the
+> fold, a cached page holds an older cut's silhouette, bounded by nothing at all —
+> the coarsest level of the chain is a legal answer for a caster that walked away,
+> and it stays until something else in that page moves.
+>
+> **The masked caster's cutout is not sampled, and that is why VT residency cannot
+> reach the atlas.** `vsm_caster.wgsl`'s `fs_masked` discards on `blend > 0.5 &&
+> blend < 1.5 && alpha < cutoff`, where `alpha` is the instance's **base-colour
+> alpha** and `cutoff` its scalar — both in `VsmCasterRaw::mat`, both folded. Neither
+> `vsm_caster.wgsl` nor `vsm_skinned.wgsl` declares a texture or a sampler at all
+> (grep-verified), which settles the P18 question by construction rather than by
+> policy: the page raster has no way to read camera-driven virtual-texture residency
+> because it reads no texture. The price is real and belongs in the remainder list:
+> **a cut-out material shadows as its whole quad** — a leaf card casts a rectangle —
+> and it is inherited from `shadow_depth.wgsl`, which spells the identical predicate
+> against the identical per-instance alpha. Changing a cutout *texture* therefore
+> cannot invalidate a page, and cannot need to.
+>
+> **The deformation refusal is enforced, not merely documented.** `deform` and
+> `Deform` appear **zero** times in `vsm_raster.rs`, `vsm_mark.rs` and `vsm.rs`;
+> `sync_terrain` reads `tile.heights`, `tile.holes`, `tile.origin` and the tile's
+> version, and there is no path by which a camera-following window could reach a
+> caster mesh. The memo's cost direction is consistent with the rest of the phase:
+> `DEFORM_MAX_DEPTH_M` = 1 m of rut casts nothing, which is a **leak** (lit), the
+> same direction `VSM_ENTRY_NONE` already chose.
+>
+> **The scatter pack's identity, and the exposure under it.** A scattered caster
+> reaches `pack_casters` as an `InstanceRaw` and folds through the primitive path:
+> kind, `model`, `sphere`, `mat` — so any change to the packed set changes the pages'
+> stamps and the cache stays honest. What is *not* honest is the set itself: the pack
+> is `pack_fallback(…, bucket_center(eye), shadow_caster_settings(scatter, reach), …)`,
+> so its membership is a function of where the camera is (a quantized eye bucket and
+> a distance band clamped to `cull_distance_m`), and a scatter instance outside that
+> band casts nothing at all. That is camera-driven residency reaching lighting — the
+> P18 law — inherited whole from the cascade path rather than introduced here, and it
+> is now written down as a P27.4/P28.3 item instead of living only in the cascade's
+> code.
+>
+> **The frame's `masked` flag is an unstamped input, and it is measured harmless.**
+> `pack_casters` raises one boolean over the *whole* caster set and the pass picks
+> `rigid_masked` or `rigid` for every rigid group with it, so a masked caster planted
+> anywhere changes the pipeline every page would be redrawn with. It cannot change a
+> page's depth: `fs_masked` discards only inside `blend ∈ (0.5, 1.5)`, which an
+> opaque caster never satisfies, so the two pipelines write identical depth for
+> identical casters — and a masked caster in a page implies the flag is already set.
+>
+> **The clear triangle, verified end to end.** One oversized triangle over NDC
+> `[-1, 3]²` at `z = 0.0` — `VSM_DEPTH_CLEAR`, pinned at compile time by
+> `const _: () = assert!(VSM_DEPTH_CLEAR == 0.0)` and in the shader text by
+> `the_page_clear_writes_the_depth_clear_value` — drawn with `depth_write_enabled:
+> true`, `depth_compare: Always`, and the pass's **default** viewport depth range
+> `[0, 1]`, because the clear loop runs before any `set_viewport`. So a cleared page
+> and a `LoadOp::Clear`'d page are bit-identical, and both halves now have
+> mutations: writing `1.0` instead of `0.0` fails seven arms and dropping `Always`
+> back to the pass's `Greater` fails
+> `a_frame_with_no_caster_clears_the_pages_the_last_one_filled` — which is the one
+> case where the old depth is *larger* than the clear value.
+>
+> ## The corrections
+>
+> * **The aliasing argument is backwards.** *"The cache is `(light, page, stamp)`
+>   per slot, all three, because a slot that is evicted, refilled by another page and
+>   re-admitted to the first would otherwise read as a hit while holding the second
+>   page's depth."* Dropping `page` from the key, dropping `light`, and dropping
+>   `level` + `light` from the geometric fold each **survive the whole tree** — because
+>   the stamp's geometric half *is* the page's world footprint, so two pages that
+>   share a stamp share the depth they want and a stamp-only hit is a **correct**
+>   hit. What the two label members really do is refuse a correct hit:
+>   `a_clipmap_grid_shift_re_labels_a_page_and_the_cache_key_pays_for_it` walks a
+>   camera until coarse levels shift and finds the world cell that was page `(x, y)`
+>   presenting as page `(x − 1, y)` with a **bit-identical matrix**. They charge a
+>   re-raster for a re-label — the *"there is no clipmap scroll"* bound wearing the
+>   cache key, and a stamp-only key would recover part of it for free, which is worth
+>   a line in P28.3's brief. Kept as defence in depth on the `is_camera_cut`
+>   precedent, with the arm carrying the condition that keeps them honest: every
+>   collision is inside **one light and one level**, so the fold's `light` and
+>   `level` terms are load-bearing and a stamp-only key is sound.
+> * **The drain ratio's own arm said 8×** where the memo, this ledger and the
+>   arithmetic all say 11 (11.19, re-derived independently). The arm asserted only
+>   `drain < frames_per_quantum`; it asserts `10 ≤ ratio < 13` now, because that
+>   number is the entire argument for `VSM_MAX_RASTER_PAGES` being a cap on *work*.
+> * **"a rebase … `is_camera_cut` fires"** is not what happens, and the block above
+>   does not claim it, but the two triggers are worth separating explicitly:
+>   `is_camera_cut` compares the **f64 world** eye, which a rebase does not move, so
+>   a rebase reaches the cache only through the stamps. It moves all of them, because
+>   the page matrix is render-local — one whole-atlas invalidation per
+>   `inf_math::REBASE_DISTANCE` = **1 024 m** of travel, draining in four frames
+>   against the 44.8 a quantum lasts. The lattice invariance
+>   `clipmap_layout` buys with the f64 world eye is therefore about the *residency* —
+>   no `clip_origins` churn, no fallback-chain recompute, no table publish for a
+>   world that did not move — and not about a cached page. Armed by
+>   `a_floating_origin_rebase_does_not_move_the_clipmap_lattice`, which also asserts
+>   the centre moves by exactly the rebase.
+>
+> ## Verified as claimed, by re-measurement
+>
+> Every time-slicing number re-derives independently at the shipped defaults
+> (`pages_per_side` 64, `first_level_extent_m` 32 m, `clipmap_levels` 8,
+> `budget_bytes` 64 MiB): level-0 texel **7.8125 mm**, `q` **3.906 mrad**, **1 608.5**
+> quanta a revolution, **44.76** frames a quantum on a 20-minute day at 60 fps, **4**
+> frames to redraw 1 024 slots at the 256 cap, ratio **11.19**. `h_ref`'s definition
+> is written down where it is used — `VSM_SUN_REFERENCE_HEIGHT_M`'s own doc comment
+> — rather than only in the memo. The **sixteen-page** deferral computes: level 7's
+> doubled quantum is 0.5 rad, `N · δ / 2` is 16.00 pages of 64, and the arm's
+> under-an-eighth tripwire sits at 8 — so the ruling has a margin of exactly 2× and
+> the arm fires if the geometry ever halves it. The **two ruled survivors** reproduce
+> exactly: deleting the `is_camera_cut` flush changes no verdict, and deleting
+> `hole_words` from the terrain cache key changes none either. The scatter's
+> containment direction is real — shrinking the invalidation AABB to a point kills
+> three arms. The terrain metres arm is off-origin on all three axes
+> (`(−0.5·span, 3.5, −0.5·span)`), and a carve leaves every page the carved tile
+> does not reach — including the whole of the neighbouring tile's — **bit-identical**.
+>
+> ## Mutation matrix: 34 run, 15 the batch's own and 19 new
+>
+> The batch's fifteen reproduce **exactly** as it recorded them — thirteen killed,
+> the `is_camera_cut` flush and the terrain cache key's `hole_words` surviving as
+> ruled. Of the nineteen new, **twelve are killed** (seven of them only because this
+> audit added the arm) and **seven survive**, all seven now rulings with sentences:
+>
+> * **Killed by arms this audit added** (each survived the whole tree before): the
+>   vgeom LOD level out of the fold; `mat` out of the caster stamp; the terrain
+>   tile's `version` out of its fold; the perspective branch of the invalidation
+>   scatter folding nothing, ever; `clipmap_layout` snapping the render-local eye;
+>   `scatter_casters` counting the merged bucket; and the skinned bind-pose cache
+>   reverted to `contains_key` over a bare address.
+> * **Killed by arms that already existed**: the invalidation AABB shrunk to a point;
+>   the clear writing the far value; the clear's `Always` compare dropped; the sun's
+>   reference height doubled; the per-level rim-page count with its level doubling
+>   removed.
+> * **Survived, as rulings**: `sphere` out of the caster stamp (derived); `hole_words`
+>   out of the terrain *fold* (the cache key's sibling); the mesh key out of the
+>   skinned fold (separated by `sphere` in every reachable fixture); `page` out of the
+>   cache key, `light` out of the cache key, and `level` + `light` out of the
+>   geometric fold (the three the aliasing correction above rules on); and the
+>   scatter's **depth envelope tightened to the sphere's centre**.
+>
+> That last one is the audit's one **carried gap rather than a redundancy**, and it
+> is recorded as such: `ndc.z ∈ [−rz, 1 + rz]` is the cull's own two planes with the
+> sphere's radius, tightening it to the centre survives the tree because every caster
+> in every fixture sits well inside a kilometres-deep box, and the fail direction of
+> a tightened test is a **stale page** — the wrong one. Reaching it needs a caster at
+> the far face of the clipmap's depth range, which is P27.4's fixture to build.
+>
+> ## The findings, and what each became
+>
+> 1. **The skinned bind-pose cache keyed on a raw `Arc` pointer without holding the
+>    `Arc`** — `146a037`. P27.3 moved that cache off `scene.version` and onto
+>    `Arc::as_ptr`, which is `passes::skinned`'s rule; that pass states the condition
+>    its key rests on in the same breath ("*the cache holds the `Arc` itself, which is
+>    what makes the pointer a sound key: the allocation cannot be freed and reused
+>    under a live entry*") and `VsmRaster` took the key without the clause. A scene
+>    that drops mesh A and pushes a different mesh B may land B on A's freed address,
+>    at which point `live` contains it, `retain` keeps A's buffers, `contains_key`
+>    skips B's upload, and the raster draws A's silhouette for B — **and never
+>    re-rasterizes the page**, because the content stamp folds that same address, so
+>    the wrong shadow is *cached*. P27.2 could not have this defect: its key was the
+>    scene version. Fixed by holding the `Arc` and by making the reuse test
+>    `Arc::ptr_eq`, so the soundness condition lives in the code that depends on it.
+> 2. **Seven claims the batch makes had no arm** — `555a90f`, and the table above:
+>    five of them stamp inputs (the vgeom LOD level, the alpha-test window, the
+>    terrain tile's version, the perspective branch of the scatter, the lattice's
+>    rebase invariance) and two counters (`scatter_casters`, and finding 1's own
+>    fix). Each is a way the cache serves depth the raster would not have written, or
+>    a number a reader would have trusted; each is killed by a named arm now.
+> 3. **The aliasing justification is backwards** — corrected above, in `555a90f`'s arm,
+>    `7b87c9f`'s doc and `7cec74f`'s memo §6.
+> 4. **A constant and three rulings were prose** — `7b87c9f`: the 11× drain ratio (the
+>    arm's own comment said 8× and its assertion checked only the inequality), and the
+>    three surviving stamp terms — `sphere`, the terrain fold's `hole_words`, the
+>    skinned fold's mesh key — which now carry the reason each is kept. A survivor
+>    with no sentence is indistinguishable from a term nobody has looked at.
+> 5. **The batch's commit count** — corrected above.
+>
+> ## The cleanup this audit was handed
+>
+> `inf-editor-core`'s `preview_session_cold_versus_warm_latency` is fixed in
+> `e53fb3a`, under the wall-clock law and not around it. The P24.5 audit had already
+> made both sides best-of-five, which was necessary and not sufficient: by 512² the
+> only session-cold cost left is a target allocation, so a strict `warm <= cold` is
+> deciding microseconds on a machine whose scheduler moves milliseconds — the batch's
+> failure was **1.5752 ms against 1.5253 ms**, a 3.3 % gap. It now carries both
+> halves. **A count, not a clock**: a fresh session owns no compiled program and the
+> cold render builds one (`cached_programs()` 0 → 1); five warm renders of the same
+> surface leave it at **one**; both reads are taken outside the timed region so the
+> assertion never pays into the number it checks. Mutation-verified — a program cache
+> whose lookup never hits fails it at **6 against 1** — so the deterministic half has
+> teeth on every adapter and in every scheduler slice. **And the clock at its own
+> resolution**: `warm <= cold + noise`, where `noise` is the larger of the two
+> five-sample spreads, printed beside the numbers. Measured here at 512²: noise
+> **0.48 ms** against a signal of **1.54 ms cold to 0.36 ms warm**, so a warm frame
+> that rebuilt its pipeline is still nowhere near passing.
+>
+> ## Remainders as amended, for P27.4
+>
+> Everything the block above lists stands, unchanged, and every one of its
+> "not done" items is still not done — no receiver, no clipmap scroll, a CPU caster
+> pack every frame, the skinned cull sphere still the bind pose inflated 50 %, one
+> quantum per light, no depth bias, no face culling, `VSM_PRIORITY_SPECULATIVE` with
+> no producer, and no host logging `vsm_summary`. Added by this audit:
+>
+> * **The invalidation scatter's depth envelope is unarmed**, and its fail direction
+>   is a stale page (above). P27.4 owes it a caster at the far face.
+> * **A cut-out material shadows as its whole quad.** The page raster samples no
+>   texture — which is what makes the P18 law hold here by construction — so a leaf
+>   card casts a rectangle, exactly as it does through `shadow_depth.wgsl`. P27.4 is
+>   where a receiver makes that visible, and where the choice between a real texture
+>   fetch in a depth-only pass and living with the rectangle has to be made rather
+>   than inherited.
+> * **The CPU scatter pack's membership is camera-driven** (`bucket_center` plus a
+>   band clamped to `cull_distance_m`), so a foliage instance outside the band casts
+>   no shadow at all. Inherited from the cascade path, not introduced by P27, and now
+>   written down: it is the P18 law's own shape and it belongs with P28.3's merged
+>   residency, beside the CPU caster cache.
+> * **A stamp-only cache key would make part of a clipmap grid shift free** (the
+>   aliasing correction) — how much is what
+>   `a_clipmap_grid_shift_re_labels_a_page_and_the_cache_key_pays_for_it` prints:
+>   slot refills over the walk against those whose depth the slot already held. Not
+>   a change to make with no receiver; a line in P28.3's brief beside the scroll,
+>   where re-seating a slot stops being one crate's private business.
+> * **The `scatter_casters` truncating case still has no arm**, unchanged from the
+>   block above — but its non-truncating half is armed now.
+> * **The whole-workspace battery and the workspace clippy are owed**, above.
+>
+> ## Machine ops, because two of these cost hours and neither was inferable
+>
+> * **A `cargo test --workspace` piped through PowerShell's `| Out-File` DEADLOCKS
+>   the build.** Cargo's stderr fills the pipe, PowerShell does not drain it, cargo
+>   blocks on the write, and every rustc it is supervising goes to **~1 % CPU** while
+>   the log file sits at a constant size for hours. It looks exactly like a hung
+>   compiler and it is a hung *pipe*: the tell is a log whose byte count never moves
+>   while `rustc` PIDs never cycle. Use
+>   `Start-Process -RedirectStandardOutput/-RedirectStandardError`, which writes to
+>   file handles and never blocks. This is the P26.2 "read a link error against
+>   `df`" law in a new disguise — read a stalled build against the log's byte count
+>   and the processes' CPU deltas before believing what it looks like.
+> * **`clippy -p <touched>` before a battery costs the battery a full rebuild.** The
+>   CLAUDE.md note says clippy keeps its own artifact set and pays the build again;
+>   the converse is the expensive half, because the battery then rebuilds every
+>   package downstream of the linted ones — here, most of the workspace, at roughly
+>   **30–36 test binaries an hour** on this machine. Run clippy **last**, as the note
+>   already says, and read "clippy first" in a brief as "clippy on the touched
+>   packages, then accept the rebuild or run it after".
+> * `-j 3` is a law about **`inf-studio`** specifically (the paging-file crash).
+>   Once `inf-studio` is built, `-j 6` runs the remaining test binaries with 19 GB
+>   free and no instability — measured, this session.
 - **P27.4 Receivers + filtering** — 1. `shadow_factor` reads through the page table with
   PCF that respects page borders (border texels or clamped kernels — measured); 2. clipmap
   level blend replaces cascade blend; 3. point/spot receiver terms in the lit passes; 4. the
