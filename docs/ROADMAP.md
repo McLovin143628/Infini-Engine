@@ -11115,6 +11115,302 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
   via the `is_camera_cut` precedent; 3. the sun's slow arc: clipmap-level time-slicing so a
   moving sun re-rasterizes coarse levels lazily inside budget (measured policy, not a magic
   constant).
+> **STATUS — P27.3 Page caching + invalidation: COMPLETE (2026-08-13)** — **five**
+> commits, counted rather than remembered (`087a10a` the Ring-0 parent rule,
+> `32745dd` the per-level snap + the content stamps + the scissored clear,
+> `7df189a` twelve arms and the mutation round — its subject says *eleven* and
+> there are **twelve**, counted rather than remembered, because the three pure
+> ones in `vsm.rs` landed with the nine on the device — `e9e0802` the policy memo,
+> `fcb5d5f` four documents this batch made stale and the vgeom memo's promise
+> re-read), plus this block. Battery green at HEAD: **240 binaries,
+> 4 330 passed, 0 failed, 8 ignored** against the P27.2 audit's
+> 240 / 4 314 / 0 / 8 — **16 new arms and no new binary**, which is exactly
+> the **3** in `inf-vsm` (two parent-rule arms in `address.rs`, one in the
+> residency gate), the **4** in `inf-render`'s lib (three in `vsm.rs`, one in
+> `vsm_raster.rs`) and the **9** in `tests/vsm_raster.rs`.
+>
+> **One battery provenance note, because the run took two attempts.** The first
+> `cargo test --workspace --release` stopped at **fifteen** binaries: it
+> fail-fasts, and it hit `inf-editor-core`'s
+> `preview_session_cold_versus_warm_latency` — a **wall-clock** arm comparing a
+> warm re-render against a cold first frame, which measured 1.5752 ms against
+> 1.5253 ms and failed on a **3 %** gap between two sub-2 ms samples. It is a
+> flake and it is **not this batch's**: four re-runs at HEAD are green, no editor
+> file is in the diff, `VsmSettings::enabled` is `false` so `vsm_sync` returns
+> before building anything, and `thumbnail/scene_render.rs` names VSM nowhere.
+> It is the *wall-clock conditions on adapter* law's own failure shape in a
+> pre-existing arm, and it is carried to the audit as cleanup rather than fixed
+> here. The numbers above are the second run, with `--no-fail-fast`, which is
+> what the baseline was taken with.
+>
+> `clippy --workspace --all-targets` under `-D warnings` and
+> `cargo fmt --all --check` clean at final HEAD, and **no source moved under the
+> battery** — the tree was committed before it started and nothing in `crates/`,
+> `editor/` or `runtime/` has an mtime inside its window, so the P27.1/P27.2
+> re-run precedent for a package that compiled against older sources does not
+> apply. **Goldens stay 50 and none was re-blessed**
+> — `git diff` over `tests/goldens/` is empty across the batch. **No schema
+> moved**, no `.inf_lvl` payload moved, and **no new external dependency**
+> (`inf-vsm` still names `thiserror` and nothing else). **VSM is still
+> `enabled: false` by default**, so no golden could move and the claim is a
+> measurement rather than a hope: `a_renderer_with_virtual_shadows_off_rasterizes_no_page`
+> is green and the CSM path is not edited — `git diff` for the whole batch names
+> no CSM file.
+>
+> **The three clauses, against what is measured:**
+>
+> * *"cached pages keyed on (light, page, content stamp); static pages survive
+>   frames untouched"* — **met, and the key is the page's own matrix rather than a
+>   proxy for it.** A page's geometric stamp is `vsm_page_matrix`'s output folded
+>   bit for bit, which is not a summary of what moves a page's content but the
+>   complete list of its inputs: the quantized sun direction, the level's snapped
+>   centre, that level's NDC offset, the floating origin, the page's
+>   sub-rectangle and the settings that size the box. Onto it is folded a
+>   **commutative** sum of every caster whose light-space bounds touch the page —
+>   `model`, `sphere`, `mat` and the identity+version of the geometry, and
+>   deliberately **not** `VsmCasterRaw::ids`, whose group and local indices are
+>   properties of this frame's packing order and would re-rasterize the whole atlas
+>   the frame a tree was planted at the other end of the level. The cache is
+>   `(light, page, stamp)` per **slot**, all three, because a slot that is evicted,
+>   refilled by another page and re-admitted to the first would otherwise read as a
+>   hit while holding the second page's depth.
+>
+>   The claim is asserted the way the phase gate demands — *"the arm FAILS if the
+>   counter is dead"*. `a_static_scene_stops_rasterizing_pages_after_warm_up`
+>   proves the warm-up rasterized, drew and packed, and **then** that six more
+>   frames of the identical scene move `pages` by **zero**, `draws` by zero and
+>   `frames` by zero while `cached_pages` grows by the resident set every frame.
+>   And the texels are the claim, not the skipped pass:
+>   `a_cached_pages_texels_are_what_a_fresh_raster_produces` copies the whole atlas
+>   off the device, throws the cache away through a gate's door, renders one frame
+>   that re-rasterizes **every** resident page, and compares the two images word
+>   for word — with the flush's own re-raster count as the anti-vacuity, or it
+>   would be comparing an atlas with itself.
+>
+> * *"movement invalidates exactly the pages the mover's light-space bounds touch
+>   (page-exact, engagement-counter proven); light moves/rotations invalidate their
+>   own tree only; origin rebase and camera cuts invalidate via the `is_camera_cut`
+>   precedent"* — **met, and it is a scatter rather than a product.** The obvious
+>   implementation tests every caster against every page with the cull's own
+>   `vsm_page_sees_sphere`, which is `1 024 × 16 384` sphere tests a frame at the
+>   ceilings. Instead a clipmap caster's sphere is projected **once** into the
+>   light's level-0 NDC and each level's page rectangle follows by arithmetic, so
+>   the cost is `casters × levels × pages the caster actually covers` and
+>   `VsmRasterStats::invalidation_touches` is that number rather than a claim about
+>   it. The rectangle is the sphere's axis-aligned NDC extent, which **contains**
+>   the frustum test the cull performs — so it may re-rasterize a page the cull
+>   then rejects and can never miss one the cull keeps, which is the only direction
+>   an over-approximation is allowed to err in. Perspective lights have no such
+>   lattice and take the per-page sphere test directly, over their own pages.
+>
+>   `a_mover_invalidates_exactly_the_pages_its_bounds_touch` asserts **two** things
+>   and the second is the one that matters: the count equals the pages either of
+>   the mover's two positions' spheres enters, computed independently through
+>   `vsm_page_sees_sphere` — and every page it did *not* touch is **bit-identical**
+>   afterwards. That second half is what `set_scissor_rect` is now load-bearing
+>   for. A light that moves invalidates its own tree only, by construction: a page
+>   matrix carries its own light's projection and nothing else's, which
+>   `a_carve_invalidates_only_the_pages_the_carved_tile_touches` measures at the
+>   granularity below it (one of two terrain tiles carved, the other's pages
+>   bit-identical). An **origin rebase** enters the geometric stamp directly — the
+>   page matrix is render-local, so a rebase moves every one of them.
+>
+> * *"the sun's slow arc: clipmap-level time-slicing so a moving sun re-rasterizes
+>   coarse levels lazily inside budget (measured policy, not a magic constant)"* —
+>   **met on the policy, deviated on the *per-level* half, and the deviation is a
+>   number.** `docs/memos/p27-3-page-cache.md` carries it.
+>
+>   The policy is a **quantum on the direction**, not a frame counter: a clock
+>   would make a page's content a function of the frame *history*, which is the
+>   property this phase is built not to have. `q = texel0 / h_ref` — one level-0
+>   shadow texel of shadow travel for a caster at `VSM_SUN_REFERENCE_HEIGHT_M`
+>   (2 m, the shortest caster whose own shadow a player watches, and therefore the
+>   one whose shadow moves fastest in texels per radian). At the shipped defaults
+>   that is **3.91 mrad**, **1 608 quanta a revolution**, **44.8 frames a quantum**
+>   on a twenty-minute day at 60 fps, against **four frames** to redraw the whole
+>   1 024-slot atlas at the 256-page cap.
+>   `the_sun_quantum_is_one_shadow_texel_at_the_reference_height` pins all five,
+>   and measures the residual angle through the **shipped**
+>   `quantize_light_dir` over a 721-sample arc, asserting **both** bounds — at most
+>   about one texel of travel (a quantum that shows) and **more than a tenth of
+>   one** (a quantum that caches nothing and is a constant pretending to be a
+>   policy).
+>
+>   **The deviation**: the literal clause asks for a quantum that *doubles per
+>   level*, and the marking pass cannot follow one. A rotation `δ` moves a point at
+>   level `L`'s rim by `N · δ / 2` **pages of that level** — level-independent — so
+>   at `N = 64` and level 7's doubled quantum of 0.5 rad that is **sixteen pages**,
+>   a quarter of the grid. (Computed by the arm rather than in this paragraph: the
+>   first draft multiplied it out here and wrote thirty-two.) The marking pass has
+>   one projection per (light, face) and the
+>   per-level variation it can follow is a *translation* in NDC, which is exactly
+>   what `ClipmapLayout::level_offset` is; a per-level **rotation** is not, and
+>   following it needs a per-level matrix in `vsm_mark.wgsl`. So there is one
+>   quantum per light, at the finest level's tolerance, and the per-level laziness
+>   lives in the **drain order** — dirty pages rasterize finest level first, then
+>   by slot, under `VSM_MAX_RASTER_PAGES`, so a quantum tick's burst spends the cap
+>   on the pages a receiver reads at the most screen pixels.
+>   `the_dirty_drain_takes_the_finest_levels_first` pins the order over a fixture
+>   whose marked set spans several levels (the single cube every other arm uses
+>   marks **one**, and an ordering over one level is vacuous — measured, that is
+>   what the first draft ran against). The stability condition is the last two
+>   numbers above: the drain is **eleven times faster** than the thing that fills
+>   it, asserted inside the quantum arm.
+>
+> **The prerequisite the ROADMAP named, and what it cost.** P27.1 shipped one
+> snapped centre for every clipmap level, which is what made `N/4 + x/2` an exact
+> parent rule and what made a *coarse* level's grid shift on any camera step — so
+> nothing coarse could ever cache. Each level now snaps **in the light's own
+> basis** (P27.1 snapped world x/y/z, which only lands the grid on the lattice
+> when the light is axis-aligned) to its own `page0 · 2^L`, from the **f64 world
+> eye** so a floating-origin rebase cannot move the lattice. Measured as a count
+> rather than described: over a 40-page camera walk level `L` takes about
+> `40 / 2^L` distinct grid positions, and `clipmap_centre` — kept alive as the
+> control — moves on every one of them.
+>
+> The **along-light** coordinate deliberately does not snap per level: a centre
+> that slides along the light rewrites every page of every level, so per-level
+> snapping there would make level 0's one-metre step invalidate the whole atlas.
+> It snaps once at the coarsest stride, and the box is `N` of those deep.
+>
+> The price is that the levels stop being **concentric**, and it is unavoidable:
+> level `L` tracks the camera at granularity `w_L` and level `L+1` at `2·w_L`, so
+> the two centres differ by up to `1.5·w_L` and cannot both be centred on the
+> camera *and* share a centre. `VsmLightDesc::parent_at` is the generalization —
+> `⌊(g_L + x)/2⌋ − g_{L+1}`, floor division because a cell index is signed — and it
+> **contains** the shipped rule rather than replacing it: at the concentric
+> origins it is identically `N/4 + ⌊x/2⌋`, page for page, over every page of every
+> level of four grids **including two that are multiples of four and not powers of
+> two**, which is where the P26.2 odd-extent law finally has something to bite on
+> in this address space (the P27.2 audit recorded that it had nothing).
+> `VsmResidency::set_clip_origins` recomputes one light's fallback chain when the
+> origins move, and the residency gate's brute-force walk reads the light's own
+> origins — so the whole-table check after **every** transaction of the 200-round
+> churn is against the tree the light actually has.
+>
+> **The structural debts the P27.2 ledger left, and what each became.**
+>
+> * *"Replace the whole-atlas `LoadOp::Clear` with per-page clears… the scissor
+>   becomes load-bearing"* — **done, and the mutation flipped.** The pass loads;
+>   each dirty page gets one full-screen triangle at the clear depth with
+>   `depth_compare: Always`, drawn with the **viewport left at the whole atlas**,
+>   because a clear wants a rectangle and not a projection. The scissor is
+>   therefore the only thing confining it: deleting `set_scissor_rect` from that
+>   loop now fails `a_mover_invalidates_exactly_the_pages_its_bounds_touch` and
+>   `a_carve_invalidates_only_the_pages_the_carved_tile_touches`, where in P27.2 it
+>   failed nothing. The P27.2 ledger's survivor ruling is superseded by this
+>   sentence.
+> * *"A carved terrain hole still casts"* — **closed for holes, refused for the
+>   deformation window, and the refusal is the interesting half.** The caster mesh
+>   drops a quad when any sample of its own decimated block is holed: the terrain
+>   raster's own poison rule (`terrain.wgsl::is_holed`) widened from the bilinear
+>   cell to the block, because a hole narrower than the decimation stride would
+>   otherwise fall between four corners and go on casting. Erring wide removes
+>   shadow, which is the leak direction this phase already chose.
+>   `a_carved_terrain_hole_casts_no_shadow` asserts it in **metres** — every
+>   written texel reconstructed through its page matrix, none inside the hole's
+>   world footprint, against a control that covers it densely — and
+>   `a_carve_invalidates_only_the_pages_the_carved_tile_touches` closes the
+>   invalidation half.
+>
+>   The **deformation window is refused**, not deferred without a reason: it is
+>   camera-following (512 texels of 0.25 m snapped to the eye), so a caster mesh
+>   built through it would be a mesh whose vertices are a function of where the
+>   viewer stands — the same objection the P27.2 ledger rejected the *clipmap
+>   patch* for, and it would make "static pages survive frames untouched" false
+>   inside 128 m of the camera, which is where every page that matters lives. Cost
+>   stated: a rut up to `DEFORM_MAX_DEPTH_M` = 1 m deep casts no shadow of its own.
+>   P28.3 is where it goes away, because the P22.1 lattice is already committed and
+>   it is only the *window* that follows the camera.
+> * *"The skinned cache rebuilds bind-pose vertex buffers on every scene-version
+>   change"* — **fixed**: the bind poses key on the `Arc` the scene hands over
+>   (`passes::skinned`'s rule) and the palettes still key on the scene version,
+>   because a palette *is* the animation. The two halves were one key and are two
+>   now. The palette also enters the caster's content stamp, so
+>   `an_animating_character_invalidates_its_pages_and_a_still_one_does_not`
+>   asserts both directions — either alone is satisfied by a defect (a stamp that
+>   ignored the palette freezes a walking character's shadow at the pose its pages
+>   were first filled at; one that folded the frame index re-rasterizes a statue).
+> * *"`VsmRasterStats::scatter_casters` counts what the fallback pack produced"* —
+>   **fixed**: `merge_bucketed` concatenates `rigid[k] ++ scatter[k]`, so the
+>   survivors are the entries past `rigid_len[k]` that the caster ceiling actually
+>   admitted. Recorded honestly: the **truncating** case has no arm, because
+>   reaching it needs 16 384 packed casters *and* a scatter batch, which costs a
+>   headless fixture more than the three lines it would arm — the same ruling the
+>   P27.2 audit made about the group ceiling's vgeom and terrain call sites.
+> * *"`VSM_MAX_RASTER_PAGES` pressure drops once caching lands — re-measure"* —
+>   **re-measured, and it stays at 256 with a changed meaning**: it caps the pages
+>   a frame **re-rasterizes**, not the pages that may be resident, and a cached
+>   page costs one stamp comparison and does not consume it. It binds only inside a
+>   burst, and the burst drains eleven times faster than the sun's quantum refills
+>   it (four frames against 44.8). Still counted in `deferred_pages`, still never
+>   silent, and a page past it is now *stale* rather than *lit* — which is a
+>   strictly better degradation than P27.2's.
+>
+> **The P27.2 audit's other two bearings, answered.** `VSM_MAX_GROUPS = 1 024`
+> still refuses through the one door `admit_group` and still counts: caching
+> changed *how often* the group population is built, not what it is, and
+> `the_group_ceiling_counts_the_groups_it_refuses` is green unchanged. The vgeom
+> and terrain call sites still have no device arm, for the reason that audit gave.
+> And **the page's content is still pinned to its slot corner** — `VSM_PAGE_BORDER`
+> is 0 and nothing here wanted otherwise; `docs/memos/p27-1-page-geometry.md` now
+> carries the confirmation, because its border rejection was written *for* this
+> batch's clause and the two page-exact arms are what it predicted.
+>
+> **Mutation-verified — fifteen mutations, thirteen killed, and both survivors are
+> rulings.** Killed by name: the hole test ignored, the clear's scissor deleted, a
+> cache that never hits, a stamp that ignores its casters, a scatter that folds
+> into every page, `LoadOp::Load` back to `Clear`, the clip origin's **y** sign
+> (the axis that runs *against* the light basis's up, because page row 0 is the
+> top — it fails in exactly one arm and nowhere else), an inert sun quantum, the
+> per-level offset dropped in the layout, the per-level offset dropped again in the
+> page matrix, an unsorted drain, a parent rule that ignores its origins, and a
+> skinned stamp that ignores its palette. **Survived:** the `is_camera_cut` flush —
+> deleting it while keeping its counter changes no verdict, because a cut moves
+> every page's matrix and the stamps invalidate the same set, which is what
+> `a_camera_cut_flushes_the_cache_and_the_stamps_would_have_too` asserts as a
+> measurement (*zero* page matrices survive a 194 m cut unchanged), so the day the
+> trigger stops being redundant that arm fails and the ruling is rewritten rather
+> than the trigger quietly removed; and the terrain cache key's `hole_words` term,
+> redundant with the version bump a projector makes when it writes a mask, kept for
+> the `version: 0` case the P16.3b1 change-stamp doctrine allows, on
+> `passes::terrain::CachedTile`'s precedent. Both have the standing the P27.2
+> scissor and the P27.1 `contain > levels − 1` early-out already have.
+>
+> **What this batch did NOT do**, in one place, for P27.4.
+> **There is no receiver still** — `shadow_factor` reads the CSM, the atlas is
+> sampled by nothing, and P27.4 still owes the `VSM_ENTRY_NONE` → *lit* fail
+> direction its gate. This batch is careful not to discharge it.
+> **There is no clipmap scroll**: when a level's grid shifts, every resident page
+> of that level names a different world cell and is re-rasterized. A scroll —
+> re-seating page `(x, y)` at `(x − sx, y − sy)` and evicting what falls off —
+> would leave only the newly exposed row and column dirty, **127 pages against up
+> to 4 096** at the shipped grid. It is bounded work at a bounded cadence, entirely
+> Ring-0 and adapter-free, and it belongs with P28.3's merged residency, where
+> re-seating a slot stops being one crate's private business.
+> **A fully-cached frame still packs its casters on the CPU.** The stamps are a
+> function of the caster set, so `sync_vgeom` / `sync_skinned` / `sync_terrain` and
+> `pack_casters` run every frame; what caching removes is the GPU half (the
+> viewport switches, the clears, the cull dispatch and the indirect draws) and the
+> scatter's own cost is in `invalidation_touches`. A CPU-side caster cache is
+> P28.3's, for the same reason the scroll is.
+> **The per-page meshlet cut is still not built**, and
+> `docs/memos/p27-2-vgeom-casters.md` was re-read rather than renewed: its third
+> reason is **discharged** (the cost is a number now, and the number is the dirty
+> page set) and its first two stand — the tuning question has no receiver until
+> P27.4 and the meshlet pools are camera-driven residency until P28.3. Its premise
+> that invalidation and the cut "want one answer" turns out to be false:
+> invalidation works from a bounding sphere and the cut is about detail.
+> **The skinned cull sphere is still the bind pose inflated 50 %**, and P27.3 made
+> that margin *load-bearing* rather than exact — it now costs re-rasterized pages
+> as well as vertex invocations, in the same conservative direction. The exact
+> bound is the posed AABB the renderer is still not handed.
+> **The sun's quantum is per light, not per level** (above), and the clipmap's
+> `range` and near/far are unchanged, so **no depth bias and no face culling**
+> still, and the bias story is still P27.4's.
+> **`VSM_PRIORITY_SPECULATIVE` still has no producer** (P28.4 is its caller), a
+> light's `range` still does not cull a marking projection, and nothing logs
+> `vsm_summary` in a host or shows an editor surface.
 - **P27.4 Receivers + filtering** — 1. `shadow_factor` reads through the page table with
   PCF that respects page borders (border texels or clamped kernels — measured); 2. clipmap
   level blend replaces cascade blend; 3. point/spot receiver terms in the lit passes; 4. the
