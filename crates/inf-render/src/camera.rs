@@ -143,12 +143,15 @@ pub struct ViewUniforms {
     pub cam_up: [f32; 4],
     /// View-mode flags (R-P2): `x` = unlit (1.0 ⇒ the lit scene passes return
     /// albedo+emissive directly, skipping the light loop — drives the Unlit,
-    /// Wireframe **and** Biomes view modes); `y` = biome overlay (P19.2: 1.0 ⇒ the
-    /// terrain pass tints by biome id instead of shading, set **only** by
-    /// `ViewMode::Biomes`, which sets `x` too); `zw` reserved. Appended last so
-    /// every pass that declares the shorter `View` struct is unaffected and every
-    /// pre-R-P2 golden stays byte-identical (the renderer writes 0 in both slots
-    /// for the default Lit mode).
+    /// Wireframe, Biomes **and** VtResidency view modes); `y` = biome overlay
+    /// (P19.2: 1.0 ⇒ the terrain pass tints by biome id instead of shading, set
+    /// **only** by `ViewMode::Biomes`, which sets `x` too); `z` = virtual-texture
+    /// residency heat-map (P26.5: 1.0 ⇒ the three lit mesh shaders return
+    /// `vt_heat` instead of shading, set **only** by `ViewMode::VtResidency`,
+    /// which sets `x` too); `w` reserved. Appended last so every pass that
+    /// declares the shorter `View` struct is unaffected and every pre-R-P2 golden
+    /// stays byte-identical (the renderer writes 0 in every slot for the default
+    /// Lit mode).
     pub flags: [f32; 4],
 }
 

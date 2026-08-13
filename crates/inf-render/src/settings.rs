@@ -456,12 +456,33 @@ impl Default for AtmosphereSettings {
     }
 }
 
+/// **The page pool's budget on the tier below High**, in bytes: 12 MiB.
+///
+/// Half the default. Not a taste: the analytic floor is bounded at
+/// `VT_FLOOR_LEVELS`'s ≤ 21 pages per texture plus
+/// [`crate::VT_FLOOR_MAX_TILES`]'s 16 per visible surface, so what a smaller
+/// pool costs is *refinement*, never a hole — the shader still resolves to a
+/// resident ancestor and the surface is blurrier rather than absent. 12 MiB is
+/// 1 357 BC1 pages, which holds the camera-free floor of **64** textures before
+/// anything is deferred at all.
+pub const VT_BUDGET_MEDIUM_BYTES: u64 = 12 * 1024 * 1024;
+
+/// **The page pool's budget on Low**, in bytes: 6 MiB — 678 BC1 pages, the
+/// camera-free floor of 32 textures.
+///
+/// The Low tier is where the clamp law earns its keep: this turns nothing off.
+/// A Low-tier machine samples the same virtual textures through the same door
+/// and sees the same content at a coarser level, which is precisely the
+/// degradation virtual texturing exists to make possible — and it is why the
+/// budget is a *number* here and not a `bool`.
+pub const VT_BUDGET_LOW_BYTES: u64 = 6 * 1024 * 1024;
+
 /// Streaming virtual texturing (P26).
 ///
-/// One knob so far, and it is a *format* knob rather than an on/off switch —
-/// whether a scene has virtual textures is a property of its content, not of the
-/// renderer, the same reasoning [`AtmosphereSettings`] and
-/// [`crate::water::WaterSettings`] are shaped by.
+/// Two knobs, and neither is an on/off switch — whether a scene has virtual
+/// textures is a property of its content, not of the renderer, the same
+/// reasoning [`AtmosphereSettings`] and [`crate::water::WaterSettings`] are
+/// shaped by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VirtualTextureSettings {
     /// Upload tiles as **block-compressed** pages (`TEXTURE_COMPRESSION_BC`).
@@ -481,11 +502,29 @@ pub struct VirtualTextureSettings {
     /// deliberately does not touch it: BC support is orthogonal to how much GPU
     /// there is, exactly as `POLYGON_MODE_LINE` is.
     pub bc_tiles: bool,
+    /// **The physical page pool's VRAM ceiling**, in bytes (P26.5).
+    ///
+    /// The one number that decides how much unique texture detail is resident at
+    /// once, and therefore the natural tier knob — which is what
+    /// [`RenderTier::apply`](crate::caps::RenderTier::apply) makes it, clamping
+    /// to [`VT_BUDGET_MEDIUM_BYTES`] / [`VT_BUDGET_LOW_BYTES`] with a `min`, so a
+    /// caller that already asked for less keeps less and no tier ever hands a
+    /// machine a bigger atlas than it asked for.
+    ///
+    /// Both hosts read it through
+    /// [`build_vt_level`](crate::build_vt_level)'s `budget_bytes` argument, which
+    /// is why it lives in settings rather than being passed at each call site:
+    /// the editor viewport and the shipped player would otherwise be two places
+    /// that decide how much VRAM a level gets.
+    pub budget_bytes: u64,
 }
 
 impl Default for VirtualTextureSettings {
     fn default() -> Self {
-        Self { bc_tiles: true }
+        Self {
+            bc_tiles: true,
+            budget_bytes: crate::DEFAULT_VT_BUDGET_BYTES,
+        }
     }
 }
 

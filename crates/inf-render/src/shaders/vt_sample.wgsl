@@ -362,3 +362,45 @@ fn vt_apply_normal(
     let bitangent = cross(n, tangent);
     return normalize(tangent * ts.x + bitangent * ts.y + n * ts.z);
 }
+
+/// **The residency heat-map** (P26.5) — what `ViewMode::VtResidency` paints.
+///
+/// One question per fragment: *how many levels coarser than the one this pixel
+/// asked for is the tile it actually got?* That is the number a streaming bug
+/// shows up in and the number a budget decision moves, and it is exactly
+/// `vt_resolve`'s `got - m` — the same walk the sampling path takes, so the view
+/// mode cannot disagree with the picture it is explaining.
+///
+/// The ramp is five buckets and deliberately not a gradient: a continuous colour
+/// invites reading a number off it, and there is no number here, only "the
+/// streamer is N levels behind".
+///
+///   grey    no virtual texture on this surface (the scalar path)
+///   green   exact — the tile this pixel wanted is resident
+///   yellow  one level of fallback
+///   orange  two
+///   red     three or more, or the analytic floor standing alone
+///
+/// Grey is load-bearing: it is what tells an author that a surface they believed
+/// was textured is not bound at all, which no amount of staring at a lit frame
+/// distinguishes from a texture that happens to look like its scalar colour.
+fn vt_heat(maps: vec3<u32>, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec3<f32> {
+    var slot = 0u;
+    if (vt_bound(maps.x)) { slot = maps.x; }
+    else if (vt_bound(maps.y)) { slot = maps.y; }
+    else if (vt_bound(maps.z)) { slot = maps.z; }
+    if (slot == 0u) {
+        return vec3<f32>(0.06, 0.06, 0.07);
+    }
+    let b = vt_table[VT_HEADER_WORDS + (slot - 1u)];
+    let w_uv = uv - floor(uv);
+    let m = vt_mip(b, ddx, ddy);
+    let r = vt_resolve(b, w_uv, m);
+    // `got` is never finer than `m` (an entry names an ANCESTOR), so this
+    // subtraction cannot wrap.
+    let behind = r.got - m;
+    if (behind == 0u) { return vec3<f32>(0.10, 0.85, 0.20); }
+    if (behind == 1u) { return vec3<f32>(0.95, 0.85, 0.10); }
+    if (behind == 2u) { return vec3<f32>(1.00, 0.45, 0.05); }
+    return vec3<f32>(0.95, 0.08, 0.08);
+}

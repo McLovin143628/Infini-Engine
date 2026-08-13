@@ -249,11 +249,16 @@ impl PlayerRenderHost {
             return;
         }
         let materials = self.materials.clone();
+        // The budget is the TIER's (P26.5), read off the settings the host
+        // already clamped through `RenderTier::apply` — not the crate default,
+        // which is what both hosts passed through P26.4 and which made the pool
+        // the one piece of the renderer a weak GPU paid full price for.
+        let budget = self.renderer.settings().vt.budget_bytes;
         let level = inf_render::build_vt_level(
             &self.gpu.device,
             &self.gpu.queue,
             self.renderer.settings(),
-            inf_render::DEFAULT_VT_BUDGET_BYTES,
+            budget,
             &mats,
             |g| materials.source(g),
         );

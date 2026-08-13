@@ -48,6 +48,14 @@ use crate::wetness::{pack_wetness, WetnessResources};
 ///   the smallest honest treatment: a biome id is a terrain-only concept, and
 ///   flat-shading the rest keeps the painted map readable without pretending a
 ///   mesh has a biome. Needs no GPU feature, so it is never degraded.
+/// * `VtResidency` (P26.5) — every virtual-textured surface painted by **how far
+///   behind the streamer is** at that pixel (`vt_sample.wgsl`'s `vt_heat`, off
+///   the same `vt_resolve` the sampling path runs); driven by the `flags.z`
+///   uniform. It sets `flags.x` too, on the `Biomes` precedent and for the same
+///   reason: residency is a property of a virtual texture, and flat-shading
+///   everything else keeps the ramp readable instead of competing with it. Needs
+///   no GPU feature, so it is never degraded — a scene with no virtual textures
+///   paints entirely grey, which is the correct answer rather than a failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
     #[default]
@@ -55,6 +63,7 @@ pub enum ViewMode {
     Unlit,
     Wireframe,
     Biomes,
+    VtResidency,
 }
 
 impl ViewMode {
@@ -68,7 +77,7 @@ impl ViewMode {
     pub fn unlit_flag(self) -> f32 {
         match self {
             ViewMode::Lit => 0.0,
-            ViewMode::Unlit | ViewMode::Wireframe | ViewMode::Biomes => 1.0,
+            ViewMode::Unlit | ViewMode::Wireframe | ViewMode::Biomes | ViewMode::VtResidency => 1.0,
         }
     }
 
@@ -78,7 +87,22 @@ impl ViewMode {
     pub fn biomes_flag(self) -> f32 {
         match self {
             ViewMode::Biomes => 1.0,
-            ViewMode::Lit | ViewMode::Unlit | ViewMode::Wireframe => 0.0,
+            ViewMode::Lit | ViewMode::Unlit | ViewMode::Wireframe | ViewMode::VtResidency => 0.0,
+        }
+    }
+
+    /// The `View.flags.z` uniform value: `1.0` **only** for
+    /// [`VtResidency`](Self::VtResidency) (P26.5).
+    ///
+    /// Its own flag rather than a second meaning for `flags.y`, because the two
+    /// overlays answer different questions about different geometry — a terrain
+    /// biome tint and a virtual-texture residency ramp can both be wanted and
+    /// only one can be shown, and a shader made to disambiguate one float is the
+    /// place that eventually gets it wrong.
+    pub fn vt_residency_flag(self) -> f32 {
+        match self {
+            ViewMode::VtResidency => 1.0,
+            ViewMode::Lit | ViewMode::Unlit | ViewMode::Wireframe | ViewMode::Biomes => 0.0,
         }
     }
 
@@ -667,6 +691,30 @@ impl EngineRenderer {
         self.vt_pop_in
     }
 
+    /// **The one line a host logs about virtual texturing** (P26.5) — and the
+    /// non-gate reader `VtStats::summary` and [`crate::VtPopIn::summary`] were
+    /// both declared for.
+    ///
+    /// Two halves because they answer two questions and one number hides which:
+    /// the residency's is *what is in the pool right now* (textures, slots,
+    /// pinned roots, whether the budget clamped), the streamer's is *what this
+    /// session has been through* (admits, deferrals, how many frames sat at
+    /// fallback, how often the feedback ring landed). A pool that is full and a
+    /// streamer that is thrashing look identical in either one alone.
+    ///
+    /// `None` on a textureless scene, which is not the same as a line of zeros:
+    /// a host that prints nothing is saying "this level has no virtual
+    /// textures", and one that prints zeros is saying "it has some and they are
+    /// doing nothing".
+    pub fn vt_summary(&self) -> Option<String> {
+        let lib = self.vt_textures.as_ref()?;
+        Some(format!(
+            "{}; {}",
+            lib.residency().stats().summary(),
+            self.vt_pop_in.summary()
+        ))
+    }
+
     /// **The streaming loop**, run once per frame at the sync point (P26.4).
     ///
     /// The five steps in `crate::vt_stream`'s module docs, in that order, and
@@ -909,13 +957,17 @@ impl EngineRenderer {
         self.view_mode
     }
 
-    /// Set the shading view mode (Lit / Unlit / Wireframe / Biomes). A `Wireframe`
-    /// request on an adapter without `POLYGON_MODE_LINE` is clamped to `Unlit`
-    /// (logged once via `tracing`) — wireframe is a hard GPU-feature requirement,
-    /// so we degrade gracefully rather than fail. `Biomes` is **never** clamped: it
-    /// is a uniform flag plus one texture, so every adapter that can draw terrain
-    /// at all can draw it. The editor viewport + goldens set this; it is never
-    /// persisted and the player never touches it.
+    /// Set the shading view mode (Lit / Unlit / Wireframe / Biomes /
+    /// VtResidency). A `Wireframe` request on an adapter without
+    /// `POLYGON_MODE_LINE` is clamped to `Unlit` (logged once via `tracing`) —
+    /// wireframe is a hard GPU-feature requirement, so we degrade gracefully
+    /// rather than fail. `Biomes` is **never** clamped: it is a uniform flag plus
+    /// one texture, so every adapter that can draw terrain at all can draw it.
+    /// Neither is `VtResidency` (P26.5) — it is a uniform flag over bindings the
+    /// lit passes already carry, so an adapter that can sample a virtual texture
+    /// can paint the heat-map, and one that has no virtual textures to paint
+    /// gets the grey that says so. The editor viewport + goldens set this; it is
+    /// never persisted and the player never touches it.
     pub fn set_view_mode(&mut self, mode: ViewMode) {
         let effective = if mode == ViewMode::Wireframe && !self.polygon_mode_line {
             if !self.wireframe_warned {
@@ -1004,6 +1056,10 @@ impl EngineRenderer {
         // P19.2 Biomes: the terrain pass tints by biome id. Every other mode
         // writes 0 here, so the branch is dead in the frames the goldens capture.
         uniforms.flags[1] = self.view_mode.biomes_flag();
+        // P26.5 VtResidency: the lit mesh shaders paint `vt_heat` instead of
+        // shading. Every other mode writes 0 here, so the branch is dead in the
+        // frames the goldens capture.
+        uniforms.flags[2] = self.view_mode.vt_residency_flag();
         if self.settings.taa {
             uniforms.view_proj = jvp.to_cols_array();
             uniforms.inv_view_proj = jvp.inverse().to_cols_array();

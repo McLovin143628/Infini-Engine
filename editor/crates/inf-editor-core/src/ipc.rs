@@ -794,8 +794,9 @@ pub enum ViewportModeDto {
 }
 
 /// Viewport shading view mode (R-P2; `viewport_set_view_mode`). Serializes as the
-/// tag string `"Lit"`/`"Unlit"`/`"Wireframe"`/`"Biomes"`. `Wireframe` degrades to
-/// `Unlit` in the renderer when the adapter lacks `POLYGON_MODE_LINE`.
+/// tag string `"Lit"`/`"Unlit"`/`"Wireframe"`/`"Biomes"`/`"VtResidency"`.
+/// `Wireframe` degrades to `Unlit` in the renderer when the adapter lacks
+/// `POLYGON_MODE_LINE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub enum ViewModeDto {
     Lit,
@@ -804,6 +805,12 @@ pub enum ViewModeDto {
     /// Terrain tinted by its per-sample biome id, everything else unlit (P19.2).
     /// Needs no GPU feature, so it never degrades.
     Biomes,
+    /// Every virtual-textured surface painted by how far behind the streamer is
+    /// at that pixel — green resident, red at the analytic floor, grey unbound
+    /// (P26.5). Everything else renders unlit, on the `Biomes` precedent. Needs
+    /// no GPU feature; a level with no virtual textures paints uniformly grey,
+    /// which is the answer rather than a failure.
+    VtResidency,
 }
 
 /// 2D-mode snapping configuration pushed from the viewport toolbar

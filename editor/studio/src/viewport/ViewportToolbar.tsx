@@ -34,6 +34,11 @@ const VIEW_MODES: [ViewModeDto, string, string][] = [
   ["Unlit", "Unlit", "Flat albedo + emissive (no lighting)"],
   ["Wireframe", "Wireframe", "Edge wireframe (falls back to Unlit if the GPU can't raster lines)"],
   ["Biomes", "Biomes", "Tint terrain by painted biome; other geometry unlit"],
+  [
+    "VtResidency",
+    "VT Residency",
+    "Virtual-texture streaming heat-map: green resident, red at the fallback floor, grey unbound",
+  ],
 ];
 
 const TOOLS: [ToolModeDto, string, string][] = [

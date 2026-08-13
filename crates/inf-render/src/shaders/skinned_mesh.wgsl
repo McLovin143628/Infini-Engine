@@ -155,6 +155,22 @@ fn point_attenuation(dist: f32, range: f32) -> f32 {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    // P26.5 RESIDENCY HEAT-MAP (`ViewMode::VtResidency`): every virtual-textured
+    // surface painted by how far behind the streamer is at that pixel.
+    //
+    // **Before the unlit short-circuit, not after.** `VtResidency` sets
+    // `flags.x` too (the `Biomes` precedent: everything that is not the overlay
+    // renders flat so the ramp is readable), so a heat branch placed below the
+    // unlit return would never execute — measured, and it is the whole defect a
+    // real-frame arm catches and a source read does not.
+    //
+    // `flags.z` is 0.0 in every other mode, so this is present-and-false and
+    // every golden runs the identical arithmetic. The derivatives are taken
+    // here, in uniform control flow: `flags.z` is a uniform, so the return is
+    // uniform, and `in.uv` is an interpolated input either way.
+    if (view.flags.z > 0.5) {
+        return vec4<f32>(vt_heat(in.vt, in.uv, dpdx(in.uv), dpdy(in.uv)), 1.0);
+    }
     // Unlit view mode (R-P2): albedo + emissive, no lighting (Unlit + Wireframe).
     if (view.flags.x > 0.5) {
         return vec4<f32>(in.color.rgb + in.emissive, in.color.a);

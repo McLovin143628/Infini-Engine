@@ -134,6 +134,22 @@ impl RenderTier {
         // the byte-stable default (`GiQuality::High` == the pre-P18.4 geometry) is
         // preserved.
         settings.gi.quality = settings.gi.quality.clamp_to(self);
+        // P26.5 — the virtual-texture page pool, and it is the shape of clamp
+        // this law was written for. A tier never turns virtual texturing OFF:
+        // whether a level has virtual textures is a property of its content, and
+        // the analytic floor is bounded per texture and per visible surface, so a
+        // smaller pool costs *refinement* and never a hole. What it does is take
+        // the `min` — a caller that already asked for less keeps less, High is a
+        // no-op, and the operation is idempotent.
+        //
+        // `bc_tiles` beside it is deliberately NOT touched: BC support is an
+        // adapter capability, clamped by `clamp_bc_tiles`, and how much GPU there
+        // is has nothing to say about it.
+        settings.vt.budget_bytes = settings.vt.budget_bytes.min(match self {
+            RenderTier::High => u64::MAX,
+            RenderTier::Medium => crate::settings::VT_BUDGET_MEDIUM_BYTES,
+            RenderTier::Low => crate::settings::VT_BUDGET_LOW_BYTES,
+        });
         settings
     }
 
@@ -180,6 +196,14 @@ impl RenderTier {
         settings.shadows.enabled = false;
         // A phone still gets a sky — at the smallest LUTs and the fewest steps.
         settings.atmosphere.quality = settings.atmosphere.quality.clamp_to(RenderTier::Low);
+        // A phone still samples its virtual textures — out of the smallest pool
+        // (P26.5), through the same door, at a coarser level. This is the tier
+        // where the transcode fallback also lands (no BC ⇒ 8× the page bytes),
+        // so the two decisions compound and the budget is the one that bounds it.
+        settings.vt.budget_bytes = settings
+            .vt
+            .budget_bytes
+            .min(crate::settings::VT_BUDGET_LOW_BYTES);
         settings
     }
 }
@@ -608,6 +632,82 @@ mod tests {
         // Idempotent.
         let m = RenderTier::Medium.apply(s);
         assert_eq!(RenderTier::Medium.apply(m), m);
+    }
+
+    /// **The VT pool budget is a tier knob, and the clamp only ever lowers it**
+    /// (P26.5).
+    ///
+    /// The P26.4 ledger's remainder: *"the pool budget is still
+    /// `DEFAULT_VT_BUDGET_BYTES` on both hosts; per-tier knobs are P26.5 (1)."*
+    /// The law it lands under is the one the phase's own "Done when" names —
+    /// `RenderTier::apply` clamps, never enables — so this arm is a `min` test in
+    /// four directions, not a table of expected values.
+    #[test]
+    fn the_vt_pool_budget_clamps_down_and_never_up() {
+        use crate::settings::{VT_BUDGET_LOW_BYTES, VT_BUDGET_MEDIUM_BYTES};
+        let s = RenderSettings::default();
+        assert_eq!(s.vt.budget_bytes, crate::DEFAULT_VT_BUDGET_BYTES);
+        // High is a no-op: the default configuration on a capable machine is the
+        // pre-P26.5 pool, byte for byte.
+        assert_eq!(
+            RenderTier::High.apply(s).vt.budget_bytes,
+            crate::DEFAULT_VT_BUDGET_BYTES
+        );
+        assert_eq!(
+            RenderTier::Medium.apply(s).vt.budget_bytes,
+            VT_BUDGET_MEDIUM_BYTES
+        );
+        assert_eq!(
+            RenderTier::Low.apply(s).vt.budget_bytes,
+            VT_BUDGET_LOW_BYTES
+        );
+        // …and the ladder really descends, or the three assertions above are one
+        // assertion written three times. A `const` block on the P26.3b
+        // precedent: clippy is right that this is constant-valued, and its
+        // remedy is the stronger one — the day someone flattens two tiers this
+        // must fail the BUILD, not a test.
+        const {
+            assert!(VT_BUDGET_LOW_BYTES < VT_BUDGET_MEDIUM_BYTES);
+            assert!(VT_BUDGET_MEDIUM_BYTES < crate::DEFAULT_VT_BUDGET_BYTES);
+        }
+
+        // A caller that already asked for LESS than the tier allows keeps its
+        // own number — the half of "clamps, never enables" that a table of
+        // expected values cannot see.
+        let mut frugal = s;
+        frugal.vt.budget_bytes = 1024 * 1024;
+        for tier in [RenderTier::High, RenderTier::Medium, RenderTier::Low] {
+            assert_eq!(
+                tier.apply(frugal).vt.budget_bytes,
+                1024 * 1024,
+                "{tier:?} RAISED a caller's pool budget"
+            );
+        }
+        // Idempotent, like every other clamp here.
+        let m = RenderTier::Medium.apply(s);
+        assert_eq!(RenderTier::Medium.apply(m), m);
+        // Mobile takes the Low pool, and `clamp_mobile` never raises either.
+        assert_eq!(
+            RenderTier::clamp_mobile(s).vt.budget_bytes,
+            VT_BUDGET_LOW_BYTES
+        );
+        assert_eq!(
+            RenderTier::clamp_mobile(frugal).vt.budget_bytes,
+            1024 * 1024
+        );
+        // The tier never turns virtual texturing OFF — there is no switch, which
+        // is the structural form of the law, and `bc_tiles` (an adapter
+        // capability, not a budget) is untouched by every tier.
+        for tier in [RenderTier::High, RenderTier::Medium, RenderTier::Low] {
+            assert!(
+                tier.apply(s).vt.bc_tiles,
+                "{tier:?} clamped an adapter capability"
+            );
+            assert!(
+                tier.apply(s).vt.budget_bytes > 0,
+                "{tier:?} disabled the pool"
+            );
+        }
     }
 
     #[test]

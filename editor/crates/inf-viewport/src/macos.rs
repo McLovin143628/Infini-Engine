@@ -50,6 +50,7 @@ fn to_view_mode(d: ViewModeDto) -> ViewMode {
         ViewModeDto::Wireframe => ViewMode::Wireframe,
         // P19.2: needs no GPU feature, so it never degrades.
         ViewModeDto::Biomes => ViewMode::Biomes,
+        ViewModeDto::VtResidency => ViewMode::VtResidency,
     }
 }
 

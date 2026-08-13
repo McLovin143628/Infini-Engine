@@ -1458,3 +1458,235 @@ fn the_registration_door_decides_the_pool_format_from_the_level() {
     // textureless command stream all 50 committed goldens recorded.
     assert!(level(vec![]).is_none());
 }
+
+// -- (e) the residency heat-map + the tier budget (P26.5) -------------------
+
+/// Draw one frame of [`face_scene`] in `mode` and return its rgba.
+///
+/// `set_vt_pools` rather than `set_vt_level` on purpose: it binds the atlas and
+/// the table and leaves `vt_textures` unset, so `EngineRenderer::vt_stream`
+/// returns immediately and the residency the heat-map paints is **exactly the
+/// one this fixture built**. A streaming loop running under the arm would
+/// re-admit mip 0 the moment the camera justified it, and the fallback fixture
+/// below would quietly become the resident one.
+fn render_face_mode(
+    gpu: &GpuContext,
+    pools: Option<VtPools>,
+    set: inf_render::VtTextureSet,
+    mode: inf_render::ViewMode,
+) -> Vec<u8> {
+    let target = inf_render::HeadlessTarget::new(gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(gpu, inf_render::HEADLESS_FORMAT);
+    renderer.set_vt_pools(pools);
+    renderer.set_view_mode(mode);
+    assert_eq!(renderer.view_mode(), mode, "the view mode was degraded");
+    renderer.render(gpu, &face_scene(set), &face_view(), &target.view, (FW, FH));
+    target.read_rgba(gpu).expect("readback")
+}
+
+/// A registry holding one 256 texture with **only its coarsest levels**
+/// resident -- the analytic floor standing alone, which is what a pool under
+/// pressure looks like and what the heat-map exists to show.
+fn floor_only_library(gpu: &GpuContext) -> (VtTextures, VtPools, inf_render::VtTextureSet) {
+    let (mut lib, _) = VtTextures::new(pool_cfg(PageFormat::Rgba8, 64));
+    lib.register_or_record(1, Arc::new(ramp_container(256, false)))
+        .expect("the fixture registers");
+    let mut pools = VtPools::new(&gpu.device, &gpu.queue, lib.residency(), false);
+    let floor = lib.want_floor();
+    let (txn, report) = lib.sync(&gpu.device, &gpu.queue, &mut pools, &floor);
+    assert_eq!(txn.deferred, 0, "the floor did not fit");
+    assert!(report.missing.is_empty());
+    // ANTI-VACUITY: mip 0 really is ABSENT, or the "fallback" fixture is the
+    // resident one under another name.
+    let desc = lib
+        .residency()
+        .desc(VtTextureHandle(0))
+        .expect("registered")
+        .clone();
+    assert!(
+        !lib.residency()
+            .is_resident(VtTextureHandle(0), TileCoord::new(0, 0, 0)),
+        "the floor admitted mip 0"
+    );
+    assert!(
+        desc.mip_count() >= 4,
+        "the pyramid is too short to fall back"
+    );
+    let set = lib.set_for(Some(1), None, None);
+    assert!(!set.is_none(), "the fixture never went warm");
+    (lib, pools, set)
+}
+
+/// The `(mean red, mean green)` of a frame.
+fn rg_means(rgba: &[u8]) -> (f64, f64) {
+    let n = (rgba.len() / 4) as f64;
+    let r: u64 = rgba.chunks_exact(4).map(|p| u64::from(p[0])).sum();
+    let g: u64 = rgba.chunks_exact(4).map(|p| u64::from(p[1])).sum();
+    (r as f64 / n, g as f64 / n)
+}
+
+/// **The residency heat-map paints what is resident** (P26.5, ROADMAP clause 1).
+///
+/// The debug view mode `VtPopIn` and `VtStats::summary` were declared for in
+/// P26.2 and P26.4 -- *"ships before its caller, deliberately: P26.5's residency
+/// heat-map ... is what reads it"* -- asserted where a debug view can actually
+/// be wrong: on the FRAME.
+///
+/// Three fixtures over one scene, one camera and one texture, differing only in
+/// what is resident:
+///
+/// * whole pyramid resident => the face is **green** (`got == m`);
+/// * the analytic floor alone, mip 0 absent => the face is **red/orange** (the
+///   walk resolves several levels up);
+/// * no pool at all => **grey**, which is the reading that tells an author a
+///   surface they believed was textured is not bound -- a fact no amount of
+///   staring at a lit frame distinguishes from a texture that happens to look
+///   like its scalar colour.
+///
+/// The channels are compared against each other rather than against constants:
+/// the ramp is written in linear space and the frame comes back through ACES and
+/// an sRGB target, so the *values* are the tonemapper's and the *ordering* is the
+/// claim.
+#[test]
+fn the_residency_heat_map_paints_what_is_resident() {
+    let Some(gpu) = gpu_or_skip("the VT residency heat-map") else {
+        return;
+    };
+    let (_lib, resident_pools, set) = resident_library(&gpu, false);
+    let (_lib2, floor_pools, floor_set) = floor_only_library(&gpu);
+
+    let hot = render_face_mode(
+        &gpu,
+        Some(resident_pools),
+        set,
+        inf_render::ViewMode::VtResidency,
+    );
+    let cold = render_face_mode(
+        &gpu,
+        Some(floor_pools),
+        floor_set,
+        inf_render::ViewMode::VtResidency,
+    );
+    let bare = render_face_mode(
+        &gpu,
+        None,
+        inf_render::VtTextureSet::NONE,
+        inf_render::ViewMode::VtResidency,
+    );
+
+    let (hot_r, hot_g) = rg_means(&hot);
+    let (cold_r, cold_g) = rg_means(&cold);
+    let (bare_r, bare_g) = rg_means(&bare);
+
+    assert!(
+        hot_g > hot_r * 2.0,
+        "a fully resident surface is not green (r {hot_r:.1}, g {hot_g:.1})"
+    );
+    assert!(
+        cold_r > cold_g * 2.0,
+        "a surface at the floor is not red (r {cold_r:.1}, g {cold_g:.1}) -- the \
+         heat-map is not reading the residency"
+    );
+    // Grey: darker than either verdict in that verdict's own channel, and with
+    // no channel dominating. A heat-map that painted an unbound surface green
+    // would say "everything is fine" about a surface that samples nothing at
+    // all. Compared against the two measured frames rather than against a
+    // constant, because the ramp is authored in linear space and read back
+    // through ACES and an sRGB target -- 0.06 linear arrives at ~69/255, and a
+    // literal here would be a pin on the tonemapper.
+    assert!(
+        bare_g * 2.0 < hot_g,
+        "an unbound surface is as green as a resident one (bare g {bare_g:.1},          resident g {hot_g:.1})"
+    );
+    assert!(
+        bare_r * 2.0 < cold_r,
+        "an unbound surface is as red as one at the floor (bare r {bare_r:.1},          floor r {cold_r:.1})"
+    );
+    assert!(
+        (bare_r - bare_g).abs() < 8.0,
+        "an unbound surface is tinted (r {bare_r:.1}, g {bare_g:.1})"
+    );
+
+    // ANTI-VACUITY: the mode does something. The same fixture in `Lit` must NOT
+    // produce this picture -- otherwise the ordering above could be a property
+    // of the ramp texture rather than of the overlay.
+    let lit = render_face_mode(
+        &gpu,
+        None,
+        inf_render::VtTextureSet::NONE,
+        inf_render::ViewMode::Lit,
+    );
+    assert_ne!(lit, bare, "VtResidency rendered the same frame as Lit");
+}
+
+/// **The one line a host logs** (P26.5) -- `VtStats::summary` and
+/// `VtPopIn::summary`'s non-gate reader, which both shipped promising this.
+///
+/// `None` on a textureless renderer is the load-bearing half: a host that prints
+/// nothing says *"this level has no virtual textures"*, and one that prints
+/// zeros says *"it has some and they are doing nothing"*. Those are different
+/// facts and an author reading an Output Log is entitled to both.
+#[test]
+fn the_vt_summary_is_a_line_a_host_can_log() {
+    let Some(gpu) = gpu_or_skip("the VT summary line") else {
+        return;
+    };
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    assert!(
+        renderer.vt_summary().is_none(),
+        "a renderer with no VT level produced a summary"
+    );
+
+    // A COLD registry: registered, nothing paged. The renderer's own streaming
+    // loop is what admits the floor, so `admits` below is a measurement of the
+    // loop rather than of this fixture — the same distinction
+    // `the_renderer_runs_the_streaming_loop_every_frame` rests on.
+    let (mut lib, _) = VtTextures::new(pool_cfg(PageFormat::Rgba8, 64));
+    lib.register_or_record(1, Arc::new(ramp_container(256, false)))
+        .expect("the fixture registers");
+    let pools = VtPools::new(&gpu.device, &gpu.queue, lib.residency(), false);
+    assert_eq!(
+        lib.residency().stats().admits,
+        0,
+        "the fixture paged something before the renderer did"
+    );
+    renderer.set_vt_level(Some((lib, pools)));
+    // Two frames: the first warms the registry, the second draws a textured
+    // surface through it — which is what puts a non-zero coverage list into the
+    // loop rather than only the camera-free floor.
+    for _ in 0..2 {
+        let set = renderer
+            .vt_textures()
+            .map(|l| l.set_for(Some(1), None, None))
+            .unwrap_or(inf_render::VtTextureSet::NONE);
+        renderer.render(&gpu, &face_scene(set), &face_view(), &target.view, (FW, FH));
+    }
+    let line = renderer.vt_summary().expect("a level has a summary");
+    // It names BOTH halves -- the residency's state and the streamer's history --
+    // because a pool that is full and a streamer that is thrashing look
+    // identical in either one alone.
+    for word in [
+        "vt residency:",
+        "slots resident",
+        "vt streaming:",
+        "admits",
+        "feedback",
+    ] {
+        assert!(
+            line.contains(word),
+            "the summary does not say {word:?}: {line}"
+        );
+    }
+    // ...and the streamer really ran, so the numbers are a measurement.
+    assert_eq!(
+        renderer.vt_pop_in().frames,
+        2,
+        "the streaming loop did not run once per frame, so the line is a row of          zeros"
+    );
+    assert!(
+        renderer.vt_pop_in().admits > 0,
+        "nothing was admitted -- the anti-vacuity number `VtPopIn` carries for \
+         exactly this reason"
+    );
+}

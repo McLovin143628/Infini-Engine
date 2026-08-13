@@ -1065,11 +1065,30 @@ impl EngineHost {
         self.mode = mode;
     }
 
-    /// Set the renderer's shading view mode (Lit / Unlit / Wireframe, R-P2). Pure
-    /// passthrough to the renderer, which clamps Wireframe→Unlit if the adapter
-    /// lacks `POLYGON_MODE_LINE`. Editor-transient (never persisted).
+    /// Set the renderer's shading view mode (Lit / Unlit / Wireframe / Biomes /
+    /// VtResidency). Pure passthrough to the renderer, which clamps
+    /// Wireframe→Unlit if the adapter lacks `POLYGON_MODE_LINE`.
+    /// Editor-transient (never persisted).
+    ///
+    /// **The one exception to "pure passthrough"** (P26.5): switching INTO the
+    /// residency heat-map writes the streamer's summary to the Output Log. The
+    /// ramp answers "which pixels are behind"; the line answers "by how much,
+    /// out of how big a pool, and did the budget clamp" — and an author who has
+    /// just asked the first question is the one person who wants the second.
+    /// It is logged on the transition rather than per frame, because a line
+    /// every 16 ms is not a log, it is a denial of service on the panel.
     pub fn set_view_mode(&mut self, mode: inf_render::ViewMode) {
+        let entering =
+            mode == inf_render::ViewMode::VtResidency && self.renderer.view_mode() != mode;
         self.renderer.set_view_mode(mode);
+        if entering {
+            match self.renderer.vt_summary() {
+                Some(line) => tracing::info!("inf-viewport: {line}"),
+                None => tracing::info!(
+                    "inf-viewport: this level binds no virtual textures — the                      residency view will be uniformly grey"
+                ),
+            }
+        }
     }
 
     /// Replace the 2D-mode snapping configuration (from the toolbar).
@@ -3982,11 +4001,14 @@ impl EngineHost {
         }
         // THE DOOR, and it is the player's: same materials, same order, same
         // pool-format ruling, same floor.
+        // The budget is the TIER's (P26.5) — the same settings field the player
+        // reads, so the two hosts plan the same pool on the same machine.
+        let budget = self.renderer.settings().vt.budget_bytes;
         let level = inf_render::build_vt_level(
             &self.gpu.device,
             &self.gpu.queue,
             self.renderer.settings(),
-            inf_render::DEFAULT_VT_BUDGET_BYTES,
+            budget,
             &content.materials,
             |g| content.source(g),
         );
