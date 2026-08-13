@@ -10428,6 +10428,17 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
 > `7b9d897` the jittered reconstruction), plus this block. Battery green:
 > **239 binaries, 4 271 passed, 0 failed, 8 ignored** (the P26.5 audit left
 > it at 235 / 4 206; this batch adds four test binaries and 65 arms).
+>
+> **One provenance note, because the counts will be compared.** The battery's
+> window (01:09 → 02:28) contains another session's two P26.5-follow-up commits
+> (`08fe207`, `52d0542`, landed 01:44 while the build was still on `inf-studio`),
+> so the run covers a tree with their `inf-player` budget/gate rewrite in it as
+> well as this batch. It does not move the attribution: their change is **+0 test
+> binaries and +0 arms** (408 lines rewriting existing arm bodies, no `#[test]`
+> added or removed), so all four binaries and all 65 arms above are this batch's,
+> and `-p inf-player --release` was re-run at HEAD afterwards — 339 passed, 0
+> failed, `phase26_gate` 16/16 — because that is the one package whose sources
+> changed underneath a running battery.
 > `clippy --workspace --all-targets` with `-D warnings` and `cargo fmt --all
 > --check` clean. **Goldens stay 50 and none was re-blessed** — a *content-digest*
 > claim since the P26.5 audit rather than a count, and `git diff` over
