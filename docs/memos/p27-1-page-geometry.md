@@ -111,8 +111,25 @@ is what would put it there.
 > bordered page's neighbours could not be. `VSM_PAGE_BORDER` is still 0 and
 > nothing in P27.3 wanted it otherwise.
 
-Then **P27.4**, with the filter in hand and a measurement of the per-tap resolve
-against a clamped kernel; and **P28.2**, where interleaved cluster pages change
+> **P27.4 landed, and the measurement it was asked for is made (2026-08-13).**
+> The answer is the **clamped kernel**, and it is in
+> `docs/memos/p27-4-receiver-filtering.md` §1 with four numbers: a tap leaves
+> its page for **508 of 16 384** texels (3.10 %); the clamped kernel costs
+> **one** table resolution against **nine**, and a clipmap resolution is a
+> walk, so **8** level-record reads against up to **72**; the clamped
+> kernel is **exact** wherever the shadow field is locally constant and off
+> by at most the dropped weight (3/9 at an edge) inside a penumbra; and the
+> per-tap resolve over an **absent** neighbour is wrong by that same 3/9 in
+> the LEAK direction on uniformly shadowed ground, which is the case the
+> clamped kernel is exact in. This memo's border rejection therefore costs
+> P27.4 nothing it wanted: the receiver pays one resolution per sample and a
+> softer seam on 3 % of texels, not the nine-storage-read tap this document
+> priced. It also costs a **sampler**: with no border there is nothing
+> correct for hardware 2 × 2 comparison filtering to read at a page edge —
+> the atlas neighbour is slot `s + 1` — so the receiver `textureLoad`s
+> integer texels, which is the one consequence this memo did not predict.
+
+Then **P28.2**, where interleaved cluster pages change
 what a page *is*. The numbers above are all in `inf-vsm`'s own arms
 (`the_ruled_page_geometry_is_the_one_the_memo_measured`,
 `the_default_atlas_is_square_and_spends_its_whole_budget`,

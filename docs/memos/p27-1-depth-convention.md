@@ -99,9 +99,30 @@ state for the whole atlas.
 * A receiver's comparison in P27.4 is `depth > stored + bias`, the camera's
   direction; the CSM's `LessEqual` receiver path stays exactly as it is until
   P27.5 demotes it.
+
+  > **P27.4 landed, and this line's SIGN was wrong (2026-08-13).** The
+  > direction is right and the side is not. Under reverse-Z a larger stored
+  > depth is a caster *nearer* the light, so a receiver is lit exactly when
+  > its **own** biased depth still reaches at least as far:
+  > `receiver.z + bias >= stored.z`. Written the other way round the bias
+  > lands on the caster's side and makes a self-shadowing surface *more*
+  > shadowed rather than less — the opposite of what a bias is for. The
+  > shipped comparison is `inf_render::vsm_receiver::vsm_level_factor`'s and
+  > `vsm_receive.wgsl`'s, and the mutation that writes this memo's version
+  > back fails three arms. Corrected here and derived in
+  > `docs/memos/p27-4-receiver-filtering.md`.
 * **The bias story is re-derived at P27.4** and is not settled here. What this
   memo establishes is that the precision available to it is 251× better on the
   perspective lights and materially unchanged on the directional one.
+
+  > **Done (2026-08-13):** `docs/memos/p27-4-receiver-filtering.md` §2. Two
+  > terms, each derived: four ULP of `f32` — constant in NDC, and *not*
+  > constant in texels, which is the whole reason for the unit — plus
+  > `(R + ½)·√2` texels of the page's own density times `tan θ`, converted
+  > by the projection's `∂z/∂m` read off the shipped matrix. Together they
+  > are **1/665** of `ShadowSettings::depth_bias` at the shipped defaults,
+  > and the perspective branch uses `z²/near` precisely because row 2 is the
+  > degenerate one this memo's own convention creates.
 
 ## When to revisit
 
