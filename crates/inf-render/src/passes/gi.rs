@@ -14,6 +14,25 @@
 //! renderer-owned [`GiResources`]; this node owns the two compute pipelines and the
 //! per-frame primitive/bin/terrain buffers.
 //!
+//! ## The boundary with virtual shadow maps (P18 law, restated at P27.1)
+//!
+//! **GI never reads a virtual shadow page, its residency, or its atlas — and it
+//! must not start.** The law is P18's, written when meshlet residency arrived:
+//! *camera-driven residency never feeds lighting*. A VSM page exists because
+//! **a visible pixel's depth asked for it** (`inf_render::vsm_mark`), so the set
+//! of resident pages is a function of where the camera is looking; a probe that
+//! consulted them would make the irradiance at a fixed point in the world depend
+//! on the viewer, and two hosts looking at one scene from two angles would light
+//! it differently. That is the same defect the meshlet path avoids by
+//! voxelizing the **always-resident root page** rather than whatever is
+//! streamed in.
+//!
+//! So the two systems meet nowhere: this pass's occlusion is its own voxel
+//! volume, and it stays that way when P27.4 gives the pages a receiver — the
+//! lit passes' *direct* term is what a shadow page darkens, and the *ambient*
+//! term is this pass's. `the_gi_pass_never_reads_a_shadow_page` is the source
+//! gate that keeps it true rather than remembered.
+//!
 //! ## What P18.4 changed
 //!
 //! * **Coverage.** v1 voxelized rigid `MeshInstance` boxes and nothing else —
@@ -1066,5 +1085,66 @@ impl RenderNode for GiNode {
 
     fn name(&self) -> &'static str {
         "gi"
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    /// Code only. The module docs above discuss the GI/VSM boundary at length,
+    /// and a ban that could not tell a doc block from a call would have to be
+    /// written without the explanation — so full-line comments are stripped and
+    /// this `#[cfg(test)]` module is cut off, and what is scanned is the code
+    /// that runs. A *trailing* comment naming a shadow page trips the gate on
+    /// purpose: move it to its own line.
+    ///
+    /// `lines()` rather than a `\n` search, so the scan is CRLF-tolerant on a
+    /// Windows checkout (the P22 law — the trig gate aborted on exactly that).
+    fn code_only(source: &str) -> String {
+        source
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or(source)
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **GI never reads a virtual shadow page, its residency or its atlas** —
+    /// the P18 law (*camera-driven residency never feeds lighting*) as a source
+    /// gate, restated at P27.1 because P27 is what creates the second
+    /// camera-driven page system for it to be broken by.
+    ///
+    /// A VSM page exists because a visible pixel's depth asked for it, so a
+    /// probe that consulted one would make the irradiance at a fixed world point
+    /// a function of where the viewer is standing. The failure would be a
+    /// *plausible* picture, which is why it needs a check rather than a comment.
+    #[test]
+    fn the_gi_pass_never_reads_a_shadow_page() {
+        for (label, source) in [
+            ("passes/gi.rs", include_str!("gi.rs")),
+            ("gi.rs", include_str!("../gi.rs")),
+            (
+                "gi_voxelize.wgsl",
+                include_str!("../shaders/gi_voxelize.wgsl"),
+            ),
+            ("gi_probes.wgsl", include_str!("../shaders/gi_probes.wgsl")),
+        ] {
+            let code = code_only(source).to_ascii_lowercase();
+            assert!(
+                !code.contains("vsm"),
+                "{label} names a virtual shadow map in CODE — camera-driven \
+                 residency never feeds lighting (the P18 law, restated at P27.1). \
+                 GI's occlusion is its own voxel volume; a shadow page darkens the \
+                 DIRECT term and never the ambient one."
+            );
+            // ANTI-VACUITY: the stripper left real code behind, so a `contains`
+            // over an empty string is not what passed.
+            assert!(
+                code.len() > 500 && (code.contains("fn ") || code.contains("@compute")),
+                "{label}: the scan found no code at all ({} bytes)",
+                code.len()
+            );
+        }
     }
 }
