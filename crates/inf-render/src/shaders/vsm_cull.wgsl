@@ -66,11 +66,18 @@ struct VsmCaster {
 const VSM_ARG_WORDS: u32 = 5u;
 
 // The six clip-space planes of `vp`, tested against a sphere.
-// `inf_render::vsm::vsm_page_sees_sphere`, mirrored — conservative in the same
-// direction (it may keep a sphere the page cannot see, never drop one it can),
-// and it SKIPS a degenerate plane rather than trusting it: a reverse-infinite
-// perspective has a `w - z` row that is identically zero, and dividing by that
-// length would reject every caster of every spot and point light.
+// `inf_render::vsm::vsm_page_sees_sphere` + `page_clip_planes`, mirrored —
+// conservative in the same direction (it may keep a sphere the page cannot see,
+// never drop one it can), and it SKIPS a degenerate plane rather than trusting it.
+//
+// **The degenerate row is `r2`, the FAR plane** (`z >= 0` is the far test under
+// reverse-Z), and a reverse-infinite perspective makes it `(0, 0, 0, near)` —
+// no finite normal, because the far plane is at infinity. `r3 - r2`, the near
+// plane, is the one row that is always well conditioned. WGSL leaves division by
+// zero INDETERMINATE, so the skip is a real guard here even though the Rust twin
+// would compute `+near/0 = +inf` and pass. (This comment said `w - z` and the Rust
+// doc said "near plane": both were wrong, and
+// `the_only_degenerate_page_plane_is_the_far_one` now measures it.)
 fn page_sees_sphere(vp: mat4x4<f32>, c: vec3<f32>, radius: f32) -> bool {
     let r0 = vec4<f32>(vp[0].x, vp[1].x, vp[2].x, vp[3].x);
     let r1 = vec4<f32>(vp[0].y, vp[1].y, vp[2].y, vp[3].y);

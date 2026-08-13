@@ -313,12 +313,22 @@ pub fn vsm_page_matrix(
 ///
 /// # The degenerate-plane skip, and what it is **not**
 ///
-/// A reverse-**infinite** perspective — every spot and every cube face — has a
-/// near-plane row of `(0, 0, 0, near)`, whose normal is the zero vector. The skip
-/// is measured rather than reasoned about, and the measurement (the P27.2
-/// mutation round) says it is **redundant here**: `near > 0`, so the distance
-/// this function would compute is `+near/0 = +∞`, which passes every test — so
-/// removing the guard moves no verdict, and no arm in this tree fails.
+/// A reverse-**infinite** perspective — every spot and every cube face — has one
+/// row whose normal is the zero vector: `row 2`, which is `(0, 0, 0, near)`. That
+/// row is the **FAR** plane, not the near one, and the distinction is the whole
+/// ruling rather than a label. Under reverse-Z the clip test `z ≥ 0` is the far
+/// plane and `z ≤ w` is the near plane, so an *infinite* far plane is exactly the
+/// plane that has no finite normal — while the near plane, `row 3 − row 2 =
+/// (0, 0, −1, −near)`, is perfectly well conditioned. (The first write-up called
+/// the degenerate row the near plane, and `vsm_cull.wgsl`'s comment named `w − z`,
+/// which is the one row that is *not* zero. Both corrected by the P27.2 audit, and
+/// [`page_clip_planes`]'s own arm now measures which row it is rather than
+/// asserting it in prose.)
+///
+/// The skip is measured rather than reasoned about, and the measurement (the P27.2
+/// mutation round) says it is **redundant here**: `near > 0`, so the distance this
+/// function would compute is `+near/0 = +∞`, which passes every test — so removing
+/// the guard moves no verdict, and no arm in this tree fails.
 ///
 /// It stays for two reasons, both of them about the *other* copy. `vsm_cull.wgsl`
 /// runs the same six planes, and WGSL leaves division by zero **indeterminate**
@@ -335,16 +345,7 @@ pub fn vsm_page_matrix(
 /// drop one it can. That direction is the one a *subtractive* cull needs, and it
 /// is the same direction `inf_render::passes::vgeom`'s cull errs in.
 pub fn vsm_page_sees_sphere(page_vp: &Mat4, centre: Vec3, radius: f32) -> bool {
-    let r = page_vp.row(3);
-    let planes = [
-        page_vp.row(0) + r, // x ≥ −w
-        r - page_vp.row(0), // x ≤ +w
-        page_vp.row(1) + r, // y ≥ −w
-        r - page_vp.row(1), // y ≤ +w
-        page_vp.row(2),     // z ≥ 0
-        r - page_vp.row(2), // z ≤ w
-    ];
-    for p in planes {
+    for p in page_clip_planes(page_vp) {
         let n = p.truncate();
         let len = n.length();
         if len < 1e-6 {
@@ -355,6 +356,27 @@ pub fn vsm_page_sees_sphere(page_vp: &Mat4, centre: Vec3, radius: f32) -> bool {
         }
     }
     true
+}
+
+/// **The six clip-space planes of a page's matrix**, in the order
+/// [`vsm_page_sees_sphere`] tests them and `vsm_cull.wgsl` mirrors:
+/// `x ≥ −w`, `x ≤ +w`, `y ≥ −w`, `y ≤ +w`, **`z ≥ 0` (the FAR plane under
+/// reverse-Z)**, `z ≤ w` (the near plane).
+///
+/// Extracted as its own function by the P27.2 audit so *which* plane is which — and
+/// which one degenerates — is something an arm can read off the shipped code
+/// instead of a second copy of the rows (`the_only_degenerate_page_plane_is_the_far_one`).
+/// `w` is the plane's constant; `xyz` its unnormalized normal.
+pub fn page_clip_planes(page_vp: &Mat4) -> [glam::Vec4; 6] {
+    let r = page_vp.row(3);
+    [
+        page_vp.row(0) + r, // x ≥ −w
+        r - page_vp.row(0), // x ≤ +w
+        page_vp.row(1) + r, // y ≥ −w
+        r - page_vp.row(1), // y ≤ +w
+        page_vp.row(2),     // z ≥ 0 — the FAR plane; infinite for a perspective
+        r - page_vp.row(2), // z ≤ w — the NEAR plane
+    ]
 }
 
 /// One (light × face) projection, as the marking shader reads it — 96 bytes.
@@ -1448,6 +1470,96 @@ mod tests {
         assert!(
             !vsm_page_sees_sphere(&p, Vec3::new(0.0, 0.0, -6.0), 1.0),
             "a caster BEHIND a cube face was kept"
+        );
+    }
+
+    /// **Which page plane degenerates, measured** (P27.2 audit) — the premise the
+    /// degenerate-plane survivor ruling rests on, which the first write-up had
+    /// backwards twice.
+    ///
+    /// `vsm_page_sees_sphere`'s doc called the zero row "the near plane"; the WGSL
+    /// twin's comment called it "the `w − z` row". Neither is true: the zero row is
+    /// **row 2**, which under reverse-Z is the test `z ≥ 0` — the **far** plane,
+    /// infinite for exactly the projections that produce it — and `w − z` is the
+    /// near plane, which is the one row that is well conditioned. Getting this
+    /// backwards matters because the ruling turns on the sign of that row's
+    /// constant: it is `+near`, so the skipped distance would have been `+∞`, which
+    /// *passes*. Had it been the near plane's `−near`, the same arithmetic would
+    /// reject every caster of every spot and point light.
+    #[test]
+    fn the_only_degenerate_page_plane_is_the_far_one() {
+        let near = 0.05f32;
+        // Every perspective page this tree builds: a cube face and a spot, at a
+        // page of their own trees rather than at the light's whole frustum.
+        for vp in [
+            vsm_page_matrix(
+                cube_face_matrix(Vec3::ZERO, 4, near),
+                VsmTreeKind::Cube,
+                0,
+                4,
+                4,
+                2,
+                1,
+            ),
+            vsm_page_matrix(
+                spot_matrix(Vec3::ZERO, Vec3::Z, 40f32.to_radians().cos(), near),
+                VsmTreeKind::Quadtree,
+                1,
+                2,
+                2,
+                1,
+                0,
+            ),
+        ] {
+            let planes = page_clip_planes(&vp);
+            let degenerate: Vec<usize> = planes
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.truncate().length() < 1e-6)
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(
+                degenerate,
+                vec![4],
+                "the degenerate row moved: planes {:?}",
+                planes.map(|p| p.truncate().length())
+            );
+            // …and it is the FAR plane, whose constant is `+near`. That sign is the
+            // whole ruling: `+near/0` is `+∞`, which passes every sphere.
+            assert!(
+                (planes[4].w - near).abs() < 1e-6 && planes[4].w > 0.0,
+                "the far plane's constant is {} where the projection's near is {near}",
+                planes[4].w
+            );
+            // The NEAR plane — `row 3 − row 2` — is well conditioned, and it is the
+            // one that actually rejects a caster behind the light.
+            assert!(
+                (planes[5].truncate().length() - 1.0).abs() < 1e-4,
+                "the near plane's normal is {:?}",
+                planes[5].truncate()
+            );
+            assert!(
+                !vsm_page_sees_sphere(&vp, Vec3::new(0.0, 0.0, 0.0) - Vec3::Z * 50.0, 1.0)
+                    || !vsm_page_sees_sphere(&vp, Vec3::Z * 50.0, 1.0)
+            );
+        }
+        // ANTI-VACUITY, and the other half of the claim: an ORTHOGRAPHIC page has a
+        // finite far plane, so none of its six rows degenerates and the skip is
+        // never taken there at all.
+        let ortho = vsm_page_matrix(
+            clipmap_matrix(Vec3::Z, Vec3::ZERO, 32.0, 128.0),
+            VsmTreeKind::Clipmap,
+            1,
+            8,
+            8,
+            5,
+            2,
+        );
+        assert!(
+            page_clip_planes(&ortho)
+                .iter()
+                .all(|p| p.truncate().length() > 1e-6),
+            "a clipmap page produced a degenerate plane"
         );
     }
 
