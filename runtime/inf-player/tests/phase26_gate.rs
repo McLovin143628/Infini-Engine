@@ -1411,6 +1411,10 @@ struct StreamRun {
     /// Every (texture, tile) of mip 0 that resolved to something OTHER than
     /// itself, with what it resolved to — the fallback record arm (c) reads.
     fallbacks: Vec<(Uuid, TileCoord, TileCoord)>,
+    /// How many mip-0 addresses the FINEST-ancestor walk in [`scripted_run`]
+    /// actually checked (P26.5 audit) — arm (c)'s anti-vacuity for a walk that
+    /// asserts inside the helper, where the residency is still alive.
+    addresses_checked: usize,
     engaged_frames: u64,
     /// Mean wall time of one frame — `render` plus the poll that lets the ring's
     /// maps fire — and **nothing else**. The registry build and the renderer's
@@ -1520,9 +1524,22 @@ fn scripted_run(
 
     // The fallback record, taken at the END of the path (the interesting state:
     // the pool is full and the camera has moved).
+    //
+    // **The two halves of "the FINEST resident ancestor" are asserted HERE**
+    // (P26.5 audit), because this is where the residency is still alive. Arm (c)
+    // used to compare each fallback against `VtTextureDesc::ancestor` at the
+    // level it was served, and that is only the *"is an ancestor"* half:
+    // measured, a `VtResidency::resolve` that named the always-pinned ROOT for
+    // every address passed the whole arm — the root IS the correct ancestor at
+    // the root's level — while failing three `inf-vt` arms. So the arm named
+    // after the phase's own "Done when" clause could not see the defect that
+    // clause is about. What is missing from `ancestor(at, got.mip) == got` is
+    // (i) that the named tile is RESIDENT and (ii) that nothing FINER is, which
+    // is what makes it the finest rather than merely one of them.
     let lib = renderer.vt_textures().expect("the level is live");
     let res = lib.residency();
     let mut fallbacks = Vec::new();
+    let mut addresses_checked = 0usize;
     for (guid, h) in &handles {
         let desc = res.desc(*h).expect("registered").clone();
         let m = desc.mips[0];
@@ -1530,9 +1547,32 @@ fn scripted_run(
             for x in 0..m.tiles_x {
                 let at = TileCoord::new(0, x, y);
                 let got = res.resolve(*h, at).expect("every address resolves").tile;
-                if got != at {
-                    fallbacks.push((*guid, at, got));
+                addresses_checked += 1;
+                // (i) RESIDENT. An address that resolves to a tile holding no
+                // page is a slot the shader samples for stale texels — the
+                // premise `VtPools`' evict path rests on.
+                assert!(
+                    res.is_resident(*h, got),
+                    "{guid} {at:?} resolves to {got:?}, which is NOT resident"
+                );
+                if got == at {
+                    continue;
                 }
+                // (ii) FINEST. Every level strictly between the wanted one and
+                // the served one must be absent, or a finer ancestor was
+                // available and the table handed out a coarser answer.
+                for lv in (at.mip + 1)..got.mip {
+                    let finer = desc
+                        .ancestor(at, lv)
+                        .expect("a level between two levels of one pyramid");
+                    assert!(
+                        !res.is_resident(*h, finer),
+                        "{guid} {at:?} was served {got:?} while its ancestor \
+                         {finer:?} is resident — the fallback is an ancestor but \
+                         not the FINEST one, which is the clause this gate closes"
+                    );
+                }
+                fallbacks.push((*guid, at, got));
             }
         }
     }
@@ -1542,6 +1582,7 @@ fn scripted_run(
         slots,
         peak_resident,
         fallbacks,
+        addresses_checked,
         engaged_frames: renderer.vt_engaged_frames(),
         frame_ms: frame_total / frames as f64,
     }
@@ -1765,9 +1806,36 @@ fn an_over_budget_scene_stays_in_the_pool_and_falls_back_to_the_finest_ancestor(
     );
 
     // 2. EVERY SAMPLE LANDS ON THE FINEST RESIDENT ANCESTOR. `resolve` reads the
-    // maintained table — exactly what the shader reads — and the assertion is
-    // that what it names is (i) resident and (ii) the FINEST resident ancestor
-    // there is, which is what makes the fallback a promise rather than a habit.
+    // maintained table — exactly what the shader reads — and three things have
+    // to hold of what it names: it is an ANCESTOR of the address (below), it is
+    // RESIDENT, and nothing FINER is resident. The last two are asserted inside
+    // `scripted_run`, where the residency is still alive; this counter is their
+    // anti-vacuity, because an assertion in a helper that walked zero addresses
+    // is an assertion about nothing.
+    //
+    // The P26.5 audit is why they exist at all: `desc.ancestor(at, got.mip) ==
+    // got` alone is satisfied by a `resolve` that names the always-pinned ROOT
+    // for every address in the pyramid — measured, and it passed this whole arm
+    // while failing three `inf-vt` arms. A gate must aim at the thing it names
+    // (the P23 law), and this one is named after the phase's own "Done when".
+    assert!(
+        run.addresses_checked >= run.fallbacks.len(),
+        "the finest-ancestor walk checked {} addresses against {} recorded \
+         fallbacks",
+        run.addresses_checked,
+        run.fallbacks.len()
+    );
+    // Six 512² pyramids, four tiles a side at mip 0 — 16 each, 96 in all.
+    // Exact rather than "> 0": the walk is over the whole level and a walk that
+    // quietly visited one texture would satisfy every assertion in it.
+    let want_addresses = BIG_TEX.len() * ((BIG_EXTENT / 128) * (BIG_EXTENT / 128)) as usize;
+    assert_eq!(
+        run.addresses_checked, want_addresses,
+        "the finest-ancestor walk visited {} mip-0 addresses, not the {} the \
+         fixture has — the residency assertions inside `scripted_run` did not \
+         cover the level",
+        run.addresses_checked, want_addresses
+    );
     assert!(
         !run.fallbacks.is_empty(),
         "no mip-0 address fell back at all under a pool six times too small, so \
