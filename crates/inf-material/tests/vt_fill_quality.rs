@@ -15,15 +15,24 @@
 //! reconstructed through the shipped `fill_from_ancestor`, and compared against
 //! the tile that actually exists at that address.
 //!
-//! **Three reconstructions, one ground truth.** Every arm below scores mean
+//! **Four reconstructions, one ground truth.** Every arm below scores mean
 //! absolute error per channel against the real finer tile:
 //!
 //! * **nearest** — the ancestor's texel repeated, which is what a point-sampled
 //!   fallback looks like;
-//! * **box** — the ancestor's texels bilinearly doubled, which is what the
-//!   hardware sampler already gives when it magnifies a coarse page, and
-//!   therefore the bar the fill has to clear to be worth existing;
+//! * **box** — the same quincunx lattice `inf_vt::upscale2x` walks, with the
+//!   direction test removed, so the pair isolates that test and nothing else;
+//! * **bilinear** — **true texel-centre bilinear magnification**, which is what
+//!   the hardware sampler gives when it magnifies a coarse page, and therefore
+//!   the bar the fill has to clear to be worth existing;
 //! * **edge-directed** — `inf_vt::upscale2x`.
+//!
+//! **The fourth arm is the P26.5 audit's**: the batch measured three and called
+//! the `box` column *"bilinear (what the sampler already does)"*, which it is
+//! not — it passes source texels through untouched and sits half a texel off.
+//! Measuring the filter the argument names moves the conclusion in the ruling's
+//! favour and moves one number in it: edge-directed does not come within one
+//! part in a hundred of the bar, it loses to it.
 //!
 //! A test that only asserted "edge-directed beats nearest" would be measuring
 //! that interpolation exists.
@@ -116,9 +125,67 @@ fn nearest2x(src: &[u8], w: u32, h: u32) -> Vec<u8> {
     out
 }
 
-/// Box/bilinear 2× on the same quincunx lattice `inf_vt::upscale2x` uses — the
-/// **same** filter with the direction test removed, so the comparison isolates
-/// the direction test and nothing else.
+/// **True texel-centre bilinear magnification** — what the hardware sampler
+/// does when it magnifies a coarse page, 2× (P26.5 audit).
+///
+/// The memo's argument for rejecting the edge-directed filter names this as the
+/// bar: *"the bilinear magnification the hardware sampler already performs for
+/// free"*. What the batch measured against was [`box2x`], which is a different
+/// filter — the quincunx box, source texels passing through untouched, offset
+/// half a texel. It is the right control for isolating the direction test and
+/// the wrong one to call "what the sampler does", so both are measured now and
+/// the memo says which is which.
+///
+/// A child texel's centre sits at parent coordinate `(cx + ½)/2 − ½`, i.e. at
+/// `(2·cx − 1)/4`, so the weights are 3/4–1/4 and 1/4–3/4 alternating, clamped at
+/// the edges. Integer arithmetic in sixteenths, exactly like the module under
+/// test — a float here would put the measuring instrument's own platform
+/// dependence into the number the ruling rests on.
+fn bilinear2x(src: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let dw = w as usize * 2;
+    let mut out = vec![0u8; dw * h as usize * 2 * 4];
+    let at = |x: i64, y: i64| -> &[u8] {
+        let x = x.clamp(0, w as i64 - 1) as usize;
+        let y = y.clamp(0, h as i64 - 1) as usize;
+        &src[(y * w as usize + x) * 4..][..4]
+    };
+    // `floor((2·c − 1)/4)` and the fractional part in quarters (1 or 3).
+    let split = |c: u32| -> (i64, i64) {
+        let q = 2 * c as i64 - 1;
+        let base = q.div_euclid(4);
+        (base, q - 4 * base)
+    };
+    for cy in 0..h * 2 {
+        let (y0, fy) = split(cy);
+        for cx in 0..w * 2 {
+            let (x0, fx) = split(cx);
+            let (a, b, c, d) = (
+                at(x0, y0),
+                at(x0 + 1, y0),
+                at(x0, y0 + 1),
+                at(x0 + 1, y0 + 1),
+            );
+            let o = (cy as usize * dw + cx as usize) * 4;
+            for k in 0..4 {
+                let v = (4 - fx) * (4 - fy) * a[k] as i64
+                    + fx * (4 - fy) * b[k] as i64
+                    + (4 - fx) * fy * c[k] as i64
+                    + fx * fy * d[k] as i64;
+                out[o + k] = ((v + 8) / 16) as u8;
+            }
+        }
+    }
+    out
+}
+
+/// Box 2× on the same quincunx lattice `inf_vt::upscale2x` uses — the **same**
+/// filter with the direction test removed, so the comparison isolates the
+/// direction test and nothing else.
+///
+/// **Not the hardware's bilinear** — see [`bilinear2x`], which is. This one
+/// passes source texels through untouched and averages the lattice's other three
+/// positions, which is why it is the right control for the direction test and
+/// the wrong one to name in a sentence about what a sampler already gives.
 fn box2x(src: &[u8], w: u32, h: u32) -> Vec<u8> {
     let dw = w as usize * 2;
     let mut out = vec![0u8; dw * h as usize * 2 * 4];
@@ -268,10 +335,13 @@ fn replicating_the_ancestor_beats_every_interpolation_of_it() {
     // -- and here it hides the whole ruling: the four quadrants of the fixture
     // are four different reconstruction problems and they do not agree about
     // which filter wins.
-    let mut per_region = [[0.0f64; 6]; 4];
+    let mut per_region = [[0.0f64; 8]; 4];
     let mut per_region_n = [0u32; 4];
     let (mut e_near, mut e_box, mut e_edge, mut tiles) = (0.0f64, 0.0f64, 0.0f64, 0u32);
     let (mut g_near, mut g_box, mut g_edge) = (0.0f64, 0.0f64, 0.0f64);
+    // The FOURTH arm (P26.5 audit): the hardware's own magnification, which is
+    // what the memo's argument names and what the three above are not.
+    let (mut e_lin, mut g_lin) = (0.0f64, 0.0f64);
     for ty in 0..m0.tiles_y {
         for tx in 0..m0.tiles_x {
             let region = ((ty * 2 / m0.tiles_y) * 2 + (tx * 2 / m0.tiles_x)) as usize;
@@ -303,6 +373,7 @@ fn replicating_the_ancestor_beats_every_interpolation_of_it() {
             let near = crop(&nearest2x(&parent, stored, stored));
             let boxed = crop(&box2x(&parent, stored, stored));
             let edge = crop(&inf_vt::upscale2x(&parent, stored, stored).expect("upscales"));
+            let lin = crop(&bilinear2x(&parent, stored, stored));
             // …and THE SHIPPED FILL is the arm the measurement chose. Pinned
             // here rather than described, so the code and the ruling cannot
             // drift: a `fill_from_ancestor` that quietly switched filters would
@@ -315,10 +386,11 @@ fn replicating_the_ancestor_beats_every_interpolation_of_it() {
             );
 
             let t = payload(&truth, stored, tile, border);
-            let (pn, pb, pe) = (
+            let (pn, pb, pe, pl) = (
                 payload(&near, stored, tile, border),
                 payload(&boxed, stored, tile, border),
                 payload(&edge, stored, tile, border),
+                payload(&lin, stored, tile, border),
             );
             let scores = [
                 mae(&pn, &t),
@@ -327,6 +399,8 @@ fn replicating_the_ancestor_beats_every_interpolation_of_it() {
                 grad_mae(&pn, &t, tile),
                 grad_mae(&pb, &t, tile),
                 grad_mae(&pe, &t, tile),
+                mae(&pl, &t),
+                grad_mae(&pl, &t, tile),
             ];
             e_near += scores[0];
             e_box += scores[1];
@@ -334,7 +408,9 @@ fn replicating_the_ancestor_beats_every_interpolation_of_it() {
             g_near += scores[3];
             g_box += scores[4];
             g_edge += scores[5];
-            for k in 0..6 {
+            e_lin += scores[6];
+            g_lin += scores[7];
+            for k in 0..8 {
                 per_region[region][k] += scores[k];
             }
             per_region_n[region] += 1;
@@ -344,6 +420,7 @@ fn replicating_the_ancestor_beats_every_interpolation_of_it() {
     let n = f64::from(tiles);
     let (e_near, e_box, e_edge) = (e_near / n, e_box / n, e_edge / n);
     let (g_near, g_box, g_edge) = (g_near / n, g_box / n, g_edge / n);
+    let (e_lin, g_lin) = (e_lin / n, g_lin / n);
     const REGIONS: [&str; 4] = [
         "smooth gradient",
         "45 deg wedge",
@@ -354,18 +431,20 @@ fn replicating_the_ancestor_beats_every_interpolation_of_it() {
     for r in 0..4 {
         let m = f64::from(per_region_n[r]);
         println!(
-            "  {:<24} texel: near {:>6.2} box {:>6.2} edge {:>6.2}   |   grad: near {:>6.2} box {:>6.2} edge {:>6.2}",
+            "  {:<24} texel: near {:>6.2} box {:>6.2} bilin {:>6.2} edge {:>6.2}   |   grad: near {:>6.2} box {:>6.2} bilin {:>6.2} edge {:>6.2}",
             REGIONS[r],
             per_region[r][0] / m,
             per_region[r][1] / m,
+            per_region[r][6] / m,
             per_region[r][2] / m,
             per_region[r][3] / m,
             per_region[r][4] / m,
+            per_region[r][7] / m,
             per_region[r][5] / m
         );
     }
     println!(
-        "  {:<24} texel: near {e_near:>6.2} box {e_box:>6.2} edge {e_edge:>6.2}   |   grad: near {g_near:>6.2} box {g_box:>6.2} edge {g_edge:>6.2}",
+        "  {:<24} texel: near {e_near:>6.2} box {e_box:>6.2} bilin {e_lin:>6.2} edge {e_edge:>6.2}   |   grad: near {g_near:>6.2} box {g_box:>6.2} bilin {g_lin:>6.2} edge {g_edge:>6.2}",
         "ALL"
     );
 
@@ -407,13 +486,39 @@ fn replicating_the_ancestor_beats_every_interpolation_of_it() {
         "an interpolation beat replication on STRUCTURE too (near {g_near:.2}, \
          box {g_box:.2}, edge {g_edge:.2}) -- see the memo"
     );
-    // …and the edge-directed filter does not clear the bilinear bar by a margin
-    // that would be worth a page write even if a reachable page existed: it is
-    // within one part in a hundred of `box` on texels and WORSE on structure.
+    // …including the HARDWARE's own magnification (P26.5 audit), which is the
+    // one the memo's argument actually names and which the batch did not
+    // measure: `box` is the quincunx control that isolates the direction test,
+    // not what a sampler does to a coarse page.
+    assert!(
+        e_near < e_lin && g_near < g_lin,
+        "true bilinear magnification beat replication (near {e_near:.2}/{g_near:.2}, \
+         bilinear {e_lin:.2}/{g_lin:.2}) -- the ruling in \
+         docs/memos/p26-5-missing-tile-fill.md rests on the opposite"
+    );
+
+    // …and the edge-directed filter does not clear the bar it was given. Against
+    // the quincunx control it is within one part in a hundred; against the
+    // hardware's own magnification — the bar the memo names — it is plainly
+    // WORSE, which is a stronger statement than the one the batch made and the
+    // reason this arm exists.
     assert!(
         (e_box - e_edge).abs() * 100.0 < e_box,
         "the edge-directed filter has moved away from `box` (box {e_box:.2}, \
          edge {e_edge:.2}) -- re-read the memo before trusting its conclusion"
+    );
+    assert!(
+        e_edge > e_lin,
+        "the edge-directed filter now beats true bilinear magnification on texels \
+         (edge {e_edge:.2}, bilinear {e_lin:.2}) -- it is the bar the memo names, \
+         so rewrite docs/memos/p26-5-missing-tile-fill.md before adopting anything"
+    );
+    // ANTI-VACUITY for the new arm: bilinear is a DIFFERENT filter from the
+    // quincunx box, or the two columns above are one column printed twice.
+    assert!(
+        (e_box - e_lin).abs() > 0.1,
+        "the quincunx box and true bilinear scored the same ({e_box:.2} vs \
+         {e_lin:.2}) -- one of them is not the filter it is named after"
     );
 }
 

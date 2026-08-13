@@ -64,13 +64,32 @@ lost.
 
 ```
 vt missing-tile fill over 16 mip-0 tiles of a 512² fixture
-                          texel MAE (0..255)          |  gradient MAE
-  smooth gradient         near  8.45 box  9.41 edge  9.61 | 21.08 21.55 22.15
-  45 deg wedge            near 12.15 box 14.82 edge 14.27 | 32.12 31.97 31.56
-  axis-aligned bars       near  8.59 box 11.67 edge 11.86 | 21.53 22.37 22.92
-  shallow (2:1) diagonal  near 10.48 box 12.61 edge 12.48 | 24.35 24.74 25.57
-  ALL                     near  9.92 box 12.13 edge 12.05 | 24.77 25.16 25.55
+                             texel MAE (0..255)            |      gradient MAE
+                       near   box  bilin   edge  |  near   box  bilin   edge
+  smooth gradient      8.45   9.41   9.10   9.61 | 21.08  21.55  22.95  22.15
+  45 deg wedge        12.15  14.82  13.81  14.27 | 32.12  31.97  31.92  31.56
+  axis-aligned bars    8.59  11.67  11.11  11.86 | 21.53  22.37  23.35  22.92
+  shallow (2:1) diag  10.48  12.61  11.79  12.48 | 24.35  24.74  25.11  25.57
+  ALL                  9.92  12.13  11.45  12.05 | 24.77  25.16  25.83  25.55
 ```
+
+**The `bilin` column is the P26.5 audit's, and it is the one this memo's argument
+was about.** The batch measured three filters and labelled the `box` column
+*"bilinear (what the sampler already does)"*. It is not: `box2x` is the quincunx
+lattice with the direction test removed — source texels pass through untouched
+and it sits half a texel off — which makes it the right control for isolating the
+direction test and the wrong thing to call a sampler's magnification. True
+texel-centre bilinear (weights 3/4–1/4, clamped at the edges) is `bilin`.
+
+Two numbers move, and both move the ruling's way:
+
+* replication still wins on both metrics against all three interpolations —
+  **9.92 / 24.77** against bilinear's 11.45 / 25.83;
+* the edge-directed filter is **not** "within one part in a hundred of the bar".
+  Against the quincunx control it is (12.05 vs 12.13); against the filter the
+  hardware actually performs it is **5 % worse** (12.05 vs 11.45), and worse on
+  structure. The conclusion below is therefore stronger than the batch's, not
+  weaker.
 
 ## What it says
 
@@ -85,15 +104,21 @@ construction. Any interpolation spends that optimality moving energy across bloc
 boundaries. It buys smoothness, and smoothness is not what a fidelity metric
 rewards.
 
-**2. The edge-directed filter does not clear the bar it was given.** The bar was
+**2. The edge-directed filter does not clear the bar it was given.** The bar is
 the bilinear magnification the hardware sampler *already performs* for free when
 it magnifies a coarse page, because a fill that does not beat that is a page
-write that buys nothing. Edge-directed comes in at 12.05 against bilinear's
-12.13 — one part in a hundred, well inside what a different fixture would move —
-and it is **worse** on structure (25.55 against 25.16). It does what it was
-designed to do on the two diagonal regions (14.27 vs 14.82; 12.48 vs 12.61) and
-pays for it on the smooth one (9.61 vs 9.41), which is the staircase risk the
-5/8 direction margin exists to bound and evidently does not eliminate.
+write that buys nothing. Edge-directed comes in at **12.05 against bilinear's
+11.45** — 5 % worse — and worse on structure too (25.55 against 25.83 is better
+here, but both lose to replication's 24.77). It does what it was designed to do
+on the two diagonal regions relative to the *quincunx box* (14.27 vs 14.82;
+12.48 vs 12.61) and pays for it on the smooth one (9.61 vs 9.41), which is the
+staircase risk the 5/8 direction margin exists to bound and evidently does not
+eliminate; against real bilinear it loses on three regions of four.
+
+*(The first version of this memo compared 12.05 against **12.13** and called it
+"one part in a hundred". That 12.13 was the quincunx box control, not the
+sampler's filter — the P26.5 audit measured the filter the sentence names. The
+conclusion is unchanged and the margin is larger.)*
 
 **3. There is no reachable window to adopt any of it into.** A page-fill needs a
 slot that has been allocated and bytes that cannot be produced. In this
@@ -140,5 +165,6 @@ and the ruling above says what to write.
 **And NTC itself stays deferred**, unchanged, for the reason §4 gave: a
 weight-per-material predictor needs a training pipeline and has no falsifiable
 bound under house gates. What this measurement adds to that ruling is a floor it
-must clear — a learned predictor has to beat **9.92**, not 12.13, because the
-cheap answer it is replacing is cheaper than anyone assumed.
+must clear — a learned predictor has to beat **9.92**, not the 11.45 a hardware
+sampler gives for nothing, because the cheap answer it is replacing is cheaper
+than anyone assumed.
