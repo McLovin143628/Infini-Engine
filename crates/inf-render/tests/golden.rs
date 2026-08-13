@@ -8609,7 +8609,6 @@ fn golden_vsm_spot() {
         inner_cos: 30f32.to_radians().cos(),
         outer_cos: 42f32.to_radians().cos(),
         cast_shadows: true,
-        ..RenderLight::default()
     });
     scene.mark_dirty();
     let view = look_view(DVec3::new(0.0, 5.0, 9.0), DVec3::new(0.0, 0.3, -1.0));

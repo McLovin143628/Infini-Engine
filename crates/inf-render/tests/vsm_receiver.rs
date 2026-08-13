@@ -101,10 +101,10 @@ fn top_view_fov(height: f64, fov_deg: f32) -> RenderView {
     }
 }
 
-fn look_view(eye: glam::DVec3, at: glam::DVec3) -> RenderView {
-    look_view_fov(eye, at, 60.0)
-}
-
+/// Every arm that looks along the ground uses [`look_view_fov`] directly: a
+/// 60-degree wrapper existed in this file's first draft and every arm that used
+/// it measured shadow detail, which a 60-degree field of view at 256 x 144
+/// cannot carry (see `NARROW_FOV_DEG`).
 fn look_view_fov(eye: glam::DVec3, at: glam::DVec3, fov_deg: f32) -> RenderView {
     RenderView {
         origin: inf_math::FloatingOrigin::new(glam::DVec3::ZERO),
@@ -664,7 +664,6 @@ fn a_spot_light_casts_the_engines_first_spot_shadow() {
         inner_cos: 32f32.to_radians().cos(),
         outer_cos: 40f32.to_radians().cos(),
         cast_shadows: cast,
-        ..Default::default()
     };
     scene.lights.push(spot(true));
     scene.mark_dirty();
@@ -854,7 +853,6 @@ fn a_spots_page_grid_is_exactly_its_outer_cone() {
         inner_cos: (outer_deg - 6.0).to_radians().cos(),
         outer_cos,
         cast_shadows: true,
-        ..Default::default()
     });
     scene.mark_dirty();
     let view = look_view_fov(

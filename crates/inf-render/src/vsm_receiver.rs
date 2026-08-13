@@ -661,7 +661,14 @@ pub fn vsm_receiver_site(
 /// the second resolve at all, which is `ShadowSettings::cascade_blend`'s own
 /// escape hatch, kept.
 pub fn vsm_blend_weight(band: f32, level: u32, lf: f32, q: Vec2, ortho: bool) -> f32 {
-    if !(band > 0.0) {
+    // `is_nan()` beside the comparison rather than `!(band > 0.0)`, which is the
+    // same predicate and hides half of it — `quantize_light_dir`'s own ruling,
+    // and clippy's. A NaN band would make every comparison below false and the
+    // seam would quietly come back; the settings boundary refuses one, and this
+    // is the second door. (`vsm_receive.wgsl` keeps the negated form, because
+    // WGSL has no `isNan` and a NaN's comparisons are false there too — so the
+    // two spell one predicate.)
+    if band.is_nan() || band <= 0.0 {
         return 0.0;
     }
     let b = band.clamp(1e-4, 1.0);
@@ -1524,8 +1531,8 @@ mod tests {
         // No level-0 page is resident; each one RESOLVES to the level-1 root,
         // which is what `VsmResidency::propagate` writes into the table — a
         // fallback is an entry naming a coarser level, not an absence.
-        for e in entries..entries + 5 {
-            table[e] = inf_vsm::pack_entry(3, 1);
+        for e in table.iter_mut().skip(entries).take(5) {
+            *e = inf_vsm::pack_entry(3, 1);
         }
 
         let proj = VsmProjection {
