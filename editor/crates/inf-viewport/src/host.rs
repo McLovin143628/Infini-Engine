@@ -1085,7 +1085,8 @@ impl EngineHost {
             match self.renderer.vt_summary() {
                 Some(line) => tracing::info!("inf-viewport: {line}"),
                 None => tracing::info!(
-                    "inf-viewport: this level binds no virtual textures — the                      residency view will be uniformly grey"
+                    "inf-viewport: this level binds no virtual textures — the \
+                     residency view will be uniformly grey"
                 ),
             }
         }

@@ -1607,11 +1607,13 @@ fn the_residency_heat_map_paints_what_is_resident() {
     // literal here would be a pin on the tonemapper.
     assert!(
         bare_g * 2.0 < hot_g,
-        "an unbound surface is as green as a resident one (bare g {bare_g:.1},          resident g {hot_g:.1})"
+        "an unbound surface is as green as a resident one (bare g {bare_g:.1}, \
+         resident g {hot_g:.1})"
     );
     assert!(
         bare_r * 2.0 < cold_r,
-        "an unbound surface is as red as one at the floor (bare r {bare_r:.1},          floor r {cold_r:.1})"
+        "an unbound surface is as red as one at the floor (bare r {bare_r:.1}, \
+         floor r {cold_r:.1})"
     );
     assert!(
         (bare_r - bare_g).abs() < 8.0,
@@ -1693,7 +1695,8 @@ fn the_vt_summary_is_a_line_a_host_can_log() {
     assert_eq!(
         renderer.vt_pop_in().frames,
         2,
-        "the streaming loop did not run once per frame, so the line is a row of          zeros"
+        "the streaming loop did not run once per frame, so the line is a row of \
+         zeros"
     );
     assert!(
         renderer.vt_pop_in().admits > 0,

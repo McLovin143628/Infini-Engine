@@ -639,7 +639,8 @@ content_hash = \"0\"
         moved.scan().expect("scan");
         assert!(
             moved.contains(guid),
-            "the level's asset id moved when its contents did, so every edge into              it goes stale on the next save"
+            "the level's asset id moved when its contents did, so every edge into \
+             it goes stale on the next save"
         );
 
         // MIGRATION: a sidecar written before the field existed still scans,

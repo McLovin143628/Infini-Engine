@@ -247,7 +247,10 @@ fn tail_cost_advisory(width: u32, height: u32) -> Option<String> {
     let pct = tiled_size_factor_pct(width, height);
     (pct >= 200).then(|| {
         format!(
-            "{width}×{height} stores {}.{}× its own pixels as a tiled .inf_tex — every mip              level is kept in whole {}² tiles, so a small texture is mostly border ring and              clamp padding; pack small textures into an atlas if the on-disk size matters",
+            "{width}×{height} stores {}.{}× its own pixels as a tiled .inf_tex — every mip \
+             level is kept in whole {}² tiles, so a small texture is mostly border \
+             ring and clamp padding; pack small textures into an atlas if the \
+             on-disk size matters",
             pct / 100,
             (pct / 10) % 10,
             crate::tiles::TILE_SIZE + 2 * crate::tiles::TILE_BORDER
@@ -464,6 +467,51 @@ mod tests {
         assert_eq!(tex.mips[0].data.len(), 4 * 4 * 4);
         let bytes = encode(&tex).unwrap();
         assert_eq!(decode::<TextureAsset>(&bytes).unwrap(), tex);
+    }
+
+    /// **The eaten-`\` law, sixth catch — and this time it is guarded**
+    /// (P26.5 audit).
+    ///
+    /// P26.5's tail-cost advisory shipped with the source indentation in it:
+    /// *"…as a tiled .inf_tex — every mip              level is kept…"*. These
+    /// are the sentences the Content Drawer's badge chip prints, so the mangling
+    /// is what an author reads, and `contains()` is perfectly happy with it —
+    /// which is why the arm above could not see it and every one of the five
+    /// prior catches was found by eye.
+    ///
+    /// The house remedy, one crate over (`inf_packager::cook`'s material
+    /// advisories, `pie_schema_skew`'s refusal, the capture wizard's literals):
+    /// assert on the PRODUCED string, over every extent that can produce one.
+    #[test]
+    fn no_import_advisory_carries_an_eaten_continuation() {
+        let mut seen = 0usize;
+        for (w, h) in [
+            (128u32, 128u32),
+            (256, 256),
+            (255, 260),
+            (4096, 16),
+            (8192, 4),
+            (4095, 15),
+            (224, 32),
+            (1, 1),
+        ] {
+            for msg in texture_import_advisories(w, h) {
+                seen += 1;
+                assert!(
+                    !msg.contains("  "),
+                    "{w}×{h}: the advisory carries a run of spaces — a Rust line \
+                     continuation was eaten and the source indentation is in the \
+                     text an author reads: {msg:?}"
+                );
+                assert!(
+                    !msg.contains('\n'),
+                    "{w}×{h}: the advisory is multi-line: {msg:?}"
+                );
+            }
+        }
+        // ANTI-VACUITY: the sweep produced sentences. An extent table that
+        // raised nothing would satisfy every assertion above.
+        assert!(seen >= 8, "the sweep produced only {seen} advisories");
     }
 
     /// P26.1 (+ P26.5's third): the advisories fire on exactly the hazards they
