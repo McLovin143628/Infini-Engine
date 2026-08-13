@@ -592,8 +592,16 @@ mod tests {
 
     /// The vertex layout really is the mesh pass's, byte for byte — the claim the
     /// shader reuse rests on.
+    ///
+    /// **Read off `mesh::VERTEX_ATTRIBUTES`, not off three literals** (P26.5
+    /// audit). This buffer is bound against `vertex_layouts()`, whose stride is
+    /// `size_of::<MeshVertex>()` and whose offsets are that constant's: a
+    /// hand-copied `24` agrees with the pipeline only until someone moves an
+    /// attribute, and a fracture chunk drawn from the wrong bytes is what the
+    /// P26.5 commit body calls "every chunk drawn from the wrong bytes".
     #[test]
     fn the_vertex_layout_matches_the_mesh_pass() {
+        use crate::passes::mesh::VERTEX_ATTRIBUTES;
         assert_eq!(
             std::mem::size_of::<RenderFractureVertex>(),
             std::mem::size_of::<super::super::mesh::MeshVertex>()
@@ -604,11 +612,24 @@ mod tests {
             uv: [0.25, 0.75],
         };
         let base = &v as *const RenderFractureVertex as usize;
-        assert_eq!(&v.pos as *const _ as usize - base, 0);
-        assert_eq!(&v.normal as *const _ as usize - base, 12);
-        // P26.5: and the uv the mesh pass reads at `@location(2)`, at the offset
-        // `mesh::VERTEX_ATTRIBUTES` declares for it.
-        assert_eq!(&v.uv as *const _ as usize - base, 24);
+        // `@location(0)` position, `@location(1)` normal, `@location(2)` uv —
+        // each at the offset the pipeline declares for that location.
+        for (field, loc) in [
+            (&v.pos as *const _ as usize - base, 0u32),
+            (&v.normal as *const _ as usize - base, 1),
+            (&v.uv as *const _ as usize - base, 2),
+        ] {
+            let want = VERTEX_ATTRIBUTES
+                .iter()
+                .find(|a| a.shader_location == loc)
+                .unwrap_or_else(|| panic!("the mesh pass declares no @location({loc})"))
+                .offset as usize;
+            assert_eq!(
+                field, want,
+                "a fracture chunk's @location({loc}) sits at byte {field} and the \
+                 mesh pipeline reads it at {want}"
+            );
+        }
     }
 
     /// Debris carries no pick id: a chunk is not an entity, so a click has

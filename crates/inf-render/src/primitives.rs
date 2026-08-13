@@ -499,9 +499,18 @@ impl PrimGpu {
 /// texture path, and `scatter_mesh.wgsl` pulls with a hard-coded stride of six.
 /// The scatter path samples no virtual texture — a scattered instance carries no
 /// [`crate::VtTextureSet`] at all — so widening this buffer would cost every
-/// foliage vertex two floats to feed a branch that cannot be taken. The flatten
-/// below names the two fields it copies rather than casting the struct, so the
-/// stride and the copy cannot drift apart.
+/// foliage vertex two floats to feed a branch that cannot be taken.
+///
+/// **The P26.5 audit made that a pin instead of an argument.** The original
+/// wording said the flatten "names the two fields it copies rather than casting
+/// the struct, so the stride and the copy cannot drift apart" — which is a
+/// description of the code, not a check on it. Measured: adding
+/// `flat.extend_from_slice(&v.uv)` here draws every scattered instance from the
+/// wrong bytes and the **whole `inf-render` suite stays green**, all four
+/// scatter goldens included, because the goldens' pixel comparison is opt-in.
+/// Before P26.5 the drift was impossible (a `MeshVertex` *was* six floats); the
+/// uv is what made it a hazard, so [`SCATTER_PULL_STRIDE`] and
+/// `the_scatter_pull_buffer_is_the_stride_the_shader_pulls_with` exist.
 ///
 /// It exists rather than reusing [`PrimGpu`]'s buffers because a wgpu buffer's
 /// usage flags are fixed at creation and `VERTEX | INDEX` is not `STORAGE`; the
@@ -512,14 +521,34 @@ pub struct PrimStorage {
     pub ranges: [PrimRange; 5],
 }
 
+/// Floats per vertex in [`PrimStorage`]'s pull buffer — **six**: position then
+/// normal, and deliberately not [`MeshVertex`]'s uv (P26.5).
+///
+/// `scatter_mesh.wgsl` indexes that buffer as `vertices[idx * 6u + k]`. WGSL has
+/// no way to import a Rust constant, so the agreement is pinned from this side
+/// instead: the arm below asserts the flatten produces exactly this many floats
+/// per vertex **and** that the shader spells the same number.
+pub const SCATTER_PULL_STRIDE: usize = 6;
+
+/// The pull buffer's contents: `position` then `normal` per vertex, flat.
+///
+/// A named function rather than a loop inside `PrimStorage::new` so a test can
+/// run it with no GPU — the whole point of the P26.5 audit's finding is that the
+/// only consumer of these bytes is a shader, on a path whose pixels nothing
+/// compares by default.
+fn scatter_pull_floats(verts: &[MeshVertex]) -> Vec<f32> {
+    let mut flat: Vec<f32> = Vec::with_capacity(verts.len() * SCATTER_PULL_STRIDE);
+    for v in verts {
+        flat.extend_from_slice(&v.pos);
+        flat.extend_from_slice(&v.normal);
+    }
+    flat
+}
+
 impl PrimStorage {
     pub fn new(gpu: &GpuContext, label: &str) -> Self {
         let (verts, idx, ranges) = packed_geometry();
-        let mut flat: Vec<f32> = Vec::with_capacity(verts.len() * 6);
-        for v in &verts {
-            flat.extend_from_slice(&v.pos);
-            flat.extend_from_slice(&v.normal);
-        }
+        let flat = scatter_pull_floats(&verts);
         let wide: Vec<u32> = idx.iter().map(|i| *i as u32).collect();
         let mk = |name: &str, bytes: &[u8]| {
             let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -783,6 +812,66 @@ mod tests {
         assert_eq!(verts[0].uv[0], 0.0);
         assert_eq!(verts[cols - 1].uv[0], 1.0);
         assert_eq!(verts[0].pos, verts[cols - 1].pos);
+    }
+
+    /// **The scatter pull buffer's stride is the stride the shader pulls with**
+    /// (P26.5 audit).
+    ///
+    /// `scatter_mesh.wgsl` reads this buffer as `vertices[idx * 6u + k]`, and
+    /// WGSL cannot import a Rust constant. Until P26.5 the agreement was
+    /// structural — a `MeshVertex` was six floats, so a `cast_slice` and a
+    /// field-by-field copy produced the same bytes. The uv broke that: the
+    /// struct is eight floats now and the buffer must stay six.
+    ///
+    /// Measured, which is why this arm exists: adding
+    /// `flat.extend_from_slice(&v.uv)` to the flatten draws every scattered
+    /// instance from the wrong bytes, and the **whole `inf-render` suite is
+    /// green** — including all four scatter goldens, because a golden's pixel
+    /// comparison is opt-in (`INF_GOLDEN_STRICT`).
+    ///
+    /// Both directions: the flatten's length and contents, and the literal in
+    /// the shader. Changing one without the other fails here.
+    #[test]
+    fn the_scatter_pull_buffer_is_the_stride_the_shader_pulls_with() {
+        let (verts, _, _) = packed_geometry();
+        let flat = scatter_pull_floats(&verts);
+        assert_eq!(
+            flat.len(),
+            verts.len() * SCATTER_PULL_STRIDE,
+            "the pull buffer is {} floats for {} vertices — the shader indexes it \
+             at {SCATTER_PULL_STRIDE} per vertex and would read every one of them \
+             from another vertex's bytes",
+            flat.len(),
+            verts.len()
+        );
+        // …and the six really are position then normal, in that order. A stride
+        // that matched with the fields permuted is the same defect one step
+        // quieter.
+        for (i, v) in verts.iter().enumerate().take(8) {
+            let base = i * SCATTER_PULL_STRIDE;
+            assert_eq!(&flat[base..base + 3], &v.pos[..], "vertex {i} position");
+            assert_eq!(
+                &flat[base + 3..base + 6],
+                &v.normal[..],
+                "vertex {i} normal"
+            );
+        }
+        // The other side of the agreement: the shader's own literal.
+        let src = include_str!("shaders/scatter_mesh.wgsl");
+        let spelled = format!("idx * {SCATTER_PULL_STRIDE}u");
+        assert!(
+            src.contains(&spelled),
+            "`scatter_mesh.wgsl` does not pull at `{spelled}`, so the buffer this \
+             crate writes and the buffer that shader reads are two different \
+             layouts"
+        );
+        // ANTI-VACUITY: a `MeshVertex` is WIDER than the stride, so this is a
+        // statement about a deliberate omission and not about a coincidence.
+        assert!(
+            std::mem::size_of::<MeshVertex>() / std::mem::size_of::<f32>() > SCATTER_PULL_STRIDE,
+            "a MeshVertex is no wider than the pull stride, so nothing is being \
+             left out and this arm is checking a tautology"
+        );
     }
 
     /// The box projection is a **table**, not a description: three faces, three

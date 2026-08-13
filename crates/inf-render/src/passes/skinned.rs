@@ -133,6 +133,38 @@ const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 11] = [
     },
 ];
 
+/// `Limits::default()`'s ceiling on vertex attributes **across every buffer of
+/// one pipeline** — the wall `docs/memos/p26-5-vertex-streams.md` measures.
+///
+/// The renderer has never raised a limit, so this is the number that decides
+/// whether a tangent stream can join the skinned path. It is a `const` rather
+/// than a sentence in a doc block because the memo's whole argument for
+/// deferring the tangent to P28.2 rests on it, and the assertion below turns
+/// "this pipeline is full" from a claim into a build failure (P26.5 audit).
+const MAX_VERTEX_ATTRIBUTES: usize = 16;
+
+/// **The skinned pipeline is at the wall, exactly.** Five vertex attributes plus
+/// eleven instance ones is sixteen, and the uv took the last address there is
+/// (`@location(15)`). Adding a seventeenth is a `wgpu` validation failure on
+/// every adapter at `create_render_pipeline`; this fails the build instead, at
+/// the file that would have to change.
+const _: () = {
+    assert!(VERTEX_ATTRIBUTES.len() + INSTANCE_ATTRIBUTES.len() == MAX_VERTEX_ATTRIBUTES);
+    // …and no location is past the last one the limit allows, which is a
+    // different fact from the count: `@location(15)` with a gap would satisfy
+    // one and not the other.
+    let mut i = 0;
+    while i < VERTEX_ATTRIBUTES.len() {
+        assert!((VERTEX_ATTRIBUTES[i].shader_location as usize) < MAX_VERTEX_ATTRIBUTES);
+        i += 1;
+    }
+    let mut j = 0;
+    while j < INSTANCE_ATTRIBUTES.len() {
+        assert!((INSTANCE_ATTRIBUTES[j].shader_location as usize) < MAX_VERTEX_ATTRIBUTES);
+        j += 1;
+    }
+};
+
 fn vertex_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
     [
         Some(wgpu::VertexBufferLayout {
