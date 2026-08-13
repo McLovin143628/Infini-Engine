@@ -9982,9 +9982,14 @@ door for editor viewport, PIE and shipping.
 > over-budget scene (measured at six times its pool) inside its slots, peaking at
 > ≥ 90 % of them, deferring, with every fallen-back mip-0 address asserted equal
 > to `VtTextureDesc::ancestor` at the level it was served. (d) the counters
-> moving first and zero second. (e) both budget classes kept apart (the P20 law)
-> — and the P26.4 remainder discharged with `VT_STREAM_STEP_BUDGET_MS`, measured
-> at 0.53 ms/frame and ratcheted at 8.0. (f) the golden count.
+> moving first and zero second. (e) the budget classes kept apart (the P20 law):
+> the level build against `LOAD_BUDGET_MS`, the pages a **steady** frame admits
+> against `VT_ADMITS_PER_FRAME_CEILING` on every adapter, and the steady-state
+> milliseconds against `VT_STREAM_STEP_BUDGET_MS` (8.0 against 0.53 measured)
+> where a clock represents a frame — **three classes, not two, since
+> 2026-08-13**: as shipped, this arm asserted a GPU-inclusive millisecond
+> unconditionally and `macos-latest` went red at 49.55 ms with nothing
+> regressed. See the FOLLOW-UP at the end of this block. (f) the golden count.
 >
 > **Three arms had to be rebuilt because the first version could not fail**, and
 > all three are worth writing down:
@@ -10216,7 +10221,12 @@ door for editor viewport, PIE and shipping.
 > `VT_STREAM_STEP_BUDGET_MS` at 8.0 against 0.53 measured is ~15×, inside the
 > house pattern (`STREAMED_STEP_BUDGET_MS` is 22× its measurement,
 > `LOAD_BUDGET_MS` ~900×) and honestly named a FRAME-class number that includes
-> the render. `vt_heat` runs the same `vt_resolve`, spelled the same way as
+> the render. **(Corrected 2026-08-13: the name was honest and the consequence
+> was missed — a number that includes a GPU frame is a hardware claim, which §8
+> numbers may not be, and the ~4× runner factor folded into that "~15×" is
+> `LOAD_BUDGET_MS`'s CPU-class figure. `macos-latest` measured 93×. See the
+> FOLLOW-UP at the end of the Phase 26 block.)** `vt_heat` runs the same
+> `vt_resolve`, spelled the same way as
 > `vt_sample` (same `b`, same `uv - floor(uv)`, same `vt_mip`) — one door, and
 > there is no second resolve. Every pipeline binding the widened `MeshVertex`
 > takes its stride from `size_of` through one `vertex_layouts()` — mesh, depth
@@ -10306,6 +10316,84 @@ door for editor viewport, PIE and shipping.
 > textureless frame does not enter the streaming loop at all — which arm (d)
 > measures rather than assumes, and which the golden set's content digest
 > (P26.5 audit) now checks rather than counts.
+>
+> **FOLLOW-UP (2026-08-13) — the budget arm was rescoped, and the ledger above is
+> corrected.** The Phase 26 close was green on `windows-latest` and
+> `ubuntu-latest` and **red on `macos-latest`**, on arm (e) alone: *"a streamed
+> frame cost 49.55 ms, over the 33 ms frame budget"* — with the sibling
+> determinism arm passing on the same runner in the same binary, its
+> `feedback_misses` landing exactly on `READBACK_LATENCY_FRAMES + 1`, and the
+> same 32 admits / 8 deferrals. Nothing had regressed. The arm's `frame_ms` was a
+> whole headless frame **plus a pump to device idle** — the render, not the
+> streaming loop — asserted on every adapter, including the "Apple Paravirtual
+> device" that `inf-render`'s `frame_budget.rs` has skipped **by that string**
+> since P15.1 and that `vgeom_streaming`, `phase18_gate` (e) and `mvs_gate` all
+> skip too. It was the tree's only wall-clock arm without that condition, and the
+> arithmetic that sized its constant borrowed `LOAD_BUDGET_MS`'s **CPU**-class
+> *"runners are ~4× slower"* factor for a GPU-inclusive measurement; the factor
+> measured on that runner is **93×**.
+>
+> What it asserts now, in three classes: the level build against
+> `LOAD_BUDGET_MS`, unchanged; **what one frame's streaming loop did**, in two
+> new §8 constants asserted unconditionally on every adapter —
+> `VT_ADMITS_PER_FRAME_CEILING` (16, measured 6 on a steady frame) for the pages
+> it uploads, since one admit is one `queue.write_texture` of one page, and
+> `VT_WANTS_PER_FRAME_CEILING` (48, measured 36) for the size of the scan that
+> asked, since admits are clamped by the pool and *"a want scan that walks the
+> whole pyramid"* is therefore nearly invisible in them — this is the half with
+> teeth in CI; and the **steady-state** milliseconds against
+> `VT_STREAM_STEP_BUDGET_MS` (value unchanged at 8.0 — rescoping what a number
+> covers is not a licence to move a §8 number) on an adapter whose clock
+> represents a frame. The cold frame is
+> separated from the steady state in both halves — `vgeom_streaming`'s
+> arrangement, and the page half needs it more sharply, since a ceiling high
+> enough to clear frame 0's whole-floor admission would be satisfied by a loop
+> re-admitting that same full pool every frame. A **VT-free control run of the
+> same path** is printed beside them, so the next macOS run measures what this
+> failure could only infer: how much of the 49.55 ms is the paravirtual pass
+> stack and how much is paging.
+>
+> **The decomposition, measured** (RTX 4070 Ti, 2026-08-13): cold frame
+> **6.67 ms**, steady mean **0.54 ms**, all-twelve mean **1.05 ms**, the same
+> path with no virtual texturing at all **0.34 ms** — so the streaming loop is
+> **0.20 ms** of a steady frame and the pass stack is the rest, and *more than
+> half* of the mean the old arm asserted was frame 0. Admits per frame
+> `0:18 1:6 … 7:4 … 10:4`: **18 on the cold frame, peak 6 on a steady one**,
+> which is what `VT_ADMITS_PER_FRAME_CEILING` is 16 against — deliberately
+> **below** the cold frame's own 18, so a loop re-admitting the floor every frame
+> trips it. Note what that distribution kills: **eight of the twelve frames admit
+> zero pages**, so the frames the old arm called over budget were streaming
+> nothing at all, and no admission policy could have saved them. And the number
+> that matters most: this machine reports **32 admits / 8 deferred**, and so did
+> the red macOS run. The world is identical on both legs; only the clock
+> differed. (Run-to-run drift on one discrete card is itself
+> ~2× — 1.05 ms today against the 0.53 ms the constant was minted on.)
+>
+> **The honest consequence, stated where a ledger can be read:** no CI leg has a
+> real adapter — Windows and Linux have no usable ICD and skip the arm outright,
+> macOS is the paravirtual one — so the millisecond half of arm (e) is a
+> **developer-machine gate**, the same standing `frame_budget.rs` has had since
+> P15.1 and the golden PNGs' visual claim has always had.
+> `docs/memos/p26-frame-budget-scope.md` carries the ruling, the three candidate
+> diagnoses, the numbers and a five-row mutation matrix. The rejected diagnosis
+> is worth remembering: an admit-per-frame cap that rides `RenderTier` was
+> considered and refused because `RenderTier` is **detected from the adapter**,
+> so it would make the residency trace a function of the machine that drew it —
+> the exact property arms (a) and (b) exist to deny.
+>
+> **Mutation-verified, and two of the mutations are findings.** A `justified_mip`
+> two levels finer (4× the tiles per surface) moves the peak admits 6 → 10 and
+> the peak wants 36 → **66**: **red on the wants ceiling**, and nowhere else — the
+> measurement that made the second constant exist. An `acquire_slot` that ignores
+> its protected set takes deferrals 8 → **0**: red on the arm's anti-vacuity. But
+> **`VT_FLOOR_MAX_TILES` 16 → 64 changes nothing**, because a 512² container is
+> exactly 4×4 tiles at mip 0 and the cap never binds on this fixture — the
+> floor's own bound is untested here, and wants a 2048²-class fixture (P28.1
+> territory, where the floor's sizing is next touched). Nor does inverting
+> `lru_victim` to evict the newest page: wanted tiles are protected inside a
+> transaction and the want set recurs frame to frame, so on this path the
+> eviction policy is inert. Worth knowing before someone optimises the evictor
+> and watches no gate move.
 
 ### Phase 27 — Virtual Shadow Maps (VSM)
 
