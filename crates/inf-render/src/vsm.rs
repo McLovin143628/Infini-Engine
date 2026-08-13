@@ -1449,8 +1449,12 @@ mod tests {
              quotes 44.8"
         );
         // The default atlas is 1 024 slots and the frame cap is 256 pages, so a
-        // whole-atlas invalidation drains in four frames against the thirty-odd a
-        // quantum lasts: the drain is 8× faster than the thing that fills it.
+        // whole-atlas invalidation drains in four frames against the forty-odd a
+        // quantum lasts. The RATIO is the stability condition, and the memo and the
+        // ledger both quote it as **eleven times** — so it is asserted rather than
+        // described. This comment read "8×" while the two documents beside it read
+        // 11× and the arithmetic reads 11.2: a constant nothing was checking
+        // (P27.3 audit).
         let drain = (inf_vsm::DEFAULT_VSM_BUDGET_BYTES
             / (VSM_PAGE_SIZE as u64 * VSM_PAGE_SIZE as u64 * 4)) as f32
             / crate::vsm_raster::VSM_MAX_RASTER_PAGES as f32;
@@ -1458,6 +1462,13 @@ mod tests {
             drain < frames_per_quantum,
             "a full invalidation drains in {drain} frames and a quantum lasts \
              {frames_per_quantum} — the dirty queue grows without bound"
+        );
+        let margin = frames_per_quantum / drain;
+        assert!(
+            (10.0..13.0).contains(&margin),
+            "the drain is {margin:.1}× the quantum's period — the memo and the \
+             P27.3 ledger both say eleven, and that number is the whole stability \
+             argument for a cap on WORK rather than on residency"
         );
 
         // **Why the quantum is per LIGHT and not per level** — the number that

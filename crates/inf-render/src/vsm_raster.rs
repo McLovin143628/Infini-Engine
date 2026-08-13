@@ -625,10 +625,30 @@ pub struct VsmRaster {
     /// **The page cache** (P27.3), indexed by atlas slot: what that slot's texels
     /// currently hold, as `(light, page, content stamp)`.
     ///
-    /// All three, not just the stamp: a slot that is evicted, filled by another
+    /// All three, and the reason is **not** the one the first write-up gave
+    /// (P27.3 audit). That reason was "a slot that is evicted, filled by another
     /// page and then re-admitted to the first one would otherwise read as a hit
-    /// while holding the *second* page's depth. The address is part of what the
-    /// texels are.
+    /// while holding the *second* page's depth", and it is backwards: the stamp's
+    /// geometric half is the page's own **matrix**, i.e. its world footprint, so
+    /// two pages that share a stamp share the depth they want and a hit under a
+    /// stamp-only key is a *correct* hit. Dropping `page`, dropping `light`, and
+    /// dropping `level` + `light` from the geometric fold each survive the whole
+    /// tree.
+    ///
+    /// What the two label members actually do is refuse a correct hit. When a
+    /// clipmap level's grid shifts, the world cell that was page `(x, y)` becomes
+    /// page `(x − 1, y)` with a **bit-identical** matrix, so the label changes
+    /// while the content does not — measured, with a count, by
+    /// `a_clipmap_grid_shift_re_labels_a_page_and_the_cache_key_pays_for_it`. They
+    /// cost a re-raster of depth the atlas already holds, which is the *"there is
+    /// no clipmap scroll"* remainder wearing the cache key, and they are kept as
+    /// cheap defence in depth on the `is_camera_cut` precedent.
+    ///
+    /// That arm carries the condition under which this stops being a ruling: every
+    /// matrix collision it finds is inside **one light and one level**. A stamp
+    /// shared across two lights or two levels would make the fold's `light` and
+    /// `level` terms inert and a stamp-only key unsound, and on that day the arm
+    /// fails and this paragraph is rewritten rather than the members removed.
     cache: Vec<Option<(u32, VsmPage, u64)>>,
     /// Last frame's view, for the [`is_camera_cut`] trigger.
     ///
@@ -2642,6 +2662,35 @@ fn pack_casters(
 /// index inside that group are properties of this frame's packing order, not of
 /// the caster, and folding them in would invalidate every page in the atlas
 /// whenever a group was inserted ahead of another.
+///
+/// # Which of these terms an arm can see, and which are rulings (P27.3 audit)
+///
+/// `model` is pinned by `a_mover_invalidates_exactly_the_pages_its_bounds_touch`
+/// and `mat` by `a_cutout_casters_alpha_test_window_is_in_its_pages_stamp`. The
+/// callers' `geom` folds are pinned by
+/// `a_vgeom_caster_that_crosses_a_lod_threshold_invalidates_its_pages` (the LOD
+/// level), `an_animating_character_invalidates_its_pages_and_a_still_one_does_not`
+/// (the joint palette) and
+/// `a_terrain_tile_whose_version_moves_invalidates_its_pages` (the tile version).
+///
+/// Three terms survive every arm in the tree and are kept as **rulings**, in the
+/// standing the `is_camera_cut` flush and the terrain cache key's `hole_words`
+/// already have:
+///
+/// * **`sphere`** is derived from `model` and a bound the `geom` fold already
+///   carries (the primitive's unit radius, the asset's bounds, the mesh's bounds,
+///   the tile's own decimated extent), so nothing can move it alone. It is folded
+///   because it is what the *cull* reads, and a stamp that named a different set
+///   of inputs from the pass it guards is the shape a drift takes.
+/// * **the terrain fold's `hole_words`** is redundant with `index_count` for any
+///   carve that removes a quad — the sibling of the cache key's own `hole_words`
+///   term, kept for the same `version: 0` case the P16.3b1 change-stamp doctrine
+///   allows.
+/// * **the skinned fold's mesh key** is separated in every reachable fixture by
+///   `sphere` (two meshes with different vertices have different bounds); it takes
+///   two meshes with identical bounds, identical palettes and identical transforms
+///   to collide. It is kept because a mesh's identity is the thing the bind-pose
+///   cache is *filed under* — see [`SkinnedCasterGeom::mesh`].
 fn caster_stamp(c: &VsmCasterRaw, geom: Fold) -> u64 {
     geom.f32s(&c.model).f32s(&c.sphere).f32s(&c.mat).done()
 }
