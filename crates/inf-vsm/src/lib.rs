@@ -60,8 +60,11 @@
 //! because a fragment may sample *any* tile and a miss would be a hole. A shadow
 //! page is only ever sampled by pixels whose depth marked it, so a page nothing
 //! marked is a page nothing reads — and pinning a clipmap's coarsest level would
-//! claim `N²` pages per directional light before any evidence at all (16 384 at
-//! the 16 k configuration, four times the whole default atlas). A page with no
+//! claim `N²` pages per directional light before any evidence at all (**4 096**
+//! at the shipped 8 k grid — four times the whole 1 024-page default atlas — and
+//! **16 384** at 16 k, which is sixteen times it; the P27.1 audit found this
+//! sentence's first draft pairing the 16 k count with the 8 k multiplier, and
+//! `address.rs` now pins both). A page with no
 //! resident ancestor therefore resolves to `NONE`, which a receiver reads as
 //! **lit**: a light leak under budget pressure rather than a black hole, and the
 //! honest degradation for a signal whose producer is a rasterizer.

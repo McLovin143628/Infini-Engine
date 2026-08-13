@@ -32,8 +32,12 @@
 //! and a miss would be a hole. **A shadow page has no such exposure**: the
 //! marking pass marks exactly the pages the visible depth buffer needs, so a page
 //! nothing marked is a page nothing samples. Pinning a clipmap's coarsest level
-//! would claim `N²` pages per directional light before any evidence — 16 384 of
-//! them at the 16 k configuration, which is four times the whole atlas.
+//! would claim `N²` pages per directional light before any evidence — **4 096**
+//! at the shipped 8 k grid, which is four times the whole 1 024-page default
+//! atlas, and **16 384** at 16 k, which is sixteen times it. The arithmetic is
+//! pinned by [`tests::pinning_a_clipmaps_coarsest_level_costs_what_the_ruling_says`]
+//! rather than quoted, because the P27.1 audit found the first draft of this
+//! paragraph pairing the 16 k page count with the 8 k multiplier.
 //!
 //! So a page that is wanted and could not be seated resolves to its **finest
 //! resident ancestor** exactly as in `inf-vt`, and to [`VSM_ENTRY_NONE`] when it
@@ -133,9 +137,23 @@ impl VsmLevelDesc {
             pages_y: n,
         }
     }
+    /// Pages in this level's grid.
+    ///
+    /// **Saturating, and that is what makes the refusal reachable.** `pages_x`
+    /// reaches this type from a host-set `VsmSettings::clipmap_pages_per_side`
+    /// exactly as the level count reaches [`VsmLightDesc::clipmap`], so it can be
+    /// absurd; `65 536²` is `2³²`, which a plain multiply wraps to **zero** in
+    /// release and panics on in debug. Neither is the
+    /// [`VsmError::PageSpaceTooLarge`](crate::VsmError::PageSpaceTooLarge)
+    /// refusal `register_light` exists to give — a zero page count *validates*,
+    /// registers, and then walks a 4-billion-page grid filling a table that has
+    /// no entries.
+    ///
+    /// A saturated count is a count that is **at least** the ceiling, which is
+    /// all a ceiling test needs.
     #[inline]
     pub const fn page_count(&self) -> u32 {
-        self.pages_x * self.pages_y
+        self.pages_x.saturating_mul(self.pages_y)
     }
 }
 
@@ -212,15 +230,19 @@ impl VsmLightDesc {
         self.level_count().saturating_sub(1)
     }
 
-    /// Pages in **one** face.
+    /// Pages in **one** face. Saturating — see [`VsmLevelDesc::page_count`].
     pub fn face_page_count(&self) -> u32 {
-        self.levels.iter().map(|l| l.page_count()).sum()
+        self.levels
+            .iter()
+            .fold(0u32, |a, l| a.saturating_add(l.page_count()))
     }
 
     /// Pages in the whole light — the number of indirection entries it needs and
-    /// the number of bits it owns in the marking mask.
+    /// the number of bits it owns in the marking mask. Saturating, so
+    /// [`crate::VsmResidency::register_light`]'s ceiling test refuses an absurd
+    /// descriptor rather than being handed a wrapped one.
     pub fn page_count(&self) -> u32 {
-        self.face_page_count() * self.faces()
+        self.face_page_count().saturating_mul(self.faces())
     }
 
     /// Whether `at` names a page that exists.
@@ -239,9 +261,9 @@ impl VsmLightDesc {
         if !self.contains(at) {
             return None;
         }
-        let mut base = at.face * self.face_page_count();
+        let mut base = at.face.saturating_mul(self.face_page_count());
         for l in &self.levels[..at.level as usize] {
-            base += l.page_count();
+            base = base.saturating_add(l.page_count());
         }
         let l = &self.levels[at.level as usize];
         Some(base + at.y * l.pages_x + at.x)
@@ -254,11 +276,11 @@ impl VsmLightDesc {
             return None;
         }
         Some(
-            face * self.face_page_count()
-                + self.levels[..level as usize]
+            face.saturating_mul(self.face_page_count()).saturating_add(
+                self.levels[..level as usize]
                     .iter()
-                    .map(|l| l.page_count())
-                    .sum::<u32>(),
+                    .fold(0u32, |a, l| a.saturating_add(l.page_count())),
+            ),
         )
     }
 
@@ -526,6 +548,40 @@ mod tests {
         assert_eq!(d.ancestor(VsmPage::flat(2, 0, 0), 1), None, "backwards");
     }
 
+    /// Every page of every finer level has **exactly one** parent, and
+    /// [`VsmLightDesc::child_range`] names it back.
+    fn assert_the_ranges_invert_the_parent_rule(d: &VsmLightDesc) {
+        d.validate().expect("a real tree");
+        for face in 0..d.faces() {
+            for level in 1..d.level_count() {
+                let parent = d.levels[level as usize];
+                let child = d.levels[level as usize - 1];
+                let mut seen = vec![0u32; child.page_count() as usize];
+                for y in 0..parent.pages_y {
+                    for x in 0..parent.pages_x {
+                        for cy in d.child_y_range(level, y) {
+                            for cx in d.child_x_range(level, x) {
+                                seen[(cy * child.pages_x + cx) as usize] += 1;
+                                assert_eq!(
+                                    d.parent(VsmPage::new(face, level - 1, cx, cy)),
+                                    Some(VsmPage::new(face, level, x, y)),
+                                    "{:?} level {level}: ({cx},{cy}) is not ({x},{y})'s child",
+                                    d.kind
+                                );
+                            }
+                        }
+                    }
+                }
+                assert!(
+                    seen.iter().all(|&n| n == 1),
+                    "{:?} level {level}: a child was adopted {:?} times",
+                    d.kind,
+                    seen.iter().collect::<std::collections::BTreeSet<_>>()
+                );
+            }
+        }
+    }
+
     /// Every child range inverts the parent rule exactly, for **both** families —
     /// including the clipmap's outer ring, which has no children at all.
     #[test]
@@ -536,36 +592,129 @@ mod tests {
             VsmLightDesc::quadtree(5),
             VsmLightDesc::cube(4),
         ] {
-            d.validate().expect("a real tree");
-            for face in 0..d.faces() {
-                for level in 1..d.level_count() {
-                    let parent = d.levels[level as usize];
-                    let child = d.levels[level as usize - 1];
-                    let mut seen = vec![0u32; child.page_count() as usize];
-                    for y in 0..parent.pages_y {
-                        for x in 0..parent.pages_x {
-                            for cy in d.child_y_range(level, y) {
-                                for cx in d.child_x_range(level, x) {
-                                    seen[(cy * child.pages_x + cx) as usize] += 1;
-                                    assert_eq!(
-                                        d.parent(VsmPage::new(face, level - 1, cx, cy)),
-                                        Some(VsmPage::new(face, level, x, y)),
-                                        "{:?} level {level}: ({cx},{cy}) is not ({x},{y})'s child",
-                                        d.kind
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    assert!(
-                        seen.iter().all(|&n| n == 1),
-                        "{:?} level {level}: a child was adopted {:?} times",
-                        d.kind,
-                        seen.iter().collect::<std::collections::BTreeSet<_>>()
-                    );
-                }
-            }
+            assert_the_ranges_invert_the_parent_rule(&d);
         }
+    }
+
+    /// **The odd extents** — the P26.2 law: a contract must be tested where the
+    /// clamp cannot hide a disagreement.
+    ///
+    /// Every fixture above is a power of two, and on a power-of-two chain the two
+    /// guards the parent rule carries are inert: `x/2` never leaves the coarser
+    /// grid, so [`VsmLightDesc::parent`]'s documented `.min(pages - 1)` clamp
+    /// never fires, and a parent's two children never run past the finer level's
+    /// end, so `child_range`'s "the last parent adopts the remainder" branch
+    /// agrees with `(lo + 2).min(child_count)` wherever it is taken. Measured, in
+    /// the P27.1 audit: **deleting either survived the whole crate.**
+    ///
+    /// The three shapes below are where they are load-bearing.
+    #[test]
+    fn the_parent_rule_holds_where_a_clamp_cannot_hide_a_disagreement() {
+        // A quadtree with SLIVER levels: `(5/2).max(1)` is 2 and `(2/2).max(1)`
+        // is 1, so this is a legal chain — and page 4 of level 0 halves to
+        // column 2 of a level that has two columns. The clamp is the only thing
+        // between that and an address outside the grid.
+        let sliver = VsmLightDesc {
+            kind: VsmTreeKind::Quadtree,
+            levels: vec![
+                VsmLevelDesc::square(5),
+                VsmLevelDesc::square(2),
+                VsmLevelDesc::square(1),
+            ],
+        };
+        assert_eq!(
+            sliver.parent(VsmPage::flat(0, 4, 4)),
+            Some(VsmPage::flat(1, 1, 1)),
+            "the odd column escaped the coarser grid — `x / 2` is 2 and level 1 \
+             has two columns"
+        );
+        assert_eq!(
+            sliver.child_x_range(1, 1),
+            2..5,
+            "the last parent adopts 2, 3 AND 4"
+        );
+        assert_eq!(sliver.child_x_range(1, 0), 0..2);
+        assert_the_ranges_invert_the_parent_rule(&sliver);
+
+        // The same shape one level shallower, where the sliver IS the root.
+        let stub = VsmLightDesc {
+            kind: VsmTreeKind::Quadtree,
+            levels: vec![VsmLevelDesc::square(3), VsmLevelDesc::square(1)],
+        };
+        assert_eq!(
+            stub.parent(VsmPage::flat(0, 2, 2)),
+            Some(VsmPage::flat(1, 0, 0))
+        );
+        assert_eq!(stub.child_x_range(1, 0), 0..3);
+        assert_the_ranges_invert_the_parent_rule(&stub);
+
+        // A clipmap grid that is a multiple of four and NOT a power of two, so
+        // `N/4 + x/2` lands on 3 + x/2 rather than on a shift.
+        let twelve = VsmLightDesc::clipmap(3, 12);
+        assert_eq!(
+            twelve.parent(VsmPage::flat(0, 0, 0)),
+            Some(VsmPage::flat(1, 3, 3))
+        );
+        assert_eq!(
+            twelve.parent(VsmPage::flat(0, 11, 11)),
+            Some(VsmPage::flat(1, 8, 8))
+        );
+        assert!(
+            twelve.child_x_range(1, 2).is_empty(),
+            "column 2 is outer ring"
+        );
+        assert_eq!(twelve.child_x_range(1, 8), 10..12);
+        assert!(twelve.child_x_range(1, 9).is_empty());
+        assert_the_ranges_invert_the_parent_rule(&twelve);
+
+        // …and a ONE-level tree, the other boundary: nothing has a parent and
+        // nothing has children, which `clipmap_levels = 1` reaches from settings.
+        let flat = VsmLightDesc::clipmap(1, 8);
+        assert_the_ranges_invert_the_parent_rule(&flat);
+        assert_eq!(flat.parent(VsmPage::flat(0, 0, 0)), None);
+        assert_eq!(flat.coarsest_level(), 0);
+    }
+
+    /// **What a mandatory floor would actually cost** — the arithmetic the
+    /// no-floor ruling rests on, pinned rather than quoted.
+    ///
+    /// The P27.1 audit found the ledger, this module's docs and the crate docs
+    /// all pairing the **16 k** configuration's page count with the **8 k**
+    /// configuration's multiplier ("16 384 … four times the whole default
+    /// atlas"). Both numbers were real and they belong to different grids; the
+    /// defence is stronger with them straight, which is why it is a correction
+    /// and not a retraction.
+    #[test]
+    fn pinning_a_clipmaps_coarsest_level_costs_what_the_ruling_says() {
+        use crate::atlas::{plan_atlas, VsmAtlasConfig};
+        let default_atlas = plan_atlas(VsmAtlasConfig::default()).0.slot_count();
+        assert_eq!(default_atlas, 1_024, "the 64 MiB default atlas");
+
+        // The grid the settings actually ship on High: 64 pages a side at 128
+        // texels is 8 192 virtual texels per level.
+        let eight_k = VsmLightDesc::clipmap(8, 64).levels[0].page_count();
+        assert_eq!(eight_k, 4_096);
+        assert_eq!(eight_k / default_atlas, 4, "the 8 k floor is FOUR atlases");
+
+        // The grid the phase's "Done when" reaches for: 128 a side, 16 k texels.
+        let sixteen_k = VsmLightDesc::clipmap(8, 128).levels[0].page_count();
+        assert_eq!(sixteen_k, 16_384);
+        assert_eq!(
+            sixteen_k / default_atlas,
+            16,
+            "16 384 pages is SIXTEEN default atlases, not four — the ruling's own \
+             number, straight"
+        );
+        // Four times the largest atlas ONE 8 192² texture can hold, which is the
+        // reading the first draft's "four times" was accidentally true of.
+        let biggest = plan_atlas(VsmAtlasConfig {
+            budget_bytes: u64::MAX / 2,
+            ..Default::default()
+        })
+        .0
+        .slot_count();
+        assert_eq!(biggest, 4_096, "64 × 64 slots is one 8 192² atlas");
+        assert_eq!(sixteen_k / biggest, 4);
     }
 
     /// ANTI-VACUITY for the arm above: a clipmap level really does have pages
@@ -671,6 +820,50 @@ mod tests {
         // …and zero is clamped UP, so a tree always has a level to resolve into.
         assert_eq!(VsmLightDesc::clipmap(0, 8).level_count(), 1);
         assert_eq!(VsmLightDesc::quadtree(0).level_count(), 1);
+    }
+
+    /// **The other half of that constructor takes a setting too**, and it went in
+    /// unguarded — the P27.1 audit's finding.
+    ///
+    /// `pages_per_side` reaches [`VsmLightDesc::clipmap`] from a host-set
+    /// `VsmSettings::clipmap_pages_per_side` exactly as `levels` does, and
+    /// `65 536²` is `2³²`. With a plain multiply that count **wrapped to zero**
+    /// in release: the descriptor validated, `register_light` compared 0 against
+    /// its million-page ceiling and accepted, and the relayout then walked a
+    /// four-billion-page grid writing into a table with no entries. In debug it
+    /// was an overflow panic. Neither is the refusal.
+    ///
+    /// Saturating makes the existing refusal reachable, which is the whole fix: a
+    /// count that saturates is a count that is **at least** the ceiling.
+    #[test]
+    fn an_absurd_page_grid_saturates_rather_than_wrapping_to_nothing() {
+        // 65 536² is exactly 2³² — the wrap that read as ZERO pages.
+        assert_eq!(VsmLevelDesc::square(65_536).page_count(), u32::MAX);
+        assert_eq!(VsmLevelDesc::square(u32::MAX).page_count(), u32::MAX);
+        // …and a grid that does NOT overflow on its own still overflows the sum
+        // over sixteen levels, which is the case a per-level check would miss.
+        assert_eq!(VsmLevelDesc::square(40_000).page_count(), 1_600_000_000);
+        assert_eq!(
+            VsmLightDesc::clipmap(16, 40_000).page_count(),
+            u32::MAX,
+            "sixteen levels of 1.6 G pages wrapped instead of saturating"
+        );
+        // A cube multiplies by six on top of that, and sixteen levels of one is
+        // 8.6 G pages — the face multiply is a third place the count can wrap.
+        assert_eq!(VsmLightDesc::cube(8).page_count(), 6 * 21_845);
+        assert_eq!(VsmLightDesc::cube(16).page_count(), u32::MAX);
+        // Every one of them is still a legal SHAPE — which is precisely why the
+        // page-space ceiling rather than `validate` has to be what refuses them.
+        for grid in [65_536u32, 100_000, u32::MAX - 3] {
+            let d = VsmLightDesc::clipmap(8, grid);
+            assert_eq!(d.validate(), Ok(()), "{grid} is a square multiple of 4");
+            assert_eq!(d.page_count(), u32::MAX, "{grid}");
+        }
+        // The addressing helpers saturate with it, so a caller that never went
+        // through the residency's door cannot make one of them panic either.
+        let d = VsmLightDesc::clipmap(8, 65_536);
+        assert_eq!(d.entry_index(VsmPage::flat(7, 0, 0)), Some(u32::MAX));
+        assert_eq!(d.level_first_entry(0, 7), Some(u32::MAX));
     }
 
     #[test]

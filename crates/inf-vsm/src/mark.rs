@@ -304,6 +304,61 @@ mod tests {
         assert!(!layout.mark(&r, &mut [], a, VsmPage::flat(0, 0, 0)));
     }
 
+    /// **Every bit decodes to the one page it names** — the *decoder's* half of
+    /// the arm above, and the one the P27.1 audit found missing.
+    ///
+    /// [`VsmMarkLayout::mark`] addresses a bit through
+    /// [`VsmLightDesc::entry_index`](crate::VsmLightDesc::entry_index)'s
+    /// `(face, level, y, x)`; [`wants_at`](VsmMarkLayout::wants_at) walks the
+    /// grid itself and counts. The two agree only if the walk is the *table's*
+    /// order and not the derived `(…, x, y)` — this module's own opening finding,
+    /// met on the consumer side. Measured: transposing the scan's two inner loops
+    /// survived every other arm in this file, because the scrambled fixture below
+    /// marks pages that sit on the diagonal, where `(x, y)` and `(y, x)` agree.
+    ///
+    /// A round trip over **every** page of two kinds, therefore, rather than a
+    /// sample: one bit in, one want out, naming the page that set it.
+    #[test]
+    fn every_bit_decodes_to_the_one_page_it_names() {
+        let mut r = residency(64);
+        let a = r.register_light(VsmLightDesc::clipmap(3, 8)).unwrap();
+        let b = r.register_light(VsmLightDesc::cube(3)).unwrap();
+        let layout = VsmMarkLayout::for_residency(&r);
+        let mut checked = 0u32;
+        for h in [a, b] {
+            let desc = r.desc(h).unwrap().clone();
+            for face in 0..desc.faces() {
+                for level in 0..desc.level_count() {
+                    let g = desc.levels[level as usize];
+                    for y in 0..g.pages_y {
+                        for x in 0..g.pages_x {
+                            let at = VsmPage::new(face, level, x, y);
+                            let mut mask = vec![0u32; layout.words()];
+                            assert!(layout.mark(&r, &mut mask, h, at), "{at:?}");
+                            let wants = layout.wants(&r, &mask);
+                            assert_eq!(wants.len(), 1, "{at:?} decoded to {wants:?}");
+                            assert_eq!(
+                                (wants[0].light, wants[0].page),
+                                (h, at),
+                                "the bit {at:?} set decodes to a DIFFERENT page — the \
+                                 scan's walk is not the table's (face, level, y, x)"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            checked,
+            r.desc(a).unwrap().page_count() + r.desc(b).unwrap().page_count(),
+            "the round trip did not reach every page"
+        );
+        // ANTI-VACUITY: the sweep really did visit pages whose x and y differ, so
+        // it can tell the two orders apart at all.
+        assert!(checked > 300);
+    }
+
     /// **`atomicOr` is idempotent, and the decoded want set proves it**: marking
     /// the same page twice — the ordinary case, since thousands of pixels mark
     /// the same page — is one want, and marking in either order is one mask.

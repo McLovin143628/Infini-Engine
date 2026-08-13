@@ -1099,6 +1099,87 @@ mod tests {
         assert!(matches!(err, VsmError::Desc(_)), "{err}");
     }
 
+    /// **And the refusal survives an absurd PAGE GRID**, which is where the
+    /// P27.1 audit found it did not.
+    ///
+    /// `clipmap_pages_per_side` is a host setting with no clamp of its own — the
+    /// tier only ever `min`s it down — so it reaches `VsmLevelDesc::square`
+    /// unbounded. Before the fix, `65 536²` wrapped to **zero** pages in release:
+    /// `validate` passed, this ceiling compared 0 against a million and let the
+    /// light in, and `relayout` then walked `65 536 × 65 536 × levels` addresses
+    /// into a table image with no entry words at all. In debug it was an
+    /// arithmetic panic. The refusal is what has to happen, on both profiles.
+    #[test]
+    fn an_absurd_page_grid_is_refused_rather_than_registered() {
+        for grid in [65_536u32, 100_000, u32::MAX - 3] {
+            let mut r = atlas(16);
+            let err = r
+                .register_light(VsmLightDesc::clipmap(8, grid))
+                .expect_err("a grid that cannot be addressed must be refused");
+            assert_eq!(
+                err,
+                VsmError::PageSpaceTooLarge {
+                    pages: u32::MAX,
+                    max: MAX_VSM_PAGES_PER_LIGHT,
+                },
+                "{grid} pages a side"
+            );
+            assert_eq!(r.light_count(), 0, "{grid}: the refusal is total");
+            // …and the residency is still usable afterwards, which is the whole
+            // point of a refusal rather than an abort.
+            let h = r
+                .register_light(VsmLightDesc::clipmap(4, 8))
+                .expect("a legal light after a refused one");
+            assert_eq!(
+                r.apply_wants(&[VsmWant::new(h, VsmPage::flat(0, 0, 0))])
+                    .admits
+                    .len(),
+                1
+            );
+        }
+    }
+
+    /// **Registering a light re-derives every other light's table from scratch,
+    /// and that pass must run COARSEST-FIRST.**
+    ///
+    /// `recompute_entries` is the only from-scratch computation in the crate: a
+    /// non-resident page copies its parent's already-final entry, so the sweep
+    /// only works if the parent was computed first. Every other arm registers
+    /// its lights before anything is resident, where a fresh image is all
+    /// `NONE` and either order agrees — measured in the P27.1 audit, where
+    /// reversing the sweep survived the whole crate.
+    ///
+    /// A host adds a shadow-casting light mid-session, so this is the product's
+    /// path and not only a mutation's.
+    #[test]
+    fn a_light_registered_later_does_not_flatten_the_others_fallbacks() {
+        let mut r = atlas(8);
+        let a = r.register_light(VsmLightDesc::clipmap(3, 8)).unwrap();
+        // Seat a page at the COARSEST level, so a whole subtree two levels deep
+        // resolves through it — the depth a one-level-only sweep would lose.
+        let coarse = VsmPage::flat(2, 3, 3);
+        assert_eq!(r.apply_wants(&[VsmWant::new(a, coarse)]).admits.len(), 1);
+        let deep = VsmPage::flat(0, 0, 0);
+        let before = r.resolve(a, deep).expect("the fixture seated nothing");
+        assert_eq!(
+            before.page, coarse,
+            "the fixture's page is not the ancestor"
+        );
+
+        let b = r.register_light(VsmLightDesc::quadtree(3)).unwrap();
+        assert_eq!(
+            r.resolve(a, deep),
+            Some(before),
+            "registering a second light flattened the first light's fallbacks — \
+             the relayout's from-scratch sweep ran fine-to-coarse"
+        );
+        assert_eq!(r.resolve(a, coarse), Some(before), "the seated page moved");
+        assert!(r.is_resident(a, coarse), "the residency itself moved");
+        // …and the new light starts where every light starts: at nothing.
+        assert_eq!(r.resolve(b, VsmPage::flat(0, 0, 0)), None);
+        assert_eq!(r.stats().resident, 1, "the relayout seated something");
+    }
+
     /// **Two runs of one want sequence produce one trace**, and the trace carries
     /// no stamp — the determinism claim, made executable at Ring 0.
     #[test]
