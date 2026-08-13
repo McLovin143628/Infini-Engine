@@ -69,10 +69,16 @@
 //!   of every level, never as pixels.
 //! * **(d) the engagement counters move on a VT scene and stay at zero on a
 //!   textureless one**, with the anti-vacuity half first.
-//! * **(e) budgets**: the streaming sync inside `FRAME_BUDGET_MS`, and the level
-//!   build against the LOAD-class ceiling — the P20 law, and the P26.4
-//!   remainder that the feedback's own budget is a page cap and not a
-//!   millisecond one.
+//! * **(e) budgets**, in **three** classes rather than two (rescoped
+//!   2026-08-13 after `macos-latest` went red at 49.55 ms with nothing
+//!   regressed): the level build against the LOAD-class ceiling, the pages one
+//!   frame admits against a per-frame ceiling — the portable half, asserted on
+//!   every adapter — and the steady-state milliseconds against
+//!   `FRAME_BUDGET_MS`, on an adapter whose clock represents a frame. The P20
+//!   law, extended by the observation that a *page* is machine-independent and
+//!   a *millisecond* is not; and the P26.4 remainder that the feedback's own
+//!   budget is a page cap and not a millisecond one, which turns out to be the
+//!   sounder of the two. See `docs/memos/p26-frame-budget-scope.md`.
 //! * **(f) the golden set is pinned and additive.**
 
 use std::collections::{BTreeMap, HashMap};
@@ -1416,13 +1422,119 @@ struct StreamRun {
     /// asserts inside the helper, where the residency is still alive.
     addresses_checked: usize,
     engaged_frames: u64,
-    /// Mean wall time of one frame — `render` plus the poll that lets the ring's
+    /// Wall time of **each** frame — `render` plus the poll that lets the ring's
     /// maps fire — and **nothing else**. The registry build and the renderer's
     /// own construction (which compiles every shader in the tree) are outside
     /// it: timing those as part of a frame is how a budget arm comes to report
     /// 177 ms and mean nothing. Measured that way once, on purpose, before this
     /// note was written.
-    frame_ms: f64,
+    ///
+    /// Kept **per frame** rather than as a mean, because frame 0 is a different
+    /// kind of frame from the eleven after it and a mean over the two says
+    /// neither number (P26.5 follow-up, `docs/memos/p26-frame-budget-scope.md`).
+    /// See [`StreamRun::cold_ms`] and [`StreamRun::steady_ms`].
+    frame_ms_each: Vec<f64>,
+    /// Pages admitted on **each** frame — the same work, counted in a unit no
+    /// adapter can inflate.
+    ///
+    /// One admit is one `queue.write_texture` of one page: `VtPools::apply`
+    /// writes exactly the transaction's admits and nothing else, so this is the
+    /// upload count as well as the residency decision. It is a pure function of
+    /// committed input (arm (a) asserts the trace it comes from is bit-exact),
+    /// which is what lets a **ceiling** on it be asserted on every adapter while
+    /// the milliseconds cannot be.
+    admits_each: Vec<u64>,
+    /// Wants offered on each frame, both classes — the size of the scan itself.
+    ///
+    /// The second world number, and it is not redundant with the first: admits
+    /// are **clamped by the pool** (a fixture with 28 slots cannot admit 200
+    /// pages however badly it asks), so a want set that stopped being bounded
+    /// shows up here and barely there. Mutation-measured: a `justified_mip` two
+    /// levels too fine moves the peak admits from 6 to 10 and the peak wants
+    /// from 36 to 66. The regression `inf_player::budget` names — *"a want scan
+    /// that walks the whole pyramid"* — is a wants regression, not an admits
+    /// one.
+    wants_each: Vec<u64>,
+}
+
+impl StreamRun {
+    /// Frame 0 — the cold one, and a different animal: it admits the whole
+    /// analytic floor into an empty pool, and it is the frame a lazily-built GPU
+    /// resource is built on. Measured and **printed**, never asserted, exactly as
+    /// `vgeom_streaming::streaming_overhead_is_bounded` treats its own cold frame
+    /// ("a one-off whose absolute cost depends entirely on how much content the
+    /// first frame sees").
+    fn cold_ms(&self) -> f64 {
+        self.frame_ms_each.first().copied().unwrap_or(0.0)
+    }
+
+    /// The mean of every frame **after** the cold one — the steady state, which
+    /// is the thing a per-frame budget is about.
+    fn steady_ms(&self) -> f64 {
+        let tail = &self.frame_ms_each[1.min(self.frame_ms_each.len())..];
+        if tail.is_empty() {
+            return 0.0;
+        }
+        tail.iter().sum::<f64>() / tail.len() as f64
+    }
+
+    /// The mean over **every** frame, cold included — the number the first
+    /// version of the budget arm asserted, kept so the printed line says what
+    /// changed and by how much.
+    fn mean_ms(&self) -> f64 {
+        if self.frame_ms_each.is_empty() {
+            return 0.0;
+        }
+        self.frame_ms_each.iter().sum::<f64>() / self.frame_ms_each.len() as f64
+    }
+
+    /// The most pages any one frame admitted, **cold frame excluded** — the
+    /// steady state, for the same reason [`steady_ms`](Self::steady_ms) exists.
+    /// Frame 0 admits the whole floor into an empty pool and is legitimately the
+    /// largest frame of the run; a ceiling that had to be above it could not see
+    /// a loop re-admitting the whole pool every frame, which is the regression
+    /// worth catching.
+    fn peak_steady_admits(&self) -> u64 {
+        self.admits_each[1.min(self.admits_each.len())..]
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// What the cold frame admitted — printed, never asserted.
+    fn cold_admits(&self) -> u64 {
+        self.admits_each.first().copied().unwrap_or(0)
+    }
+
+    /// The largest want set any frame offered. Not split cold/steady: the floor
+    /// is bounded on **every** frame by construction
+    /// (`visible surfaces × VT_FLOOR_MAX_TILES` plus the camera-free coarse
+    /// levels), so frame 0 is not a special case here the way it is for admits.
+    fn peak_wants(&self) -> u64 {
+        self.wants_each.iter().copied().max().unwrap_or(0)
+    }
+
+    /// `frame:wants` for every frame.
+    fn wants_trace(&self) -> String {
+        self.wants_each
+            .iter()
+            .enumerate()
+            .map(|(i, w)| format!("{i}:{w}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// `frame:admits` for every frame, for a failure message that says *which*
+    /// frame did the work.
+    fn admits_trace(&self) -> String {
+        self.admits_each
+            .iter()
+            .enumerate()
+            .map(|(i, a)| format!("{i}:{a}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 /// **Run the scripted path through the real renderer** and record the world.
@@ -1469,7 +1581,11 @@ fn scripted_run(
 
     let mut trace = Vec::with_capacity(frames as usize);
     let mut peak_resident = 0u32;
-    let mut frame_total = 0.0f64;
+    let mut frame_ms_each = Vec::with_capacity(frames as usize);
+    let mut admits_each = Vec::with_capacity(frames as usize);
+    let mut wants_each = Vec::with_capacity(frames as usize);
+    let mut admits_so_far = 0u64;
+    let mut wants_so_far = 0u64;
     for step in 0..frames {
         // The projector's job, once per frame: the sets come out of the live
         // registry, so a texture that is not yet warm is simply not named.
@@ -1495,7 +1611,16 @@ fn scripted_run(
         let t = std::time::Instant::now();
         renderer.render(gpu, &scene, &path_view(step), &target.view, (320, 180));
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
-        frame_total += t.elapsed().as_secs_f64() * 1000.0;
+        frame_ms_each.push(t.elapsed().as_secs_f64() * 1000.0);
+        // The frame's own admits and wants, differenced out of the running
+        // totals — the work THIS frame asked the queue for, in pages, and the
+        // size of the scan that asked for it.
+        let pop = renderer.vt_pop_in();
+        admits_each.push(pop.admits - admits_so_far);
+        admits_so_far = pop.admits;
+        let wants_now = pop.floor_wants + pop.refine_wants;
+        wants_each.push(wants_now - wants_so_far);
+        wants_so_far = wants_now;
 
         let res = renderer
             .vt_textures()
@@ -1584,7 +1709,9 @@ fn scripted_run(
         fallbacks,
         addresses_checked,
         engaged_frames: renderer.vt_engaged_frames(),
-        frame_ms: frame_total / frames as f64,
+        frame_ms_each,
+        admits_each,
+        wants_each,
     }
 }
 
@@ -1939,28 +2066,84 @@ fn the_engagement_counters_move_on_a_vt_scene_and_are_zero_without_one() {
 
 // ── (e) budgets ─────────────────────────────────────────────────────────────
 
-/// **(e) The level build is inside the LOAD budget and the per-frame streaming
-/// sync is inside the FRAME budget** (P26.5).
+/// **(e) The level build is inside the LOAD budget, one frame's streaming work
+/// is inside its page ceiling, and the frame's milliseconds are inside the FRAME
+/// budget where a millisecond means something** (P26.5, rescoped 2026-08-13).
 ///
-/// Two classes, and keeping them apart is the P20 law: *"loads assert
-/// `LOAD_BUDGET_MS`, never `FRAME_BUDGET_MS`"*. Building a level's registry and
-/// admitting its floor happens once, cold; the streaming sync happens thirty
-/// times a second forever.
+/// Three classes now, and keeping them apart is the P20 law taken one step
+/// further than P26.5 took it. The law says *"loads assert `LOAD_BUDGET_MS`,
+/// never `FRAME_BUDGET_MS`"*, because a load happens once and a frame happens
+/// thirty times a second. The same reasoning splits the frame half in two: what
+/// one frame's streaming loop **does** is a world fact, and what it **costs in
+/// milliseconds** is a fact about the machine that ran it.
 ///
-/// This is also the P26.4 remainder discharged: *"the feedback's own budget is a
+/// * **LOAD** — registry + pool, once, against [`LOAD_BUDGET_MS`]. Everywhere.
+/// * **WORLD** — what one frame's loop did, in two numbers, everywhere, because
+///   a page is a page on every adapter and arm (a) proves both sequences are a
+///   pure function of committed input. This is the half with teeth in CI.
+///   Pages **admitted** per steady frame against
+///   [`inf_player::budget::VT_ADMITS_PER_FRAME_CEILING`] (`VtPools::apply`
+///   issues exactly one `write_texture` per admit, so it is the upload count),
+///   and **wants offered** per frame against
+///   [`inf_player::budget::VT_WANTS_PER_FRAME_CEILING`] — the second because
+///   admits are clamped by the pool, so a scan that walked the whole pyramid
+///   would barely move them (measured: +4 admits, +30 wants, +218 deferrals).
+/// * **CLOCK** — the steady-state mean, against
+///   [`inf_player::budget::VT_STREAM_STEP_BUDGET_MS`] and [`FRAME_BUDGET_MS`],
+///   **only on an adapter whose timing represents something**. Printed on every
+///   adapter, always.
+///
+/// # Why the clock is conditional, measured rather than argued
+///
+/// The first version of this arm asserted the mean frame time unconditionally
+/// and went red on `macos-latest` at **49.55 ms** against a 33 ms budget, with
+/// nothing regressed: the runner's adapter is the "Apple Paravirtual device"
+/// that `inf-render`'s `frame_budget.rs` has named by that string since P15.1,
+/// and every other wall-clock arm in the tree — `frame_budget.rs` (five sites),
+/// `vgeom_streaming::streaming_overhead_is_bounded`,
+/// `phase18_gate::the_composed_frame_stays_inside_the_frame_budget`,
+/// `mvs_gate::parity_is_strict` — already declines to assert on it. This arm was
+/// the outlier, and the number it asserted was never the streaming loop's: it is
+/// `render` plus a blocking pump to idle, i.e. a whole GPU frame, on a
+/// virtualized GPU, held against a budget derived on a discrete one. `budget.rs`
+/// says §8 numbers *"are not hardware claims"*; this one was.
+/// `docs/memos/p26-frame-budget-scope.md` carries the ruling and the numbers.
+///
+/// # And why the cold frame is separated
+///
+/// Frame 0 admits the whole analytic floor into an empty pool and builds
+/// whatever the renderer builds lazily; frames 1..n admit a handful. A mean over
+/// the two describes neither. `vgeom_streaming` set that precedent
+/// ("the cold frame is measured separately and printed rather than asserted…
+/// because a regression that moved work from the cold frame into the steady
+/// state would otherwise look like an improvement"), and both numbers are
+/// printed here for the same reason.
+///
+/// This is still the P26.4 remainder discharged: *"the feedback's own budget is a
 /// page cap, not a millisecond cap. `VT_FEEDBACK_MAX_TILES` and
 /// `VT_FEEDBACK_REQUEST_CAP` bound the work; what the sync costs in LOAD-class
 /// milliseconds is not yet ratcheted, and the `phase26_gate` budget arm is where
-/// that lands."* `inf_player::budget::VT_STREAM_STEP_BUDGET_MS` is that ratchet.
+/// that lands."* It lands as two ratchets rather than one, and the page-shaped
+/// one is the portable half.
 #[test]
 fn the_streaming_loop_stays_inside_its_budgets() {
     let Some(gpu) = gpu_or_skip("the P26 budgets") else {
         return;
     };
+    // The classification `frame_budget.rs` has carried since P15.1, spelled the
+    // same way (a CPU rasterizer and a paravirtualized GPU have
+    // non-representative, run-to-run-noisy timing).
+    let info = gpu.adapter.get_info();
+    let virtualized = {
+        let n = info.name.to_ascii_lowercase();
+        n.contains("paravirtual") || n.contains("virtualbox") || n.contains("vmware")
+    };
+    let software = info.device_type == wgpu::DeviceType::Cpu || virtualized;
+
     let tmp = tempfile::tempdir().expect("tempdir");
     let (content, _) = big_pack(tmp.path());
 
-    // LOAD class: registry + pool + the floor, once.
+    // ── LOAD class: registry + pool, once ───────────────────────────────────
     let t0 = std::time::Instant::now();
     let built = inf_render::build_vt_level(
         &gpu.device,
@@ -1984,36 +2167,189 @@ fn the_streaming_loop_stays_inside_its_budgets() {
     );
     drop(built);
 
-    // FRAME class: the scripted path, timed **per frame** — `render` plus the
-    // poll, and nothing else. The renderer's construction compiles every shader
-    // in the tree and the registry build is the LOAD-class number above; timing
-    // either as part of a frame is how a budget arm comes to report 177 ms and
-    // mean nothing (measured, before this comment existed).
+    // The scripted path, timed **per frame** — `render` plus the poll, and
+    // nothing else. The renderer's construction compiles every shader in the
+    // tree and the registry build is the LOAD-class number above; timing either
+    // as part of a frame is how a budget arm comes to report 177 ms and mean
+    // nothing (measured, before this comment existed).
     let run = scripted_run(&gpu, &content, BIG_BUDGET_BYTES, PATH_FRAMES);
-    let per_frame = run.frame_ms;
+    // The same path with **no virtual texturing at all** — the control that says
+    // how much of a frame the streaming loop is, on whatever adapter is running
+    // it. The P18 gate's (e) precedent: measure a subsystem against the same
+    // scene with it off, rather than against an adjective.
+    let control = vt_free_control(&gpu, PATH_FRAMES);
+    let control_steady = mean_of_tail(&control);
+
     println!(
-        "phase26 budgets: {per_frame:.2} ms/frame over {PATH_FRAMES} streamed \
-         frames ({} admits, {} deferred); frame budget {FRAME_BUDGET_MS} ms, \
-         streaming ratchet {} ms",
+        "phase26 budgets on {} ({:?}){}:\n  \
+         cold frame (the floor, into an empty pool) {:.2} ms\n  \
+         steady mean over {} frames               {:.2} ms (all {} frames: {:.2} ms)\n  \
+         the same path with no VT at all          {control_steady:.2} ms \
+         (streaming is {:+.2} ms of it)\n  \
+         {} admits, {} deferred; {} on the cold frame, peak {} on a steady one \
+         (per frame: {})\n  \
+         wants peak {} in one frame (per frame: {})\n  \
+         budgets: frame {FRAME_BUDGET_MS} ms, streaming ratchet {} ms, \
+         steady admits/frame ceiling {}, wants/frame ceiling {}",
+        info.name,
+        info.device_type,
+        if software {
+            " [virtual/software — the clock is reported, not asserted]"
+        } else {
+            ""
+        },
+        run.cold_ms(),
+        PATH_FRAMES - 1,
+        run.steady_ms(),
+        PATH_FRAMES,
+        run.mean_ms(),
+        run.steady_ms() - control_steady,
         run.pop_in.admits,
         run.pop_in.deferred,
-        inf_player::budget::VT_STREAM_STEP_BUDGET_MS
+        run.cold_admits(),
+        run.peak_steady_admits(),
+        run.admits_trace(),
+        run.peak_wants(),
+        run.wants_trace(),
+        inf_player::budget::VT_STREAM_STEP_BUDGET_MS,
+        inf_player::budget::VT_ADMITS_PER_FRAME_CEILING,
+        inf_player::budget::VT_WANTS_PER_FRAME_CEILING,
     );
-    // ANTI-VACUITY: the frames did streaming work, or this times an empty loop.
-    assert!(run.pop_in.admits > 0 && run.pop_in.deferred > 0);
+
+    // ── WORLD class: what one frame's streaming loop DID ─────────────────────
+    // ANTI-VACUITY FIRST: the frames did streaming work, or every bound below is
+    // a bound on an empty loop.
     assert!(
-        per_frame < FRAME_BUDGET_MS,
-        "a streamed frame cost {per_frame:.2} ms, over the {FRAME_BUDGET_MS} ms \
-         frame budget {}",
+        run.pop_in.admits > 0 && run.pop_in.deferred > 0,
+        "the path admitted {} and deferred {} — nothing to bound: {}",
+        run.pop_in.admits,
+        run.pop_in.deferred,
+        run.pop_in.summary()
+    );
+    assert_eq!(
+        run.admits_each.iter().sum::<u64>(),
+        run.pop_in.admits,
+        "the per-frame admits do not sum to the streamer's own total, so the \
+         ceiling below is being asserted against a bookkeeping bug"
+    );
+    // …and no steady frame asked the queue for more pages than a frame may.
+    // This is the assertion that survives on every adapter, and it is a
+    // measurement of the engine rather than of the runner: one admit is one
+    // `write_texture` of one page. The cold frame is excluded and printed — it
+    // admits the whole floor the pool can hold, and a ceiling that had to clear
+    // it could not see a loop re-admitting that same pool on every frame after.
+    assert!(
+        run.peak_steady_admits() <= inf_player::budget::VT_ADMITS_PER_FRAME_CEILING,
+        "a steady frame admitted {} pages, over the {} the streaming loop is \
+         allowed per frame {} (per frame: {})",
+        run.peak_steady_admits(),
+        inf_player::budget::VT_ADMITS_PER_FRAME_CEILING,
+        inf_player::budget::RATCHET_NOTE,
+        run.admits_trace()
+    );
+    // ANTI-VACUITY for the ceiling itself: the steady frames really did admit
+    // pages, or the bound above is a bound on zero.
+    assert!(
+        run.peak_steady_admits() > 0,
+        "every admit of the run happened on the cold frame, so the steady-state \
+         ceiling is asserted against nothing (per frame: {})",
+        run.admits_trace()
+    );
+    // …and the SCAN that asked for them stayed bounded. Admits alone cannot say
+    // this: they are clamped by the pool, so a want set that walked the whole
+    // pyramid would show up as a handful more admits and a mountain of
+    // deferrals. Measured (mutation): `justified_mip` two levels too fine moves
+    // the peak admits 6 → 10, inside any ceiling a 6 justifies, and the peak
+    // wants 36 → 66 with deferrals 8 → 226. This is the arm's answer to the
+    // regression `inf_player::budget` names by name.
+    assert!(
+        run.peak_wants() <= inf_player::budget::VT_WANTS_PER_FRAME_CEILING,
+        "one frame offered {} wants, over the {} a bounded scan produces {} \
+         (per frame: {})",
+        run.peak_wants(),
+        inf_player::budget::VT_WANTS_PER_FRAME_CEILING,
+        inf_player::budget::RATCHET_NOTE,
+        run.wants_trace()
+    );
+    assert!(
+        run.peak_wants() > 0,
+        "no frame offered a want at all: {}",
+        run.wants_trace()
+    );
+
+    // ── CLOCK class: only where a millisecond represents a frame ─────────────
+    if software {
+        return;
+    }
+    let steady = run.steady_ms();
+    assert!(
+        steady < FRAME_BUDGET_MS,
+        "a streamed frame cost {steady:.2} ms on {}, over the {FRAME_BUDGET_MS} \
+         ms frame budget {}",
+        info.name,
         inf_player::budget::RATCHET_NOTE
     );
     assert!(
-        per_frame < inf_player::budget::VT_STREAM_STEP_BUDGET_MS,
-        "a streamed frame cost {per_frame:.2} ms, over the {} ms virtual-texture \
-         streaming ratchet {}",
+        steady < inf_player::budget::VT_STREAM_STEP_BUDGET_MS,
+        "a streamed frame cost {steady:.2} ms on {}, over the {} ms \
+         virtual-texture streaming ratchet {}",
+        info.name,
         inf_player::budget::VT_STREAM_STEP_BUDGET_MS,
         inf_player::budget::RATCHET_NOTE
     );
+}
+
+/// The mean of everything after the first element — a slice's steady state.
+fn mean_of_tail(ms: &[f64]) -> f64 {
+    let tail = &ms[1.min(ms.len())..];
+    if tail.is_empty() {
+        return 0.0;
+    }
+    tail.iter().sum::<f64>() / tail.len() as f64
+}
+
+/// The scripted path's frames with **no virtual texturing**: the same renderer,
+/// the same three cubes, the same views, `VtTextureSet::NONE` and no level.
+///
+/// What it isolates is the whole point of measuring it: a frame's cost is the
+/// renderer's pass stack plus the streaming loop, and only the second is this
+/// phase's. On an adapter where the first is 40 ms the difference is the only
+/// number that says anything about the second — which is exactly what the
+/// `macos-latest` failure could not distinguish.
+fn vt_free_control(gpu: &GpuContext, frames: u64) -> Vec<f64> {
+    let target = inf_render::HeadlessTarget::new(gpu, 320, 180);
+    let mut renderer = inf_render::EngineRenderer::new(gpu, inf_render::HEADLESS_FORMAT);
+    let mut out = Vec::with_capacity(frames as usize);
+    for step in 0..frames {
+        let mut scene = inf_render::RenderScene::default();
+        for i in 0..BIG_MAT.len() {
+            scene.instances.push(inf_render::MeshInstance {
+                vt: inf_render::VtTextureSet::NONE,
+                translation: glam::DVec3::new(0.0, 0.0, -4.0 * i as f64),
+                rotation: glam::Quat::IDENTITY,
+                scale: glam::Vec3::splat(2.0),
+                color: [1.0, 1.0, 1.0, 1.0],
+                metallic: 0.0,
+                roughness: 0.5,
+                emissive: [0.0; 3],
+                id: i as u32 + 1,
+                mesh: inf_render::PrimMesh::Cube,
+                blend: 0,
+                cutoff: 0.5,
+            });
+        }
+        scene.mark_dirty();
+        let t = std::time::Instant::now();
+        renderer.render(gpu, &scene, &path_view(step), &target.view, (320, 180));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        out.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    assert_eq!(
+        renderer.vt_pop_in(),
+        VtPopIn::default(),
+        "the VT-free control ran the streaming loop, so it is not a control"
+    );
+    out
 }
 
 // ── (f) the golden set ──────────────────────────────────────────────────────
