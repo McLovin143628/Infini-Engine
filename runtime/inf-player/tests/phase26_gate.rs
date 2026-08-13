@@ -2026,14 +2026,49 @@ fn the_streaming_loop_stays_inside_its_budgets() {
 /// `vt_engaged_frames` and `VtPopIn::frames` both measure (arm (d)) and that this
 /// counts.
 ///
-/// A count and not a hash: what "additive only" forbids is a golden *changing*,
-/// and a changed PNG is what the harness's own comparison catches. What a
-/// comparison cannot catch is a golden being deleted to make a red build green,
-/// which is what this is for.
+/// # A count is not enough, and the P26.5 audit measured why
+///
+/// The first version of this arm counted, and justified counting like this:
+/// *"what 'additive only' forbids is a golden changing, and a changed PNG is
+/// what the harness's own comparison catches. What a comparison cannot catch is
+/// a golden being deleted."* **Both halves are backwards**, and both were
+/// measured rather than reasoned:
+///
+/// * a **changed** golden is not caught. `check_golden`'s pixel comparison runs
+///   only under `INF_GOLDEN_STRICT`, which is opt-in precisely because exact
+///   cross-adapter pixels differ — no battery sets it. Measured: `unlit.png`
+///   overwritten with `voxel.png`'s bytes, `golden_unlit` green;
+/// * a **deleted** golden is not caught for long either, because `check_golden`
+///   writes any golden it cannot read (`read_png(&path).is_none() =>
+///   write_png`). Measured: `rm unlit.png`, run the golden suite, the file is
+///   back and the count is 50 again. Deleting a golden is therefore a *silent
+///   re-bless from the current code* — which is the shape of the thing the
+///   ledger promises never happened. The count only bites in the window before
+///   `golden.rs` runs, and they are separate test binaries with no ordering
+///   between them.
+///
+/// So the set is pinned by CONTENT as well as by count. The digest fails on an
+/// edited frame, on a re-bless, and on a delete-then-regenerate **whenever the
+/// regenerated frame differs from the committed one** — which is exactly the
+/// case that matters, since a deletion made to turn a red build green is a
+/// deletion whose replacement will not match. (Measured on this machine: an
+/// unchanged renderer regenerates `unlit.png` byte for byte, so the pin is quiet
+/// about a deletion that changed nothing, and loud about one that did.)
+///
+/// Adding a golden is still allowed and still means moving a constant in the
+/// same commit — two of them now, which is the honest price of the claim the
+/// ledger makes about this phase.
 #[test]
 fn the_golden_set_is_pinned_and_additive() {
     /// The count P26.1 through P26.4 each carried forward untouched.
     const GOLDENS: usize = 50;
+    /// `xxh3_128` over `"{file_name} {hex}\n"` for every golden, name-sorted —
+    /// the CONTENT pin (P26.5 audit). Committed PNGs are `-text` in
+    /// `.gitattributes`, so these bytes are the same on every checkout.
+    ///
+    /// **RULE: this may change only in a commit that adds a golden**, never in
+    /// one that edits an existing frame. Phase 26 re-blessed none.
+    const GOLDEN_SET_DIGEST: &str = "a07eb4adb2b49018020c6c3e9712d553";
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -2060,4 +2095,26 @@ fn the_golden_set_is_pinned_and_additive() {
         let len = std::fs::metadata(p).expect("stat").len();
         assert!(len > 256, "{} is {len} B — not a golden", p.display());
     }
+
+    // THE CONTENT PIN. Name and bytes, in name order, folded into one digest —
+    // so a re-blessed frame, a silently regenerated one and a deleted one are
+    // three ways of failing the same assertion, none of which the harness's own
+    // opt-in comparison sees.
+    let mut manifest = String::new();
+    for p in &pngs {
+        let bytes = std::fs::read(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+        manifest.push_str(&format!(
+            "{} {}\n",
+            p.file_name().expect("a file name").to_string_lossy(),
+            inf_asset::ContentHash::of(&bytes).to_hex()
+        ));
+    }
+    let digest = inf_asset::ContentHash::of(manifest.as_bytes()).to_hex();
+    assert_eq!(
+        digest, GOLDEN_SET_DIGEST,
+        "the golden set's CONTENT moved. A golden was re-blessed, deleted (the \
+         harness regenerates any golden it cannot read, so the count above stays \
+         50), or replaced. Adding one is allowed and means moving both constants \
+         in the same commit; changing an existing frame is not.\n{manifest}"
+    );
 }
