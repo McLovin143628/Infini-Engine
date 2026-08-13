@@ -11749,6 +11749,353 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
   PCF that respects page borders (border texels or clamped kernels — measured); 2. clipmap
   level blend replaces cascade blend; 3. point/spot receiver terms in the lit passes; 4. the
   bias story re-derived for page-resolution shadows and pinned by goldens.
+> **STATUS — P27.4 Receivers + filtering: COMPLETE (2026-08-13)** — **five**
+> commits, counted rather than remembered (`cdc4c34` the receiver itself,
+> `ec1c941` the arms and the mutation round, `4bb307d` the four goldens and the
+> PIE == shipping pair, `73c83d6` the filtering memo and two amendments to
+> P27.1's, and `3538452` three lints the battery's own warning stream and clippy
+> found), plus this block. Battery green at HEAD: **242 binaries,
+> 4 366 passed, 0 failed, 8 ignored** against the P27.3 audit's
+> stated 240 / 4 337 / 0 / 8 — **two new test binaries and 29
+> new arms**. That audit's own closing note said *"the whole-workspace
+> `cargo test --workspace --release --no-fail-fast` did not reach its run phase
+> inside this audit's window and that number is therefore **not** asserted here:
+> it is P27.4's first act to take it"* — taken, and it is this line.
+>
+> `clippy --workspace --all-targets` under `-D warnings` and `cargo fmt --all
+> --check` clean at final HEAD, in that order and after the battery (the P27.3
+> audit measured clippy-first costing the battery a full downstream rebuild).
+> **One provenance note, because the counts will be compared.** Clippy found
+> three lints the battery's *own warning stream* had already printed and cargo
+> does not fail on — a dead helper, a negated NaN comparison and three inert
+> struct updates — so `3538452` landed **after** the run. Three binaries'
+> sources moved with it (`inf-render`'s lib, `tests/vsm_receiver`,
+> `tests/golden`) and all three were re-run at HEAD in release: **14 / 9 / 100
+> passed, 0 failed.** No arm was added or removed by that commit, so the numbers
+> above are the numbers at HEAD. This is the P27.1 and P27.2 precedent, and the
+> lesson under it is new: *the battery prints the warnings clippy will fail on,
+> hours before clippy runs* — reading its stderr while it works costs nothing
+> and would have moved this fix in front of the run.
+> **The golden set goes 50 → 54 and none of the fifty moved**: `git status` over
+> `tests/goldens/` across the batch reports four additions and nothing else, and
+> both pins move in the one commit that adds them — `phase18_gate`'s named
+> inventory (`[&str; 54]`) and `phase26_gate`'s content digest
+> (`a07eb4ad…` → `23d41a61c31c28a17a20871b6c875707`). **No schema moved**
+> (`VsmSettings` is not serialized — `RenderSettingsRecord` does not carry it, so
+> `level_blend` is a renderer knob and not a level's), no `.inf_lvl` payload
+> moved, and **no new external dependency**. **`vsm_raster.rs`, `csm.rs` and
+> `passes/shadow.rs` are not named by the diff at all**, which is what makes
+> P27.3's `a_cached_pages_texels_are_what_a_fresh_raster_produces` and
+> `a_static_scene_stops_rasterizing_pages_after_warm_up` green for the reason
+> they were before rather than for a new one.
+>
+> **Fifty-four deleted lines in `crates/` and `runtime/`, enumerated rather than
+> counted, and they add up**: **13** for `LightsUniform::from_scene` (ten call
+> sites, its signature, its loop header and the `params` field's doc line — it
+> takes the per-light slot list now, and `params.w` stopped being reserved);
+> **15** for `ResourceKey` widening from four components to five (the type, the
+> seven `GenCache` tuples, the six injectivity assertions and the doc line that
+> said *four*); **5** guards `shadow.params.x > 0.5` becoming
+> `sun_shadowing_enabled()`; **4** `shade_light` calls gaining `* vsm_f`; **5**
+> for the projection upload moving from `record` to `sync`; **3** for
+> `vsm_sync`'s `if let` becoming a `let … else`; **1** composition format string
+> gaining a fragment; **1** stale doc line in `project_light` (`cast_shadows`
+> stopped being inert for point and spot in this batch); and **7** golden
+> constants and their prose. **No assertion was removed or loosened anywhere** —
+> the four `ResourceKey` assertions were replaced by five and the guards by a
+> wider one, and the golden pins were *raised*.
+>
+> **The four clauses, against what is measured:**
+>
+> * *"`shadow_factor` reads through the page table with PCF that respects page
+>   borders (border texels or clamped kernels — **measured**)"* — **met, and the
+>   measurement rules for CLAMPING.** `docs/memos/p27-4-receiver-filtering.md` §1
+>   carries it and `the_clamped_kernel_is_cheaper_and_its_error_is_bounded_where_
+>   the_other_is_not` produces every number: a tap leaves its page for **508 of
+>   16 384** texels (**3.10 %**, and 6.15 % at radius 2 — the number is a function
+>   of the radius, not a property of 128); the clamp costs **one** table
+>   resolution against **nine**, and a clipmap resolution is a *walk*, so **8**
+>   level-record reads against up to **72**; the clamped kernel is **exactly** the
+>   full kernel wherever the shadow field is locally constant and off by at most
+>   the dropped weight (**3/9** at an edge, **5/9** at a corner) inside a
+>   penumbra; and the per-tap resolve over an **absent** neighbour is wrong by
+>   that same 3/9 **in the leak direction on uniformly shadowed ground** — a
+>   bright one-texel line along a page seam, appearing *because* the filter was
+>   made more exact.
+>
+>   **And therefore no comparison sampler**, which is the consequence the
+>   page-geometry memo did not predict and which is now written into it: hardware
+>   `textureSampleCompare` filtering is a 2 × 2 footprint in *atlas* space, and a
+>   page's atlas neighbour is slot `s + 1` — an unrelated page of a possibly
+>   unrelated light. With no border there is nothing correct for it to filter
+>   against, so every tap is a `textureLoad` at an integer texel. That saves a
+>   binding and makes the clamp exact by integer arithmetic rather than by a
+>   texel-centre offset; what it gives up is the hardware's own 2 × 2 pre-filter,
+>   so the kernel is 9 samples where the cascade path effectively gets 36.
+>
+>   One more thing this clause settled and it is the mirror of a P26.2 finding:
+>   the receiver **re-derives** its address at the level the table served rather
+>   than walking the ancestor chain, and that is legal *here* and forbidden in
+>   `vt_sample.wgsl`. A clipmap level is a world lattice with a known origin and a
+>   quadtree level is `2^(n−1−L)` pages over the *same* frustum, so
+>   `⌊u·N⌋ == ⌊⌊u·2N⌋/2⌋`; a virtual texture's `w/2` mip chain has slack this does
+>   not. `the_re_derived_address_is_the_ancestor_the_chain_walks_to` sweeps both
+>   kinds against `VsmLightDesc::ancestor_at` — including clipmap levels whose
+>   per-level offsets are deliberately **not** concentric, which is where P27.3's
+>   generalization has something to bite on — over **5 000+** addresses with
+>   **2 000+** deep fallbacks, and `a_fallback_entry_is_read_at_the_level_the_
+>   table_served` drives the fallback case directly on a hand-built table, because
+>   no device fixture in this phase produces one.
+>
+> * *"clipmap level blend replaces cascade blend"* — **met, with a bound written
+>   down rather than discovered later.** `VsmSettings::level_blend` (default 0.1,
+>   the cascade's own) is a **second** knob rather than a reader of
+>   `ShadowSettings::cascade_blend`: which blend *runs* is the ROADMAP's clause,
+>   and a project that turned the cascade's seam fix off must not silently turn
+>   the clipmap's off with it. The CSM's knob is untouched.
+>
+>   A clipmap level has **two** edges a receiver can approach and both are seams,
+>   so the weight is the larger of two proximities — resolution
+>   (`lf − (L − 1)`, which clamps to zero when containment raised the level, so a
+>   receiver on `L` because nothing finer *reaches* it does not blend) and
+>   footprint (`max(|q.x|, |q.y|)`, clipmaps only). `0.0` restores the hard switch
+>   exactly: the second resolve is not issued.
+>
+>   **The bound**: the blend can only act where the **coarser level is already
+>   resident**, and the marking pass asks for exactly one level per pixel — so the
+>   band is populated only where some *other*, farther pixel happened to want the
+>   level this one blends toward. Along a receding plane that is common; in a tight
+>   interior it may never happen. `the_clipmap_level_blend_acts_in_a_band_and_zero_
+>   is_the_hard_switch` prints the pixel count it moved rather than asserting a
+>   large one, and the fix — a receiver that *wants* its blend partner — belongs
+>   with P27.5, because it changes the want set P27.3's caching clause is measured
+>   against.
+>
+> * *"point/spot receiver terms in the lit passes"* — **met, and they are the
+>   first point and spot shadows this engine has drawn.** A spot resolves through
+>   its single quadtree and a point through the cube face its own direction
+>   selects, in `mesh`, `skinned_mesh`, `vgeom_mesh` and `scatter_mesh` — every
+>   lit shader that both shades an analytic light and binds the shared
+>   environment group. (`voxel.wgsl` is `ShaderKind::Plain` and binds no env group
+>   at all, which its own header rules; it is the one lit path with a light loop
+>   and no receiver, and it is carried.)
+>
+>   The mapping is `GpuLight::params.w`, a field that has shipped as `0.0` on
+>   every light of every kind since P7.1 — so `vsm_light_shadow` is an exact
+>   `* 1.0` on every scene without virtual shadows and no golden could move. The
+>   **sun** does not ride there and the reason is `terrain.wgsl`: it shades the
+>   sun from `view.sun_dir` and has no light index at all, so the directional
+>   tree is named by the receiver uniform and reached through `shadow_factor`,
+>   which is one door for terrain, for the fallback sun and for the first
+>   directional light of the loop.
+>
+>   **The face rule is exact rather than approximate**, and its seam is pinned
+>   twice. The six faces are axis-aligned 90° frusta, so the dominant axis *is*
+>   the containing face —
+>   `the_cube_face_rule_is_the_face_whose_projection_contains_the_point` sweeps
+>   1 600 directions and finds every pick inside its projection, then adds five
+>   **constructed** seams (a spherical sweep at half-cell offsets measured **zero**
+>   diagonals, so the tie-break the rule states would otherwise have been untested
+>   by an arm that names it). And the seam is **depth-continuous**: two faces share
+>   one position and one near plane, and exactly at the diagonal the two view
+>   depths are equal, so `near/d` is the same number on both sides while the page
+>   address jumps —
+>   `the_cube_seam_changes_the_page_and_not_the_stored_depth` measures it across a
+>   401-sample sweep at under **2 × 10⁻⁴** of NDC. What is *not* continuous at a
+>   seam is the filter: a clamped kernel never crosses a face, so a penumbra
+>   narrows to one side there. Recorded, not fixed.
+>
+>   `spot_matrix`'s cone-to-fov derivation — the P27.1 audit's remainder, *"pinned
+>   only on the CPU"* — has its device arm:
+>   `a_spots_page_grid_is_exactly_its_outer_cone` places a caster at half the outer
+>   cone's half-width at a known depth, asserts it projects to |NDC x| = 0.5
+>   through the **shipped** matrix (the full angle instead of the half would put it
+>   at 0.25), takes the **sign** from `light_basis` rather than assuming an axis,
+>   and then reads the atlas back to find written depth at the page that point
+>   names.
+>
+> * *"the bias story re-derived for page-resolution shadows and pinned by
+>   goldens"* — **met, in two terms, neither of them tuned.** Memo §2. The
+>   constant term is a property of the depth **format** and is therefore constant
+>   in NDC: four ULP of `f32`'s worst binade, `2 × f32::EPSILON = 2.384 × 10⁻⁷`.
+>   The unit is the whole ruling — expressed in *texels* the same guard is
+>   **0.125** at the shipped defaults and **32** at the 16-level ceiling, because
+>   the along-light box grows with the coarsest level while a level-0 texel does
+>   not. The slope term is a property of the page's texel **density**, which is
+>   what the clause asks for: `(R + ½)·√2 = 2.1213` texels — a derivation, from
+>   the receiver's own half-texel of position uncertainty plus the kernel's reach,
+>   on both axes — times `texel₀ · 2^level` metres, times `tan θ`, converted by the
+>   projection's `∂z/∂m` **read off the shipped matrix** (row 2's length for an
+>   ortho; `z²/near` for a reverse-infinite perspective, whose row 2 is the
+>   degenerate one the P27.2 audit named the far plane). At the shipped defaults,
+>   45°, level 0: **2.26 × 10⁻⁶** NDC, which is **1/665** of the cascade's flat
+>   `depth_bias`.
+>
+>   **One correction to `docs/memos/p27-1-depth-convention.md`, and it is a sign.**
+>   That memo's closing consequence wrote the receiver's comparison as
+>   *"`depth > stored + bias`"*, which puts the bias on the **caster's** side and
+>   makes a self-shadowing surface *more* shadowed rather than less. Under
+>   reverse-Z a larger stored depth is a caster nearer the light, so the shipped
+>   comparison is `receiver.z + bias ≥ stored.z`; the mutation that writes the memo's
+>   version back fails three arms. Corrected in place.
+>
+>   Pinned by **four new goldens** — `vsm_directional` (the clipmap on
+>   `golden_csm`'s own caster/receiver arrangement, so the two paths can be looked
+>   at side by side), `vsm_spot`, `vsm_point` (four casters out through four
+>   different cube faces) and `vsm_bias_grazing` — all through `check_vsm_golden`,
+>   because a residency fed by a ring pinned at `frame − 2` holds nothing before
+>   frame 2, so a VSM golden's determinism gate has to be over a whole warm-up
+>   rather than over one cold frame.
+>
+> **THE CARRIED GATE, discharged.** The P27.1 audit found the thin spot and named
+> the obligation: *"Phase 27's own 'Done when' contains **no** missing-fallback
+> clause at all … so nothing anywhere will fail if P27.4's receiver reads
+> `VSM_ENTRY_NONE` as *shadowed* instead of *lit*. The ruling rests entirely on
+> this ledger and `table.rs`'s docs. **P27.4 owes it a gate**."*
+>
+> `a_missing_page_reads_lit_and_the_frame_says_so` is that gate, and its
+> construction needed **no new door**: a budget of **two** pages against a marked
+> set of many, so one frame holds both populations at once under the phase's own
+> degradation. Three renders — a no-shadow control, a full-budget frame and a
+> starved one — and the ruling is a **containment**: *the starved frame darkens
+> only pixels the full-budget frame darkens*, byte-compared per pixel. A receiver
+> that read the sentinel as slot 0 samples the one resident page all over the
+> frame and darkens ground no shadow reaches; one that returned 0.0 on it darkens
+> everything. Both break the containment, and the arm asserts `admits > 0`,
+> `deferred > 0` and a non-zero count of `NONE`-resolving pages in the residency
+> **first**, so neither population is empty. Both mutations are dead by name.
+>
+> **PIE == shipping, over a scene that runs virtual shadows** —
+> `runtime/inf-player/tests/vsm_pie.rs`, and it is the first batch where Phase 27's
+> own "Done when" clause has a subject at all. One cooked project; two worlds — the
+> **pack's** and the editor **payload's** — both projected through
+> `inf_player::render::project_scene`, the one door a shipped frame's scene comes
+> through; and what is compared is the **resident page trace by ADDRESS**
+> (`light/face/level/x/y`, sorted — a slot index is an allocation order and two
+> hosts that seated the same pages differently describe the same shadow) **plus
+> the frame bytes**, because two hosts can resolve the same pages and shade them
+> differently. Anti-vacuity in both directions: the trace moves along the walk, and
+> the shadowed frame differs from the same frame with virtual shadows off.
+> `the_shadow_page_trace_is_bit_exact_twice` is the determinism half.
+>
+> **Face culling: REFUSED, and the raster is untouched.** The P27.2 ledger left
+> *"no depth bias and no face culling"* and the brief asked for the two to be
+> decided together. Front-face culling (storing the **back** face's depth) removes
+> acne for a *closed* caster — and this engine's caster set is not closed:
+> `sync_terrain` builds a single-sided open surface from a tile's heights, and a
+> masked cutout is a card. Front-face casting makes both cast **nothing at all**,
+> which is strictly worse than acne and which no bias recovers. The derived slope
+> term is measured to leave a flat lit plane un-striped, so what back-face casting
+> would buy is already bought. The consequence the brief asked to protect follows
+> by construction rather than by care: `git diff` over the batch names no line of
+> `vsm_raster.rs`, so the content stamp is untouched and the cached == fresh arms
+> are green for the reason they already were.
+>
+> **The third engagement counter.** `vsm_receiver_frames` counts frames drawn with
+> the atlas **bound to the lit passes** — a different claim from marking a page or
+> filling one, and the one "the setting stops being inert" rests on. The
+> anti-vacuity pattern extends whole:
+> `the_receiver_engages_on_a_vsm_scene_and_is_inert_on_every_other` asserts all
+> three counters move on a VSM-on scene (and that the receiver's is exactly one per
+> frame, and that the sun slot and the blend band the shader read are the ones the
+> settings named), then **zero** on the default settings *and* on a scene whose
+> only light does not cast.
+>
+> **Mutation-verified — fifteen mutations, thirteen killed.** Killed by name: the
+> sentinel read as shadowed; the sentinel ignored (slot 0, level 0); the depth
+> compare reversed; the bias on the caster's side (the memo's own wrong sign); the
+> slope term deleted; the bias replaced by the cascade's flat constant; the cube
+> face pinned to 0; the per-level NDC offset dropped; the blend weight forced to
+> zero; the kernel's page clamp deleted; `shadow_factor` never taking the virtual
+> path; an analytic light's slot never reaching the lights uniform; and the slot
+> mapping ignoring a truncated light list. **Survived, and both are the WGSL half
+> of a claim whose Rust half is armed**: the fallback address (`gq` at `got` rather
+> than at `level`) and the normal offset, neither reachable by a device fixture in
+> this phase — the first needs a resident ancestor over an absent child and the
+> second is redundant with the slope term at every configuration this tree builds.
+> Both now carry a **source pin** that says so in the same breath as the honesty
+> about what a source pin is worth (the P23 law: a byte pin catches a deletion, not
+> a re-derivation), and both have a pure arm —
+> `a_fallback_entry_is_read_at_the_level_the_table_served` and
+> `the_normal_offset_is_one_texel_of_the_asked_for_level`.
+>
+> **Two corrections the mutation round forced on this batch's own arms.**
+> `RenderTier::apply` clears `ShadowSettings::enabled` at **Low** as well — a
+> pre-existing P13.4.2 decision — so "Low keeps CSM" is a claim about which
+> *mechanism* a tier runs and not about a Low frame having shadows in it; the arm
+> now says it on the settings and on the system, and asserts the cascade's own
+> liveness separately, by turning virtual shadows off by hand and watching the
+> frame still darken. And a caster **occludes its own shadow** when the sun is
+> behind the camera, which cost an afternoon: every probe pixel of the bias arm's
+> first draft was reading the cube rather than the floor, so the receiver was being
+> measured 2 m nearer than the arm believed and at a level its own twin never
+> chose.
+>
+> **The fixture was the thing that had to be realistic.** The level rule is one
+> shadow texel per **screen pixel**, so a 256 × 144 arm at a 60° field of view asks
+> for **94 mm** texels — coarser than any shipped configuration. At that density
+> and an 18° sun the derived bias is **0.61 m** against a 1.5 m caster's **0.46 m**
+> of depth separation and the shadow correctly disappears: a 94 mm shadow map
+> cannot resolve a metre-scale box at a grazing angle, no constant would have made
+> it, and a constant small enough to draw it would stripe every flat surface in the
+> frame. The arms that measure shadow *detail* use a narrow field of view — the
+> honest way to raise a small target's pixel density — and the whole episode is
+> recorded in the memo, because it is the shape of the ruling rather than an
+> accident of a test.
+>
+> **The P27.3 audit's remainder list, item by item, because two of them were
+> addressed to this batch by name.**
+>
+> * *"The invalidation scatter's depth envelope is unarmed, and its fail
+>   direction is a stale page. P27.4 owes it a caster at the far face."* — **NOT
+>   done, and it is this batch's one unpaid inherited debt.** It lives in
+>   `vsm_raster.rs`, which this batch does not edit at all, and building a caster
+>   at the far face of a kilometres-deep clipmap box is a raster fixture rather
+>   than a receiver one. Carried to P27.5 unchanged, with its fail direction
+>   restated: tightening `ndc.z ∈ [−rz, 1 + rz]` to the sphere's centre survives
+>   the tree, and what it produces is a **stale** page — the wrong direction.
+> * *"A cut-out material shadows as its whole quad … P27.4 is where a receiver
+>   makes that visible, and where the choice between a real texture fetch in a
+>   depth-only pass and living with the rectangle has to be made rather than
+>   inherited."* — **made, and the answer is the rectangle.** A leaf card casts a
+>   rectangle, exactly as it does through `shadow_depth.wgsl`. The reason is not
+>   cost: `vsm_caster.wgsl` and `vsm_skinned.wgsl` declare **no texture and no
+>   sampler**, and that is what makes the P18 law — camera-driven residency never
+>   feeds lighting — hold in the page raster *by construction* rather than by
+>   policy. A real cutout fetch is a virtual-texture read, so it would put the
+>   camera's own texture residency inside a shadow page's content and make a
+>   shadow's silhouette a function of where the viewer stands. The price is
+>   visible now that a receiver exists and it is paid deliberately; the day it has
+>   to change, it changes at P28.3, where the merged residency stops being
+>   camera-driven.
+> * *"The CPU scatter pack's membership is camera-driven"*, *"a stamp-only cache
+>   key would make part of a clipmap grid shift free"*, and *"the
+>   `scatter_casters` truncating case still has no arm"* — carried unchanged; all
+>   three are P28.3's or a raster batch's, and none is reachable from a receiver.
+> * *"The whole-workspace battery and the workspace clippy are owed"* — **paid**,
+>   above.
+>
+> **What this batch did NOT do**, in one place, for P27.5.
+> **The blend needs its partner resident** (above) and cannot ask for it.
+> **`voxel.wgsl` has a light loop and no receiver**: it is `ShaderKind::Plain` by
+> its own header's ruling, so a voxel surface takes no point or spot shadow.
+> **`vgeom_mesh.wgsl` and `scatter_mesh.wgsl` take the analytic term but not the
+> directional one**, because neither has ever called `shadow_factor` — virtualized
+> geometry and foliage receive no *sun* shadow, from the cascade either, and
+> closing that is a change to what the CSM path shadows rather than to this batch's
+> receiver.
+> **A cut-out material still shadows as its whole quad** (the P27.3 audit's
+> remainder): the page raster samples no texture, which is what makes the P18 law
+> hold there by construction, and this batch made that visible without deciding it.
+> **The CPU scatter pack's membership is still camera-driven**, unchanged.
+> **The kernel is 3 × 3 and there is no soft-shadow width**: no PCSS, no blocker
+> search, no contact-hardening. **No `vsm_summary` in a host and no editor
+> surface**, unchanged from P27.1.
+> **`VSM_PRIORITY_SPECULATIVE` still has no producer** and a light's `range` still
+> does not cull a marking projection.
+> **The 16-light ceiling is the lights uniform's**, so a scene's seventeenth light
+> has no slot to carry — `VSM_MAX_PROJECTIONS` is 64 and `MAX_LIGHTS` is 16, and
+> the two ceilings have never been compared in one place.
 - **P27.5 Tiers, retirement & the gate** — 1. High/Medium run VSM; Low keeps CSM (the clamp
   law); CSM code stays as the fallback, demoted not deleted; 2. GI keeps its own voxel
   occlusion (the P18 law: camera-driven residency never feeds lighting — VSM pages are
