@@ -45,6 +45,35 @@
 //! through a mesh's own sidecar edges the way a glTF import writes them. Without
 //! it (e) cannot tell a walk of the pack index from a walk of the level's
 //! bindings, which is exactly the defect it found.
+//!
+//! # P26.5: the streaming half
+//!
+//! Everything above is about bytes reaching a runtime *record*. The arms below
+//! are the phase's own "Done when", and they run the real streaming loop through
+//! the real `EngineRenderer` on a real device:
+//!
+//! * **(a) a scripted path's residency trace is bit-exact twice per run.** Both
+//!   halves, because the P26.4 ledger says they are different claims: the floor
+//!   is a pure function of `(camera, bounds, registry)` and is exact
+//!   unconditionally; the *feedback* is exact **given the same arrival pattern**,
+//!   and the arrival pattern is a GPU-timing fact. The device is pumped to
+//!   completion between frames so arrival is pinned, and `feedback_misses` is
+//!   asserted at exactly the ring's latency — which is what proves the pattern
+//!   was pinned rather than hoped for.
+//! * **(b) PIE == shipping on that trace.** The same level's content resolved
+//!   two ways — out of a cooked pack and out of a streamed payload — folded
+//!   through one renderer, compared **by GUID** (the P26.3 LAW: a handle is a
+//!   per-registry index and the two hosts mint different ones).
+//! * **(c) an over-budget scene stays inside the pool and every sample lands on
+//!   the finest resident ancestor** — asserted as residency STATE over every tile
+//!   of every level, never as pixels.
+//! * **(d) the engagement counters move on a VT scene and stay at zero on a
+//!   textureless one**, with the anti-vacuity half first.
+//! * **(e) budgets**: the streaming sync inside `FRAME_BUDGET_MS`, and the level
+//!   build against the LOAD-class ceiling — the P20 law, and the P26.4
+//!   remainder that the feedback's own budget is a page cap and not a
+//!   millisecond one.
+//! * **(f) the golden set is pinned and additive.**
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -1245,4 +1274,719 @@ fn a_levels_sidecar_records_its_bindings_and_the_delete_guard_sees_them() {
             .any(|r| r.uuid() == LEVEL),
         "an unbound level still refers to the material"
     );
+}
+
+// ══ P26.5: the streaming gate ═══════════════════════════════════════════════
+
+use inf_core::FRAME_BUDGET_MS;
+use inf_player::budget::LOAD_BUDGET_MS;
+use inf_render::{GpuContext, VtPopIn};
+use inf_vt::{TileCoord, VtTextureHandle};
+
+/// The over-budget fixture's ids.
+const BIG_MAT: [Uuid; 3] = [
+    Uuid::from_u128(0x2605_0000_0000_0011),
+    Uuid::from_u128(0x2605_0000_0000_0012),
+    Uuid::from_u128(0x2605_0000_0000_0013),
+];
+const BIG_TEX: [Uuid; 6] = [
+    Uuid::from_u128(0x2605_0000_0000_0021),
+    Uuid::from_u128(0x2605_0000_0000_0022),
+    Uuid::from_u128(0x2605_0000_0000_0023),
+    Uuid::from_u128(0x2605_0000_0000_0024),
+    Uuid::from_u128(0x2605_0000_0000_0025),
+    Uuid::from_u128(0x2605_0000_0000_0026),
+];
+/// Six 512² containers, and a pool that holds a fraction of them.
+const BIG_EXTENT: u32 = 512;
+/// **2 MiB.** The RGBA8 page is 136² × 4 = 73 984 B, so this is 28 slots against
+/// a referenced set of six 28-tile pyramids — **six times** the pool, which is
+/// the "severalfold" the phase's own "Done when" asks for. Named as a fraction
+/// of the content rather than as a round number, and asserted as one below.
+const BIG_BUDGET_BYTES: u64 = 2 * 1024 * 1024;
+
+/// The number of frames every scripted arm runs. Twelve is the path length
+/// `the_floor_holds_across_a_whole_scripted_path_and_repeats_exactly` uses one
+/// crate down, kept so the two are talking about the same walk.
+const PATH_FRAMES: u64 = 12;
+
+fn gpu_or_skip(what: &str) -> Option<GpuContext> {
+    match GpuContext::headless() {
+        Ok(gpu) => Some(gpu),
+        Err(e) => {
+            eprintln!("SKIP {what}: no GPU adapter ({e})");
+            None
+        }
+    }
+}
+
+/// A project whose level binds three materials, six textures, and far more
+/// texture bytes than the pool below will hold.
+fn over_budget_project(tmp: &Path) -> (PathBuf, SceneDoc) {
+    let proj = tmp.join("big");
+    ProjectManifest::new("Phase 26 Streaming", "blank-3d")
+        .save(&proj)
+        .unwrap();
+    let content = proj.join("Content");
+    std::fs::create_dir_all(&content).unwrap();
+
+    let mut doc = SceneDoc::new();
+    for (i, mat) in BIG_MAT.iter().enumerate() {
+        put(
+            &content,
+            &format!("Big{i}.inf_mat"),
+            *mat,
+            &inf_asset::encode(&MaterialAsset {
+                base_color_texture: Some(AssetId(BIG_TEX[i * 2])),
+                metallic_roughness_texture: Some(AssetId(BIG_TEX[i * 2 + 1])),
+                ..Default::default()
+            })
+            .expect("encode material"),
+            AssetKind::Material,
+        );
+        for k in 0..2 {
+            put(
+                &content,
+                &format!("BigTex{}.inf_tex", i * 2 + k),
+                BIG_TEX[i * 2 + k],
+                &texture_bytes(BIG_EXTENT, (40 + i * 40 + k * 15) as u8),
+                AssetKind::Texture,
+            );
+        }
+        let cube = doc.edit_create(
+            inf_editor_core::ipc::SpawnKind::Cube,
+            &format!("Wall{i}"),
+            None,
+        );
+        let world = doc.world_mut();
+        let e = world.entity_of(cube).expect("the cube exists");
+        world.world_mut().entity_mut(e).insert(Material {
+            asset: Some(*mat),
+            ..Default::default()
+        });
+        // Spread them along −Z so a forward walk brings them in one at a time,
+        // which is what makes the residency trace a *path* rather than a still.
+        world
+            .world_mut()
+            .entity_mut(e)
+            .insert(inf_ecs::components::Transform {
+                translation: inf_ecs::math::Vec3d::new(0.0, 0.0, -4.0 * i as f64),
+                ..Default::default()
+            });
+    }
+    let level = serialize::encode(&serialize::to_scene_file(&doc)).expect("encode level");
+    put(&content, "Big.inf_lvl", LEVEL, &level, AssetKind::Level);
+    (proj, doc)
+}
+
+/// One frame of a scripted walk: the eye marches toward the wall row.
+fn path_view(step: u64) -> inf_render::RenderView {
+    inf_render::RenderView {
+        origin: inf_math::FloatingOrigin::new(glam::DVec3::ZERO),
+        eye_world: glam::DVec3::new(0.0, 0.6, 9.0 - 0.7 * step as f64),
+        forward: glam::Vec3::new(0.0, 0.0, -1.0),
+        up: glam::Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 0.05,
+        width: 320,
+        height: 180,
+        ortho: None,
+    }
+}
+
+/// What one scripted run produced.
+struct StreamRun {
+    /// Per frame: the whole resident set, **keyed by asset GUID** and sorted —
+    /// the P26.3 LAW, because the two hosts mint different handles for one
+    /// texture and comparing the integers would be comparing two correct
+    /// answers and calling them wrong.
+    trace: Vec<String>,
+    pop_in: VtPopIn,
+    /// Slots the pool was planned with, and the peak it held.
+    slots: u32,
+    peak_resident: u32,
+    /// Every (texture, tile) of mip 0 that resolved to something OTHER than
+    /// itself, with what it resolved to — the fallback record arm (c) reads.
+    fallbacks: Vec<(Uuid, TileCoord, TileCoord)>,
+    engaged_frames: u64,
+    /// Mean wall time of one frame — `render` plus the poll that lets the ring's
+    /// maps fire — and **nothing else**. The registry build and the renderer's
+    /// own construction (which compiles every shader in the tree) are outside
+    /// it: timing those as part of a frame is how a budget arm comes to report
+    /// 177 ms and mean nothing. Measured that way once, on purpose, before this
+    /// note was written.
+    frame_ms: f64,
+}
+
+/// **Run the scripted path through the real renderer** and record the world.
+///
+/// The device is pumped to completion after every frame. That is not tidiness:
+/// `take(frame)` returns the mask recorded at `frame − 2` **or nothing**, and
+/// which frames get "or nothing" is a GPU-timing fact — so without the pump the
+/// refinement half of the trace is a function of how fast the device drained.
+/// With it, arrival is a constant and `feedback_misses` says so.
+fn scripted_run(
+    gpu: &GpuContext,
+    content: &inf_player::MaterialContent,
+    budget: u64,
+    frames: u64,
+) -> StreamRun {
+    let mats = content.vt_materials();
+    assert!(!mats.is_empty(), "the fixture binds no material");
+    let (lib, pools, report) = inf_render::build_vt_level(
+        &gpu.device,
+        &gpu.queue,
+        &inf_render::RenderSettings::default(),
+        budget,
+        &mats,
+        |g| content.source(g),
+    )
+    .expect("the level builds");
+    assert_eq!(report.refused, 0, "a bound texture was refused");
+    let slots = lib.residency().stats().slots;
+    // GUIDs in registration order, so the trace can name them.
+    let order = content.registration_order();
+    let handles: Vec<(Uuid, VtTextureHandle)> = order
+        .iter()
+        .filter_map(|g| lib.handle(g.as_u128()).map(|h| (*g, h)))
+        .collect();
+    assert_eq!(
+        handles.len(),
+        order.len(),
+        "a bound texture did not register"
+    );
+
+    let target = inf_render::HeadlessTarget::new(gpu, 320, 180);
+    let mut renderer = inf_render::EngineRenderer::new(gpu, inf_render::HEADLESS_FORMAT);
+    renderer.set_vt_level(Some((lib, pools)));
+
+    let mut trace = Vec::with_capacity(frames as usize);
+    let mut peak_resident = 0u32;
+    let mut frame_total = 0.0f64;
+    for step in 0..frames {
+        // The projector's job, once per frame: the sets come out of the live
+        // registry, so a texture that is not yet warm is simply not named.
+        let mut scene = inf_render::RenderScene::default();
+        for (i, mat) in BIG_MAT.iter().enumerate() {
+            let set = inf_render::vt_set_for(renderer.vt_textures(), Some(mat.as_u128()));
+            scene.instances.push(inf_render::MeshInstance {
+                vt: set,
+                translation: glam::DVec3::new(0.0, 0.0, -4.0 * i as f64),
+                rotation: glam::Quat::IDENTITY,
+                scale: glam::Vec3::splat(2.0),
+                color: [1.0, 1.0, 1.0, 1.0],
+                metallic: 0.0,
+                roughness: 0.5,
+                emissive: [0.0; 3],
+                id: i as u32 + 1,
+                mesh: inf_render::PrimMesh::Cube,
+                blend: 0,
+                cutoff: 0.5,
+            });
+        }
+        scene.mark_dirty();
+        let t = std::time::Instant::now();
+        renderer.render(gpu, &scene, &path_view(step), &target.view, (320, 180));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        frame_total += t.elapsed().as_secs_f64() * 1000.0;
+
+        let res = renderer
+            .vt_textures()
+            .expect("the level is live")
+            .residency();
+        let mut line = String::new();
+        let mut resident = 0u32;
+        for (guid, h) in &handles {
+            let desc = res.desc(*h).expect("registered").clone();
+            for mip in 0..desc.mip_count() {
+                let m = desc.mips[mip as usize];
+                for y in 0..m.tiles_y {
+                    for x in 0..m.tiles_x {
+                        let at = TileCoord::new(mip, x, y);
+                        if res.is_resident(*h, at) {
+                            resident += 1;
+                            line.push_str(&format!("{guid} {mip} {x} {y};"));
+                        }
+                    }
+                }
+            }
+        }
+        peak_resident = peak_resident.max(resident);
+        trace.push(line);
+    }
+
+    // The fallback record, taken at the END of the path (the interesting state:
+    // the pool is full and the camera has moved).
+    let lib = renderer.vt_textures().expect("the level is live");
+    let res = lib.residency();
+    let mut fallbacks = Vec::new();
+    for (guid, h) in &handles {
+        let desc = res.desc(*h).expect("registered").clone();
+        let m = desc.mips[0];
+        for y in 0..m.tiles_y {
+            for x in 0..m.tiles_x {
+                let at = TileCoord::new(0, x, y);
+                let got = res.resolve(*h, at).expect("every address resolves").tile;
+                if got != at {
+                    fallbacks.push((*guid, at, got));
+                }
+            }
+        }
+    }
+    StreamRun {
+        trace,
+        pop_in: renderer.vt_pop_in(),
+        slots,
+        peak_resident,
+        fallbacks,
+        engaged_frames: renderer.vt_engaged_frames(),
+        frame_ms: frame_total / frames as f64,
+    }
+}
+
+/// The over-budget project, cooked, with its pack content resolved.
+fn big_pack(tmp: &Path) -> (inf_player::MaterialContent, u64) {
+    let (proj, _doc) = over_budget_project(tmp);
+    let report = cook(&proj, &tmp.join("out"), &cook_opts()).expect("the project cooks");
+    let source = inf_player::level::PackLevelSource::open(&report.pack_path).expect("open pack");
+    let content = source.material_content();
+    let bytes: u64 = content
+        .registration_order()
+        .iter()
+        .filter_map(|g| {
+            content
+                .source(g.as_u128())
+                .map(|s| s.payload().len() as u64)
+        })
+        .sum();
+    (content, bytes)
+}
+
+// ── (a) the scripted-path residency trace, bit-exact twice ──────────────────
+
+/// **(a) Two runs of one scripted path produce the same residency trace, byte
+/// for byte** — and the arrival pattern that makes the refinement half of that
+/// claim true is pinned rather than assumed (P26.5).
+///
+/// The P26.4 ledger's own reading, which this arm is built to honour:
+///
+/// > The floor is bit-exact unconditionally: it is a pure function of
+/// > `(camera, bounds, registry)` with no clock, no frame history and no GPU in
+/// > it. The *feedback* is bit-exact **given the same arrival pattern**, and the
+/// > arrival pattern is a GPU-timing fact … That is the honest reading of "a
+/// > dropped feedback frame degrades to the floor, deterministically" — the
+/// > *degradation* is deterministic, the *timing* is not.
+///
+/// So the device is pumped to completion between frames and
+/// `VtPopIn::feedback_misses` is asserted at **exactly** the ring's latency:
+/// two frames can have no mask to read because nothing was recorded two frames
+/// earlier, and every frame after that must land. A run that missed more than
+/// that did not have a pinned arrival pattern, and the trace equality below
+/// would be luck.
+#[test]
+fn the_scripted_paths_residency_trace_is_bit_exact_twice() {
+    let Some(gpu) = gpu_or_skip("the P26 residency trace") else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (content, _) = big_pack(tmp.path());
+
+    let a = scripted_run(&gpu, &content, BIG_BUDGET_BYTES, PATH_FRAMES);
+    let b = scripted_run(&gpu, &content, BIG_BUDGET_BYTES, PATH_FRAMES);
+
+    // ANTI-VACUITY FIRST: the trace is not a column of empty strings, and it
+    // MOVES along the path. Two runs of a streamer that admitted nothing agree
+    // perfectly.
+    assert_eq!(a.trace.len(), PATH_FRAMES as usize);
+    assert!(
+        a.trace.iter().all(|l| !l.is_empty()),
+        "a frame of the path had nothing resident at all"
+    );
+    assert!(
+        a.trace.windows(2).any(|w| w[0] != w[1]),
+        "residency never changed across {PATH_FRAMES} frames of a scripted \
+         approach, so the equality below is about a still frame"
+    );
+    assert_eq!(
+        a.trace, b.trace,
+        "two runs of one scripted path produced different residency traces"
+    );
+
+    // THE ARRIVAL PATTERN, pinned — and the number is `latency + 1`, measured
+    // rather than assumed. `READBACK_LATENCY_FRAMES` frames miss because nothing
+    // was recorded that far back; the extra one is the COLD FIRST FRAME. On
+    // frame 0 the registry is not yet warm, so `vt_set_for` names nothing, the
+    // coverage list is empty, `VtFeedback::record` dispatches nothing and hands
+    // the ring no copy — which frame 2 then misses. That is "a dropped feedback
+    // frame degrades to the floor" taken for real, on the one frame of a level's
+    // life where it is guaranteed.
+    let latency = inf_render::READBACK_LATENCY_FRAMES + 1;
+    for run in [&a, &b] {
+        assert_eq!(
+            run.pop_in.frames,
+            PATH_FRAMES,
+            "the streaming loop did not run once per frame: {}",
+            run.pop_in.summary()
+        );
+        assert_eq!(
+            run.pop_in.feedback_misses,
+            latency,
+            "the ring missed {} frames of {PATH_FRAMES}, not the {latency} its \
+             pinned latency and its cold first frame account for — the arrival \
+             pattern is not pinned, so the trace equality above is luck: {}",
+            run.pop_in.feedback_misses,
+            run.pop_in.summary()
+        );
+        assert_eq!(
+            run.pop_in.feedback_frames + run.pop_in.feedback_misses,
+            PATH_FRAMES,
+            "a frame neither read a mask nor recorded a miss"
+        );
+        // …and both want classes are populated, or the per-class pop-in counters
+        // are measuring one thing.
+        assert!(
+            run.pop_in.floor_wants > 0 && run.pop_in.refine_wants > 0,
+            "one want class is empty: {}",
+            run.pop_in.summary()
+        );
+    }
+    assert_eq!(
+        a.pop_in, b.pop_in,
+        "the pop-in counters differ between runs"
+    );
+}
+
+// ── (b) PIE == shipping, on that trace ──────────────────────────────────────
+
+/// **(b) The cooked pack and the streamed payload page the same tiles, frame for
+/// frame** (P26.5).
+///
+/// Arm (a) says the streamer is deterministic; this says the two *hosts* feed it
+/// the same thing. They resolve differently and must — the player reads derived
+/// `.inf_matd` records out of a pack, the editor-side payload builder reads
+/// authored `.inf_mat` files — so what is compared is the residency each one
+/// arrives at, **by GUID**.
+///
+/// The control is the one the P24.4 mutation matrix earned: an unbound level
+/// must page nothing, or the equality is two empty worlds agreeing.
+#[test]
+fn pie_equals_shipping_on_the_residency_trace() {
+    let Some(gpu) = gpu_or_skip("the P26 PIE-vs-shipping trace") else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let proj_dir = tmp.path().join("big");
+    let (content_from_pack, referenced) = big_pack(tmp.path());
+
+    // The payload side, over the same project.
+    let doc = serialize::load(&proj_dir.join("Content").join("Big.inf_lvl")).expect("load level");
+    let content_from_payload = inf_player::materials_from_payload(&payload_for(&proj_dir, &doc));
+
+    // Both resolve SOMETHING, or the comparison is about two empty maps.
+    assert_eq!(content_from_pack.materials.len(), BIG_MAT.len());
+    assert_eq!(
+        content_from_payload.registration_order(),
+        content_from_pack.registration_order(),
+        "the two hosts walk different registration orders, so their residencies \
+         cannot be compared at all"
+    );
+    assert!(referenced > 0);
+
+    let shipped = scripted_run(&gpu, &content_from_pack, BIG_BUDGET_BYTES, PATH_FRAMES);
+    let previewed = scripted_run(&gpu, &content_from_payload, BIG_BUDGET_BYTES, PATH_FRAMES);
+    assert_eq!(
+        shipped.trace, previewed.trace,
+        "a cooked pack and a PIE payload paged different tiles for one level"
+    );
+    assert_eq!(shipped.pop_in, previewed.pop_in);
+
+    // ANTI-VACUITY: an unbound level registers nothing at all, so every equality
+    // above is a measurement of the binding rather than of two empty registries.
+    let bare = tempfile::tempdir().expect("tempdir");
+    let (bare_proj, bare_doc) = scaffold(bare.path(), false);
+    let bare_content = inf_player::materials_from_payload(&payload_for(&bare_proj, &bare_doc));
+    assert!(bare_content.vt_materials().is_empty());
+}
+
+// ── (c) the over-budget scene ───────────────────────────────────────────────
+
+/// **(c) A scene referencing several times the physical pool renders inside it,
+/// and every sample lands on the finest resident ancestor** (P26.5) — the
+/// phase's own "Done when", asserted as residency STATE and never as pixels.
+#[test]
+fn an_over_budget_scene_stays_in_the_pool_and_falls_back_to_the_finest_ancestor() {
+    let Some(gpu) = gpu_or_skip("the P26 over-budget scene") else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (content, referenced) = big_pack(tmp.path());
+
+    // THE PREMISE, measured rather than asserted by construction: the level
+    // references several times what the pool can hold. A fixture that fitted
+    // would make every claim below vacuous.
+    assert!(
+        referenced > BIG_BUDGET_BYTES * 4,
+        "the fixture references {referenced} B against a {BIG_BUDGET_BYTES} B \
+         pool — not 'severalfold', so nothing below is an over-budget test"
+    );
+
+    let run = scripted_run(&gpu, &content, BIG_BUDGET_BYTES, PATH_FRAMES);
+
+    // 1. INSIDE THE POOL. The slot count is what the budget bought, and the
+    // residency never exceeded it — the invariant the whole phase exists for.
+    assert!(
+        u64::from(run.slots) * inf_vt::PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE)
+            <= BIG_BUDGET_BYTES,
+        "the pool planner granted {} slots, which is more than the budget",
+        run.slots
+    );
+    assert!(
+        run.peak_resident <= run.slots,
+        "residency peaked at {} of {} slots",
+        run.peak_resident,
+        run.slots
+    );
+    // …and it really filled up, or "stayed inside the budget" is a statement
+    // about a streamer that never streamed.
+    assert!(
+        run.peak_resident * 10 >= run.slots * 9,
+        "the pool peaked at {} of {} slots — the fixture never pressed it, so \
+         the bound above is not a measurement",
+        run.peak_resident,
+        run.slots
+    );
+    assert!(
+        run.pop_in.deferred > 0,
+        "nothing was ever deferred under a pool six times too small: {}",
+        run.pop_in.summary()
+    );
+
+    // 2. EVERY SAMPLE LANDS ON THE FINEST RESIDENT ANCESTOR. `resolve` reads the
+    // maintained table — exactly what the shader reads — and the assertion is
+    // that what it names is (i) resident and (ii) the FINEST resident ancestor
+    // there is, which is what makes the fallback a promise rather than a habit.
+    assert!(
+        !run.fallbacks.is_empty(),
+        "no mip-0 address fell back at all under a pool six times too small, so \
+         this arm never exercised the fallback"
+    );
+    let order = content.registration_order();
+    let (lib, _pools, _r) = inf_render::build_vt_level(
+        &gpu.device,
+        &gpu.queue,
+        &inf_render::RenderSettings::default(),
+        BIG_BUDGET_BYTES,
+        &content.vt_materials(),
+        |g| content.source(g),
+    )
+    .expect("the level builds");
+    let descs: BTreeMap<Uuid, inf_vt::VtTextureDesc> = order
+        .iter()
+        .filter_map(|g| {
+            lib.handle(g.as_u128())
+                .and_then(|h| lib.residency().desc(h).cloned())
+                .map(|d| (*g, d))
+        })
+        .collect();
+    for (guid, at, got) in &run.fallbacks {
+        let desc = descs.get(guid).expect("a registered texture");
+        assert!(got.mip > at.mip, "a 'fallback' resolved to its own level");
+        assert_eq!(
+            desc.ancestor(*at, got.mip),
+            Some(*got),
+            "{guid} {at:?} resolved to {got:?}, which is not its ancestor at that \
+             level — the shader walks the clamped chain and would read another \
+             tile's texels"
+        );
+    }
+}
+
+// ── (d) engagement counters ─────────────────────────────────────────────────
+
+/// **(d) The counters move on a VT scene and are zero on a textureless one**
+/// (P26.5), anti-vacuity first.
+///
+/// The P20 law: a claim about the command stream needs an engagement counter,
+/// not a pixel. And the P26.3 audit's correction to it — *"the engagement-counter
+/// arm asserted zero twice without ever drawing a frame with a pool"* — so the
+/// moving half comes first here, and the zero half is what it is compared
+/// against.
+#[test]
+fn the_engagement_counters_move_on_a_vt_scene_and_are_zero_without_one() {
+    let Some(gpu) = gpu_or_skip("the P26 engagement counters") else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (content, _) = big_pack(tmp.path());
+
+    // FIRST: they move.
+    let run = scripted_run(&gpu, &content, BIG_BUDGET_BYTES, PATH_FRAMES);
+    assert_eq!(run.engaged_frames, PATH_FRAMES, "a frame drew with no pool");
+    assert!(run.pop_in.admits > 0, "{}", run.pop_in.summary());
+    assert!(run.pop_in.frames == PATH_FRAMES, "{}", run.pop_in.summary());
+
+    // THEN: a textureless scene touches nothing. Same renderer, same frames, no
+    // VT level at all — which is the state all 50 goldens record.
+    let target = inf_render::HeadlessTarget::new(&gpu, 320, 180);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let mut scene = inf_render::RenderScene::default();
+    scene.instances.push(inf_render::MeshInstance {
+        vt: inf_render::VtTextureSet::NONE,
+        translation: glam::DVec3::ZERO,
+        rotation: glam::Quat::IDENTITY,
+        scale: glam::Vec3::splat(2.0),
+        color: [1.0, 1.0, 1.0, 1.0],
+        metallic: 0.0,
+        roughness: 0.5,
+        emissive: [0.0; 3],
+        id: 1,
+        mesh: inf_render::PrimMesh::Cube,
+        blend: 0,
+        cutoff: 0.5,
+    });
+    scene.mark_dirty();
+    for step in 0..PATH_FRAMES {
+        renderer.render(&gpu, &scene, &path_view(step), &target.view, (320, 180));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    assert_eq!(
+        renderer.vt_engaged_frames(),
+        0,
+        "a textureless scene engaged virtual texturing"
+    );
+    assert_eq!(
+        renderer.vt_pop_in(),
+        VtPopIn::default(),
+        "a textureless scene moved a streaming counter — the command stream the \
+         goldens recorded is not the one being drawn"
+    );
+    assert!(
+        renderer.vt_summary().is_none(),
+        "a textureless renderer produced a virtual-texture summary"
+    );
+}
+
+// ── (e) budgets ─────────────────────────────────────────────────────────────
+
+/// **(e) The level build is inside the LOAD budget and the per-frame streaming
+/// sync is inside the FRAME budget** (P26.5).
+///
+/// Two classes, and keeping them apart is the P20 law: *"loads assert
+/// `LOAD_BUDGET_MS`, never `FRAME_BUDGET_MS`"*. Building a level's registry and
+/// admitting its floor happens once, cold; the streaming sync happens thirty
+/// times a second forever.
+///
+/// This is also the P26.4 remainder discharged: *"the feedback's own budget is a
+/// page cap, not a millisecond cap. `VT_FEEDBACK_MAX_TILES` and
+/// `VT_FEEDBACK_REQUEST_CAP` bound the work; what the sync costs in LOAD-class
+/// milliseconds is not yet ratcheted, and the `phase26_gate` budget arm is where
+/// that lands."* `inf_player::budget::VT_STREAM_STEP_BUDGET_MS` is that ratchet.
+#[test]
+fn the_streaming_loop_stays_inside_its_budgets() {
+    let Some(gpu) = gpu_or_skip("the P26 budgets") else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (content, _) = big_pack(tmp.path());
+
+    // LOAD class: registry + pool + the floor, once.
+    let t0 = std::time::Instant::now();
+    let built = inf_render::build_vt_level(
+        &gpu.device,
+        &gpu.queue,
+        &inf_render::RenderSettings::default(),
+        BIG_BUDGET_BYTES,
+        &content.vt_materials(),
+        |g| content.source(g),
+    );
+    let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    assert!(built.is_some(), "the level did not build");
+    println!(
+        "phase26 budgets: level build {load_ms:.2} ms (load budget {} ms)",
+        LOAD_BUDGET_MS
+    );
+    assert!(
+        load_ms < LOAD_BUDGET_MS,
+        "building the virtual-texture level took {load_ms:.2} ms, over the \
+         {LOAD_BUDGET_MS} ms load budget {}",
+        inf_player::budget::RATCHET_NOTE
+    );
+    drop(built);
+
+    // FRAME class: the scripted path, timed **per frame** — `render` plus the
+    // poll, and nothing else. The renderer's construction compiles every shader
+    // in the tree and the registry build is the LOAD-class number above; timing
+    // either as part of a frame is how a budget arm comes to report 177 ms and
+    // mean nothing (measured, before this comment existed).
+    let run = scripted_run(&gpu, &content, BIG_BUDGET_BYTES, PATH_FRAMES);
+    let per_frame = run.frame_ms;
+    println!(
+        "phase26 budgets: {per_frame:.2} ms/frame over {PATH_FRAMES} streamed \
+         frames ({} admits, {} deferred); frame budget {FRAME_BUDGET_MS} ms, \
+         streaming ratchet {} ms",
+        run.pop_in.admits,
+        run.pop_in.deferred,
+        inf_player::budget::VT_STREAM_STEP_BUDGET_MS
+    );
+    // ANTI-VACUITY: the frames did streaming work, or this times an empty loop.
+    assert!(run.pop_in.admits > 0 && run.pop_in.deferred > 0);
+    assert!(
+        per_frame < FRAME_BUDGET_MS,
+        "a streamed frame cost {per_frame:.2} ms, over the {FRAME_BUDGET_MS} ms \
+         frame budget {}",
+        inf_player::budget::RATCHET_NOTE
+    );
+    assert!(
+        per_frame < inf_player::budget::VT_STREAM_STEP_BUDGET_MS,
+        "a streamed frame cost {per_frame:.2} ms, over the {} ms virtual-texture \
+         streaming ratchet {}",
+        inf_player::budget::VT_STREAM_STEP_BUDGET_MS,
+        inf_player::budget::RATCHET_NOTE
+    );
+}
+
+// ── (f) the golden set ──────────────────────────────────────────────────────
+
+/// **(f) The golden set is pinned, and it is additive only** (P26.5).
+///
+/// Phase 26 renders material textures into the interactive renderer for the
+/// first time, and it re-blessed nothing: a textureless frame does not enter the
+/// streaming loop at all, which is a claim about the command stream that
+/// `vt_engaged_frames` and `VtPopIn::frames` both measure (arm (d)) and that this
+/// counts.
+///
+/// A count and not a hash: what "additive only" forbids is a golden *changing*,
+/// and a changed PNG is what the harness's own comparison catches. What a
+/// comparison cannot catch is a golden being deleted to make a red build green,
+/// which is what this is for.
+#[test]
+fn the_golden_set_is_pinned_and_additive() {
+    /// The count P26.1 through P26.4 each carried forward untouched.
+    const GOLDENS: usize = 50;
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("crates")
+        .join("inf-render")
+        .join("tests")
+        .join("goldens");
+    let mut pngs: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "png"))
+        .collect();
+    pngs.sort();
+    assert_eq!(
+        pngs.len(),
+        GOLDENS,
+        "the golden set is {} files, not {GOLDENS}. ADDING one is allowed and \
+         means moving this constant in the same commit; losing one is not.",
+        pngs.len()
+    );
+    // …and every one of them is a real image rather than a truncated file that
+    // would compare equal to nothing.
+    for p in &pngs {
+        let len = std::fs::metadata(p).expect("stat").len();
+        assert!(len > 256, "{} is {len} B — not a golden", p.display());
+    }
 }

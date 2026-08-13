@@ -151,6 +151,33 @@ pub const CELL_RESIDENT_BYTES_CEILING: u64 = 256 * 1024;
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
 pub const CELL_RESIDENT_CEILING: usize = 8;
 
+/// Hard **mean per-frame** budget, in milliseconds, for a frame that also runs
+/// the virtual-texture streaming loop (P26.5).
+///
+/// The P26.4 remainder, discharged: *"the feedback's own budget is a page cap,
+/// not a millisecond cap. `VT_FEEDBACK_MAX_TILES` and `VT_FEEDBACK_REQUEST_CAP`
+/// bound the work; what the sync costs in LOAD-class milliseconds is not yet
+/// ratcheted, and the `phase26_gate` budget arm is where that lands."*
+///
+/// It is a **FRAME**-class number, and the P20 law is why the distinction is
+/// spelled out rather than assumed: the level *build* — registry, pool, floor —
+/// happens once and is held against [`LOAD_BUDGET_MS`]; the sync happens thirty
+/// times a second forever. `phase26_gate` asserts both, on the same fixture, in
+/// the same run.
+///
+/// Measured at **0.53 ms/frame** on a developer machine over the gate's scripted
+/// path — a 320×180 headless frame including the render, against a pool six
+/// times too small so every frame admits and defers. The ratchet is ~15× that
+/// (≈4× after the ~4× a shared CI runner costs) and under a quarter of
+/// `inf_core::FRAME_BUDGET_MS`, which is the property worth asserting:
+/// streaming must never become a visible share of a frame. A regression that
+/// matters — a want scan that walks the whole pyramid, a page that re-uploads
+/// every frame — moves this by an order of magnitude; a 20 % drift does not, and
+/// is not what CI is for.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.**
+pub const VT_STREAM_STEP_BUDGET_MS: f64 = 8.0;
+
 /// The message every budget assertion fails with — the ratchet rule, at the point
 /// where somebody is most tempted to break it.
 pub const RATCHET_NOTE: &str =
