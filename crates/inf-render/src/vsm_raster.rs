@@ -301,6 +301,24 @@ pub const VSM_TERRAIN_CASTER_CELLS: u32 = 64;
 
 /// One skinned mesh's bind-pose caster geometry.
 struct SkinnedCasterGeom {
+    /// **The `Arc` this entry is keyed by**, held rather than merely pointed at.
+    ///
+    /// The key is `Arc::as_ptr` — a raw address — and an address is only an
+    /// identity for as long as the allocation behind it cannot be freed and
+    /// re-used. `passes::skinned`'s cache says so outright ("*the cache holds the
+    /// `Arc` itself, which is what makes the pointer a sound key: the allocation
+    /// cannot be freed and reused under a live entry*") and P27.3 copied the key
+    /// without the clause that makes it sound (P27.3 audit).
+    ///
+    /// What that cost: a scene that drops mesh A and pushes a different mesh B is
+    /// free to land B's `Arc` on A's address, at which point `live` contains the
+    /// address, `retain` keeps A's buffers and `contains_key` skips B's upload —
+    /// so the page raster draws A's silhouette for B. **And the page is not even
+    /// re-rasterized**, because the content stamp folds that same address, so the
+    /// wrong shadow is *cached* rather than merely drawn once. P27.2 could not
+    /// have this defect: it keyed the bind poses on `scene.version`, which moves
+    /// whenever the mesh list does.
+    mesh: std::sync::Arc<crate::scene::SkinnedMeshData>,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     index_count: u32,
@@ -1628,9 +1646,14 @@ impl VsmRaster {
     /// the scene hands over now — `passes::skinned`'s rule, and the one the caching
     /// clause needs, because a caster geometry that is re-created every frame is a
     /// caster whose *page* has no chance of being cached either.
+    ///
+    /// **The pointer key is sound only because the entry holds the `Arc`** — see
+    /// [`SkinnedCasterGeom::mesh`], which is the half P27.3 shipped without and
+    /// the P27.3 audit put back.
     fn sync_skinned(&mut self, gpu: &GpuContext, scene: &RenderScene) {
         // The bind-pose half: keyed on pointer identity, evicted by what the scene
         // still names. Runs every frame and costs a pointer compare per mesh.
+        // The entry owns its `Arc`, so an address cannot be recycled under it.
         let keys: Vec<usize> = scene
             .skinned_meshes
             .iter()
@@ -1639,7 +1662,18 @@ impl VsmRaster {
         let live: std::collections::BTreeSet<usize> = keys.iter().copied().collect();
         self.skinned.retain(|k, _| live.contains(k));
         for (mesh, &key) in scene.skinned_meshes.iter().zip(&keys) {
-            if self.skinned.contains_key(&key) {
+            // `ptr_eq` and not `contains_key`, so the soundness condition is
+            // *written in the code that depends on it*: an entry is reused only
+            // when it is the same allocation the scene is handing over, which is
+            // what holding the `Arc` guarantees and what a bare address cannot
+            // say. With the `Arc` held this can never be false for a live key —
+            // and that is the point: the day someone drops the field, this line
+            // re-uploads instead of serving the dead mesh's vertices.
+            if self
+                .skinned
+                .get(&key)
+                .is_some_and(|g| std::sync::Arc::ptr_eq(&g.mesh, mesh))
+            {
                 continue;
             }
             let vertices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1680,6 +1714,10 @@ impl VsmRaster {
             self.skinned.insert(
                 key,
                 SkinnedCasterGeom {
+                    // The clone is the whole point: it is what stops the address
+                    // this entry is filed under from being handed to another mesh
+                    // while the entry lives. See `SkinnedCasterGeom::mesh`.
+                    mesh: mesh.clone(),
                     vertices,
                     indices,
                     index_count: mesh.indices.len() as u32,
