@@ -1698,3 +1698,844 @@ fn the_group_ceiling_counts_the_groups_it_refuses() {
         "{stats:?}"
     );
 }
+
+// ── (i) P27.3: the page cache, and what invalidates it ───────────────────────
+
+/// Render `steps`, then hand back the renderer **and** the raster stats at the
+/// end of each step — the door every caching arm needs, because the claim is
+/// always about what one step did rather than about a session total.
+fn run_stepped(
+    gpu: &GpuContext,
+    steps: &[(&RenderScene, u64)],
+    v: &RenderView,
+    set: &VsmSettings,
+) -> (inf_render::EngineRenderer, Vec<inf_render::VsmRasterStats>) {
+    let target = inf_render::HeadlessTarget::new(gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(gpu, inf_render::HEADLESS_FORMAT);
+    let mut s = *renderer.settings();
+    s.vsm = *set;
+    renderer.set_settings(s);
+    let mut marks = Vec::with_capacity(steps.len());
+    for (scene, frames) in steps {
+        for _ in 0..*frames {
+            renderer.render(gpu, scene, v, &target.view, (FW, FH));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        marks.push(renderer.vsm_raster_stats().expect("stats"));
+    }
+    (renderer, marks)
+}
+
+/// The whole atlas as raw bits — for the arms whose claim is **byte-identical**
+/// rather than "close enough in metres".
+fn atlas_bits(gpu: &GpuContext, renderer: &inf_render::EngineRenderer) -> Vec<u32> {
+    let (_, _, d) = read_atlas(gpu, renderer);
+    d.iter().map(|f| f.to_bits()).collect()
+}
+
+/// **THE CACHING CLAUSE** (P27.3, clause 1): a static scene stops rasterizing
+/// pages, and the counter that says so is alive before it says it.
+///
+/// Built to fail the way the phase gate demands ("the arm FAILS if the counter is
+/// dead"): a raster that never ran also re-rasterizes zero pages, so the first
+/// half of this arm proves pages **were** rasterized and the second proves they
+/// stopped. A no-op cache — one that reports every page cached without ever
+/// filling one — fails the first half; a cache that never hits fails the second.
+#[test]
+fn a_static_scene_stops_rasterizing_pages_after_warm_up() {
+    let Some(gpu) = gpu_or_skip("the VSM page cache") else {
+        return;
+    };
+    let s = scene(0, 0.5, 1.0);
+    let set = settings_with(64);
+    let v = view(5.0);
+    // Two windows over one unchanging scene: the first warms the cache, the
+    // second is the steady state.
+    let (renderer, marks) = run_stepped(&gpu, &[(&s, 6), (&s, 6)], &v, &set);
+    let (warm, steady) = (marks[0], marks[1]);
+    let resident = resident_pages(&renderer).len();
+
+    // ANTI-VACUITY: the warm-up really rasterized, drew and packed.
+    assert!(
+        warm.pages > 0 && warm.draws > 0 && warm.casters > 0,
+        "the warm-up rasterized nothing, so 'zero afterwards' says nothing: {warm:?}"
+    );
+    assert!(resident > 0, "no page was resident to cache");
+    // **ZERO.** Not "fewer": the second six frames touched no page at all.
+    assert_eq!(
+        steady.pages - warm.pages,
+        0,
+        "a static scene re-rasterized {} pages after warm-up ({warm:?} -> {steady:?})",
+        steady.pages - warm.pages
+    );
+    assert_eq!(steady.draws - warm.draws, 0, "{warm:?} -> {steady:?}");
+    assert_eq!(
+        steady.frames - warm.frames,
+        0,
+        "the pass opened on a frame with nothing to do"
+    );
+    // …and the cache is what did it, rather than the pages having gone away.
+    assert!(
+        steady.cached_pages - warm.cached_pages >= 6 * resident as u64,
+        "the steady window served {} cached pages over 6 frames of {resident} \
+         resident: {steady:?}",
+        steady.cached_pages - warm.cached_pages
+    );
+    assert_eq!(
+        renderer.vsm().expect("live").raster_state().cached_slots(),
+        resident,
+        "the cache vouches for a different number of slots than are resident"
+    );
+}
+
+/// **A CACHED PAGE'S TEXELS ARE WHAT A FRESH RASTER PRODUCES** — bit for bit, off
+/// the device (P27.3).
+///
+/// The claim a cache makes is not "we skipped a pass", it is "the texels are
+/// right", and the two are only the same if nothing else wrote them. So: warm the
+/// cache, copy the whole atlas off the GPU, **throw the cache away**, render one
+/// more frame — which re-rasterizes every resident page from scratch — and compare
+/// the two images word for word.
+///
+/// The anti-vacuity is the half that matters: the flush has to have caused a real
+/// re-raster (`pages` moves by the resident count), or this compares an atlas
+/// against itself.
+#[test]
+fn a_cached_pages_texels_are_what_a_fresh_raster_produces() {
+    let Some(gpu) = gpu_or_skip("the VSM cache's honesty") else {
+        return;
+    };
+    let s = scene(0, 0.5, 1.0);
+    let set = settings_with(64);
+    let v = view(5.0);
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let mut rs = *renderer.settings();
+    rs.vsm = set;
+    renderer.set_settings(rs);
+    for _ in 0..8 {
+        renderer.render(&gpu, &s, &v, &target.view, (FW, FH));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    let resident = resident_pages(&renderer).len() as u64;
+    assert!(resident > 0, "nothing was resident");
+    let before = atlas_bits(&gpu, &renderer);
+    let cached = renderer.vsm_raster_stats().expect("stats");
+
+    renderer.vsm_mut().expect("live").flush_page_cache();
+    renderer.render(&gpu, &s, &v, &target.view, (FW, FH));
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let after = atlas_bits(&gpu, &renderer);
+    let fresh = renderer.vsm_raster_stats().expect("stats");
+
+    // ANTI-VACUITY: the flushed frame really re-rasterized every resident page.
+    assert_eq!(
+        fresh.pages - cached.pages,
+        resident,
+        "the flush re-rasterized {} of {resident} resident pages, so this arm is \
+         comparing an atlas with itself",
+        fresh.pages - cached.pages
+    );
+    assert!(fresh.draws > cached.draws, "{cached:?} -> {fresh:?}");
+    // …and there was something in the atlas to compare.
+    let written = before
+        .iter()
+        .filter(|&&b| b != inf_render::VSM_DEPTH_CLEAR.to_bits())
+        .count();
+    assert!(
+        written > 256,
+        "only {written} texels of the atlas held depth — the comparison below is \
+         about an empty image"
+    );
+    assert_eq!(before.len(), after.len(), "the atlas changed size");
+    let differing = before.iter().zip(&after).filter(|(a, b)| a != b).count();
+    assert_eq!(
+        differing,
+        0,
+        "{differing} of {} atlas texels differ between the cached image and the \
+         one a fresh raster produced — the cache is serving depth the raster \
+         would not have written",
+        before.len()
+    );
+}
+
+/// **PAGE-EXACT INVALIDATION** (P27.3, clause 2): moving one object re-rasterizes
+/// exactly the pages its light-space bounds touch, and **nothing else's texels
+/// move**.
+///
+/// Two assertions, and the second is the one the scissor is load-bearing for.
+///
+/// 1. The count: the pages the frame rasterized are exactly the pages whose
+///    frustum the mover's sphere entered **or** left — computed independently on
+///    the CPU from the two positions, through the cull's own
+///    `vsm_page_sees_sphere`. Strictly fewer than the resident set, or the clause
+///    is met by "invalidate everything".
+/// 2. The texels: every page the mover did *not* touch holds bit-identically what
+///    it held before. With `set_scissor_rect` deleted from the per-page clear, the
+///    clear covers the whole atlas and this half fails on every untouched page.
+#[test]
+fn a_mover_invalidates_exactly_the_pages_its_bounds_touch() {
+    let Some(gpu) = gpu_or_skip("the VSM page-exact invalidation") else {
+        return;
+    };
+    // A wide static backdrop so many pages are resident and full, plus one small
+    // mover that covers a couple of them.
+    const MOVER_XY: (f64, f64) = (-1.5, 1.0);
+    const MOVER_SCALE: f32 = 0.4;
+    const STEP: f64 = 0.6;
+    let mut base = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    base.instances.push(backdrop());
+    base.instances.push(inf_render::MeshInstance::lit(
+        glam::DVec3::new(MOVER_XY.0, MOVER_XY.1, 0.0),
+        glam::Quat::IDENTITY,
+        glam::Vec3::splat(MOVER_SCALE),
+        [1.0, 1.0, 1.0, 1.0],
+        3,
+    ));
+    base.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Directional,
+        direction: glam::Vec3::Z,
+        cast_shadows: true,
+        ..Default::default()
+    });
+    base.mark_dirty();
+    // The same scene with the mover a short step to the right — far enough to
+    // leave one page and enter another, nowhere near far enough to reach most.
+    let mut moved = base.clone();
+    moved.instances[1].translation.x += STEP;
+    moved.mark_dirty();
+
+    let set = settings_with(64);
+    let v = view(5.0);
+    let (mut renderer, marks) = run_stepped(&gpu, &[(&base, 8)], &v, &set);
+    let warm = marks[0];
+    let pages = resident_pages(&renderer);
+    assert!(
+        pages.len() >= 4,
+        "only {} pages were resident — 'exactly the ones it touches' needs pages \
+         it does NOT touch",
+        pages.len()
+    );
+    let before = atlas_bits(&gpu, &renderer);
+
+    // The independent answer: which resident pages either position's sphere is in.
+    // The radius is the primitive's own bounding radius times the largest scale —
+    // `pack_casters`'s derivation, restated here rather than read off the pack, so
+    // the two are two statements.
+    let r = inf_render::PrimMesh::Cube.bounding_radius() * MOVER_SCALE;
+    let a = glam::Vec3::new(MOVER_XY.0 as f32, MOVER_XY.1 as f32, 0.0);
+    let b = glam::Vec3::new((MOVER_XY.0 + STEP) as f32, MOVER_XY.1 as f32, 0.0);
+    let want: std::collections::BTreeSet<usize> = pages
+        .iter()
+        .enumerate()
+        .filter(|(_, (light, page, _))| {
+            let vp = page_vp(&renderer, *light, *page);
+            inf_render::vsm_page_sees_sphere(&vp, a, r)
+                || inf_render::vsm_page_sees_sphere(&vp, b, r)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !want.is_empty() && want.len() < pages.len(),
+        "the mover touches {} of {} resident pages — the fixture cannot tell \
+         'exactly' from 'everything'",
+        want.len(),
+        pages.len()
+    );
+
+    // One frame of the moved scene.
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    renderer.render(&gpu, &moved, &v, &target.view, (FW, FH));
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let after_stats = renderer.vsm_raster_stats().expect("stats");
+    let touched = after_stats.pages - warm.pages;
+    assert!(
+        touched > 0,
+        "moving an object rasterized nothing at all: {warm:?} -> {after_stats:?}"
+    );
+    assert_eq!(
+        touched,
+        want.len() as u64,
+        "the mover's bounds touch {} pages and the frame rasterized {touched} \
+         ({warm:?} -> {after_stats:?})",
+        want.len()
+    );
+
+    // **The texels.** Every page outside `want` is bit-identical.
+    let after = atlas_bits(&gpu, &renderer);
+    let (w, _, _) = read_atlas(&gpu, &renderer);
+    let mut untouched_texels = 0usize;
+    let mut moved_outside = 0usize;
+    for (i, (_, _, rect)) in pages.iter().enumerate() {
+        if want.contains(&i) {
+            continue;
+        }
+        for y in rect.1..rect.1 + rect.2 {
+            for x in rect.0..rect.0 + rect.2 {
+                let k = (y * w + x) as usize;
+                untouched_texels += 1;
+                moved_outside += usize::from(before[k] != after[k]);
+            }
+        }
+    }
+    assert!(
+        untouched_texels > 4096,
+        "only {untouched_texels} texels were outside the mover's pages"
+    );
+    assert_eq!(
+        moved_outside, 0,
+        "{moved_outside} of {untouched_texels} texels changed in pages the mover \
+         never touched — a page-wide clear, or an invalidation that is not \
+         page-exact"
+    );
+}
+
+/// **The drain order is finest level first** (P27.3, clause 3's other half).
+///
+/// When something invalidates every level at once — the sun crossing a quantum, a
+/// rebase, a cut — the frame's cap has to choose, and the choice is a function of
+/// the page set rather than of arrival order: finest level first, then slot. The
+/// finest pages are the ones a receiver reads at the most screen pixels, so a
+/// budget that ran out would leave the coarse half stale rather than the near half.
+#[test]
+fn the_dirty_drain_takes_the_finest_levels_first() {
+    let Some(gpu) = gpu_or_skip("the VSM drain order") else {
+        return;
+    };
+    // A long floor receding from the camera, so the marked set spans several
+    // clipmap levels: the level rule is one shadow texel per screen pixel, and a
+    // pixel's world footprint grows with distance. The single cube every other arm
+    // uses sits at one distance and marks **one** level, which is a fixture that
+    // cannot see an ordering at all (measured — that is what the first draft of
+    // this arm ran against).
+    let mut s = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    s.instances.push(inf_render::MeshInstance::lit(
+        glam::DVec3::new(0.0, -1.0, -30.0),
+        glam::Quat::IDENTITY,
+        glam::Vec3::new(60.0, 0.2, 80.0),
+        [1.0, 1.0, 1.0, 1.0],
+        4,
+    ));
+    s.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Directional,
+        direction: glam::Vec3::Y,
+        cast_shadows: true,
+        ..Default::default()
+    });
+    s.mark_dirty();
+    let set = settings_with(64);
+    let v = view(5.0);
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let mut rs = *renderer.settings();
+    rs.vsm = set;
+    renderer.set_settings(rs);
+    for _ in 0..8 {
+        renderer.render(&gpu, &s, &v, &target.view, (FW, FH));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    // A full invalidation, so every level is dirty in one frame.
+    renderer.vsm_mut().expect("live").flush_page_cache();
+    renderer.render(&gpu, &s, &v, &target.view, (FW, FH));
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+
+    let sys = renderer.vsm().expect("live");
+    let drawn = sys.raster_state().last_pages();
+    assert!(!drawn.is_empty(), "the flushed frame rasterized nothing");
+    let levels: Vec<u32> = drawn.iter().map(|(_, p, _)| p.level).collect();
+    assert!(
+        levels.windows(2).all(|w| w[0] <= w[1]),
+        "the drain order is not finest-first: {levels:?}"
+    );
+    // ANTI-VACUITY: more than one level was dirty, or "sorted" is vacuous.
+    let distinct: std::collections::BTreeSet<u32> = levels.iter().copied().collect();
+    assert!(
+        distinct.len() > 1,
+        "every dirty page was at level {distinct:?}, so the order says nothing"
+    );
+}
+
+/// **Two routes to one residency make the same raster decisions** (the P26.2
+/// "function of state, not history" law).
+///
+/// Two renderers reach the same scene by different paths — one straight through,
+/// one with the cache thrown away half way — and the atlases they hold are
+/// bit-identical. The second half of the law is the interesting one: their
+/// **stamps** differ, because the residency's generation counter is process-global
+/// and monotone, and that difference reaches no raster.
+#[test]
+fn two_routes_to_one_residency_make_the_same_raster_decisions() {
+    let Some(gpu) = gpu_or_skip("the VSM route independence") else {
+        return;
+    };
+    let s = scene(0, 0.5, 1.0);
+    let set = settings_with(64);
+    let v = view(5.0);
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let build = |flush_at: Option<u64>| {
+        let mut r = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+        let mut rs = *r.settings();
+        rs.vsm = set;
+        r.set_settings(rs);
+        for i in 0..10u64 {
+            if Some(i) == flush_at {
+                r.vsm_mut().expect("live").flush_page_cache();
+            }
+            r.render(&gpu, &s, &v, &target.view, (FW, FH));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        r
+    };
+    let straight = build(None);
+    let detoured = build(Some(6));
+
+    let a = atlas_bits(&gpu, &straight);
+    let b = atlas_bits(&gpu, &detoured);
+    assert_eq!(a.len(), b.len());
+    let written = a
+        .iter()
+        .filter(|&&x| x != inf_render::VSM_DEPTH_CLEAR.to_bits())
+        .count();
+    assert!(written > 256, "only {written} texels held depth");
+    assert_eq!(
+        a.iter().zip(&b).filter(|(x, y)| x != y).count(),
+        0,
+        "two routes to the same residency produced different atlases"
+    );
+    // The resident SET agrees too, page for page and slot for slot.
+    assert_eq!(
+        resident_pages(&straight),
+        resident_pages(&detoured),
+        "the two routes hold different pages in different slots"
+    );
+    // …and the stamps do NOT agree, which is the half that makes this a law about
+    // state rather than a coincidence about two identical runs.
+    let generation = |r: &inf_render::EngineRenderer| {
+        r.vsm()
+            .expect("live")
+            .residency()
+            .generation(VsmLightHandle(0))
+            .expect("registered")
+    };
+    assert_ne!(
+        generation(&straight),
+        generation(&detoured),
+        "the two residencies carry the same generation stamp, so 'stamps differ \
+         and rasters do not' was not exercised"
+    );
+    // The route that flushed really did pay for it, or it was not a second route.
+    assert!(
+        detoured.vsm_raster_stats().expect("stats").pages
+            > straight.vsm_raster_stats().expect("stats").pages,
+        "the detour rasterized no more pages than the straight run"
+    );
+}
+
+/// **A camera cut flushes the cache — and the stamps would have caught it anyway**
+/// (P27.3's `is_camera_cut` clause, measured rather than asserted).
+///
+/// The bullet asks for the cut to invalidate through the `is_camera_cut`
+/// precedent, and it does. What this arm records is the honest standing of that
+/// trigger, on the `set_scissor_rect` precedent from P27.2: a cut moves the
+/// clipmap's snapped centre by far more than a page, so **every page's own matrix
+/// changes**, and the content stamps invalidate exactly the same set without the
+/// trigger. It is defence in depth, its counter is alive, and this is where that
+/// is written down rather than implied.
+#[test]
+fn a_camera_cut_flushes_the_cache_and_the_stamps_would_have_too() {
+    let Some(gpu) = gpu_or_skip("the VSM camera cut") else {
+        return;
+    };
+    let s = scene(0, 0.5, 1.0);
+    let set = settings_with(64);
+    let near = view(5.0);
+    // 194 m away: past `is_camera_cut`'s own 50 m threshold, and far enough that
+    // the clipmap re-centres.
+    let far = view(199.0);
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let mut rs = *renderer.settings();
+    rs.vsm = set;
+    renderer.set_settings(rs);
+    for _ in 0..6 {
+        renderer.render(&gpu, &s, &near, &target.view, (FW, FH));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    let before = renderer.vsm_raster_stats().expect("stats");
+    assert_eq!(before.cut_flushes, 0, "a cut fired on a still camera");
+    // The page matrices as they stand, so the redundancy claim is measured on the
+    // shipped door rather than argued.
+    let near_matrices: Vec<[f32; 16]> = resident_pages(&renderer)
+        .iter()
+        .map(|(l, p, _)| page_vp(&renderer, *l, *p).to_cols_array())
+        .collect();
+
+    renderer.render(&gpu, &s, &far, &target.view, (FW, FH));
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let after = renderer.vsm_raster_stats().expect("stats");
+    assert_eq!(
+        after.cut_flushes, 1,
+        "a 194 m jump did not read as a cut: {before:?} -> {after:?}"
+    );
+    assert!(
+        after.pages > before.pages,
+        "the cut flushed the cache and nothing was re-rasterized"
+    );
+    // **The redundancy, measured.** Every page's matrix moved across the cut, so
+    // every stamp moved with it and the flush changed no verdict.
+    let far_matrices: Vec<[f32; 16]> = resident_pages(&renderer)
+        .iter()
+        .map(|(l, p, _)| page_vp(&renderer, *l, *p).to_cols_array())
+        .collect();
+    assert!(!near_matrices.is_empty() && !far_matrices.is_empty());
+    let same = near_matrices
+        .iter()
+        .filter(|m| far_matrices.contains(m))
+        .count();
+    assert_eq!(
+        same, 0,
+        "{same} page matrices survived a 194 m camera cut unchanged — the cut \
+         trigger is NOT redundant with the content stamps, and this arm's ruling \
+         has to be rewritten rather than the trigger removed"
+    );
+}
+
+// ── (j) P27.3: a carved terrain hole casts nothing, and a carve invalidates ──
+
+/// Row-packed per-sample hole bits, exactly as a projector writes them —
+/// `ceil(res/32) * res` words, LSB first (`RenderTerrainTile::is_hole`'s layout).
+fn pack_holes(res: u32, holed: impl Fn(u32, u32) -> bool) -> Vec<u32> {
+    let words = res.div_ceil(32) as usize;
+    let mut out = vec![0u32; words * res as usize];
+    for j in 0..res {
+        for i in 0..res {
+            if holed(i, j) {
+                out[j as usize * words + (i >> 5) as usize] |= 1u32 << (i & 31);
+            }
+        }
+    }
+    out
+}
+
+/// A planar tile with a square hole through the middle of its sample grid.
+fn holed_tile(t: PlanarTile, lo: u32, hi: u32) -> inf_render::RenderTerrainTile {
+    let mut built = t.build();
+    built.holes = pack_holes(TILE_RES, |i, j| {
+        (lo..hi).contains(&i) && (lo..hi).contains(&j)
+    });
+    built.version = 2;
+    built
+}
+
+/// **A CARVED HOLE CASTS NOTHING** (P27.3) — the P27.2 remainder, closed.
+///
+/// P27.2's caster mesh read `heights` and ignored `holes`, so a tunnel mouth
+/// shadowed as solid ground: the one defect in that pass a player standing under
+/// it could see. The claim is made about **depth in metres**, not about a texel
+/// count: every written texel of the atlas is reconstructed through its page's own
+/// matrix, and none of them may land over the hole's world footprint — while the
+/// same fixture without the mask covers it densely.
+#[test]
+fn a_carved_terrain_hole_casts_no_shadow() {
+    let Some(gpu) = gpu_or_skip("the VSM terrain holes") else {
+        return;
+    };
+    let tile = PlanarTile {
+        key: inf_render::TerrainTileKey::lod0((0, 0)),
+        origin: glam::DVec3::new(-0.5 * TILE_SPAN, 3.5, -0.5 * TILE_SPAN),
+        plane: (1.0, 2.5, -4.0),
+    };
+    // The middle third of the tile's samples, so the hole is comfortably wider
+    // than the caster mesh's decimation stride and its world footprint is easy to
+    // state.
+    const LO: u32 = 11;
+    const HI: u32 = 22;
+    let hole_lo = LO as f64 / (TILE_RES - 1) as f64;
+    let hole_hi = (HI - 1) as f64 / (TILE_RES - 1) as f64;
+    let inside = |p: glam::Vec3| {
+        let u = (p.x as f64 - tile.origin.x) / TILE_SPAN;
+        let v = (p.z as f64 - tile.origin.z) / TILE_SPAN;
+        // Half a decimation cell of slack on each side: the caster quad that
+        // *contains* a holed sample is dropped whole, so the removed region is at
+        // least the hole and at most one cell wider.
+        let e = 1.0 / inf_render::VSM_TERRAIN_CASTER_CELLS as f64;
+        (hole_lo + e..hole_hi - e).contains(&u) && (hole_lo + e..hole_hi - e).contains(&v)
+    };
+
+    let set = settings_with(64);
+    let v = terrain_view();
+    let solid = terrain_scene(&[tile]);
+    let mut carved = solid.clone();
+    carved.terrains[0].tiles[0] = holed_tile(tile, LO, HI);
+    carved.mark_dirty();
+
+    let count_over_hole = |renderer: &inf_render::EngineRenderer| {
+        let atlas = read_atlas(&gpu, renderer);
+        let (mut over, mut total) = (0usize, 0usize);
+        for (light, page, rect) in resident_pages(renderer) {
+            let inv = page_vp(renderer, light, page).inverse();
+            for_each_written(&atlas, rect, |x, y, d| {
+                let p = texel_world(inv, rect, x, y, d);
+                total += 1;
+                over += usize::from(inside(p));
+            });
+        }
+        (over, total)
+    };
+
+    // The control first: the same tile with no mask covers the hole's footprint.
+    let solid_r = run(&gpu, &solid, &v, &set, 6);
+    let (solid_over, solid_total) = count_over_hole(&solid_r);
+    assert!(
+        solid_total > 512,
+        "only {solid_total} ground texels were written at all"
+    );
+    assert!(
+        solid_over > 64,
+        "the uncarved control wrote only {solid_over} texels over the hole's \
+         footprint, so 'zero after the carve' would say nothing"
+    );
+
+    let carved_r = run(&gpu, &carved, &v, &set, 6);
+    assert!(
+        carved_r.vsm_raster_stats().expect("stats").terrain_casters > 0,
+        "the carved tile stopped being a caster altogether"
+    );
+    let (carved_over, carved_total) = count_over_hole(&carved_r);
+    assert_eq!(
+        carved_over, 0,
+        "{carved_over} atlas texels put ground inside a carved hole — a tunnel \
+         mouth is shadowing as solid ground"
+    );
+    // …and the rest of the tile still casts: the fix removes the hole, not the
+    // tile.
+    assert!(
+        carved_total > solid_total / 2,
+        "the carve removed {carved_total} of {solid_total} written texels — that \
+         is the whole tile, not its hole"
+    );
+}
+
+/// **A carve invalidates exactly the pages it touches** (P27.3, clause 2 meeting
+/// the P21/P22 machinery).
+///
+/// Two tiles side by side; one is carved. The pages the frame re-rasterizes are
+/// exactly the pages the carved tile's own bounds reach — computed independently
+/// through the cull's `vsm_page_sees_sphere` against the caster sphere the pack
+/// derives — and the other tile's pages hold bit-identically what they held.
+///
+/// The version bump is not decoration: a projector bumps a tile's version when it
+/// writes holes into it, and `hole_words` in the caster cache key is what catches
+/// the *first* carve, which changes the mask's length rather than its content.
+#[test]
+fn a_carve_invalidates_only_the_pages_the_carved_tile_touches() {
+    let Some(gpu) = gpu_or_skip("the VSM carve invalidation") else {
+        return;
+    };
+    let left = PlanarTile {
+        key: inf_render::TerrainTileKey::lod0((0, 0)),
+        origin: glam::DVec3::new(-1.5 * TILE_SPAN, 0.0, -0.5 * TILE_SPAN),
+        plane: (0.0, 0.0, 0.0),
+    };
+    let right = PlanarTile {
+        key: inf_render::TerrainTileKey::lod0((1, 0)),
+        origin: glam::DVec3::new(0.5 * TILE_SPAN, 0.0, -0.5 * TILE_SPAN),
+        plane: (0.0, 0.0, 0.0),
+    };
+    let set = settings_with(64);
+    let v = terrain_view();
+    let before_scene = terrain_scene(&[left, right]);
+    let mut after_scene = before_scene.clone();
+    after_scene.terrains[0].tiles[0] = holed_tile(left, 11, 22);
+    after_scene.mark_dirty();
+
+    let (mut renderer, marks) = run_stepped(&gpu, &[(&before_scene, 8)], &v, &set);
+    let warm = marks[0];
+    let pages = resident_pages(&renderer);
+    assert!(
+        pages.len() >= 4,
+        "only {} pages resident — the fixture cannot tell 'exactly' from \
+         'everything'",
+        pages.len()
+    );
+    let before = atlas_bits(&gpu, &renderer);
+
+    // The carved tile's caster sphere, as the pack derives it: the render-local
+    // bound of its own decimated surface. Rebuilt here from the tile rather than
+    // read off the pack, so the two are two statements.
+    let lo = glam::Vec3::new(left.origin.x as f32, 0.0, left.origin.z as f32);
+    let hi = lo + glam::Vec3::new(TILE_SPAN as f32, 0.0, TILE_SPAN as f32);
+    let centre = 0.5 * (lo + hi);
+    let radius = (hi - centre).length();
+    let want: std::collections::BTreeSet<usize> = pages
+        .iter()
+        .enumerate()
+        .filter(|(_, (light, page, _))| {
+            inf_render::vsm_page_sees_sphere(&page_vp(&renderer, *light, *page), centre, radius)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !want.is_empty() && want.len() < pages.len(),
+        "the carved tile reaches {} of {} pages",
+        want.len(),
+        pages.len()
+    );
+
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    renderer.render(&gpu, &after_scene, &v, &target.view, (FW, FH));
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let after_stats = renderer.vsm_raster_stats().expect("stats");
+    let touched = after_stats.pages - warm.pages;
+    assert!(
+        touched > 0,
+        "carving a tile re-rasterized nothing — the caster cache did not notice \
+         the mask ({warm:?} -> {after_stats:?})"
+    );
+    assert_eq!(
+        touched,
+        want.len() as u64,
+        "the carved tile reaches {} pages and the frame rasterized {touched}",
+        want.len()
+    );
+
+    let after = atlas_bits(&gpu, &renderer);
+    let (w, _, _) = read_atlas(&gpu, &renderer);
+    let (mut checked, mut moved) = (0usize, 0usize);
+    for (i, (_, _, rect)) in pages.iter().enumerate() {
+        if want.contains(&i) {
+            continue;
+        }
+        for y in rect.1..rect.1 + rect.2 {
+            for x in rect.0..rect.0 + rect.2 {
+                let k = (y * w + x) as usize;
+                checked += 1;
+                moved += usize::from(before[k] != after[k]);
+            }
+        }
+    }
+    assert!(
+        checked > 4096,
+        "only {checked} texels outside the carved tile"
+    );
+    assert_eq!(
+        moved, 0,
+        "{moved} of {checked} texels moved in pages the carved tile never reaches"
+    );
+}
+
+/// **A character that animates invalidates its pages; one that stands still does
+/// not** (P27.3).
+///
+/// The stamp of a skinned caster folds its whole joint palette, because the
+/// palette **is** the geometry the vertex shader draws — a bind pose does not move
+/// and a pose does. Both halves have to be asserted or the claim collapses into
+/// one of two useless ones: a stamp that ignored the palette would leave a walking
+/// character's shadow frozen at the pose the page was first filled at (measured —
+/// dropping the palette from the fold survives every other arm in this file), and
+/// a stamp that folded the frame index would re-rasterize a statue.
+///
+/// The pages are counted rather than the frames: a palette change invalidates only
+/// the pages the character's cull sphere reaches, which is the same page-exact
+/// claim the rigid mover makes, at the granularity a character has.
+#[test]
+fn an_animating_character_invalidates_its_pages_and_a_still_one_does_not() {
+    let Some(gpu) = gpu_or_skip("the VSM skinned stamp") else {
+        return;
+    };
+    let vert = |x: f32, y: f32| inf_render::SkinnedVertex {
+        pos: [x, y, 0.0],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0, 0.0],
+        joints: [0, 0, 0, 0],
+        weights: [1.0, 0.0, 0.0, 0.0],
+    };
+    let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
+        vertices: vec![
+            vert(-0.5, -0.5),
+            vert(0.5, -0.5),
+            vert(0.5, 0.5),
+            vert(-0.5, 0.5),
+        ],
+        indices: vec![0, 1, 2, 0, 2, 3],
+    });
+    let posed = |palette: glam::Mat4| {
+        let mut s = RenderScene {
+            grid_enabled: false,
+            skinned_meshes: vec![mesh.clone()],
+            ..Default::default()
+        };
+        s.skinned.push(inf_render::SkinnedInstance {
+            translation: glam::DVec3::new(-1.4, 1.1, 0.0),
+            rotation: glam::Quat::IDENTITY,
+            scale: glam::Vec3::splat(0.3),
+            color: [1.0, 1.0, 1.0, 1.0],
+            metallic: 0.0,
+            roughness: 1.0,
+            emissive: [0.0; 3],
+            id: 77,
+            mesh: 0,
+            palette: vec![palette],
+            vt: inf_render::VtTextureSet::NONE,
+        });
+        s.instances.push(backdrop());
+        s.lights.push(inf_render::RenderLight {
+            kind: inf_render::LightKind::Directional,
+            direction: glam::Vec3::Z,
+            cast_shadows: true,
+            ..Default::default()
+        });
+        s.mark_dirty();
+        s
+    };
+    // The same pose twice, then a different one. `mark_dirty` moves the scene
+    // version in every case, so what tells the three steps apart is the stamp and
+    // nothing else.
+    let still = posed(glam::Mat4::IDENTITY);
+    let still_again = posed(glam::Mat4::IDENTITY);
+    let moved = posed(glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.4, 0.0)));
+
+    let set = settings_with(64);
+    let v = view(5.0);
+    let (renderer, marks) = run_stepped(
+        &gpu,
+        &[(&still, 8), (&still_again, 4), (&moved, 2)],
+        &v,
+        &set,
+    );
+    let (warm, held, animated) = (marks[0], marks[1], marks[2]);
+    assert!(
+        warm.skinned_casters > 0,
+        "no skinned caster was packed at all: {warm:?}"
+    );
+    assert!(warm.pages > 0, "the warm-up rasterized nothing: {warm:?}");
+    // **Still**: four more frames of the identical pose touch nothing, even though
+    // the scene version moved under every one of them.
+    assert_eq!(
+        held.pages - warm.pages,
+        0,
+        "a character holding one pose re-rasterized {} pages ({warm:?} -> {held:?})",
+        held.pages - warm.pages
+    );
+    // **Animating**: the new pose invalidates, and only the pages the character
+    // reaches.
+    let touched = animated.pages - held.pages;
+    assert!(
+        touched > 0,
+        "a character that changed pose re-rasterized nothing — its shadow is \
+         frozen at the pose its pages were first filled at ({held:?} -> \
+         {animated:?})"
+    );
+    let resident = resident_pages(&renderer).len() as u64;
+    assert!(
+        touched < resident,
+        "a pose change re-rasterized {touched} of {resident} resident pages — that \
+         is every page, not the character's"
+    );
+}

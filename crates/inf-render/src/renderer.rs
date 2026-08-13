@@ -1069,6 +1069,20 @@ impl EngineRenderer {
         self.vsm.as_ref()
     }
 
+    /// The same system, mutably — **a gate's door** (P27.3), on
+    /// `VsmRaster::read_draw_counts`'s precedent.
+    ///
+    /// The only `&mut` operation it exposes is
+    /// [`VsmSystem::flush_page_cache`](crate::vsm_mark::VsmSystem::flush_page_cache),
+    /// and nothing in the shipping path calls it: a page invalidation is meant to
+    /// be a consequence of a content stamp moving, and throwing the cache away is
+    /// the blunt instrument that lets an arm *force* the fresh raster it compares
+    /// the cached texels against.
+    #[inline]
+    pub fn vsm_mut(&mut self) -> Option<&mut crate::vsm_mark::VsmSystem> {
+        self.vsm.as_mut()
+    }
+
     /// Frames that recorded the shadow-page marking pass — the P27.1 engagement
     /// counter. **Zero is the assertion** on a scene that does not run VSM, not
     /// an absence of evidence.

@@ -1116,6 +1116,248 @@ mod tests {
         );
     }
 
+    /// A layout of `levels` levels for a sun along `+Z`, at `eye` metres of world.
+    fn layout_at(eye: glam::DVec3, half: f32, n: u32, levels: u32) -> ClipmapLayout {
+        clipmap_layout(
+            Vec3::Z,
+            &inf_math::FloatingOrigin::new(glam::DVec3::ZERO),
+            eye,
+            half,
+            n,
+            levels,
+        )
+    }
+
+    /// **THE P27.1 REMAINDER, CLOSED** (P27.3): a coarse clipmap level holds its
+    /// grid while a fine one shifts, because each level snaps to its own page
+    /// stride.
+    ///
+    /// This is the whole reason page caching is possible at all, so it is asserted
+    /// against the arrangement it replaces rather than on its own: the same camera
+    /// step is shown to move the **shared** centre `clipmap_centre` computes — the
+    /// P27.1 arrangement, under which every level's grid moved and therefore every
+    /// coarse page's content did.
+    #[test]
+    fn a_coarse_clipmap_level_holds_its_grid_while_a_fine_one_shifts() {
+        let (half, n, levels) = (32.0f32, 64u32, 8u32);
+        let page0 = clipmap_page_world(half, n) as f64;
+        assert!(
+            (page0 - 1.0).abs() < 1e-9,
+            "64 pages over 64 m is 1 m a page"
+        );
+        // A step of one and a half level-0 pages: level 0 must move, and level 5
+        // (whose page is 32 m) must not.
+        let a = layout_at(glam::DVec3::new(100.0, 7.0, -3.0), half, n, levels);
+        let b = layout_at(
+            glam::DVec3::new(100.0 + 1.5 * page0, 7.0, -3.0),
+            half,
+            n,
+            levels,
+        );
+        assert_ne!(
+            a.clip_origins[0], b.clip_origins[0],
+            "level 0's grid did not follow a one-and-a-half-page step"
+        );
+        for level in 2..levels as usize {
+            assert_eq!(
+                a.clip_origins[level],
+                b.clip_origins[level],
+                "level {level}'s grid (a {} m page) moved on a 1.5 m step",
+                page0 * (1u64 << level) as f64
+            );
+        }
+        // **The arrangement this replaces**, measured rather than described: the
+        // shared centre P27.1 snapped moves on exactly this step, and every level
+        // was derived from it — so every coarse page's footprint moved with it.
+        let sun = Vec3::Z;
+        let (right, _, _) = light_basis(sun);
+        let e = |x: f64| Vec3::new(x as f32, 7.0, -3.0);
+        let shared_a = clipmap_centre(e(100.0), page0 as f32);
+        let shared_b = clipmap_centre(e(100.0 + 1.5 * page0), page0 as f32);
+        assert_ne!(
+            shared_a.dot(right),
+            shared_b.dot(right),
+            "the rejected shared centre did NOT move on this step, so the \
+             comparison above is not a comparison"
+        );
+
+        // …and the sweep behind the two cases: over a 40-page walk, level L's grid
+        // takes about `40 / 2^L` distinct positions. That is the whole claim —
+        // "coarse levels shift 2^L times less often" — as a count.
+        for level in 0..6usize {
+            let mut seen = std::collections::BTreeSet::new();
+            for i in 0..400 {
+                let l = layout_at(
+                    glam::DVec3::new(i as f64 * 0.1 * page0, 0.0, 0.0),
+                    half,
+                    n,
+                    levels,
+                );
+                seen.insert(l.clip_origins[level]);
+            }
+            let want = 40 >> level;
+            assert!(
+                (want.max(1) - 1..=want + 2).contains(&(seen.len() as i32)),
+                "level {level} took {} grid positions over a 40-page walk; the \
+                 stride rule says about {want}",
+                seen.len()
+            );
+        }
+    }
+
+    /// **The per-level offset and the parent rule are the same statement**
+    /// (P27.3): the `clip_origins` a layout hands `inf_vsm` describe the grids its
+    /// `level_offset` puts in NDC, so a page's world footprint and the cell its
+    /// fallback chain names are one thing.
+    ///
+    /// Checked by walking level 0's pages, taking each page's own centre in world
+    /// metres out of `vsm_page_matrix`'s inverse, and asking which level-1 page
+    /// contains that point — then comparing against `VsmLightDesc::parent_at` on
+    /// the same origins. A sign error in the y half of `clip_origins` (the axis
+    /// that runs *against* the light basis's up, because page row 0 is the top)
+    /// fails here and nowhere else.
+    #[test]
+    fn the_level_offsets_and_the_clip_origins_describe_one_grid() {
+        let (half, n, levels) = (32.0f32, 8u32, 4u32);
+        // An eye off the lattice on both lateral axes, so no level's snap is the
+        // identity and the offsets are all non-zero.
+        let eye = glam::DVec3::new(13.7, 5.3, -21.1);
+        let layout = layout_at(eye, half, n, levels);
+        let desc = VsmLightDesc::clipmap(levels, n);
+        let range = 2.0 * half * (1u32 << desc.coarsest_level()) as f32;
+        let vp = clipmap_matrix(Vec3::Z, layout.centre, half, range);
+        assert!(
+            layout.level_offset[1..]
+                .iter()
+                .any(|o| o[0] != 0.0 || o[1] != 0.0),
+            "every level's offset is zero — the fixture's eye is on the lattice"
+        );
+        let mut checked = 0usize;
+        for y in 0..n {
+            for x in 0..n {
+                let at = VsmPage::flat(0, x, y);
+                // The page's own centre, back through its matrix.
+                let m = vsm_page_matrix(vp, VsmTreeKind::Clipmap, 0, n, n, x, y, layout.offset(0));
+                let inv = m.inverse();
+                let h = inv * glam::Vec4::new(0.0, 0.0, 0.5, 1.0);
+                let p = h.truncate() / h.w;
+                // Which level-1 page contains it, forwards through level 1's own
+                // page matrices.
+                let mut found = None;
+                for py in 0..n {
+                    for px in 0..n {
+                        let m1 = vsm_page_matrix(
+                            vp,
+                            VsmTreeKind::Clipmap,
+                            1,
+                            n,
+                            n,
+                            px,
+                            py,
+                            layout.offset(1),
+                        );
+                        let c = m1 * p.extend(1.0);
+                        let ndc = c.truncate() / c.w;
+                        if ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 {
+                            found = Some(VsmPage::flat(1, px, py));
+                        }
+                    }
+                }
+                let want = desc.parent_at(&layout.clip_origins, at);
+                assert_eq!(
+                    found, want,
+                    "page {at:?} sits in {found:?} and `parent_at` says {want:?} \
+                     (origins {:?})",
+                    layout.clip_origins
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, (n * n) as usize);
+    }
+
+    /// **THE TIME-SLICING POLICY'S MEASUREMENT** (P27.3, clause 3) — the numbers
+    /// `docs/memos/p27-3-page-cache.md` quotes.
+    ///
+    /// The quantum is derived, not chosen: rotating the sun by `δ` moves the
+    /// shadow of a caster `h` metres above its receiver by `h · δ` along the
+    /// ground, and one level-0 shadow texel is what a re-raster buys back. So a
+    /// quantum is "one texel of shadow travel at the reference height", and this
+    /// arm measures that through the **shipped** `quantize_light_dir` rather than
+    /// through the formula beside it: the worst displacement over a sweep of
+    /// directions must be about one texel — not much less (a quantum that buys
+    /// nothing) and not more (a quantum that shows).
+    #[test]
+    fn the_sun_quantum_is_one_shadow_texel_at_the_reference_height() {
+        let settings = VsmSettings {
+            clipmap_pages_per_side: 64,
+            first_level_extent_m: 32.0,
+            ..Default::default()
+        };
+        let q = vsm_sun_quantum(&settings);
+        let texel0 = 2.0 * settings.first_level_extent_m
+            / (settings.clipmap_pages_per_side * VSM_PAGE_SIZE) as f32;
+        assert!(
+            (texel0 - 0.0078125).abs() < 1e-6,
+            "a 64 m level 0 over 64 pages of 128 texels is 7.8 mm a texel, not \
+             {texel0}"
+        );
+        assert!(
+            (q - texel0 / VSM_SUN_REFERENCE_HEIGHT_M).abs() < 1e-9,
+            "the quantum is not the ruled one"
+        );
+        // The worst angle the quantizer leaves, swept over a sun arc — and the
+        // shadow displacement it costs at the reference height.
+        let mut worst_angle = 0f32;
+        for i in 0..721 {
+            let t = i as f32 * std::f32::consts::TAU / 720.0;
+            let d = Vec3::new(t.cos(), t.sin().abs().max(0.05), t.sin() * 0.3).normalize();
+            let qd = quantize_light_dir(d, q);
+            worst_angle = worst_angle.max(d.angle_between(qd));
+        }
+        let travel = worst_angle * VSM_SUN_REFERENCE_HEIGHT_M;
+        assert!(
+            travel <= 1.5 * texel0,
+            "the quantizer leaves {worst_angle} rad, which moves a {}m caster's \
+             shadow {travel} m — {:.2} texels",
+            VSM_SUN_REFERENCE_HEIGHT_M,
+            travel / texel0
+        );
+        assert!(
+            travel > 0.1 * texel0,
+            "the quantizer moves the sun by {travel} m of shadow — a quantum that \
+             small caches nothing and is a constant pretending to be a policy"
+        );
+        // **The policy's period, and the condition that makes it stable.** A full
+        // revolution is `TAU / q` quanta; at the shipped 20-minute day that is a
+        // quantum every `N` frames at 60 fps, and the whole atlas re-rasterizes in
+        // `slots / VSM_MAX_RASTER_PAGES` frames. The queue only fails to drain if
+        // the second number is the larger one.
+        let quanta_per_revolution = std::f32::consts::TAU / q;
+        assert!(
+            (1_500.0..1_700.0).contains(&quanta_per_revolution),
+            "{quanta_per_revolution} quanta a revolution — the memo quotes 1 608"
+        );
+        let day_s = 20.0 * 60.0;
+        let frames_per_quantum = (day_s / quanta_per_revolution) * 60.0;
+        assert!(
+            (40.0..50.0).contains(&frames_per_quantum),
+            "{frames_per_quantum} frames a quantum on a 20-minute day — the memo \
+             quotes 44.8"
+        );
+        // The default atlas is 1 024 slots and the frame cap is 256 pages, so a
+        // whole-atlas invalidation drains in four frames against the thirty-odd a
+        // quantum lasts: the drain is 8× faster than the thing that fills it.
+        let drain = (inf_vsm::DEFAULT_VSM_BUDGET_BYTES
+            / (VSM_PAGE_SIZE as u64 * VSM_PAGE_SIZE as u64 * 4)) as f32
+            / crate::vsm_raster::VSM_MAX_RASTER_PAGES as f32;
+        assert!(
+            drain < frames_per_quantum,
+            "a full invalidation drains in {drain} frames and a quantum lasts \
+             {frames_per_quantum} — the dirty queue grows without bound"
+        );
+    }
+
     /// **The CPU twin marks the page the geometry says it should**, on a
     /// clipmap — a hand-computed case, so the twin is checked against arithmetic
     /// rather than against itself.
