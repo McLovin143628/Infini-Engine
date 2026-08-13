@@ -10934,6 +10934,180 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
 > gate, and this batch is careful not to discharge it: an un-admitted page has no
 > entry, and a page the frame's cap did not reach holds the clear, which is
 > "no caster" and reads as lit either way.
+> **P27.2 AUDIT — 2026-08-13.** Adversarial pass over `c81755e..5b6bb41`. Four
+> commits appended, **none amended** (`72a0b8e` the degenerate-plane correction and
+> `page_clip_planes`, `24fee69` four defects in the caster pass, `87983e5` thirteen
+> arms for the seven mutations that survived, `ccffd8f` one of those arms' own
+> anti-vacuity, and this block) — the P27.1-audit precedent. Battery at HEAD:
+> **240 binaries, 4 314 passed, 0 failed, 8 ignored** against the block above's
+> 240 / 4 301 / 0 / 8 — **thirteen new arms and no new binary**, which is exactly
+> the 1 + 4 + 8 this audit added. `clippy --workspace --all-targets`
+> under `-D warnings` and `cargo fmt --all --check` clean. **Goldens stay 50** and
+> `git diff` over `tests/goldens/` is empty across the audit as it is across the
+> batch. **No schema moved**, no `.inf_lvl` payload moved, and **no new external
+> dependency**. The audit's own deletions are corrections and one refactor: two
+> mangled literals, a wrong doc comment in two files, a five-member tuple that
+> became a named struct, and three copies of a refusal that became one door.
+> **No assertion was removed or loosened anywhere**, and the CSM path is still not
+> edited — `git diff` for the whole batch *and* the audit names no CSM file.
+>
+> **Five statements in the block above are corrected.**
+>
+> * *"The eight deleted lines in the whole diff…"* — there are **ten**, counted
+>   rather than remembered: the eight the block enumerates plus the two lines of
+>   `a_light_refused_at_registration_stops_the_list_it_is_in`'s fixture that
+>   `8860516` replaced when it moved the arm's door. Its clause is right — no
+>   assertion was removed — and its count is not.
+> * *"the only degenerate row this tree's projections produce is a reverse-infinite
+>   perspective's **near plane** `(0, 0, 0, near)`"* — it is the **FAR** plane.
+>   Under reverse-Z the clip test `z ≥ 0` is the far one, and an *infinite* far
+>   plane is exactly the plane with no finite normal; `w − z` is the near plane and
+>   is the one row that cannot degenerate — which is what `vsm_cull.wgsl`'s own
+>   comment named as the zero row. The ruling still stands and now rests on a
+>   measurement: `the_only_degenerate_page_plane_is_the_far_one` reads the six
+>   shipped rows out of `page_clip_planes`, asserts exactly one degenerates, that it
+>   is row 2, that its constant is `+near` (which is why the skipped distance is
+>   `+∞` and passes), and that an orthographic page has no degenerate row at all.
+>   The sign is the whole ruling: the *near* plane's constant would be `−near`, and
+>   the same arithmetic would then reject every caster of every spot and point
+>   light.
+> * *"The visible list is `pages × casters` entries — **the one** allocation that
+>   grows as a **product**, and the reason both ceilings exist."* — it is not the
+>   one that binds. The per-(page, group) draw uniform is the same product at
+>   `VSM_PAGE_DRAW_STRIDE`, **64× the bytes an entry**, and its second factor is
+>   *groups* — which nothing capped. A skinned instance is a group because its
+>   palette is a bind group and a resident terrain tile is a group, so
+>   `groups ≈ casters` on any level with characters or streamed ground: the worst
+>   case was `256 × 16 384 × 256 B` = **1 GiB**, four times `wgpu`'s default
+>   `max_buffer_size` and therefore a device error at `create_buffer` rather than a
+>   counted refusal. **`VSM_MAX_GROUPS` = 1 024** is the third ceiling (64 MiB draws
+>   / 5 MiB args / 16 MiB visible, and
+>   `the_page_rasters_worst_case_buffers_fit_the_default_device_limits` asserts both
+>   that these fit and that the uncapped number does not). It refuses through **one
+>   door**, `admit_group`, and counts in `dropped_groups`.
+> * *"`fs_masked` discards with **the identical predicate** `mesh.wgsl`,
+>   `depth_prepass.wgsl` and `shadow_depth.wgsl` all spell"* — identical was a claim
+>   about **four copies** with nothing comparing them, which is the one-door law's
+>   own failure shape on a wire constant. There is no way to share a fragment body
+>   across four standalone WGSL modules, so the door is now an arm:
+>   `every_caster_pass_alpha_tests_with_one_predicate` reads the three depth-only
+>   casters' spelling character for character and the lit pass's by structure, and
+>   pins the Rust side that chooses the pipeline against the same window.
+> * *"A page with nothing to draw into it still has to be CLEARED … this early
+>   return is only taken when there is no pass to open at all"* — the early return
+>   was taken with **pages and no casters**, and left every slot holding the
+>   previous frame's depth. The editor's infinite grid is that configuration: it
+>   writes camera depth so it marks pages, and it is not a caster. Deleting every
+>   object in a level left their shadows in the atlas. Fixed in `24fee69`.
+>
+> **Verified as claimed, by re-measurement rather than by reading.** The cull's
+> arithmetic is exactly the block's: `vsm_cull.wgsl` writes
+> `args[(page·groups + group)·5 + 1]` and the CPU draws at
+> `slot · VSM_ARG_WORDS · 4` with the same `slot`, so the two agree by construction
+> and a transposition of the two factors dies on the cull arm; the append lands at
+> `visible[page·casters + ids.z + slot]` and the draw uniform reads from
+> `page·casters + group_first(groups, g)`, the same base, and dropping it kills two
+> arms. **The overflow-impossibility argument holds**: every packed caster
+> increments exactly one group's count, so `Σ group.casters == casters`, a group's
+> slice starts at its own prefix sum and one thread exists per (page, caster) — so
+> at most `group.casters` appends land in a slice `group.casters` long, and the last
+> group's slice ends exactly at `(page + 1) · casters`. The spelling is **P18.5
+> scatter's**, not `inf_vgeom`'s two-buffer split, and the block says so. The cull
+> arms genuinely read the device: `read_draw_counts` copies the args buffer to a
+> `MAP_READ` staging buffer and maps it, and deleting the sphere test at HEAD still
+> fails `the_per_page_cull_drops_the_casters_the_page_cannot_see`. The scissor
+> ruling reproduces exactly — `set_scissor_rect` deleted survives everything,
+> `set_viewport` deleted fails five arms — and the obligation it creates is carried
+> in the block's own remainder list ("it is where the scissor stops being defence in
+> depth"), though **not** in P27.3's bullet, which is where a reader looks first.
+>
+> **The depth arm's independence, stated precisely.** The device arm compares GPU
+> depth against a CPU re-derivation through the *same* Rust `vsm_page_matrix`, so on
+> its own it is two hosts agreeing — it proves the plumbing (this page, this
+> projection, this slot), not the matrix. What pins the matrix is a different
+> derivation: `a_pages_projection_contains_exactly_the_points_that_mark_it` checks
+> it against `mark_page_for`, which computes the page grid *forwards* from NDC, in
+> both directions and with three anti-vacuity counters, and
+> `a_coarser_clipmap_page_covers_twice_the_extent_on_each_axis` measures a page's
+> world width by bisection. The third leg is there; the block did not say so.
+> **The odd-extent law has nothing to bite on here**, and that is worth writing
+> down rather than leaving as an untested gap: `inf_vsm` refuses a clipmap level
+> that is not square and not a multiple of four, the settings boundary refuses it
+> before that, and a quadtree level is `2^L` square — so `pages_x` and `pages_y` are
+> equal on every tree this engine can build and a transposition of them is
+> unobservable by construction rather than unarmed.
+>
+> **Mutation matrix: 26 in the first cut (the batch's own eleven re-run, plus
+> fifteen new), then 6 more aimed at the audit's own fixes. Nine survived; nine are
+> closed and none is left open.** The batch's eleven reproduce exactly as it
+> recorded them — nine killed, `set_scissor_rect` and the degenerate skip surviving
+> as ruled. The seven new survivors, every one of them a sentence the block above
+> states as fact: **the page's content is registered to its slot corner** (a viewport
+> inset by two texels is inside every rect, writes every page, holds exactly the
+> predicted depth, and passed the whole file — and P27.4 maps a receiver onto that
+> corner); **the terrain caster is the tile's own surface** (transposing the height
+> index survived, and so did dropping the tile origin's `y`, the second one only
+> because the fixture's origin *was* `y = 0` — a fixture that cannot distinguish is
+> not a control); **a streamed-in tile does not inherit an evicted one's mesh**
+> (`b921fd3` shipped unarmed); **the skinned pose margin** (`SKINNED_POSE_MARGIN =
+> 0.0` survived everything, because a bound that is too tight only loses the pages
+> the escaped limb reached and this fixture's pages are metres wide); **the caster
+> ceiling counts** (`266acda` shipped unarmed); **the group ceiling counts** (this
+> audit's own); and **the vgeom caster's level is the camera's** (replacing
+> `pick_classic_level` with `errors.len() − 1` lands in the same pages at almost the
+> same depths, so nothing could see it). All seven are dead at HEAD. Of the six
+> aimed at the fixes, five die and one is recorded: deleting the group ceiling's
+> *vgeom* call site survives, because reaching it needs a thousand distinct
+> `.inf_vmesh` assets and reaching the terrain one needs a thousand resident tiles —
+> both of which cost a headless fixture more than the three lines they would arm.
+> That is why the ceiling is **one door**, `admit_group`, with its own pure arm,
+> rather than three copies of a refusal: the remaining mutation is "a caller does
+> not call the door", which is the residual every shared door leaves and is a
+> smaller surface than three independent refusals. The device arm exercises the
+> skinned caller, which is the one a real level reaches first.
+>
+> **The arms this audit added, and what each one measures.** `vsm.rs`:
+> `the_only_degenerate_page_plane_is_the_far_one`. `vsm_raster.rs`:
+> `the_page_rasters_worst_case_buffers_fit_the_default_device_limits`,
+> `the_group_door_refuses_at_the_ceiling_and_counts_it`,
+> `the_summary_is_one_line_with_no_mangled_whitespace`,
+> `every_caster_pass_alpha_tests_with_one_predicate`. `tests/vsm_raster.rs`:
+> `a_pages_content_is_registered_to_its_slots_corner`,
+> `a_terrain_page_holds_the_tiles_own_surface_in_metres`,
+> `a_streamed_in_terrain_tile_does_not_inherit_the_evicted_ones_mesh`,
+> `a_skinned_casters_cull_sphere_contains_a_pose_that_left_the_bind_pose`,
+> `the_caster_ceiling_counts_the_casters_it_refuses`,
+> `the_group_ceiling_counts_the_groups_it_refuses`,
+> `a_vgeom_casters_level_is_the_one_its_pixel_error_justifies`,
+> `a_frame_with_no_caster_clears_the_pages_the_last_one_filled`. Two doors were
+> opened for them and both are named as gates' doors in their own docs, on
+> `read_draw_counts`'s precedent: `VsmRaster::last_casters` (the frame's packed
+> records, kept by **moving** the `Vec` the pass already built, so the shipping path
+> pays nothing) and `VsmRasterStats::vgeom_level_sum`.
+>
+> **Confirmed as carried, not closed.** A carved terrain hole still casts — the
+> caster mesh reads `heights` and ignores `holes` and the deformation window, and
+> the new surface arm is written against a fixture with neither, so it does not
+> discharge it. The skinned cull sphere is still the bind pose inflated 50 %, and
+> the arm now measures that the inflation is load-bearing rather than that the
+> bound is exact. The whole atlas is still re-rasterized and re-cleared every
+> frame; the caster-less clear makes that unconditional rather than conditional,
+> which is the direction P27.3 has to replace anyway.
+>
+> **Remainders as amended, for P27.3.** Everything the block above lists stands.
+> Added: **the group ceiling's vgeom and terrain call sites have no device arm** (the
+> door does; a fixture cannot reach a thousand assets or tiles cheaply); **the page
+> raster's viewport is the whole *stored* slot**, `page_size + 2 · border`, which is
+> the page itself only because `VSM_PAGE_BORDER` is **0** — a ruling the P27.1
+> page-geometry memo makes and `the_ruled_page_geometry_is_the_one_the_memo_measured`
+> pins, so this is a note about a `VsmAtlasConfig::border` a caller sets by hand
+> (its content would be painted over rather than filled) and not a deferred item;
+> **`the_summary_is_one_line…` is the only guard of its kind in the crate** (the P22
+> mangled-literal law is enforced on one struct's summary and nowhere else); and
+> **`VsmRasterStats::scatter_casters` counts what the fallback pack produced rather
+> than what survived the ceilings**, so under truncation it over-reports — a
+> reporting bound, recorded rather than fixed, because the ceiling and the scatter
+> pack are P27.3's to reconcile when caching makes the packed set persist.
 - **P27.3 Page caching + invalidation** — 1. cached pages keyed on (light, page, content
   stamp); static pages survive frames untouched; 2. movement invalidates exactly the pages
   the mover's light-space bounds touch (page-exact, engagement-counter proven); light
