@@ -1485,6 +1485,184 @@ mod tests {
         }
     }
 
+    /// **A table entry that names a COARSER level is read at that level** — the
+    /// half of [`vsm_page_of`]'s ruling no device fixture reaches.
+    ///
+    /// Measured (the P27.4 mutation round): replacing `vsm_level_ndc(p, l, got)`
+    /// with `… level` survives every device arm, because every fixture's marked
+    /// set is resident and `got == level` throughout. The fail direction is a
+    /// receiver sampling the finer level's texel position inside the COARSER
+    /// page's slot — a shadow displaced by up to half a page. So it is armed
+    /// here, on a hand-built table, where a fallback can simply be written down.
+    #[test]
+    fn a_fallback_entry_is_read_at_the_level_the_table_served() {
+        // Two levels of a quadtree: level 0 is 2 pages a side, level 1 is one.
+        let desc = VsmLightDesc::quadtree(2);
+        let block = VSM_TABLE_HEADER_WORDS + 1;
+        let entries = block + VSM_TABLE_LIGHT_HEADER_WORDS + 2 * VSM_TABLE_LEVEL_REC_WORDS;
+        let mut table = vec![0u32; entries + 5];
+        table[0] = inf_vsm::VSM_TABLE_MAGIC;
+        table[1] = 1;
+        table[2] = 4; // slots a row
+        table[3] = VSM_PAGE_SIZE; // stored page size
+        table[VSM_TABLE_HEADER_WORDS] = block as u32;
+        table[block] = 2; // levels
+        table[block + 1] = VSM_PAGE_SIZE;
+        table[block + 2] = 0; // border
+        table[block + 3] = inf_vsm::VsmTreeKind::Quadtree.wire() | (1 << 8);
+        // level 0: 2x2, entries at `entries`; level 1: 1x1, at `entries + 4`.
+        for (i, (px, py, first)) in [
+            (0u32, (2u32, 2u32, entries as u32)),
+            (1, (1, 1, entries as u32 + 4)),
+        ] {
+            let rec = block + VSM_TABLE_LIGHT_HEADER_WORDS + VSM_TABLE_LEVEL_REC_WORDS * i as usize;
+            table[rec] = px;
+            table[rec + 1] = py;
+            table[rec + 2] = first;
+            table[rec + 3] = 0;
+        }
+        // No level-0 page is resident; each one RESOLVES to the level-1 root,
+        // which is what `VsmResidency::propagate` writes into the table — a
+        // fallback is an entry naming a coarser level, not an absence.
+        for e in entries..entries + 5 {
+            table[e] = inf_vsm::pack_entry(3, 1);
+        }
+
+        let proj = VsmProjection {
+            view_proj: Mat4::IDENTITY.to_cols_array(),
+            info: [block as u32, 0, 0, crate::vsm::VSM_PROJ_PERSPECTIVE],
+            ..Default::default()
+        };
+        // A point in level 0's page (1, 0) — the top-RIGHT quadrant. Its level-1
+        // ancestor is the single root page, and the texel inside that root is
+        // three quarters across, not a quarter.
+        let ndc = Vec3::new(0.5, 0.5, 0.5);
+        let (px, _, _) = vsm_page_of(&desc, 0, ndc.truncate()).expect("level 0");
+        assert_eq!(px, 1, "the fixture's point is not in the right quadrant");
+        let mut read = Vec::new();
+        let f = vsm_level_factor(&table, &proj, &desc, ndc, 0, 0.0, |x, y| {
+            read.push((x, y));
+            0.0
+        });
+        assert!(f >= 0.0, "the fallback resolved to nothing");
+        // Slot 3 of a 4-wide atlas is at x = 3 · 128; the point is 0.75 across
+        // the root page, i.e. texel 96.
+        let (ox, oy) = (3 * VSM_PAGE_SIZE, 0);
+        assert!(
+            read.contains(&(ox + 96, oy + 32)),
+            "the taps landed at {read:?}, not at the SERVED level's texel \
+             ({}, {})",
+            ox + 96,
+            oy + 32
+        );
+        // …and the finer level's texel position inside that slot — what the
+        // mutation produces — is a different place entirely.
+        assert!(
+            !read.contains(&(ox + 64, oy)),
+            "the taps landed at the ASKED level's texel inside the SERVED \
+             level's page"
+        );
+    }
+
+    /// The normal offset is **one page texel of the level the receiver asks
+    /// for**, and it is applied before the projection.
+    ///
+    /// Measured (the P27.4 mutation round): deleting it survives every device
+    /// arm, because the slope term already covers the acne it guards against at
+    /// every configuration this tree builds. It is armed here rather than
+    /// removed, for the reason `VSM_NORMAL_BIAS_TEXELS`'s own docs give — with
+    /// no page border the displacement has to be part of the ADDRESS — and it is
+    /// its magnitude, not its existence, that a reader would trust.
+    #[test]
+    fn the_normal_offset_is_one_texel_of_the_asked_for_level() {
+        let vp = crate::vsm::clipmap_matrix(Vec3::Y, Vec3::ZERO, 32.0, 1_024.0);
+        let texel0 = 2.0 * 32.0 / (32.0 * VSM_PAGE_SIZE as f32);
+        let desc = VsmLightDesc::clipmap(6, 32);
+        let mut proj = VsmProjection {
+            view_proj: vp.to_cols_array(),
+            info: [0, 0, 0, VSM_PROJ_ORTHO],
+            ..Default::default()
+        };
+        proj.light[3] = texel0;
+        let world = Vec3::new(1.0, 0.0, 2.0);
+        // A pixel footprint that justifies level 2 exactly: `2 < log2(pw/t0) ≤ 3`.
+        let pixel_world = texel0 * 6.0;
+        let level0 = vsm_justified_level(texel0, pixel_world, desc.level_count());
+        assert_eq!(level0, 3);
+        let site = vsm_receiver_site(&proj, &desc, world, Vec3::Y, pixel_world, 0.05)
+            .expect("the point is inside the clipmap");
+        // The displaced point, recovered by unprojecting the site's own NDC.
+        let back = vp.inverse() * site.ndc.extend(1.0);
+        let back = back.truncate() / back.w;
+        let moved = (back - world).length();
+        let want = VSM_NORMAL_BIAS_TEXELS * texel0 * (1u32 << level0) as f32;
+        assert!(
+            (moved - want).abs() < 1e-4,
+            "the receiver moved {moved} m along its normal, not {want} — one \
+             texel of the level it asks for"
+        );
+        assert!(want > 0.0, "the offset is inert");
+    }
+
+    /// The shader's own clamp, pinned by SOURCE — because a one-texel band on
+    /// 3.1 % of a page's texels is not something a 256 × 144 frame can see.
+    ///
+    /// Measured (the P27.4 mutation round): deleting the bounds test from
+    /// `vsm_receive.wgsl` survives every device arm. The Rust half is armed
+    /// directly by `the_kernel_drops_the_taps_that_leave_the_page…` — a tap
+    /// count is a number — and this is what keeps the two halves saying the same
+    /// thing. Read as a SCOPE (the P23 law): the guard is looked for inside the
+    /// kernel loop, not anywhere in the file.
+    #[test]
+    fn the_shaders_kernel_is_clamped_to_its_page_too() {
+        let src = include_str!("shaders/vsm_receive.wgsl");
+        let at = src
+            .find("for (var dy = -VSM_PCF_RADIUS")
+            .expect("the kernel loop moved; this gate scopes on it");
+        let end = src[at..]
+            .find("return sum / taps;")
+            .expect("the loop's end");
+        let body = &src[at..at + end];
+        assert!(
+            body.contains("t.x >= i32(page_size)") && body.contains("t.y >= i32(page_size)"),
+            "the kernel no longer drops the taps that leave its page — with no \
+             border those taps read the atlas slot NEXT DOOR"
+        );
+        assert!(
+            body.contains("t.x < 0") && body.contains("t.y < 0"),
+            "the kernel no longer guards the low edge"
+        );
+        assert!(
+            body.contains("continue;"),
+            "the out-of-page taps are clamped rather than DROPPED, which \
+             double-weights a page's rim"
+        );
+
+        // Two more expressions of `vsm_shadow`'s that no device fixture can
+        // reach, pinned in the same breath and with the same honesty about what
+        // a source pin is worth (a byte pin cannot see a semantic change — the
+        // P23 law — so this catches a DELETION and not a re-derivation):
+        //
+        // * the fallback address is taken at `got`, the level the table SERVED.
+        //   Its arm is `a_fallback_entry_is_read_at_the_level_the_table_served`,
+        //   which is pure, because reaching a fallback on a device needs a
+        //   resident ancestor over an absent child — residency pressure this
+        //   phase's fixtures do not produce and P27.5's gate will;
+        // * the normal offset is applied. Its arm is
+        //   `the_normal_offset_is_one_texel_of_the_asked_for_level`, also pure,
+        //   because the offset is redundant with the slope term at every
+        //   configuration this tree builds — it earns its place at a page
+        //   boundary, where the displacement changes which page is resolved.
+        assert!(
+            src.contains("let gq = vsm_level_ndc(p, l, got);"),
+            "the shader no longer re-derives the address at the level the table              SERVED — a fallback would sample the finer level's texel position              inside the coarser page's slot"
+        );
+        assert!(
+            src.contains("VSM_NORMAL_BIAS_TEXELS * texel0 * exp2(f32(level0))"),
+            "the shader no longer displaces the receiver along its normal before              projecting it"
+        );
+    }
+
     /// The clamped kernel drops rather than clamps, and the centre tap is always
     /// in — so the divisor is never zero and a page edge is never double-counted.
     #[test]
