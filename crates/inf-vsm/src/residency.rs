@@ -329,6 +329,10 @@ struct Light {
     desc: VsmLightDesc,
     /// Exact-resident slot per virtual page, indexed by `desc.entry_index`.
     resident: Vec<Option<u32>>,
+    /// Where each clipmap level's grid sits on the world lattice — see
+    /// [`VsmLightDesc::clip_origin`]. Empty until a caller sets it, which is the
+    /// exactly-concentric arrangement P27.1 shipped.
+    clip_origins: Vec<(i64, i64)>,
     generation: u64,
 }
 
@@ -425,6 +429,44 @@ impl VsmResidency {
         self.lights.get(light.index()).map(|l| &l.desc)
     }
 
+    /// **Where each of this light's clipmap levels sits on the world lattice** —
+    /// see [`VsmLightDesc::clip_origin`]. Empty means exactly concentric.
+    pub fn clip_origins(&self, light: VsmLightHandle) -> &[(i64, i64)] {
+        self.lights
+            .get(light.index())
+            .map_or(&[], |l| &l.clip_origins)
+    }
+
+    /// **Re-point one light's per-level clipmap grids** (P27.3).
+    ///
+    /// P27.1 shipped one snapped centre for every level, which made the
+    /// concentric `N/4 + x/2` parent rule exact and made a *coarse* level's grid
+    /// shift on any camera motion — so nothing coarse could ever cache. Snapping
+    /// each level to its own page stride fixes that and costs exactly this: the
+    /// levels stop being concentric, so the fallback chain has to be recomputed
+    /// against the new offsets ([`VsmLightDesc::parent_at`]).
+    ///
+    /// **The pages keep their slots.** A page whose *world cell* changed is
+    /// stale content, not a stale allocation, and which of them is stale is a
+    /// question about the raster's content stamps rather than about residency —
+    /// so this layer does what it owns (the entry chain) and reports the change
+    /// rather than guessing at the other half.
+    ///
+    /// Returns whether anything moved; a no-op call recomputes nothing and does
+    /// not move the light's generation, so a host may call it every frame.
+    pub fn set_clip_origins(&mut self, light: VsmLightHandle, origins: &[(i64, i64)]) -> bool {
+        let Some(l) = self.lights.get_mut(light.index()) else {
+            return false;
+        };
+        if l.clip_origins == origins {
+            return false;
+        }
+        l.clip_origins = origins.to_vec();
+        self.recompute_entries(light.index());
+        self.lights[light.index()].generation = next_stamp();
+        true
+    }
+
     /// **Register a shadow-casting light's page tree.**
     ///
     /// Unlike `inf_vt::VtResidency::register_texture` this seats **nothing** and
@@ -445,6 +487,7 @@ impl VsmResidency {
         self.lights.push(Light {
             desc,
             resident: vec![None; pages as usize],
+            clip_origins: Vec::new(),
             generation: next_stamp(),
         });
         // The directory sits before the blocks, so a new light moves every block
@@ -558,7 +601,7 @@ impl VsmResidency {
         let e = unpack_entry(word)?;
         Some(VsmResolved {
             slot: e.slot,
-            page: l.desc.ancestor(at, e.level)?,
+            page: l.desc.ancestor_at(&l.clip_origins, at, e.level)?,
         })
     }
 
@@ -632,6 +675,7 @@ impl VsmResidency {
     /// The only from-scratch computation in the crate; everything else patches.
     fn recompute_entries(&mut self, l: usize) {
         let desc = self.lights[l].desc.clone();
+        let origins = self.lights[l].clip_origins.clone();
         for face in 0..desc.faces() {
             for level in (0..desc.level_count()).rev() {
                 let g = desc.levels[level as usize];
@@ -641,13 +685,14 @@ impl VsmResidency {
                         let idx = desc.entry_index(at).expect("in tree");
                         let word = match self.lights[l].resident[idx as usize] {
                             Some(slot) => pack_entry(slot, level),
-                            None => match desc.parent(at) {
-                                Some(p) => {
-                                    self.table.words[self
-                                        .table
-                                        .entry_word(l, &desc, p)
-                                        .expect("parent in tree")]
-                                }
+                            // A parent the offsets put outside the coarser grid
+                            // has no entry to inherit, and `NONE` is the right
+                            // answer rather than a panic: it reads as *lit*.
+                            None => match desc
+                                .parent_at(&origins, at)
+                                .and_then(|p| self.table.entry_word(l, &desc, p))
+                            {
+                                Some(w) => self.table.words[w],
                                 None => VSM_ENTRY_NONE,
                             },
                         };
@@ -664,6 +709,7 @@ impl VsmResidency {
     /// walk: its own subtree resolves to it, not through `from`.
     fn propagate(&mut self, l: usize, from: VsmPage, word: u32) {
         let desc = self.lights[l].desc.clone();
+        let origins = self.lights[l].clip_origins.clone();
         let mut stack = vec![from];
         while let Some(v) = stack.pop() {
             let w = self.table.entry_word(l, &desc, v).expect("in tree");
@@ -671,8 +717,8 @@ impl VsmResidency {
             if v.level == 0 {
                 continue;
             }
-            for cy in desc.child_y_range(v.level, v.y) {
-                for cx in desc.child_x_range(v.level, v.x) {
+            for cy in desc.child_y_range_at(&origins, v.level, v.y) {
+                for cx in desc.child_x_range_at(&origins, v.level, v.x) {
                     let c = VsmPage::new(v.face, v.level - 1, cx, cy);
                     let idx = desc.entry_index(c).expect("child in tree");
                     if self.lights[l].resident[idx as usize].is_none() {
@@ -735,10 +781,14 @@ impl VsmResidency {
             .expect("a victim is occupied");
         let li = l as usize;
         let desc = self.lights[li].desc.clone();
+        let origins = self.lights[li].clip_origins.clone();
         let idx = desc.entry_index(page).expect("seated page exists");
         self.lights[li].resident[idx as usize] = None;
-        let word = match desc.parent(page) {
-            Some(p) => self.table.words[self.table.entry_word(li, &desc, p).expect("in tree")],
+        let word = match desc
+            .parent_at(&origins, page)
+            .and_then(|p| self.table.entry_word(li, &desc, p))
+        {
+            Some(w) => self.table.words[w],
             None => VSM_ENTRY_NONE,
         };
         self.propagate(li, page, word);

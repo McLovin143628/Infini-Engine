@@ -284,8 +284,36 @@ impl VsmLightDesc {
         )
     }
 
+    /// **Where one clipmap level's page grid sits on the world lattice**: the
+    /// index of page `(0, 0)`'s cell at that level's own page stride.
+    ///
+    /// `origins` is the caller's per-level table, finest first; an entry it does
+    /// not have — and an empty table — means the **concentric** default,
+    /// `(−pages_x/2, −pages_y/2)`, which is the arrangement every level shares
+    /// when they share one snapped centre. That default is not a convention: it
+    /// is the value that makes [`parent_at`](Self::parent_at) reduce to
+    /// `N/4 + x/2` exactly, which
+    /// [`tests::the_general_clipmap_parent_rule_reduces_to_the_concentric_one`]
+    /// asserts rather than asserts about.
+    ///
+    /// Meaningless for a quadtree or a cube face, whose levels are nested by
+    /// construction and whose parent rule is `x/2` whatever the world does.
+    pub fn clip_origin(&self, origins: &[(i64, i64)], level: u32) -> (i64, i64) {
+        let l = self
+            .levels
+            .get(level as usize)
+            .copied()
+            .unwrap_or(VsmLevelDesc::square(0));
+        origins
+            .get(level as usize)
+            .copied()
+            .unwrap_or((-(i64::from(l.pages_x) / 2), -(i64::from(l.pages_y) / 2)))
+    }
+
     /// The page at the next-coarser level whose footprint contains `at`'s, or
-    /// `None` when `at` is already at the coarsest.
+    /// `None` when `at` is already at the coarsest — **for exactly concentric
+    /// clipmap levels**. [`parent_at`](Self::parent_at) is the general rule and
+    /// this is the special case `origins = &[]` names.
     ///
     /// # The two rules, and why the clipmap's is not `x / 2`
     ///
@@ -299,25 +327,52 @@ impl VsmLightDesc {
     /// re-parent every page a quarter of a level's extent off — a shadow that
     /// falls back to the wrong ground, with no error anywhere.
     pub fn parent(&self, at: VsmPage) -> Option<VsmPage> {
+        self.parent_at(&[], at)
+    }
+
+    /// **The general clipmap parent rule**: the coarser page whose *world cell*
+    /// contains `at`'s, when the levels are each snapped to their own page stride
+    /// and are therefore **not** concentric.
+    ///
+    /// Level `L` page `x` covers world cell `gx_L + x` at stride `w_L`; level
+    /// `L+1`'s cells are twice as wide, so that cell sits in coarse cell
+    /// `⌊(gx_L + x) / 2⌋` and the coarse *page* index is that minus `gx_{L+1}`.
+    /// Floor division, not truncation — a cell index is signed and truncation
+    /// would fold the two cells either side of the origin onto one parent.
+    ///
+    /// This is the whole of P27.3's per-level-offset change to the address space,
+    /// and it **contains** the shipped concentric rule rather than replacing it:
+    /// at the default origins the expression is identically `N/4 + ⌊x/2⌋` (see
+    /// [`clip_origin`](Self::clip_origin)). `None` when `at` is at the coarsest
+    /// level, when `at` is not in the tree, **or when the offsets put the parent
+    /// outside the coarser grid** — which resolves to `VSM_ENTRY_NONE`, read as
+    /// *lit*, the fail direction this phase already chose.
+    pub fn parent_at(&self, origins: &[(i64, i64)], at: VsmPage) -> Option<VsmPage> {
         let up = at.level + 1;
-        let l = self.levels.get(up as usize)?;
+        let l = *self.levels.get(up as usize)?;
         if !self.contains(at) {
             return None;
         }
-        Some(match self.kind {
-            VsmTreeKind::Clipmap => VsmPage::new(
-                at.face,
-                up,
-                l.pages_x / 4 + at.x / 2,
-                l.pages_y / 4 + at.y / 2,
-            ),
-            VsmTreeKind::Quadtree | VsmTreeKind::Cube => VsmPage::new(
+        match self.kind {
+            VsmTreeKind::Clipmap => {
+                let (gx_l, gy_l) = self.clip_origin(origins, at.level);
+                let (gx_p, gy_p) = self.clip_origin(origins, up);
+                let px = (gx_l + i64::from(at.x)).div_euclid(2) - gx_p;
+                let py = (gy_l + i64::from(at.y)).div_euclid(2) - gy_p;
+                if !(0..i64::from(l.pages_x)).contains(&px)
+                    || !(0..i64::from(l.pages_y)).contains(&py)
+                {
+                    return None;
+                }
+                Some(VsmPage::new(at.face, up, px as u32, py as u32))
+            }
+            VsmTreeKind::Quadtree | VsmTreeKind::Cube => Some(VsmPage::new(
                 at.face,
                 up,
                 (at.x / 2).min(l.pages_x - 1),
                 (at.y / 2).min(l.pages_y - 1),
-            ),
-        })
+            )),
+        }
     }
 
     /// The ancestor of `at` at level `target`, following the same chain
@@ -325,12 +380,17 @@ impl VsmLightDesc {
     /// names**, and the CPU twin of the walk a receiver does when the table hands
     /// it a coarser level than it asked for.
     pub fn ancestor(&self, at: VsmPage, target: u32) -> Option<VsmPage> {
+        self.ancestor_at(&[], at, target)
+    }
+
+    /// [`ancestor`](Self::ancestor) under per-level clipmap offsets.
+    pub fn ancestor_at(&self, origins: &[(i64, i64)], at: VsmPage, target: u32) -> Option<VsmPage> {
         if !self.contains(at) || target < at.level || target as usize >= self.levels.len() {
             return None;
         }
         let mut cur = at;
         while cur.level < target {
-            cur = self.parent(cur)?;
+            cur = self.parent_at(origins, cur)?;
         }
         Some(cur)
     }
@@ -338,15 +398,33 @@ impl VsmLightDesc {
     /// The half-open range of child columns of parent column `x` at level
     /// `level` — the inverse of [`parent`](Self::parent).
     pub fn child_x_range(&self, level: u32, x: u32) -> Range<u32> {
-        self.child_range(level, x, |l| l.pages_x)
+        self.child_range(&[], level, x, |l| l.pages_x, |o| o.0)
     }
 
     /// The half-open range of child rows of parent row `y` at level `level`.
     pub fn child_y_range(&self, level: u32, y: u32) -> Range<u32> {
-        self.child_range(level, y, |l| l.pages_y)
+        self.child_range(&[], level, y, |l| l.pages_y, |o| o.1)
     }
 
-    fn child_range(&self, level: u32, p: u32, axis: fn(&VsmLevelDesc) -> u32) -> Range<u32> {
+    /// [`child_x_range`](Self::child_x_range) under per-level clipmap offsets —
+    /// the exact inverse of [`parent_at`](Self::parent_at).
+    pub fn child_x_range_at(&self, origins: &[(i64, i64)], level: u32, x: u32) -> Range<u32> {
+        self.child_range(origins, level, x, |l| l.pages_x, |o| o.0)
+    }
+
+    /// [`child_y_range`](Self::child_y_range) under per-level clipmap offsets.
+    pub fn child_y_range_at(&self, origins: &[(i64, i64)], level: u32, y: u32) -> Range<u32> {
+        self.child_range(origins, level, y, |l| l.pages_y, |o| o.1)
+    }
+
+    fn child_range(
+        &self,
+        origins: &[(i64, i64)],
+        level: u32,
+        p: u32,
+        axis: fn(&VsmLevelDesc) -> u32,
+        of: fn(&(i64, i64)) -> i64,
+    ) -> Range<u32> {
         let parent_count = self.levels.get(level as usize).map_or(0, axis);
         let child_count = level
             .checked_sub(1)
@@ -357,14 +435,18 @@ impl VsmLightDesc {
         }
         match self.kind {
             // Only the middle half of a clipmap level has children at all: the
-            // finer level covers a quarter of the area, concentrically.
+            // finer level covers a quarter of the area. Under the concentric
+            // default that window is `[N/4, 3N/4)` and this expression is
+            // identically `(p − N/4)·2`; under per-level offsets the window
+            // slides, and it is the SAME arithmetic because both are "which
+            // child cells fall in this parent cell".
             VsmTreeKind::Clipmap => {
-                let q = parent_count / 4;
-                if p < q || p >= q + parent_count / 2 {
-                    return 0..0;
-                }
-                let lo = (p - q) * 2;
-                lo..(lo + 2).min(child_count)
+                let gp = of(&self.clip_origin(origins, level));
+                let gc = of(&self.clip_origin(origins, level - 1));
+                let n = i64::from(child_count);
+                let lo = (2 * (i64::from(p) + gp) - gc).clamp(0, n);
+                let hi = (2 * (i64::from(p) + gp) - gc + 2).clamp(0, n);
+                lo as u32..hi as u32
             }
             VsmTreeKind::Quadtree | VsmTreeKind::Cube => {
                 let lo = p.saturating_mul(2);
@@ -548,9 +630,15 @@ mod tests {
         assert_eq!(d.ancestor(VsmPage::flat(2, 0, 0), 1), None, "backwards");
     }
 
-    /// Every page of every finer level has **exactly one** parent, and
-    /// [`VsmLightDesc::child_range`] names it back.
-    fn assert_the_ranges_invert_the_parent_rule(d: &VsmLightDesc) {
+    /// Every page of every finer level has **at most one** parent, and
+    /// [`VsmLightDesc::child_range`] names it back. Under the concentric default
+    /// every child has exactly one; under per-level offsets a fine page can hang
+    /// off the coarser grid's edge, and `expect_total` says which world it is.
+    fn assert_the_ranges_invert_the_parent_rule_at(
+        d: &VsmLightDesc,
+        origins: &[(i64, i64)],
+        expect_total: bool,
+    ) {
         d.validate().expect("a real tree");
         for face in 0..d.faces() {
             for level in 1..d.level_count() {
@@ -559,11 +647,11 @@ mod tests {
                 let mut seen = vec![0u32; child.page_count() as usize];
                 for y in 0..parent.pages_y {
                     for x in 0..parent.pages_x {
-                        for cy in d.child_y_range(level, y) {
-                            for cx in d.child_x_range(level, x) {
+                        for cy in d.child_y_range_at(origins, level, y) {
+                            for cx in d.child_x_range_at(origins, level, x) {
                                 seen[(cy * child.pages_x + cx) as usize] += 1;
                                 assert_eq!(
-                                    d.parent(VsmPage::new(face, level - 1, cx, cy)),
+                                    d.parent_at(origins, VsmPage::new(face, level - 1, cx, cy)),
                                     Some(VsmPage::new(face, level, x, y)),
                                     "{:?} level {level}: ({cx},{cy}) is not ({x},{y})'s child",
                                     d.kind
@@ -573,13 +661,40 @@ mod tests {
                     }
                 }
                 assert!(
-                    seen.iter().all(|&n| n == 1),
+                    seen.iter().all(|&n| n <= 1),
                     "{:?} level {level}: a child was adopted {:?} times",
                     d.kind,
                     seen.iter().collect::<std::collections::BTreeSet<_>>()
                 );
+                if expect_total {
+                    assert!(
+                        seen.iter().all(|&n| n == 1),
+                        "{:?} level {level}: a child was orphaned",
+                        d.kind
+                    );
+                }
+                // A child with no range entry must have no parent either — the
+                // two halves are one statement, and this is what catches an
+                // offset that drops a page out of both.
+                for cy in 0..child.pages_y {
+                    for cx in 0..child.pages_x {
+                        let has_parent = d
+                            .parent_at(origins, VsmPage::new(face, level - 1, cx, cy))
+                            .is_some();
+                        assert_eq!(
+                            has_parent,
+                            seen[(cy * child.pages_x + cx) as usize] == 1,
+                            "{:?} level {level}: ({cx},{cy}) disagrees about its parent",
+                            d.kind
+                        );
+                    }
+                }
             }
         }
+    }
+
+    fn assert_the_ranges_invert_the_parent_rule(d: &VsmLightDesc) {
+        assert_the_ranges_invert_the_parent_rule_at(d, &[], true);
     }
 
     /// Every child range inverts the parent rule exactly, for **both** families —
@@ -593,6 +708,115 @@ mod tests {
             VsmLightDesc::cube(4),
         ] {
             assert_the_ranges_invert_the_parent_rule(&d);
+        }
+    }
+
+    /// **The general clipmap parent rule CONTAINS the concentric one** (P27.3).
+    ///
+    /// P27.3 snaps each clipmap level to its own page stride, which is what stops
+    /// a coarse level's grid shifting on every camera step — and costs exactly
+    /// one thing: the levels stop being concentric, so `N/4 + x/2` stops being
+    /// the parent. The replacement is "which coarse world cell contains this fine
+    /// cell", and this arm is the pin that the replacement is not a *change*:
+    /// at the default origins it is the same function, page for page, over every
+    /// page of every level of four grids — including the two that are multiples
+    /// of four and **not** powers of two, where `N/4` is not a shift.
+    #[test]
+    fn the_general_clipmap_parent_rule_reduces_to_the_concentric_one() {
+        for d in [
+            VsmLightDesc::clipmap(4, 8),
+            VsmLightDesc::clipmap(3, 16),
+            VsmLightDesc::clipmap(4, 12),
+            VsmLightDesc::clipmap(3, 20),
+        ] {
+            let n = d.levels[0].pages_x;
+            let concentric: Vec<(i64, i64)> =
+                vec![(-(i64::from(n) / 2), -(i64::from(n) / 2)); d.levels.len()];
+            let mut checked = 0usize;
+            for level in 0..d.level_count() {
+                for y in 0..n {
+                    for x in 0..n {
+                        let at = VsmPage::flat(level, x, y);
+                        assert_eq!(
+                            d.parent_at(&concentric, at),
+                            d.parent(at),
+                            "{n}: {at:?} re-parents under the default origins"
+                        );
+                        assert_eq!(d.parent_at(&[], at), d.parent(at), "{n}: {at:?}");
+                        checked += 1;
+                    }
+                }
+            }
+            // ANTI-VACUITY: the sweep really covered the grid, and the rule it
+            // agrees with really is the concentric one rather than `x/2`.
+            assert_eq!(checked, (d.level_count() * n * n) as usize);
+            assert_eq!(
+                d.parent(VsmPage::flat(0, n - 1, n - 1)),
+                Some(VsmPage::flat(1, n / 4 + (n - 1) / 2, n / 4 + (n - 1) / 2))
+            );
+            // …and the offsets are load-bearing: shifting the FINE level one cell
+            // re-parents half its pages — the ODD columns, because a cell and its
+            // neighbour share a parent and the shift moves which of the two pairs
+            // a column lands in. Page 0 is *not* one of them (the concentric
+            // origin is even, so cell −N/2 and cell −N/2+1 have one parent), and
+            // asserting on it is how the first draft of this arm passed with the
+            // offsets deleted.
+            let mut shifted = concentric.clone();
+            shifted[0].0 += 1;
+            assert_eq!(
+                d.parent_at(&shifted, VsmPage::flat(0, 0, 0)),
+                d.parent(VsmPage::flat(0, 0, 0)),
+                "{n}: an even column pairs with the one above it"
+            );
+            assert_ne!(
+                d.parent_at(&shifted, VsmPage::flat(0, 1, 0)),
+                d.parent(VsmPage::flat(0, 1, 0)),
+                "{n}: a level offset that moves nothing is not an offset"
+            );
+            let moved = (0..n)
+                .filter(|&x| {
+                    d.parent_at(&shifted, VsmPage::flat(0, x, 0))
+                        != d.parent(VsmPage::flat(0, x, 0))
+                })
+                .count();
+            assert_eq!(moved, (n / 2) as usize, "{n}: {moved} of {n} columns moved");
+        }
+    }
+
+    /// **A shifted clipmap still has one parent per page, and the ranges still
+    /// invert it** (P27.3) — the same total property, under offsets that are not
+    /// concentric, at extents where `N/4` is not a shift.
+    ///
+    /// The offsets swept are the ones per-level snapping actually produces:
+    /// `d ∈ {−1, 0, 1}` between consecutive levels, because level `L`'s centre is
+    /// within `w_L/2` of the eye and level `L+1`'s within `w_L`, so the two can
+    /// never be more than one and a half fine pages apart.
+    #[test]
+    fn a_shifted_clipmap_still_has_one_parent_per_page() {
+        for n in [8u32, 12, 16, 20] {
+            let d = VsmLightDesc::clipmap(4, n);
+            for dx in [-1i64, 0, 1] {
+                for dy in [-1i64, 0, 1] {
+                    // Level L's origin is the concentric one plus L·d — the shape
+                    // "every level is one cell off its parent" produces.
+                    let origins: Vec<(i64, i64)> = (0..d.levels.len())
+                        .map(|l| {
+                            (
+                                -(i64::from(n) / 2) + dx * l as i64,
+                                -(i64::from(n) / 2) + dy * l as i64,
+                            )
+                        })
+                        .collect();
+                    assert_the_ranges_invert_the_parent_rule_at(&d, &origins, dx == 0 && dy == 0);
+                    // A page at the CENTRE of a shifted level still has a parent —
+                    // the offsets are small enough that only the rim can hang off.
+                    assert!(
+                        d.parent_at(&origins, VsmPage::flat(0, n / 2, n / 2))
+                            .is_some(),
+                        "n={n} d=({dx},{dy}): the middle of the grid lost its parent"
+                    );
+                }
+            }
         }
     }
 

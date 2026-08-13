@@ -89,13 +89,19 @@ impl Shadow {
     /// Resolve `at` by walking the tree upward — the brute force. `None` when
     /// nothing in the chain is resident, which is a legal answer here and is the
     /// whole difference from `inf-vt`'s model.
-    fn resolve(&self, light: u32, desc: &VsmLightDesc, at: VsmPage) -> Option<VsmResolved> {
+    fn resolve(
+        &self,
+        light: u32,
+        desc: &VsmLightDesc,
+        origins: &[(i64, i64)],
+        at: VsmPage,
+    ) -> Option<VsmResolved> {
         let mut cur = at;
         loop {
             if let Some(&slot) = self.0.get(&(light, cur)) {
                 return Some(VsmResolved { slot, page: cur });
             }
-            cur = desc.parent(cur)?;
+            cur = desc.parent_at(origins, cur)?;
         }
     }
 }
@@ -133,13 +139,18 @@ fn assert_world(res: &VsmResidency, shadow: &Shadow, what: &str) -> WorldShape {
     for l in 0..res.light_count() as u32 {
         let handle = VsmLightHandle(l);
         let desc = res.desc(handle).expect("registered").clone();
+        // The brute-force walk uses the light's OWN per-level offsets, read off
+        // the residency — so a clipmap that snapped its levels is checked against
+        // the tree it actually has rather than against the concentric one it had
+        // at registration (P27.3).
+        let origins = res.clip_origins(handle).to_vec();
         for face in 0..desc.faces() {
             for level in 0..desc.level_count() {
                 let g = desc.levels[level as usize];
                 for y in 0..g.pages_y {
                     for x in 0..g.pages_x {
                         let at = VsmPage::new(face, level, x, y);
-                        let brute = shadow.resolve(l, &desc, at);
+                        let brute = shadow.resolve(l, &desc, &origins, at);
                         assert_eq!(
                             res.resolve(handle, at),
                             brute,
@@ -152,7 +163,10 @@ fn assert_world(res: &VsmResidency, shadow: &Shadow, what: &str) -> WorldShape {
                                 // The answer is genuinely an ancestor of what was
                                 // asked for, not merely something resident.
                                 assert!(r.page.level >= at.level);
-                                assert_eq!(desc.ancestor(at, r.page.level), Some(r.page));
+                                assert_eq!(
+                                    desc.ancestor_at(&origins, at, r.page.level),
+                                    Some(r.page)
+                                );
                                 shape.deep += u64::from(r.page.level > at.level + 1);
                                 // **The premise that makes an evict cost nothing on
                                 // the GPU**: no live entry addresses a slot that is
@@ -408,6 +422,91 @@ fn every_address_resolves_to_the_finest_resident_ancestor_or_to_nothing() {
     // …and the residency really did stay inside its slots.
     assert!(res.stats().resident <= 12);
     assert_eq!(res.stats().resident as usize, c.shadow.0.len());
+}
+
+/// **A clipmap that snapped its levels independently still resolves exactly**
+/// (P27.3).
+///
+/// P27.3 gives each clipmap level its own snapped centre, which is what stops a
+/// coarse level's grid shifting on every camera step. The price is that the
+/// levels stop being concentric, so the whole maintained fallback chain is
+/// against a *different* parent rule — and a maintained structure that is not
+/// recomputed when its rule changes is a structure that silently points at the
+/// wrong ground.
+///
+/// So: churn a residency into a state with real fallbacks, move the offsets, and
+/// re-check **every** entry of the table against the independent walk under the
+/// new offsets. The anti-vacuity is the one that matters: the new offsets must
+/// re-parent something, or the arm is asserting that nothing changed.
+#[test]
+fn moving_a_clipmaps_level_offsets_re_points_the_whole_fallback_chain() {
+    let mut c = churn(0x0FF5_E750, 12, 60);
+    // The clipmap is fixture 0 (see `fixtures`), and it is the only kind offsets
+    // mean anything for.
+    let h = VsmLightHandle(0);
+    let desc = c.res.desc(h).expect("registered").clone();
+    let n = desc.levels[0].pages_x;
+    assert!(
+        matches!(desc.kind, inf_vsm::VsmTreeKind::Clipmap),
+        "fixture 0 is the clipmap"
+    );
+    assert_eq!(c.res.clip_origins(h), &[] as &[(i64, i64)], "concentric");
+
+    // Each level one cell further off than the one below it — the shape per-level
+    // snapping produces when the camera sits between two coarse pages.
+    let origins: Vec<(i64, i64)> = (0..desc.levels.len())
+        .map(|l| {
+            (
+                -(i64::from(n) / 2) + l as i64,
+                -(i64::from(n) / 2) - l as i64,
+            )
+        })
+        .collect();
+
+    // How many addresses the two rules disagree about, BEFORE anything is applied
+    // — the arm's anti-vacuity, computed from the descriptor rather than observed.
+    let re_parented = (1..desc.level_count())
+        .flat_map(|level| {
+            let g = desc.levels[level as usize - 1];
+            (0..g.pages_y).flat_map(move |y| (0..g.pages_x).map(move |x| (level - 1, x, y)))
+        })
+        .filter(|&(level, x, y)| {
+            let at = VsmPage::flat(level, x, y);
+            desc.parent_at(&origins, at) != desc.parent(at)
+        })
+        .count();
+    assert!(
+        re_parented > 100,
+        "the offsets re-parent only {re_parented} pages — the arm would pass with \
+         `parent_at` ignoring its argument"
+    );
+
+    assert!(c.res.set_clip_origins(h, &origins), "the offsets moved");
+    assert!(
+        !c.res.set_clip_origins(h, &origins),
+        "setting the same offsets twice recomputed the table a second time"
+    );
+    assert_eq!(c.res.clip_origins(h), origins.as_slice());
+    // The whole table, against the independent walk, under the new rule.
+    let shape = assert_world(&c.res, &c.shadow, "after the levels snapped");
+    assert!(
+        shape.none > 0,
+        "nothing resolved to NONE after the shift — the sentinel path went untested"
+    );
+
+    // …and a further transaction still maintains it: the recompute is a starting
+    // point, not a one-off repair.
+    let txn = c.res.apply_wants(&[
+        VsmWant::new(h, VsmPage::flat(0, 1, 1)),
+        VsmWant::new(h, VsmPage::flat(1, 3, 2)),
+        VsmWant::new(h, VsmPage::flat(2, 4, 4)),
+    ]);
+    c.shadow.apply(&txn);
+    assert_world(
+        &c.res,
+        &c.shadow,
+        "after a transaction under the new offsets",
+    );
 }
 
 /// **LRU honesty**, with the timeline written out so the expected victim is a
