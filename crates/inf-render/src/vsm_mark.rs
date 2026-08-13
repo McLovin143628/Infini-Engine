@@ -373,11 +373,24 @@ impl VsmSystem {
             tracing::warn!("inf-render: virtual shadow atlas: {a}");
         }
         let mut blocks = Vec::with_capacity(trees.len());
-        let mut kept = Vec::with_capacity(trees.len());
-        for tree in trees {
+        let mut kept: Vec<VsmLightDesc> = Vec::with_capacity(trees.len());
+        for tree in &trees {
+            // A refusal TRUNCATES rather than skips, for `vsm_light_trees`'s
+            // reason and it is the same invariant: handle `n` is the `n`-th
+            // shadow-casting light in scene order, and `vsm_projections` rebuilds
+            // that by re-walking `scene.lights`. Dropping a light out of the
+            // middle would hand every light after it another light's table block
+            // and bit range — silently.
             match residency.register_light(tree.clone()) {
-                Ok(_) => kept.push(tree),
-                Err(e) => tracing::warn!("inf-render: a shadow light was refused: {e}"),
+                Ok(_) => kept.push(tree.clone()),
+                Err(e) => {
+                    tracing::warn!(
+                        "inf-render: shadow light {} was refused ({e}); it and every \
+                         shadow-caster after it keep the cascaded shadow map",
+                        kept.len()
+                    );
+                    break;
+                }
             }
         }
         if kept.is_empty() {
@@ -401,7 +414,11 @@ impl VsmSystem {
         let marker = VsmMarker::new(&gpu.device, layout, VSM_PROJECTION_CAP);
         Some(Self {
             signature: VsmSignature {
-                trees: kept.clone(),
+                // The list `vsm_light_trees` produced, **not** the truncated one:
+                // `matches` compares against that function's output, so storing
+                // the truncation here would make a system with a refused light
+                // rebuild itself — and re-allocate an atlas — every frame.
+                trees,
                 budget_bytes: settings.budget_bytes,
             },
             residency,

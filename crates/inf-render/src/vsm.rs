@@ -283,8 +283,21 @@ pub struct VsmMarkParams {
 ///
 /// The list is capped at [`VSM_MAX_PROJECTIONS`] *projections*, not lights, so a
 /// point light costs six of the budget — which is what it costs the marking pass.
-/// A light past the cap is dropped from the list entirely rather than half
-/// registered.
+///
+/// # The cap **stops**, it does not skip
+///
+/// A light that does not fit ends the list, and every shadow-caster after it is
+/// dropped too — even one that would have fitted. That is not tidiness, it is
+/// the invariant the whole mapping rests on: **handle `n` is the `n`-th
+/// shadow-casting light in scene order**, and [`vsm_projections`] re-walks
+/// `scene.lights` to rebuild it.
+///
+/// Skipping instead would break it silently and expensively. Eleven point lights
+/// followed by a sun would drop the eleventh point light (66 > 64 projections)
+/// and keep the sun — which then becomes handle 10, takes the *point* light's
+/// table block and its bit range, and marks the sun's clipmap pages into another
+/// light's address space. No error, no counter, and a shadow atlas full of pages
+/// nothing will ever read.
 pub fn vsm_light_trees(scene: &RenderScene, settings: &VsmSettings) -> Vec<VsmLightDesc> {
     let mut out = Vec::new();
     let mut projections = 0usize;
@@ -301,7 +314,7 @@ pub fn vsm_light_trees(scene: &RenderScene, settings: &VsmSettings) -> Vec<VsmLi
         };
         let faces = desc.faces() as usize;
         if projections + faces > VSM_MAX_PROJECTIONS {
-            continue;
+            break;
         }
         projections += faces;
         out.push(desc);
@@ -829,6 +842,37 @@ mod tests {
         }
         let trees = vsm_light_trees(&many, &settings);
         assert_eq!(trees.len(), 10, "10 × 6 = 60 fits, 11 × 6 = 66 does not");
+
+        // **THE PREFIX INVARIANT.** A sun after the eleventh point light would
+        // FIT — one projection into the four that are left — and it must still be
+        // dropped, because handle `n` is the `n`-th shadow-casting light in scene
+        // order and `vsm_projections` rebuilds that by re-walking `scene.lights`.
+        // A cap that skipped instead of stopping would make that sun handle 10,
+        // give it the point light's table block and bit range, and mark its
+        // clipmap into another light's address space — no error, no counter, and
+        // an atlas full of pages nothing reads.
+        many.lights.push(RenderLight {
+            kind: LightKind::Directional,
+            cast_shadows: true,
+            ..Default::default()
+        });
+        let trees = vsm_light_trees(&many, &settings);
+        assert_eq!(
+            trees.len(),
+            10,
+            "a light that fits was admitted PAST one that did not — the handle \
+             mapping is no longer the scene order"
+        );
+        assert!(
+            trees.iter().all(|t| t.kind == VsmTreeKind::Cube),
+            "the sun took a handle behind the light that stopped the list"
+        );
+        // …and the projections agree: ten cubes, sixty entries, no clipmap.
+        let blocks = vec![0u32; trees.len()];
+        let bases = vec![0u32; trees.len()];
+        let ps = vsm_projections(&many, &view_at(10.0), &settings, &trees, &blocks, &bases);
+        assert_eq!(ps.len(), 60);
+        assert!(ps.iter().all(|p| p.info[3] == VSM_PROJ_PERSPECTIVE));
     }
 
     /// A **spot** projection points down its beam and its level-0 texel scales
