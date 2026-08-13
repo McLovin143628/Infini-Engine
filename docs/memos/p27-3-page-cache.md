@@ -194,7 +194,13 @@ follow it**, and the number says so:
 > A rotation `δ` moves a point at the rim of level `L` by `R_L · δ` where
 > `R_L = N · w_L / 2`, which in **pages of that level** is `N · δ / 2` — level
 > independent. At `N = 64` and level 7's quantum of `128 q = 0.5 rad`, that is
-> **32 pages**.
+> **16 pages**, a quarter of the grid.
+
+(The first draft of this paragraph multiplied it out in prose and wrote 32. The
+arm computes it now — `the_sun_quantum_is_one_shadow_texel_at_the_reference_height`
+— which is what the P22 law about inference dressed as measurement asks for, and
+the ruling is unchanged either way: a quarter of the grid is not a disagreement a
+marking pass can carry.)
 
 The marking pass decides which page a pixel needs, from **one** projection per
 (light, face) — the per-level variation it can follow is a *translation* in NDC,

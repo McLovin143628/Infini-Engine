@@ -1387,6 +1387,36 @@ mod tests {
             "a full invalidation drains in {drain} frames and a quantum lasts \
              {frames_per_quantum} — the dirty queue grows without bound"
         );
+
+        // **Why the quantum is per LIGHT and not per level** — the number that
+        // defers the literal clause, computed here rather than multiplied out in
+        // the memo's prose.
+        //
+        // The clause asks for a quantum that doubles per level. The marking pass
+        // has ONE projection per (light, face) and the per-level variation it can
+        // follow is a translation in NDC (`ClipmapLayout::level_offset`); a
+        // per-level ROTATION is not a translation. How far apart that would put
+        // the marker and the raster is `R_L · δ_L` in pages of level `L`, where
+        // `R_L = N · w_L / 2` is the level's own half-extent — so the page count
+        // is `N · δ_L / 2`, and at the coarsest level's doubled quantum it is what
+        // this asserts. A quarter of the grid is not a disagreement a marking pass
+        // can carry, which is why there is one quantum per light and the per-level
+        // laziness lives in the drain order instead.
+        let n = settings.clipmap_pages_per_side as f32;
+        let coarsest = q * (1u32 << (settings.clipmap_levels - 1)) as f32;
+        let rim_pages = n * coarsest / 2.0;
+        assert!(
+            (15.0..17.0).contains(&rim_pages),
+            "a per-level quantum would put the marking pass {rim_pages} pages from \
+             the raster at the coarsest level — the memo quotes 16, and the ruling \
+             rests on it"
+        );
+        assert!(
+            rim_pages > n / 8.0,
+            "{rim_pages} pages of {n} is small enough that a per-level quantum \
+             might be followable after all — the deferral in \
+             `docs/memos/p27-3-page-cache.md` has to be re-argued"
+        );
     }
 
     /// **The CPU twin marks the page the geometry says it should**, on a
