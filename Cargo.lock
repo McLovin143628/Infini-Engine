@@ -3383,6 +3383,7 @@ dependencies = [
  "inf-terrain",
  "inf-vgeom",
  "inf-voxel",
+ "inf-vsm",
  "inf-vt",
  "inf-water",
  "naga",

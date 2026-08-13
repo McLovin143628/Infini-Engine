@@ -150,6 +150,28 @@ impl RenderTier {
             RenderTier::Medium => crate::settings::VT_BUDGET_MEDIUM_BYTES,
             RenderTier::Low => crate::settings::VT_BUDGET_LOW_BYTES,
         });
+        // P27.1 — virtual shadow maps, and this is the P27.5 clause ("High/Medium
+        // run VSM; Low keeps CSM") wired at the START of the phase rather than at
+        // the end of it, so the clamp exists before anything can be shipped that
+        // forgets it. Three `min`s and an `&&`: every one of them only ever
+        // lowers, so `apply` stays idempotent and order-independent, High is a
+        // no-op, and a caller who already asked for less keeps less.
+        //
+        // The `enabled` clamp is the one the law is about. It **clears** a flag a
+        // caller set; it can never set one, which is why it is `&=` against a
+        // constant and not an assignment. A Low-tier machine therefore keeps the
+        // cascaded shadow map — the path P27.5 demotes rather than deletes —
+        // whatever the project's settings say.
+        settings.vsm.enabled &= !matches!(self, RenderTier::Low);
+        settings.vsm.budget_bytes = settings.vsm.budget_bytes.min(match self {
+            RenderTier::High => u64::MAX,
+            RenderTier::Medium => crate::settings::VSM_BUDGET_MEDIUM_BYTES,
+            RenderTier::Low => crate::settings::VSM_BUDGET_LOW_BYTES,
+        });
+        settings.vsm.clipmap_pages_per_side = settings.vsm.clipmap_pages_per_side.min(match self {
+            RenderTier::High => u32::MAX,
+            RenderTier::Medium | RenderTier::Low => crate::settings::VSM_CLIPMAP_PAGES_MEDIUM,
+        });
         settings
     }
 
@@ -595,6 +617,62 @@ mod tests {
         let l = RenderTier::Low.apply(s2);
         assert!(!l.vgeom.enabled && !l.bloom.enabled && !l.ssao.enabled);
         assert!(!l.taa && !l.shadows.enabled && !l.gi.enabled);
+    }
+
+    /// **The P27.5 clamp, wired in P27.1.** Low keeps CSM; nothing ever turns
+    /// virtual shadow maps on.
+    ///
+    /// The arm the clamp law is actually about is the last one: `apply` is fed a
+    /// tier for a machine that could run VSM and a settings block with it OFF —
+    /// the default — and it must still be off afterwards. A clamp that "enables
+    /// on High" would pass every other assertion here.
+    #[test]
+    fn a_tier_clamps_virtual_shadow_maps_down_and_never_up() {
+        use crate::settings::{
+            VSM_BUDGET_LOW_BYTES, VSM_BUDGET_MEDIUM_BYTES, VSM_CLIPMAP_PAGES_MEDIUM,
+        };
+        let mut on = RenderSettings::default();
+        on.vsm.enabled = true;
+
+        // High is a no-op on every field.
+        assert_eq!(RenderTier::High.apply(on), on);
+
+        // Medium keeps the feature and pulls the numbers in.
+        let m = RenderTier::Medium.apply(on);
+        assert!(m.vsm.enabled, "Medium runs VSM");
+        assert_eq!(m.vsm.budget_bytes, VSM_BUDGET_MEDIUM_BYTES);
+        assert_eq!(m.vsm.clipmap_pages_per_side, VSM_CLIPMAP_PAGES_MEDIUM);
+
+        // Low turns it OFF — the clause: CSM is what a Low machine keeps.
+        let l = RenderTier::Low.apply(on);
+        assert!(!l.vsm.enabled, "Low did not fall back to CSM");
+        assert_eq!(l.vsm.budget_bytes, VSM_BUDGET_LOW_BYTES);
+
+        // A caller who already asked for less keeps less, on every tier.
+        let mut frugal = RenderSettings::default();
+        frugal.vsm.budget_bytes = 1024;
+        frugal.vsm.clipmap_pages_per_side = 4;
+        for tier in [RenderTier::High, RenderTier::Medium, RenderTier::Low] {
+            let a = tier.apply(frugal);
+            assert_eq!(a.vsm.budget_bytes, 1024, "{tier:?} raised the budget");
+            assert_eq!(a.vsm.clipmap_pages_per_side, 4, "{tier:?} raised the grid");
+            // …and idempotent: applying twice is applying once.
+            assert_eq!(tier.apply(a), a, "{tier:?} is not idempotent");
+        }
+
+        // THE LAW: a tier never turns it on. The default is off, and High is the
+        // tier that would be tempted.
+        let off = RenderSettings::default();
+        assert!(!off.vsm.enabled);
+        for tier in [RenderTier::High, RenderTier::Medium, RenderTier::Low] {
+            assert!(
+                !tier.apply(off).vsm.enabled,
+                "{tier:?} ENABLED virtual shadow maps — `apply` clamps, never enables"
+            );
+        }
+        // …and the mobile preset, which starts from a profile rather than from
+        // the defaults, is off too.
+        assert!(!RenderTier::mobile_default().vsm.enabled);
     }
 
     #[test]

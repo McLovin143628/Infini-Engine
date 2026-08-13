@@ -112,6 +112,13 @@ pub struct RenderSettings {
     /// knobs. Inert on a scene with no virtual textures, so every existing
     /// golden is untouched.
     pub vt: VirtualTextureSettings,
+    /// Virtual shadow maps (P27). **OFF by default**, and it must stay off until
+    /// P27.4 gives the pages a receiver — with it off the marking pass is never
+    /// recorded, no atlas is allocated, and the CSM path is byte-identical.
+    /// [`RenderTier::apply`](crate::caps::RenderTier::apply) clamps it **off** on
+    /// Low, which is the P27.5 clause wired at the start of the phase rather than
+    /// at the end of it.
+    pub vsm: VsmSettings,
     /// GPU-capability auto-tier override (P13.4.2). `None` → the host probes the
     /// adapter and picks a [`RenderTier`](crate::caps::RenderTier)
     /// ([`detect_tier`](crate::caps::detect_tier)); `Some(tier)` forces it
@@ -528,6 +535,79 @@ impl Default for VirtualTextureSettings {
     }
 }
 
+/// **The page atlas's budget on the tier below High**, in bytes: 32 MiB — half
+/// the default, 512 pages.
+///
+/// Not a taste. What a smaller atlas costs is *shadow resolution*, never a hole:
+/// a page that cannot be seated resolves to its coarsest resident ancestor and
+/// the shadow there is blurrier, exactly the degradation virtual shadow mapping
+/// exists to make possible — which is why the tier knob is a **number** and not
+/// a `bool`.
+pub const VSM_BUDGET_MEDIUM_BYTES: u64 = 32 * 1024 * 1024;
+
+/// **The page atlas's budget on Low**, in bytes: 16 MiB — 256 pages.
+///
+/// Inert in practice, because Low also clamps [`VsmSettings::enabled`] off and
+/// keeps CSM (the P27.5 clause). It exists so the clamp is total: a host that
+/// forced VSM on at Low would still get the Low atlas rather than the High one.
+pub const VSM_BUDGET_LOW_BYTES: u64 = 16 * 1024 * 1024;
+
+/// **The clipmap's page grid on Medium**: 32 pages a side — 4 k virtual texels
+/// per level against High's 8 k.
+pub const VSM_CLIPMAP_PAGES_MEDIUM: u32 = 32;
+
+/// Virtual shadow maps (P27).
+///
+/// Unlike [`VirtualTextureSettings`] this **does** carry an enable flag, and the
+/// difference is not an oversight: virtual texturing is the only way a `.inf_tex`
+/// reaches the GPU, so "off" would mean "no textures", while VSM is an
+/// *alternative* to a cascaded shadow map that still ships. The flag is what
+/// P27.5's "High/Medium run VSM; Low keeps CSM" clamps, and
+/// [`RenderTier::apply`](crate::caps::RenderTier::apply) may only ever clear it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VsmSettings {
+    /// Master enable. **False** until P27.4 gives the pages a receiver: with it
+    /// off the marking pass is never recorded, no atlas is allocated, and every
+    /// golden records the command stream it always did.
+    pub enabled: bool,
+    /// The physical page atlas's VRAM ceiling, in bytes. The tier knob, clamped
+    /// with a `min` to [`VSM_BUDGET_MEDIUM_BYTES`] / [`VSM_BUDGET_LOW_BYTES`].
+    pub budget_bytes: u64,
+    /// Pages across one directional clipmap level. 64 at 128-texel pages is
+    /// **8 192 virtual texels per level**, which is the phase's "≥8 k effective
+    /// on High". Clamped down to [`VSM_CLIPMAP_PAGES_MEDIUM`] below High.
+    pub clipmap_pages_per_side: u32,
+    /// Clipmap levels. Eight doublings from
+    /// [`first_level_extent_m`](Self::first_level_extent_m) reaches 128× it.
+    pub clipmap_levels: u32,
+    /// Half the world extent of clipmap level 0, in metres. 32 m at 64 pages of
+    /// 128 texels is a **7.8 mm** shadow texel under the camera.
+    pub first_level_extent_m: f32,
+    /// Quadtree levels for a spot light: 7 is 64 pages a side at level 0, i.e.
+    /// 8 192 virtual texels across the cone.
+    pub spot_levels: u32,
+    /// Quadtree levels per cube face for a point light: 6 is 32 pages a side,
+    /// 4 096 virtual texels per face, six faces.
+    pub point_levels: u32,
+    /// The near plane of a spot's or a cube face's projection, in metres.
+    pub perspective_near_m: f32,
+}
+
+impl Default for VsmSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            budget_bytes: inf_vsm::DEFAULT_VSM_BUDGET_BYTES,
+            clipmap_pages_per_side: 64,
+            clipmap_levels: 8,
+            first_level_extent_m: 32.0,
+            spot_levels: 7,
+            point_levels: 6,
+            perspective_near_m: 0.05,
+        }
+    }
+}
+
 impl Default for RenderSettings {
     fn default() -> Self {
         Self {
@@ -544,6 +624,7 @@ impl Default for RenderSettings {
             atmosphere: AtmosphereSettings::default(),
             water: crate::water::WaterSettings::default(),
             vt: VirtualTextureSettings::default(),
+            vsm: VsmSettings::default(),
             tier_override: None,
         }
     }
