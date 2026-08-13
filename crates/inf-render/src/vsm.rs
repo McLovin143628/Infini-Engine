@@ -309,12 +309,27 @@ pub fn vsm_page_matrix(
 /// **the CPU twin of `vsm_cull.wgsl`'s test**, and the terrain caster path's own
 /// cull.
 ///
-/// The six clip-space planes of the matrix, tested against the sphere. A plane
-/// whose normal is degenerate is skipped rather than trusted: a reverse-**infinite**
-/// perspective (every spot and every cube face) has no far plane at all, and its
-/// `w − z` row is identically zero — dividing by that length would make every
-/// caster of every perspective light fail the test, which is the shape of a bug
-/// that deletes all point-light shadows and nothing else.
+/// The six clip-space planes of the matrix, tested against the sphere.
+///
+/// # The degenerate-plane skip, and what it is **not**
+///
+/// A reverse-**infinite** perspective — every spot and every cube face — has a
+/// near-plane row of `(0, 0, 0, near)`, whose normal is the zero vector. The skip
+/// is measured rather than reasoned about, and the measurement (the P27.2
+/// mutation round) says it is **redundant here**: `near > 0`, so the distance
+/// this function would compute is `+near/0 = +∞`, which passes every test — so
+/// removing the guard moves no verdict, and no arm in this tree fails.
+///
+/// It stays for two reasons, both of them about the *other* copy. `vsm_cull.wgsl`
+/// runs the same six planes, and WGSL leaves division by zero **indeterminate**
+/// rather than defining it as an infinity, so the shader's skip is a real guard
+/// and the two must not diverge. And the redundancy is a property of the
+/// projections this tree builds today: a finite far plane, a reversed near, or
+/// P28.5's ray-query experiment could each make that row's constant negative,
+/// which would turn `−∞` into "reject every caster of every perspective light" —
+/// a bug that deletes all point-light shadows and nothing else. So this is a
+/// documented-redundant guard, the standing the P27.1 audit gave the shader's
+/// `contain > levels − 1` early-out, and not an untested claim.
 ///
 /// Conservative by construction: it may keep a sphere the page cannot see, never
 /// drop one it can. That direction is the one a *subtractive* cull needs, and it
@@ -327,7 +342,7 @@ pub fn vsm_page_sees_sphere(page_vp: &Mat4, centre: Vec3, radius: f32) -> bool {
         page_vp.row(1) + r, // y ≥ −w
         r - page_vp.row(1), // y ≤ +w
         page_vp.row(2),     // z ≥ 0
-        r - page_vp.row(2), // z ≤ w — degenerate under an infinite far plane
+        r - page_vp.row(2), // z ≤ w
     ];
     for p in planes {
         let n = p.truncate();
