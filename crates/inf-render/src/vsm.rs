@@ -1307,6 +1307,72 @@ mod tests {
         assert_eq!(checked, (n * n) as usize);
     }
 
+
+    /// **A floating-origin rebase does not move the clipmap's lattice** (P27.3
+    /// audit) — the reason [`clipmap_layout`] takes the **f64 world** eye.
+    ///
+    /// The claim is in that function's own docs (*"the lattice a level snaps to is
+    /// a property of the world, so a floating-origin rebase must not move it"*) and
+    /// nothing checked it: snapping the render-local eye instead survived every arm
+    /// in this tree.
+    ///
+    /// What the invariance buys is **not** a cached page — a rebase re-writes every
+    /// page matrix regardless, because the matrix is render-local, so the atlas is
+    /// re-rasterized whole either way (once every `inf_math::REBASE_DISTANCE` of
+    /// travel, which drains inside a frame or four). What it buys is the
+    /// *residency*: `clip_origins` is the parent rule's input, and origins that
+    /// churned on every rebase would re-point the whole fallback chain and publish
+    /// a new table for a world that had not moved. So the assertion is exactly
+    /// that: same world, same lattice, and a centre that differs by precisely the
+    /// rebase.
+    #[test]
+    fn a_floating_origin_rebase_does_not_move_the_clipmap_lattice() {
+        let (half, n, levels) = (32.0f32, 64u32, 8u32);
+        // An eye off the lattice on every axis, so no level's snap is the identity.
+        let eye = glam::DVec3::new(1_337.4, 55.9, -812.3);
+        let dir = Vec3::new(0.3, 0.8, 0.5).normalize();
+        // `FloatingOrigin::new` snaps to `inf_math::ORIGIN_SNAP`, so the rebase the
+        // layout actually sees is read back rather than assumed — the two origins'
+        // own difference is what the centre below is checked against.
+        let o_a = inf_math::FloatingOrigin::new(glam::DVec3::ZERO);
+        let o_b = inf_math::FloatingOrigin::new(glam::DVec3::new(1_280.0, 0.0, -768.0));
+        let at = |o: &inf_math::FloatingOrigin| clipmap_layout(dir, o, eye, half, n, levels);
+        let a = at(&o_a);
+        let b = at(&o_b);
+        assert_eq!(
+            a.clip_origins, b.clip_origins,
+            "a rebase moved the world lattice the levels snap to — the residency's \
+             parent rule would be re-pointed for a world that did not move"
+        );
+        assert_eq!(
+            a.level_offset, b.level_offset,
+            "a rebase moved the per-level NDC offsets"
+        );
+        // ANTI-VACUITY: the lattice is not the trivial one. Some level is snapped
+        // off the concentric default, and the offsets are not all zero.
+        let half_n = i64::from(n) / 2;
+        assert!(
+            a.clip_origins.iter().any(|&(x, y)| x != -half_n || y != -half_n),
+            "every level sat at the concentric origin, so 'the lattice did not \
+             move' is a statement about a constant"
+        );
+        assert!(
+            a.level_offset[1..].iter().any(|o| o[0] != 0.0 || o[1] != 0.0),
+            "every offset is zero — the fixture's eye is on the lattice"
+        );
+        // …and the centre DOES move, by exactly the rebase, because it is
+        // render-local. That is the half that re-rasterizes the atlas, and it is
+        // why the invariance above is about the residency and not about the cache.
+        let rebase = (o_b.origin() - o_a.origin()).as_vec3();
+        assert!(rebase.length() > 1.0, "the fixture's two origins are the same");
+        let delta = a.centre - b.centre;
+        assert!(
+            (delta - rebase).length() < 1e-2,
+            "the render-local centre moved by {delta:?} where the rebase was \
+             {rebase:?}"
+        );
+    }
+
     /// **THE TIME-SLICING POLICY'S MEASUREMENT** (P27.3, clause 3) — the numbers
     /// `docs/memos/p27-3-page-cache.md` quotes.
     ///

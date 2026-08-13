@@ -1474,6 +1474,16 @@ fn the_caster_ceiling_counts_the_casters_it_refuses() {
     // ANTI-VACUITY: the group ceiling is NOT what refused them, so the two counters
     // are telling different stories rather than one story twice.
     assert_eq!(stats.dropped_groups, 0, "{stats:?}");
+    // …and `scatter_casters` counts what the SCATTER pack contributed, not what
+    // the merged bucket holds (P27.3 audit). This fixture has 16 384 rigid
+    // instances and no scatter batch at all, so the honest answer is zero — and a
+    // counter that counted the merged bucket would report every one of them.
+    assert_eq!(
+        stats.scatter_casters, 0,
+        "a scene with no scatter batch reported {} scattered casters — the \
+         counter is counting the merged bucket rather than the pack's survivors",
+        stats.scatter_casters
+    );
     // …and the summary a host reads says the number.
     let line = renderer.vsm_summary().expect("a live system");
     assert!(
@@ -2537,5 +2547,607 @@ fn an_animating_character_invalidates_its_pages_and_a_still_one_does_not() {
         touched < resident,
         "a pose change re-rasterized {touched} of {resident} resident pages — that \
          is every page, not the character's"
+    );
+}
+
+// ── (k) P27.3 AUDIT: the stamp inputs nothing was checking ──────────────────
+
+/// **The skinned caster cache holds the `Arc` its pointer key names** (P27.3
+/// audit) — the clause that makes an address an identity.
+///
+/// P27.3 moved the bind-pose cache from `scene.version` onto `Arc::as_ptr`, which
+/// is `passes::skinned`'s rule — but that pass states the condition its key rests
+/// on outright: *"the cache holds the `Arc` itself, which is what makes the
+/// pointer a sound key: the allocation cannot be freed and reused under a live
+/// entry"*. `VsmRaster` copied the key and not the clause, and the consequence is
+/// the worst shape a cache defect has: a scene that drops mesh A and pushes a
+/// different mesh B is free to land B on A's address, at which point `retain`
+/// keeps A's buffers, the upload is skipped, the raster draws A's silhouette for
+/// B — **and the page is not re-rasterized**, because the content stamp folds that
+/// same address, so the wrong shadow is *cached*.
+///
+/// Asserted as ownership rather than as a reproduction, because reproducing an
+/// ABA means winning a race with the allocator and an arm that only sometimes
+/// reproduces is an arm that only sometimes fails. The strong count is isolated to
+/// this pass by turning VSM on **under one renderer**: what the count gains across
+/// that boundary is the page raster's own reference and nothing else's.
+#[test]
+fn the_skinned_caster_cache_holds_the_arc_its_pointer_key_names() {
+    let Some(gpu) = gpu_or_skip("the VSM skinned cache's key") else {
+        return;
+    };
+    let vert = |x: f32, y: f32| inf_render::SkinnedVertex {
+        pos: [x, y, 0.0],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0, 0.0],
+        joints: [0, 0, 0, 0],
+        weights: [1.0, 0.0, 0.0, 0.0],
+    };
+    let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
+        vertices: vec![
+            vert(-0.5, -0.5),
+            vert(0.5, -0.5),
+            vert(0.5, 0.5),
+            vert(-0.5, 0.5),
+        ],
+        indices: vec![0, 1, 2, 0, 2, 3],
+    });
+    let mut s = RenderScene {
+        grid_enabled: false,
+        skinned_meshes: vec![mesh.clone()],
+        ..Default::default()
+    };
+    s.skinned.push(inf_render::SkinnedInstance {
+        translation: glam::DVec3::new(-1.4, 1.1, 0.0),
+        rotation: glam::Quat::IDENTITY,
+        scale: glam::Vec3::splat(0.3),
+        color: [1.0, 1.0, 1.0, 1.0],
+        metallic: 0.0,
+        roughness: 1.0,
+        emissive: [0.0; 3],
+        id: 77,
+        mesh: 0,
+        palette: vec![glam::Mat4::IDENTITY],
+        vt: inf_render::VtTextureSet::NONE,
+    });
+    s.instances.push(backdrop());
+    s.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Directional,
+        direction: glam::Vec3::Z,
+        cast_shadows: true,
+        ..Default::default()
+    });
+    s.mark_dirty();
+
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    // Virtual shadows OFF first — the default. Everything else in the frame runs,
+    // including `passes::skinned`'s own (correctly held) cache.
+    let scene_only = std::sync::Arc::strong_count(&mesh);
+    for _ in 0..8 {
+        renderer.render(&gpu, &s, &view(5.0), &target.view, (FW, FH));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    let without_vsm = std::sync::Arc::strong_count(&mesh);
+    // ANTI-VACUITY on the instrument: `passes::skinned` really does vouch for the
+    // allocation, so a count that did not move below is a statement about the page
+    // raster and not about `Arc::strong_count` being inert here.
+    assert!(
+        without_vsm > scene_only,
+        "the lit skinned pass did not take a reference ({scene_only} -> \
+         {without_vsm}) — this arm's instrument is dead"
+    );
+
+    let mut rs = *renderer.settings();
+    rs.vsm = settings_with(64);
+    renderer.set_settings(rs);
+    for _ in 0..8 {
+        renderer.render(&gpu, &s, &view(5.0), &target.view, (FW, FH));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    assert!(
+        renderer
+            .vsm_raster_stats()
+            .expect("stats")
+            .skinned_casters
+            > 0,
+        "no skinned caster was packed, so the cache under test was never filled"
+    );
+    let with_vsm = std::sync::Arc::strong_count(&mesh);
+    assert!(
+        with_vsm > without_vsm,
+        "the page raster cached this mesh's bind pose under its ADDRESS \
+         ({without_vsm} -> {with_vsm} references) without holding the `Arc` — the \
+         allocation can be freed and handed to a different mesh under the live \
+         entry, and the stamp folds the same address, so the wrong silhouette \
+         would be *cached* rather than merely drawn once"
+    );
+}
+
+/// **A vgeom caster that crosses a LOD threshold invalidates its pages** (P27.3
+/// audit).
+///
+/// The level a `.inf_vmesh` casts at is a **camera** decision — `pick_classic_level`
+/// against the camera's own `lod_threshold`, the P27.2 deviation memo's ruling — so
+/// it is the one caster input that moves while the caster does not. If it were not
+/// in the content stamp, "a cached page equals a fresh raster" would be false the
+/// moment the viewer walked far enough to coarsen the cut, and the byte-compare arm
+/// could not see it: that arm never moves the camera between caching and comparing.
+/// Deleting the level from the fold survived the whole file before this.
+///
+/// The tolerance is moved rather than the camera, because a camera step also moves
+/// every page matrix and would prove nothing about the caster. The control is the
+/// same settings change over a scene with **no** virtualized geometry: if changing
+/// `pixel_error` re-rasterized pages by some other route, it would do it there too.
+#[test]
+fn a_vgeom_caster_that_crosses_a_lod_threshold_invalidates_its_pages() {
+    let Some(gpu) = gpu_or_skip("the VSM vgeom LOD stamp") else {
+        return;
+    };
+    let mesh = std::sync::Arc::new(inf_vgeom::test_support::dense_grid_mesh(24));
+    let mut s = RenderScene {
+        grid_enabled: false,
+        vgeom_assets: vec![
+            inf_render::VgeomAsset::from_mesh(0x5150, &mesh).expect("index the vmesh")
+        ],
+        ..Default::default()
+    };
+    s.vgeom_instances.push(inf_render::VgeomInstance::lit(
+        0x5150,
+        glam::DVec3::ZERO,
+        glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        glam::Vec3::splat(3.0),
+        [0.8, 0.8, 0.8, 1.0],
+        1,
+    ));
+    s.instances.push(backdrop());
+    s.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Directional,
+        direction: glam::Vec3::Z,
+        cast_shadows: true,
+        ..Default::default()
+    });
+    s.mark_dirty();
+    // The control: the same frame with the vmesh taken out.
+    let mut control = s.clone();
+    control.vgeom_instances.clear();
+    control.vgeom_assets.clear();
+    control.mark_dirty();
+
+    let set = settings_with(64);
+    let v = view(9.0);
+    // Warm at a tenth of a pixel of tolerated error (the finest level), then move
+    // the tolerance past every level in the chain and take ONE more frame.
+    let coarsen = |scene: &RenderScene| {
+        let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+        let mut r = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+        let mut rs = *r.settings();
+        rs.vsm = set;
+        rs.vgeom.pixel_error = 0.1;
+        r.set_settings(rs);
+        for _ in 0..8 {
+            r.render(&gpu, scene, &v, &target.view, (FW, FH));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        let warm = r.vsm_raster_stats().expect("stats");
+        rs.vgeom.pixel_error = 400.0;
+        r.set_settings(rs);
+        r.render(&gpu, scene, &v, &target.view, (FW, FH));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let after = r.vsm_raster_stats().expect("stats");
+        (warm, after, resident_pages(&r).len() as u64)
+    };
+
+    let (warm, after, resident) = coarsen(&s);
+    // ANTI-VACUITY: the level really moved, so this is an arm about a LOD change
+    // and not about a settings write.
+    assert_eq!(
+        warm.vgeom_level_sum, 0,
+        "a caster at a tenth of a pixel of error already drew past the finest \
+         level: {warm:?}"
+    );
+    assert!(
+        after.vgeom_level_sum > warm.vgeom_level_sum,
+        "400 px of tolerated error drew the same level as 0.1 px — the fixture \
+         never crossed a threshold ({warm:?} -> {after:?})"
+    );
+    let touched = after.pages - warm.pages;
+    assert!(
+        touched > 0,
+        "a caster that changed geometry re-rasterized nothing — its pages hold the \
+         previous cut's silhouette and the cache is serving it ({warm:?} -> \
+         {after:?})"
+    );
+    assert!(
+        touched <= resident,
+        "{touched} pages for {resident} resident: the invalidation is not \
+         page-exact"
+    );
+
+    // **The control.** Nothing in the frame but the setting changed, and with no
+    // virtualized geometry in the scene that setting reaches no caster.
+    let (c_warm, c_after, _) = coarsen(&control);
+    assert_eq!(
+        c_after.pages - c_warm.pages,
+        0,
+        "changing `pixel_error` re-rasterized {} pages in a scene with no vgeom at \
+         all, so the assertion above is not about the LOD ({c_warm:?} -> \
+         {c_after:?})",
+        c_after.pages - c_warm.pages
+    );
+}
+
+/// **A cut-out caster's alpha-test window is in its page's stamp** (P27.3 audit).
+///
+/// A masked caster's page depth is decided by `fs_masked`'s `alpha < cutoff`, so
+/// the cutoff and the base-colour alpha are raster inputs exactly as the model
+/// matrix is — they decide whether the caster writes depth at all. They ride in
+/// `VsmCasterRaw::mat`, and deleting `mat` from the caster stamp survived every
+/// other arm in this file: a material edit that opened or closed a cutout would
+/// leave the shadow it used to cast frozen in the atlas.
+///
+/// Asserted on the **texels**, not on the counter: the cutout closes, so the
+/// caster's own depth has to leave the atlas.
+#[test]
+fn a_cutout_casters_alpha_test_window_is_in_its_pages_stamp() {
+    let Some(gpu) = gpu_or_skip("the VSM alpha-test stamp") else {
+        return;
+    };
+    // Masked, and passing its own test: alpha 1.0 against a cutoff of 0.5, so the
+    // cube casts. The backdrop keeps the pages marked either way.
+    let mut casting = scene(1, 0.5, 1.0);
+    casting.instances.push(backdrop());
+    casting.mark_dirty();
+    // The same caster with the cutoff raised past its alpha — every fragment
+    // discards, so it stops casting. Nothing else about it moves: same transform,
+    // same bounds, same geometry, same scene shape.
+    let mut discarding = casting.clone();
+    discarding.instances[0].cutoff = 1.5;
+    discarding.mark_dirty();
+
+    let set = settings_with(64);
+    let v = view(5.0);
+    let (mut renderer, marks) = run_stepped(&gpu, &[(&casting, 8)], &v, &set);
+    let warm = marks[0];
+    assert!(warm.masked_frames > 0, "the fixture packed no masked caster");
+    let pages = resident_pages(&renderer);
+    let before = atlas_bits(&gpu, &renderer);
+
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    renderer.render(&gpu, &discarding, &v, &target.view, (FW, FH));
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let after_stats = renderer.vsm_raster_stats().expect("stats");
+    assert!(
+        after_stats.pages > warm.pages,
+        "raising a cutout's cutoff past its own alpha re-rasterized nothing — the \
+         alpha-test window is not in the content stamp ({warm:?} -> \
+         {after_stats:?})"
+    );
+
+    // …and the texels moved with it: the cube's depth left the atlas.
+    let after = atlas_bits(&gpu, &renderer);
+    let (w, _, _) = read_atlas(&gpu, &renderer);
+    let mut changed = 0usize;
+    for (_, _, rect) in &pages {
+        for y in rect.1..rect.1 + rect.2 {
+            for x in rect.0..rect.0 + rect.2 {
+                let k = (y * w + x) as usize;
+                changed += usize::from(before[k] != after[k]);
+            }
+        }
+    }
+    assert!(
+        changed > 0,
+        "the pages re-rasterized and not one texel moved — the discard did not \
+         reach the depth this arm is about"
+    );
+}
+
+/// **A terrain tile whose version moves invalidates its pages** (P27.3 audit).
+///
+/// `version` is the one thing in the terrain caster's fold that a sculpt is
+/// guaranteed to move, and deleting it survived the whole file — because the two
+/// carve arms move the hole mask and the triangle count as well, and *those* are
+/// what they were measuring. So the fixture is built to move nothing else: the
+/// tile's plane is **transposed** rather than tilted, which changes every interior
+/// height while leaving the height *range* — and therefore the caster's bounding
+/// sphere, which is the other geometric term in the fold — bit-identical.
+#[test]
+fn a_terrain_tile_whose_version_moves_invalidates_its_pages() {
+    let Some(gpu) = gpu_or_skip("the VSM terrain version stamp") else {
+        return;
+    };
+    let before_tile = PlanarTile {
+        key: inf_render::TerrainTileKey::lod0((0, 0)),
+        origin: glam::DVec3::new(-0.5 * TILE_SPAN, 3.5, -0.5 * TILE_SPAN),
+        plane: (1.0, 2.5, -4.0),
+    };
+    // The same plane with its two gradients swapped: the surface is a different
+    // surface at every interior sample and its min/max are the same two numbers.
+    let after_tile = PlanarTile {
+        plane: (1.0, -4.0, 2.5),
+        ..before_tile
+    };
+    let set = settings_with(64);
+    let v = terrain_view();
+    let before_scene = terrain_scene(&[before_tile]);
+    let mut after_scene = terrain_scene(&[after_tile]);
+    // The sculpt's stamp. Without it nothing downstream would rebuild the mesh at
+    // all, which is a different (and already-armed) claim.
+    after_scene.terrains[0].tiles[0].version = 2;
+    after_scene.mark_dirty();
+
+    // ANTI-VACUITY, computed from the fixture: the bound the fold carries beside
+    // the version did NOT move, so what is left to notice the edit is the version.
+    let (a, b) = (
+        before_scene.terrains[0].tiles[0].height_bounds,
+        after_scene.terrains[0].tiles[0].height_bounds,
+    );
+    assert_eq!(a, b, "the transposed plane moved the tile's height bounds");
+    assert_ne!(
+        before_scene.terrains[0].tiles[0].heights, after_scene.terrains[0].tiles[0].heights,
+        "the two tiles have identical heights, so there is no edit to notice"
+    );
+
+    let (mut renderer, marks) = run_stepped(&gpu, &[(&before_scene, 8)], &v, &set);
+    let warm = marks[0];
+    assert!(warm.terrain_casters > 0, "no terrain caster: {warm:?}");
+    let pages = resident_pages(&renderer);
+    let resident = pages.len() as u64;
+    assert!(resident > 0, "nothing was resident");
+    let before = atlas_bits(&gpu, &renderer);
+
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    renderer.render(&gpu, &after_scene, &v, &target.view, (FW, FH));
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let after_stats = renderer.vsm_raster_stats().expect("stats");
+    let touched = after_stats.pages - warm.pages;
+    assert!(
+        touched > 0,
+        "a sculpt that moved the tile's version re-rasterized nothing — the pages \
+         hold the previous surface ({warm:?} -> {after_stats:?})"
+    );
+    assert!(touched <= resident, "{touched} of {resident} is not page-exact");
+
+    // …and the depth in the atlas really is the new surface.
+    let after = atlas_bits(&gpu, &renderer);
+    let (w, _, _) = read_atlas(&gpu, &renderer);
+    let mut moved = 0usize;
+    for (_, _, rect) in &pages {
+        for y in rect.1..rect.1 + rect.2 {
+            for x in rect.0..rect.0 + rect.2 {
+                let k = (y * w + x) as usize;
+                moved += usize::from(before[k] != after[k]);
+            }
+        }
+    }
+    assert!(
+        moved > 0,
+        "the pages re-rasterized and the atlas is unchanged — the caster mesh was \
+         not rebuilt from the new heights"
+    );
+}
+
+/// **A perspective light's pages are invalidated by the mover they see** (P27.3
+/// audit).
+///
+/// A clipmap's pages are a lattice, so the invalidation scatter derives their
+/// rectangles arithmetically. A spot's are not, so its pages take the per-page
+/// sphere test directly — a completely separate branch of `scatter_caster_stamps`,
+/// and one that **no arm reached**: deleting it (folding nothing into any
+/// perspective page, ever) survived the whole file, which would leave every spot
+/// and point light's shadow frozen at whatever the frame that first filled its
+/// pages saw.
+#[test]
+fn a_spot_lights_pages_are_invalidated_by_the_mover_they_see() {
+    let Some(gpu) = gpu_or_skip("the VSM perspective invalidation") else {
+        return;
+    };
+    let mut base = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    base.instances.push(backdrop());
+    base.instances.push(inf_render::MeshInstance::lit(
+        glam::DVec3::new(-0.6, 0.4, 0.0),
+        glam::Quat::IDENTITY,
+        glam::Vec3::splat(0.5),
+        [1.0, 1.0, 1.0, 1.0],
+        3,
+    ));
+    // A spot behind the camera shining down -Z at the backdrop. `direction` points
+    // TOWARD the light, so a beam travelling along -Z is `+Z`.
+    base.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Spot,
+        position: glam::DVec3::new(0.0, 0.0, 7.0),
+        direction: glam::Vec3::Z,
+        cast_shadows: true,
+        ..Default::default()
+    });
+    base.mark_dirty();
+    let mut moved = base.clone();
+    moved.instances[1].translation.x += 0.5;
+    moved.mark_dirty();
+
+    let set = settings_with(64);
+    let v = view(5.0);
+    let (mut renderer, marks) = run_stepped(&gpu, &[(&base, 8)], &v, &set);
+    let warm = marks[0];
+    // The fixture really is a perspective tree, or the arm is a second clipmap arm.
+    let sys = renderer.vsm().expect("live");
+    assert_eq!(
+        sys.trees().len(),
+        1,
+        "the fixture registered {} trees",
+        sys.trees().len()
+    );
+    assert_eq!(
+        sys.trees()[0].kind,
+        inf_render::VsmTreeKind::Quadtree,
+        "the spot did not take a quadtree"
+    );
+    let resident = resident_pages(&renderer).len() as u64;
+    assert!(resident > 0, "the spot marked no page at all");
+    assert!(warm.pages > 0, "the warm-up rasterized nothing: {warm:?}");
+
+    // The steady state first: the identical scene touches nothing, so what the
+    // move does below is the move and not a light that never caches.
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    renderer.render(&gpu, &base, &v, &target.view, (FW, FH));
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let held = renderer.vsm_raster_stats().expect("stats");
+    assert_eq!(
+        held.pages - warm.pages,
+        0,
+        "a spot light's pages do not cache at all ({warm:?} -> {held:?})"
+    );
+
+    renderer.render(&gpu, &moved, &v, &target.view, (FW, FH));
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let after = renderer.vsm_raster_stats().expect("stats");
+    let touched = after.pages - held.pages;
+    assert!(
+        touched > 0,
+        "a mover under a SPOT light re-rasterized nothing — the perspective half \
+         of the invalidation scatter folds no caster into any page, and every \
+         spot and point shadow is frozen at the frame that filled it ({held:?} -> \
+         {after:?})"
+    );
+    assert!(
+        touched <= resident,
+        "{touched} of {resident} pages — the perspective branch invalidates \
+         everything rather than what the mover reaches"
+    );
+}
+
+/// **A clipmap grid shift re-labels a page, and the cache key pays a re-raster
+/// for the label** (P27.3 audit) — the aliasing ruling, measured, and it does not
+/// say what the ledger said it said.
+///
+/// The P27.3 ledger justifies all three members of `(light, page, stamp)` with:
+/// *"a slot that is evicted, refilled by another page and re-admitted to the first
+/// would otherwise read as a hit while holding the second page's depth"*. Measured,
+/// that is backwards. Dropping `page` from the key, dropping `light`, and dropping
+/// `level`+`light` from the geometric fold each survive the whole file — and this
+/// arm says why: the stamp's geometric half is the page's **own matrix**, which is
+/// its world footprint, so a page that shares a stamp shares the depth it wants.
+/// A hit under a stamp-only key is a *correct* hit.
+///
+/// What the walk below finds is the case that makes those two members non-trivial
+/// in the other direction. When a clipmap level's grid shifts by one page, the
+/// world cell that was page `(x, y)` becomes page `(x−1, y)` — the same footprint,
+/// a different address, a **bit-identical matrix**. So the extra members can only
+/// ever turn a correct hit into a miss, and what they cost is a re-raster of depth
+/// the atlas already holds. That is the *"there is no clipmap scroll"* remainder,
+/// wearing the cache key instead of the residency, and this arm puts a number on
+/// the fraction of it a stamp-only key would recover for free.
+///
+/// Both halves are asserted, and the first is what keeps the members honest: every
+/// collision is inside **one light and one level**. A stamp shared across two
+/// lights or two levels would mean the fold's `light` and `level` terms were doing
+/// no work and a stamp-only key was unsound — the day that happens this arm fails
+/// and the ruling is rewritten rather than the members quietly removed.
+#[test]
+fn a_clipmap_grid_shift_re_labels_a_page_and_the_cache_key_pays_for_it() {
+    let Some(gpu) = gpu_or_skip("the VSM cache key's aliasing") else {
+        return;
+    };
+    // Two lights, so "the same page of a different light" is in the sample, and a
+    // camera that walks far enough for coarse levels to shift their grids.
+    let mut s = scene(0, 0.5, 1.0);
+    s.instances.push(backdrop());
+    s.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Directional,
+        direction: glam::Vec3::new(0.4, 0.8, 0.45).normalize(),
+        cast_shadows: true,
+        ..Default::default()
+    });
+    s.mark_dirty();
+
+    let set = settings_with(16);
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let mut rs = *renderer.settings();
+    rs.vsm = set;
+    renderer.set_settings(rs);
+
+    // matrix bits -> every (light, page) that ever presented it.
+    let mut seen: std::collections::BTreeMap<[u32; 16], std::collections::BTreeSet<(u32, VsmPage)>> =
+        std::collections::BTreeMap::new();
+    // slot -> (occupant, its matrix) last frame, so a refill can be classified.
+    let mut occupant: std::collections::BTreeMap<u32, ((u32, VsmPage), [u32; 16])> =
+        std::collections::BTreeMap::new();
+    let (mut refills, mut free_hits) = (0usize, 0usize);
+    for step in 0..24 {
+        let v = view(5.0 + step as f64 * 1.5);
+        renderer.render(&gpu, &s, &v, &target.view, (FW, FH));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let mut now = std::collections::BTreeMap::new();
+        for (light, page, rect) in resident_pages(&renderer) {
+            let m = page_vp(&renderer, light, page)
+                .to_cols_array()
+                .map(f32::to_bits);
+            seen.entry(m).or_default().insert((light, page));
+            let slot = rect.0 * 1_000_000 + rect.1;
+            if let Some(&(prev, prev_m)) = occupant.get(&slot) {
+                if prev != (light, page) {
+                    refills += 1;
+                    // The slot changed occupant and the new occupant wants exactly
+                    // the depth the old one left: a hit a stamp-only key would take
+                    // and this key refuses.
+                    free_hits += usize::from(prev_m == m);
+                }
+            }
+            now.insert(slot, ((light, page), m));
+        }
+        occupant = now;
+    }
+
+    // **The collisions are re-labellings**, never a stamp shared across lights or
+    // levels — which is what makes the geometric fold's `light` and `level` terms
+    // load-bearing and a stamp-only key sound.
+    let mut relabelled = 0usize;
+    for (m, addrs) in &seen {
+        if addrs.len() < 2 {
+            continue;
+        }
+        relabelled += addrs.len() - 1;
+        let first = addrs.iter().next().expect("non-empty");
+        for a in addrs {
+            assert_eq!(
+                (a.0, a.1.face, a.1.level),
+                (first.0, first.1.face, first.1.level),
+                "pages {addrs:?} share the page matrix {m:?} across two lights or \
+                 two levels — the content stamp cannot tell them apart, so the \
+                 cache key's extra members are load-bearing for CORRECTNESS and \
+                 this ruling has to be rewritten"
+            );
+        }
+    }
+    // ANTI-VACUITY on the walk: it saw many pages, refilled slots, and really did
+    // re-label some of them.
+    assert!(
+        seen.len() > 24,
+        "only {} distinct page matrices over the walk",
+        seen.len()
+    );
+    assert!(
+        refills > 0,
+        "no slot ever changed occupant, so the aliasing case this arm rules on was \
+         never reached"
+    );
+    assert!(
+        relabelled > 0,
+        "no clipmap level ever re-labelled a page over a 34 m camera walk — the \
+         cost this arm measures is not reachable and the ledger's aliasing \
+         sentence has no case at all"
+    );
+    // …and the number: refills whose depth the atlas already held, which a
+    // stamp-only key would have served and this one re-rasterizes.
+    eprintln!(
+        "VSM CACHE KEY: {refills} slot refills over the walk, {free_hits} of them \
+         wanting depth the slot already held ({relabelled} re-labelled addresses \
+         over {} distinct matrices)",
+        seen.len()
     );
 }
