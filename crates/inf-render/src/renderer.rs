@@ -433,6 +433,10 @@ pub struct EngineRenderer {
     /// not run VSM, and it is a claim about the command stream that no pixel
     /// comparison can make.
     vsm_engaged_frames: u64,
+    /// Frames that rasterized at least one shadow PAGE (P27.2). A separate
+    /// counter from the marking one on purpose: a frame can mark pages it has no
+    /// caster for, and a frame can rasterize pages while its mask misses.
+    vsm_raster_frames: u64,
 }
 
 impl EngineRenderer {
@@ -629,6 +633,7 @@ impl EngineRenderer {
             vt_engaged_frames: 0,
             vsm: None,
             vsm_engaged_frames: 0,
+            vsm_raster_frames: 0,
         }
     }
 
@@ -1072,6 +1077,22 @@ impl EngineRenderer {
         self.vsm_engaged_frames
     }
 
+    /// Frames that rasterized at least one shadow page — the P27.2 engagement
+    /// counter. **Zero is the assertion** on a scene that does not run virtual
+    /// shadows, and it is a different claim from `vsm_engaged_frames`: marking a
+    /// page and filling it are two passes with two failure modes.
+    #[inline]
+    pub fn vsm_raster_frames(&self) -> u64 {
+        self.vsm_raster_frames
+    }
+
+    /// The caster pass's counters (P27.2). `None` when no system is built.
+    pub fn vsm_raster_stats(&self) -> Option<crate::vsm_raster::VsmRasterStats> {
+        self.vsm
+            .as_ref()
+            .map(crate::vsm_mark::VsmSystem::raster_stats)
+    }
+
     /// The one line a host logs about virtual shadow maps. `None` when the
     /// system is not built, which is not the same as a line of zeros.
     pub fn vsm_summary(&self) -> Option<String> {
@@ -1222,6 +1243,18 @@ impl EngineRenderer {
         // before any command in this encoder runs. The marking pass itself is
         // recorded AFTER the graph, where the depth buffer it reads exists.
         self.vsm_sync(gpu, scene, view);
+
+        // **THE CASTER PASS** (P27.2), recorded here and deliberately BEFORE the
+        // graph: it produces the depth P27.4's receivers sample from inside the
+        // lit passes, so it has to precede them. (The marking pass is the mirror
+        // case and is recorded after — it consumes the depth the graph writes.)
+        // A frame with no shadow-casting light, or with virtual shadows off, does
+        // not touch the encoder at all.
+        let rastered = match self.vsm.as_mut() {
+            Some(v) => v.raster(gpu, &mut encoder, scene, view, &self.settings),
+            None => 0,
+        };
+        self.vsm_raster_frames += u64::from(rastered > 0);
 
         let targets = self.targets.as_ref().unwrap();
         let post_hdr = if self.settings.taa {

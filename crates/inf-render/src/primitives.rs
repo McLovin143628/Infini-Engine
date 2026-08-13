@@ -430,6 +430,22 @@ impl PrimGpu {
         }
     }
 
+    /// Bind the shared vertex + index buffers and **nothing else** — for a pass
+    /// that pulls its instance data from a storage buffer instead of a vertex-step
+    /// one (P27.2's page raster, whose instance count comes out of an indirect
+    /// args block the GPU wrote).
+    pub fn bind_geometry<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) {
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
+    }
+
+    /// Where one kind's indices live in the shared buffers — the three constant
+    /// words of a `draw_indexed_indirect` args block.
+    #[inline]
+    pub fn range(&self, kind: PrimMesh) -> PrimRange {
+        self.ranges[kind.index()]
+    }
+
     /// Bind the shared geometry + `instances`, then issue one `draw_indexed` per
     /// kind with a non-empty instance range. `inst_ranges[k]` is the slice of the
     /// (bucket-packed) instance buffer holding kind `k`'s instances — see

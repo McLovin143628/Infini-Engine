@@ -348,6 +348,13 @@ pub struct VsmSystem {
     /// This frame's projection list, built at the sync point and consumed by the
     /// recording after the graph — one derivation, two readers.
     projections: Vec<VsmProjection>,
+    /// Index of each light's **first** projection in [`projections`](Self::projections),
+    /// in handle order. A cube light owns six consecutive entries, so a page's
+    /// face indexes off this base rather than off its handle — the one place the
+    /// (light × face) list is turned back into a per-light one.
+    proj_base: Vec<u32>,
+    /// The P27.2 caster pass.
+    raster: crate::vsm_raster::VsmRaster,
     signature: VsmSignature,
     stats: VsmStreamStats,
 }
@@ -421,6 +428,16 @@ impl VsmSystem {
             .collect();
         let pools = VsmPools::new(&gpu.device, &gpu.queue, &residency);
         let marker = VsmMarker::new(&gpu.device, layout, VSM_PROJECTION_CAP);
+        // Where each light's projections begin. `vsm_projections` emits one entry
+        // per face in tree order, so this is a running sum of `faces()` and it is
+        // built ONCE — it is a function of the tree list, which is exactly what
+        // `signature` says this system is rebuilt on.
+        let mut proj_base = Vec::with_capacity(kept.len());
+        let mut base = 0u32;
+        for tree in &kept {
+            proj_base.push(base);
+            base += tree.faces();
+        }
         Some(Self {
             signature: VsmSignature {
                 // The list `vsm_light_trees` produced, **not** the truncated one:
@@ -437,6 +454,8 @@ impl VsmSystem {
             blocks,
             bases,
             projections: Vec::new(),
+            proj_base,
+            raster: crate::vsm_raster::VsmRaster::new(gpu),
             stats: VsmStreamStats::default(),
         })
     }
@@ -515,6 +534,52 @@ impl VsmSystem {
         txn
     }
 
+    /// The caster pass's engagement counters (P27.2).
+    #[inline]
+    pub fn raster_stats(&self) -> crate::vsm_raster::VsmRasterStats {
+        self.raster.stats()
+    }
+
+    /// The caster pass itself — for a gate that wants the **cull's own verdict**
+    /// (`read_draw_counts`) rather than a counter over it.
+    #[inline]
+    pub fn raster_state(&self) -> &crate::vsm_raster::VsmRaster {
+        &self.raster
+    }
+
+    /// **Step 3b (P27.2)**: rasterize this frame's resident pages.
+    ///
+    /// Recorded **before** the graph, not after it like the marking pass, and the
+    /// two placements answer different questions. The marker consumes the frame's
+    /// depth buffer, so it has to follow every pass that writes it. The raster
+    /// produces the atlas P27.4's receivers will sample from *inside* the graph, so
+    /// it has to precede them — putting it after would hand the lit passes an atlas
+    /// one frame stale on top of the marking ring's pinned two, and P27.4 would
+    /// have to move it as its first act.
+    ///
+    /// Returns the number of page rectangles rasterized; 0 means the encoder was
+    /// not touched.
+    pub fn raster(
+        &mut self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        scene: &RenderScene,
+        view: &RenderView,
+        settings: &crate::settings::RenderSettings,
+    ) -> u32 {
+        self.raster.record(
+            gpu,
+            encoder,
+            &self.residency,
+            &self.projections,
+            &self.proj_base,
+            self.pools.atlas_view(),
+            scene,
+            view,
+            settings,
+        )
+    }
+
     /// **Step 4**: record the marking pass over `depth`, which the graph has
     /// already written this frame. `inv_view_proj` must invert the projection
     /// that depth was **rasterized** with — the jittered one when TAA is on; see
@@ -554,9 +619,10 @@ impl VsmSystem {
     /// identical in either one alone.
     pub fn summary(&self) -> String {
         format!(
-            "{}; {}",
+            "{}; {}; {}",
             self.residency.stats().summary(),
-            self.stats.summary()
+            self.stats.summary(),
+            self.raster.stats().summary()
         )
     }
 }

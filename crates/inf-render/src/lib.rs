@@ -47,6 +47,10 @@ pub mod vsm_atlas;
 /// readback ring that reads it at a pinned latency, and the residency step
 /// that turns its bits into allocations.
 pub mod vsm_mark;
+/// The P27.2 caster pass: the per-page GPU cull, the one render pass that owns
+/// the whole atlas, and the viewport/scissor pair that pins each page to its
+/// slot.
+pub mod vsm_raster;
 pub mod vt;
 /// The P26.3 registration door: `.inf_tex` v2 payloads become virtual
 /// textures here, for both hosts, through one rule.
@@ -138,6 +142,10 @@ pub use vsm::{
 };
 pub use vsm_atlas::{VsmApplyReport, VsmPools, VSM_PAGE_FORMAT};
 pub use vsm_mark::{VsmMarker, VsmStreamStats, VsmSystem, VSM_PROJECTION_CAP};
+pub use vsm_raster::{
+    VsmCasterRaw, VsmRaster, VsmRasterStats, VSM_ARG_WORDS, VSM_MAX_CASTERS, VSM_MAX_RASTER_PAGES,
+    VSM_PAGE_DRAW_STRIDE, VSM_RIGID_GROUPS,
+};
 // The shadow page space's own vocabulary, re-exported on `inf_vt`'s precedent so
 // a host or a gate that reads a residency does not have to add the GPU-free
 // crate to its own manifest to spell a page address.

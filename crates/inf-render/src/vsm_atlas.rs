@@ -84,8 +84,18 @@ impl VsmPools {
             dimension: wgpu::TextureDimension::D2,
             format: VSM_PAGE_FORMAT,
             // RENDER_ATTACHMENT because P27.2 rasterizes into it; TEXTURE_BINDING
-            // because P27.4 samples it. Nothing copies into it, ever.
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // because P27.4 samples it. Nothing copies INTO it, ever — there is no
+            // `COPY_DST`, and an admit is still an allocation rather than an
+            // upload.
+            //
+            // `COPY_SRC` is P27.2's and it is a gate's flag rather than a
+            // renderer's: the caster pass's claim is *depth in a rectangle*, and
+            // the standing law is to assert the WORLD rather than a pass report —
+            // which for a depth attachment means copying it off the device and
+            // comparing texels. Nothing in the shipping path reads it.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());

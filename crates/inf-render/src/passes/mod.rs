@@ -1325,6 +1325,13 @@ mod shader_compose_tests {
             // by a device that happened to be present.
             ("vt_feedback", include_str!("../shaders/vt_feedback.wgsl")),
             ("vsm_mark", include_str!("../shaders/vsm_mark.wgsl")),
+            // P27.2's three: the per-page cull compute and the page rasters. Each
+            // owns its own `@group(0)` and prepends nothing (a page has no camera),
+            // exactly as `shadow_depth` does — so they are standalone rather than
+            // `SHADER_TABLE` entries, and this list is the only thing that
+            // naga-validates them on a CI leg with no adapter.
+            ("vsm_cull", include_str!("../shaders/vsm_cull.wgsl")),
+            ("vsm_caster", include_str!("../shaders/vsm_caster.wgsl")),
         ] {
             validate(label, source);
         }
