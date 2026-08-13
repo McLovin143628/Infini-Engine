@@ -101,6 +101,16 @@ P27.3's engagement counter ever reports a mover invalidating nine pages where it
 bounds touch one, this document is where the reason lives, and re-adding a border
 is what would put it there.
 
+> **P27.3 landed, and the ruling held exactly as written (2026-08-13).**
+> `a_mover_invalidates_exactly_the_pages_its_bounds_touch` asserts the count is
+> the pages the mover's own sphere enters — computed independently through the
+> cull's `vsm_page_sees_sphere` — with **no** dilation, and
+> `a_carve_invalidates_only_the_pages_the_carved_tile_touches` says the same for a
+> terrain carve. Both would have to be `3 × 3` statements with a border on, and
+> both assert the untouched pages are **bit-identical** afterwards, which a
+> bordered page's neighbours could not be. `VSM_PAGE_BORDER` is still 0 and
+> nothing in P27.3 wanted it otherwise.
+
 Then **P27.4**, with the filter in hand and a measurement of the per-tap resolve
 against a clamped kernel; and **P28.2**, where interleaved cluster pages change
 what a page *is*. The numbers above are all in `inf-vsm`'s own arms

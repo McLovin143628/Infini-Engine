@@ -341,8 +341,16 @@ pub fn vsm_justified_level(texel0_world: f32, pixel_world: f32, levels: u32) -> 
     want.clamp(0.0, (levels - 1) as f32) as u32
 }
 
-/// **The coarsest level a clipmap point is outside of** — the other half of the
-/// clipmap's level rule.
+/// **The coarsest level a clipmap point is outside of**, for **concentric**
+/// levels — the closed form P27.3's per-level walk generalizes.
+///
+/// No longer on the shipped path: [`mark_page_for`] and `vsm_mark.wgsl` walk
+/// upward asking each level whether it contains the point, because with
+/// per-level snapped offsets ([`ClipmapLayout`]) there is no closed form. It is
+/// kept as the **specification** that walk is checked against —
+/// `a_clipmap_point_cannot_be_served_by_a_level_that_misses_it` asserts the two
+/// agree wherever the offsets are zero, which is what makes the walk a
+/// generalization rather than a replacement.
 ///
 /// `ndc0` is the point's level-0 NDC extent (`max(|x|, |y|)`). Level `L` covers
 /// `2^L` times level 0, so the finest level that *contains* the point is
@@ -1065,6 +1073,29 @@ mod tests {
              answer rather than a clamp onto the edge"
         );
         assert_eq!(clipmap_containing_level(0.1, 0), None);
+
+        // **The walk that replaced it agrees with it wherever the offsets are
+        // zero** (P27.3). `mark_page_for` no longer calls this function — with
+        // per-level snapped grids there is no closed form — so this is what keeps
+        // it a *specification* rather than dead code: for every concentric point
+        // in the tree, "the first level whose NDC contains it" is exactly what
+        // `ceil(log2(ndc0))` says.
+        let mut checked = 0usize;
+        for i in 0..400 {
+            let ndc0 = 0.02 + i as f32 * 0.9;
+            let closed = clipmap_containing_level(ndc0, 8);
+            let walked = (0..8u32).find(|&l| {
+                let q = clipmap_level_ndc(Vec3::new(ndc0, 0.0, 0.5), l, [0.0, 0.0]);
+                q.x.abs() <= 1.0 && q.y.abs() <= 1.0
+            });
+            assert_eq!(closed, walked, "ndc0 = {ndc0}");
+            checked += usize::from(closed.is_some());
+        }
+        // ANTI-VACUITY: the sweep really covered both answers.
+        assert!(
+            (8..400).contains(&checked),
+            "{checked} of 400 sweep points were inside the clipmap at all"
+        );
     }
 
     fn view_at(z: f64) -> RenderView {

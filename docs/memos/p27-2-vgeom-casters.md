@@ -82,3 +82,35 @@ Then **P28.3**, where the unified streamer merges the shadow and texture
 residencies — if meshlet pages join that merge, the objection in point 2 above
 goes away, because there would be one residency rather than a camera's one being
 read by a light.
+
+### P27.3 re-read this, and the routing stands — with one reason discharged
+
+**2026-08-13.** P27.3 landed page caching and did **not** build the per-page
+meshlet cut. This section is the record of what it read and what it found,
+because "revisit at P27.3" is a promise and the promise has to be answered rather
+than renewed.
+
+* **Reason 3 is discharged, and the number is smaller than this memo expected.**
+  It said a per-page DAG cut would be `pages × meshlets` threshold evaluations a
+  frame "with nothing to amortize it against". With caching the second factor is
+  the **dirty** page set rather than the resident one, and on a static scene that
+  set is empty — the arm `a_static_scene_stops_rasterizing_pages_after_warm_up`
+  measures it as zero after warm-up. So the cost is now a number and the number is
+  *cheap*. That was the reason this memo said made the decision unmeasurable, and
+  it no longer applies.
+* **Reasons 1 and 2 are unchanged, and they are the ones that decide.** A per-page
+  DAG cut is still a second, independently-tuned LOD policy whose tolerance
+  ("how much silhouette does a shadow need?") has no answer until a receiver
+  exists — **P27.4**. And the meshlet pools are still camera-driven residency with
+  `NOT_RESIDENT` entries, which the P18 law forbids a light to read — until
+  **P28.3** makes it one residency rather than a camera's being read by a light.
+* **P27.3's own invalidation does not want the meshlet answer either.** The
+  scatter that decides which pages a caster touches works from a bounding
+  *sphere*, and a per-meshlet cut would refine what is *drawn* into a page rather
+  than *which* pages a mover invalidates. The two questions this memo said "want
+  one answer" turn out to be different questions: invalidation is about bounds and
+  the cut is about detail.
+
+So the revisit point moves to **P27.4** for the tuning question and **P28.3** for
+the residency one, with reason 3 struck. The costs in *What it costs, stated*
+above are unchanged.

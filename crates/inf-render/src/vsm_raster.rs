@@ -27,15 +27,22 @@
 //! honest statement is in `tests/vsm_raster.rs`, where deleting the viewport
 //! fails an arm and the scissor's redundancy is recorded as a measurement.
 //!
-//! # The whole atlas is cleared every frame, and P27.3 is where that stops
+//! # A page whose content stamp did not move is not touched (P27.3)
 //!
-//! `LoadOp::Clear` clears an attachment, not a scissor rectangle, so one pass over
-//! the atlas clears every slot. That is exactly right for P27.2, which has **no
-//! caching**: every resident page is re-rasterized every frame, so every slot that
-//! matters is rewritten in the same pass that cleared it. It is also precisely
-//! what P27.3's "static pages survive frames untouched" has to replace — with
-//! `LoadOp::Load` and a per-page clear, which is where the scissor stops being
-//! defence in depth and becomes load-bearing.
+//! P27.2 cleared the whole atlas with `LoadOp::Clear` and re-rasterized every
+//! resident page in the same pass, so every slot that mattered was rewritten in
+//! the pass that wiped it. That is no longer the shape. The pass **loads**, each
+//! frame's *dirty* pages get a scissored clear of their own rectangle, and a page
+//! whose stamp held still is not in the pages buffer at all — no viewport, no
+//! clear, no draw. A static scene therefore opens no pass, which is what
+//! `VsmRasterStats::pages` stops moving on and `cached_pages` moves instead.
+//!
+//! **This is where the scissor stops being defence in depth.** The clear wants a
+//! rectangle rather than a projection, so it is drawn with the viewport left at
+//! the whole atlas and the scissor is the only thing confining it: delete
+//! `set_scissor_rect` from that loop and the first dirty page wipes every cached
+//! one. The P27.2 ledger predicted that and this is the batch that made it true
+//! — measured, not asserted (the mutation flipped from survivor to killed).
 //!
 //! # What a page's caster set is
 //!
@@ -111,13 +118,20 @@ fn fold_into(acc: &mut u64, hash: u64) {
 
 /// Page rectangles one frame may rasterize.
 ///
-/// A **cost** ceiling, not a quality one, and it is the honest place for it: with
-/// no caching (P27.3) every resident page is re-drawn every frame, so the work is
-/// `pages × casters` and a 1 024-slot atlas full of pages would issue 1 024
-/// viewport switches and 1 024 × groups indirect draws. Pages past the cap keep
-/// the depth the clear left them — the [`VSM_ENTRY_NONE`] fail direction, *lit* —
-/// and [`VsmRasterStats::deferred_pages`] counts them rather than the cap being
+/// A **cost** ceiling, not a quality one, and since P27.3 it is a cap on *work*
+/// rather than on residency: it bounds the pages a frame **re-rasterizes**, and a
+/// page the cache serves costs one stamp comparison and does not consume it. A
+/// page past the cap keeps the depth it already had until a later frame reaches
+/// it, which is a *stale* page rather than a missing one, and
+/// [`VsmRasterStats::deferred_pages`] counts them rather than the cap being
 /// silent.
+///
+/// **Re-measured at 256 with caching in place** (`docs/memos/p27-3-page-cache.md`):
+/// the default 1 024-slot atlas drains a whole-atlas invalidation in four frames,
+/// against the 44.8 frames the sun's own quantum lasts — so the cap binds only
+/// inside a burst, and the burst drains eleven times faster than it refills.
+///
+/// [`VSM_ENTRY_NONE`]: inf_vsm::VSM_ENTRY_NONE
 ///
 /// [`VSM_ENTRY_NONE`]: inf_vsm::VSM_ENTRY_NONE
 pub const VSM_MAX_RASTER_PAGES: u32 = 256;
@@ -307,8 +321,15 @@ struct SkinnedCasterGeom {
 /// for a rig whose joints stay inside their own mesh and it is a *cull* margin,
 /// so its only cost is drawing a caster a page would have clipped anyway. The
 /// exact bound is the posed skeleton's own AABB, which the renderer is not given
-/// (`SkinnedInstance` carries a palette, not a bound) — P27.3 is where a mover's
-/// bounds become load-bearing, and that is where this becomes exact.
+/// (`SkinnedInstance` carries a palette, not a bound).
+///
+/// **P27.3 made a mover's bounds load-bearing and did not make this one exact**,
+/// which is worth stating rather than leaving as a stale forward reference: the
+/// invalidation scatter folds a skinned caster's stamp into the pages this
+/// inflated sphere reaches, so the margin now costs *re-rasterized pages* as well
+/// as vertex invocations — a conservative bound over-invalidates, in the same
+/// direction it over-draws. Making it exact needs the posed AABB the renderer is
+/// still not handed, which is `inf-anim`'s to produce.
 pub const SKINNED_POSE_MARGIN: f32 = 0.5;
 
 /// One terrain tile as a static caster mesh: the tile's own height samples, in
@@ -2363,8 +2384,13 @@ fn pack_casters(
     // `pick_classic_level`. Against the camera and not against the page,
     // deliberately: a VSM page exists because a visible pixel asked for it, so the
     // camera's tolerance is the one that bounds how much silhouette detail the
-    // shadow can possibly show. Per-page LOD is a P27.3 question and the memo says
-    // so.
+    // shadow can possibly show. Per-page LOD is still not this: see
+    // `docs/memos/p27-2-vgeom-casters.md`, whose "revisit at P27.3" was re-read
+    // here — caching discharges its third reason (the cost is a number now, and
+    // the number is the DIRTY page set rather than the resident one) and leaves
+    // the first two standing, because a per-page DAG cut is a second LOD policy
+    // with no receiver to tune against until P27.4 and the meshlet pools are
+    // camera-driven residency until P28.3 merges them.
     let mut by_group: std::collections::BTreeMap<(u128, usize), Vec<usize>> =
         std::collections::BTreeMap::new();
     for (i, inst) in scene.vgeom_instances.iter().enumerate() {
