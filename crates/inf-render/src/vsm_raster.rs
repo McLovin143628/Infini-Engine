@@ -354,6 +354,10 @@ pub struct VsmRasterStats {
     pub skinned_casters: u64,
     /// Terrain-tile casters packed, summed over frames.
     pub terrain_casters: u64,
+    /// Casters the [`VSM_MAX_CASTERS`] ceiling dropped, summed over frames.
+    /// **Never a silent cap** — a caster set that quietly stopped at 16 384 reads
+    /// as "the far half of the level stopped casting".
+    pub dropped_casters: u64,
 }
 
 impl VsmRasterStats {
@@ -361,7 +365,7 @@ impl VsmRasterStats {
     pub fn summary(&self) -> String {
         format!(
             "vsm raster: {} frames, {} pages, {} draws, {} casters ({} scattered, \
-             {} meshlet-asset, {} skinned, {} terrain), {} pages deferred",
+             {} meshlet-asset, {} skinned, {} terrain), {} pages deferred, {}              casters dropped",
             self.frames,
             self.pages,
             self.draws,
@@ -371,6 +375,7 @@ impl VsmRasterStats {
             self.skinned_casters,
             self.terrain_casters,
             self.deferred_pages,
+            self.dropped_casters,
         )
     }
 }
@@ -796,7 +801,7 @@ impl VsmRaster {
         self.sync_vgeom(gpu, scene);
         self.sync_skinned(gpu, scene);
         self.sync_terrain(gpu, scene, view);
-        let (casters, groups, masked, scattered) = pack_casters(
+        let (casters, groups, masked, scattered, dropped) = pack_casters(
             &self.prim,
             &self.vgeom,
             &self.skinned,
@@ -1064,6 +1069,13 @@ impl VsmRaster {
         self.stats.skinned_casters += of(|s| matches!(s, GroupSource::Skinned { .. }));
         self.stats.terrain_casters += of(|s| matches!(s, GroupSource::Terrain { .. }));
         self.stats.masked_frames += u64::from(masked);
+        self.stats.dropped_casters += u64::from(dropped);
+        if dropped > 0 {
+            tracing::warn!(
+                "inf-render: {dropped} shadow casters past the {} this frame packs                  cast nothing; raise the ceiling or reduce the caster set",
+                VSM_MAX_CASTERS
+            );
+        }
         page_count
     }
 
@@ -1555,7 +1567,7 @@ fn pack_casters(
     scene: &RenderScene,
     view: &RenderView,
     settings: &crate::settings::RenderSettings,
-) -> (Vec<VsmCasterRaw>, Vec<GroupGeom>, bool, u32) {
+) -> (Vec<VsmCasterRaw>, Vec<GroupGeom>, bool, u32, u32) {
     let origin = &view.origin;
     // Opaque + masked only. Translucent geometry does not cast — the cascade's
     // scope, kept, so the two shadow paths agree about what a caster is.
@@ -1585,6 +1597,10 @@ fn pack_casters(
     let mut groups = Vec::with_capacity(PrimMesh::ALL.len());
     let mut masked = false;
     let mut first = 0u32;
+    // The ceiling counts what it refuses. Every `break`/`continue` on
+    // `VSM_MAX_CASTERS` below increments it, so a truncated caster set is a
+    // number in the summary rather than a level whose far half stopped casting.
+    let mut dropped = 0u32;
     for (k, kind) in PrimMesh::ALL.iter().enumerate() {
         let range = ranges[k].clone();
         let unit = kind.bounding_radius();
@@ -1594,6 +1610,7 @@ fn pack_casters(
             .enumerate()
         {
             if casters.len() as u32 >= VSM_MAX_CASTERS {
+                dropped += (range.end - range.start) - local as u32;
                 break;
             }
             let model = Mat4::from_cols_array(&raw.model);
@@ -1669,6 +1686,7 @@ fn pack_casters(
         let mut count = 0u32;
         for (local, &i) in members.iter().enumerate() {
             if casters.len() as u32 >= VSM_MAX_CASTERS {
+                dropped += (members.len() - local) as u32;
                 break;
             }
             let inst = &scene.vgeom_instances[i];
@@ -1704,6 +1722,7 @@ fn pack_casters(
     // just at the granularity a character has.
     for (i, inst) in scene.skinned.iter().enumerate() {
         if casters.len() as u32 >= VSM_MAX_CASTERS {
+            dropped += (scene.skinned.len() - i) as u32;
             break;
         }
         let Some(mesh) = skinned.get(inst.mesh) else {
@@ -1738,7 +1757,11 @@ fn pack_casters(
     // `TerrainCasterGeom`. The model matrix is the identity: the mesh is already
     // in render-local space, which is what lets it be cached across frames.
     for ((tid, tkey), geom) in terrain {
-        if casters.len() as u32 >= VSM_MAX_CASTERS || geom.index_count == 0 {
+        if geom.index_count == 0 {
+            continue;
+        }
+        if casters.len() as u32 >= VSM_MAX_CASTERS {
+            dropped += 1;
             continue;
         }
         casters.push(VsmCasterRaw {
@@ -1764,7 +1787,7 @@ fn pack_casters(
         });
         first += 1;
     }
-    (casters, groups, masked, scattered)
+    (casters, groups, masked, scattered, dropped)
 }
 
 #[cfg(test)]
