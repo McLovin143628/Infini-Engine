@@ -1097,6 +1097,7 @@ fn a_terrain_tile_casts_from_its_own_heights() {
 /// One planar terrain tile: `height(u, v) = a + b·u + c·v` over the tile's own
 /// samples, so the caster mesh's triangulation reproduces it **exactly** whatever
 /// the decimation does and a depth arm can assert metres rather than texels.
+#[derive(Clone, Copy)]
 struct PlanarTile {
     key: inf_render::TerrainTileKey,
     origin: glam::DVec3,
@@ -1313,11 +1314,6 @@ fn a_streamed_in_terrain_tile_does_not_inherit_the_evicted_ones_mesh() {
     };
     let set = settings_with(64);
     let before = terrain_scene(&[first, keep]);
-    let keep = PlanarTile {
-        key: inf_render::TerrainTileKey::lod0((1, 0)),
-        origin: glam::DVec3::new(0.5 * TILE_SPAN, 0.0, -0.5 * TILE_SPAN),
-        plane: (1.0, 0.0, 0.0),
-    };
     let after_tiles = [second, keep];
     let after = terrain_scene(&after_tiles);
     let v = terrain_view();
@@ -1336,22 +1332,21 @@ fn a_streamed_in_terrain_tile_does_not_inherit_the_evicted_ones_mesh() {
          is {worst} m off the resident tiles' own surfaces — the caster mesh is the \
          EVICTED tile's, inherited through a cache keyed on a streaming index"
     );
-    // ANTI-VACUITY: the two tiles really are six metres apart, so a stale mesh
-    // would have been visible.
+    // ANTI-VACUITY: the evicted tile's mesh sat six metres below the one that
+    // replaced it, so a stale mesh would have been far outside the tolerance above.
+    let over_the_swap = -(TILE_SPAN as f32);
+    let now = second
+        .world_y(over_the_swap, 0.0)
+        .expect("inside the new tile");
+    let then = first
+        .world_y(over_the_swap, 0.0)
+        .expect("inside the old one");
     assert!(
-        (after_tiles[0]
-            .world_y(-(TILE_SPAN as f32), 0.0)
-            .expect("inside")
-            - first_height())
-        .abs()
-            > 5.0
+        (now - then).abs() > 5.0,
+        "the two tiles are {} m apart, which the {} m tolerance would not have seen",
+        (now - then).abs(),
+        0.05
     );
-}
-
-/// The height the evicted tile's mesh would have sat at, named so the anti-vacuity
-/// above reads as a comparison rather than a magic number.
-fn first_height() -> f32 {
-    0.0
 }
 
 // ── (h) off path, and the settings door ─────────────────────────────────────
