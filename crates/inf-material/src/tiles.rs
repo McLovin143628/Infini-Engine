@@ -804,8 +804,15 @@ mod tests {
         assert_eq!(r.mips().len(), 14, "the ≥1 floor holds the short axis at 1");
         assert_eq!(r.tiles().len(), 64 + 32 + 16 + 8 + 4 + 2 + 1 + 7);
         assert_eq!(r.to_texture_asset().unwrap(), v1);
-        // …and it is the shape the aspect-ratio advisory exists to warn about.
-        assert_eq!(crate::texture::texture_import_advisories(w, h).len(), 1);
+        // …and it is the shape BOTH shape advisories exist to warn about: 2048:1
+        // is a strip that stores mostly clamp padding (P26.1), and its levels
+        // are almost all smaller than one tile, so it also pays the uniform
+        // page's tail cost (P26.5). Two sentences, and they are about two
+        // different costs of the same extent.
+        let said = crate::texture::texture_import_advisories(w, h);
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[0].contains("2048:1"), "{said:?}");
+        assert!(said[1].contains("tiled .inf_tex"), "{said:?}");
     }
 
     /// The same claim through the public door, on the bytes a consumer actually
