@@ -1396,10 +1396,13 @@ fn path_view(step: u64) -> inf_render::RenderView {
 
 /// What one scripted run produced.
 struct StreamRun {
-    /// Per frame: the whole resident set, **keyed by asset GUID** and sorted —
-    /// the P26.3 LAW, because the two hosts mint different handles for one
-    /// texture and comparing the integers would be comparing two correct
-    /// answers and calling them wrong.
+    /// Per frame: the whole resident set, named by **asset GUID** and walked in
+    /// `MaterialContent::registration_order` — not by handle, which is the P26.3
+    /// LAW (the two hosts mint different handles for one texture, so comparing
+    /// the integers would be comparing two correct answers and calling them
+    /// wrong), and not sorted here, because the registration order is already
+    /// the one sequence both hosts walk and arm (b) asserts they agree on it
+    /// before comparing a single frame.
     trace: Vec<String>,
     pop_in: VtPopIn,
     /// Slots the pool was planned with, and the peak it held.

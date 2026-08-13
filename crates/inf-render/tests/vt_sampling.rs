@@ -1,4 +1,6 @@
-//! **The VT sampling gate** (P26.3): the shader's walk, against the CPU's.
+//! **The VT sampling gate** (P26.3, extended P26.5): the shader's walk against
+//! the CPU's — and, since P26.5, the residency heat-map's pixels and the
+//! downlevel tier's.
 //!
 //! # What this aims at
 //!

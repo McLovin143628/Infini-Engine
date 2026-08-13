@@ -8,8 +8,8 @@
 //! tiles and spawn a partition cell before it does any of its own work*, and a
 //! residency that grows with how far the player has walked.
 //!
-//! So this module adds four constants, asserted headless over the **composed
-//! Phase 16 gate scene** (`samples/phase16-world`: a wizard-imported streamed
+//! So this module adds four **P16.6** constants, asserted headless over the
+//! **composed Phase 16 gate scene** (`samples/phase16-world`: a wizard-imported streamed
 //! terrain, a partitioned world on top of it, a second inline terrain, and a
 //! scripted walk) by `runtime/inf-player/tests/phase16_gate.rs`:
 //!
@@ -18,6 +18,14 @@
 //! * [`TERRAIN_RESIDENT_BYTES_CEILING`] — peak terrain page bytes;
 //! * [`CELL_RESIDENT_BYTES_CEILING`] / [`CELL_RESIDENT_CEILING`] — peak cell blob
 //!   bytes and peak active cells.
+//!
+//! A fifth arrived with **P26.5**, over a different gate scene and named so:
+//! [`VT_STREAM_STEP_BUDGET_MS`], the per-frame cost of the virtual-texture
+//! streaming loop, asserted by `runtime/inf-player/tests/phase26_gate.rs`. It is
+//! here rather than in `inf-render` for the same reason every other number in
+//! this file is: a ratchet belongs where the gate that reads it lives, and a
+//! Ring-0 crate that could read a budget is one edit away from letting the
+//! machine decide what a frame contains.
 //!
 //! Alongside them lives [`LOAD_BUDGET_MS`], the player's **load-class** ceiling.
 //! It is deliberately a different *class* of number from everything above and from

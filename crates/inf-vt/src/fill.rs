@@ -263,8 +263,10 @@ pub fn replicate2x(src: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
 /// The doubling is [`replicate2x`], **not** [`upscale2x`], and that is the
 /// P26.5 ruling rather than a default: the measurement in `inf-material`'s
 /// `tests/vt_fill_quality.rs` scored replication best on both a fidelity and a
-/// structure metric, and `the_shipped_fill_is_the_filter_the_measurement_chose`
-/// pins this call site against it so the code and the memo cannot drift.
+/// structure metric, and `inf-material`'s
+/// `replicating_the_ancestor_beats_every_interpolation_of_it` asserts THIS call
+/// site against its own nearest-neighbour arm — so the code and the memo cannot
+/// drift, and a fill that quietly switched filters fails there by name.
 ///
 /// `descent` is the quadrant path from the ancestor down to the wanted tile,
 /// coarsest first — [`crate::VtTextureDesc::descent`] computes it from the same

@@ -9878,6 +9878,264 @@ door for editor viewport, PIE and shipping.
   `FRAME_BUDGET_MS`, (f) golden set pinned (additive goldens only). Mutation-verified per the
   house law.
 
+> **STATUS — P26.5 Editor, tiers & the gate: COMPLETE (2026-08-12)** — eight
+> commits (`5af7d98` the uv streams, `622ca5c` the heat-map + the tier budget,
+> `d3cfd9e` the missing-tile fill measured, `97ffcd9` the blend pins, `0f024c6`
+> the import badge, `5c47820` the P26.4 audit's four remainders, `94a990f` the
+> gate's six streaming arms, `c508a8a` the strip advisory the release
+> battery found, and this block). Battery green: **235 binaries,
+> 4 202 passed, 0 failed, 8 ignored** (P26.4's audit left it at 231 / 4 170;
+> this batch adds four test binaries and 32 arms).
+> `clippy --workspace --all-targets` with `-D warnings` and `cargo fmt --all
+> --check` clean; `tsc`, `eslint` and 423 vitest green. Goldens stay **50** and
+> none was re-blessed — the count is now a gate arm (f), because a *changed*
+> golden is what the harness compares and a *deleted* one is what it cannot.
+> **No schema moved.** No new external dependency. **Eleven `.inf_lvl.toml`
+> sidecars re-blessed** — additively, and sidecars only: the arm that wrote them
+> asserts every `.inf_lvl` payload's bytes unmoved, under the bless flag as well
+> as without it.
+>
+> **The vertex streams, landed inside Phase 26.** The debt carried since P26.3
+> and memo'd in P26.4: `MeshVertex` gains a `uv` at `@location(2)` and
+> `SkinnedVertex` at `@location(15)`, filled by **five** producers — five
+> generated primitive parametrizations; `classic_vgeom` copying across the
+> authored `VgeomVertex::uv` it had been **dropping**; `skinned_mesh_data` in
+> BOTH mirror-pinned copies; `RenderFractureVertex`, because that stream is bound
+> against `mesh.wgsl`'s own pipeline and a stride disagreement there is every
+> chunk drawn from the wrong bytes; and `deformed_skinned_mesh`, which has no
+> authored parametrization to inherit. `vt_box_uv` is gone from WGSL — that last
+> producer is its only remaining consumer, and it takes `inf_render::box_uv` once
+> per VERTEX rather than once per fragment. The cube's generated uv CALLS
+> that function rather than transcribing it, so the one shape a dominant-axis
+> projection was already exactly right for is provably unmoved. One repair fell
+> out: the cylinder's side ring was **wrap-shared**, which is free with no uv and
+> with one mirrors the whole texture into a twenty-fourth of the barrel.
+>
+> **No tangent stream, and the reason is two measurements**
+> (`docs/memos/p26-5-vertex-streams.md`): the skinned pipeline reaches
+> `max_vertex_attributes: 16` exactly with the uv at 15, and the rigid stream's
+> two producers are the primitives (which could supply one) and `VgeomVertex`
+> (which has none to give) — so a tangent there would be real data on five
+> built-in shapes and a derived guess on every imported mesh. The container edit
+> that fixes it is already scheduled: **P28.2** rewrites `.inf_vmesh`'s sections.
+> `vt_apply_normal` keeps its per-fragment cotangent frame, now derived from a
+> real parametrization rather than from a projection.
+>
+> **THE MEASUREMENT THAT WENT THE OTHER WAY.** Clause 2 asked for a
+> *"deterministic edge-directed upscale of the finest resident ancestor (the NTC
+> intent, **measured before adoption**; memo on the outcome)"*. It was built
+> (`inf_vt::fill`, integer-only, float-gated on `container.rs`'s pattern) and
+> measured end to end against the tiles that actually exist — and **replicating
+> the ancestor's texels beats every interpolation of them**, on a fidelity metric
+> and a structure metric, in every region of the fixture:
+>
+> | | texel MAE | gradient MAE |
+> |---|---|---|
+> | replicate | **9.92** | **24.77** |
+> | bilinear (what the sampler already does) | 12.13 | 25.16 |
+> | edge-directed | 12.05 | 25.55 |
+>
+> Not a quirk of the fixture: a mip level is a **box downsample**, so a parent
+> texel *is* the mean of its four children — the minimum-error constant predictor
+> for that block, by construction — and any interpolation spends that optimality
+> moving energy across block boundaries to buy a smoothness the hardware sampler
+> already provides for free. The edge-directed filter is within one part in a
+> hundred of bilinear and worse on structure. **And there is no reachable window
+> to adopt it into**: a tile read is a synchronous mmap slice, so an admitted
+> page's bytes arrive in the call that admitted it, and the only remaining
+> `fetch` miss is a container declaring tiles it does not contain — which `parse`
+> refuses at the door (the P26.1 audit's three layout equalities). Wiring it in
+> would be the defensive-and-unreachable branch the P26.4 audit withdrew
+> `c78d2ff` for. So the module ships **declared and pinned with no hot-path
+> caller** (the `VtStats::summary` rule), `fill_from_ancestor` uses the filter the
+> measurement chose, the arm asserts the ruling **in the direction it went**, and
+> the caller is named: P28.3, where an admit's bytes genuinely arrive late.
+> `docs/memos/p26-5-missing-tile-fill.md` carries the numbers and the floor they
+> set for NTC itself — a learned predictor must beat **9.92**, not 12.13.
+>
+> **The heat-map, and the defect a source read would not have found.**
+> `ViewMode::VtResidency` paints every virtual-textured surface by how far behind
+> the streamer is at that pixel, off the same `vt_resolve` the sampling path runs
+> — five buckets, grey for "this surface has no virtual texture at all", which is
+> the reading no amount of staring at a lit frame gives you. It sets `flags.x` on
+> the `Biomes` precedent, and **the branch therefore has to go ABOVE the unlit
+> short-circuit**: below it, the heat never executes. The real-frame arm caught
+> that on its first run. `EngineRenderer::vt_summary` is the non-gate reader
+> `VtStats::summary` and `VtPopIn::summary` were both declared for, `None` on a
+> textureless scene (which is a different fact from a line of zeros), logged by
+> the viewport on the TRANSITION into the mode.
+>
+> **The pool budget is a tier knob** — `VirtualTextureSettings::budget_bytes`,
+> clamped by `RenderTier::apply` with a `min` (24 / 12 / 6 MiB, mobile takes
+> Low), read by both hosts instead of the crate default. The clamp law in its
+> cleanest form: a tier never turns virtual texturing **off**, because there is
+> no switch — the analytic floor is bounded per texture and per visible surface,
+> so a smaller pool costs *refinement* and never a hole. `bc_tiles` beside it is
+> untouched by every tier: an adapter capability is not a budget.
+>
+> **What the gate's six arms are, and what it took to make them mean anything.**
+> (a) the scripted path's residency trace, bit-exact twice, with the device
+> pumped between frames and `feedback_misses` asserted at exactly
+> `READBACK_LATENCY_FRAMES + 1` — the `+ 1` **measured**: on frame 0 the registry
+> is not yet warm, so the coverage list is empty and nothing is recorded for
+> frame 2 to read. (b) PIE == shipping on that trace, compared by GUID. (c) the
+> over-budget scene (measured at six times its pool) inside its slots, peaking at
+> ≥ 90 % of them, deferring, with every fallen-back mip-0 address asserted equal
+> to `VtTextureDesc::ancestor` at the level it was served. (d) the counters
+> moving first and zero second. (e) both budget classes kept apart (the P20 law)
+> — and the P26.4 remainder discharged with `VT_STREAM_STEP_BUDGET_MS`, measured
+> at 0.53 ms/frame and ratcheted at 8.0. (f) the golden count.
+>
+> **Three arms had to be rebuilt because the first version could not fail**, and
+> all three are worth writing down:
+>
+> * **the budget arm reported 177 ms/frame** because it timed
+>   `EngineRenderer::new` — every shader in the tree — inside "a frame". A
+>   budget's *scope* is part of the budget;
+> * **the downlevel pixel arm took three measures.** The frame's own spread is
+>   useless (a displaced grid's *shading* out-spanned the texture, 162 against
+>   129). The textured-minus-untextured DIFFERENCE is useless too, because a
+>   texture modulates **multiplicatively**: a `uv: [0.0; 2]` mutation that
+>   collapses a whole mesh onto one texel left a delta spread of 74 and survived
+>   untouched. A ratio does not divide the shading out either, because a
+>   tonemapped sRGB frame is not linear in radiance (a FLAT texture scored 81/256
+>   against a ramp's 112). It took a **flat** grid, a **flat-texture control**
+>   beside the ramp, and a collapse guard to separate them: 49/256 against 9/256;
+> * **`VtTextureDesc::descent`'s first arm re-walked the chain**, and a `x & 1`
+>   mutation — right on every power-of-two pyramid, wrong on every clamped one —
+>   survived it, because every child of a clamped parent is inside that parent's
+>   subtree. It asserts against the **texel map** now and fails by name on the
+>   257² sliver.
+>
+> **The P26.4 audit's four remainders, closed.** The delete guard was inert on
+> every committed sample: eleven of sixteen bind something, all eleven are
+> re-saved, and `committed_level_sidecars.rs` keeps them saved *and* asserts the
+> `.inf_lvl` payload bytes do not move — even under the bless flag, because a
+> re-bless that had to rewrite a payload is a content edit wearing a metadata
+> edit's clothes. The downlevel tier has its pixel arm (above). The editor's VT
+> invalidation is no longer a source pin over a three-term condition: the rule
+> **moved** into `EditorRenderAssets::vt_level_key`, Ring 1, where a test runs it
+> on every leg — `tests/vt_level_key.rs` executes the whole sequence through the
+> real registration door on a real device and asserts the rebuilt registry's own
+> descriptor carries the re-imported extent. And the id-collision path is ruled:
+> **first wins, and the second is named** (`inf_asset::IdCollision`). Not
+> last-writer, and the first reason decides it — last-writer was not even
+> deterministic, because `scan_dir` walked `read_dir` in the filesystem's order.
+> The walk is path-sorted now, so "first" is a fact about the directory; a copy
+> cannot steal an original's identity, since every edge in the graph names the
+> id; and the loser is reported rather than dropped in silence.
+>
+> **The cheap half of the blend-enum debt** (`p26-4-carried-debts.md` §1) is done
+> and consolidation stays deferred. The two unpinned pairs are pinned — and the
+> memo's own reassurance turned out to be half wrong: *"a fourth variant added to
+> one and not the others is a compile error at every mapping site"* is true of
+> the enum-to-enum mappings and **false** of the Ring-2 string map, where
+> `MatBlend::Translucent => "Translucent"` is a literal handed to
+> `PropValue::Enum`. Rename a variant in `inf-ecs` and it becomes a name
+> reflection cannot resolve: not a compile error, not a panic, just a masked
+> cutout that silently stops being masked.
+>
+> **P26.1's deferred badging** is closed with a number the project computes
+> rather than remembers: `tiled_size_factor_pct` derives the tail cost from the
+> extent and the tile geometry — integer, pure, **format-independent by
+> construction**, which is the structural form of the audit's finding that the
+> growth is the uniform page and not a lost zstd frame — and reproduces the
+> measured table to the digit (677 % at 128², 254 % at 256², 121 % at 1024²).
+> The advisory reaches the Content Drawer as one dismissible chip, empty on a
+> cache hit and on every non-texture job by construction.
+>
+> **Mutation matrix: fourteen mutations, zero survivors** — counted, because the
+> P26.4 ledger's own opening sentence miscounted its commits and the audit had to
+> fix it. A `vt_heat` that always returns green; `.max` for `.min` in the tier
+> clamp; a `descent` spelled `x & 1`; a threshold the tail-cost badge can never
+> reach; a variant inserted mid-`DerivedBlend`; a typo'd Ring-2 blend literal; a
+> `VtLevelKey` without its generation term; an unsorted `scan_dir`; a
+> last-writer collision rule; a camera-free `analytic_floor`; a `resolve` that
+> re-derives the tile from the texel; an engagement counter that fires every
+> frame; `classic_vgeom` dropping its texture set (the P26.4 defect, restored);
+> and `classic_vgeom` dropping its **uv** (this batch's own).
+>
+> **Two of those fourteen survived a first version of the arm that now kills
+> them**, and both are written up above rather than quietly re-run: the `x & 1`
+> descent survived a re-walk check, and the dropped uv survived a
+> difference-based downlevel arm and then a ratio-based one. Each is what its
+> arm is now shaped by.
+>
+> **Honest remainders, routed.**
+> * **The tangent stream → P28.2**, with the `.inf_vmesh` section rewrite that
+>   has to carry it. The skinned path's `max_vertex_attributes: 16` wall is a
+>   separate decision and needs either a packed attribute or a raised limit; the
+>   memo has both.
+> * **Per-fragment feedback → P28.1**, unchanged from
+>   `p26-4-feedback-mechanism.md`: the visibility buffer makes the producer a
+>   compute-stage write with no new adapter capability, and nothing but the
+>   producer changes.
+> * **`inf_vt::fill` → P28.3**, where an admit's bytes genuinely arrive late.
+> * **`VtTransaction::unknown_texture` → P28.3**, still a tripwire with no
+>   producer, reading zero because nothing in this tree can make it read anything
+>   else.
+> * **A `--level` dev boot has no material content**, and it is structural rather
+>   than an omission: a `.inf_matd` is derived by the cook and by the payload
+>   builder, both of which link `inf-material`, and a shipped player must not.
+>   Documented where the dev boot is documented (`inf_player::level`), so an
+>   author who takes that path is told rather than left to discover a
+>   textureless level.
+> * **The viewport host's *call* is still a source pin.** `EngineHost::new` takes
+>   a real surface, so nothing headless constructs one; what is pinned is now one
+>   line (`vt_level_key(doc)` and a whole-value compare) rather than a three-term
+>   condition, and the rule behind it is executed end to end in Ring 1.
+> * **Terrain still does not sample through VT** (the entries are bound and
+>   inert), and the occlusion map still multiplies **ambient** AO only.
+> * **`upscale2x` has no non-test caller** — deliberately, as the measured
+>   alternative the ruling rests on, so it can be re-measured rather than
+>   re-argued.
+
+> **PHASE 26 — STREAMING VIRTUAL TEXTURING: COMPLETE (2026-08-12).** **Six**
+> batches (P26.1 container, P26.2 pool + residency, P26.3 sampling, P26.3b the
+> wire, P26.4 feedback + streaming, P26.5 editor + tiers + the gate) and **five**
+> adversarial audits — counted rather than remembered, because the P26.4 ledger
+> opened by saying "nine commits" about a thirteen-commit batch and the audit had
+> to correct it.
+>
+> **The "Done when", clause by clause, against what is now measured:**
+>
+> * *"a gate scene whose referenced texture bytes exceed the physical pool
+>   severalfold renders through the VT path with the pool inside budget"* — **met
+>   and measured**: `phase26_gate`'s fixture references **six times** its pool
+>   (asserted in the arm, not by construction), residency peaks at ≥ 90 % of the
+>   granted slots and never exceeds them, and the loop defers.
+> * *"sampled detail refines under camera approach on a scripted path with a
+>   bit-exact residency trace (twice per run, and PIE == shipping)"* — **met,
+>   with the P26.4 ledger's distinction kept**: the floor is exact
+>   unconditionally; the refinement is exact given a pinned arrival pattern, so
+>   the gate pins one (the device is pumped between frames) and asserts
+>   `feedback_misses` at exactly the number that pattern implies. Both hosts fold
+>   the same trace, compared by GUID.
+> * *"missing-tile fallback always lands on the finest resident ancestor
+>   (asserted as state, never pixels alone)"* — **met**: every mip-0 address that
+>   fell back is asserted equal to `VtTextureDesc::ancestor` at the level it was
+>   served, over every tile of every texture, on the residency itself.
+> * *"Low tier degrades through the same door (`RenderTier::apply` clamps, never
+>   enables)"* — **met**: the pool budget is a tier knob clamped with a `min`,
+>   there is no switch to turn virtual texturing off, and the arm asserts a
+>   caller who already asked for less keeps less.
+>
+> **What Phase 26 changed about the engine.** Material textures reach the
+> interactive renderer for the first time, and they are virtual from day one:
+> `.inf_tex` became a byte-addressable tiled container, `inf-vt` became the
+> GPU-free residency brain, the lit passes gained three bindings and a tile-tree
+> walk, `.inf_mat` bindings became persisted scene state, and the whole thing
+> streams off a deterministic analytic floor refined by a GPU feedback mask read
+> at a pinned latency. The readback ring built for it is not a virtual-texturing
+> detail — P27.1's shadow-page marking and P28.3's unified streamer read through
+> the same primitive.
+>
+> **What it did not do**, in one place: terrain does not sample through VT;
+> feedback is per-surface rather than per-fragment (P28.1); there is no tangent
+> stream (P28.2); a `--level` dev boot has no material content; and the whole
+> phase re-blessed **no** golden, because a textureless frame does not enter the
+> streaming loop at all — which arm (d) measures rather than assumes.
+
 ### Phase 27 — Virtual Shadow Maps (VSM)
 
 **Goal:** shadow resolution becomes virtual — 16k-equivalent per light paid only for pages

@@ -3950,23 +3950,33 @@ impl EngineHost {
     /// anything is projected, because the per-instance sets the projection reads
     /// come out of the registry this builds.
     ///
-    /// **Gated on the binding SET *and* the asset-index generation**, not on the
-    /// document version. A projection runs on every version bump — a gizmo drag
-    /// bumps it per input event — and building a VT level creates an atlas
+    /// **Gated on an `inf_editor_core::render_assets::VtLevelKey`** — the
+    /// binding SET *and* the asset-index generation, as one value — and not on
+    /// the document version. A projection runs on every version bump (a gizmo
+    /// drag bumps it per input event) and building a VT level creates an atlas
     /// texture and an indirection buffer, so the work must not happen per frame.
     ///
     /// The generation is the second half, and it was missing (P26.4 audit). This
     /// gate read the binding set alone, and its own doc claimed
     /// `refresh_asset_index` "forces a re-projection and clears the set" — it
     /// forces the re-projection and clears nothing: **nothing in the codebase
-    /// ever cleared `vt_bindings`**. So re-importing a `.inf_tex`, or editing a
-    /// material's graph, changed neither the version-independent set nor
-    /// anything else this early-out reads, and the viewport kept the atlas it
+    /// ever cleared the binding set**. So re-importing a `.inf_tex`, or editing
+    /// a material's graph, changed neither the version-independent set nor
+    /// anything else this early-out read, and the viewport kept the atlas it
     /// built the first time for the rest of the session.
-    /// `EditorRenderAssets::index_generation` moves on exactly the two events
-    /// that can put different bytes behind a GUID — an index refresh and a root
-    /// change — and `the_asset_index_generation_moves_when_a_binding_could_have_changed`
-    /// pins it against the bytes rather than against the counter.
+    ///
+    /// **Where the rule is now, and where it is tested** (P26.5). Both terms
+    /// live in `EditorRenderAssets::vt_level_key`, in Ring 1, because
+    /// `EngineHost::new` takes a real surface and nothing headless constructs
+    /// one — so the audit could only pin this early-out as source text.
+    /// `inf-editor-core`'s `tests/vt_level_key.rs` executes the whole sequence
+    /// on a real device through the real `build_vt_level` and asserts the
+    /// rebuilt registry's own descriptor carries a re-imported texture's extent;
+    /// `render_assets`'s
+    /// `a_levels_bindings_resolve_to_registrable_material_content` pins the
+    /// underlying store on the BYTES rather than on the counter. What is pinned
+    /// as source here is one call and one whole-value compare
+    /// (`projector_mirror`).
     ///
     /// Bindings are collected in **document order** and handed to the registry,
     /// which sorts them (`inf_render::registration_order`). The P26.3 LAW says

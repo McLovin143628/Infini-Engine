@@ -251,6 +251,33 @@ pub trait WorldBuilder {
 }
 
 /// v1 [`LevelSource`]: read an `.inf_lvl` file straight off disk.
+///
+/// # A `--level` dev boot draws NO material textures, and that is structural
+///
+/// Every other source can hand a runtime a level's virtual-texture content;
+/// this one cannot, and the reason is a dependency rule rather than an omission
+/// (P26.5, routed here from the P26.4 ledger).
+///
+/// A surface's textures reach a runtime through an `inf_asset::DerivedMaterial`
+/// — a `.inf_matd`, three texture GUIDs and the scalars, flattened out of an
+/// authored `.inf_mat`. Only two things derive one: the **cook**, which writes
+/// it into a pack, and the **PIE payload builder**, which computes it through
+/// the same door under the same salted id. Both link `inf-material`, and a
+/// shipped player must not — that is the P26.2 dependency inversion, and the
+/// whole reason `DerivedMaterial` lives in `inf-asset` at all rather than beside
+/// the compiler that produces it.
+///
+/// So a `--level` boot reads a level's bytes, resolves its meshes, its terrain,
+/// its voxels and its skeletons, and leaves every bound material at its **scalar
+/// surface** — which is exactly what a pre-v22 level renders as, and is the
+/// permanent no-texture path rather than a failure. [`PackLevelSource`]'s
+/// `material_content` is the textured path; `inf --cook` is one command away.
+///
+/// The alternative would be teaching this source to flatten a `.inf_mat` itself,
+/// which is `inf-material` in the shipped player's dependency graph for the
+/// benefit of a developer flag. It is not worth that, and saying so here is
+/// cheaper than letting someone discover an untextured level and go looking for
+/// a streaming bug.
 pub struct DevDirLevelSource {
     path: PathBuf,
 }
