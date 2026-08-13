@@ -3560,6 +3560,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "inf-vsm"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "inf-vt"
 version = "0.1.0"
 dependencies = [

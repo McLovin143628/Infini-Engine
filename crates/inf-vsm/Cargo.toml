@@ -1,0 +1,24 @@
+[package]
+name = "inf-vsm"
+description = "Virtual shadow maps: the per-light virtual page space, the physical page atlas and its residency (GPU-free)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+# The `inf-vt` dependency list, deliberately — thiserror and nothing else. The
+# reason is the same one that crate's manifest gives and it is structural rather
+# than frugal: this is the bookkeeping half of virtual shadow mapping, so it must
+# be unit-testable with no adapter on every CI leg, and a GPU-free crate that
+# names `wgpu` (or `glam`, or `inf-render`) stops being one the first time
+# somebody reaches for the convenience.
+#
+# It does NOT name `inf-vt` either. See the crate docs' measurement: the two
+# address spaces are different shapes, and a dependency edge between them would
+# buy one 30-line `pack_entry` at the price of coupling shadow paging to a
+# texture container's tile geometry. P28.3 merges the two BRAINS; that merge is a
+# rewrite of both, not an edge added early.
+thiserror = { workspace = true }

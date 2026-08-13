@@ -14,6 +14,7 @@ members = [
     "crates/inf-vgeom",
     "crates/inf-dcc",
     "crates/inf-vt",
+    "crates/inf-vsm",
     "crates/inf-material",
     "crates/inf-terrain",
     "crates/inf-voxel",
@@ -360,6 +361,13 @@ inf-dcc = { path = "crates/inf-dcc" }
 # shader validator to sample a texture" a dependency cycle rather than a review
 # question. It sits BEFORE inf-material in the member list for the same reason.
 inf-vt = { path = "crates/inf-vt" }
+# inf-vsm = virtual shadow mapping's GPU-free half (P27.1): the per-light virtual
+# page space (clipmap levels for the sun, face quadtrees for point, one quadtree
+# for spot), the physical page atlas geometry and the residency that allocates
+# it. Ring 0 on `inf-vt`'s exact terms — thiserror, nothing else — and it does
+# NOT name `inf-vt`: see that crate's docs for the measurement, and P28.3 for
+# where the two brains merge.
+inf-vsm = { path = "crates/inf-vsm" }
 inf-material = { path = "crates/inf-material" }
 inf-terrain = { path = "crates/inf-terrain" }
 # inf-voxel = the sparse SDF chunk volumes that locally extend the heightfield
