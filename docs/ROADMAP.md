@@ -9565,11 +9565,17 @@ door for editor viewport, PIE and shipping.
   frames-at-fallback counters per tile class, budgeted in the gate.
 
 > **STATUS — P26.4 Deterministic feedback + streaming loop: COMPLETE
-> (2026-08-12)** — nine commits (`76fd90c` the Ring-0 rank + mask layout,
+> (2026-08-12)** — thirteen commits (`76fd90c` the Ring-0 rank + mask layout,
 > `0ca2be1` the readback ring, `00d7c94` the registration order,
 > `853fd4b` the player's registration, `24e171f` the editor's, `5e167b6` the
-> streaming loop, `8d19123` the GPU walk arm, `cae8259` the level's dependency
-> edges, `91c3b4b` the carried-debts memo). Battery green:
+> streaming loop, `8d19123` the GPU walk arm, `fe556b3` the end-to-end renderer
+> arm, `91c3b4b` the carried-debts memo, `cae8259` the level's dependency edges,
+> `a4b9c07` the named-argument allow, `c78d2ff` **the fix** — the parallel page
+> staging keyed by ADDRESS rather than by position, a hazard this batch
+> introduced into its own new code and found by reading its own call site — and
+> `e04625e` this block. (The first draft of this line said "nine" and named
+> neither `c78d2ff` nor the two beside it; the P26.4 audit corrected it.)
+> Battery green:
 > **231 binaries, 4 160 passed, 0 failed, 8 ignored** (P26.3b left it at 229 /
 > 4 133; this batch adds two test binaries and 27 arms). Goldens stay **50** and
 > none was re-blessed —
@@ -9685,15 +9691,125 @@ door for editor viewport, PIE and shipping.
 > `vt_materials` fails the new set arm and the P26.3b content arm and nothing
 > else.
 >
-> **Honest remainders carried into P26.5.**
+> **THE P26.4 AUDIT (2026-08-12)** — eight commits appended, none amended
+> (`ab4a108` the downlevel tier's dropped texture set, `7a04974` the frustum
+> twin + three arms, `a411119` the registration door's first test, `8e02a14` the
+> two arms that could not fail, `6ee3ebb` the editor's missing invalidation +
+> the sidecar arms, `3a02634` the citations, `517b042` fmt, and this block).
+> Battery after the fixes: **231 binaries, 4 170 passed, 0 failed, 8 ignored**
+> (the batch left it at 231 / 4 160; the audit adds ten arms and no binary).
+> `clippy --workspace --all-targets` with `-D warnings` and
+> `cargo fmt --all --check` clean. Goldens stay **50**,
+> none re-blessed, and the textureless command stream is untouched — no golden
+> file appears in `git diff d465012..main --stat`, and no test file in the batch
+> lost a line (`--numstat` deletions are all source refactors).
+>
+> **Twenty mutations; fourteen were killed by name on the first pass.** The six
+> survivors are what the arms below are for, and one of them is withdrawn on
+> measurement rather than closed.
+>
+> * **The registration door had never been executed.** `build_vt_level` is
+>   clause 0 — the one call both hosts make — and the pool-format ruling above is
+>   a paragraph about three branches of it. `projector_mirror` greps its NAME out
+>   of two source files; `phase26_gate` deliberately spells the format decision by
+>   hand. So a mutation making a MIXED level take a BC pool, and one making every
+>   level take RGBA8, **both survived the whole crate**; so did
+>   `inf_vt::stored_page_format`, the ruling's only input, which shipped with one
+>   caller and no arm. The new arm runs the door four ways and then asserts the
+>   WORLD: a mixed BC1/BC3 level takes RGBA8 **and every page of its floor
+>   transcodes** (`report.missing` empty), which is what "the one format every
+>   container transcodes into" has to mean. Both adapter tiers, with the
+>   discriminating assertion guarded and explained rather than skipped.
+> * **The feedback's frustum test was not the floor's twin it is documented as.**
+>   Two divergences, and both are invisible for the same reason — both make the
+>   FLOOR more generous than the FEEDBACK, which is never a crash, never a wrong
+>   pixel, and always a surface quietly stuck at the floor's level. The shader's
+>   NDC margin was **half** `analytic_floor`'s, so there is a band at the edge of
+>   the frustum the floor claims and the feedback dropped. And the shader returned
+>   unconditionally on `clip.w <= 0` where `on_screen` keeps a sphere that
+>   **straddles** the eye — which is the ordinary state of the terrain-sized quad
+>   this signal's own memo names as its worst case: a camera standing on a 200 m
+>   ground plane is inside that plane's bounding sphere, so the largest surface on
+>   screen was the one that never got marked at all. One rule now
+>   (`inf_render::ndc_margin` plus both of `on_screen`'s branches, mirrored), no
+>   CPU behaviour moved, and a five-position sweep whose last position is
+>   **bisected** into the old margin band. Both halves fail it by name.
+> * **The classic (non-meshlet) tier drew every real mesh textureless.**
+>   `passes::classic_vgeom::pack_vgeom_instance` builds a `MeshInstance` to reuse
+>   the rigid layout and spelled one field `vt: Default::default()`;
+>   `InstanceRaw::pack` reads exactly that field into `misc.yzw` and `mesh.wgsl`
+>   tests those three words. The node runs precisely when
+>   `RenderSettings.vgeom.enabled == false`, so one level rendered textured on a
+>   meshlet-capable adapter and textureless on one without. Pre-existing (P13.4)
+>   and **inert until this batch** — before P26.4 every projector filled `NONE`
+>   anyway. The one-door claim reads "both hosts"; the third spelling was inside
+>   `inf-render`, downstream of both, where `projector_mirror` cannot see it.
+> * **A re-imported texture never reached the editor's atlas.**
+>   `sync_vt_bindings` is gated on the binding SET and its own doc said
+>   *"`refresh_asset_index` forces a re-projection and clears the set"*. It forces
+>   the re-projection and clears nothing: **nothing in the tree ever cleared
+>   `vt_bindings`** — four references, none of them a reset. So re-importing a
+>   `.inf_tex` or saving a material graph left the viewport holding the bytes it
+>   read the first time for the rest of the session, on a path Ring 2 drives from
+>   both `commands/assets.rs` and `commands/dcc.rs`. The same hole has a
+>   boot-order face: a level projected before `set_content_root` arrives records
+>   its bindings against an empty resolution and can never be un-stuck.
+>   `EditorRenderAssets::index_generation` is the third term, and the arm asserts
+>   the **bytes** rather than the counter.
+> * **An anti-vacuity control that could not fail.**
+>   `an_unready_slot_is_a_miss_and_never_a_neighbours_bytes` ended with
+>   `take_eventually(…).is_some() || ring.misses() > 6`, and `take_eventually`
+>   bumps `misses` on every attempt — so the right-hand side is true exactly when
+>   the left is false. It was also asking for a frame that ring could never
+>   answer. Beside it, the **reachable** form of "never a neighbour's bytes": a
+>   slot index is `frame % slots`, and `VtFeedback::record` writes nothing on a
+>   frame with empty coverage, so a textureless stretch leaves slot `F % 3`
+>   holding `F − 3`'s bytes. Weakening `take`'s guard to "any `Ready` slot at this
+>   index" survives both latency arms — measured — and fails the new one.
+> * **The dedup's stronger rank, and one withdrawal.**
+>   `a_tile_wanted_twice_keeps_the_stronger_rank` asserts the two wants become ONE
+>   want, which is true of either survivor; reversing the tie-break left it and
+>   the whole workspace green. The rank is only observable under budget pressure,
+>   and the new arm looks there. The **address-keyed page staging** (`c78d2ff`) is
+>   the withdrawal: it is defensive and unreachable. `VtPools::apply` skips
+>   `fetch` only for a slot outside the atlas geometry, `VtPools::new` takes that
+>   geometry from the residency, and slots are handed out in ascending order — so
+>   a geometry skip always falls at the TAIL of the admit list and cannot shift a
+>   later page onto another tile's bytes. Recorded rather than given an arm that
+>   would have to build a transaction the door cannot produce.
+> * **`VtTransaction::unknown_texture` has no producer**, and the claim that a
+>   stale mask after a level switch makes one is withdrawn:
+>   `VtFeedbackLayout::wants_at` resolves each handle through `res.desc()` and
+>   skips what it cannot, `analytic_floor` does the same, `want_floor` iterates the
+>   registry. It is a tripwire for P28.3's cross-level want sets and reads zero
+>   because nothing can make it read anything else.
+> * **Four citations.** `serialize.rs` named
+>   `the_level_sidecar_records_what_it_binds`, which occurs nowhere but in that
+>   comment (the arm exists under another name);
+>   `EngineRenderer::vt_set_for_material` was a second spelling of clause 0's one
+>   expression with **zero callers**, asserted by two doc blocks to be what
+>   projectors call — removed; `inf-vgeom/src/stream.rs:57-68` starts mid-sentence
+>   and overruns into `use` statements where the batch's own `vt_feedback.wgsl`
+>   has 52-62; and `passes::ResourceKey` has no member spelled
+>   `table_generation`, only an anonymous fourth component fed by
+>   `VtPools::table_generation`.
+> * **This ledger said "nine commits" for a thirteen-commit batch** and never
+>   mentioned `c78d2ff` at all — the one commit in it that repairs a defect the
+>   batch introduced into its own new code. Corrected above.
+>
+> **Honest remainders carried into P26.5** (after the audit).
 > * **THE ONE TO READ FIRST — what "bit-exact residency trace" now requires.**
 >   The floor is bit-exact unconditionally: it is a pure function of
 >   `(camera, bounds, registry)` with no clock, no frame history and no GPU in
 >   it. The *feedback* is bit-exact **given the same arrival pattern**, and the
 >   arrival pattern is a GPU-timing fact: `take(F)` returns frame `F − 2`'s mask
 >   **or nothing**, and which frames get "or nothing" depends on how fast the
->   device drained. So two runs of one scripted path agree on the floor always,
->   and on the refinement only if the ring landed on the same frames. That is
+>   device drained. So two runs of one scripted path agree on the floor always —
+>   asserted since the audit, as sequence equality over a twelve-step path in
+>   `the_floor_holds_across_a_whole_scripted_path_and_repeats_exactly`, which
+>   also pins residency ⊇ that step's floor after EVERY transaction under pool
+>   pressure — and on the refinement only if the ring landed on the same
+>   frames. That is
 >   the honest reading of "a dropped feedback frame degrades to the floor,
 >   deterministically" — the *degradation* is deterministic, the *timing* is
 >   not. **The mechanism P26.5's gate arm (a) needs already exists**: pump the
@@ -9726,6 +9842,32 @@ door for editor viewport, PIE and shipping.
 >   that ships before its caller (`summary()` is pinned meanwhile).
 > * The pool budget is still `DEFAULT_VT_BUDGET_BYTES` on both hosts; per-tier
 >   knobs are P26.5 (1).
+> * **The delete guard is inert on every committed sample.** All sixteen
+>   `.inf_lvl.toml` files under `samples/` and `templates/` predate
+>   `dependencies` and nothing in this batch rewrites them, so `has_referrers`
+>   stays blind to level → material for shipped content until each level is
+>   re-saved through the editor. The migration is correct and now has its arm;
+>   the *effect* is retroactively absent.
+> * **The downlevel tier has no pixel arm.** `pack_vgeom_instance`'s dropped
+>   texture set is fixed and pinned on `InstanceRaw`'s words; nothing renders a
+>   textured vgeom surface with `RenderSettings.vgeom.enabled = false`, so "the
+>   two tiers sample the same thing" is asserted on instance bytes rather than
+>   on texels. P26.5's over-budget arm (c) is the natural home.
+> * **The editor's VT invalidation is pinned by a SOURCE assertion.** The rule
+>   is asserted on bytes in Ring 1 (`EditorRenderAssets::index_generation` vs a
+>   re-imported `.inf_tex`), but the host's *use* of it needs a live
+>   `EngineHost` — a window and a device — so `projector_mirror` pins the call
+>   and nothing executes it. Same class as every other viewport-host claim.
+> * **Honouring a declared guid opens an id-collision path.** `read_entry` now
+>   prefers a sidecar's own `guid` over the content hash for any payload whose
+>   sidecar it cannot parse. Two payloads declaring one guid therefore collide:
+>   `by_id` keeps the last scanned and `by_path` keeps both paths pointing at
+>   it. An exact file copy already collided before the batch (identical hash →
+>   identical id); same-guid/different-content is new, and untested. The
+>   realistic trigger is a filesystem copy of a `.inf_lvl` beside its `.toml`.
+> * **`VtTransaction::unknown_texture` still has no producer** — a tripwire for
+>   P28.3's cross-level want sets, reading zero because nothing in this tree can
+>   make it read anything else (audit; the doc says so now).
 - **P26.5 Editor, tiers & the gate** — 1. VT residency heatmap debug view mode + pool budget
   knobs per tier; 2. missing-tile fill v1: deterministic edge-directed upscale of the finest
   resident ancestor (the NTC intent, measured before adoption; memo on the outcome);
