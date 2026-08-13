@@ -10089,13 +10089,158 @@ door for editor viewport, PIE and shipping.
 > * **`upscale2x` has no non-test caller** — deliberately, as the measured
 >   alternative the ruling rests on, so it can be re-measured rather than
 >   re-argued.
+> * *(added by the audit)* **"Refines under camera approach" is a Ring-0
+>   assertion and a gate inference → P27's gate.** `phase26_gate` asserts the
+>   trace moves and that both want classes fire; the finer-as-you-close property
+>   lives in `inf-render`'s `the_floor_holds_across_a_whole_scripted_path_and_repeats_exactly`
+>   (residency ⊇ the camera-driven floor at every step). Restating it at the
+>   gate is one assertion and it belongs with the next phase's scripted path.
+> * *(added by the audit)* **83 string literals tree-wide still carry an eaten
+>   `\`.** Six were repaired here (the two user-facing ones this batch added,
+>   three assertion messages, one carried from P26.4). The rest are assertion
+>   text in earlier phases' gates; the law now has a producer-side guard where it
+>   reaches a user (`inf-material`'s advisories, `inf_packager::cook`'s,
+>   `pie_schema_skew`'s, the capture wizard's), and a tree-wide sweep is a
+>   cleanup with no deadline rather than a defect with one.
+
+> **THE P26.5 AUDIT (2026-08-12)** — seven commits appended, none amended
+> (`96e2569` the finest-ancestor arm, `81449ea` the eaten-`\` literals,
+> `04e65e0` the goldens' content pin, `afb9c21` the vertex-stream layout pins,
+> `a30c028` the skinned uv's world arm, `2d82d0a` the sorted walk's pin,
+> `2edf0b6` the fill measurement's fourth filter, and this block). Battery
+> after the fixes: **235 binaries, 4 206 passed, 0 failed, 8 ignored** (the
+> batch left it at 235 / 4 202; the audit adds **four** new arms, strengthens
+> four existing ones in place, and adds no binary — which is why the count moves
+> by less than the number of findings).
+> `clippy --workspace --all-targets` with `-D warnings` and `cargo fmt --all
+> --check` clean. Goldens stay **50**, none re-blessed — and that is now a
+> statement with a check behind it rather than a count (below). No schema
+> moved. No `.inf_lvl` payload moved (`git diff 0491ac4..main -- '*.inf_lvl'`
+> is empty, which is the byte claim the sidecar re-bless rests on, verified
+> against git rather than against the arm that also wrote them).
+>
+> **Eighteen mutations; twelve were killed by name on the first pass.** Six
+> survived, and they are what the seven commits are for.
+>
+> * **THE FINDING: the arm the phase's own "Done when" is certified against
+>   could not see a coarser answer.**
+>   `an_over_budget_scene_stays_in_the_pool_and_falls_back_to_the_finest_ancestor`
+>   says in its own comment that it asserts what `resolve` names is *"(i)
+>   resident and (ii) the FINEST resident ancestor there is"*. It asserted
+>   neither: what it had was `desc.ancestor(at, got.mip) == Some(got)`, the
+>   "is AN ancestor" half. Measured — a `VtResidency::resolve` that names the
+>   always-pinned **ROOT** for every address in every pyramid passes the whole
+>   arm untouched, while failing three `inf-vt` arms by name. So the property
+>   was pinned at Ring 0 and the integration gate the completion block cites
+>   for it was blind to exactly the defect the clause is about. A gate must aim
+>   at the thing it names (the P23 law). Both halves are asserted now, in
+>   `scripted_run` where the residency is alive, with arm (c) carrying their
+>   anti-vacuity (all 96 mip-0 addresses of the fixture, exact rather than
+>   non-zero).
+> * **Nothing in the tree pinned a golden's CONTENT, and arm (f)'s reason for
+>   not doing so was backwards in both halves.** The arm counted, on the
+>   grounds that *"a changed PNG is what the harness's own comparison catches.
+>   What a comparison cannot catch is a golden being deleted."* Measured:
+>   `unlit.png` overwritten with `voxel.png`'s bytes leaves `golden_unlit`
+>   **green** (the pixel compare is `INF_GOLDEN_STRICT`, opt-in since P2 and set
+>   by no battery); and `rm unlit.png` is repaired by `check_golden` itself on
+>   the next run (`read_png().is_none() => write_png`), so a deletion is a
+>   *silent re-bless from the current code* and the count is 50 again. The
+>   phase's headline claim — "the whole phase re-blessed **no** golden" — rested
+>   on 50 files of the right size. It rests on a digest now.
+> * **The scatter pull buffer's stride was an argument, and this batch is what
+>   made it breakable.** `PrimStorage` flattens the primitives into a storage
+>   buffer `scatter_mesh.wgsl` indexes at `idx * 6u`, under a doc saying the
+>   flatten "names the two fields it copies rather than casting the struct, so
+>   the stride and the copy cannot drift apart". Measured: adding
+>   `flat.extend_from_slice(&v.uv)` draws **every scattered instance from the
+>   wrong bytes** and the whole `inf-render` suite is green, all four scatter
+>   goldens included. Before P26.5 a `MeshVertex` *was* six floats and the drift
+>   was impossible; the uv is what opened it. `SCATTER_PULL_STRIDE` + an arm on
+>   both sides of the agreement. Beside it: the fracture vertex's layout arm
+>   read three hand-copied offsets and reads `mesh::VERTEX_ATTRIBUTES` now, and
+>   the memo's load-bearing `max_vertex_attributes: 16` measurement is a `const`
+>   assertion instead of a sentence in two doc blocks (a **seventeenth**
+>   attribute — the tangent P28.2 carries — fails the build at the file that
+>   would have to change, instead of failing `create_render_pipeline` on a
+>   device).
+> * **The skinned uv was mirrored, never measured.** The batch's headline for
+>   that path is that a character samples the artist's parametrization, and what
+>   pinned it was `projector_mirror` comparing the editor's `skinned_mesh_data`
+>   with the player's copy. Measured: dropping `uv: v.uv` in **both** copies is
+>   invisible to `inf-editor-core` and `inf-player` — 600+ tests green, the
+>   mirror perfectly satisfied, because the two hosts agree about building the
+>   same wrong buffer. **Two hosts agreeing is not the world being right** (the
+>   P24 law), and a mirror is the one gate shape that can never tell.
+> * **NTFS hides the sorted walk.** `the_scan_walk_is_path_sorted` argues that
+>   *"a `read_dir` order would have to agree with `sort()` twice by chance"*; on
+>   NTFS a directory is a name-ordered B-tree and it agrees every time.
+>   Measured: deleting `paths.sort()` leaves every `inf-asset` arm green here
+>   and on the Windows CI leg. The P25 one-platform law turned around — not a
+>   bound that reddens CI on one platform but a gate that goes **vacuous** on
+>   one, which is worse, because a red build gets read and a green one does not.
+>   The behavioural arm keeps the legs where it bites; a source pin covers the
+>   rest.
+> * **The eaten-`\` law, sixth catch — and two of the six were user-facing.**
+>   P26.5's tail-cost advisory shipped with its source indentation inside it,
+>   and that sentence is what the batch's own Content Drawer badge prints; so
+>   did the viewport's Output Log line on entering the heat-map. `contains()` is
+>   happy with a mangled string, which is why this batch's own advisory arm —
+>   asserting the count and the substring `"tiled .inf_tex"` — passed straight
+>   over it, and why all five prior catches were found by eye. The advisories
+>   have the guard the house already uses in `inf_packager::cook`. **The law
+>   caught this audit's own first repair**: the scripted fix's `\\` arrived as a
+>   `\`, Python read it as its own continuation, and the "repaired" literal came
+>   out byte-identical to the defect. `chr(92)`, never a literal backslash in a
+>   scripted edit.
+>
+> **The measurement that was labelled wrong, and got firmer when corrected.**
+> `docs/memos/p26-5-missing-tile-fill.md` rejects the edge-directed upscale
+> against *"the bilinear magnification the hardware sampler already performs for
+> free"*, and the column it called bilinear is `box2x` — the quincunx lattice
+> with the direction test removed, source texels passing through untouched, half
+> a texel off. It is the right control for isolating the direction test and the
+> wrong thing to call a sampler's filter. True texel-centre bilinear is measured
+> now (integer, in sixteenths) and **both numbers move the ruling's way**:
+> replication still wins on both metrics (9.92 / 24.77 against 11.45 / 25.83),
+> and edge-directed is not "within one part in a hundred of the bar" — against
+> the filter the hardware actually performs it is **5 % worse**. The memo
+> carries the corrected table, the correction itself, and the NTC floor restated
+> against the right number.
+>
+> **Verified on measurement, not withdrawn.** The `+ 1` in arm (a)'s
+> `feedback_misses == READBACK_LATENCY_FRAMES + 1` is a derivation and not a
+> tuning: `set_for` returns `NONE` until a texture is warm, so frame 0's
+> coverage list is empty and frame 2 has nothing to read — and
+> `feedback_frames + feedback_misses == PATH_FRAMES` is asserted beside it.
+> `VT_STREAM_STEP_BUDGET_MS` at 8.0 against 0.53 measured is ~15×, inside the
+> house pattern (`STREAMED_STEP_BUDGET_MS` is 22× its measurement,
+> `LOAD_BUDGET_MS` ~900×) and honestly named a FRAME-class number that includes
+> the render. `vt_heat` runs the same `vt_resolve`, spelled the same way as
+> `vt_sample` (same `b`, same `uv - floor(uv)`, same `vt_mip`) — one door, and
+> there is no second resolve. Every pipeline binding the widened `MeshVertex`
+> takes its stride from `size_of` through one `vertex_layouts()` — mesh, depth
+> prepass, shadow, mask, pick, translucent, scatter, fracture, classic vgeom —
+> so the only place a number was written down is the one the finding above is
+> about. The two `skinned_mesh_data` copies do move together (dropping the uv in
+> one fails the mirror by name). Rust's `box_uv` and the retired WGSL
+> `vt_box_uv` differ only where `signum` and `sign` differ — an all-zero normal
+> — which no producer can present (`deformed_skinned_mesh` falls back to +Y,
+> every primitive normal is unit), so *"character for character"* holds where it
+> can be reached. `fetch`'s other `None` branch (a registered texture with no
+> reader) cannot occur: `register` pushes both or neither. The batch weakened no
+> prior gate — the only test-file deletions in the diff are comment rewrites and
+> `projector_mirror`'s one source assertion becoming **two**.
 
 > **PHASE 26 — STREAMING VIRTUAL TEXTURING: COMPLETE (2026-08-12).** **Six**
 > batches (P26.1 container, P26.2 pool + residency, P26.3 sampling, P26.3b the
-> wire, P26.4 feedback + streaming, P26.5 editor + tiers + the gate) and **five**
+> wire, P26.4 feedback + streaming, P26.5 editor + tiers + the gate) and **six**
 > adversarial audits — counted rather than remembered, because the P26.4 ledger
 > opened by saying "nine commits" about a thirteen-commit batch and the audit had
-> to correct it.
+> to correct it. (Five when this block was first written; the P26.5 audit above
+> is the sixth, and it is why the **third** clause below is *certified* rather
+> than merely *claimed* — the other three were met as written and were
+> re-checked against the code clause by clause.)
 >
 > **The "Done when", clause by clause, against what is now measured:**
 >
@@ -10106,15 +10251,38 @@ door for editor viewport, PIE and shipping.
 >   granted slots and never exceeds them, and the loop defers.
 > * *"sampled detail refines under camera approach on a scripted path with a
 >   bit-exact residency trace (twice per run, and PIE == shipping)"* — **met,
->   with the P26.4 ledger's distinction kept**: the floor is exact
->   unconditionally; the refinement is exact given a pinned arrival pattern, so
->   the gate pins one (the device is pumped between frames) and asserts
->   `feedback_misses` at exactly the number that pattern implies. Both hosts fold
->   the same trace, compared by GUID.
+>   with the P26.4 ledger's distinction kept and one bound the P26.5 audit
+>   names.** The floor is exact unconditionally; the refinement is exact given a
+>   pinned arrival pattern, so the gate pins one (the device is pumped between
+>   frames) and asserts `feedback_misses` at exactly the number that pattern
+>   implies — a derivation, not a tuning: `set_for` returns `NONE` until a
+>   texture is warm, so frame 0 records nothing and frame 2 has nothing to read.
+>   Both hosts fold the same trace, compared by GUID.
+>
+>   **The bound**: what the gate asserts about the *approach* is that the trace
+>   MOVES across the twelve steps (a still frame would make the equality above a
+>   statement about one frame) and that both want classes are populated. It does
+>   **not** assert that a given surface's resident mip gets finer as the camera
+>   closes on it. That property is pinned one crate down, in `inf-render`'s
+>   `the_floor_holds_across_a_whole_scripted_path_and_repeats_exactly`:
+>   residency ⊇ the step's floor after every transaction under pool pressure,
+>   with the floor camera-driven at the level each surface's footprint justifies
+>   (a camera-free `analytic_floor` is one of the batch's own killed mutations).
+>   So "refines under camera approach" is **asserted at Ring 0 and inferred at
+>   the gate** — the same shape the finest-ancestor clause had before this audit,
+>   and the natural first item for P27's gate work.
 > * *"missing-tile fallback always lands on the finest resident ancestor
->   (asserted as state, never pixels alone)"* — **met**: every mip-0 address that
->   fell back is asserted equal to `VtTextureDesc::ancestor` at the level it was
->   served, over every tile of every texture, on the residency itself.
+>   (asserted as state, never pixels alone)"* — **met, and this is the clause the
+>   P26.5 audit had to repair before it could be certified.** As written, the arm
+>   asserted only that a fallback is *an* ancestor (`VtTextureDesc::ancestor` at
+>   the level it was served), which a `resolve` naming the always-pinned root
+>   satisfies for every address in the pyramid — measured, and it passed. The two
+>   words that matter are **finest** and **resident**, and both are asserted now,
+>   per address, over every mip-0 tile of every texture in the fixture: the tile
+>   the table names is resident, and every level between it and the address is
+>   not. `inf-vt`'s 200-round churn arm holds the same property against an
+>   independent brute-force model at Ring 0; the gate is what holds it through
+>   the real renderer.
 > * *"Low tier degrades through the same door (`RenderTier::apply` clamps, never
 >   enables)"* — **met**: the pool budget is a tier knob clamped with a `min`,
 >   there is no switch to turn virtual texturing off, and the arm asserts a
@@ -10132,9 +10300,12 @@ door for editor viewport, PIE and shipping.
 >
 > **What it did not do**, in one place: terrain does not sample through VT;
 > feedback is per-surface rather than per-fragment (P28.1); there is no tangent
-> stream (P28.2); a `--level` dev boot has no material content; and the whole
-> phase re-blessed **no** golden, because a textureless frame does not enter the
-> streaming loop at all — which arm (d) measures rather than assumes.
+> stream (P28.2, and the skinned path's `max_vertex_attributes: 16` wall is a
+> separate decision now asserted as a `const`); a `--level` dev boot has no
+> material content; and the whole phase re-blessed **no** golden, because a
+> textureless frame does not enter the streaming loop at all — which arm (d)
+> measures rather than assumes, and which the golden set's content digest
+> (P26.5 audit) now checks rather than counts.
 
 ### Phase 27 — Virtual Shadow Maps (VSM)
 
@@ -10209,7 +10380,16 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
   sections interleaved per virtual cluster page (`.inf_vmesh` v3 sections or a pack-layout
   extension — decided at cook, raw-image law holds); 2. one page-in transaction feeds both
   the geometry pools and the VT atlas; partial admission is impossible by construction and
-  the gate asserts the invariant (a resident cluster's tiles are resident, always).
+  the gate asserts the invariant (a resident cluster's tiles are resident, always);
+  3. **the tangent channel P26.5 routed here** (`docs/memos/p26-5-vertex-streams.md`):
+  `inf_vgeom::VgeomVertex` is position + normal + uv and has no tangent to give, so the
+  rigid and meshlet streams cannot carry one until this container moves — which is why the
+  uv landed in P26.5 and the tangent did not. It belongs in *this* edit, where the
+  container moves once. `vt_apply_normal`'s per-fragment cotangent frame is what it
+  replaces. **The skinned path is a separate decision**: that pipeline is at
+  `max_vertex_attributes: 16` exactly (asserted as a `const` in `passes::skinned`), so a
+  tangent there needs a packed attribute (uv.xy + an octahedral tangent in one
+  `Float32x4`) or the renderer's first raised limit — the memo has both.
 - **P28.3 One streamer** — 1. `inf-stream`: the vgeom planner, VT residency and VSM page
   cache become consumers of one budget arbiter + one feedback/readback ring + one stamp
   domain + one want pipeline (analytic floor ∪ feedback refinement ∪ predictor); 2. per-tier
