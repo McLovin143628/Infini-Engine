@@ -593,6 +593,168 @@ pub struct VsmSettings {
     pub perspective_near_m: f32,
 }
 
+/// A [`VsmSettings`] value outside the legal set — **the settings boundary's own
+/// refusal** (P27.2).
+///
+/// # Why this type exists, and what it is defence in depth *for*
+///
+/// Until P27.2 the only door was per light: `VsmLightDesc::clipmap` clamped a
+/// level count, `VsmLevelDesc::page_count` saturated a page grid, and
+/// `VsmSystem::for_scene` truncated the light list with a `tracing::warn`. Every
+/// one of those is a **recovery**, and the P27.1 audit found what a recovery costs
+/// when it is the only door: `clipmap_pages_per_side = 65 536` is `2³²` pages, the
+/// multiply wrapped to **zero** in release, the descriptor validated (a square
+/// multiple of four is a legal clipmap grid), `register_light` compared 0 against
+/// its ceiling and *accepted*, and the relayout then walked four billion addresses
+/// into a table with no entry words at all.
+///
+/// The saturating counters closed that hole from inside. This closes it from
+/// outside, so a host learns its configuration is illegal **when it sets it**
+/// rather than one frame later in a log line — and the two are deliberately
+/// redundant, because the settings struct is `Copy` and a caller may still
+/// construct one by hand and hand it to a lower layer.
+/// `PartialEq` but **not `Eq`**: [`Distance`](VsmSettingsError::Distance) carries
+/// the offending `f32`, and one of the values it exists to reject is `NaN`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VsmSettingsError {
+    /// A level count outside `1..=inf_vsm::MAX_VSM_LEVELS`.
+    Levels {
+        /// Which setting: `"clipmap_levels"`, `"spot_levels"`, `"point_levels"`.
+        field: &'static str,
+        levels: u32,
+        max: usize,
+    },
+    /// A clipmap page grid that is zero, or not the multiple of four the
+    /// concentric `N/4 + x/2` parent rule needs.
+    ClipmapGrid { pages_per_side: u32 },
+    /// A light's whole page space past [`inf_vsm::MAX_VSM_PAGES_PER_LIGHT`] — the
+    /// ceiling `register_light` enforces, restated here so it is refused before an
+    /// allocation is attempted rather than after.
+    PageSpace {
+        field: &'static str,
+        pages: u64,
+        max: u32,
+    },
+    /// A page budget that does not hold one page, so every want would be deferred
+    /// and the atlas would be empty for ever.
+    Budget { budget_bytes: u64, page_bytes: u64 },
+    /// A distance that is not a positive finite number of metres.
+    Distance { field: &'static str, value: f32 },
+}
+
+impl std::fmt::Display for VsmSettingsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Levels { field, levels, max } => write!(
+                f,
+                "`{field}` is {levels}; a light's page tree needs 1..={max} levels \
+                 (a packed indirection entry carries the level in 8 bits)"
+            ),
+            Self::ClipmapGrid { pages_per_side } => write!(
+                f,
+                "`clipmap_pages_per_side` is {pages_per_side}; a clipmap level must \
+                 be a non-zero multiple of 4, or the concentric parent rule \
+                 `N/4 + x/2` lands between pages"
+            ),
+            Self::PageSpace { field, pages, max } => write!(
+                f,
+                "`{field}` gives a light {pages} virtual pages and the ceiling is \
+                 {max}; the indirection block and the residency vector are both \
+                 linear in it, so an unbounded tree is an unbounded allocation at \
+                 registration"
+            ),
+            Self::Budget {
+                budget_bytes,
+                page_bytes,
+            } => write!(
+                f,
+                "`budget_bytes` is {budget_bytes} and one shadow page costs \
+                 {page_bytes}; the atlas would have no slots and every page request \
+                 would be deferred"
+            ),
+            Self::Distance { field, value } => {
+                write!(f, "`{field}` is {value}; it must be a positive finite metre")
+            }
+        }
+    }
+}
+
+impl std::error::Error for VsmSettingsError {}
+
+impl VsmSettings {
+    /// **The settings boundary.** `Ok` iff every light tree these settings would
+    /// build is one `inf_vsm` can hold, and every distance is a real metre.
+    ///
+    /// Checked **through the arithmetic the descriptors actually use** rather than
+    /// beside it: the page counts below are the products
+    /// `VsmLightDesc::page_count` computes, taken in `u64` so an illegal grid is
+    /// *large* here instead of wrapped, which is precisely the failure mode the
+    /// P27.1 audit found. Called by
+    /// [`EngineRenderer::set_settings`](crate::EngineRenderer::set_settings), which
+    /// refuses rather than clamps.
+    ///
+    /// `enabled` is deliberately **not** consulted: settings that are illegal while
+    /// the feature is off become illegal the moment somebody turns it on, and a
+    /// door that only guards when the light is already on is not a door.
+    pub fn validate(&self) -> Result<(), VsmSettingsError> {
+        let max_levels = inf_vsm::MAX_VSM_LEVELS;
+        let ceiling = inf_vsm::MAX_VSM_PAGES_PER_LIGHT;
+        for (field, levels) in [
+            ("clipmap_levels", self.clipmap_levels),
+            ("spot_levels", self.spot_levels),
+            ("point_levels", self.point_levels),
+        ] {
+            if levels == 0 || levels as usize > max_levels {
+                return Err(VsmSettingsError::Levels {
+                    field,
+                    levels,
+                    max: max_levels,
+                });
+            }
+        }
+        let n = self.clipmap_pages_per_side;
+        if n == 0 || !n.is_multiple_of(4) {
+            return Err(VsmSettingsError::ClipmapGrid { pages_per_side: n });
+        }
+        // The clipmap: every level is the same `n × n` grid, so the whole tree is
+        // `levels · n²` — in `u64`, which is the point.
+        let clipmap = u64::from(n) * u64::from(n) * u64::from(self.clipmap_levels);
+        // A quadtree: `4^(levels-1) + … + 1`, i.e. `(4^levels − 1) / 3`. A cube is
+        // six of them. Both computed rather than approximated, so the refusal and
+        // `register_light`'s agree about the same number.
+        let quadtree = |levels: u32| -> u64 { (4u64.pow(levels) - 1) / 3 };
+        for (field, pages) in [
+            ("clipmap_pages_per_side", clipmap),
+            ("spot_levels", quadtree(self.spot_levels)),
+            ("point_levels", 6 * quadtree(self.point_levels)),
+        ] {
+            if pages > u64::from(ceiling) {
+                return Err(VsmSettingsError::PageSpace {
+                    field,
+                    pages,
+                    max: ceiling,
+                });
+            }
+        }
+        let page_bytes = inf_vsm::VsmAtlasConfig::default().page_bytes();
+        if self.budget_bytes < page_bytes {
+            return Err(VsmSettingsError::Budget {
+                budget_bytes: self.budget_bytes,
+                page_bytes,
+            });
+        }
+        for (field, value) in [
+            ("first_level_extent_m", self.first_level_extent_m),
+            ("perspective_near_m", self.perspective_near_m),
+        ] {
+            if !(value.is_finite() && value > 0.0) {
+                return Err(VsmSettingsError::Distance { field, value });
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for VsmSettings {
     fn default() -> Self {
         Self {
@@ -746,6 +908,234 @@ pub fn ssao_hemisphere_kernel(count: usize, seed: u32) -> Vec<[f32; 3]> {
         out.push(v);
     }
     out
+}
+
+#[cfg(test)]
+mod vsm_settings_boundary_tests {
+    use super::*;
+    use inf_vsm::{VsmLightDesc, VsmResidency, MAX_VSM_LEVELS, MAX_VSM_PAGES_PER_LIGHT};
+
+    /// **The one the P27.1 audit asked for**: the grid that wrapped is refused at
+    /// the door, and the refusal is a *type* rather than a log line.
+    ///
+    /// `65 536²` is exactly `2³²`. Before the saturating counters landed it wrapped
+    /// to zero, validated as a legal square multiple of four, registered against a
+    /// million-page ceiling as *zero* pages, and then walked four billion addresses
+    /// into a table image with no entry words. The counters closed it from inside;
+    /// this asserts the outside door refuses it *without needing them* — the
+    /// arithmetic here is `u64`, so an illegal grid is large rather than absent.
+    #[test]
+    fn the_page_grid_that_wrapped_is_refused_at_the_settings_boundary() {
+        let bad = VsmSettings {
+            clipmap_pages_per_side: 65_536,
+            ..Default::default()
+        };
+        let err = bad.validate().expect_err("2^32 pages was accepted");
+        assert!(
+            matches!(err, VsmSettingsError::PageSpace { field: "clipmap_pages_per_side", pages, .. }
+                if pages == 65_536 * 65_536 * 8),
+            "{err:?}"
+        );
+        // …and the second door the audit named: 40 000 fits per level and does not
+        // fit summed over eight, which no per-level check could catch.
+        let sum = VsmSettings {
+            clipmap_pages_per_side: 40_000,
+            ..Default::default()
+        };
+        assert!(matches!(
+            sum.validate(),
+            Err(VsmSettingsError::PageSpace { .. })
+        ));
+        // ANTI-VACUITY, and it is the whole point of a boundary: a grid one step
+        // below the ceiling is ACCEPTED, so this is a bound and not a ban.
+        let ok = VsmSettings {
+            clipmap_pages_per_side: 256,
+            clipmap_levels: 16,
+            ..Default::default()
+        };
+        assert_eq!(
+            u64::from(ok.clipmap_pages_per_side).pow(2) * u64::from(ok.clipmap_levels),
+            u64::from(MAX_VSM_PAGES_PER_LIGHT),
+            "the fixture is meant to sit exactly ON the ceiling"
+        );
+        assert_eq!(ok.validate(), Ok(()));
+    }
+
+    /// The refusal and `VsmResidency::register_light`'s agree about **which**
+    /// configurations are legal — measured by building the descriptor the settings
+    /// name and registering it, rather than by two lists of constants.
+    ///
+    /// This is what makes the boundary *defence in depth* rather than a second
+    /// opinion: anything it lets through must register, and anything it refuses
+    /// must be one registration would have had to recover from.
+    #[test]
+    fn the_boundary_and_the_registration_door_agree() {
+        let cases = [
+            (VsmSettings::default(), true),
+            (
+                VsmSettings {
+                    clipmap_pages_per_side: 4,
+                    clipmap_levels: 1,
+                    spot_levels: 1,
+                    point_levels: 1,
+                    ..Default::default()
+                },
+                true,
+            ),
+            (
+                VsmSettings {
+                    clipmap_pages_per_side: 32,
+                    clipmap_levels: 16,
+                    spot_levels: 10,
+                    point_levels: 9,
+                    ..Default::default()
+                },
+                true,
+            ),
+            // Illegal: not a multiple of four, so `N/4 + x/2` lands between pages.
+            (
+                VsmSettings {
+                    clipmap_pages_per_side: 6,
+                    ..Default::default()
+                },
+                false,
+            ),
+            // Illegal: zero levels is not a tree.
+            (
+                VsmSettings {
+                    spot_levels: 0,
+                    ..Default::default()
+                },
+                false,
+            ),
+            // Illegal: past the 8-bit level field.
+            (
+                VsmSettings {
+                    point_levels: MAX_VSM_LEVELS as u32 + 1,
+                    ..Default::default()
+                },
+                false,
+            ),
+        ];
+        let mut accepted = 0;
+        let mut refused = 0;
+        for (s, legal) in cases {
+            assert_eq!(s.validate().is_ok(), legal, "{s:?}");
+            if !legal {
+                refused += 1;
+                continue;
+            }
+            accepted += 1;
+            // Everything the boundary accepts registers, with no clamp and no
+            // truncation: the descriptor the settings name has exactly the levels
+            // and the grid they asked for.
+            let (mut res, _) = VsmResidency::new(inf_vsm::VsmAtlasConfig {
+                budget_bytes: s.budget_bytes,
+                ..Default::default()
+            });
+            for desc in [
+                VsmLightDesc::clipmap(s.clipmap_levels, s.clipmap_pages_per_side),
+                VsmLightDesc::quadtree(s.spot_levels),
+                VsmLightDesc::cube(s.point_levels),
+            ] {
+                let handle = res
+                    .register_light(desc.clone())
+                    .expect("the boundary accepted a descriptor registration refuses");
+                assert_eq!(res.desc(handle), Some(&desc));
+            }
+            assert_eq!(
+                res.desc(inf_vsm::VsmLightHandle(0))
+                    .expect("registered")
+                    .level_count(),
+                s.clipmap_levels,
+                "a level count was clamped on the way in"
+            );
+        }
+        assert!(
+            accepted >= 3 && refused >= 3,
+            "the sweep collapsed: {accepted} accepted, {refused} refused"
+        );
+    }
+
+    /// A budget that cannot hold one page, and a distance that is not a distance.
+    #[test]
+    fn a_budget_below_one_page_and_a_nonsense_metre_are_refused() {
+        let page = inf_vsm::VsmAtlasConfig::default().page_bytes();
+        assert_eq!(page, 64 * 1024, "a 128² Depth32Float page is 64 KiB");
+        assert!(matches!(
+            VsmSettings {
+                budget_bytes: page - 1,
+                ..Default::default()
+            }
+            .validate(),
+            Err(VsmSettingsError::Budget { .. })
+        ));
+        // …and exactly one page is legal, so the bound is `<` and not `<=`.
+        assert_eq!(
+            VsmSettings {
+                budget_bytes: page,
+                ..Default::default()
+            }
+            .validate(),
+            Ok(())
+        );
+        for bad in [0.0f32, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(
+                matches!(
+                    VsmSettings {
+                        first_level_extent_m: bad,
+                        ..Default::default()
+                    }
+                    .validate(),
+                    Err(VsmSettingsError::Distance {
+                        field: "first_level_extent_m",
+                        ..
+                    })
+                ),
+                "{bad} was accepted as a clipmap extent"
+            );
+            assert!(matches!(
+                VsmSettings {
+                    perspective_near_m: bad,
+                    ..Default::default()
+                }
+                .validate(),
+                Err(VsmSettingsError::Distance {
+                    field: "perspective_near_m",
+                    ..
+                })
+            ));
+        }
+    }
+
+    /// **The tier clamps never produce a configuration the boundary refuses.**
+    ///
+    /// `RenderTier::apply` may only clamp down, and every clamp it applies has to
+    /// land on a legal value — a Medium grid of 32 is a multiple of four and a Low
+    /// budget of 16 MiB holds 256 pages. Without this arm the two could drift and
+    /// the symptom would be a host whose settings are refused *because the tier
+    /// clamped them*, which is the worst possible place to discover it.
+    #[test]
+    fn every_tier_clamp_lands_on_a_legal_configuration() {
+        let mut on = RenderSettings::default();
+        on.vsm.enabled = true;
+        for tier in [
+            crate::caps::RenderTier::High,
+            crate::caps::RenderTier::Medium,
+            crate::caps::RenderTier::Low,
+        ] {
+            let applied = tier.apply(on);
+            assert_eq!(
+                applied.vsm.validate(),
+                Ok(()),
+                "{tier:?} clamped into an illegal configuration"
+            );
+        }
+        assert_eq!(
+            crate::caps::RenderTier::mobile_default().vsm.validate(),
+            Ok(())
+        );
+    }
 }
 
 #[cfg(test)]

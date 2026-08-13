@@ -125,7 +125,7 @@ pub use scene::{
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
     BloomSettings, GiSettings, RenderSettings, ScatterSettings, ShadowSettings, SsaoSettings,
-    VgeomSettings, VirtualTextureSettings, VsmSettings, VSM_BUDGET_LOW_BYTES,
+    VgeomSettings, VirtualTextureSettings, VsmSettings, VsmSettingsError, VSM_BUDGET_LOW_BYTES,
     VSM_BUDGET_MEDIUM_BYTES, VSM_CLIPMAP_PAGES_MEDIUM,
 };
 // P27.1 virtual shadow maps: the projections and the level rules (pure,

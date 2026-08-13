@@ -871,12 +871,45 @@ impl EngineRenderer {
 
     /// Replace the HDR/post settings (bloom, SSAO, TAA, exposure, dither). The
     /// viewport + player expose this to their UI; goldens set it per scene.
+    ///
+    /// **An illegal virtual-shadow configuration is refused, not clamped** (P27.2):
+    /// the settings are left exactly as they were and the refusal is logged. See
+    /// [`try_set_settings`](Self::set_settings) — this is the same call with the
+    /// error dropped, kept infallible because every existing caller passes settings
+    /// derived from [`RenderSettings::default`] and a `Result` at those call sites
+    /// would be noise. A host that wants the reason takes the typed one.
     pub fn set_settings(&mut self, settings: RenderSettings) {
+        if let Err(e) = self.try_set_settings(settings) {
+            tracing::warn!(
+                "inf-render: virtual shadow settings refused ({e}); the previous \
+                 settings are unchanged"
+            );
+        }
+    }
+
+    /// [`set_settings`](Self::set_settings) with the refusal returned.
+    ///
+    /// **The settings boundary the P27.1 audit named.** A per-light truncation is a
+    /// recovery, and a recovery that is the *only* door is how a wrapped `65 536²`
+    /// page grid reached the allocator: it validated, it registered, and it walked
+    /// four billion addresses into a table with no entries. The saturating counters
+    /// in `inf-vsm` closed that from inside; this closes it from outside, and the
+    /// two are deliberately redundant.
+    ///
+    /// **Nothing is applied on `Err`** — not the legal half, not the illegal half.
+    /// A partially-applied settings block is a configuration no caller asked for,
+    /// and it is exactly the silent cap this refusal exists to replace.
+    pub fn try_set_settings(
+        &mut self,
+        settings: RenderSettings,
+    ) -> Result<(), crate::settings::VsmSettingsError> {
+        settings.vsm.validate()?;
         // Toggling TAA invalidates the accumulated history.
         if settings.taa != self.settings.taa {
             self.prev_view_proj = None;
         }
         self.settings = settings;
+        Ok(())
     }
 
     /// Enable/disable the P18.1 vgeom occlusion-audit counters. **Off by
