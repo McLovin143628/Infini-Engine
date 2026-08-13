@@ -10418,6 +10418,164 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
   allocator with stamps, unit-tested with no adapter; 4. the depth-convention ruling: pages
   adopt the camera's reverse-Z unless measurement defends keeping the forward-Z exception
   (memo either way).
+
+> **STATUS — P27.1 Page marking + allocation: COMPLETE (2026-08-13)** — **nine**
+> commits, counted rather than remembered (`a208eb3` the Ring-0 crate, `18f34fd`
+> the setting + its tier clamp, `d2cab4d` the marking pass + the mirror + the
+> depth ruling, `c2f1aa2` the two memos, `59d0e74` the GI boundary gate,
+> `adb27a9` the cube-face arm, and **three fixes this batch's own review found
+> before the battery**: `431e9e0` the projection cap, `aab8053` the level clamp,
+> `7b9d897` the jittered reconstruction), plus this block. Battery green:
+> **239 binaries, 4 271 passed, 0 failed, 8 ignored** (the P26.5 audit left
+> it at 235 / 4 206; this batch adds four test binaries and 65 arms).
+> `clippy --workspace --all-targets` with `-D warnings` and `cargo fmt --all
+> --check` clean. **Goldens stay 50 and none was re-blessed** — a *content-digest*
+> claim since the P26.5 audit rather than a count, and `git diff` over
+> `tests/goldens/` across the whole batch is empty. No schema moved and no
+> `.inf_lvl` payload moved. **No new external dependency**: `inf-vsm` names
+> `thiserror` and nothing else. The batch weakened no prior gate — the only three
+> deleted lines in the diff are a re-export being extended and the CSM's two depth
+> constants becoming `pub` at unchanged values.
+>
+> **The four clauses, against what is measured:**
+>
+> * *"screen-driven page marking: depth buffer → light-space page coords →
+>   needed-page bitmask (order-independent, deterministic content)"* — **met**,
+>   and it is the one place the shadow signal is **better** than P26.4's texture
+>   one. `docs/memos/p26-4-feedback-mechanism.md` had to make virtual texturing's
+>   coverage per-*surface* because a per-fragment mark needs a writable storage
+>   buffer in the FRAGMENT stage, all four bind groups are spoken for, and a
+>   writable entry in the shared environment layout would make
+>   `FRAGMENT_WRITABLE_STORAGE` a requirement of every lit pass on every adapter.
+>   None of that reaches a **compute pass that consumes the depth attachment**:
+>   `vsm_mark.wgsl` owns its own `@group(0)` of five entries, is recorded after
+>   the graph and before the submit, and reads the live MSAA depth at sample 0
+>   through `cloud.wgsl`'s binding shape — so `FrameTargets` gains no texture and
+>   no usage flag, and no lit pipeline is touched. The signal is therefore
+>   **per-pixel, with occlusion included by construction**. Content is an
+>   `atomicOr` of a constant bit at `light_base + entry_index`, read at a pinned
+>   `frame − 2` through P26.4's ring — the ring that names this consumer in its
+>   own module docs.
+> * *"virtual quadtree per light — clipmap levels for the directional sun, face
+>   quadtrees for point, single quadtree for spot; Ring-0 crate first (`inf-vsm`
+>   or inside a widened `inf-vt` — **measure which**)"* — **met, and measured.**
+>   `inf-vt` has **3 290 non-test lines and nineteen of them are reusable
+>   unchanged** (`pack_entry`, `MAX_SLOT_INDEX`, `lru_victim`, `slot_origin` —
+>   0.6 %); `unpack_entry` is not among them, because a shadow entry has a `NONE`
+>   state a virtual texture's cannot have. The address spaces are different
+>   *shapes*: a mip level has fewer tiles than the one below it, a clipmap level
+>   has exactly as many and covers twice the ground, so its parent is
+>   `N/4 + x/2` rather than `x/2` — and `inf-material` depends on `inf-vt`, so
+>   widening it would put the shadow allocator inside the texture importer. New
+>   crate, same dependency list, types spelled for P28.3's merge.
+> * *"physical `Depth32Float` page atlas + Ring-0 free-list allocator with stamps,
+>   unit-tested with no adapter"* — **met**: 46 arms with no adapter, including a
+>   200-round churn that re-derives the whole table from the transaction stream
+>   alone and compares it against the maintained one after **every** transaction.
+>   Both reachability counters are measured rather than hoped: **11 669** deep
+>   fallbacks and **75 702** `NONE` resolutions over the churn. Page geometry is
+>   ruled in `docs/memos/p27-1-page-geometry.md` — 128 texels (which divides
+>   8 192 exactly, so the default 64 MiB atlas is 1 024 pages laid out 32 × 32
+>   with **zero** residual) and **no border**, because a rasterized border must be
+>   re-rasterized whenever a *neighbour's* casters move, which would turn this
+>   phase's own "invalidates exactly the pages its bounds touch" into a statement
+>   about **nine** pages. The rejected alternative's cost is measured too: a
+>   4-texel ring is 11.42 % of every page and 121 pages of 1 024.
+> * *"the depth-convention ruling"* — **met, and the exception is retired.**
+>   `docs/memos/p27-1-depth-convention.md`: orthographic cannot tell the two
+>   conventions apart (21.2 µm reverse against 15.2 µm forward over a 200 m box,
+>   ratio 1.40, against a `depth_bias` default that *is* 0.3 m over that range),
+>   and perspective — which P27 introduces and CSM never had — prefers reverse by
+>   **251×** (7.43 µm against 1.87 mm over a 0.1–50 m spot cone, forward-Z's worst
+>   case at 46.8 m, the far end where a spot's shadow covers the most screen).
+>   The CSM's own forward-Z is **untouched**, asserted rather than assumed. The
+>   measurement also corrected this ledger's first draft: f32's ULP is a step
+>   function of the *stored* depth, so a linear depth's coarsest step lands
+>   wherever the `[0.5, 1)` binade does — mid-box at 67 m and 153 m — not at "the
+>   far plane" and "the near plane".
+>
+> **The law that did not transfer, and it is the load-bearing one.** `inf-vt`
+> pins every texture's coarsest mip because a fragment may sample any tile and a
+> miss would be a hole. A shadow page is only ever sampled by pixels whose depth
+> marked it, so **there is no mandatory floor**: pinning a clipmap's coarsest
+> level would claim `N²` pages per sun before any evidence — 16 384 at the 16 k
+> configuration, four times the whole default atlas. A page with no resident
+> ancestor resolves to `VSM_ENTRY_NONE`, which a receiver reads as *lit*: a leak
+> under budget pressure rather than a black hole, and the honest degradation for
+> a signal whose producer is a rasterizer rather than a file.
+>
+> **Mutation-verified — eleven mutations, and three survived the first cut.**
+> Killed by name: `propagate` stopping at the page itself, `acquire_slot`
+> ignoring the protected set, an `x/2` clipmap parent, an `(x, y)` entry index, a
+> level rule that always answers 0, a constant depth in the reconstruction, a
+> dropped `face × face_stride`, a `continue` restored to the projection cap, and
+> a level count allocated before it is clamped. **Survived, and what each cost:**
+> (1) the fixture's cube sat at the origin, so the page grid's vertical flip
+> mapped the marked set onto itself and deleting it was invisible — the cube is
+> off-centre in y now; (2) the arm claiming the pass reads depth passed against a
+> *weakened* sky test, because a reverse-Z depth of 0 unprojects to infinity and
+> is rejected downstream anyway — the arm mutates a constant depth instead, and
+> the early-out is documented as a cost guard rather than defended; (3) every
+> marking arm drove a clipmap, whose single face leaves `face × face_stride` at
+> zero, so the face arithmetic had no arm at all until the point-light one.
+>
+> **Three defects this batch's own review found, all before the battery.**
+> `vsm_light_trees`'s projection cap **skipped** rather than stopped, so eleven
+> point lights followed by a sun would have given the sun handle 10 — another
+> light's table block and bit range, marking its clipmap into the wrong address
+> space, with no error and no counter. `VsmLightDesc::clipmap` sized its level
+> vector from a host setting before clamping, so `clipmap_levels = u32::MAX` was
+> an out-of-memory abort rather than the `TooManyLevels` refusal `validate`
+> exists to give. And the marking pass reconstructed world positions with
+> `view.view_proj().inverse()` while the depth was rasterized with the
+> TAA-**jittered** projection — small at page granularity, and still a quiet
+> dependence of the page trace on the Halton cursor.
+>
+> **Two more laws, met where they could be broken.** *Camera-driven residency
+> never feeds lighting* (the P18 law) now has a **source gate**: a VSM page exists
+> because a visible pixel's depth asked for it, so a probe that consulted one
+> would make the irradiance at a fixed world point a function of the viewer.
+> `the_gi_pass_never_reads_a_shadow_page` scans both GI sources and both GI
+> shaders over CODE only (full-line comments stripped, the test module cut off),
+> `lines()`-based so a CRLF checkout cannot make it vacuous. And *mirrored ≠
+> measured* (P26.5): the indirection buffer is read back off the device and its
+> entries decoded against an independent walk of the residency, with anti-vacuity
+> on both answers — real entries **and** real absences. Also `vt_feedback.wgsl`
+> was never in `standalone_shaders_validate`; both compute modules are now.
+>
+> **What this batch did NOT do**, in one place. **Nothing is rasterized into the
+> atlas** — an admit is an *allocation*, the slot is published and the page's
+> depth is whatever was there before (P27.2). **No receiver**: `shadow_factor`
+> still reads the CSM, and `VsmSettings::enabled` is **false** by default, so the
+> whole loop is inert on every scene and no golden could move — measured, not
+> assumed: `vsm_engaged_frames` is 0 on the default settings *and* on a scene
+> whose only light does not cast. **No caching and no invalidation**: LRU keeps a
+> marked page across frames, but there is no content stamp and no page-exact
+> invalidation (P27.3). **The clipmap's levels share one snapped centre**, which
+> is what makes the concentric parent rule exact and what makes a *coarse* level's
+> grid shift on any camera motion — the first thing P27.3's caching clause has to
+> answer, and per-level offsets are the answer it will need. **A light's `range`
+> does not cull** a marking projection. **`VSM_PRIORITY_SPECULATIVE` has no
+> producer** (P28.4 is its caller; the rank ships now because a sort with one rank
+> is a sort nothing exercises). **`spot_matrix` has no device arm of its own** —
+> its level rule is unit-tested and its perspective branch is the one the
+> cube-face arm exercises, but the cone-to-fov derivation is pinned only on the
+> CPU. The marking dispatch is **one thread per pixel with no stride**, so there
+> is no tier knob for its cost. The atlas is **allocated whole** at the budget the
+> tier grants rather than grown. A settings value outside the legal set (a page
+> grid that is not a multiple of 4, more than 16 levels) is refused per light with
+> a `tracing::warn` and a truncation rather than validated at the settings
+> boundary. Nothing logs `vsm_summary` in a host and no editor surface exists.
+> And **the jitter fix has no falsifying arm** — an arm comparing TAA on against
+> off would pass with the defect in place, so it is plumbing that is obviously
+> right rather than a claim under test.
+>
+> **Carried forward for P27.5's gate**: the ROADMAP's own P26.5 item —
+> *"refinement under camera approach must be restated AT the gate, over the
+> page-allocation trace"* — is seeded by
+> `the_marked_level_gets_finer_as_the_camera_closes`, which asserts it on a real
+> device over the resident page set. The gate still has to say it over a
+> **scripted path** with a bit-exact trace, and PIE == shipping.
 - **P27.2 Casters into pages** — 1. per-page culling on GPU (instances and meshlets against
   page frusta) into per-page visible lists; one `draw_indirect` per dirty page (no
   `MULTI_DRAW_INDIRECT` — the two-buffer vgeom precedent), `set_viewport`/`set_scissor` per
