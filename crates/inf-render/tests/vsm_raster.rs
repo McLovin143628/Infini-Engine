@@ -133,14 +133,41 @@ fn run(
     set: &VsmSettings,
     frames: u64,
 ) -> inf_render::EngineRenderer {
+    run_sequence(gpu, &[(scene, frames)], v, set)
+}
+
+/// The same renderer across a **sequence** of scenes — the door an arm about what
+/// one frame leaves behind for the next has to come through (P27.2 audit). `run`
+/// is this with one entry.
+fn run_sequence(
+    gpu: &GpuContext,
+    steps: &[(&RenderScene, u64)],
+    v: &RenderView,
+    set: &VsmSettings,
+) -> inf_render::EngineRenderer {
+    run_tuned(gpu, steps, v, set, |_| {})
+}
+
+/// [`run_sequence`] with the rest of the render settings tunable — the door an arm
+/// about a setting the caster pass *reads* (rather than one it owns) comes through.
+fn run_tuned(
+    gpu: &GpuContext,
+    steps: &[(&RenderScene, u64)],
+    v: &RenderView,
+    set: &VsmSettings,
+    tune: impl FnOnce(&mut inf_render::RenderSettings),
+) -> inf_render::EngineRenderer {
     let target = inf_render::HeadlessTarget::new(gpu, FW, FH);
     let mut renderer = inf_render::EngineRenderer::new(gpu, inf_render::HEADLESS_FORMAT);
     let mut s = *renderer.settings();
     s.vsm = *set;
+    tune(&mut s);
     renderer.set_settings(s);
-    for _ in 0..frames {
-        renderer.render(gpu, scene, v, &target.view, (FW, FH));
-        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    for (scene, frames) in steps {
+        for _ in 0..*frames {
+            renderer.render(gpu, scene, v, &target.view, (FW, FH));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
     }
     renderer
 }
@@ -221,17 +248,69 @@ fn resident_pages(renderer: &inf_render::EngineRenderer) -> Vec<(u32, VsmPage, (
 
 /// Texels of one rectangle that are not the reverse-Z clear value.
 fn written(atlas: &(u32, u32, Vec<f32>), rect: (u32, u32, u32)) -> Vec<f32> {
-    let (w, _, ref data) = *atlas;
     let mut out = Vec::new();
+    for_each_written(atlas, rect, |_, _, d| out.push(d));
+    out
+}
+
+/// Every written texel of one rectangle, with its **atlas coordinates** — the door
+/// an arm about *where* in a page the depth landed comes through (P27.2 audit).
+fn for_each_written(
+    atlas: &(u32, u32, Vec<f32>),
+    rect: (u32, u32, u32),
+    mut f: impl FnMut(u32, u32, f32),
+) {
+    let (w, _, ref data) = *atlas;
     for y in rect.1..rect.1 + rect.2 {
         for x in rect.0..rect.0 + rect.2 {
             let d = data[(y * w + x) as usize];
             if d != inf_render::VSM_DEPTH_CLEAR {
-                out.push(d);
+                f(x, y, d);
             }
         }
     }
-    out
+}
+
+/// The render-local world point a written texel stands for: undo the viewport
+/// transform into the page's own NDC, then the page matrix.
+///
+/// **The reconstruction is what makes a depth arm independent of the geometry that
+/// wrote it** (P27.2 audit): it turns "there is depth in this page" into "the
+/// surface is *here*, in metres", which is a claim the fixture's own heights can be
+/// checked against rather than a claim about a texel count.
+fn texel_world(
+    vp_inv: glam::Mat4,
+    rect: (u32, u32, u32),
+    x: u32,
+    y: u32,
+    depth: f32,
+) -> glam::Vec3 {
+    let s = rect.2 as f32;
+    // wgpu's viewport puts NDC +1 at the TOP of the rect, and a texel's centre is
+    // half a texel in from its corner.
+    let ndc_x = ((x - rect.0) as f32 + 0.5) / s * 2.0 - 1.0;
+    let ndc_y = 1.0 - ((y - rect.1) as f32 + 0.5) / s * 2.0;
+    let h = vp_inv * glam::Vec4::new(ndc_x, ndc_y, depth, 1.0);
+    h.truncate() / h.w
+}
+
+/// The page matrix of one resident page, through the shipped door.
+fn page_vp(renderer: &inf_render::EngineRenderer, light: u32, page: VsmPage) -> glam::Mat4 {
+    let sys = renderer.vsm().expect("a live vsm system");
+    let desc = sys
+        .residency()
+        .desc(VsmLightHandle(light))
+        .expect("registered");
+    let g = desc.levels[page.level as usize];
+    vsm_page_matrix(
+        glam::Mat4::from_cols_array(&sys.projections()[0].view_proj),
+        desc.kind,
+        page.level,
+        g.pages_x,
+        g.pages_y,
+        page.x,
+        page.y,
+    )
 }
 
 // ── (a) the pass runs, and the depth it writes is the depth the page's own
@@ -391,6 +470,100 @@ fn a_caster_writes_inside_its_page_and_nowhere_else() {
         "every slot of the atlas was resident ({} of {slots}), so the arm bounded \
          an empty region",
         occupied.len()
+    );
+}
+
+/// **THE REGISTRATION PROOF** (P27.2 audit): a caster's silhouette lands on the
+/// texels its page's own NDC says, not merely *somewhere* inside the slot.
+///
+/// `a_caster_writes_inside_its_page_and_nowhere_else` bounds the content to the
+/// rect and nothing pinned it *to the rect's corner*: a viewport inset by two
+/// texels — the shape a future border would introduce — is inside every rect,
+/// writes every page it should, holds exactly the depth the CPU predicts, and
+/// survived the whole file. It is a real defect, because P27.4 samples a page by
+/// mapping a receiver's light-space position onto the slot and a two-texel shear
+/// puts every shadow two texels off its caster.
+///
+/// So this arm compares the **bounding box of the written texels** against the
+/// forward projection of the cube's own corners through `vsm_page_matrix` and the
+/// viewport transform. One texel of tolerance, which is what a pixel-centre
+/// coverage rule costs.
+#[test]
+fn a_pages_content_is_registered_to_its_slots_corner() {
+    let Some(gpu) = gpu_or_skip("the VSM page registration") else {
+        return;
+    };
+    let set = settings_with(64);
+    let renderer = run(&gpu, &scene(0, 0.5, 1.0), &view(5.0), &set, 6);
+    let atlas = read_atlas(&gpu, &renderer);
+    let pages = resident_pages(&renderer);
+    assert!(!pages.is_empty());
+
+    let half = SIDE * 0.5;
+    let mut checked = 0;
+    // A page whose predicted box stops strictly inside the rect on some edge — the
+    // anti-vacuity that says an EDGE was compared and not just "the whole slot".
+    let mut partial = 0;
+    for (light, page, rect) in &pages {
+        let vp = page_vp(&renderer, *light, *page);
+        let (mut ox0, mut oy0, mut ox1, mut oy1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+        let mut hits = 0;
+        for_each_written(&atlas, *rect, |x, y, _| {
+            ox0 = ox0.min(x);
+            oy0 = oy0.min(y);
+            ox1 = ox1.max(x);
+            oy1 = oy1.max(y);
+            hits += 1;
+        });
+        if hits == 0 {
+            continue;
+        }
+        // The cube's near face, whose four corners are the silhouette: the light
+        // looks along −Z and the face at `z = +SIDE/2` is the one a page sees.
+        let (mut nx0, mut ny0, mut nx1, mut ny1) = (
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        );
+        for (dx, dy) in [(-half, -half), (half, -half), (half, half), (-half, half)] {
+            let c = vp * glam::Vec3::new(CUBE_XY.0 + dx, CUBE_XY.1 + dy, half).extend(1.0);
+            let (nx, ny) = (c.x / c.w, c.y / c.w);
+            nx0 = nx0.min(nx);
+            nx1 = nx1.max(nx);
+            ny0 = ny0.min(ny);
+            ny1 = ny1.max(ny);
+        }
+        let s = rect.2 as f32;
+        let to_x = |n: f32| rect.0 as f32 + (n * 0.5 + 0.5) * s;
+        // NDC y is up and a viewport's y is down, so the NDC MAXIMUM is the top row.
+        let to_y = |n: f32| rect.1 as f32 + (0.5 - n * 0.5) * s;
+        let lo_x = to_x(nx0).max(rect.0 as f32);
+        let hi_x = to_x(nx1).min((rect.0 + rect.2) as f32) - 1.0;
+        let lo_y = to_y(ny1).max(rect.1 as f32);
+        let hi_y = to_y(ny0).min((rect.1 + rect.2) as f32) - 1.0;
+        for (label, want, got) in [
+            ("left", lo_x, ox0),
+            ("right", hi_x, ox1),
+            ("top", lo_y, oy0),
+            ("bottom", hi_y, oy1),
+        ] {
+            assert!(
+                (got as f32 - want).abs() <= 1.0,
+                "page {page:?} in rect {rect:?}: its {label} written texel is {got} \
+                 where its own projection puts the caster's silhouette at {want:.2} \
+                 — the page's content is not registered to its slot"
+            );
+        }
+        if to_x(nx0) > rect.0 as f32 + 0.5 || to_y(ny1) > rect.1 as f32 + 0.5 {
+            partial += 1;
+        }
+        checked += 1;
+    }
+    assert!(
+        checked > 0 && partial > 0,
+        "{checked} pages compared, {partial} of them with an edge strictly inside \
+         the slot — an arm that only ever saw full pages cannot see a shear"
     );
 }
 
@@ -921,6 +1094,266 @@ fn a_terrain_tile_casts_from_its_own_heights() {
     );
 }
 
+/// One planar terrain tile: `height(u, v) = a + b·u + c·v` over the tile's own
+/// samples, so the caster mesh's triangulation reproduces it **exactly** whatever
+/// the decimation does and a depth arm can assert metres rather than texels.
+struct PlanarTile {
+    key: inf_render::TerrainTileKey,
+    origin: glam::DVec3,
+    plane: (f32, f32, f32),
+}
+
+const TILE_RES: u32 = 33;
+const TILE_MPS: f64 = 0.5;
+const TILE_SPAN: f64 = (TILE_RES as f64 - 1.0) * TILE_MPS;
+
+impl PlanarTile {
+    fn height(&self, u: f32, v: f32) -> f32 {
+        self.plane.0 + self.plane.1 * u + self.plane.2 * v
+    }
+    /// The world height of this tile's surface at render-local `(x, z)`, or `None`
+    /// outside its own footprint.
+    fn world_y(&self, x: f32, z: f32) -> Option<f32> {
+        let u = (x as f64 - self.origin.x) / TILE_SPAN;
+        let v = (z as f64 - self.origin.z) / TILE_SPAN;
+        // A texel exactly on the edge is inside; the slack is one sample.
+        let e = TILE_MPS / TILE_SPAN;
+        ((-e..=1.0 + e).contains(&u) && (-e..=1.0 + e).contains(&v))
+            .then(|| self.origin.y as f32 + self.height(u as f32, v as f32))
+    }
+    fn build(&self) -> inf_render::RenderTerrainTile {
+        let mut heights = vec![0f32; (TILE_RES * TILE_RES) as usize];
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for j in 0..TILE_RES {
+            for i in 0..TILE_RES {
+                let h = self.height(
+                    i as f32 / (TILE_RES - 1) as f32,
+                    j as f32 / (TILE_RES - 1) as f32,
+                );
+                heights[(j * TILE_RES + i) as usize] = h;
+                lo = lo.min(h);
+                hi = hi.max(h);
+            }
+        }
+        inf_render::RenderTerrainTile {
+            key: self.key,
+            origin: self.origin,
+            heights,
+            weights: Vec::new(),
+            biomes: Vec::new(),
+            height_bounds: (lo, hi),
+            holes: Vec::new(),
+            version: 1,
+        }
+    }
+}
+
+fn planar_terrain(tiles: &[PlanarTile]) -> inf_render::RenderTerrain {
+    inf_render::RenderTerrain {
+        id: 7,
+        tile_resolution: TILE_RES,
+        meters_per_sample: TILE_MPS,
+        tiles: tiles.iter().map(PlanarTile::build).collect(),
+        layers: Default::default(),
+        macro_variation: 0.0,
+        biome_palette: Vec::new(),
+    }
+}
+
+/// A camera above the ground looking down at it, so the tiles mark pages.
+fn terrain_view() -> RenderView {
+    RenderView {
+        origin: inf_math::FloatingOrigin::new(glam::DVec3::ZERO),
+        eye_world: glam::DVec3::new(0.0, 14.0, 14.0),
+        forward: glam::Vec3::new(0.0, -1.0, -1.0).normalize(),
+        up: glam::Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 0.05,
+        width: FW,
+        height: FH,
+        ortho: None,
+    }
+}
+
+/// A scene of nothing but planar terrain under an overhead sun — so **every**
+/// written texel of the atlas is ground and there is nothing else for a residual
+/// to be blamed on.
+fn terrain_scene(tiles: &[PlanarTile]) -> RenderScene {
+    let mut s = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    s.terrains.push(planar_terrain(tiles));
+    s.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Directional,
+        // Straight up: the direction TO the light, so the sun looks down and a
+        // page's depth is world height. Nothing here depends on the light basis —
+        // the page matrix is INVERTED rather than assumed.
+        direction: glam::Vec3::Y,
+        cast_shadows: true,
+        ..Default::default()
+    });
+    s.mark_dirty();
+    s
+}
+
+/// Every written atlas texel, reconstructed into render-local metres and compared
+/// against the nearest tile surface below it. Returns `(texels checked, worst
+/// residual in metres, texels that landed on no tile at all)`.
+fn terrain_residuals(
+    gpu: &GpuContext,
+    renderer: &inf_render::EngineRenderer,
+    tiles: &[PlanarTile],
+) -> (usize, f32, usize) {
+    let atlas = read_atlas(gpu, renderer);
+    let (mut checked, mut worst, mut orphan) = (0usize, 0f32, 0usize);
+    for (light, page, rect) in resident_pages(renderer) {
+        let inv = page_vp(renderer, light, page).inverse();
+        for_each_written(&atlas, rect, |x, y, d| {
+            let p = texel_world(inv, rect, x, y, d);
+            let best = tiles
+                .iter()
+                .filter_map(|t| t.world_y(p.x, p.z))
+                .map(|y| (y - p.y).abs())
+                .fold(f32::INFINITY, f32::min);
+            if best.is_finite() {
+                checked += 1;
+                worst = worst.max(best);
+            } else {
+                orphan += 1;
+            }
+        });
+    }
+    (checked, worst, orphan)
+}
+
+/// **THE TERRAIN SURFACE ARM** (P27.2 audit): the depth a page holds over ground
+/// is the tile's **own** surface, in metres, at the world height the tile's origin
+/// and heights put it.
+///
+/// The first terrain arm counted texels against a control — which says the tile
+/// casts *something* and nothing about *what*. Measured: transposing the height
+/// index (`heights[si·res + sj]`) and dropping the tile origin's `y` from the
+/// vertex both survived the whole file, the second one because the fixture's tile
+/// origin was `y = 0` and a fixture that cannot distinguish is not a control. This
+/// arm reconstructs every written texel through the page matrix's inverse and
+/// compares it to `origin.y + height(u, v)`.
+///
+/// The fixture's height field is **planar** and its origin is off the ground plane
+/// in all three axes, so the assertion is exact under any triangulation and no term
+/// of the composition is zero.
+#[test]
+fn a_terrain_page_holds_the_tiles_own_surface_in_metres() {
+    let Some(gpu) = gpu_or_skip("the VSM terrain surface") else {
+        return;
+    };
+    let tiles = [PlanarTile {
+        key: inf_render::TerrainTileKey::lod0((0, 0)),
+        // Off-origin on every axis. `y = 3.5` is the term the old fixture zeroed.
+        origin: glam::DVec3::new(-0.5 * TILE_SPAN, 3.5, -0.5 * TILE_SPAN),
+        // Sloped on BOTH axes, and by different amounts, so a transposed height
+        // index is a different surface rather than the same one.
+        plane: (1.0, 2.5, -4.0),
+    }];
+    let set = settings_with(64);
+    let renderer = run(&gpu, &terrain_scene(&tiles), &terrain_view(), &set, 6);
+    let stats = renderer.vsm_raster_stats().expect("stats");
+    assert!(stats.terrain_casters > 0, "{stats:?}");
+
+    let (checked, worst, orphan) = terrain_residuals(&gpu, &renderer, &tiles);
+    assert!(
+        checked > 512,
+        "only {checked} ground texels were reconstructed — the arm bounded almost \
+         nothing"
+    );
+    assert_eq!(
+        orphan, 0,
+        "{orphan} written texels reconstruct to a point over no tile at all"
+    );
+    assert!(
+        worst < 0.05,
+        "a page's depth puts the ground {worst} m off the tile's own surface"
+    );
+}
+
+/// **The terrain caster cache is keyed on the tile, not on its place in a
+/// streaming list** (P27.2 audit) — `b921fd3`'s fix, which shipped without an arm.
+///
+/// The list is a residency: tiles arrive and leave, and the entry that was index 0
+/// last frame belongs to a different tile this frame. Keyed on the index, a tile
+/// that streams in over an evicted one's slot inherits the evicted one's *mesh*
+/// whenever the two share a version stamp — and the two always do, because a tile's
+/// version starts at 1.
+///
+/// So: render a tile, evict it, stream a different tile into its place at the same
+/// version, and assert the ground is at the NEW tile's height. Under the old key
+/// the residual is the whole difference between the two.
+#[test]
+fn a_streamed_in_terrain_tile_does_not_inherit_the_evicted_ones_mesh() {
+    let Some(gpu) = gpu_or_skip("the VSM terrain cache key") else {
+        return;
+    };
+    // `keep` is resident throughout; `first` is evicted and `second` takes its
+    // place in the list, at a DIFFERENT height and a different tile key.
+    let keep = PlanarTile {
+        key: inf_render::TerrainTileKey::lod0((1, 0)),
+        origin: glam::DVec3::new(0.5 * TILE_SPAN, 0.0, -0.5 * TILE_SPAN),
+        plane: (1.0, 0.0, 0.0),
+    };
+    let first = PlanarTile {
+        key: inf_render::TerrainTileKey::lod0((0, 0)),
+        origin: glam::DVec3::new(-1.5 * TILE_SPAN, 0.0, -0.5 * TILE_SPAN),
+        plane: (0.0, 0.0, 0.0),
+    };
+    let second = PlanarTile {
+        key: inf_render::TerrainTileKey::lod0((0, 1)),
+        origin: glam::DVec3::new(-1.5 * TILE_SPAN, 0.0, -0.5 * TILE_SPAN),
+        // Six metres above where the evicted tile's mesh sits.
+        plane: (6.0, 0.0, 0.0),
+    };
+    let set = settings_with(64);
+    let before = terrain_scene(&[first, keep]);
+    let keep = PlanarTile {
+        key: inf_render::TerrainTileKey::lod0((1, 0)),
+        origin: glam::DVec3::new(0.5 * TILE_SPAN, 0.0, -0.5 * TILE_SPAN),
+        plane: (1.0, 0.0, 0.0),
+    };
+    let after_tiles = [second, keep];
+    let after = terrain_scene(&after_tiles);
+    let v = terrain_view();
+    let renderer = run_sequence(&gpu, &[(&before, 6), (&after, 6)], &v, &set);
+    assert!(
+        renderer.vsm_raster_stats().expect("stats").terrain_casters > 0,
+        "no terrain caster survived the swap"
+    );
+
+    let (checked, worst, orphan) = terrain_residuals(&gpu, &renderer, &after_tiles);
+    assert!(checked > 512, "only {checked} ground texels after the swap");
+    assert_eq!(orphan, 0, "{orphan} texels over no resident tile");
+    assert!(
+        worst < 0.05,
+        "after a tile was evicted and another streamed into its place, the ground \
+         is {worst} m off the resident tiles' own surfaces — the caster mesh is the \
+         EVICTED tile's, inherited through a cache keyed on a streaming index"
+    );
+    // ANTI-VACUITY: the two tiles really are six metres apart, so a stale mesh
+    // would have been visible.
+    assert!(
+        (after_tiles[0]
+            .world_y(-(TILE_SPAN as f32), 0.0)
+            .expect("inside")
+            - first_height())
+        .abs()
+            > 5.0
+    );
+}
+
+/// The height the evicted tile's mesh would have sat at, named so the anti-vacuity
+/// above reads as a comparison rather than a magic number.
+fn first_height() -> f32 {
+    0.0
+}
+
 // ── (h) off path, and the settings door ─────────────────────────────────────
 
 /// With virtual shadows off, the caster pass never opens — the byte-stability
@@ -985,4 +1418,367 @@ fn the_renderer_refuses_an_illegal_shadow_configuration_whole() {
     good.vsm = VsmSettings::default();
     assert!(renderer.try_set_settings(good).is_ok());
     assert_eq!(renderer.settings().exposure, 3.25);
+}
+
+// ── (i) the P27.2 audit's arms ──────────────────────────────────────────────
+
+/// **THE POSE MARGIN, MEASURED** (P27.2 audit): the cull sphere a skinned caster
+/// is tested with contains a pose that has **left** its bind-pose bound.
+///
+/// `SKINNED_POSE_MARGIN` carries the batch's own reasoning — "a skeleton moves
+/// vertices, so a bind-pose bound is not conservative for an arbitrary pose, and
+/// culling on a bound the pose escapes would delete a limb's shadow at exactly the
+/// moment the limb moved" — and setting it to `0.0` survived every arm in this
+/// file. It has to: a bound that is too tight only loses the pages the escaped limb
+/// reached, and at the levels a 256 × 144 fixture marks, a page is metres wide.
+///
+/// So the assertion is on the **shipped caster record** — the sphere the GPU cull
+/// actually ran — against the posed vertices the raster actually draws. Both halves
+/// are needed: the pose is inside the margined sphere, and it is outside the
+/// bind-pose one, which is what makes the margin the thing under test rather than
+/// the sphere.
+#[test]
+fn a_skinned_casters_cull_sphere_contains_a_pose_that_left_the_bind_pose() {
+    let Some(gpu) = gpu_or_skip("the VSM skinned pose margin") else {
+        return;
+    };
+    let v = |x: f32, y: f32| inf_render::SkinnedVertex {
+        pos: [x, y, 0.0],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0, 0.0],
+        joints: [0, 0, 0, 0],
+        weights: [1.0, 0.0, 0.0, 0.0],
+    };
+    let verts = [v(-1.0, -1.0), v(1.0, -1.0), v(1.0, 1.0), v(-1.0, 1.0)];
+    let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
+        vertices: verts.to_vec(),
+        indices: vec![0, 1, 2, 0, 2, 3],
+    });
+    // 0.6 m along x: the far corner ends up 1.89 m from the bind centre, which is
+    // outside the bind sphere (1.41 m) and inside the margined one (2.12 m).
+    let palette = glam::Mat4::from_translation(glam::Vec3::new(0.6, 0.0, 0.0));
+    let mut s = RenderScene {
+        grid_enabled: false,
+        skinned_meshes: vec![mesh],
+        ..Default::default()
+    };
+    s.skinned.push(inf_render::SkinnedInstance {
+        translation: glam::DVec3::new(0.0, CUBE_XY.1 as f64, 0.0),
+        rotation: glam::Quat::IDENTITY,
+        scale: glam::Vec3::ONE,
+        color: [1.0, 1.0, 1.0, 1.0],
+        metallic: 0.0,
+        roughness: 1.0,
+        emissive: [0.0; 3],
+        id: 3,
+        mesh: 0,
+        palette: vec![palette],
+        vt: inf_render::VtTextureSet::NONE,
+    });
+    s.instances.push(backdrop());
+    s.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Directional,
+        direction: glam::Vec3::Z,
+        cast_shadows: true,
+        ..Default::default()
+    });
+    s.mark_dirty();
+
+    let renderer = run(&gpu, &s, &view(6.0), &settings_with(64), 6);
+    let sys = renderer.vsm().expect("live");
+    let casters = sys.raster_state().last_casters();
+    // The rigid groups come first and are exactly one per primitive kind, so any
+    // group past them is this scene's only other caster: the skinned quad.
+    let c = casters
+        .iter()
+        .find(|c| c.ids[0] >= inf_render::VSM_RIGID_GROUPS)
+        .expect("a skinned caster record was packed");
+    let centre = glam::Vec3::new(c.sphere[0], c.sphere[1], c.sphere[2]);
+    let radius = c.sphere[3];
+    let model = glam::Mat4::from_cols_array(&c.model);
+    let mut worst = 0f32;
+    for vert in &verts {
+        // What `vsm_skinned.wgsl` draws: the palette, then the caster's model.
+        let skinned = (palette * glam::Vec3::from(vert.pos).extend(1.0)).truncate();
+        worst = worst.max((model.transform_point3(skinned) - centre).length());
+    }
+    assert!(
+        worst <= radius + 1e-4,
+        "the posed quad reaches {worst} m from its cull sphere's centre and the \
+         sphere is {radius} m — the page cull can delete this caster from a page \
+         its own geometry covers"
+    );
+    // ANTI-VACUITY, and the whole point: the BIND pose's own bound does not contain
+    // it. Without the margin the assertion above is the one that fails.
+    let bind = radius / (1.0 + inf_render::SKINNED_POSE_MARGIN);
+    assert!(
+        worst > bind,
+        "the fixture's pose stays inside the bind-pose bound ({worst} m against \
+         {bind} m), so it proves nothing about the margin"
+    );
+    // …and the pose really is drawn, so this is a claim about a caster that casts.
+    assert!(renderer.vsm_raster_stats().expect("stats").skinned_casters > 0);
+}
+
+/// **The caster ceiling counts what it refuses** (P27.2 audit) — `266acda`'s fix,
+/// which shipped without an arm.
+///
+/// `VSM_MAX_CASTERS` was a bare `break` before that commit: a level past 16 384
+/// casters had its tail stop casting with no counter and no log line. The fix added
+/// the counter; nothing exercised it, and zeroing the increment survives every
+/// other arm in this file because no fixture with one cube in it reaches the
+/// ceiling. This one reaches it.
+#[test]
+fn the_caster_ceiling_counts_the_casters_it_refuses() {
+    let Some(gpu) = gpu_or_skip("the VSM caster ceiling") else {
+        return;
+    };
+    const OVER: u32 = 100;
+    let mut s = scene(0, 0.5, 1.0);
+    // A dense slab of cubes behind the fixture's own one. They do not have to be
+    // visible — `pack_casters` walks the scene, not the frame — but they are packed
+    // in scene order, so the ones past the ceiling are the ones refused.
+    let total = inf_render::VSM_MAX_CASTERS + OVER;
+    for i in 1..total {
+        let (x, y) = ((i % 128) as f64 * 0.05 - 3.2, (i / 128) as f64 * 0.05 - 3.2);
+        s.instances.push(inf_render::MeshInstance::lit(
+            glam::DVec3::new(x, y, -1.0),
+            glam::Quat::IDENTITY,
+            glam::Vec3::splat(0.04),
+            [1.0, 1.0, 1.0, 1.0],
+            100 + i,
+        ));
+    }
+    s.mark_dirty();
+    let renderer = run(&gpu, &s, &view(5.0), &settings(), 3);
+    let stats = renderer.vsm_raster_stats().expect("stats");
+    assert!(stats.frames > 0, "the pass never opened: {stats:?}");
+    assert_eq!(
+        stats.casters,
+        u64::from(inf_render::VSM_MAX_CASTERS) * stats.frames,
+        "the ceiling did not bound the packed set: {stats:?}"
+    );
+    assert_eq!(
+        stats.dropped_casters,
+        u64::from(OVER) * stats.frames,
+        "{} casters over the ceiling were refused and {} were counted — a silent \
+         cap is how the far half of a level stops casting",
+        u64::from(OVER) * stats.frames,
+        stats.dropped_casters
+    );
+    // ANTI-VACUITY: the group ceiling is NOT what refused them, so the two counters
+    // are telling different stories rather than one story twice.
+    assert_eq!(stats.dropped_groups, 0, "{stats:?}");
+    // …and the summary a host reads says the number.
+    let line = renderer.vsm_summary().expect("a live system");
+    assert!(
+        line.contains(&format!("{} casters dropped", stats.dropped_casters)),
+        "{line}"
+    );
+}
+
+/// **A vgeom caster draws the level the CAMERA justifies** (P27.2 audit) — the
+/// deviation memo's load-bearing sentence, measured.
+///
+/// `docs/memos/p27-2-vgeom-casters.md` rules that virtualized geometry casts
+/// through "the same `pick_classic_level` against the same `lod_threshold`, at the
+/// same `VgeomSettings::pixel_error`". Nothing could see it: a caster drawn from
+/// the coarsest level of the chain lands in the same pages at almost the same
+/// depths, so replacing the pick with `errors.len() - 1` survived every arm in this
+/// file. `VsmRasterStats::vgeom_level_sum` is the counter that makes the sentence a
+/// measurement, and `pixel_error` is the input the ruling names.
+#[test]
+fn a_vgeom_casters_level_is_the_one_its_pixel_error_justifies() {
+    let Some(gpu) = gpu_or_skip("the VSM vgeom LOD") else {
+        return;
+    };
+    let mesh = std::sync::Arc::new(inf_vgeom::test_support::dense_grid_mesh(24));
+    let mut s = RenderScene {
+        grid_enabled: false,
+        vgeom_assets: vec![
+            inf_render::VgeomAsset::from_mesh(0x5150, &mesh).expect("index the vmesh")
+        ],
+        ..Default::default()
+    };
+    s.vgeom_instances.push(inf_render::VgeomInstance::lit(
+        0x5150,
+        glam::DVec3::ZERO,
+        glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        glam::Vec3::splat(3.0),
+        [0.8, 0.8, 0.8, 1.0],
+        1,
+    ));
+    s.instances.push(backdrop());
+    s.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Directional,
+        direction: glam::Vec3::Z,
+        cast_shadows: true,
+        ..Default::default()
+    });
+    s.mark_dirty();
+
+    let set = settings_with(64);
+    let at = |pixel_error: f32| {
+        let r = run_tuned(&gpu, &[(&s, 6)], &view(9.0), &set, move |rs| {
+            rs.vgeom.pixel_error = pixel_error;
+        });
+        r.vsm_raster_stats().expect("stats")
+    };
+    // A tenth of a pixel of tolerated error: the finest level of the chain.
+    let fine = at(0.1);
+    // …and a tolerance no level can miss: the coarsest.
+    let coarse = at(400.0);
+    assert!(
+        fine.vgeom_casters > 0 && coarse.vgeom_casters == fine.vgeom_casters,
+        "the two runs packed different caster sets ({fine:?} / {coarse:?})"
+    );
+    assert_eq!(
+        fine.vgeom_level_sum, 0,
+        "a caster whose pixel error is a tenth of a pixel drew a level past the \
+         finest: {fine:?}"
+    );
+    assert!(
+        coarse.vgeom_level_sum > 0,
+        "the same caster at 400 px of tolerated error drew the same level — the \
+         page raster is not picking through `pick_classic_level` at all: {coarse:?}"
+    );
+}
+
+/// **A frame with pages and no casters CLEARS them** (P27.2 audit).
+///
+/// The pass used to return early when nothing packed, on the reasoning that "the
+/// pass below clears the whole atlas, so this early return is only taken when there
+/// is no pass to open at all". It is taken when there are pages and no casters —
+/// and the editor's infinite grid is exactly that configuration: it writes camera
+/// depth, so it marks pages, and it is not a caster. Delete every object in a level
+/// and the atlas goes on holding their shadows.
+#[test]
+fn a_frame_with_no_caster_clears_the_pages_the_last_one_filled() {
+    let Some(gpu) = gpu_or_skip("the VSM caster-less clear") else {
+        return;
+    };
+    let mut filled = scene(0, 0.5, 1.0);
+    filled.grid_enabled = true;
+    filled.mark_dirty();
+    // The same scene with its one object deleted. The grid still writes depth, so
+    // pages are still marked and still resident.
+    let mut emptied = filled.clone();
+    emptied.instances.clear();
+    emptied.mark_dirty();
+
+    let set = settings_with(64);
+    let v = view(5.0);
+    let renderer = run_sequence(&gpu, &[(&filled, 6), (&emptied, 6)], &v, &set);
+    let stats = renderer.vsm_raster_stats().expect("stats");
+    let pages = resident_pages(&renderer);
+    // ANTI-VACUITY, three ways: pages are resident, the first half really drew
+    // casters, and the pass went on opening once they were gone.
+    assert!(!pages.is_empty(), "nothing was resident to clear");
+    assert!(
+        stats.casters > 0,
+        "the filled half packed nothing: {stats:?}"
+    );
+    assert!(
+        stats.frames > 6,
+        "the pass stopped opening once the casters were gone: {stats:?}"
+    );
+
+    let atlas = read_atlas(&gpu, &renderer);
+    let left: usize = pages
+        .iter()
+        .map(|(_, _, r)| written(&atlas, *r).len())
+        .sum();
+    assert_eq!(
+        left, 0,
+        "{left} texels still hold a deleted object's depth — a caster-less frame \
+         left the atlas as it found it"
+    );
+}
+
+/// **The group ceiling counts what it refuses too** (P27.2 audit).
+///
+/// `VSM_MAX_GROUPS` is the ceiling the first write-up did not have: the
+/// per-(page, group) draw uniform is `pages x groups x 256 B`, and a skinned
+/// instance is a group because its palette is a bind group. A thousand characters
+/// is a thousand groups, and without a ceiling that buffer passes what a default
+/// device will allocate.
+///
+/// So the fixture is a thousand and thirty characters, sharing one two-triangle
+/// mesh: the ceiling has to refuse eleven of them, and it has to say so in both
+/// counters.
+#[test]
+fn the_group_ceiling_counts_the_groups_it_refuses() {
+    let Some(gpu) = gpu_or_skip("the VSM group ceiling") else {
+        return;
+    };
+    let v = |x: f32, y: f32| inf_render::SkinnedVertex {
+        pos: [x, y, 0.0],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0, 0.0],
+        joints: [0, 0, 0, 0],
+        weights: [1.0, 0.0, 0.0, 0.0],
+    };
+    let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
+        vertices: vec![v(-0.1, -0.1), v(0.1, -0.1), v(0.1, 0.1), v(-0.1, 0.1)],
+        indices: vec![0, 1, 2, 0, 2, 3],
+    });
+    // Enough instances that the rigid groups plus the skinned ones overrun the
+    // ceiling by a countable margin.
+    const OVER: u32 = 11;
+    let want = inf_render::VSM_MAX_GROUPS + OVER - inf_render::VSM_RIGID_GROUPS;
+    let mut s = RenderScene {
+        grid_enabled: false,
+        skinned_meshes: vec![mesh],
+        ..Default::default()
+    };
+    for i in 0..want {
+        s.skinned.push(inf_render::SkinnedInstance {
+            translation: glam::DVec3::new((i % 32) as f64 * 0.2 - 3.2, (i / 32) as f64 * 0.2, 0.0),
+            rotation: glam::Quat::IDENTITY,
+            scale: glam::Vec3::ONE,
+            color: [1.0, 1.0, 1.0, 1.0],
+            metallic: 0.0,
+            roughness: 1.0,
+            emissive: [0.0; 3],
+            id: 1_000 + i,
+            mesh: 0,
+            palette: vec![glam::Mat4::IDENTITY],
+            vt: inf_render::VtTextureSet::NONE,
+        });
+    }
+    s.instances.push(backdrop());
+    s.lights.push(inf_render::RenderLight {
+        kind: inf_render::LightKind::Directional,
+        direction: glam::Vec3::Z,
+        cast_shadows: true,
+        ..Default::default()
+    });
+    s.mark_dirty();
+
+    let renderer = run(&gpu, &s, &view(6.0), &settings(), 3);
+    let stats = renderer.vsm_raster_stats().expect("stats");
+    assert!(stats.frames > 0, "the pass never opened: {stats:?}");
+    assert_eq!(
+        stats.dropped_groups,
+        u64::from(OVER) * stats.frames,
+        "{} groups over the ceiling and {} counted: {stats:?}",
+        u64::from(OVER) * stats.frames,
+        stats.dropped_groups
+    );
+    // Every refused group took its caster with it, and the two counters agree.
+    assert_eq!(stats.dropped_casters, stats.dropped_groups, "{stats:?}");
+    assert_eq!(
+        stats.skinned_casters,
+        u64::from(want - OVER) * stats.frames,
+        "{stats:?}"
+    );
+    // ANTI-VACUITY: the CASTER ceiling is not what refused them — a thousand
+    // characters is nowhere near 16 384 — so this is the group ceiling's own arm.
+    assert!(stats.casters < u64::from(inf_render::VSM_MAX_CASTERS) * stats.frames);
+    // …and the pages still rasterized, so the ceiling refused a tail rather than
+    // taking the frame down.
+    assert!(
+        stats.draws > 0 && renderer.vsm_raster_frames() > 0,
+        "{stats:?}"
+    );
 }
