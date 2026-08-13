@@ -275,7 +275,16 @@ enum GroupSource {
     /// is per instance and it is a bind group.
     Skinned { instance: usize },
     /// One terrain tile, as a static world-space caster mesh.
-    Terrain { terrain: u64, tile: usize },
+    ///
+    /// Keyed by the tile's **own** `TerrainTileKey` and not by its index in the
+    /// terrain's list: that list is a streaming residency, so index 3 is a
+    /// different tile from one frame to the next and a cache keyed on it would
+    /// hand a tile another tile's heights whenever the two happened to share a
+    /// version stamp. (Found by this batch's own review, before the battery.)
+    Terrain {
+        terrain: u64,
+        tile: crate::scene::TerrainTileKey,
+    },
 }
 
 /// Where one geometry group's indices live — the three constant words of its
@@ -416,7 +425,7 @@ pub struct VsmRaster {
     skinned_palettes: Vec<(wgpu::Buffer, wgpu::BindGroup, usize)>,
     /// Static caster meshes for terrain tiles, keyed `(terrain id, tile index)`
     /// and rebuilt when that tile's version moves.
-    terrain: std::collections::BTreeMap<(u64, usize), TerrainCasterGeom>,
+    terrain: std::collections::BTreeMap<(u64, crate::scene::TerrainTileKey), TerrainCasterGeom>,
     /// The scene version the skinned caches were built for.
     skinned_version: Option<u64>,
 
@@ -1291,8 +1300,8 @@ impl VsmRaster {
         let mut live = std::collections::BTreeSet::new();
         for terrain in &scene.terrains {
             let res = terrain.tile_resolution.max(2);
-            for (ti, tile) in terrain.tiles.iter().enumerate() {
-                let key = (terrain.id, ti);
+            for tile in &terrain.tiles {
+                let key = (terrain.id, tile.key);
                 live.insert(key);
                 if self
                     .terrain
@@ -1542,7 +1551,7 @@ fn pack_casters(
     prim: &PrimGpu,
     vgeom: &std::collections::BTreeMap<u128, VgeomCasterGeom>,
     skinned: &[SkinnedCasterGeom],
-    terrain: &std::collections::BTreeMap<(u64, usize), TerrainCasterGeom>,
+    terrain: &std::collections::BTreeMap<(u64, crate::scene::TerrainTileKey), TerrainCasterGeom>,
     scene: &RenderScene,
     view: &RenderView,
     settings: &crate::settings::RenderSettings,
@@ -1728,7 +1737,7 @@ fn pack_casters(
     // from the camera-fitted clipmap patch the terrain pass draws — see
     // `TerrainCasterGeom`. The model matrix is the identity: the mesh is already
     // in render-local space, which is what lets it be cached across frames.
-    for ((tid, ti), geom) in terrain {
+    for ((tid, tkey), geom) in terrain {
         if casters.len() as u32 >= VSM_MAX_CASTERS || geom.index_count == 0 {
             continue;
         }
@@ -1746,7 +1755,7 @@ fn pack_casters(
         groups.push(GroupGeom {
             source: GroupSource::Terrain {
                 terrain: *tid,
-                tile: *ti,
+                tile: *tkey,
             },
             index_count: geom.index_count,
             first_index: 0,
