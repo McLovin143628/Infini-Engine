@@ -47,13 +47,67 @@
 //! its coarsest level's extent rather than `ShadowSettings::max_distance`.
 
 use glam::Mat4;
-use inf_vsm::{VsmLightHandle, VsmPage, VsmResidency};
+use inf_vsm::{VsmLightHandle, VsmPage, VsmResidency, VsmTreeKind};
 
 use crate::camera::{RenderView, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
 use crate::primitives::{PrimGpu, PrimMesh};
 use crate::scene::RenderScene;
-use crate::vsm::{vsm_page_matrix, VsmProjection, VSM_DEPTH_CLEAR, VSM_DEPTH_COMPARE};
+use crate::vsm::{
+    vsm_page_matrix, ClipmapLayout, VsmProjection, VSM_DEPTH_CLEAR, VSM_DEPTH_COMPARE,
+};
+
+/// **The one mixing function this module hashes with** — SplitMix64's finalizer.
+///
+/// Written out rather than reached for, because a content stamp decides whether a
+/// page is re-rasterized and `DefaultHasher` is documented as unstable across Rust
+/// releases: a hash that changed under the compiler would turn "nothing moved" into
+/// "everything moved" on an upgrade, silently and only in the frame time. Nothing
+/// here is ever serialized, so this is a *runtime* identity and not a format.
+#[inline]
+fn mix64(v: u64) -> u64 {
+    let mut z = v.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// An order-**dependent** accumulator, for the fields of one record.
+#[derive(Debug, Clone, Copy)]
+struct Fold(u64);
+
+impl Fold {
+    #[inline]
+    fn new(seed: u64) -> Self {
+        Self(mix64(seed))
+    }
+    #[inline]
+    fn u64(self, v: u64) -> Self {
+        Self(mix64(self.0 ^ v))
+    }
+    #[inline]
+    fn f32s(self, v: &[f32]) -> Self {
+        v.iter().fold(self, |a, &f| a.u64(u64::from(f.to_bits())))
+    }
+    #[inline]
+    fn done(self) -> u64 {
+        // Never 0: a zero key would be indistinguishable from the empty fold, and
+        // the empty fold is a real answer (a page with no caster in it).
+        self.0 | 1
+    }
+}
+
+/// One caster's contribution to a page, folded in **commutatively**.
+///
+/// A page's caster set is a *set*: the order `pack_casters` happens to emit two
+/// casters in is not a property of the world, and a key that depended on it would
+/// re-rasterize a static page the day a group was added in front of another. So
+/// the combiner is `wrapping_add` of a mixed hash — commutative, and (unlike XOR)
+/// it does not cancel a caster against its own duplicate.
+#[inline]
+fn fold_into(acc: &mut u64, hash: u64) {
+    *acc = acc.wrapping_add(mix64(hash));
+}
 
 /// Page rectangles one frame may rasterize.
 ///
@@ -107,6 +161,12 @@ pub const VSM_ARG_WORDS: u64 = 5;
 /// `min_uniform_buffer_offset_alignment`, which is what a dynamic offset must be a
 /// multiple of.
 pub const VSM_PAGE_DRAW_STRIDE: u64 = 256;
+
+/// `shaders/vsm_clear.wgsl` writes the clear value as a **literal**, because a
+/// pipeline with one bind group for one constant costs more than the constant.
+/// This is the compile-time half of the pin; the arm
+/// `the_page_clear_writes_the_depth_clear_value` reads the shader for the other.
+const _: () = assert!(VSM_DEPTH_CLEAR == 0.0);
 
 /// Geometry groups the rigid path owns — one per [`PrimMesh`] kind, which is
 /// exactly the per-kind index ranges `PrimGpu` already holds.
@@ -268,6 +328,12 @@ struct TerrainCasterGeom {
     bounds: (glam::Vec3, f32),
     /// The tile version this mesh was built from.
     version: u64,
+    /// The length of the tile's hole mask when this mesh was built.
+    /// `passes::terrain::CachedTile` carries the same term for the same reason: a
+    /// tile's **first** carve changes the mask from empty to `words × res`, and a
+    /// cache that only compared versions would keep a solid mesh for a tile that
+    /// now has a tunnel through it.
+    hole_words: u32,
     /// The floating origin it was built under — a rebase moves render-local space
     /// under it, so the mesh has to be rebuilt (the same rule every packed
     /// instance buffer in the tree follows).
@@ -395,6 +461,31 @@ pub struct VsmRasterStats {
     /// Their casters are in [`dropped_casters`](Self::dropped_casters) too; this
     /// says *which* ceiling refused them.
     pub dropped_groups: u64,
+
+    // ── P27.3: the cache's own counters ──────────────────────────────────────
+    /// **Resident pages the frame did not touch because their content stamp had
+    /// not moved** — the caching clause's engagement counter.
+    ///
+    /// Read *with* [`pages`](Self::pages), never alone: a no-op cache also
+    /// re-rasterizes zero pages, so the arm that asserts "zero after warm-up" has
+    /// to show `pages` moved first. That is the phase gate's own wording ("the arm
+    /// FAILS if the counter is dead") and this is the pair it reads.
+    pub cached_pages: u64,
+    /// Resident pages whose stamp *had* moved, summed over frames — before the
+    /// frame's cap. `pages` is what survived it.
+    pub dirty_pages: u64,
+    /// Page rectangles cleared, summed over frames. Equal to `pages` in every
+    /// frame that opens the pass, because a page that is re-rasterized is cleared
+    /// first — and *unequal* to the atlas's slot count, which is the whole change
+    /// from P27.2's `LoadOp::Clear`.
+    pub cleared_pages: u64,
+    /// (page, caster) pairs the invalidation scatter touched, summed over frames.
+    /// The cost of page-exact invalidation, as a number rather than as a claim —
+    /// `casters × pages` would be the product this exists not to pay.
+    pub invalidation_touches: u64,
+    /// Times the whole cache was thrown away because the view cut
+    /// (`is_camera_cut`), summed over frames.
+    pub cut_flushes: u64,
 }
 
 impl VsmRasterStats {
@@ -403,7 +494,8 @@ impl VsmRasterStats {
         format!(
             "vsm raster: {} frames, {} pages, {} draws, {} casters ({} scattered, \
              {} meshlet-asset, {} skinned, {} terrain), {} pages deferred, \
-             {} casters dropped, {} groups refused",
+             {} casters dropped, {} groups refused, {} pages cached / {} dirty / \
+             {} cleared, {} invalidation touches, {} cut flushes",
             self.frames,
             self.pages,
             self.draws,
@@ -415,6 +507,11 @@ impl VsmRasterStats {
             self.deferred_pages,
             self.dropped_casters,
             self.dropped_groups,
+            self.cached_pages,
+            self.dirty_pages,
+            self.cleared_pages,
+            self.invalidation_touches,
+            self.cut_flushes,
         )
     }
 }
@@ -428,6 +525,9 @@ pub struct VsmRaster {
     rigid: wgpu::RenderPipeline,
     rigid_masked: wgpu::RenderPipeline,
     skinned_pipeline: wgpu::RenderPipeline,
+    /// **The per-page clear** (P27.3): a depth-only triangle at the clear value,
+    /// `depth_compare: Always`, confined by the **scissor** alone.
+    clear_pipeline: wgpu::RenderPipeline,
     palette_bgl: wgpu::BindGroupLayout,
     prim: PrimGpu,
 
@@ -461,17 +561,40 @@ pub struct VsmRaster {
     /// owned by a render node, and a shadow caster that reached into them would
     /// couple the page raster to residency it does not control.
     vgeom: std::collections::BTreeMap<u128, VgeomCasterGeom>,
-    /// Bind-pose GPU buffers per skinned mesh index, and one palette buffer +
-    /// bind group per skinned instance. Keyed by the scene's own indices and
-    /// rebuilt when the scene version moves, because a palette is *animation* and
-    /// changes every frame by construction.
-    skinned: Vec<SkinnedCasterGeom>,
+    /// Bind-pose GPU buffers per skinned mesh, keyed on the **`Arc` the scene
+    /// hands over** rather than on the scene version (P27.3).
+    ///
+    /// P27.2 rebuilt these whenever `scene.version` moved, which is every frame a
+    /// character animates — and a bind pose is exactly the thing animation does
+    /// not change. `passes::skinned` caches on pointer identity for the same
+    /// reason and this is now the same rule: a mesh whose `Arc` the host still
+    /// holds is a mesh whose vertices are the ones already on the device.
+    skinned: std::collections::BTreeMap<usize, SkinnedCasterGeom>,
+    /// The `Arc` pointer each `scene.skinned_meshes` index resolved to last frame,
+    /// so an index that changed *meshes* invalidates and an index that did not
+    /// costs nothing.
+    skinned_keys: Vec<usize>,
     skinned_palettes: Vec<(wgpu::Buffer, wgpu::BindGroup, usize)>,
-    /// Static caster meshes for terrain tiles, keyed `(terrain id, tile index)`
-    /// and rebuilt when that tile's version moves.
+    /// Static caster meshes for terrain tiles, keyed `(terrain id, tile key)` and
+    /// rebuilt when that tile's version, its hole mask or the origin moves.
     terrain: std::collections::BTreeMap<(u64, crate::scene::TerrainTileKey), TerrainCasterGeom>,
-    /// The scene version the skinned caches were built for.
+    /// The scene version the palette buffers were built for. A palette **is** the
+    /// animation, so it changes every frame by construction and there is nothing
+    /// finer to key it on.
     skinned_version: Option<u64>,
+
+    /// **The page cache** (P27.3), indexed by atlas slot: what that slot's texels
+    /// currently hold, as `(light, page, content stamp)`.
+    ///
+    /// All three, not just the stamp: a slot that is evicted, filled by another
+    /// page and then re-admitted to the first one would otherwise read as a hit
+    /// while holding the *second* page's depth. The address is part of what the
+    /// texels are.
+    cache: Vec<Option<(u32, VsmPage, u64)>>,
+    /// Last frame's view, for the [`is_camera_cut`] trigger.
+    ///
+    /// [`is_camera_cut`]: crate::passes::vgeom::is_camera_cut
+    prev_view: Option<RenderView>,
 
     /// The pages the last [`record`](Self::record) rasterized, in draw order, and
     /// how many geometry groups each one was drawn with. Kept so a gate can map
@@ -682,6 +805,45 @@ impl VsmRaster {
                 cache: None,
             });
 
+        // ── the per-page clear (P27.3). Its own pipeline, its own layout with no
+        // bind groups at all, and `depth_compare: Always` so it writes the clear
+        // value over whatever the slot held. See `record` for why the scissor —
+        // and not the viewport — is what confines it.
+        let clear_shader = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("vsm-page-clear"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/vsm_clear.wgsl").into()),
+            });
+        let clear_layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("vsm-page-clear"),
+                bind_group_layouts: &[],
+                immediate_size: 0,
+            });
+        let clear_pipeline = gpu
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vsm-page-clear"),
+                layout: Some(&clear_layout),
+                vertex: wgpu::VertexState {
+                    module: &clear_shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: None,
+                primitive: page_primitive_state(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    ..page_depth_state()
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
         let empty = |label: &str, usage: wgpu::BufferUsages| {
             gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -698,6 +860,7 @@ impl VsmRaster {
             rigid,
             rigid_masked,
             skinned_pipeline,
+            clear_pipeline,
             palette_bgl,
             prim: PrimGpu::new(gpu, "vsm"),
             visible: empty("vsm-visible", wgpu::BufferUsages::STORAGE),
@@ -729,10 +892,13 @@ impl VsmRaster {
             caster_bind: None,
             page_bind: None,
             vgeom: std::collections::BTreeMap::new(),
-            skinned: Vec::new(),
+            skinned: std::collections::BTreeMap::new(),
+            skinned_keys: Vec::new(),
             skinned_palettes: Vec::new(),
             terrain: std::collections::BTreeMap::new(),
             skinned_version: None,
+            cache: Vec::new(),
+            prev_view: None,
             last_pages: Vec::new(),
             last_groups: 0,
             last_casters: Vec::new(),
@@ -746,8 +912,13 @@ impl VsmRaster {
         self.stats
     }
 
-    /// The pages the last [`record`](Self::record) rasterized, in the order the
-    /// args buffer indexes them: `(light, page, atlas rect)`.
+    /// The pages the last [`record`](Self::record) **that rasterized anything**
+    /// drew, in the order the args buffer indexes them: `(light, page, atlas
+    /// rect)`.
+    ///
+    /// Not cleared by a frame the cache served whole (P27.3): the args buffer
+    /// still holds that older frame's counts, so this is the index that decodes
+    /// it. Whether *this* frame rasterized is [`VsmRasterStats::pages`].
     #[inline]
     pub fn last_pages(&self) -> &[(VsmLightHandle, VsmPage, (u32, u32, u32))] {
         &self.last_pages
@@ -835,26 +1006,53 @@ impl VsmRaster {
 
     /// **Record the page raster.**
     ///
-    /// Everything is a pure function of `(residency, projections, scene, view)`;
-    /// nothing here reads a clock, a frame index or a stamp.
+    /// Everything is a pure function of `(residency, page geometry, scene, view)`
+    /// and of the **cache**, which is derived state: nothing here reads a clock, a
+    /// frame index or a stamp, and rebuilding the cache from scratch reproduces
+    /// the same atlas ([`flush_cache`](Self::flush_cache) is the door an arm
+    /// proves that through).
     ///
     /// Returns the number of page rectangles rasterized — 0 means the encoder was
     /// not touched at all, which is the off-path guarantee every pass in this tree
-    /// keeps.
+    /// keeps **and**, since P27.3, the steady state of a static scene.
     #[allow(clippy::too_many_arguments)]
     pub fn record(
         &mut self,
         gpu: &GpuContext,
         encoder: &mut wgpu::CommandEncoder,
         residency: &VsmResidency,
-        projections: &[VsmProjection],
-        proj_base: &[u32],
+        geom: PageGeometry<'_>,
         atlas: &wgpu::TextureView,
         scene: &RenderScene,
         view: &RenderView,
         settings: &crate::settings::RenderSettings,
     ) -> u32 {
-        let pages = self.collect_pages(residency, projections, proj_base);
+        // ── 0. the cache, and the thing that throws it away wholesale.
+        let slots = residency.geometry().slot_count() as usize;
+        if self.cache.len() != slots {
+            // A different atlas is a different set of texels. (A resize only
+            // happens when the whole system is rebuilt, so this is belt and
+            // braces — and it is what makes `cache[slot]` safe to index.)
+            self.cache = vec![None; slots];
+        }
+        // **The `is_camera_cut` precedent** (P27.3's clause 2 names it). A cut does
+        // not by itself change any page's content — a page's depth is a function
+        // of the light and the world, and the clipmap centre a cut jumps to is
+        // already an input to every page matrix, so the stamps below catch it
+        // exactly. This is the conservative belt on top; whether it is *redundant*
+        // is measured rather than asserted, in
+        // `a_camera_cut_flushes_the_cache_and_the_stamps_would_have_too`.
+        let cut = self
+            .prev_view
+            .as_ref()
+            .is_some_and(|p| crate::passes::vgeom::is_camera_cut(p, view));
+        if cut {
+            self.cache.iter_mut().for_each(|c| *c = None);
+            self.stats.cut_flushes += 1;
+        }
+        self.prev_view = Some(*view);
+
+        let mut pages = self.collect_pages(residency, geom);
         if pages.is_empty() {
             return 0;
         }
@@ -863,6 +1061,7 @@ impl VsmRaster {
         self.sync_terrain(gpu, scene, view);
         let CasterPack {
             casters,
+            hashes,
             groups,
             masked,
             scattered,
@@ -873,32 +1072,152 @@ impl VsmRaster {
             &self.prim,
             &self.vgeom,
             &self.skinned,
+            &self.skinned_keys,
             &self.terrain,
             scene,
             view,
             settings,
         );
-        // **A page with nothing to draw into it still has to be CLEARED.** This
-        // used to return early, and the comment that stood here argued the return
-        // was only taken when there was no pass to open — which is exactly wrong:
-        // it is taken when there are *pages* and no *casters*, and then the atlas
-        // keeps the previous frame's depth in every slot. That configuration is
-        // reachable and it is not exotic: the editor's infinite grid writes camera
-        // depth and is not a caster, so an empty level under a shadow-casting sun
-        // marks pages and packs nothing — and every object the author just deleted
-        // goes on casting out of the atlas. (P27.2 audit.)
+
+        // ── 1. **the content stamps**, and with them the page-exact invalidation.
         //
-        // So the pass opens either way and the clear is the frame's whole output.
-        // `draws` and `casters` stay zero, which is what tells a caster-less frame
-        // apart from an empty one in the counters.
-        if casters.is_empty() {
-            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("vsm-pages-clear"),
+        // Every caster's stamp is folded into exactly the pages its light-space
+        // bounds touch — not into every page, which is what makes "moving one
+        // object invalidates exactly the pages its bounds touch" a property of the
+        // arithmetic rather than a hope about a threshold. The scatter is
+        // conservative in the cull's own direction: it may fold a caster into a
+        // page the page's frustum would reject, never miss one it would keep.
+        self.stats.invalidation_touches +=
+            scatter_caster_stamps(&mut pages, residency, geom, &casters, &hashes);
+
+        // ── 2. the dirty set: a page whose slot already holds this content is not
+        // touched at all — no viewport, no clear, no draw, and it is not even in
+        // the pages buffer the cull walks.
+        let resident = pages.len();
+        pages.retain(|p| self.cache[p.slot as usize] != Some((p.light, p.page, p.key)));
+        self.stats.cached_pages += (resident - pages.len()) as u64;
+        self.stats.dirty_pages += pages.len() as u64;
+        if pages.is_empty() {
+            // **The steady state.** Nothing is recorded, which is the claim: the
+            // encoder is not touched, `frames` does not move, and `pages` stays
+            // where it was — so an arm reading `pages` sees it *stop* rather than
+            // seeing a pass that draws nothing.
+            //
+            // `last_pages` / `last_groups` / `last_casters` are deliberately NOT
+            // cleared: they describe the frame that last wrote the args buffer,
+            // and the args buffer still holds exactly that frame's counts, so
+            // clearing them would leave `read_draw_counts` decoding live data
+            // against an empty index. "Did this frame rasterize" is
+            // `VsmRasterStats::pages`, which is what a counter is for.
+            return 0;
+        }
+
+        // **The drain order, and it is half of the sun's-arc policy.** Dirty pages
+        // are rasterized finest level first, then by slot — a total order that is a
+        // function of the page set alone. When something invalidates every level at
+        // once (the sun crossing a quantum, an origin rebase, a cut) the frame's cap
+        // takes the finest pages, which are the ones a receiver reads at the most
+        // screen pixels, and the coarse ones follow over the next frames.
+        // `docs/memos/p27-3-page-cache.md` measures that drain against the quantum's
+        // own period, which is the condition under which the queue does not grow.
+        pages.sort_by_key(|p| (p.page.level, p.slot));
+        if pages.len() as u32 > VSM_MAX_RASTER_PAGES {
+            let deferred = pages.len() as u64 - u64::from(VSM_MAX_RASTER_PAGES);
+            pages.truncate(VSM_MAX_RASTER_PAGES as usize);
+            self.stats.deferred_pages += deferred;
+            tracing::warn!(
+                "inf-render: {deferred} dirty shadow pages past the {} rasterized \
+                 this frame keep the depth they had until a later frame reaches them",
+                VSM_MAX_RASTER_PAGES
+            );
+        }
+
+        let page_count = pages.len() as u32;
+        let caster_count = casters.len() as u32;
+        let group_count = groups.len() as u32;
+        self.ensure(gpu, page_count, caster_count.max(1), group_count.max(1));
+
+        // ── 3. uploads, all through the queue, so they are ordered BEFORE every
+        // command this encoder holds (the `crate::vt` ordering contract).
+        if caster_count > 0 {
+            gpu.queue.write_buffer(
+                &self.params,
+                0,
+                bytemuck::bytes_of(&VsmCullParamsRaw {
+                    counts: [caster_count, page_count, group_count, 0],
+                }),
+            );
+            gpu.queue
+                .write_buffer(&self.casters, 0, bytemuck::cast_slice(&casters));
+            let page_raw: Vec<VsmPageRaw> = pages
+                .iter()
+                .enumerate()
+                .map(|(i, p)| VsmPageRaw {
+                    view_proj: p.view_proj.to_cols_array(),
+                    info: [i as u32 * caster_count, p.slot, p.light, 0],
+                })
+                .collect();
+            gpu.queue
+                .write_buffer(&self.pages, 0, bytemuck::cast_slice(&page_raw));
+
+            // The per-(page, group) draw uniforms and the indirect args, built
+            // together so a draw and the args it reads can never name different
+            // groups. `instance_count` is written as **zero** and only the GPU ever
+            // raises it — the `inf_vgeom` reset, at one args block per (page, group).
+            let mut draw_raw = Vec::with_capacity(pages.len() * groups.len());
+            let mut arg_raw: Vec<u32> = Vec::with_capacity(pages.len() * groups.len() * 5);
+            for (i, p) in pages.iter().enumerate() {
+                for (g, geo) in groups.iter().enumerate() {
+                    draw_raw.push(VsmPageDrawRaw {
+                        view_proj: p.view_proj.to_cols_array(),
+                        info: [
+                            i as u32 * caster_count + group_first(&groups, g),
+                            p.slot,
+                            g as u32,
+                            0,
+                        ],
+                        _pad: [0; 44],
+                    });
+                    arg_raw.extend_from_slice(&[
+                        geo.index_count,
+                        0,
+                        geo.first_index,
+                        geo.base_vertex as u32,
+                        0,
+                    ]);
+                }
+            }
+            gpu.queue
+                .write_buffer(&self.draws, 0, bytemuck::cast_slice(&draw_raw));
+            gpu.queue
+                .write_buffer(&self.args, 0, bytemuck::cast_slice(&arg_raw));
+            self.rebuild_binds(gpu);
+
+            // ── the cull: one thread per (caster, page) pair.
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("vsm-cull"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.cull_pipeline);
+            pass.set_bind_group(0, self.cull_bind.as_ref().expect("just built"), &[]);
+            pass.dispatch_workgroups(caster_count.div_ceil(64).max(1), page_count, 1);
+        }
+
+        // ── 4. the raster: ONE pass over the atlas, **loading** rather than
+        // clearing, a scissored clear per dirty page, then a viewport per page.
+        let mut draws = 0u64;
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("vsm-pages"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: atlas,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(VSM_DEPTH_CLEAR),
+                        // **`Load`, not `Clear`** (P27.3). A cached page's texels are
+                        // what the frame that drew them left, and clearing the
+                        // attachment would wipe every one of them to fill the handful
+                        // that moved. What replaces it is the scissored clear below.
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -907,80 +1226,179 @@ impl VsmRaster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.last_pages = pages
-                .iter()
-                .map(|p| (VsmLightHandle(p.light), p.page, p.rect))
-                .collect();
-            self.last_groups = 0;
-            self.last_casters.clear();
-            self.stats.frames += 1;
-            self.stats.pages += pages.len() as u64;
-            return pages.len() as u32;
-        }
 
-        let page_count = pages.len() as u32;
-        let caster_count = casters.len() as u32;
-        let group_count = groups.len() as u32;
-        self.ensure(gpu, page_count, caster_count, group_count);
+            // **The clear loop, and the viewport is deliberately left alone.** A
+            // clear wants a rectangle, not a projection, so the clear triangle is
+            // drawn against the *atlas's* NDC and the **scissor** is the only thing
+            // that confines it. That is where the scissor stops being defence in
+            // depth: with `set_scissor_rect` deleted this loop wipes the whole
+            // atlas, cached pages included.
+            pass.set_pipeline(&self.clear_pipeline);
+            for p in pages.iter() {
+                pass.set_scissor_rect(p.rect.0, p.rect.1, p.rect.2, p.rect.2);
+                pass.draw(0..3, 0..1);
+            }
 
-        // ── uploads, all through the queue, so they are ordered BEFORE every
-        // command this encoder holds (the `crate::vt` ordering contract).
-        gpu.queue.write_buffer(
-            &self.params,
-            0,
-            bytemuck::bytes_of(&VsmCullParamsRaw {
-                counts: [caster_count, page_count, group_count, 0],
-            }),
-        );
-        gpu.queue
-            .write_buffer(&self.casters, 0, bytemuck::cast_slice(&casters));
-        let page_raw: Vec<VsmPageRaw> = pages
-            .iter()
-            .enumerate()
-            .map(|(i, p)| VsmPageRaw {
-                view_proj: p.view_proj.to_cols_array(),
-                info: [i as u32 * caster_count, p.slot, p.light, 0],
-            })
-            .collect();
-        gpu.queue
-            .write_buffer(&self.pages, 0, bytemuck::cast_slice(&page_raw));
-
-        // The per-(page, group) draw uniforms and the indirect args, built
-        // together so a draw and the args it reads can never name different
-        // groups. `instance_count` is written as **zero** and only the GPU ever
-        // raises it — the `inf_vgeom` reset, at one args block per (page, group).
-        let mut draw_raw = Vec::with_capacity(pages.len() * groups.len());
-        let mut arg_raw: Vec<u32> = Vec::with_capacity(pages.len() * groups.len() * 5);
-        for (i, p) in pages.iter().enumerate() {
-            for (g, geom) in groups.iter().enumerate() {
-                draw_raw.push(VsmPageDrawRaw {
-                    view_proj: p.view_proj.to_cols_array(),
-                    info: [
-                        i as u32 * caster_count + group_first(&groups, g),
-                        p.slot,
-                        g as u32,
-                        0,
-                    ],
-                    _pad: [0; 44],
-                });
-                arg_raw.extend_from_slice(&[
-                    geom.index_count,
-                    0,
-                    geom.first_index,
-                    geom.base_vertex as u32,
-                    0,
-                ]);
+            if caster_count > 0 {
+                let caster_bind = self.caster_bind.as_ref().expect("just built");
+                let page_bind = self.page_bind.as_ref().expect("just built");
+                let rigid = if masked {
+                    &self.rigid_masked
+                } else {
+                    &self.rigid
+                };
+                let mut bound_skinned = false;
+                pass.set_pipeline(rigid);
+                pass.set_bind_group(1, caster_bind, &[]);
+                for (i, p) in pages.iter().enumerate() {
+                    // **The page rect, pinned exactly.** `slot_origin` is the atlas
+                    // texel of the slot's corner and `stored_page_size` its side, so
+                    // this is the 128 × 128 rectangle `inf_vsm` planned and not a
+                    // rounding of it.
+                    let (x, y) = (p.rect.0, p.rect.1);
+                    let s = p.rect.2;
+                    pass.set_viewport(x as f32, y as f32, s as f32, s as f32, 0.0, 1.0);
+                    pass.set_scissor_rect(x, y, s, s);
+                    for (g, geo) in groups.iter().enumerate() {
+                        if geo.casters == 0 || geo.index_count == 0 {
+                            continue;
+                        }
+                        // Bound per group rather than once per pass: the built-in
+                        // primitives share one pair of buffers, and every other
+                        // caster path brings its own. The pipeline switches only for
+                        // the skinned path, whose vertex format is a different one —
+                        // groups 0 and 1 survive the switch because both layouts name
+                        // the same two at the same indices.
+                        let wants_skinned = matches!(geo.source, GroupSource::Skinned { .. });
+                        if wants_skinned != bound_skinned {
+                            pass.set_pipeline(if wants_skinned {
+                                &self.skinned_pipeline
+                            } else {
+                                rigid
+                            });
+                            bound_skinned = wants_skinned;
+                        }
+                        match geo.source {
+                            GroupSource::Prim => self.prim.bind_geometry(&mut pass),
+                            GroupSource::Vgeom { asset, level } => {
+                                let Some(a) = self.vgeom.get(&asset) else {
+                                    continue;
+                                };
+                                let Some((indices, _)) = a.levels.get(level) else {
+                                    continue;
+                                };
+                                pass.set_vertex_buffer(0, a.vertices.slice(..));
+                                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                            }
+                            GroupSource::Skinned { instance } => {
+                                let Some(mesh_index) =
+                                    self.skinned_palettes.get(instance).map(|(_, _, m)| *m)
+                                else {
+                                    continue;
+                                };
+                                let Some(m) = self.skinned.get(&mesh_index) else {
+                                    continue;
+                                };
+                                pass.set_bind_group(2, &self.skinned_palettes[instance].1, &[]);
+                                pass.set_vertex_buffer(0, m.vertices.slice(..));
+                                pass.set_index_buffer(
+                                    m.indices.slice(..),
+                                    wgpu::IndexFormat::Uint32,
+                                );
+                            }
+                            GroupSource::Terrain { terrain, tile } => {
+                                let Some(t) = self.terrain.get(&(terrain, tile)) else {
+                                    continue;
+                                };
+                                pass.set_vertex_buffer(0, t.vertices.slice(..));
+                                pass.set_index_buffer(
+                                    t.indices.slice(..),
+                                    wgpu::IndexFormat::Uint32,
+                                );
+                            }
+                        }
+                        let slot = (i * groups.len() + g) as u64;
+                        pass.set_bind_group(
+                            0,
+                            page_bind,
+                            &[(slot * VSM_PAGE_DRAW_STRIDE) as wgpu::DynamicOffset],
+                        );
+                        // Issued whether or not the cull found anything: the drawn
+                        // set lives entirely on the GPU, and a CPU-side assumption
+                        // about it is the shortcut that turns into missing geometry
+                        // (the `inf_vgeom` rule, quoted because it is the same rule).
+                        pass.draw_indexed_indirect(&self.args, slot * VSM_ARG_WORDS * 4);
+                        draws += 1;
+                    }
+                }
             }
         }
-        gpu.queue
-            .write_buffer(&self.draws, 0, bytemuck::cast_slice(&draw_raw));
-        gpu.queue
-            .write_buffer(&self.args, 0, bytemuck::cast_slice(&arg_raw));
 
-        // Bind groups are rebuilt only when a buffer moved (`ensure` clears them),
-        // which is the cheap half of `crate::vt`'s generation discipline: a bind
-        // group over a reallocated buffer keeps a dead resource alive and `wgpu`
-        // validates nothing about it.
+        // ── 5. the cache now holds what the pass just wrote.
+        for p in pages.iter() {
+            self.cache[p.slot as usize] = Some((p.light, p.page, p.key));
+        }
+
+        self.last_pages = pages
+            .iter()
+            .map(|p| (VsmLightHandle(p.light), p.page, p.rect))
+            .collect();
+        self.last_groups = if caster_count > 0 { groups.len() } else { 0 };
+        self.last_casters = casters;
+        self.stats.frames += 1;
+        self.stats.pages += u64::from(page_count);
+        self.stats.cleared_pages += u64::from(page_count);
+        self.stats.draws += draws;
+        self.stats.casters += u64::from(caster_count);
+        self.stats.scatter_casters += u64::from(scattered);
+        let of = |f: fn(&GroupSource) -> bool| -> u64 {
+            groups
+                .iter()
+                .filter(|g| f(&g.source))
+                .map(|g| u64::from(g.casters))
+                .sum()
+        };
+        self.stats.vgeom_casters += of(|s| matches!(s, GroupSource::Vgeom { .. }));
+        self.stats.skinned_casters += of(|s| matches!(s, GroupSource::Skinned { .. }));
+        self.stats.terrain_casters += of(|s| matches!(s, GroupSource::Terrain { .. }));
+        self.stats.masked_frames += u64::from(masked);
+        self.stats.dropped_casters += u64::from(dropped);
+        self.stats.dropped_groups += u64::from(dropped_groups);
+        self.stats.vgeom_level_sum += level_sum;
+        if dropped > 0 {
+            tracing::warn!(
+                "inf-render: {dropped} shadow casters past this frame's ceilings \
+                 ({} casters, {} geometry groups) cast nothing, {dropped_groups} of \
+                 them whole groups; raise a ceiling or reduce the caster set",
+                VSM_MAX_CASTERS,
+                VSM_MAX_GROUPS
+            );
+        }
+        page_count
+    }
+
+    /// **Throw the page cache away** — a gate's door (P27.3), on
+    /// `read_draw_counts`'s precedent.
+    ///
+    /// Nothing in the shipping path calls it: an invalidation is meant to be a
+    /// consequence of a content stamp moving, and a flush is the blunt instrument
+    /// that proves the fine one is honest.
+    pub fn flush_cache(&mut self) {
+        self.cache.iter_mut().for_each(|c| *c = None);
+    }
+
+    /// Atlas slots the cache currently vouches for — a gate's reader, so "the
+    /// cache is warm" is a number rather than an inference from a frame count.
+    pub fn cached_slots(&self) -> usize {
+        self.cache.iter().filter(|c| c.is_some()).count()
+    }
+
+    /// Rebuild the bind groups `ensure` dropped when a buffer moved.
+    ///
+    /// Bind groups are rebuilt only when a buffer moved, which is the cheap half of
+    /// `crate::vt`'s generation discipline: a bind group over a reallocated buffer
+    /// keeps a dead resource alive and `wgpu` validates nothing about it.
+    fn rebuild_binds(&mut self, gpu: &GpuContext) {
         if self.cull_bind.is_none() {
             self.cull_bind = Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("vsm-cull"),
@@ -1028,225 +1446,79 @@ impl VsmRaster {
         if self.page_bind.is_none() {
             self.page_bind = Some(page_bind_group(&gpu.device, &self.page_bgl, &self.draws));
         }
-
-        // ── the cull: one thread per (caster, page) pair.
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("vsm-cull"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.cull_pipeline);
-            pass.set_bind_group(0, self.cull_bind.as_ref().expect("just built"), &[]);
-            pass.dispatch_workgroups(caster_count.div_ceil(64).max(1), page_count, 1);
-        }
-
-        // ── the raster: ONE pass over the atlas, one viewport per page.
-        let caster_bind = self.caster_bind.as_ref().expect("just built");
-        let page_bind = self.page_bind.as_ref().expect("just built");
-        let mut draws = 0u64;
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("vsm-pages"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: atlas,
-                    depth_ops: Some(wgpu::Operations {
-                        // Reverse-Z: 0 is "far / nothing", so a slot nothing draws
-                        // into reads as no caster at all.
-                        load: wgpu::LoadOp::Clear(VSM_DEPTH_CLEAR),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            let rigid = if masked {
-                &self.rigid_masked
-            } else {
-                &self.rigid
-            };
-            let mut bound_skinned = false;
-            pass.set_pipeline(rigid);
-            pass.set_bind_group(1, caster_bind, &[]);
-            for (i, p) in pages.iter().enumerate() {
-                // **The page rect, pinned exactly.** `slot_origin` is the atlas
-                // texel of the slot's corner and `stored_page_size` its side, so
-                // this is the 128 × 128 rectangle `inf_vsm` planned and not a
-                // rounding of it.
-                let (x, y) = (p.rect.0, p.rect.1);
-                let s = p.rect.2;
-                pass.set_viewport(x as f32, y as f32, s as f32, s as f32, 0.0, 1.0);
-                pass.set_scissor_rect(x, y, s, s);
-                for (g, geom) in groups.iter().enumerate() {
-                    if geom.casters == 0 || geom.index_count == 0 {
-                        continue;
-                    }
-                    // Bound per group rather than once per pass: the built-in
-                    // primitives share one pair of buffers, and every other caster
-                    // path brings its own. The pipeline switches only for the
-                    // skinned path, whose vertex format is a different one —
-                    // groups 0 and 1 survive the switch because both layouts name
-                    // the same two at the same indices.
-                    let wants_skinned = matches!(geom.source, GroupSource::Skinned { .. });
-                    if wants_skinned != bound_skinned {
-                        pass.set_pipeline(if wants_skinned {
-                            &self.skinned_pipeline
-                        } else {
-                            rigid
-                        });
-                        bound_skinned = wants_skinned;
-                    }
-                    match geom.source {
-                        GroupSource::Prim => self.prim.bind_geometry(&mut pass),
-                        GroupSource::Vgeom { asset, level } => {
-                            let Some(a) = self.vgeom.get(&asset) else {
-                                continue;
-                            };
-                            let Some((indices, _)) = a.levels.get(level) else {
-                                continue;
-                            };
-                            pass.set_vertex_buffer(0, a.vertices.slice(..));
-                            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                        }
-                        GroupSource::Skinned { instance } => {
-                            let Some(mesh_index) =
-                                self.skinned_palettes.get(instance).map(|(_, _, m)| *m)
-                            else {
-                                continue;
-                            };
-                            let Some(m) = self.skinned.get(mesh_index) else {
-                                continue;
-                            };
-                            pass.set_bind_group(2, &self.skinned_palettes[instance].1, &[]);
-                            pass.set_vertex_buffer(0, m.vertices.slice(..));
-                            pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
-                        }
-                        GroupSource::Terrain { terrain, tile } => {
-                            let Some(t) = self.terrain.get(&(terrain, tile)) else {
-                                continue;
-                            };
-                            pass.set_vertex_buffer(0, t.vertices.slice(..));
-                            pass.set_index_buffer(t.indices.slice(..), wgpu::IndexFormat::Uint32);
-                        }
-                    }
-                    let slot = (i * groups.len() + g) as u64;
-                    pass.set_bind_group(
-                        0,
-                        page_bind,
-                        &[(slot * VSM_PAGE_DRAW_STRIDE) as wgpu::DynamicOffset],
-                    );
-                    // Issued whether or not the cull found anything: the drawn set
-                    // lives entirely on the GPU, and a CPU-side assumption about it
-                    // is the shortcut that turns into missing geometry (the
-                    // `inf_vgeom` rule, quoted because it is the same rule).
-                    pass.draw_indexed_indirect(&self.args, slot * VSM_ARG_WORDS * 4);
-                    draws += 1;
-                }
-            }
-        }
-
-        self.last_pages = pages
-            .iter()
-            .map(|p| (VsmLightHandle(p.light), p.page, p.rect))
-            .collect();
-        self.last_groups = groups.len();
-        self.last_casters = casters;
-        self.stats.frames += 1;
-        self.stats.pages += u64::from(page_count);
-        self.stats.draws += draws;
-        self.stats.casters += u64::from(caster_count);
-        self.stats.scatter_casters += u64::from(scattered);
-        let of = |f: fn(&GroupSource) -> bool| -> u64 {
-            groups
-                .iter()
-                .filter(|g| f(&g.source))
-                .map(|g| u64::from(g.casters))
-                .sum()
-        };
-        self.stats.vgeom_casters += of(|s| matches!(s, GroupSource::Vgeom { .. }));
-        self.stats.skinned_casters += of(|s| matches!(s, GroupSource::Skinned { .. }));
-        self.stats.terrain_casters += of(|s| matches!(s, GroupSource::Terrain { .. }));
-        self.stats.masked_frames += u64::from(masked);
-        self.stats.dropped_casters += u64::from(dropped);
-        self.stats.dropped_groups += u64::from(dropped_groups);
-        self.stats.vgeom_level_sum += level_sum;
-        if dropped > 0 {
-            tracing::warn!(
-                "inf-render: {dropped} shadow casters past this frame's ceilings \
-                 ({} casters, {} geometry groups) cast nothing, {dropped_groups} of \
-                 them whole groups; raise a ceiling or reduce the caster set",
-                VSM_MAX_CASTERS,
-                VSM_MAX_GROUPS
-            );
-        }
-        page_count
     }
 
-    /// The resident pages this frame will rasterize, in **slot order** — a total
-    /// order that is a function of the residency alone, so two runs of one want
-    /// sequence rasterize the same pages in the same order.
+    /// The resident pages, in **slot order** — a total order that is a function of
+    /// the residency alone, so two runs of one want sequence produce the same list.
     ///
     /// Walking slots rather than the address space is not just cheaper (an atlas
     /// has thousands of slots and a clipmap has millions of addresses): it is what
     /// makes the set exactly "the pages a receiver could read", because a page that
     /// occupies no slot is one the table resolves past.
-    fn collect_pages(
-        &mut self,
-        residency: &VsmResidency,
-        projections: &[VsmProjection],
-        proj_base: &[u32],
-    ) -> Vec<PageDraw> {
+    ///
+    /// Since P27.3 this is **every** resident page, capped by nothing: the frame's
+    /// ceiling applies to the pages that turn out to be *dirty*, which is the work
+    /// it exists to bound, and a cached page costs one stamp comparison.
+    fn collect_pages(&mut self, residency: &VsmResidency, geom: PageGeometry<'_>) -> Vec<PageDraw> {
         let geometry = residency.geometry();
         let mut out = Vec::new();
-        let mut deferred = 0u64;
         for slot in 0..geometry.slot_count() {
             let Some((light, page)) = residency.slot_occupant(slot) else {
                 continue;
             };
-            if out.len() as u32 >= VSM_MAX_RASTER_PAGES {
-                deferred += 1;
-                continue;
-            }
             let Some(desc) = residency.desc(light) else {
                 continue;
             };
             let Some(g) = desc.levels.get(page.level as usize) else {
                 continue;
             };
-            let Some(&base) = proj_base.get(light.index()) else {
+            let Some(&base) = geom.proj_base.get(light.index()) else {
                 continue;
             };
-            let Some(proj) = projections.get((base + page.face) as usize) else {
+            let Some(proj) = geom.projections.get((base + page.face) as usize) else {
                 continue;
             };
             let Some((x, y)) = geometry.slot_origin(slot) else {
                 continue;
             };
+            let offset = geom
+                .layouts
+                .get(light.index())
+                .map_or([0.0, 0.0], |l| l.offset(page.level));
+            let view_proj = vsm_page_matrix(
+                Mat4::from_cols_array(&proj.view_proj),
+                desc.kind,
+                page.level,
+                g.pages_x,
+                g.pages_y,
+                page.x,
+                page.y,
+                offset,
+            );
             out.push(PageDraw {
-                view_proj: vsm_page_matrix(
-                    Mat4::from_cols_array(&proj.view_proj),
-                    desc.kind,
-                    page.level,
-                    g.pages_x,
-                    g.pages_y,
-                    page.x,
-                    page.y,
-                ),
+                // **The geometric half of the content stamp is the page's own
+                // matrix**, folded bit for bit. It is not a proxy for the things
+                // that move a page's content — it *is* them: the light's direction
+                // (quantized), the level's snapped centre, that level's offset, the
+                // floating origin, the page's sub-rectangle and the settings that
+                // size the box are all inputs to it and nothing else is. So a
+                // rebase moves it, a sun crossing its quantum moves it, and a
+                // camera crossing a level's page stride moves *that* level's and
+                // not the others'.
+                geo_key: Fold::new(u64::from(page.face))
+                    .u64(u64::from(page.level))
+                    .u64(u64::from(light.0))
+                    .f32s(&view_proj.to_cols_array())
+                    .0,
+                key: 0,
+                view_proj,
                 rect: (x, y, geometry.stored_page_size),
                 slot,
                 light: light.0,
                 page,
+                casters: 0,
+                caster_fold: 0,
             });
-        }
-        if deferred > 0 {
-            self.stats.deferred_pages += deferred;
-            tracing::warn!(
-                "inf-render: {deferred} resident shadow pages past the {} \
-                 rasterized this frame keep the depth the clear left them (lit)",
-                VSM_MAX_RASTER_PAGES
-            );
         }
         out
     }
@@ -1326,20 +1598,29 @@ impl VsmRaster {
     /// Upload the bind-pose geometry of every skinned mesh and one palette buffer
     /// per skinned instance.
     ///
-    /// Keyed on `scene.version` and rebuilt whole when it moves, because a
-    /// palette **is** the animation: it changes every frame by construction, and
-    /// a cache keyed on anything finer would be a cache that always misses. The
-    /// bind-pose vertices are re-uploaded with it, which is the one wasteful half
-    /// — `passes::skinned` avoids it by caching on `Arc` pointer identity, and
-    /// doing the same here is a P27.3 refinement rather than a correctness one.
+    /// **The two halves are keyed differently, and P27.3 is where that stopped
+    /// being one key.** A palette *is* the animation: it changes every frame by
+    /// construction, so it is rebuilt whenever `scene.version` moves and there is
+    /// nothing finer to key it on. A **bind pose** is exactly the thing animation
+    /// does not change, and P27.2 re-uploaded every skinned mesh's vertices every
+    /// animated frame because the two shared that key. They are keyed on the `Arc`
+    /// the scene hands over now — `passes::skinned`'s rule, and the one the caching
+    /// clause needs, because a caster geometry that is re-created every frame is a
+    /// caster whose *page* has no chance of being cached either.
     fn sync_skinned(&mut self, gpu: &GpuContext, scene: &RenderScene) {
-        if self.skinned_version == Some(scene.version) {
-            return;
-        }
-        self.skinned_version = Some(scene.version);
-        self.skinned.clear();
-        self.skinned_palettes.clear();
-        for mesh in &scene.skinned_meshes {
+        // The bind-pose half: keyed on pointer identity, evicted by what the scene
+        // still names. Runs every frame and costs a pointer compare per mesh.
+        let keys: Vec<usize> = scene
+            .skinned_meshes
+            .iter()
+            .map(|m| std::sync::Arc::as_ptr(m) as usize)
+            .collect();
+        let live: std::collections::BTreeSet<usize> = keys.iter().copied().collect();
+        self.skinned.retain(|k, _| live.contains(k));
+        for (mesh, &key) in scene.skinned_meshes.iter().zip(&keys) {
+            if self.skinned.contains_key(&key) {
+                continue;
+            }
             let vertices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("vsm-skinned-verts"),
                 size: (std::mem::size_of::<crate::scene::SkinnedVertex>()
@@ -1375,13 +1656,25 @@ impl VsmRaster {
                 let c = 0.5 * (lo + hi);
                 (c, (hi - c).length() * (1.0 + SKINNED_POSE_MARGIN))
             };
-            self.skinned.push(SkinnedCasterGeom {
-                vertices,
-                indices,
-                index_count: mesh.indices.len() as u32,
-                bounds,
-            });
+            self.skinned.insert(
+                key,
+                SkinnedCasterGeom {
+                    vertices,
+                    indices,
+                    index_count: mesh.indices.len() as u32,
+                    bounds,
+                },
+            );
         }
+        self.skinned_keys = keys;
+
+        // The palette half: rebuilt whole on a scene-version move, because a
+        // palette changes every frame by construction.
+        if self.skinned_version == Some(scene.version) {
+            return;
+        }
+        self.skinned_version = Some(scene.version);
+        self.skinned_palettes.clear();
         for inst in &scene.skinned {
             let n = inst.palette.len().max(1);
             let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1403,15 +1696,22 @@ impl VsmRaster {
                     resource: buffer.as_entire_binding(),
                 }],
             });
-            self.skinned_palettes.push((buffer, bind, inst.mesh));
+            // The **pointer key**, not the scene index: the group that draws this
+            // instance looks its geometry up by identity, so an index that changed
+            // meshes cannot be handed the previous mesh's buffers.
+            let key = self.skinned_keys.get(inst.mesh).copied().unwrap_or(0);
+            self.skinned_palettes.push((buffer, bind, key));
         }
     }
 
     /// Build (and evict) one static caster mesh per resident terrain tile.
     ///
-    /// Rebuilt when the tile's version moves **or** the floating origin rebases,
-    /// which is the same key every packed buffer in this tree carries — a mesh
-    /// in render-local space is a mesh under one origin.
+    /// Rebuilt when the tile's version moves **or** its hole mask changes shape
+    /// **or** the floating origin rebases — the same key every packed buffer in
+    /// this tree carries, plus the one `passes::terrain::CachedTile` had to add for
+    /// exactly this reason: a tile's *first* carve changes the mask's length, and a
+    /// version stamp alone cannot repair a cache that has already decided the tile
+    /// is solid.
     fn sync_terrain(&mut self, gpu: &GpuContext, scene: &RenderScene, view: &RenderView) {
         let origin = view.origin.origin();
         let mut live = std::collections::BTreeSet::new();
@@ -1420,11 +1720,10 @@ impl VsmRaster {
             for tile in &terrain.tiles {
                 let key = (terrain.id, tile.key);
                 live.insert(key);
-                if self
-                    .terrain
-                    .get(&key)
-                    .is_some_and(|g| g.version == tile.version && g.origin == origin)
-                {
+                let holes = tile.holes.len() as u32;
+                if self.terrain.get(&key).is_some_and(|g| {
+                    g.version == tile.version && g.origin == origin && g.hole_words == holes
+                }) {
                     continue;
                 }
                 let expect = (res * res) as usize;
@@ -1462,6 +1761,25 @@ impl VsmRaster {
                 let mut indices: Vec<u32> = Vec::with_capacity((cells * cells * 6) as usize);
                 for j in 0..cells {
                     for i in 0..cells {
+                        // **A carved hole casts nothing** (P27.3). P27.2's caster
+                        // mesh read `heights` and ignored `holes`, so a tunnel mouth
+                        // shadowed as solid ground — the one defect in this pass that
+                        // is visible to a player standing under it.
+                        //
+                        // The rule is the terrain raster's own poison rule
+                        // (`terrain.wgsl::is_holed`: any holed corner of a bilinear
+                        // cell removes the whole cell) widened to the caster's
+                        // decimation: a caster quad spans `step` samples, so a quad
+                        // is dropped when **any** sample of its own block is holed.
+                        // Widened rather than sampled at the four corners, because a
+                        // hole narrower than the decimation stride would otherwise
+                        // fall between the corners and go on casting. Erring wide
+                        // *removes* shadow, which is the leak direction this phase
+                        // chose for `VSM_ENTRY_NONE` and the one a hole in the ground
+                        // wants anyway.
+                        if quad_is_holed(tile, res, i, j, step) {
+                            continue;
+                        }
                         let a = j * stride + i;
                         let b = a + 1;
                         let c = a + stride;
@@ -1496,6 +1814,7 @@ impl VsmRaster {
                         bounds: (centre, (hi - centre).length()),
                         version: tile.version,
                         origin,
+                        hole_words: holes,
                     },
                 );
             }
@@ -1574,6 +1893,22 @@ impl VsmRaster {
     }
 }
 
+/// **Where this frame's page projections come from** — the three lists
+/// [`VsmRaster::record`] needs to turn a resident page into a matrix.
+///
+/// A struct rather than three arguments because the third (P27.3's per-level
+/// clipmap layouts) has to travel with the other two or a caller can compose a
+/// page matrix out of an offset that belongs to a different frame.
+#[derive(Clone, Copy)]
+pub struct PageGeometry<'a> {
+    /// One entry per (light × face), in handle order.
+    pub projections: &'a [VsmProjection],
+    /// Index of each light's first projection, in handle order.
+    pub proj_base: &'a [u32],
+    /// One entry per **light**: where its clipmap levels sit this frame.
+    pub layouts: &'a [ClipmapLayout],
+}
+
 /// One page's raster state.
 struct PageDraw {
     view_proj: Mat4,
@@ -1582,6 +1917,214 @@ struct PageDraw {
     slot: u32,
     light: u32,
     page: VsmPage,
+    /// The geometric half of the content stamp — see [`VsmRaster::collect_pages`].
+    geo_key: u64,
+    /// The commutative fold of every caster whose light-space bounds touch this
+    /// page, and how many there were.
+    caster_fold: u64,
+    casters: u32,
+    /// The whole content stamp: `geo_key`, the caster fold and the caster count.
+    /// Zero until [`scatter_caster_stamps`] finishes it.
+    key: u64,
+}
+
+/// **Whether the caster quad at `(i, j)` sits over a carved hole** (P27.3).
+///
+/// The terrain raster's poison rule — *any* holed sample of the bilinear cell
+/// removes the cell (`terrain.wgsl::is_holed`, `RenderTerrain::seam_sample`,
+/// `inf_terrain::TerrainData::height_at`, all the same predicate) — widened from
+/// the cell to the caster's decimated **block**. A caster quad spans `step`
+/// samples on each axis, so it is over a hole if any sample in
+/// `[i·step, (i+1)·step] × [j·step, (j+1)·step]` is holed; testing only the four
+/// corners would let a tunnel mouth narrower than the stride go on casting.
+fn quad_is_holed(
+    tile: &crate::scene::RenderTerrainTile,
+    res: u32,
+    i: u32,
+    j: u32,
+    step: f32,
+) -> bool {
+    if tile.holes.is_empty() {
+        return false;
+    }
+    let lo = |k: u32| ((k as f32 * step).round() as u32).min(res - 1);
+    let (i0, i1) = (lo(i), lo(i + 1));
+    let (j0, j1) = (lo(j), lo(j + 1));
+    (j0..=j1).any(|sj| (i0..=i1).any(|si| tile.is_hole(res, si, sj)))
+}
+
+/// One clipmap light's page grids, for the invalidation scatter.
+struct LightGrids {
+    /// The light's **level-0** clip matrix.
+    vp0: Mat4,
+    /// NDC radius per world metre on each axis, from the matrix's own rows — so a
+    /// sphere's NDC extent is read off the shipped projection rather than
+    /// re-derived from `half_extent`.
+    radius: glam::Vec3,
+    /// Per level with a resident page: `(pages_x, pages_y, page-list index or
+    /// `u32::MAX`)`.
+    levels: std::collections::BTreeMap<u32, (u32, u32, Vec<u32>)>,
+    /// That level's NDC offset (P27.3's per-level snapping).
+    offsets: Vec<[f32; 2]>,
+}
+
+/// **Fold every caster's content stamp into exactly the pages its light-space
+/// bounds touch** (P27.3, clause 2), and finish each page's key.
+///
+/// # Why this is a scatter and not `pages × casters`
+///
+/// The obvious implementation tests every caster against every page with the
+/// cull's own `vsm_page_sees_sphere`. That is the product the GPU cull pays on
+/// thousands of cores, and paying it on one is 1 024 × 16 384 sphere tests a
+/// frame at the ceilings. Instead a clipmap caster's bounding sphere is projected
+/// **once** into the light's level-0 NDC, and each level's page rectangle follows
+/// by arithmetic — so the cost is `casters × levels × pages the caster actually
+/// covers`, which for anything smaller than a page is a constant.
+/// [`VsmRasterStats::invalidation_touches`] is that number, measured rather than
+/// argued.
+///
+/// # Conservative in the cull's direction
+///
+/// The rectangle is the sphere's axis-aligned NDC extent, which contains the
+/// frustum test the cull performs — so this may fold a caster into a page the cull
+/// then rejects (a page re-rasterized for nothing) and can never miss a page the
+/// cull keeps (a stale page, which is a wrong shadow). The z test is the cull's
+/// own two planes, in the same direction.
+///
+/// Perspective lights (spot, cube face) have no such rectangle — their levels
+/// share one frustum and their pages are not a lattice — so those pages take the
+/// per-page sphere test directly, over that light's pages alone.
+fn scatter_caster_stamps(
+    pages: &mut [PageDraw],
+    residency: &VsmResidency,
+    geom: PageGeometry<'_>,
+    casters: &[VsmCasterRaw],
+    hashes: &[u64],
+) -> u64 {
+    let mut grids: std::collections::BTreeMap<u32, LightGrids> = std::collections::BTreeMap::new();
+    let mut perspective: Vec<usize> = Vec::new();
+    for (i, p) in pages.iter().enumerate() {
+        let handle = VsmLightHandle(p.light);
+        let Some(desc) = residency.desc(handle) else {
+            continue;
+        };
+        if desc.kind != VsmTreeKind::Clipmap {
+            perspective.push(i);
+            continue;
+        }
+        let Some(g) = desc.levels.get(p.page.level as usize) else {
+            continue;
+        };
+        let entry = grids.entry(p.light).or_insert_with(|| {
+            let base = geom.proj_base.get(handle.index()).copied().unwrap_or(0);
+            let vp0 = geom
+                .projections
+                .get(base as usize)
+                .map(|pr| Mat4::from_cols_array(&pr.view_proj))
+                .unwrap_or(Mat4::IDENTITY);
+            LightGrids {
+                radius: glam::Vec3::new(
+                    vp0.row(0).truncate().length(),
+                    vp0.row(1).truncate().length(),
+                    vp0.row(2).truncate().length(),
+                ),
+                vp0,
+                levels: std::collections::BTreeMap::new(),
+                offsets: geom
+                    .layouts
+                    .get(handle.index())
+                    .map(|l| l.level_offset.clone())
+                    .unwrap_or_default(),
+            }
+        });
+        let cell = entry.levels.entry(p.page.level).or_insert_with(|| {
+            (
+                g.pages_x,
+                g.pages_y,
+                vec![u32::MAX; (g.pages_x * g.pages_y) as usize],
+            )
+        });
+        if p.page.x < cell.0 && p.page.y < cell.1 {
+            cell.2[(p.page.y * cell.0 + p.page.x) as usize] = i as u32;
+        }
+    }
+
+    let mut touches = 0u64;
+    for (c, &hash) in casters.iter().zip(hashes) {
+        let centre = glam::Vec3::new(c.sphere[0], c.sphere[1], c.sphere[2]);
+        let radius = c.sphere[3];
+        for grid in grids.values() {
+            let clip = grid.vp0 * centre.extend(1.0);
+            if clip.w.abs() < 1e-9 {
+                continue;
+            }
+            let ndc = clip.truncate() / clip.w;
+            let (rx, ry, rz) = (
+                radius * grid.radius.x,
+                radius * grid.radius.y,
+                radius * grid.radius.z,
+            );
+            if !ndc.is_finite() || ndc.z < -rz || ndc.z > 1.0 + rz {
+                continue;
+            }
+            for (&level, (nx, ny, cells)) in &grid.levels {
+                let s = 1.0 / (1u64 << level.min(62)) as f32;
+                let off = grid
+                    .offsets
+                    .get(level as usize)
+                    .copied()
+                    .unwrap_or([0.0; 2]);
+                let (qx, qy) = (ndc.x * s + off[0], ndc.y * s + off[1]);
+                let (dx, dy) = (rx * s, ry * s);
+                // `px = floor((q·0.5 + 0.5)·nx)`, and `py` runs the other way
+                // because page row 0 is the top — the same flip `mark_page_for`
+                // and `vsm_page_matrix` make.
+                let fx = *nx as f32;
+                let fy = *ny as f32;
+                let x0 = (((qx - dx) * 0.5 + 0.5) * fx).floor();
+                let x1 = (((qx + dx) * 0.5 + 0.5) * fx).floor();
+                let y0 = ((0.5 - (qy + dy) * 0.5) * fy).floor();
+                let y1 = ((0.5 - (qy - dy) * 0.5) * fy).floor();
+                if !(x0.is_finite() && x1.is_finite() && y0.is_finite() && y1.is_finite()) {
+                    continue;
+                }
+                let xa = x0.max(0.0) as u32;
+                let xb = (x1.min(fx - 1.0)).max(-1.0) as i64;
+                let ya = y0.max(0.0) as u32;
+                let yb = (y1.min(fy - 1.0)).max(-1.0) as i64;
+                if xb < i64::from(xa) || yb < i64::from(ya) {
+                    continue;
+                }
+                for y in ya..=(yb as u32) {
+                    for x in xa..=(xb as u32) {
+                        touches += 1;
+                        let idx = cells[(y * nx + x) as usize];
+                        if idx != u32::MAX {
+                            let p = &mut pages[idx as usize];
+                            fold_into(&mut p.caster_fold, hash);
+                            p.casters += 1;
+                        }
+                    }
+                }
+            }
+        }
+        for &i in &perspective {
+            touches += 1;
+            let p = &mut pages[i];
+            if crate::vsm::vsm_page_sees_sphere(&p.view_proj, centre, radius) {
+                fold_into(&mut p.caster_fold, hash);
+                p.casters += 1;
+            }
+        }
+    }
+
+    for p in pages.iter_mut() {
+        p.key = Fold::new(p.geo_key)
+            .u64(p.caster_fold)
+            .u64(u64::from(p.casters))
+            .done();
+    }
+    touches
 }
 
 /// **Whether one more geometry group fits this frame's ceiling** — one door for
@@ -1679,6 +2222,15 @@ pub(crate) fn page_depth_state() -> wgpu::DepthStencilState {
 /// counter be added and never read.
 struct CasterPack {
     casters: Vec<VsmCasterRaw>,
+    /// **One content stamp per caster**, parallel to `casters` (P27.3).
+    ///
+    /// What a caster *is*, not where it sits in this frame's list: its model
+    /// matrix, its cull sphere, its material window and the identity+version of the
+    /// geometry it draws — and deliberately **not** `VsmCasterRaw::ids`, whose group
+    /// index and local index move whenever another caster is added in front of it.
+    /// A stamp that included them would re-rasterize every page in the atlas the
+    /// frame a tree was planted at the other end of the level.
+    hashes: Vec<u64>,
     /// Sorted by group, which is what makes a page's visible list overflow-proof:
     /// a group's slice is its own caster count long.
     groups: Vec<GroupGeom>,
@@ -1701,7 +2253,8 @@ struct CasterPack {
 fn pack_casters(
     prim: &PrimGpu,
     vgeom: &std::collections::BTreeMap<u128, VgeomCasterGeom>,
-    skinned: &[SkinnedCasterGeom],
+    skinned: &std::collections::BTreeMap<usize, SkinnedCasterGeom>,
+    mesh_keys: &[usize],
     terrain: &std::collections::BTreeMap<(u64, crate::scene::TerrainTileKey), TerrainCasterGeom>,
     scene: &RenderScene,
     view: &RenderView,
@@ -1728,14 +2281,24 @@ fn pack_casters(
         &caster_settings,
         crate::passes::scatter::MAX_CPU_SCATTER_INSTANCES,
     );
-    let scattered = pack.instances.len() as u32;
+    // **How many rigid instances each bucket holds**, kept before the merge because
+    // `merge_bucketed` concatenates `rigid[k] ++ scatter[k]` — so inside a merged
+    // bucket the first `rigid_len[k]` entries are rigid and the rest are scattered.
+    // That is what makes the scatter count a count of **survivors** below.
+    let rigid_len: [u32; 5] = std::array::from_fn(|k| ranges[k].end - ranges[k].start);
     let (merged, ranges) =
         crate::passes::scatter::merge_bucketed((rigid, ranges), (pack.instances, pack.ranges));
 
     let mut casters = Vec::with_capacity(merged.len());
+    let mut hashes = Vec::with_capacity(merged.len());
     let mut groups = Vec::with_capacity(PrimMesh::ALL.len());
     let mut masked = false;
     let mut first = 0u32;
+    // **What the ceilings actually let through**, not what the pack produced
+    // (P27.2 audit): `pack_fallback`'s output over-reports the moment
+    // `VSM_MAX_CASTERS` truncates a bucket, and a counter an arm reads has to be
+    // the survivors.
+    let mut scattered = 0u32;
     // The ceilings count what they refuse. Every `break`/`continue` on
     // `VSM_MAX_CASTERS` or `VSM_MAX_GROUPS` below increments one of these, so a
     // truncated caster set is a number in the summary rather than a level whose
@@ -1771,12 +2334,15 @@ fn pack_casters(
                 .max(model.z_axis.truncate().length());
             let centre = model.w_axis.truncate();
             masked |= raw.pbr[3] > 0.5 && raw.pbr[3] < 1.5;
-            casters.push(VsmCasterRaw {
+            let c = VsmCasterRaw {
                 model: raw.model,
                 sphere: [centre.x, centre.y, centre.z, unit * scale],
                 mat: [raw.pbr[2], raw.pbr[3], raw.color[3], 0.0],
                 ids: [k as u32, local as u32, first, 0],
-            });
+            };
+            hashes.push(caster_stamp(&c, Fold::new(1).u64(k as u64)));
+            casters.push(c);
+            scattered += u32::from(local as u32 >= rigid_len[k]);
             count += 1;
         }
         let r = prim.range(*kind);
@@ -1845,7 +2411,7 @@ fn pack_casters(
             let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
             let max_scale = inst.scale.abs().max_element().max(1e-6);
             let centre = model.transform_point3(glam::Vec3::from(a.bounds.0));
-            casters.push(VsmCasterRaw {
+            let c = VsmCasterRaw {
                 model: model.to_cols_array(),
                 sphere: [centre.x, centre.y, centre.z, a.bounds.1 * max_scale],
                 // Opaque: virtualized geometry has no per-instance blend code, so
@@ -1853,7 +2419,19 @@ fn pack_casters(
                 // tier.
                 mat: [0.0, 0.0, 1.0, 0.0],
                 ids: [groups.len() as u32, local as u32, first, 0],
-            });
+            };
+            // The asset id AND the LOD level: a `.inf_vmesh`'s classic chain is
+            // derived from a cooked DAG so the id pins the geometry, and the level
+            // is a *camera* decision (the P27.2 deviation memo) — so a caster that
+            // crosses a LOD threshold really is different geometry in the page.
+            hashes.push(caster_stamp(
+                &c,
+                Fold::new(2)
+                    .u64(asset as u64)
+                    .u64((asset >> 64) as u64)
+                    .u64(level as u64),
+            ));
+            casters.push(c);
             level_sum += level as u64;
             count += 1;
         }
@@ -1878,7 +2456,10 @@ fn pack_casters(
             dropped += (scene.skinned.len() - i) as u32;
             break;
         }
-        let Some(mesh) = skinned.get(inst.mesh) else {
+        let Some(mesh_key) = mesh_keys.get(inst.mesh).copied() else {
+            continue;
+        };
+        let Some(mesh) = skinned.get(&mesh_key) else {
             continue;
         };
         if mesh.index_count == 0 {
@@ -1890,12 +2471,24 @@ fn pack_casters(
         let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
         let max_scale = inst.scale.abs().max_element().max(1e-6);
         let centre = model.transform_point3(mesh.bounds.0);
-        casters.push(VsmCasterRaw {
+        let c = VsmCasterRaw {
             model: model.to_cols_array(),
             sphere: [centre.x, centre.y, centre.z, mesh.bounds.1 * max_scale],
             mat: [0.0, 0.0, 1.0, 0.0],
             ids: [groups.len() as u32, 0, first, 0],
-        });
+        };
+        // **The palette IS the geometry** for a skinned caster: the bind pose is
+        // fixed and the pose is what the vertex shader draws, so the stamp folds
+        // every joint matrix. A character that is animating invalidates its pages
+        // every frame — correctly, because its shadow moves every frame — and a
+        // character standing still does not, which is the claim
+        // `a_still_character_stops_re_rasterizing_its_pages` measures.
+        let mut fold = Fold::new(3).u64(mesh_key as u64);
+        for m in &inst.palette {
+            fold = fold.f32s(&m.to_cols_array());
+        }
+        hashes.push(caster_stamp(&c, fold));
+        casters.push(c);
         groups.push(GroupGeom {
             source: GroupSource::Skinned { instance: i },
             index_count: mesh.index_count,
@@ -1923,7 +2516,7 @@ fn pack_casters(
         if !admit_group(groups.len(), 1, &mut dropped, &mut dropped_groups) {
             continue;
         }
-        casters.push(VsmCasterRaw {
+        let c = VsmCasterRaw {
             model: glam::Mat4::IDENTITY.to_cols_array(),
             sphere: [
                 geom.bounds.0.x,
@@ -1933,7 +2526,24 @@ fn pack_casters(
             ],
             mat: [0.0, 0.0, 1.0, 0.0],
             ids: [groups.len() as u32, 0, first, 0],
-        });
+        };
+        // **A carve moves this stamp**, which is how "a carve invalidates exactly
+        // the pages it touches" happens: the tile's version is bumped by the write
+        // that carved it, and `hole_words` catches the first carve, which changes the
+        // mask's *length* rather than its content and would otherwise be invisible
+        // to a version comparison on a tile the projector rebuilt anyway.
+        hashes.push(caster_stamp(
+            &c,
+            Fold::new(4)
+                .u64(*tid)
+                .u64(u64::from(tkey.lod))
+                .u64(tkey.coord.0 as u32 as u64)
+                .u64(tkey.coord.1 as u32 as u64)
+                .u64(geom.version)
+                .u64(u64::from(geom.hole_words))
+                .u64(u64::from(geom.index_count)),
+        ));
+        casters.push(c);
         groups.push(GroupGeom {
             source: GroupSource::Terrain {
                 terrain: *tid,
@@ -1946,8 +2556,10 @@ fn pack_casters(
         });
         first += 1;
     }
+    debug_assert_eq!(casters.len(), hashes.len(), "one stamp per caster");
     CasterPack {
         casters,
+        hashes,
         groups,
         masked,
         scattered,
@@ -1955,6 +2567,19 @@ fn pack_casters(
         dropped_groups,
         level_sum,
     }
+}
+
+/// **One caster's content stamp**: what it *is*, folded onto the geometry
+/// identity `geom` its caller already knows.
+///
+/// `model`, `sphere` and `mat` — the transform, the cull bound and the alpha-test
+/// window, which are exactly the three things that change what depth this caster
+/// writes into a page. **`ids` is deliberately absent**: its group index and its
+/// index inside that group are properties of this frame's packing order, not of
+/// the caster, and folding them in would invalidate every page in the atlas
+/// whenever a group was inserted ahead of another.
+fn caster_stamp(c: &VsmCasterRaw, geom: Fold) -> u64 {
+    geom.f32s(&c.model).f32s(&c.sphere).f32s(&c.mat).done()
 }
 
 #[cfg(test)]
@@ -2188,14 +2813,51 @@ mod tests {
             terrain_casters: 2,
             dropped_casters: 6,
             dropped_groups: 1,
+            cached_pages: 23,
+            dirty_pages: 29,
+            cleared_pages: 31,
+            invalidation_touches: 37,
+            cut_flushes: 41,
         }
         .summary();
         assert!(!s.contains("  "), "a run of spaces in the summary: {s:?}");
         assert!(!s.contains('\n') && !s.contains('\t'), "{s:?}");
         // …and every counter that can be non-zero appears in it, so a field added
         // to the struct and forgotten in the line fails here.
-        for n in ["3", "17", "51", "9", "2", "1", "4", "6"] {
+        // The P27.3 counters use primes so a missing one cannot be read out of
+        // another field's digits — which is what "2" and "1" above rely on the
+        // reader not to worry about.
+        for n in [
+            "3", "17", "51", "9", "2", "1", "4", "6", "23", "29", "31", "37", "41",
+        ] {
             assert!(s.contains(n), "{n} is missing from {s:?}");
         }
+    }
+
+    /// **The per-page clear writes the depth convention's own clear value**
+    /// (P27.3).
+    ///
+    /// `vsm_clear.wgsl` has no uniform — a pipeline with one bind group for one
+    /// constant would cost more than the literal — so the literal is pinned here
+    /// against [`VSM_DEPTH_CLEAR`], which is the camera's `DEPTH_CLEAR` by
+    /// identity (`docs/memos/p27-1-depth-convention.md`). A clear that wrote 1.0
+    /// under reverse-Z would make every cleared page read as a caster at the near
+    /// plane, i.e. **everything in shadow**, which is the opposite of the
+    /// fail-direction this phase chose.
+    #[test]
+    fn the_page_clear_writes_the_depth_clear_value() {
+        assert_eq!(VSM_DEPTH_CLEAR, 0.0);
+        let src = include_str!("shaders/vsm_clear.wgsl");
+        assert_eq!(
+            src.matches("return vec4<f32>(x, y, 0.0, 1.0);").count(),
+            1,
+            "the clear shader no longer writes {VSM_DEPTH_CLEAR} as its depth"
+        );
+        // …and it is a depth-ONLY draw with no fragment entry point, so it cannot
+        // write colour into an attachment list the pass does not have.
+        assert!(
+            !src.contains("@fragment"),
+            "the clear grew a fragment stage"
+        );
     }
 }

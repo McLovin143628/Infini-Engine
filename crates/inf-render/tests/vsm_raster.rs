@@ -23,9 +23,7 @@
 //!
 //! Every GPU arm skips cleanly, and says so, when the machine has no adapter.
 
-use inf_render::{
-    vsm_page_matrix, GpuContext, RenderScene, RenderView, VsmLightHandle, VsmPage, VsmSettings,
-};
+use inf_render::{GpuContext, RenderScene, RenderView, VsmLightHandle, VsmPage, VsmSettings};
 
 fn gpu_or_skip(what: &str) -> Option<GpuContext> {
     match GpuContext::headless() {
@@ -296,21 +294,11 @@ fn texel_world(
 
 /// The page matrix of one resident page, through the shipped door.
 fn page_vp(renderer: &inf_render::EngineRenderer, light: u32, page: VsmPage) -> glam::Mat4 {
-    let sys = renderer.vsm().expect("a live vsm system");
-    let desc = sys
-        .residency()
-        .desc(VsmLightHandle(light))
-        .expect("registered");
-    let g = desc.levels[page.level as usize];
-    vsm_page_matrix(
-        glam::Mat4::from_cols_array(&sys.projections()[0].view_proj),
-        desc.kind,
-        page.level,
-        g.pages_x,
-        g.pages_y,
-        page.x,
-        page.y,
-    )
+    renderer
+        .vsm()
+        .expect("a live vsm system")
+        .page_matrix(VsmLightHandle(light), page)
+        .expect("a resident page has a matrix")
 }
 
 // ── (a) the pass runs, and the depth it writes is the depth the page's own
@@ -336,7 +324,10 @@ fn a_resident_page_holds_the_depth_its_own_projection_produces() {
         .vsm_raster_stats()
         .expect("the system exists once a light casts");
     // ANTI-VACUITY, three ways: the pass ran, it saw pages, and it issued draws.
-    assert!(renderer.vsm_raster_frames() >= 3, "{stats:?}");
+    // `vsm_raster_frames` counts frames that rasterized **at least one page**, and
+    // since P27.3 that is a small number on a static scene by design — the pages
+    // settle and the cache serves them. One is the floor the claim needs.
+    assert!(renderer.vsm_raster_frames() >= 1, "{stats:?}");
     assert!(
         stats.pages > 0 && stats.draws > 0 && stats.casters > 0,
         "{stats:?}"
@@ -350,25 +341,10 @@ fn a_resident_page_holds_the_depth_its_own_projection_produces() {
     // The cube's near face in light space: the light looks along −Z (its
     // `direction` is the direction TO the light, +Z), so the surface a page sees
     // is the face at `z = +SIDE/2`.
-    let sys = renderer.vsm().expect("live");
     let mut checked = 0;
     let mut total_written = 0usize;
     for (light, page, rect) in &pages {
-        let desc = sys
-            .residency()
-            .desc(VsmLightHandle(*light))
-            .expect("registered");
-        let g = desc.levels[page.level as usize];
-        let base = sys.projections()[0];
-        let vp = vsm_page_matrix(
-            glam::Mat4::from_cols_array(&base.view_proj),
-            desc.kind,
-            page.level,
-            g.pages_x,
-            g.pages_y,
-            page.x,
-            page.y,
-        );
+        let vp = page_vp(&renderer, *light, *page);
         let hits = written(&atlas, *rect);
         total_written += hits.len();
         if hits.is_empty() {
@@ -625,17 +601,7 @@ fn the_per_page_cull_drops_the_casters_the_page_cannot_see() {
     let mut rejected = 0usize;
     let mut kept = 0usize;
     for (i, (light, page, _)) in pages.iter().enumerate() {
-        let desc = sys.residency().desc(*light).expect("registered");
-        let g = desc.levels[page.level as usize];
-        let vp = vsm_page_matrix(
-            glam::Mat4::from_cols_array(&sys.projections()[0].view_proj),
-            desc.kind,
-            page.level,
-            g.pages_x,
-            g.pages_y,
-            page.x,
-            page.y,
-        );
+        let vp = page_vp(&renderer, light.0, *page);
         let want = spheres
             .iter()
             .filter(|(c, r)| inf_render::vsm_page_sees_sphere(&vp, *c, *r))
@@ -689,23 +655,9 @@ fn a_masked_caster_discards_in_the_page_raster() {
         s.mark_dirty();
         let r = run(&gpu, &s, &v, &set, 6);
         let atlas = read_atlas(&gpu, &r);
-        let sys = r.vsm().expect("live");
         let mut n = 0usize;
         for (light, page, rect) in resident_pages(&r) {
-            let desc = sys
-                .residency()
-                .desc(VsmLightHandle(light))
-                .expect("registered");
-            let g = desc.levels[page.level as usize];
-            let vp = vsm_page_matrix(
-                glam::Mat4::from_cols_array(&sys.projections()[0].view_proj),
-                desc.kind,
-                page.level,
-                g.pages_x,
-                g.pages_y,
-                page.x,
-                page.y,
-            );
+            let vp = page_vp(&r, light, page);
             // The light looks along -Z, so a larger z is nearer it and — under
             // reverse-Z — holds the larger depth. Halfway between the two
             // surfaces separates them with room to spare.
@@ -808,23 +760,9 @@ fn a_virtualized_geometry_instance_casts_into_the_pages_it_touches() {
     // only other caster in the scene. Anything the backdrop wrote is at the
     // backdrop's depth, so a texel past the midpoint can only be the vmesh's.
     let atlas = read_atlas(&gpu, &renderer);
-    let sys = renderer.vsm().expect("live");
     let mut vgeom_texels = 0usize;
     for (light, page, rect) in resident_pages(&renderer) {
-        let desc = sys
-            .residency()
-            .desc(VsmLightHandle(light))
-            .expect("registered");
-        let g = desc.levels[page.level as usize];
-        let vp = vsm_page_matrix(
-            glam::Mat4::from_cols_array(&sys.projections()[0].view_proj),
-            desc.kind,
-            page.level,
-            g.pages_x,
-            g.pages_y,
-            page.x,
-            page.y,
-        );
+        let vp = page_vp(&renderer, light, page);
         let at = |z: f32| {
             let c = vp * glam::Vec3::new(0.0, 0.0, z).extend(1.0);
             c.z / c.w
@@ -846,23 +784,9 @@ fn a_virtualized_geometry_instance_casts_into_the_pages_it_touches() {
     bare.mark_dirty();
     let control = run(&gpu, &bare, &view(9.0), &set, 6);
     let control_atlas = read_atlas(&gpu, &control);
-    let csys = control.vsm().expect("live");
     let mut control_texels = 0usize;
     for (light, page, rect) in resident_pages(&control) {
-        let desc = csys
-            .residency()
-            .desc(VsmLightHandle(light))
-            .expect("registered");
-        let g = desc.levels[page.level as usize];
-        let vp = vsm_page_matrix(
-            glam::Mat4::from_cols_array(&csys.projections()[0].view_proj),
-            desc.kind,
-            page.level,
-            g.pages_x,
-            g.pages_y,
-            page.x,
-            page.y,
-        );
+        let vp = page_vp(&control, light, page);
         let at = |z: f32| {
             let c = vp * glam::Vec3::new(0.0, 0.0, z).extend(1.0);
             c.z / c.w
@@ -890,23 +814,9 @@ fn a_virtualized_geometry_instance_casts_into_the_pages_it_touches() {
 /// — the measurement every "does this path cast?" arm in this file makes.
 fn depth_past_backdrop(gpu: &GpuContext, renderer: &inf_render::EngineRenderer) -> usize {
     let atlas = read_atlas(gpu, renderer);
-    let sys = renderer.vsm().expect("live");
     let mut n = 0usize;
     for (light, page, rect) in resident_pages(renderer) {
-        let desc = sys
-            .residency()
-            .desc(VsmLightHandle(light))
-            .expect("registered");
-        let g = desc.levels[page.level as usize];
-        let vp = vsm_page_matrix(
-            glam::Mat4::from_cols_array(&sys.projections()[0].view_proj),
-            desc.kind,
-            page.level,
-            g.pages_x,
-            g.pages_y,
-            page.x,
-            page.y,
-        );
+        let vp = page_vp(renderer, light, page);
         let at = |z: f32| {
             let c = vp * glam::Vec3::new(0.0, 0.0, z).extend(1.0);
             c.z / c.w
@@ -1667,15 +1577,26 @@ fn a_frame_with_no_caster_clears_the_pages_the_last_one_filled() {
     let stats = renderer.vsm_raster_stats().expect("stats");
     let pages = resident_pages(&renderer);
     // ANTI-VACUITY, three ways: pages are resident, the first half really drew
-    // casters, and the pass went on opening once they were gone.
+    // casters, and the pass opened **again** once they were gone.
+    //
+    // "Again" rather than "on every frame" since P27.3: the pass opens for the
+    // frames whose content stamps moved, and deleting every object moves them all
+    // exactly once. `frames >= 2` is therefore the claim — the filled half filled
+    // them, the emptied half cleared them — and `cached_pages > 0` proves the
+    // steady state in between really was the cache and not a pass drawing nothing.
     assert!(!pages.is_empty(), "nothing was resident to clear");
     assert!(
         stats.casters > 0,
         "the filled half packed nothing: {stats:?}"
     );
     assert!(
-        stats.frames > 6,
+        stats.frames >= 2,
         "the pass stopped opening once the casters were gone: {stats:?}"
+    );
+    assert!(
+        stats.cached_pages > 0,
+        "no frame was served by the cache, so this is P27.2's every-frame raster \
+         rather than P27.3's: {stats:?}"
     );
 
     let atlas = read_atlas(&gpu, &renderer);

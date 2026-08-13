@@ -1333,6 +1333,9 @@ mod shader_compose_tests {
             ("vsm_cull", include_str!("../shaders/vsm_cull.wgsl")),
             ("vsm_caster", include_str!("../shaders/vsm_caster.wgsl")),
             ("vsm_skinned", include_str!("../shaders/vsm_skinned.wgsl")),
+            // P27.3's per-page clear — the module that replaces the whole-atlas
+            // `LoadOp::Clear`, and the one the scissor became load-bearing for.
+            ("vsm_clear", include_str!("../shaders/vsm_clear.wgsl")),
         ] {
             validate(label, source);
         }

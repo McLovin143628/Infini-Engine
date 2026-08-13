@@ -71,6 +71,11 @@ struct VsmProjection {
     // shadow texel size: world metres for a clipmap, metres per metre of light
     // distance for a perspective light.
     light: vec4<f32>,
+    // Per level, finest first: the NDC offset that turns level 0's NDC into that
+    // level's, because P27.3 snaps every clipmap level to its OWN page stride
+    // (`inf_render::vsm::ClipmapLayout`). Zero for a spot or a cube face, whose
+    // levels share one frustum. 16 = `inf_vsm::MAX_VSM_LEVELS`.
+    level_offset: array<vec2<f32>, 16>,
 };
 @group(0) @binding(1) var<storage, read> projections: array<VsmProjection>;
 // The indirection table, READ ONLY — the same buffer the P27.4 receiver samples
@@ -149,22 +154,30 @@ fn cs_mark(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         var xy = l.xy;
         if (p.info.w == VSM_PROJ_ORTHO) {
-            // A clipmap level covers 2^L times level 0 about the SAME centre, so
-            // its NDC is level 0's divided by 2^L — one matrix reaches every
-            // level. A point must also be INSIDE the level that serves it, which
-            // is the other half of the clipmap's level rule
-            // (`inf_render::vsm::clipmap_containing_level`): a pixel cannot be
-            // served by a level that misses it, however fine its footprint says
-            // it deserves.
-            let extent = max(abs(l.x), abs(l.y));
-            if (extent > 1.0) {
-                let contain = ceil(log2(extent));
-                if (contain > f32(levels - 1u)) {
-                    continue;
+            // A clipmap level covers 2^L times level 0 and, since P27.3, is
+            // snapped to its OWN page stride — so its NDC is level 0's divided by
+            // 2^L PLUS that level's offset. A point must also be INSIDE the level
+            // that serves it (a pixel cannot be served by a level that misses it,
+            // however fine its footprint says it deserves), and with per-level
+            // offsets that is no longer `ceil(log2(extent))`: it is a walk upward
+            // from the justified level asking each in turn. The walk gives the
+            // same answer as the closed form when the offsets are zero, and it
+            // subsumes the `contain > levels - 1` early-out the P27.1 audit
+            // measured as provably redundant. `inf_render::vsm::mark_page_for` is
+            // the same walk on the CPU.
+            var found = false;
+            for (var lv = level; lv < levels; lv = lv + 1u) {
+                let q = l.xy / exp2(f32(lv)) + p.level_offset[lv];
+                if (abs(q.x) <= 1.0 && abs(q.y) <= 1.0) {
+                    level = lv;
+                    xy = q;
+                    found = true;
+                    break;
                 }
-                level = max(level, u32(contain));
             }
-            xy = l.xy / exp2(f32(level));
+            if (!found) {
+                continue;
+            }
         }
         if (abs(xy.x) > 1.0 || abs(xy.y) > 1.0) {
             continue;

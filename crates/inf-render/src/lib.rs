@@ -135,17 +135,18 @@ pub use settings::{
 // P27.1 virtual shadow maps: the projections and the level rules (pure,
 // unit-tested with no adapter), the mirror, and the marking loop's counters.
 pub use vsm::{
-    clipmap_centre, clipmap_containing_level, clipmap_matrix, clipmap_page_world, cube_face_matrix,
-    mark_page_for, page_clip_planes, spot_fov_y, spot_matrix, vsm_justified_level, vsm_light_trees,
-    vsm_page_matrix, vsm_page_sees_sphere, vsm_projections, VsmMarkParams, VsmProjection,
-    CUBE_FACE_BASES, VSM_DEPTH_CLEAR, VSM_DEPTH_COMPARE, VSM_MAX_PROJECTIONS, VSM_PROJ_ORTHO,
-    VSM_PROJ_PERSPECTIVE,
+    clipmap_centre, clipmap_containing_level, clipmap_layout, clipmap_level_ndc, clipmap_matrix,
+    clipmap_page_world, cube_face_matrix, light_basis, mark_page_for, page_clip_planes,
+    quantize_light_dir, spot_fov_y, spot_matrix, vsm_justified_level, vsm_light_trees,
+    vsm_page_matrix, vsm_page_sees_sphere, vsm_projections, vsm_sun_quantum, ClipmapLayout,
+    VsmMarkParams, VsmProjection, CUBE_FACE_BASES, VSM_DEPTH_CLEAR, VSM_DEPTH_COMPARE,
+    VSM_MAX_PROJECTIONS, VSM_PROJ_ORTHO, VSM_PROJ_PERSPECTIVE, VSM_SUN_REFERENCE_HEIGHT_M,
 };
 pub use vsm_atlas::{VsmApplyReport, VsmPools, VSM_PAGE_FORMAT};
 pub use vsm_mark::{VsmMarker, VsmStreamStats, VsmSystem, VSM_PROJECTION_CAP};
 pub use vsm_raster::{
-    VsmCasterRaw, VsmRaster, VsmRasterStats, SKINNED_POSE_MARGIN, VSM_ARG_WORDS, VSM_MAX_CASTERS,
-    VSM_MAX_GROUPS, VSM_MAX_RASTER_PAGES, VSM_PAGE_DRAW_STRIDE, VSM_RIGID_GROUPS,
+    PageGeometry, VsmCasterRaw, VsmRaster, VsmRasterStats, SKINNED_POSE_MARGIN, VSM_ARG_WORDS,
+    VSM_MAX_CASTERS, VSM_MAX_GROUPS, VSM_MAX_RASTER_PAGES, VSM_PAGE_DRAW_STRIDE, VSM_RIGID_GROUPS,
     VSM_TERRAIN_CASTER_CELLS,
 };
 // The shadow page space's own vocabulary, re-exported on `inf_vt`'s precedent so

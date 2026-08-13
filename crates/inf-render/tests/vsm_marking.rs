@@ -746,10 +746,18 @@ fn a_clipmap_pixel_outside_its_justified_level_is_served_by_a_coarser_one() {
         sys.summary()
     );
     let levels: BTreeSet<u32> = got.iter().map(|p| p.level).collect();
-    assert_eq!(
-        levels,
-        [3u32].into_iter().collect::<BTreeSet<_>>(),
-        "the marked levels are {levels:?}"
+    // **3 or coarser, and 3 is reached.** The equality this arm shipped with
+    // (`{3}` exactly) was a statement about *concentric* levels: with one snapped
+    // centre, "outside level 2" and "inside level 3" were one boundary. P27.3
+    // snaps each level to its own page stride, so level 3's rim is up to one of
+    // its own pages away from where level 4's arithmetic would put it, and a pixel
+    // sitting on that rim is legitimately served by 4. The claim under test is
+    // unchanged and is asserted below: the level the footprint alone justifies is
+    // **2**, and the containing floor is what raised it.
+    assert!(
+        levels.contains(&3) && levels.iter().all(|&l| (3..5).contains(&l)),
+        "the marked levels are {levels:?} — the containing floor should raise the \
+         justified level 2 to 3, and per-level snapping can spill a rim pixel to 4"
     );
     // THE POINT: the level the footprint alone justifies is a FINER one, so the
     // containing floor is what chose 3. Computed from the shipped rule rather

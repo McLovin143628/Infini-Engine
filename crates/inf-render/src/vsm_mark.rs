@@ -68,6 +68,12 @@ pub struct VsmStreamStats {
     /// number**: a loop that never dispatches a projection also never marks a
     /// page, and both look like a scene with no shadow-casting lights.
     pub projections: u64,
+    /// Times a light's clipmap levels moved on the world lattice (P27.3), summed
+    /// over frames. **A camera that has not travelled a page does not move one**,
+    /// which is the property the whole caching clause rests on — so this is the
+    /// counter that says whether the snapping is doing anything, and the one an
+    /// arm reads to prove a coarse level held still while a fine one did not.
+    pub level_shifts: u64,
 }
 
 impl VsmStreamStats {
@@ -76,7 +82,7 @@ impl VsmStreamStats {
     pub fn summary(&self) -> String {
         format!(
             "vsm marking: {} frames, {} projections, {} admits / {} evicts, {} deferred, \
-             {} marked wants, mask {} landed / {} missed",
+             {} marked wants, mask {} landed / {} missed, {} level shifts",
             self.frames,
             self.projections,
             self.admits,
@@ -85,6 +91,7 @@ impl VsmStreamStats {
             self.marked_wants,
             self.mark_frames,
             self.mark_misses,
+            self.level_shifts,
         )
     }
 }
@@ -348,6 +355,10 @@ pub struct VsmSystem {
     /// This frame's projection list, built at the sync point and consumed by the
     /// recording after the graph — one derivation, two readers.
     projections: Vec<VsmProjection>,
+    /// This frame's per-light clipmap layout (P27.3): where each level's grid sits
+    /// on the world lattice, and the NDC offset that says so. One entry per
+    /// **light**, unlike [`projections`](Self::projections), which is per face.
+    layouts: Vec<crate::vsm::ClipmapLayout>,
     /// Index of each light's **first** projection in [`projections`](Self::projections),
     /// in handle order. A cube light owns six consecutive entries, so a page's
     /// face indexes off this base rather than off its handle — the one place the
@@ -454,6 +465,7 @@ impl VsmSystem {
             blocks,
             bases,
             projections: Vec::new(),
+            layouts: Vec::new(),
             proj_base,
             raster: crate::vsm_raster::VsmRaster::new(gpu),
             stats: VsmStreamStats::default(),
@@ -495,8 +507,50 @@ impl VsmSystem {
         &self.projections
     }
 
-    /// **The sync point** (steps 1–3): read frame `F − 2`'s mask, allocate what
-    /// it asked for, publish the table, and build this frame's projections.
+    /// The per-light clipmap layouts the last [`sync`](Self::sync) built (P27.3).
+    #[inline]
+    pub fn layouts(&self) -> &[crate::vsm::ClipmapLayout] {
+        &self.layouts
+    }
+
+    /// **The page matrix of one resident page**, through the shipped door — the
+    /// light's own projection, its level's snapped offset, and the page's
+    /// sub-rectangle.
+    ///
+    /// A door rather than a convenience: the offset is per level and per frame, so
+    /// a caller that composed `vsm_page_matrix` itself out of `projections()[0]`
+    /// would be reproducing the layout rather than reading it — and P27.4's
+    /// receiver has to ask exactly this question.
+    pub fn page_matrix(&self, light: VsmLightHandle, page: inf_vsm::VsmPage) -> Option<glam::Mat4> {
+        let desc = self.residency.desc(light)?;
+        let g = desc.levels.get(page.level as usize)?;
+        let base = *self.proj_base.get(light.index())?;
+        let proj = self.projections.get((base + page.face) as usize)?;
+        let offset = self
+            .layouts
+            .get(light.index())
+            .map_or([0.0, 0.0], |l| l.offset(page.level));
+        Some(crate::vsm::vsm_page_matrix(
+            glam::Mat4::from_cols_array(&proj.view_proj),
+            desc.kind,
+            page.level,
+            g.pages_x,
+            g.pages_y,
+            page.x,
+            page.y,
+            offset,
+        ))
+    }
+
+    /// **The sync point** (steps 1–3): build this frame's projections, re-point
+    /// the clipmap levels they snapped, read frame `F − 2`'s mask, allocate what
+    /// it asked for and publish the table.
+    ///
+    /// The projections come **first** since P27.3: each clipmap level snaps to its
+    /// own page stride, so the projection list is what decides where the levels
+    /// sit, and the residency's parent rule is a function of that. Applying wants
+    /// against last frame's offsets would propagate a fallback chain the frame
+    /// does not have.
     pub fn sync(
         &mut self,
         gpu: &GpuContext,
@@ -505,6 +559,29 @@ impl VsmSystem {
         settings: &VsmSettings,
         frame: u64,
     ) -> VsmTransaction {
+        let (projections, layouts) = vsm_projections(
+            scene,
+            view,
+            settings,
+            &self.trees,
+            &self.blocks,
+            &self.bases,
+        );
+        self.projections = projections;
+        self.layouts = layouts;
+        // A light whose levels moved has a changed indirection block even when no
+        // page was admitted, because the fallback chain was recomputed against the
+        // new parent rule. Merged into the transaction's own list rather than
+        // written separately, so the mirror still applies **one** transaction.
+        let mut moved: Vec<VsmLightHandle> = Vec::new();
+        for (i, layout) in self.layouts.iter().enumerate() {
+            let h = VsmLightHandle(i as u32);
+            if self.residency.set_clip_origins(h, &layout.clip_origins) {
+                moved.push(h);
+            }
+        }
+        self.stats.level_shifts += moved.len() as u64;
+
         let wants = match self.marker.take_wants(&gpu.device, &self.residency, frame) {
             Some(w) => {
                 self.stats.mark_frames += 1;
@@ -516,21 +593,18 @@ impl VsmSystem {
             }
         };
         self.stats.marked_wants += wants.len() as u64;
-        let txn = self.residency.apply_wants(&wants);
+        let mut txn = self.residency.apply_wants(&wants);
+        if !moved.is_empty() {
+            txn.tables.extend(moved);
+            txn.tables.sort_unstable();
+            txn.tables.dedup();
+        }
         self.pools
             .apply(&gpu.device, &gpu.queue, &self.residency, &txn);
         self.stats.admits += txn.admits.len() as u64;
         self.stats.evicts += txn.evicts.len() as u64;
         self.stats.deferred += u64::from(txn.deferred);
         self.stats.frames += 1;
-        self.projections = vsm_projections(
-            scene,
-            view,
-            settings,
-            &self.trees,
-            &self.blocks,
-            &self.bases,
-        );
         txn
     }
 
@@ -571,13 +645,29 @@ impl VsmSystem {
             gpu,
             encoder,
             &self.residency,
-            &self.projections,
-            &self.proj_base,
+            crate::vsm_raster::PageGeometry {
+                projections: &self.projections,
+                proj_base: &self.proj_base,
+                layouts: &self.layouts,
+            },
             self.pools.atlas_view(),
             scene,
             view,
             settings,
         )
+    }
+
+    /// **Throw the page cache away** — a gate's door (P27.3), on
+    /// `read_draw_counts`'s precedent.
+    ///
+    /// Nothing in the shipping path calls it: an invalidation is supposed to be a
+    /// consequence of a content stamp moving, and a flush is the blunt instrument
+    /// that proves the fine one is honest. Two arms need it — "a cached page's
+    /// texels are byte-for-byte what a fresh raster produces" has to be able to
+    /// *force* the fresh raster, and "two routes to one residency make the same
+    /// decisions" has to be able to build the second route.
+    pub fn flush_page_cache(&mut self) {
+        self.raster.flush_cache();
     }
 
     /// **Step 4**: record the marking pass over `depth`, which the graph has

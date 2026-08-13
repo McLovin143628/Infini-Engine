@@ -51,7 +51,7 @@ use glam::{Mat4, Vec3};
 use crate::camera::{ortho_reverse_z, RenderView, DEPTH_CLEAR, DEPTH_COMPARE};
 use crate::scene::{LightKind, RenderScene};
 use crate::settings::VsmSettings;
-use inf_vsm::{VsmLightDesc, VsmPage, VsmTreeKind, VSM_PAGE_SIZE};
+use inf_vsm::{VsmLightDesc, VsmPage, VsmTreeKind, MAX_VSM_LEVELS, VSM_PAGE_SIZE};
 
 /// Shadow pages clear to the camera's clear value. See the module docs.
 pub const VSM_DEPTH_CLEAR: f32 = DEPTH_CLEAR;
@@ -87,20 +87,22 @@ pub fn clipmap_page_world(half_extent: f32, pages_per_side: u32) -> f32 {
 }
 
 /// **Where a clipmap is centred**: the camera's render-local eye, snapped to the
-/// *level-0 page* lattice.
+/// *level-0 page* lattice, in **world axes**.
 ///
 /// Snapping is `csm::cascade_matrix`'s texel snap one granularity up, and for
 /// the same reason: an unsnapped centre makes every page's content depend on
 /// sub-page camera motion, so a static scene would re-rasterize everything every
 /// frame and P27.3's "zero page re-rasters after warm-up" would be unreachable.
 ///
-/// **The honest bound, carried to P27.3.** All levels share this one centre,
-/// which is what makes `inf_vsm`'s concentric `N/4 + x/2` parent rule exact. The
-/// price is that a *coarse* level's grid moves in steps of a level-0 page —
-/// a fraction of its own page — so a coarse page's content shifts on any camera
-/// motion. That costs nothing in P27.1, where nothing is cached and every marked
-/// page is re-allocated each frame; it is the first thing P27.3's caching clause
-/// has to answer, and per-level offsets are the answer it will need.
+/// **Superseded by [`clipmap_layout`] for the shipped path** (P27.3), and kept
+/// because it is the statement the *rejected* arrangement makes and the arm
+/// `a_shared_centre_shifts_a_coarse_level_on_every_camera_step` measures it
+/// against the one that shipped. Two things are wrong with it and both cost the
+/// caching clause: it snaps in **world** axes, so the light-space page boundaries
+/// only land on the lattice when the light happens to be axis-aligned; and all
+/// levels share it, so a *coarse* level's grid moves in steps of a level-0 page —
+/// a fraction of its own page — and a coarse page's content shifts on any camera
+/// motion.
 pub fn clipmap_centre(eye: Vec3, page_world: f32) -> Vec3 {
     let p = page_world.max(1e-4);
     Vec3::new(
@@ -108,6 +110,152 @@ pub fn clipmap_centre(eye: Vec3, page_world: f32) -> Vec3 {
         (eye.y / p).round() * p,
         (eye.z / p).round() * p,
     )
+}
+
+/// A directional light's orthonormal basis: `(right, up, forward)`, where
+/// `forward` is the direction the light **travels** (`−direction`).
+///
+/// One derivation, three callers ([`clipmap_matrix`], [`spot_matrix`],
+/// [`clipmap_layout`]) — because the snapping lattice and the projection have to
+/// agree about which way "right" is, and two copies of a `cross` are two chances
+/// not to.
+pub fn light_basis(light_dir_to: Vec3) -> (Vec3, Vec3, Vec3) {
+    let fwd = (-light_dir_to).normalize_or_zero();
+    let fwd = if fwd.length_squared() < 1e-6 {
+        Vec3::NEG_Y
+    } else {
+        fwd
+    };
+    let up = if fwd.dot(Vec3::Y).abs() > 0.99 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
+    let right = fwd.cross(up).normalize_or_zero();
+    let true_up = right.cross(fwd).normalize_or_zero();
+    (right, true_up, fwd)
+}
+
+/// **Where every level of one clipmap sits this frame** (P27.3) — the answer to
+/// the P27.1 remainder.
+///
+/// Each level snaps its centre to **its own** page stride, in the light's own
+/// basis, so level `L`'s page boundaries land on a fixed world lattice of stride
+/// `w_L = page0 · 2^L`. A camera step therefore moves level `L`'s grid at most
+/// once every `w_L` metres instead of once every `page0` — which is the whole
+/// difference between "a coarse page can cache" and "nothing coarse can".
+///
+/// # What it costs, and where that cost is paid
+///
+/// The levels stop being **concentric**, so `inf_vsm`'s `N/4 + x/2` stops being
+/// the parent rule. `VsmLightDesc::parent_at` is the generalization and
+/// [`clip_origins`](Self::clip_origins) is what it is generalized *by*: the index
+/// of each level's page `(0, 0)` on that level's world lattice.
+///
+/// # The along-light axis snaps once, at the COARSEST stride
+///
+/// A page's stored depth is `(p − centre) · forward` scaled, so a centre that
+/// slides along the light re-writes **every** page of **every** level. Snapping
+/// it per level would therefore make level 0's 1 m step invalidate the whole
+/// atlas, which is the defect this type exists to remove. It snaps once, at the
+/// coarsest level's stride, and the box is `N` of those deep — so the snap costs
+/// `1/N` of the depth range and buys one invalidation per `w_top` of travel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipmapLayout {
+    /// Level 0's render-local centre — what [`clipmap_matrix`] is built about.
+    pub centre: Vec3,
+    /// Per level, finest first: the NDC offset that turns level 0's NDC into this
+    /// level's, `ndc_L = ndc_0 / 2^L + offset[L]`. `offset[0]` is exactly zero.
+    pub level_offset: Vec<[f32; 2]>,
+    /// Per level, finest first: `inf_vsm`'s clip origins — the world-lattice cell
+    /// index of page `(0, 0)`. The **y** axis runs with the page grid's rows,
+    /// which run *down*, i.e. against the light basis's `up`.
+    pub clip_origins: Vec<(i64, i64)>,
+}
+
+impl ClipmapLayout {
+    /// The layout with every level concentric about `centre` — what P27.1
+    /// shipped, kept as the degenerate case so a caller with one level (or a
+    /// test) does not have to special-case the vectors.
+    pub fn concentric(centre: Vec3, levels: u32, pages_per_side: u32) -> Self {
+        let n = i64::from(pages_per_side.max(1)) / 2;
+        Self {
+            centre,
+            level_offset: vec![[0.0, 0.0]; levels.max(1) as usize],
+            clip_origins: vec![(-n, -n); levels.max(1) as usize],
+        }
+    }
+
+    /// This level's NDC offset, or zero past the end.
+    #[inline]
+    pub fn offset(&self, level: u32) -> [f32; 2] {
+        self.level_offset
+            .get(level as usize)
+            .copied()
+            .unwrap_or([0.0, 0.0])
+    }
+}
+
+/// Build the per-level snapped layout of one directional light's clipmap.
+///
+/// `eye_world` is the camera in **world** space (`f64`), deliberately: the
+/// lattice a level snaps to is a property of the world, so a floating-origin
+/// rebase must not move it. `half_extent` is level 0's half-extent in metres and
+/// `pages_per_side` its page grid.
+pub fn clipmap_layout(
+    light_dir_to: Vec3,
+    origin: &inf_math::FloatingOrigin,
+    eye_world: glam::DVec3,
+    half_extent: f32,
+    pages_per_side: u32,
+    levels: u32,
+) -> ClipmapLayout {
+    let levels = levels.max(1);
+    let n = pages_per_side.max(1);
+    let (right, up, fwd) = light_basis(light_dir_to);
+    let (rd, ud, fd) = (right.as_dvec3(), up.as_dvec3(), fwd.as_dvec3());
+    let half = f64::from(half_extent.max(1e-3));
+    let w0 = 2.0 * half / f64::from(n);
+    let top = (1u64 << (levels - 1).min(62)) as f64;
+    let w_top = w0 * top;
+    let (er, eu, ef) = (eye_world.dot(rd), eye_world.dot(ud), eye_world.dot(fd));
+    // The along-light coordinate snaps ONCE, at the coarsest stride — see the
+    // type docs.
+    let mf = (ef / w_top).round();
+    let half_n = i64::from(n) / 2;
+
+    let mut level_offset = Vec::with_capacity(levels as usize);
+    let mut clip_origins = Vec::with_capacity(levels as usize);
+    let mut m0 = (0.0f64, 0.0f64);
+    let mut centre0 = glam::DVec3::ZERO;
+    for level in 0..levels {
+        let scale = (1u64 << level.min(62)) as f64;
+        let wl = w0 * scale;
+        let mr = (er / wl).round();
+        let mu = (eu / wl).round();
+        if level == 0 {
+            m0 = (mr, mu);
+            centre0 = rd * (mr * wl) + ud * (mu * wl) + fd * (mf * w_top);
+        }
+        // `ndc_L = ndc_0 / 2^L + (c0 − cL)·axis / half_L`, with `half_L =
+        // (N/2)·w_L` — so the offset is `2·(m_0/2^L − m_L)/N`, which is a
+        // fraction of a page by construction (the two roundings differ by at most
+        // one).
+        let k = 2.0 / f64::from(n);
+        level_offset.push([
+            (k * (m0.0 / scale - mr)) as f32,
+            (k * (m0.1 / scale - mu)) as f32,
+        ]);
+        // Page column `x` covers cell `m_r − N/2 + x` along `right`; page ROW `y`
+        // covers cell `−(m_u + N/2) + y` along `−up`, because row 0 is the top and
+        // NDC y is up. The sign is the whole of the y half of the parent rule.
+        clip_origins.push((mr as i64 - half_n, -(mu as i64) - half_n));
+    }
+    ClipmapLayout {
+        centre: origin.to_render(centre0),
+        level_offset,
+        clip_origins,
+    }
 }
 
 /// The **level-0** `view_proj` of a directional light's clipmap: a reverse-Z
@@ -124,19 +272,7 @@ pub fn clipmap_matrix(
     half_extent: f32,
     depth_range: f32,
 ) -> Mat4 {
-    let fwd = (-light_dir_to).normalize_or_zero();
-    let fwd = if fwd.length_squared() < 1e-6 {
-        Vec3::NEG_Y
-    } else {
-        fwd
-    };
-    let up = if fwd.dot(Vec3::Y).abs() > 0.99 {
-        Vec3::Z
-    } else {
-        Vec3::Y
-    };
-    let right = fwd.cross(up).normalize_or_zero();
-    let true_up = right.cross(fwd).normalize_or_zero();
+    let (_right, true_up, fwd) = light_basis(light_dir_to);
     let range = depth_range.max(1e-3);
     let eye = centre - fwd * (range * 0.5);
     let view = glam::camera::rh::view::look_to_mat4(eye, fwd, true_up);
@@ -152,19 +288,7 @@ pub fn clipmap_matrix(
 /// so the projection's vertical field of view is twice its arccos, clamped away
 /// from the degenerate ends.
 pub fn spot_matrix(position: Vec3, light_dir_to: Vec3, outer_cos: f32, near: f32) -> Mat4 {
-    let fwd = (-light_dir_to).normalize_or_zero();
-    let fwd = if fwd.length_squared() < 1e-6 {
-        Vec3::NEG_Y
-    } else {
-        fwd
-    };
-    let up = if fwd.dot(Vec3::Y).abs() > 0.99 {
-        Vec3::Z
-    } else {
-        Vec3::Y
-    };
-    let right = fwd.cross(up).normalize_or_zero();
-    let true_up = right.cross(fwd).normalize_or_zero();
+    let (_right, true_up, fwd) = light_basis(light_dir_to);
     let view = glam::camera::rh::view::look_to_mat4(position, fwd, true_up);
     glam::camera::rh::proj::directx::perspective_infinite_reverse(
         spot_fov_y(outer_cos),
@@ -260,11 +384,13 @@ pub fn clipmap_containing_level(ndc0: f32, levels: u32) -> Option<u32> {
 /// raster fills pages the marker never asked for. So the arithmetic is inverted
 /// from that function rather than re-derived:
 ///
-/// * a **clipmap** level covers `2^L` times level 0 about the same centre, so its
-///   NDC is level 0's divided by `2^L` — the `xy = l.xy / exp2(level)` line in
+/// * a **clipmap** level covers `2^L` times level 0 and is snapped to its own page
+///   stride, so its NDC is level 0's divided by `2^L` **plus that level's offset**
+///   ([`ClipmapLayout`]) — the `xy = l.xy / exp2(level) + off` line in
 ///   `vsm_mark.wgsl`;
 /// * a **quadtree** (spot) or **cube face** level covers the light's whole
-///   frustum whatever its page count, so its NDC *is* the light's.
+///   frustum whatever its page count, so its NDC *is* the light's and `offset` is
+///   ignored.
 ///
 /// # The vertical flip lives here too
 ///
@@ -274,6 +400,7 @@ pub fn clipmap_containing_level(ndc0: f32, levels: u32) -> Option<u32> {
 /// a page's own projection needs no flip of its own: flipping here as well would
 /// mirror every page's content vertically inside a correctly-chosen slot, which is
 /// the defect that looks like a bias problem.
+#[allow(clippy::too_many_arguments)]
 pub fn vsm_page_matrix(
     light_vp: Mat4,
     kind: VsmTreeKind,
@@ -282,25 +409,28 @@ pub fn vsm_page_matrix(
     pages_y: u32,
     x: u32,
     y: u32,
+    offset: [f32; 2],
 ) -> Mat4 {
     let (nx, ny) = (pages_x.max(1) as f32, pages_y.max(1) as f32);
-    let level_scale = match kind {
-        VsmTreeKind::Clipmap => 1.0 / (1u64 << level.min(62)) as f32,
-        VsmTreeKind::Quadtree | VsmTreeKind::Cube => 1.0,
+    let (level_scale, off) = match kind {
+        VsmTreeKind::Clipmap => (1.0 / (1u64 << level.min(62)) as f32, offset),
+        VsmTreeKind::Quadtree | VsmTreeKind::Cube => (1.0, [0.0, 0.0]),
     };
     // The page's centre in its LEVEL's NDC. `x` runs with NDC x; `y` runs against
     // it (row 0 is the top), which is the one asymmetry in this file.
     let cx = -1.0 + (2.0 * x as f32 + 1.0) / nx;
     let cy = 1.0 - (2.0 * y as f32 + 1.0) / ny;
     let (a, b) = (level_scale * nx, level_scale * ny);
-    // `sub * clip` = `(a·clip.x − cx·nx·clip.w, b·clip.y − cy·ny·clip.w, clip.z,
-    // clip.w)`: the level scale and the page's blow-up folded into one matrix, so
-    // the raster pays one multiply and the light's own matrix is never rebuilt.
+    // `sub * clip` = `(a·clip.x + (off.x − cx)·nx·clip.w, …, clip.z, clip.w)`: the
+    // level scale, the level's own snapped offset and the page's blow-up folded
+    // into one matrix, so the raster pays one multiply and the light's own matrix
+    // is never rebuilt. `ndc_L = ndc_0/2^L + off` is the same statement
+    // `vsm_mark.wgsl` makes, inverted.
     let sub = Mat4::from_cols(
         glam::Vec4::new(a, 0.0, 0.0, 0.0),
         glam::Vec4::new(0.0, b, 0.0, 0.0),
         glam::Vec4::new(0.0, 0.0, 1.0, 0.0),
-        glam::Vec4::new(-cx * nx, -cy * ny, 0.0, 1.0),
+        glam::Vec4::new((off[0] - cx) * nx, (off[1] - cy) * ny, 0.0, 1.0),
     );
     sub * light_vp
 }
@@ -379,9 +509,9 @@ pub fn page_clip_planes(page_vp: &Mat4) -> [glam::Vec4; 6] {
     ]
 }
 
-/// One (light × face) projection, as the marking shader reads it — 96 bytes.
+/// One (light × face) projection, as the marking shader reads it — 224 bytes.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VsmProjection {
     /// Render-local world → this light/face's **level-0** clip space.
     pub view_proj: [f32; 16],
@@ -393,6 +523,93 @@ pub struct VsmProjection {
     /// level-0 shadow texel size: **world metres** for a clipmap, **metres per
     /// metre of light distance** for a perspective light.
     pub light: [f32; 4],
+    /// Per level, finest first: [`ClipmapLayout::level_offset`] — what turns
+    /// level 0's NDC into that level's under P27.3's per-level snapping. Zero for
+    /// a quadtree or a cube face, whose levels share one frustum.
+    ///
+    /// Carried **in the projection** rather than in a second storage array
+    /// because the marking shader needs it inside the same loop iteration that
+    /// reads `view_proj`, and a second binding for 128 bytes would buy a bind
+    /// slot's worth of nothing.
+    pub level_offset: [[f32; 2]; MAX_VSM_LEVELS],
+}
+
+impl Default for VsmProjection {
+    fn default() -> Self {
+        Self {
+            view_proj: [0.0; 16],
+            info: [0; 4],
+            light: [0.0; 4],
+            level_offset: [[0.0; 2]; MAX_VSM_LEVELS],
+        }
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<VsmProjection>() == 224);
+const _: () = assert!(std::mem::offset_of!(VsmProjection, level_offset) == 96);
+
+/// **How far the sun may turn before a shadow page is stale** — the time-slicing
+/// policy's one constant, and the height it is derived at.
+///
+/// Rotating the sun by `δ` moves the shadow of a caster `h` metres above its
+/// receiver by `h · δ` along the ground. A page's own texel at level 0 is
+/// `2 · first_level_extent_m / (clipmap_pages_per_side · VSM_PAGE_SIZE)` metres
+/// across, and the clipmap's level rule puts about one of those under each screen
+/// pixel — so "the shadow has moved one texel" is "the shadow has moved one
+/// pixel", which is the tolerance a re-raster buys back.
+///
+/// The reference height is **2 m**, a standing figure: the shortest caster whose
+/// own shadow a player watches, and therefore the one whose shadow moves fastest
+/// in texels per radian at a given level. A taller caster tolerates *less*
+/// rotation, and its shadow is correspondingly further from its foot — the
+/// measurement and the numbers it produces are in
+/// `docs/memos/p27-3-page-cache.md`.
+pub const VSM_SUN_REFERENCE_HEIGHT_M: f32 = 2.0;
+
+/// The angular quantum the sun's direction is snapped to, in radians, for
+/// `settings`. See [`VSM_SUN_REFERENCE_HEIGHT_M`].
+pub fn vsm_sun_quantum(settings: &VsmSettings) -> f32 {
+    let texel0 = 2.0 * settings.first_level_extent_m.max(1e-3)
+        / (settings.clipmap_pages_per_side.max(1) * VSM_PAGE_SIZE) as f32;
+    (texel0 / VSM_SUN_REFERENCE_HEIGHT_M).clamp(1e-6, 0.5)
+}
+
+/// **Snap a light direction to the time-slicing lattice** — the sun's slow arc,
+/// as a pure function of committed state rather than as a frame counter.
+///
+/// A clock-driven "re-raster the coarse levels every N frames" would make a
+/// page's content a function of the frame *history*, which is the property the
+/// whole phase is built not to have (`inf_vgeom::stream`'s ruling, and P26.2's
+/// "function of state, not history"). Quantizing the **direction** is the same
+/// policy with none of that: two runs that reach the same sun angle produce the
+/// same quantized direction, the same page matrices and therefore the same
+/// content, whatever they did on the way there.
+///
+/// Round-to-multiple on the components and renormalize — deliberately no trig,
+/// because `f32::sin`/`cos` are not bit-portable (the P14 law) and this direction
+/// reaches a page's stored depth.
+pub fn quantize_light_dir(dir: Vec3, quantum: f32) -> Vec3 {
+    let d = dir.normalize_or_zero();
+    // `is_nan()` rather than `!(quantum > 0.0)`: a NaN quantum is a caller defect
+    // and the honest answer is the unquantized direction, but the two conditions
+    // read as one and clippy is right that the negated comparison hides that.
+    if d.length_squared() < 1e-6 || quantum.is_nan() || quantum <= 0.0 {
+        return dir;
+    }
+    let q = quantum.max(1e-6);
+    let snapped = Vec3::new(
+        (d.x / q).round() * q,
+        (d.y / q).round() * q,
+        (d.z / q).round() * q,
+    );
+    // A direction that snaps to the origin (every component under half a quantum)
+    // has no axis to keep; the unsnapped one is the honest answer and the quantum
+    // is far too small for it in every shipped configuration.
+    if snapped.length_squared() < 1e-12 {
+        d
+    } else {
+        snapped.normalize()
+    }
 }
 
 /// Kind discriminants carried in [`VsmProjection::info`]`.w`. **Freeze-pinned**:
@@ -472,14 +689,10 @@ pub fn vsm_projections(
     trees: &[VsmLightDesc],
     blocks: &[u32],
     bases: &[u32],
-) -> Vec<VsmProjection> {
+) -> (Vec<VsmProjection>, Vec<ClipmapLayout>) {
     let mut out = Vec::new();
-    let eye = view.eye_local();
-    let page0 = clipmap_page_world(
-        settings.first_level_extent_m,
-        settings.clipmap_pages_per_side,
-    );
-    let centre = clipmap_centre(eye, page0);
+    let mut layouts = Vec::new();
+    let quantum = vsm_sun_quantum(settings);
     let mut handle = 0usize;
     for l in &scene.lights {
         if !l.cast_shadows {
@@ -499,12 +712,31 @@ pub fn vsm_projections(
                 // anywhere in the clipmap's footprint is inside the box whatever
                 // direction the sun comes from.
                 let range = 2.0 * half * (1u32 << tree.coarsest_level()) as f32;
+                // **The sun's arc is quantized before anything is built from it**
+                // — the basis, the snapping lattice and the projection all come
+                // off this one direction, so a page's content is a function of the
+                // quantized angle and nothing downstream can disagree about which
+                // angle that was.
+                let dir = quantize_light_dir(l.direction, quantum);
+                let layout = clipmap_layout(
+                    dir,
+                    &view.origin,
+                    view.eye_world,
+                    half,
+                    settings.clipmap_pages_per_side,
+                    tree.level_count(),
+                );
+                let mut level_offset = [[0.0f32; 2]; MAX_VSM_LEVELS];
+                for (i, o) in layout.level_offset.iter().take(MAX_VSM_LEVELS).enumerate() {
+                    level_offset[i] = *o;
+                }
                 out.push(VsmProjection {
-                    view_proj: clipmap_matrix(l.direction.normalize_or_zero(), centre, half, range)
-                        .to_cols_array(),
+                    view_proj: clipmap_matrix(dir, layout.centre, half, range).to_cols_array(),
                     info: [block, base, 0, VSM_PROJ_ORTHO],
                     light: [0.0, 0.0, 0.0, 2.0 * half / texels0],
+                    level_offset,
                 });
+                layouts.push(layout);
             }
             VsmTreeKind::Quadtree => {
                 let pos = view.origin.to_render(l.position);
@@ -519,7 +751,9 @@ pub fn vsm_projections(
                     .to_cols_array(),
                     info: [block, base, 0, VSM_PROJ_PERSPECTIVE],
                     light: [pos.x, pos.y, pos.z, per_metre],
+                    ..Default::default()
                 });
+                layouts.push(ClipmapLayout::concentric(pos, tree.level_count(), 1));
             }
             VsmTreeKind::Cube => {
                 let pos = view.origin.to_render(l.position);
@@ -535,12 +769,26 @@ pub fn vsm_projections(
                         .to_cols_array(),
                         info: [block, base, face, VSM_PROJ_PERSPECTIVE],
                         light: [pos.x, pos.y, pos.z, per_metre],
+                        ..Default::default()
                     });
                 }
+                layouts.push(ClipmapLayout::concentric(pos, tree.level_count(), 1));
             }
         }
     }
-    out
+    (out, layouts)
+}
+
+/// **Level `L`'s NDC from level 0's**, under P27.3's per-level snapped offsets:
+/// `ndc_L = ndc_0 / 2^L + offset`.
+///
+/// The one place that arithmetic is written on the CPU. `vsm_page_matrix` folds
+/// its inverse into a matrix and `vsm_mark.wgsl` spells it inline; this is what
+/// both of them mean, and what an arm compares them against.
+#[inline]
+pub fn clipmap_level_ndc(ndc0: Vec3, level: u32, offset: [f32; 2]) -> glam::Vec2 {
+    let s = 1.0 / (1u64 << level.min(62)) as f32;
+    glam::Vec2::new(ndc0.x * s + offset[0], ndc0.y * s + offset[1])
 }
 
 /// **The CPU twin of the marking rule**: which page of `proj`'s light a world
@@ -576,12 +824,24 @@ pub fn mark_page_for(
     };
     let mut level = vsm_justified_level(texel0, pixel_world, levels);
     let uv = if ortho {
-        // A clipmap point must also be INSIDE the level it is served by.
-        level = level.max(clipmap_containing_level(
-            ndc.x.abs().max(ndc.y.abs()),
-            levels,
-        )?);
-        ndc.truncate() / (1u32 << level) as f32
+        // **A clipmap point must also be INSIDE the level it is served by**, and
+        // under P27.3's per-level snapping that is no longer a closed form: each
+        // level has its own offset, so "which level contains this point" is a walk
+        // upward from the justified one asking each level in turn. The walk
+        // subsumes the `ceil(log2(extent))` shortcut exactly (it *is* that answer
+        // when every offset is zero) and it subsumes the `contain > levels − 1`
+        // early-out too, which the P27.1 audit measured as provably redundant.
+        let mut found = None;
+        for l in level..levels {
+            let q = clipmap_level_ndc(ndc, l, proj.level_offset[l as usize]);
+            if q.x.abs() <= 1.0 && q.y.abs() <= 1.0 {
+                found = Some((l, q));
+                break;
+            }
+        }
+        let (l, q) = found?;
+        level = l;
+        q
     } else {
         ndc.truncate()
     };
@@ -886,6 +1146,7 @@ mod tests {
             view_proj: vp.to_cols_array(),
             info: [0, 0, 0, VSM_PROJ_ORTHO],
             light: [0.0, 0.0, 0.0, 2.0 * half / texels0],
+            ..Default::default()
         };
         // A pixel whose footprint is finer than a level-0 texel: level 0.
         let texel0 = 2.0 * half / texels0;
@@ -957,7 +1218,7 @@ mod tests {
 
         let blocks = vec![0u32; trees.len()];
         let bases = vec![0u32; trees.len()];
-        let projections =
+        let (projections, _) =
             vsm_projections(&scene, &view_at(10.0), &settings, &trees, &blocks, &bases);
         assert_eq!(projections.len(), 1 + 1 + 6, "a cube is six projections");
         assert_eq!(projections[0].info[3], VSM_PROJ_ORTHO);
@@ -1006,7 +1267,7 @@ mod tests {
         // …and the projections agree: ten cubes, sixty entries, no clipmap.
         let blocks = vec![0u32; trees.len()];
         let bases = vec![0u32; trees.len()];
-        let ps = vsm_projections(&many, &view_at(10.0), &settings, &trees, &blocks, &bases);
+        let (ps, _) = vsm_projections(&many, &view_at(10.0), &settings, &trees, &blocks, &bases);
         assert_eq!(ps.len(), 60);
         assert!(ps.iter().all(|p| p.info[3] == VSM_PROJ_PERSPECTIVE));
     }
@@ -1026,6 +1287,7 @@ mod tests {
             view_proj: spot_matrix(Vec3::ZERO, Vec3::Z, outer, 0.1).to_cols_array(),
             info: [0, 0, 0, VSM_PROJ_PERSPECTIVE],
             light: [0.0, 0.0, 0.0, per_metre],
+            ..Default::default()
         };
         // The same pixel footprint at 4 m and at 32 m. A spot's page grid is
         // ANGULAR, so a level-0 texel near the light is tiny and one far away is
@@ -1135,7 +1397,7 @@ mod tests {
             ..Default::default()
         });
         let trees = vsm_light_trees(&scene, &settings);
-        let ps = vsm_projections(
+        let (ps, _) = vsm_projections(
             &scene,
             &view_at(10.0),
             &settings,
@@ -1247,6 +1509,7 @@ mod tests {
             .to_cols_array(),
             info: [0, 0, 0, VSM_PROJ_ORTHO],
             light: [0.0, 0.0, 0.0, 2.0 * settings.first_level_extent_m / texels0],
+            ..Default::default()
         };
         let page_of = |p: Vec3| mark_page_for(&proj, &desc, p, pixel_world);
         let marked = page_of(right).expect("the fixture's point marks a page");
@@ -1294,6 +1557,7 @@ mod tests {
             view_proj: vp.to_cols_array(),
             info: [0, 0, 0, VSM_PROJ_ORTHO],
             light: [0.0, 0.0, 0.0, 2.0 * half / texels0],
+            ..Default::default()
         };
         let texel0 = 2.0 * half / texels0;
         // Fine enough a footprint that the level rule always answers 0, so the
@@ -1322,6 +1586,7 @@ mod tests {
                     g.pages_y,
                     marked.x,
                     marked.y,
+                    [0.0, 0.0],
                 );
                 let c = m * p.extend(1.0);
                 let n = c.truncate() / c.w;
@@ -1347,6 +1612,7 @@ mod tests {
                         g.pages_y,
                         nx as u32,
                         ny as u32,
+                        [0.0, 0.0],
                     );
                     let c = m * p.extend(1.0);
                     let n = c.truncate() / c.w;
@@ -1385,7 +1651,7 @@ mod tests {
         // so page (4, 3) is the one straddling the origin upward — the same page
         // `the_clipmap_twin_marks_the_page_the_geometry_names` hand-computes.
         let world_span = |level: u32| {
-            let m = vsm_page_matrix(vp, VsmTreeKind::Clipmap, level, n, n, 4, 3);
+            let m = vsm_page_matrix(vp, VsmTreeKind::Clipmap, level, n, n, 4, 3, [0.0, 0.0]);
             // Walk +x until the page's own NDC leaves the unit square: that
             // distance is the page's half-width in metres.
             let mut lo = 0.0f32;
@@ -1415,7 +1681,16 @@ mod tests {
         // frustum, so the page grid alone decides the page's size.
         let spot = spot_matrix(Vec3::ZERO, Vec3::Z, 40f32.to_radians().cos(), 0.05);
         let q_span = |level: u32, pages: u32| {
-            let m = vsm_page_matrix(spot, VsmTreeKind::Quadtree, level, pages, pages, 0, 0);
+            let m = vsm_page_matrix(
+                spot,
+                VsmTreeKind::Quadtree,
+                level,
+                pages,
+                pages,
+                0,
+                0,
+                [0.0, 0.0],
+            );
             let c = m * Vec3::new(0.0, 0.0, -10.0).extend(1.0);
             (c.x / c.w, c.y / c.w)
         };
@@ -1438,7 +1713,7 @@ mod tests {
         let half = 32.0f32;
         let vp = clipmap_matrix(Vec3::Z, Vec3::ZERO, half, 4.0 * half);
         let n = 8u32;
-        let page = |x, y| vsm_page_matrix(vp, VsmTreeKind::Clipmap, 0, n, n, x, y);
+        let page = |x, y| vsm_page_matrix(vp, VsmTreeKind::Clipmap, 0, n, n, x, y, [0.0, 0.0]);
         // An 8 m page: a 0.1 m sphere at its centre is seen, the same sphere three
         // pages away is not, and a 20 m sphere three pages away IS (it reaches).
         let centre_of = |x: u32, y: u32| {
@@ -1462,7 +1737,7 @@ mod tests {
         // …and the infinite-far case. A cube face's `w − z` row is identically
         // zero; trusting it would reject every caster of every point light.
         let face = cube_face_matrix(Vec3::ZERO, 4, 0.05);
-        let p = vsm_page_matrix(face, VsmTreeKind::Cube, 0, 4, 4, 2, 2);
+        let p = vsm_page_matrix(face, VsmTreeKind::Cube, 0, 4, 4, 2, 2, [0.0, 0.0]);
         assert!(
             vsm_page_sees_sphere(&p, Vec3::new(0.6, -0.6, 6.0), 1.0),
             "an infinite far plane rejected a caster in front of the light"
@@ -1500,6 +1775,7 @@ mod tests {
                 4,
                 2,
                 1,
+                [0.0, 0.0],
             ),
             vsm_page_matrix(
                 spot_matrix(Vec3::ZERO, Vec3::Z, 40f32.to_radians().cos(), near),
@@ -1509,6 +1785,7 @@ mod tests {
                 2,
                 1,
                 0,
+                [0.0, 0.0],
             ),
         ] {
             let planes = page_clip_planes(&vp);
@@ -1554,6 +1831,7 @@ mod tests {
             8,
             5,
             2,
+            [0.0, 0.0],
         );
         assert!(
             page_clip_planes(&ortho)
