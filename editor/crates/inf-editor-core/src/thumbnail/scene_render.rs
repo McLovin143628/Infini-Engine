@@ -1738,9 +1738,36 @@ fn cs_bake(@builtin(global_invocation_id) gid: vec3<u32>) {
     /// Measured: it failed 2 of 2 full-battery runs (where a dozen other test
     /// binaries share the GPU) and passed 3 of 3 in isolation. So `cold` is now
     /// best-of-five too — a **fresh session each attempt**, the noise treated
-    /// identically on both sides. No tolerance and no millisecond bound: cold
-    /// does strictly more work than warm, and once the two are sampled alike that
-    /// is what the numbers show.
+    /// identically on both sides.
+    ///
+    /// # The clock decides inside its own resolution, and a COUNTER decides the rest
+    ///
+    /// Sampling both sides alike was not enough (P27.3 audit). It failed again in
+    /// a P27.3 battery at **1.5752 ms warm against 1.5253 ms cold** — a **3.3 %**
+    /// gap between two sub-2 ms samples, four re-runs green — because by 512² the
+    /// only session-cold cost left is a target allocation, and "strictly more
+    /// work" is worth microseconds on a machine whose scheduler moves whole
+    /// milliseconds. A strict `warm <= cold` on that is a coin toss, which is the
+    /// *wall-clock conditions on adapter* law's own failure shape.
+    ///
+    /// So the arm now carries both halves, and the deterministic one is the one
+    /// with teeth everywhere:
+    ///
+    /// * **A count, not a clock.** A fresh session owns no compiled program and
+    ///   the cold render has to build one (`cached_programs()` 0 → 1); five more
+    ///   warm renders of the same surface leave it at **one**. That is "cold does
+    ///   more work than warm" as a fact about the work, and it fails identically
+    ///   on every adapter and in every scheduler slice. Both reads are taken
+    ///   *outside* the timed region, or the assertion would pay into the number
+    ///   it is checking.
+    /// * **The clock, at its own resolution.** The spread of five samples of one
+    ///   workload is this machine's own measurement noise, so the comparison is
+    ///   allowed to be decided inside it: `warm <= cold + noise`, where `noise` is
+    ///   the larger of the two spreads. Self-calibrating rather than a tolerance
+    ///   picked to fit — a quiet machine gets a tight bound and a busy one a loose
+    ///   one, and a warm frame that genuinely rebuilt its pipeline is orders
+    ///   outside either. The spreads are printed, so the bound is a number a
+    ///   reader can check rather than a constant to trust.
     #[test]
     fn preview_session_cold_versus_warm_latency() {
         let Some(gpu) = gpu_or_skip() else { return };
@@ -1765,20 +1792,41 @@ fn cs_bake(@builtin(global_invocation_id) gid: vec3<u32>) {
             // best-of-five against a single sample is a comparison of sampling
             // methods rather than of work.
             let mut cold = std::time::Duration::MAX;
+            let mut cold_worst = std::time::Duration::ZERO;
             let mut session = PreviewSession::new(&gpu, size);
+            // The counter half's premise, read before any clock starts: a session
+            // is born with nothing compiled, so the render below has to build it.
+            assert_eq!(
+                session.cached_programs(),
+                0,
+                "a fresh session was born holding a program, so 'the cold render \
+                 builds one' is not a claim about the cold render"
+            );
             for _ in 0..5 {
                 let t = std::time::Instant::now();
                 let mut fresh = PreviewSession::new(&gpu, size);
                 let _ = fresh
                     .render(&gpu, MIN_SURFACE, 0, PreviewView::default())
                     .expect("cold render");
-                cold = cold.min(t.elapsed());
+                let dt = t.elapsed();
+                cold = cold.min(dt);
+                cold_worst = cold_worst.max(dt);
+                // **The deterministic half**, and read AFTER the timer so the
+                // assertion never pays into the number it checks: the cold frame
+                // compiled the program the warm loop below reuses.
+                assert_eq!(
+                    fresh.cached_programs(),
+                    1,
+                    "the cold render did not compile a program — 'cold does more \
+                     work than warm' would then rest on the clock alone"
+                );
                 session = fresh;
             }
 
             // Warm: camera only, five frames, best-of (an orbit is judged by the
             // frame it usually delivers, not by the one that hit a scheduler).
             let mut warm = std::time::Duration::MAX;
+            let mut warm_worst = std::time::Duration::ZERO;
             for i in 1..=5 {
                 let view = PreviewView {
                     yaw_deg: 30.0 + i as f32 * 7.0,
@@ -1786,8 +1834,19 @@ fn cs_bake(@builtin(global_invocation_id) gid: vec3<u32>) {
                 };
                 let t = std::time::Instant::now();
                 let _ = session.render(&gpu, MIN_SURFACE, 0, view).expect("warm");
-                warm = warm.min(t.elapsed());
+                let dt = t.elapsed();
+                warm = warm.min(dt);
+                warm_worst = warm_worst.max(dt);
             }
+            // …and the warm side really did reuse. Five renders of the same
+            // surface left the cache at one program: a warm frame that rebuilt
+            // its pipeline is the defect this arm exists to catch, and here it is
+            // caught by a count rather than by a millisecond.
+            assert_eq!(
+                session.cached_programs(),
+                1,
+                "the warm loop rebuilt the program it was supposed to keep"
+            );
             // …and the rest of the round trip the panel actually pays, because
             // an offscreen preview reaches the webview as a PNG data URL. A
             // number that stopped at `read_rgba` would be measuring the half of
@@ -1810,21 +1869,33 @@ fn cs_bake(@builtin(global_invocation_id) gid: vec3<u32>) {
                 encode_fast = encode_fast.min(t.elapsed());
                 bytes_fast = png.len();
             }
+            // **This machine's own measurement noise**: the spread of five
+            // samples of ONE workload, taken on both sides and reported, because
+            // the bound below is decided by it.
+            let cold_spread = cold_worst - cold;
+            let warm_spread = warm_worst - warm;
+            let noise = cold_spread.max(warm_spread);
             eprintln!(
                 "PREVIEW LATENCY {size}x{size}: session-cold {:.2} ms, warm {:.2} ms, \
                  png {:.2} ms ({bytes} B) / png-fast {:.2} ms ({bytes_fast} B) \
-                 => orbit frame {:.2} ms",
+                 => orbit frame {:.2} ms; sampling noise {:.2} ms (cold spread \
+                 {:.2}, warm spread {:.2})",
                 cold.as_secs_f64() * 1e3,
                 warm.as_secs_f64() * 1e3,
                 encode.as_secs_f64() * 1e3,
                 encode_fast.as_secs_f64() * 1e3,
-                (warm + encode_fast).as_secs_f64() * 1e3
+                (warm + encode_fast).as_secs_f64() * 1e3,
+                noise.as_secs_f64() * 1e3,
+                cold_spread.as_secs_f64() * 1e3,
+                warm_spread.as_secs_f64() * 1e3
             );
             assert!(
-                warm <= cold,
+                warm <= cold + noise,
                 "warm re-render ({warm:?}) was slower than the cold first frame \
-                 ({cold:?}) at {size}x{size} — the session is rebuilding something \
-                 it was supposed to keep"
+                 ({cold:?}) at {size}x{size} by more than this machine can resolve \
+                 ({noise:?} of sampling noise: cold spread {cold_spread:?}, warm \
+                 spread {warm_spread:?}) — the session is rebuilding something it \
+                 was supposed to keep"
             );
         }
     }
