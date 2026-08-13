@@ -460,6 +460,7 @@ fn triangle() -> SkinnedMeshData {
     let v = |x: f32, y: f32, j: u32| SkinnedVertex {
         pos: [x, y, 0.0],
         normal: [0.0, 0.0, 1.0],
+        uv: [x, y],
         joints: [j, 0, 0, 0],
         weights: [1.0, 0.0, 0.0, 0.0],
     };

@@ -313,16 +313,25 @@ fn vt_surface(
 /// Re-anchor a tangent-space normal onto an interpolated geometric normal
 /// **without a tangent stream**.
 ///
-/// The engine's *render* vertex formats carry no tangent — `MeshVertex` and
-/// `SkinnedVertex` are position + normal, `VgeomVertex` adds a uv — so there is
-/// no basis to re-anchor onto. Adding one is a change to three vertex layouts and
-/// the meshlet builder, and it is **not** a schema change: `inf_mesh::MeshVertex`
-/// has carried `tangent: [f32; 4]` (xyz + handedness) since P4, so the data
-/// already exists on disk and only the upload path drops it. Out of this batch's
-/// scope and named as such in the ledger. Until then the basis is
-/// derived per fragment from the screen-space derivatives of the world position
-/// and the uv, which is the standard cotangent-frame construction: exact for a
-/// planar patch, and correct to first order everywhere else.
+/// The engine's *render* vertex formats carry no tangent. `MeshVertex` and
+/// `SkinnedVertex` are position + normal + **uv** as of P26.5, and
+/// `VgeomVertex` has been position + normal + uv since P13.1b — so the basis
+/// this derives is now built from a REAL parametrization rather than from a box
+/// projection, which is the difference between "first-order correct against the
+/// artist's uv" and "first-order correct against a guess".
+///
+/// A tangent did not come with the uv, and `docs/memos/p26-5-vertex-streams.md`
+/// measures why rather than asserting it: the skinned pipeline reached
+/// `max_vertex_attributes: 16` exactly with the uv at `@location(15)`, and the
+/// two producers that feed the rigid stream are the built-in primitives (which
+/// could supply one analytically) and `VgeomVertex` (which has none to give) —
+/// so a tangent attribute there would be real data on five shapes and a derived
+/// guess on every imported mesh. The data does exist on disk:
+/// `inf_mesh::MeshVertex` has carried `tangent: [f32; 4]` (xyz + handedness)
+/// since P4. Until a container carries it through the meshlet builder, the basis
+/// is derived per fragment from the screen-space derivatives of the world
+/// position and the uv, which is the standard cotangent-frame construction:
+/// exact for a planar patch, and correct to first order everywhere else.
 ///
 /// A degenerate uv patch (both derivatives zero — a fragment whose uv does not
 /// vary) leaves the geometric normal alone rather than producing a NaN basis.
@@ -352,44 +361,4 @@ fn vt_apply_normal(
     }
     let bitangent = cross(n, tangent);
     return normalize(tangent * ts.x + bitangent * ts.y + n * ts.z);
-}
-
-/// **The uv a path with no uv stream samples with** (P26.3, v1).
-///
-/// A dominant-axis box projection in OBJECT space, mapping a unit primitive
-/// centred on the origin onto [0,1]² per face with a consistent winding. In
-/// object space rather than world space so the projection rides the instance
-/// instead of sliding when it moves.
-///
-/// **Which paths need it, and why — this is a v1 and it is named as one.** The
-/// *render* vertex formats `inf_render::passes::mesh::MeshVertex` and
-/// `inf_render::SkinnedVertex` are position + normal and carry no uv, so the
-/// rigid and skinned fragment stages have nothing else to sample with. That is a
-/// fact about the RENDER stream and not about the asset: `inf_mesh::MeshVertex`
-/// has carried `uv` (and a `tangent`) since P4, and a skinned character's
-/// `.inf_mesh` therefore has authored uvs this path does not read. **A box
-/// projection on a character is visibly wrong** — the seams fall on the dominant
-/// axis rather than on the artist's, and a face's texture will not line up with
-/// its head. Wiring the real uv through is a widened vertex buffer rather than a
-/// new idea: a `uv` at `@location(2)` on `MeshVertex` and `@location(15)` on
-/// `SkinnedVertex`, plus the mirrored change in
-/// `inf_editor_core::render_assets::skinned_mesh_data` and its player twin.
-///
-/// The meshlet path does NOT use this: `VgeomVertex` has stored a real uv since
-/// P13.1b (8 floats a vertex, the last two unread until P26.3), and a real
-/// imported mesh draws through that path.
-///
-/// **One definition, composed into every lit shader** — it was spelled once in
-/// `mesh.wgsl` and again in `skinned_mesh.wgsl`, which is two copies of one
-/// projection that have to agree for a rigid surface and a skinned one to texture
-/// alike.
-fn vt_box_uv(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
-    let a = abs(n);
-    if (a.x >= a.y && a.x >= a.z) {
-        return vec2<f32>(-p.z * sign(n.x), -p.y) + vec2<f32>(0.5);
-    }
-    if (a.y >= a.z) {
-        return vec2<f32>(p.x, -p.z * sign(n.y)) + vec2<f32>(0.5);
-    }
-    return vec2<f32>(p.x * sign(n.z), -p.y) + vec2<f32>(0.5);
 }

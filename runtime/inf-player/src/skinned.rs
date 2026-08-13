@@ -426,6 +426,13 @@ impl SkinnedRegistry {
 /// kept and pinned to joint 0 with weight 1, which is what a rigid part welded to
 /// a skeleton's root means; dropping it would silently lose geometry.
 ///
+/// **The uv crosses with the position and the normal** (P26.5). It is the reason
+/// the box projection could be retired: a skinned character is the case where
+/// `vt_box_uv` was visibly wrong, and the authored uv has been sitting in
+/// `inf_mesh::MeshVertex` since P4 — this copy simply did not read it. An
+/// unwrapped submesh contributes its `[0, 0]` default, which is what it has on
+/// disk and not a value invented here.
+///
 /// **MIRROR** of the other host's `skinned_mesh_data` — keep the two
 /// byte-identical, **this doc block included** (`projector_mirror.rs`). It has to
 /// be: the two hosts would otherwise upload *different vertex buffers* for the
@@ -446,6 +453,7 @@ pub fn skinned_mesh_data(mesh: &MeshAsset) -> Option<SkinnedMeshData> {
             vertices.push(SkinnedVertex {
                 pos: v.position,
                 normal: v.normal,
+                uv: v.uv,
                 joints: skin.joints.map(u32::from),
                 weights: skin.weights,
             });
@@ -544,6 +552,7 @@ mod tests {
         let v = |x: f32, y: f32, j: u32| SkinnedVertex {
             pos: [x, y, 0.0],
             normal: [0.0, 0.0, 1.0],
+            uv: [x, y],
             joints: [j, 0, 0, 0],
             weights: [1.0, 0.0, 0.0, 0.0],
         };

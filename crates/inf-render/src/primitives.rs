@@ -3,9 +3,35 @@
 //!
 //! Every scene primitive used to render as a cube; [`PrimMesh`] adds Sphere /
 //! Plane / Cylinder / Cone as real geometry. The generators are **pure** (no GPU)
-//! and produce `MeshVertex { pos, normal }` — the exact layout every mesh pass
-//! already binds — so a pass swaps its private cube buffer for one [`PrimGpu`]
-//! and issues up to five `draw_indexed` calls (one per kind that has instances).
+//! and produce `MeshVertex { pos, normal, uv }` — the exact layout every mesh
+//! pass already binds — so a pass swaps its private cube buffer for one
+//! [`PrimGpu`] and issues up to five `draw_indexed` calls (one per kind that has
+//! instances).
+//!
+//! # The five parametrizations (P26.5)
+//!
+//! The `uv` field arrived with P26.5, and it is what makes `vt_box_uv` — the
+//! P26.3 dominant-axis box projection these shapes sampled with — retirable.
+//! Each generator now carries a **named** parametrization, because a uv is a
+//! visual decision rather than a derivation and the next person is entitled to
+//! know which one was taken:
+//!
+//! * **cube** — [`crate::scene::box_uv`] itself, called rather than transcribed.
+//!   A unit cube is the one shape a dominant-axis box projection was already
+//!   exactly right for, so this is the shape whose appearance must not move, and
+//!   calling the function is a fact where a matching table would be a
+//!   coincidence waiting to rot;
+//! * **sphere** — equirectangular: `u` = longitude, `v` = latitude from the north
+//!   pole. The seam is the `θ = 0` meridian, which is where the duplicated
+//!   `slices + 1`th column already sat;
+//! * **plane** — the XZ footprint itself, `u = x + ½`, `v = z + ½`;
+//! * **cylinder** — the side unwraps to `u` = angle, `v` = height; each cap is a
+//!   disc mapped into the unit square by its own `(cos, sin)`;
+//! * **cone** — the same, with `v = 0` at the apex.
+//!
+//! All of them are **derived from the values the generator already computed**
+//! (the `psin64`/`pcos64` ring, the face tangents, the corner signs), so the
+//! no-`std`-trig law below reaches the uv for free.
 //!
 //! Convention (matches the cube): unit shapes centred on the origin, extent
 //! `±0.5`; all indices wind **CCW when seen from outside** (front faces), since
@@ -81,7 +107,7 @@ impl PrimMesh {
         }
     }
 
-    /// This kind's CPU geometry (`pos + normal`, CCW-outside).
+    /// This kind's CPU geometry (`pos + normal + uv`, CCW-outside).
     pub fn geometry(self) -> (Vec<MeshVertex>, Vec<u16>) {
         match self {
             PrimMesh::Cube => cube_geometry(),
@@ -111,13 +137,26 @@ const TAU64: f64 = std::f64::consts::TAU;
 const PI64: f64 = std::f64::consts::PI;
 
 #[inline]
-fn v(pos: [f32; 3], normal: [f32; 3]) -> MeshVertex {
-    MeshVertex { pos, normal }
+fn v(pos: [f32; 3], normal: [f32; 3], uv: [f32; 2]) -> MeshVertex {
+    MeshVertex { pos, normal, uv }
+}
+
+/// A disc's `[0,1]²` cap mapping from the ring's own `(cos, sin)` — the cylinder's
+/// two caps and the cone's base, written once so the three agree.
+///
+/// `v` is flipped against `sin` so the cap reads the same way round as the side
+/// unwrap does; a cap is a decision either way, and one decision is better than
+/// three.
+#[inline]
+fn cap_uv(c: f32, s: f32) -> [f32; 2] {
+    [0.5 + 0.5 * c, 0.5 - 0.5 * s]
 }
 
 /// Unit cube centred at the origin (extent `±0.5`), 24 verts / 36 indices. Moved
-/// here from `passes::mesh` (re-exported there for existing references); the byte
-/// layout is unchanged so every cube golden stays identical.
+/// here from `passes::mesh` (re-exported there for existing references).
+/// Positions, normals and winding are unchanged since R-P1 — P26.5 appended a
+/// `uv`, which no textureless scene reads, so every cube golden stays
+/// identical.
 pub fn cube_geometry() -> (Vec<MeshVertex>, Vec<u16>) {
     let faces: [([f32; 3], [f32; 3], [f32; 3]); 6] = [
         // (normal, tangent u, tangent v)
@@ -137,7 +176,16 @@ pub fn cube_geometry() -> (Vec<MeshVertex>, Vec<u16>) {
         let base = verts.len() as u16;
         for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
             let p = (n3 + u3 * su + v3 * sv) * 0.5;
-            verts.push(v(p.to_array(), n));
+            // P26.5: the cube's parametrization **is** the projection it
+            // replaces, computed by the same function rather than transcribed
+            // from it. A unit cube is the one shape a dominant-axis box
+            // projection was already exactly right for, so this is the shape
+            // whose appearance must not move — and `crate::scene::box_uv`
+            // agreeing with a hand-written table is a coincidence waiting to
+            // rot, while calling it is a fact. (The ±Y faces are why: their
+            // tangent pair runs `v` along −Z, so the corner-sign formula the
+            // other four faces satisfy is inverted on exactly two of six.)
+            verts.push(v(p.to_array(), n, crate::scene::box_uv(p.to_array(), n)));
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -158,7 +206,15 @@ pub fn sphere_geometry() -> (Vec<MeshVertex>, Vec<u16>) {
             let theta = TAU64 * j as f64 / slices as f64;
             let (st, ct) = (psin64(theta), pcos64(theta));
             let n = [(sp * ct) as f32, cp as f32, (sp * st) as f32];
-            verts.push(v([n[0] * 0.5, n[1] * 0.5, n[2] * 0.5], n));
+            // P26.5, equirectangular: `u` is longitude and `v` latitude from the
+            // north pole. The `slices + 1`th column is the duplicated seam
+            // vertex, which is precisely why it exists — it takes `u = 1` while
+            // its twin takes `u = 0`.
+            verts.push(v(
+                [n[0] * 0.5, n[1] * 0.5, n[2] * 0.5],
+                n,
+                [j as f32 / slices as f32, i as f32 / stacks as f32],
+            ));
         }
     }
     let row = slices + 1;
@@ -178,11 +234,13 @@ pub fn sphere_geometry() -> (Vec<MeshVertex>, Vec<u16>) {
 /// mirrors the cube's top face (CCW seen from above).
 pub fn plane_geometry() -> (Vec<MeshVertex>, Vec<u16>) {
     let n = [0.0, 1.0, 0.0];
+    // P26.5: the XZ footprint itself — `u = x + ½`, `v = z + ½`. A plane is the
+    // one shape where any other choice would be arbitrary.
     let verts = vec![
-        v([-0.5, 0.0, 0.5], n),
-        v([0.5, 0.0, 0.5], n),
-        v([0.5, 0.0, -0.5], n),
-        v([-0.5, 0.0, -0.5], n),
+        v([-0.5, 0.0, 0.5], n, [0.0, 1.0]),
+        v([0.5, 0.0, 0.5], n, [1.0, 1.0]),
+        v([0.5, 0.0, -0.5], n, [1.0, 0.0]),
+        v([-0.5, 0.0, -0.5], n, [0.0, 0.0]),
     ];
     let indices = vec![0u16, 1, 2, 0, 2, 3];
     (verts, indices)
@@ -196,31 +254,46 @@ pub fn cylinder_geometry() -> (Vec<MeshVertex>, Vec<u16>) {
     let mut verts = Vec::new();
     let mut indices = Vec::new();
 
-    // Side rings: bottom [0..segs), top [segs..2segs). Radial normals, wrap-shared.
+    // Side rings: bottom `[0..=segs]`, top `[segs+1 ..= 2·segs+1]`. Radial
+    // normals.
+    //
+    // **`segs + 1` columns, not `segs`** (P26.5). The ring used to be
+    // wrap-SHARED — the last quad's right edge was column 0 again — which is
+    // free while there is no uv and *wrong* the moment there is one: the seam
+    // segment would run `u` from `(segs-1)/segs` back to `0`, i.e. the whole
+    // texture mirrored into one twenty-fourth of the barrel. The extra column is
+    // the same duplicated seam vertex `sphere_geometry` has always emitted, for
+    // the same reason. Positions and normals are unchanged, so the surface is
+    // the surface it was.
     let ring: Vec<(f32, f32)> = (0..segs)
         .map(|s| {
             let a = TAU64 * s as f64 / segs as f64;
             (pcos64(a) as f32, psin64(a) as f32)
         })
         .collect();
-    for &(c, s) in &ring {
-        verts.push(v([0.5 * c, -0.5, 0.5 * s], [c, 0.0, s]));
+    let cols = segs + 1;
+    for i in 0..cols {
+        let (c, s) = ring[(i % segs) as usize];
+        let u = i as f32 / segs as f32;
+        verts.push(v([0.5 * c, -0.5, 0.5 * s], [c, 0.0, s], [u, 1.0]));
     }
-    for &(c, s) in &ring {
-        verts.push(v([0.5 * c, 0.5, 0.5 * s], [c, 0.0, s]));
+    for i in 0..cols {
+        let (c, s) = ring[(i % segs) as usize];
+        let u = i as f32 / segs as f32;
+        verts.push(v([0.5 * c, 0.5, 0.5 * s], [c, 0.0, s], [u, 0.0]));
     }
     for s in 0..segs {
-        let s1 = (s + 1) % segs;
-        let (bc, bn, tc, tn) = (s as u16, s1 as u16, (segs + s) as u16, (segs + s1) as u16);
+        let (bc, bn) = (s as u16, (s + 1) as u16);
+        let (tc, tn) = ((cols + s) as u16, (cols + s + 1) as u16);
         indices.extend_from_slice(&[bc, tc, bn, bn, tc, tn]);
     }
 
     // Top cap (+Y): centre + rim fan.
     let top_center = verts.len() as u16;
-    verts.push(v([0.0, 0.5, 0.0], [0.0, 1.0, 0.0]));
+    verts.push(v([0.0, 0.5, 0.0], [0.0, 1.0, 0.0], [0.5, 0.5]));
     let top_rim = verts.len() as u16;
     for &(c, s) in &ring {
-        verts.push(v([0.5 * c, 0.5, 0.5 * s], [0.0, 1.0, 0.0]));
+        verts.push(v([0.5 * c, 0.5, 0.5 * s], [0.0, 1.0, 0.0], cap_uv(c, s)));
     }
     for s in 0..segs {
         let s1 = (s + 1) % segs;
@@ -229,10 +302,10 @@ pub fn cylinder_geometry() -> (Vec<MeshVertex>, Vec<u16>) {
 
     // Bottom cap (−Y): centre + rim fan (reversed winding for the −Y normal).
     let bot_center = verts.len() as u16;
-    verts.push(v([0.0, -0.5, 0.0], [0.0, -1.0, 0.0]));
+    verts.push(v([0.0, -0.5, 0.0], [0.0, -1.0, 0.0], [0.5, 0.5]));
     let bot_rim = verts.len() as u16;
     for &(c, s) in &ring {
-        verts.push(v([0.5 * c, -0.5, 0.5 * s], [0.0, -1.0, 0.0]));
+        verts.push(v([0.5 * c, -0.5, 0.5 * s], [0.0, -1.0, 0.0], cap_uv(c, s)));
     }
     for s in 0..segs {
         let s1 = (s + 1) % segs;
@@ -263,21 +336,28 @@ pub fn cone_geometry() -> (Vec<MeshVertex>, Vec<u16>) {
         let r0 = [0.5 * pcos64(a0) as f32, -0.5, 0.5 * psin64(a0) as f32];
         let r1 = [0.5 * pcos64(a1) as f32, -0.5, 0.5 * psin64(a1) as f32];
         let base = verts.len() as u16;
-        verts.push(v([0.0, 0.5, 0.0], n_apex)); // apex
-        verts.push(v(r1, n1)); // rim[s+1]
-        verts.push(v(r0, n0)); // rim[s]
+        // P26.5: the side unwraps like the cylinder's — `u` = angle, `v` = 0 at
+        // the apex. The cone needs no duplicated seam column because every
+        // segment already has its own three vertices, so `s = segs - 1` ends at
+        // `u = 1` rather than wrapping to 0.
+        let (u0, u1) = (s as f32 / segs as f32, (s + 1) as f32 / segs as f32);
+        verts.push(v([0.0, 0.5, 0.0], n_apex, [0.5 * (u0 + u1), 0.0])); // apex
+        verts.push(v(r1, n1, [u1, 1.0])); // rim[s+1]
+        verts.push(v(r0, n0, [u0, 1.0])); // rim[s]
         indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
 
     // Base cap (−Y): centre + rim fan.
     let center = verts.len() as u16;
-    verts.push(v([0.0, -0.5, 0.0], [0.0, -1.0, 0.0]));
+    verts.push(v([0.0, -0.5, 0.0], [0.0, -1.0, 0.0], [0.5, 0.5]));
     let rim = verts.len() as u16;
     for s in 0..segs {
         let a = angle(s);
+        let (c, sn) = (pcos64(a) as f32, psin64(a) as f32);
         verts.push(v(
-            [0.5 * pcos64(a) as f32, -0.5, 0.5 * psin64(a) as f32],
+            [0.5 * c, -0.5, 0.5 * sn],
             [0.0, -1.0, 0.0],
+            cap_uv(c, sn),
         ));
     }
     for s in 0..segs {
@@ -410,10 +490,18 @@ impl PrimGpu {
 /// vertex-pulling passes (P18.5 scatter).
 ///
 /// Two buffers, both read in the vertex stage: `vertices` is a flat `array<f32>`
-/// with six floats per vertex (position then normal, exactly `MeshVertex`'s
-/// layout), and `indices` widens the packed `u16` index list to `u32` because
-/// WGSL has no 16-bit scalar type. Widening costs ~4 KB for the whole primitive
-/// set and buys an index read that is one array subscript.
+/// with **six** floats per vertex (position then normal), and `indices` widens
+/// the packed `u16` index list to `u32` because WGSL has no 16-bit scalar type.
+/// Widening costs ~4 KB for the whole primitive set and buys an index read that
+/// is one array subscript.
+///
+/// **Six and not eight** (P26.5): [`MeshVertex`] grew a `uv` for the virtual
+/// texture path, and `scatter_mesh.wgsl` pulls with a hard-coded stride of six.
+/// The scatter path samples no virtual texture — a scattered instance carries no
+/// [`crate::VtTextureSet`] at all — so widening this buffer would cost every
+/// foliage vertex two floats to feed a branch that cannot be taken. The flatten
+/// below names the two fields it copies rather than casting the struct, so the
+/// stride and the copy cannot drift apart.
 ///
 /// It exists rather than reusing [`PrimGpu`]'s buffers because a wgpu buffer's
 /// usage flags are fixed at creation and `VERTEX | INDEX` is not `STORAGE`; the
@@ -599,5 +687,123 @@ mod tests {
         assert_eq!(idx_cursor as usize, indices.len());
         assert_eq!(vtx_cursor as usize, verts.len());
         assert!(verts.len() < 65_536);
+    }
+
+    // ── the uv streams (P26.5) ───────────────────────────────────────────────
+
+    /// **Every built-in shape carries a real parametrization** — inside the unit
+    /// square, and *spanning* it on both axes.
+    ///
+    /// The span is the load-bearing half and the P23 law says why: *"every UV is
+    /// inside the unit square" is satisfied perfectly by all-zeros.* A generator
+    /// that forgot its uv, or a `v()` helper defaulting one, passes a bounds
+    /// check and fails this. The floor is 0.9 rather than 1.0 because the
+    /// sphere's poles and the caps' discs do not reach a corner.
+    #[test]
+    fn every_primitive_spans_its_own_uv_square() {
+        for kind in PrimMesh::ALL {
+            let (verts, _) = kind.geometry();
+            let mut lo = [f32::MAX; 2];
+            let mut hi = [f32::MIN; 2];
+            for v in &verts {
+                for a in 0..2 {
+                    assert!(
+                        (-1e-6..=1.000_001).contains(&v.uv[a]),
+                        "{kind:?}: uv {:?} leaves the unit square",
+                        v.uv
+                    );
+                    lo[a] = lo[a].min(v.uv[a]);
+                    hi[a] = hi[a].max(v.uv[a]);
+                }
+            }
+            for a in 0..2 {
+                assert!(
+                    hi[a] - lo[a] > 0.9,
+                    "{kind:?}: uv axis {a} spans only {} — an unfilled stream \
+                     (all zeros) looks exactly like this and passes every bounds \
+                     check there is",
+                    hi[a] - lo[a]
+                );
+            }
+        }
+    }
+
+    /// **The cube's uv is the retired box projection, face for face.**
+    ///
+    /// The one shape whose appearance must not move: `vt_box_uv` mapped a unit
+    /// cube's faces onto `[0,1]²` and so does the stream, so a surface that
+    /// sampled this way through P26.3/P26.4 samples the same texels now. Any
+    /// other shape *does* move, deliberately — that is what "a box projection on
+    /// a character is visibly wrong" means.
+    #[test]
+    fn the_cube_uv_is_the_projection_it_replaces() {
+        let (verts, _) = cube_geometry();
+        for v in &verts {
+            let want = crate::scene::box_uv(v.pos, v.normal);
+            assert!(
+                (v.uv[0] - want[0]).abs() < 1e-6 && (v.uv[1] - want[1]).abs() < 1e-6,
+                "cube vertex {:?} (normal {:?}) is uv {:?}, the box projection says {want:?}",
+                v.pos,
+                v.normal,
+                v.uv
+            );
+        }
+    }
+
+    /// **The cylinder's side has a seam column, not a shared one.**
+    ///
+    /// The ring was wrap-shared before P26.5 — free without a uv, and with one it
+    /// means the last quad runs `u` from `(segs-1)/segs` back to `0`: the whole
+    /// texture mirrored into one twenty-fourth of the barrel. Asserted as "every
+    /// side quad's `u` increases", which is what the shared column cannot do,
+    /// plus the two anti-vacuity facts that make the sweep mean something (the
+    /// quads exist, and one of them really is the wrap).
+    #[test]
+    fn the_cylinder_side_never_runs_its_uv_backwards() {
+        let (verts, indices) = cylinder_geometry();
+        let segs = RADIAL_SEGMENTS as usize;
+        let cols = segs + 1;
+        // The side occupies the first `2·cols` vertices and the first `6·segs`
+        // indices, by construction above.
+        let mut checked = 0usize;
+        for t in indices[..segs * 6].chunks(3) {
+            let mut us: Vec<f32> = t.iter().map(|i| verts[*i as usize].uv[0]).collect();
+            us.sort_by(f32::total_cmp);
+            assert!(
+                us[2] - us[0] <= 1.0 / segs as f32 + 1e-6,
+                "a side triangle spans {} of u — the seam column is shared, so the \
+                 texture is mirrored across one segment",
+                us[2] - us[0]
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, segs * 2, "the side quads were not swept");
+        // The wrap really is there: the last side column is u = 1 and the first
+        // is u = 0, over two vertices at the SAME position.
+        assert_eq!(verts[0].uv[0], 0.0);
+        assert_eq!(verts[cols - 1].uv[0], 1.0);
+        assert_eq!(verts[0].pos, verts[cols - 1].pos);
+    }
+
+    /// The box projection is a **table**, not a description: three faces, three
+    /// dominant axes, and the `[0,1]²` corner each lands on.
+    ///
+    /// It is the last fallback for a surface with no authored uv
+    /// (`deformed_skinned_mesh`), so it is pinned by value rather than by the
+    /// shader it was transliterated from — that shader is gone.
+    #[test]
+    fn the_box_projection_is_the_one_it_always_was() {
+        use crate::scene::box_uv;
+        // +Z face, the four corners of a unit quad at z = +0.5.
+        assert_eq!(box_uv([-0.5, -0.5, 0.5], [0.0, 0.0, 1.0]), [0.0, 1.0]);
+        assert_eq!(box_uv([0.5, 0.5, 0.5], [0.0, 0.0, 1.0]), [1.0, 0.0]);
+        // +X face: `u` runs along −Z.
+        assert_eq!(box_uv([0.5, -0.5, -0.5], [1.0, 0.0, 0.0]), [1.0, 1.0]);
+        // +Y face: `u` runs along X, `v` along −Z.
+        assert_eq!(box_uv([-0.5, 0.5, 0.5], [0.0, 1.0, 0.0]), [0.0, 0.0]);
+        // A degenerate normal picks the X branch and still returns a number.
+        assert!(box_uv([0.1, 0.2, 0.3], [0.0; 3])
+            .iter()
+            .all(|f| f.is_finite()));
     }
 }

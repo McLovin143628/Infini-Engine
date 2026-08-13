@@ -9,6 +9,11 @@ struct VsIn {
     @location(1) normal: vec3<f32>,
     @location(2) joints: vec4<u32>,
     @location(3) weights: vec4<f32>,
+    // P26.5: the character's AUTHORED uv, at the one location left. The instance
+    // block owns 4..=14 here, so 15 is the last address
+    // `max_vertex_attributes: 16` allows — this pipeline is now full, which is
+    // the wall `docs/memos/p26-5-vertex-streams.md` measures against a tangent.
+    @location(15) uv: vec2<f32>,
     // Instance data (buffer 1), @location(4..=14).
     @location(4) model_0: vec4<f32>,
     @location(5) model_1: vec4<f32>,
@@ -31,10 +36,10 @@ struct VsOut {
     @location(3) @interpolate(flat) id: u32,
     @location(4) @interpolate(flat) pbr: vec4<f32>,
     @location(5) @interpolate(flat) emissive: vec3<f32>,
-    // P26.3, exactly as mesh.wgsl: the object-space frame the box-projected uv
-    // comes from, and the instance's virtual-texture set.
-    @location(6) obj_pos: vec3<f32>,
-    @location(7) obj_nrm: vec3<f32>,
+    // P26.5, exactly as mesh.wgsl: the character's own uv and the instance's
+    // virtual-texture set. The bind-space frame the box projection needed is
+    // gone with the projection.
+    @location(6) uv: vec2<f32>,
     @location(8) @interpolate(flat) vt: vec3<u32>,
 };
 
@@ -63,17 +68,18 @@ fn vs(in: VsIn) -> VsOut {
     out.id = in.misc.x;
     out.pbr = in.pbr;
     out.emissive = in.emissive.rgb;
-    // The SKINNED position, not the bind-pose one: a virtual texture projected
-    // from bind space would slide across a moving character.
-    out.obj_pos = skinned_pos;
-    out.obj_nrm = skinned_normal;
+    // The uv is a property of the SURFACE, not of the pose, so it rides through
+    // unchanged — which is the whole difference between an authored
+    // parametrization and a projection that had to be re-derived from the
+    // skinned position every frame to stop it sliding.
+    out.uv = in.uv;
     out.vt = in.misc.yzw;
     return out;
 }
 
-// The uv this path samples with is `vt_box_uv`, in `vt_sample.wgsl` — one
-// definition, shared with the rigid path, so a skinned surface and a rigid one
-// cannot texture differently.
+// The uv this path samples with is the character's own (P26.5) — the same rule
+// as the rigid path's, so a skinned surface and a rigid one cannot texture
+// differently, and neither of them box-projects any more.
 
 // ── Lights (must match LightsUniform / MAX_LIGHTS in passes/mesh.rs) ──
 const MAX_LIGHTS: u32 = 16u;
@@ -161,9 +167,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // P26.3 VIRTUAL TEXTURES. Zero on every instance that names no texture, so
     // the branch is present-and-false for every scene that predates this batch
     // and the arithmetic below is byte-identical.
-    // The box-projected uv (see `vt_box_uv`): object space, so it rides the
-    // instance rather than the camera.
-    let uv = vt_box_uv(in.obj_pos, in.obj_nrm);
+    // The CHARACTER'S OWN uv (P26.5).
+    let uv = in.uv;
     // The screen derivatives, taken in UNIFORM control flow — a fragment shader
     // may only difference against its neighbours outside a divergent branch, and
     // the VT branch below is per instance. Cheap when nothing samples: a

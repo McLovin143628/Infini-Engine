@@ -461,6 +461,7 @@ mod tests {
                 RenderFractureVertex {
                     pos: [0.0; 3],
                     normal: [0.0, 1.0, 0.0],
+                    uv: [0.0; 2],
                 };
                 verts
             ],
@@ -600,10 +601,14 @@ mod tests {
         let v = RenderFractureVertex {
             pos: [1.0, 2.0, 3.0],
             normal: [0.0, 1.0, 0.0],
+            uv: [0.25, 0.75],
         };
         let base = &v as *const RenderFractureVertex as usize;
         assert_eq!(&v.pos as *const _ as usize - base, 0);
         assert_eq!(&v.normal as *const _ as usize - base, 12);
+        // P26.5: and the uv the mesh pass reads at `@location(2)`, at the offset
+        // `mesh::VERTEX_ATTRIBUTES` declares for it.
+        assert_eq!(&v.uv as *const _ as usize - base, 24);
     }
 
     /// Debris carries no pick id: a chunk is not an entity, so a click has

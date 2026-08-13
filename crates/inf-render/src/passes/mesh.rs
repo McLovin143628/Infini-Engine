@@ -20,12 +20,30 @@ use crate::scene::{LightKind, MeshInstance, RenderScene};
 /// (`passes::mesh` re-exports the cube generator for existing call sites).
 pub use crate::primitives::cube_geometry;
 
-/// Vertex: position + normal.
+/// Vertex: position + normal + **uv** (P26.5).
+///
+/// The uv arrived with P26.5 and it is what retires `vt_box_uv` on this path.
+/// P26.3 shipped a dominant-axis box projection because this stream carried no
+/// uv at all — *"a box projection on a character is visibly wrong"* — and the
+/// asset never had that problem: `inf_mesh::MeshVertex` has carried `uv` since
+/// P4 and `inf_vgeom::VgeomVertex` since P13.1b. What was missing was the
+/// RENDER stream, which is this struct.
+///
+/// **A tangent did not come with it, and the reason is measured** — see
+/// `docs/memos/p26-5-vertex-streams.md`: the two producers that feed this
+/// buffer are `crate::primitives` (analytic, could supply one) and
+/// `passes::classic_vgeom` (a `VgeomVertex`, which has **no** tangent), so a
+/// tangent attribute here would be real data on five built-in shapes and a
+/// derived guess on every imported mesh. `vt_apply_normal` keeps its
+/// screen-space cotangent frame, now built from a **real** uv rather than a
+/// projected one.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MeshVertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
+    /// Texture coordinate, `@location(2)`.
+    pub uv: [f32; 2],
 }
 
 /// Per-instance GPU data. Matches the `@location(3..=13)` attributes in
@@ -139,7 +157,15 @@ pub const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 11] = [
     },
 ];
 
-pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] = [
+/// `@location(0)` position, `@location(1)` normal, `@location(2)` **uv**
+/// (P26.5).
+///
+/// Location 2 was the one gap the instance block left (it starts at 3), which
+/// is why the memo named it before the work started. A pass whose shader does
+/// not declare the uv — the depth prepass, the shadow raster, the selection
+/// mask — is unaffected: `wgpu` requires every shader input to be *provided*,
+/// not every provided attribute to be *read*.
+pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x3,
         offset: 0,
@@ -149,6 +175,11 @@ pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] = [
         format: wgpu::VertexFormat::Float32x3,
         offset: 12,
         shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 24,
+        shader_location: 2,
     },
 ];
 

@@ -190,12 +190,22 @@ struct ClassicGpu {
 
 impl ClassicGpu {
     fn build(gpu: &GpuContext, mesh: &VgeomMesh) -> Self {
+        // **The uv comes across** (P26.5). `VgeomVertex` has carried a real
+        // authored uv since P13.1b and this conversion dropped it, because
+        // `MeshVertex` had nowhere to put it — so the classic tier's answer to
+        // "what does this surface sample with" was `vt_box_uv`, a box
+        // projection, over geometry whose artist had already answered the
+        // question. The GPU-driven twin (`passes::vgeom`) reads
+        // `VgeomVertex::uv` directly and always has; this is the second half of
+        // the P26.4 audit's downlevel finding, one field over from the texture
+        // set it restored.
         let verts: Vec<MeshVertex> = mesh
             .vertices
             .iter()
             .map(|v| MeshVertex {
                 pos: v.position,
                 normal: v.normal,
+                uv: v.uv,
             })
             .collect();
         let vertices = gpu.device.create_buffer(&wgpu::BufferDescriptor {

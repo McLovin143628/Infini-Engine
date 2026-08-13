@@ -37,7 +37,15 @@ use crate::renderer::{FrameData, SCENE_FORMAT, SCENE_SAMPLES};
 use crate::scene::{SkinnedInstance, SkinnedMeshData};
 
 /// Vertex attributes for one [`SkinnedVertex`] (buffer 0).
-const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
+///
+/// **Five attributes, and the fifth is at 15** (P26.5). The instance block owns
+/// `4..=14` here (one location further along than the rigid path, which starts
+/// at 3), so the uv had exactly one address left: `@location(15)`, the last one
+/// `Limits::default()`'s `max_vertex_attributes: 16` allows. That is the wall
+/// `docs/memos/p26-5-vertex-streams.md` measures — this pipeline is now **full**,
+/// and a tangent stream cannot join it without packing two channels into one
+/// attribute or raising a limit the renderer has never raised.
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x3,
         offset: 0,
@@ -49,13 +57,18 @@ const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
         shader_location: 1,
     },
     wgpu::VertexAttribute {
-        format: wgpu::VertexFormat::Uint32x4,
+        format: wgpu::VertexFormat::Float32x2,
         offset: 24,
+        shader_location: 15,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32x4,
+        offset: 32,
         shader_location: 2,
     },
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x4,
-        offset: 40,
+        offset: 48,
         shader_location: 3,
     },
 ];

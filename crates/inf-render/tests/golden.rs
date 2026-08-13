@@ -1916,6 +1916,12 @@ fn skinned_cylinder() -> (inf_anim::Skeleton, inf_anim::AnimClip, SkinnedMeshDat
             vertices.push(SkinnedVertex {
                 pos: [radius * c, y, radius * sn],
                 normal: [c, 0.0, sn],
+                // P26.5: the stream carries a uv now. This fixture binds no
+                // virtual texture, so nothing reads it — a cylindrical unwrap is
+                // written anyway rather than a zero, because a golden fixture
+                // that ships a degenerate stream is where a degenerate stream
+                // becomes normal.
+                uv: [s as f32 / radial as f32, y / height],
                 joints: [0, 1, 0, 0],
                 weights: [w0, w1, 0.0, 0.0],
             });

@@ -6,6 +6,10 @@
 struct VsIn {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    // P26.5: the mesh's own uv. `crate::primitives` generates one per built-in
+    // shape and `passes::classic_vgeom` copies the authored `VgeomVertex::uv`
+    // across, so this path no longer projects a uv it was never given.
+    @location(2) uv: vec2<f32>,
     // Instance data
     @location(3) model_0: vec4<f32>,
     @location(4) model_1: vec4<f32>,
@@ -28,10 +32,10 @@ struct VsOut {
     @location(3) @interpolate(flat) id: u32,
     @location(4) @interpolate(flat) pbr: vec4<f32>,
     @location(5) @interpolate(flat) emissive: vec3<f32>,
-    // P26.3: the object-space frame the box-projected uv is derived from, and
-    // the instance's virtual-texture set (albedo, normal, ORM slots).
-    @location(6) obj_pos: vec3<f32>,
-    @location(7) obj_nrm: vec3<f32>,
+    // P26.5: the mesh's own uv, and the instance's virtual-texture set (albedo,
+    // normal, ORM slots). `obj_pos`/`obj_nrm` — the object-space frame P26.3's
+    // box projection was derived from — are gone with the projection.
+    @location(6) uv: vec2<f32>,
     @location(8) @interpolate(flat) vt: vec3<u32>,
 };
 
@@ -48,15 +52,15 @@ fn vs(in: VsIn) -> VsOut {
     out.id = in.misc.x;
     out.pbr = in.pbr;
     out.emissive = in.emissive.rgb;
-    out.obj_pos = in.pos;
-    out.obj_nrm = in.normal;
+    out.uv = in.uv;
     out.vt = in.misc.yzw;
     return out;
 }
 
-// The uv this path samples with is `vt_box_uv`, in `vt_sample.wgsl` — one
-// definition, composed into every lit shader, with the v1 compromise it carries
-// written down where it is defined.
+// The uv this path samples with is the vertex stream's own (P26.5). The
+// dominant-axis box projection that stood in for it through P26.3/P26.4 is gone
+// from WGSL entirely; its last producer — deformed cloth and hair, which have no
+// authored parametrization — takes `inf_render::box_uv` once per vertex instead.
 
 // ── Lights (must match LightsUniform / MAX_LIGHTS in passes/mesh.rs) ──
 const MAX_LIGHTS: u32 = 16u;
@@ -157,9 +161,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // no texture — which is every instance before this batch and every instance
     // of every committed golden — so `vt_surface` returns its arguments
     // unchanged and the arithmetic below is byte-identical.
-    // The box-projected uv (see `vt_box_uv`): object space, so it rides the
-    // instance rather than the camera.
-    let uv = vt_box_uv(in.obj_pos, in.obj_nrm);
+    // The MESH'S OWN uv (P26.5).
+    let uv = in.uv;
     // The screen derivatives, taken in UNIFORM control flow — a fragment shader
     // may only difference against its neighbours outside a divergent branch, and
     // the VT branch below is per instance. Cheap when nothing samples: a

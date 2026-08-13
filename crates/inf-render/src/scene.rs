@@ -440,14 +440,25 @@ impl ScatterBatch {
     }
 }
 
-/// One vertex of a [`SkinnedMeshData`] — position + normal in **bind (rest)
-/// space**, plus the four joint influences that deform it. `#[repr(C)]` + `Pod`
-/// so it uploads straight to a GPU vertex buffer (56 bytes, no padding).
+/// One vertex of a [`SkinnedMeshData`] — position + normal + **uv** in **bind
+/// (rest) space**, plus the four joint influences that deform it. `#[repr(C)]` +
+/// `Pod` so it uploads straight to a GPU vertex buffer (64 bytes, no padding).
+///
+/// **The uv is P26.5's**, and it is the half of the change that mattered: a box
+/// projection on a *character* is the case the P26.3 ledger named as visibly
+/// wrong, because the seams fall on the dominant axis rather than on the
+/// artist's and a face's texture will not line up with its head. A skinned
+/// `.inf_mesh` has carried authored uvs since P4; only the upload dropped them.
+/// It rides `@location(15)` — the last attribute `Limits::default()`'s
+/// `max_vertex_attributes: 16` has room for, which is also why **no tangent
+/// stream joins it here** (`docs/memos/p26-5-vertex-streams.md`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SkinnedVertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
+    /// Texture coordinate, `@location(15)`.
+    pub uv: [f32; 2],
     /// Joint indices into the instance's skinning palette.
     pub joints: [u32; 4],
     /// Normalized influence weights (`Σ = 1`).
@@ -465,11 +476,16 @@ pub struct SkinnedMeshData {
 /// The tint a simulated garment or hair ribbon draws in (linear rgba).
 ///
 /// **v1 has no per-garment material.** A `.inf_cloth` / `.inf_hair` carries no
-/// material slot and `SkinnedVertex` has no UV channel, so there is nothing to
-/// sample a texture with; giving the garment the *wearer's* `Material` would draw
-/// a coat in exactly the body's colour, which is worse than useless for telling
-/// them apart. So both draw in one neutral cloth tint, defined once here so the
-/// two projectors cannot disagree about it. Ledgered in ROADMAP §12's P24 block.
+/// material slot, so there is nothing to bind a texture *from*; giving the
+/// garment the *wearer's* `Material` would draw a coat in exactly the body's
+/// colour, which is worse than useless for telling them apart. So both draw in
+/// one neutral cloth tint, defined once here so the two projectors cannot
+/// disagree about it. Ledgered in ROADMAP §12's P24 block.
+///
+/// (The original wording added *"and `SkinnedVertex` has no UV channel"*. P26.5
+/// gave it one, and [`deformed_skinned_mesh`] fills it with [`box_uv`] — so the
+/// remaining obstacle is the missing material slot alone, which is the honest
+/// statement of what a v2 has to add.)
 pub const CLOTH_TINT: [f32; 4] = [0.42, 0.46, 0.58, 1.0];
 
 /// The tint a simulated hair ribbon draws in (linear rgba).
@@ -509,9 +525,44 @@ pub const HAIR_TINT: [f32; 4] = [0.20, 0.14, 0.10, 1.0];
 /// Ledgered: a garment costs one vertex-buffer upload per frame, which is what
 /// bounds how many characters can wear one.
 ///
+/// **The dominant-axis box projection** — the uv a surface with no authored one
+/// samples with (P26.3's `vt_box_uv`, moved to Rust in P26.5).
+///
+/// It lived in `vt_sample.wgsl` and ran in the fragment stage of *every* rigid
+/// and skinned draw, because the render vertex streams carried no uv at all.
+/// They carry one now, so the projection has exactly one producer left — the
+/// deformed cloth/hair geometry below, which is positions and topology and has
+/// no parametrization to inherit. Computing it once per vertex where the stream
+/// is built, rather than once per fragment where it is read, is strictly less
+/// work and puts the fallback next to the one thing that needs it.
+///
+/// Object space (so the projection rides the instance instead of sliding when it
+/// moves), `[0,1]²` per face, with the same winding the WGSL had — character for
+/// character, so a surface that used to sample this way still does.
+pub fn box_uv(p: [f32; 3], n: [f32; 3]) -> [f32; 2] {
+    let a = [n[0].abs(), n[1].abs(), n[2].abs()];
+    if a[0] >= a[1] && a[0] >= a[2] {
+        return [-p[2] * n[0].signum() + 0.5, -p[1] + 0.5];
+    }
+    if a[1] >= a[2] {
+        return [p[0] + 0.5, -p[2] * n[1].signum() + 0.5];
+    }
+    [p[0] * n[2].signum() + 0.5, -p[1] + 0.5]
+}
+
 /// `indices` is passed through unchanged. An index out of range is **dropped**
 /// with its whole triangle rather than clamped, so a malformed garment draws less
 /// instead of drawing a spike to the origin.
+///
+/// # The uv is box-projected, and that is the last caller of the projection
+///
+/// P26.5 gave [`SkinnedVertex`] a uv and every other producer of one fills it
+/// from the asset. This geometry has no asset uv to fill it from — a garment is
+/// simulated positions over a topology — so it takes [`box_uv`] against the
+/// recomputed normal. Nothing samples it yet (a garment's set is
+/// [`VtTextureSet::NONE`]; see [`CLOTH_TINT`]), which is precisely why it must
+/// not be left at zero: an all-zero uv is a whole coat sampling one texel, and
+/// it would arrive silently on the day a `.inf_cloth` grows a material slot.
 pub fn deformed_skinned_mesh(positions: &[[f32; 3]], indices: &[u32]) -> SkinnedMeshData {
     let n = positions.len();
     let mut accum = vec![glam::Vec3::ZERO; n];
@@ -545,9 +596,11 @@ pub fn deformed_skinned_mesh(positions: &[[f32; 3]], indices: &[u32]) -> Skinned
             } else {
                 glam::Vec3::Y
             };
+            let normal = normal.to_array();
             SkinnedVertex {
                 pos: *p,
-                normal: normal.to_array(),
+                normal,
+                uv: box_uv(*p, normal),
                 joints: [0; 4],
                 weights: [1.0, 0.0, 0.0, 0.0],
             }
@@ -1569,12 +1622,19 @@ pub struct RenderFractureChunk {
     pub version: u64,
 }
 
-/// A fracture chunk's vertex: position + normal, chunk-local.
+/// A fracture chunk's vertex: position + normal + uv, chunk-local.
 ///
-/// Deliberately the **same 24-byte layout** as
+/// Deliberately the **same 32-byte layout** as
 /// [`crate::passes::mesh::MeshVertex`], so the fracture pass can bind
 /// `mesh.wgsl`'s own vertex stage against a per-chunk buffer instead of shipping
-/// a second PBR shader that would then have to be kept in step with it.
+/// a second PBR shader that would then have to be kept in step with it. The
+/// `uv` followed `MeshVertex`'s in P26.5 and it is a *layout* obligation before
+/// it is a feature: a `RenderFractureChunk` carries no
+/// [`VtTextureSet`](crate::VtTextureSet), so nothing samples with it — but a
+/// buffer whose stride disagrees with the pipeline's is not a subtle bug, it is
+/// every chunk drawn from the wrong bytes. The projectors fill it from the
+/// `.inf_fracture` chunk's own `inf_mesh::MeshVertex::uv`, which the Voronoi cut
+/// carries for the hull faces and defaults on the interior ones.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RenderFractureVertex {
@@ -1582,6 +1642,8 @@ pub struct RenderFractureVertex {
     pub pos: [f32; 3],
     /// Unit normal.
     pub normal: [f32; 3],
+    /// Texture coordinate, `@location(2)` — the chunk's own, unrotated.
+    pub uv: [f32; 2],
 }
 
 /// A voxel volume's meshed, resident chunk set (P21.1) — the renderer's
@@ -1961,6 +2023,46 @@ impl RenderScene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A deformed garment carries a uv, and it is the box projection** (P26.5).
+    ///
+    /// This is the last producer of [`box_uv`] and the reason the projection was
+    /// moved to Rust rather than deleted: a garment is simulated positions over a
+    /// topology and has no authored parametrization to inherit. Nothing samples
+    /// it yet — a garment's set is `VtTextureSet::NONE` — which is exactly why
+    /// the stream must not be left at zero: an all-zero uv is a whole coat
+    /// sampling one texel, and it would arrive silently the day a `.inf_cloth`
+    /// grows a material slot.
+    #[test]
+    fn a_deformed_garment_carries_a_projected_uv_and_never_a_flat_one() {
+        // A quad in XZ, so its recomputed normal is +Y and the projection's
+        // dominant axis is unambiguous.
+        let positions = [
+            [-0.5, 0.0, -0.5],
+            [0.5, 0.0, -0.5],
+            [0.5, 0.0, 0.5],
+            [-0.5, 0.0, 0.5],
+        ];
+        let mesh = deformed_skinned_mesh(&positions, &[0, 2, 1, 0, 3, 2]);
+        assert_eq!(mesh.vertices.len(), 4);
+        for v in &mesh.vertices {
+            assert_eq!(
+                v.uv,
+                box_uv(v.pos, v.normal),
+                "the garment's uv is not the projection"
+            );
+        }
+        // ANTI-VACUITY: it VARIES. A `uv: [0.0; 2]` default satisfies "equals a
+        // function of position" for a function that ignores its argument, and
+        // this quad is the shape that would hide it.
+        let u: Vec<f32> = mesh.vertices.iter().map(|v| v.uv[0]).collect();
+        let w: Vec<f32> = mesh.vertices.iter().map(|v| v.uv[1]).collect();
+        let span = |xs: &[f32]| {
+            xs.iter().cloned().fold(f32::MIN, f32::max)
+                - xs.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        assert!(span(&u) > 0.9 && span(&w) > 0.9, "the garment's uv is flat");
+    }
 
     #[test]
     fn default_sun_is_the_retired_constant_normalized() {

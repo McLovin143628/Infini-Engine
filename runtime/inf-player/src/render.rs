@@ -1423,6 +1423,10 @@ fn project_fracture(
                 inf_render::RenderFractureVertex {
                     pos: [p.x as f32, p.y as f32, p.z as f32],
                     normal: [n.x as f32, n.y as f32, n.z as f32],
+                    // The chunk's own uv (P26.5). A placement rotates positions
+                    // and normals; a parametrization is not a direction, so it
+                    // rides across untouched.
+                    uv: v.uv,
                 }
             })
             .collect();

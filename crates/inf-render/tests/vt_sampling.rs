@@ -623,7 +623,7 @@ fn read_page(gpu: &GpuContext, pools: &VtPools, slot: u32) -> Vec<u8> {
 // Everything above proves the bytes reach the atlas and that the address
 // arithmetic agrees with `inf-vt`. Nothing above renders a fragment, and the
 // audit measured what that costs: severing the sRGB decode, swapping the albedo
-// and ORM words in `InstanceRaw::pack`, collapsing `vt_box_uv` to a constant and
+// and ORM words in `InstanceRaw::pack`, collapsing the uv to a constant and
 // dropping the border offset were all invisible to the whole `inf-render` test
 // suite. The arms below close that: they draw a real frame through the real
 // `EngineRenderer` and read the colour back.
@@ -655,9 +655,15 @@ fn face_scene(set: inf_render::VtTextureSet) -> inf_render::RenderScene {
 }
 
 /// Head-on at the +Z face, close enough that the face overfills 320×180 on both
-/// axes. `vt_box_uv` maps that face onto uv ≈ [0.09, 0.91] × [0.27, 0.73], and
-/// the footprint works out under one texel of a 256² texture per pixel, so the
-/// gradient mip resolves to **mip 0** — the level the arms below make resident.
+/// axes. The cube's uv stream (P26.5) maps that face onto the whole unit square,
+/// so the framing above reaches uv ≈ [0.09, 0.91] × [0.27, 0.73] of it — and the
+/// footprint works out under one texel of a 256² texture per pixel, so the
+/// gradient mip resolves to **mip 0**, the level the arms below make resident.
+///
+/// The numbers are the ones the retired box projection produced, because a unit
+/// cube is the shape it was exactly right for: `the_cube_uv_is_the_projection_it_replaces`
+/// pins that identity, which is what keeps these arms measuring what they
+/// measured before the stream landed.
 fn face_view() -> inf_render::RenderView {
     inf_render::RenderView {
         origin: inf_math::FloatingOrigin::new(glam::DVec3::ZERO),
@@ -772,8 +778,8 @@ fn ramp_container(n: u32, srgb: bool) -> Vec<u8> {
 ///
 /// * the textured frame differs from the textureless one (something sampled);
 /// * the textured frame **varies across the surface** while the textureless one
-///   does not (the uv is a projection, not a constant — a `vt_box_uv` that
-///   returns one value passes every other arm in this file);
+///   does not (the uv varies across the face — a stream, or the projection it
+///   replaced, that returns one value passes every other arm in this file);
 /// * `vt_engaged_frames` is 1 after one frame with a pool and **0** after one
 ///   frame without, which is what makes "the 50 goldens did not change" a
 ///   measurement of the command stream rather than an expectation.
