@@ -10510,10 +10510,17 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
 > miss would be a hole. A shadow page is only ever sampled by pixels whose depth
 > marked it, so **there is no mandatory floor**: pinning a clipmap's coarsest
 > level would claim `N²` pages per sun before any evidence — 16 384 at the 16 k
-> configuration, four times the whole default atlas. A page with no resident
-> ancestor resolves to `VSM_ENTRY_NONE`, which a receiver reads as *lit*: a leak
-> under budget pressure rather than a black hole, and the honest degradation for
-> a signal whose producer is a rasterizer rather than a file.
+> configuration, four times the whole default atlas. [**P27.1 audit,
+> 2026-08-13:** the two halves of that sentence belong to different grids. The
+> default atlas is **1 024** pages, so 16 384 is **sixteen** times it; *four*
+> times is the 8 k grid the settings actually ship — 64 pages a side, 4 096
+> pages. Both numbers were real and the pairing was not. The ruling is stronger
+> with them straight, so this is a correction and not a retraction, and
+> `address.rs`'s `pinning_a_clipmaps_coarsest_level_costs_what_the_ruling_says`
+> now pins the arithmetic instead of three documents quoting it.] A page with
+> no resident ancestor resolves to `VSM_ENTRY_NONE`, which a receiver reads as
+> *lit*: a leak under budget pressure rather than a black hole, and the honest
+> degradation for a signal whose producer is a rasterizer rather than a file.
 >
 > **Mutation-verified — eleven mutations, and three survived the first cut.**
 > Killed by name: `propagate` stopping at the page itself, `acquire_slot`
@@ -10587,6 +10594,130 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
 > `the_marked_level_gets_finer_as_the_camera_closes`, which asserts it on a real
 > device over the resident page set. The gate still has to say it over a
 > **scripted path** with a bit-exact trace, and PIE == shipping.
+>
+> **P27.1 AUDIT — 2026-08-13.** Adversarial pass over `7e0ced1..b46eaf3`. Three
+> commits appended, **none amended** (`52d63ab` the product fix and three Ring-0
+> contracts, `1dc177f` four renderer-side claims and the jitter bound, and this
+> block) — the P26.5-audit precedent. Battery at HEAD: **239 binaries,
+> 4 283 passed, 0 failed, 8 ignored** against the block above's 239 / 4 271 /
+> 0 / 8: **twelve new arms and no new binary.** `clippy --workspace
+> --all-targets` under `-D warnings` and `cargo fmt --all --check` clean.
+> **Goldens stay 50** and `git diff` over `tests/goldens/` is empty across the
+> audit as it is across the batch. No schema moved and no new dependency. The
+> block above's "only three deleted lines" is **confirmed**: `git diff` over
+> `crates/` for `7e0ced1..b46eaf3` removes exactly the re-export line and the
+> CSM's two constants, at unchanged values. The audit's own commits delete more,
+> and every one is a correction or a refactor — a wrong comment, a mangled
+> literal, the mis-paired arithmetic above, four accumulators that now saturate,
+> and one sweep body lifted into a helper two arms share. **No assertion was
+> removed or loosened anywhere.**
+>
+> **Verified as claimed, by re-measurement rather than by reading.** The depth
+> memo's six headline numbers reproduce to three significant figures from an
+> independent f32 re-implementation of the shipped matrices, outside this tree:
+> ortho **21.23 µm at 66.97 m** reverse against **15.17 µm at 152.93 m** forward
+> (ratio **1.399**), perspective **7.43 µm** reverse against **1.866 mm at
+> 46.79 m** forward (**251.1×**) — including the corrected claim that neither
+> ortho peak is at an end of the box. The page-geometry memo's arithmetic
+> reproduces exactly too: 128 divides 8 192 into 64, a page is 64 KiB, 64 MiB is
+> 1 024 pages at 32 × 32 with zero residual, a 4-texel ring is **11.42 %** of a
+> page and costs **121 of 1 024** (907 wanted — 907 *is* prime — 903 usable at
+> 21 × 43, and the 136-texel tile leaves 32 texels an axis). `inf-vsm` names
+> `thiserror` and nothing else; the four items the separate-crate measurement
+> called reusable are byte-equivalent across the two crates today, and are now
+> **pinned** in `inf-render`, which is the only crate allowed to depend on both.
+> `inf-vt`'s non-test line count measures 3 283 against the quoted 3 290.
+>
+> **Mutation matrix: 22 new mutations beyond the batch's own eleven, plus six
+> re-runs of the batch's (all still killed). Nine survived the first cut; seven
+> are closed and two are bounds rather than gaps.** The seven closed:
+> `recompute_entries` reversed (the relayout's from-scratch sweep, exercised only
+> when a light registers over a live residency — a host's path); the quadtree
+> parent's grid clamp and `child_range`'s remainder branch, both inert on the
+> power-of-two chains every fixture used (the P26.2 odd-extent law); the mask
+> decoder's `(y, x)` walk transposed (the crate's own opening finding, unguarded
+> on the consumer side, and invisible to a fixture that marks the diagonal); the
+> shader's clipmap containing-level floor, provably unreachable at the arms' page
+> grid and frame size; the marking mask's per-frame clear, invisible to a
+> residency that never evicts; and `VsmSystem::for_scene`'s truncation, the half
+> of `431e9e0` that was fixed and not verified. Two remain, and neither is an
+> untested claim: **the jitter fix** — swapping `jvp.inverse()` for
+> `view.view_proj().inverse()` still fails nothing, exactly as this block says,
+> and the bound is now *measured* rather than asserted (the displacement is
+> `|jitter| × pixel_world`, pinned at 0.1–0.71 pixels, against a page that is at
+> least 128 pixels across because the level rule errs coarse — at most 1/256 of a
+> page, so a page can only move in or out of the marked set where the geometry's
+> coverage of it is already thinner than half a pixel, and *there* the correct
+> reconstruction is equally jitter-dependent); and the shader's
+> `contain > levels - 1` early-out, which is **provably redundant** with the
+> `|xy| > 1` rejection below it — measured, replacing it with a clamp moves no
+> marked set — so it has the standing the `depth <= 0.0` guard already documents.
+>
+> **One product defect, and it is the sibling of one this batch found itself.**
+> `aab8053` fixed `VsmLightDesc::clipmap`'s *level* count because "a refusal has
+> to survive being asked for something absurd"; the same constructor's other
+> setting-fed argument went in unguarded. `clipmap_pages_per_side` is a host
+> setting no tier clamp ever raises and nothing validates at the settings
+> boundary, and `65 536²` is exactly `2³²` — `VsmLevelDesc::page_count` **wrapped
+> to zero** in release, so the descriptor validated (a square multiple of four is
+> a legal clipmap grid), `register_light` compared 0 against its million-page
+> ceiling and *accepted*, and `relayout` then walked `65 536 × 65 536 × levels`
+> addresses into a table image with no entry words at all. In debug it was an
+> overflow panic. A grid of 40 000 reaches the same place by a second door: every
+> level fits alone and the sum over sixteen does not. Saturating the three
+> accumulators makes the **existing** `PageSpaceTooLarge` refusal reachable —
+> a count that saturates is a count that is at least the ceiling.
+>
+> **The `NONE` → *lit* ruling: upheld, with its defence sharpened and one
+> obligation carried.** The deviation is real and defensible — a missing shadow
+> page is a **light leak**, the opposite fail-direction from virtual texturing's
+> blurry-but-never-a-hole — and the half of it that is shared with P26 is held
+> harder here than P26 held its own: `residency_gate` asserts *finest* and
+> *resident* per address against an independent upward walk after **every**
+> transaction of a 200-round churn, with 11 669 deep fallbacks and 75 702 `NONE`
+> resolutions measured rather than hoped, and the `NONE` terminal is asserted as
+> WORLD state in five places including a device readback that requires both real
+> entries and real absences. Two things the audit changes. **First**, the
+> arithmetic behind the defence was wrong by 4× and is corrected in place above.
+> **Second, and this is the thin spot**: Phase 27's own "Done when" contains **no
+> missing-fallback clause at all** — the one this batch's ruling is measured
+> against is *P26's*, about virtual textures — so nothing anywhere will fail if
+> P27.4's receiver reads `VSM_ENTRY_NONE` as *shadowed* instead of *lit*. The
+> ruling rests entirely on this ledger and `table.rs`'s docs. **P27.4 owes it a
+> gate**: a receiver arm over an address with no resident ancestor, asserting the
+> lit branch, is what turns the deviation from a decision into a property.
+>
+> **Also corrected, and small.** The point-light arm's comment named face 4
+> (`+Z`) where its own fixture puts the geometry down face 5 (`-Z`) — a light at
+> `z = 11` over a face at `z = 1` — and its assertion was `any(|f| f > 0)`, which
+> any non-zero face satisfies; the face set is pinned to `{5}` now. Both
+> perspective `per_metre` constants — the numbers that decide how much shadow
+> resolution a spot or a point light gets — had no arm, and halving the cube
+> face's is absorbed by the point-light arm's anti-vacuity band; they are checked
+> against the shipped matrices now. `docs/memos/p27-1-page-geometry.md`'s "when to
+> revisit" listed P27.4 and P28.2 and **not P27.3**, whose clause the border
+> ruling is actually about.
+>
+> **Two observations carried rather than fixed.** `VsmMarkLayout::wants_at`'s
+> `if entry > count { break; }` is unreachable (a layout's page count is the
+> descriptor's, and lights are append-only) *and* would only break the innermost
+> loop if it were reached — a guard that neither fires nor guards, worth deleting
+> when P28.3 rewrites the scan. And the working tree carries **CRLF** in several
+> freshly written `.rs` files despite `*.rs text eol=lf`; the committed blobs are
+> LF and `git diff` is clean, so this is an editor artifact rather than a repo
+> defect — but a scripted byte-anchored edit to this batch's files has to handle
+> both, which cost this audit two mutation rounds.
+>
+> **Remainders as amended, for P27.2 onward.** Everything the block above lists
+> stands, minus the three items this audit closed (`for_scene`'s truncation is
+> now armed; the containing-level rule and the mask clear now have device arms).
+> Added: **P27.4 owes the `NONE` → lit fail-direction a receiver gate** (above);
+> `spot_matrix`'s cone-to-fov derivation still has no device arm of its own,
+> though its `per_metre` is now pinned on the CPU against its own matrix; and a
+> settings value outside the legal set is still refused **per light** with a
+> `tracing::warn` rather than validated at the settings boundary — which is what
+> made the page-grid overflow reachable at all, and is the one structural change
+> P27.2 could make cheaply.
 - **P27.2 Casters into pages** — 1. per-page culling on GPU (instances and meshlets against
   page frusta) into per-page visible lists; one `draw_indirect` per dirty page (no
   `MULTI_DRAW_INDIRECT` — the two-buffer vgeom precedent), `set_viewport`/`set_scissor` per

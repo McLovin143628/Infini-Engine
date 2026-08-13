@@ -93,7 +93,15 @@ per-tap resolve on goldens when the receiver exists.
 
 ## When to revisit
 
-**P27.4**, with the filter in hand and a measurement of the per-tap resolve
+**P27.3 first, and this was missing from the list the P27.1 audit read.** The
+argument above is *P27.3's* — its clause is the one a border would make false by
+construction — so the person who most needs to know a border was rejected is the
+one implementing page-exact invalidation, not the one implementing the filter. If
+P27.3's engagement counter ever reports a mover invalidating nine pages where its
+bounds touch one, this document is where the reason lives, and re-adding a border
+is what would put it there.
+
+Then **P27.4**, with the filter in hand and a measurement of the per-tap resolve
 against a clamped kernel; and **P28.2**, where interleaved cluster pages change
 what a page *is*. The numbers above are all in `inf-vsm`'s own arms
 (`the_ruled_page_geometry_is_the_one_the_memo_measured`,
