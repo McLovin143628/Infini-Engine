@@ -900,6 +900,19 @@ fn a_light_refused_at_registration_stops_the_list_it_is_in() {
         clipmap_pages_per_side: 6,
         ..settings()
     };
+    // **This configuration can no longer reach the renderer** (P27.2): a clipmap
+    // grid of 6 is not a multiple of four, and `VsmSettings::validate` refuses it
+    // at the settings boundary — which is precisely the structural change the
+    // P27.1 audit asked for, and it is asserted here rather than assumed, because
+    // it is what makes the rest of this arm have to go through a different door.
+    assert!(
+        set.validate().is_err(),
+        "the settings boundary accepted the grid this arm exists to refuse"
+    );
+    // So the truncation is exercised where it LIVES — `VsmSystem::for_scene` —
+    // rather than through a host that can no longer produce the input. The
+    // invariant is unchanged and so is the arm: per-light truncation is now
+    // defence in depth, and defence in depth still has to work.
     // spot, sun, spot — so a cap that skipped would keep TWO lights and hand the
     // second spot the sun's place in scene order.
     let mut s = scene(&[]);
@@ -916,8 +929,13 @@ fn a_light_refused_at_registration_stops_the_list_it_is_in() {
         });
     }
     s.mark_dirty();
-    let renderer = run(&gpu, &s, &view(6.0), &set, 3);
-    let sys = renderer.vsm().expect("the first spot registered");
+    let v = view(6.0);
+    let mut sys =
+        inf_render::VsmSystem::for_scene(&gpu, &s, &set).expect("the first spot registered");
+    // `sync` is what builds the projection list the assertions below read; one
+    // step is enough, and it needs no frame because nothing here is about depth.
+    sys.sync(&gpu, &s, &v, &set, 0);
+    let sys = &sys;
 
     assert_eq!(
         sys.trees().len(),

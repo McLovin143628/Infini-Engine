@@ -10723,6 +10723,201 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
   `MULTI_DRAW_INDIRECT` — the two-buffer vgeom precedent), `set_viewport`/`set_scissor` per
   page (the tree's first scissor use); 2. all caster paths: rigid, **vgeom meshlets**,
   skinned, terrain, scatter — masked materials keep alpha-test in the page raster.
+> **STATUS — P27.2 Casters into pages: COMPLETE (2026-08-13)** — **eight**
+> commits, counted rather than remembered (`b155282` the settings boundary,
+> `2953fe5` the page matrix + the page cull, `b3bd82a` the per-page GPU cull and
+> the raster itself, `3ebef93` virtualized geometry + its deviation memo,
+> `671f566` skinned + terrain, `1550aa8` the mutation round's one survivor
+> written down, and **two fixes this batch's own review found**: `b921fd3` the
+> terrain cache key and `266acda` the caster ceiling's silent truncation), plus
+> this block. Battery green at HEAD: **BATTERY_LINE** against the P27.1
+> audit's 239 / 4 283 / 0 / 8 — **one new test binary and eighteen new arms**.
+> `clippy --workspace --all-targets` under `-D warnings` and `cargo fmt --all
+> --check` clean. **Goldens stay 50 and none was re-blessed** — `git diff` over
+> `tests/goldens/` is empty across the batch. **No schema moved**, no `.inf_lvl`
+> payload moved, and **no new external dependency**. The eight deleted lines in
+> the whole diff are four re-export reflows, one comment reword, the atlas usage
+> line becoming three, and one `format!` string gaining a field: **no assertion
+> was removed or loosened anywhere**, and the CSM path was not edited at all.
+>
+> **The two clauses, against what is measured:**
+>
+> * *"per-page culling on GPU (instances and meshlets against page frusta) into
+>   per-page visible lists; one `draw_indirect` per dirty page (no
+>   `MULTI_DRAW_INDIRECT` — the two-buffer vgeom precedent),
+>   `set_viewport`/`set_scissor` per page (the tree's first scissor use)"* —
+>   **met on the instances half, deviated on the meshlets half, and the scissor
+>   claim is verified rather than assumed.** `vsm_cull.wgsl` runs one thread per
+>   (page, caster) pair, tests the caster's bounding sphere against the page's own
+>   six clip planes, and appends through the *counter that IS the args word* —
+>   `inf_vgeom`'s construction, with P18.5 scatter's indexing
+>   (`draw_indexed_indirect(args, (page·groups + group) · 20)`), because vgeom's
+>   literal two-buffer split exists only to avoid a non-zero `first_instance` and
+>   does not scale to N pages. There is **no** separate counter buffer, **no**
+>   compaction pass and **no** `MULTI_DRAW_INDIRECT` anywhere in the tree. A
+>   group's slice of a page's visible list is exactly its own caster count long,
+>   so the append **cannot overflow** and needs no bounds test — pinned by
+>   `the_group_slices_tile_a_pages_visible_list`, whose interesting case is an
+>   *empty* group not consuming a slot.
+>
+>   The **scissor** claim was verified before it was written: the only two
+>   occurrences of either call in `crates/inf-render` were the comments in
+>   `vsm_atlas.rs` and `vsm.rs` promising this batch. One render pass now owns the
+>   whole atlas and sets a viewport + scissor per page — the inversion
+>   `passes::shadow` never had to make, because a cascade is a *subresource* and a
+>   page is a *rectangle*, and there is no view of a rectangle.
+>
+>   **Which of the two pins the rect is measured, not assumed.** Deleting
+>   `set_viewport` fails `a_caster_writes_inside_its_page_and_nowhere_else`;
+>   deleting `set_scissor_rect` fails **nothing**, because clipping happens against
+>   the clip volume *before* the viewport transform, so a triangle cannot land
+>   outside its viewport rect. The pair ships because the ROADMAP asks for it and
+>   because the scissor is the one of the two that becomes load-bearing the moment
+>   P27.3 replaces the whole-atlas `LoadOp::Clear` with `Load` plus a per-page
+>   clear — but the honest statement is that today it is defence in depth, and
+>   this ledger is where that is written rather than implied.
+>
+>   The **deviation** is meshlet granularity: virtualized geometry casts through
+>   its **classic LOD chain** (the same `classic_lods()` chain
+>   `passes::classic_vgeom` draws, picked by the same `pick_classic_level` against
+>   the same `lod_threshold`), so the per-page cull tests *instances* rather than
+>   meshlets. `docs/memos/p27-2-vgeom-casters.md` carries the three reasons — a DAG
+>   cut is a projection-derived LOD policy rather than a frustum test and its
+>   tolerance has no answer until a receiver exists; the meshlet pools are
+>   **camera-driven residency**, which the P18 law forbids a light from reading;
+>   and the cost of a second per-page cut is unmeasurable until P27.3 makes a
+>   page's raster conditional on being dirty — and the price paid: a second copy
+>   of the DAG's vertices, and a silhouette at the level the camera already
+>   tolerates.
+>
+> * *"all caster paths: rigid, **vgeom meshlets**, skinned, terrain, scatter —
+>   masked materials keep alpha-test in the page raster"* — **met, all five, each
+>   with a device arm that reads the atlas back.** Before this batch
+>   `passes/shadow.rs` cast **rigid + a CPU scatter pack and nothing else**; it
+>   contains no occurrence of `vgeom` or `meshlet`, and skinned and terrain were
+>   named in its own scope note as "a follow-up" and had stayed there for thirteen
+>   phases. Now:
+>   **rigid** and **scatter** go through `passes::shadow`'s own doors
+>   (`pack_bucketed`, `shadow_caster_settings`, `pack_fallback`,
+>   `merge_bucketed`) so a page and a cascade cannot disagree about what a caster
+>   *is* — at VSM's reach rather than the cascade's, because a clipmap reaches its
+>   coarsest level's extent and not `ShadowSettings::max_distance`;
+>   **vgeom** through the classic chain above;
+>   **skinned** through its own page pipeline (`vsm_skinned.wgsl`), one group per
+>   *instance* because a joint palette is a bind group, with a cull sphere that is
+>   the bind pose's **inflated by `SKINNED_POSE_MARGIN`** — a skeleton moves
+>   vertices, so a bind-pose bound is not conservative for an arbitrary pose, and
+>   culling on a bound the pose escapes would delete a limb's shadow at exactly the
+>   moment the limb moved;
+>   **terrain** through a static per-tile mesh built from the tile's **own
+>   heights** rather than from the camera-fitted clipmap patch, because that
+>   patch's LOD, morph and skirt are all functions of where the camera is and a
+>   shadow drawn through them would move when the camera moved while nothing in
+>   the world had.
+>   **Masked** materials keep the alpha test: the R-P5 blend code and cutoff ride
+>   the caster record and `fs_masked` discards with the identical predicate
+>   `mesh.wgsl`, `depth_prepass.wgsl` and `shadow_depth.wgsl` all spell.
+>
+> **The atlas is the assertion, not the report.** Every device arm copies the
+> `Depth32Float` atlas off the GPU and compares texels (`COPY_SRC` is a gate's
+> flag on that texture and on the args buffer, and nothing in the shipping path
+> reads either). The depth a page holds is checked against a **CPU re-derivation
+> through the same `vsm_page_matrix`**, not against "something non-zero"; the
+> rectangle claim counts written texels **outside** every resident page's rect and
+> asserts zero, with the anti-vacuity that unoccupied slots existed to be checked;
+> and each caster path's arm carries a control that isolates the mechanism (the
+> skinned one poses the *same* instance 50 m away **through its palette alone**,
+> so what is measured is the skinning rather than the draw call).
+>
+> **The cull's verdict is read off the device, because the atlas cannot see it.**
+> A caster the page's frustum rejects writes no depth whether the cull dropped it
+> or the rasterizer clipped it — so an image-side arm is satisfied by a cull that
+> keeps everything, which is the failure that costs `pages × casters` vertex
+> invocations and is invisible everywhere else. `read_draw_counts` copies the
+> `instance_count` words back and compares them per (page, group) against an
+> independent CPU walk of the same spheres, with anti-vacuity on **both** answers.
+> That is *mirrored ≠ measured* (P26.5) applied to a decision rather than to a
+> table.
+>
+> **Mutation-verified — eleven mutations, ten killed, and the survivor is a
+> bound.** Killed by name: the page matrix dropping its clipmap `1/2^L` scale, the
+> page matrix losing the vertical flip, `set_viewport` deleted (with the scissor
+> left in place), the GPU cull's sphere test deleted, `fs_masked`'s discard
+> deleted, the skinned raster ignoring its palette, `sync_terrain` building
+> nothing, `VsmSettings::validate` accepting everything, and `group_first`
+> answering 0. **Survived, and both are recorded rather than papered over:**
+> `set_scissor_rect` (above — provably redundant with the viewport, kept as
+> defence in depth and as P27.3's future load-bearer), and
+> `vsm_page_sees_sphere`'s degenerate-plane skip — the only degenerate row this
+> tree's projections produce is a reverse-infinite perspective's near plane
+> `(0, 0, 0, near)`, and `near > 0` makes the distance `+∞`, which passes. It
+> stays because the WGSL twin runs the same six planes and **WGSL leaves division
+> by zero indeterminate** rather than defining it as an infinity, and because a
+> finite far plane or a reversed near would make that constant negative and turn
+> the same arithmetic into "reject every caster of every perspective light". Both
+> now have the standing the P27.1 audit gave the marking shader's
+> `contain > levels − 1` early-out.
+>
+> **Two defects this batch's own review found, both before the battery finished.**
+> `sync_terrain` keyed its per-tile caster mesh on the tile's **index in
+> `terrain.tiles`** — a streaming residency, so index 3 is a different tile from
+> one frame to the next and a tile could be handed another tile's heights whenever
+> the two shared a version stamp: the shadow of a hill that is somewhere else,
+> with no error and no counter. And `VSM_MAX_CASTERS` was a bare `break`, so a
+> level past 16 384 casters would have had its tail stop casting silently — the
+> shape the no-silent-caps doctrine forbids, and the shape the page cap beside it
+> already avoided. Both fixed; the ceiling counts what it refuses now.
+>
+> **The settings boundary — the audit's one cheap structural change — landed, in
+> its own commit.** `VsmSettings::validate` refuses at the door a host sets, in
+> `u64`, so the `65 536²` grid that **wrapped to zero** in release is *large* here
+> instead of absent; `EngineRenderer::try_set_settings` applies **nothing** on
+> `Err`, not the legal half either. The two doors are deliberately redundant — the
+> per-light truncation becomes defence in depth rather than the only door — and
+> the arms measure the agreement rather than restating it: everything the boundary
+> accepts **registers with no clamp**, a grid exactly *on* the million-page ceiling
+> is accepted (so it is a bound and not a ban), and **every tier clamp lands on a
+> configuration the boundary accepts**.
+>
+> **Nothing lights differently on defaults**, measured rather than assumed:
+> `VsmSettings::enabled` is still `false`, `RenderTier::apply` still only clears
+> it, `vsm_raster_frames` is **0** on a renderer with virtual shadows off *and* on
+> a scene whose only light does not cast, and no golden moved. The caster pass is
+> recorded **before** the graph — the mirror of the marking pass, which is recorded
+> after it — because the marker consumes the depth the graph writes while the
+> raster produces the atlas P27.4's receivers will sample from inside it.
+>
+> **What this batch did NOT do**, in one place, for P27.3.
+> **No caching and no invalidation**: every *resident* page is re-rasterized every
+> frame and the pass clears the **whole atlas** to do it (`LoadOp::Clear` clears an
+> attachment, not a scissor rectangle). P27.3's "static pages survive frames
+> untouched" is exactly the replacement — `LoadOp::Load` plus a per-page clear —
+> and it is where the scissor stops being defence in depth.
+> **`VSM_MAX_RASTER_PAGES` is 256** and pages past it keep the depth the clear
+> left them (*lit*, the fail direction this phase already chose), counted in
+> `deferred_pages`. The visible list is `pages × casters` entries — the one
+> allocation that grows as a **product**, and the reason both ceilings exist.
+> **The draw count is per (page × geometry group)**, not literally one per page: a
+> scene of one primitive kind is one indirect draw per page, and five kinds are
+> five. **No depth bias and no face culling** — the cascade's `constant: 2,
+> slope_scale: 2.0` is tuned for forward-Z and would push the wrong way, and
+> `docs/memos/p27-1-depth-convention.md` says the bias is re-derived at P27.4.
+> **No HZB and no two-pass occlusion** in the page cull. **A carved terrain hole
+> still casts**: the caster mesh reads `heights` and ignores `holes` (P21.2) and
+> the deformation window (P22.1), so a tunnel mouth shadows as solid ground and a
+> rut casts no shadow of its own. **The terrain caster mesh is decimated** to
+> `VSM_TERRAIN_CASTER_CELLS` = 64, so a ridge thinner than the sample stride
+> smooths — which leaks light, the chosen direction. **The skinned cache rebuilds
+> bind-pose vertex buffers on every scene-version change** because a palette is
+> animation and changes every frame; `passes::skinned` caches on `Arc` identity and
+> this should too. **Scatter casts through the CPU fallback pack** (the same set
+> the cascade casts), not through the GPU scatter path. **Virtualized geometry's
+> LOD is the camera's**, and it holds a second copy of each DAG's vertices.
+> **No receiver still** — `shadow_factor` reads the CSM and the atlas is sampled
+> by nothing, so P27.4 still owes the `VSM_ENTRY_NONE` → *lit* fail direction its
+> gate, and this batch is careful not to discharge it: an un-admitted page has no
+> entry, and a page the frame's cap did not reach holds the clear, which is
+> "no caster" and reads as lit either way.
 - **P27.3 Page caching + invalidation** — 1. cached pages keyed on (light, page, content
   stamp); static pages survive frames untouched; 2. movement invalidates exactly the pages
   the mover's light-space bounds touch (page-exact, engagement-counter proven); light
