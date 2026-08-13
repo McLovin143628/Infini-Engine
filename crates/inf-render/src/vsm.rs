@@ -470,6 +470,7 @@ pub fn mark_page_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vt_stream::projection_scale;
 
     /// The shadow pages' convention **is** the camera's, by identity rather than
     /// by two constants that agree today.
@@ -935,6 +936,200 @@ mod tests {
             .to_cols_array()
             .iter()
             .all(|f| f.is_finite()));
+    }
+
+    /// **A perspective light's level-0 texel is the width its own frustum
+    /// covers** — the two `per_metre` constants [`vsm_projections`] writes into
+    /// `VsmProjection::light.w`, checked against the shipped matrices instead of
+    /// restated.
+    ///
+    /// The P27.1 audit found both unpinned: halving the cube face's `2.0` moves
+    /// every marked level by exactly one and the point-light arm's
+    /// anti-vacuity band absorbs it, so the number that decides how much shadow
+    /// resolution a point light gets had no arm at all.
+    #[test]
+    fn a_perspective_lights_texel_is_the_width_its_frustum_covers() {
+        let settings = VsmSettings::default();
+        let d = 8.0f32;
+
+        // ── a cube face: 90°, so the cross-section at `d` is `2 · d · tan 45°`.
+        let cube = VsmLightDesc::cube(settings.point_levels);
+        let cube_texels = (cube.levels[0].pages_x * VSM_PAGE_SIZE) as f32;
+        let cube_per_metre = 2.0 / cube_texels;
+        // Face 4 is `+Z`; a point `w` metres off its axis at `d` metres out.
+        let m = cube_face_matrix(Vec3::ZERO, 4, settings.perspective_near_m);
+        let ndc_x = |w: f32| {
+            let c = m * Vec3::new(w, 0.0, d).extend(1.0);
+            c.x / c.w
+        };
+        // One level-0 texel is `2 / texels` of NDC, since NDC spans [-1, 1].
+        assert!(
+            ((ndc_x(cube_per_metre * d) - ndc_x(0.0)).abs() - 2.0 / cube_texels).abs() < 1e-5,
+            "a cube face's per-metre texel does not span one texel of its own \
+             projection at {d} m"
+        );
+
+        // ── a spot: the same claim at the outer cone's own field of view.
+        let outer = 40f32.to_radians().cos();
+        let spot = VsmLightDesc::quadtree(settings.spot_levels);
+        let spot_texels = (spot.levels[0].pages_x * VSM_PAGE_SIZE) as f32;
+        let spot_per_metre = 2.0 * (spot_fov_y(outer) * 0.5).tan() / spot_texels;
+        let s = spot_matrix(Vec3::ZERO, Vec3::Z, outer, settings.perspective_near_m);
+        let s_ndc_x = |w: f32| {
+            let c = s * Vec3::new(w, 0.0, -d).extend(1.0);
+            c.x / c.w
+        };
+        assert!(
+            ((s_ndc_x(spot_per_metre * d) - s_ndc_x(0.0)).abs() - 2.0 / spot_texels).abs() < 1e-5,
+            "a spot's per-metre texel does not span one texel of its own cone"
+        );
+
+        // …and the SHIPPED builder writes exactly those numbers, so the two
+        // cannot drift apart.
+        use crate::scene::RenderLight;
+        let mut scene = RenderScene::default();
+        scene.lights.push(RenderLight {
+            kind: LightKind::Spot,
+            outer_cos: outer,
+            cast_shadows: true,
+            ..Default::default()
+        });
+        scene.lights.push(RenderLight {
+            kind: LightKind::Point,
+            cast_shadows: true,
+            ..Default::default()
+        });
+        let trees = vsm_light_trees(&scene, &settings);
+        let ps = vsm_projections(
+            &scene,
+            &view_at(10.0),
+            &settings,
+            &trees,
+            &vec![0u32; trees.len()],
+            &vec![0u32; trees.len()],
+        );
+        assert_eq!(ps.len(), 7, "a spot and a cube");
+        assert!((ps[0].light[3] - spot_per_metre).abs() < 1e-9, "the spot");
+        for p in &ps[1..] {
+            assert!((p.light[3] - cube_per_metre).abs() < 1e-9, "a cube face");
+        }
+        // ANTI-VACUITY: the two lights' texels really are different numbers, so
+        // the two assertions above are not one assertion twice.
+        assert_ne!(spot_per_metre, cube_per_metre);
+    }
+
+    /// **The jittered-inverse fix, measured — and the precise bound on what any
+    /// arm may be asked to prove about it.**
+    ///
+    /// `VsmMarker::record` is handed `jvp.inverse()`: the inverse of the matrix
+    /// the frame's depth was actually rasterized with, jitter and all. Feeding it
+    /// `view.view_proj().inverse()` instead is not a small error in one place, it
+    /// is a *systematic* one — every pixel in the frame reconstructs off its own
+    /// surface — and the first half of this arm says by exactly how much.
+    ///
+    /// The second half says why the marked **set** cannot see it, which is the
+    /// ledger's "this fix has no falsifying arm", made a measurement rather than
+    /// a claim. The displacement is `|jitter| × pixel_world`, at most half a
+    /// pixel. The level rule targets one shadow texel per screen pixel and errs
+    /// **coarse**, so a page at the level a pixel justifies is at least 128
+    /// pixels across: the displacement is at most **1/256 of a page**. A page can
+    /// therefore only enter or leave the marked set if the geometry's coverage of
+    /// it is already thinner than half a pixel — and in that configuration the
+    /// *correct* reconstruction is equally jitter-dependent, because the
+    /// rasterized coverage moves with the jitter too. The bound is structural, not
+    /// a property of this fixture.
+    #[test]
+    fn the_unjittered_inverse_displaces_a_pixel_without_moving_its_page() {
+        let v = view_at(6.0);
+        let base = v.view_proj();
+        // The renderer's own jitter, at the frame of the 16-frame cycle whose
+        // Halton offset is largest — the worst case, not an average one.
+        let jitter = (0..16u64)
+            .map(crate::settings::halton_jitter)
+            .max_by(|a, b| (a[0] * a[0] + a[1] * a[1]).total_cmp(&(b[0] * b[0] + b[1] * b[1])))
+            .expect("a sixteen-frame cycle");
+        let jvp = Mat4::from_translation(Vec3::new(
+            2.0 * jitter[0] / v.width as f32,
+            2.0 * jitter[1] / v.height as f32,
+            0.0,
+        )) * base;
+
+        // A surface point the rasterizer wrote depth for, and the clip position
+        // it wrote it at.
+        let surface = Vec3::new(0.3, 1.1, 0.0);
+        let clip = jvp * surface.extend(1.0);
+        let ndc = clip.truncate() / clip.w;
+        // What the shader does with the inverse it is handed.
+        let recover = |inv: Mat4| {
+            let h = inv * ndc.extend(1.0);
+            h.truncate() / h.w
+        };
+        let right = recover(jvp.inverse());
+        let wrong = recover(base.inverse());
+        assert!(
+            (right - surface).length() < 1e-3,
+            "the matrix the depth was drawn with did not recover the point that \
+             drew it: {right:?}"
+        );
+
+        let pixel_world = (surface - v.eye_local()).length() / projection_scale(&v);
+        let displaced = (wrong - surface).length();
+        let in_pixels = displaced / pixel_world;
+        let jitter_px = (jitter[0] * jitter[0] + jitter[1] * jitter[1]).sqrt();
+        assert!(
+            (in_pixels - jitter_px).abs() < 0.02 * jitter_px.max(1e-3),
+            "the displacement is {in_pixels} pixels where the jitter is {jitter_px}"
+        );
+        assert!(
+            in_pixels > 0.1 && in_pixels < 0.71,
+            "the defect displaced {in_pixels} pixels — it is neither absent nor \
+             more than half a pixel on the diagonal"
+        );
+
+        // THE BOUND: the same two reconstructions mark the same page, so no arm
+        // over a marked set can tell them apart.
+        let settings = VsmSettings {
+            clipmap_pages_per_side: 8,
+            clipmap_levels: 6,
+            first_level_extent_m: 6.0,
+            ..Default::default()
+        };
+        let desc = VsmLightDesc::clipmap(settings.clipmap_levels, settings.clipmap_pages_per_side);
+        let texels0 = (desc.levels[0].pages_x * VSM_PAGE_SIZE) as f32;
+        let proj = VsmProjection {
+            view_proj: clipmap_matrix(
+                Vec3::Z,
+                clipmap_centre(
+                    v.eye_local(),
+                    clipmap_page_world(
+                        settings.first_level_extent_m,
+                        settings.clipmap_pages_per_side,
+                    ),
+                ),
+                settings.first_level_extent_m,
+                8.0 * settings.first_level_extent_m,
+            )
+            .to_cols_array(),
+            info: [0, 0, 0, VSM_PROJ_ORTHO],
+            light: [0.0, 0.0, 0.0, 2.0 * settings.first_level_extent_m / texels0],
+        };
+        let page_of = |p: Vec3| mark_page_for(&proj, &desc, p, pixel_world);
+        let marked = page_of(right).expect("the fixture's point marks a page");
+        assert_eq!(
+            page_of(wrong),
+            Some(marked),
+            "the displaced reconstruction marked a different page — if this ever \
+             fails, the fix HAS a falsifying arm and the ledger's remainder is stale"
+        );
+        // …and the reason, as arithmetic: the page is two orders of magnitude
+        // wider than the error.
+        let page_world = 2.0 * settings.first_level_extent_m * (1u32 << marked.level) as f32
+            / desc.levels[0].pages_x as f32;
+        assert!(
+            displaced * 128.0 < page_world,
+            "a {displaced} m displacement against a {page_world} m page is not the \
+             1/256-of-a-page bound the ledger rests on"
+        );
     }
 
     /// The six cube faces **tile the sphere**: every direction lands inside

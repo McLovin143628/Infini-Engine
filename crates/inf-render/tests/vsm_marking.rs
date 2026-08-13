@@ -645,9 +645,17 @@ fn a_point_lights_faces_mark_through_their_own_stride() {
         sys.summary()
     );
     // THE POINT OF THE ARM: the marked pages are on a face the stride has to
-    // reach. Face 4 is `+Z` in `CUBE_FACE_BASES`, which is the face looking back
-    // at the camera — a non-zero index, so `face * face_stride` is load-bearing.
+    // reach. The light stands at `z = 11` and the lit face is at `z = 1`, so the
+    // geometry lies along the light's `-Z` — `CUBE_FACE_BASES[5]`, a non-zero
+    // index, which is what makes `face * face_stride` load-bearing.
     let faces: BTreeSet<u32> = got.iter().map(|p| p.face).collect();
+    assert_eq!(
+        faces,
+        [5u32].into_iter().collect::<BTreeSet<_>>(),
+        "the marked pages are on faces {faces:?}; the geometry sits squarely down \
+         `CUBE_FACE_BASES[5]` (`-Z`) from a light at z = 11, so anything else is \
+         the face arithmetic and not the fixture"
+    );
     assert!(
         faces.iter().any(|f| *f > 0),
         "every marked page is on face 0, so the face stride was never exercised \
@@ -668,7 +676,281 @@ fn a_point_lights_faces_mark_through_their_own_stride() {
     let levels: BTreeSet<u32> = got.iter().map(|p| p.level).collect();
     assert!(
         levels.iter().all(|l| *l > 0 && *l + 1 < desc.level_count()),
-        "the marked levels {levels:?} reach an end of a {}-level tree, so a clamp          answered rather than the rule",
+        "the marked levels {levels:?} reach an end of a {}-level tree, so a clamp \
+         answered rather than the rule",
         desc.level_count()
     );
+}
+
+// ── (h) the clipmap's OTHER level rule, on the device ──
+
+/// **A clipmap pixel is served by the finest level that CONTAINS it**, never by
+/// the finer one its footprint alone would justify — on the device, which is
+/// where that half of the rule had no arm at all.
+///
+/// `mark_page_for`'s CPU twin has covered it since the batch landed; the shader's
+/// mirror of it had not, and the reason is arithmetic rather than oversight. The
+/// two levels a pixel names are
+/// `justified = ceil(log2(pixel_world / texel0))` and
+/// `containing = ceil(log2(r / half))`, and since the clipmap is centred on the
+/// camera, `r ≤ d`; substituting `texel0 = 2·half / (N·128)` makes their
+/// difference `log2(2·scale / (N·128)) + log2(r / d)`. At the other arms' 8-page
+/// grid and 320×180 frame that is **−1.7 levels** — the containing rule can never
+/// bind, so the branch that implements it is dead in every fixture above.
+/// Measured, in the P27.1 audit: deleting `level = max(level, contain)` from
+/// `vsm_mark.wgsl` left the whole file green.
+///
+/// This fixture puts it the other way round: a 4-page grid at 960×540 with the
+/// sun across the view, where the geometry sits **outside level 0** and the
+/// containing rule raises the marked level from 2 to 3. With the floor deleted
+/// the same pixels compute `|xy| > 1` at level 2 and mark **nothing**.
+#[test]
+fn a_clipmap_pixel_outside_its_justified_level_is_served_by_a_coarser_one() {
+    let Some(gpu) = gpu_or_skip("the VSM containing-level rule") else {
+        return;
+    };
+    const W: u32 = 960;
+    const H: u32 = 540;
+    let set = VsmSettings {
+        enabled: true,
+        clipmap_pages_per_side: 4,
+        clipmap_levels: 6,
+        first_level_extent_m: 1.0,
+        ..Default::default()
+    };
+    let v = RenderView {
+        width: W,
+        height: H,
+        ..view(6.0)
+    };
+    // The sun ACROSS the view, so the clipmap's lateral axis measures the
+    // camera-to-cube distance rather than the cube's small offset — which is what
+    // makes `r / d` about 1 instead of about 0.25.
+    let s = scene(&[glam::Vec3::X]);
+    let target = inf_render::HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let mut rs = *renderer.settings();
+    rs.vsm = set;
+    renderer.set_settings(rs);
+    for _ in 0..6 {
+        renderer.render(&gpu, &s, &v, &target.view, (W, H));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
+    let sys = renderer.vsm().expect("a live vsm system");
+    let got = resident_pages(&renderer, 0);
+    assert!(
+        !got.is_empty(),
+        "no page was marked at all — a pixel outside its justified level marked \
+         NOTHING instead of a coarser page: {}",
+        sys.summary()
+    );
+    let levels: BTreeSet<u32> = got.iter().map(|p| p.level).collect();
+    assert_eq!(
+        levels,
+        [3u32].into_iter().collect::<BTreeSet<_>>(),
+        "the marked levels are {levels:?}"
+    );
+    // THE POINT: the level the footprint alone justifies is a FINER one, so the
+    // containing floor is what chose 3. Computed from the shipped rule rather
+    // than quoted, so the fixture cannot drift away from its own premise.
+    let texel0 = 2.0 * set.first_level_extent_m
+        / (set.clipmap_pages_per_side * inf_render::VSM_PAGE_SIZE) as f32;
+    let face_centre = glam::Vec3::new(CUBE_XY.0, CUBE_XY.1, SIDE * 0.5);
+    let pixel_world = (v.eye_local() - face_centre).length() / inf_render::projection_scale(&v);
+    let justified = inf_render::vsm_justified_level(texel0, pixel_world, set.clipmap_levels);
+    assert_eq!(
+        justified, 2,
+        "the fixture's footprint no longer justifies a FINER level than the one \
+         that was marked, so the containing floor is not what is under test"
+    );
+    // ANTI-VACUITY: neither level is at an end of the tree.
+    assert!(justified > 0 && 3 + 1 < set.clipmap_levels);
+
+    // …and the OTHER end of the same rule: a point the coarsest level does not
+    // reach marks **nothing**. Two levels here instead of six, so the same
+    // geometry now sits outside the whole clipmap.
+    //
+    // What this pins is the OUTCOME and not the branch, honestly. The shader's
+    // `if (contain > levels - 1) { continue; }` is a cost guard rather than a
+    // claim: past the coarsest level `ndc0 > 2^(levels-1)`, so clamping `level`
+    // to the coarsest still leaves `|xy| > 1` and the general rejection below it
+    // catches the same pixel. Measured in the P27.1 audit — replacing that
+    // `continue` with a clamp changes no marked set anywhere — which is the same
+    // standing the `depth <= 0.0` early-out already documents. The behaviour is
+    // worth a gate; the line is not falsifiable on its own.
+    let short = VsmSettings {
+        clipmap_levels: 2,
+        ..set
+    };
+    let mut rs = *renderer.settings();
+    rs.vsm = short;
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    renderer.set_settings(rs);
+    for _ in 0..6 {
+        renderer.render(&gpu, &s, &v, &target.view, (W, H));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    let sys = renderer.vsm().expect("a live vsm system");
+    assert_eq!(renderer.vsm_engaged_frames(), 6, "the pass did not run");
+    assert!(sys.stats().mark_frames > 0, "the ring never landed");
+    assert_eq!(
+        sys.stats().admits,
+        0,
+        "geometry past the coarsest clipmap level allocated {} pages — a point \
+         outside the tree was clamped onto its edge instead of refused: {}",
+        sys.stats().admits,
+        sys.summary()
+    );
+    assert!(resident_pages(&renderer, 0).is_empty());
+}
+
+// ── (i) a frame's mark is THIS frame's ──
+
+/// **The needed-page mask is cleared every frame**, so a frame's coverage is a
+/// function of that frame and never an OR with its history.
+///
+/// `VsmMarker::record`'s own docs say so — *"which would make the signal depend
+/// on the frame history, the exact property the pinned ring exists to avoid"* —
+/// and in the P27.1 audit deleting the `clear_buffer` left every arm in this file
+/// green. It has to: the residency never evicts under this fixture's 1 024-page
+/// atlas, so the *resident* set is a union either way. What separates them is the
+/// number of pages a frame **asks** for, which is why this arm measures that.
+///
+/// One renderer, three windows: far, near, far. With the clear, the third window
+/// asks for exactly what the first did. Without it, it asks for both.
+#[test]
+fn a_frames_mask_is_that_frames_and_not_a_union_with_its_history() {
+    let Some(gpu) = gpu_or_skip("the VSM mask clear") else {
+        return;
+    };
+    let set = settings();
+    let s = scene(&[glam::Vec3::Z]);
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let mut rs = *renderer.settings();
+    rs.vsm = set;
+    renderer.set_settings(rs);
+
+    // Warm through the ring's two-frame latency, then measure the steady-state
+    // wants per frame over three frames the ring is asserted to have landed.
+    let window = |r: &mut inf_render::EngineRenderer, eye_z: f64| -> u64 {
+        let v = view(eye_z);
+        for _ in 0..8 {
+            r.render(&gpu, &s, &v, &target.view, (FW, FH));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        let before = r.vsm().expect("a live system").stats();
+        for _ in 0..3 {
+            r.render(&gpu, &s, &v, &target.view, (FW, FH));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        let after = r.vsm().expect("a live system").stats();
+        assert_eq!(
+            after.mark_frames - before.mark_frames,
+            3,
+            "the ring missed inside the measured window, so the count below is \
+             not three steady frames"
+        );
+        (after.marked_wants - before.marked_wants) / 3
+    };
+
+    let far = window(&mut renderer, 24.0);
+    let near = window(&mut renderer, 3.0);
+    let far_again = window(&mut renderer, 24.0);
+    assert!(far > 0, "the far camera marked nothing");
+    // ANTI-VACUITY: the two cameras genuinely want different page sets, so the
+    // equality below is not one answer compared with itself.
+    assert_ne!(
+        near, far,
+        "the fixture's two cameras ask for the same number of pages ({far}), so a \
+         mask that never cleared would look identical"
+    );
+    assert_eq!(
+        far_again, far,
+        "returning to the far camera asked for {far_again} pages where it first \
+         asked for {far} — the mask is accumulating across frames, and the want \
+         set is a function of the frame HISTORY"
+    );
+}
+
+// ── (j) the SECOND truncation door ──
+
+/// **A refused light truncates the registration too** — the other half of the
+/// projection cap's invariant, on the door `VsmSystem::for_scene` owns.
+///
+/// `431e9e0` fixed both `vsm_light_trees` and this loop and mutation-verified the
+/// first; the P27.1 audit found the second unarmed — turning its `break` back
+/// into a `continue` left the whole tree green. The invariant is the same one and
+/// so is the cost: **handle `n` is the `n`-th shadow-casting light in scene
+/// order**, because `vsm_projections` rebuilds the mapping by re-walking
+/// `scene.lights`. A light admitted *past* a refused one takes the refused
+/// light's table block and bit range and marks into another light's address
+/// space.
+///
+/// The fixture makes a clipmap unregisterable without touching the other kinds:
+/// a 6-page grid is square but not a multiple of four, so the concentric parent
+/// rule `N/4 + x/2` would land between pages and `validate` refuses it.
+#[test]
+fn a_light_refused_at_registration_stops_the_list_it_is_in() {
+    let Some(gpu) = gpu_or_skip("the VSM registration truncation") else {
+        return;
+    };
+    let set = VsmSettings {
+        clipmap_pages_per_side: 6,
+        ..settings()
+    };
+    // spot, sun, spot — so a cap that skipped would keep TWO lights and hand the
+    // second spot the sun's place in scene order.
+    let mut s = scene(&[]);
+    for kind in [
+        inf_render::LightKind::Spot,
+        inf_render::LightKind::Directional,
+        inf_render::LightKind::Spot,
+    ] {
+        s.lights.push(inf_render::RenderLight {
+            kind,
+            direction: glam::Vec3::Z,
+            cast_shadows: true,
+            ..Default::default()
+        });
+    }
+    s.mark_dirty();
+    let renderer = run(&gpu, &s, &view(6.0), &set, 3);
+    let sys = renderer.vsm().expect("the first spot registered");
+
+    assert_eq!(
+        sys.trees().len(),
+        1,
+        "a light was registered PAST one that was refused — the handle mapping is \
+         no longer the scene order"
+    );
+    assert_eq!(
+        sys.trees()[0].kind,
+        inf_render::VsmTreeKind::Quadtree,
+        "the light that survived is not the first spot"
+    );
+    assert_eq!(
+        sys.projections().len(),
+        1,
+        "the projection list does not agree with the tree list"
+    );
+    // THE INVARIANT, stated directly: handle `h` is the `h`-th shadow-casting
+    // light in scene order, and its tree is that light's kind.
+    let casters: Vec<inf_render::LightKind> = s
+        .lights
+        .iter()
+        .filter(|l| l.cast_shadows)
+        .map(|l| l.kind)
+        .collect();
+    for (h, tree) in sys.trees().iter().enumerate() {
+        let want = match casters[h] {
+            inf_render::LightKind::Directional => inf_render::VsmTreeKind::Clipmap,
+            inf_render::LightKind::Spot => inf_render::VsmTreeKind::Quadtree,
+            inf_render::LightKind::Point => inf_render::VsmTreeKind::Cube,
+        };
+        assert_eq!(tree.kind, want, "handle {h} is not scene light {h}'s kind");
+    }
+    // ANTI-VACUITY: the refusal really happened — three casters, one tree.
+    assert_eq!(casters.len(), 3, "the fixture lost a light");
 }

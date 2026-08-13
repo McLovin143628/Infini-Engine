@@ -218,4 +218,47 @@ mod tests {
         assert_eq!(VSM_PAGE_FORMAT.block_dimensions(), (1, 1));
         assert_eq!(VSM_PAGE_FORMAT, crate::camera::DEPTH_FORMAT);
     }
+
+    /// **The nineteen lines the separate-crate ruling copied still agree** — one
+    /// door where a dependency edge is not allowed to be one.
+    ///
+    /// `inf-vsm`'s manifest and its crate docs both say why it does not name
+    /// `inf-vt`: the two address spaces are different shapes, and the edge would
+    /// buy one 30-line `pack_entry` at the price of coupling shadow paging to a
+    /// texture container's tile geometry. The price it *does* pay is a copy, and
+    /// a copy with no pin is a copy that drifts — which matters here because
+    /// P28.3's whole plan is to merge the two brains, and a silent divergence in
+    /// the entry format is a divergence in what the merged table means.
+    ///
+    /// This crate depends on **both**, so the pin can live here even though
+    /// neither crate may hold it. It is a mechanical agreement check, not a
+    /// re-derivation: `lru_victim` is `pub(crate)` in both and `slot_origin` sits
+    /// on two different geometry types, so what is pinnable is the entry word and
+    /// its slot ceiling — the two the wire format actually rests on.
+    #[test]
+    fn the_two_page_tables_pack_a_slot_the_same_way() {
+        assert_eq!(
+            inf_vsm::MAX_SLOT_INDEX,
+            inf_vt::table::MAX_SLOT_INDEX,
+            "the two crates disagree about how many slots an entry addresses"
+        );
+        for slot in [0u32, 1, 1_023, 2_713, inf_vsm::MAX_SLOT_INDEX] {
+            for level in [0u32, 1, 8, 15] {
+                assert_eq!(
+                    inf_vsm::pack_entry(slot, level),
+                    inf_vt::pack_entry(slot, level),
+                    "slot {slot} level {level}: the copied `pack_entry` has drifted"
+                );
+            }
+        }
+        // …and the ONE deliberate difference is still deliberate: a shadow entry
+        // has a NONE state a virtual texture's cannot have, which is why
+        // `unpack_entry` was measured as *not* reusable.
+        assert_eq!(inf_vsm::unpack_entry(inf_vsm::VSM_ENTRY_NONE), None);
+        assert_eq!(
+            inf_vt::unpack_entry(inf_vsm::VSM_ENTRY_NONE).slot,
+            inf_vsm::MAX_SLOT_INDEX,
+            "`inf-vt`'s unpack has no absence to return, which is the measurement"
+        );
+    }
 }
