@@ -132,9 +132,9 @@ pub use settings::{
 // unit-tested with no adapter), the mirror, and the marking loop's counters.
 pub use vsm::{
     clipmap_centre, clipmap_containing_level, clipmap_matrix, clipmap_page_world, cube_face_matrix,
-    mark_page_for, spot_fov_y, spot_matrix, vsm_justified_level, vsm_light_trees, vsm_projections,
-    VsmMarkParams, VsmProjection, CUBE_FACE_BASES, VSM_DEPTH_CLEAR, VSM_DEPTH_COMPARE,
-    VSM_MAX_PROJECTIONS, VSM_PROJ_ORTHO, VSM_PROJ_PERSPECTIVE,
+    mark_page_for, spot_fov_y, spot_matrix, vsm_justified_level, vsm_light_trees, vsm_page_matrix,
+    vsm_page_sees_sphere, vsm_projections, VsmMarkParams, VsmProjection, CUBE_FACE_BASES,
+    VSM_DEPTH_CLEAR, VSM_DEPTH_COMPARE, VSM_MAX_PROJECTIONS, VSM_PROJ_ORTHO, VSM_PROJ_PERSPECTIVE,
 };
 pub use vsm_atlas::{VsmApplyReport, VsmPools, VSM_PAGE_FORMAT};
 pub use vsm_mark::{VsmMarker, VsmStreamStats, VsmSystem, VSM_PROJECTION_CAP};

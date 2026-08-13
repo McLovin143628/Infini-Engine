@@ -244,6 +244,104 @@ pub fn clipmap_containing_level(ndc0: f32, levels: u32) -> Option<u32> {
     }
 }
 
+/// **The world→clip matrix of ONE page** — the projection P27.2's caster raster
+/// draws that page's dirty depth with.
+///
+/// A page is a *sub-rectangle* of its level's projection, so this is the light's
+/// own `view_proj` composed with a 2-D scale-and-offset that blows that rectangle
+/// up to the full `[-1, 1]` clip square. Nothing else changes: `z` and `w` pass
+/// through untouched, so a page keeps the light's depth range, its reverse-Z
+/// convention and its near plane exactly.
+///
+/// # The two level rules, inverted
+///
+/// [`mark_page_for`] decides which page a world point marks; this decides which
+/// world points a page contains, and the two must be the same statement or the
+/// raster fills pages the marker never asked for. So the arithmetic is inverted
+/// from that function rather than re-derived:
+///
+/// * a **clipmap** level covers `2^L` times level 0 about the same centre, so its
+///   NDC is level 0's divided by `2^L` — the `xy = l.xy / exp2(level)` line in
+///   `vsm_mark.wgsl`;
+/// * a **quadtree** (spot) or **cube face** level covers the light's whole
+///   frustum whatever its page count, so its NDC *is* the light's.
+///
+/// # The vertical flip lives here too
+///
+/// Page row 0 is the **top** of the level — `mark_page_for` computes
+/// `py = (0.5 − ndc.y·0.5) · pages_y`, so `ndc.y = +1` is row 0 — and wgpu's
+/// viewport puts `ndc.y = +1` at the top of the rect. The two agree, which is why
+/// a page's own projection needs no flip of its own: flipping here as well would
+/// mirror every page's content vertically inside a correctly-chosen slot, which is
+/// the defect that looks like a bias problem.
+pub fn vsm_page_matrix(
+    light_vp: Mat4,
+    kind: VsmTreeKind,
+    level: u32,
+    pages_x: u32,
+    pages_y: u32,
+    x: u32,
+    y: u32,
+) -> Mat4 {
+    let (nx, ny) = (pages_x.max(1) as f32, pages_y.max(1) as f32);
+    let level_scale = match kind {
+        VsmTreeKind::Clipmap => 1.0 / (1u64 << level.min(62)) as f32,
+        VsmTreeKind::Quadtree | VsmTreeKind::Cube => 1.0,
+    };
+    // The page's centre in its LEVEL's NDC. `x` runs with NDC x; `y` runs against
+    // it (row 0 is the top), which is the one asymmetry in this file.
+    let cx = -1.0 + (2.0 * x as f32 + 1.0) / nx;
+    let cy = 1.0 - (2.0 * y as f32 + 1.0) / ny;
+    let (a, b) = (level_scale * nx, level_scale * ny);
+    // `sub * clip` = `(a·clip.x − cx·nx·clip.w, b·clip.y − cy·ny·clip.w, clip.z,
+    // clip.w)`: the level scale and the page's blow-up folded into one matrix, so
+    // the raster pays one multiply and the light's own matrix is never rebuilt.
+    let sub = Mat4::from_cols(
+        glam::Vec4::new(a, 0.0, 0.0, 0.0),
+        glam::Vec4::new(0.0, b, 0.0, 0.0),
+        glam::Vec4::new(0.0, 0.0, 1.0, 0.0),
+        glam::Vec4::new(-cx * nx, -cy * ny, 0.0, 1.0),
+    );
+    sub * light_vp
+}
+
+/// Whether a world-space sphere can contribute to the page `page_vp` describes —
+/// **the CPU twin of `vsm_cull.wgsl`'s test**, and the terrain caster path's own
+/// cull.
+///
+/// The six clip-space planes of the matrix, tested against the sphere. A plane
+/// whose normal is degenerate is skipped rather than trusted: a reverse-**infinite**
+/// perspective (every spot and every cube face) has no far plane at all, and its
+/// `w − z` row is identically zero — dividing by that length would make every
+/// caster of every perspective light fail the test, which is the shape of a bug
+/// that deletes all point-light shadows and nothing else.
+///
+/// Conservative by construction: it may keep a sphere the page cannot see, never
+/// drop one it can. That direction is the one a *subtractive* cull needs, and it
+/// is the same direction `inf_render::passes::vgeom`'s cull errs in.
+pub fn vsm_page_sees_sphere(page_vp: &Mat4, centre: Vec3, radius: f32) -> bool {
+    let r = page_vp.row(3);
+    let planes = [
+        page_vp.row(0) + r, // x ≥ −w
+        r - page_vp.row(0), // x ≤ +w
+        page_vp.row(1) + r, // y ≥ −w
+        r - page_vp.row(1), // y ≤ +w
+        page_vp.row(2),     // z ≥ 0
+        r - page_vp.row(2), // z ≤ w — degenerate under an infinite far plane
+    ];
+    for p in planes {
+        let n = p.truncate();
+        let len = n.length();
+        if len < 1e-6 {
+            continue;
+        }
+        if (n.dot(centre) + p.w) / len < -radius {
+            return false;
+        }
+    }
+    true
+}
+
 /// One (light × face) projection, as the marking shader reads it — 96 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -1129,6 +1227,212 @@ mod tests {
             displaced * 128.0 < page_world,
             "a {displaced} m displacement against a {page_world} m page is not the \
              1/256-of-a-page bound the ledger rests on"
+        );
+    }
+
+    /// **A page's projection contains exactly the world points that mark it.**
+    ///
+    /// The P27.2 clause that everything else rests on: the raster fills a page with
+    /// the casters `vsm_page_matrix` admits, and the marking pass allocated that
+    /// page because [`mark_page_for`] said a pixel needed it. If those two
+    /// statements are not the same statement, the atlas holds depth from the wrong
+    /// ground and every receiver is wrong in a way no counter reports.
+    ///
+    /// Swept rather than sampled, and asserted in **both** directions — a
+    /// containment test that only ever says "yes" is satisfied by a matrix that
+    /// maps the whole world into the unit square.
+    #[test]
+    fn a_pages_projection_contains_exactly_the_points_that_mark_it() {
+        let settings = VsmSettings {
+            clipmap_pages_per_side: 8,
+            clipmap_levels: 4,
+            first_level_extent_m: 32.0,
+            ..Default::default()
+        };
+        let desc = VsmLightDesc::clipmap(settings.clipmap_levels, settings.clipmap_pages_per_side);
+        let half = settings.first_level_extent_m;
+        let vp = clipmap_matrix(Vec3::Z, Vec3::ZERO, half, 4.0 * half);
+        let texels0 = (desc.levels[0].pages_x * VSM_PAGE_SIZE) as f32;
+        let proj = VsmProjection {
+            view_proj: vp.to_cols_array(),
+            info: [0, 0, 0, VSM_PROJ_ORTHO],
+            light: [0.0, 0.0, 0.0, 2.0 * half / texels0],
+        };
+        let texel0 = 2.0 * half / texels0;
+        // Fine enough a footprint that the level rule always answers 0, so the
+        // sweep is a statement about the PAGE arithmetic and not about the level
+        // rule (which its own arm covers).
+        let pixel = texel0 * 0.5;
+        let (mut inside, mut outside) = (0u32, 0u32);
+        let mut pages_hit = std::collections::BTreeSet::new();
+        for iy in 0..40 {
+            for ix in 0..40 {
+                let p = Vec3::new(
+                    -half + 2.0 * half * (ix as f32 + 0.5) / 40.0,
+                    -half + 2.0 * half * (iy as f32 + 0.5) / 40.0,
+                    0.0,
+                );
+                let marked = mark_page_for(&proj, &desc, p, pixel).expect("inside level 0");
+                assert_eq!(marked.level, 0, "the sweep left level 0 at {p:?}");
+                pages_hit.insert((marked.x, marked.y));
+                // Its own page contains it…
+                let g = desc.levels[marked.level as usize];
+                let m = vsm_page_matrix(
+                    vp,
+                    desc.kind,
+                    marked.level,
+                    g.pages_x,
+                    g.pages_y,
+                    marked.x,
+                    marked.y,
+                );
+                let c = m * p.extend(1.0);
+                let n = c.truncate() / c.w;
+                assert!(
+                    n.x.abs() <= 1.0 + 1e-4 && n.y.abs() <= 1.0 + 1e-4,
+                    "{p:?} marks {marked:?} but its own page's projection puts it at \
+                     {n:?}"
+                );
+                inside += 1;
+                // …and its NEIGHBOURS do not. This is the half that fails when the
+                // page centre, the level scale or the vertical flip is wrong, and
+                // it is the half a one-directional test cannot see.
+                for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                    let (nx, ny) = (marked.x as i32 + dx, marked.y as i32 + dy);
+                    if nx < 0 || ny < 0 || nx >= g.pages_x as i32 || ny >= g.pages_y as i32 {
+                        continue;
+                    }
+                    let m = vsm_page_matrix(
+                        vp,
+                        desc.kind,
+                        marked.level,
+                        g.pages_x,
+                        g.pages_y,
+                        nx as u32,
+                        ny as u32,
+                    );
+                    let c = m * p.extend(1.0);
+                    let n = c.truncate() / c.w;
+                    assert!(
+                        n.x.abs() > 1.0 - 1e-4 || n.y.abs() > 1.0 - 1e-4,
+                        "{p:?} marks ({}, {}) and page ({nx}, {ny}) also contains it \
+                         at {n:?}",
+                        marked.x,
+                        marked.y
+                    );
+                    outside += 1;
+                }
+            }
+        }
+        // ANTI-VACUITY on all three counters: the sweep really did cover many
+        // pages, really did test both directions, and really did reject.
+        assert_eq!(inside, 1_600);
+        assert!(outside > 5_000, "only {outside} neighbour rejections");
+        assert_eq!(
+            pages_hit.len(),
+            64,
+            "the sweep covered {} of 64 pages",
+            pages_hit.len()
+        );
+    }
+
+    /// A **coarse** clipmap level's pages cover four times the ground of the level
+    /// below, concentrically — the `1/2^L` half of the rule, which the level-0
+    /// sweep above cannot see at all.
+    #[test]
+    fn a_coarser_clipmap_page_covers_twice_the_extent_on_each_axis() {
+        let half = 32.0f32;
+        let vp = clipmap_matrix(Vec3::Z, Vec3::ZERO, half, 8.0 * half);
+        let n = 8u32;
+        // The centre page of an even grid: `N/2` is the first page right of centre,
+        // so page (4, 3) is the one straddling the origin upward — the same page
+        // `the_clipmap_twin_marks_the_page_the_geometry_names` hand-computes.
+        let world_span = |level: u32| {
+            let m = vsm_page_matrix(vp, VsmTreeKind::Clipmap, level, n, n, 4, 3);
+            // Walk +x until the page's own NDC leaves the unit square: that
+            // distance is the page's half-width in metres.
+            let mut lo = 0.0f32;
+            let mut hi = 4.0 * half;
+            for _ in 0..60 {
+                let mid = 0.5 * (lo + hi);
+                let c = m * Vec3::new(mid, 1.0, 0.0).extend(1.0);
+                if (c.x / c.w).abs() <= 1.0 {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo
+        };
+        let l0 = world_span(0);
+        let l1 = world_span(1);
+        let l2 = world_span(2);
+        // 64 m over 8 pages is an 8 m page — and the walk starts at `x = 0`, which
+        // for an EVEN grid is the clipmap centre and therefore page 4's own left
+        // edge, so what it measures is the page's whole width rather than half of
+        // it. (Measured: the first draft of this arm asserted 4 m and read 8.)
+        assert!((l0 - 8.0).abs() < 0.05, "level 0 page width {l0} m");
+        assert!((l1 / l0 - 2.0).abs() < 0.01, "{l1} / {l0}");
+        assert!((l2 / l1 - 2.0).abs() < 0.01, "{l2} / {l1}");
+        // A **quadtree** does not do that: every level covers the light's whole
+        // frustum, so the page grid alone decides the page's size.
+        let spot = spot_matrix(Vec3::ZERO, Vec3::Z, 40f32.to_radians().cos(), 0.05);
+        let q_span = |level: u32, pages: u32| {
+            let m = vsm_page_matrix(spot, VsmTreeKind::Quadtree, level, pages, pages, 0, 0);
+            let c = m * Vec3::new(0.0, 0.0, -10.0).extend(1.0);
+            (c.x / c.w, c.y / c.w)
+        };
+        // The beam axis at 10 m is the level's centre, so under a 2×2 grid it sits
+        // at the inner corner of page (0, 0) — at NDC (+1, −1) — whatever the level.
+        for (level, pages) in [(0u32, 2u32), (1, 2)] {
+            let (x, y) = q_span(level, pages);
+            assert!(
+                (x - 1.0).abs() < 1e-3 && (y + 1.0).abs() < 1e-3,
+                "level {level}: the beam axis landed at ({x}, {y}), not the page corner"
+            );
+        }
+    }
+
+    /// The page cull keeps what a page can see and drops what it cannot — **and
+    /// survives a projection with no far plane**, which every spot and every cube
+    /// face is.
+    #[test]
+    fn the_page_cull_rejects_a_sphere_the_page_cannot_see() {
+        let half = 32.0f32;
+        let vp = clipmap_matrix(Vec3::Z, Vec3::ZERO, half, 4.0 * half);
+        let n = 8u32;
+        let page = |x, y| vsm_page_matrix(vp, VsmTreeKind::Clipmap, 0, n, n, x, y);
+        // An 8 m page: a 0.1 m sphere at its centre is seen, the same sphere three
+        // pages away is not, and a 20 m sphere three pages away IS (it reaches).
+        let centre_of = |x: u32, y: u32| {
+            Vec3::new(
+                -half + 8.0 * (x as f32 + 0.5),
+                half - 8.0 * (y as f32 + 0.5),
+                0.0,
+            )
+        };
+        assert!(vsm_page_sees_sphere(&page(4, 3), centre_of(4, 3), 0.1));
+        assert!(!vsm_page_sees_sphere(&page(4, 3), centre_of(7, 3), 0.1));
+        assert!(vsm_page_sees_sphere(&page(4, 3), centre_of(7, 3), 20.0));
+        // Behind the light's box, along the light: rejected by the depth planes,
+        // which is the half a 2-D test would miss.
+        assert!(!vsm_page_sees_sphere(
+            &page(4, 3),
+            centre_of(4, 3) - Vec3::Z * 500.0,
+            1.0
+        ));
+
+        // …and the infinite-far case. A cube face's `w − z` row is identically
+        // zero; trusting it would reject every caster of every point light.
+        let face = cube_face_matrix(Vec3::ZERO, 4, 0.05);
+        let p = vsm_page_matrix(face, VsmTreeKind::Cube, 0, 4, 4, 2, 2);
+        assert!(
+            vsm_page_sees_sphere(&p, Vec3::new(0.6, -0.6, 6.0), 1.0),
+            "an infinite far plane rejected a caster in front of the light"
+        );
+        assert!(
+            !vsm_page_sees_sphere(&p, Vec3::new(0.0, 0.0, -6.0), 1.0),
+            "a caster BEHIND a cube face was kept"
         );
     }
 

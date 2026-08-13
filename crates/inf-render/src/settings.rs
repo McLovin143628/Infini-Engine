@@ -673,7 +673,10 @@ impl std::fmt::Display for VsmSettingsError {
                  would be deferred"
             ),
             Self::Distance { field, value } => {
-                write!(f, "`{field}` is {value}; it must be a positive finite metre")
+                write!(
+                    f,
+                    "`{field}` is {value}; it must be a positive finite metre"
+                )
             }
         }
     }
