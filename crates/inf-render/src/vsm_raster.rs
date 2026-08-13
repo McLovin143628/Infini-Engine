@@ -163,6 +163,93 @@ impl Default for VsmPageDrawRaw {
 
 const _: () = assert!(std::mem::size_of::<VsmPageDrawRaw>() as u64 == VSM_PAGE_DRAW_STRIDE);
 
+/// The four `SkinnedVertex` fields a page raster reads: position, normal (bound
+/// because the layout declares it, never read), joints and weights. **The uv at
+/// offset 24 is deliberately skipped** — a depth-only pass has nothing to sample.
+const SKINNED_CASTER_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 12,
+        shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32x4,
+        offset: 32,
+        shader_location: 2,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 48,
+        shader_location: 3,
+    },
+];
+
+/// Cells a side of a terrain tile's caster mesh.
+///
+/// A tile's own resolution can be 512 samples a side, which is a 8 MiB vertex
+/// buffer per tile held for the life of the level. A shadow page is 128 texels
+/// across and a clipmap level covers many tiles, so terrain shadow detail is
+/// bounded by the page long before it is bounded by the heightfield: 64 cells is
+/// 4 225 vertices and 135 KiB. The cost is real and stated — a ridge thinner
+/// than the sample stride is *smoothed*, so it casts a slightly thinner shadow
+/// than it should. The fail direction is a leak (lit), which is the one this
+/// phase already chose for `VSM_ENTRY_NONE`.
+pub const VSM_TERRAIN_CASTER_CELLS: u32 = 64;
+
+/// One skinned mesh's bind-pose caster geometry.
+struct SkinnedCasterGeom {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    index_count: u32,
+    /// Local-space bounding sphere of the BIND pose. Conservative for a posed
+    /// instance only in the sense that a pose can leave it — which is why the
+    /// radius is inflated by [`SKINNED_POSE_MARGIN`] rather than trusted.
+    bounds: (glam::Vec3, f32),
+}
+
+/// How far a posed skinned mesh may leave its bind-pose bounding sphere, as a
+/// fraction of that sphere's radius.
+///
+/// A skeleton moves vertices, so a bind-pose bound is **not** conservative for an
+/// arbitrary pose — an arm raised over the head leaves it. The lit skinned pass
+/// never had to care (it does not cull), and a shadow caster that culled on a
+/// bound the pose escapes would delete a limb's shadow at exactly the moment the
+/// limb moved, which is the worst shape a defect can have. 50 % is a large margin
+/// for a rig whose joints stay inside their own mesh and it is a *cull* margin,
+/// so its only cost is drawing a caster a page would have clipped anyway. The
+/// exact bound is the posed skeleton's own AABB, which the renderer is not given
+/// (`SkinnedInstance` carries a palette, not a bound) — P27.3 is where a mover's
+/// bounds become load-bearing, and that is where this becomes exact.
+pub const SKINNED_POSE_MARGIN: f32 = 0.5;
+
+/// One terrain tile as a static caster mesh: the tile's own height samples, in
+/// render-local space, at full tile resolution.
+///
+/// **Not the clipmap's LOD patch.** The terrain pass draws a camera-fitted
+/// clipmap with morphing and skirts, all of which are functions of where the
+/// camera is; a shadow drawn through them would move when the camera moved while
+/// nothing in the world had. A tile's heights do not move, so this mesh is built
+/// once per tile version and cached — which also makes it exactly the geometry
+/// P27.3 needs to keep a static page from re-rasterizing.
+struct TerrainCasterGeom {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    index_count: u32,
+    /// Render-local bounding sphere at the origin the mesh was built under.
+    bounds: (glam::Vec3, f32),
+    /// The tile version this mesh was built from.
+    version: u64,
+    /// The floating origin it was built under — a rebase moves render-local space
+    /// under it, so the mesh has to be rebuilt (the same rule every packed
+    /// instance buffer in the tree follows).
+    origin: glam::DVec3,
+}
+
 /// The cull's uniform. 16 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -183,6 +270,12 @@ enum GroupSource {
     Prim,
     /// One virtualized-geometry asset at one classic LOD level.
     Vgeom { asset: u128, level: usize },
+    /// One skinned instance: its mesh's bind-pose buffers plus its own joint
+    /// palette. A group per *instance* rather than per mesh, because the palette
+    /// is per instance and it is a bind group.
+    Skinned { instance: usize },
+    /// One terrain tile, as a static world-space caster mesh.
+    Terrain { terrain: u64, tile: usize },
 }
 
 /// Where one geometry group's indices live — the three constant words of its
@@ -248,6 +341,10 @@ pub struct VsmRasterStats {
     /// Of the packed casters, the ones that are **virtualized-geometry** instances
     /// — so "vgeom casts" is a measurement rather than a claim about a code path.
     pub vgeom_casters: u64,
+    /// Skinned casters packed, summed over frames.
+    pub skinned_casters: u64,
+    /// Terrain-tile casters packed, summed over frames.
+    pub terrain_casters: u64,
 }
 
 impl VsmRasterStats {
@@ -255,13 +352,15 @@ impl VsmRasterStats {
     pub fn summary(&self) -> String {
         format!(
             "vsm raster: {} frames, {} pages, {} draws, {} casters ({} scattered, \
-             {} meshlet-asset), {} pages deferred",
+             {} meshlet-asset, {} skinned, {} terrain), {} pages deferred",
             self.frames,
             self.pages,
             self.draws,
             self.casters,
             self.scatter_casters,
             self.vgeom_casters,
+            self.skinned_casters,
+            self.terrain_casters,
             self.deferred_pages,
         )
     }
@@ -275,6 +374,8 @@ pub struct VsmRaster {
     caster_bgl: wgpu::BindGroupLayout,
     rigid: wgpu::RenderPipeline,
     rigid_masked: wgpu::RenderPipeline,
+    skinned_pipeline: wgpu::RenderPipeline,
+    palette_bgl: wgpu::BindGroupLayout,
     prim: PrimGpu,
 
     /// `pages × casters` entries. `STORAGE` only — nothing reads it back.
@@ -307,6 +408,17 @@ pub struct VsmRaster {
     /// owned by a render node, and a shadow caster that reached into them would
     /// couple the page raster to residency it does not control.
     vgeom: std::collections::BTreeMap<u128, VgeomCasterGeom>,
+    /// Bind-pose GPU buffers per skinned mesh index, and one palette buffer +
+    /// bind group per skinned instance. Keyed by the scene's own indices and
+    /// rebuilt when the scene version moves, because a palette is *animation* and
+    /// changes every frame by construction.
+    skinned: Vec<SkinnedCasterGeom>,
+    skinned_palettes: Vec<(wgpu::Buffer, wgpu::BindGroup, usize)>,
+    /// Static caster meshes for terrain tiles, keyed `(terrain id, tile index)`
+    /// and rebuilt when that tile's version moves.
+    terrain: std::collections::BTreeMap<(u64, usize), TerrainCasterGeom>,
+    /// The scene version the skinned caches were built for.
+    skinned_version: Option<u64>,
 
     /// The pages the last [`record`](Self::record) rasterized, in draw order, and
     /// how many geometry groups each one was drawn with. Kept so a gate can map
@@ -459,6 +571,61 @@ impl VsmRaster {
             }),
         );
 
+        // ── the skinned page pipeline. Its own vertex format and its own third
+        // group (the instance's joint palette); everything else — the page
+        // uniform, the pulled caster record, the depth state — is shared, so a
+        // skinned caster and a rigid one cannot end up in different conventions.
+        let palette_bgl = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("vsm-palette"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let skinned_shader = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("vsm-skinned"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/vsm_skinned.wgsl").into()),
+            });
+        let skinned_layout = gpu
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("vsm-skinned"),
+                bind_group_layouts: &[Some(&page_bgl), Some(&caster_bgl), Some(&palette_bgl)],
+                immediate_size: 0,
+            });
+        let skinned_pipeline = gpu
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vsm-skinned"),
+                layout: Some(&skinned_layout),
+                vertex: wgpu::VertexState {
+                    module: &skinned_shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<crate::scene::SkinnedVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &SKINNED_CASTER_ATTRIBUTES,
+                    })],
+                },
+                fragment: None,
+                primitive: page_primitive_state(),
+                depth_stencil: Some(page_depth_state()),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
         let empty = |label: &str, usage: wgpu::BufferUsages| {
             gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -474,6 +641,8 @@ impl VsmRaster {
             caster_bgl,
             rigid,
             rigid_masked,
+            skinned_pipeline,
+            palette_bgl,
             prim: PrimGpu::new(gpu, "vsm"),
             visible: empty("vsm-visible", wgpu::BufferUsages::STORAGE),
             visible_entries: 64,
@@ -504,6 +673,10 @@ impl VsmRaster {
             caster_bind: None,
             page_bind: None,
             vgeom: std::collections::BTreeMap::new(),
+            skinned: Vec::new(),
+            skinned_palettes: Vec::new(),
+            terrain: std::collections::BTreeMap::new(),
+            skinned_version: None,
             last_pages: Vec::new(),
             last_groups: 0,
             stats: VsmRasterStats::default(),
@@ -612,8 +785,17 @@ impl VsmRaster {
             return 0;
         }
         self.sync_vgeom(gpu, scene);
-        let (casters, groups, masked, scattered) =
-            pack_casters(&self.prim, &self.vgeom, scene, view, settings);
+        self.sync_skinned(gpu, scene);
+        self.sync_terrain(gpu, scene, view);
+        let (casters, groups, masked, scattered) = pack_casters(
+            &self.prim,
+            &self.vgeom,
+            &self.skinned,
+            &self.terrain,
+            scene,
+            view,
+            settings,
+        );
         // A page with nothing to draw into it still has to be CLEARED, or it keeps
         // a previous occupant's depth — a slot is reused the moment its page is
         // evicted, and stale depth in a live page is a shadow from geometry that
@@ -767,12 +949,13 @@ impl VsmRaster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            let pipeline = if masked {
+            let rigid = if masked {
                 &self.rigid_masked
             } else {
                 &self.rigid
             };
-            pass.set_pipeline(pipeline);
+            let mut bound_skinned = false;
+            pass.set_pipeline(rigid);
             pass.set_bind_group(1, caster_bind, &[]);
             for (i, p) in pages.iter().enumerate() {
                 // **The page rect, pinned exactly.** `slot_origin` is the atlas
@@ -788,8 +971,20 @@ impl VsmRaster {
                         continue;
                     }
                     // Bound per group rather than once per pass: the built-in
-                    // primitives share one pair of buffers, and every vgeom asset
-                    // brings its own.
+                    // primitives share one pair of buffers, and every other caster
+                    // path brings its own. The pipeline switches only for the
+                    // skinned path, whose vertex format is a different one —
+                    // groups 0 and 1 survive the switch because both layouts name
+                    // the same two at the same indices.
+                    let wants_skinned = matches!(geom.source, GroupSource::Skinned { .. });
+                    if wants_skinned != bound_skinned {
+                        pass.set_pipeline(if wants_skinned {
+                            &self.skinned_pipeline
+                        } else {
+                            rigid
+                        });
+                        bound_skinned = wants_skinned;
+                    }
                     match geom.source {
                         GroupSource::Prim => self.prim.bind_geometry(&mut pass),
                         GroupSource::Vgeom { asset, level } => {
@@ -801,6 +996,26 @@ impl VsmRaster {
                             };
                             pass.set_vertex_buffer(0, a.vertices.slice(..));
                             pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                        }
+                        GroupSource::Skinned { instance } => {
+                            let Some(mesh_index) =
+                                self.skinned_palettes.get(instance).map(|(_, _, m)| *m)
+                            else {
+                                continue;
+                            };
+                            let Some(m) = self.skinned.get(mesh_index) else {
+                                continue;
+                            };
+                            pass.set_bind_group(2, &self.skinned_palettes[instance].1, &[]);
+                            pass.set_vertex_buffer(0, m.vertices.slice(..));
+                            pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        }
+                        GroupSource::Terrain { terrain, tile } => {
+                            let Some(t) = self.terrain.get(&(terrain, tile)) else {
+                                continue;
+                            };
+                            pass.set_vertex_buffer(0, t.vertices.slice(..));
+                            pass.set_index_buffer(t.indices.slice(..), wgpu::IndexFormat::Uint32);
                         }
                     }
                     let slot = (i * groups.len() + g) as u64;
@@ -829,11 +1044,16 @@ impl VsmRaster {
         self.stats.draws += draws;
         self.stats.casters += u64::from(caster_count);
         self.stats.scatter_casters += u64::from(scattered);
-        self.stats.vgeom_casters += groups
-            .iter()
-            .filter(|g| matches!(g.source, GroupSource::Vgeom { .. }))
-            .map(|g| u64::from(g.casters))
-            .sum::<u64>();
+        let of = |f: fn(&GroupSource) -> bool| -> u64 {
+            groups
+                .iter()
+                .filter(|g| f(&g.source))
+                .map(|g| u64::from(g.casters))
+                .sum()
+        };
+        self.stats.vgeom_casters += of(|s| matches!(s, GroupSource::Vgeom { .. }));
+        self.stats.skinned_casters += of(|s| matches!(s, GroupSource::Skinned { .. }));
+        self.stats.terrain_casters += of(|s| matches!(s, GroupSource::Terrain { .. }));
         self.stats.masked_frames += u64::from(masked);
         page_count
     }
@@ -975,6 +1195,186 @@ impl VsmRaster {
                 },
             );
         }
+    }
+
+    /// Upload the bind-pose geometry of every skinned mesh and one palette buffer
+    /// per skinned instance.
+    ///
+    /// Keyed on `scene.version` and rebuilt whole when it moves, because a
+    /// palette **is** the animation: it changes every frame by construction, and
+    /// a cache keyed on anything finer would be a cache that always misses. The
+    /// bind-pose vertices are re-uploaded with it, which is the one wasteful half
+    /// — `passes::skinned` avoids it by caching on `Arc` pointer identity, and
+    /// doing the same here is a P27.3 refinement rather than a correctness one.
+    fn sync_skinned(&mut self, gpu: &GpuContext, scene: &RenderScene) {
+        if self.skinned_version == Some(scene.version) {
+            return;
+        }
+        self.skinned_version = Some(scene.version);
+        self.skinned.clear();
+        self.skinned_palettes.clear();
+        for mesh in &scene.skinned_meshes {
+            let vertices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vsm-skinned-verts"),
+                size: (std::mem::size_of::<crate::scene::SkinnedVertex>()
+                    * mesh.vertices.len().max(1)) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let indices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vsm-skinned-indices"),
+                size: (std::mem::size_of::<u32>() * mesh.indices.len().max(1)) as u64,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            if !mesh.vertices.is_empty() {
+                gpu.queue
+                    .write_buffer(&vertices, 0, bytemuck::cast_slice(&mesh.vertices));
+            }
+            if !mesh.indices.is_empty() {
+                gpu.queue
+                    .write_buffer(&indices, 0, bytemuck::cast_slice(&mesh.indices));
+            }
+            // The bind pose's bound, inflated: see `SKINNED_POSE_MARGIN`.
+            let mut lo = glam::Vec3::splat(f32::INFINITY);
+            let mut hi = glam::Vec3::splat(f32::NEG_INFINITY);
+            for v in &mesh.vertices {
+                let p = glam::Vec3::from(v.pos);
+                lo = lo.min(p);
+                hi = hi.max(p);
+            }
+            let bounds = if mesh.vertices.is_empty() {
+                (glam::Vec3::ZERO, 0.0)
+            } else {
+                let c = 0.5 * (lo + hi);
+                (c, (hi - c).length() * (1.0 + SKINNED_POSE_MARGIN))
+            };
+            self.skinned.push(SkinnedCasterGeom {
+                vertices,
+                indices,
+                index_count: mesh.indices.len() as u32,
+                bounds,
+            });
+        }
+        for inst in &scene.skinned {
+            let n = inst.palette.len().max(1);
+            let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vsm-skinned-palette"),
+                size: (n * std::mem::size_of::<glam::Mat4>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            if !inst.palette.is_empty() {
+                let raw: Vec<[f32; 16]> = inst.palette.iter().map(|m| m.to_cols_array()).collect();
+                gpu.queue
+                    .write_buffer(&buffer, 0, bytemuck::cast_slice(&raw));
+            }
+            let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vsm-skinned-palette"),
+                layout: &self.palette_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+            });
+            self.skinned_palettes.push((buffer, bind, inst.mesh));
+        }
+    }
+
+    /// Build (and evict) one static caster mesh per resident terrain tile.
+    ///
+    /// Rebuilt when the tile's version moves **or** the floating origin rebases,
+    /// which is the same key every packed buffer in this tree carries — a mesh
+    /// in render-local space is a mesh under one origin.
+    fn sync_terrain(&mut self, gpu: &GpuContext, scene: &RenderScene, view: &RenderView) {
+        let origin = view.origin.origin();
+        let mut live = std::collections::BTreeSet::new();
+        for terrain in &scene.terrains {
+            let res = terrain.tile_resolution.max(2);
+            for (ti, tile) in terrain.tiles.iter().enumerate() {
+                let key = (terrain.id, ti);
+                live.insert(key);
+                if self
+                    .terrain
+                    .get(&key)
+                    .is_some_and(|g| g.version == tile.version && g.origin == origin)
+                {
+                    continue;
+                }
+                let expect = (res * res) as usize;
+                if tile.heights.len() < expect {
+                    continue;
+                }
+                let span = terrain.tile_span_at(tile.key.lod) as f32;
+                let cells = VSM_TERRAIN_CASTER_CELLS.min(res - 1).max(1);
+                let step = (res - 1) as f32 / cells as f32;
+                let o = view.origin.to_render(tile.origin);
+                let mut verts: Vec<crate::passes::mesh::MeshVertex> =
+                    Vec::with_capacity(((cells + 1) * (cells + 1)) as usize);
+                let mut lo = glam::Vec3::splat(f32::INFINITY);
+                let mut hi = glam::Vec3::splat(f32::NEG_INFINITY);
+                for j in 0..=cells {
+                    for i in 0..=cells {
+                        let (si, sj) = (
+                            ((i as f32 * step).round() as u32).min(res - 1),
+                            ((j as f32 * step).round() as u32).min(res - 1),
+                        );
+                        let h = tile.heights[(sj * res + si) as usize];
+                        let u = si as f32 / (res - 1) as f32;
+                        let v = sj as f32 / (res - 1) as f32;
+                        let p = glam::Vec3::new(o.x + u * span, o.y + h, o.z + v * span);
+                        lo = lo.min(p);
+                        hi = hi.max(p);
+                        verts.push(crate::passes::mesh::MeshVertex {
+                            pos: [p.x, p.y, p.z],
+                            normal: [0.0, 1.0, 0.0],
+                            uv: [u, v],
+                        });
+                    }
+                }
+                let stride = cells + 1;
+                let mut indices: Vec<u32> = Vec::with_capacity((cells * cells * 6) as usize);
+                for j in 0..cells {
+                    for i in 0..cells {
+                        let a = j * stride + i;
+                        let b = a + 1;
+                        let c = a + stride;
+                        let d = c + 1;
+                        indices.extend_from_slice(&[a, c, b, b, c, d]);
+                    }
+                }
+                let vertices = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("vsm-terrain-verts"),
+                    size: (std::mem::size_of::<crate::passes::mesh::MeshVertex>() * verts.len())
+                        as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                gpu.queue
+                    .write_buffer(&vertices, 0, bytemuck::cast_slice(&verts));
+                let index_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("vsm-terrain-indices"),
+                    size: (std::mem::size_of::<u32>() * indices.len()) as u64,
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                gpu.queue
+                    .write_buffer(&index_buf, 0, bytemuck::cast_slice(&indices));
+                let centre = 0.5 * (lo + hi);
+                self.terrain.insert(
+                    key,
+                    TerrainCasterGeom {
+                        vertices,
+                        indices: index_buf,
+                        index_count: indices.len() as u32,
+                        bounds: (centre, (hi - centre).length()),
+                        version: tile.version,
+                        origin,
+                    },
+                );
+            }
+        }
+        self.terrain.retain(|k, _| live.contains(k));
     }
 
     /// Grow the buffers to hold `(pages, casters, groups)`, dropping every bind
@@ -1137,9 +1537,12 @@ pub(crate) fn page_depth_state() -> wgpu::DepthStencilState {
 /// Returns `(casters, groups, any masked, scatter casters)`. The records are
 /// sorted by group, which is what makes a page's visible list overflow-proof: a
 /// group's slice is its own caster count long.
+#[allow(clippy::too_many_arguments)]
 fn pack_casters(
     prim: &PrimGpu,
     vgeom: &std::collections::BTreeMap<u128, VgeomCasterGeom>,
+    skinned: &[SkinnedCasterGeom],
+    terrain: &std::collections::BTreeMap<(u64, usize), TerrainCasterGeom>,
     scene: &RenderScene,
     view: &RenderView,
     settings: &crate::settings::RenderSettings,
@@ -1282,6 +1685,75 @@ fn pack_casters(
             casters: count,
         });
         first += count;
+    }
+
+    // ── skinned ────────────────────────────────────────────────────────
+    //
+    // One group per INSTANCE, because the joint palette is per instance and it is
+    // a bind group. Each group therefore holds exactly one caster, and the cull's
+    // verdict for it is 0 or 1 — which is still the per-page cull doing its job,
+    // just at the granularity a character has.
+    for (i, inst) in scene.skinned.iter().enumerate() {
+        if casters.len() as u32 >= VSM_MAX_CASTERS {
+            break;
+        }
+        let Some(mesh) = skinned.get(inst.mesh) else {
+            continue;
+        };
+        if mesh.index_count == 0 {
+            continue;
+        }
+        let model = origin.model_matrix(inst.translation, inst.rotation, inst.scale);
+        let max_scale = inst.scale.abs().max_element().max(1e-6);
+        let centre = model.transform_point3(mesh.bounds.0);
+        casters.push(VsmCasterRaw {
+            model: model.to_cols_array(),
+            sphere: [centre.x, centre.y, centre.z, mesh.bounds.1 * max_scale],
+            mat: [0.0, 0.0, 1.0, 0.0],
+            ids: [groups.len() as u32, 0, first, 0],
+        });
+        groups.push(GroupGeom {
+            source: GroupSource::Skinned { instance: i },
+            index_count: mesh.index_count,
+            first_index: 0,
+            base_vertex: 0,
+            casters: 1,
+        });
+        first += 1;
+    }
+
+    // ── terrain ────────────────────────────────────────────────────────
+    //
+    // One group per resident tile, drawn from the tile's OWN heights rather than
+    // from the camera-fitted clipmap patch the terrain pass draws — see
+    // `TerrainCasterGeom`. The model matrix is the identity: the mesh is already
+    // in render-local space, which is what lets it be cached across frames.
+    for ((tid, ti), geom) in terrain {
+        if casters.len() as u32 >= VSM_MAX_CASTERS || geom.index_count == 0 {
+            continue;
+        }
+        casters.push(VsmCasterRaw {
+            model: glam::Mat4::IDENTITY.to_cols_array(),
+            sphere: [
+                geom.bounds.0.x,
+                geom.bounds.0.y,
+                geom.bounds.0.z,
+                geom.bounds.1,
+            ],
+            mat: [0.0, 0.0, 1.0, 0.0],
+            ids: [groups.len() as u32, 0, first, 0],
+        });
+        groups.push(GroupGeom {
+            source: GroupSource::Terrain {
+                terrain: *tid,
+                tile: *ti,
+            },
+            index_count: geom.index_count,
+            first_index: 0,
+            base_vertex: 0,
+            casters: 1,
+        });
+        first += 1;
     }
     (casters, groups, masked, scattered)
 }

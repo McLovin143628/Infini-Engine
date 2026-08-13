@@ -711,7 +711,217 @@ fn a_virtualized_geometry_instance_casts_into_the_pages_it_touches() {
     );
 }
 
-// ── (f) off path, and the settings door ─────────────────────────────────────
+// ── (g) skinned and terrain cast ─────────────────────────────
+
+/// Depth **nearer the light than the backdrop**, summed over every resident page
+/// — the measurement every "does this path cast?" arm in this file makes.
+fn depth_past_backdrop(gpu: &GpuContext, renderer: &inf_render::EngineRenderer) -> usize {
+    let atlas = read_atlas(gpu, renderer);
+    let sys = renderer.vsm().expect("live");
+    let mut n = 0usize;
+    for (light, page, rect) in resident_pages(renderer) {
+        let desc = sys
+            .residency()
+            .desc(VsmLightHandle(light))
+            .expect("registered");
+        let g = desc.levels[page.level as usize];
+        let vp = vsm_page_matrix(
+            glam::Mat4::from_cols_array(&sys.projections()[0].view_proj),
+            desc.kind,
+            page.level,
+            g.pages_x,
+            g.pages_y,
+            page.x,
+            page.y,
+        );
+        let at = |z: f32| {
+            let c = vp * glam::Vec3::new(0.0, 0.0, z).extend(1.0);
+            c.z / c.w
+        };
+        let mid = 0.5 * (at(0.0) + at(BACKDROP_Z + BACKDROP_T));
+        n += written(&atlas, rect).iter().filter(|d| **d > mid).count();
+    }
+    n
+}
+
+/// **A skinned caster casts, and it casts its POSE.** The skeleton's palette
+/// reaches the page raster, so a character's shadow is the character's silhouette
+/// rather than its bind pose sitting wherever the asset was authored.
+///
+/// The control is the same instance with a palette that translates it out of the
+/// light's reach: same mesh, same instance transform, same everything but the
+/// matrices — so what the arm measures is the skinning, not the presence of a
+/// draw call.
+#[test]
+fn a_skinned_caster_casts_through_its_own_palette() {
+    let Some(gpu) = gpu_or_skip("the VSM skinned caster") else {
+        return;
+    };
+    // A unit quad in the XY plane, every vertex bound to joint 0.
+    let v = |x: f32, y: f32| inf_render::SkinnedVertex {
+        pos: [x, y, 0.0],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0, 0.0],
+        joints: [0, 0, 0, 0],
+        weights: [1.0, 0.0, 0.0, 0.0],
+    };
+    let mesh = std::sync::Arc::new(inf_render::SkinnedMeshData {
+        vertices: vec![v(-1.0, -1.0), v(1.0, -1.0), v(1.0, 1.0), v(-1.0, 1.0)],
+        indices: vec![0, 1, 2, 0, 2, 3],
+    });
+
+    let build = |palette: glam::Mat4| {
+        let mut s = RenderScene {
+            grid_enabled: false,
+            skinned_meshes: vec![mesh.clone()],
+            ..Default::default()
+        };
+        s.skinned.push(inf_render::SkinnedInstance {
+            translation: glam::DVec3::new(0.0, CUBE_XY.1 as f64, 0.0),
+            rotation: glam::Quat::IDENTITY,
+            scale: glam::Vec3::ONE,
+            color: [1.0, 1.0, 1.0, 1.0],
+            metallic: 0.0,
+            roughness: 1.0,
+            emissive: [0.0; 3],
+            id: 3,
+            mesh: 0,
+            palette: vec![palette],
+            vt: inf_render::VtTextureSet::NONE,
+        });
+        s.instances.push(backdrop());
+        s.lights.push(inf_render::RenderLight {
+            kind: inf_render::LightKind::Directional,
+            direction: glam::Vec3::Z,
+            cast_shadows: true,
+            ..Default::default()
+        });
+        s.mark_dirty();
+        s
+    };
+
+    let set = settings_with(64);
+    let posed = run(&gpu, &build(glam::Mat4::IDENTITY), &view(6.0), &set, 6);
+    let stats = posed.vsm_raster_stats().expect("stats");
+    assert!(
+        stats.skinned_casters > 0,
+        "no skinned caster was packed: {stats:?}"
+    );
+    let lit = depth_past_backdrop(&gpu, &posed);
+    assert!(lit > 16, "the skinned quad wrote {lit} texels");
+
+    // The SAME instance, posed 50 m behind the backdrop by its palette alone.
+    // If the palette were ignored, the quad would sit where the bind pose puts it
+    // and this count would match the one above.
+    let far = run(
+        &gpu,
+        &build(glam::Mat4::from_translation(glam::Vec3::new(
+            0.0, 0.0, -50.0,
+        ))),
+        &view(6.0),
+        &set,
+        6,
+    );
+    assert_eq!(
+        depth_past_backdrop(&gpu, &far),
+        0,
+        "the joint palette did not move the caster — the page raster is drawing \
+         the bind pose"
+    );
+    assert!(
+        far.vsm_raster_stats().expect("stats").skinned_casters > 0,
+        "the control packed no skinned caster, so it proves nothing"
+    );
+}
+
+/// **A terrain tile casts**, out of its own heights rather than out of the
+/// camera-fitted clipmap patch.
+#[test]
+fn a_terrain_tile_casts_from_its_own_heights() {
+    let Some(gpu) = gpu_or_skip("the VSM terrain caster") else {
+        return;
+    };
+    // One 33-sample tile, 0.5 m a sample, with a ridge along x that stands well
+    // in front of the backdrop.
+    const RES: u32 = 33;
+    const MPS: f64 = 0.5;
+    let span = (RES as f64 - 1.0) * MPS;
+    let mut heights = vec![0f32; (RES * RES) as usize];
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for j in 0..RES {
+        for i in 0..RES {
+            // A ramp in z: the tile's own surface leans toward the light.
+            let h = 2.0 - 3.0 * (j as f32 / (RES - 1) as f32);
+            heights[(j * RES + i) as usize] = h;
+            lo = lo.min(h);
+            hi = hi.max(h);
+        }
+    }
+    let terrain = inf_render::RenderTerrain {
+        id: 7,
+        tile_resolution: RES,
+        meters_per_sample: MPS,
+        tiles: vec![inf_render::RenderTerrainTile {
+            key: inf_render::TerrainTileKey::lod0((0, 0)),
+            origin: glam::DVec3::new(-0.5 * span, 0.0, -0.5 * span),
+            heights,
+            weights: Vec::new(),
+            biomes: Vec::new(),
+            height_bounds: (lo, hi),
+            holes: Vec::new(),
+            version: 1,
+        }],
+        layers: Default::default(),
+        macro_variation: 0.0,
+        biome_palette: Vec::new(),
+    };
+
+    let mut s = scene(0, 0.5, 1.0);
+    s.terrains.push(terrain);
+    s.mark_dirty();
+    let set = settings_with(64);
+    let renderer = run(&gpu, &s, &view(8.0), &set, 6);
+    let stats = renderer.vsm_raster_stats().expect("stats");
+    assert!(
+        stats.terrain_casters > 0,
+        "no terrain tile was packed as a caster: {stats:?}"
+    );
+    // The heightfield is the ONLY thing in this scene at those depths besides the
+    // cube, and the cube is a metre across; the tile spans 16 m. So a page that
+    // holds terrain depth holds far more written texels than the cube alone can
+    // explain — measured against the same scene with the terrain removed.
+    let with_terrain = {
+        let atlas = read_atlas(&gpu, &renderer);
+        resident_pages(&renderer)
+            .iter()
+            .map(|(_, _, r)| written(&atlas, *r).len())
+            .sum::<usize>()
+    };
+    let mut bare = s.clone();
+    bare.terrains.clear();
+    bare.mark_dirty();
+    let control = run(&gpu, &bare, &view(8.0), &set, 6);
+    let without = {
+        let atlas = read_atlas(&gpu, &control);
+        resident_pages(&control)
+            .iter()
+            .map(|(_, _, r)| written(&atlas, *r).len())
+            .sum::<usize>()
+    };
+    assert_eq!(
+        control.vsm_raster_stats().expect("stats").terrain_casters,
+        0,
+        "a scene with no terrain packed a terrain caster"
+    );
+    assert!(
+        with_terrain > without + 64,
+        "the terrain added {} written texels over a control of {without} — it is \
+         not casting",
+        with_terrain.saturating_sub(without)
+    );
+}
+
+// ── (h) off path, and the settings door ─────────────────────────────────────
 
 /// With virtual shadows off, the caster pass never opens — the byte-stability
 /// guarantee every golden rests on, as a counter rather than a hope.

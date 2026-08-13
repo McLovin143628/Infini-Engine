@@ -1332,6 +1332,7 @@ mod shader_compose_tests {
             // naga-validates them on a CI leg with no adapter.
             ("vsm_cull", include_str!("../shaders/vsm_cull.wgsl")),
             ("vsm_caster", include_str!("../shaders/vsm_caster.wgsl")),
+            ("vsm_skinned", include_str!("../shaders/vsm_skinned.wgsl")),
         ] {
             validate(label, source);
         }
