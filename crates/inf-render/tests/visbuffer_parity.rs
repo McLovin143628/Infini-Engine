@@ -47,7 +47,9 @@ use std::sync::Arc;
 use glam::{DVec3, Quat, Vec3};
 use inf_math::FloatingOrigin;
 use inf_render::passes::visbuffer::VisImage;
-use inf_render::visbuffer::{VisPacking, VIS_EMPTY};
+use inf_render::visbuffer::{
+    parity_ok, parity_verdict, ParityVerdict, VisPacking, VIS_EMPTY,
+};
 use inf_render::{
     EngineRenderer, GpuContext, HeadlessTarget, LightKind, RenderLight, RenderScene,
     RenderSettings, RenderView, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings,
@@ -238,61 +240,34 @@ fn render(gpu: &GpuContext, sc: &RenderScene, st: RenderSettings, ids: bool) -> 
 /// ledger, where transposing the resolve's `d_dx`/`d_dy` puts the worst delta at
 /// 60+ and the differing fraction past a third.
 use inf_render::visbuffer::PARITY_MAX_STEP;
-/// The fraction of interior pixels allowed to sit on a rounding boundary.
-use inf_render::visbuffer::PARITY_UNTEXTURED_MAX_FRACTION as PARITY_MAX_FRACTION;
 
 /// Forward vs resolved on every interior pixel.
 ///
-/// Returns `(interior compared, pixels differing at all, worst channel delta)`.
+/// **The criterion's own classifier**, not a second copy of it (P28.5 audit).
+/// `inf_render::visbuffer::parity_verdict` walks the same interior set this file
+/// used to walk by hand; sharing the five constants left two implementations of
+/// *bordering* and *solid centre* free to drift, which is the fork the "one
+/// door" claim says does not exist.
+///
 /// The caller asserts the population was not empty as well — a parity claim over
 /// nothing is the vacuous shape the P19 audit named.
-fn compare_interior(fwd: &[u8], res: &[u8], ids: &VisImage) -> (usize, usize, u8) {
-    let interior = ids.interior();
-    let mut bad = 0usize;
-    let mut worst = 0u8;
-    for &(x, y) in &interior {
-        let i = ((y * ids.width + x) * 4) as usize;
-        let mut differs = false;
-        for c in 0..4 {
-            let d = fwd[i + c].abs_diff(res[i + c]);
-            if d > 0 {
-                differs = true;
-                worst = worst.max(d);
-            }
-        }
-        bad += usize::from(differs);
-    }
-    (interior.len(), bad, worst)
+fn compare_interior(fwd: &[u8], res: &[u8], ids: &VisImage) -> ParityVerdict {
+    parity_verdict(fwd, res, ids.width, &ids.interior())
 }
 
 /// The assertion every matrix row makes, in one place so the bound is stated
-/// once and cannot drift between rows.
-fn assert_parity(label: &str, n: usize, bad: usize, worst: u8, floor: usize) {
+/// once and cannot drift between rows — and it is
+/// [`inf_render::visbuffer::parity_ok`], the same predicate `phase28_gate` holds
+/// its rows to.
+fn assert_parity(label: &str, v: &ParityVerdict, floor: usize) {
     assert!(
-        n > floor,
-        "{label}: only {n} interior pixels; a parity claim over a handful of \
-         pixels is not one"
+        v.interior > floor,
+        "{label}: only {} interior pixels; a parity claim over a handful of \
+         pixels is not one",
+        v.interior
     );
-    assert!(
-        worst <= PARITY_MAX_STEP,
-        "{label}: an interior pixel differs by {worst} of 255. The two paths \
-         agree to within 8-bit rounding or they do not agree; anything past one \
-         step is a disagreement about shading, not about quantization."
-    );
-    let frac = bad as f64 / n as f64;
-    assert!(
-        frac <= PARITY_MAX_FRACTION,
-        "{label}: {bad} of {n} interior pixels ({:.2} %) sit on a rounding \
-         boundary, past the {:.0} % this bound allows — a systematic offset \
-         looks exactly like this once it is smaller than a step",
-        100.0 * frac,
-        100.0 * PARITY_MAX_FRACTION
-    );
-    eprintln!(
-        "parity {label}: {n} interior, {bad} at a rounding boundary ({:.2} %), \
-         worst step {worst}",
-        100.0 * frac
-    );
+    parity_ok(v, false).unwrap_or_else(|e| panic!("{label}: {e}"));
+    eprintln!("parity {label}: {}", v.summary());
 }
 
 /// One matrix row. Renders both paths, checks the visibility path was actually
@@ -319,9 +294,9 @@ fn parity_row(gpu: &GpuContext, label: &str, sc: &RenderScene) -> (usize, usize)
          fixture is not on screen and the comparison below is about the sky",
         W * H
     );
-    let (n, bad, worst) = compare_interior(&fwd.rgba, &res.rgba, ids);
-    assert_parity(label, n, bad, worst, (W * H / 100) as usize);
-    (n, covered)
+    let v = compare_interior(&fwd.rgba, &res.rgba, ids);
+    assert_parity(label, &v, (W * H / 100) as usize);
+    (v.interior, covered)
 }
 
 // ── the matrix ───────────────────────────────────────────────────────────────
@@ -409,8 +384,8 @@ fn parity_gi_on() {
     let fwd = render(&gpu, &sc, st_off, false);
     let res = render(&gpu, &sc, st_on, true);
     let ids = res.ids.as_ref().expect("readback on");
-    let (n, bad, worst) = compare_interior(&fwd.rgba, &res.rgba, ids);
-    assert_parity("GI on", n, bad, worst, 100);
+    let v = compare_interior(&fwd.rgba, &res.rgba, ids);
+    assert_parity("GI on", &v, 100);
 }
 
 /// **Shadows on** — the sun's `shadow_factor`, reached through the same one door
@@ -430,8 +405,8 @@ fn parity_sun_shadowed() {
     let fwd = render(&gpu, &sc, st_off, false);
     let res = render(&gpu, &sc, st_on, true);
     let ids = res.ids.as_ref().expect("readback on");
-    let (n, bad, worst) = compare_interior(&fwd.rgba, &res.rgba, ids);
-    assert_parity("sun shadowed", n, bad, worst, 100);
+    let v = compare_interior(&fwd.rgba, &res.rgba, ids);
+    assert_parity("sun shadowed", &v, 100);
 }
 
 // ── determinism, on the device ───────────────────────────────────────────────
@@ -591,8 +566,9 @@ fn the_edge_population_is_where_the_two_paths_are_allowed_to_differ() {
     );
     // The claim the ruling rests on, asserted rather than only printed: the
     // difference between the two paths lives at the edges and nowhere else.
-    let (n, interior_bad, interior_worst) = compare_interior(&fwd.rgba, &res.rgba, ids);
-    assert_parity("edge-arm interior", n, interior_bad, interior_worst, 100);
+    let v = compare_interior(&fwd.rgba, &res.rgba, ids);
+    let (n, interior_bad) = (v.interior, v.differing);
+    assert_parity("edge-arm interior", &v, 100);
     // …and the edges are where the difference actually is, by a wide margin. The
     // ratio is the ruling's content: a single-sample buffer costs silhouettes and
     // costs surfaces nothing.
@@ -850,92 +826,29 @@ fn parity_textured_virtual_texture() {
          compare two untextured frames and call it parity"
     );
     let ids = ids.expect("readback on");
-    let (n, bad, worst) = compare_interior(&fwd, &res, &ids);
-    assert!(n > 1000, "textured: only {n} interior pixels");
-    let frac = bad as f64 / n as f64;
-    eprintln!(
-        "parity textured: {n} interior, {bad} differing ({:.2} %), worst step \
-         {worst} — the analytic-vs-quad mip boundary set",
-        100.0 * frac
-    );
-    // The bound, stated: the two gradient constructions agree on the mip almost
-    // everywhere. A transposed or missing gradient does not look like this — it
-    // reads a different mip over whole triangles, not at their boundaries.
+    let v = compare_interior(&fwd, &res, &ids);
     assert!(
-        frac < inf_render::visbuffer::PARITY_TEXTURED_MAX_FRACTION,
-        "textured: {bad} of {n} interior pixels ({:.2} %) disagree — past the \
-         12 % this bound allows for the analytic-vs-quad-derivative mip \
-         boundary, which means the gradients disagree about more than a boundary",
-        100.0 * frac
+        v.interior > 1000,
+        "textured: only {} interior pixels",
+        v.interior
     );
+    eprintln!("parity textured: {}", v.summary());
 
-    // **THE EXCEPTION IS BOUNDED AS A CLASS, not merely as a population**
-    // (P28.1 audit). "8.79 % of pixels differ" is satisfied equally by a mip
-    // BOUNDARY — a curve, one or two pixels thick, where the footprint crosses a
-    // power of two — and by a broad smear over whole triangles, which is what a
-    // wrong gradient actually produces. The population bound above cannot tell
-    // them apart; these two do, and they are what lets the memo call this a mip
-    // boundary rather than merely hope it is one.
+    // **THE CRITERION, THROUGH THE ONE DOOR** (P28.5 audit). The bound and the
+    // shape are `inf_render::visbuffer::parity_ok(_, true)` — the same predicate
+    // `phase28_gate`'s row holds to, over the same `parity_verdict` classifier.
     //
-    // Measured on this fixture: 94.8 % of the differing pixels touch an agreeing
-    // interior pixel and ZERO of them are the centre of a solid 3 x 3 differing
-    // block. The thresholds are loose against those numbers on purpose — the
-    // shape is the claim, not the digits, and a bound tuned to this adapter is
-    // the P25 one-platform class.
-    let interior_set: std::collections::BTreeSet<(u32, u32)> = ids.interior().into_iter().collect();
-    let differing: Vec<(u32, u32)> = interior_set
-        .iter()
-        .copied()
-        .filter(|&(x, y)| {
-            let i = ((y * ids.width + x) * 4) as usize;
-            (0..4).any(|c| fwd[i + c] != res[i + c])
-        })
-        .collect();
-    let dset: std::collections::BTreeSet<(u32, u32)> = differing.iter().copied().collect();
-    let touching = differing
-        .iter()
-        .filter(|&&(x, y)| {
-            [
-                (x.wrapping_sub(1), y),
-                (x + 1, y),
-                (x, y.wrapping_sub(1)),
-                (x, y + 1),
-            ]
-            .iter()
-            .any(|p| interior_set.contains(p) && !dset.contains(p))
-        })
-        .count();
-    let solid = differing
-        .iter()
-        .filter(|&&(x, y)| {
-            x >= 1
-                && y >= 1
-                && (0..3).all(|dy| (0..3).all(|dx| dset.contains(&(x + dx - 1, y + dy - 1))))
-        })
-        .count();
-    eprintln!(
-        "textured class: {}/{} differing pixels touch an agreeing one ({:.1} %), \
-         {solid} are the centre of a solid 3x3 differing block",
-        touching,
-        differing.len(),
-        100.0 * touching as f64 / differing.len().max(1) as f64
-    );
-    assert!(
-        touching as f64
-            >= differing.len() as f64 * inf_render::visbuffer::PARITY_TEXTURED_MIN_BORDERING,
-        "only {touching} of {} differing pixels border an AGREEING interior pixel \
-         — the disagreement is a region, not a boundary, and 'the mip-transition \
-         set' is the wrong name for it",
-        differing.len()
-    );
-    assert!(
-        (solid as f64)
-            <= differing.len() as f64 * inf_render::visbuffer::PARITY_TEXTURED_MAX_SOLID_CENTRES,
-        "{solid} of {} differing pixels sit at the centre of a solid 3x3 block of \
-         disagreement — a mip boundary is one or two pixels thick and this is a \
-         patch, which is what a wrong gradient over a whole triangle looks like",
-        differing.len()
-    );
+    // Until this audit the two files shared the five CONSTANTS and each owned its
+    // own implementation of *differing*, *bordering* and *solid centre*, which is
+    // two spellings of the criterion wearing one door's name: a change to what
+    // "bordering" means would have moved the gate and left the nucleus still
+    // green. The population bound alone cannot tell a mip BOUNDARY — a curve one
+    // or two pixels thick where the footprint crosses a power of two — from a
+    // broad smear over whole triangles, which is what a wrong gradient produces;
+    // the bordering and solid-centre clauses are what do, and they are now stated
+    // exactly once in the tree.
+    parity_ok(&v, true).unwrap_or_else(|e| panic!("textured: {e}"));
+
     // …and anti-vacuity in the other direction: the texture actually modulates
     // the surface, so "they agree" is a claim about sampling and not about two
     // untextured frames.
@@ -1019,8 +932,8 @@ fn parity_interleaved_with_rigid_geometry() {
         "only {occluded} pixels are free of meshlet ids; the rigid cube is not \
          in the frame and this arm compares what every other row already does"
     );
-    let (n, bad, worst) = compare_interior(&fwd.rgba, &res.rgba, ids);
-    assert_parity("interleaved rigid", n, bad, worst, 100);
+    let v = compare_interior(&fwd.rgba, &res.rgba, ids);
+    assert_parity("interleaved rigid", &v, 100);
     // …and the two frames agree about the CUBE's pixels too, which is the half
     // that fails when the resolve writes a wrong depth: a meshlet pixel that
     // should have lost the depth test paints over the cube.
@@ -1059,5 +972,8 @@ fn parity_interleaved_with_rigid_geometry() {
         cube_seen > 10_000,
         "only {cube_seen} pixels are meshlet-free and surrounded by meshlet-free          pixels; the rigid slab and the background between them are what this          half of the arm is about"
     );
-    eprintln!("parity interleaved rigid: {n} interior, {cube_seen} non-meshlet pixels");
+    eprintln!(
+        "parity interleaved rigid: {} interior, {cube_seen} non-meshlet pixels",
+        v.interior
+    );
 }
