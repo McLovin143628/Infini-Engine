@@ -517,3 +517,94 @@ fn sculpt_preserves_zero_anchor() {
         DVec3::new(0.0, 0.0, 0.0)
     );
 }
+
+// ── the hardening-B NaN arms (C4-35, C4-36) ─────────────────────────────────
+
+/// **C4-36 — `Falloff::weight` was the standing NaN-blind-guard class, verbatim,
+/// on the `.inf_terrain` write path.**
+///
+/// `radius <= 0.0` is false for NaN. `dist >= radius` is false for NaN. And
+/// `(dist / radius).clamp(0.0, 1.0)` *propagates* NaN — `f64::clamp` returns
+/// `self` when `self` is NaN — so the poison came out the other side as a
+/// weight, which the caller multiplied a height by.
+///
+/// Un-fix mutation: delete the `is_finite` line at the top of `weight` and every
+/// falloff below returns NaN.
+#[test]
+fn a_non_finite_brush_argument_weighs_nothing() {
+    for f in [
+        Falloff::Smooth,
+        Falloff::Sphere,
+        Falloff::Linear,
+        Falloff::Sharp,
+        Falloff::Plateau(0.5),
+    ] {
+        for (d, r) in [
+            (f64::NAN, 4.0),
+            (2.0, f64::NAN),
+            (f64::NAN, f64::NAN),
+            (f64::INFINITY, 4.0),
+            (2.0, f64::INFINITY),
+        ] {
+            let w = f.weight(d, r);
+            assert!(
+                w.is_finite() && (0.0..=1.0).contains(&w),
+                "{f:?}.weight({d}, {r}) = {w}"
+            );
+        }
+        // The healthy contract is untouched: 1 at the centre, 0 at the radius.
+        assert!((f.weight(0.0, 4.0) - 1.0).abs() < 1e-12);
+        assert_eq!(f.weight(4.0, 4.0), 0.0);
+    }
+}
+
+/// **C4-35 — a saturating sculpt used to write NaN into the committed
+/// heightfield.**
+///
+/// `Raise` computes `old + strength · w` in f64 and narrows with `as f32`, which
+/// **saturates to `f32::INFINITY`** rather than wrapping. A later `Smooth` dab
+/// over the same tile computes `old + (mean − old) · blend` — `inf − inf` —
+/// which is NaN; `Flatten` does the same. Every guard between there and the
+/// tile was NaN-blind: `w <= 0.0` is false for NaN so nothing was skipped, and
+/// `new_off != old_off` is ALWAYS true for NaN so every sample in the footprint
+/// was committed. `encode_tile` then bincodes it with no finiteness check.
+///
+/// This asserts the WORLD — every stored sample of every tile — rather than the
+/// call's return value.
+#[test]
+fn no_sculpt_can_put_a_non_finite_height_into_a_tile() {
+    let mut t = flat_terrain(16);
+    // A strength beyond f32's reach. The Tauri door bounds this now
+    // (`SculptSettings::sanitized`), but Ring 0 has no door and the op is public.
+    apply_brush(
+        &mut t,
+        BrushOp::Raise,
+        BrushParams::new(DVec2::new(8.0, 8.0), 6.0, 1.0e300),
+    );
+    apply_brush(
+        &mut t,
+        BrushOp::Smooth { iterations: 2 },
+        BrushParams::new(DVec2::new(8.0, 8.0), 6.0, 0.5),
+    );
+    apply_brush(
+        &mut t,
+        BrushOp::Flatten {
+            target: FlattenTarget::Mean,
+        },
+        BrushParams::new(DVec2::new(8.0, 8.0), 6.0, 0.5),
+    );
+    // And the NaN arguments themselves, straight at the op.
+    apply_brush(
+        &mut t,
+        BrushOp::Raise,
+        BrushParams::new(DVec2::new(8.0, 8.0), f64::NAN, f64::NAN),
+    );
+    for (coord, tile) in t.tiles() {
+        for (i, &v) in tile.heights().iter().enumerate() {
+            assert!(
+                v.is_finite(),
+                "tile {coord:?} sample {i} is {v} — a non-finite height reached the heightfield"
+            );
+        }
+    }
+}

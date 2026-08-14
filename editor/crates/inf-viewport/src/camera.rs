@@ -880,6 +880,57 @@ impl Default for SculptSettings {
     }
 }
 
+/// The largest per-dab displacement the brush will accept, in metres at full
+/// weight.
+///
+/// A thousand kilometres in one dab is already absurd — the point of the number
+/// is not taste, it is that `f32::MAX` is `3.4 × 10³⁸` and the height a dab
+/// writes goes through `as f32`, which **saturates rather than wrapping**. A
+/// single unbounded dab could therefore make a tile infinite, and it takes
+/// `10³²` bounded ones to do the same.
+pub const MAX_SCULPT_STRENGTH: f64 = 1.0e6;
+
+/// The largest brush radius, in world metres. Generous against any real terrain
+/// and finite, which is the property that matters: `Falloff::weight` divides by
+/// it.
+pub const MAX_SCULPT_RADIUS: f64 = 1.0e6;
+
+impl SculptSettings {
+    /// Bound the brush's two continuous parameters — **the door every producer
+    /// of a `SculptSettings` goes through** (C4-35).
+    ///
+    /// The Tauri command used to write `radius: sculpt.radius.max(0.0)` and, on
+    /// the very next line, `strength: sculpt.strength` with nothing at all. Half
+    /// a guard reads as a whole one, which is why the asymmetry survived: the
+    /// line above it looks like the rule being followed.
+    ///
+    /// What the missing half cost: `Raise` computes `old + strength · w` in f64
+    /// and narrows with `as f32`, which **saturates to `f32::INFINITY`** past
+    /// `f32::MAX` instead of wrapping. A later `Smooth` dab over the same tile
+    /// computes `old + (mean − old) · blend` — `inf − inf` — which is **NaN**,
+    /// and `Flatten` does the same. Every guard on the way was NaN-blind, so the
+    /// whole footprint was committed into the `.inf_terrain`.
+    ///
+    /// A non-finite value is replaced by the default rather than clamped: NaN
+    /// has no nearest bound, and `clamp` would propagate it.
+    pub fn sanitized(mut self) -> Self {
+        let d = Self::default();
+        self.radius = if self.radius.is_finite() {
+            self.radius.clamp(0.0, MAX_SCULPT_RADIUS)
+        } else {
+            d.radius
+        };
+        self.strength = if self.strength.is_finite() {
+            self.strength
+                .clamp(-MAX_SCULPT_STRENGTH, MAX_SCULPT_STRENGTH)
+        } else {
+            d.strength
+        };
+        self.paint_layer = self.paint_layer.min(3);
+        self
+    }
+}
+
 /// Shortest-path angular lerp (handles the ±π wrap).
 fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
     let mut d = (b - a) % std::f32::consts::TAU;

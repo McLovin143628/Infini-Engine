@@ -106,6 +106,18 @@ pub enum GizmoDelta {
 }
 
 /// Closest point on the infinite line `p + t·d` to the ray `o + s·rd`.
+///
+/// # `denom.abs() < 1e-6` is false for NaN (C4-44)
+///
+/// Both this and [`ray_plane`] guarded a division with a magnitude test, which
+/// is the house's standing NaN-blind-guard class: `NaN < 1e-6` is false, so the
+/// "degenerate" branch was skipped and the division ran. The result flows
+/// `GizmoDrag::update` → `GizmoDelta::Translate` → `EngineHost::apply_delta` →
+/// `SceneDoc` → **`.inf_lvl`**, with no finiteness check anywhere on the chain.
+/// Rotate and Scale happen to be safe, which is what left Translate exposed.
+///
+/// Asked the other way round — "is this a usable divisor" — NaN answers
+/// correctly and takes the degenerate branch it belongs in.
 fn closest_on_line(p: Vec3, d: Vec3, o: Vec3, rd: Vec3) -> Vec3 {
     // Standard closest-points-of-two-lines solution.
     let w0 = p - o;
@@ -115,25 +127,36 @@ fn closest_on_line(p: Vec3, d: Vec3, o: Vec3, rd: Vec3) -> Vec3 {
     let dd = d.dot(w0);
     let e = rd.dot(w0);
     let denom = a * c - b * b;
-    let t = if denom.abs() < 1e-6 {
-        0.0
-    } else {
+    let t = if denom.is_finite() && denom.abs() >= 1e-6 {
         (b * e - c * dd) / denom
+    } else {
+        0.0
     };
-    p + d * t
+    let out = p + d * t;
+    if out.is_finite() {
+        out
+    } else {
+        p
+    }
 }
 
 /// Intersect ray `o + s·rd` with the plane through `p` with normal `n`.
+///
+/// Returns `None` for a degenerate or non-finite intersection — see
+/// [`closest_on_line`] for why the guard is written as a positive test. `s <
+/// 0.0` is NaN-blind in the same way, so this used to hand back `Some(NaN)` as
+/// an "intersection".
 fn ray_plane(o: Vec3, rd: Vec3, p: Vec3, n: Vec3) -> Option<Vec3> {
     let denom = n.dot(rd);
-    if denom.abs() < 1e-6 {
+    if !(denom.is_finite() && denom.abs() >= 1e-6) {
         return None;
     }
     let s = n.dot(p - o) / denom;
-    if s < 0.0 {
+    if !(s >= 0.0) {
         return None;
     }
-    Some(o + rd * s)
+    let hit = o + rd * s;
+    hit.is_finite().then_some(hit)
 }
 
 /// Where the cursor ray grabs a handle at drag start. `basis` rotates the axis
@@ -517,6 +540,38 @@ fn build_geometry_2d(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **C4-44 — the gizmo's two divisions were guarded NaN-blind**, and the
+    /// value they produce is written into the `.inf_lvl`.
+    ///
+    /// `denom.abs() < 1e-6` is false for NaN, so the degenerate branch was
+    /// skipped and the division ran; `ray_plane`'s `s < 0.0` is false for NaN
+    /// too, so it returned `Some(NaN)` as an "intersection". From there:
+    /// `GizmoDrag::update` → `GizmoDelta::Translate` → `EngineHost::apply_delta`
+    /// → `SceneDoc` → the level file, unchecked the whole way.
+    ///
+    /// Un-fix mutation: restore either `< 1e-6` guard and the matching assertion
+    /// below fails.
+    #[test]
+    fn a_degenerate_or_non_finite_ray_never_produces_a_nan_position() {
+        let nan = Vec3::splat(f32::NAN);
+        // A degenerate axis and a NaN ray both take the safe branch.
+        let p = closest_on_line(Vec3::ZERO, Vec3::ZERO, Vec3::Z * -5.0, Vec3::Z);
+        assert!(p.is_finite(), "degenerate axis produced {p:?}");
+        let p = closest_on_line(Vec3::ZERO, Vec3::X, nan, Vec3::Z);
+        assert!(p.is_finite(), "NaN ray origin produced {p:?}");
+        let p = closest_on_line(Vec3::ZERO, Vec3::X, Vec3::Z * -5.0, nan);
+        assert!(p.is_finite(), "NaN ray direction produced {p:?}");
+
+        // `ray_plane` refuses rather than returning Some(NaN).
+        assert!(ray_plane(Vec3::ZERO, Vec3::X, Vec3::ZERO, Vec3::Y).is_none());
+        assert!(ray_plane(nan, Vec3::Z, Vec3::ZERO, Vec3::Y).is_none());
+        assert!(ray_plane(Vec3::ZERO, nan, Vec3::ZERO, Vec3::Y).is_none());
+        assert!(ray_plane(Vec3::ZERO, Vec3::Z, Vec3::ZERO, nan).is_none());
+        // The healthy intersection is unchanged.
+        let hit = ray_plane(Vec3::new(0.0, 5.0, 0.0), -Vec3::Y, Vec3::ZERO, Vec3::Y).unwrap();
+        assert!((hit - Vec3::ZERO).length() < 1e-5, "{hit:?}");
+    }
 
     #[test]
     fn screen_size_grows_with_distance() {

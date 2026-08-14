@@ -120,8 +120,19 @@ impl HeightRegion {
     }
 
     /// Overwrite the height offset at `(c, r)`.
+    ///
+    /// **A non-finite height is dropped, not stored** (C4-35). This buffer is
+    /// written back into tiles and `encode_tile` bincodes whatever is in it with
+    /// no finiteness check, so a NaN here is a NaN in the committed
+    /// `.inf_terrain` — and an undo delta whose `before` is a real number and
+    /// whose `after` is not. Smooth's `old + (mean - old) * blend` and Flatten's
+    /// `old + (target - old) * blend` are both `inf - inf` on a tile a saturated
+    /// sculpt left infinite, which is the route that produced one.
     #[inline]
     pub fn set_height(&mut self, c: u32, r: u32, v: f32) {
+        if !v.is_finite() {
+            return;
+        }
         let i = self.idx(c, r);
         self.heights[i] = v;
     }

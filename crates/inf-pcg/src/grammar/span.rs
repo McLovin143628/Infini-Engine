@@ -313,10 +313,30 @@ impl Span {
             };
         }
         let total = self.length();
+        // **Two panics in two adjacent lines** (C4-19), both from a NaN reaching
+        // an API that asserts an ordering:
+        //
+        // * `s.clamp(0.0, total)` panics when `total` is NaN (`f64::clamp`
+        //   asserts `min <= max`), and `total` is `cum.last()`, which is NaN if
+        //   any control point of the source spline is;
+        // * `partial_cmp(..).unwrap()` panics when either side is NaN — and this
+        //   was the ONLY `partial_cmp().unwrap()` in production code tree-wide,
+        //   a lone straggler in a house that otherwise uses `total_cmp`.
+        //
+        // Both reachable from a PCG/grammar asset. A span with no usable length
+        // has no frames to hand out, so answer with the first point rather than
+        // inventing one.
+        if !(total.is_finite() && s.is_finite()) {
+            return Frame {
+                position: self.points[0],
+                tangent: DVec3::Z,
+            };
+        }
         let s = s.clamp(0.0, total);
         // The last index whose cumulative length does not exceed `s`, capped so
-        // there is always a following point.
-        let i = match self.cum.binary_search_by(|c| c.partial_cmp(&s).unwrap()) {
+        // there is always a following point. `total_cmp` is a TOTAL order — it
+        // cannot fail to compare, which is the whole reason the house uses it.
+        let i = match self.cum.binary_search_by(|c| c.total_cmp(&s)) {
             Ok(mut i) => {
                 // Duplicate cumulative values (zero-length segments) — take the
                 // first, so the frame is a pure function of `s`.
@@ -523,6 +543,42 @@ mod tests {
             closed,
             interp,
         }
+    }
+
+    /// **C4-19 — two panics in two adjacent lines.**
+    ///
+    /// `s.clamp(0.0, total)` panics when `total` is NaN (`f64::clamp` asserts
+    /// `min <= max`), and `total` is `cum.last()` — NaN if any control point of
+    /// the source spline is. `binary_search_by(|c| c.partial_cmp(&s).unwrap())`
+    /// panics when either side is NaN, and it was the **only**
+    /// `partial_cmp().unwrap()` in production code tree-wide.
+    ///
+    /// Both reachable from a PCG/grammar asset. Un-fix mutation: restore either
+    /// spelling and this test panics rather than failing.
+    #[test]
+    fn a_span_built_over_a_nan_never_panics_and_never_hands_out_a_nan() {
+        let s = Span::from_points(
+            [
+                DVec3::ZERO,
+                DVec3::new(f64::NAN, 0.0, 0.0),
+                DVec3::new(3.0, 4.0, 0.0),
+            ],
+            false,
+        );
+        for probe in [0.0f64, 1.0, -5.0, 1e9, f64::NAN, f64::INFINITY] {
+            let f = s.frame_at(probe);
+            assert!(
+                f.tangent.is_finite(),
+                "frame_at({probe}) tangent is {:?}",
+                f.tangent
+            );
+        }
+        // A finite span is unaffected: the healthy path still measures exactly.
+        let ok = Span::from_points([DVec3::ZERO, DVec3::new(3.0, 0.0, 0.0)], false);
+        assert_eq!(ok.length(), 3.0);
+        assert_eq!(ok.frame_at(3.0).position, DVec3::new(3.0, 0.0, 0.0));
+        // ... and a NaN query against a healthy span answers rather than panics.
+        assert!(ok.frame_at(f64::NAN).position.is_finite());
     }
 
     #[test]

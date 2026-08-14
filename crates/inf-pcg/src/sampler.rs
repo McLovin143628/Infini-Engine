@@ -104,9 +104,22 @@ pub struct SlopeFilter<H> {
 impl<H: HeightProvider> DensityField for SlopeFilter<H> {
     fn density(&self, x: f64, z: f64) -> f64 {
         match self.height.normal(x, z) {
+            // `normalize_or` and a finiteness test, not a bare `normalize()`
+            // plus a `clamp` (C4-45): glam's `normalize` is unchecked with the
+            // workspace's `glam` pin, a zero-length or non-finite normal comes
+            // back as NaN, and `f64::clamp` PROPAGATES NaN (it returns `self`
+            // when `self` is NaN) straight into `acos`'s domain. Scatter output
+            // is cooked content, so a wrong-but-stable answer here is a content
+            // difference that nothing downstream would question. `HeightProvider`
+            // is a public trait: the shipped provider always answers `+Y`, but
+            // the door is open to any implementor.
             Some(n) => {
-                let up_dot = n.normalize().dot(DVec3::Y).clamp(-1.0, 1.0);
-                let slope_deg = up_dot.acos().to_degrees();
+                let n = n.normalize_or(DVec3::Y);
+                let up_dot = n.dot(DVec3::Y);
+                if !up_dot.is_finite() {
+                    return 0.0;
+                }
+                let slope_deg = up_dot.clamp(-1.0, 1.0).acos().to_degrees();
                 feather_window(slope_deg, self.min_deg, self.max_deg, self.feather_deg)
             }
             None => 0.0,

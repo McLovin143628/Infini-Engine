@@ -524,11 +524,14 @@ pub async fn viewport_set_sculpt(
             SculptOpDto::Noise => SculptOp::Noise,
             SculptOpDto::Paint => SculptOp::Paint,
         },
-        radius: sculpt.radius.max(0.0),
+        // One door, not a hand-written half of one (C4-35): `radius.max(0.0)`
+        // used to stand here with `strength` unguarded on the next line.
+        radius: sculpt.radius,
         strength: sculpt.strength,
         falloff: to_falloff(sculpt.falloff),
-        paint_layer: sculpt.paint_layer.min(3),
-    };
+        paint_layer: sculpt.paint_layer,
+    }
+    .sanitized();
     state.with(Target::from_arg(viewport), |h| h.set_sculpt(sculpt));
     Ok(())
 }

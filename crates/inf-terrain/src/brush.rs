@@ -42,7 +42,25 @@ pub enum Falloff {
 impl Falloff {
     /// Brush weight in `[0, 1]` at distance `dist` from the centre for radius
     /// `radius`. `0` at or beyond the radius, `1` at the centre.
+    ///
+    /// # A non-finite argument weighs nothing (C4-36)
+    ///
+    /// This was the house's standing NaN-blind-guard class, verbatim, on the
+    /// `.inf_terrain` write path. `radius <= 0.0` is false for NaN; `dist >=
+    /// radius` is false for NaN; and `(dist / radius).clamp(0.0, 1.0)`
+    /// **propagates** a NaN rather than rejecting it, because `f64::clamp`
+    /// returns `self` when `self` is NaN. So a NaN reached every arm below and
+    /// came back out as a weight — which the caller then multiplied a height by
+    /// and wrote into a tile.
+    ///
+    /// The only thing standing in front of it was an accidental `.max(0.0)` at
+    /// the Tauri door, which guards `radius` and not `dist`, and which nothing
+    /// in Ring 0 goes through at all. Refusing here is the check that is true
+    /// for every caller.
     pub fn weight(&self, dist: f64, radius: f64) -> f64 {
+        if !(dist.is_finite() && radius.is_finite()) {
+            return 0.0;
+        }
         if radius <= 0.0 {
             return if dist <= 0.0 { 1.0 } else { 0.0 };
         }
@@ -263,6 +281,20 @@ fn apply_local<F>(
                         let old_off = existing.map(|t| t.sample(res, i, j)).unwrap_or(0.0);
                         let old_world = base_y + old_off as f64;
                         let new_off = (value(wx, wz, old_world, w) - base_y) as f32;
+                        // **A sample the arithmetic could not compute is not
+                        // written** (C4-35). `as f32` SATURATES to
+                        // `f32::INFINITY` past `f32::MAX`, so an unbounded
+                        // strength turns a finite tile into an infinite one; a
+                        // later Smooth dab then computes `inf - inf` = NaN and a
+                        // Flatten does the same. Both of them sail past the
+                        // `w <= 0.0` guard above (false for NaN) and past the
+                        // `new_off != old_off` test below (ALWAYS true for NaN,
+                        // since NaN equals nothing) — so every sample in the
+                        // footprint would be committed, and `encode_tile`
+                        // bincodes it into the `.inf_terrain` without a word.
+                        if !new_off.is_finite() {
+                            continue;
+                        }
                         if new_off != old_off {
                             ws.push((i, j, old_off, new_off));
                         }
