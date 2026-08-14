@@ -1147,4 +1147,69 @@ mod boundary_tests {
             );
         }
     }
+
+    /// **A shadow page darkens the DIRECT term and never the AMBIENT one**
+    /// (P27.5) — the other half of the seam, and the half P27.5 created.
+    ///
+    /// The arm above bans VSM from GI's own sources. It could not see the new
+    /// meeting point this batch made: `vgeom_mesh.wgsl` and `scatter_mesh.wgsl`
+    /// now call `shadow_factor`, so for the first time **four** lit shaders
+    /// compute a virtual-shadow factor and a GI irradiance in one fragment, a
+    /// few lines apart. Multiplying the second by the first is a one-character
+    /// edit and would make the ambient term at a fixed world point a function of
+    /// where the viewer stands — the P18 law, broken from the other side.
+    ///
+    /// Scoped rather than spelled (the P23 law): what is scanned is the region
+    /// from the ambient block to the end of the fragment shader, which is where
+    /// the irradiance is used, and the ban is on any shadow term appearing in
+    /// it. The anti-vacuity is that the region really contains the GI call.
+    #[test]
+    fn a_shadow_page_never_reaches_the_ambient_term() {
+        for (label, source) in [
+            ("mesh.wgsl", include_str!("../shaders/mesh.wgsl")),
+            (
+                "skinned_mesh.wgsl",
+                include_str!("../shaders/skinned_mesh.wgsl"),
+            ),
+            (
+                "vgeom_mesh.wgsl",
+                include_str!("../shaders/vgeom_mesh.wgsl"),
+            ),
+            (
+                "scatter_mesh.wgsl",
+                include_str!("../shaders/scatter_mesh.wgsl"),
+            ),
+        ] {
+            let at = source
+                .find("let up = clamp(")
+                .unwrap_or_else(|| panic!("{label}: the ambient block moved"));
+            let tail: String = source[at..]
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                tail.contains("gi_irradiance("),
+                "{label}: the scanned region holds no GI call, so the ban below \
+                 is about nothing"
+            );
+            for banned in ["shadow_factor", "vsm_light_shadow", "vsm_shadow("] {
+                assert!(
+                    !tail.contains(banned),
+                    "{label} applies `{banned}` to the ambient term — a virtual \
+                     shadow page is camera-driven residency, and the irradiance \
+                     at a fixed world point must not be a function of where the \
+                     viewer is standing (the P18 law, from the other side)"
+                );
+            }
+            // …and the DIRECT term above really does take it, or the ban is
+            // satisfied by a shader with no shadows in it at all.
+            let head = &source[..at];
+            assert!(
+                head.contains("shadow_factor(in.world_pos, n)"),
+                "{label} takes no sun shadow at all, so this arm is measuring a \
+                 shader that has nothing to keep out of its ambient term"
+            );
+        }
+    }
 }

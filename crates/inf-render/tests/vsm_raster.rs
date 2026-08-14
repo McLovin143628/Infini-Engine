@@ -3372,3 +3372,139 @@ fn a_clipmap_grid_shift_re_labels_a_page_and_the_cache_key_pays_for_it() {
         seen.len()
     );
 }
+
+// ── P27.5: THE SKINNED CULL SPHERE, RULED WITH ITS EXACT FIX MEASURED ───────
+
+/// **The skinned caster's bound stays the inflated bind pose, and the exact fix
+/// is measured rather than described** (P27.5) — the P27.2/P27.3 remainder.
+///
+/// The carried sentence was: *"the skinned cull sphere is still the bind pose
+/// inflated 50 %, and P27.3 made that margin load-bearing rather than exact — it
+/// now costs re-rasterized pages as well as vertex invocations. The exact bound
+/// is the posed AABB the renderer is still not handed."*
+///
+/// # One correction, and it changes where the fix lives
+///
+/// *"the renderer is still not handed"* implied the fix needs `inf-anim`'s
+/// cooperation. It does not. A skinned instance already carries its **joint
+/// palette** — the renderer has it, uses it, and folds it into the caster's
+/// content stamp — so a bound that follows the pose is computable from data in
+/// hand: transform the bind sphere's centre by each joint and take the union,
+/// scaling the radius by each matrix's largest axis scale. No new data crosses
+/// any boundary, and `inf-anim` stays a dev-dependency.
+///
+/// # The measurement, and therefore the ruling
+///
+/// This arm computes both bounds for the pose `a_skinned_casters_cull_sphere_
+/// contains_a_pose_that_left_the_bind_pose` already drives, and both contain the
+/// posed geometry — so what separates them is cost, which is what a ruling has
+/// to be made on. The palette union is measured **tighter**, and the ledger
+/// carries the number.
+///
+/// **Not landed here.** A tighter caster sphere changes which pages the cull
+/// keeps and therefore which pages a mover invalidates, which is the exact
+/// quantity `phase27_gate`'s arm (c) asserts and P27.3's caching clause is
+/// measured against — so it is a change to make with its own arms and its own
+/// re-measurement, in the batch that owns the caster pack. That is P28.3, where
+/// the CPU caster cache already lives. The margin ships unchanged and this arm
+/// is what makes the day it moves a decision with a number in it.
+#[test]
+fn the_palette_union_bound_is_tighter_than_the_shipped_pose_margin() {
+    // The fixture's bind pose: a quad at ±1 in x and y, so its bind sphere is
+    // centred at the origin with radius √2.
+    let corners = [
+        glam::Vec3::new(-1.0, -1.0, 0.0),
+        glam::Vec3::new(1.0, -1.0, 0.0),
+        glam::Vec3::new(1.0, 1.0, 0.0),
+        glam::Vec3::new(-1.0, 1.0, 0.0),
+    ];
+    let bind_centre = glam::Vec3::ZERO;
+    let bind_radius = corners
+        .iter()
+        .map(|c| (*c - bind_centre).length())
+        .fold(0.0f32, f32::max);
+    assert!((bind_radius - std::f32::consts::SQRT_2).abs() < 1e-5);
+
+    // The pose: 0.6 m along x, through one joint — the same palette the device
+    // arm above drives.
+    let palette = [glam::Mat4::from_translation(glam::Vec3::new(0.6, 0.0, 0.0))];
+    let posed: Vec<glam::Vec3> = corners
+        .iter()
+        .map(|c| palette[0].transform_point3(*c))
+        .collect();
+
+    // 1. THE SHIPPED BOUND: the bind sphere, inflated, at the bind centre.
+    // , which is how the shipped code spells it: the constant
+    // is the INFLATION and not the factor (0.5 means half again).
+    let shipped_r = bind_radius * (1.0 + inf_render::SKINNED_POSE_MARGIN);
+    for p in &posed {
+        assert!(
+            (*p - bind_centre).length() <= shipped_r + 1e-4,
+            "the shipped margin does not contain the pose — the device arm's \
+             premise is wrong"
+        );
+    }
+
+    // 2. THE PALETTE UNION: each joint's transformed bind sphere, unioned. The
+    //    radius scale is the matrix's largest axis length, which is what makes
+    //    it conservative under a scaling joint.
+    let mut union_centre = glam::Vec3::ZERO;
+    let mut union_r = 0.0f32;
+    for (i, m) in palette.iter().enumerate() {
+        let c = m.transform_point3(bind_centre);
+        let scale = [
+            m.x_axis.truncate(),
+            m.y_axis.truncate(),
+            m.z_axis.truncate(),
+        ]
+        .iter()
+        .map(|a| a.length())
+        .fold(0.0f32, f32::max);
+        let r = bind_radius * scale;
+        if i == 0 {
+            union_centre = c;
+            union_r = r;
+            continue;
+        }
+        // Merge two spheres: the smallest sphere containing both.
+        let d = (c - union_centre).length();
+        if d + r <= union_r {
+            continue;
+        }
+        let nr = 0.5 * (union_r + d + r);
+        union_centre += (c - union_centre) * ((nr - union_r) / d.max(1e-6));
+        union_r = nr;
+    }
+    for p in &posed {
+        assert!(
+            (*p - union_centre).length() <= union_r + 1e-4,
+            "the palette union does not contain the pose, so it is not a legal \
+             replacement whatever it costs"
+        );
+    }
+
+    // THE COMPARISON, which is the ruling's evidence.
+    println!(
+        "phase27 skinned bound: shipped r {shipped_r:.4} m at {bind_centre:?}, \
+         palette union r {union_r:.4} m at {union_centre:?} — {:.0} % of the \
+         radius and {:.0} % of the volume",
+        100.0 * union_r / shipped_r,
+        100.0 * (union_r / shipped_r).powi(3)
+    );
+    assert!(
+        union_r < shipped_r,
+        "the palette union ({union_r}) is no tighter than the shipped margin \
+         ({shipped_r}), so the carried remainder has no fix in it and the \
+         ledger should say so instead"
+    );
+    // …and the margin is not merely slack: dropping it entirely leaves the pose
+    // OUTSIDE the bind sphere, which is why it exists at all.
+    assert!(
+        posed
+            .iter()
+            .any(|p| (*p - bind_centre).length() > bind_radius),
+        "the fixture's pose never leaves its bind sphere, so neither bound is \
+         under test"
+    );
+    assert!(inf_render::SKINNED_POSE_MARGIN > 0.0);
+}

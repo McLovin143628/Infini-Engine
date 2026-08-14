@@ -1581,3 +1581,129 @@ fn the_shadow_summary_is_one_line_a_host_can_log() {
         assert!(line.contains(want), "the summary has no {want:?}: {line}");
     }
 }
+
+// ── P27.5: THE BLEND PARTNER, RULED BY MEASUREMENT ──────────────────────────
+
+/// **How often the level blend's partner is resident** (P27.5) — the P27.4
+/// remainder, decided by measurement rather than by argument.
+///
+/// The ledger left it as a bound with a proposed fix: *"the blend can only act
+/// where the coarser level is already resident, and the marking pass asks for
+/// exactly one level per pixel — so the band is populated only where some other,
+/// farther pixel happened to want the level this one blends toward … the fix — a
+/// receiver that WANTS its blend partner — belongs with P27.5, because it
+/// changes the want set P27.3's caching clause is measured against."*
+///
+/// So the question this arm answers is the one the fix rests on: **on a scene
+/// with depth range in it, how much of the resident set already has its
+/// partner?** The answer is measured off the live residency, per resident page,
+/// through `VsmLightDesc::ancestor_at` — the same walk the fallback chain uses.
+///
+/// # The ruling
+///
+/// **REFUSED for P27, and routed.** Not because the coverage is good — it is
+/// printed, not assumed — but because the mechanism a second want needs already
+/// exists and already has an owner: `VSM_PRIORITY_SPECULATIVE`, whose producer
+/// the ROADMAP assigns to **P28.4**. Marking the partner unconditionally at
+/// equal priority would make the want set a function of `level_blend`, which is
+/// a *quality* knob, and would move the page-allocation trace that P27.3's
+/// caching clause and `phase27_gate`'s arm (a) are both measured against. A
+/// speculative want at strictly lower priority is exactly the shape that does
+/// neither, and it is a rank with no producer until P28.4 builds one.
+///
+/// What this arm pins meanwhile is the *condition* the ruling rests on: the band
+/// is populated where the scene has depth range, and the number is printed so
+/// the day P28.4 measures its own improvement it has a before.
+#[test]
+fn the_blend_partners_residency_is_measured_and_the_speculative_want_is_refused() {
+    let Some(gpu) = gpu_or_skip("the P27.5 blend-partner measurement") else {
+        return;
+    };
+    // A receding plane: the level rule asks for a finer level near the eye and a
+    // coarser one far away, which is the arrangement that populates a partner at
+    // all. (A top-down view — this file's usual one — keeps the whole frame in
+    // ONE level, where the question is vacuous by construction.)
+    let mut scene = floor_scene(&[(0.0, 0.0), (2.4, 1.2), (-3.0, -2.0)]);
+    scene.lights.push(sun(true));
+    scene.mark_dirty();
+    let view = look_view_fov(
+        glam::DVec3::new(0.0, 2.2, 11.0),
+        glam::DVec3::new(0.0, 0.0, -14.0),
+        NARROW_FOV_DEG,
+    );
+
+    let (renderer, _) = run(&gpu, &scene, &view, |s| s.vsm = settings(256), FRAMES);
+    let sys = renderer.vsm().expect("a live system");
+    let handle = VsmLightHandle(0);
+    let desc = sys.residency().desc(handle).expect("registered").clone();
+    let origins = sys.residency().clip_origins(handle).to_vec();
+
+    let geom = sys.residency().geometry();
+    let resident: Vec<VsmPage> = (0..geom.slot_count())
+        .filter_map(|s| sys.residency().slot_occupant(s))
+        .filter(|(l, _)| *l == handle)
+        .map(|(_, p)| p)
+        .collect();
+    assert!(
+        resident.len() > 8,
+        "only {} pages are resident — the measurement below is about nothing",
+        resident.len()
+    );
+    let levels: std::collections::BTreeSet<u32> = resident.iter().map(|p| p.level).collect();
+    assert!(
+        levels.len() > 1,
+        "the resident set spans one level ({levels:?}), so no page in it HAS a \
+         coarser partner to be resident or absent — the fixture cannot answer \
+         the question"
+    );
+
+    let mut with_partner = 0usize;
+    let mut without = 0usize;
+    for p in &resident {
+        if p.level + 1 >= desc.level_count() {
+            continue;
+        }
+        match desc.ancestor_at(&origins, *p, p.level + 1) {
+            Some(parent) if sys.residency().is_resident(handle, parent) => with_partner += 1,
+            _ => without += 1,
+        }
+    }
+    let total = with_partner + without;
+    assert!(
+        total > 0,
+        "no resident page has a coarser level to blend toward"
+    );
+    println!(
+        "phase27 blend partners: {with_partner} of {total} resident pages have \
+         their coarser partner resident ({:.0} %), over {} levels {levels:?}; \
+         the marking pass asks for ONE level per pixel, so the rest is where the \
+         blend is inert and where P28.4's speculative want would act",
+        100.0 * with_partner as f64 / total as f64,
+        levels.len()
+    );
+
+    // THE CONDITION THE RULING RESTS ON, asserted in both directions so it is a
+    // measurement and not a printout: the band is populated on a scene with
+    // depth range (some partner is there), and it is NOT complete (some is not)
+    // — which is exactly the gap a speculative want would close and the reason
+    // the ledger records a bound rather than a fix.
+    assert!(
+        with_partner > 0,
+        "no resident page has its blend partner resident, so the level blend is \
+         inert on every pixel of a receding plane — the bound the P27.4 ledger \
+         states is worse than it says"
+    );
+    assert!(
+        without > 0,
+        "EVERY resident page already has its partner, so the blend needs no \
+         speculative want at all — the P27.4 bound is retired, and this ruling \
+         should be rewritten rather than carried"
+    );
+
+    // …and the mechanism the fix would use exists and is still unproduced, which
+    // is the other half of routing it to P28.4 rather than building it here.
+    assert!(
+        inf_vsm::VSM_PRIORITY_SPECULATIVE > inf_vsm::VSM_PRIORITY_MARKED,
+        "the speculative rank is no longer strictly BELOW the marked one, so a          speculative want could take a page a visible pixel asked for"
+    );
+}
