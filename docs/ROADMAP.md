@@ -13721,10 +13721,16 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
 
 > ## P28.2 STATUS — interleaved cluster pages: **COMPLETE** (2026-08-14)
 >
-> **Seven commits, `04d6465..HEAD`** — git range notation excludes `04d6465`,
-> which is P28.1's audit tail and not this batch's. Five implementation, one
-> formatting pass, and the one that corrects this line, which the P28.1 audit's
-> finding about its own predecessor's count is the reason for counting at all.
+> **The batch is `04d6465..HEAD`** — range notation excludes `04d6465`, which is
+> P28.1's audit tail and not this batch's. Five commits carry the work:
+> `cb5f550` the container, `4f5c706` the cook, `2bff3c0` the joint page-in,
+> `7923e4f` the gate, `4e2f644` the memo + this block; the rest are a formatting
+> pass, a lockfile record, and the commits that carry and correct this paragraph.
+> **Named rather than counted, deliberately**: the P28.1 audit's closing finding
+> was a STATUS block whose own "six commits" excluded one by range notation and
+> predated two more, and a total is a number that goes stale the moment anything
+> lands after the block is written.
+>
 > The ROADMAP's three clauses answered against code, with the arm that fails if
 > each claim stops being true, and two owed channels ruled on with the
 > measurement that ruled them.
