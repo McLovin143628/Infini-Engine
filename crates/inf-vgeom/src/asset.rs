@@ -2031,6 +2031,161 @@ mod tests {
         }
     }
 
+    /// **THE MIP RULE, DERIVED — not restated** (P28.2 audit).
+    ///
+    /// The memo argues for `mip = lod / 2` by measuring ONE rival and refusing
+    /// it (a density rule at `K = 64`, which never pairs mip 0 and so leaves the
+    /// artifact reachable). That is an argument against a rival, not an argument
+    /// for the rule — and the batch's invariant gate cannot supply one either,
+    /// because its oracle *re-derives the same formula*: a wrong rule the cook
+    /// and the oracle share is invisible to it. The gate's M1 killed a **shifted**
+    /// rule precisely because only one side moved; consistency, not correctness.
+    ///
+    /// So here is the independent derivation, and it is a property of the DAG
+    /// rather than of the formula. What "matched detail" means is that a page's
+    /// **texels per triangle** does not depend on which page it is. Under the
+    /// builder's own decimation — `target_ratio` 0.5, so a LOD level halves
+    /// triangles — and a mip chain that quarters texels, `texels(m)/tris(L)` is
+    /// `D₀ · 2^L / 4^m`, which is constant exactly when `m = L/2`. Any other
+    /// slope makes it diverge geometrically in `L`.
+    ///
+    /// Three things are asserted, in the order the argument needs them:
+    ///
+    /// 1. **the premise**, measured on this build rather than assumed — the DAG
+    ///    really does halve (observed 0.4975 – 0.5025 over the deep levels here,
+    ///    drifting up at the coarsest ones where the boundary locks bind);
+    /// 2. **the property** — with `lod / 2` the density's spread across every
+    ///    page of the asset is small, and it is smaller by a wide factor than
+    ///    the neighbouring slopes. Stated as a RATIO between rules measured on
+    ///    the same DAG, so it is immune to `meshopt` producing a different DAG
+    ///    on another platform (the `test_support` law);
+    /// 3. **the offset** — `lod / 2` rounds DOWN, and that is the conservative
+    ///    direction rather than an accident of integer division: flooring gives
+    ///    the odd levels a texture up to 2× *denser* than matched, while `ceil`
+    ///    would give them one up to 2× *sparser* — which is the "detailed mesh,
+    ///    blurry texture" artifact by half a level, on the very rule that exists
+    ///    to close it. And the measurement says the spread CANNOT decide it: the
+    ///    two roundings sit within a few percent of each other, so the direction
+    ///    is the whole argument. That is written down here because it was not
+    ///    written down anywhere.
+    ///
+    /// Measured on the memo's own 96² fixture against a 2 048² texture: the
+    /// density runs 227.6 / 455.4 / 228.8 / 460.3 / 229.8 / 476.6 / 169.8 texels
+    /// per triangle from the finest page to the coarsest — the factor-of-2
+    /// sawtooth integer flooring predicts, and nothing else.
+    #[test]
+    fn the_mip_rule_is_the_slope_that_keeps_texel_density_invariant() {
+        // Two differently-proportioned fixtures: a big grid against a big square
+        // texture (the memo's), and a small grid against a wide, low one — so a
+        // rule that happens to suit one aspect ratio cannot pass by luck.
+        for (n, tex_w, tex_h) in [(48usize, 2048u32, 2048u32), (40, 1024, 256)] {
+            let mesh = crate::test_support::dense_mesh(n);
+            let desc = inf_vt::full_pyramid(tex_w, tex_h, 128, 4, true);
+            let mips = desc.mips.len() as u32;
+            let src = VgeomSource::from_mesh(&mesh).expect("index");
+
+            // (1) THE PREMISE: the DAG halves per level.
+            let mut per_level: std::collections::BTreeMap<u8, u64> = Default::default();
+            for m in &mesh.meshlets {
+                *per_level.entry(m.lod_level).or_default() += u64::from(m.triangle_count);
+            }
+            let levels: Vec<u64> = per_level.values().copied().collect();
+            assert!(
+                levels.len() >= 4,
+                "the fixture has no LOD ladder to measure"
+            );
+            // The deep half of the ladder, where the boundary locks do not yet
+            // dominate; the coarsest levels legitimately stall short of a half.
+            let deep = &levels[..levels.len() / 2];
+            for w in deep.windows(2) {
+                let r = w[1] as f64 / w[0] as f64;
+                assert!(
+                    (0.4..0.62).contains(&r),
+                    "a LOD level did not halve the triangles ({r:.4}) — the whole \
+                     derivation below rests on it"
+                );
+            }
+
+            // (2) THE PROPERTY: the spread of texels-per-triangle over the pages.
+            let spread = |slope: &dyn Fn(u32) -> u32| -> f64 {
+                let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
+                for (pi, e) in src.pages().iter().enumerate() {
+                    // The root page spans every level and pairs with the
+                    // always-resident coarsest mip by fiat, so it is outside the
+                    // rule and outside this measurement (see the ledger).
+                    if e.lod == u32::MAX {
+                        continue;
+                    }
+                    let tris: u64 = src
+                        .with_page_sections(pi, |s| {
+                            bytemuck::cast_slice::<u8, u32>(s.indices)
+                                .iter()
+                                .map(|g| u64::from(mesh.meshlets[*g as usize].triangle_count))
+                                .sum::<u64>()
+                        })
+                        .unwrap_or(0);
+                    if tris == 0 {
+                        continue;
+                    }
+                    let m = &desc.mips[slope(e.lod).min(mips - 1) as usize];
+                    let d = f64::from(m.width) * f64::from(m.height) / tris as f64;
+                    lo = lo.min(d);
+                    hi = hi.max(d);
+                }
+                assert!(hi > 0.0 && lo.is_finite(), "no pages measured");
+                hi / lo
+            };
+
+            let shipped = spread(&|lod| lod / 2);
+            let one_per_level = spread(&|lod| lod);
+            let one_per_four = spread(&|lod| lod / 4);
+            assert!(
+                shipped * 4.0 < one_per_level,
+                "grid {n} / {tex_w}x{tex_h}: stepping the texture once per LOD \
+                 level spreads the density {one_per_level:.2}x against \
+                 {shipped:.2}x for lod/2 — not the wide margin that makes lod/2 \
+                 the answer rather than a preference"
+            );
+            assert!(
+                shipped * 2.0 < one_per_four,
+                "grid {n} / {tex_w}x{tex_h}: stepping once per FOUR levels \
+                 spreads the density {one_per_four:.2}x against {shipped:.2}x"
+            );
+            // And the shipped rule's own spread is the factor-of-2 sawtooth that
+            // integer flooring of a half-integer ideal predicts, plus whatever
+            // the coarsest levels' stalled decimation adds.
+            assert!(
+                shipped < 4.0,
+                "grid {n} / {tex_w}x{tex_h}: lod/2 spreads the density {shipped:.2}x, \
+                 which is more than the flooring alone can explain"
+            );
+
+            // (3) THE OFFSET, and why DOWN. `ceil` has the tighter spread and is
+            // still wrong, because it is the blurry side of matched.
+            let ceil = spread(&|lod| lod.div_ceil(2));
+            assert!(
+                (0.5..2.0).contains(&(ceil / shipped)),
+                "spread separates floor from ceil ({shipped:.2}x against {ceil:.2}x) \
+                 — then the direction argument below is not what decides the \
+                 rounding, and this test is telling the wrong story about why"
+            );
+            for lod in 0..8u32 {
+                let f = tile_mip_for_lod(lod, mips);
+                assert!(
+                    f <= lod.div_ceil(2),
+                    "the shipped rule must never be COARSER than the ideal — a \
+                     texture sparser than matched is the artifact this phase closes"
+                );
+            }
+            assert_eq!(
+                tile_mip_for_lod(0, mips),
+                0,
+                "and the finest geometry must reach the finest texture level, \
+                 which is the offset the spread above cannot fix"
+            );
+        }
+    }
+
     /// The pairing **covers** what the page samples: every uv of every meshlet in
     /// a page lands in a tile the page's own section names. Sampled from the
     /// vertices directly rather than from the bound the builder computed — which
@@ -2187,13 +2342,27 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/v2_dense12.inf_vmesh");
         let mut bytes = std::fs::read(&path).expect("fixture");
-        // `tile_count` of page 0 lives at directory offset 40.
-        let at = HEADER_LEN as usize + 40;
-        bytes[at..at + 4].copy_from_slice(&1u32.to_le_bytes());
-        assert!(matches!(
-            VgeomAssetReader::new(bytes.as_slice()),
-            Err(VgeomAssetError::Malformed(_))
-        ));
+        // **Both lanes, separately** (P28.2 audit): the guard is
+        // `tile_count != 0 || tiles_off != 0`, and only the first half had an
+        // arm — so a guard narrowed to `tile_count` alone passed this test
+        // green while a v2 image carrying a v3 offset sailed through.
+        // `tile_count` of page 0 lives at directory offset 40, `tiles_off` at 88.
+        for (off, patch) in [
+            (40usize, 1u64.to_le_bytes()[..4].to_vec()),
+            (88usize, SECTION_ALIGN.to_le_bytes().to_vec()),
+        ] {
+            let mut doctored = bytes.clone();
+            let at = HEADER_LEN as usize + off;
+            doctored[at..at + patch.len()].copy_from_slice(&patch);
+            assert!(
+                matches!(
+                    VgeomAssetReader::new(doctored.as_slice()),
+                    Err(VgeomAssetError::Malformed(_))
+                ),
+                "a v2 image with a non-zero v3 lane at directory offset {off} parsed"
+            );
+        }
+        let _ = &mut bytes;
     }
 
     #[test]

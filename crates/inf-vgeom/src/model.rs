@@ -716,11 +716,67 @@ mod tangent_tests {
                 }
             }
         }
-        // Measured worst `1 - cos(theta)` over the sweep: **2.03e-6**, i.e.
-        // **0.115°**. The bound sits just above it so dropping an axis to 10 bits
-        // — which roughly quadruples the term — fails here rather than showing up
+        // Measured worst `1 - cos(theta)` over this sweep: **1.79e-6**. The bound
+        // sits above the real worst case below so dropping an axis to 10 bits —
+        // which roughly quadruples the term — fails here rather than showing up
         // as a normal map that leans.
         assert!(worst < 2.5e-6, "worst 1-cos was {worst}");
+    }
+
+    /// **The worst case, searched rather than sampled** (P28.2 audit).
+    ///
+    /// The sweep above walks a grid of *directions* and reports the worst it
+    /// happens to land on. That is a sample, and the memo quoted its number —
+    /// `2.03e-6`, `0.115°` — as though it were the bound. It is not: a two-
+    /// million-direction random sweep already beats it (`2.21e-6`), because the
+    /// error is not a function of direction, it is a function of where a
+    /// direction falls **inside a quantization cell**, and a 96 × 96 grid of
+    /// directions lands near cell centres only by luck.
+    ///
+    /// So this searches the cell centres directly — every one of the 2 × 2048²
+    /// of them — which is where the maximum provably lives for a nearest-value
+    /// quantizer. **2.33e-6, i.e. 0.124°**, at oct `(-0.292, -0.378)` in the
+    /// lower hemisphere. The channel's real angular bound, and 21 % above the
+    /// number that was written down.
+    #[test]
+    fn the_quantization_bound_is_the_worst_cell_centre_not_the_luckiest_sample() {
+        let mut worst = 0.0f64;
+        for i in 0..2048i32 {
+            for j in 0..2048i32 {
+                // The centre of quantization cell (i, j), in octahedral space.
+                let ox = (i as f32 - 1023.5) / TANGENT_Q;
+                let oy = (j as f32 - 1023.5) / TANGENT_Q;
+                if !(-1.0..=1.0).contains(&ox) || !(-1.0..=1.0).contains(&oy) {
+                    continue;
+                }
+                let (mut x, mut y) = (ox, oy);
+                let z = 1.0 - x.abs() - y.abs();
+                if z < 0.0 {
+                    let (sx, sy) = (sign_not_zero(x), sign_not_zero(y));
+                    let (ax, ay) = (x.abs(), y.abs());
+                    x = (1.0 - ay) * sx;
+                    y = (1.0 - ax) * sy;
+                }
+                let inv = 1.0 / (x * x + y * y + z * z).sqrt();
+                for hemi in [1.0f32, -1.0] {
+                    let t = [x * inv, y * inv, z * inv * hemi];
+                    let Some((b, _)) = unpack_tangent(pack_tangent(t, 1.0)) else {
+                        continue;
+                    };
+                    let dot = (f64::from(t[0]) * f64::from(b[0])
+                        + f64::from(t[1]) * f64::from(b[1])
+                        + f64::from(t[2]) * f64::from(b[2]))
+                    .min(1.0);
+                    worst = worst.max(1.0 - dot);
+                }
+            }
+        }
+        // Above the sampled sweep's 1.79e-6 — which is the point — and below the
+        // ceiling a 10-bit axis would blow through.
+        assert!(
+            (2.0e-6..3.0e-6).contains(&worst),
+            "the searched worst 1-cos was {worst:e}; the channel's bound moved"
+        );
     }
 
     /// The sentinel is *reachable only by asking for it* — a degenerate tangent —
