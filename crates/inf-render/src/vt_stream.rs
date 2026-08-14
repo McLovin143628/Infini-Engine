@@ -172,6 +172,16 @@ pub struct VtPopIn {
     /// measures is how much of the speculation is still outstanding, and a ratio
     /// that never falls is a horizon the budget cannot serve.
     pub predict_fallback: u64,
+    /// **Frames in which at least one refinement want was at fallback** (P28.4)
+    /// — the *other* A/B counter, and the one a whip-pan actually moves.
+    ///
+    /// The floor's camera-driven level is subsumed by the pinned camera-free
+    /// floor on a square pyramid ([`VT_PREDICT_MAX_TILES`]), so what a turning
+    /// camera changes is which *refinements* are wanted — which is what
+    /// `VtPopIn`'s own header calls "what pop-in **is**". A frame counter over
+    /// it answers the question a player asks: how often did I look at something
+    /// blurry.
+    pub refine_fallback_frames: u64,
 }
 
 impl VtPopIn {
@@ -378,20 +388,62 @@ pub fn analytic_floor(lib: &VtTextures, view: &RenderView, coverage: &[VtCoverag
         view,
         coverage,
         VT_PRIORITY_FLOOR,
+        VT_FLOOR_MAX_TILES,
     ));
     out
 }
 
-/// **The camera-driven half of [`analytic_floor`], at an arbitrary camera and an
-/// arbitrary lane** (P28.4).
+/// The most tiles **one speculative want** may claim for one surface (P28.4).
 ///
-/// One door, two callers, and the second one is why this exists: a speculative
-/// want is not a *different rule* about what a camera justifies, it is the
-/// **same rule asked at a camera the predictor says is coming**. Writing the
-/// predictor its own footprint rule would be two derivations of one fact (the
-/// P21 one-door law) and, worse, would let the two drift — a predictor that
-/// asked for a level the floor would never ask for is not prefetching, it is
-/// streaming something else.
+/// **Exactly [`VT_FEEDBACK_MAX_TILES`]**, and the equality is a ruling reached
+/// by refuting the other two candidates with a measurement rather than by
+/// preferring this one.
+///
+/// # A prefetch must speak the language of the class it prefetches for
+///
+/// A tile is an *address* — `(texture, mip, x, y)` — so a speculation at a
+/// different cap settles on a different **mip** and shares not one tile with
+/// what the future want will ask for. Whatever this lane prefetches for, it must
+/// use that class's cap exactly. So the question is only *which class*.
+///
+/// # And the floor cannot be the answer, because it cannot be prefetched
+///
+/// `VtResidency::apply_wants` admits a miss the frame it is offered, out of the
+/// same pool, with no per-frame admission throttle anywhere in the loop
+/// (`VT_ADMITS_PER_FRAME_CEILING` is a *gate ceiling*, not a governor). So the
+/// floor's fallback count is `max(0, demand − pool)`: under the pool nothing
+/// misses, over it the shortfall is the arithmetic difference, and in **neither
+/// regime does having asked earlier change the number**. Measured, not argued —
+/// `whip_pan::a_saturated_floor_cannot_be_prefetched_and_the_arm_says_so` runs
+/// the whole 360° path over an undersized pool and the two arms come out
+/// byte-identical on every floor counter.
+///
+/// What *does* lag the camera is the **GPU refinement**: it is marked off a
+/// depth buffer, so it can only ever ask for surfaces that are already visible,
+/// and it arrives `READBACK_LATENCY_FRAMES` later than that. That gap is what
+/// pop-in is (`VtPopIn`'s own header says so), it is the only thing in this
+/// subsystem a prediction can close, and closing it needs the refinement's own
+/// cap.
+pub const VT_PREDICT_MAX_TILES: u32 = VT_FEEDBACK_MAX_TILES;
+
+/// **What a camera justifies** — one footprint rule, at an arbitrary camera, at
+/// an arbitrary lane, under an arbitrary per-surface cap (P28.4).
+///
+/// This is [`analytic_floor`]'s camera-driven half, lifted so the three want
+/// classes stop being three copies of it. Every class is *this* rule with two
+/// numbers changed, which is the whole design:
+///
+/// | class | camera | lane | cap |
+/// |---|---|---|---|
+/// | analytic floor | committed | `VT_PRIORITY_FLOOR` | [`VT_FLOOR_MAX_TILES`] (16) |
+/// | GPU refinement | committed | `VT_PRIORITY_FEEDBACK` | [`VT_FEEDBACK_MAX_TILES`] (256) |
+/// | speculation | **predicted** | `VT_PRIORITY_PREDICT` | [`VT_PREDICT_MAX_TILES`] (64) |
+///
+/// The two existing classes already differed only by those two numbers and said
+/// so in prose (*"Both halves compute the level from the same rule"*); the third
+/// is what made writing it down worth doing. A predictor with a footprint rule
+/// of its own is not prefetching, it is streaming something else, and the
+/// failure is silent because both want sets look plausible alone.
 ///
 /// The camera-free part ([`VtTextures::want_floor`]) is deliberately *not* here:
 /// it is a property of the registry, so a predicted camera adds nothing to it
@@ -407,6 +459,7 @@ pub fn camera_wants(
     view: &RenderView,
     coverage: &[VtCoverage],
     lane: inf_vt::VtPriority,
+    max_tiles: u32,
 ) -> Vec<VtWant> {
     let mut out = Vec::new();
     if coverage.is_empty() {
@@ -431,10 +484,8 @@ pub fn camera_wants(
             };
             let extent = desc.mips[0].width.max(desc.mips[0].height);
             let mut lv = justified_mip(extent, px, desc.mip_count());
-            // Coarser until the level fits the floor's per-surface cap.
-            while lv + 1 < desc.mip_count()
-                && desc.mips[lv as usize].tile_count() > VT_FLOOR_MAX_TILES
-            {
+            // Coarser until the level fits this class's per-surface cap.
+            while lv + 1 < desc.mip_count() && desc.mips[lv as usize].tile_count() > max_tiles {
                 lv += 1;
             }
             let m = desc.mips[lv as usize];
@@ -480,8 +531,14 @@ pub fn predicted_view(view: &RenderView, p: &inf_math::Prediction) -> RenderView
     }
 }
 
-/// **The speculative want set** (P28.4, clause 2): the analytic floor's own
-/// footprint rule, asked at the predicted camera, at [`VT_PRIORITY_PREDICT`].
+/// **The speculative want set** (P28.4, clause 2): the one footprint rule, asked
+/// at the predicted camera, at [`VT_PRIORITY_PREDICT`], under
+/// [`VT_PREDICT_MAX_TILES`].
+///
+/// It predicts the **refinement** an arriving surface will need, not the floor,
+/// and that is a measured ruling rather than a preference: the floor is admitted
+/// the frame it is asked and cannot be prefetched at all. See
+/// [`VT_PREDICT_MAX_TILES`].
 ///
 /// Every one of these wants is strictly below both the floor and the feedback,
 /// so the whole set is free in the only sense that matters: it can take a slot
@@ -500,6 +557,7 @@ pub fn speculative_wants(
         &predicted_view(view, prediction),
         coverage,
         inf_vt::VT_PRIORITY_PREDICT,
+        VT_PREDICT_MAX_TILES,
     )
 }
 
@@ -583,6 +641,7 @@ pub fn feedback_requests(
 /// counters are summed over.
 pub(crate) fn count_fallbacks(lib: &VtTextures, wants: &[VtWant], stats: &mut VtPopIn) {
     let mut floor_missed = false;
+    let mut refine_missed = false;
     for w in wants {
         let at_fallback = !lib.residency().is_resident(w.texture, w.tile);
         // **A match and not an `else`** (P28.4). Before the predictor existed
@@ -595,6 +654,7 @@ pub(crate) fn count_fallbacks(lib: &VtTextures, wants: &[VtWant], stats: &mut Vt
             inf_vt::VT_PRIORITY_FEEDBACK => {
                 stats.refine_wants += 1;
                 stats.refine_fallback += u64::from(at_fallback);
+                refine_missed |= at_fallback;
             }
             inf_vt::VT_PRIORITY_PREDICT => {
                 stats.predict_wants += 1;
@@ -608,6 +668,7 @@ pub(crate) fn count_fallbacks(lib: &VtTextures, wants: &[VtWant], stats: &mut Vt
         }
     }
     stats.floor_fallback_frames += u64::from(floor_missed);
+    stats.refine_fallback_frames += u64::from(refine_missed);
 }
 
 /// The GPU half of the loop: the coverage bitmask, its compute pass, and the
@@ -930,22 +991,30 @@ mod tests {
         }
     }
 
-    /// **One rule, two cameras** — the whole of clause 2's producer, stated as
-    /// the property that would break if the predictor grew a footprint rule of
-    /// its own: the speculative want set at a camera is the floor want set at
-    /// that same camera, with a different rank and nothing else different.
-    ///
-    /// A predictor with its own rule is not prefetching, it is streaming
-    /// something else — and the failure is silent, because both sets look
-    /// plausible on their own.
+    /// **One rule, three classes** — the property that would break if the
+    /// predictor grew a footprint rule of its own: at one camera and one cap,
+    /// two lanes produce the same addresses in the same order and differ only in
+    /// the rank.
     #[test]
-    fn a_speculative_want_is_the_floors_own_rule_at_another_camera() {
+    fn a_speculative_want_is_the_floors_own_rule_at_another_lane() {
         let (res, h) = one_texture();
         let cov = [cover(Vec3::new(0.0, 0.0, -6.0), h)];
         let view = look(glam::DVec3::ZERO, Vec3::NEG_Z);
 
-        let floor = camera_wants(&res, &view, &cov, inf_vt::VT_PRIORITY_FLOOR);
-        let spec = camera_wants(&res, &view, &cov, inf_vt::VT_PRIORITY_PREDICT);
+        let floor = camera_wants(
+            &res,
+            &view,
+            &cov,
+            inf_vt::VT_PRIORITY_FLOOR,
+            VT_FLOOR_MAX_TILES,
+        );
+        let spec = camera_wants(
+            &res,
+            &view,
+            &cov,
+            inf_vt::VT_PRIORITY_PREDICT,
+            VT_FLOOR_MAX_TILES,
+        );
         assert!(!floor.is_empty(), "the fixture wants nothing at all");
         assert_eq!(floor.len(), spec.len());
         for (f, s) in floor.iter().zip(&spec) {
@@ -953,6 +1022,72 @@ mod tests {
             assert_eq!(f.priority, inf_vt::VT_PRIORITY_FLOOR);
             assert_eq!(s.priority, inf_vt::VT_PRIORITY_PREDICT);
         }
+    }
+
+    /// **THE MEASUREMENT THAT CHOSE THE CAP**, and it is a refutation of the
+    /// obvious choice rather than a preference between two good ones.
+    ///
+    /// "A guess should claim less than a proof" argues for a speculative cap
+    /// between the floor's 16 and the feedback's 256. It is wrong, and the
+    /// reason is that a tile is an *address*: a different cap picks a different
+    /// **mip**, and two mips share no tile. A speculation at any cap but the one
+    /// belonging to the class it prefetches for fills the pool with pages that
+    /// class never asks for — a prefetch that prefetches something else.
+    ///
+    /// Swept over five square pyramids. Where the caps bind at different levels
+    /// the two address sets are **disjoint**, and at least one extent in the
+    /// sweep must exhibit it or this arm is about a fixture too small to
+    /// separate them. The shipped cap is the refinement's, so the shipped set
+    /// is the refinement's set exactly — see [`VT_PREDICT_MAX_TILES`] for why
+    /// the floor is not the class a prediction can serve.
+    #[test]
+    fn a_prediction_at_a_finer_cap_names_addresses_the_floor_will_never_ask_for() {
+        let mut separated = 0usize;
+        for extent in [512u32, 1024, 2048, 4096, 8192] {
+            let (mut res, _adv) = inf_vt::VtResidency::new(inf_vt::VtPoolConfig::default());
+            let h = res
+                .register_texture(inf_vt::full_pyramid(extent, extent, 128, 4, true))
+                .expect("the floor fits");
+            // A LARGE surface, close: the cap only binds when the footprint
+            // justifies a level finer than the cap allows, and a 1 m sphere at
+            // three metres in a 512 px viewport justifies mip 5 of an 8 192²
+            // texture — where both caps agree and the arm sees nothing. This is
+            // a wall filling the frame.
+            let cov = [VtCoverage {
+                centre: Vec3::new(0.0, 0.0, -2.5),
+                radius: 60.0,
+                set: crate::scene::VtTextureSet {
+                    albedo: h.0 + 1,
+                    ..crate::scene::VtTextureSet::NONE
+                },
+                vgeom: false,
+            }];
+            let view = look(glam::DVec3::ZERO, Vec3::NEG_Z);
+            let at = |cap| -> std::collections::BTreeSet<(u32, u32, u32, u32)> {
+                camera_wants(&res, &view, &cov, inf_vt::VT_PRIORITY_FLOOR, cap)
+                    .iter()
+                    .map(|w| (w.texture.0, w.tile.mip, w.tile.x, w.tile.y))
+                    .collect()
+            };
+            let floor = at(VT_FLOOR_MAX_TILES);
+            let finer = at(VT_FEEDBACK_MAX_TILES);
+            assert!(!floor.is_empty(), "{extent}: the surface is not visible");
+            if floor != finer {
+                separated += 1;
+                assert!(
+                    floor.is_disjoint(&finer),
+                    "{extent}: two caps that chose different levels shared a tile"
+                );
+            }
+            // …and the shipped cap is the refinement's, so the speculative set
+            // is the refinement's set exactly and the floor's not at all.
+            assert_eq!(at(VT_PREDICT_MAX_TILES), finer);
+        }
+        assert!(
+            separated > 0,
+            "no extent in the sweep made the two caps disagree — the arm cannot \
+             see its own subject"
+        );
     }
 
     /// **The prefetch, as a set difference.** A surface behind the camera is
@@ -966,7 +1101,14 @@ mod tests {
         let cov = [cover(Vec3::new(-14.0, 0.0, 4.0), h)];
         let view = look(glam::DVec3::ZERO, Vec3::NEG_Z);
         assert!(
-            camera_wants(&res, &view, &cov, inf_vt::VT_PRIORITY_FLOOR).is_empty(),
+            camera_wants(
+                &res,
+                &view,
+                &cov,
+                inf_vt::VT_PRIORITY_FLOOR,
+                VT_FLOOR_MAX_TILES
+            )
+            .is_empty(),
             "the fixture is visible already, so it cannot show a prefetch"
         );
 
