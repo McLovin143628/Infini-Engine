@@ -14,8 +14,33 @@ One `R32Uint` texel names a triangle. Thirty-two bits, three fields:
 | field | bits | range | the measured ceiling it was designed against |
 |---|---|---|---|
 | triangle | 7 | 0..=127 | `BuildParams::max_triangles` defaults to **124**, and every cooked `.inf_vmesh` in the tree carries that. `meshopt`'s hard cap is 512, so 128 is a *refusal boundary* rather than a format one. |
-| meshlet | 14 | 0..=16 383 | a slot in the **shared pool**, not an asset-local id. The flagship `vgeom-demo` DAG is ~500 slots for a 10 M-triangle scene, because meshlets are stored once per asset and instanced. 16 384 slots is 1 MiB of 64-byte records. |
+| meshlet | 14 | 0..=16 383 | a slot in the **shared pool**, not an asset-local id, and **not the DAG's size** — see the correction below. 16 384 slots is 1 MiB of 64-byte records. |
 | instance | 11 | 0..=2 046 | `RenderScene::vgeom_instances`. `vgeom-demo` places **324** (an 18 × 18 grid). |
+
+### The meshlet ceiling, restated against the quantity the door reads (P28.1 audit)
+
+The first version of this table justified 14 bits with *"the flagship `vgeom-demo`
+DAG is ~500 slots, so 16 384 is 32×"*. That measures the wrong thing.
+`VisState::admit` is handed `pool_bytes = self.pools.sizes[1]` — the meshlet
+pool's **capacity**, which the streamer grows toward `VgeomStreamBudget::
+budget_bytes` as pages arrive — and divides it by `MESHLET_REC_LEN`. The DAG of
+any one asset never enters the arithmetic.
+
+So the real headroom is a fraction of the streaming budget, and it is measurable.
+Meshlet descriptors are a stable **5.26 – 5.44 %** of a cooked asset's pool bytes
+(measured over 16², 48² and 96² displaced grids — 13, 118 and 468 meshlets), the
+rest being vertices, vertex-index lists and micro-indices. One MiB of descriptors
+is therefore about **18.4 – 19.0 MiB of resident meshlet pool**, against a
+`DEFAULT_VGEOM_BUDGET_BYTES` of **256 MiB** — so the visibility path refuses at
+roughly **7 % of the default budget**, not at 32× the flagship. In meshlets that
+is ~16 000 resident descriptors, which at 124 triangles each is ~2 M resident
+triangles; the flagship's *source* count is 10 M and its resident set is far
+smaller, which is why the demo is admitted comfortably and why the ceiling is
+nonetheless reachable by ordinary streamed content.
+
+That is not a defect — the refusal is typed, counted and falls back — but the
+sentence justifying the field has to name the pool, because that is what the door
+reads. Widening the field is the frame-derived split below, routed to P28.3.
 
 The instance field stores `instance + 1`. That bias is what makes `VIS_EMPTY`
 (zero) **unreachable from a real fragment**, so "cleared" and "no geometry here"
@@ -68,13 +93,63 @@ screen-linear interpolation of `z/w` the rasterizer performs. Written as
 marking pass find meshlet depth where they always have.
 
 **Measured against the forward path's `dpdx`**: on the textured parity row,
-**8.79 %** of interior pixels differ, worst step **26** of 255. That is not a
-defect and the arm says so: `dpdx(uv)` is a first-order finite difference *shared
-by four pixels*; the resolve's is exact and per pixel. They pick the same mip
-except at a level boundary, and a different mip is a different texel. The
-resolve's number is the better one — it is exactly the sub-surface-variation win
-`docs/memos/p26-4-feedback-mechanism.md` item 3 predicted a visibility buffer
-would buy.
+**8.79 %** of interior pixels differ, worst step **26** of 255. `dpdx(uv)` is a
+first-order finite difference *shared by four pixels*; the resolve's is exact and
+per pixel. They pick the same mip except at a level boundary, and a different mip
+is a different texel.
+
+### The exception, bounded as a class (P28.1 audit)
+
+"8.79 % of pixels differ" is satisfied equally by a mip **boundary** — a curve
+one or two pixels thick where the footprint crosses a power of two — and by a
+broad smear over whole triangles, which is what a wrong gradient actually
+produces. A population bound cannot tell them apart, so
+`parity_textured_virtual_texture` now measures the *shape*: **431 of the 451
+differing pixels (95.6 %) border an agreeing interior pixel, and ZERO of them are
+the centre of a solid 3 × 3 block of disagreement**. It is a boundary set.
+Falsified rather than assumed: with the population bound disabled and the uv
+x-gradient scaled 4×, the same measurement reads 0 % bordering and 1 320 solid
+3 × 3 centres, and the class assertion is what fails.
+
+### "The resolve's number is the better one" — WITHDRAWN on measurement (P28.1 audit)
+
+The first version of this section ruled that the resolve's mip is the better one
+and cited no measurement of it. The audit built the one the claim needs — a **16×
+supersampled** forward reference (1280 × 720, box-downsampled to 320 × 180 in
+linear space) — and it does not support the ruling:
+
+| over 5 132 interior pixels | forward | resolve |
+|---|---|---|
+| mean abs. error vs the reference | **0.065542** | **0.065580** |
+| on the 420 differing pixels only | **0.069580** | **0.070049** |
+| differing pixels the path is *closer* on | 52.4 % | **47.6 %** |
+
+A coin flip, with the sign marginally against the resolve. Nor could that design
+have found a small effect, and the control says so: running the identical
+comparison with **no texture bound at all** — pure resolution-dependent shading,
+AO, specular — gives a floor of **0.0868**, larger than the whole textured signal
+and roughly 200× the difference between the two paths. Repeating it on the
+isolated texture contribution (textured minus untextured, which cancels the
+common shading) gives 51.2 %: the same coin flip.
+
+So the claim is demoted to the half that **is** measured, and it is a statement
+about the *gradient*, not about the image:
+
+* the resolve's gradient is the exact analytic derivative — asserted by
+  `the_analytic_gradient_is_the_limit_of_the_finite_difference` as a convergence
+  signature, with an inline control that drops the `2/width` step and must
+  disagree by 400×;
+* the forward path's is a first-order difference quantized to a 2 × 2 quad;
+* **which of the two mips yields a better image is undecided by measurement**,
+  and settling it needs a fixture whose reference is not dominated by
+  resolution-dependent shading — a flat, unlit, texture-only surface, which this
+  suite does not have. Routed to P28.3 with the streamer's own quality work.
+
+The `p26-4-feedback-mechanism.md` item-3 win the first version invoked is a claim
+about the *feedback* signal — one level per screen region instead of one per
+surface — and that one **is** measured, at 22 resident tiles against 32
+(`the_per_fragment_signal_is_finer_and_a_hidden_surface_adds_nothing_to_it`). It
+was being spent twice.
 
 **A symmetry worth recording**: transposing `d_dx` and `d_dy` is invisible to
 every arm here, and always will be, because `vt_mip` takes
@@ -110,6 +185,31 @@ the P25 audit named.
 `the_resolve_spends_every_fragment_storage_binding_the_default_limit_grants`
 counts them, so the next binding the environment group grows fails a test here
 instead of failing `create_pipeline_layout` on a user's machine.
+
+**And that arm did not do it** (P28.1 audit). Its first draft asserted
+`4 + 4 == 8` with both fours written as literals, under a comment claiming they
+were "read off `passes::mod`'s own constants"; they were not. Mutation-measured:
+turning the environment group's binding 6 from a uniform into a storage buffer —
+the exact growth the arm exists for — left it green, and the failure would have
+arrived as a `create_pipeline_layout` refusal on a user's machine, which is what
+the arm's own doc says it prevents. Both entry lists are now hoisted into
+functions (`passes::env_bgl_entries`, `passes::visbuffer::resolve_bgl_entries`)
+and the arm filters them for FRAGMENT-visible storage buffers. Same mutation now
+kills it.
+
+**A precision hazard the first write-up named backwards.** `Rgba32Float` is an
+exact 32-bit container and the three shaders `bitcast` the id texel rather than
+converting it — right, but the reason given was "an f32 round-trip would be a
+DIFFERENT handle for anything past 2^24", which is where the danger is *not*. A
+VT slot is `handle + 1`, a small integer, and **every u32 below 2^23 has an
+all-zero f32 exponent field** — as a float, every real handle in this table is
+*subnormal*, and WGSL permits an implementation to flush subnormals to zero.
+Converting would turn slot 1 into slot 0, i.e. "this surface binds no texture":
+a silently untextured frame, not an error. The bitcast is a reinterpretation of a
+loaded texel and takes no arithmetic, which is why it survives;
+`parity_textured_virtual_texture`'s closing `assert_ne!` is what witnesses it on
+whatever adapter runs, because a flushed slot makes the textured frame
+byte-identical to the untextured one. Corrected in all three shaders.
 
 ---
 
@@ -198,6 +298,39 @@ full-screen shading passes). **A mode that is 14 % slower on one frame and 13 %
 faster on another, and that gives up silhouettes and intersections to get there,
 does not become a default on this evidence.**
 
+**Which leg is load-bearing, stated so a stronger fixture cannot be read as
+overturning the ruling** (P28.1 audit). It is (a). The visibility buffer is
+single-sample by clause 1 and `SCENE_SAMPLES` is a compile-time 4, so turning the
+mode on changes what a meshlet frame looks like and re-blesses fifty-four
+byte-frozen goldens — and it does so to ship a mode whose quality recovery is off
+by default. That is decisive on its own, at any frame budget. (b) says what the
+change costs in quality and (c) says the speed does not buy it back; a rerun of
+(c) on a genuinely overdraw-bound fixture could reverse (c) and would still leave
+the ruling standing until TAA is on by default. The memo says so here rather than
+leaving a future reader to infer it from a table.
+
+### (d) What the frame budget above is partly paying for, named (P28.1 audit)
+
+Two costs the first version of this memo folded into the wall-clock numbers
+without naming, because both are structural rather than incidental:
+
+* **The resolve writes `@builtin(frag_depth)`, which forbids early-Z in that
+  pass.** It is a real depth-tested, depth-writing pass into the MSAA scene depth
+  (`DEPTH_COMPARE`, `depth_write_enabled: true`), and a shader that computes its
+  own depth cannot be rejected before it runs. The `discard` for `VIS_EMPTY` is
+  at the top of the fragment, so a pixel with no meshlet costs a texel load and
+  nothing else — but a pixel *with* one pays the whole lit program before the
+  comparison happens.
+* **So the visibility path shades pixels that lose to NON-meshlet geometry.** The
+  visibility buffer has a depth of its own and knows nothing about the rigid
+  pass; a meshlet fragment behind a rigid wall still owns its texel, is still
+  shaded by the resolve, and is then thrown away by the depth test. Deferred's
+  "shade each pixel once" holds here against meshlet-vs-meshlet overdraw only.
+  `parity_interleaved_with_rigid_geometry` proves the *result* is right — the
+  cube's pixels agree to the byte — and nothing measures the waste. A depth
+  pre-test against the resolved scene depth is the fix and it is P28.3's, where
+  the prepass and the visibility buffer stop being two independent depths.
+
 ### What would change the ruling
 
 Three things, and P28.1 built none of them:
@@ -245,3 +378,51 @@ Three things, and P28.1 built none of them:
 * **The visibility path does not reach the picker, the depth prepass, the HZB or
   the shadow caster passes.** It is an alternative *shading* path for the meshlet
   raster and nothing more; every other consumer of meshlet geometry is unchanged.
+
+---
+
+## 7. What the P28.1 AUDIT changed, in one place
+
+* **Three cited arms had never existed** — `the_resolves_gradients_match_the_
+  devices` (in `visbuffer.rs`), `the_per_pixel_mark_uses_the_same_mip_rule` (in
+  `vis_feedback.wgsl`) and `the_visbuffer_edge_cost_against_the_forward_path` (in
+  `passes/visbuffer.rs`). The P20 law, three times, in the batch that caught it
+  once in P27.5's ledger and wrote the finding up. The second has been **written**
+  (the LOD rule is pinned line-for-line between `vt_sample.wgsl` and
+  `vis_feedback.wgsl`), the third **renamed** to the arm that does the work, and
+  the first **withdrawn**: there is no device-vs-twin gradient comparison, because
+  the id names a shared-pool slot and the slot→asset remap lives on the GPU, so a
+  host cannot decode a readback id into three vertices. The twin is a mirror, and
+  the doc now says so.
+* **Two arms could not see their own subject.** The storage-binding ceiling
+  (above) and `the_pool_ceiling_converts_bytes_to_slots_at_the_record_length`,
+  which re-implemented `VisState::admit`'s division locally — so replacing
+  `MESHLET_REC_LEN` with a wrong constant inside `admit` left it green. One
+  conversion function now, called by both.
+* **The refusal's fallback arm did not falsify.** `a_scene_past_a_ceiling_falls_
+  back_to_the_forward_path_and_says_which` asserted `refused.rgba ==
+  forward.rgba`, and both frames take the *same* forward draw call — so deleting
+  that call leaves them identically empty and the arm green, which is precisely
+  the "a refusal that dropped the geometry would satisfy every counter" failure
+  the ledger claims it rules out. Mutation-measured. It now compares the refused
+  frame against a **geometry-free** frame and requires 5 % of the frame to differ.
+* **The degenerate guard was NaN-blind.** Every comparison against NaN is false,
+  so `abs(det) < VIS_DET_EPS` let a NaN vertex through the guard and out as
+  `λ = (NaN, NaN, NaN)` — from a function whose doc said a degenerate case
+  resolves "rather than to a NaN". `|| det.is_nan()` in the twin, `|| det != det`
+  in both shaders, and an arm that sweeps a NaN through all twelve clip
+  components. Also recorded: the floor is a **finiteness** bound and not a
+  conditioning one — a sliver at `ε = 1e-5`, fifteen orders above the floor,
+  already gives a gradient of 33.6 per pixel and weights of `(-0.40, 0.80, 0.60)`.
+* **The parity oracle's independence is now pinned, and its boundary measured.**
+  The two paths share the whole composed `Lit(2)` prelude — `vt_sample`,
+  `vsm_receive`, the environment lighting, the atmosphere — and an error in there
+  is invisible to all twelve arms: mutation-measured, `+ 1.0` on `vt_sample`'s
+  `vt_mip` (a wrong mip for the entire engine) leaves the suite green. What is
+  independent is the vertex pull, the barycentrics, the gradients and the BRDF,
+  and `the_resolve_derives_its_own_shading_rather_than_borrowing_the_forward_
+  paths` fails the day one of those is de-duplicated into the prelude.
+* **The textured exception** — classified (§2) and its "better" ruling withdrawn
+  (§2).
+* **The meshlet ceiling** — restated against the pool capacity the door reads
+  (§1).
