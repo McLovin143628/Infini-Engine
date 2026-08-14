@@ -850,7 +850,22 @@ fn a_lead_time_costs_this_fixture_what_the_lane_earns_it() {
     let zero = run(Some(0), PAGES);
     let shipped = run(Some(HORIZON), PAGES);
 
-    for (name, a) in [("OFF ", &off), ("h=0 ", &zero), ("h=18", &shipped)] {
+    // **The whole lead sweep, printed** — the table in this arm's own header,
+    // reproduced by the arm rather than remembered from an audit. The
+    // assertions below are only about the two ends that matter; the rows in
+    // between are what make the shape monotonic rather than a pair of points.
+    let mut sweep: Vec<(String, Arm)> = vec![("OFF ".into(), off.clone())];
+    for lead in [0u32, 3, 6, 12, HORIZON, 24, 36] {
+        let a = if lead == 0 {
+            zero.clone()
+        } else if lead == HORIZON {
+            shipped.clone()
+        } else {
+            run(Some(lead), PAGES)
+        };
+        sweep.push((format!("h={lead:<3}"), a));
+    }
+    for (name, a) in &sweep {
         println!(
             "{name} blur {}/{} over {} frames | ARRIVAL blur {}/{} over {} frames | \
              speculation {} offered, {} seated over {} ticks",
