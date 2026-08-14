@@ -12400,6 +12400,469 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
   after warm-up — and the arm FAILS if the counter is dead (a no-op cache also re-rasters
   zero; the counter must first prove rasters happened), (c) page-exact invalidation on a
   scripted mover, (d) point/spot engagement, (e) budget, (f) goldens pinned additive.
+> **STATUS — P27.5 Tiers, retirement & the gate: COMPLETE (2026-08-13)** —
+> **seven** commits, counted rather than remembered (`0f53a21` the two tier
+> knobs, `8aa2f75` the ceiling ruling, `e11a598` the receiver-completeness
+> ruling, `5da8f26` observability, `4a6b693` the gate, `dfaae29` the GI seam's
+> second half plus the two small rulings and the memo, and the lint-and-doc fix
+> below), plus this block.
+> Battery green: **243 binaries, 4 388 passed, 0 failed, 8 ignored** against the
+> P27.4 audit's 242 / 4 370 / 0 / 8 — **one new test binary and eighteen new
+> arms**, which is exactly `tests/phase27_gate.rs` and the 1 + 1 + 2 + 1 in the
+> lib (`caps`, `settings`, `vsm_receiver`, `passes::gi`) plus the 1 + 4 + 1 in
+> `tests/vsm_marking.rs`, `tests/vsm_receiver.rs` and `tests/vsm_raster.rs` plus
+> the gate's 7. Completion checked by **matched counts**, not by a sentinel:
+> 204 `Running` + 39 `Doc-tests` = **243** = the `test result` lines, with
+> `inf_water` last.
+> `clippy --workspace --all-targets` under `-D warnings` and `cargo fmt --all
+> --check` clean, in that order and after the battery.
+>
+> **The P27.4 machine-ops lesson, refined by this batch rather than merely
+> repeated.** That lesson is *"the battery prints the warnings clippy will fail
+> on, hours before clippy runs"*, and it was applied: the run's stderr was read
+> throughout and printed **zero** warnings. Clippy then found **two** — both
+> `clippy::assertions_on_constants`, which **rustc never emits at all**. So the
+> lesson holds for the rustc-lint class and is silent about the clippy-only one,
+> and the honest form is: *reading the battery's stderr rules out the warnings
+> rustc would have printed, and rules out nothing else.* Both findings took
+> clippy's own remedy — a `const` block, which is the stronger claim (the P26.3b
+> precedent: the day the relation changes it must fail the BUILD).
+>
+> **One provenance note, because the counts will be compared.** Two commits
+> landed after the run: the lint fix above, and a **comment relocation** in
+> `vsm_receive.wgsl` — this batch's `vsm_heat` insertion had landed between
+> `vsm_light_shadow`'s doc comment and the function it describes. The first
+> touches two test files and adds no arm; the second is comments plus one
+> `_ = n;` phony assignment. Every binary they could reach was re-run at final
+> HEAD: `-p inf-render --release` **whole** (399 lib + every integration binary,
+> 0 failed, and the 100 golden arms again under `INF_GOLDEN_STRICT`) and
+> `-p inf-player --release` whole. **And the comment fix caught a real defect
+> on its way in**: `let _ = n;` is not WGSL (`Identifier can't be \`_\``), which
+> failed 99 of the golden binary's 100 arms at `create_shader_module` — a
+> reminder that `composed_scene_shaders_validate` has to be re-run after **any**
+> shader edit, including one that looks like a comment.
+> **Goldens stay 54 and none was re-blessed** — `git diff --name-status` over
+> `tests/goldens/` across the batch is **empty**, and the stronger check was run
+> too: all 100 arms of `crates/inf-render/tests/golden.rs` pass under
+> `INF_GOLDEN_STRICT`, which compares against the committed PNGs pixel for
+> pixel. **No schema moved** (`VsmSettings` is not serialized), no `.inf_lvl`
+> payload moved, and **no new external dependency**.
+> **114 deleted lines in `crates/`, `runtime/` and `editor/`**, and every one is
+> a replacement or a reflow: 59 in `vsm_receiver.rs` (the two retired shader
+> constants' mirror assertions and the arms that carried them, replaced by more
+> assertions than they held), 9 + 9 in `vsm_mark.rs` / `vsm.rs` (a return type
+> widened to carry two counters and a summary format string gaining a field),
+> 7 + 3 + 4 + 4 in the shaders (two constants retired to the uniform, the
+> pixel index gaining its stride, the two light loops' directional branch
+> rewritten to take a shadow), 6 in `lib.rs` (re-export reflows), and the rest
+> single lines of doc. **No assertion was removed or loosened**: the one
+> constant-mirror pair that went is written out in §2 of the memo as an
+> exchange, and the arm that replaced it makes three claims where the pair made
+> two.
+>
+> **The four clauses, against what is measured:**
+>
+> * *"High/Medium run VSM; Low keeps CSM (the clamp law); CSM code stays as the
+>   fallback, demoted not deleted"* — **met, and the golden trap is resolved
+>   explicitly rather than survived.** The clamp itself landed at **P27.1**,
+>   deliberately early, so nothing could ship that forgot it: `&=` against a
+>   constant clears a flag and can never set one. What P27.5 owed was the
+>   *knobs* and the *statement*.
+>
+>   **The statement first, because it is the trap.** Shadows have been default
+>   **OFF** since P13, so "High runs VSM" is a claim about which *mechanism*
+>   serves shadows when a project enables them — not that a High frame has
+>   shadows in it. (P27.4's own arm had to be corrected on exactly this point:
+>   `RenderTier::apply` clears `ShadowSettings::enabled` at Low too, and has
+>   since P13.4.2.) **Nothing about the shipped default changed here**, and that
+>   is a product decision recorded rather than a thing left undone: turning
+>   shadows on by default changes what every existing project looks like and
+>   what fifty-four committed frames record, and it belongs to whoever owns the
+>   shipping profile. `docs/memos/p27-5-tiers-and-retirement.md` §1 carries it.
+>
+>   **The knobs**: `mark_stride` and `pcf_radius`, and the pair is only
+>   interesting together because they clamp in **opposite arithmetic
+>   directions** for one reason — a larger stride dispatches fewer threads, a
+>   larger radius loads more texels. So the arm asserts the **cost** falls with
+>   the tier (marking threads per pixel **1.0 → 0.25**, kernel taps per fragment
+>   **9 → 1**) rather than that two numbers move, and a re-tune that inverts one
+>   of them fails. Both are refused out of range at the settings boundary,
+>   `whatever enabled says`, and every tier clamp is asserted to land on a
+>   configuration that boundary accepts.
+>
+>   **The default path is bit-identical, measured rather than hoped**:
+>   `gid.xy * 1u` is `gid.xy`; `VsmReceiverParams::new` writes exactly
+>   `VSM_PCF_RADIUS` and `VSM_SLOPE_BIAS_TEXELS` at the default; the retired
+>   WGSL literal `2.1213203` **is** that Rust constant's `f32`, bit for bit; and
+>   the four virtual-shadow goldens pass under `INF_GOLDEN_STRICT`.
+>
+>   The two retired shader constants are an **exchange**: the radius and its
+>   bias arrive per frame in `counts.z` and `params.w` — reserved fields, so no
+>   uniform grew — derived from each other in one place, so a one-tap kernel can
+>   never run a three-tap bias. `the_kernel_and_its_bias_are_read_from_the_
+>   uniform_the_tier_writes` names the loop header and the multiply, which is
+>   the P27.4-audit corollary about pinning the expression whose **absence** is
+>   the defect.
+>
+> * *"GI keeps its own voxel occlusion (the P18 law … VSM pages are
+>   camera-driven and stay out of GI)"* — **met, and this batch had to extend
+>   it, which is the interesting half.** P27.1's `the_gi_pass_never_reads_a_
+>   shadow_page` bans VSM from GI's own sources. It could not see the meeting
+>   point **P27.5 created**: closing the receiver hole (below) means four lit
+>   shaders now compute a virtual-shadow factor and a GI irradiance in one
+>   fragment, a few lines apart, and multiplying the second by the first is a
+>   one-character edit that would make the irradiance at a fixed world point a
+>   function of where the viewer stands.
+>
+>   `a_shadow_page_never_reaches_the_ambient_term` is the second half. Scoped
+>   rather than spelled (the P23 law): the region from the ambient block to the
+>   end of each fragment shader, asserted to contain the GI call, with every
+>   shadow term banned inside it — **and** the head of the same shader required
+>   to take the sun shadow, so the ban is not satisfied by a shader that has no
+>   shadows in it at all.
+>
+> * *"`phase27_gate` arms (a)–(f)"* — **met, six arms plus two carried claims,
+>   in `runtime/inf-player/tests/phase27_gate.rs`**, on a real device, over a
+>   scripted approach, through `inf_player::render::project_scene` — the one
+>   door a shipped frame's scene comes through.
+>
+>   **(a) deterministic + PIE == shipping.** Two runs of one walk agree byte for
+>   byte and two *hosts* — a cooked pack and an editor `ScenePayload` — agree on
+>   the trace **and** the frame bytes, because two hosts can resolve the same
+>   pages and shade them differently. The trace is by **address**
+>   (`light/face/level/x/y`, sorted) and never by slot: a slot index is an
+>   allocation order. Anti-vacuity in both directions — the trace must MOVE
+>   along the walk, and the shadowed frame must differ from the same frame with
+>   virtual shadows off.
+>
+>   **Refinement under camera approach rides here**, which is where the P26.5
+>   audit routed it (*"restated AT the gate, over the page-allocation trace"*):
+>   the finest resident level of the **sun's** tree falls along the approach and
+>   never goes backwards. One correction the fixture forced and it is worth the
+>   line: a handle is the n-th shadow-casting light in *scene* order and the
+>   projector walks `Guid` order, so the first draft was reading the **spot's**
+>   levels — which a camera approach does not refine. Every per-light assertion
+>   in the file locates its light by **tree kind** now.
+>
+>   **(b) zero re-rasters after warm-up, and the arm fails if the counter is
+>   dead.** Built the way the ROADMAP's own anti-vacuity clause demands: the
+>   warm-up must be proven to have rasterized, drawn, packed and **cleared**,
+>   the atlas must hold occupied slots, and then six more frames of the
+>   identical scene from the identical eye move `pages`, `draws` and
+>   `cleared_pages` by **zero** — while `cached_pages` grows by **at least a
+>   full resident set a frame**. That last one is what tells "nothing happened"
+>   from "nothing needed to happen", and it is what a no-op cache cannot
+>   produce. A parked camera, not a walk: a moving camera moves every page
+>   matrix and would invalidate for a reason that has nothing to do with
+>   caching.
+>
+>   **(c) page-exact invalidation on a scripted mover.** A **real entity**,
+>   moved in the sim's world and re-projected through the one door, with the
+>   expected page set computed **independently** — every resident page's own
+>   matrix (through `VsmSystem::page_matrix`, the shipped door) against the
+>   mover's bounding sphere at both positions with `vsm_page_sees_sphere`. The
+>   count is asserted **exactly**, and the fixture is checked to have pages the
+>   mover does *not* touch, or "exactly" cannot be told from "everything". A
+>   settled frame is taken first, so the count is a delta from a frame that
+>   itself rasterized nothing.
+>
+>   **(d) point/spot engagement.** One quadtree and one cube register beside the
+>   clipmap, both hold resident pages, and the **point's pages are resident on
+>   more than one FACE** — which is the thing a cube tree does that a quadtree
+>   does not, and the assertion a total cannot make. The receiver's sun slot is
+>   checked against the first shadow-casting directional light's slot in the
+>   projected scene rather than against index 0. Then **zero** on the shipped
+>   defaults: no receiver frame, `VsmRasterStats::default()`,
+>   `VsmStreamStats::default()`, and an empty trace.
+>
+>   **(e) budgets, in P26.5's three classes.** LOAD (cook → pack → world,
+>   against `LOAD_BUDGET_MS`); **WORLD** on every adapter, because a page is a
+>   page everywhere — the per-frame page counts sum to the raster's own total
+>   (so the ceiling is not asserted against a bookkeeping bug), no frame exceeds
+>   `VSM_MAX_RASTER_PAGES`, the residency stays inside the atlas it was planned
+>   with, and the marking pass dispatches one thread per pixel at the tier's
+>   stride; and **CLOCK** only where a millisecond represents a frame.
+>
+>   **The sun's drain bound is asserted here**, because this is the one place
+>   both of its numbers are in scope: measured **44.76 frames a quantum**
+>   against **4** to drain 1 024 slots at 256 a frame — ratio **11.19**, in the
+>   `10..13` band. (The first draft wrote `floor + 1` for the drain and reported
+>   8.95 — the same arithmetic error one place over, and the ratio is the entire
+>   argument for `VSM_MAX_RASTER_PAGES` being a cap on *work*.)
+>
+>   **(f) goldens pinned additive**: 54, by content digest as well as by count,
+>   with the four `vsm_*` frames named — so "additive" is a claim about this
+>   phase's own additions rather than about a number. Deliberately a **second**
+>   copy of `phase26_gate`'s constants rather than a shared helper: two gates
+>   are two phases' claims about one directory, and a shared constant would let
+>   one phase's re-bless satisfy the other's pin.
+>
+>   **Plus the phase's own ≥8k claim, MEASURED.** Effective resolution is the
+>   virtual extent a receiver addresses at its finest level, read off the **live
+>   tree** on a configuration `RenderTier::High.apply` produced: **64 pages ×
+>   128 texels = 8 192** a side, **7.81 mm** a texel over a ±32 m level 0. An
+>   equivalent single shadow map is **268 MB** against the atlas's **64 MiB**,
+>   which is the sentence the whole phase exists to make true, as arithmetic.
+>   Medium's clamp takes it to 4 096 — ≥8k is a **High** claim.
+>
+> **THE RECEIVER-COMPLETENESS RULING: closed, not owned.** The P27.4 remainder
+> was literal and verified at the time — *"`vgeom_mesh.wgsl` and
+> `scatter_mesh.wgsl` take the analytic term but not the directional one,
+> because neither has ever called `shadow_factor`"*, and `git log -S` over both
+> files' whole history returned nothing. So the engine's flagship geometry path
+> and its ground cover received no sun shadow **from either mechanism**. A phase
+> named Virtual Shadow MAPS whose flagship geometry path cannot RECEIVE a sun
+> shadow is a hole, and this closes it: both shaders already bind the shared
+> environment group, so only the call site was missing, and it is spelled
+> exactly as `mesh.wgsl` spells it. Closing it **through `shadow_factor`**
+> closes it for the cascade at the same time, which the device arm measures
+> rather than argues. The arm renders a roof over a meshlet grid and a scattered
+> field, each in its own colour so a pixel is attributable to the pipeline that
+> drew it — a floor pixel darkening proves only what P27.4 already proved. (The
+> first draft classified "blue-dominant" pixels and found the **sky**: 82 % of
+> what it called the meshlet surface.)
+>
+> **`voxel.wgsl` is REFUSED, with a sentence and an arm.** It is
+> `ShaderKind::Plain`: it binds no environment group and *cannot* call either
+> receiver. Giving it one to get a shadow would make it look integrated — AO'd,
+> fogged, shadow-receiving — while it still casts no shadow, feeds no GI and is
+> invisible to the depth prepass, which is the half-wired shape its own header
+> has refused since P21.1. The fix is not a call site; it is **P28.1's VisBuffer
+> resolve**. `every_env_bound_lit_path_receives_the_suns_shadow_and_voxel_is_
+> refused` reads `passes::shader_kind` for the composition, so the day it
+> changes the refusal is a failing test rather than a stale comment.
+>
+> **THE CEILING, RULED — the P27.4 audit's assigned tier decision.**
+> `MAX_LIGHTS` is 16 and `VSM_MAX_PROJECTIONS` is 64, and `for_scene` registered
+> a tree for every shadow-casting light with no reference to the first number.
+> **Ruled: refuse at registration, typed and counted.** Lifting `MAX_LIGHTS` is
+> the wrong lever — that number is the forward renderer's analytic light loop, a
+> per-pixel shading cost P7.1 chose, and moving it makes every lit fragment in
+> the engine pay for a virtual-shadow ceiling. What a shadow phase may decide is
+> whether to allocate pages for a light nothing shades.
+>
+> `vsm_light_trees` returns `VsmTreeSet` now: the trees plus **two** counters,
+> one per ceiling, because the two refusals are different facts and one number
+> would wear both names. It is a **stop** rather than a skip, and that is free
+> rather than careful — `index ≥ MAX_LIGHTS` is a *suffix* of the light list, so
+> the handle invariant the projection cap protects is untouched by construction.
+> The **sun** is exempt from the *slot* mechanism (it rides `counts.x`, which is
+> why it was put there) and **not** from the ceiling: a directional light past
+> index 16 has no direct term either. The arm flips from documenting a hazard to
+> pinning a rule, and the invariant *every rasterized page is sampleable* is
+> assertable.
+>
+> **OBSERVABILITY, both halves of the P27.1 remainder.** `ViewMode::VsmPages`
+> is the VT heat-map's twin one virtual system over, and it earns a mode of its
+> own because of the state it shows that a lit frame cannot: a page with no
+> resident ancestor reads as *lit*, so a missing shadow and a surface nothing
+> shadows are the same picture — **blue** gives it a colour. It rides `flags.w`,
+> which was reserved. `vsm_heat` is deliberately a **page** view and not a tap
+> view: no normal offset, no kernel, because what it is about is which page a
+> pixel lands in; it reads the same table and the same projection and never
+> returns a shadow factor. The arm is counters-move-then-zero **on pixels** —
+> the resident colour covers the floor with a tree and covers **nothing**
+> without one — and it asserts the page view differs from the **unlit** frame,
+> which is the `VtResidency` defect measured rather than remembered (this mode
+> sets `flags.x` too, so a ramp below the short-circuit would never execute).
+> Both hosts log the line: the editor on entering the view, the player once a
+> second beside the two streaming summaries. A level with virtual shadows off
+> produces **no line at all** rather than a line of zeros.
+>
+> **The two small owed rulings, each decided by a measurement.**
+>
+> * **The blend's resident partner — refused for P27, routed to P28.4.**
+>   Measured on a receding plane spanning four resident levels: **10 of 17**
+>   resident pages (59 %) already have their coarser partner resident. Both
+>   halves are asserted in both directions, so the number is a measurement
+>   rather than a printout — *none* would mean the P27.4 bound is worse than it
+>   says, and *all* would retire it. Refused because the vehicle already exists
+>   and already has an owner: `VSM_PRIORITY_SPECULATIVE`, a rank with no
+>   producer, assigned to P28.4. Marking the partner at equal priority would
+>   make the want set a function of `level_blend` — a *quality* knob — and would
+>   move the page trace P27.3's caching clause and this gate's arm (a) are
+>   measured against.
+> * **The skinned cull sphere — one correction, and the fix costed.** The
+>   carried sentence said the exact bound is *"the posed AABB the renderer is
+>   still not handed"*, which implied `inf-anim`'s cooperation. **It does not**:
+>   the instance already carries its joint palette, so a pose-following bound is
+>   computable from data in hand — transform the bind sphere's centre by each
+>   joint and union, scaling the radius by each matrix's largest axis length.
+>   Measured on the pose the device arm already drives: shipped **2.1213 m** at
+>   the bind centre against a palette union of **1.4142 m** at the posed centre —
+>   **67 %** of the radius and **30 %** of the volume, both containing the pose.
+>   Not landed here, because a tighter caster sphere changes which pages a mover
+>   invalidates, which is the exact quantity arm (c) asserts; routed to **P28.3**,
+>   where the CPU caster cache already lives.
+>
+> **Mutation-verified — nine mutations, and two of the first cut's were
+> MIS-AIMED rather than survivors, which is worth recording because both
+> mistakes are instructive.** Killed by name: a cache that never hits (arm (b));
+> an invalidation scatter that folds nothing (arm (c)); a point light given a
+> quadtree (arm (d)); an inert sun quantum (arm (e)); a constant level rule (the
+> refinement claim); a stride absent from the dispatch (the marking arm); and a
+> registration with no shader ceiling (the ceiling arm). The two mis-aims:
+> bumping every page's key **after** the scatter is a **no-op**, because the
+> same bump lands on the cached key the next frame too; and mutating the
+> **receiver's** cube-face rule cannot be seen by an arm that reads what the
+> **marking** pass made resident. Re-aimed, both die.
+>
+> **Two corrections the gate's own fixture forced.** `SceneDoc` keys its
+> creation-order list by the guid it minted, so re-keying an entity **orphans it
+> at save time** — the fixture lost its fifth instance to that, and the mover is
+> found by NAME now. And the light **order** is the projector's `Guid` walk, not
+> the document's, which cost the refinement assertion a first draft aimed at the
+> spot.
+>
+> **What this batch did NOT do**, in one place. It **did not change the shipped
+> default** — shadows stay off on every tier, which is the product decision §1
+> of the memo records rather than an omission. It **did not land the palette-union
+> caster bound** or the blend's speculative want, both ruled above with their
+> measurements and routed. It **added no golden**: Medium's stride and one-tap
+> kernel are asserted as cost and as containment, and a tier's *look* is not a
+> thing to freeze. It **added no pop-in counter type** — the brief allowed a
+> `VtPopIn` twin "if the gate needs them", and it did not: `VsmRasterStats` and
+> `VsmStreamStats` already carry admits, evicts, deferrals, pages, draws and the
+> cache's own hits, and the gate reads all six. And `vsm_heat` is a **second
+> reader** of the indirection table beside `vsm_shadow` — a debug view, never a
+> sampling door, and the one place in this phase where the same table is walked
+> by two functions. Phase 27's own remainder list, routed by sub-phase, is in the
+> completion block below.
+>
+> ## PHASE 27 — VIRTUAL SHADOW MAPS: **COMPLETE** (2026-08-13)
+>
+> Five batches and four adversarial audits, from `a208eb3` — the Ring-0 crate —
+> to this block. The phase's own "Done when" is answered clause by clause below
+> **against code**, with the arm that fails if the claim stops being true, and
+> the clauses that are met with a bound say so in the same sentence.
+>
+> **The goal**, first, because it is the sentence the clauses serve: *"shadow
+> resolution becomes virtual — 16k-equivalent per light paid only for pages that
+> shadow visible pixels."* Met at **8 192 texels a side per clipmap level** on
+> the shipped High configuration (the phase's own "≥8k"; the 16 k of the goal
+> sentence is a settings value the boundary accepts and no tier grants), paid
+> for out of a **64 MiB** atlas against the **268 MB** an equivalent single
+> shadow map would cost — measured off the live tree by
+> `the_high_tier_addresses_at_least_eight_thousand_shadow_texels`, and *"paid
+> only for pages that shadow visible pixels"* is what the screen-driven marking
+> pass makes structurally true: a page exists because a visible pixel's depth
+> asked for it.
+>
+> ### "Done when", clause by clause
+>
+> 1. ***"directional + spot + point shadows render through the page atlas at ≥8k
+>    effective on High tier"*** — **MET.** All three kinds render:
+>    `golden_vsm_directional`, `golden_vsm_spot` and `golden_vsm_point` are
+>    committed frames (P27.4), and `phase27_gate`'s arm (d) asserts the spot's
+>    quadtree and the point's cube both hold resident pages with the point's on
+>    **more than one face**. The ≥8k is measured rather than read off a literal
+>    (above). The **bound in the same sentence**: it is a High claim —
+>    `RenderTier::apply` takes Medium to 4 096 a side, which is the ladder
+>    working rather than a gap.
+> 2. ***"a static scene re-rasterizes zero pages after warm-up
+>    (engagement-counter proven, falsifiable)"*** — **MET, and the falsifiability
+>    is the clause's own words made executable.** `phase27_gate`'s arm (b) proves
+>    the warm-up rasterized, drew, packed and cleared, proves the atlas holds
+>    occupied slots, then asserts `pages`, `draws` and `cleared_pages` move by
+>    **zero** over six more frames while `cached_pages` grows by at least a full
+>    resident set per frame. Mutation-verified: a cache that never hits kills it.
+>    `a_static_scene_stops_rasterizing_pages_after_warm_up` (P27.3) is the
+>    renderer-level twin, and `a_cached_pages_texels_are_what_a_fresh_raster_
+>    produces` is the one that makes it a claim about *texels* rather than about
+>    a skipped pass.
+> 3. ***"moving one object invalidates exactly the pages its bounds touch"*** —
+>    **MET, exactly, twice.** `phase27_gate`'s arm (c) moves a **real entity** in
+>    the sim and re-projects through the one door, with the expected set computed
+>    independently through `vsm_page_sees_sphere` over each resident page's own
+>    matrix and the count asserted **equal** — on a fixture checked to have pages
+>    the mover does not touch. `a_mover_invalidates_exactly_the_pages_its_bounds_
+>    touch` (P27.3) adds the texel half: every page outside the set is
+>    bit-identical afterwards.
+> 4. ***"vgeom/skinned/terrain/rigid all cast"*** — **MET** (P27.2), each with a
+>    device arm that reads the atlas back and compares depth against a CPU
+>    re-derivation through the same page matrix. **And P27.5 closed the mirror
+>    half the clause does not name**: vgeom and scatter surfaces now *receive*
+>    the sun's shadow too, which neither had ever done from either mechanism.
+>    The **bounds**: virtualized geometry casts through its classic LOD chain
+>    rather than through a per-page meshlet cut
+>    (`docs/memos/p27-2-vgeom-casters.md`); a cut-out material casts its whole
+>    quad; and a voxel surface neither casts nor receives, which its own header
+>    has refused since P21.1 and which P28.1 closes.
+> 5. ***"the page-allocation trace is deterministic and PIE == shipping
+>    holds"*** — **MET.** `phase27_gate`'s arm (a): two runs of one scripted walk
+>    agree byte for byte, and a cooked pack and an editor `ScenePayload` agree on
+>    the trace **and** the frame bytes — two boot paths sharing only
+>    `project_scene`. Anti-vacuity in both directions. `vsm_pie.rs` (P27.4) is
+>    the same claim at the renderer's own level.
+> 6. ***"Low tier keeps CSM through `RenderTier::apply`"*** — **MET**, and the
+>    clamp is the shape the law demands (`&=` against a constant clears and can
+>    never set). `the_tier_clamp_runs_vsm_on_high_and_medium_and_keeps_the_
+>    cascade_on_low` asserts it on the settings **and** on the system, and
+>    asserts the cascade's own liveness separately — the "demoted, not deleted"
+>    half, and the half a frame can see. **The bound, stated plainly**: Low also
+>    clears `ShadowSettings::enabled` (a P13.4.2 decision this phase did not
+>    touch), so "Low keeps CSM" is about which *mechanism* a Low machine runs and
+>    not about a Low frame having shadows in it — the same distinction that makes
+>    "High runs VSM" a statement about a mechanism, because **shadows are OFF by
+>    default on every tier** and this phase deliberately did not change that.
+>
+> ### The remainders, routed
+>
+> **To P28.1 (VisBuffer):**
+> * **`voxel.wgsl` has an analytic 3D light loop and no receiver** — refused
+>   here with its reason and its arm; it gets shading parity when meshlet and
+>   voxel surfaces are shaded through one material pass with the env group bound
+>   once.
+> * **The marking signal is per-pixel and the VT feedback is per-surface** — the
+>   asymmetry `docs/memos/p26-4-feedback-mechanism.md` records; a VisBuffer makes
+>   a per-fragment texture mark reachable by the same argument that made the
+>   shadow one reachable.
+>
+> **To P28.3 (one streamer):**
+> * **No clipmap scroll**: a level's grid shifting re-rasterizes every resident
+>   page of that level. A scroll leaves **127 pages against up to 4 096** dirty
+>   and is entirely Ring-0 — it belongs where re-seating a slot stops being one
+>   crate's private business.
+> * **A stamp-only cache key would make part of a grid shift free** (the P27.3
+>   audit's correction), beside the scroll.
+> * **A fully-cached frame still packs its casters on the CPU** — the stamps are
+>   a function of the caster set, so the sync and pack run every frame.
+> * **The CPU scatter pack's membership is camera-driven** (`bucket_center` plus
+>   a band clamped to `cull_distance_m`), inherited from the cascade path — the
+>   P18 law's own shape, and the merged residency is where it stops.
+> * **The terrain deformation window is refused** — camera-following, so a caster
+>   mesh built through it would have vertices that are a function of where the
+>   viewer stands. Cost: a rut up to `DEFORM_MAX_DEPTH_M` = 1 m casts no shadow.
+>   The P22.1 lattice is already committed; only the *window* follows the camera.
+> * **The skinned cull sphere is the bind pose inflated 50 %**, with its exact
+>   fix now costed (67 % of the radius, 30 % of the volume) — it lands where the
+>   CPU caster cache lives, because it changes what a mover invalidates.
+>
+> **To P28.4 (predictive prefetch):**
+> * **`VSM_PRIORITY_SPECULATIVE` still has no producer** — the rank ships and
+>   the sort is tested; P28.4 is its caller.
+> * **The level blend's partner is resident 59 % of the time** and the receiver
+>   cannot ask for it; a speculative want at strictly lower priority is the fix
+>   that does not move the want set a caching clause is measured against.
+>
+> **Carried, unrouted, and honest:**
+> * **Shadows are OFF by default on every tier** — a product decision, not an
+>   engineering one, with a fifty-four-frame re-bless in it.
+> * **A cut-out material shadows as its whole quad**: the page raster declares no
+>   texture and no sampler, which is what makes the P18 law hold there *by
+>   construction*; a real cutout fetch would put camera-driven texture residency
+>   inside a shadow page's content.
+> * **The kernel is 3 × 3 and there is no soft-shadow width** — no PCSS, no
+>   blocker search, no contact hardening.
+> * **A light's `range` does not cull a marking projection.**
+> * **`sprite.wgsl`'s `MAX_2D_LIGHTS` loop has no receiver** — a separate radial
+>   falloff system, not an oversight.
+> * **Two ceilings' call sites have no device arm** (`admit_group` from the vgeom
+>   and terrain paths; the `scatter_casters` truncating case) — reaching them
+>   costs a headless fixture more than the lines they would arm, and the door
+>   itself is armed.
+> * **Medium's marking stride and one-tap kernel have no golden**: they are
+>   asserted as cost and as containment, and a tier's *look* is not frozen.
 
 ### Phase 28 — Nanite-native unification: one virtual streamer
 
