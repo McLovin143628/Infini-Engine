@@ -472,22 +472,14 @@ impl PackWriter {
     /// Durability is deliberately *not* guaranteed: there is no fsync before the
     /// rename, because a pack is a rebuildable build artifact, not a document.
     pub fn write_to_file(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let mut buf = Vec::new();
         self.write(&mut buf)?;
-
-        // Never leave temp litter next to a ship artifact — a mid-cook failure
-        // (disk full is the realistic one) must clean up after itself just as a
-        // failed rename does.
-        let tmp = temp_sibling(path);
-        let staged = std::fs::write(&tmp, &buf).and_then(|()| std::fs::rename(&tmp, path));
-        if let Err(err) = staged {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(err.into());
-        }
-        Ok(())
+        // The mechanism this doc describes now lives in one place —
+        // [`crate::atomic::write_atomically`] — which is where every other
+        // document door in the engine reaches it too. Never leave temp litter
+        // next to a ship artifact: a mid-cook failure (disk full is the
+        // realistic one) cleans up after itself just as a failed rename does.
+        Ok(crate::atomic::write_atomically(path, &buf)?)
     }
 
     /// Serialize the pack to an in-memory buffer.
@@ -496,17 +488,6 @@ impl PackWriter {
         self.write(&mut buf)?;
         Ok(buf)
     }
-}
-
-/// A unique temp path next to `path` (same directory, so the rename that
-/// follows stays on one filesystem and is therefore atomic).
-fn temp_sibling(path: &Path) -> std::path::PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let unique = NEXT.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{pid}.{unique}.tmp"));
-    path.with_file_name(name)
 }
 
 /// Compress a payload if it is worth it; returns `(stored_bytes, compressed?)`.

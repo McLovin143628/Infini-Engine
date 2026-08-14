@@ -86,12 +86,19 @@ impl AssetSidecar {
         Ok(toml::from_str(text)?)
     }
 
-    /// Write the sidecar next to `payload_path`.
+    /// Write the sidecar next to `payload_path`, **atomically**.
+    ///
+    /// Truncating an existing sidecar is worse than not writing one: the asset's
+    /// GUID would be lost while its payload stayed, and the next scan re-registers
+    /// that payload under a *content-derived* id — so the id churns with the
+    /// contents and every reference into the asset goes stale. Renaming a
+    /// complete temp over the target makes the sidecar wholly old or wholly new.
+    ///
+    /// The discipline used to live in one caller
+    /// (`inf_editor_core::assets::save_sidecar_atomically`, which six other
+    /// sites did not use). It belongs here, where every caller reaches it.
     pub fn save(&self, payload_path: &Path) -> Result<()> {
-        if let Some(parent) = payload_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(sidecar_path(payload_path), self.to_toml()?)?;
+        crate::atomic::write_atomically(&sidecar_path(payload_path), self.to_toml()?)?;
         Ok(())
     }
 
@@ -183,5 +190,42 @@ mod tests {
         assert!(sidecar_path(&payload).exists());
         let back = AssetSidecar::load(&payload).unwrap();
         assert_eq!(back.guid, s.guid);
+    }
+
+    /// **`save` is atomic** (C4-11): a reader holding the previous sidecar open
+    /// never observes the restamp, and no temp litter lands in the content root.
+    ///
+    /// The consequence being defended is specific: a torn sidecar loses the
+    /// asset's GUID while its payload stays, and `AssetDb` then re-registers
+    /// that payload under a content-derived id that churns with its bytes.
+    #[test]
+    fn saving_a_sidecar_never_exposes_a_torn_one() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("Hero.inf_mesh");
+        std::fs::write(&payload, b"payload").unwrap();
+
+        let first = AssetSidecar::new(AssetId::new(), AssetKind::Mesh, ContentHash::of(b"payload"));
+        first.save(&payload).unwrap();
+        let before = std::fs::read_to_string(sidecar_path(&payload)).unwrap();
+
+        let mut live = std::fs::File::open(sidecar_path(&payload)).unwrap();
+        let mut second =
+            AssetSidecar::new(AssetId::new(), AssetKind::Mesh, ContentHash::of(b"other"));
+        second.tags = vec!["restamped".into()];
+        second.save(&payload).unwrap();
+
+        let mut seen = String::new();
+        live.read_to_string(&mut seen).unwrap();
+        assert_eq!(seen, before, "a live reader must not observe the restamp");
+        assert_eq!(AssetSidecar::load(&payload).unwrap().guid, second.guid);
+
+        let strays: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "left temp files behind: {strays:?}");
     }
 }

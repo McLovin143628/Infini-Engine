@@ -18,6 +18,7 @@
 //! `inf-material`) and the editor's import orchestrator, which depend on this
 //! crate for identity, the sidecar, and [`AssetPayload`].
 
+pub mod atomic;
 pub mod data;
 pub mod db;
 pub mod derived_material;
@@ -34,6 +35,7 @@ pub mod sidecar;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod watch;
 
+pub use atomic::{temp_sibling, write_atomically};
 pub use data::{CellValue, EnumAsset, FieldDef, FieldType, StructAsset, TableAsset};
 pub use db::{AssetDb, AssetEntry, IdCollision};
 pub use derived_material::{

@@ -573,25 +573,20 @@ impl std::fmt::Debug for TerrainAsset {
 /// safety contract forbids. A failed write cleans up its temp file rather than
 /// leaving litter beside the asset.
 ///
+/// The mechanism comes from [`inf_asset::write_atomically`] rather than being
+/// re-spelled here, which also gives this door the *counter* half of the Spike C
+/// temp-name law: the name used to be pid-only, so two threads of one process
+/// writing two terrains at once could pick one temp path and interleave into
+/// each other's rename.
+///
 /// Returns the bytes written, so a caller can hash them into the sidecar without
 /// re-reading the file.
 pub fn write_terrain_asset<'a>(
     path: &std::path::Path,
     asset: &'a TerrainAsset,
 ) -> std::io::Result<&'a [u8]> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let bytes = asset.as_bytes();
-    let tmp = {
-        let mut s = path.as_os_str().to_os_string();
-        s.push(format!(".{}.tmp", std::process::id()));
-        std::path::PathBuf::from(s)
-    };
-    if let Err(err) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err);
-    }
+    inf_asset::write_atomically(path, bytes)?;
     Ok(bytes)
 }
 
