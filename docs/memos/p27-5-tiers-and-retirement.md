@@ -185,6 +185,17 @@ Measured on the pose the device arm already drives: the shipped bound is
 centre — **67 %** of the radius and **30 %** of the volume, and both contain the
 posed geometry.
 
+> **P27.5 audit, 2026-08-13 — what those two percentages are.** The fixture is a
+> **single translating joint at unit scale**, so the union radius *is* the bind
+> radius and the shipped one is `1.5 ×` it: 67 % and 30 % are
+> `1/(1 + SKINNED_POSE_MARGIN)` and its cube — the margin's own reciprocal —
+> and they would be the same two numbers for a pose that moved a hundred metres.
+> The containment checks are real and the correction above stands: the palette is
+> in hand and `inf-anim` is not needed. What is **not** established is that a
+> palette union is tighter *in general* — with joints far apart the union can
+> exceed the inflated bind sphere, and no arm tests that. P28.3 inherits the
+> question rather than the number.
+
 **Not landed here.** A tighter caster sphere changes which pages the cull keeps
 and therefore which pages a mover invalidates, which is the exact quantity
 `phase27_gate`'s arm (c) asserts. It is a change that needs its own arms and its
