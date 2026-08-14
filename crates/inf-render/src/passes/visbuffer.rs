@@ -32,9 +32,10 @@
 //! colour to all four samples of its pixel, so a meshlet silhouette is a hard
 //! edge where the forward path resolves four. That is the whole content of the
 //! P28.1 MSAA ruling, it is measured by
-//! `the_visbuffer_edge_cost_against_the_forward_path`, and it is why this mode
-//! is a setting rather than the High-tier default. See
-//! `docs/memos/p28-1-visbuffer.md` §5.
+//! `the_edge_population_is_where_the_two_paths_are_allowed_to_differ` (the first
+//! draft of this line named an arm that has never existed — the P20 law, and the
+//! P28.1 audit's correction), and it is why this mode is a setting rather than
+//! the High-tier default. See `docs/memos/p28-1-visbuffer.md` §5.
 
 use crate::camera::{DEPTH_COMPARE, DEPTH_FORMAT};
 use crate::gpu::GpuContext;
@@ -524,19 +525,11 @@ impl VisState {
             });
 
         // ── the resolve ─────────────────────────────────────────────────────
-        let fs = wgpu::ShaderStages::FRAGMENT;
         let resolve_bgl = gpu
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("visbuffer-resolve"),
-                entries: &[
-                    entry(0, fs, uint_tex(false)),
-                    entry(1, fs, ro),
-                    entry(2, fs, ro),
-                    entry(3, fs, ro),
-                    entry(4, fs, ro),
-                    entry(5, fs, float_tex),
-                ],
+                entries: &resolve_bgl_entries(),
             });
         let resolve_shader = gpu
             .device
@@ -783,7 +776,7 @@ impl VisState {
         pool_bytes: u64,
         max_tri: u32,
     ) -> Result<(), VisPackError> {
-        let slots = (pool_bytes / MESHLET_REC_LEN as u64).min(u32::MAX as u64) as u32;
+        let slots = meshlet_slots_for_bytes(pool_bytes);
         match VisPacking::admit(instances, slots, max_tri) {
             Ok(()) => {
                 self.audit.flat_instances = instances;
@@ -796,6 +789,61 @@ impl VisState {
             }
         }
     }
+}
+
+/// **The resolve's own `@group(3)` layout entries**, hoisted out of
+/// [`VisState::new`] so a test can COUNT the storage bindings it spends
+/// (P28.1 audit — see [`VIS_FRAGMENT_STORAGE_BINDINGS`] and
+/// [`crate::passes::env_bgl_entries`]).
+fn resolve_bgl_entries() -> [wgpu::BindGroupLayoutEntry; 6] {
+    let fs = wgpu::ShaderStages::FRAGMENT;
+    let ro = wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Storage { read_only: true },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: fs,
+        ty,
+        count: None,
+    };
+    [
+        entry(
+            0,
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+        ),
+        entry(1, ro),
+        entry(2, ro),
+        entry(3, ro),
+        entry(4, ro),
+        // The flat instance table. A TEXTURE, and the whole reason the sum
+        // above is four and not five.
+        entry(
+            5,
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+        ),
+    ]
+}
+
+/// **The pool ceiling's byte→slot conversion**, in ONE place because it is
+/// measured in bytes at the call site and enforced in slots in the packing
+/// (P28.1 audit).
+///
+/// Its first draft lived only inside [`VisState::admit`] and the arm about it
+/// re-implemented the division — so replacing `MESHLET_REC_LEN` with a wrong
+/// constant left `the_pool_ceiling_converts_bytes_to_slots_at_the_record_length`
+/// green. Mutation-measured. A mirror is not a measurement (P24).
+pub fn meshlet_slots_for_bytes(pool_bytes: u64) -> u32 {
+    (pool_bytes / MESHLET_REC_LEN as u64).min(u32::MAX as u64) as u32
 }
 
 fn instance_texture(gpu: &GpuContext, rows: u32) -> wgpu::Texture {
@@ -833,6 +881,14 @@ mod tests {
     /// the arm exists so the ninth is a failing test here rather than a
     /// `create_pipeline_layout` refusal on a user's machine — which is how this
     /// ceiling was found in the first place.
+    ///
+    /// **Its first draft could not do that** (P28.1 audit). It asserted
+    /// `4 + 4 == 8` with both fours written as literals and a comment claiming
+    /// they were "read off `passes::mod`'s own constants"; they were not, and
+    /// turning the environment group's binding 6 from a uniform into a storage
+    /// buffer left the arm green — mutation-measured. It now COUNTS, off the two
+    /// entry lists the two layouts are actually built from, so the growth it is
+    /// named for is the thing it sees.
     #[test]
     fn the_resolve_spends_every_fragment_storage_binding_the_default_limit_grants() {
         assert_eq!(
@@ -841,13 +897,36 @@ mod tests {
             "the pinned wgpu's default storage-binding limit moved; the ruling in \
              VIS_FRAGMENT_STORAGE_BINDINGS is arithmetic about the old one"
         );
-        // The environment group's four, read off `passes::mod`'s own constants
-        // rather than counted by hand: GI SH probes, the VT table, the VSM table
-        // and its projections.
-        let env_storage = 4u32;
+        let is_fragment_storage = |e: &wgpu::BindGroupLayoutEntry| {
+            e.visibility.contains(wgpu::ShaderStages::FRAGMENT)
+                && matches!(
+                    e.ty,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { .. },
+                        ..
+                    }
+                )
+        };
+        // The environment group's: GI SH probes (5), the VT indirection table
+        // (16), the VSM page table (18) and its projections (19) — counted, not
+        // recited, and counted through `VtPools`/`vsm_receiver`'s own entry
+        // constructors, which is where two of the four actually come from.
+        let env_storage = super::super::env_bgl_entries()
+            .iter()
+            .filter(|e| is_fragment_storage(e))
+            .count() as u32;
         // The resolve's own: the four meshlet pools. The instance table is a
         // texture precisely so this sum is not five.
-        let resolve_storage = 4u32;
+        let resolve_storage = resolve_bgl_entries()
+            .iter()
+            .filter(|e| is_fragment_storage(e))
+            .count() as u32;
+        assert_eq!(
+            (env_storage, resolve_storage),
+            (4, 4),
+            "the split moved: the ruling in VIS_FRAGMENT_STORAGE_BINDINGS is \
+             arithmetic about four environment bindings and four pools"
+        );
         assert_eq!(
             env_storage + resolve_storage,
             VIS_FRAGMENT_STORAGE_BINDINGS,
@@ -904,14 +983,18 @@ mod tests {
     /// the packing, and the conversion is the meshlet record length. A frame
     /// whose pool is one record past the field is refused; one record short of
     /// it is admitted.
+    ///
+    /// **Calls the door's own conversion** (P28.1 audit). The first draft
+    /// re-implemented the division locally — "mirrors `VisState::admit`'s
+    /// arithmetic without a GpuContext" — so replacing `MESHLET_REC_LEN` with a
+    /// wrong constant inside `admit` left this green. Mutation-measured.
     #[test]
     fn the_pool_ceiling_converts_bytes_to_slots_at_the_record_length() {
         let rec = MESHLET_REC_LEN as u64;
         let mut s = VisAudit::default();
         let at = (VIS_MAX_MESHLET_SLOTS as u64) * rec;
         let over = at + rec;
-        // Mirrors `VisState::admit`'s arithmetic without a GpuContext.
-        let slots = |bytes: u64| (bytes / rec).min(u32::MAX as u64) as u32;
+        let slots = super::meshlet_slots_for_bytes;
         assert_eq!(slots(at), VIS_MAX_MESHLET_SLOTS);
         assert_eq!(slots(over), VIS_MAX_MESHLET_SLOTS + 1);
         assert_eq!(VisPacking::admit(1, slots(at), 124), Ok(()));

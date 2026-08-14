@@ -36,10 +36,13 @@ pub mod renderer;
 pub mod scene;
 pub mod settings;
 pub mod surface;
+/// The P28.1 visibility buffer's **packing contract** — the thirty-two bits that
+/// name a triangle, the typed refusal a scene past them takes, and the Rust twin
+/// of the resolve's barycentric solve.
+pub mod visbuffer;
 /// Virtual-shadow-map geometry (P27.1): the per-light projections, the
 /// clipmap's centring rule, the depth-convention ruling and the one level rule
 /// the marking pass mirrors.
-pub mod visbuffer;
 pub mod vsm;
 /// The P27.1 GPU mirror: one `Depth32Float` page atlas and one indirection
 /// buffer, executing an `inf_vsm::VsmTransaction`.

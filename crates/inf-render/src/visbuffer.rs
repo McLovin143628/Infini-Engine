@@ -211,13 +211,23 @@ impl VisPacking {
 /// A pixel's position on its triangle, with the **exact** screen derivatives of
 /// the perspective-correct barycentrics.
 ///
-/// [`VisBary::of`] is the Rust twin of `vis_resolve.wgsl`'s `vis_bary`. It is
-/// here so the construction can be *stated* in a language that has tests, and so
-/// the device arms have something to compare a readback **against** rather than
-/// merely re-running the shader and agreeing with themselves (the P24
-/// two-hosts law: a mirror is not a measurement, so
-/// `the_resolves_gradients_match_the_devices` feeds this the vertices and the
-/// pixel the GPU used and compares the numbers the GPU produced).
+/// [`VisBary::of`] is the Rust twin of `vis_resolve.wgsl`'s `vis_bary`, and it is
+/// here so the construction can be *stated* in a language that has tests: the
+/// arms below assert the gradient is the **limit of a central difference** at a
+/// second-order signature, with an inline control that drops the `2/width` pixel
+/// step and must disagree by 400×.
+///
+/// **What it is NOT, stated because the first draft of this block claimed
+/// otherwise** (P28.1 audit): it is not compared against the device. There is no
+/// arm that feeds the twin the vertices and the pixel the GPU used and checks the
+/// numbers the GPU produced — the visibility id names a slot in the *shared*
+/// meshlet pool and the slot→asset remap lives on the GPU, so a host cannot
+/// decode a readback id back to three vertices without rebuilding the streamer's
+/// residency. So this is a **mirror, not a measurement** (the P24 two-hosts law),
+/// and the device's gradients are witnessed only indirectly, through
+/// `parity_textured_virtual_texture` — the one row whose shading a derivative can
+/// reach at all. Closing that is P28.3's, where one streamer owns the remap and a
+/// host can name a slot.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VisBary {
     /// Perspective-correct barycentric weights, summing to 1.
@@ -253,6 +263,25 @@ impl VisBary {
     /// direction `vt_apply_normal` fails in (its own `abs(det) < 1e-12` returns
     /// the geometric normal): a degenerate case resolves to *something local*
     /// rather than to a NaN that would poison a whole tile of the atlas.
+    ///
+    /// # What the floor does and does not buy, measured (P28.1 audit)
+    ///
+    /// The guard carries an explicit `|| det.is_nan()` (`det != det` in the two
+    /// shaders) because every comparison against NaN is **false**: `|det| < ε`
+    /// alone lets a NaN vertex walk through the guard, through the solve and into
+    /// the frame. Measured, before this clause: one NaN clip coordinate produced
+    /// `λ = (NaN, NaN, NaN)` and non-finite gradients, from a function whose own
+    /// doc said a degenerate case resolves "rather than to a NaN".
+    ///
+    /// The floor is **not** a conditioning bound and does not pretend to be.
+    /// Measured on a sliver whose two edges are `ε` apart: at `ε = 1e-3` the
+    /// gradient is already 6.2 per pixel, at `1e-5` it is 33.6 and `λ` is
+    /// `(-0.40, 0.80, 0.60)` — finite, outside the triangle, meaningless. What
+    /// the floor guarantees is only that nothing **non-finite** leaves here; a
+    /// near-degenerate triangle leaves a garbage gradient, which `vt_mip`'s
+    /// `min(…, mip_count - 1)` turns into the coarsest level of the pyramid. That
+    /// is the safe direction (a blurry texel, not a NaN tile) and it is a
+    /// property of the consumer rather than of this function.
     pub fn of(c0: Vec4, c1: Vec4, c2: Vec4, ndc: Vec2, width: f32, height: f32) -> Self {
         let m = Mat3::from_cols(
             Vec3::new(c0.x, c0.y, c0.w),
@@ -260,7 +289,7 @@ impl VisBary {
             Vec3::new(c2.x, c2.y, c2.w),
         );
         let det = m.determinant();
-        if det.abs() < VIS_DET_EPS {
+        if det.abs() < VIS_DET_EPS || det.is_nan() {
             return Self {
                 lambda: Vec3::X,
                 d_dx: Vec3::ZERO,
@@ -274,7 +303,7 @@ impl VisBary {
         let dmu_du = inv * Vec3::X;
         let dmu_dv = inv * Vec3::Y;
         let d = mu.x + mu.y + mu.z;
-        if d.abs() < VIS_DET_EPS {
+        if d.abs() < VIS_DET_EPS || d.is_nan() {
             return Self {
                 lambda: Vec3::X,
                 d_dx: Vec3::ZERO,
@@ -582,6 +611,128 @@ mod tests {
         }
     }
 
+    /// **The parity oracle's independence, pinned** (P28.1 audit).
+    ///
+    /// `tests/visbuffer_parity.rs` rests entirely on the forward meshlet path
+    /// being a SECOND derivation of the same frame — the P27.5 law that a gate
+    /// cannot see an error the subsystems share. That property was stated in a
+    /// comment and checked by nothing, which is the same shape as a cited gate
+    /// that does not exist.
+    ///
+    /// So: every piece of shading arithmetic the two paths agree about must be
+    /// **written twice**. The day someone de-duplicates `shade_light` into the
+    /// shared lit prelude — an obviously good refactor, and the one that silently
+    /// retires the whole nucleus — one of the two files stops declaring it (it
+    /// must; a second declaration of a composed symbol does not compile) and this
+    /// arm fails.
+    ///
+    /// # The boundary this arm does NOT extend past, measured
+    ///
+    /// Both files are `ShaderKind::Lit(2)`, so both are composed with the same
+    /// prelude: `vt_sample`, `vsm_receive`, the environment lighting, the
+    /// atmosphere, the wetness. Those functions ARE shared, deliberately (the
+    /// resolve must reach the shadow atlas through the one declaration
+    /// `vsm_receive` owns), and an error inside them is invisible to every parity
+    /// arm. Mutation-measured: adding `+ 1.0` to `vt_sample.wgsl`'s `vt_mip` —
+    /// a wrong mip for the whole engine — leaves all twelve arms green, because
+    /// both paths shift a level together. The nucleus is a gate on the
+    /// *reconstruction*, not on the shading library, and this arm marks exactly
+    /// where the one stops and the other begins.
+    #[test]
+    fn the_resolve_derives_its_own_shading_rather_than_borrowing_the_forward_paths() {
+        let resolve = include_str!("shaders/vis_resolve.wgsl");
+        let forward = include_str!("shaders/vgeom_mesh.wgsl");
+        // The BRDF and the vertex pull: the arithmetic a parity claim is about.
+        for f in [
+            "shade_light",
+            "distribution_ggx",
+            "geometry_smith",
+            "fresnel_schlick",
+            "point_attenuation",
+            "read_tri_byte",
+        ] {
+            let decl = format!("fn {f}(");
+            for (name, src) in [("vis_resolve.wgsl", resolve), ("vgeom_mesh.wgsl", forward)] {
+                assert!(
+                    src.lines()
+                        .map(|l| l.trim_end_matches('\r'))
+                        .any(|l| l.starts_with(&decl)),
+                    "{name} no longer declares `{f}` itself. If it has moved into \
+                     the shared lit prelude then the two paths are one program, \
+                     and `tests/visbuffer_parity.rs` compares it with itself — \
+                     which is the P27.5 law, and the ONLY thing standing between \
+                     that suite and being a mirror."
+                );
+            }
+        }
+        // …and no CODE line of the resolve reaches for the forward path's file.
+        // Comments may cite it (one does, about branch order) — a citation is
+        // documentation; an `include` would be the coupling.
+        assert!(
+            !resolve
+                .lines()
+                .map(|l| l.trim_end_matches('\r').trim())
+                .any(|l| !l.starts_with("//") && l.contains("vgeom_mesh")),
+            "a code line of vis_resolve.wgsl names vgeom_mesh.wgsl"
+        );
+        // The reconstruction the forward path does NOT have, and must not gain:
+        // it interpolates through the rasterizer, so a `vis_bary` in there would
+        // mean the oracle solved the same system the subject does.
+        assert!(
+            !forward.lines().any(|l| l.starts_with("fn vis_bary(")),
+            "vgeom_mesh.wgsl now solves for barycentrics too — the forward path's \
+             independence IS that it gets them from the rasterizer's \
+             interpolators"
+        );
+    }
+
+    /// **The per-pixel mark asks for the level the sampler reads** (P28.1 audit).
+    ///
+    /// `vis_feedback.wgsl`'s header cited an arm of this name and the arm did not
+    /// exist — the P20 law, three files over from where this batch caught it in
+    /// P27.5's. This is it: the LOD rule is written twice, in `vt_sample.wgsl`
+    /// (what a sample reads) and in `vis_feedback.wgsl` (what the streamer is
+    /// asked for), and a feedback pass that chased a different level than the
+    /// sampler reads is a streamer paging tiles nothing samples — which presents
+    /// as a permanent backlog with every counter green.
+    #[test]
+    fn the_per_pixel_mark_uses_the_same_mip_rule() {
+        // The three lines that ARE the rule: the footprint in texels, the larger
+        // axis, and the level it justifies. Everything else in the two functions
+        // is table addressing.
+        let core = [
+            "let dx = ddx * size;",
+            "let dy = ddy * size;",
+            "let rho = max(length(dx), length(dy));",
+            "let lod = max(log2(max(rho, 1e-8)), 0.0);",
+        ];
+        for (name, src) in [
+            ("vt_sample.wgsl", include_str!("shaders/vt_sample.wgsl")),
+            (
+                "vis_feedback.wgsl",
+                include_str!("shaders/vis_feedback.wgsl"),
+            ),
+        ] {
+            let code: Vec<&str> = src
+                .lines()
+                .map(|l| l.trim_end_matches('\r').trim())
+                .collect();
+            for want in core {
+                assert!(
+                    code.contains(&want),
+                    "{name} no longer computes the mip as `{want}` — the producer \
+                     and the sampler have to name one level or the streamer is \
+                     paging tiles nothing reads"
+                );
+            }
+            // Both clamp to the pyramid's top rather than trusting `lod`.
+            assert!(
+                code.iter().any(|l| l.starts_with("return min(u32(lod),")),
+                "{name} no longer clamps the level to the pyramid"
+            );
+        }
+    }
+
     /// The determinant floor is one number in two languages too.
     #[test]
     fn the_degenerate_floor_is_one_number() {
@@ -781,6 +932,84 @@ mod tests {
         assert_eq!(b.d_dx, Vec3::ZERO);
         assert_eq!(b.d_dy, Vec3::ZERO);
         assert!(b.lambda.is_finite() && b.d_dx.is_finite());
+    }
+
+    /// **A NaN vertex takes the degenerate branch**, and it did not before
+    /// (P28.1 audit).
+    ///
+    /// Every comparison against NaN is false, so the guard's natural spelling —
+    /// `det.abs() < VIS_DET_EPS` — is NaN-*blind*: measured, one NaN clip
+    /// coordinate produced `λ = (NaN, NaN, NaN)` and non-finite gradients out of
+    /// a function whose own doc said a degenerate case resolves "rather than to a
+    /// NaN". The explicit `|| det.is_nan()` is what makes that sentence true, and
+    /// `det != det` is the same clause in the two shaders.
+    #[test]
+    fn a_nan_vertex_takes_the_degenerate_branch_rather_than_the_solve() {
+        let good = fixture_triangle();
+        for k in 0..3 {
+            for field in 0..4 {
+                let mut c = [good.0, good.1, good.2];
+                c[k][field] = f32::NAN;
+                let b = VisBary::of(c[0], c[1], c[2], Vec2::new(0.02, 0.03), 800.0, 600.0);
+                assert!(
+                    b.lambda.is_finite() && b.d_dx.is_finite() && b.d_dy.is_finite(),
+                    "a NaN in vertex {k} component {field} reached the output: \
+                     {b:?}"
+                );
+            }
+        }
+        // …and the clause is spelled in the two shaders too, so a tidy-up that
+        // "simplified" it back to `abs(det) < eps` is a failing test.
+        for (name, src) in [
+            ("vis_resolve.wgsl", include_str!("shaders/vis_resolve.wgsl")),
+            (
+                "vis_feedback.wgsl",
+                include_str!("shaders/vis_feedback.wgsl"),
+            ),
+        ] {
+            let code: Vec<&str> = src
+                .lines()
+                .map(|l| l.trim_end_matches('\r').trim())
+                .collect();
+            assert!(
+                code.contains(&"if (abs(det) < VIS_DET_EPS || det != det) {"),
+                "{name}'s determinant guard has lost its NaN clause"
+            );
+            assert!(
+                code.contains(&"if (abs(d) < VIS_DET_EPS || d != d) {"),
+                "{name}'s weight-sum guard has lost its NaN clause"
+            );
+        }
+    }
+
+    /// **What the floor does NOT buy**, recorded as a measurement rather than
+    /// left to be assumed (P28.1 audit).
+    ///
+    /// `VIS_DET_EPS` is a *finiteness* floor, not a conditioning bound. A sliver
+    /// well above it produces a finite, enormous, meaningless gradient — and that
+    /// is the safe direction only because `vt_mip` clamps to the top of the
+    /// pyramid, which is a property of the consumer. The arm pins both halves: no
+    /// non-finite output anywhere, and a gradient that really does blow up long
+    /// before the floor is reached, so nobody reads the guard as conditioning.
+    #[test]
+    fn the_determinant_floor_bounds_finiteness_and_not_conditioning() {
+        let mut worst_above_floor = 0.0f32;
+        for eps in [1e-3f32, 1e-5, 1e-7, 1e-9, 1e-12, 1e-15, 1e-18, 1e-24] {
+            let c0 = Vec4::new(0.10, 0.20, 0.5, 1.0);
+            let c1 = Vec4::new(0.10 + eps, 0.20, 0.5, 1.0);
+            let c2 = Vec4::new(0.10, 0.20 + eps, 0.5, 1.0);
+            let b = VisBary::of(c0, c1, c2, Vec2::new(0.1, 0.2), 320.0, 180.0);
+            assert!(
+                b.lambda.is_finite() && b.d_dx.is_finite() && b.d_dy.is_finite(),
+                "a sliver at eps {eps:e} left a non-finite result: {b:?}"
+            );
+            worst_above_floor = worst_above_floor.max(b.d_dx.abs().max_element());
+        }
+        assert!(
+            worst_above_floor > 1.0,
+            "no sliver above the floor produced a large gradient ({worst_above_floor}), \
+             so this arm is not measuring the conditioning it is named for"
+        );
     }
 
     /// The gradients scale with the **viewport**, not with the triangle: half the

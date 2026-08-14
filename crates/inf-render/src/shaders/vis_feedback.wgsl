@@ -83,8 +83,19 @@ fn vis_instance(id: u32) -> Instance {
     // (threshold, metallic, roughness, max_scale)
     let pbr = textureLoad(v_instance_tex, vec2<i32>(9, y), 0);
     // (pick_id, vt0, vt1, vt2) — u32 words, so they are bitcast rather than
-    // rounded: a handle that went through an f32 round-trip would be a
-    // DIFFERENT handle for anything past 2^24.
+    // converted. `bitcast` is the right call and the FIRST version of this
+    // comment gave the wrong reason for it: it said an f32 round-trip breaks
+    // "anything past 2^24", which is where the danger is NOT. A virtual-texture
+    // slot is `handle + 1`, a small integer, and every u32 below 2^23 has an
+    // all-zero f32 exponent field — so as a float every real handle here is
+    // SUBNORMAL, and WGSL permits an implementation to flush subnormals to zero.
+    // Converting would turn slot 1 into slot 0, which reads as "this surface
+    // binds no texture" and shows up as a silently untextured frame rather than
+    // as an error (P28.1 audit). A bitcast of a loaded texel is a
+    // reinterpretation and takes no arithmetic, which is why it survives;
+    // `parity_textured_virtual_texture`'s closing `assert_ne!` is what witnesses
+    // that on whatever adapter runs, because a flushed slot makes the textured
+    // frame byte-identical to the untextured one.
     let ids = textureLoad(v_instance_tex, vec2<i32>(10, y), 0);
     var out: Instance;
     out.model = mat4x4<f32>(c0, c1, c2, c3);
@@ -271,7 +282,11 @@ fn cs_feedback(@builtin(global_invocation_id) gid: vec3<u32>) {
         vec3<f32>(clip[2].x, clip[2].y, clip[2].w),
     );
     let det = determinant(mm);
-    if (abs(det) < VIS_DET_EPS) {
+    // The NaN clause the resolve carries, for the same reason: a comparison
+    // against NaN is FALSE, so `abs(det) < VIS_DET_EPS` alone would let a NaN
+    // triangle reach `vis_mark_tile`, where `u32(gp.x)` of a NaN is an
+    // implementation-defined tile index (P28.1 audit).
+    if (abs(det) < VIS_DET_EPS || det != det) {
         return;
     }
     let inv = mat3x3_inverse(mm, det);
@@ -279,7 +294,7 @@ fn cs_feedback(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dmu_du = inv * vec3<f32>(1.0, 0.0, 0.0);
     let dmu_dv = inv * vec3<f32>(0.0, 1.0, 0.0);
     let d = mu.x + mu.y + mu.z;
-    if (abs(d) < VIS_DET_EPS) {
+    if (abs(d) < VIS_DET_EPS || d != d) {
         return;
     }
     let inv_d = 1.0 / d;

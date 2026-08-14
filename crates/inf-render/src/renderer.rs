@@ -1113,11 +1113,6 @@ impl EngineRenderer {
         Ok(())
     }
 
-    /// Enable/disable the P18.1 vgeom occlusion-audit counters. **Off by
-    /// default**: the cull compute skips the atomics entirely and no readback copy
-    /// is recorded, so the shipping frame is untouched. Turning it on costs four
-    /// atomics per surviving (instance, meshlet) pair plus a 16-byte copy — a
-    /// test/tools instrument, not a shipping counter.
     /// Turn the P28.1 visibility-buffer readback on. Off by default: it records a
     /// full-viewport `copy_texture_to_buffer` every frame the visibility path
     /// runs, which no shipping frame should pay for.
@@ -1152,6 +1147,11 @@ impl EngineRenderer {
         self.vis_report.lock().map(|a| *a).unwrap_or_default()
     }
 
+    /// Enable/disable the P18.1 vgeom occlusion-audit counters. **Off by
+    /// default**: the cull compute skips the atomics entirely and no readback copy
+    /// is recorded, so the shipping frame is untouched. Turning it on costs four
+    /// atomics per surviving (instance, meshlet) pair plus a 16-byte copy — a
+    /// test/tools instrument, not a shipping counter.
     pub fn set_vgeom_audit(&mut self, enabled: bool) {
         self.vgeom_audit.enabled = enabled;
     }
