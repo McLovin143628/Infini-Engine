@@ -7,7 +7,16 @@
 use crate::gpu::GpuContext;
 use crate::renderer::FrameData;
 
-pub trait RenderNode {
+/// A pass in the graph.
+///
+/// `: Any` is what lets [`RenderGraph::node_mut`] hand a caller one node back by
+/// type. P28.2 needs it for exactly one reason: the **cluster page-in** has to
+/// happen at the frame's sync point, beside the virtual texture's, because the
+/// two halves of one transaction cannot be seated at two different depths of the
+/// frame — and the meshlet streamer lives inside a node. The alternative was a
+/// shared `Mutex` around the streamer, which is a lock over a value only one
+/// thread ever touches, standing in for a borrow the compiler can already prove.
+pub trait RenderNode: std::any::Any {
     fn name(&self) -> &'static str;
     fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData);
 }
@@ -20,6 +29,18 @@ pub struct RenderGraph {
 impl RenderGraph {
     pub fn add(&mut self, node: impl RenderNode + 'static) {
         self.nodes.push(Box::new(node));
+    }
+
+    /// The first node of type `T`, mutably.
+    ///
+    /// There is exactly one of each node type in the graph and the registration
+    /// order in `EngineRenderer::new` is the pass order, so "the first" is "the
+    /// one". `None` when the graph was built without it, which is a legitimate
+    /// configuration and not an error.
+    pub fn node_mut<T: RenderNode>(&mut self) -> Option<&mut T> {
+        self.nodes
+            .iter_mut()
+            .find_map(|n| (n.as_mut() as &mut dyn std::any::Any).downcast_mut::<T>())
     }
 
     pub fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {

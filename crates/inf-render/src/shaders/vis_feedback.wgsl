@@ -121,6 +121,14 @@ struct VisFeedbackParams {
 
 @group(0) @binding(0) var<uniform> params: VisFeedbackParams;
 @group(0) @binding(1) var vis_buf: texture_2d<u32>;
+// **The meshlet vertex record's stride, in floats** (P28.2). One `VgeomVertex`
+// is position(3) + normal(3) + uv(2) + a packed tangent word(1) = 9, and this
+// constant is the Rust `VERTEX_REC_LEN / 4` read back — `the_shaders_vertex_
+// stride_is_the_rusts` fails the day the two stop agreeing, in every shader that
+// reads the pool. A wrong stride here does not error: it reads a neighbouring
+// vertex's bytes as this one's position, which is a mesh that renders and is
+// wrong everywhere.
+const VGEOM_VSTRIDE: u32 = 9u;
 @group(0) @binding(2) var<storage, read> v_positions: array<f32>;
 @group(0) @binding(3) var<storage, read> v_meshlets: array<Meshlet>;
 @group(0) @binding(4) var<storage, read> v_meshlet_verts: array<u32>;
@@ -266,7 +274,7 @@ fn cs_feedback(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var k = 0u; k < 3u; k = k + 1u) {
         let local = read_tri_byte(m.triangle_offset + tri * 3u + k);
         let global_v = v_meshlet_verts[m.vertex_offset + local];
-        let base = global_v * 8u;
+        let base = global_v * VGEOM_VSTRIDE;
         let p = vec3<f32>(v_positions[base], v_positions[base + 1u], v_positions[base + 2u]);
         uv3[k] = vec2<f32>(v_positions[base + 6u], v_positions[base + 7u]);
         clip[k] = params.view_proj * (inst.model * vec4<f32>(p, 1.0));

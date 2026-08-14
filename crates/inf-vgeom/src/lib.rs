@@ -79,9 +79,9 @@ pub use model::{
     VgeomMesh, VgeomVertex, NO_TANGENT, TANGENT_EXP,
 };
 pub use stream::{
-    ideal_page_count, AssetResidency, PageBlocks, PageUpload, PoolAllocator, PoolBlock, VgeomPools,
-    VgeomStreamBudget, VgeomStreamPlan, VgeomStreamStats, VgeomStreamer, VgeomWant,
-    DEFAULT_VGEOM_BUDGET_BYTES, NOT_RESIDENT,
+    ideal_page_count, AssetResidency, ClusterPage, ClusterPageIn, PageBlocks, PageUpload,
+    PoolAllocator, PoolBlock, VgeomPools, VgeomStreamBudget, VgeomStreamPlan, VgeomStreamStats,
+    VgeomStreamer, VgeomWant, DEFAULT_VGEOM_BUDGET_BYTES, NOT_RESIDENT,
 };
 
 // ── The derived-asset id rule (Ring 0, P18.3) ───────────────────────────────

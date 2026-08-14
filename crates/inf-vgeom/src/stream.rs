@@ -860,7 +860,15 @@ fn reserve(pools: &mut VgeomPools, res: &mut AssetResidency, page: usize) -> boo
 #[derive(Debug, Default)]
 pub struct VgeomStreamPlan {
     /// Pages to write into the pools, in deterministic order.
-    pub uploads: Vec<PageUpload>,
+    ///
+    /// **Private since P28.2, and that is the whole mechanism.** The only way to
+    /// reach a [`PageUpload`] is [`VgeomStreamer::pair`], which demands the
+    /// texture half of the same page-in and *retracts* — releases the pool
+    /// blocks, drops the residency — any page whose tiles could not be admitted.
+    /// So "geometry admitted, tiles missing" has no representation: a
+    /// [`ClusterPage`] is the only container a `PageUpload` is ever seen in, and
+    /// it carries both halves by construction.
+    uploads: Vec<PageUpload>,
     /// `(asset, page)` pairs evicted this sync.
     pub evicted: Vec<(u128, usize)>,
     /// Assets that left the frame entirely and were fully freed.
@@ -890,6 +898,81 @@ pub struct PageUpload {
     pub vertices: Vec<u8>,
     /// The page's global meshlet indices (the remap table's keys).
     indices: Vec<u32>,
+}
+
+// ── the joint page-in (P28.2) ───────────────────────────────────────────────
+
+/// One cluster page's page-in: **the geometry and the texture tiles together**.
+///
+/// There is no constructor and no accessor that yields one half without the
+/// other. `PageUpload`'s only public source is [`ClusterPage::geometry`], which
+/// is reached through a value that already holds [`ClusterPage::tiles`] — so a
+/// consumer cannot loop over geometry with the texture half out of scope, and a
+/// consumer that ignores the tiles is ignoring something it was handed rather
+/// than something it never saw.
+///
+/// `A` is whatever the caller's texture consumer calls a seated tile
+/// (`inf-render` uses a `(VtTextureHandle, TileCoord, slot)` binding). `inf-vgeom`
+/// never looks inside it, which is what keeps this crate free of the virtual
+/// texture's residency and testable with no adapter.
+#[derive(Debug)]
+pub struct ClusterPage<A> {
+    geometry: PageUpload,
+    tiles: Vec<A>,
+}
+
+impl<A> ClusterPage<A> {
+    /// The geometry half: pool-absolute bytes, ready for `write_buffer`.
+    #[inline]
+    pub fn geometry(&self) -> &PageUpload {
+        &self.geometry
+    }
+
+    /// The texture half: the tiles this page's materials sample, **already
+    /// seated**. Empty only when the page's pairing is empty — an unpaired asset,
+    /// or a paired one whose textures this level does not bind.
+    #[inline]
+    pub fn tiles(&self) -> &[A] {
+        &self.tiles
+    }
+}
+
+/// The complete page-in transaction for one sync point.
+///
+/// Produced by [`VgeomStreamer::pair`] and by nothing else. Every page in it has
+/// both halves; every page that could not get both is **gone** — released from
+/// the pools, dropped from residency, counted in
+/// [`retracted`](Self::retracted) — before this value exists.
+#[derive(Debug)]
+pub struct ClusterPageIn<A> {
+    pages: Vec<ClusterPage<A>>,
+    /// `(asset, page)` pairs evicted this sync, including the retractions.
+    pub evicted: Vec<(u128, usize)>,
+    /// Assets that left the frame entirely and were fully freed.
+    pub dropped: Vec<u128>,
+    /// Pages whose bytes could not be read; each blocks its asset from there on.
+    pub failed: Vec<(u128, usize, String)>,
+    /// Whether a pool's capacity moved, so the render side must grow (and copy)
+    /// its backing buffers before writing the pages.
+    pub pools_grew: bool,
+    /// Pages the geometry planner granted and the **texture half refused** —
+    /// handed back rather than half-admitted. Never a silent cap: this is the
+    /// number, and a frame that reads it non-zero is a frame where the texture
+    /// budget, not the geometry budget, decided the detail.
+    pub retracted: u32,
+}
+
+impl<A> ClusterPageIn<A> {
+    /// The pages to write, geometry and tiles together.
+    #[inline]
+    pub fn pages(&self) -> &[ClusterPage<A>] {
+        &self.pages
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.pages.is_empty()
+    }
 }
 
 // ── the streamer ────────────────────────────────────────────────────────────
@@ -949,6 +1032,102 @@ impl VgeomStreamer {
     /// Every asset with residency, in id order.
     pub fn assets(&self) -> impl Iterator<Item = (u128, &AssetResidency)> {
         self.assets.iter().map(|(k, v)| (*k, v))
+    }
+
+    /// **The joint page-in** (P28.2): turn a geometry plan into a transaction
+    /// that carries the texture half too, or does not carry the page at all.
+    ///
+    /// `seat` is asked, once per staged page, for the tiles that page's materials
+    /// sample — the caller has already run its texture consumer's own transaction
+    /// and is answering from its result. `None` means *the texture half could not
+    /// be seated*, and the page is then **retracted**: its pool blocks are
+    /// released and the asset's residency is truncated to just before it, exactly
+    /// as a page whose bytes failed to read is. Residency is a prefix, so a
+    /// retraction takes everything finer with it — which is the correct
+    /// degradation and not an approximation of one: without page *p* there is no
+    /// state in which page *p + 1* is drawable.
+    ///
+    /// **What this makes impossible, and how.** [`VgeomStreamPlan::uploads`] is
+    /// private and this is its only door, so a caller cannot obtain a
+    /// [`PageUpload`] without having supplied the tiles for it. And because the
+    /// retraction runs *here*, before the returned value exists, the streamer's
+    /// own residency and the transaction's contents are produced together by one
+    /// function — there is no window, not even a private one, in which the
+    /// streamer believes a page is resident while its tiles are not. A
+    /// geometry-only admit is not "forbidden by discipline"; it has no
+    /// representation.
+    ///
+    /// Deterministic: `seat` is called in the plan's own staging order, and
+    /// nothing about the retraction depends on anything but its answers.
+    pub fn pair<A>(
+        &mut self,
+        plan: VgeomStreamPlan,
+        mut seat: impl FnMut(u128, usize) -> Option<Vec<A>>,
+    ) -> ClusterPageIn<A> {
+        let VgeomStreamPlan {
+            uploads,
+            mut evicted,
+            dropped,
+            failed,
+            pools_grew,
+        } = plan;
+
+        // Ask first, retract second. Asking inside the release loop would let an
+        // asset's later pages be judged against a residency the loop had already
+        // truncated — an answer about a state that no longer exists.
+        let mut answers: Vec<(PageUpload, Option<Vec<A>>)> = Vec::with_capacity(uploads.len());
+        for up in uploads {
+            let tiles = seat(up.asset, up.page);
+            answers.push((up, tiles));
+        }
+
+        // The finest page each asset refused truncates it, exactly as `plan`'s own
+        // read-failure cut does: `cut_at` keeps the SHALLOWEST refusal per asset.
+        let mut cut_at: BTreeMap<u128, usize> = BTreeMap::new();
+        for (up, tiles) in &answers {
+            if tiles.is_none() {
+                let slot = cut_at.entry(up.asset).or_insert(up.page);
+                *slot = (*slot).min(up.page);
+            }
+        }
+        let mut retracted = 0u32;
+        for (&asset, &from) in &cut_at {
+            let Some(res) = self.assets.get_mut(&asset) else {
+                continue;
+            };
+            while res.resident > from {
+                let i = res.resident - 1;
+                release(&mut self.pools, res, i);
+                evicted.push((asset, i));
+                retracted += 1;
+                self.stats.evictions += 1;
+            }
+        }
+
+        let mut pages: Vec<ClusterPage<A>> = Vec::with_capacity(answers.len());
+        for (geometry, tiles) in answers {
+            let Some(tiles) = tiles else { continue };
+            // A page finer than another page's refusal is gone from residency, so
+            // its bytes must not be written: the pool blocks it named are free.
+            if cut_at
+                .get(&geometry.asset)
+                .is_some_and(|c| geometry.page >= *c)
+            {
+                continue;
+            }
+            pages.push(ClusterPage { geometry, tiles });
+        }
+
+        self.stats.resident_pages = self.assets.values().map(|r| r.resident).sum();
+        self.stats.resident_bytes = self.assets.values().map(|r| r.bytes).sum();
+        ClusterPageIn {
+            pages,
+            evicted,
+            dropped,
+            failed,
+            pools_grew,
+            retracted,
+        }
     }
 
     /// **The sync point.** Advance residency one bounded, deterministic step

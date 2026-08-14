@@ -567,6 +567,93 @@ mod tests {
         }
     }
 
+    /// **The vertex record's stride is one number in five places** (P28.2).
+    ///
+    /// The meshlet vertex pool is bound as `array<f32>` and every shader that
+    /// reads it multiplies a vertex index by the record's float count. A wrong
+    /// stride does not error and does not fail validation: it reads a
+    /// neighbouring vertex's bytes as this one's position, which is a mesh that
+    /// renders and is wrong everywhere. So the four shaders declare the constant
+    /// and this compares all four against `VERTEX_REC_LEN` — the Rust the
+    /// container writes with — rather than against a literal.
+    #[test]
+    fn the_shaders_vertex_stride_is_the_rusts() {
+        let floats = inf_vgeom::asset::VERTEX_REC_LEN / 4;
+        assert_eq!(
+            inf_vgeom::asset::VERTEX_REC_LEN % 4,
+            0,
+            "a vertex record that is not a whole number of floats cannot be read \
+             out of an `array<f32>` at all"
+        );
+        let want = format!("const VGEOM_VSTRIDE: u32 = {floats}u;");
+        for (name, src) in [
+            ("vgeom_mesh.wgsl", include_str!("shaders/vgeom_mesh.wgsl")),
+            ("visbuffer.wgsl", include_str!("shaders/visbuffer.wgsl")),
+            ("vis_resolve.wgsl", include_str!("shaders/vis_resolve.wgsl")),
+            (
+                "vis_feedback.wgsl",
+                include_str!("shaders/vis_feedback.wgsl"),
+            ),
+        ] {
+            let code: Vec<&str> = src
+                .lines()
+                .map(|l| l.trim_end_matches('\r').trim())
+                .filter(|l| !l.starts_with("//"))
+                .collect();
+            assert!(
+                code.iter().any(|l| l.starts_with(want.as_str())),
+                "{name} does not declare `{want}` — the vertex record moved and \
+                 one of its readers did not"
+            );
+            // And nothing steps by a literal beside the constant.
+            assert!(
+                !code.iter().any(|l| l.contains("global_v * 8u")),
+                "{name} still multiplies a vertex index by a literal"
+            );
+        }
+    }
+
+    /// **The tangent word's unpack is one function in two languages** (P28.2).
+    ///
+    /// `inf_vgeom::unpack_tangent` is the reference and `vt_sample.wgsl`'s
+    /// `vgeom_unpack_tangent` is the mirror; there is no way to run the WGSL half
+    /// on the host, so what is checked is that the mirror is built from the same
+    /// four constants the Rust half is — the quantization scale, the handedness
+    /// bit, and the two shift amounts that sign-extend the 11-bit fields. Each of
+    /// them is a silent wrong answer if it drifts: a wrong scale tilts every
+    /// tangent, a wrong bit flips every bitangent, a wrong shift decodes a
+    /// different direction entirely.
+    #[test]
+    fn the_shaders_tangent_unpack_is_the_rusts() {
+        let src = include_str!("shaders/vt_sample.wgsl");
+        let code: Vec<String> = src
+            .lines()
+            .map(|l| l.trim_end_matches('\r').trim().to_string())
+            .filter(|l| !l.starts_with("//"))
+            .collect();
+        let body = code.join("\n");
+        for (what, needle) in [
+            ("the quantization scale", "/ 1023.0"),
+            ("the handedness bit", "(word & 0x400000u) != 0u"),
+            ("the low field's sign extension", "i32(word << 21u) >> 21u"),
+            ("the high field's sign extension", "i32(word << 10u) >> 21u"),
+            ("the sentinel", "if (word == 0u)"),
+        ] {
+            assert!(
+                body.contains(needle),
+                "vt_sample.wgsl's tangent unpack no longer spells {what} \
+                 (`{needle}`) — it has drifted from `inf_vgeom::unpack_tangent`"
+            );
+        }
+        // The Rust half really does use those numbers, so the pin above is a
+        // comparison and not two copies of a guess.
+        let (t, w) = inf_vgeom::unpack_tangent(inf_vgeom::pack_tangent([0.0, 0.0, 1.0], -1.0))
+            .expect("packed");
+        assert_eq!(w, -1.0, "the handedness bit round-trips on the host");
+        assert!(t[2] > 0.99, "the +Z direction round-trips on the host");
+        assert!(inf_vgeom::unpack_tangent(inf_vgeom::NO_TANGENT).is_none());
+    }
+
     /// **The structural reason a voxel surface is still not shaded here**
     /// (P28.1's correction to P27.5's routing).
     ///

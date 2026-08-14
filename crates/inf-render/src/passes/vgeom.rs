@@ -888,9 +888,16 @@ pub fn cull_visible_source(
         source,
         threshold,
     }]);
+    // Through the SAME joint door the frame path uses (P28.2's "one door" rule),
+    // with a texture half that seats everything: this readback helper has no
+    // virtual-texture library, so there is nothing for a pairing to keep in step
+    // and every page pairs with the empty set. That is a complete page-in, not a
+    // partial one — and routing it here rather than around it is what keeps
+    // `VgeomStreamPlan::uploads` reachable from exactly one function.
+    let page_in = streamer.pair(plan, |_, _| Some(Vec::<()>::new()));
     pools.ensure(gpu, streamer.pools());
-    for up in &plan.uploads {
-        pools.write_page(gpu, up);
+    for p in page_in.pages() {
+        pools.write_page(gpu, p.geometry());
     }
     let Some(res) = streamer.residency(0) else {
         return CullReadback::EMPTY;
@@ -1298,6 +1305,11 @@ pub struct VgeomStreamReport {
     pub floor_lod: BTreeMap<u128, u32>,
     /// Per asset, `(resident pages, total pages)`.
     pub pages: BTreeMap<u128, (usize, usize)>,
+    /// Cluster pages the geometry planner granted and the **texture half**
+    /// refused, cumulative (P28.2). Non-zero means the virtual-texture budget,
+    /// not the meshlet budget, is what decided this frame's detail — the two now
+    /// degrade together, and this is the number that says which one bound.
+    pub retracted: u64,
 }
 
 /// The shared handle the renderer hands the node.
@@ -1345,6 +1357,33 @@ pub struct VgeomNode {
     vis_bases: Vec<(u128, u32)>,
     /// The audit counters, shared with the renderer.
     vis_report: super::visbuffer::SharedVisReport,
+    /// The geometry half of this frame's cluster page-in, between
+    /// [`Self::plan_cluster_pages`] and [`Self::commit_cluster_pages`].
+    ///
+    /// It exists for the length of one virtual-texture transaction and no longer:
+    /// the plan is staged, the texture half is seated against it, and the commit
+    /// pairs or retracts. `None` outside that window, and outside it there is no
+    /// way to reach a `PageUpload` at all (`VgeomStreamPlan::uploads` is private
+    /// and `VgeomStreamer::pair` is its only door).
+    pending: Option<inf_vgeom::VgeomStreamPlan>,
+    /// `(asset, page)` → the tiles that page's materials sample, read out of the
+    /// page's own v3 tiles section by [`Self::cluster_tile_wants`] and consumed by
+    /// [`Self::commit_cluster_pages`].
+    ///
+    /// **One derivation, read twice.** The want set handed to the virtual texture
+    /// and the set the commit checks residency against are the same `Vec`s; the
+    /// alternative — computing the pairing once for the wants and again for the
+    /// check — is two derivations that agree only while nobody edits one of them
+    /// (the P21 one-door law), and the thing they would disagree about is exactly
+    /// the invariant this batch exists to make structural.
+    page_tiles: BTreeMap<(u128, usize), Vec<(u128, inf_vt::TileCoord)>>,
+    /// Whether the last commit reallocated a pool buffer, so `run`'s bind groups
+    /// are stale. Set by [`Self::commit_cluster_pages`], read once in `run`.
+    pools_rebuilt: bool,
+    /// Pages the geometry planner granted this frame and the texture half
+    /// refused, cumulative — the counter that says the texture budget, not the
+    /// geometry budget, decided the detail.
+    retracted: u64,
 }
 
 impl VgeomNode {
@@ -1542,6 +1581,10 @@ impl VgeomNode {
             vis: None,
             vis_bases: Vec::new(),
             vis_report,
+            pending: None,
+            page_tiles: BTreeMap::new(),
+            pools_rebuilt: false,
+            retracted: 0,
         }
     }
 
@@ -1555,6 +1598,171 @@ impl VgeomNode {
     // exposed here: a node lives inside the render graph and is not reachable from
     // outside it, so an accessor on `VgeomNode` would be dead API. See
     // `EngineRenderer::vgeom_stream_report`.
+
+    // ── The cluster page-in, phase 1 of 2 (P28.2) ───────────────────────────
+    //
+    // Split out of `run` and hoisted to the renderer's sync point, because a
+    // page-in that feeds two consumers cannot be seated at two different depths
+    // of the frame. `plan_cluster_pages` stages the geometry half;
+    // `cluster_tile_wants` reports what the texture half owes;
+    // `commit_cluster_pages` pairs the two or retracts the page. `run` then
+    // writes what survived and knows nothing about the arrangement.
+
+    /// Stage the geometry half of this frame's page-in.
+    ///
+    /// The want per asset is the SMALLEST per-instance threshold — its
+    /// closest/largest instance decides how much detail the asset needs — and it
+    /// is the *same* scalar the cut compares meshlet errors against, so the two
+    /// can never disagree about what "finer" means. Assets in the scene list with
+    /// no instances are not wanted, so they are evicted rather than held.
+    pub fn plan_cluster_pages(
+        &mut self,
+        scene: &crate::scene::RenderScene,
+        view: &RenderView,
+        settings: &crate::settings::VgeomSettings,
+    ) {
+        self.pending = None;
+        if !settings.enabled || scene.vgeom_instances.is_empty() || scene.vgeom_assets.is_empty() {
+            return;
+        }
+        let mut by_asset: BTreeMap<u128, Vec<&VgeomInstance>> = BTreeMap::new();
+        for inst in &scene.vgeom_instances {
+            by_asset.entry(inst.asset).or_default().push(inst);
+        }
+        let source_of: BTreeMap<u128, &inf_vgeom::VgeomSource> = scene
+            .vgeom_assets
+            .iter()
+            .map(|a| (a.id, a.source.as_ref()))
+            .collect();
+        self.streamer.set_budget(settings.stream);
+        let origin = view.origin;
+        let wants: Vec<inf_vgeom::VgeomWant<'_>> = by_asset
+            .iter()
+            .filter_map(|(asset, insts)| {
+                let source = *source_of.get(asset)?;
+                let bounds = source.bounds();
+                let threshold = insts
+                    .iter()
+                    .map(|i| pack_instance(&origin, view, bounds, i, settings.pixel_error).threshold)
+                    .fold(f32::INFINITY, f32::min);
+                Some(inf_vgeom::VgeomWant {
+                    asset: *asset,
+                    source,
+                    threshold,
+                })
+            })
+            .collect();
+        self.pending = Some(self.streamer.plan(&wants));
+    }
+
+    /// The tiles every **resident** cluster page's materials sample, as
+    /// `(texture guid, tile)` pairs — what the texture half owes this frame.
+    ///
+    /// Read off the residency *after* the plan, so it covers the pages this frame
+    /// just granted **and** the ones earlier frames did. That is what keeps the
+    /// invariant true between transactions rather than only at one: a want that
+    /// is already resident is *protected* by `VtResidency::apply_wants` before any
+    /// miss is offered a slot, so a tile cannot be evicted out from under a page
+    /// that is still resident.
+    pub fn cluster_tile_wants(
+        &mut self,
+        scene: &crate::scene::RenderScene,
+        known: impl Fn(u128) -> bool,
+    ) -> Vec<(u128, inf_vt::TileCoord)> {
+        self.page_tiles.clear();
+        let mut out: Vec<(u128, inf_vt::TileCoord)> = Vec::new();
+        if self.pending.is_none() {
+            return out;
+        }
+        let source_of: BTreeMap<u128, &inf_vgeom::VgeomSource> = scene
+            .vgeom_assets
+            .iter()
+            .map(|a| (a.id, a.source.as_ref()))
+            .collect();
+        for (asset, res) in self.streamer.assets() {
+            let Some(src) = source_of.get(&asset) else {
+                continue;
+            };
+            for page in 0..res.resident_pages() {
+                let mut here: Vec<(u128, inf_vt::TileCoord)> = Vec::new();
+                src.with_page_sections(page, |s| {
+                    for t in s.tile_refs() {
+                        let guid = t.texture().uuid().as_u128();
+                        // **A texture this level does not bind is not part of the
+                        // pairing.** The cook pairs against the materials the
+                        // AUTHORED level binds; a runtime that draws the mesh with
+                        // a different material has nothing to keep in step for the
+                        // cook's texture, and demanding it would retract every page
+                        // of the asset for ever — the mesh would collapse to its
+                        // root page and never recover. So the coupling protects
+                        // what is actually in play and says nothing about the rest.
+                        if known(guid) {
+                            here.push((guid, t.coord()));
+                        }
+                    }
+                });
+                out.extend_from_slice(&here);
+                self.page_tiles.insert((asset, page), here);
+            }
+        }
+        out.sort_unstable_by_key(|(g, t)| (*g, t.payload_order()));
+        out.dedup();
+        out
+    }
+
+    /// Pair the geometry half with the texture half, or hand the page back.
+    ///
+    /// `resident` answers "is this tile in the atlas right now" — the caller has
+    /// already run its virtual-texture transaction and is reading its result. A
+    /// page whose tiles are not all there is **retracted** by
+    /// `VgeomStreamer::pair` before this function can see it, so the writes below
+    /// are, by construction, writes of pages whose texture half is seated.
+    pub fn commit_cluster_pages(
+        &mut self,
+        gpu: &GpuContext,
+        mut resident: impl FnMut(u128, inf_vt::TileCoord) -> bool,
+    ) {
+        let Some(plan) = self.pending.take() else {
+            return;
+        };
+        // The pairing is asked page by page, from the same `page_tiles` the want
+        // set was built out of — one derivation, read twice.
+        let page_tiles = &self.page_tiles;
+        let page_in = self.streamer.pair(plan, |asset, page| {
+            // A page with no entry is a page the want pass never saw — a state
+            // this sequence does not produce, and refusing it is the safe read.
+            let refs = page_tiles.get(&(asset, page))?;
+            // An empty pairing is not a refusal: an unpaired asset, or one whose
+            // textures this level does not bind, has nothing to keep in step and
+            // streams exactly as it did before P28.2.
+            let mut seated: Vec<(u128, inf_vt::TileCoord)> = Vec::with_capacity(refs.len());
+            for &(guid, tile) in refs {
+                if !resident(guid, tile) {
+                    return None;
+                }
+                seated.push((guid, tile));
+            }
+            Some(seated)
+        });
+        self.retracted += u64::from(page_in.retracted);
+        self.pools_rebuilt = self.pools.ensure(gpu, self.streamer.pools());
+        for p in page_in.pages() {
+            self.pools.write_page(gpu, p.geometry());
+        }
+        for asset in &page_in.dropped {
+            self.draws.remove(asset);
+        }
+        if let Ok(mut r) = self.report.lock() {
+            r.stats = *self.streamer.stats();
+            r.retracted = self.retracted;
+            r.floor_lod.clear();
+            r.pages.clear();
+            for (id, res) in self.streamer.assets() {
+                r.floor_lod.insert(id, res.floor_lod());
+                r.pages.insert(id, (res.resident_pages(), res.page_count()));
+            }
+        }
+    }
 }
 
 impl RenderNode for VgeomNode {
@@ -1583,55 +1791,18 @@ impl RenderNode for VgeomNode {
             .map(|a| (a.id, a.source.as_ref()))
             .collect();
 
-        // ── The streaming sync point (P18.2) ────────────────────────────────
+        // ── The streaming sync point moved out (P18.2 → P28.2) ──────────────
         //
-        // ONE call, before any culling, whose result is a pure function of
-        // (wants, residency, budget). The want per asset is the SMALLEST
-        // per-instance threshold — its closest/largest instance decides how much
-        // detail the asset needs — and it is the *same* scalar the cut compares
-        // meshlet errors against, so the two can never disagree about what
-        // "finer" means. Assets in the scene list with no instances are not
-        // wanted, so they are evicted rather than held.
-        self.streamer.set_budget(settings.stream);
+        // It used to be the first thing this node did. It now happens at the
+        // frame's sync point, beside the virtual texture's, because a page-in
+        // that feeds two consumers cannot be seated at two different depths of
+        // the frame — see `EngineRenderer::cluster_sync`. By the time `run` is
+        // reached the residency has advanced, the pages that got both halves are
+        // written and the ones that did not are gone. What is left here is the
+        // consequence: a pool that grew was reallocated, so every bind group
+        // holding one is stale.
+        let pools_rebuilt = std::mem::take(&mut self.pools_rebuilt);
         let origin = frame.view.origin;
-        let wants: Vec<inf_vgeom::VgeomWant<'_>> = by_asset
-            .iter()
-            .filter_map(|(asset, insts)| {
-                let source = *source_of.get(asset)?;
-                let bounds = source.bounds();
-                let threshold = insts
-                    .iter()
-                    .map(|i| {
-                        pack_instance(&origin, frame.view, bounds, i, settings.pixel_error)
-                            .threshold
-                    })
-                    .fold(f32::INFINITY, f32::min);
-                Some(inf_vgeom::VgeomWant {
-                    asset: *asset,
-                    source,
-                    threshold,
-                })
-            })
-            .collect();
-        let plan = self.streamer.plan(&wants);
-        // A pool that grew was reallocated, so every bind group holding one is
-        // stale; the plan re-stages every resident page to refill it.
-        let pools_rebuilt = self.pools.ensure(gpu, self.streamer.pools());
-        for up in &plan.uploads {
-            self.pools.write_page(gpu, up);
-        }
-        for asset in &plan.dropped {
-            self.draws.remove(asset);
-        }
-        if let Ok(mut r) = self.report.lock() {
-            r.stats = *self.streamer.stats();
-            r.floor_lod.clear();
-            r.pages.clear();
-            for (id, res) in self.streamer.assets() {
-                r.floor_lod.insert(id, res.floor_lod());
-                r.pages.insert(id, (res.resident_pages(), res.page_count()));
-            }
-        }
 
         // ── P28.1: the FLAT instance table ──────────────────────────────────
         //
@@ -1729,6 +1900,10 @@ impl RenderNode for VgeomNode {
             hzb: hzb_chain,
             prev_view,
             report: _,
+            pending: _,
+            page_tiles: _,
+            pools_rebuilt: _,
+            retracted: _,
             view_bgl: _,
             lights_bgl: _,
             vis,

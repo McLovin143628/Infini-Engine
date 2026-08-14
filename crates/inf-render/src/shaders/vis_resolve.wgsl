@@ -115,6 +115,14 @@ fn vis_instance(id: u32) -> Instance {
 
 // Group 3: the visibility buffer + the shared pools + the FLAT instance table.
 @group(3) @binding(0) var vis_buf: texture_2d<u32>;
+// **The meshlet vertex record's stride, in floats** (P28.2). One `VgeomVertex`
+// is position(3) + normal(3) + uv(2) + a packed tangent word(1) = 9, and this
+// constant is the Rust `VERTEX_REC_LEN / 4` read back — `the_shaders_vertex_
+// stride_is_the_rusts` fails the day the two stop agreeing, in every shader that
+// reads the pool. A wrong stride here does not error: it reads a neighbouring
+// vertex's bytes as this one's position, which is a mesh that renders and is
+// wrong everywhere.
+const VGEOM_VSTRIDE: u32 = 9u;
 @group(3) @binding(1) var<storage, read> v_positions: array<f32>;
 @group(3) @binding(2) var<storage, read> v_meshlets: array<Meshlet>;
 @group(3) @binding(3) var<storage, read> v_meshlet_verts: array<u32>;
@@ -321,18 +329,25 @@ fn fs(in: VsOut) -> FsOut {
     var wp: array<vec3<f32>, 3>;
     var nrm3: array<vec3<f32>, 3>;
     var uv3: array<vec2<f32>, 3>;
+    var tan3: array<vec4<f32>, 3>;
     var clip: array<vec4<f32>, 3>;
     let nmat = mat3x3<f32>(inst.n0, inst.n1, inst.n2);
     for (var k = 0u; k < 3u; k = k + 1u) {
         let local = read_tri_byte(m.triangle_offset + tri * 3u + k);
         let global_v = v_meshlet_verts[m.vertex_offset + local];
-        let base = global_v * 8u;
+        let base = global_v * VGEOM_VSTRIDE;
         let p = vec3<f32>(v_positions[base], v_positions[base + 1u], v_positions[base + 2u]);
         let nn = vec3<f32>(v_positions[base + 3u], v_positions[base + 4u], v_positions[base + 5u]);
         let w = inst.model * vec4<f32>(p, 1.0);
         wp[k] = w.xyz;
         nrm3[k] = nmat * nn;
         uv3[k] = vec2<f32>(v_positions[base + 6u], v_positions[base + 7u]);
+        // P28.2: the vertex tangent, rotated with the same normal matrix. The
+        // resolve interpolates it by the solved barycentrics below, so its frame
+        // is the raster's frame with better-conditioned weights — the same
+        // relationship the whole pass has to the forward path.
+        let t4 = vgeom_unpack_tangent(bitcast<u32>(v_positions[base + 8u]));
+        tan3[k] = vec4<f32>(nmat * t4.xyz, t4.w);
         clip[k] = view.view_proj * w;
     }
 
@@ -354,6 +369,13 @@ fn fs(in: VsOut) -> FsOut {
     out.depth = dot(l, zc) / max(dot(l, wc), 1e-20);
 
     let world_pos = wp[0] * l.x + wp[1] * l.y + wp[2] * l.z;
+    // The handedness is a per-vertex CONSTANT of an authored parametrization, so
+    // it is taken from the nearest corner rather than blended: averaging +1 and
+    // -1 across a seam would produce 0, which this frame reads as "no tangent".
+    let tw = select(select(tan3[2].w, tan3[1].w, l.y >= l.z),
+                    tan3[0].w, l.x >= max(l.y, l.z));
+    let tangent_i = vec4<f32>(
+        tan3[0].xyz * l.x + tan3[1].xyz * l.y + tan3[2].xyz * l.z, tw);
     let normal_i = nrm3[0] * l.x + nrm3[1] * l.y + nrm3[2] * l.z;
     let uv = uv3[0] * l.x + uv3[1] * l.y + uv3[2] * l.z;
 
@@ -397,7 +419,9 @@ fn fs(in: VsOut) -> FsOut {
         rough = clamp(s.roughness, 0.04, 1.0);
         vt_ao = s.occlusion;
         if (s.has_normal) {
-            n = vt_apply_normal(n, vt_dpx, vt_dpy, vt_ddx, vt_ddy, s.normal_ts);
+            n = vt_apply_normal_t(
+                n, tangent_i, vt_dpx, vt_dpy, vt_ddx, vt_ddy, s.normal_ts
+            );
         }
     }
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);

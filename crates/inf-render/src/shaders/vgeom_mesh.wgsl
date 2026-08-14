@@ -54,7 +54,15 @@ struct Instance {
 };
 
 // Group 3: the virtualized-geometry storage buffers.
-@group(3) @binding(0) var<storage, read> v_positions: array<f32>; // 8 f32 / vertex
+// **The meshlet vertex record's stride, in floats** (P28.2). One `VgeomVertex`
+// is position(3) + normal(3) + uv(2) + a packed tangent word(1) = 9, and this
+// constant is the Rust `VERTEX_REC_LEN / 4` read back — `the_shaders_vertex_
+// stride_is_the_rusts` fails the day the two stop agreeing, in every shader that
+// reads the pool. A wrong stride here does not error: it reads a neighbouring
+// vertex's bytes as this one's position, which is a mesh that renders and is
+// wrong everywhere.
+const VGEOM_VSTRIDE: u32 = 9u;
+@group(3) @binding(0) var<storage, read> v_positions: array<f32>; // VGEOM_VSTRIDE f32 / vertex
 @group(3) @binding(1) var<storage, read> v_meshlets: array<Meshlet>;
 @group(3) @binding(2) var<storage, read> v_meshlet_verts: array<u32>;
 @group(3) @binding(3) var<storage, read> v_meshlet_tris: array<u32>; // packed u8
@@ -87,6 +95,10 @@ struct VsOut {
     // pair nothing read until now.
     @location(7) uv: vec2<f32>,
     @location(8) @interpolate(flat) vt: vec3<u32>,
+    // P28.2: the vertex-level tangent frame (`xyz` local-space tangent, `w`
+    // handedness), interpolated. `w == 0` means this asset carried none and the
+    // fragment falls back to the derivative frame it used before.
+    @location(9) tangent: vec4<f32>,
 };
 
 fn read_tri_byte(byte_addr: u32) -> u32 {
@@ -126,10 +138,11 @@ fn vs(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> V
 
     let local = read_tri_byte(m.triangle_offset + tri * 3u + corner);
     let global_v = v_meshlet_verts[m.vertex_offset + local];
-    let base = global_v * 8u;
+    let base = global_v * VGEOM_VSTRIDE;
     let position = vec3<f32>(v_positions[base], v_positions[base + 1u], v_positions[base + 2u]);
     let normal = vec3<f32>(v_positions[base + 3u], v_positions[base + 4u], v_positions[base + 5u]);
     let uv = vec2<f32>(v_positions[base + 6u], v_positions[base + 7u]);
+    let tan4 = vgeom_unpack_tangent(bitcast<u32>(v_positions[base + 8u]));
 
     let nrm = mat3x3<f32>(inst.n0.xyz, inst.n1.xyz, inst.n2.xyz);
     let wp = inst.model * vec4<f32>(position, 1.0);
@@ -140,6 +153,9 @@ fn vs(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> V
     out.id = inst.pick_id;
     out.pbr = vec4<f32>(inst.metallic, inst.roughness, 0.0, 0.0);
     out.emissive = inst.emissive.rgb;
+    // Rotate into world space with the same normal matrix the normal takes; the
+    // handedness rides through untouched, because it is a sign and not a vector.
+    out.tangent = vec4<f32>(nrm * tan4.xyz, tan4.w);
     out.meshlet = pair.y;
     out.uv = uv;
     out.vt = vec3<u32>(inst.vt0, inst.vt1, inst.vt2);
@@ -290,7 +306,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         rough = clamp(s.roughness, 0.04, 1.0);
         vt_ao = s.occlusion;
         if (s.has_normal) {
-            n = vt_apply_normal(n, vt_dpx, vt_dpy, vt_ddx, vt_ddy, s.normal_ts);
+            n = vt_apply_normal_t(
+                n, in.tangent, vt_dpx, vt_dpy, vt_ddx, vt_ddy, s.normal_ts
+            );
         }
     }
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);

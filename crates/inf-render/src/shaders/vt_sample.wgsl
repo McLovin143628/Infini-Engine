@@ -363,6 +363,74 @@ fn vt_apply_normal(
     return normalize(tangent * ts.x + bitangent * ts.y + n * ts.z);
 }
 
+/// **The tangent word** (P28.2): the octahedral direction + handedness a
+/// `VgeomVertex` carries, unpacked.
+///
+/// The mirror of `inf_vgeom::model::unpack_tangent`, and pinned against it by
+/// `the_shaders_tangent_unpack_is_the_rusts`, which reads this source. The word
+/// is loaded out of the vertex pool as an `f32` and `bitcast` here because the
+/// pool has one `array<f32>` view and no room for a second (`vis_resolve` is a
+/// FRAGMENT pass and P28.1 measured the storage bindings fully spent) — which is
+/// safe *because the packer pins the exponent field*: every real word is a
+/// normal float in ±[1, 2), never subnormal, never NaN, so nothing here can be
+/// flushed or canonicalized. `0.0` is the "no authored tangent" sentinel and
+/// returns `w == 0`, which is how a caller asks for the derivative frame.
+fn vgeom_unpack_tangent(word: u32) -> vec4<f32> {
+    if (word == 0u) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    // Sign-extend the two 11-bit fields by shifting them to the top and back.
+    let ex = f32(i32(word << 21u) >> 21u) / 1023.0;
+    let ey = f32(i32(word << 10u) >> 21u) / 1023.0;
+    var v = vec3<f32>(ex, ey, 1.0 - abs(ex) - abs(ey));
+    if (v.z < 0.0) {
+        let sx = select(1.0, -1.0, v.x < 0.0);
+        let sy = select(1.0, -1.0, v.y < 0.0);
+        v = vec3<f32>((1.0 - abs(v.y)) * sx, (1.0 - abs(v.x)) * sy, v.z);
+    }
+    let h = select(1.0, -1.0, (word & 0x400000u) != 0u);
+    return vec4<f32>(normalize(v), h);
+}
+
+/// `vt_apply_normal` with a **vertex-level** tangent frame, where one exists.
+///
+/// P26.5 routed this here: the derivative frame above is exact for a planar patch
+/// and first-order elsewhere, and what it costs is normal-map orientation on
+/// curved patches. `tan4` is the interpolated `vgeom_unpack_tangent` — `xyz` the
+/// tangent in the same space as `n`, `w` the handedness — and `w == 0` means the
+/// vertex carried none, which is every asset cooked before `.inf_vmesh` v3 and
+/// every primitive that has no authored parametrization. Those fall straight
+/// back, so the channel is additive: a surface without one shades exactly as it
+/// did before this batch.
+///
+/// Gram-Schmidt against `n` rather than trusting the interpolated tangent: linear
+/// interpolation of two unit tangents is neither unit nor perpendicular to the
+/// interpolated normal, and a frame that is not orthonormal skews the mapped
+/// normal in a way that reads as a lighting error rather than as a tangent one.
+fn vt_apply_normal_t(
+    n: vec3<f32>,
+    tan4: vec4<f32>,
+    dp1: vec3<f32>,
+    dp2: vec3<f32>,
+    duv1: vec2<f32>,
+    duv2: vec2<f32>,
+    ts: vec3<f32>,
+) -> vec3<f32> {
+    if (tan4.w == 0.0) {
+        return vt_apply_normal(n, dp1, dp2, duv1, duv2, ts);
+    }
+    let t = tan4.xyz - n * dot(n, tan4.xyz);
+    let l = length(t);
+    if (!(l > 1e-6)) {
+        // Degenerate only when the authored tangent is parallel to the normal,
+        // which is authoring damage rather than a frame this can rescue.
+        return vt_apply_normal(n, dp1, dp2, duv1, duv2, ts);
+    }
+    let tangent = t / l;
+    let bitangent = cross(n, tangent) * tan4.w;
+    return normalize(tangent * ts.x + bitangent * ts.y + n * ts.z);
+}
+
 /// **The residency heat-map** (P26.5) — what `ViewMode::VtResidency` paints.
 ///
 /// One question per fragment: *how many levels coarser than the one this pixel

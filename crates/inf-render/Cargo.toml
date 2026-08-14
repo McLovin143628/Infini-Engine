@@ -88,6 +88,12 @@ naga = { workspace = true }
 # `naga`); the residency door that will page these tiles for real is `inf-vt` in
 # P26.2. No cycle: `inf-material` names no renderer type.
 inf-material = { workspace = true }
+# P28.2: the cluster-page invariant gate names a `.inf_tex` by its ASSET ID,
+# because that is what a `ClusterTileRef` carries — one spelling of a texture's
+# identity across the container, the cook and the residency. DEV-ONLY: the
+# shipping renderer keys textures by `u128` and never names the asset crate.
+inf-asset = { workspace = true }
+uuid = { workspace = true }
 # Drives the skinned golden from a real clip (pose eval → skinning palette).
 # Dev-only: keeps the shipping renderer free of an anim dependency (Ring 0
 # discipline) while proving the GPU-skinning path against inf-anim end to end.

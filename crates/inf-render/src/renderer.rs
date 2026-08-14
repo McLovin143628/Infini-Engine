@@ -929,6 +929,7 @@ impl EngineRenderer {
         scene: &RenderScene,
         view: &RenderView,
         encoder: &mut wgpu::CommandEncoder,
+        cluster: &[(u128, inf_vt::TileCoord)],
     ) {
         let (Some(lib), Some(pools)) = (self.vt_textures.as_mut(), self.vt.as_mut()) else {
             return;
@@ -963,9 +964,23 @@ impl EngineRenderer {
         }
         let feedback = self.vt_feedback.as_mut().expect("just built");
 
-        // 1–2. coverage and the analytic floor.
+        // 1–2. coverage and the analytic floor, plus (P28.2) the tiles every
+        // resident cluster page's materials sample.
+        //
+        // The cluster wants ride at `VT_PRIORITY_FLOOR`, in the SAME want set as
+        // the analytic floor, and that is the whole mechanism by which the
+        // invariant survives between transactions rather than only at one:
+        // `apply_wants` protects every want that is already resident before any
+        // miss is offered a slot, so a tile belonging to a resident cluster page
+        // cannot be evicted while the page is still resident. Put them in a
+        // second transaction and that stops being true on the very next frame.
         let coverage = crate::vt_stream::scene_coverage(scene, &view.origin);
         let mut wants = crate::vt_stream::analytic_floor(lib, view, &coverage);
+        for (guid, tile) in cluster {
+            if let Some(h) = lib.handle(*guid) {
+                wants.push(inf_vt::VtWant::new(h, *tile));
+            }
+        }
         let floor_len = wants.len();
 
         // 3. frame F − 2's mask, or nothing. Never "whatever arrived".
@@ -1529,12 +1544,53 @@ impl EngineRenderer {
                 label: Some("frame"),
             });
 
+        // **THE CLUSTER PAGE-IN** (P28.2), in three steps around one virtual-
+        // texture transaction, because a page-in that feeds two consumers cannot
+        // be seated at two different depths of the frame.
+        //
+        //   1. stage the geometry half (the meshlet streamer's plan);
+        //   2. run ONE virtual-texture transaction whose want set contains the
+        //      analytic floor, the previous frame's feedback AND the tiles every
+        //      resident cluster page samples;
+        //   3. pair — or retract the pages whose tiles the transaction could not
+        //      seat, releasing their pool blocks before anything can write them.
+        //
+        // Disjoint field borrows: the node lives in `self.graph`, the registry in
+        // `self.vt_textures`, and the destructuring is what lets both be `&mut`
+        // at once.
+        let vsettings = self.settings.vgeom;
+        let cluster_wants = {
+            let node = self.graph.node_mut::<passes::vgeom::VgeomNode>();
+            match node {
+                Some(n) => {
+                    n.plan_cluster_pages(scene, view, &vsettings);
+                    let lib = self.vt_textures.as_ref();
+                    n.cluster_tile_wants(scene, |g| {
+                        lib.is_some_and(|l| l.handle(g).is_some())
+                    })
+                }
+                None => Vec::new(),
+            }
+        };
+
         // **THE VIRTUAL-TEXTURE SYNC POINT** (P26.4). Before any pass samples
         // the atlas, and inside the frame's own encoder, so the ordering
         // contract in `crate::vt`'s module docs holds unchanged: a transaction
         // is applied whole, staged on the queue, and executes before the
         // commands of this encoder. A textureless frame does none of it.
-        self.vt_stream(gpu, scene, view, &mut encoder);
+        self.vt_stream(gpu, scene, view, &mut encoder, &cluster_wants);
+
+        {
+            let lib = self.vt_textures.as_ref();
+            if let Some(n) = self.graph.node_mut::<passes::vgeom::VgeomNode>() {
+                n.commit_cluster_pages(gpu, |guid, tile| {
+                    lib.is_some_and(|l| {
+                        l.handle(guid)
+                            .is_some_and(|h| l.residency().is_resident(h, tile))
+                    })
+                });
+            }
+        }
 
         // **THE SHADOW-PAGE SYNC POINT** (P27.1), for the same reason and at the
         // same place: frame F − 2's needed-page mask becomes this frame's

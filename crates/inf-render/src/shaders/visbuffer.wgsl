@@ -110,7 +110,15 @@ fn vis_instance(id: u32) -> Instance {
 // pools sit one group lower than in the forward path — this pass's layout is its
 // own, and reading the forward path's group numbering into it is exactly the
 // coupling the file header refuses.)
-@group(1) @binding(0) var<storage, read> v_positions: array<f32>; // 8 f32 / vertex
+// **The meshlet vertex record's stride, in floats** (P28.2). One `VgeomVertex`
+// is position(3) + normal(3) + uv(2) + a packed tangent word(1) = 9, and this
+// constant is the Rust `VERTEX_REC_LEN / 4` read back — `the_shaders_vertex_
+// stride_is_the_rusts` fails the day the two stop agreeing, in every shader that
+// reads the pool. A wrong stride here does not error: it reads a neighbouring
+// vertex's bytes as this one's position, which is a mesh that renders and is
+// wrong everywhere.
+const VGEOM_VSTRIDE: u32 = 9u;
+@group(1) @binding(0) var<storage, read> v_positions: array<f32>; // VGEOM_VSTRIDE f32 / vertex
 @group(1) @binding(1) var<storage, read> v_meshlets: array<Meshlet>;
 @group(1) @binding(2) var<storage, read> v_meshlet_verts: array<u32>;
 @group(1) @binding(3) var<storage, read> v_meshlet_tris: array<u32>; // packed u8
@@ -183,7 +191,7 @@ fn vs(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> V
 
     let local = read_tri_byte(m.triangle_offset + tri * 3u + corner);
     let global_v = v_meshlet_verts[m.vertex_offset + local];
-    let base = global_v * 8u;
+    let base = global_v * VGEOM_VSTRIDE;
     let position = vec3<f32>(v_positions[base], v_positions[base + 1u], v_positions[base + 2u]);
 
     let inst = vis_instance(vis.flags.x + pair.x);
