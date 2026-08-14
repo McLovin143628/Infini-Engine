@@ -16271,6 +16271,143 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
 > phase — which looks exactly like a hang and is not. Count the process, not the
 > log tail.
 
+## Hardening Wave A — save integrity & data loss (2026-08-14)
+
+The first repair wave of the final hardening campaign. Its subject is the half of
+the engine the master plan's own closing table never numbered: the **document
+save half**. The streaming and runtime interior is the best-audited code in this
+repo; the front doors and the save doors were not, and the campaign's fourth and
+fifth discovery lenses found the same shape at seventeen of them.
+
+**The unit, not the line.** One helper — `inf_asset::write_atomically` (temp
+sibling + rename, with the Spike C pid *and* counter law) — applied at every
+document door in the engine. The mechanism was never missing; it was **copied**,
+pid-only, into three writers and simply absent from thirteen more, including the
+`.inf_lvl` itself. Two smaller units ride with it: *corrupt-parses-as-Default-
+then-gets-written-back* (five loaders adopting the `mixer.rs` idiom), and
+*save honesty* (`mark_saved` after the write; sidecar synthesis that knows
+"absent" from "unreadable").
+
+### The ledger: finding → commit → arm
+
+| Finding | What it was | Commit | Arm |
+|---|---|---|---|
+| C4-11 | `AssetSidecar::save` non-atomic; the atomic wrapper six callers did not use | `d939cb8` | `saving_a_sidecar_never_exposes_a_torn_one` |
+| C4-38 (import_cache) | a truncated import manifest read as an empty cache and was written back → next import mints new GUIDs for everything | `d939cb8` | `a_corrupt_manifest_is_refused_while_an_absent_one_is_empty` |
+| F13 | terrain/voxel temp names pid-only, missing the counter half of the law | `d939cb8` | `temp_names_carry_a_pid_and_never_repeat` |
+| (the helper itself) | — | `d939cb8` | `a_reader_holding_the_old_file_never_observes_the_rewrite`, `a_failed_write_destroys_nothing_and_leaves_no_litter`, `a_read_only_destination_keeps_its_old_bytes` (windows), `rename_over_an_existing_file_replaces_it` |
+| C4-2 / F1 | every `.inf_lvl` save a torn write, payload **and** sidecar | `91977d5` | `saving_a_level_never_exposes_a_torn_payload_or_sidecar` |
+| C4-10 / F3 | the crash-recovery file torn-writable every 5 s — an autosave could destroy the previous autosave | `91977d5` | `rewriting_the_recovery_file_never_destroys_the_previous_one` |
+| C4-45 (recovery) | `serialize.rs:6422` / `:6444` discarded removals: re-offer a spent recovery every boot, or restore it **over newer saved content** | `91977d5` | `a_recovery_older_than_its_superseded_stamp_is_never_restored` |
+| C4-3 / F2 | `mark_saved()` ran before the write, so a failed save reported success and starved the recovery autosave | `e6b0e45` | `scene_save_marks_the_document_saved_only_after_the_write`, `a_document_edited_during_its_own_save_stays_dirty` |
+| C4-12 / F9 | `rewrite_payload` in place, under a message reading "Nothing on disk changed." | `e6b0e45` | `rewriting_a_payload_never_exposes_a_torn_one` |
+| C4-13 | the IDE panel's Ctrl+S torn-writing the user's own `.rs`/`.toml` | `e6b0e45` | (the helper's arms; `file_write` is one call) |
+| C4-21 | `pcg_save` / `sm_save` bare `fs::write` into the content root with **no sidecar** → id churned with content on every save | `e6b0e45` | `a_deterministic_path_save_keeps_one_file_and_one_guid` |
+| C4-22 / F10 | rename left a torn pair (payload moved first) + a TOCTOU pre-check | `e6b0e45` | `a_rename_that_cannot_finish_leaves_the_pair_whole` |
+| C4-23 | an "atomic" replace that deleted the destination first | `e6b0e45`, `888a9f5` | `saving_a_preset_never_deletes_its_destination_first` |
+| C4-24 | the `.infinity/*.toml` family written in place (layers, sorting, settings, sequences, collections, mixer) | `e6b0e45` | `a_corrupt_registry_is_refused_while_an_absent_one_is_the_default` (×2), `corrupt_settings_are_refused_while_absent_ones_are_the_default` |
+| C4-25 | `inf.toml` torn-writable → the project becomes unopenable and `prune_missing` keeps the entry | `e6b0e45` | (the helper's arms; `manifest::save` is one call) |
+| C4-26 | the one cache a torn file does **not** re-derive — existence is the hit and `sweep` never collects it | `e6b0e45` | (the helper's arms; the write is one call) |
+| C4-27 | torn *new* payloads entering the DB looking legitimate (`write_asset` / `duplicate` / `write_tiled_texture`) | `e6b0e45` | (the helper's arms) |
+| C4-29 | the terrain data-map export overwriting in place inside the content root | `e6b0e45` | (the helper's arms) |
+| C4-38 (4 more) | collision layers, sorting layers, project settings, recents: corrupt parsed as Default, then written back | `e6b0e45` | the three registry arms above + `a_corrupt_list_is_refused_while_an_absent_one_is_empty` |
+| F14 | `RecentProjects` had no `schema_version` | `e6b0e45` | `the_version_field_defaults_on_read_and_refuses_the_future` |
+| C4-39 | the asset DB synthesized a sidecar on **any** load failure and then persisted it over the real one; `by_path` keyed on a canonicalization that fails for a just-deleted file | `e6b0e45`, `f21eb40` | `an_unreadable_sidecar_is_advised_and_never_written_over`, `removing_a_file_that_is_already_gone_still_leaves_the_index` |
+| C4-44 / C4-45 (tail) | `assets/mod.rs:356/:358` reported "deleted" over files still on disk; `queue.rs:577/:580` dropped a rescan error and a removal verdict | `e6b0e45` | (surfaced as logs; no arm — see the honest notes) |
+
+### Mutation results — every arm was made to fail by name
+
+| Mutation | Arms that died |
+|---|---|
+| `write_atomically` → plain `fs::write` | `a_reader_holding_the_old_file_never_observes_the_rewrite`, `saving_a_sidecar_never_exposes_a_torn_one` |
+| `write_encoded` → plain `fs::write` | `saving_a_level_never_exposes_a_torn_payload_or_sidecar` |
+| `write_recovery_bytes` → plain `fs::write` | `rewriting_the_recovery_file_never_destroys_the_previous_one` |
+| the superseded-stamp guard disabled | `a_recovery_older_than_its_superseded_stamp_is_never_restored` |
+| `rewrite_payload` → plain `fs::write` | `rewriting_a_payload_never_exposes_a_torn_one` |
+| `rename` back to payload-first, rollback removed | `a_rename_that_cannot_finish_leaves_the_pair_whole` |
+| `read_entry` back to synthesize-on-any-error | `an_unreadable_sidecar_is_advised_and_never_written_over` |
+| `normalize` back to leaf-dependent canonicalize | `removing_a_file_that_is_already_gone_still_leaves_the_index` |
+| `write_asset_at` back to always minting an id | `a_deterministic_path_save_keeps_one_file_and_one_guid` |
+| `CollisionLayers::load_or_default` → `unwrap_or_default` | `a_corrupt_registry_is_refused_while_an_absent_one_is_the_default` |
+| `ImportCache::open` → `unwrap_or_default` | `a_corrupt_manifest_is_refused_while_an_absent_one_is_empty` |
+| `RecentProjects::load_or_default` → `unwrap_or_default` | `a_corrupt_list_is_refused_while_an_absent_one_is_empty`, `the_version_field_defaults_on_read_and_refuses_the_future` |
+| `mark_saved` moved back before the write | `scene_save_marks_the_document_saved_only_after_the_write` |
+| `layouts::save` back to delete-then-rename | **NOTHING** — see below |
+
+### THE ONE THAT DID NOT DIE, AND WHAT IT COST
+
+Restoring `layouts::save`'s delete-then-rename left
+`overwriting_a_preset_never_makes_it_disappear` **green**. The arm looked
+convincing — a held reader, an existence check, a litter sweep — and it is blind
+by construction: the state the deleted lines create (the preset momentarily
+absent) exists strictly *between two syscalls inside `save`*, and every
+observation in that arm happens after `save` returns. On Windows a reader handle
+opened with `FILE_SHARE_DELETE` also survives the unlink, so even the held-reader
+half could not see it.
+
+There is no deterministic external observation of a window between two syscalls,
+so the falsifier is a **source gate** —
+`saving_a_preset_never_deletes_its_destination_first`, asserting that `save`'s
+body goes through `write_atomically` and contains no `remove_file` — with
+`rename_over_an_existing_file_replaces_it` supplying the premise the deleted
+lines doubted ("Windows rename fails if the target exists"; it does not, and five
+writers in this repo have relied on that since P16). The behavioural arm stays,
+with its doc corrected to say what it *does* prove and to state plainly that it
+does not falsify C4-23.
+
+**The law, restated:** *an arm that observes only the endpoints cannot see a
+window between them.* Mutation-verify every arm, including — especially — the
+ones that read as thorough.
+
+### Notes an honest ledger owes
+
+* **`RecentProjects.schema_version` is not a schema move.** It is a JSON editor
+  config: nothing decodes it positionally, no `.inf_*` payload carries it, no
+  pack ships it. The engine schema ladder is untouched by this wave, goldens stay
+  **54** with an empty `git diff` over `tests/goldens/`, and no wire type or
+  ts-rs binding changed.
+* **`inf-project` gained an `inf-asset` dependency** for the one helper. Ring-0 →
+  Ring-0, no cycle (`inf-asset` never names a project), and free of weight in
+  practice: every consumer of `inf-project` — the CLI, the packager, the player,
+  the studio — already links `inf-asset`. The alternative was a second copy of
+  the temp+rename law inside the crate that writes the file a project cannot be
+  opened without.
+* **The `payload.rs:59` bound (B-series, ROADMAP §12) keeps its wording and loses
+  its producers.** The bound is that `migrate`'s default guard checks only
+  *newer*, so a zero-filled or torn payload decodes as a valid asset with
+  `schema_version = 0`. It was reasonable while nothing was known to manufacture
+  such a file; lens 4 identified the producers as C4-2, C4-11, C4-12, C4-21,
+  C4-27, `import_cache.rs` and `recent.rs` — **all seven closed here**. The
+  bound's premise is restored rather than the bound removed: structural
+  validation in `migrate()` is a separate unit (U6) and belongs to another wave.
+* **Deliberately not converted: `inf_editor_core::assets::vmesh`'s
+  `write_payload_atomically`.** It is already atomic and already has a real arm,
+  and that arm injects its failure by *parking a directory at the derived temp
+  path* — which only works because the name is pid-only and therefore
+  predictable. Routing it through the shared helper (pid + counter) would trade a
+  working falsifier for naming consistency. The site is a derived build artifact,
+  not a document; recorded, not fixed.
+* **Deliberately not converted: `Sequence::load` / `list_sequences`.** The
+  sequencer's *write* half is atomic now, but a corrupt sequence still reads as
+  `None` (absent). It is the C4-24 class and was not among C4-38's five named
+  sites; a sequence is a single named document rather than a project-wide
+  registry, so the write-back blast radius that made the other five severe is not
+  present. Recorded.
+* **Three doors have no site-specific arm** and rest on the helper's own: the
+  thumbnail cache write (`get_or_render` needs a GPU adapter to reach the write
+  at all), `file_write`, and `manifest::save`. Each is now a single
+  `write_atomically` call with nothing else on the path.
+* **`AssetDb::sidecar_advisories()` has a surface, unlike its `collisions()`
+  sibling.** `collisions()` has had no production consumer since P26.5 — a
+  record, not a report. The new advisory is logged by `AssetProject::open` and
+  `rescan`, so a payload listed under a stand-in identity says so in the Output
+  Log. `collisions()`' own missing surface is left as found, and named here.
+* **The `clear_recovery` verdict goes to the Output Log, not `SaveResultDto`.**
+  The save itself succeeded; the DTO's two warning lists name the two asset
+  classes a save writes. A recovery file that outlives the save superseding it
+  cannot silently restore over newer content either way — the superseded stamp
+  makes the next boot refuse it.
+
 ---
 
 *This roadmap is a living document. Each phase completion updates it; decision memos land in
