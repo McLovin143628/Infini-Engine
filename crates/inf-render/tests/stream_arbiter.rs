@@ -610,19 +610,42 @@ fn a_clusters_tiles_and_pages_age_together() {
 /// Two different ladders that converge on the same threshold, then the same
 /// step offered to both. The grants, the admits and the coupling must agree —
 /// the arbiter has no memory, and neither may the walk that consumes it.
+///
+/// **The routes have to be routes, and the first draft's were not** (P28.3
+/// audit). It ran `[4.0, 0.5, 0.2, 0.05]` against `[2.0, 1.0, 0.1, 0.05]`, and
+/// measured, those two ladders produce **byte-identical** pages, admits and
+/// resident bytes at every rung — both thresholds in each pair land on the same
+/// page cut. So the arm compared one route with itself and asserted
+/// *determinism*, which is a different claim and one nothing here doubted: a
+/// history-dependent arbiter would have passed it. The gradual ladder now runs
+/// against a **one-shot** one that arrives at the answer immediately, which
+/// diverges at three of the four rungs and reconverges — and `diverged` below
+/// is the guard that says so, because a fixture that stops diverging turns this
+/// arm back into the one it replaced.
 #[test]
 fn two_routes_to_one_residency_triple_arbitrate_identically() {
     let src = paired_source();
-    let converge = |ladder: &[f32]| -> Streamer {
+    let converge = |ladder: &[f32]| -> (Streamer, Vec<(usize, usize)>) {
         let mut s = Streamer::new(1024 * 1024, 16);
+        let mut trace = Vec::new();
         for (i, t) in ladder.iter().enumerate() {
-            s.step(&src, *t, &marks_for(i), true);
+            let step = s.step(&src, *t, &marks_for(i), true);
+            trace.push((step.pages, step.admits.len()));
         }
-        s
+        (s, trace)
     };
-    // Two routes, ending at the same threshold and the same mark set.
-    let mut a = converge(&[4.0, 0.5, 0.2, 0.05]);
-    let mut b = converge(&[2.0, 1.0, 0.1, 0.05]);
+    // Two routes, ending at the same threshold and the same mark set: one walks
+    // the ladder down, the other sits at the destination from the first frame.
+    let (mut a, trace_a) = converge(&[4.0, 0.5, 0.2, 0.05]);
+    let (mut b, trace_b) = converge(&[0.05, 0.05, 0.05, 0.05]);
+    // **ANTI-VACUITY, the one the first draft was missing**: the two routes are
+    // genuinely two. Measured, they differ at rungs 0, 1 and 2 — (1,2) (1,0)
+    // (2,80) against (2,82) (2,0) (2,0) — and agree at 3.
+    assert_ne!(
+        trace_a, trace_b,
+        "the two ladders produced the same residency at every step, so this arm \
+         compares one route with itself and cannot see history at all"
+    );
     // Settle both onto one state: the same threshold twice, so any transient of
     // the route is spent.
     for i in 0..2 {

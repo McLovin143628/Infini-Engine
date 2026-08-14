@@ -205,6 +205,10 @@ struct Run {
     /// distinguishable from a replacement only by asking whether the per-surface
     /// path holds a tile the per-fragment path does not.
     tiles: std::collections::BTreeSet<(u32, inf_vt::TileCoord)>,
+    /// **The unified streamer's audit, as the renderer folds it** (P28.3) —
+    /// carried out of the run so the arm below reads the SHIPPED derivation
+    /// rather than a second copy of it.
+    report: inf_render::StreamReport,
 }
 
 /// Drive `frames` frames of one scene through the real renderer, with the real
@@ -272,6 +276,7 @@ fn run(gpu: &GpuContext, visbuffer: bool, hidden: bool, frames: usize) -> Run {
         })
         .unwrap_or_default();
     Run {
+        report: r.stream_report(),
         admits: pop.admits,
         feedback_frames: pop.feedback_frames,
         resident: r
@@ -548,5 +553,198 @@ fn the_analytic_floor_still_covers_a_handed_over_meshlet_surface() {
         "floor after handover: {} wants with the meshlet surface, {} without",
         floor.len(),
         bare.len()
+    );
+}
+
+/// **THE UNIFIED STREAMER'S AUDIT HAS A READER** (P28.3 audit).
+///
+/// `EngineRenderer::stream_report` is where P28.3 closed the P28.2 audit's
+/// *"the `stale_tiles` counter has no reader"*, and where the memo says
+/// `StreamError::FloorExceedsBudget` *"has its producer over real numbers"*.
+/// Nothing in the tree called it: not a gate, not the player, not the editor.
+/// So the finding was closed by a reader that nothing read, `mismatched_
+/// textures` / `coupled_groups` / `coupled_tiles` / `dropped_groups` /
+/// `floor_bytes` / `RingLedger::readers_agree` arrived the same way, and the
+/// arbiter's own oracle re-derived the live floors instead of exercising the
+/// shipped fold — two derivations of one fact, which is the P21 one-door law
+/// pointed at the batch that quotes it.
+///
+/// This is that reader. It asserts the fold against quantities taken from the
+/// residency directly, so an accessor that returned a plausible constant fails.
+#[test]
+fn the_streamers_audit_folds_the_live_residency() {
+    let Some(gpu) = gpu_or_skip("the stream audit") else {
+        return;
+    };
+    let vis = run(&gpu, true, false, 10);
+    let r = &vis.report;
+
+    // The texture consumer's residency is the residency's own number, not a
+    // re-count — and it is non-zero, or every bound below is a bound on zero.
+    let texture = r.resident_of(inf_render::Consumer::Texture);
+    assert!(texture > 0, "the texture pool held nothing: {r:?}");
+    assert_eq!(
+        r.resident_bytes(),
+        r.resident.iter().sum::<u64>(),
+        "the combined number is not the sum of its parts"
+    );
+
+    // **The live floor**, which is the input `RenderSettings::arbitrate_budgets`
+    // cannot have and the whole reason this call exists: the virtual texture
+    // pinned roots at registration, so its floor is real bytes.
+    assert!(
+        r.floors[inf_render::Consumer::Texture.index()] > 0,
+        "no root was pinned, so the live-floor arbitration is over zeros: {r:?}"
+    );
+    assert_eq!(
+        r.floors[inf_render::Consumer::Shadow.index()],
+        0,
+        "the shadow atlas has no floor by design"
+    );
+
+    // The arbiter ran over the LIVE floors, granted, and the consumers are
+    // inside it. It is an identity here — the three requests fit the default
+    // ceiling — so the grant is the sum of the requests and not the ceiling:
+    // `vsm.enabled` is off in this fixture, and a consumer that is not live
+    // leaves its share behind rather than reserving a third it cannot use.
+    let grant = r
+        .grant
+        .as_ref()
+        .expect("the live floors fit the default budget");
+    assert!(
+        grant.total() <= r.budget_bytes,
+        "the grant left the unified ceiling: {} of {}",
+        grant.total(),
+        r.budget_bytes
+    );
+    assert_eq!(
+        grant.get(inf_render::Consumer::Shadow),
+        0,
+        "shadows are off and still took a share: {r:?}"
+    );
+    assert!(
+        grant.get(inf_render::Consumer::Texture) >= r.floors[inf_render::Consumer::Texture.index()],
+        "the texture grant is under its own live floor: {r:?}"
+    );
+    assert!(r.within_grant(), "a consumer is over its grant: {r:?}");
+
+    // A healthy fixture makes no staleness claim, in either direction — which
+    // is what makes a non-zero value on a broken pack evidence.
+    assert_eq!(r.stale_tiles, 0, "a healthy pack reported stale addresses");
+    assert_eq!(
+        r.mismatched_textures, 0,
+        "a healthy pack reported a wrong image"
+    );
+
+    // **The ring ledger**, and the property one domain buys that two rings
+    // cannot state: the consumers that read agree on the source frame.
+    assert!(
+        r.ring.reader(inf_render::Consumer::Texture).hits > 0,
+        "the texture consumer never landed a readback over ten frames, so the \
+         ledger below is empty: {:?}",
+        r.ring
+    );
+    assert!(
+        r.ring.readers_agree(),
+        "two feedback consumers last read two different source frames: {:?}",
+        r.ring
+    );
+    assert_eq!(
+        r.ring.reader(inf_render::Consumer::Geometry).reads(),
+        0,
+        "the meshlet streamer has no ring — its wants are CPU-derived by ruling"
+    );
+
+    // And the one line a host logs names what it counts.
+    let s = r.summary();
+    for token in ["stream:", "geometry", "texture", "shadow", "stream ring"] {
+        assert!(s.contains(token), "{token:?} missing from {s}");
+    }
+    assert!(!s.contains("REFUSED"), "{s}");
+    eprintln!("stream audit: {s}");
+}
+
+/// **A FRAME THAT DRAWS NOTHING MUST NOT REPORT THAT IT MARKED** (P28.3 audit).
+///
+/// The batch closed the P28.1 audit's second latent shape with `!flat.is_
+/// empty()` in `VgeomNode::run`, and said why it is not cosmetic: `admit`
+/// succeeds on an empty flat table (zero instances is inside every ceiling), so
+/// the frame incremented `VisAudit::frames`, `EngineRenderer::render` read that
+/// as *"the per-pixel producer marked"*, handed the readback ring a copy of an
+/// all-zero mask, and the streamer read **no evidence** as *evidence of
+/// nothing* — a landed feedback frame with an empty refinement set, which is
+/// what a converged scene looks like.
+///
+/// It landed **unarmed**: removing `!flat.is_empty()` again killed nothing in
+/// all twenty-two of this crate's test binaries. This is the arm. The state is
+/// the one the surrounding `continue` already exists for — an instance naming
+/// an asset the scene does not carry, which is a level switch mid-frame — and
+/// it is reached with both vgeom vectors non-empty, because the node returns
+/// early when either is not.
+#[test]
+fn a_frame_whose_instances_name_no_asset_does_not_report_that_it_marked() {
+    let Some(gpu) = gpu_or_skip("the empty frame") else {
+        return;
+    };
+    const ABSENT: u128 = 0xDEAD_0000_0000_0001;
+    let m = Arc::new(dense_grid_mesh(16));
+    let mut sc = RenderScene {
+        grid_enabled: false,
+        // The scene CARRIES one asset, so `run` does not take its early exit…
+        vgeom_assets: vec![VgeomAsset::from_mesh(ASSET, &m).expect("index the vmesh")],
+        ..Default::default()
+    };
+    // …and every instance names a different one, so the flat table is empty.
+    sc.vgeom_instances.push(VgeomInstance::lit(
+        ABSENT,
+        DVec3::ZERO,
+        Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        Vec3::splat(9.0),
+        [1.0, 1.0, 1.0, 1.0],
+        1,
+    ));
+    sc.lights.push(RenderLight {
+        kind: LightKind::Directional,
+        color: [1.0, 1.0, 1.0],
+        intensity: 3.0,
+        direction: Vec3::new(0.35, 0.55, 0.75).normalize(),
+        position: DVec3::ZERO,
+        range: 0.0,
+        ..RenderLight::default()
+    });
+    sc.mark_dirty();
+
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut r = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    r.set_settings(settings(true));
+    let v = view();
+    for _ in 0..4 {
+        r.render(&gpu, &sc, &v, &target.view, (W, H));
+        for _ in 0..8 {
+            if gpu.device.poll(wgpu::PollType::wait_indefinitely()).is_ok() {
+                break;
+            }
+        }
+    }
+    let audit = r.vis_audit();
+    assert_eq!(
+        audit.frames, 0,
+        "a frame with nothing to rasterize reported that the per-pixel producer \
+         marked, so an all-zero mask reaches the ring as evidence: {audit:?}"
+    );
+    // ANTI-VACUITY, and the half that separates this from a refusal: nothing
+    // was refused either — the frame was not over a ceiling, it was empty.
+    assert_eq!(
+        audit.refused(),
+        0,
+        "the frame was REFUSED rather than empty, so this arm is about a \
+         ceiling and not about the flat table: {audit:?}"
+    );
+    // …and the same renderer DOES mark once there is something to draw, or the
+    // assertion above is about a renderer that never marks at all.
+    let vis = run(&gpu, true, false, 4);
+    assert!(
+        vis.feedback_frames > 0,
+        "the control never marked either, so `frames == 0` above says nothing"
     );
 }
