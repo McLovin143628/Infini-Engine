@@ -138,7 +138,7 @@ impl AssetPayload for AnimClipAsset {
     /// and in the shipped player — because the guard in front of it was
     /// `duration <= 0.0` and every ordering comparison a NaN takes part in is
     /// false. The guards are fixed too ([`crate::clip::resolve_time`],
-    /// [`crate::clip::locate`]), but a guard that survives a poisoned value is
+    /// and `clip::locate`), but a guard that survives a poisoned value is
     /// not the same as refusing to hold one: the looping branch has no panic and
     /// instead writes `rem_euclid(NaN)` back into `AnimPlayer.t`, which is
     /// persisted into the `.inf_lvl`. That is NaN in committed bytes, and the

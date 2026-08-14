@@ -365,8 +365,9 @@ impl AudioEngine {
     /// allocates a handle and tracks the voice (so `is_playing`, `effective_*`,
     /// etc. behave consistently); only the audible output is skipped.
     ///
-    /// `None` when the backend refused the voice — see
-    /// [`play_voice`](Self::play_voice).
+    /// `None` when the backend refused the voice: its command queue was full,
+    /// or the device would not take the sound. Never `None` in the no-device
+    /// fallback, which tracks the voice so the reap seam can complete it.
     pub fn play(&mut self, data: &SoundData, settings: PlaySettings) -> Option<SoundHandle> {
         self.play_voice(
             data,

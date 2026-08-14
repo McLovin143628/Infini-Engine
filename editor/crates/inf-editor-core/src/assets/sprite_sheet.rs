@@ -83,7 +83,7 @@ pub struct ResolvedSlice {
 ///
 /// 64 Ki cells is far past any real atlas (a 4096² sheet of 16-pixel tiles is
 /// 65 536 cells exactly, which is the number this is) and is bounded work.
-const MAX_GRID_CELLS: u32 = 1 << 16;
+pub const MAX_GRID_CELLS: u32 = 1 << 16;
 
 impl GridSlicing {
     /// Row-major tile count, bounded by [`MAX_GRID_CELLS`].

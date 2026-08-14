@@ -10,7 +10,7 @@
 //! wrong. An imported file is not like that: it is bytes somebody else wrote,
 //! and this crate hands them to three things that cannot defend themselves.
 //!
-//! * **`meshopt`.** [`crate::optimize`] passes the index buffer to a C library
+//! * **`meshopt`.** [`crate::optimize()`] passes the index buffer to a C library
 //!   through raw FFI. `generate_vertex_remap` sizes its remap table from
 //!   `vertices.len()` and the C side writes `remap[index]` with its `assert`
 //!   compiled out under `-DNDEBUG` — so one index past the end of the vertex

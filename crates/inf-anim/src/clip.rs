@@ -195,7 +195,7 @@ impl AnimClip {
     ///
     /// * `duration` is finite and not negative — `resolve_time` clamps against
     ///   it and `AnimPlayer::advance` takes a `rem_euclid` of it;
-    /// * every keyframe time is finite — [`locate`] binary-searches them;
+    /// * every keyframe time is finite — `locate` binary-searches them;
     /// * `times.len() == values.len()` on every channel — `sample()` indexes
     ///   `values` with an index derived from `times`, and the constructors only
     ///   `debug_assert` the agreement, which is compiled out in release.

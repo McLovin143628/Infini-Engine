@@ -25,7 +25,7 @@ pub struct TableImportReport {
 
 /// The advisory cap. A malformed 100 k-row CSV must not produce 100 k strings —
 /// the sibling advisory caps in this crate use the same shape.
-const MAX_ADVISORIES: usize = 32;
+pub const MAX_ADVISORIES: usize = 32;
 
 impl TableImportReport {
     fn note(&mut self, msg: String) {
