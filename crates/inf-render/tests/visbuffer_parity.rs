@@ -47,9 +47,7 @@ use std::sync::Arc;
 use glam::{DVec3, Quat, Vec3};
 use inf_math::FloatingOrigin;
 use inf_render::passes::visbuffer::VisImage;
-use inf_render::visbuffer::{
-    parity_ok, parity_verdict, ParityVerdict, VisPacking, VIS_EMPTY,
-};
+use inf_render::visbuffer::{parity_ok, parity_verdict, ParityVerdict, VisPacking, VIS_EMPTY};
 use inf_render::{
     EngineRenderer, GpuContext, HeadlessTarget, LightKind, RenderLight, RenderScene,
     RenderSettings, RenderView, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings,

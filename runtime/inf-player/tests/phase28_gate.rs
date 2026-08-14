@@ -589,7 +589,10 @@ fn the_visbuffer_path_shades_at_parity_with_the_forward_path() {
     // GATE CRITERION, recorded for P28.5"). Changing one is a deliberate act
     // that re-states what Phase 28 measured, so it fails here first and gets
     // argued for in a ledger.
-    assert_eq!(PARITY_MAX_STEP, 1, "the recorded criterion's step bound moved");
+    assert_eq!(
+        PARITY_MAX_STEP, 1,
+        "the recorded criterion's step bound moved"
+    );
     assert_eq!(
         PARITY_UNTEXTURED_MAX_FRACTION, 0.02,
         "the recorded criterion's untextured population bound moved"
