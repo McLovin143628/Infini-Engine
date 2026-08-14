@@ -277,6 +277,33 @@ struct Arm {
     proved_resident: Vec<BTreeSet<Addr>>,
     /// Per tick, the pose the producer predicted, recorded for the oracle.
     predicted: Vec<Option<(DVec3, DVec3)>>,
+    /// **The arrival window** (P28.4 audit): tiles justified by a surface that
+    /// is visible *now* and was not visible one tick ago, and how many of them
+    /// the pool did not hold.
+    ///
+    /// The only class a *lead time* can serve. Everything else in this file
+    /// measures surfaces that are already on screen, and for those "ask for what
+    /// is needed now" is unbeatable in a loop with no admission throttle — which
+    /// is the ruling `a_saturated_floor_cannot_be_prefetched_and_the_arm_says_so`
+    /// already reached for the floor. If dead reckoning earns anything anywhere,
+    /// it is here.
+    arrival_blur: u64,
+    arrival_justified: u64,
+    arrival_frames: u64,
+    /// **Speculative wants this transaction actually SEATED**, and the ticks at
+    /// least one was — the "there was headroom" half of the equality's
+    /// anti-vacuity (P28.4 audit).
+    spec_admits: u64,
+    spec_admit_ticks: u64,
+    /// **Speculative wants still unseated after the transaction**, and the ticks
+    /// at least one was — the "the pool pushed back" half.
+    ///
+    /// Both are needed and neither is enough. An equality between the two arms'
+    /// proved sets proves the rank protects the classes above it only if the
+    /// lane below was *pressing* on them; measured under a lane that was never
+    /// admitted, or never refused, it is an equality between two inert runs.
+    spec_denied: u64,
+    spec_denied_ticks: u64,
 }
 
 fn run(predict: Option<u32>, pages: u64) -> Arm {
@@ -316,9 +343,11 @@ fn run(predict: Option<u32>, pages: u64) -> Arm {
 
         let p = predict.and_then(|h| inf_math::dead_reckon(&hist, h));
         arm.predicted.push(p.map(|p| (p.eye, p.forward)));
+        let mut speculated: BTreeSet<Addr> = BTreeSet::new();
         if let Some(p) = &p {
             let spec = speculative_wants(lib.residency(), &view, &cov, p);
             arm.predict_wants += spec.len() as u64;
+            speculated = spec.iter().map(|w| addr(w.texture, w.tile)).collect();
             wants.extend(spec);
         }
 
@@ -337,6 +366,29 @@ fn run(predict: Option<u32>, pages: u64) -> Arm {
                 arm.floor_breaches += 1;
             }
         }
+        // **The two regimes the equality below rests on** (P28.4 audit), read
+        // off the transaction and the pool rather than inferred: how many
+        // speculative addresses this transaction seated, and how many it left
+        // unseated. `residency_never_falls_below_the_proved_classes_under_
+        // speculation` is a statement about a lane that was both admitted
+        // somewhere and refused somewhere; without these it is a statement about
+        // whichever of the two happened.
+        let seated = txn
+            .admits
+            .iter()
+            .filter(|a| speculated.contains(&addr(a.texture, a.tile)))
+            .count() as u64;
+        arm.spec_admits += seated;
+        arm.spec_admit_ticks += u64::from(seated > 0);
+        let denied = speculated
+            .iter()
+            .filter(|(t, mip, x, y)| {
+                !lib.residency()
+                    .is_resident(VtTextureHandle(*t), TileCoord::new(*mip, *x, *y))
+            })
+            .count() as u64;
+        arm.spec_denied += denied;
+        arm.spec_denied_ticks += u64::from(denied > 0);
         arm.proved_resident.push(
             wants[..proved_end]
                 .iter()
@@ -360,6 +412,28 @@ fn run(predict: Option<u32>, pages: u64) -> Arm {
         arm.blur += blur;
         arm.blur_frames += u64::from(blur > 0);
         arm.sharp.push(sharp);
+
+        // **The arrival window**: the surfaces that entered view on THIS tick.
+        // Visibility is a property of the camera path alone, so "was it visible
+        // a tick ago" is asked of `whip_view(tick - 1)` and of nothing residency
+        // holds.
+        if tick > 0 {
+            let seen_before: BTreeSet<u32> =
+                justified_tiles(lib.residency(), &whip_view(tick - 1), &cov)
+                    .iter()
+                    .map(|(h, _)| h.0)
+                    .collect();
+            let mut arriving_blur = 0u64;
+            for (h, t) in &need {
+                if seen_before.contains(&h.0) {
+                    continue;
+                }
+                arm.arrival_justified += 1;
+                arriving_blur += u64::from(!lib.residency().is_resident(*h, *t));
+            }
+            arm.arrival_blur += arriving_blur;
+            arm.arrival_frames += u64::from(arriving_blur > 0);
+        }
 
         let floor_miss = wants[..floor_end]
             .iter()
@@ -546,14 +620,19 @@ fn residency_never_falls_below_the_proved_classes_under_speculation() {
     // the predictor has to have asked.
     println!(
         "proved residency: identical at every tick, ON holds {gained} extra tile-frames; \
-         proved set peaks at {} tiles, {} deferrals under {} speculative wants",
+         proved set peaks at {} tiles, {} deferrals under {} speculative wants; \
+         speculation seated {} tiles over {} ticks and was refused {} over {} ticks",
         on.proved_resident
             .iter()
             .map(BTreeSet::len)
             .max()
             .unwrap_or(0),
         on.deferred,
-        on.predict_wants
+        on.predict_wants,
+        on.spec_admits,
+        on.spec_admit_ticks,
+        on.spec_denied,
+        on.spec_denied_ticks
     );
     assert!(
         on.proved_resident
@@ -567,6 +646,32 @@ fn residency_never_falls_below_the_proved_classes_under_speculation() {
     assert!(
         on.deferred > 0 && on.predict_wants > 0,
         "nothing was refused a slot, so nothing was ranked"
+    );
+
+    // **THE ANTI-VACUITY THAT DECIDES WHAT THE EQUALITY MEANS** (P28.4 audit).
+    //
+    // Identical-because-protected and identical-because-inert are the same
+    // measurement, and the counters above cannot tell them apart: `deferred` and
+    // `predict_wants` are both satisfied by a lane that offered 137 584 wants
+    // and was handed nothing, which is a run in which the rank was never tested.
+    // What has to be true is that the lane got in somewhere — so there were
+    // ticks with headroom, and the equality is not "the pool was full all
+    // along" — AND that it was turned away somewhere, so there were ticks
+    // without, and the equality is not "the pool was never contested". Only
+    // under both is "a strictly-lower lane is exactly neutral to the classes
+    // above it" a statement about the rank.
+    //
+    // Measured here: seated on 22 of the 260 ticks, refused on 106.
+    assert!(
+        on.spec_admit_ticks > 0,
+        "no speculative want was ever SEATED — the two arms are identical \
+         because the lane below never got in, not because the rank held it out \
+         of the classes above"
+    );
+    assert!(
+        on.spec_denied_ticks > 0,
+        "no speculative want was ever REFUSED — the pool was never under \
+         pressure, so nothing was ranked and the equality is arithmetic"
     );
 
     // **And the same claim is NOT made per tick about `sharp`**, deliberately,
@@ -697,6 +802,109 @@ fn every_horizon_in_the_roadmaps_band_beats_the_predictor_being_off() {
     assert!(
         shipped.2 <= table[table.len() - 1].2,
         "the shipped horizon loses to 500 ms"
+    );
+}
+
+/// **THE CONTROL THE A/B DID NOT RUN, AND THE RULING IT FORCES** (P28.4 audit).
+///
+/// `the_predictor_strictly_reduces_a_whip_pans_fallback_frames` compares the
+/// speculative lane against **no lane at all**, so what it measures is the lane
+/// — a CPU-side want set at the *refinement's* cap — and not the dead reckoning
+/// inside it. The control that separates the two is a horizon of **zero**, which
+/// is reachable through the shipped API and needs no mutation: `dead_reckon` at
+/// `h = 0` scales the secant by nothing and turns by nothing, so it returns the
+/// newest committed pose exactly. Same lane, same cap, same rank, no lead.
+///
+/// Measured on this fixture, blur frames / blur tiles against OFF's 131 /
+/// 19 872 and an arrival window of 384 / 1 728 over 15 frames:
+///
+/// | lead | blur frames | blur tiles | arrival blur |
+/// |---|---|---|---|
+/// | **0 ticks** | **105** | **18 752** | **64**, over 2 frames |
+/// | 3 | 108 | 18 800 | 96 |
+/// | 6 | 113 | 18 912 | 144 |
+/// | 12 | 115 | 18 976 | 176 |
+/// | **18 (shipped)** | 115 | 18 976 | 176, over 7 frames |
+/// | 24 | 112 | 18 896 | 128 |
+/// | 36 | 124 | 19 152 | 224 |
+///
+/// **The lead time is a cost on this fixture, not the win** — and the arrival
+/// window, the only class a lead can serve, says it louder than the aggregate
+/// does. That is not a defect in the predictor; it is
+/// `a_saturated_floor_cannot_be_prefetched_and_the_arm_says_so` one class up.
+/// `apply_wants` seats a miss the frame it is offered, out of the same pool,
+/// with no admission throttle and no fetch latency — a page is sampleable the
+/// frame it is admitted — so *having asked earlier* buys nothing anywhere in
+/// this loop, and every want spent on where the camera will be is a slot not
+/// spent on where it is.
+///
+/// Asserted rather than written down, in the shape the floor's refutation
+/// already uses: **the day a lead time wins, this arm goes red and the ruling is
+/// re-opened by a test instead of by memory.** What would make it win is a
+/// throttle or a real latency between "admitted" and "sampleable"; neither
+/// exists in this tree today (P28.3 §8 re-measured the loader and left it
+/// alone).
+#[test]
+fn a_lead_time_costs_this_fixture_what_the_lane_earns_it() {
+    let off = run(None, PAGES);
+    let zero = run(Some(0), PAGES);
+    let shipped = run(Some(HORIZON), PAGES);
+
+    for (name, a) in [("OFF ", &off), ("h=0 ", &zero), ("h=18", &shipped)] {
+        println!(
+            "{name} blur {}/{} over {} frames | ARRIVAL blur {}/{} over {} frames | \
+             speculation {} offered, {} seated over {} ticks",
+            a.blur,
+            a.justified,
+            a.blur_frames,
+            a.arrival_blur,
+            a.arrival_justified,
+            a.arrival_frames,
+            a.predict_wants,
+            a.spec_admits,
+            a.spec_admit_ticks
+        );
+    }
+
+    // ANTI-VACUITY: a horizon of zero really is the committed pose, and the
+    // arrival window really has surfaces in it.
+    assert_eq!(
+        zero.predicted[TICKS as usize - 1]
+            .expect("a full window predicts")
+            .1,
+        whip_view(TICKS - 1).forward.as_dvec3(),
+        "h = 0 did not return the committed direction, so this is not the \
+         control it claims to be"
+    );
+    assert!(zero.predict_wants > 0 && off.arrival_justified > 0);
+
+    // **The lane earns the win** — which is what the A/B arm next door
+    // measures, stated here as the half of it that is about the lane.
+    assert!(
+        zero.blur_frames < off.blur_frames,
+        "the speculative lane at the refinement's cap did not beat OFF even with \
+         no lead to pay for: {} against {}",
+        zero.blur_frames,
+        off.blur_frames
+    );
+
+    // **…and the lead costs.** `>=` rather than `>` because the two are
+    // allowed to tie; what is refused is the reading that the lead is what won.
+    assert!(
+        shipped.blur_frames >= zero.blur_frames,
+        "the shipped lead now BEATS the zero-lead control ({} against {}) — a \
+         throttle or a fetch latency has appeared between `apply_wants` and a \
+         sampleable page, and P28.4's ruling on what the predictor buys has to \
+         be rewritten",
+        shipped.blur_frames,
+        zero.blur_frames
+    );
+    assert!(
+        shipped.arrival_blur >= zero.arrival_blur,
+        "the lead now wins the ARRIVAL window ({} against {}) — the same \
+         re-opening, on the class a lead time is actually for",
+        shipped.arrival_blur,
+        zero.arrival_blur
     );
 }
 
