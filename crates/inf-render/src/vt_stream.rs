@@ -137,6 +137,21 @@ pub struct VtPopIn {
     pub admits: u64,
     /// Frames this streamer has run.
     pub frames: u64,
+    /// **Pages actually written into the atlas**, summed over frames (P28.3) —
+    /// `VtApplyReport::pages`, which reached a caller per call and was summed
+    /// nowhere.
+    ///
+    /// The P26.5 routing asked for *"re-upload regressions visible to
+    /// counters"*, and this is the pair that makes them visible: `admits` is
+    /// what residency decided and this is what the queue paid for. They agree
+    /// on a healthy frame and diverge exactly when the mirror writes a page
+    /// residency did not newly admit — a pool re-created, a slot re-staged, a
+    /// growth's full re-upload — which is the regression class nothing in this
+    /// tree could name before.
+    pub page_uploads: u64,
+    /// Bytes of page data written, summed over frames — the same signal in the
+    /// unit a VRAM budget is spent in.
+    pub page_upload_bytes: u64,
 }
 
 impl VtPopIn {
@@ -145,10 +160,13 @@ impl VtPopIn {
     /// in one log.
     pub fn summary(&self) -> String {
         format!(
-            "vt streaming: {} frames, {} admits, {} deferred, floor {}/{} at fallback, \
-             refine {}/{} at fallback, feedback {} landed / {} missed",
+            "vt streaming: {} frames, {} admits ({} uploads, {:.2} MiB), {} deferred, \
+             floor {}/{} at fallback, refine {}/{} at fallback, feedback {} landed \
+             / {} missed",
             self.frames,
             self.admits,
+            self.page_uploads,
+            self.page_upload_bytes as f64 / (1024.0 * 1024.0),
             self.deferred,
             self.floor_fallback,
             self.floor_wants,

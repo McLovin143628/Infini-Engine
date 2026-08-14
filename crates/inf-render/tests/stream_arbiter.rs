@@ -55,6 +55,12 @@ fn descs() -> Vec<(u128, VtTextureDesc)> {
 
 /// A paired `.inf_vmesh` — the shape a cook produces, tangents and all.
 fn paired_source() -> VgeomSource {
+    source_paired_against(&descs())
+}
+
+/// A paired image cooked against `cook`, to be met at runtime by whatever the
+/// caller registers.
+fn source_paired_against(cook: &[(u128, VtTextureDesc)]) -> VgeomSource {
     let mesh = inf_vgeom::test_support::build_grid_tangented(
         24,
         0.3,
@@ -62,7 +68,7 @@ fn paired_source() -> VgeomSource {
         true,
     );
     let set = ClusterTextureSet {
-        textures: descs()
+        textures: cook
             .iter()
             .map(|(g, d)| ClusterTexture::from_desc(asset_id(*g), d))
             .collect(),
@@ -648,6 +654,89 @@ fn two_routes_to_one_residency_triple_arbitrate_identically() {
     assert!(
         !sa.admits.is_empty() || !sa.evicts.is_empty(),
         "the compared step was a no-op on both routes"
+    );
+}
+
+/// **CROSS-CONSUMER IDENTITY** (P28.3): a cooked tile address carries the
+/// digest of the grid it was paired against, and a mismatch is detected from
+/// the FIRST reference rather than discovered address by address.
+///
+/// The P28.2 audit routed the *format* answer here — *"a mip-count or a content
+/// digest in the tiles section, checked at load — belongs with P28.3's unified
+/// streamer, which is where cross-consumer identity is owned"* — and named the
+/// direction the runtime answer is blind to: an image re-imported **larger**
+/// still has every cooked address, so `can_address` says yes to all of them and
+/// the surface streams the wrong detail level in silence.
+///
+/// Measured here, in both directions, against a control that is the same asset
+/// cooked against the image it actually meets.
+#[test]
+fn a_pairing_cooked_against_another_grid_is_detected_from_its_first_reference() {
+    let bigger = vec![
+        (TEX_A, full_pyramid(4096, 4096, 128, 4, true)),
+        (TEX_B, full_pyramid(1024, 1024, 128, 4, false)),
+    ];
+    let smaller = vec![
+        (TEX_A, full_pyramid(512, 512, 128, 4, true)),
+        (TEX_B, full_pyramid(1024, 1024, 128, 4, false)),
+    ];
+    // The runtime registers `descs()`; the cooks disagree with it.
+    let count = |src: &VgeomSource| -> (usize, usize) {
+        let (res, by_guid) = texture_residency(4 * 1024 * 1024);
+        let (mut mismatched, mut missing) = (0usize, 0usize);
+        for page in 0..src.pages().len() {
+            src.with_page_sections(page, |s| {
+                for t in s.tile_refs() {
+                    let g = t.texture().uuid().as_u128();
+                    let Some(h) = by_guid.get(&g) else { continue };
+                    let desc = res.desc(*h).expect("registered");
+                    if !t.grid_matches(desc) {
+                        mismatched += 1;
+                    } else if !res.can_address(*h, t.coord()) {
+                        missing += 1;
+                    }
+                }
+            });
+        }
+        (mismatched, missing)
+    };
+
+    // THE CONTROL: cooked against the image it meets — nothing is detected, so
+    // the two numbers below are about the mismatch and not about the walk.
+    let (m, x) = count(&paired_source());
+    assert_eq!((m, x), (0, 0), "the control detected a mismatch");
+
+    // **The direction `can_address` cannot see.** Every address of a 4 096²
+    // image exists inside a 2 048² one? No — but every address of the SMALLER
+    // cook exists in the bigger registered image, which is the benign direction
+    // the audit called out. Both are caught by the grid.
+    let (m_big, _) = count(&source_paired_against(&bigger));
+    assert!(m_big > 0, "a coarser cook's grid claim was accepted");
+    let (m_small, _) = count(&source_paired_against(&smaller));
+    assert!(m_small > 0, "a finer cook's grid claim was accepted");
+
+    // And the SECOND texture, cooked against the image that is registered, is
+    // untouched — a mismatch is per texture and does not condemn the pairing.
+    let src = source_paired_against(&bigger);
+    let (res, by_guid) = texture_residency(4 * 1024 * 1024);
+    let mut ok_b = 0usize;
+    for page in 0..src.pages().len() {
+        src.with_page_sections(page, |s| {
+            for t in s.tile_refs() {
+                let g = t.texture().uuid().as_u128();
+                if g != TEX_B {
+                    continue;
+                }
+                let h = by_guid.get(&g).expect("registered");
+                if t.grid_matches(res.desc(*h).expect("registered")) {
+                    ok_b += 1;
+                }
+            }
+        });
+    }
+    assert!(
+        ok_b > 0,
+        "the untouched texture's pairing was condemned with its neighbour's"
     );
 }
 

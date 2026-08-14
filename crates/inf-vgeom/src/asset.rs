@@ -255,13 +255,48 @@ pub struct ClusterTileRef {
     pub mip: u32,
     pub x: u32,
     pub y: u32,
-    /// Zero. Present so the record is 32 bytes — two to a 16-byte lane, which is
-    /// what keeps the section's alignment arithmetic exact.
-    pub pad: u32,
+    /// **The digest of the tile grid this address was cooked against**, or `0`
+    /// for "the cook made no claim" (P28.3).
+    ///
+    /// This word was the record's pad, written as zero by every v3 cook. That
+    /// is what lets it carry a claim without a container version: a P28.2 image
+    /// parses as *no claim*, which is the truth about it rather than a default
+    /// standing in for one — the same argument that let `tile_count` and
+    /// `tiles_off` take v2's two zero pads.
+    ///
+    /// **The staleness class it closes.** The tiles section holds addresses
+    /// into *another asset's* address space, and the P28.2 audit measured what
+    /// nothing tying the two costs: a `.inf_vmesh` paired against a 2 048²
+    /// image, met by a 512² image of the same GUID, took residency to zero and
+    /// kept it there. The runtime answer landed then —
+    /// `VtResidency::can_address` separates *"not paged in"* from *"no such
+    /// tile"*, so the asset degrades instead of vanishing — and the audit
+    /// routed the **format** answer here.
+    ///
+    /// A digest and not a mip count, and the difference is measurable: a
+    /// 2 048×2 048 pyramid and a 2 048×1 024 one have the **same** mip count
+    /// and different grids at every level, so a mip count would call a re-crop
+    /// fresh. This is a hash of the whole mip directory — see
+    /// [`ClusterTexture::grid_digest`].
+    ///
+    /// It is checked at **load** (the runtime compares it against the
+    /// registered `VtTextureDesc`'s own digest, once per texture) rather than
+    /// per address, which is the structural half: a stale image is detected
+    /// from its FIRST tile reference, including the re-imported-*larger*
+    /// direction, where every cooked address still exists and over-supplies —
+    /// benign to residency, and silently the wrong detail level.
+    pub grid: u32,
 }
 
 impl ClusterTileRef {
+    /// A tile reference with **no grid claim** — the P28.2 shape, kept for a
+    /// caller that has an address and no descriptor.
     pub fn new(texture: AssetId, mip: u32, x: u32, y: u32) -> Self {
+        Self::with_grid(texture, mip, x, y, 0)
+    }
+
+    /// A tile reference carrying the digest of the grid it was cooked against.
+    pub fn with_grid(texture: AssetId, mip: u32, x: u32, y: u32, grid: u32) -> Self {
         let v = texture.uuid().as_u128();
         Self {
             texture_lo: v as u64,
@@ -269,7 +304,7 @@ impl ClusterTileRef {
             mip,
             x,
             y,
-            pad: 0,
+            grid,
         }
     }
 
@@ -283,6 +318,16 @@ impl ClusterTileRef {
     /// The tile address, in `inf_vt`'s spelling.
     pub fn coord(&self) -> inf_vt::TileCoord {
         inf_vt::TileCoord::new(self.mip, self.x, self.y)
+    }
+
+    /// Whether this reference's grid claim is consistent with `desc`.
+    ///
+    /// `true` when the cook made no claim (a P28.2 image), because *"the
+    /// pairing is unverified"* and *"the pairing is wrong"* are different facts
+    /// and only the second may cost an asset its coupling. The same shape as
+    /// `VtResidency::can_address`'s split, one level up.
+    pub fn grid_matches(&self, desc: &inf_vt::VtTextureDesc) -> bool {
+        self.grid == 0 || self.grid == grid_digest(desc.mips.iter().map(|m| (m.tiles_x, m.tiles_y)))
     }
 
     /// The order the section is sorted in: by texture, then by the order the
@@ -316,6 +361,47 @@ impl ClusterTexture {
             id,
             mips: desc.mips.iter().map(|m| (m.tiles_x, m.tiles_y)).collect(),
         }
+    }
+
+    /// **The digest of this texture's tile grid** — what a cooked
+    /// [`ClusterTileRef`] carries so a runtime can tell the image it was paired
+    /// against from the image in front of it.
+    pub fn grid_digest(&self) -> u32 {
+        grid_digest(self.mips.iter().copied())
+    }
+}
+
+/// A 32-bit digest of a tile grid: the level count and every level's
+/// `(tiles_x, tiles_y)`, finest first.
+///
+/// **Owned arithmetic, no dependency.** An FNV-1a walk over the little-endian
+/// words, folded to 32 bits — this crate must not grow a hash dependency to
+/// spell four numbers, and the digest never crosses a process boundary except
+/// inside a `.inf_vmesh` that this same function reads back.
+///
+/// **Never 0**: zero is the section's "no claim" sentinel, so a grid that
+/// happens to hash to it is stored as 1. The collision that buys is one grid in
+/// 2^32 reading as a different grid, against the alternative of one grid in
+/// 2^32 silently disabling the check for every asset paired with it.
+pub fn grid_digest(mips: impl ExactSizeIterator<Item = (u32, u32)>) -> u32 {
+    const OFFSET: u32 = 0x811c_9dc5;
+    const PRIME: u32 = 0x0100_0193;
+    let mut h = OFFSET;
+    let mut fold = |v: u32| {
+        for b in v.to_le_bytes() {
+            h ^= u32::from(b);
+            h = h.wrapping_mul(PRIME);
+        }
+    };
+    fold(mips.len() as u32);
+    for (x, y) in mips {
+        fold(x);
+        fold(y);
+    }
+    if h == 0 {
+        1
+    } else {
+        h
     }
 }
 
@@ -846,7 +932,7 @@ fn pair_page_tiles(
         let (ty0, ty1) = (tile_of(v0, tiles_y), tile_of(v1, tiles_y));
         for y in ty0..=ty1 {
             for x in tx0..=tx1 {
-                out.push(ClusterTileRef::new(tex.id, mip, x, y));
+                out.push(ClusterTileRef::with_grid(tex.id, mip, x, y, tex.grid_digest()));
             }
         }
     }
@@ -2358,7 +2444,60 @@ mod tests {
         let r = ClusterTileRef::new(id, 3, 11, 7);
         assert_eq!(r.texture(), id);
         assert_eq!(r.coord(), inf_vt::TileCoord::new(3, 11, 7));
-        assert_eq!(r.pad, 0);
+        assert_eq!(r.grid, 0, "`new` makes no grid claim");
+    }
+
+    /// **The grid digest separates two images the mip count cannot** (P28.3).
+    ///
+    /// The P28.2 audit routed the FORMAT answer to this batch: nothing tied a
+    /// cooked tile address to the image it addresses, and the failure mode was
+    /// total (residency reached zero and stayed there). A mip count was the
+    /// obvious answer and is measurably too weak — a 2 048 x 2 048 pyramid and
+    /// a 2 048 x 1 024 one have the SAME mip count and a different grid at
+    /// every level — so the record carries a digest of the whole directory.
+    #[test]
+    fn the_grid_digest_separates_two_images_a_mip_count_cannot() {
+        let square = inf_vt::full_pyramid(2048, 2048, 128, 4, true);
+        let wide = inf_vt::full_pyramid(2048, 1024, 128, 4, true);
+        assert_eq!(
+            square.mip_count(),
+            wide.mip_count(),
+            "the fixture's premise: a mip count cannot tell these apart"
+        );
+        let id = AssetId(uuid::Uuid::from_u128(7));
+        let a = ClusterTexture::from_desc(id, &square);
+        let b = ClusterTexture::from_desc(id, &wide);
+        assert_ne!(a.grid_digest(), b.grid_digest());
+        // …and the shrunken image the audit measured, which a mip count DOES
+        // separate — the digest must separate it too.
+        let small = inf_vt::full_pyramid(512, 512, 128, 4, true);
+        assert_ne!(a.grid_digest(), ClusterTexture::from_desc(id, &small).grid_digest());
+
+        // The record's claim answers about the descriptor it was cooked from
+        // and refuses the others.
+        let r = ClusterTileRef::with_grid(id, 0, 0, 0, a.grid_digest());
+        assert!(r.grid_matches(&square));
+        assert!(!r.grid_matches(&wide));
+        assert!(!r.grid_matches(&small));
+        // **A P28.2 image makes no claim, and no claim is not a mismatch**: an
+        // unverified pairing and a wrong one are different facts, and only the
+        // second may cost an asset its coupling.
+        assert!(ClusterTileRef::new(id, 0, 0, 0).grid_matches(&wide));
+
+        // Deterministic, never zero, and a function of the grid alone.
+        assert_eq!(a.grid_digest(), ClusterTexture::from_desc(id, &square).grid_digest());
+        assert_ne!(a.grid_digest(), 0);
+        for d in [&square, &wide, &small] {
+            assert_ne!(
+                grid_digest(d.mips.iter().map(|m| (m.tiles_x, m.tiles_y))),
+                0,
+                "0 is the no-claim sentinel and must be unreachable"
+            );
+        }
+        // The level COUNT is folded in, so a prefix of a pyramid is a different
+        // grid even when every level it does have agrees.
+        let truncated: Vec<(u32, u32)> = a.mips[..a.mips.len() - 1].to_vec();
+        assert_ne!(a.grid_digest(), grid_digest(truncated.into_iter()));
     }
 
     // ── the v2 lift ─────────────────────────────────────────────────────────

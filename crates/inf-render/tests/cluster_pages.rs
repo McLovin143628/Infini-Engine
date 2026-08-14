@@ -523,7 +523,12 @@ fn the_renderers_cluster_sync_seats_the_texture_half_between_the_plan_and_the_pa
             .unwrap_or_else(|| panic!("renderer.rs no longer contains `{needle}`"))
     };
     let plan = at("plan_cluster_pages(scene, view, &vsettings)");
-    let wants = at("n.cluster_tile_wants(scene,");
+    // The call, not its formatting: P28.3 gave `cluster_tile_wants` a third
+    // argument and rustfmt broke the call over four lines, which a pin on
+    // `"n.cluster_tile_wants(scene,"` could not survive. A pin must read the
+    // SCOPE it means and not one spelling of it (the P23 law), so this names
+    // the function and the arm below still orders it against the other three.
+    let wants = at("n.cluster_tile_wants(");
     let vt = at("self.vt_stream(gpu, scene, view, &mut encoder, &cluster_wants)");
     let pair = at("n.commit_cluster_pages(gpu,");
     assert!(

@@ -61,6 +61,14 @@ pub struct StreamReport {
     /// `VgeomStreamReport` in P28.2 with nothing consuming it, and the audit's
     /// remainder list says so by name.
     pub stale_tiles: u64,
+    /// Textures whose cooked **grid digest** does not match the registered
+    /// image's, cumulative (P28.3) — the *structural* half of the staleness
+    /// class the P28.2 audit routed here. A non-zero value is a pack whose
+    /// `.inf_vmesh` and `.inf_tex` came from two different cooks, and it is the
+    /// one direction `stale_tiles` cannot see: an image that GREW still has
+    /// every cooked address, so nothing is missing and the detail is silently
+    /// wrong.
+    pub mismatched_textures: u64,
     /// The readback ledger both feedback consumers report into.
     pub ring: RingLedger,
 }
@@ -109,6 +117,12 @@ impl StreamReport {
         if self.stale_tiles > 0 {
             s.push_str(&format!(" [{} stale tile addresses]", self.stale_tiles));
         }
+        if self.mismatched_textures > 0 {
+            s.push_str(&format!(
+                " [{} textures paired against another image]",
+                self.mismatched_textures
+            ));
+        }
         if let Err(e) = &self.grant {
             s.push_str(&format!(" [REFUSED: {e}]"));
         }
@@ -140,6 +154,7 @@ mod tests {
             dropped_groups: 2,
             retracted: 1,
             stale_tiles: 0,
+            mismatched_textures: 0,
             ring: RingLedger::default(),
         }
     }
@@ -192,9 +207,13 @@ mod tests {
             assert!(s.contains(token), "{token:?} missing from {s}");
         }
         assert!(!s.contains("stale"), "{s}");
+        assert!(!s.contains("another image"), "{s}");
         let mut stale = r;
         stale.stale_tiles = 4;
-        assert!(stale.summary().contains("[4 stale tile addresses]"));
+        stale.mismatched_textures = 1;
+        let s = stale.summary();
+        assert!(s.contains("[4 stale tile addresses]"), "{s}");
+        assert!(s.contains("[1 textures paired against another image]"), "{s}");
     }
 
     /// Residency past the grant is visible — the ratchet's own predicate.

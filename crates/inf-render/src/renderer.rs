@@ -1009,9 +1009,16 @@ impl EngineRenderer {
         );
 
         // 4. apply, and upload the pages.
-        let (txn, _report) = lib.sync(&gpu.device, &gpu.queue, pools, &wants);
+        let (txn, report) = lib.sync(&gpu.device, &gpu.queue, pools, &wants);
         self.vt_pop_in.deferred += u64::from(txn.deferred);
         self.vt_pop_in.admits += txn.admits.len() as u64;
+        // P26.5's routed remainder: the apply report reached a caller per call
+        // and was summed nowhere, so a re-upload regression had no counter.
+        // `admits` is what residency decided, this is what the queue paid for,
+        // and the pair diverges exactly when the mirror writes a page residency
+        // did not newly admit.
+        self.vt_pop_in.page_uploads += report.pages as u64;
+        self.vt_pop_in.page_upload_bytes += report.page_bytes;
         self.vt_pop_in.frames += 1;
         crate::vt_stream::count_fallbacks(lib, &wants, &mut self.vt_pop_in);
 
@@ -1291,6 +1298,7 @@ impl EngineRenderer {
             coupled_groups: vgeom.coupled_groups,
             coupled_tiles: vgeom.coupled_tiles,
             dropped_groups: vgeom.dropped_groups,
+            mismatched_textures: vgeom.mismatched_textures,
             retracted: vgeom.retracted,
             stale_tiles: vgeom.stale_tiles,
             ring: self.stream_ring,
@@ -1670,12 +1678,26 @@ impl EngineRenderer {
                     // no transaction can ever seat, so the page was retracted on
                     // every frame for ever (measured: residency reached zero and
                     // the mesh vanished). `can_address` separates the two.
-                    n.cluster_tile_wants(scene, |g, tile| {
-                        lib.is_some_and(|l| {
-                            l.handle(g)
-                                .is_some_and(|h| l.residency().can_address(h, tile))
-                        })
-                    })
+                    n.cluster_tile_wants(
+                        scene,
+                        |g, tile| {
+                            lib.is_some_and(|l| {
+                                l.handle(g)
+                                    .is_some_and(|h| l.residency().can_address(h, tile))
+                            })
+                        },
+                        // P28.3's grid claim: the cooked digest against the
+                        // REGISTERED image's own. A texture this level does not
+                        // bind is not a mismatch — it is simply not part of the
+                        // pairing, which the `addressable` filter already says.
+                        |g, t| {
+                            lib.is_none_or(|l| {
+                                l.handle(g).is_none_or(|h| {
+                                    l.residency().desc(h).is_none_or(|d| t.grid_matches(d))
+                                })
+                            })
+                        },
+                    )
                 }
                 None => Vec::new(),
             }

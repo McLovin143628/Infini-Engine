@@ -1330,6 +1330,9 @@ pub struct VgeomStreamReport {
     /// Groups dropped since the node was built — the anti-vacuity number for
     /// cross-system aging. See `VgeomNode`'s field of the same name.
     pub dropped_groups: u64,
+    /// Textures whose cooked grid digest does not match the registered image's,
+    /// cumulative (P28.3). See `VgeomNode`'s field of the same name.
+    pub mismatched_textures: u64,
     /// **The meshlet streamer's mandatory floor**, in bytes (P28.3): every
     /// resident asset's page 0, which holds all its roots and is never evicted.
     ///
@@ -1427,6 +1430,16 @@ pub struct VgeomNode {
     /// never lets anything go and one that is never populated both report zero
     /// breaches, and only this tells them apart.
     dropped_groups: u64,
+    /// Textures whose cooked **grid digest** does not match the registered
+    /// image's, cumulative and counted **once per texture per frame** (P28.3).
+    ///
+    /// A stronger fact than `stale_tiles`, and the one that explains it: a
+    /// non-zero value here means a `.inf_vmesh` was paired against a different
+    /// `.inf_tex` than the one this session registered, detected from the first
+    /// tile reference rather than discovered address by address — and detected
+    /// in the direction `stale_tiles` is blind to, where the image grew and
+    /// every cooked address still exists.
+    mismatched_textures: u64,
     /// Cooked tile addresses the registered image does not have, cumulative — a
     /// `.inf_vmesh` paired against a **different** `.inf_tex` than the one in
     /// front of it. Never silence, on the P16 advisory doctrine: nothing else in
@@ -1635,6 +1648,7 @@ impl VgeomNode {
             pools_rebuilt: false,
             retracted: 0,
             dropped_groups: 0,
+            mismatched_textures: 0,
             stale_tiles: 0,
         }
     }
@@ -1727,15 +1741,27 @@ impl VgeomNode {
     /// the asset for ever (P28.2 audit; measured, it went to **zero pages** —
     /// the mesh vanished — because the root page's coarsest-mip address is the
     /// first one a shrunken pyramid loses).
+    ///
+    /// **`grid` is the P28.3 half, and it is checked first.** A tile reference
+    /// carries the digest of the grid it was cooked against, so an image that
+    /// is not the one this pairing was baked for is detected from the FIRST
+    /// reference to it — including the re-imported-*larger* direction, where
+    /// every cooked address still exists and over-supplies, which
+    /// `addressable` cannot see at all because nothing is missing. A mismatched
+    /// texture's whole pairing is dropped, once, and counted.
     pub fn cluster_tile_wants(
         &mut self,
         scene: &crate::scene::RenderScene,
         addressable: impl Fn(u128, inf_vt::TileCoord) -> bool,
+        grid_matches: impl Fn(u128, &inf_vgeom::ClusterTileRef) -> bool,
     ) -> Vec<(u128, inf_vt::TileCoord)> {
         self.coupling.clear();
         if self.pending.is_none() {
             return Vec::new();
         }
+        // Textures whose grid claim this frame already rejected, so one stale
+        // image is one number however many pages reference it.
+        let mut mismatched: std::collections::BTreeSet<u128> = std::collections::BTreeSet::new();
         let source_of: BTreeMap<u128, &inf_vgeom::VgeomSource> = scene
             .vgeom_assets
             .iter()
@@ -1764,7 +1790,15 @@ impl VgeomNode {
                         // was baked against a `.inf_tex` that is not the one in
                         // front of us, and no budget will ever seat a tile that
                         // does not exist.
-                        if addressable(guid, t.coord()) {
+                        // The grid claim first: a wrong IMAGE is a stronger
+                        // fact than a missing address, and it is the one that
+                        // explains every missing address that follows.
+                        if !grid_matches(guid, t) {
+                            if mismatched.insert(guid) {
+                                self.mismatched_textures += 1;
+                            }
+                            self.stale_tiles += 1;
+                        } else if addressable(guid, t.coord()) {
                             here.push((guid, t.coord()));
                         } else {
                             self.stale_tiles += 1;
@@ -1870,6 +1904,7 @@ impl VgeomNode {
             r.coupled_groups = self.coupling.len();
             r.coupled_tiles = self.coupling.member_count();
             r.stale_tiles = self.stale_tiles;
+            r.mismatched_textures = self.mismatched_textures;
             r.floor_lod.clear();
             r.pages.clear();
             for (id, res) in self.streamer.assets() {
@@ -1981,9 +2016,22 @@ impl RenderNode for VgeomNode {
             vis.ensure_targets(gpu, frame);
             vis.ensure_instances(gpu, flat.len() as u32);
             vis.ensure_flags(gpu, flat_at.len());
-            if vis
-                .admit(flat.len() as u32, pool_bytes, max_tri_all)
-                .is_ok()
+            // **`!flat.is_empty()` is the P28.1 audit's second latent shape,
+            // closed** (P28.3). `admit` succeeds on an empty flat table — zero
+            // instances is inside every ceiling — so a frame where no asset has
+            // any residency yet used to increment `frames` and rasterize
+            // nothing. That is not cosmetic: `EngineRenderer::render` reads
+            // `vis_audit().frames` moving as *"the per-pixel producer marked"*,
+            // so an empty frame handed the readback ring a copy of an all-zero
+            // mask, and the streamer read **no evidence** as *evidence of
+            // nothing* — a landed feedback frame with an empty refinement set,
+            // which is exactly what a converged scene looks like. The cold
+            // frame is when it happens, which is the frame the analytic floor
+            // is carrying alone.
+            if !flat.is_empty()
+                && vis
+                    .admit(flat.len() as u32, pool_bytes, max_tri_all)
+                    .is_ok()
             {
                 vis.audit.frames += 1;
                 vis_on = true;
@@ -2020,6 +2068,7 @@ impl RenderNode for VgeomNode {
             pools_rebuilt: _,
             retracted: _,
             dropped_groups: _,
+            mismatched_textures: _,
             stale_tiles: _,
             view_bgl: _,
             lights_bgl: _,
@@ -2222,7 +2271,21 @@ impl RenderNode for VgeomNode {
             // The per-asset instance buffer is a SLICE of the flat table built
             // above (P28.1) — one `pack_instance` call per instance per frame, as
             // before, from one place instead of two.
-            let (flat_base, flat_count) = flat_at[asset_id];
+            // **The P28.1 audit's first latent shape, closed** (P28.3). This
+            // was `flat_at[asset_id]`, an indexing panic the day the flat-table
+            // loop and this one ever filter differently — today they are
+            // character-identical, which is a property of the present tense.
+            // A missing entry now costs this asset its draw and says so in
+            // debug: a panic is the right answer to a bug on a developer's
+            // machine and the wrong one on a player's, where the frame is
+            // simply short one asset.
+            let Some(&(flat_base, flat_count)) = flat_at.get(asset_id) else {
+                debug_assert!(
+                    false,
+                    "the flat instance table and the draw loop disagree about                      asset {asset_id:#034x}"
+                );
+                continue;
+            };
             let packed = &flat[flat_base as usize..(flat_base + flat_count) as usize];
             gpu.queue
                 .write_buffer(&draw.instances, 0, bytemuck::cast_slice(packed));
