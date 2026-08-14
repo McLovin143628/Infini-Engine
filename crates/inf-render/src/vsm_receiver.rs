@@ -2295,6 +2295,46 @@ mod tests {
             "twelve lights are inside the uniform's array; the projection cap is \
              what refused these"
         );
+
+        // **BOTH CEILINGS IN ONE SCENE** (P27.5 audit). The two counters are two
+        // counters so that neither wears the other's name, and the case that
+        // tests the claim is the one where both refusals are live at once:
+        // twenty point lights: ten get trees, the projection cap stops the walk
+        // at index 10, and the tail it stops in straddles `MAX_LIGHTS`.
+        //
+        // The whole tail is refused either way — a stop is a stop — but SIX of
+        // them are refused for not fitting the projection budget and FOUR for
+        // sitting past the array every lit shader's loop ends at. Attributing
+        // all ten to the cap would make `for_scene`'s warning tell four lights
+        // they "keep the cascaded shadow map", which is false: nothing shades
+        // them at all.
+        let mut both = crate::RenderScene::default();
+        for _ in 0..20 {
+            both.lights.push(crate::RenderLight {
+                kind: crate::LightKind::Point,
+                cast_shadows: true,
+                ..Default::default()
+            });
+        }
+        let split = crate::vsm::vsm_light_trees(&both, &VsmSettings::default());
+        assert_eq!(split.trees.len(), 10, "the projection cap stops at ten");
+        assert_eq!(
+            split.refused_past_projection_cap, 6,
+            "lights 10..16 are inside the lights uniform and were refused by the \
+             projection budget"
+        );
+        assert_eq!(
+            split.refused_past_shader_ceiling, 4,
+            "lights 16..20 are past the lights uniform's array; the projection \
+             cap is not why they get no tree"
+        );
+        assert_eq!(
+            split.refused(),
+            10,
+            "the two counters partition the refused tail exactly once — a light \
+             counted twice would over-report and a light counted zero times \
+             would be a silent cap"
+        );
     }
 
     /// The clamped kernel drops rather than clamps, and the centre tap is always

@@ -702,7 +702,22 @@ pub fn vsm_light_trees(scene: &RenderScene, settings: &VsmSettings) -> VsmTreeSe
         };
         let faces = desc.faces() as usize;
         if projections + faces > VSM_MAX_PROJECTIONS {
-            out.refused_past_projection_cap = scene.lights[index..]
+            // **The suffix is split at the OTHER ceiling** (P27.5 audit). Both
+            // stops are stops, so whichever fires first owns the whole tail —
+            // and a light past `MAX_LIGHTS` in that tail was never going to be
+            // shaded whatever the projection budget said. Counting it here
+            // would put "no shader can shade this light" under "did not fit the
+            // projection budget", which is one number wearing both names: the
+            // exact thing the pair of counters exists to prevent, and what the
+            // `for_scene` warning would then say wrongly (it tells the refused
+            // lights they *keep the cascaded shadow map*, which is true of a
+            // light inside the array and false of one past it).
+            let shaded = crate::passes::mesh::MAX_LIGHTS.min(scene.lights.len());
+            out.refused_past_projection_cap = scene.lights[index..shaded]
+                .iter()
+                .filter(|l| l.cast_shadows)
+                .count() as u32;
+            out.refused_past_shader_ceiling = scene.lights[shaded..]
                 .iter()
                 .filter(|l| l.cast_shadows)
                 .count() as u32;
