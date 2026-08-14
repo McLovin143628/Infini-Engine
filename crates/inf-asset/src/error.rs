@@ -62,6 +62,16 @@ pub enum AssetError {
     /// A pack could not be written, parsed, or verified (`.inf_pack`).
     #[error("pack: {0}")]
     Pack(String),
+
+    /// A sidecar is on disk beside its payload but could not be parsed, so the
+    /// database is holding a synthesized stand-in for it — and refuses to write
+    /// that stand-in over the real file (C4-39).
+    #[error(
+        "the sidecar {path} exists but cannot be read, so this asset's real guid, source, \
+         import settings, tags and dependencies are unknown; the file is left untouched — \
+         repair or delete it, then rescan"
+    )]
+    SidecarUnreadable { path: String },
 }
 
 /// Convenience alias.

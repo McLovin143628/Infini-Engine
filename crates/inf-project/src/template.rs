@@ -171,10 +171,7 @@ pub fn scaffold(parent: &Path, name: &str, template: ProjectTemplate) -> Result<
 }
 
 fn write(path: &Path, contents: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, contents)?;
+    inf_asset::write_atomically(path, contents)?;
     Ok(())
 }
 

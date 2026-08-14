@@ -49,10 +49,21 @@ fn layers_path(root: &Path) -> PathBuf {
 impl SortingLayers {
     /// Load the registry for the project rooted at `root`, or the default
     /// (a single "Default" layer at id 0) when none has been saved yet.
-    pub fn load(root: &Path) -> Self {
-        match std::fs::read_to_string(layers_path(root)) {
-            Ok(text) => toml::from_str(&text).unwrap_or_default(),
-            Err(_) => Self::default(),
+    ///
+    /// **Absent is the default; unreadable is an error** (C4-38) —
+    /// `CollisionLayers::load_or_default`'s twin, with the same write-back
+    /// consequence: every authored sorting id in the project re-maps.
+    pub fn load_or_default(root: &Path) -> Result<Self, String> {
+        let path = layers_path(root);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => toml::from_str(&text).map_err(|e| {
+                format!(
+                    "{} exists but cannot be read ({e}); it is left untouched rather than                      replaced by defaults — repair or delete it",
+                    path.display()
+                )
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(format!("read {}: {e}", path.display())),
         }
     }
 
@@ -76,12 +87,13 @@ impl SortingLayers {
     }
 
     /// Write the registry under `root` (creating `.infinity/` if needed).
+    ///
+    /// Atomic (C4-24) — `CollisionLayers::save`'s twin, and the same
+    /// consequence: a truncated file loads as the single Default layer and every
+    /// authored sorting id in the project re-maps.
     pub fn save(&self, root: &Path) -> Result<(), String> {
         let path = layers_path(root);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&path, self.to_toml()?).map_err(|e| e.to_string())
+        inf_asset::write_atomically(&path, self.to_toml()?).map_err(|e| e.to_string())
     }
 }
 
@@ -155,13 +167,34 @@ mod tests {
         let a = l.to_toml().unwrap();
         let b = l.to_toml().unwrap();
         assert_eq!(a, b, "re-emit is byte-identical");
-        let back = SortingLayers::load(dir.path());
+        let back = SortingLayers::load_or_default(dir.path()).unwrap();
         assert_eq!(back, l);
     }
 
     #[test]
     fn load_missing_returns_default() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(SortingLayers::load(dir.path()), SortingLayers::default());
+        assert_eq!(
+            SortingLayers::load_or_default(dir.path()).unwrap(),
+            SortingLayers::default()
+        );
+    }
+
+    /// **A corrupt registry is refused; an absent one is the default** (C4-38),
+    /// and the corrupt file survives untouched.
+    #[test]
+    fn a_corrupt_registry_is_refused_while_an_absent_one_is_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        SortingLayers::default().save(dir.path()).unwrap();
+        let path = layers_path(dir.path());
+        let damaged = b"[[layers]]
+id = \"not a number\"
+".to_vec();
+        std::fs::write(&path, &damaged).unwrap();
+
+        let err = SortingLayers::load_or_default(dir.path())
+            .expect_err("a damaged registry must not read as the default one");
+        assert!(err.contains("cannot be read"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
     }
 }

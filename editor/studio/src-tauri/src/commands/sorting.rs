@@ -28,7 +28,9 @@ fn to_dtos(registry: SortingLayers) -> Vec<SortingLayerDto> {
 #[tauri::command]
 pub async fn layers_get(assets: State<'_, AssetState>) -> Result<Vec<SortingLayerDto>, String> {
     let root = assets.content_root().ok_or("assets not initialized")?;
-    Ok(to_dtos(SortingLayers::load(&root)))
+    // Unreadable is an error, not the default (C4-38) — see
+    // `collision_layers_get`.
+    Ok(to_dtos(SortingLayers::load_or_default(&root)?))
 }
 
 /// Replace the sorting-layer registry (add/rename/remove rows). Normalized +

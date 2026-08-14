@@ -44,11 +44,21 @@ fn settings_path(root: &Path) -> PathBuf {
 
 impl ProjectSettings {
     /// Load the settings for the project rooted at `root`, or the default when
-    /// none has been saved / the file is unparseable.
-    pub fn load(root: &Path) -> Self {
-        match std::fs::read_to_string(settings_path(root)) {
-            Ok(text) => toml::from_str(&text).unwrap_or_default(),
-            Err(_) => Self::default(),
+    /// none has been saved.
+    ///
+    /// **Absent is the default; unreadable is an error** (C4-38), like the two
+    /// layer registries beside it.
+    pub fn load_or_default(root: &Path) -> Result<Self, String> {
+        let path = settings_path(root);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => toml::from_str(&text).map_err(|e| {
+                format!(
+                    "{} exists but cannot be read ({e}); it is left untouched rather than                      replaced by defaults — repair or delete it",
+                    path.display()
+                )
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(format!("read {}: {e}", path.display())),
         }
     }
 
@@ -68,12 +78,11 @@ impl ProjectSettings {
     }
 
     /// Write the settings under `root` (creating `.infinity/` if needed).
+    ///
+    /// Atomic (C4-24), like the two layer registries beside it.
     pub fn save(&self, root: &Path) -> Result<(), String> {
         let path = settings_path(root);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&path, self.to_toml()?).map_err(|e| e.to_string())
+        inf_asset::write_atomically(&path, self.to_toml()?).map_err(|e| e.to_string())
     }
 }
 
@@ -108,15 +117,32 @@ mod tests {
         };
         s.save(dir.path()).unwrap();
         assert_eq!(s.to_toml().unwrap(), s.to_toml().unwrap());
-        assert_eq!(ProjectSettings::load(dir.path()), s);
+        assert_eq!(ProjectSettings::load_or_default(dir.path()).unwrap(), s);
     }
 
     #[test]
     fn load_missing_returns_default() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            ProjectSettings::load(dir.path()),
+            ProjectSettings::load_or_default(dir.path()).unwrap(),
             ProjectSettings::default()
         );
+    }
+
+    /// **Corrupt is refused; absent is the default** (C4-38), and the corrupt
+    /// file survives untouched.
+    #[test]
+    fn corrupt_settings_are_refused_while_absent_ones_are_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        ProjectSettings::default().save(dir.path()).unwrap();
+        let path = settings_path(dir.path());
+        let damaged = b"pixels_per_unit = \"one hundred\"
+".to_vec();
+        std::fs::write(&path, &damaged).unwrap();
+
+        let err = ProjectSettings::load_or_default(dir.path())
+            .expect_err("damaged settings must not read as the default ones");
+        assert!(err.contains("cannot be read"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
     }
 }

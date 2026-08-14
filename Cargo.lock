@@ -3362,6 +3362,7 @@ dependencies = [
 name = "inf-project"
 version = "0.1.0"
 dependencies = [
+ "inf-asset",
  "serde",
  "serde_json",
  "tempfile",

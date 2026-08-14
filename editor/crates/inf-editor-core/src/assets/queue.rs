@@ -572,12 +572,30 @@ pub fn tick(
                     {
                         out.index_stale = true;
                     }
+                    // Both verdicts are reported (C4-39/C4-44). A dropped
+                    // rescan error leaves a *stale* database entry while
+                    // `bump()` and `content_changed` still fire, so the drawer
+                    // re-reads and shows the old asset as current; a removal
+                    // that matched nothing means the entry is still indexed and
+                    // still counting as a live referrer for a file that is gone.
                     match c {
                         AssetChange::Upserted(p) => {
-                            let _ = proj.db_mut().rescan_path(&p);
+                            if let Err(e) = proj.db_mut().rescan_path(&p) {
+                                tracing::warn!(
+                                    "content watcher: {} changed but could not be re-read \
+                                     ({e}); the database still holds its previous entry",
+                                    p.display()
+                                );
+                            }
                         }
                         AssetChange::Removed(p) => {
-                            proj.db_mut().remove_path(&p);
+                            if proj.db_mut().remove_path(&p).is_none() {
+                                tracing::debug!(
+                                    "content watcher: {} was removed but was not in the \
+                                     database under that path",
+                                    p.display()
+                                );
+                            }
                         }
                     }
                 }

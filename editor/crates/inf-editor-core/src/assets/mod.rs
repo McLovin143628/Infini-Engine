@@ -131,8 +131,11 @@ impl AssetProject {
         let id = AssetId::new();
         let ext = T::KIND.extension().expect("payload kinds have extensions");
         let path = unique_path(dir, name, ext)?;
-        std::fs::create_dir_all(dir)?;
-        std::fs::write(&path, &bytes)?;
+        // Atomic (C4-27): a crash between a plain payload write and its sidecar
+        // leaves a *truncated* payload that the next scan promotes into the
+        // database with a synthesized sidecar — an asset that looks legitimate
+        // and decodes as `schema_version = 0` with every field zero.
+        inf_asset::write_atomically(&path, &bytes)?;
 
         let mut sidecar = AssetSidecar::new(id, T::KIND, hash);
         sidecar.source = source;
@@ -152,6 +155,8 @@ impl AssetProject {
             sidecar,
             path,
             name,
+            // The sidecar was written by this call, so it is on disk and legible.
+            sidecar_unreadable: false,
         });
         self.bump();
         Ok(id)
@@ -221,7 +226,7 @@ impl AssetProject {
         if let Some(existing) = reuse.and_then(|r| self.db.get(r)) {
             sidecar.tags = existing.sidecar.tags.clone();
         }
-        if let Err(e) = save_sidecar_atomically(&sidecar, &path) {
+        if let Err(e) = sidecar.save(&path) {
             if reuse.is_none() {
                 let _ = std::fs::remove_file(&path);
             }
@@ -236,6 +241,61 @@ impl AssetProject {
             sidecar,
             path,
             name,
+            // The sidecar was written by this call, so it is on disk and legible.
+            sidecar_unreadable: false,
+        });
+        self.bump();
+        Ok(id)
+    }
+
+    /// Write `payload` to an **exact** path, overwriting whatever asset is
+    /// registered there and keeping its GUID, or creating a new one.
+    ///
+    /// The door for an editor whose save target is a *deterministic file name*
+    /// rather than a fresh unique one — the graph editors, which slug the
+    /// document's name into `<Content>/PCG/<Name>.inf_pcg` and re-save over it
+    /// (C4-21). Those two saves used to be a bare `fs::write` into the content
+    /// root: non-atomic, and with **no sidecar at all**, so the payload was left
+    /// for the watcher to promote under a *synthesized* id derived from its
+    /// content hash — an asset GUID that churned with every edit, so every
+    /// reference into the graph went stale on each save.
+    ///
+    /// [`write_asset`](Self::write_asset) cannot serve them: it calls
+    /// `unique_path`, so the second save of "Forest" would land in `Forest_1`.
+    pub fn write_asset_at<T: AssetPayload>(
+        &mut self,
+        path: &Path,
+        payload: &T,
+        dependencies: Vec<AssetId>,
+    ) -> Result<AssetId> {
+        if let Some(existing) = self.db.get_by_path(path) {
+            if existing.kind() == T::KIND {
+                let id = existing.id();
+                self.rewrite_payload(id, payload, dependencies)?;
+                return Ok(id);
+            }
+        }
+        let bytes = inf_asset::encode(payload)?;
+        let hash = ContentHash::of(&bytes);
+        let id = AssetId::new();
+        inf_asset::write_atomically(path, &bytes)?;
+        let mut sidecar = AssetSidecar::new(id, T::KIND, hash);
+        sidecar.dependencies = dependencies;
+        if let Err(e) = sidecar.save(path) {
+            let _ = std::fs::remove_file(path);
+            return Err(e);
+        }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Asset")
+            .to_string();
+        self.db.insert(AssetEntry {
+            sidecar,
+            path: path.to_path_buf(),
+            name,
+            // The sidecar was written by this call, so it is on disk and legible.
+            sidecar_unreadable: false,
         });
         self.bump();
         Ok(id)
@@ -251,6 +311,23 @@ impl AssetProject {
     // ── mutation ──────────────────────────────────────────────────────────
 
     /// Rename an asset (moves both payload + sidecar on disk).
+    ///
+    /// # The sidecar moves first, and a failure rolls it back
+    ///
+    /// The pair used to move payload-then-sidecar (C4-22/F10), so a failure or a
+    /// crash between the two left the payload at the new path with **no
+    /// sidecar** and an orphan sidecar at the old one — the exact state this
+    /// module documents as the GUID-churn hazard at `write_asset` and
+    /// `register_written_asset`: the watcher promotes the sidecar-less payload
+    /// under a freshly minted id and every edge into the asset dangles.
+    ///
+    /// Moving the sidecar first inverts the exposure into the harmless one — a
+    /// sidecar at the new path with no payload beside it is not an asset and no
+    /// scan adopts it — and a failed payload move puts the sidecar back, so the
+    /// on-disk pair is always whole at one path or the other.
+    ///
+    /// The old `exists()` pre-check is gone with it: it was a TOCTOU window, and
+    /// `NotFound` from the rename says the same thing without one.
     pub fn rename(&mut self, id: AssetId, new_name: &str) -> Result<()> {
         let entry = self.db.get(id).ok_or(AssetError::UnknownAsset(id))?;
         let old_path = entry.path.clone();
@@ -258,10 +335,21 @@ impl AssetProject {
         let dir = old_path.parent().unwrap_or(Path::new("."));
         let new_path = unique_path(dir, new_name, ext)?;
 
-        std::fs::rename(&old_path, &new_path)?;
         let old_side = inf_asset::sidecar_path(&old_path);
-        if old_side.exists() {
-            std::fs::rename(old_side, inf_asset::sidecar_path(&new_path))?;
+        let new_side = inf_asset::sidecar_path(&new_path);
+        let moved_sidecar = match std::fs::rename(&old_side, &new_side) {
+            Ok(()) => true,
+            // A payload with no sidecar is a state this database already handles
+            // (it synthesizes one), so an absent sidecar is not a reason to
+            // refuse the rename — but any other error is.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e.into()),
+        };
+        if let Err(e) = std::fs::rename(&old_path, &new_path) {
+            if moved_sidecar {
+                let _ = std::fs::rename(&new_side, &old_side);
+            }
+            return Err(e.into());
         }
         // Re-register under the new path.
         let mut entry = self.db.remove(id).unwrap();
@@ -291,7 +379,7 @@ impl AssetProject {
 
         let new_id = AssetId::new();
         let path = unique_path(&dir, &base, ext)?;
-        std::fs::write(&path, &bytes)?;
+        inf_asset::write_atomically(&path, &bytes)?; // C4-27, as `write_asset`
         let mut sidecar = AssetSidecar::new(new_id, kind, hash);
         sidecar.dependencies = deps;
         sidecar.source = source;
@@ -306,6 +394,8 @@ impl AssetProject {
             sidecar,
             path,
             name,
+            // The sidecar was written by this call, so it is on disk and legible.
+            sidecar_unreadable: false,
         });
         self.bump();
         Ok(new_id)
@@ -319,10 +409,15 @@ impl AssetProject {
         let entry = self.db.get(id).ok_or(AssetError::UnknownAsset(id))?;
         let path = entry.path.clone();
         let name = entry.name.clone();
+        // The flag rides with the entry, not with the metadata being written
+        // into it: an asset whose sidecar on disk is unreadable still is one,
+        // and `persist` below is exactly the call that must refuse (C4-39).
+        let sidecar_unreadable = entry.sidecar_unreadable;
         self.db.insert(AssetEntry {
             sidecar,
             path,
             name,
+            sidecar_unreadable,
         });
         self.db.persist(id)?;
         self.bump();
@@ -353,9 +448,23 @@ impl AssetProject {
         }
         let was_mesh = self.db.get(id).map(|e| e.kind()) == Some(AssetKind::Mesh);
         if let Some(entry) = self.db.remove(id) {
-            let _ = std::fs::remove_file(&entry.path);
-            let side = inf_asset::sidecar_path(&entry.path);
-            let _ = std::fs::remove_file(side);
+            // A removal that fails is reported, not swallowed (C4-45): the
+            // command answers "deleted" while the payload is still on disk, so
+            // the next scan re-registers it — under a *synthesized* sidecar if
+            // the sidecar half is the one that went — and the asset reappears
+            // with a different GUID than every reference to it names.
+            for path in [entry.path.clone(), inf_asset::sidecar_path(&entry.path)] {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        tracing::error!(
+                            "deleting asset {id}: could not remove {} ({e}); it is out of the \
+                             database but still on disk, and the next content scan will \
+                             re-register it",
+                            path.display()
+                        );
+                    }
+                }
+            }
             self.bump();
         }
         if was_mesh {
@@ -418,7 +527,7 @@ impl AssetProject {
         let bytes = image.as_bytes();
         let hash = ContentHash::of(bytes);
         let path = self.unique_asset_path(dir, name, "inf_tex")?;
-        std::fs::write(&path, bytes)?;
+        inf_asset::write_atomically(&path, bytes)?; // C4-27, as `write_asset`
         self.register_written_asset(
             path,
             inf_material::TiledTextureImage::KIND,
@@ -429,8 +538,16 @@ impl AssetProject {
         )
     }
 
-    /// Rewrite an existing asset's payload in place (data-asset editors save
-    /// through this), updating the content hash + dependency edges.
+    /// Rewrite an existing asset's payload (data-asset editors save through
+    /// this), updating the content hash + dependency edges.
+    ///
+    /// **All-or-nothing** (C4-12), like its sibling
+    /// [`write_asset`](Self::write_asset). This is the save door for every
+    /// data-asset editor and, via `dcc::save_mesh_session`, for the Model
+    /// Editor; a failure here maps to `SaveError::Write`, whose user-facing text
+    /// ends *"Nothing on disk changed."* That sentence was false in exactly the
+    /// disk-full / interrupted case it exists for — the payload was already
+    /// truncated. Temp+rename is what makes the message true.
     pub fn rewrite_payload<T: AssetPayload>(
         &mut self,
         id: AssetId,
@@ -445,7 +562,7 @@ impl AssetProject {
             .clone();
         let bytes = inf_asset::encode(payload)?;
         let hash = ContentHash::of(&bytes);
-        std::fs::write(&path, &bytes)?;
+        inf_asset::write_atomically(&path, &bytes)?;
 
         let name = self.db.get(id).unwrap().name.clone();
         let mut sidecar = self.db.get(id).unwrap().sidecar.clone();
@@ -456,6 +573,8 @@ impl AssetProject {
             sidecar,
             path,
             name,
+            // The sidecar was written by this call, so it is on disk and legible.
+            sidecar_unreadable: false,
         });
         self.bump();
         Ok(())
@@ -471,33 +590,6 @@ impl AssetProject {
     pub(crate) fn cache_mut(&mut self) -> &mut ImportCache {
         &mut self.cache
     }
-}
-
-/// Write `sidecar` beside `payload_path` **atomically** (temp file + rename),
-/// the same discipline `inf_terrain::write_terrain_asset` and
-/// `PackWriter::write_to_file` use.
-///
-/// A plain `fs::write` can leave a truncated TOML behind on a full disk or a
-/// crash, and truncating an existing sidecar is worse than not writing one: the
-/// asset's GUID would be lost while its payload stayed. Renaming over the target
-/// makes the sidecar either wholly old or wholly new. A failed attempt cleans up
-/// its own temp file rather than leaving litter in the content root.
-fn save_sidecar_atomically(sidecar: &AssetSidecar, payload_path: &Path) -> Result<()> {
-    if let Some(parent) = payload_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let final_path = inf_asset::sidecar_path(payload_path);
-    let tmp = {
-        let mut s = final_path.as_os_str().to_os_string();
-        s.push(format!(".{}.tmp", std::process::id()));
-        PathBuf::from(s)
-    };
-    let text = sidecar.to_toml()?;
-    if let Err(e) = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &final_path)) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
-    Ok(())
 }
 
 /// A collision-free payload path: `<dir>/<name>.<ext>`, `_1`, `_2`, …
@@ -762,5 +854,137 @@ mod tests {
         // Fresh open scans the sidecar back in.
         let proj = AssetProject::open(dir.path()).unwrap();
         assert!(proj.db().contains(id), "persisted asset reloads");
+    }
+
+    /// **`rewrite_payload` is all-or-nothing** (C4-12/F9) — the save door for
+    /// every data-asset editor and, through `save_mesh_session`, for the Model
+    /// Editor. Its failure reports *"Nothing on disk changed."*; a reader
+    /// holding the old payload open proves that sentence.
+    #[test]
+    fn rewriting_a_payload_never_exposes_a_torn_one() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let mut proj = AssetProject::open(dir.path()).unwrap();
+        let d = proj.content_dir("tables").unwrap();
+
+        let mut table = inf_asset::StructAsset::new("Doc");
+        let id = proj.write_asset(&d, "Doc", &table, None, vec![], None).unwrap();
+        let path = proj.db().get(id).unwrap().path.clone();
+        let before = std::fs::read(&path).unwrap();
+
+        let mut live = std::fs::File::open(&path).unwrap();
+        for i in 0..64 {
+            table.fields.push(inf_asset::FieldDef {
+                name: format!("field_{i}"),
+                ty: inf_asset::FieldType::Int,
+            });
+        }
+        proj.rewrite_payload(id, &table, vec![]).unwrap();
+
+        let mut seen = Vec::new();
+        live.read_to_end(&mut seen).unwrap();
+        assert_eq!(seen, before, "a live reader observed the rewrite");
+        assert_ne!(std::fs::read(&path).unwrap(), before);
+        assert!(no_temp_litter(&d), "left temp files behind");
+    }
+
+    /// **A rename moves the sidecar first and rolls it back on failure**
+    /// (C4-22/F10). The exposure a failure leaves must be "a sidecar with no
+    /// payload" (which no scan adopts) and never "a payload with no sidecar"
+    /// (which the watcher promotes under a fresh GUID, dangling every edge).
+    #[test]
+    fn a_rename_that_cannot_finish_leaves_the_pair_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut proj = AssetProject::open(dir.path()).unwrap();
+        let d = proj.content_dir("m").unwrap();
+        let id = proj
+            .write_asset(&d, "Before", &MaterialAsset::default(), None, vec![], None)
+            .unwrap();
+        let old_path = proj.db().get(id).unwrap().path.clone();
+        let old_side = inf_asset::sidecar_path(&old_path);
+
+        // (a) The SIDECAR move is the one that fails. Park a directory at
+        // `After.inf_mat.toml` — `rename` onto a non-empty directory fails on
+        // every platform, and `unique_path` does not look at the `.toml`, so the
+        // payload destination stays free.
+        let blocked = d.join("After.inf_mat.toml");
+        std::fs::create_dir_all(&blocked).unwrap();
+        std::fs::write(blocked.join("occupant"), b"x").unwrap();
+
+        assert!(
+            proj.rename(id, "After").is_err(),
+            "the rename must not report success"
+        );
+        assert!(
+            old_path.exists(),
+            "the payload moved out from under its sidecar — the watcher would \
+             promote it under a fresh GUID"
+        );
+        assert!(!d.join("After.inf_mat").exists());
+        assert_eq!(inf_asset::AssetSidecar::load(&old_path).unwrap().guid, id);
+        std::fs::remove_file(blocked.join("occupant")).unwrap();
+        std::fs::remove_dir(&blocked).unwrap();
+
+        // (b) The PAYLOAD move is the one that fails, *after* the sidecar has
+        // already moved: the rollback path. The payload is removed behind the
+        // database's back, so its rename comes back `NotFound`.
+        std::fs::remove_file(&old_path).unwrap();
+        assert!(proj.rename(id, "After").is_err());
+        assert!(
+            old_side.exists(),
+            "the sidecar was not rolled back to the payload's path"
+        );
+        assert!(!d.join("After.inf_mat.toml").exists());
+
+        // Unblocked, the rename lands and both halves move together.
+        std::fs::write(&old_path, b"payload").unwrap();
+        proj.rename(id, "After").unwrap();
+        let new_path = proj.db().get(id).unwrap().path.clone();
+        assert!(!old_path.exists() && !old_side.exists());
+        assert_eq!(inf_asset::AssetSidecar::load(&new_path).unwrap().guid, id);
+    }
+
+    /// **`write_asset_at` overwrites in place and keeps the GUID** (C4-21) —
+    /// the deterministic-path door the graph editors save through. The second
+    /// save must land on the same file with the same id, not on `Name_1` and
+    /// not under a fresh one.
+    #[test]
+    fn a_deterministic_path_save_keeps_one_file_and_one_guid() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut proj = AssetProject::open(dir.path()).unwrap();
+        let d = proj.content_dir("graphs").unwrap();
+        let path = d.join("Forest.inf_struct");
+
+        let first = proj
+            .write_asset_at(&path, &inf_asset::StructAsset::new("Forest"), vec![])
+            .unwrap();
+        assert!(inf_asset::sidecar_path(&path).exists(), "no sidecar written");
+
+        let mut edited = inf_asset::StructAsset::new("Forest");
+        edited.name = "Forest v2".into();
+        let second = proj.write_asset_at(&path, &edited, vec![]).unwrap();
+        assert_eq!(first, second, "the graph's GUID churned on re-save");
+        assert_eq!(
+            std::fs::read_dir(&d)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("inf_struct"))
+                .count(),
+            1,
+            "the re-save forked a second file"
+        );
+        assert_eq!(
+            proj.load_payload::<inf_asset::StructAsset>(first)
+                .unwrap()
+                .name,
+            "Forest v2"
+        );
+    }
+
+    fn no_temp_litter(dir: &Path) -> bool {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
     }
 }

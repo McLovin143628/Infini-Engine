@@ -305,7 +305,21 @@ impl ThumbnailCache {
         }
         let rgba = thumbnailer.render_rgba(project, id)?;
         let png = encode_png(thumbnailer.size(), &rgba).ok()?;
-        std::fs::write(&path, png).ok()?;
+        // **The one cache a torn file does not re-derive** (C4-26). A hit is
+        // decided by *existence*, and the key is the content hash — so a crash
+        // mid-write leaves a truncated PNG under a still-live hash that `sweep`
+        // will never collect and `get_or_render` will return forever. Atomic
+        // makes the file either absent (re-rendered next time) or whole.
+        if let Err(e) = inf_asset::write_atomically(&path, &png) {
+            // …and the error is named rather than swallowed by `.ok()?`: a
+            // permanently unwritable cache dir means every thumbnail is
+            // re-rendered on every scan, which looks like slowness, not a fault.
+            tracing::warn!(
+                "thumbnail cache: could not write {} ({e}); this asset re-renders every time",
+                path.display()
+            );
+            return None;
+        }
         Some(path)
     }
 

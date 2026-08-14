@@ -17,7 +17,8 @@ pub async fn project_settings_get(
     assets: State<'_, AssetState>,
 ) -> Result<ProjectSettingsDto, String> {
     let root = assets.content_root().ok_or("assets not initialized")?;
-    let s = ProjectSettings::load(&root);
+    // Unreadable is an error, not the default (C4-38).
+    let s = ProjectSettings::load_or_default(&root)?;
     Ok(ProjectSettingsDto {
         pixels_per_unit: s.pixels_per_unit,
     })

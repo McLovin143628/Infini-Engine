@@ -107,7 +107,11 @@ pub async fn project_templates() -> Result<Vec<ProjectTemplateDto>, String> {
 #[tauri::command]
 pub async fn project_recent(app: AppHandle) -> Result<Vec<RecentProjectDto>, String> {
     let cfg = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    let mut list = RecentProjects::load(&cfg);
+    // A list that exists but cannot be read is an error, not an empty list
+    // (C4-38/F14): reporting it empty is how the Start Screen would have shown
+    // "no recent projects" one moment before `push` wrote that emptiness back
+    // over the real file.
+    let mut list = RecentProjects::load_or_default(&cfg).map_err(|e| e.to_string())?;
     list.prune_missing();
     Ok(list
         .entries

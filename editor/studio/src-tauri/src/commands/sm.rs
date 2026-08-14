@@ -375,6 +375,11 @@ pub async fn sm_get(id: String, state: State<'_, SmEditorState>) -> Result<SmDoc
 
 /// Persist the pushed document into a `.inf_sm` asset **and** update the
 /// in-memory doc. Returns the written file name.
+///
+/// **Through the asset door** (C4-21) — `pcg_save`'s twin, and it had the same
+/// defect: a bare `fs::write` into `<Content>/StateMachines/<slug>.inf_sm`,
+/// non-atomic and with no sidecar, so the payload was promoted by the watcher
+/// under a content-derived id that changed on every save.
 #[tauri::command]
 pub async fn sm_save(
     id: String,
@@ -383,33 +388,28 @@ pub async fn sm_save(
     state: State<'_, SmEditorState>,
     assets: State<'_, AssetState>,
 ) -> Result<String, String> {
-    // Update in-memory + encode the payload.
-    let (bytes, file_name) = {
+    // Update in-memory + build the payload.
+    let (payload, file_name) = {
         let mut s = state.inner.lock().map_err(|e| e.to_string())?;
         let machine = dto_to_machine(&doc.machine);
         let payload = StateMachineAsset::new(machine, None);
-        let bytes = inf_asset::encode(&payload).map_err(|e| e.to_string())?;
         s.docs.insert(id.clone(), doc.clone());
         let base = if name.is_empty() { &doc.name } else { &name };
         let slug: String = base
             .chars()
             .map(|c| if c.is_alphanumeric() { c } else { '_' })
             .collect();
-        (bytes, format!("{slug}.inf_sm"))
+        (payload, format!("{slug}.inf_sm"))
     };
 
-    let root = assets
-        .content_root()
-        .ok_or("open a project before saving a state machine")?;
-    // Filesystem write is blocking — keep it off the async workers.
-    tauri::async_runtime::spawn_blocking(move || {
-        let dir = root.join("StateMachines");
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        std::fs::write(dir.join(&file_name), &bytes).map_err(|e| e.to_string())?;
-        Ok::<_, String>(file_name)
+    assets.with_project(|proj| {
+        let dir = proj
+            .content_dir("StateMachines")
+            .map_err(|e| e.to_string())?;
+        proj.write_asset_at(&dir.join(&file_name), &payload, Vec::new())
+            .map_err(|e| e.to_string())?;
+        Ok(file_name.clone())
     })
-    .await
-    .map_err(|e| format!("sm_save task failed to run: {e}"))?
 }
 
 /// Close a document: free it from the workspace so open state machines don't

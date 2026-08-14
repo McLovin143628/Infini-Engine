@@ -9,6 +9,13 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# The one atomic-write door (`inf_asset::write_atomically`). A Ring-0 -> Ring-0
+# edge, and free of weight in practice: every consumer of this crate
+# (inf-cli, inf-packager, inf-player, the studio) already links `inf-asset`,
+# and `inf-asset` has no edge back here, so there is no cycle. The alternative
+# was a second copy of the temp+rename law in a crate that writes the file a
+# project cannot be opened without.
+inf-asset = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

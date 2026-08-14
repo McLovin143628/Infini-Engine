@@ -486,8 +486,14 @@ pub async fn pcg_compile(
 
 /// Persist the authored graph into a `.inf_pcg` asset under the project content
 /// root (the graph is the source of truth; the lowered document rides along).
-/// Written as a loose payload — the asset watcher rescans and registers it.
 /// Returns the written file name.
+///
+/// **Through the asset door** (C4-21). This used to be a bare `fs::write` into
+/// `<Content>/PCG/<slug>.inf_pcg`: a re-save clobbered the committed payload
+/// non-atomically *and* wrote no sidecar, so the file was left for the watcher
+/// to promote under a synthesized id derived from its content hash — a GUID
+/// that changed on every edit, dangling every reference into the graph.
+/// `write_asset_at` overwrites the same path atomically and keeps the GUID.
 #[tauri::command]
 pub async fn pcg_save(
     id: String,
@@ -496,31 +502,24 @@ pub async fn pcg_save(
     assets: State<'_, AssetState>,
 ) -> Result<String, String> {
     let masks = AssetMasks(&assets);
-    let (bytes, file_name) = state.with(|s| {
+    let (payload, file_name) = state.with(|s| {
         let doc = s.docs.get(&id).ok_or_else(|| format!("no pcg `{id}`"))?;
         let lowered = lower_graph_with(&doc.graph, &s.registry, &masks);
         let payload = inf_pcg::PcgAssetPayload::from_graph(&doc.graph, lowered.document);
-        let bytes = payload.encode().map_err(|e| e.to_string())?;
         let base = if name.is_empty() { &doc.name } else { &name };
         let slug: String = base
             .chars()
             .map(|c| if c.is_alphanumeric() { c } else { '_' })
             .collect();
-        Ok((bytes, format!("{slug}.inf_pcg")))
+        Ok((payload, format!("{slug}.inf_pcg")))
     })?;
 
-    let root = assets
-        .content_root()
-        .ok_or("open a project before saving a PCG graph")?;
-    // Filesystem write is blocking — keep it off the async workers.
-    tauri::async_runtime::spawn_blocking(move || {
-        let dir = root.join("PCG");
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        std::fs::write(dir.join(&file_name), &bytes).map_err(|e| e.to_string())?;
-        Ok::<_, String>(file_name)
+    assets.with_project(|proj| {
+        let dir = proj.content_dir("PCG").map_err(|e| e.to_string())?;
+        proj.write_asset_at(&dir.join(&file_name), &payload, Vec::new())
+            .map_err(|e| e.to_string())?;
+        Ok(file_name.clone())
     })
-    .await
-    .map_err(|e| format!("pcg_save task failed to run: {e}"))?
 }
 
 /// Lower the PCG graph and evaluate it over the scene terrain into the target

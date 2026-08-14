@@ -32,7 +32,10 @@ pub async fn collision_layers_get(
     assets: State<'_, AssetState>,
 ) -> Result<Vec<CollisionLayerDto>, String> {
     let root = assets.content_root().ok_or("assets not initialized")?;
-    Ok(to_dtos(CollisionLayers::load(&root)))
+    // A registry that exists but cannot be read is an error, not the default
+    // (C4-38): reporting the default here is what let `collision_layers_set`
+    // write it back over every named layer in the project.
+    Ok(to_dtos(CollisionLayers::load_or_default(&root)?))
 }
 
 /// Replace the collision-layer registry (add/rename/remove rows). Normalized +

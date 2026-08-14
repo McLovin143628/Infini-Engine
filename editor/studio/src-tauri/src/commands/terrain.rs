@@ -156,7 +156,10 @@ pub async fn terrain_export_data_map(
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = dir.join(format!("{}_{}.png", sanitize(&name), kind.label()));
     let bytes = png.len() as u32;
-    std::fs::write(&path, &png).map_err(|e| format!("write {}: {e}", path.display()))?;
+    // Atomic (C4-29): the file name is deterministic, so a re-export overwrites
+    // a committed PNG inside the content root that the watcher has registered as
+    // an asset — a torn one is a broken asset, not a missing file.
+    inf_asset::write_atomically(&path, &png).map_err(|e| format!("write {}: {e}", path.display()))?;
 
     Ok(DataMapExportDto {
         map: kind.label().to_string(),

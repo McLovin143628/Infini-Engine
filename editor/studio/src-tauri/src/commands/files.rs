@@ -32,13 +32,17 @@ pub async fn file_read(path: String) -> Result<String, String> {
 }
 
 /// Write a UTF-8 text file (creating parent dirs).
+///
+/// **Atomic** (C4-13). This is the IDE panel's Ctrl+S, over the user's own
+/// `.rs`/`.toml`, and unlike a level there is no schema check downstream to
+/// notice the damage: a truncated `.rs` fails to compile with a message about
+/// the wrong thing, and a truncated `Cargo.toml` may still parse as
+/// valid-but-wrong.
 #[tauri::command]
 pub async fn file_write(path: String, content: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        if let Some(parent) = Path::new(&path).parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
-        }
-        std::fs::write(&path, content).map_err(|e| format!("write {path}: {e}"))
+        inf_asset::write_atomically(Path::new(&path), content)
+            .map_err(|e| format!("write {path}: {e}"))
     })
     .await
     .map_err(|e| format!("file_write task failed to run: {e}"))?

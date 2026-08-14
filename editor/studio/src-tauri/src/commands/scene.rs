@@ -842,6 +842,29 @@ fn voxels_still_dirty(volumes: Option<&inf_editor_core::voxel_store::SharedVoxel
     volumes.is_some_and(|v| v.lock().map_or(true, |s| s.has_unsaved_edits()))
 }
 
+/// Mark the document saved — **after** a successful write, and only if it is
+/// still the document that was written (C4-3/F2).
+///
+/// The version guard matters because the encode and the disk write deliberately
+/// happen at different times, with the doc lock released in between so the
+/// viewport can keep rendering. An edit that lands in that window is genuinely
+/// *not* in the bytes on disk, so marking the document clean would lose it at
+/// the next close-without-prompt exactly as the pre-write `mark_saved` did.
+fn mark_saved_if_unchanged(state: &SceneState, saved_version: u64) -> Result<(), String> {
+    let mut doc = lock(&state.doc)?;
+    if doc.version() == saved_version {
+        doc.mark_saved();
+    } else {
+        tracing::info!(
+            "scene_save: the document changed while it was being written (v{saved_version} → \
+             v{}), so it stays dirty — the save is complete, it is just no longer the whole \
+             document",
+            doc.version()
+        );
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn scene_save(
     app: AppHandle,
@@ -867,12 +890,24 @@ pub async fn scene_save(
     // Streamed-terrain edits are staged in the same window and written in the same
     // "outside the lock" phase (P16.4b): a `.inf_terrain` rewrite is a
     // whole-payload operation and must never happen under the doc lock.
-    let (enc, staged) = {
+    //
+    // **`mark_saved` runs AFTER the write, never before** — the `skel.rs` rule
+    // (C4-3/F2). It used to run here, inside the encode block, so a write that
+    // failed returned `Err` with the document already clean: the dirty indicator
+    // lied, closing discarded the work without a prompt, and — worst — the
+    // autosave gate below (`!doc.is_dirty()`) stopped writing the crash-recovery
+    // file for work that then existed nowhere on disk.
+    //
+    // The version stamped here is what the mark is checked against afterwards,
+    // so an edit that lands between the encode and the write leaves the document
+    // dirty (it is: the bytes on disk do not contain it) instead of being
+    // marked saved by a save that never saw it.
+    let (enc, staged, saved_version) = {
         let mut doc = lock(&state.doc)?;
         let enc = doc.with_authored_scene(|d| serialize::encode_scene(d, None))?;
         let staged = terrain_edit::stage_terrain_edits(&doc);
-        doc.mark_saved();
-        (enc, staged)
+        let version = doc.version();
+        (enc, staged, version)
     };
     // The voxel half is staged at the same "save begins" moment, out of the
     // shared store the viewport carves into (schema v19 is frozen, so the chunks
@@ -904,7 +939,11 @@ pub async fn scene_save(
         .try_state::<crate::commands::SharedStores>()
         .map(|s| s.voxel_volumes());
     let staged_voxels = stage_voxels(voxel_volumes.as_ref());
+    // The write, and only then the mark. A failed write returns here with the
+    // document still dirty, so the indicator, the close prompt and the
+    // crash-recovery autosave all keep telling the truth (C4-3/F2).
     serialize::write_encoded(&enc, &target)?;
+    mark_saved_if_unchanged(&state, saved_version)?;
 
     // Fold this session's sculpt/paint into the `.inf_terrain` assets, then clear
     // the write-back marks for the ones that really landed and re-point the
@@ -1168,6 +1207,13 @@ pub async fn scene_autosave(app: AppHandle, state: State<'_, SceneState>) -> Res
         // tiles dirty. Gating autosave on `is_dirty()` alone would then starve the
         // one mechanism that records those edits ever existed (P16.4b audit).
         // `voxel_note` is exactly that condition for a `.inf_voxel`.
+        //
+        // The *level* half of the same hazard is closed at the source since
+        // C4-3/F2: `scene_save` no longer marks the document saved before its
+        // write, so a save whose `.inf_lvl` write failed leaves the document
+        // dirty and this gate re-arms the recovery file by itself. It used to
+        // do the opposite — mark clean, fail, and stop autosaving work that
+        // existed nowhere on disk.
         if !doc.is_dirty() && !doc.has_unsaved_terrain_edits() && voxel_note.is_none() {
             return Ok(());
         }
@@ -1224,7 +1270,11 @@ pub async fn scene_new(
 #[cfg(test)]
 mod tests {
     use super::resolve_save_target;
-    use super::{stage_voxels, voxels_still_dirty, POISONED_VOXEL_STORE_SAVE_FAILURE};
+    use super::{
+        mark_saved_if_unchanged, stage_voxels, voxels_still_dirty, SceneState,
+        POISONED_VOXEL_STORE_SAVE_FAILURE,
+    };
+    use inf_editor_core::ipc::SpawnKind;
     use inf_editor_core::voxel_store::{shared_volumes, SharedVoxelVolumes};
     use std::path::{Path, PathBuf};
 
@@ -1340,6 +1390,80 @@ mod tests {
             voxels_still_dirty(Some(&volumes)),
             voxels_still_dirty(None),
             "…and must answer the recovery-file question the same way"
+        );
+    }
+
+    /// **`mark_saved` runs after `write_encoded`, never before** (C4-3/F2).
+    ///
+    /// A source gate, because a `#[tauri::command]` cannot be driven from a test
+    /// (the reason `save_mesh_session`'s logic lives in Ring 1) and *ordering*
+    /// is the whole rule. It reads `scene_save`'s own body and asserts three
+    /// things: the write is there, the mark is there, and the write comes
+    /// first — plus that no bare `mark_saved()` call has crept back into the
+    /// body, which is exactly the shape that was there before.
+    ///
+    /// `.rs` is `text eol=lf` in `.gitattributes`, so the indices this compares
+    /// are the same on every checkout (the P22.4 lesson).
+    #[test]
+    fn scene_save_marks_the_document_saved_only_after_the_write() {
+        const SRC: &str = include_str!("scene.rs");
+        let start = SRC
+            .find("pub async fn scene_save(")
+            .expect("scene_save moved or was renamed");
+        let body = &SRC[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("scene_save's body has no closing brace at column 0");
+        let body = &body[..end];
+
+        let write = body
+            .find("serialize::write_encoded(")
+            .expect("scene_save no longer writes the level through write_encoded");
+        let mark = body
+            .find("mark_saved_if_unchanged(")
+            .expect("scene_save no longer marks the document saved");
+        assert!(
+            write < mark,
+            "mark_saved runs before the write — a failed save would report success, \
+             disarm the close prompt and starve the crash-recovery autosave"
+        );
+        assert!(
+            !body.contains("doc.mark_saved()"),
+            "a bare mark_saved() is back in scene_save; the marking must go through \
+             mark_saved_if_unchanged, after the write"
+        );
+    }
+
+    /// The version guard inside that marking: a document edited while it was
+    /// being written stays dirty, because the bytes on disk do not contain the
+    /// edit. Both directions, so "never mark anything" cannot pass.
+    #[test]
+    fn a_document_edited_during_its_own_save_stays_dirty() {
+        let state = SceneState::new();
+
+        // Unchanged: the mark lands.
+        {
+            let mut doc = state.doc.lock().unwrap();
+            doc.edit_create(SpawnKind::Cube, "A", None);
+            assert!(doc.is_dirty());
+        }
+        let version = state.doc.lock().unwrap().version();
+        mark_saved_if_unchanged(&state, version).unwrap();
+        assert!(
+            !state.doc.lock().unwrap().is_dirty(),
+            "a save of the current document must mark it clean"
+        );
+
+        // Changed under the write: the mark is withheld.
+        {
+            let mut doc = state.doc.lock().unwrap();
+            doc.edit_create(SpawnKind::Cone, "B", None);
+        }
+        mark_saved_if_unchanged(&state, version).unwrap();
+        assert!(
+            state.doc.lock().unwrap().is_dirty(),
+            "an edit that landed after the encode was marked saved by a save that \
+             never saw it"
         );
     }
 }

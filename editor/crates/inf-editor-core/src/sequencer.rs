@@ -298,12 +298,10 @@ impl Sequence {
 
     /// Write the sequence under `root` (creating `.infinity/sequences/` if needed).
     /// The file is `<slug(name)>.toml`.
+    /// Atomic (C4-24), like the rest of the `.infinity/` family.
     pub fn save(&self, root: &Path) -> Result<(), String> {
         let path = sequence_path(root, &self.name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&path, self.to_toml()?).map_err(|e| e.to_string())
+        inf_asset::write_atomically(&path, self.to_toml()?).map_err(|e| e.to_string())
     }
 
     /// Load the sequence named `name` under `root`, if present + parseable.

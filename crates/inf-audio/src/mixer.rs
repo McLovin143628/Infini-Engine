@@ -222,12 +222,13 @@ impl MixerConfig {
     }
 
     /// Write the mixer to `<root>/.infinity/mixer.toml`, creating `.infinity/`.
+    ///
+    /// Atomic (C4-24). The read half of this file has been disciplined since it
+    /// was written — it is the idiom the rest of the family copied — and the
+    /// write half was the plain one.
     pub fn save(&self, root: &Path) -> Result<(), String> {
         let path = Self::path_in(root);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-        }
-        std::fs::write(&path, self.to_toml_string()?)
+        inf_asset::write_atomically(&path, self.to_toml_string()?)
             .map_err(|e| format!("write {}: {e}", path.display()))
     }
 }

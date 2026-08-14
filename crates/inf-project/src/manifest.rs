@@ -74,18 +74,28 @@ impl ProjectManifest {
     }
 
     /// Read the manifest at `<root>/inf.toml`.
+    ///
+    /// The `exists()` pre-check is gone (C4-25): it was a TOCTOU window, and
+    /// `NotFound` from the read says the same thing without one.
     pub fn load(root: &Path) -> Result<Self> {
         let path = root.join(PROJECT_FILE);
-        if !path.exists() {
-            return Err(ProjectError::NoManifest(PROJECT_FILE.to_string()));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Self::from_toml(&text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(ProjectError::NoManifest(PROJECT_FILE.to_string()))
+            }
+            Err(e) => Err(e.into()),
         }
-        Self::from_toml(&std::fs::read_to_string(path)?)
     }
 
-    /// Write the manifest to `<root>/inf.toml`.
+    /// Write the manifest to `<root>/inf.toml`, **atomically**.
+    ///
+    /// `Project::open` requires this file, so a truncated one makes the project
+    /// unopenable (C4-25) — and `RecentProjects::prune_missing` only checks that
+    /// it *exists*, so the entry stays in the list and keeps failing. It is a
+    /// permanent single point of failure for the whole project.
     pub fn save(&self, root: &Path) -> Result<()> {
-        std::fs::create_dir_all(root)?;
-        std::fs::write(root.join(PROJECT_FILE), self.to_toml()?)?;
+        inf_asset::write_atomically(&root.join(PROJECT_FILE), self.to_toml()?)?;
         Ok(())
     }
 }

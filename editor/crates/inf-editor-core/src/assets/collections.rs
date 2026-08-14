@@ -105,12 +105,10 @@ impl CollectionsFile {
     /// Deterministic: collections are sorted by name (via [`to_toml_string`]).
     ///
     /// [`to_toml_string`]: Self::to_toml_string
+    /// Atomic (C4-24), like the rest of the `.infinity/` family.
     pub fn save(&self, root: &Path) -> Result<(), String> {
         let path = Self::path_in(root);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-        }
-        std::fs::write(&path, self.to_toml_string()?)
+        inf_asset::write_atomically(&path, self.to_toml_string()?)
             .map_err(|e| format!("write {}: {e}", path.display()))
     }
 

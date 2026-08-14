@@ -29,6 +29,17 @@ pub struct AssetEntry {
     pub path: PathBuf,
     /// Display name (file stem).
     pub name: String,
+    /// **A sidecar file is beside this payload and could not be read** — so
+    /// [`sidecar`](Self::sidecar) is a stand-in this crate invented, not what is
+    /// on disk (C4-39).
+    ///
+    /// Distinct from "there is no sidecar", which is the ordinary case a
+    /// synthesized entry exists for: a payload with no sidecar loses nothing
+    /// when the synthesized one is written out, while a payload whose sidecar is
+    /// merely *unparseable* still has a real source path, import settings, tags
+    /// and dependency list on disk that the stand-in would destroy.
+    /// [`AssetDb::persist`] refuses to write over one.
+    pub sidecar_unreadable: bool,
 }
 
 impl AssetEntry {
@@ -55,6 +66,9 @@ pub struct AssetDb {
     /// Two files under the root claiming one GUID, found by the last
     /// [`scan`](Self::scan) (P26.5). See [`IdCollision`].
     collisions: Vec<IdCollision>,
+    /// Payloads whose sidecar is present but unreadable, found by the last
+    /// [`scan`](Self::scan) (C4-39). Advisory text, ready to show.
+    sidecar_advisories: Vec<String>,
 }
 
 /// **Two payloads under one content root declaring the same GUID** (P26.5).
@@ -273,8 +287,22 @@ impl AssetDb {
     }
 
     /// Write an asset's sidecar to disk (memory → disk).
+    ///
+    /// **Refuses to overwrite a sidecar this crate could not read** (C4-39). The
+    /// in-memory sidecar for such an entry is a stand-in — a fresh id-or-hash,
+    /// no source path, no import settings, no tags — and writing it out is how a
+    /// TOML syntax error or a merge-conflict marker turned into permanent data
+    /// loss, one `set_tags` later. The file stays as it is until a human repairs
+    /// it, at which point the next scan reads the real thing.
     pub fn persist(&self, id: AssetId) -> Result<()> {
         let entry = self.by_id.get(&id).ok_or(AssetError::UnknownAsset(id))?;
+        if entry.sidecar_unreadable {
+            return Err(AssetError::SidecarUnreadable {
+                path: crate::sidecar::sidecar_path(&entry.path)
+                    .display()
+                    .to_string(),
+            });
+        }
         entry.sidecar.save(&entry.path)
     }
 
@@ -287,6 +315,7 @@ impl AssetDb {
         self.by_hash.clear();
         self.reverse.clear();
         self.collisions.clear();
+        self.sidecar_advisories.clear();
         let root = self.root.clone();
         let mut count = 0;
         if root.exists() {
@@ -311,7 +340,10 @@ impl AssetDb {
             if path.is_dir() {
                 self.scan_dir(&path, count)?;
             } else if !is_sidecar(&path) {
-                if let Some(e) = read_entry(&path)? {
+                let mut advisories = std::mem::take(&mut self.sidecar_advisories);
+                let entry = read_entry(&path, &mut advisories);
+                self.sidecar_advisories = advisories;
+                if let Some(e) = entry? {
                     // FIRST WINS. The incumbent keeps the id and the intruder is
                     // named, rather than the intruder silently re-pointing every
                     // edge in the graph at itself — see `IdCollision`.
@@ -341,13 +373,28 @@ impl AssetDb {
         &self.collisions
     }
 
+    /// Payloads whose sidecar exists but could not be read, found by the last
+    /// [`scan`](Self::scan) (C4-39).
+    ///
+    /// A sibling of [`collisions`](Self::collisions), and it exists for the same
+    /// reason: the scan already *knew* something was wrong with the content root
+    /// and said nothing, so a TOML syntax error, a merge-conflict marker or a
+    /// permission error was indistinguishable from a missing file — right up
+    /// until a `persist` wrote the stand-in over the real one.
+    pub fn sidecar_advisories(&self) -> &[String] {
+        &self.sidecar_advisories
+    }
+
     /// Re-read a single asset at `path` (on a watch event). Returns the id if it
     /// is a recognized, sidecar-bearing asset.
     pub fn rescan_path(&mut self, path: &Path) -> Result<Option<AssetId>> {
         if is_sidecar(path) {
             return Ok(None);
         }
-        match read_entry(path)? {
+        let mut advisories = std::mem::take(&mut self.sidecar_advisories);
+        let entry = read_entry(path, &mut advisories);
+        self.sidecar_advisories = advisories;
+        match entry? {
             Some(e) => {
                 let id = e.id();
                 self.insert(e);
@@ -370,7 +417,7 @@ impl AssetDb {
 /// `.inf_*` payloads without a sidecar are still surfaced (with a synthesized
 /// sidecar) so nothing under the content root goes invisible; unrecognized files
 /// are ignored.
-fn read_entry(path: &Path) -> Result<Option<AssetEntry>> {
+fn read_entry(path: &Path, advisories: &mut Vec<String>) -> Result<Option<AssetEntry>> {
     let kind = AssetKind::from_path(path);
     if kind == AssetKind::Unknown {
         return Ok(None);
@@ -381,9 +428,23 @@ fn read_entry(path: &Path) -> Result<Option<AssetEntry>> {
         .unwrap_or("asset")
         .to_string();
 
+    // **Absent and unreadable are different facts** (C4-39). Both still produce
+    // an entry — a payload that vanishes from the Content Drawer because its
+    // metadata is damaged is the failure this synthesis exists to avoid — but
+    // only the absent case produces one that may be written back out.
+    let mut sidecar_unreadable = false;
     let sidecar = match AssetSidecar::load(path) {
         Ok(s) => s,
-        Err(_) => {
+        Err(e) => {
+            if !is_not_found(&e) {
+                sidecar_unreadable = true;
+                advisories.push(format!(
+                    "{}: the sidecar beside it exists but cannot be read ({e}); it is listed \
+                     under a stand-in identity and nothing will be written over the file — \
+                     repair or delete it, then rescan",
+                    path.display()
+                ));
+            }
             // No/invalid sidecar: synthesize one from the payload so the asset is
             // still browsable. The GUID is derived deterministically from the
             // content hash so a missing sidecar doesn't churn ids across scans.
@@ -425,7 +486,14 @@ fn read_entry(path: &Path) -> Result<Option<AssetEntry>> {
         sidecar,
         path: normalize(path),
         name,
+        sidecar_unreadable,
     }))
+}
+
+/// True when this error means "the sidecar is not there" rather than "the
+/// sidecar is there and this crate cannot make sense of it".
+fn is_not_found(e: &AssetError) -> bool {
+    matches!(e, AssetError::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// What a sidecar this crate could **not** parse as an [`AssetSidecar`] still
@@ -453,10 +521,47 @@ fn declared_sidecar(payload_path: &Path) -> (Option<AssetId>, Vec<AssetId>) {
     (guid, deps)
 }
 
-/// Normalize a path for use as a map key: canonicalize when the file exists
-/// (resolves `..`, symlinks, and case on Windows), else return it as-is.
+/// Normalize a path for use as a map key.
+///
+/// # The key must not depend on whether the leaf exists
+///
+/// This used to be `canonicalize(path).unwrap_or(path)`, which produced **two
+/// different keys for one file** depending on the moment it was asked (C4-39).
+/// `remove_path` is called by the watcher with the raw path of a file that has
+/// *just been deleted* — where `canonicalize` necessarily fails — so it hashed
+/// the un-canonicalized path, missed the canonicalized key the scan had
+/// inserted, and the entry never left the index: an externally deleted asset
+/// kept listing in the Content Drawer and kept counting as a live referrer in
+/// `has_referrers`, so nothing it referenced could be deleted either.
+///
+/// The fix keeps canonicalization — it is what resolves `..`, symlinks and case
+/// on Windows, and a purely lexical key would treat `C:\Content` and
+/// `c:\content` as two assets — but applies it to the deepest **existing**
+/// ancestor and re-joins the rest lexically. A file and its own grave therefore
+/// share a key, because the directory they live in is what gets canonicalized.
 fn normalize(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    let mut tail = Vec::new();
+    let mut cursor = path;
+    while let Some(parent) = cursor.parent() {
+        // `file_name()` is `None` for `..` and for a root/prefix; neither can be
+        // canonicalized away safely, so give up and key the path as written.
+        let Some(name) = cursor.file_name() else {
+            return path.to_path_buf();
+        };
+        tail.push(name.to_os_string());
+        if let Ok(canonical) = std::fs::canonicalize(parent) {
+            let mut out = canonical;
+            for name in tail.iter().rev() {
+                out.push(name);
+            }
+            return out;
+        }
+        cursor = parent;
+    }
+    path.to_path_buf()
 }
 
 #[cfg(test)]
@@ -470,6 +575,7 @@ mod tests {
             sidecar: sc,
             path: PathBuf::from(format!("/content/{id}.{}", kind.extension().unwrap())),
             name: id.to_string(),
+            sidecar_unreadable: false,
         }
     }
 
@@ -533,6 +639,7 @@ mod tests {
                 sidecar: sc,
                 path: PathBuf::from(format!("/content/{id}.inf_tex")),
                 name: id.to_string(),
+                sidecar_unreadable: false,
             });
         }
         let mut dupes = db.by_content_hash(h);
@@ -676,6 +783,104 @@ content_hash = \"0\"
         );
         assert!(bad.contains(guid));
         assert!(bad.referenced_by(mat).is_empty());
+    }
+
+    /// **An unreadable sidecar is advised and never written over; an absent one
+    /// is simply synthesized** (C4-39) — the two arms side by side, because the
+    /// defect is that the code had one.
+    ///
+    /// The unreadable half is where real data lives: a sidecar with a TOML
+    /// syntax error still carries the asset's guid, source path, import settings
+    /// and tags, and `persist` used to write a freshly-invented stand-in over all
+    /// of it the first time anything called `set_tags`.
+    #[test]
+    fn an_unreadable_sidecar_is_advised_and_never_written_over() {
+        // (a) ABSENT: no advisory, and persisting materializes the sidecar.
+        let bare = tempfile::tempdir().unwrap();
+        let payload = bare.path().join("Loose.inf_mesh");
+        std::fs::write(&payload, b"payload").unwrap();
+        let mut db = AssetDb::new(bare.path());
+        assert_eq!(db.scan().unwrap(), 1);
+        assert!(
+            db.sidecar_advisories().is_empty(),
+            "a missing sidecar is not a damaged one"
+        );
+        let id = db.iter().next().unwrap().id();
+        assert!(!db.get(id).unwrap().sidecar_unreadable);
+        db.set_tags(id, vec!["ok".into()]).unwrap();
+        db.persist(id)
+            .expect("a synthesized sidecar for a payload that has none may be written");
+        assert!(crate::sidecar::sidecar_path(&payload).exists());
+
+        // (b) UNREADABLE: advised, flagged, and the file is left exactly alone.
+        let damaged = tempfile::tempdir().unwrap();
+        let payload = damaged.path().join("Real.inf_mesh");
+        std::fs::write(&payload, b"payload").unwrap();
+        let side = crate::sidecar::sidecar_path(&payload);
+        // A merge-conflict marker: legible enough to exist, not to parse.
+        let bytes = b"<<<<<<< HEAD\nschema_version = 1\n=======\n".to_vec();
+        std::fs::write(&side, &bytes).unwrap();
+
+        let mut db = AssetDb::new(damaged.path());
+        assert_eq!(db.scan().unwrap(), 1, "the payload must stay browsable");
+        assert_eq!(
+            db.sidecar_advisories().len(),
+            1,
+            "the scan knew and said nothing: {:?}",
+            db.sidecar_advisories()
+        );
+        assert!(db.sidecar_advisories()[0].contains("Real.inf_mesh"));
+        let id = db.iter().next().unwrap().id();
+        assert!(db.get(id).unwrap().sidecar_unreadable);
+
+        db.set_tags(id, vec!["tag".into()]).unwrap();
+        let err = db
+            .persist(id)
+            .expect_err("the stand-in must not be written over the real sidecar");
+        assert!(matches!(err, AssetError::SidecarUnreadable { .. }), "{err}");
+        assert_eq!(
+            std::fs::read(&side).unwrap(),
+            bytes,
+            "the damaged sidecar was modified"
+        );
+
+        // A rescan re-raises it (the advisory is a property of the content root,
+        // not a one-shot at boot).
+        db.rescan_path(&payload).unwrap();
+        assert!(!db.sidecar_advisories().is_empty());
+    }
+
+    /// **A deleted asset leaves the index** (C4-39, the `by_path` half).
+    ///
+    /// The watcher calls `remove_path` with the raw path of a file that has just
+    /// been deleted, where `canonicalize` necessarily fails — so the key it
+    /// computed never matched the one the scan inserted, the entry stayed
+    /// forever, and it kept counting as a live referrer in `has_referrers`.
+    #[test]
+    fn removing_a_file_that_is_already_gone_still_leaves_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        // A path with a `.` segment, so the raw and canonical spellings differ
+        // in more than existence alone.
+        let sub = dir.path().join("Meshes");
+        std::fs::create_dir_all(&sub).unwrap();
+        let payload = sub.join("Prop.inf_mesh");
+        std::fs::write(&payload, b"payload").unwrap();
+
+        let mut db = AssetDb::new(dir.path());
+        assert_eq!(db.scan().unwrap(), 1);
+        let id = db.iter().next().unwrap().id();
+
+        // Delete first, then report — the watcher's real order.
+        std::fs::remove_file(&payload).unwrap();
+        std::fs::remove_file(crate::sidecar::sidecar_path(&payload)).ok();
+        let indirect = dir.path().join("Meshes").join(".").join("Prop.inf_mesh");
+        assert_eq!(
+            db.remove_path(&indirect),
+            Some(id),
+            "an externally deleted asset never left the index"
+        );
+        assert!(!db.contains(id));
+        assert!(db.get_by_path(&payload).is_none());
     }
 
     /// **Two files claiming one GUID: the first wins, and the second is named**

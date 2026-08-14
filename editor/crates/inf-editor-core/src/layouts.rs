@@ -8,7 +8,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
 use crate::ipc::LayoutSummary;
@@ -34,24 +33,21 @@ impl LayoutStore {
     /// Persist `json` under `name`, atomically (temp file + rename — a
     /// concurrent reader never observes a torn write; see the Spike C
     /// shadow-copy race for why the temp name must be unique per writer).
+    ///
+    /// # The delete-then-rename that made the doc above false
+    ///
+    /// This used to remove the destination before renaming onto it (C4-23),
+    /// justified by "Windows rename fails if the target exists". That is not
+    /// true: `std::fs::rename` asks for `MOVEFILE_REPLACE_EXISTING`, and five
+    /// other writers in this repo — the pack, the vmesh, the sidecar, the
+    /// `.inf_voxel` and the `.inf_terrain` — have relied on rename-over-existing
+    /// on Windows since P16. The cost of the belief was real: between the delete
+    /// and the rename the preset did **not exist**, and a failed rename lost it
+    /// permanently while reporting "rename to …".
     pub fn save(&self, name: &str, json: &str) -> Result<(), String> {
         let path = self.path_for(name)?;
-        fs::create_dir_all(&self.dir)
-            .map_err(|e| format!("create layout dir {}: {e}", self.dir.display()))?;
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let tmp = self.dir.join(format!(
-            ".{name}.{}-{}.tmp",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::write(&tmp, json).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        // Windows rename fails if the target exists — remove first. The
-        // brief gap is fine: layouts are single-user, last-writer-wins.
-        if path.exists() {
-            fs::remove_file(&path).map_err(|e| format!("replace {}: {e}", path.display()))?;
-        }
-        fs::rename(&tmp, &path).map_err(|e| format!("rename to {}: {e}", path.display()))?;
-        Ok(())
+        inf_asset::write_atomically(&path, json)
+            .map_err(|e| format!("write {}: {e}", path.display()))
     }
 
     /// Load a layout's JSON. `Ok(None)` when the preset doesn't exist.
@@ -162,6 +158,42 @@ mod tests {
             store.load("Default").unwrap().as_deref(),
             Some(r#"{"v":2}"#)
         );
+    }
+
+    /// **A preset is never absent between two saves** (C4-23).
+    ///
+    /// The doc has promised "a concurrent reader never observes a torn write"
+    /// since P1.2.5, and the code deleted the destination first — so between the
+    /// delete and the rename the preset did not exist at all, and a failed
+    /// rename lost it permanently. A reader holding the old file open proves the
+    /// promise now, and the file is present at every instant either way.
+    #[test]
+    fn overwriting_a_preset_never_makes_it_disappear() {
+        use std::io::Read;
+        let (_guard, store) = store();
+        store.save("Default", r#"{"v":1}"#).unwrap();
+        let path = store.dir().join("Default.json");
+
+        let mut live = fs::File::open(&path).unwrap();
+        store.save("Default", r#"{"v":2}"#).unwrap();
+        assert!(path.exists(), "the preset vanished during the overwrite");
+
+        let mut seen = String::new();
+        live.read_to_string(&mut seen).unwrap();
+        assert_eq!(
+            seen, r#"{"v":1}"#,
+            "a concurrent reader observed the rewrite"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"v":2}"#);
+
+        // …and no temp litter, which `list` would otherwise have to filter.
+        let strays: Vec<_> = fs::read_dir(store.dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "left temp files behind: {strays:?}");
     }
 
     #[test]
