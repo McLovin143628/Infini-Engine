@@ -112,6 +112,13 @@ jobs:
           # floor is on `Documenting` lines and NOT on the warning count, because
           # the repair campaign is meant to drive that count to zero and must not
           # break this step when it succeeds.
+          # The restored cargo cache (Swatinem) carries target/doc, which makes
+          # `cargo doc` a warm no-op — exactly the vacuous pass the guard below
+          # refuses, and how this step's first CI run went red on all three legs
+          # while the code was green. Cleaning ONLY the doc output forces every
+          # workspace crate to re-document (deps' rmeta stays cached), so the
+          # count below is a count of the whole tree, every run.
+          cargo clean --doc
           if ! cargo doc --no-deps --workspace 2>&1 | tee /tmp/rustdoc.log; then
             echo "::error::cargo doc FAILED. A ratchet over rustdoc warnings cannot count them if rustdoc did not finish."
             exit 1
