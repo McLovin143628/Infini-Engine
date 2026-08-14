@@ -575,6 +575,38 @@ fn the_visbuffer_path_shades_at_parity_with_the_forward_path() {
         100.0 * PARITY_TEXTURED_MAX_SOLID_CENTRES,
     );
 
+    // **THE CRITERION IS PINNED, not merely printed** (P28.5 audit).
+    //
+    // Hoisting the five constants made the criterion one door. It did not make
+    // the door hard to move: mutation-measured at this audit, taking
+    // `PARITY_MAX_STEP` from 1 to **60** leaves all seven gate arms and all
+    // twelve nucleus arms green, because a *loosened* bound is satisfied by
+    // every measurement that satisfied the tight one. The phase's headline claim
+    // would then be "the two paths agree to within 60 of 255", which is not the
+    // claim, and nothing in the tree would have said so.
+    //
+    // These five numbers ARE the recorded criterion (`docs/ROADMAP.md`, "THE
+    // GATE CRITERION, recorded for P28.5"). Changing one is a deliberate act
+    // that re-states what Phase 28 measured, so it fails here first and gets
+    // argued for in a ledger.
+    assert_eq!(PARITY_MAX_STEP, 1, "the recorded criterion's step bound moved");
+    assert_eq!(
+        PARITY_UNTEXTURED_MAX_FRACTION, 0.02,
+        "the recorded criterion's untextured population bound moved"
+    );
+    assert_eq!(
+        PARITY_TEXTURED_MAX_FRACTION, 0.12,
+        "the recorded criterion's textured population bound moved"
+    );
+    assert_eq!(
+        PARITY_TEXTURED_MIN_BORDERING, 0.80,
+        "the recorded criterion's bordering bound moved"
+    );
+    assert_eq!(
+        PARITY_TEXTURED_MAX_SOLID_CENTRES, 0.10,
+        "the recorded criterion's solid-centre bound moved"
+    );
+
     // ── the rows a derivative cannot reach ──────────────────────────────────
     parity_row(
         &gpu,
