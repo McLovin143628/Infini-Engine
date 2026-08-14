@@ -667,10 +667,29 @@ const _: () = assert!(std::mem::size_of::<VsmMarkParams>() == 112);
 /// table block and its bit range, and marks the sun's clipmap pages into another
 /// light's address space. No error, no counter, and a shadow atlas full of pages
 /// nothing will ever read.
-pub fn vsm_light_trees(scene: &RenderScene, settings: &VsmSettings) -> Vec<VsmLightDesc> {
-    let mut out = Vec::new();
+pub fn vsm_light_trees(scene: &RenderScene, settings: &VsmSettings) -> VsmTreeSet {
+    let mut out = VsmTreeSet::default();
     let mut projections = 0usize;
-    for l in &scene.lights {
+    for (index, l) in scene.lights.iter().enumerate() {
+        // **THE SHADER CEILING** (P27.5, the P27.4 audit's assigned decision).
+        // `LightsUniform::from_scene` truncates at `MAX_LIGHTS`, and every lit
+        // shader's loop caps at it too, so a light at scene index >= 16 has no
+        // direct term in any frame this engine draws. A page tree for it would
+        // mark, rasterize and evict pages that shade nothing — and, for a point
+        // or a spot, could not be named even if it did, because its slot rides
+        // `GpuLight::params.w` inside that same truncated array.
+        //
+        // It is a `break` rather than a `continue` because index >= MAX_LIGHTS is
+        // a SUFFIX of the light list: the cap below stops rather than skips for
+        // the handle invariant, and this one is the same shape by construction
+        // rather than by care.
+        if index >= crate::passes::mesh::MAX_LIGHTS {
+            out.refused_past_shader_ceiling = scene.lights[index..]
+                .iter()
+                .filter(|l| l.cast_shadows)
+                .count() as u32;
+            break;
+        }
         if !l.cast_shadows {
             continue;
         }
@@ -683,12 +702,46 @@ pub fn vsm_light_trees(scene: &RenderScene, settings: &VsmSettings) -> Vec<VsmLi
         };
         let faces = desc.faces() as usize;
         if projections + faces > VSM_MAX_PROJECTIONS {
+            out.refused_past_projection_cap = scene.lights[index..]
+                .iter()
+                .filter(|l| l.cast_shadows)
+                .count() as u32;
             break;
         }
         projections += faces;
-        out.push(desc);
+        out.trees.push(desc);
     }
     out
+}
+
+/// The tree list [`vsm_light_trees`] built, **and what it refused** (P27.5).
+///
+/// A `Vec` with two counters welded to it, rather than a bare `Vec`, because the
+/// no-silent-caps doctrine applies to both ceilings and only one of them used to
+/// be visible at all: the projection cap logs, and the shader ceiling did not
+/// exist. `PartialEq` because `VsmSystem::matches` compares one of these against
+/// the last one — a light appearing past the ceiling still changes the scene's
+/// answer, so the counters are part of the identity rather than commentary on it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VsmTreeSet {
+    /// The trees, in handle order: handle `n` is the `n`-th shadow-casting light
+    /// in scene order that reached both ceilings.
+    pub trees: Vec<VsmLightDesc>,
+    /// Shadow-casting lights refused because their **scene index** is past
+    /// [`MAX_LIGHTS`](crate::passes::mesh::MAX_LIGHTS) — the lights uniform's
+    /// array, and therefore the largest index any lit shader can shade at all.
+    pub refused_past_shader_ceiling: u32,
+    /// Shadow-casting lights refused because their tree would not fit
+    /// [`VSM_MAX_PROJECTIONS`].
+    pub refused_past_projection_cap: u32,
+}
+
+impl VsmTreeSet {
+    /// Lights that asked for a tree and did not get one, by either ceiling.
+    #[inline]
+    pub fn refused(&self) -> u32 {
+        self.refused_past_shader_ceiling + self.refused_past_projection_cap
+    }
 }
 
 /// **Build this frame's projection list** — one entry per (light × face), in the
@@ -1605,7 +1658,7 @@ mod tests {
             cast_shadows: false,
             ..Default::default()
         });
-        let trees = vsm_light_trees(&scene, &settings);
+        let trees = vsm_light_trees(&scene, &settings).trees;
         assert_eq!(trees.len(), 3, "a non-casting light took a tree");
         assert_eq!(trees[0].kind, VsmTreeKind::Clipmap);
         assert_eq!(trees[1].kind, VsmTreeKind::Quadtree);
@@ -1632,7 +1685,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        let trees = vsm_light_trees(&many, &settings);
+        let trees = vsm_light_trees(&many, &settings).trees;
         assert_eq!(trees.len(), 10, "10 × 6 = 60 fits, 11 × 6 = 66 does not");
 
         // **THE PREFIX INVARIANT.** A sun after the eleventh point light would
@@ -1648,7 +1701,7 @@ mod tests {
             cast_shadows: true,
             ..Default::default()
         });
-        let trees = vsm_light_trees(&many, &settings);
+        let trees = vsm_light_trees(&many, &settings).trees;
         assert_eq!(
             trees.len(),
             10,
@@ -1791,7 +1844,7 @@ mod tests {
             cast_shadows: true,
             ..Default::default()
         });
-        let trees = vsm_light_trees(&scene, &settings);
+        let trees = vsm_light_trees(&scene, &settings).trees;
         let (ps, _) = vsm_projections(
             &scene,
             &view_at(10.0),

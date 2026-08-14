@@ -433,7 +433,7 @@ pub struct VsmSystem {
 /// otherwise — a light moving is not a new system, a light *appearing* is.
 #[derive(Debug, Clone, PartialEq)]
 struct VsmSignature {
-    trees: Vec<VsmLightDesc>,
+    trees: crate::vsm::VsmTreeSet,
     budget_bytes: u64,
 }
 
@@ -445,7 +445,30 @@ impl VsmSystem {
         scene: &RenderScene,
         settings: &VsmSettings,
     ) -> Option<Self> {
-        let trees = vsm_light_trees(scene, settings);
+        let asked = vsm_light_trees(scene, settings);
+        // **Never a silent cap** (P27.2's doctrine, extended to the ceiling the
+        // P27.4 audit found). Logged once at construction rather than per frame,
+        // because a system is rebuilt when its tree list changes and this number
+        // is part of that list's identity.
+        if asked.refused_past_shader_ceiling > 0 {
+            tracing::warn!(
+                "inf-render: {} shadow-casting light(s) sit past scene index {} — \
+                 the lights uniform's array — so they are not shaded at all and \
+                 get no page tree",
+                asked.refused_past_shader_ceiling,
+                crate::passes::mesh::MAX_LIGHTS,
+            );
+        }
+        if asked.refused_past_projection_cap > 0 {
+            tracing::warn!(
+                "inf-render: {} shadow-casting light(s) did not fit the {} \
+                 marking projections a frame may hold; they keep the cascaded \
+                 shadow map",
+                asked.refused_past_projection_cap,
+                crate::vsm::VSM_MAX_PROJECTIONS,
+            );
+        }
+        let trees = asked.trees.clone();
         if trees.is_empty() {
             return None;
         }
@@ -514,7 +537,7 @@ impl VsmSystem {
                 // `matches` compares against that function's output, so storing
                 // the truncation here would make a system with a refused light
                 // rebuild itself — and re-allocate an atlas — every frame.
-                trees,
+                trees: asked,
                 budget_bytes: settings.budget_bytes,
             },
             residency,
@@ -559,6 +582,17 @@ impl VsmSystem {
     #[inline]
     pub fn trees(&self) -> &[VsmLightDesc] {
         &self.trees
+    }
+
+    /// **What the two ceilings refused** (P27.5) — the shader ceiling and the
+    /// projection cap, as counts rather than as a log line a test cannot read.
+    ///
+    /// This is what makes *"every rasterized page is sampleable"* an assertion:
+    /// a tree exists here only for a light some lit shader can shade, so a page
+    /// belonging to it has a slot that reaches a fragment.
+    #[inline]
+    pub fn tree_refusals(&self) -> &crate::vsm::VsmTreeSet {
+        &self.signature.trees
     }
     /// The projection list the last [`sync`](Self::sync) built.
     #[inline]

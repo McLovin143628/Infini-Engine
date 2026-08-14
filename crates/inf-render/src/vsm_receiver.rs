@@ -2066,29 +2066,49 @@ mod tests {
         );
     }
 
-    /// **The two light ceilings, compared in one place** — the P27.4 audit's
-    /// answer to a remainder that said they never had been.
+    /// **THE TWO LIGHT CEILINGS, AND THE RULE THAT NOW HOLDS BETWEEN THEM**
+    /// (P27.5 — the tier decision the P27.4 audit assigned to this batch).
     ///
     /// `MAX_LIGHTS` is **16**: the lights uniform's array, and therefore the
-    /// largest scene index whose `GpuLight::params.w` a lit shader can read.
-    /// `VSM_MAX_PROJECTIONS` is **64**: the marking pass's projection ceiling,
-    /// and `VsmSystem::for_scene` registers a tree for every shadow-casting light
-    /// in scene order with no reference to the first number.
+    /// largest scene index whose direct term any lit shader computes at all —
+    /// every one of them loops `i < count && i < MAX_LIGHTS`.
+    /// `VSM_MAX_PROJECTIONS` is **64**: the marking pass's projection ceiling.
     ///
-    /// **The consequence, written down rather than left to be found:** a
-    /// point or spot light at scene index ≥ 16 can hold a page tree that marks,
-    /// rasterizes and evicts pages **no shader can ever sample**, because
-    /// `LightsUniform::from_scene` truncates at `MAX_LIGHTS` and its slot never
-    /// reaches a `GpuLight`. The **sun** is not affected: it rides in
-    /// `VsmReceiverParams::counts.x` rather than in a light record, which is
-    /// exactly why it was put there.
+    /// The audit's finding was that `VsmSystem::for_scene` registered a tree for
+    /// **every** shadow-casting light in scene order with no reference to the
+    /// first number, so a point or spot light at scene index >= 16 could hold a
+    /// page tree that marked, rasterized and evicted pages **no shader could
+    /// ever sample**. Armed, unfixed, and left as a tier decision.
     ///
-    /// Not fixed here — capping the tree list at `MAX_LIGHTS` changes which
-    /// lights get pages, so it is a tier decision and belongs with P27.5. Armed
-    /// so the day either ceiling moves, the relationship is a failing test rather
-    /// than a paragraph.
+    /// # The ruling: REFUSE, typed and counted
+    ///
+    /// The alternative was lifting `MAX_LIGHTS`, and it is the wrong lever. That
+    /// number is the **forward renderer's analytic light loop** — a per-pixel
+    /// shading cost P7.1 chose — not a shadow budget, and moving it would make
+    /// every lit fragment in the engine pay for a virtual-shadow ceiling. What a
+    /// shadow phase may decide is whether to allocate pages for a light nothing
+    /// shades, and the answer is no.
+    ///
+    /// So `vsm_light_trees` stops at the scene index the lights uniform ends at,
+    /// counts what it refused in `VsmTreeSet::refused_past_shader_ceiling`, and
+    /// `for_scene` logs it once. It is a **stop**, not a skip, and that is free
+    /// rather than careful: index >= MAX_LIGHTS is a *suffix* of the light list,
+    /// so the handle invariant the projection cap protects is untouched.
+    ///
+    /// The **sun** is exempt from the *slot* mechanism and that is not luck — it
+    /// rides `VsmReceiverParams::counts.x` rather than a `GpuLight` — but it is
+    /// not exempt from this ceiling, because a directional light past index 16
+    /// contributes no direct term either, and shadowing a light that is not
+    /// shaded is the same waste in a different place.
+    ///
+    /// # What this turns into an invariant
+    ///
+    /// *Every rasterized page is sampleable.* A tree exists only for a light some
+    /// lit shader can shade; a point or spot light's slot is
+    /// `GpuLight::params.w`, which is inside the array; the sun's is
+    /// `counts.x`. The arm asserts the mapping directly rather than restating it.
     #[test]
-    fn the_lights_uniform_ceiling_is_lower_than_the_projection_ceiling() {
+    fn a_light_past_the_shader_ceiling_gets_no_page_tree() {
         let uniform = crate::passes::mesh::MAX_LIGHTS;
         let projections = crate::vsm::VSM_MAX_PROJECTIONS;
         assert_eq!(uniform, 16, "the lights uniform's array");
@@ -2096,23 +2116,80 @@ mod tests {
         assert!(
             projections > uniform,
             "the projection ceiling ({projections}) is no longer the larger of \
-             the two, so a tree can no longer outlive the slot that reads it and \
-             this arm's whole consequence is retired — say so in the ledger"
+             the two, so the shader ceiling has stopped being the binding one — \
+             say so in the ledger before deleting this"
         );
         // A point light is six projections, so the projection ceiling is ten
         // point lights; the uniform's is sixteen lights of any kind.
         assert_eq!(projections / 6, 10);
-        // The slot mapping itself is over the WHOLE light list, which is where
-        // the two ceilings actually meet: light 16 gets slot 17 and no
-        // `GpuLight` to carry it.
-        let casts: Vec<bool> = (0..20).map(|_| true).collect();
-        let bases: Vec<u32> = (0..20).collect();
-        let slots = receiver_slots(casts, 20, &bases);
+
+        // THE RULE, on the door that enforces it. Twenty directional casters:
+        // sixteen get trees, four are refused and COUNTED.
+        let mut scene = crate::RenderScene::default();
+        for _ in 0..20 {
+            scene.lights.push(crate::RenderLight {
+                kind: crate::LightKind::Directional,
+                cast_shadows: true,
+                ..Default::default()
+            });
+        }
+        let asked = crate::vsm::vsm_light_trees(&scene, &VsmSettings::default());
+        assert_eq!(asked.trees.len(), uniform, "a tree past the uniform's array");
+        assert_eq!(asked.refused_past_shader_ceiling, 4);
+        assert_eq!(asked.refused_past_projection_cap, 0);
+        assert_eq!(asked.refused(), 4);
+
+        // THE INVARIANT: every tree's light has a slot a shader can read. The
+        // slot list is over the WHOLE light list, and past the ceiling it is 0 —
+        // which is `vsm_bound()`'s "this light has no tree".
+        let casts: Vec<bool> = scene.lights.iter().map(|l| l.cast_shadows).collect();
+        let bases: Vec<u32> = (0..asked.trees.len() as u32).collect();
+        let slots = receiver_slots(casts, asked.trees.len(), &bases);
         assert_eq!(slots.len(), 20);
+        for (i, slot) in slots.iter().enumerate() {
+            if i < uniform {
+                assert_eq!(*slot, i as u32 + 1, "light {i} lost its slot");
+            } else {
+                assert_eq!(
+                    *slot, 0,
+                    "light {i} is past the lights uniform's array and still names \
+                     a projection — a page tree no shader can sample"
+                );
+            }
+        }
+
+        // ANTI-VACUITY, and it is the assertion that makes the refusal a rule
+        // rather than an accident of this fixture: with the ceiling honoured,
+        // NOTHING in the tree list sits past it. The pre-P27.5 behaviour is the
+        // control — it would have produced twenty trees here.
+        assert!(
+            asked.trees.len() <= uniform,
+            "the tree list reaches past the lights uniform's array"
+        );
+        assert!(
+            asked.refused() > 0,
+            "the fixture refused nothing, so the counters above are zero for the \
+             wrong reason"
+        );
+
+        // …and the OTHER ceiling still stops the list where it always did, with
+        // its own counter, so the two refusals are distinguishable rather than
+        // one number wearing two names.
+        let mut many = crate::RenderScene::default();
+        for _ in 0..12 {
+            many.lights.push(crate::RenderLight {
+                kind: crate::LightKind::Point,
+                cast_shadows: true,
+                ..Default::default()
+            });
+        }
+        let capped = crate::vsm::vsm_light_trees(&many, &VsmSettings::default());
+        assert_eq!(capped.trees.len(), 10, "10 x 6 = 60 fits, 11 x 6 = 66 does not");
+        assert_eq!(capped.refused_past_projection_cap, 2);
         assert_eq!(
-            slots[uniform], 17,
-            "the light after the uniform's last has a slot the uniform cannot \
-             carry"
+            capped.refused_past_shader_ceiling, 0,
+            "twelve lights are inside the uniform's array; the projection cap is \
+             what refused these"
         );
     }
 

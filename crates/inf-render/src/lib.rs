@@ -144,6 +144,7 @@ pub use vsm::{
     clipmap_page_world, cube_face_matrix, light_basis, mark_page_for, page_clip_planes,
     quantize_light_dir, spot_fov_y, spot_matrix, vsm_justified_level, vsm_light_trees,
     vsm_page_matrix, vsm_page_sees_sphere, vsm_projections, vsm_sun_quantum, ClipmapLayout,
+    VsmTreeSet,
     VsmMarkParams, VsmProjection, CUBE_FACE_BASES, VSM_DEPTH_CLEAR, VSM_DEPTH_COMPARE,
     VSM_MAX_PROJECTIONS, VSM_PROJ_ORTHO, VSM_PROJ_PERSPECTIVE, VSM_SUN_REFERENCE_HEIGHT_M,
 };
