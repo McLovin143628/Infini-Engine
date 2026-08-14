@@ -1433,3 +1433,151 @@ fn green_field() -> inf_render::ScatterBatch {
         91,
     )
 }
+
+// ── P27.5: OBSERVABILITY ────────────────────────────────────────────────────
+
+/// **The shadow-page view mode paints residency, and it is inert everywhere
+/// else** (P27.5) — the P27.1 remainder *"nothing logs `vsm_summary` in a host
+/// and no editor surface exists"*, closed at the surface half.
+///
+/// The VT heat-map's precedent, one virtual system over, and the reason it is
+/// worth a mode of its own is the state it shows that a lit frame cannot: a page
+/// with **no resident ancestor** reads as *lit*, so a missing shadow and a
+/// surface nothing shadows are the same picture. The ramp gives that state a
+/// colour.
+///
+/// Three claims, and the third is the one the `VtResidency` precedent had to
+/// learn by measurement: the branch is above the unlit short-circuit, which this
+/// mode also sets, so a ramp placed below it would never execute.
+#[test]
+fn the_shadow_page_view_mode_paints_residency_and_is_inert_elsewhere() {
+    let Some(gpu) = gpu_or_skip("the P27.5 shadow-page view mode") else {
+        return;
+    };
+    let mut scene = floor_scene(&[(0.0, 0.0), (2.4, 1.2)]);
+    scene.lights.push(sun(true));
+    scene.mark_dirty();
+    let view = top_view(9.0);
+
+    let painted = |mode: inf_render::ViewMode, vsm: bool| {
+        let target = HeadlessTarget::new(&gpu, FW, FH);
+        let mut renderer = EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+        let mut s = *renderer.settings();
+        if vsm {
+            s.vsm = settings(64);
+        }
+        renderer.try_set_settings(s).expect("legal settings");
+        renderer.set_view_mode(mode);
+        for _ in 0..FRAMES {
+            renderer.render(&gpu, &scene, &view, &target.view, (FW, FH));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        (renderer, target.read_rgba(&gpu).expect("readback"))
+    };
+
+    // 1. THE RAMP RUNS. The page view of a shadowed scene is not its lit frame,
+    //    and it is not its UNLIT frame either — which is the assertion that
+    //    fails when the branch sits below the short-circuit this mode sets.
+    let (_, lit) = painted(inf_render::ViewMode::Lit, true);
+    let (_, unlit) = painted(inf_render::ViewMode::Unlit, true);
+    let (pages_r, pages) = painted(inf_render::ViewMode::VsmPages, true);
+    assert_ne!(pages, lit, "the page view is the lit frame");
+    assert_ne!(
+        pages, unlit,
+        "the page view is the UNLIT frame — the ramp branch is below the unlit \
+         short-circuit `VsmPages` itself sets, so it never executes"
+    );
+    assert!(
+        pages_r.vsm_receiver_frames() > 0,
+        "the atlas never reached the lit passes"
+    );
+
+    // 2. IT IS THE RESIDENCY RAMP, not a tint: the resident colour is on the
+    //    floor in quantity. Green is `(0.10, 0.85, 0.20)` before tonemapping, so
+    //    it is classified by dominance rather than by value.
+    let resident = |img: &[u8]| {
+        img.chunks(4)
+            .filter(|p| p[1] > p[0] + 40 && p[1] > p[2] + 40)
+            .count()
+    };
+    let green = resident(&pages);
+    assert!(
+        green > 500,
+        "the page view painted {green} resident pixels — the ramp is not \
+         reading the table"
+    );
+
+    // 3. INERT ELSEWHERE. A renderer with no virtual shadows paints the grey
+    //    that says so, and — the golden claim — the LIT frame of a scene with
+    //    the mode never selected is untouched by the flag existing.
+    let (off_r, off_pages) = painted(inf_render::ViewMode::VsmPages, false);
+    assert!(off_r.vsm().is_none());
+    // THE COUNTER MOVES, THEN ZERO: the resident colour covers the floor with a
+    // tree and covers **nothing at all** without one. A ramp that painted green
+    // unconditionally passes the first half and fails here.
+    assert_eq!(
+        resident(&off_pages),
+        0,
+        "a scene with NO shadow tree painted resident pixels — the ramp is not \
+         reading the table, it is reading a constant"
+    );
+    // …and what it paints instead is ONE colour over the frame, which is the
+    // 'no tree' answer rather than lit shading with a tint on it.
+    let first = off_pages[..3].to_vec();
+    let uniform = off_pages
+        .chunks(4)
+        .filter(|p| p[..3].iter().zip(&first).all(|(a, b)| a.abs_diff(*b) < 4))
+        .count();
+    assert!(
+        uniform * 10 > (FW * FH) as usize * 9,
+        "the no-tree page view is {uniform} of {} pixels of one colour — it is \
+         shading rather than answering",
+        FW * FH
+    );
+    let (_, plain) = painted(inf_render::ViewMode::Lit, false);
+    assert_ne!(
+        plain, off_pages,
+        "the page view and the lit view agree on a scene with no shadows, so \
+         the mode is not reaching the shader at all"
+    );
+}
+
+/// **The host's one line** (P27.5): `vsm_summary` exists, is one line, and is
+/// `None` — not a line of zeros — when there is no system.
+///
+/// The P22 mangled-literal law, applied to the line a host actually prints. The
+/// distinction in the second half is the load-bearing one: a level with virtual
+/// shadows off and a level whose atlas is empty are different states, and a host
+/// that printed zeros for both would say neither.
+#[test]
+fn the_shadow_summary_is_one_line_a_host_can_log() {
+    let Some(gpu) = gpu_or_skip("the P27.5 host summary") else {
+        return;
+    };
+    let mut scene = floor_scene(&[(0.0, 0.0)]);
+    scene.lights.push(sun(true));
+    scene.mark_dirty();
+
+    let (off, _) = run(&gpu, &scene, &top_view(9.0), |_| {}, 2);
+    assert!(
+        off.vsm_summary().is_none(),
+        "a renderer with no virtual shadow system produced a summary"
+    );
+
+    let (on, _) = run(
+        &gpu,
+        &scene,
+        &top_view(9.0),
+        |s| s.vsm = settings(64),
+        FRAMES,
+    );
+    let line = on.vsm_summary().expect("a live system has a summary");
+    assert_eq!(line.lines().count(), 1, "the summary is {line:?}");
+    assert!(!line.contains("  "), "mangled whitespace in {line:?}");
+    // All three halves are in it — the residency's, the marking loop's and the
+    // raster's — because a full atlas and a thrashing loop look identical in any
+    // one of them alone.
+    for want in ["vsm marking:", "vsm raster:", "marking threads"] {
+        assert!(line.contains(want), "the summary has no {want:?}: {line}");
+    }
+}

@@ -39,6 +39,11 @@ const VIEW_MODES: [ViewModeDto, string, string][] = [
     "VT Residency",
     "Virtual-texture streaming heat-map: green resident, red at the fallback floor, grey unbound",
   ],
+  [
+    "VsmPages",
+    "Shadow Pages",
+    "Virtual-shadow page residency: green resident, red three levels behind, blue where no page exists (the receiver reads it as lit), grey unshadowed",
+  ],
 ];
 
 const TOOLS: [ToolModeDto, string, string][] = [

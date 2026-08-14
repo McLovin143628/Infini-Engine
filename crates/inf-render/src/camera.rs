@@ -148,7 +148,9 @@ pub struct ViewUniforms {
     /// **only** by `ViewMode::Biomes`, which sets `x` too); `z` = virtual-texture
     /// residency heat-map (P26.5: 1.0 ⇒ the three lit mesh shaders return
     /// `vt_heat` instead of shading, set **only** by `ViewMode::VtResidency`,
-    /// which sets `x` too); `w` reserved. Appended last so every pass that
+    /// which sets `x` too); `w` = shadow-page residency ramp (P27.5: 1.0 ⇒ the
+    /// four lit mesh shaders return `vsm_heat` instead of shading, set **only**
+    /// by `ViewMode::VsmPages`, which sets `x` too). Appended last so every pass that
     /// declares the shorter `View` struct is unaffected and every pre-R-P2 golden
     /// stays byte-identical (the renderer writes 0 in every slot for the default
     /// Lit mode).

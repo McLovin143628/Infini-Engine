@@ -517,6 +517,7 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
 /// [`Plain`](ShaderKind::Plain): a Plain shader binds no environment group, so
 /// it *cannot* call `shadow_factor`, and the day that changes the refusal is a
 /// stale comment rather than a structural fact.
+#[cfg(test)]
 pub(crate) fn shader_kind(label: &str) -> Option<&'static ShaderKind> {
     SHADER_TABLE
         .iter()

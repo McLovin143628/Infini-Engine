@@ -274,7 +274,16 @@ impl PlayerApp {
     fn log_stream_stats(&mut self, dt: f64) {
         let terrain = !self.sim.terrain_streaming().is_empty();
         let cells = !self.sim.cell_streaming().is_empty();
-        if !terrain && !cells {
+        // P27.5: the shadow-page streamer joins the two that were already here,
+        // through the same seam (`tracing`, which already tees to the log file
+        // and, in the editor, to the Output Log) and on the same cadence. A
+        // level with virtual shadows off produces no line at all rather than a
+        // line of zeros — `vsm_summary` is `None` there.
+        let shadows = self
+            .live
+            .as_ref()
+            .is_some_and(|l| l.host.vsm_summary().is_some());
+        if !terrain && !cells && !shadows {
             return;
         }
         self.stats_accum += dt;
@@ -293,6 +302,9 @@ impl PlayerApp {
                 "inf-player: {}",
                 self.sim.cell_streaming().stats().summary()
             );
+        }
+        if let Some(line) = self.live.as_ref().and_then(|l| l.host.vsm_summary()) {
+            tracing::info!("inf-player: {line}");
         }
     }
 

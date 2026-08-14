@@ -807,7 +807,8 @@ pub enum ViewportModeDto {
 }
 
 /// Viewport shading view mode (R-P2; `viewport_set_view_mode`). Serializes as the
-/// tag string `"Lit"`/`"Unlit"`/`"Wireframe"`/`"Biomes"`/`"VtResidency"`.
+/// tag string `"Lit"`/`"Unlit"`/`"Wireframe"`/`"Biomes"`/`"VtResidency"`/
+/// `"VsmPages"`.
 /// `Wireframe` degrades to `Unlit` in the renderer when the adapter lacks
 /// `POLYGON_MODE_LINE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -824,6 +825,13 @@ pub enum ViewModeDto {
     /// no GPU feature; a level with no virtual textures paints uniformly grey,
     /// which is the answer rather than a failure.
     VtResidency,
+    /// Every surface painted by how far behind the **shadow-page** residency is
+    /// at that pixel — green resident, red three levels behind, **blue** where
+    /// the page has no resident ancestor at all and the receiver therefore reads
+    /// it as lit (P27.5). Everything else renders unlit, on the `Biomes`
+    /// precedent. Needs no GPU feature; a level with no shadow-casting light
+    /// paints uniformly grey.
+    VsmPages,
 }
 
 /// 2D-mode snapping configuration pushed from the viewport toolbar

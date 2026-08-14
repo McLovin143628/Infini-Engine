@@ -162,6 +162,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (view.flags.z > 0.5) {
         return vec4<f32>(vt_heat(in.vt, in.uv, dpdx(in.uv), dpdy(in.uv)), 1.0);
     }
+    // P27.5 VsmPages: the shadow-page residency ramp, beside the texture one and
+    // for the same reason. `flags.w` is 0.0 in every other mode, so this is
+    // present-and-false and every golden runs the identical arithmetic. Above
+    // the unlit short-circuit, which `VsmPages` also sets (the `VtResidency`
+    // precedent, and the defect a source read does not catch).
+    if (view.flags.w > 0.5) {
+        return vec4<f32>(vsm_heat(in.world_pos, normalize(in.normal)), 1.0);
+    }
     // Unlit view mode (R-P2): return albedo + emissive directly, skipping the
     // light loop entirely. Drives both Unlit and Wireframe; `flags.x` is 0 in the
     // default Lit mode so this branch is never taken there (goldens byte-stable).

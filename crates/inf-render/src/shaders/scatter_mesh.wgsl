@@ -369,6 +369,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
 
+    // P27.5 VsmPages: the shadow-page residency ramp. Above the unlit
+    // short-circuit, which `VsmPages` also sets — a heat branch below it would
+    // never execute (the `VtResidency` precedent, and the defect a source read
+    // does not catch). `flags.w` is 0.0 in every other mode, so this is
+    // present-and-false and every golden runs the identical arithmetic.
+    if (view.flags.w > 0.5) {
+        return vec4<f32>(vsm_heat(in.world_pos, normalize(in.normal)), 1.0);
+    }
     if (view.flags.x > 0.5) {
         return vec4<f32>(in.color.rgb + sp.emissive.rgb, in.color.a);
     }

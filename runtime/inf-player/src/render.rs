@@ -367,6 +367,18 @@ impl PlayerRenderHost {
     }
 
     /// Whether the GPU meshlet path is active (the auto-picked tier is High).
+    /// **The one line a host logs about virtual shadow maps** (P27.5) — the
+    /// P27.1 remainder *"nothing logs `vsm_summary` in a host"*, closed on the
+    /// shipping side.
+    ///
+    /// `None` when the renderer has no system, which is not the same as a line
+    /// of zeros: a level with virtual shadows off and a level whose atlas is
+    /// empty are different states and a host that printed zeros for both would
+    /// say neither.
+    pub fn vsm_summary(&self) -> Option<String> {
+        self.renderer.vsm_summary()
+    }
+
     pub fn vgeom_enabled(&self) -> bool {
         self.vgeom_enabled
     }

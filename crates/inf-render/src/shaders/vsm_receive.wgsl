@@ -413,6 +413,100 @@ fn vsm_shadow(world_pos: vec3<f32>, n: vec3<f32>, slot: u32) -> f32 {
 // `slot` is `GpuLight.params.w`, which is 0 on every light without a tree — so
 // this is exactly `1.0` on every scene that has no virtual shadows, and every
 // pre-P27.4 golden runs the identical arithmetic.
+// **The shadow-page residency ramp** (P27.5) — the VT heat-map's twin, one
+// virtual system over, driven by `view.flags.w` and `ViewMode::VsmPages`.
+//
+// It answers the question a shadow author actually has and a lit frame cannot
+// show: *is this pixel's shadow the resolution it asked for, or is it reading a
+// coarser ancestor because the page it wanted did not fit?* A blurry shadow and
+// a correctly-coarse one look identical.
+//
+//   grey    no shadow tree reaches this pixel — no sun, outside the clipmap, or
+//           the light was refused at registration (P27.5's ceiling, made
+//           visible)
+//   green   the page the pixel asked for is resident: full resolution
+//   yellow  one level behind
+//   orange  two
+//   red     three or more
+//   blue    NO DATA — no resident ancestor, so the receiver reads LIT. The
+//           phase's chosen fail direction, and the one state an author must be
+//           able to see, because a missing shadow looks exactly like a surface
+//           nothing shadows.
+//
+// **It is a PAGE view and not a tap view**, deliberately: it re-derives the
+// address from the undisplaced world position, with no normal offset and no
+// kernel, because what it is about is which page a pixel lands in rather than
+// which texels a filter reads. `vsm_shadow` is the sampling door and this is
+// not a second one — it reads the same table and the same projection and it
+// never returns a shadow factor.
+fn vsm_heat(world_pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let grey = vec3<f32>(0.06, 0.06, 0.07);
+    let slot = vsm.counts.x;
+    if (!vsm_bound(slot)) {
+        return grey;
+    }
+    var pi = slot - 1u;
+    var p = vsm_proj[pi];
+    let ortho = p.info.w == VSM_PROJ_ORTHO_KIND;
+    let faces = vsm_table[p.info.x + 3u] >> 8u;
+    if (faces == 6u) {
+        let f = vsm_cube_face(world_pos - p.light.xyz);
+        if (pi + f >= vsm.counts.y) {
+            return grey;
+        }
+        pi = pi + f;
+        p = vsm_proj[pi];
+    }
+    let levels = vsm_table[p.info.x];
+    if (levels == 0u) {
+        return grey;
+    }
+    let clip = p.view_proj * vec4<f32>(world_pos, 1.0);
+    if (clip.w <= 0.0) {
+        return grey;
+    }
+    let l = clip.xyz / clip.w;
+    if (l.z <= 0.0 || l.z > 1.0) {
+        return grey;
+    }
+    let view_dist = max(length(world_pos - view.eye.xyz), 1e-4);
+    let pixel_world = view_dist / max(vsm.params.y, 1e-6);
+    var texel0 = p.light.w;
+    if (!ortho) {
+        texel0 = texel0 * max(length(world_pos - p.light.xyz), 1e-4);
+    }
+    let level = vsm_receiver_level(p, levels, l, texel0, pixel_world);
+    if (level >= levels) {
+        return grey;
+    }
+    let q = vsm_level_ndc(p, l, level);
+    if (abs(q.x) > 1.0 || abs(q.y) > 1.0) {
+        return grey;
+    }
+    let b = p.info.x;
+    let rec = b + VSM_LIGHT_HEADER_WORDS + level * VSM_LEVEL_REC_WORDS;
+    let pages_x = vsm_table[rec];
+    let pages_y = vsm_table[rec + 1u];
+    let first = vsm_table[rec + 2u];
+    let face_stride = vsm_table[rec + 3u];
+    let u = clamp(q.x * 0.5 + 0.5, 0.0, 0.999999);
+    let v = clamp(0.5 - q.y * 0.5, 0.0, 0.999999);
+    let px = min(u32(u * f32(pages_x)), pages_x - 1u);
+    let py = min(u32(v * f32(pages_y)), pages_y - 1u);
+    let entry = vsm_table[first + p.info.z * face_stride + py * pages_x + px];
+    if (entry == VSM_ENTRY_NONE) {
+        return vec3<f32>(0.10, 0.25, 0.95);
+    }
+    let got = (entry >> 16u) & 0xFFu;
+    // `got` is never finer than the level asked for (an entry names an
+    // ANCESTOR), so this subtraction cannot wrap.
+    let behind = got - level;
+    if (behind == 0u) { return vec3<f32>(0.10, 0.85, 0.20); }
+    if (behind == 1u) { return vec3<f32>(0.95, 0.85, 0.10); }
+    if (behind == 2u) { return vec3<f32>(1.00, 0.45, 0.05); }
+    return vec3<f32>(0.95, 0.08, 0.08);
+}
+
 fn vsm_light_shadow(world_pos: vec3<f32>, n: vec3<f32>, slot: f32) -> f32 {
     return vsm_shadow(world_pos, n, u32(max(slot, 0.0)));
 }

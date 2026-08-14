@@ -51,6 +51,8 @@ fn to_view_mode(d: ViewModeDto) -> ViewMode {
         // P19.2: needs no GPU feature, so it never degrades.
         ViewModeDto::Biomes => ViewMode::Biomes,
         ViewModeDto::VtResidency => ViewMode::VtResidency,
+        // P27.5: the same, one virtual system over.
+        ViewModeDto::VsmPages => ViewMode::VsmPages,
     }
 }
 

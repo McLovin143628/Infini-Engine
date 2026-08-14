@@ -766,6 +766,7 @@ export function registerViewportCommands(): void {
     { id: "view.wireframe", title: "View Mode: Wireframe", category: "View" },
     { id: "view.biomes", title: "View Mode: Biomes", category: "View" },
     { id: "view.vtResidency", title: "View Mode: VT Residency", category: "View" },
+    { id: "view.vsmPages", title: "View Mode: Shadow Pages", category: "View" },
     { id: "tool.select", title: "Tool: Select", category: "Tools" },
     { id: "tool.sculpt", title: "Tool: Sculpt Terrain", category: "Tools" },
     { id: "tool.foliage", title: "Tool: Paint Foliage", category: "Tools" },
@@ -805,6 +806,9 @@ export function registerViewportCommands(): void {
     setCommandHandler("view.vtResidency", () =>
       useViewportStore.getState().setViewMode("VtResidency"),
     );
+  }
+  if (getCommand("view.vsmPages")) {
+    setCommandHandler("view.vsmPages", () => useViewportStore.getState().setViewMode("VsmPages"));
   }
   if (getCommand("tool.foliage")) {
     setCommandHandler("tool.foliage", () => useViewportStore.getState().setToolMode("Foliage"));

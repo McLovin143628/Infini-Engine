@@ -56,6 +56,13 @@ use crate::wetness::{pack_wetness, WetnessResources};
 ///   everything else keeps the ramp readable instead of competing with it. Needs
 ///   no GPU feature, so it is never degraded — a scene with no virtual textures
 ///   paints entirely grey, which is the correct answer rather than a failure.
+/// * `VsmPages` (P27.5) — the same idea one virtual system over: every surface
+///   painted by **how far behind the shadow-page residency is** at that pixel
+///   (`vsm_receive.wgsl`'s `vsm_heat`), with a distinct colour for the state
+///   that has no colour in a lit frame at all — a page with no resident
+///   ancestor, which the receiver reads as *lit*. Driven by `flags.w`, sets
+///   `flags.x` on the same precedent, never degraded, and grey on a scene with
+///   no shadow tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
     #[default]
@@ -64,6 +71,7 @@ pub enum ViewMode {
     Wireframe,
     Biomes,
     VtResidency,
+    VsmPages,
 }
 
 impl ViewMode {
@@ -77,7 +85,11 @@ impl ViewMode {
     pub fn unlit_flag(self) -> f32 {
         match self {
             ViewMode::Lit => 0.0,
-            ViewMode::Unlit | ViewMode::Wireframe | ViewMode::Biomes | ViewMode::VtResidency => 1.0,
+            ViewMode::Unlit
+            | ViewMode::Wireframe
+            | ViewMode::Biomes
+            | ViewMode::VtResidency
+            | ViewMode::VsmPages => 1.0,
         }
     }
 
@@ -87,7 +99,11 @@ impl ViewMode {
     pub fn biomes_flag(self) -> f32 {
         match self {
             ViewMode::Biomes => 1.0,
-            ViewMode::Lit | ViewMode::Unlit | ViewMode::Wireframe | ViewMode::VtResidency => 0.0,
+            ViewMode::Lit
+            | ViewMode::Unlit
+            | ViewMode::Wireframe
+            | ViewMode::VtResidency
+            | ViewMode::VsmPages => 0.0,
         }
     }
 
@@ -102,7 +118,29 @@ impl ViewMode {
     pub fn vt_residency_flag(self) -> f32 {
         match self {
             ViewMode::VtResidency => 1.0,
-            ViewMode::Lit | ViewMode::Unlit | ViewMode::Wireframe | ViewMode::Biomes => 0.0,
+            ViewMode::Lit
+            | ViewMode::Unlit
+            | ViewMode::Wireframe
+            | ViewMode::Biomes
+            | ViewMode::VsmPages => 0.0,
+        }
+    }
+
+    /// The `View.flags.w` uniform value: `1.0` **only** for
+    /// [`VsmPages`](Self::VsmPages) (P27.5).
+    ///
+    /// Its own flag, on `vt_residency_flag`'s precedent and for its reason: a
+    /// texture-residency ramp and a shadow-page-residency ramp can both be
+    /// wanted and only one can be shown, and a shader made to disambiguate one
+    /// float is the place that eventually gets it wrong.
+    pub fn vsm_pages_flag(self) -> f32 {
+        match self {
+            ViewMode::VsmPages => 1.0,
+            ViewMode::Lit
+            | ViewMode::Unlit
+            | ViewMode::Wireframe
+            | ViewMode::Biomes
+            | ViewMode::VtResidency => 0.0,
         }
     }
 
@@ -1102,8 +1140,9 @@ impl EngineRenderer {
     /// Neither is `VtResidency` (P26.5) — it is a uniform flag over bindings the
     /// lit passes already carry, so an adapter that can sample a virtual texture
     /// can paint the heat-map, and one that has no virtual textures to paint
-    /// gets the grey that says so. The editor viewport + goldens set this; it is
-    /// never persisted and the player never touches it.
+    /// gets the grey that says so. Nor is `VsmPages` (P27.5), for the identical
+    /// reason one virtual system over. The editor viewport + goldens set this;
+    /// it is never persisted and the player never touches it.
     pub fn set_view_mode(&mut self, mode: ViewMode) {
         let effective = if mode == ViewMode::Wireframe && !self.polygon_mode_line {
             if !self.wireframe_warned {
@@ -1325,6 +1364,10 @@ impl EngineRenderer {
         // shading. Every other mode writes 0 here, so the branch is dead in the
         // frames the goldens capture.
         uniforms.flags[2] = self.view_mode.vt_residency_flag();
+        // P27.5 VsmPages: the shadow-page residency ramp. `flags[3]` was
+        // reserved, so no uniform grew and every pass that declares the
+        // shorter `View` struct is unaffected.
+        uniforms.flags[3] = self.view_mode.vsm_pages_flag();
         if self.settings.taa {
             uniforms.view_proj = jvp.to_cols_array();
             uniforms.inv_view_proj = jvp.inverse().to_cols_array();

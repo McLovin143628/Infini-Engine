@@ -1078,15 +1078,29 @@ impl EngineHost {
     /// It is logged on the transition rather than per frame, because a line
     /// every 16 ms is not a log, it is a denial of service on the panel.
     pub fn set_view_mode(&mut self, mode: inf_render::ViewMode) {
-        let entering =
-            mode == inf_render::ViewMode::VtResidency && self.renderer.view_mode() != mode;
+        let entering = self.renderer.view_mode() != mode;
         self.renderer.set_view_mode(mode);
-        if entering {
+        if entering && mode == inf_render::ViewMode::VtResidency {
             match self.renderer.vt_summary() {
                 Some(line) => tracing::info!("inf-viewport: {line}"),
                 None => tracing::info!(
                     "inf-viewport: this level binds no virtual textures — the \
                      residency view will be uniformly grey"
+                ),
+            }
+        }
+        // P27.5: the same rule for the shadow-page view, and it closes the
+        // P27.1 remainder that *"nothing logs `vsm_summary` in a host and no
+        // editor surface exists"* — both halves at once, because the ramp
+        // answers "which pixels are behind" and the line answers "by how much,
+        // out of how big an atlas, and did the budget defer".
+        if entering && mode == inf_render::ViewMode::VsmPages {
+            match self.renderer.vsm_summary() {
+                Some(line) => tracing::info!("inf-viewport: {line}"),
+                None => tracing::info!(
+                    "inf-viewport: this level runs no virtual shadow maps (the \
+                     setting is off, or no light casts) — the page view will be \
+                     uniformly grey"
                 ),
             }
         }
