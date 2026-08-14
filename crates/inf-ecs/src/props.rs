@@ -361,22 +361,47 @@ fn apply_value(
         PropValue::Enum { value, .. } => field
             .try_apply(&DynamicEnum::new(value.clone(), DynamicVariant::Unit))
             .is_ok(),
+        // **Scratch-build, then swap** (C4-32). Apply into a *copy* of the
+        // struct and commit it only when every field took; a partial apply
+        // leaves the authored value exactly as it was.
+        //
+        // The old shape mutated in place and reported `all == false` afterwards,
+        // which is the worst of both: the caller reads the verdict as "nothing
+        // happened" — `world.rs`'s `dirty = true` is skipped and `doc.rs` does
+        // not record the undo command — while the entity is already holding the
+        // half-applied value, and *that* is what the next save writes. Data
+        // changed, document unaware, no undo step.
         PropValue::Struct(pairs) => {
-            let ReflectMut::Struct(s) = field.reflect_mut() else {
-                return false;
-            };
-            let mut all = true;
-            for (name, pv) in pairs {
-                match s.field_mut(name) {
-                    Some(child) => all &= apply_value(registry, child, pv),
-                    None => all = false,
+            let mut scratch = field.to_dynamic();
+            {
+                let ReflectMut::Struct(s) = scratch.reflect_mut() else {
+                    return false;
+                };
+                for (name, pv) in pairs {
+                    match s.field_mut(name) {
+                        Some(child) => {
+                            if !apply_value(registry, child, pv) {
+                                return false;
+                            }
+                        }
+                        None => return false,
+                    }
                 }
             }
-            all
+            field.try_apply(scratch.as_ref()).is_ok()
         }
         // Replace the whole list: build a fresh default element per entry, apply
         // the incoming value into it, then swap the collection's contents. This
         // is length-changing (add/remove) safe, unlike element-wise `try_apply`.
+        //
+        // **Every element is built before any of the authored ones are
+        // destroyed** (C4-32). `while list.pop().is_some() {}` used to run
+        // *first*, so a value the Details ListField (or a malformed `PropValue`
+        // over the IPC) could not apply left the user's authored list replaced
+        // by defaults and partials — while the function returned `false`, i.e.
+        // "nothing happened", so no undo step was recorded and the document did
+        // not know it was dirty. The user's data was gone with no way back and
+        // no indication anything had occurred.
         PropValue::List(elems) => {
             // Resolve the element `Default` factory up front — `item_ty` comes
             // from the field's `'static` type info (no lingering field borrow),
@@ -392,17 +417,22 @@ fn apply_value(
             else {
                 return false;
             };
+            let mut built = Vec::with_capacity(elems.len());
+            for pv in elems {
+                let mut elem = item_default.default();
+                if !apply_value(registry, elem.as_partial_reflect_mut(), pv) {
+                    return false; // the authored list is untouched
+                }
+                built.push(elem.into_partial_reflect());
+            }
             let ReflectMut::List(list) = field.reflect_mut() else {
                 return false;
             };
             while list.pop().is_some() {}
-            let mut all = true;
-            for pv in elems {
-                let mut elem = item_default.default();
-                all &= apply_value(registry, elem.as_partial_reflect_mut(), pv);
-                list.push(elem.into_partial_reflect());
+            for elem in built {
+                list.push(elem);
             }
-            all
+            true
         }
     }
 }
@@ -610,6 +640,64 @@ mod tests {
         // Shrink to 1 (remove).
         let shrink = PropValue::List(vec![PropValue::Vec3([0.0, 0.0, 0.0])]);
         assert!(write_field(w.world_mut(), &reg, e, tp, "points", &shrink));
+        assert_eq!(w.world().entity(e).get::<Spline>().unwrap().points.len(), 1);
+    }
+
+    /// **C4-32 — a rejected list edit must leave the authored list alone.**
+    ///
+    /// `while list.pop().is_some() {}` used to run *before* anything was
+    /// validated, and each element was then rebuilt as a default, partially
+    /// applied, and pushed regardless. So a `PropValue` the elements cannot take
+    /// — a Details ListField in a mixed state, or a malformed value over the IPC
+    /// — replaced the author's data with defaults and partials **and** returned
+    /// `false`. That verdict is what `world.rs` reads to decide `dirty = true`
+    /// and `doc.rs` reads to decide whether to record the undo command, so the
+    /// data was gone, the document did not know it had changed, there was no
+    /// undo step, and the mutated state is what the next save would write.
+    ///
+    /// Un-fix mutation: move the `pop` loop back above the build loop and this
+    /// fails on the surviving-points assertion.
+    #[test]
+    fn a_rejected_list_edit_leaves_the_authored_list_untouched() {
+        let (mut w, reg, e) = world_with_spline();
+        let tp = <Spline as TypePath>::type_path();
+        let before = w.world().entity(e).get::<Spline>().unwrap().points.clone();
+        assert_eq!(before.len(), 3, "the fixture must have something to lose");
+
+        // A list whose second element is the wrong shape for `Vec3d`.
+        let bad = PropValue::List(vec![
+            PropValue::Vec3([9.0, 9.0, 9.0]),
+            PropValue::Text("not a point".into()),
+            PropValue::Vec3([4.0, 5.0, 6.0]),
+        ]);
+        assert!(
+            !write_field(w.world_mut(), &reg, e, tp, "points", &bad),
+            "the write reported success for a value it could not apply"
+        );
+        assert_eq!(
+            w.world().entity(e).get::<Spline>().unwrap().points,
+            before,
+            "a refused edit destroyed the authored list"
+        );
+
+        // The same rule for a struct: a partially-applicable struct value must
+        // not half-land. `interp` is an enum, so a Number cannot take.
+        let before_closed = w.world().entity(e).get::<Spline>().unwrap().closed;
+        let bad_struct = PropValue::Struct(vec![
+            ("closed".into(), PropValue::Bool(!before_closed)),
+            ("interp".into(), PropValue::Number(3.0)),
+        ]);
+        assert!(!write_field(w.world_mut(), &reg, e, tp, "", &bad_struct));
+        assert_eq!(
+            w.world().entity(e).get::<Spline>().unwrap().closed,
+            before_closed,
+            "a refused struct edit half-landed"
+        );
+
+        // The control: a good edit still applies, so the refusals above are not
+        // passing because nothing applies.
+        let good = PropValue::List(vec![PropValue::Vec3([1.0, 1.0, 1.0])]);
+        assert!(write_field(w.world_mut(), &reg, e, tp, "points", &good));
         assert_eq!(w.world().entity(e).get::<Spline>().unwrap().points.len(), 1);
     }
 
