@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use inf_anim::{
     AnimClip, Interpolation, Joint, JointTrack, JointTransform, QuatTrack, Skeleton, SkeletonAsset,
-    SmState, SmTransition, Socket, StateMachine,
+    SmState, SmTransition, Socket, StateMachine, Vec3Track,
 };
 use inf_ecs::components::{AnimPlayer, AnimStateMachine, AttachedTo, SkeletalMesh, Transform};
 use inf_ecs::math::Vec3d;
@@ -772,11 +772,35 @@ fn a_non_finite_goal_cannot_panic_the_step_or_reach_the_trace() {
 /// fixed step.
 ///
 /// So the fixture manufactures one: a state machine playing a clip with a
-/// `[NaN; 4]` rotation key. Two claims, and the first is the blocker:
+/// `[NaN; 3]` **translation** key. Two claims, and the first is the blocker:
 ///
 /// 1. **the step completes** — pre-fix this panicked, taking the session down;
 /// 2. the trace is byte-identical to the same world with no goal at all, so the
 ///    refused solve contributed nothing rather than half-solving.
+///
+/// # Why translation and not rotation (hardening wave B, C4-31)
+///
+/// The fixture used to put its NaN in a `[NaN; 4]` **rotation** key, and that
+/// route no longer produces a non-finite pose: `QuatTrack::sample` now goes
+/// through `normalized_or_identity`, because `glam` is pinned with no
+/// `glam-assert` feature and `Quat::normalize()` on a degenerate quaternion is
+/// four NaNs *silently* — which rode `pose_state_bytes`, this very trace, into
+/// the PIE-==-shipping parity comparison. Closing that at the sampler is right,
+/// and it un-broke this fixture: the clip sampled to identity, the pose was
+/// finite, the solve legitimately ran, and the trace moved.
+///
+/// The property this arm names is unchanged and still real — `solve_chain`
+/// refuses a non-finite **pose**, and the docstring above describes the
+/// mechanism in terms of `(mid − root).length()`, which is a *translation*
+/// computation. So the fixture moves to the channel that computation actually
+/// reads, and that nothing between here and there sanitizes: `Vec3Track::sample`
+/// hands its stored array to `Vec3::from_array` unguarded, by design — a
+/// translation has no normalization to fall back to, and inventing one would be
+/// making up a position.
+///
+/// The vacuity assertion at the end of this test is what makes the swap safe to
+/// trust: it fails if the fixture's pose is finite, whichever channel carries
+/// the poison.
 #[test]
 fn a_goal_on_a_non_finite_pose_refuses_instead_of_panicking() {
     fn broken_clips() -> BTreeMap<Uuid, AnimClip> {
@@ -787,20 +811,22 @@ fn a_goal_on_a_non_finite_pose_refuses_instead_of_panicking() {
                 duration: 1.0,
                 tracks: vec![JointTrack {
                     joint: 1,
-                    translation: None,
                     // Not a number, in the one place a corrupt clip, a divide by
-                    // zero in a blend, or a bad import would put one.
-                    rotation: Some(QuatTrack::new(
+                    // zero in a blend, or a bad import would put one — and the
+                    // channel `two_bone_positions` measures. See the doc above
+                    // for why this is the translation and no longer the rotation.
+                    translation: Some(Vec3Track::new(
                         vec![0.0],
-                        vec![[f32::NAN; 4]],
+                        vec![[f32::NAN; 3]],
                         Interpolation::Step,
                     )),
+                    rotation: None,
                     scale: None,
                 }],
             },
         )])
     }
-    fn trace(goal: Option<inf_ecs::IkGoal>) -> Vec<Vec<u8>> {
+    fn run(goal: Option<inf_ecs::IkGoal>) -> (Vec<Vec<u8>>, Vec<inf_ecs::IkOutcome>) {
         let mut world = EcsWorld::new();
         let e = world.spawn_with_guid(HERO, "Hero", None);
         world.world_mut().entity_mut(e).insert(character());
@@ -820,26 +846,51 @@ fn a_goal_on_a_non_finite_pose_refuses_instead_of_panicking() {
         if let Some(g) = goal {
             inf_ecs::set_ik_goals(sim.world_mut(), HERO, vec![g]);
         }
-        (0..STEPS)
+        let bytes = (0..STEPS)
             .map(|_| {
                 // The blocker: pre-fix, THIS call aborted the process.
                 sim.step_once(RuntimeInput::default());
                 inf_ecs::pose::pose_state_bytes(sim.world())
             })
-            .collect()
+            .collect();
+        let verdicts = inf_ecs::ik_outcomes(sim.world(), HERO)
+            .map(|v| v.to_vec())
+            .unwrap_or_default();
+        (bytes, verdicts)
     }
 
-    let without = trace(None);
-    let with = trace(Some(inf_ecs::IkGoal {
+    let (without, no_verdicts) = run(None);
+    assert!(no_verdicts.is_empty(), "no goal, no verdict");
+    let (with, verdicts) = run(Some(inf_ecs::IkGoal {
         chain: vec![0, 1, 2],
         target: [0.5, 1.0, 0.0],
         pole: None,
         weight: 1.0,
     }));
+
+    // **The load-bearing claim** (hardening wave B). Byte-equality alone cannot
+    // carry it: the poisoned pose puts NaNs in BOTH traces, and two identical
+    // NaN bit patterns compare EQUAL as bytes — so a solve that ran on
+    // not-numbers and wrote not-numbers back is invisible to it. Measured:
+    // stripping every finiteness guard out of `inf_anim::ik` leaves the byte
+    // assertion below green. The recorded verdict is the half that falsifies.
+    match verdicts.as_slice() {
+        [inf_ecs::IkOutcome::Refused(e)] => {
+            let named = format!("{e:?}");
+            assert!(
+                named.contains("NonFinite"),
+                "refused, but not for the reason this arm is about: {named}"
+            );
+        }
+        other => panic!(
+            "a goal over a non-finite pose must be REFUSED by name; the solve \
+             returned {other:?}, so it ran on numbers that are not numbers"
+        ),
+    }
     assert_eq!(
         with, without,
-        "a goal over a non-finite pose must be refused whole; the trace moved, \
-         so the solve ran on numbers that are not numbers"
+        "the refused solve still moved the trace, so it half-solved rather than \
+         contributing nothing"
     );
     // The fixture really is broken — otherwise this test proves nothing about
     // non-finite poses, only that two clean traces agree.
