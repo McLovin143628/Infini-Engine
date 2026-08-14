@@ -693,9 +693,15 @@ pub struct PredictSettings {
     pub enabled: bool,
     /// How many committed **ticks** ahead to dead-reckon.
     ///
-    /// **18**, measured (`docs/memos/p28-4-predictive-prefetch.md` §3), which is
-    /// 300 ms at 60 Hz — the middle of the ROADMAP's band, and where the sweep
-    /// puts the knee.
+    /// **0** since P28.5 — the committed pose, no lead — and the reason is a
+    /// measurement rather than a taste. See
+    /// [`DEFAULT_PREDICT_HORIZON_TICKS`] and
+    /// `docs/memos/p28-5-lead-time-ruling.md`.
+    ///
+    /// The knob is real and the whole dead-reckoner is still behind it: a
+    /// non-zero value extrapolates exactly as P28.4 built it, and the day this
+    /// loop grows a latency between *admitted* and *sampleable* a lead becomes
+    /// worth paying for again.
     pub horizon_ticks: u32,
 }
 
@@ -708,10 +714,52 @@ impl Default for PredictSettings {
     }
 }
 
-/// **The shipped horizon**, in committed ticks — 18, i.e. 300 ms at the 60 Hz
-/// fixed step. See `docs/memos/p28-4-predictive-prefetch.md` §3 for the sweep
-/// that chose it over the rest of the ROADMAP's 200–500 ms band.
-pub const DEFAULT_PREDICT_HORIZON_TICKS: u32 = 18;
+/// **The shipped horizon**, in committed ticks — **0**, the committed pose.
+///
+/// # The deviation, and the measurement that forced it
+///
+/// The ROADMAP's P28.4 clause 1 prescribes a *"200–500 ms horizon"*. P28.4
+/// shipped 18 ticks (300 ms) out of that band and its own gate refuted it: the
+/// lead is a **cost** at every horizon on the only fixture that exists, and the
+/// speculative *lane* — a CPU-side want set at the refinement's cap, ranked
+/// below every proved class — is the entire win.
+///
+/// Measured on `whip_pan.rs`'s 360° path, blur frames against **131** with the
+/// predictor off:
+///
+/// | lead (ticks) | **0** | 3 | 6 | 12 | 18 | 24 | 36 |
+/// |---|---|---|---|---|---|---|---|
+/// | blur frames | **105** | 108 | 113 | 115 | 115 | 112 | 124 |
+/// | arrival-window blur / 1 728 | **64** | 96 | 144 | 176 | 176 | 128 | 224 |
+///
+/// The mechanism is structural, not a tuning accident: `apply_wants` seats a
+/// miss the frame it is offered, with no per-frame admission throttle and **no
+/// latency between admitted and sampleable**, so having asked earlier buys
+/// nothing anywhere in this loop and every want spent on where the camera will
+/// be is a slot not spent on where it is. It is
+/// `a_saturated_floor_cannot_be_prefetched_and_the_arm_says_so`, one want class
+/// up.
+///
+/// So P28.5 ships the lane at zero lead and records the deviation rather than
+/// shipping a knob its own gate measures backwards
+/// (`docs/memos/p28-5-lead-time-ruling.md`). **An unmeasured prescription can
+/// be backwards** — the P20/P25 law — and this one was.
+///
+/// The dead-reckoner, the sweep and the tripwire all stay: see
+/// [`ROADMAP_PREDICT_HORIZON_TICKS`].
+pub const DEFAULT_PREDICT_HORIZON_TICKS: u32 = 0;
+
+/// **The horizon the ROADMAP's clause prescribed** — 18 ticks, 300 ms at the
+/// 60 Hz fixed step, the middle of its 200–500 ms band.
+///
+/// Kept as a named constant rather than deleted, because it is the *lead* half
+/// of the A/B that produced the ruling above. `whip_pan.rs`'s
+/// `a_lead_time_costs_this_fixture_what_the_lane_earns_it` runs the shipped
+/// zero against it and fails the day the inequality inverts — which is how the
+/// ruling re-opens: by a red test rather than by memory. The day this tree
+/// grows an admission throttle or a loader with real latency, this is the
+/// number the default goes back to.
+pub const ROADMAP_PREDICT_HORIZON_TICKS: u32 = 18;
 
 /// **The page atlas's budget on the tier below High**, in bytes: 32 MiB — half
 /// the default, 512 pages.

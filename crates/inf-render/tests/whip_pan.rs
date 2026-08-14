@@ -65,8 +65,17 @@ const SWEEP: u64 = 180;
 /// measure a tautology. A third of this sweep is a rate the predictor is
 /// provably wrong about.
 const RAMP: u64 = 30;
-/// The shipped horizon, in committed ticks (300 ms at 60 Hz).
+/// The shipped horizon, in committed ticks — **0** since P28.5, i.e. the
+/// committed pose with the speculative lane still running. See
+/// [`inf_render::DEFAULT_PREDICT_HORIZON_TICKS`] and
+/// `docs/memos/p28-5-lead-time-ruling.md` for the ruling and its measurement.
 const HORIZON: u32 = inf_render::DEFAULT_PREDICT_HORIZON_TICKS;
+/// **The lead the ROADMAP's clause prescribed** — 18 ticks, 300 ms at 60 Hz.
+///
+/// The refuted arm of the A/B, kept by name so
+/// `a_lead_time_costs_this_fixture_what_the_lane_earns_it` runs the shipped
+/// zero against the prescription rather than against a literal.
+const LEAD: u32 = inf_render::ROADMAP_PREDICT_HORIZON_TICKS;
 
 /// **The whip-pan's yaw at `tick`**, radians — a closed form, so the camera at
 /// tick `t` does not depend on the camera at tick `t − 1` and the oracle can
@@ -766,9 +775,16 @@ fn the_prediction_replays_from_the_recorded_history_alone() {
 /// **The horizon sweep**, printed for the memo and asserted as a band.
 ///
 /// The ROADMAP names 200–500 ms. Every horizon in that band must strictly beat
-/// OFF — a band in which some members lose is a band the ROADMAP should not have
-/// named — and the shipped default is asserted no worse than either end, which
-/// is weaker than "best" and is what a single fixture can support.
+/// OFF — a band in which some members lose is a band the ROADMAP should not
+/// have named, and that half of P28.4's claim survives intact.
+///
+/// **What P28.5 changes is the second half.** P28.4 asserted the shipped
+/// horizon was no worse than either *end of the band*; the band is flat (nine
+/// frames of 131 separate best from worst), so that comparison could not see
+/// what the zero-lead control then showed — every member of the band loses to
+/// no lead at all. The assertion is now the ruling: the **shipped** horizon
+/// beats every member of the band, one row at a time. The day a member wins,
+/// this goes red and `DEFAULT_PREDICT_HORIZON_TICKS` is wrong.
 #[test]
 fn every_horizon_in_the_roadmaps_band_beats_the_predictor_being_off() {
     let off = run(None, PAGES);
@@ -791,18 +807,25 @@ fn every_horizon_in_the_roadmaps_band_beats_the_predictor_being_off() {
     for (ms, ticks, frames, tiles) in &table {
         println!("  {ms:>3} ms / {ticks:>2} ticks -> {frames} frames, {tiles} tiles");
     }
-    let shipped = table
-        .iter()
-        .find(|r| r.1 == HORIZON)
-        .expect("the shipped horizon is inside the band");
+    // **THE P28.5 RULING**, asserted against every row rather than against the
+    // two ends: the shipped horizon is not in this band and beats all of it.
+    let shipped = run(Some(HORIZON), PAGES);
     assert!(
-        shipped.2 <= table[0].2,
-        "the shipped horizon loses to 200 ms"
+        shipped.blur_frames < off.blur_frames,
+        "the shipped horizon does not beat OFF at all"
     );
-    assert!(
-        shipped.2 <= table[table.len() - 1].2,
-        "the shipped horizon loses to 500 ms"
-    );
+    for (ms, ticks, frames, tiles) in &table {
+        assert!(
+            shipped.blur_frames <= *frames,
+            "the ROADMAP's {ms} ms ({ticks} ticks) BEATS the shipped horizon \
+             ({} ticks): {} frames / {} tiles against {frames} / {tiles}. The \
+             lead-time ruling in docs/memos/p28-5-lead-time-ruling.md is \
+             refuted and DEFAULT_PREDICT_HORIZON_TICKS has to be re-decided.",
+            HORIZON,
+            shipped.blur_frames,
+            shipped.blur
+        );
+    }
 }
 
 /// **THE CONTROL THE A/B DID NOT RUN, AND THE RULING IT FORCES** (P28.4 audit).
@@ -838,6 +861,13 @@ fn every_horizon_in_the_roadmaps_band_beats_the_predictor_being_off() {
 /// this loop, and every want spent on where the camera will be is a slot not
 /// spent on where it is.
 ///
+/// **P28.5 acted on it** (`docs/memos/p28-5-lead-time-ruling.md`): the shipped
+/// [`inf_render::DEFAULT_PREDICT_HORIZON_TICKS`] is now **0** — the lane at the
+/// committed pose, which is the measured win — and the ROADMAP's prescribed 18
+/// is kept as [`LEAD`], the arm this compares against. So the two runs below
+/// have swapped names since P28.4 and the *inequality is unchanged*: no lead
+/// beats a lead, on the aggregate and on the arrival window both.
+///
 /// Asserted rather than written down, in the shape the floor's refutation
 /// already uses: **the day a lead time wins, this arm goes red and the ruling is
 /// re-opened by a test instead of by memory.** What would make it win is a
@@ -847,18 +877,26 @@ fn every_horizon_in_the_roadmaps_band_beats_the_predictor_being_off() {
 #[test]
 fn a_lead_time_costs_this_fixture_what_the_lane_earns_it() {
     let off = run(None, PAGES);
-    let zero = run(Some(0), PAGES);
-    let shipped = run(Some(HORIZON), PAGES);
+    // The shipped arm IS the zero-lead control since P28.5 — asserted rather
+    // than assumed, so a default that drifts off zero is caught here and not
+    // silently turned into a comparison of a lead with itself.
+    assert_eq!(
+        HORIZON, 0,
+        "the shipped horizon left zero — this arm's control is no longer the \
+         committed pose and the ruling has to be re-measured"
+    );
+    let zero = run(Some(HORIZON), PAGES);
+    let shipped = run(Some(LEAD), PAGES);
 
     // **The whole lead sweep, printed** — the table in this arm's own header,
     // reproduced by the arm rather than remembered from an audit. The
     // assertions below are only about the two ends that matter; the rows in
     // between are what make the shape monotonic rather than a pair of points.
     let mut sweep: Vec<(String, Arm)> = vec![("OFF ".into(), off.clone())];
-    for lead in [0u32, 3, 6, 12, HORIZON, 24, 36] {
-        let a = if lead == 0 {
+    for lead in [HORIZON, 3, 6, 12, LEAD, 24, 36] {
+        let a = if lead == HORIZON {
             zero.clone()
-        } else if lead == HORIZON {
+        } else if lead == LEAD {
             shipped.clone()
         } else {
             run(Some(lead), PAGES)
@@ -910,8 +948,8 @@ fn a_lead_time_costs_this_fixture_what_the_lane_earns_it() {
     );
     assert!(
         (at_shipped - committed).length() > 0.5,
-        "the shipped horizon predicted the committed pose ({at_shipped:?}), so \
-         the two arms are the same camera and the comparison is empty"
+        "the LEAD arm predicted the committed pose ({at_shipped:?}), so the two \
+         arms are the same camera and the comparison is empty"
     );
     assert!(zero.predict_wants > 0 && off.arrival_justified > 0);
 
@@ -929,10 +967,10 @@ fn a_lead_time_costs_this_fixture_what_the_lane_earns_it() {
     // allowed to tie; what is refused is the reading that the lead is what won.
     assert!(
         shipped.blur_frames >= zero.blur_frames,
-        "the shipped lead now BEATS the zero-lead control ({} against {}) — a \
-         throttle or a fetch latency has appeared between `apply_wants` and a \
-         sampleable page, and P28.4's ruling on what the predictor buys has to \
-         be rewritten",
+        "the ROADMAP's {LEAD}-tick lead now BEATS the shipped zero ({} against \
+         {}) — a throttle or a fetch latency has appeared between `apply_wants` \
+         and a sampleable page, and P28.5's ruling on what the predictor buys \
+         has to be rewritten",
         shipped.blur_frames,
         zero.blur_frames
     );
@@ -972,5 +1010,152 @@ fn the_predictor_is_clamped_off_on_low_and_on_mobile() {
         inf_render::RenderTier::Low.apply(low),
         low,
         "the clamp is not idempotent"
+    );
+}
+
+/// **THE TRUTH ORACLE** (P28.4 audit, inherited item 13) — how far the
+/// prediction is from where the camera **actually went**.
+///
+/// The P28.4 audit's verdict on `the_prediction_replays_from_the_recorded_
+/// history_alone` is that it is an oracle and that it measures **conformance**:
+/// it is a second longhand implementation of the same specification, so its
+/// `4.04e-16` is the distance between two spellings of one formula and says
+/// nothing about the world. *"A truth oracle would compare the prediction
+/// against `whip_view(tick + h)` and is not built."* This is that comparison,
+/// and it needs no residency at all — a prediction is a pose, and this file
+/// already has the closed form for where the camera is at any tick.
+///
+/// Three things it establishes, and each is load-bearing for a different claim:
+///
+/// * **`h = 0` is the committed pose, exactly.** The shipped horizon since
+///   P28.5, so the zero-lead control's whole meaning is that at `h = 0` the
+///   prediction *is* the camera. Measured against the truth rather than against
+///   a rearrangement of the same algebra.
+/// * **The error grows with the lead**, monotonically in the worst case. This
+///   is the accuracy statement behind the lead-time ruling: the reckoner is not
+///   broken, it is being asked a question whose answer is further away.
+/// * **It is right about what it assumes and wrong about what it does not.**
+///   Restricted to the constant-rate hold — the phase where "the rate holds" is
+///   true — the error collapses; over the acceleration ramps it does not. A
+///   dead-reckoner that scored the same in both would not be dead-reckoning.
+#[test]
+fn the_prediction_is_measured_against_where_the_camera_actually_went() {
+    /// Angle between two unit directions, radians, in portable trig.
+    fn angle(a: DVec3, b: DVec3) -> f64 {
+        inf_math::pacos64(a.normalize().dot(b.normalize()).clamp(-1.0, 1.0))
+    }
+    // The constant-rate hold: after the acceleration ramp, before the brake —
+    // the phase dead reckoning's own premise is true in.
+    let holding = |t: u64| t > WARM + RAMP && t < WARM + SWEEP - RAMP;
+    // The acceleration ramps, where the premise is false by construction.
+    let ramping =
+        |t: u64| (t > WARM && t <= WARM + RAMP) || (t >= WARM + SWEEP - RAMP && t < WARM + SWEEP);
+
+    let mut table: Vec<(u32, f64, f64, f64, f64, u64)> = Vec::new();
+    for h in [HORIZON, 3, 6, 12, LEAD, 24, 36] {
+        let mut hist = inf_math::CameraHistory::new();
+        let (mut worst, mut worst_hold, mut worst_ramp, mut worst_eye) =
+            (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        let mut turned = 0u64;
+        for tick in 0..TICKS {
+            let v = whip_view(tick);
+            hist.commit(inf_math::CameraSample {
+                tick,
+                eye: v.eye_world,
+                forward: v.forward.as_dvec3(),
+                up: v.up.as_dvec3(),
+            });
+            let Some(p) = inf_math::dead_reckon(&hist, h) else {
+                continue;
+            };
+            // **The world**, not a re-derivation of the predictor: the closed
+            // form for where this camera is at tick + h.
+            let truth = whip_view(tick + u64::from(h));
+            let err = angle(p.forward, truth.forward.as_dvec3());
+            worst = worst.max(err);
+            worst_eye = worst_eye.max((p.eye - truth.eye_world).length());
+            if holding(tick) && holding(tick + u64::from(h)) {
+                worst_hold = worst_hold.max(err);
+            }
+            if ramping(tick) {
+                worst_ramp = worst_ramp.max(err);
+            }
+            turned += u64::from(angle(v.forward.as_dvec3(), truth.forward.as_dvec3()) > 1e-3);
+        }
+        table.push((h, worst, worst_hold, worst_ramp, worst_eye, turned));
+    }
+
+    println!("prediction accuracy against whip_view(tick + h) — worst, radians:");
+    for (h, worst, hold, ramp, eye, turned) in &table {
+        println!(
+            "  h={h:<3} worst {worst:.6} rad ({:.3}°) | hold {hold:.6} | ramp {ramp:.6} | \
+             eye {eye:.3e} m | {turned} ticks where the camera actually moved",
+            worst.to_degrees()
+        );
+    }
+
+    // **`h = 0` is the committed pose.** `1e-6` and not equality, for the reason
+    // `a_lead_time_costs_this_fixture_what_the_lane_earns_it` gives at the same
+    // tolerance: `psin64(0)`/`pcos64(0)` are portable approximations of 0 and 1
+    // and `dead_reckon` runs its Rodrigues rotation regardless, so the residual
+    // is arithmetic and not a lead. Measured **2.1 × 10⁻⁸ rad** — 1.2 × 10⁻⁶
+    // degrees, some eleven orders under a tile boundary. The eye is **exact**:
+    // this path's drift is linear and a secant extrapolates linear motion with
+    // no error at all, which is why every row below is an *angular* number.
+    let zero = table[0];
+    assert_eq!(zero.0, 0, "the shipped horizon left zero");
+    assert!(
+        zero.1 < 1e-6 && zero.4 < 1e-6,
+        "h = 0 is not the committed pose ({:.3e} rad, {:.3e} m) — the zero-lead \
+         control in `a_lead_time_costs_this_fixture_what_the_lane_earns_it` is \
+         not the control it claims to be",
+        zero.1,
+        zero.4
+    );
+    // …and `turned` says the same thing from the other side: at zero lead the
+    // truth IS this tick, so there is no tick at which the camera moved over
+    // the horizon. It is the one row for which that count must be zero.
+    assert_eq!(
+        zero.5, 0,
+        "h = 0 saw the camera move over its horizon, which is a horizon"
+    );
+
+    // ANTI-VACUITY: under every non-zero lead the path has to have moved, or
+    // "the error grows" is a statement about a still camera.
+    for (h, .., turned) in table.iter().skip(1) {
+        assert!(
+            *turned > SWEEP / 2,
+            "h={h}: the camera barely moved over the horizon ({turned} ticks), \
+             so nothing below measures a prediction"
+        );
+    }
+
+    // **The error grows with the lead**, worst case, every step of the ladder.
+    for w in table.windows(2) {
+        assert!(
+            w[1].1 > w[0].1,
+            "the worst error did not grow from h={} to h={}: {:.6} against \
+             {:.6} rad",
+            w[0].0,
+            w[1].0,
+            w[0].1,
+            w[1].1
+        );
+    }
+
+    // **Right about what it assumes, wrong about what it does not.** At the
+    // ROADMAP's own lead, the constant-rate hold is where the premise holds and
+    // the ramps are where it does not, and the two must not be the same number.
+    let lead = table
+        .iter()
+        .find(|r| r.0 == LEAD)
+        .expect("the prescribed lead is in the table");
+    assert!(
+        lead.3 > lead.2 * 4.0,
+        "the acceleration ramps cost no more accuracy than the constant-rate \
+         hold ({:.6} against {:.6} rad) — this fixture is not exercising the \
+         regime dead reckoning is provably wrong about",
+        lead.3,
+        lead.2
     );
 }
