@@ -339,9 +339,19 @@ impl PlayerApp {
             self.sim.sync_render_terrain(v.eye_world);
         }
         self.log_stream_stats(dt);
+        let steps = self.sim.steps();
         let Some(live) = self.live.as_mut() else {
             return;
         };
+        // **The predictor's committed sample** (P28.4), at the same sync point
+        // and for the same reason the terrain's cut advances here: after the
+        // fixed steps and before the projection, keyed on the SIM's step count
+        // rather than on a frame index. A frame that ran no fixed step commits
+        // nothing and is refused, which is exactly right — the horizon is
+        // measured in committed ticks, and a frame is not one.
+        if let Some(v) = view.as_ref() {
+            live.host.commit_camera(steps, v);
+        }
         if live.host.is_lost() {
             tracing::warn!("inf-player: device lost — rebuilding GPU stack");
             match Self::build_host(&live.window, self.width, self.height, self.render) {

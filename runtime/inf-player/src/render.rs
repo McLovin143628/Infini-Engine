@@ -295,6 +295,19 @@ impl PlayerRenderHost {
         self.origin
     }
 
+    /// **Commit a camera pose at a fixed step** (P28.4) — the predictive
+    /// prefetcher's only input, and the door that keeps it honest.
+    ///
+    /// `tick` must be the *sim's* step count and not a frame index, and the
+    /// renderer refuses a tick that does not strictly advance — which is what a
+    /// frame that ran zero fixed steps produces, and what a host wired to the
+    /// wrong loop would produce every frame. This player qualifies to call it
+    /// because its camera is `RuntimeSim::camera_focus`, a fold of actor
+    /// positions, which is a pure function of the committed input.
+    pub fn commit_camera(&mut self, tick: u64, view: &RenderView) -> bool {
+        self.renderer.commit_camera(tick, view)
+    }
+
     /// Rebuild the render scene from the sim's world, interpolated by `alpha`.
     ///
     /// `camera_world` is this frame's eye in world metres — the same point
