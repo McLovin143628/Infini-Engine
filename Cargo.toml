@@ -13,6 +13,7 @@ members = [
     "crates/inf-mesh",
     "crates/inf-vgeom",
     "crates/inf-dcc",
+    "crates/inf-stream",
     "crates/inf-vt",
     "crates/inf-vsm",
     "crates/inf-material",
@@ -352,6 +353,16 @@ inf-vgeom = { path = "crates/inf-vgeom" }
 # member list because it depends on inf-mesh and nothing in Ring 0 depends on it
 # yet — the Model Editor (P23.4, Ring 2) is its first consumer.
 inf-dcc = { path = "crates/inf-dcc" }
+# inf-stream = the ONE virtual streamer (P28.3): one stamp domain, one want
+# pipeline, one budget arbiter, one readback ledger. Ring 0 on `inf-vt`'s exact
+# terms — thiserror, nothing else — and it sits BEFORE all three residency
+# crates in the member list because all three depend on it. It names none of
+# them: what crosses the seam is a lane, a stamp, a byte count and a slot index,
+# plus one trait the consumers implement over their own state. That direction is
+# the whole architecture — a streamer that named `inf-vgeom` would drag the
+# meshlet DAG into the virtual texture's dependency list, and the arbiter would
+# stop being usable by a fourth consumer.
+inf-stream = { path = "crates/inf-stream" }
 # inf-vt = streaming virtual texturing's GPU-free half (P26.2): the virtual
 # address space, the physical page pool and its residency. Ring 0, and the
 # SHORTEST dependency list in the workspace — thiserror, nothing else,

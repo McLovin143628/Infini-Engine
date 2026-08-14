@@ -1,0 +1,27 @@
+[package]
+name = "inf-stream"
+description = "The one virtual streamer (Phase 28): one stamp domain, one want pipeline, one budget arbiter, one readback ledger."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+# `inf-vt`'s dependency list, deliberately, and for the third time — thiserror
+# and nothing else. It is not frugality: this crate sits STRICTLY BELOW the
+# three residency brains it arbitrates for (`inf-vgeom`, `inf-vt`, `inf-vsm`),
+# so anything it names becomes a dependency of all three and, through
+# `inf-vgeom`, of the cook and the shipped player. A crate that names `wgpu`,
+# `glam` or an asset container stops being one the first time somebody reaches
+# for the convenience, and the edge would be a review question rather than a
+# compile error.
+#
+# The same rule bans a dependency in the other direction: this crate names none
+# of its three consumers. What crosses the seam is a `Lane`, a `Stamp`, a byte
+# count and a slot index — four scalars — plus the `SlotPool` trait, which the
+# consumers implement over their own state. That is what lets the admission
+# order be written once and executed three times without any of the three
+# learning what the other two page.
+thiserror = { workspace = true }
