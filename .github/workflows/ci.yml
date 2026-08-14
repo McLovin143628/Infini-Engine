@@ -66,6 +66,41 @@ jobs:
       - name: Doctests (nextest does not run them)
         run: cargo test --workspace --doc
 
+      # P28.5 — `cargo doc` reached no CI leg, which is why rustdoc warnings
+      # accumulated: rustdoc reports things clippy does not (unresolved
+      # intra-doc links, public docs pointing at private items), and this repo
+      # has fixed several of them by hand, in an auditor's habit rather than in
+      # the workflow. The P28.3 audit fixed four; the P28.4 audit found seventy
+      # standing at sixty locations across five crates and routed the CI step
+      # here.
+      #
+      # A RATCHET and not `-D warnings`, deliberately: the standing warnings are
+      # the repair campaign's inventory and not this step's to clear, so the
+      # step freezes the inventory and fails on a NEW one. Re-pinning the
+      # ceiling downward as the campaign clears them is the point; re-pinning it
+      # upward is a decision somebody has to write down.
+      #
+      # The ceiling is a **measurement** (2026-08-14, Windows, whole workspace).
+      # A platform whose `#[cfg]` set differs may come in above or below it, and
+      # if it does the step goes red and the fix is a deliberate one-line
+      # re-pin — which is what a ratchet is for (the P15 budget-ratchet
+      # doctrine).
+      - name: Rustdoc ratchet (cargo doc reaches a CI leg)
+        shell: bash
+        env:
+          RUSTDOC_WARNING_CEILING: 450
+        run: |
+          set -uo pipefail
+          cargo doc --no-deps --workspace 2>&1 | tee /tmp/rustdoc.log
+          n=$(grep -c '^warning: ' /tmp/rustdoc.log || true)
+          echo "rustdoc warnings: $n (ceiling ${RUSTDOC_WARNING_CEILING})"
+          if [ "$n" -gt "${RUSTDOC_WARNING_CEILING}" ]; then
+            echo "::error::rustdoc warnings rose to $n, above the pinned ceiling of ${RUSTDOC_WARNING_CEILING}."
+            echo "The new ones are in the log above. Fix them, or re-pin the ceiling deliberately."
+            grep -n '^warning: ' /tmp/rustdoc.log | head -40
+            exit 1
+          fi
+
       - name: Cook-and-run smoke (§8)
         shell: bash
         run: |
