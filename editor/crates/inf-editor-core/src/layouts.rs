@@ -160,13 +160,18 @@ mod tests {
         );
     }
 
-    /// **A preset is never absent between two saves** (C4-23).
+    /// The doc's standing promise — "a concurrent reader never observes a torn
+    /// write" — asserted, plus no temp litter for `list` to filter.
     ///
-    /// The doc has promised "a concurrent reader never observes a torn write"
-    /// since P1.2.5, and the code deleted the destination first — so between the
-    /// delete and the rename the preset did not exist at all, and a failed
-    /// rename lost it permanently. A reader holding the old file open proves the
-    /// promise now, and the file is present at every instant either way.
+    /// **This arm does not falsify C4-23 and is not claimed to.** Measured: the
+    /// delete-then-rename shape still passes it, because the gap it opens is
+    /// between two calls *inside* `save` and every observation here happens
+    /// after `save` returns (and on Windows a handle opened with
+    /// `FILE_SHARE_DELETE` survives the unlink besides). The falsifier for the
+    /// deleted lines is
+    /// `saving_a_preset_never_deletes_its_destination_first` below, with
+    /// `inf_asset::atomic::rename_over_an_existing_file_replaces_it` supplying
+    /// the premise those lines doubted.
     #[test]
     fn overwriting_a_preset_never_makes_it_disappear() {
         use std::io::Read;
@@ -194,6 +199,38 @@ mod tests {
             .filter(|n| n.ends_with(".tmp"))
             .collect();
         assert!(strays.is_empty(), "left temp files behind: {strays:?}");
+    }
+
+    /// **`save` never removes its destination** (C4-23) — the falsifier.
+    ///
+    /// A source gate, because the state being ruled out exists only *between*
+    /// two syscalls inside `save` and no observation from outside it is
+    /// deterministic. The property is exactly a source property: there must be
+    /// no delete on the write path at all.
+    ///
+    /// `.rs` is `text eol=lf` in `.gitattributes`, so this reads the same on
+    /// every checkout (the P22.4 lesson).
+    #[test]
+    fn saving_a_preset_never_deletes_its_destination_first() {
+        const SRC: &str = include_str!("layouts.rs");
+        let start = SRC
+            .find("pub fn save(&self, name: &str, json: &str)")
+            .expect("LayoutStore::save moved or was renamed");
+        let body = &SRC[start..];
+        let end = body
+            .find("\n    }\n")
+            .expect("save's body has no closing brace at its indent");
+        let body = &body[..end];
+
+        assert!(
+            body.contains("write_atomically"),
+            "save no longer goes through the one atomic-write door"
+        );
+        assert!(
+            !body.contains("remove_file"),
+            "save deletes its destination again — between that call and the \
+             rename the preset does not exist, and a failed rename loses it"
+        );
     }
 
     #[test]
