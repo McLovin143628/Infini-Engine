@@ -13314,6 +13314,181 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
   3. the MSAA ruling measured and memo'd: VisBuffer+TAA becomes the High-tier default or
   stays behind a setting — decided by goldens and frame budget, not taste; the forward
   meshlet path remains as the fallback and the parity control.
+> ## P28.1 STATUS — the visibility buffer: **COMPLETE** (2026-08-14)
+>
+> Six commits, `3f4e5f7..a544945`. The ROADMAP's three clauses answered against
+> code, with the arm that fails if each claim stops being true.
+>
+> ### Clause 1 — the single-sample `R32Uint` VisBuffer
+>
+> **MET.** `visbuffer.wgsl` rasterizes `instance (+) meshlet (+) triangle` through
+> the meshlet path's own indirect, vertex-pulled draw, into an `R32Uint` target and
+> a single-sample depth of its own. The packing is a **wire-shaped contract**
+> (`crates/inf-render/src/visbuffer.rs`) read by three programs and pinned by
+> `the_shaders_bit_split_is_the_rusts`, which reads all three `.wgsl` for four
+> `const`s, CRLF-tolerantly.
+>
+> **The split, and the ceiling each field was designed against**: 7 bits of
+> triangle (cooked `max_triangles` is **124**; `meshopt`'s cap is 512, so 128 is a
+> refusal boundary), 14 of shared-pool meshlet slot (the flagship `vgeom-demo` DAG
+> is ~500 slots for a 10 M-triangle scene, because meshlets are stored once per
+> asset), 11 of instance stored **biased by one** (`vgeom-demo` places 324). The
+> bias is what makes `VIS_EMPTY` unreachable from a real fragment, so "cleared" and
+> "no geometry here" are one statement. Round-tripped over a 1 048 064-case dense
+> sweep. Overflow is `VisPacking::admit`, a **typed refusal at registration** (the
+> P27.1 grid-overflow law) naming both the measurement and the ceiling, split into
+> three counters on the P27.5 ruling that one number would wear both names — and
+> the refused frame is asserted **byte-identical to the forward frame**, because a
+> refusal that dropped the geometry would satisfy every counter.
+>
+> **The determinism argument is stated where the pass lives and pinned on the
+> device**: `a_visbuffer_is_bit_identical_across_two_runs`. The argument is today's
+> opaque raster's and no stronger — a tie is broken by primitive order, which is
+> the cull's append order, which is not ordered; what is guaranteed is that one
+> draw stream replays to one buffer.
+>
+> ### Clause 2 — the material-resolve pass
+>
+> **MET**, and the gradients are **solved rather than sampled**: with
+> `M = [c0.xyw | c1.xyw | c2.xyw]`, `mu = M^-1 (ndc.x, ndc.y, 1)` is LINEAR in the
+> pixel, so its gradients are two columns of the inverse and nothing is differenced
+> anywhere. The same solve recovers the rasterized depth (`dot(mu, z)`), written as
+> `@builtin(frag_depth)` so translucency, water and the shadow marking find meshlet
+> depth where they always have. The Rust twin's gradient arm asserts a **1/step
+> signature** — f32 rounding, since the truncation term is 2.8e-11 in f64 — with an
+> inline control that drops the `2/width` pixel step and must disagree 400x.
+>
+> `vis_resolve.wgsl` is `ShaderKind::Lit(2)`, which is the only way it can be
+> right: `vsm_receive`'s own arm asserts `vsm_atlas` is declared exactly once in
+> the tree. **Screen-space material bins are the id itself** — a `u32` is constant
+> across a triangle; per-material indirect dispatches are measured-and-not-taken in
+> the memo's §4, because there is exactly ONE lit program for every meshlet
+> instance and every bin would name it.
+>
+> **The three debts, precisely:**
+>
+> * **Per-fragment VT feedback — DISCHARGED.** `vis_feedback.wgsl` is a COMPUTE
+>   pass with a bind group of its own, so the `FRAGMENT_WRITABLE_STORAGE` wall
+>   `docs/memos/p26-4-feedback-mechanism.md` records never reaches it. The handover
+>   is **exclusive** (`feedback_requests`' `skip_vgeom`), because a union with a
+>   coarse mark IS the coarse mark; the floor is untouched, so a dropped mask still
+>   lands on exactly the analytic residency. Measured: the per-surface path settles
+>   at **22** resident tiles and the per-fragment path at **32** — loss (3),
+>   sub-surface variation, recovered and visible. Loss (1), occlusion, is recovered
+>   **structurally and not measured at residency level**: the analytic floor is
+>   deliberately occlusion-blind and its cap already covers the justified level, so
+>   both paths grow by the floor's one tile — isolating it needs per-consumer want
+>   accounting, which is P28.3's.
+> * **The tangent channel — NOT discharged, and P26.5's routing to P28.2 stands.**
+>   The resolve computes no tangent; it calls `vt_apply_normal` with analytic
+>   world-position and uv gradients, which is the forward path's per-fragment
+>   cotangent frame with better-conditioned inputs. P28.2 still owes the whole
+>   vertex-level channel: `VgeomVertex` is position + normal + uv, and the skinned
+>   path is still at `max_vertex_attributes: 16` exactly.
+> * **`voxel.wgsl` shading parity — REFUSED, and P27.5's routing to this pass is
+>   CORRECTED.** P27.5 said the fix was "the VisBuffer resolve, where meshlet and
+>   voxel surfaces are shaded through one material pass". Building the pass
+>   falsifies it: the meshlet field is a slot in the shared meshlet pool and a
+>   voxel chunk has none, and all thirty-two bits are spent
+>   (`the_visbuffer_id_space_has_no_room_for_a_second_geometry_kind`). The two real
+>   doors are measured in the shader's own header — **meshletize voxel chunks**
+>   (P28.2; it also closes casting, GI and the prepass, which the cheap door does
+>   not) and the env group alone, refused for the reason P27.5 gave. **And a defect
+>   found on the way**: that paragraph pinned itself against
+>   `a_voxel_surface_is_refused_a_receiver_and_says_so`, which has **never existed
+>   in this tree** — the P20 law, met again.
+>
+> ### Clause 3 — the MSAA ruling
+>
+> **MET: a setting, not the High-tier default.** `docs/memos/p28-1-visbuffer.md`
+> §5, decided by goldens and frame budget in that order. Goldens stay **54**, count
+> and content digest, `git diff` over `tests/goldens/` empty across the batch — and
+> a default would have re-blessed them to ship a mode whose quality recovery (TAA)
+> is itself off by default. What is given up, measured: **58.9 %** of covered
+> pixels are edge and **1 275** (2.21 % of the frame) differ, plus **128** of 45 274
+> "empty" pixels one step off a silhouette, plus **intersection curves** — a 4x MSAA
+> depth buffer resolves an intersection per SAMPLE and a single-sample
+> reconstruction cannot (104 of 255 on thirteen pixels). Frame budget, this adapter,
+> 1280x720, quoted as a ratio: **+14 %** on a spread frame (1.161 -> 1.325 ms),
+> **-13 %** on a depth-stacked one (0.199 -> 0.173 ms), with the second fixture's
+> weakness stated rather than rounded in its favour. **The forward meshlet path
+> remains**, as the fallback, as the refusal's destination, and as the parity
+> gate's independent oracle.
+>
+> ### The parity nucleus
+>
+> `tests/visbuffer_parity.rs`, **twelve arms**, per-pixel byte compare on a real
+> device across **seven rows**: untextured/scalar, per-instance-set variation,
+> masked alpha, dir+point+spot, GI on, sun-shadowed, textured (VT), plus
+> interleaved-with-rigid, determinism, on-device id decode, the edge measurement
+> and the refusal's fallback.
+>
+> The comparison is over **interior** pixels — those whose four neighbours carry
+> their own id — because at a silhouette the two paths are OBLIGED to differ and
+> comparing there measures MSAA rather than the resolve. **Result: worst channel
+> step 1 of 255**, 0.06 % - 0.74 % of 4 320 - 6 465 interior pixels a row at a
+> rounding boundary. Not zero, and the bound says so rather than hiding it: the
+> forward path's barycentrics come from the rasterizer's interpolators, the
+> resolve's are solved, the frame is 8-bit. `PARITY_MAX_STEP = 1` forbids two.
+>
+> **The textured row is the honest exception**, and the only row the gradients are
+> visible in — every other row shades from per-instance constants a derivative
+> cannot affect. **8.79 %** of interior pixels differ, worst step 26: `dpdx(uv)` is
+> a first-order difference shared by a 2x2 quad and the resolve's is exact per
+> pixel, so they pick the same mip except at a level boundary. The resolve's number
+> is the **better** one.
+>
+> ### Mutation matrix — eight mutations, eight killed
+>
+> | # | what was mutated | died at |
+> |---|---|---|
+> | M1 | the uv x-gradient scaled 4x | `parity_textured_virtual_texture` |
+> | M2 | the raster's instance bias off by one | `the_devices_ids_decode_to_the_scene_the_host_placed` |
+> | M3 | the resolve's meshlet field shifted one bit | `parity_untextured_scalar` |
+> | M4 | the meshlet handover disabled | `the_per_fragment_signal_is_finer…` |
+> | M5 | the ring copy gated on the per-surface count alone | `the_per_fragment_producer_feeds_the_same_pinned_ring` |
+> | M6 | the resolve reads instance 0 for every pixel | `parity_per_instance_variation` |
+> | M7 | the triangle ceiling raised eightfold | `a_scene_past_a_ceiling_falls_back…` |
+> | M8 | the reconstructed depth replaced by a constant | `parity_interleaved_with_rigid_geometry` |
+>
+> **The first pass had three survivors and every one was a gap in an ARM.** The
+> transposed-gradient mutation cannot be killed by a mip test at all — `vt_mip`
+> takes `max(length(dx), length(dy))`, symmetric under the swap — so it is replaced
+> by a scale. The handover survived residency twice, by size (the union is still
+> larger) and as a SET (the per-surface set is a strict subset here, 22 inside 32),
+> and is now read directly off `EngineRenderer::vt_feedback_requests`. The depth
+> survived every row because a frame with only meshlet geometry has nothing to be
+> depth-ordered against — hence the interleaved-rigid arm, which then found the
+> intersection-curve obligation.
+>
+> ### One defect this batch's own gate caught
+>
+> `VtFeedback::finish` gated the ring copy on the **per-surface dispatch count**.
+> With the handover in place, a scene whose only textured surfaces are meshlets
+> dispatches zero — so the mask the per-pixel pass had just filled was never handed
+> to the ring, on exactly the scenes the per-pixel pass exists for. It presents as
+> a streamer sitting on the analytic floor for ever with every counter green.
+> `finish` now takes "did anything produce", measured as the union of the two
+> producers.
+>
+> ### Carried, honest
+>
+> * **The visibility path reaches shading and nothing else** — not the picker, the
+>   depth prepass, the HZB, or the shadow caster passes. Every other consumer of
+>   meshlet geometry is unchanged.
+> * **Zero fragment storage-binding headroom.** `Limits::default()` grants 8 and
+>   the env group spends 4; the flat instance table moved to an `Rgba32Float`
+>   texture to fit, and an arm pins the count so the ninth binding fails a test
+>   rather than a pipeline on a user's machine.
+> * **The frame-derived bit split** — measured, more capacious (16 instance bits
+>   instead of 11 on `vgeom-demo`), not taken because it moves the refusal out of
+>   registration. Routed to **P28.3**.
+> * **`VisReadback` is off by default** and records a full-viewport
+>   `copy_texture_to_buffer` when on; nothing on the shipping path turns it on.
+> * **No golden pictures the visibility path.** Its quality claim is a *parity*
+>   claim against the forward path, which is stronger than a frozen frame and is
+>   why no fifty-fifth golden was added.
+
 - **P28.2 Interleaved cluster pages** — 1. cook emits mesh-page + referenced-texture-tile
   sections interleaved per virtual cluster page (`.inf_vmesh` v3 sections or a pack-layout
   extension — decided at cook, raw-image law holds); 2. one page-in transaction feeds both
