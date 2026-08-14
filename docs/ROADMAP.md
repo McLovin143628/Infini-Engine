@@ -13721,9 +13721,13 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
 
 > ## P28.2 STATUS — interleaved cluster pages: **COMPLETE** (2026-08-14)
 >
-> Five commits, `cb5f550..` this block. The ROADMAP's three clauses answered
-> against code, with the arm that fails if each claim stops being true, and two
-> owed channels ruled on with the measurement that ruled them.
+> **Seven commits, `04d6465..HEAD`** — git range notation excludes `04d6465`,
+> which is P28.1's audit tail and not this batch's. Five implementation, one
+> formatting pass, and the one that corrects this line, which the P28.1 audit's
+> finding about its own predecessor's count is the reason for counting at all.
+> The ROADMAP's three clauses answered against code, with the arm that fails if
+> each claim stops being true, and two owed channels ruled on with the
+> measurement that ruled them.
 >
 > ### Clause 1 — cook emits mesh-page + texture-tile sections interleaved
 >
