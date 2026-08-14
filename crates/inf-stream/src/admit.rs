@@ -192,7 +192,7 @@ mod tests {
             }
         }
         fn resident(&self, key: u32) -> bool {
-            self.occupant.iter().any(|o| *o == Some(key))
+            self.occupant.contains(&Some(key))
         }
         /// A slot nothing may evict — `inf-vt`'s pinned root, in miniature.
         fn pin(&mut self, slot: u32, pinned: bool) {

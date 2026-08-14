@@ -152,7 +152,28 @@ mod tests {
         // ANTI-VACUITY: the feedback addresses really do precede the floor's in
         // payload order, so the assertion above is about the lane and not about
         // an order that happened to agree.
-        assert!(10 < 80, "the fixture's lanes and addresses are not opposed");
+        //
+        // Read off the FIXTURE, not written as two literals. The first draft was
+        // `assert!(10 < 80, ..)`, which clippy is right to call always-true and
+        // which is the P28.1 audit's "an arm that could not see its own
+        // subject" in miniature: editing the fixture's addresses would have
+        // left it green while the claim above stopped holding.
+        let finest_floor = input
+            .iter()
+            .filter(|w| w.1 == LANE_FLOOR)
+            .map(|w| w.0)
+            .min()
+            .expect("the fixture has floor wants");
+        let coarsest_feedback = input
+            .iter()
+            .filter(|w| w.1 == LANE_FEEDBACK)
+            .map(|w| w.0)
+            .max()
+            .expect("the fixture has feedback wants");
+        assert!(
+            coarsest_feedback < finest_floor,
+            "the fixture's lanes and addresses are not opposed: feedback reaches              {coarsest_feedback}, floor starts at {finest_floor}"
+        );
     }
 
     /// The want set is a **function of its contents, not of its arrival

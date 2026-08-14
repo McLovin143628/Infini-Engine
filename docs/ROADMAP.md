@@ -14259,12 +14259,17 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
   cross-system aware (a cluster's tiles and pages age together).
 > ## P28.3 STATUS — one streamer: **COMPLETE** (2026-08-14)
 >
-> Five commits carry the work: `2c93dbd` the crate, `4eb6c14` the consumers
-> (stamp domain + want pipeline + the protection order), `5eac53d` the budget
-> and the coupling and the arbiter's gate, `c92f638` cross-consumer identity and
-> the two latent shapes, and the memo + this block. Named rather than counted,
-> on P28.2's ruling: a total goes stale the moment anything lands after the
-> block is written.
+> The work: `2c93dbd` the crate, `4eb6c14` the consumers (stamp domain + want
+> pipeline + the protection order), `5eac53d` the budget and the coupling and
+> the arbiter's gate, `c92f638` cross-consumer identity and the two latent
+> shapes, `1f1d70f` the memo and this block, `9c5b369` the formatting pass and
+> two over-claims withdrawn on mutation — plus whatever carries this correction
+> and the battery's tail.
+>
+> **Named rather than counted, deliberately**, on P28.2's ruling and against
+> P28.1's finding: this paragraph's first draft opened *"Five commits"* and was
+> stale before the batch ended, which is the failure mode a total has and a list
+> does not.
 >
 > `docs/memos/p28-3-one-streamer.md` carries the rulings and the measurements.
 > The ROADMAP's three clauses, answered against code, with the arm that fails if
