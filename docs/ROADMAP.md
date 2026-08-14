@@ -14521,6 +14521,121 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
 >   it** — it changed arbitration, not page geometry. A shadow page is still
 >   depth-only, still 128², still bordered by four texels.
 
+> ### P28.3 AUDIT — adversarial pass, 2026-08-14
+>
+> Every prior gate re-run at the batch's HEAD and green **unmodified**:
+> `phase26_gate` (16), `phase27_gate` (7), `visbuffer_parity` (12),
+> `visbuffer_feedback` (4), `cluster_pages` (6), `inf-vt` and `inf-vsm`
+> residency gates (8 each), `vgeom_streaming` (7), `vgeom_occlusion` (11).
+> `git log -p` over every one of those FILES across `3f6d410..a5f51c9` touches
+> exactly two of them and both are the called-out exceptions: the inverted arm
+> and the mechanical byte-pin linebreak. Goldens **54**, `git diff` over
+> `tests/goldens/` empty across the batch.
+>
+> **The unification-changed-nothing proof holds, both halves.** The inverted arm
+> is justified and falsifiable: reverting the lane walk fails
+> `…_costs_a_resident_page_nothing` *and* reproduces the old measurement it
+> replaced — `contested` [1,1,2,3,3,3,3,3] against `alone` [1,1,2,3,4,4,5,5], so
+> the retired assertion's own number is genuinely the new arm's control. The
+> identity-at-defaults claim holds in both directions too: the `const` block
+> pins each tier's sum (build failure, not test failure), and the arbiter is
+> **not** an identity everywhere — making it one fails five `budget` arms plus
+> `the_arbiter_is_an_identity_at_the_defaults_and_divides_an_over_ask`, so it is
+> not dead code the gates cannot see.
+>
+> **Findings, fixed.**
+>
+> * **A transaction evicted the tile it was about to want again** (`deca5f4`).
+>   The per-lane walk offered every miss the LRU victim over *every* unprotected
+>   slot, so a tile **demoted** from the floor lane to the feedback lane on the
+>   frame a new floor tile arrives was evicted, re-admitted into another slot and
+>   re-uploaded for nothing — measured on a real `VtResidency`: **two evictions
+>   and two admissions to move one tile in and one out**, with `AdmitLog::evicts`
+>   naming an address that was **resident again** by the time the caller read it,
+>   against a field documented as *"unseated"*. Unreachable before P28.3, whose
+>   priority-blind order protected every resident want of every lane first. Fixed
+>   by trying an *unwanted* slot before a weaker lane's resident one; the rank is
+>   untouched, and when no unwanted slot exists the fallback is the pre-audit
+>   behaviour exactly. Armed by `a_transaction_never_re_admits_what_it_just_
+>   evicted`; the trait now states the `None`-unseats-nothing contract the two
+>   attempts rest on.
+> * **`EngineRenderer::stream_report` had no caller** (`b97b7cb`) — so the P28.2
+>   audit's *"`stale_tiles` has no reader"* was closed by a reader nothing read,
+>   and `mismatched_textures`, `coupled_groups`, `coupled_tiles`,
+>   `dropped_groups`, `floor_bytes` and `RingLedger::readers_agree` arrived the
+>   same way. The oracle re-derived the live floors in its own `floors()` rather
+>   than exercising the shipped fold — two derivations of one fact, the P21 law.
+>   `the_streamers_audit_folds_the_live_residency` is that reader, over the real
+>   renderer.
+> * **`!flat.is_empty()` landed unarmed** (`b97b7cb`). Removing the
+>   `VisAudit::frames` fix again killed nothing in all twenty-two of
+>   `inf-render`'s test binaries, and it was listed under *landed* rather than
+>   disclosed as unarmed the way the has-group guard correctly was. Armed by
+>   `a_frame_whose_instances_name_no_asset_does_not_report_that_it_marked`.
+> * **The two routes were one route** (`b97b7cb`). Measured,
+>   `[4.0, 0.5, 0.2, 0.05]` and `[2.0, 1.0, 0.1, 0.05]` produce byte-identical
+>   pages, admits and resident bytes at **every** rung, so
+>   `two_routes_to_one_residency_triple_arbitrate_identically` asserted
+>   determinism and a history-dependent arbiter would have passed it. Replaced
+>   with a gradual ladder against a one-shot one (diverges at three rungs of
+>   four, reconverges) plus the `assert_ne!` on the traces that the first draft
+>   was missing.
+> * **A vacuous assertion beside it** (`deca5f4`):
+>   `a_transaction_never_evicts_what_it_just_admitted` looped over `txn.evicts`
+>   on the line after asserting it empty — zero iterations by construction.
+> * **Seven counters, not five** (`8d8ae9c`). The stamp-domain ruling closes with
+>   *"Five counters existed"* in a paragraph naming four content counters
+>   (`inf_terrain`'s one, **`inf_voxel`'s two**, `inf_dcc`'s one) beside the three
+>   that merged. Corrected in all three places it is asserted.
+> * **Four citations to statics this batch deleted** (`8d8ae9c`):
+>   `NEXT_RESIDENCY_STAMP` twice, `NEXT_VSM_STAMP`, `NEXT_VT_STAMP`. Three are
+>   rustdoc intra-doc links, which `cargo doc` reports and clippy does not.
+> * **`stale_tiles` counts one thing more than its doc said** (`8d8ae9c`): every
+>   reference of a grid-refused texture, whose addresses all exist in the
+>   re-imported-larger direction. Widened to *addresses dropped from the pairing*.
+> * **A floor larger than an even share had no arm** (`deca5f4`). Measured 70/10/10
+>   under a 90 ceiling with a 60 floor — floors whole, then the *remainder*
+>   evenly, not the level-equalizing 60/15/15 "water-fill" suggests. Correct as
+>   specified, now pinned.
+> * **`inf_graph::cache`'s `last_use` is documented "process-unique"** and is a
+>   per-instance field reset by `new` (`8d8ae9c`). It is the only other recency
+>   ordering in the workspace besides `inf_terrain`'s `DeformCell::
+>   last_stamp_step`, which is drawn from the fixed step counter and correctly
+>   stays apart. Neither is comparable with the residency domain; neither needs
+>   to be. Enumeration verified complete.
+>
+> **Verified and upheld, not changed.** The stamp merge is armed (a private
+> counter in one consumer fails the interleaving arm). The even-vs-proportional
+> measurement reproduces exactly — even 23.33/**21.33**/19.33, proportional
+> 47.24/**5.78**/10.98. The water-fill's edges are sound (under-ceiling,
+> exactly-at-ceiling, a zero request, a floor over an even share). The ratchet is
+> dead-counter-proof (killing the peak tracker fails `peak_bytes > 0` rather than
+> passing at zero). The anti-vacuity guards fire: the eviction guard on a walk
+> that protects everything, the coupling control's when the control stops being
+> one. `inf-vgeom` genuinely surrenders its budget — a private one fails the
+> conservation arm. The two recorded survivors are accurate: the digest's length
+> fold is redundant across the whole crate, and the has-group guard is
+> unreachable. `a5f51c9`'s provenance is exactly two lines of `inf-stream` test
+> code plus the commit list. The `.inf_vmesh` pad-zero argument holds by
+> construction — `ClusterTileRef::new` is the only other constructor and the
+> record has no padding.
+>
+> **The circular caster-pack refusal is confirmed, and is stronger than stated.**
+> The dirty set is `pages.retain(|p| cache[p.slot] != Some((.., p.key)))` and
+> `p.key` exists only after `scatter_caster_stamps` folds the hashes
+> `pack_casters` produced — so skipping the pack does need the dirty set before
+> the pack that produces it. And `hashes.push(caster_stamp(&c, …))` computes each
+> hash **from the packed `VsmCasterRaw`**, so the re-route's *"what is skippable
+> is the packing into records"* is not free either: it needs `caster_stamp` to
+> stop being a function of the packed record first. **P28.5 inherits that
+> correction**, not a cheaper number.
+>
+> **Amended remainders.** To **P28.4**: unchanged (the clipmap scroll, the
+> palette-union caster bound, the shadow-page coupling membership). To **P28.5**:
+> the twelve items above, unchanged, plus the caster-pack correction; and
+> `stream_report` now has a gate reader but still has no *host* caller, so the
+> line a host logs is still a line nothing logs.
+
 - **P28.4 Predictive prefetch** — 1. deterministic dead-reckoning over committed input
   history (camera velocity + angular momentum, 200–500 ms horizon — a pure function, the
   memo's neural-predictor deviation); 2. speculative wants enter at strictly lower priority
