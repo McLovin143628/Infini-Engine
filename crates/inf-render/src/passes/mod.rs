@@ -787,166 +787,179 @@ pub(crate) struct EnvBinding {
     bg: GenCache<ResourceKey, wgpu::BindGroup>,
 }
 
+/// **The shared environment group's layout entries**, hoisted out of
+/// [`EnvBinding::new`] so a test can COUNT them (P28.1 audit).
+///
+/// The count that matters is the FRAGMENT storage bindings: `Limits::default()`
+/// grants eight a stage and the P28.1 resolve spends the other four, so the
+/// ninth is refused by `create_pipeline_layout` on a user's machine. The arm
+/// `the_resolve_spends_every_fragment_storage_binding_the_default_limit_grants`
+/// exists to make that a failing test instead — and its first draft asserted
+/// `4 + 4 == 8` with both numbers written by hand, so growing this list by a
+/// storage buffer left it green. A gate must aim at the thing it names (P23).
+pub(crate) fn env_bgl_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    let frag = wgpu::ShaderStages::FRAGMENT;
+    [
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: frag,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: frag,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: frag,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: frag,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: frag,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 5,
+            visibility: frag,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 6,
+            visibility: frag,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        },
+        // ── P17.2 atmosphere ──
+        wgpu::BindGroupLayoutEntry {
+            binding: ENV_ATMOS_TRANSMITTANCE,
+            visibility: frag,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: ENV_ATMOS_SKYVIEW,
+            visibility: frag,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: ENV_ATMOS_SAMPLER,
+            visibility: frag,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: ENV_ATMOS_UNIFORM,
+            visibility: frag,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        },
+        // ── P17.3 clouds ──
+        wgpu::BindGroupLayoutEntry {
+            binding: ENV_CLOUD_SHADOW,
+            visibility: frag,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        // ── P18.4 SSR ──
+        wgpu::BindGroupLayoutEntry {
+            binding: ENV_SCENE_DEPTH,
+            visibility: frag,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        // ── P20.3 shoreline wetness ──
+        wgpu::BindGroupLayoutEntry {
+            binding: ENV_WETNESS,
+            visibility: frag,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        },
+    ]
+    // ── P26.3 virtual texturing (14, 15, 16) ──
+    //
+    // Appended from the mirror's own constructor rather than spelled again here:
+    // the layout and the entries are a PAIR, and a pair written in two files is a
+    // pair that drifts into a validation error at pipeline creation — or, worse,
+    // into a bind group that is legal and wrong.
+    .into_iter()
+    .chain(crate::vt::VtPools::bind_group_layout_entries(ENV_VT_ATLAS))
+    // ── P27.4 virtual shadow maps (17, 18, 19, 20) ──
+    //
+    // Appended from the receiver's own module for `VtPools`'s reason: the layout
+    // and the entries are a PAIR, and a pair written in two files is a pair that
+    // drifts into a validation error — or, worse, into a bind group that is legal
+    // and wrong.
+    .chain(crate::vsm_receiver::bind_group_layout_entries(
+        ENV_VSM_ATLAS,
+    ))
+    .collect::<Vec<_>>()
+}
+
 impl EnvBinding {
     pub fn new(gpu: &GpuContext) -> Self {
-        let frag = wgpu::ShaderStages::FRAGMENT;
         let bgl = gpu
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("env"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Depth,
-                            view_dimension: wgpu::TextureViewDimension::D2Array,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 5,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 6,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    // ── P17.2 atmosphere ──
-                    wgpu::BindGroupLayoutEntry {
-                        binding: ENV_ATMOS_TRANSMITTANCE,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: ENV_ATMOS_SKYVIEW,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: ENV_ATMOS_SAMPLER,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: ENV_ATMOS_UNIFORM,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    // ── P17.3 clouds ──
-                    wgpu::BindGroupLayoutEntry {
-                        binding: ENV_CLOUD_SHADOW,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    // ── P18.4 SSR ──
-                    wgpu::BindGroupLayoutEntry {
-                        binding: ENV_SCENE_DEPTH,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Depth,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    // ── P20.3 shoreline wetness ──
-                    wgpu::BindGroupLayoutEntry {
-                        binding: ENV_WETNESS,
-                        visibility: frag,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ]
-                // ── P26.3 virtual texturing (14, 15, 16) ──
-                //
-                // Appended from the mirror's own constructor rather than spelled
-                // again here: the layout and the entries are a PAIR, and a pair
-                // written in two files is a pair that drifts into a validation
-                // error at pipeline creation — or, worse, into a bind group that
-                // is legal and wrong.
-                .into_iter()
-                .chain(crate::vt::VtPools::bind_group_layout_entries(ENV_VT_ATLAS))
-                // ── P27.4 virtual shadow maps (17, 18, 19, 20) ──
-                //
-                // Appended from the receiver's own module for `VtPools`'s
-                // reason: the layout and the entries are a PAIR, and a pair
-                // written in two files is a pair that drifts into a validation
-                // error — or, worse, into a bind group that is legal and wrong.
-                .chain(crate::vsm_receiver::bind_group_layout_entries(
-                    ENV_VSM_ATLAS,
-                ))
-                .collect::<Vec<_>>(),
+                entries: &env_bgl_entries(),
             });
         let ao_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("env-ao"),
