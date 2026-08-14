@@ -427,7 +427,14 @@ fn vt_apply_normal_t(
         return vt_apply_normal(n, dp1, dp2, duv1, duv2, ts);
     }
     let tangent = t / l;
-    let bitangent = cross(n, tangent) * tan4.w;
+    // The **sign** of `w`, never its magnitude (P28.2 audit). `vis_resolve` takes
+    // the handedness from the nearest corner, so its `w` is exactly ±1; the
+    // forward path in `vgeom_mesh` carries it as an ordinary interpolated varying,
+    // so a triangle straddling a uv-mirror seam delivers a fractional `w` — and
+    // `cross(n, tangent) * w` then hands back a bitangent SHORTER than unit,
+    // which is precisely the non-orthonormal frame the Gram-Schmidt above exists
+    // to prevent. Two consumers of one function must not disagree about that.
+    let bitangent = cross(n, tangent) * select(-1.0, 1.0, tan4.w > 0.0);
     return normalize(tangent * ts.x + bitangent * ts.y + n * ts.z);
 }
 

@@ -605,10 +605,19 @@ mod tests {
                 "{name} does not declare `{want}` — the vertex record moved and \
                  one of its readers did not"
             );
-            // And nothing steps by a literal beside the constant.
+            // And the constant is USED (P28.2 audit: banning one literal
+            // spelling left `global_v * 10u` passing both arms — a ban
+            // enumerates what you thought of, so require the constant instead).
             assert!(
-                !code.iter().any(|l| l.contains("global_v * 8u")),
-                "{name} still multiplies a vertex index by a literal"
+                code.iter().any(|l| l.contains("global_v * VGEOM_VSTRIDE")),
+                "{name} declares the stride and steps by something else"
+            );
+            assert!(
+                !code
+                    .iter()
+                    .any(|l| l.contains("global_v * ") && !l.contains("VGEOM_VSTRIDE")),
+                "{name} multiplies a vertex index by something that is not the \
+                 declared stride"
             );
         }
     }
@@ -638,6 +647,27 @@ mod tests {
             ("the low field's sign extension", "i32(word << 21u) >> 21u"),
             ("the high field's sign extension", "i32(word << 10u) >> 21u"),
             ("the sentinel", "if (word == 0u)"),
+            // **The octahedral fold, which had no pin at all** (P28.2 audit).
+            // Every line below is a silently wrong hemisphere if it drifts, and
+            // the five needles above are all satisfied while the fold is deleted
+            // outright, has its two signs swapped, or drops the x/y swap.
+            ("the fold's z", "1.0 - abs(ex) - abs(ey)"),
+            ("the fold's guard", "if (v.z < 0.0)"),
+            ("the fold's x sign", "let sx = select(1.0, -1.0, v.x < 0.0)"),
+            ("the fold's y sign", "let sy = select(1.0, -1.0, v.y < 0.0)"),
+            (
+                "the fold's swap",
+                "v = vec3<f32>((1.0 - abs(v.y)) * sx, (1.0 - abs(v.x)) * sy, v.z)",
+            ),
+            // And the handedness is read as a SIGN, never as a magnitude: the
+            // forward path interpolates `w` as an ordinary varying, so a seam
+            // delivers a fractional one and `cross(n, t) * w` would hand back a
+            // short bitangent — a non-orthonormal frame, which is the exact
+            // failure the Gram-Schmidt above exists to prevent.
+            (
+                "the handedness as a sign",
+                "select(-1.0, 1.0, tan4.w > 0.0)",
+            ),
         ] {
             assert!(
                 body.contains(needle),
@@ -647,10 +677,26 @@ mod tests {
         }
         // The Rust half really does use those numbers, so the pin above is a
         // comparison and not two copies of a guess.
-        let (t, w) = inf_vgeom::unpack_tangent(inf_vgeom::pack_tangent([0.0, 0.0, 1.0], -1.0))
-            .expect("packed");
+        //
+        // The direction is chosen to EXERCISE them (P28.2 audit): this arm used
+        // to round-trip `[0, 0, 1]`, whose two quantized fields are both **zero**,
+        // so any pair of shift amounts and any fold at all decoded it correctly
+        // and the assert saw nothing but the handedness bit. This one is in the
+        // lower hemisphere (so the fold runs) with two different non-zero
+        // magnitudes of opposite sign (so a swapped `sx`/`sy`, a dropped swap, or
+        // a shift that reads the wrong field all move it).
+        let d = {
+            let v = [0.3f32, -0.7, -0.5];
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            [v[0] / l, v[1] / l, v[2] / l]
+        };
+        let (t, w) = inf_vgeom::unpack_tangent(inf_vgeom::pack_tangent(d, -1.0)).expect("packed");
         assert_eq!(w, -1.0, "the handedness bit round-trips on the host");
-        assert!(t[2] > 0.99, "the +Z direction round-trips on the host");
+        let cos = t[0] * d[0] + t[1] * d[1] + t[2] * d[2];
+        assert!(
+            1.0 - cos < 1e-5,
+            "the host round-trip lost the direction: {t:?} against {d:?}"
+        );
         assert!(inf_vgeom::unpack_tangent(inf_vgeom::NO_TANGENT).is_none());
     }
 

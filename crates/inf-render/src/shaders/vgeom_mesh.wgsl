@@ -153,9 +153,19 @@ fn vs(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> V
     out.id = inst.pick_id;
     out.pbr = vec4<f32>(inst.metallic, inst.roughness, 0.0, 0.0);
     out.emissive = inst.emissive.rgb;
-    // Rotate into world space with the same normal matrix the normal takes; the
-    // handedness rides through untouched, because it is a sign and not a vector.
-    out.tangent = vec4<f32>(nrm * tan4.xyz, tan4.w);
+    // Into world space with the model matrix's LINEAR part, not the normal
+    // matrix (P28.2 audit). A tangent is contravariant — it lies IN the surface —
+    // so it rides `rotation · scale`, while a normal rides the inverse transpose
+    // `rotation · scale⁻¹`. Under uniform scale the two are proportional and
+    // normalization erases the difference; under NON-uniform instance scale they
+    // differ by more than a positive factor, the transformed tangent is not
+    // tangent to the deformed surface, and Gram-Schmidt cannot recover what the
+    // transform destroyed — a frame worse than the derivative one it replaced.
+    // The handedness rides through untouched, because it is a sign and not a
+    // vector. `vis_resolve` does the identical thing, which is what keeps the
+    // parity nucleus a comparison rather than two conventions.
+    let tmat = mat3x3<f32>(inst.model[0].xyz, inst.model[1].xyz, inst.model[2].xyz);
+    out.tangent = vec4<f32>(tmat * tan4.xyz, tan4.w);
     out.meshlet = pair.y;
     out.uv = uv;
     out.vt = vec3<u32>(inst.vt0, inst.vt1, inst.vt2);

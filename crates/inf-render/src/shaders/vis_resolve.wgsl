@@ -332,6 +332,7 @@ fn fs(in: VsOut) -> FsOut {
     var tan3: array<vec4<f32>, 3>;
     var clip: array<vec4<f32>, 3>;
     let nmat = mat3x3<f32>(inst.n0, inst.n1, inst.n2);
+    let tmat = mat3x3<f32>(inst.model[0].xyz, inst.model[1].xyz, inst.model[2].xyz);
     for (var k = 0u; k < 3u; k = k + 1u) {
         let local = read_tri_byte(m.triangle_offset + tri * 3u + k);
         let global_v = v_meshlet_verts[m.vertex_offset + local];
@@ -342,12 +343,15 @@ fn fs(in: VsOut) -> FsOut {
         wp[k] = w.xyz;
         nrm3[k] = nmat * nn;
         uv3[k] = vec2<f32>(v_positions[base + 6u], v_positions[base + 7u]);
-        // P28.2: the vertex tangent, rotated with the same normal matrix. The
-        // resolve interpolates it by the solved barycentrics below, so its frame
-        // is the raster's frame with better-conditioned weights — the same
-        // relationship the whole pass has to the forward path.
+        // P28.2: the vertex tangent, carried by the model matrix's LINEAR part —
+        // a tangent is contravariant and rides `rotation · scale`, not the normal
+        // matrix's `rotation · scale⁻¹` (P28.2 audit; the two part company under
+        // non-uniform instance scale). The resolve interpolates it by the solved
+        // barycentrics below, so its frame is the raster's frame with
+        // better-conditioned weights — the same relationship the whole pass has
+        // to the forward path, and `vgeom_mesh` does the identical thing.
         let t4 = vgeom_unpack_tangent(bitcast<u32>(v_positions[base + 8u]));
-        tan3[k] = vec4<f32>(nmat * t4.xyz, t4.w);
+        tan3[k] = vec4<f32>(tmat * t4.xyz, t4.w);
         clip[k] = view.view_proj * w;
     }
 
