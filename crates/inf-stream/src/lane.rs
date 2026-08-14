@@ -10,8 +10,8 @@
 /// How badly something is wanted — **the primary sort key**, lower first.
 ///
 /// A rank, not a policy: the consumer still decides what to want and in which
-/// lane. Three lanes exist and the third has no producer yet (P28.4), which is
-/// stated rather than implied — the `VSM_PRIORITY_SPECULATIVE` treatment.
+/// lane. Three lanes exist and, since P28.4, all three have producers — see
+/// [`LANE_PREDICT`], which shipped in P28.3 with none and said so.
 pub type Lane = u8;
 
 /// **The analytic floor.** Computed on the CPU from `(camera, bounds,
@@ -31,12 +31,24 @@ pub const LANE_FEEDBACK: Lane = 1;
 /// whose contract is that it enters *"at strictly lower priority than the
 /// analytic floor and feedback"*.
 ///
-/// **It has no producer in this tree**, deliberately: the pipeline carries the
-/// lane now and P28.4 supplies the producer. A sort with two ranks is a sort
-/// that cannot see a third being mis-ordered, so the lane ships with the walk
-/// that orders it and with
-/// [`admit::tests::a_predicted_want_never_takes_a_floor_or_feedback_slot`](crate::admit)
-/// exercising it, rather than as a reserved constant.
+/// **P28.3 shipped it without a producer and P28.4 supplied two**, one per
+/// slot-pool consumer: `inf_render::speculative_wants` for the texture pool and
+/// `inf_render::speculative_shadow_wants` for the shadow atlas, both off one
+/// `inf_math::dead_reckon`. The disclosure P28.3 carried here — *"it has no
+/// producer in this tree"*, the `VtTransaction::unknown_texture` treatment — is
+/// **discharged rather than deleted**, because a lane that waited a batch for a
+/// producer should say which one supplied it.
+///
+/// The lane still ships with the walk that orders it and with
+/// [`admit::tests::a_predicted_want_never_takes_a_floor_or_feedback_slot`](crate::admit),
+/// which is what made it a tested property before either producer existed: a
+/// sort with two ranks cannot see a third being mis-ordered.
+///
+/// **Both consumers use this one lane**, and that is the invariant rather than a
+/// coincidence: *residency ⊇ floor ∪ feedback under full speculative pressure*
+/// has to mean the same thing in `inf-vt` and in `inf-vsm`, and a speculation
+/// ranked into [`LANE_FEEDBACK`] in one of them makes it mean something else
+/// there (`inf_vsm::VSM_PRIORITY_SPECULATIVE`, moved here by P28.4).
 pub const LANE_PREDICT: Lane = 2;
 
 /// **Normalize a want set**: dedup on the address, keeping the *strongest*

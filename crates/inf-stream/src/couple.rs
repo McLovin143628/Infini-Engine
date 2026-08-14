@@ -47,8 +47,12 @@
 //! resident, after the marking mask has been read, so producing it at the
 //! arbiter's sync point means deriving next frame's page set from last frame's
 //! casters. That is a *prediction*, and a prediction enters at
-//! [`LANE_PREDICT`](crate::lane::LANE_PREDICT) — P28.4's lane, with no producer
-//! here. Recorded rather than approximated.
+//! [`LANE_PREDICT`](crate::lane::LANE_PREDICT) — where P28.4 landed it, as
+//! `inf_render::speculative_shadow_wants`. It is still not a coupling **member**
+//! and the reason is unchanged: a coupling has to know which *group* each page
+//! belongs to, and that is only knowable from the raster's per-page frustum
+//! verdict, while the producer works in page-index space over a light's whole
+//! proved set. Recorded rather than approximated.
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -97,8 +97,12 @@ pub const VT_PRIORITY_FEEDBACK: VtPriority = inf_stream::LANE_FEEDBACK;
 /// than the analytic floor and feedback"* — spelled as a rank the one admission
 /// walk already orders, rather than as a policy anything has to remember.
 ///
-/// It is a *third* lane here and not `inf-vsm`'s treatment of the same idea,
-/// because this consumer has two producers above it and that one has one.
+/// It is a *third* lane here because this consumer has two producers above it,
+/// and it is the **same** lane `inf_vsm::VSM_PRIORITY_SPECULATIVE` uses even
+/// though that consumer has one — which is the correction P28.4 made to its own
+/// first reading. The invariant is one statement over all three consumers, so a
+/// speculation ranked into the feedback lane next door would make *residency ⊇
+/// floor ∪ feedback* mean something different there than it means here.
 pub const VT_PRIORITY_PREDICT: VtPriority = inf_stream::LANE_PREDICT;
 
 /// "This tile, please." The whole input language of residency — deliberately no
