@@ -247,7 +247,7 @@ fn the_feedback_pass_marks_the_level_the_camera_justifies() {
             &v,
             &requests,
         );
-        feedback.finish(&mut enc, frame, n);
+        feedback.finish(&mut enc, frame, n > 0);
         gpu.queue.submit([enc.finish()]);
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         (n, requests.len())
@@ -668,7 +668,7 @@ fn run_feedback(
         v,
         &requests,
     );
-    feedback.finish(&mut enc, frame, n);
+    feedback.finish(&mut enc, frame, n > 0);
     assert_eq!(
         n as usize,
         requests.len(),

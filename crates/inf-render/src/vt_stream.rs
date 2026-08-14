@@ -715,12 +715,22 @@ impl VtFeedback {
     /// The latency the ring pins is unchanged: frame `k`'s mask is still read at
     /// `k + 2` and never "whenever it resolves".
     ///
-    /// `dispatched` is [`record`](Self::record)'s return: zero means nothing was
-    /// recorded, the ring gets no copy, and the read two frames later misses —
-    /// the same degradation as a late mask, and the behaviour `record` had when
-    /// it owned this line.
-    pub fn finish(&mut self, encoder: &mut wgpu::CommandEncoder, frame: u64, dispatched: u32) {
-        if dispatched == 0 {
+    /// `produced` is whether **any** producer marked into the mask this frame.
+    ///
+    /// It is deliberately not `record`'s return value alone, and the difference
+    /// is a defect this batch's own gate caught: with the visibility path on, the
+    /// meshlet set is handed to the per-FRAGMENT producer, so a scene whose only
+    /// textured surfaces are meshlets dispatches **zero** per-surface requests —
+    /// and gating the ring copy on that number means the mask the per-pixel pass
+    /// just filled is never read, on exactly the scenes the per-pixel pass exists
+    /// for. It presents as a streamer that silently sits on the analytic floor
+    /// for ever, which is the quietest failure this subsystem has.
+    ///
+    /// `false` means nothing marked, the ring gets no copy, and the read two
+    /// frames later misses — the same degradation as a late mask, and the
+    /// behaviour `record` had when it owned this line.
+    pub fn finish(&mut self, encoder: &mut wgpu::CommandEncoder, frame: u64, produced: bool) {
+        if !produced {
             return;
         }
         self.ring.record(encoder, &self.mask, frame);

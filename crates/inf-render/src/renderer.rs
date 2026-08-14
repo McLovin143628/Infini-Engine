@@ -1592,6 +1592,7 @@ impl EngineRenderer {
                 _ => None,
             },
         };
+        let vis_frames_before = self.vis_audit().frames;
         self.graph.run(gpu, &mut encoder, &frame);
         drop(frame);
 
@@ -1602,8 +1603,15 @@ impl EngineRenderer {
         // dispatch → graph → copy, one encoder and one submit, so the mask the
         // ring receives carries both producers of THIS frame and the pinned
         // `frame − 2` read is unchanged.
+        //
+        // "Did anything mark?" is the union of the two producers, MEASURED rather
+        // than assumed: the visibility node publishes a frame counter, so a frame
+        // it refused (a scene past a packing ceiling) correctly reports that its
+        // per-pixel pass did not run.
+        let vis_marked = self.vis_audit().frames > vis_frames_before;
+        let produced = self.vt_feedback_dispatched > 0 || vis_marked;
         if let Some(f) = self.vt_feedback.as_mut() {
-            f.finish(&mut encoder, self.frame_index, self.vt_feedback_dispatched);
+            f.finish(&mut encoder, self.frame_index, produced);
         }
 
         // **The shadow-page marking pass** (P27.1), recorded here and nowhere
