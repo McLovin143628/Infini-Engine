@@ -59,6 +59,14 @@ struct BodyRecord {
     collider: Option<ColliderId>,
     kind: BodyKind,
     rb: Option<RigidBody2D>,
+    /// The collider descriptor **actually attached**, never the one asked for
+    /// (C4-30). See the 3D mirror's field for the argument: this is the
+    /// reconcile's change detector, so recording a desired-but-unbuilt shape
+    /// here tells the next sync there is nothing to do.
+    ///
+    /// 2D shapes are all analytic (ball / cuboid / capsule / polygon), so a
+    /// refusal here is far rarer than in 3D — but "rarer" is not "impossible",
+    /// and the two bridges are read side by side.
     col: Option<Collider2D>,
     /// The joint this entity owns (P12.1): handle + other body + last snapshot.
     joint: Option<JointBinding>,
@@ -217,7 +225,11 @@ impl PhysicsBridge2D {
                         .and_then(|c| self.world.add_collider(body, collider_desc(c)));
                     if let Some(r) = self.entities.get_mut(&guid) {
                         r.collider = new_col;
-                        r.col = snap.col;
+                        // Only what was achieved (C4-30). A refused build leaves
+                        // `col` at `None`, so the next sync sees the difference
+                        // and retries — which in 2D is cheap, every shape being
+                        // analytic, so this mirror needs no `col_refused` brake.
+                        r.col = new_col.and(snap.col);
                     }
                 }
             } else {
@@ -237,7 +249,7 @@ impl PhysicsBridge2D {
                         collider,
                         kind,
                         rb: snap.rb,
-                        col: snap.col,
+                        col: collider.and(snap.col),
                         joint: None,
                     },
                 );

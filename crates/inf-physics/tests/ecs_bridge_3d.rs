@@ -170,3 +170,109 @@ fn two_identical_scenes_step_byte_identical() {
         "two identical scenes diverged after 300 steps"
     );
 }
+
+// ── C4-30: a collider that will not build (hardening wave B) ────────────────
+
+/// A trimesh whose index buffer names a vertex it does not have. parry refuses
+/// it, deterministically — the same *shape* of refusal `FIX_INTERNAL_EDGES`
+/// gives on the non-manifold output Surface-Nets voxel chunks and Voronoi
+/// fracture hulls produce, which this repo's own seam-chord law measured at
+/// ~10 % of meshes.
+fn unbuildable_trimesh() -> ColliderDesc3D {
+    ColliderDesc3D::new(ColliderShape3D::Trimesh {
+        vertices: vec![DVec3::ZERO, DVec3::X, DVec3::Z],
+        indices: vec![[0, 1, 9]],
+    })
+}
+
+/// **THE walk-through-walls fix.**
+///
+/// `add_collider` returning `None` used to be followed by `r.col =
+/// snap.collider.clone()` — the DESIRED descriptor recorded as the ACHIEVED
+/// one. The next reconcile compared them, found nothing to do, and the entity
+/// kept a rigid body with no collider. No log, no counter, no advisory: the
+/// only symptom is a player walking through a cave wall.
+///
+/// This asserts the world (does the body have a collider?) and the ledger (was
+/// the refusal counted and attributed?), and then that a **changed** shape is
+/// retried — which is the case where retrying can actually succeed, and the
+/// thing the latch destroyed.
+#[test]
+fn a_collider_that_will_not_build_is_never_recorded_as_built() {
+    let guid = Uuid::from_u128(7);
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+
+    let mut scene = vec![entity(
+        7,
+        BodyKind3D::Dynamic,
+        unbuildable_trimesh(),
+        DVec3::new(0.0, 5.0, 0.0),
+    )];
+    bridge.sync(&scene);
+
+    // The world: a body, and nothing to collide with.
+    assert!(bridge.body_of(guid).is_some(), "the body must still exist");
+    assert!(
+        bridge.collider_of(guid).is_none(),
+        "parry refused this shape; a handle here would mean it did not"
+    );
+    // The ledger: counted once, attributed to the entity.
+    assert_eq!(bridge.collider_refusals(), 1);
+    assert_eq!(bridge.entities_missing_colliders(), vec![guid]);
+
+    // Re-syncing the SAME descriptor must not re-attempt it: `to_shared_checked`
+    // is a pure function of the descriptor, so a retry is trimesh-topology cost
+    // per fixed step for an answer that cannot change.
+    for _ in 0..5 {
+        bridge.sync(&scene);
+    }
+    assert_eq!(
+        bridge.collider_refusals(),
+        1,
+        "the same refused shape was re-attempted every sync"
+    );
+    assert!(bridge.collider_of(guid).is_none());
+
+    // A CHANGED shape is retried — the case the latch destroyed. This is what a
+    // re-carve, a re-fracture or a terrain edit looks like from here.
+    scene[0].collider = Some(ball_collider());
+    bridge.sync(&scene);
+    assert!(
+        bridge.collider_of(guid).is_some(),
+        "a repaired shape was never retried — the latch is still there"
+    );
+    assert_eq!(
+        bridge.collider_refusals(),
+        1,
+        "the repair counted as a fail"
+    );
+    assert!(bridge.entities_missing_colliders().is_empty());
+
+    // And it really collides: drop it onto a floor and it must stop.
+    scene.push(entity(1, BodyKind3D::Static, floor_collider(), DVec3::ZERO));
+    bridge.sync(&scene);
+    for _ in 0..240 {
+        bridge.step(DT);
+    }
+    let y = bridge
+        .write_back()
+        .into_iter()
+        .find(|w| w.guid == guid)
+        .expect("the dynamic body must write back")
+        .translation
+        .y;
+    assert!(
+        y > 0.4 && y < 1.5,
+        "the repaired body fell to y = {y}; it has no collider after all"
+    );
+}
+
+/// The control: a healthy level refuses nothing. Without this the assertions
+/// above cannot tell "the counter works" from "the counter counts everything".
+#[test]
+fn a_healthy_scene_refuses_no_colliders() {
+    let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
+    bridge.sync(&drop_scene());
+    assert_eq!(bridge.collider_refusals(), 0);
+    assert!(bridge.entities_missing_colliders().is_empty());
+}

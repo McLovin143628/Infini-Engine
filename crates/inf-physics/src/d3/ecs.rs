@@ -126,7 +126,26 @@ struct BodyRecord {
     collider: Option<ColliderId3D>,
     kind: BodyKind3D,
     rb: Option<BodyDesc3D>,
+    /// The collider descriptor that is **actually attached** — never the one
+    /// that was asked for (C4-30).
+    ///
+    /// The distinction is the whole finding. This field is the reconcile's
+    /// change detector: `rec.col != snap.collider` is what decides whether to
+    /// rebuild. Writing the *desired* descriptor here after `add_collider`
+    /// returned `None` told the next reconcile there was nothing to do, and the
+    /// entity kept a rigid body with no collider — silently, with no log and no
+    /// counter, which is a player walking through a cave wall.
     col: Option<ColliderDesc3D>,
+    /// The descriptor that was tried and **refused**, so the retry is bounded
+    /// (C4-30).
+    ///
+    /// Without it, an honest `col` (left `None` after a refusal) would make
+    /// every subsequent sync re-attempt the same build — and `to_shared_checked`
+    /// is a pure function of the descriptor, so it would fail identically, for
+    /// ever, at trimesh-topology cost per fixed step. With it the retry happens
+    /// exactly when it can succeed: when the shape *changes*. Which is what a
+    /// re-carve, a re-fracture or a terrain edit does.
+    col_refused: Option<ColliderDesc3D>,
     /// The joint this entity owns (P12.1): its handle, the other body it was
     /// built against, and the last-synced snapshot (for change detection).
     joint: Option<JointBinding>,
@@ -211,6 +230,16 @@ pub struct PhysicsBridge3D {
     /// it — the inverse of [`collider_of`](Self::collider_of). Deterministic
     /// (`BTreeMap`, sorted keys).
     collider_to_guid: BTreeMap<ColliderId3D, Uuid>,
+    /// **How many collider builds this bridge has refused, ever** (C4-30), and
+    /// which entities it has already complained about.
+    ///
+    /// A counter rather than a log line alone because the failure is a *rate*
+    /// question — "~10 % of meshes" is the seam-chord law's own measurement of
+    /// how often `FIX_INTERNAL_EDGES` fails on Surface-Nets and Voronoi output —
+    /// and because a test can assert a number. The warn set keeps the log
+    /// honest: one line per entity, not one per fixed step.
+    collider_refusals: u64,
+    warned_colliders: BTreeSet<Uuid>,
 
     // ── water (P20.2) ─────────────────────────────────────────────────────
     /// The level's water, spatially indexed. Rebuilt only when
@@ -253,6 +282,8 @@ impl PhysicsBridge3D {
             terrain_audit: TerrainColliderAudit::default(),
             fracture_stamps: BTreeMap::new(),
             collider_to_guid: BTreeMap::new(),
+            collider_refusals: 0,
+            warned_colliders: BTreeSet::new(),
             water: WaterIndex::default(),
             water_stamps: Vec::new(),
             water_scratch: Vec::new(),
@@ -262,6 +293,62 @@ impl PhysicsBridge3D {
             swimming: BTreeMap::new(),
             water_events: Vec::new(),
         }
+    }
+
+    /// **The one door every collider attach goes through** (C4-30).
+    ///
+    /// Returns `(handle, achieved descriptor, refused descriptor)` — the second
+    /// and third are the honest record. Exactly one of them is `Some` when a
+    /// collider was wanted; both are `None` when none was.
+    ///
+    /// A refusal is counted, and logged **once per entity** rather than once per
+    /// fixed step: the same non-manifold chunk is re-described by the voxel
+    /// stamp machinery whenever a neighbour moves, and a log line per step is a
+    /// log nobody reads.
+    fn attach_collider(
+        &mut self,
+        guid: Uuid,
+        body: BodyId3D,
+        want: Option<&ColliderDesc3D>,
+    ) -> (
+        Option<ColliderId3D>,
+        Option<ColliderDesc3D>,
+        Option<ColliderDesc3D>,
+    ) {
+        let Some(desc) = want else {
+            return (None, None, None);
+        };
+        match self.world.try_add_collider(body, desc.clone()) {
+            Ok(id) => (Some(id), Some(desc.clone()), None),
+            Err(why) => {
+                self.collider_refusals += 1;
+                if self.warned_colliders.insert(guid) {
+                    tracing::warn!(
+                        entity = %guid,
+                        reason = why,
+                        "collider could not be built; this entity has a rigid body and \
+                         nothing to collide with until its shape changes"
+                    );
+                }
+                (None, None, Some(desc.clone()))
+            }
+        }
+    }
+
+    /// How many collider builds this bridge has refused since it was created
+    /// (C4-30). Zero on a healthy level.
+    pub fn collider_refusals(&self) -> u64 {
+        self.collider_refusals
+    }
+
+    /// The entities that asked for a collider and have none, in `Guid` order
+    /// (C4-30) — the *world's* answer, not a report of it.
+    pub fn entities_missing_colliders(&self) -> Vec<Uuid> {
+        self.entities
+            .iter()
+            .filter(|(_, r)| r.collider.is_none() && r.col_refused.is_some())
+            .map(|(g, _)| *g)
+            .collect()
     }
 
     /// The wrapped physics world (for scene queries, contact-event drain, etc.).
@@ -1008,6 +1095,7 @@ impl PhysicsBridge3D {
                 let rec_kind = rec.kind;
                 let rec_rb = rec.rb;
                 let rec_col = rec.col.clone();
+                let rec_refused = rec.col_refused.clone();
                 let old_collider = rec.collider;
                 let body = rec.body;
 
@@ -1030,18 +1118,20 @@ impl PhysicsBridge3D {
                         r.rb = snap.body;
                     }
                 }
-                if rec_col != snap.collider {
-                    // Rebuild the collider so shape/material edits take effect.
+                // Rebuild the collider so shape/material edits take effect —
+                // unless this exact descriptor has already been tried and
+                // refused, in which case retrying is a pure function returning
+                // the same answer at trimesh-topology cost per step (C4-30).
+                if rec_col != snap.collider && rec_refused != snap.collider {
                     if let Some(old) = old_collider {
                         self.world.remove_collider(old);
                     }
-                    let new_col = snap
-                        .collider
-                        .as_ref()
-                        .and_then(|c| self.world.add_collider(body, c.clone()));
+                    let (new_col, achieved, refused) =
+                        self.attach_collider(snap.guid, body, snap.collider.as_ref());
                     if let Some(r) = self.entities.get_mut(&snap.guid) {
                         r.collider = new_col;
-                        r.col = snap.collider.clone();
+                        r.col = achieved;
+                        r.col_refused = refused;
                     }
                 }
             } else {
@@ -1050,10 +1140,8 @@ impl PhysicsBridge3D {
                 if let Some(rb) = snap.body.as_ref() {
                     apply_rb_props(&mut self.world, body, rb);
                 }
-                let collider = snap
-                    .collider
-                    .as_ref()
-                    .and_then(|c| self.world.add_collider(body, c.clone()));
+                let (collider, achieved, refused) =
+                    self.attach_collider(snap.guid, body, snap.collider.as_ref());
                 self.entities.insert(
                     snap.guid,
                     BodyRecord {
@@ -1061,7 +1149,8 @@ impl PhysicsBridge3D {
                         collider,
                         kind,
                         rb: snap.body,
-                        col: snap.collider.clone(),
+                        col: achieved,
+                        col_refused: refused,
                         joint: None,
                     },
                 );

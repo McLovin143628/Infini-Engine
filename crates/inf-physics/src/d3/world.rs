@@ -168,13 +168,30 @@ pub enum ColliderShape3D {
     },
 }
 
+/// **Why a collider could not be built** — the sentence a refusal is allowed to
+/// say out loud (C4-30).
+///
+/// Every one of these used to be a bare `None`. The bridge then recorded the
+/// *desired* descriptor as the *achieved* one and moved on, so an entity kept a
+/// rigid body with no collider and nothing anywhere said why: no log, no
+/// counter, no advisory. The symptom a player sees is walking through a cave
+/// wall, and the symptom an author sees is nothing at all.
+///
+/// A `&'static str` rather than an enum because the only consumer is a log line
+/// and a counter, and the reason has to be readable by somebody who is holding a
+/// mesh, not this source file.
+pub type ColliderRefusal = &'static str;
+
 impl ColliderShape3D {
-    /// Build the rapier shape. Returns `None` when the shape's buffers cannot
-    /// make a collider — a degenerate `Trimesh` (empty / non-manifold) or a
-    /// degenerate `ConvexHull` (see [`convex_hull_is_buildable`]) — so
-    /// [`PhysicsWorld3D::add_collider`] can refuse it rather than panic.
-    pub(crate) fn to_shared(&self) -> Option<SharedShape> {
-        Some(match self {
+    /// Build the rapier shape, or say why not.
+    ///
+    /// The refusals are real and reachable, not defensive padding:
+    /// `FIX_INTERNAL_EDGES` needs half-edge topology, which **fails on exactly
+    /// the non-manifold output that Surface-Nets voxel chunks and Voronoi
+    /// fracture hulls produce** — this repo's own seam-chord law measured ~10 %
+    /// of meshes as affected.
+    pub(crate) fn to_shared_checked(&self) -> Result<SharedShape, ColliderRefusal> {
+        Ok(match self {
             ColliderShape3D::Sphere { radius } => SharedShape::ball(*radius),
             ColliderShape3D::Box { half_extents } => {
                 SharedShape::cuboid(half_extents.x, half_extents.y, half_extents.z)
@@ -185,7 +202,20 @@ impl ColliderShape3D {
             } => SharedShape::capsule_y(*half_height, *radius),
             ColliderShape3D::Trimesh { vertices, indices } => {
                 if vertices.is_empty() || indices.is_empty() {
-                    return None;
+                    return Err("trimesh: empty vertex or index buffer");
+                }
+                // **parry PANICS on an index outside the vertex buffer** — it
+                // indexes `vertices[i]` inside `TriMesh::new`, so this is not a
+                // `Result` it hands back (measured against parry3d-f64 0.29:
+                // `trimesh.rs:1280`). Every producer of this shape is internal
+                // (the Surface-Nets mesher, the Voronoi fracture builder, the
+                // DCC exporter), so an out-of-range index is an engine bug
+                // rather than a hostile file — but "an engine bug takes the
+                // process down mid-step" is not the failure mode this bridge
+                // wants, and it is the one shape whose buffers are a pair.
+                let n = vertices.len() as u32;
+                if indices.iter().flatten().any(|&i| i >= n) {
+                    return Err("trimesh: an index addresses outside the vertex buffer");
                 }
                 let verts: Vec<DVec3> = vertices.clone();
                 // The same internal-edge fix the height field above needs, and
@@ -202,17 +232,30 @@ impl ColliderShape3D {
                     indices.clone(),
                     TriMeshFlags::FIX_INTERNAL_EDGES,
                 )
-                .ok()?
+                .map_err(|_| {
+                    "trimesh: parry could not build half-edge topology \
+                     (FIX_INTERNAL_EDGES needs a manifold surface)"
+                })?
             }
-            ColliderShape3D::ConvexHull { points } => hull_shape(points)?,
+            ColliderShape3D::ConvexHull { points } => {
+                hull_shape(points).ok_or("convex hull: no four non-coplanar points")?
+            }
             ColliderShape3D::Heightfield {
                 samples_x,
                 samples_z,
                 heights,
                 removed_cells,
                 span,
-            } => heightfield_shape(*samples_x, *samples_z, heights, removed_cells, *span)?,
+            } => heightfield_shape(*samples_x, *samples_z, heights, removed_cells, *span)
+                .ok_or("heightfield: sample counts, buffer lengths or span are not usable")?,
         })
+    }
+
+    /// Build the rapier shape, discarding the reason. See
+    /// [`to_shared_checked`](Self::to_shared_checked) — this exists for the
+    /// callers that have nowhere to put one.
+    pub(crate) fn to_shared(&self) -> Option<SharedShape> {
+        self.to_shared_checked().ok()
     }
 
     /// The shape's **volume in m³**, or `None` for a shape that has no
@@ -884,11 +927,24 @@ impl PhysicsWorld3D {
 
     /// Attach a collider to a body. Returns `None` if the body handle is invalid
     /// or the shape could not be built (a degenerate trimesh).
+    ///
+    /// Prefer [`try_add_collider`](Self::try_add_collider) anywhere the refusal
+    /// can be reported: this spelling throws away the one fact that makes a
+    /// missing collider diagnosable.
     pub fn add_collider(&mut self, body: BodyId3D, desc: ColliderDesc3D) -> Option<ColliderId3D> {
+        self.try_add_collider(body, desc).ok()
+    }
+
+    /// Attach a collider to a body, **or say why not** (C4-30).
+    pub fn try_add_collider(
+        &mut self,
+        body: BodyId3D,
+        desc: ColliderDesc3D,
+    ) -> Result<ColliderId3D, ColliderRefusal> {
         if !self.bodies.contains(body.0) {
-            return None;
+            return Err("no such body");
         }
-        let shape = desc.shape.to_shared()?;
+        let shape = desc.shape.to_shared_checked()?;
         let collider = ColliderBuilder::new(shape)
             .friction(desc.friction)
             .restitution(desc.restitution)
@@ -908,7 +964,7 @@ impl PhysicsWorld3D {
             .colliders
             .insert_with_parent(collider, body.0, &mut self.bodies);
         self.query_dirty = true;
-        Some(ColliderId3D(handle))
+        Ok(ColliderId3D(handle))
     }
 
     /// Destroy a collider. Returns `false` if the handle was already invalid.
