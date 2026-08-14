@@ -92,6 +92,17 @@ pub struct VtCoverage {
     pub radius: f32,
     /// The three slots this surface samples (`handle + 1`, 0 = none).
     pub set: VtTextureSet,
+    /// Whether this surface is drawn by the **meshlet** path (P28.1).
+    ///
+    /// It exists so `feedback_requests` can hand the meshlet set to the
+    /// per-FRAGMENT producer instead of marking it per surface — which is what
+    /// makes `docs/memos/p26-4-feedback-mechanism.md`'s three losses actually
+    /// *recovered* rather than merely also-covered. A union of a coarse mark and
+    /// a precise one is the coarse mark. `analytic_floor` ignores this field
+    /// entirely: the floor covers every surface whatever draws it, which is the
+    /// property that lets a dropped mask degrade to exactly the analytic
+    /// residency.
+    pub vgeom: bool,
 }
 
 /// Pop-in instrumentation (P26.4, clause 5) — **per tile class**, because the two
@@ -264,6 +275,7 @@ pub fn scene_coverage(scene: &RenderScene, origin: &inf_math::FloatingOrigin) ->
             centre: origin.to_render(i.translation),
             radius: UNIT_RADIUS * i.scale.abs().max_element().max(1e-4),
             set: i.vt,
+            vgeom: false,
         });
     }
     let bounds: BTreeMap<u128, f32> = scene
@@ -280,6 +292,7 @@ pub fn scene_coverage(scene: &RenderScene, origin: &inf_math::FloatingOrigin) ->
             centre: origin.to_render(i.translation),
             radius: r * i.scale.abs().max_element().max(1e-4),
             set: i.vt,
+            vgeom: true,
         });
     }
     for i in &scene.skinned {
@@ -290,6 +303,7 @@ pub fn scene_coverage(scene: &RenderScene, origin: &inf_math::FloatingOrigin) ->
             centre: origin.to_render(i.translation),
             radius: UNIT_RADIUS * i.scale.abs().max_element().max(1e-4),
             set: i.vt,
+            vgeom: false,
         });
     }
     out
@@ -396,13 +410,26 @@ pub struct FeedbackParams {
 /// itself a stable function of the scene. The mask does not care (OR is
 /// order-independent), and a deterministic upload keeps the *command stream*
 /// comparable between runs, which the golden harness does care about.
+///
+/// **`skip_vgeom` is P28.1's handover.** With the visibility buffer on, meshlet
+/// surfaces are marked per FRAGMENT by `vis_feedback.wgsl` — with occlusion, with
+/// the uv extent a pixel actually reached, and with a level per screen region
+/// rather than one per surface. Leaving their per-surface requests in as well
+/// would put the coarse marks back into the same mask, and a union with a coarse
+/// mark is a coarse mark. The **floor** is untouched either way, so a frame that
+/// refuses the visibility path, or a mask that never arrives, still lands on
+/// exactly the analytic residency.
 pub fn feedback_requests(
     lib: &VtTextures,
     layout: &VtFeedbackLayout,
     coverage: &[VtCoverage],
+    skip_vgeom: bool,
 ) -> Vec<FeedbackRequest> {
     let mut out = Vec::new();
     for c in coverage {
+        if skip_vgeom && c.vgeom {
+            continue;
+        }
         for slot in c.set.slots() {
             if slot == 0 {
                 continue;
@@ -574,7 +601,11 @@ impl VtFeedback {
     /// ring gets no copy, so the read two frames later misses and the floor
     /// stands — the same degradation as a late mask).
     ///
-    /// Nine arguments, and bundling them would hide the two that matter. The
+    /// The frame index left with the ring copy in P28.1 — this function no
+    /// longer hands anything to the ring, so a frame number here would be an
+    /// argument nothing reads. See [`finish`](Self::finish).
+    ///
+    /// Eight arguments, and bundling them would hide the two that matter. The
     /// table and its **generation** travel together on purpose: a bind group
     /// cached across a re-creation of the indirection buffer marks bits against
     /// a table from before the new texture existed, which is the same hazard
@@ -594,9 +625,14 @@ impl VtFeedback {
         table_generation: u64,
         view: &RenderView,
         requests: &[FeedbackRequest],
-        frame: u64,
     ) -> u32 {
         let count = (requests.len() as u32).min(self.request_cap);
+        // Cleared UNCONDITIONALLY (P28.1), and before the early return. A second
+        // producer marks into this buffer from inside the render graph, so "no
+        // per-surface requests this frame" must still mean "the mask starts from
+        // zero" — otherwise a scene whose only textured surfaces are meshlets
+        // would OR its per-fragment marks into whatever the last frame left.
+        encoder.clear_buffer(&self.mask, 0, None);
         if count == 0 {
             return 0;
         }
@@ -652,7 +688,6 @@ impl VtFeedback {
             });
             self.bind = Some((table_generation, bind));
         }
-        encoder.clear_buffer(&self.mask, 0, None);
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("vt-feedback"),
@@ -662,8 +697,39 @@ impl VtFeedback {
             pass.set_bind_group(0, &self.bind.as_ref().expect("just built").1, &[]);
             pass.dispatch_workgroups(count.div_ceil(64).max(1), 1, 1);
         }
-        self.ring.record(encoder, &self.mask, frame);
         count
+    }
+
+    /// **Hand the mask to the ring**, after every producer has marked into it.
+    ///
+    /// Split out of [`record`](Self::record) in P28.1, and the split is the whole
+    /// mechanism by which a SECOND producer became possible. `record` runs at the
+    /// frame's sync point, before the render graph; the per-fragment marker
+    /// (`vis_feedback.wgsl`) runs inside it, from a visibility buffer that does
+    /// not exist yet when `record` is called. With the copy still inside `record`
+    /// the per-fragment marks would land in the mask *after* it had been read,
+    /// and would reach the streamer one frame late or not at all.
+    ///
+    /// So the sequence is now clear → per-surface dispatch → (graph, including
+    /// the per-fragment dispatch) → copy, all in **one encoder and one submit**.
+    /// The latency the ring pins is unchanged: frame `k`'s mask is still read at
+    /// `k + 2` and never "whenever it resolves".
+    ///
+    /// `dispatched` is [`record`](Self::record)'s return: zero means nothing was
+    /// recorded, the ring gets no copy, and the read two frames later misses —
+    /// the same degradation as a late mask, and the behaviour `record` had when
+    /// it owned this line.
+    pub fn finish(&mut self, encoder: &mut wgpu::CommandEncoder, frame: u64, dispatched: u32) {
+        if dispatched == 0 {
+            return;
+        }
+        self.ring.record(encoder, &self.mask, frame);
+    }
+
+    /// The mask buffer itself — what a second producer marks into.
+    #[inline]
+    pub fn mask(&self) -> &wgpu::Buffer {
+        &self.mask
     }
 }
 

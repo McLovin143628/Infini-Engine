@@ -29,6 +29,7 @@ pub mod tonemap;
 pub mod translucent;
 pub mod underwater;
 pub mod vgeom;
+pub mod visbuffer;
 pub mod voxel;
 pub mod water;
 
@@ -470,6 +471,24 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
         "scatter_cull",
         include_str!("../shaders/scatter_cull.wgsl"),
         ShaderKind::HzbCull,
+    ),
+    (
+        "visbuffer",
+        include_str!("../shaders/visbuffer.wgsl"),
+        // Plain (P28.1): the visibility raster shades nothing. It writes an id
+        // and a depth, so it binds view + its own pool group and neither lights
+        // nor the environment — which is what makes it cheap enough to be worth
+        // running before the shading it feeds.
+        ShaderKind::Plain,
+    ),
+    (
+        "vis_resolve",
+        include_str!("../shaders/vis_resolve.wgsl"),
+        // Lit(2) (P28.1): the material-resolve pass is where every lit input
+        // the forward meshlet fragment stage reads has to arrive — the shadow
+        // receiver, the virtual textures, the GI, the atmosphere — through the
+        // SAME env group, at the same index the forward path uses.
+        ShaderKind::Lit(2),
     ),
     (
         "scatter_mesh",
@@ -1428,6 +1447,13 @@ mod shader_compose_tests {
             // compiles is validated here", and `vt_feedback` was validated only
             // by a device that happened to be present.
             ("vt_feedback", include_str!("../shaders/vt_feedback.wgsl")),
+            // P28.1's per-FRAGMENT twin of the line above. Standalone for the
+            // same reason and one more: composing it would prepend
+            // `common_view.wgsl`, whose `view` uniform sits at the `@group(0)
+            // @binding(0)` this pass's own params occupy — and a resolve pass
+            // that had to renumber around a prelude it never calls would be
+            // carrying the coupling it exists to avoid.
+            ("vis_feedback", include_str!("../shaders/vis_feedback.wgsl")),
             ("vsm_mark", include_str!("../shaders/vsm_mark.wgsl")),
             // P27.2's three: the per-page cull compute and the page rasters. Each
             // owns its own `@group(0)` and prepends nothing (a page has no camera),

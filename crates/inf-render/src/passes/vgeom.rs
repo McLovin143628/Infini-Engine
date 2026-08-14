@@ -1328,6 +1328,21 @@ pub struct VgeomNode {
     prev_view: Option<RenderView>,
     /// Published streaming state (shared with the renderer).
     report: SharedStreamReport,
+    /// The view layout, kept so the P28.1 visibility path can build its own
+    /// pipelines the first time it is asked for one.
+    view_bgl: wgpu::BindGroupLayout,
+    /// The lights layout, kept for the same reason.
+    lights_bgl: wgpu::BindGroupLayout,
+    /// P28.1's visibility-buffer resources, built **lazily**: three pipelines and
+    /// two viewport-sized targets are not free, and the mode is off by default on
+    /// every tier. A renderer that never turns it on pays exactly what it paid
+    /// before this batch — which is also what keeps every existing headless test's
+    /// construction cost, and its command stream, unchanged.
+    vis: Option<super::visbuffer::VisState>,
+    /// The per-asset instance bases the last visibility frame assigned, published
+    /// so a test can name the flat index a pixel's id decodes to without
+    /// re-deriving the asset order.
+    vis_bases: Vec<(u128, u32)>,
 }
 
 impl VgeomNode {
@@ -1377,6 +1392,11 @@ impl VgeomNode {
         });
 
         let env = super::EnvBinding::new(gpu);
+        // Kept (P28.1) so the resolve pipeline's layout can name the SAME lights
+        // layout `lights_bg` was built against, rather than a structurally equal
+        // twin — "compatible" is a wgpu-internal judgement and a pipeline layout
+        // is not the place to rely on one.
+        let lights_bgl_kept = lights_bgl.clone();
 
         // Group 3: the vgeom storage buffers (vertex-visible) + flags uniform.
         let vs = wgpu::ShaderStages::VERTEX;
@@ -1514,7 +1534,23 @@ impl VgeomNode {
             hzb: HzbChain::new(gpu),
             prev_view: None,
             report,
+            view_bgl: view_bgl.clone(),
+            lights_bgl: lights_bgl_kept,
+            vis: None,
+            vis_bases: Vec::new(),
         }
+    }
+
+    /// The P28.1 visibility path's audit counters — zero until a frame turns the
+    /// mode on, and the *reason* a frame did not take it once one has.
+    pub fn vis_audit(&self) -> super::visbuffer::VisAudit {
+        self.vis.as_ref().map(|v| v.audit).unwrap_or_default()
+    }
+
+    /// The per-asset bases the last visibility frame assigned into the flat
+    /// instance table, in the deterministic asset order the raster walked.
+    pub fn vis_instance_bases(&self) -> &[(u128, u32)] {
+        &self.vis_bases
     }
 
     // The streamer's state is published through `report` each frame rather than
@@ -1599,6 +1635,85 @@ impl RenderNode for VgeomNode {
             }
         }
 
+        // ── P28.1: the FLAT instance table ──────────────────────────────────
+        //
+        // Every drawn asset's packed instances, concatenated in the same
+        // deterministic asset order the raster loops walk, so `base + local` is
+        // the global index the visibility packing stores. It is built here — once
+        // — and the per-asset buffers are written from SLICES of it, which is what
+        // makes "the flat table and the per-asset table agree" true by
+        // construction rather than by a second call to `pack_instance`. The
+        // forward path's bytes are unchanged: it writes the same records it always
+        // did, from a different place.
+        //
+        // Built unconditionally, because the alternative is two derivations that
+        // agree only while nobody edits one of them (the P21 one-door law).
+        let mut flat: Vec<VgeomInstanceGpu> = Vec::new();
+        let mut flat_at: BTreeMap<u128, (u32, u32)> = BTreeMap::new();
+        let mut max_tri_all = 0u32;
+        for (asset_id, insts) in &by_asset {
+            let Some(source) = source_of.get(asset_id) else {
+                continue;
+            };
+            let Some(residency) = self.streamer.residency(*asset_id) else {
+                continue;
+            };
+            if source.meshlet_count() == 0
+                || source.max_tri() == 0
+                || residency.resident_pages() == 0
+            {
+                continue;
+            }
+            let bounds = source.bounds();
+            let base = flat.len() as u32;
+            flat.extend(
+                insts
+                    .iter()
+                    .map(|i| pack_instance(&origin, frame.view, bounds, i, settings.pixel_error)),
+            );
+            flat_at.insert(*asset_id, (base, insts.len() as u32));
+            max_tri_all = max_tri_all.max(source.max_tri());
+        }
+
+        // ── P28.1: the admission door ───────────────────────────────────────
+        //
+        // A pure function of the committed scene and the streamer's residency, so
+        // two runs of one scripted path refuse on exactly the same frames. A
+        // refusal is not a failure: the frame renders through the forward meshlet
+        // raster, which P28.1 keeps precisely so there is somewhere to fall back
+        // to, and the counter says which ceiling.
+        let mut vis_on = false;
+        if settings.visbuffer {
+            if self.vis.is_none() {
+                self.vis = Some(super::visbuffer::VisState::new(
+                    gpu,
+                    &self.view_bgl,
+                    &self.lights_bgl,
+                    &self.env.bgl,
+                ));
+            }
+            let pool_bytes = self.pools.sizes[1];
+            let vis = self.vis.as_mut().expect("built above");
+            vis.ensure_targets(gpu, frame);
+            vis.ensure_instances(
+                gpu,
+                flat.len() as u32,
+                std::mem::size_of::<VgeomInstanceGpu>() as u64,
+            );
+            vis.ensure_flags(gpu, flat_at.len());
+            if vis
+                .admit(flat.len() as u32, pool_bytes, max_tri_all)
+                .is_ok()
+            {
+                vis.audit.frames += 1;
+                vis_on = true;
+                if !flat.is_empty() {
+                    gpu.queue
+                        .write_buffer(&vis.instances, 0, bytemuck::cast_slice(&flat));
+                }
+            }
+        }
+
         // Disjoint field borrows: the HZB build below needs `&mut self.hzb` while
         // the asset loops hold `&self.pools` / `&mut self.draws`.
         let Self {
@@ -1615,7 +1730,12 @@ impl RenderNode for VgeomNode {
             hzb: hzb_chain,
             prev_view,
             report: _,
+            view_bgl: _,
+            lights_bgl: _,
+            vis,
+            vis_bases,
         } = self;
+        vis_bases.clear();
 
         // Lights (shared with the rigid pass).
         let lights =
@@ -1748,6 +1868,10 @@ impl RenderNode for VgeomNode {
         // result and pass 2 adds nothing (see the module docs).
         // Per asset: (id, conservative, meshlet_count, floor_lod, residency generation).
         let mut planned: Vec<(u128, bool, u32, u32, u64)> = Vec::new();
+        // The visibility buffer and its depth are cleared by the FIRST draw of
+        // the frame and loaded by every one after — the same shape the forward
+        // path's `LoadOp::Load` into the shared scene targets has, one level down.
+        let mut vis_cleared = false;
         for (asset_id, insts) in &by_asset {
             let Some(source) = source_of.get(asset_id) else {
                 continue;
@@ -1803,14 +1927,28 @@ impl RenderNode for VgeomNode {
                 key.residency_generation,
             ));
 
-            // Pack instances (per-frame; the LOD threshold tracks the camera).
-            let bounds = source.bounds();
-            let packed: Vec<VgeomInstanceGpu> = insts
-                .iter()
-                .map(|i| pack_instance(&origin, frame.view, bounds, i, settings.pixel_error))
-                .collect();
+            // The per-asset instance buffer is a SLICE of the flat table built
+            // above (P28.1) — one `pack_instance` call per instance per frame, as
+            // before, from one place instead of two.
+            let (flat_base, flat_count) = flat_at[asset_id];
+            let packed = &flat[flat_base as usize..(flat_base + flat_count) as usize];
             gpu.queue
-                .write_buffer(&draw.instances, 0, bytemuck::cast_slice(&packed));
+                .write_buffer(&draw.instances, 0, bytemuck::cast_slice(packed));
+            let vis_slot = match (vis_on, vis.as_ref()) {
+                (true, Some(v)) => {
+                    let slot = vis_bases.len();
+                    gpu.queue.write_buffer(
+                        &v.flags[slot],
+                        0,
+                        bytemuck::bytes_of(&super::visbuffer::VisFlagsGpu {
+                            flags: [flat_base, 0, 0, 0],
+                        }),
+                    );
+                    vis_bases.push((*asset_id, flat_base));
+                    Some(slot)
+                }
+                _ => None,
+            };
 
             // Reset draw args: vertex_count = max_tri*3, instance_count = 0.
             // `max_tri` is the header's whole-mesh maximum, so the draw shape is a
@@ -1871,17 +2009,44 @@ impl RenderNode for VgeomNode {
                 pass.set_bind_group(0, &cull_bg, &[]);
                 pass.dispatch_workgroups(total.div_ceil(64).max(1), 1, 1);
             }
-            raster_draw(
-                encoder,
-                "vgeom-raster-early",
-                pools,
-                draw,
-                &draw.visible,
-                &draw.draw_args,
-            );
+            match (vis_slot, vis.as_ref()) {
+                (Some(slot), Some(v)) => {
+                    vis_raster_draw(
+                        gpu,
+                        encoder,
+                        "visbuffer-early",
+                        v,
+                        pools,
+                        &v.flags[slot],
+                        &draw.visible,
+                        &draw.remap,
+                        &draw.draw_args,
+                        frame.view_bg,
+                        !vis_cleared,
+                    );
+                    vis_cleared = true;
+                }
+                _ => raster_draw(
+                    encoder,
+                    "vgeom-raster-early",
+                    pools,
+                    draw,
+                    &draw.visible,
+                    &draw.draw_args,
+                ),
+            }
         }
 
         if !two_pass {
+            // …and so does the resolve: this is a whole frame's visibility, not
+            // half of one. A `return` that skipped it would leave the meshlet
+            // geometry rasterized into an id buffer nothing ever shaded — a black
+            // hole in the frame that no assertion about the buffer could see.
+            if vis_cleared {
+                if let Some(v) = vis.as_ref() {
+                    vis_resolve_and_feedback(gpu, encoder, v, pools, frame, lights_bg, &env_bg);
+                }
+            }
             // Single-pass still fills the counters (its one dispatch sees every
             // pair), so the readback has to be recorded on this exit too.
             if audit {
@@ -1950,14 +2115,33 @@ impl RenderNode for VgeomNode {
             // skipped on the CPU — the drawn set lives entirely on the GPU, and a
             // CPU-side assumption about it is exactly the kind of shortcut that
             // turns into missing geometry.
-            raster_draw(
-                encoder,
-                "vgeom-raster-late",
-                pools,
-                draw,
-                &draw.visible_late,
-                &draw.draw_args_late,
-            );
+            let vis_slot = vis_bases.iter().position(|(a, _)| *a == asset_id);
+            match (vis_slot, vis.as_ref()) {
+                (Some(slot), Some(v)) if vis_on => {
+                    vis_raster_draw(
+                        gpu,
+                        encoder,
+                        "visbuffer-late",
+                        v,
+                        pools,
+                        &v.flags[slot],
+                        &draw.visible_late,
+                        &draw.remap,
+                        &draw.draw_args_late,
+                        frame.view_bg,
+                        !vis_cleared,
+                    );
+                    vis_cleared = true;
+                }
+                _ => raster_draw(
+                    encoder,
+                    "vgeom-raster-late",
+                    pools,
+                    draw,
+                    &draw.visible_late,
+                    &draw.draw_args_late,
+                ),
+            }
 
             // Ping-pong: what the late dispatch just published becomes next
             // frame's early set. The bind groups above hold their own references,
@@ -1974,6 +2158,12 @@ impl RenderNode for VgeomNode {
             });
         }
 
+        if vis_cleared {
+            if let Some(v) = vis.as_ref() {
+                vis_resolve_and_feedback(gpu, encoder, v, pools, frame, lights_bg, &env_bg);
+            }
+        }
+
         if audit {
             encoder.copy_buffer_to_buffer(
                 &frame.vgeom_audit.stats,
@@ -1984,6 +2174,281 @@ impl RenderNode for VgeomNode {
             );
         }
     }
+}
+
+// ── P28.1: the three visibility passes ───────────────────────────────────────
+
+/// One asset's indirect draw into the visibility buffer.
+///
+/// A free function rather than a closure because the closure the forward path
+/// uses captures `env_bg`/`lights_bg` by reference, and this one has to be
+/// callable while `vis` is borrowed for its per-asset flags uniform. Every
+/// argument is spelled out for the P27.3 reason: a struct is where a field
+/// becomes easy to forget to fill.
+#[allow(clippy::too_many_arguments)]
+fn vis_raster_draw(
+    gpu: &GpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    label: &str,
+    vis: &super::visbuffer::VisState,
+    pools: &VgeomPoolBuffers,
+    flags: &wgpu::Buffer,
+    visible: &wgpu::Buffer,
+    remap: &wgpu::Buffer,
+    args: &wgpu::Buffer,
+    view_bg: &wgpu::BindGroup,
+    clear: bool,
+) {
+    let Some(targets) = vis.targets.as_ref() else {
+        return;
+    };
+    let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("visbuffer-raster"),
+        layout: &vis.raster_bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: pools.vertices.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: pools.meshlets.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: pools.mlverts.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: pools.mltris.as_entire_binding(),
+            },
+            // The FLAT table, not this asset's slice: the id the raster writes is
+            // a global index, so the buffer it indexes has to be the global one.
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: vis.instances.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: visible.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: flags.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: remap.as_entire_binding(),
+            },
+        ],
+    });
+    let color_ops = wgpu::Operations {
+        // `VIS_EMPTY` is zero, which the packing's `instance + 1` bias makes
+        // unreachable from a real fragment — so "clear to zero" and "no geometry
+        // here" are the same statement rather than two that have to be kept in
+        // step.
+        load: if clear {
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+        } else {
+            wgpu::LoadOp::Load
+        },
+        store: wgpu::StoreOp::Store,
+    };
+    let depth_ops = wgpu::Operations {
+        load: if clear {
+            wgpu::LoadOp::Clear(crate::camera::DEPTH_CLEAR)
+        } else {
+            wgpu::LoadOp::Load
+        },
+        store: wgpu::StoreOp::Store,
+    };
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &targets.color,
+            resolve_target: None,
+            depth_slice: None,
+            ops: color_ops,
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &targets.depth,
+            depth_ops: Some(depth_ops),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(&vis.raster);
+    pass.set_bind_group(0, view_bg, &[]);
+    pass.set_bind_group(1, &bg, &[]);
+    pass.draw_indirect(args, 0);
+}
+
+/// The material-resolve pass and the per-fragment feedback, in that order.
+///
+/// Recorded once per frame after every visibility draw, and only when the frame
+/// actually rasterized one — a resolve over a buffer nothing wrote is a
+/// fullscreen pass that discards every pixel, which costs a dispatch and proves
+/// nothing.
+fn vis_resolve_and_feedback(
+    gpu: &GpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    vis: &super::visbuffer::VisState,
+    pools: &VgeomPoolBuffers,
+    frame: &FrameData,
+    lights_bg: &wgpu::BindGroup,
+    env_bg: &wgpu::BindGroup,
+) {
+    let Some(targets) = vis.targets.as_ref() else {
+        return;
+    };
+    let pool_entries = |first: u32| {
+        [
+            wgpu::BindGroupEntry {
+                binding: first,
+                resource: pools.vertices.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: first + 1,
+                resource: pools.meshlets.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: first + 2,
+                resource: pools.mlverts.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: first + 3,
+                resource: pools.mltris.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: first + 4,
+                resource: vis.instances.as_entire_binding(),
+            },
+        ]
+    };
+
+    // ── the resolve ─────────────────────────────────────────────────────────
+    let resolve_bg = {
+        let pool = pool_entries(1);
+        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("visbuffer-resolve"),
+            layout: &vis.resolve_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&targets.color),
+                },
+                pool[0].clone(),
+                pool[1].clone(),
+                pool[2].clone(),
+                pool[3].clone(),
+                pool[4].clone(),
+            ],
+        })
+    };
+    {
+        // Into the MSAA scene colour AND the MSAA scene depth, both LOADED: the
+        // resolve is one more opaque pass as far as everything downstream is
+        // concerned, and `@builtin(frag_depth)` is what puts the meshlet depth
+        // where translucency, water and the shadow marking expect to find it.
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("visbuffer-resolve"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &frame.targets.color_msaa,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &frame.targets.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&vis.resolve);
+        pass.set_bind_group(0, frame.view_bg, &[]);
+        pass.set_bind_group(1, lights_bg, &[]);
+        pass.set_bind_group(2, env_bg, &[]);
+        pass.set_bind_group(3, &resolve_bg, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    // ── the per-fragment virtual-texture feedback ───────────────────────────
+    let Some(fb) = frame.vt_feedback else {
+        return;
+    };
+    gpu.queue.write_buffer(
+        &vis.feedback_params,
+        0,
+        bytemuck::bytes_of(&super::visbuffer::VisFeedbackParamsGpu {
+            // The JITTERED matrix — the one the buffer above was rasterized
+            // with (the P27.1 law).
+            view_proj: frame.view_proj,
+            counts: [
+                targets.size.0,
+                targets.size.1,
+                fb.words,
+                fb.bases.len() as u32,
+            ],
+        }),
+    );
+    if !fb.bases.is_empty() {
+        gpu.queue
+            .write_buffer(&vis.feedback_bases, 0, bytemuck::cast_slice(fb.bases));
+    }
+    let pool = pool_entries(2);
+    let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("visbuffer-feedback"),
+        layout: &vis.feedback_bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: vis.feedback_params.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&targets.color),
+            },
+            pool[0].clone(),
+            pool[1].clone(),
+            pool[2].clone(),
+            pool[3].clone(),
+            pool[4].clone(),
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: fb.table.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: vis.feedback_bases.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: fb.mask.as_entire_binding(),
+            },
+        ],
+    });
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("visbuffer-feedback"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(&vis.feedback);
+    pass.set_bind_group(0, &bg, &[]);
+    pass.dispatch_workgroups(
+        targets.size.0.div_ceil(8).max(1),
+        targets.size.1.div_ceil(8).max(1),
+        1,
+    );
 }
 
 // ── HZB: reverse-Z min-depth pyramid from the MSAA scene depth ───────────────

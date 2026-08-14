@@ -84,6 +84,11 @@ impl RenderTier {
                 settings.vgeom.enabled = false;
                 settings.vgeom.occlusion = false;
                 settings.vgeom.two_pass = false;
+                // P28.1: and with the meshlet path gone the visibility buffer
+                // has nothing to rasterize. Cleared explicitly rather than left
+                // to ride on `enabled`, because a clamp that depends on another
+                // clamp's ordering is one edit away from being wrong.
+                settings.vgeom.visbuffer = false;
                 // P18.5: the same shape for scatter — the *mechanism* drops to the
                 // CPU-culled classic instanced path, the content still draws, and
                 // the bands pull in so a mid GPU pays for less of it.
@@ -97,6 +102,7 @@ impl RenderTier {
                 settings.vgeom.enabled = false;
                 settings.vgeom.occlusion = false;
                 settings.vgeom.two_pass = false;
+                settings.vgeom.visbuffer = false;
                 settings.scatter.gpu = false;
                 settings.scatter.occlusion = false;
                 settings.scatter.impostors = false;
@@ -223,6 +229,7 @@ impl RenderTier {
         settings.vgeom.enabled = false;
         settings.vgeom.occlusion = false;
         settings.vgeom.two_pass = false;
+        settings.vgeom.visbuffer = false;
         // A phone still draws its foliage — through the CPU-culled fallback, at a
         // third of the distance, with no impostor pass.
         settings.scatter.gpu = false;

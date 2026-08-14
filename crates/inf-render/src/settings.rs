@@ -312,6 +312,33 @@ pub struct VgeomSettings {
     pub cone_cull: bool,
     /// Frustum-sphere culling in the cull compute.
     pub frustum_cull: bool,
+    /// **Visibility-buffer shading** (P28.1). With it on the meshlet path
+    /// rasterizes `instance ⊕ meshlet ⊕ triangle` ids into a single-sample
+    /// `R32Uint` target and a fullscreen material-resolve pass shades from them;
+    /// with it off the forward meshlet raster shades in its own fragment stage,
+    /// exactly as it has since P13.1b.
+    ///
+    /// **OFF by default on every tier, and that is the P28.1 ruling rather than
+    /// a placeholder.** `docs/memos/p28-1-visbuffer.md` §5 carries the
+    /// measurement: the visibility buffer is single-sample by the ROADMAP's own
+    /// clause and the scene targets are a compile-time `SCENE_SAMPLES = 4`, so
+    /// meshlet silhouettes lose the 4x coverage the forward path resolves — a
+    /// loss TAA recovers and nothing else does, and
+    /// [`RenderSettings::taa`](crate::RenderSettings::taa) is itself off by
+    /// default for headless determinism. A default that turned one on without
+    /// the other would ship a visibly worse frame; a default that turned both on
+    /// would re-bless fifty-four byte-frozen goldens. So it is a setting, the
+    /// forward path stays the shipped default, and P28.3 revisits it when the
+    /// unified streamer makes the cost side of the ledger measurable.
+    ///
+    /// The forward path is also what a refused frame falls back to: see
+    /// [`crate::visbuffer::VisPacking::admit`], whose ceilings this mode is
+    /// admitted under every frame.
+    ///
+    /// Requires [`enabled`](VgeomSettings::enabled); clamped off below High by
+    /// [`RenderTier::apply`](crate::caps::RenderTier::apply) — which it inherits
+    /// for free, because Medium and Low clear `enabled` itself.
+    pub visbuffer: bool,
     /// Meshlet **streaming** budget (P18.2): the VRAM ceiling for the shared
     /// meshlet pools, the per-frame load cap, and the eviction hysteresis.
     ///
@@ -335,6 +362,7 @@ impl Default for VgeomSettings {
             two_pass: true,
             cone_cull: true,
             frustum_cull: true,
+            visbuffer: false,
             stream: inf_vgeom::VgeomStreamBudget::default(),
         }
     }

@@ -322,6 +322,16 @@ pub struct FrameData<'a> {
     /// bake node writes and the sky/lit passes sample. **Resizable** — its
     /// `generation` is part of the `EnvBinding` cache key.
     pub atmosphere: &'a AtmosphereResources,
+    /// **The matrix this frame's depth was rasterized with** — jittered whenever
+    /// TAA is on, and identical to what `view.view_proj` holds in the uniform.
+    ///
+    /// Exposed (P28.1) because a COMPUTE pass cannot read the view uniform: the
+    /// view bind group is vertex/fragment-visible, and a reconstruction that
+    /// rebuilt a projection from [`RenderView`] instead would land on a different
+    /// sub-pixel grid than its own buffer — the P27.1 jitter law, which the
+    /// shadow marking pass obeys by being handed `jvp.inverse()` for exactly the
+    /// same reason.
+    pub view_proj: [f32; 16],
     /// Jittered view-projection of the **previous** frame (TAA reprojection).
     pub taa_prev_view_proj: [f32; 16],
     /// False on the first frame / after a resize (history has nothing usable).
@@ -361,6 +371,30 @@ pub struct FrameData<'a> {
     /// no system, which is what keeps `params.w` at the `0.0` it has held since
     /// P7.1 and every pre-P27.4 golden byte-identical.
     pub vsm_light_slots: &'a [u32],
+    /// **The per-fragment virtual-texture feedback handover** (P28.1). `Some`
+    /// only when the frame has a live VT pool AND the visibility path is on, and
+    /// then it names the very mask `VtFeedback::record` cleared moments earlier
+    /// and `VtFeedback::finish` will hand to the ring after the graph. The
+    /// visibility pass ORs into it from inside the graph; nothing else does.
+    pub vt_feedback: Option<VtFeedbackFrame<'a>>,
+}
+
+/// What a graph node needs to mark virtual-texture tiles (P28.1).
+///
+/// A struct rather than four `FrameData` fields because the four are meaningless
+/// apart: a mask without its word count is unbounded, and a bit base table for a
+/// different layout addresses the wrong texture.
+#[derive(Clone, Copy)]
+pub struct VtFeedbackFrame<'a> {
+    /// The order-independent coverage bitmask (`inf_vt::feedback`'s layout).
+    pub mask: &'a wgpu::Buffer,
+    /// Per texture handle, the first mask bit — `VtFeedbackLayout::texture_base`.
+    pub bases: &'a [u32],
+    /// `VtFeedbackLayout::words`, the bound a marker must respect.
+    pub words: u32,
+    /// The indirection table the marks address through. The **same buffer** the
+    /// env group binds, so producer and sampler cannot disagree about a mip.
+    pub table: &'a wgpu::Buffer,
 }
 
 impl FrameData<'_> {
@@ -511,6 +545,12 @@ pub struct EngineRenderer {
     /// against the registry's bitmask layout and rebuilt when a registration
     /// grows it (a mask sized for four textures cannot address a fifth).
     vt_feedback: Option<crate::vt_stream::VtFeedback>,
+    /// Per texture handle, the first mask bit — recomputed with the layout, so a
+    /// registration that grows the mask cannot leave a stale base behind.
+    vt_feedback_bases: Vec<u32>,
+    /// Requests the per-surface pass dispatched this frame; `VtFeedback::finish`
+    /// hands the mask to the ring only when something produced marks.
+    vt_feedback_dispatched: u32,
     /// P26.4 pop-in instruments — per tile class. See [`crate::VtPopIn`].
     vt_pop_in: crate::VtPopIn,
     /// The empty VT surface, created once and never recreated (so it adds no
@@ -747,6 +787,8 @@ impl EngineRenderer {
             vt: None,
             vt_textures: None,
             vt_feedback: None,
+            vt_feedback_bases: Vec::new(),
+            vt_feedback_dispatched: 0,
             vt_pop_in: crate::VtPopIn::default(),
             vt_absent: crate::vt::VtEmptyPool::new(&gpu.device),
             vt_engaged_frames: 0,
@@ -893,6 +935,17 @@ impl EngineRenderer {
                 layout,
                 VT_FEEDBACK_REQUEST_CAP,
             ));
+            // Recomputed WITH the layout, never beside it: the bases are a pure
+            // function of the layout, and a stale one addresses another
+            // texture's tiles — a mark that lands on the wrong bit is a page
+            // streamed for a surface that never asked.
+            let l = self.vt_feedback.as_ref().expect("just built").layout();
+            self.vt_feedback_bases = (0..l.texture_count())
+                .map(|t| {
+                    l.texture_base(inf_vt::VtTextureHandle(t as u32))
+                        .unwrap_or(0)
+                })
+                .collect();
         }
         let feedback = self.vt_feedback.as_mut().expect("just built");
 
@@ -923,8 +976,14 @@ impl EngineRenderer {
 
         // 5. record the next feedback pass. The table it reads is the one the
         // transaction above just wrote, which is why this is last.
-        let requests = crate::vt_stream::feedback_requests(lib, feedback.layout(), &coverage);
-        feedback.record(
+        //
+        // With the visibility path on, the meshlet surfaces are handed to the
+        // per-FRAGMENT producer inside the graph instead (P28.1) — see
+        // `feedback_requests`' `skip_vgeom`.
+        let skip_vgeom = self.settings.vgeom.enabled && self.settings.vgeom.visbuffer;
+        let requests =
+            crate::vt_stream::feedback_requests(lib, feedback.layout(), &coverage, skip_vgeom);
+        self.vt_feedback_dispatched = feedback.record(
             &gpu.device,
             &gpu.queue,
             encoder,
@@ -932,7 +991,6 @@ impl EngineRenderer {
             pools.table_generation(),
             view,
             &requests,
-            frame,
         );
     }
 
@@ -1468,6 +1526,7 @@ impl EngineRenderer {
             post_hdr,
             taa_history_prev: &targets.taa_history[prev],
             taa_history_cur: &targets.taa_history[cur],
+            view_proj: jvp.to_cols_array(),
             taa_prev_view_proj: prev_vp,
             taa_history_valid: history_valid,
             shadow: &self.shadow,
@@ -1484,8 +1543,33 @@ impl EngineRenderer {
             vsm_absent: &self.vsm_absent,
             vsm_receiver: &self.vsm_receiver,
             vsm_light_slots: &self.vsm_light_slots,
+            vt_feedback: match (
+                self.settings.vgeom.enabled && self.settings.vgeom.visbuffer,
+                self.vt_feedback.as_ref(),
+                self.vt.as_ref(),
+            ) {
+                (true, Some(f), Some(p)) => Some(VtFeedbackFrame {
+                    mask: f.mask(),
+                    bases: &self.vt_feedback_bases,
+                    words: f.layout().words() as u32,
+                    table: p.table(),
+                }),
+                _ => None,
+            },
         };
         self.graph.run(gpu, &mut encoder, &frame);
+        drop(frame);
+
+        // **The virtual-texture feedback's ring copy** (P28.1), recorded here
+        // rather than inside `VtFeedback::record`: the per-FRAGMENT producer
+        // marks from inside the graph above, off a visibility buffer that did not
+        // exist when the per-surface pass was recorded. Clear → per-surface
+        // dispatch → graph → copy, one encoder and one submit, so the mask the
+        // ring receives carries both producers of THIS frame and the pinned
+        // `frame − 2` read is unchanged.
+        if let Some(f) = self.vt_feedback.as_mut() {
+            f.finish(&mut encoder, self.frame_index, self.vt_feedback_dispatched);
+        }
 
         // **The shadow-page marking pass** (P27.1), recorded here and nowhere
         // else: it consumes the scene depth, so it has to follow every pass that

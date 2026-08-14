@@ -192,6 +192,7 @@ fn cut_settings(budget_bytes: u64) -> VgeomSettings {
         two_pass: false,
         pixel_error: 1.0,
         debug_meshlets: false,
+        visbuffer: false,
         stream: inf_vgeom::VgeomStreamBudget {
             budget_bytes,
             ..inf_vgeom::VgeomStreamBudget::default()

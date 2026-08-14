@@ -114,6 +114,7 @@ fn the_analytic_floor_is_camera_driven_bounded_and_never_below_the_camera_free_o
         centre: glam::Vec3::ZERO,
         radius: 1.0,
         set: lib.set_for(Some(7), None, None),
+        vgeom: false,
     };
     // Cold: the registry is not warm yet, so no set names anything and the
     // coverage contributes nothing — the warm gate, reaching this far.
@@ -131,6 +132,7 @@ fn the_analytic_floor_is_camera_driven_bounded_and_never_below_the_camera_free_o
             centre: glam::Vec3::ZERO,
             radius: 1.0,
             set,
+            vgeom: false,
         }],
     );
     let far = analytic_floor(
@@ -140,6 +142,7 @@ fn the_analytic_floor_is_camera_driven_bounded_and_never_below_the_camera_free_o
             centre: glam::Vec3::ZERO,
             radius: 1.0,
             set,
+            vgeom: false,
         }],
     );
     let behind = analytic_floor(
@@ -149,6 +152,7 @@ fn the_analytic_floor_is_camera_driven_bounded_and_never_below_the_camera_free_o
             centre: glam::Vec3::new(0.0, 0.0, 500.0),
             radius: 1.0,
             set,
+            vgeom: false,
         }],
     );
 
@@ -230,7 +234,7 @@ fn the_feedback_pass_marks_the_level_the_camera_justifies() {
                pools: &VtPools,
                coverage: &[VtCoverage],
                frame: u64| {
-        let requests = feedback_requests(lib, feedback.layout(), coverage);
+        let requests = feedback_requests(lib, feedback.layout(), coverage, false);
         let mut enc = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -242,8 +246,8 @@ fn the_feedback_pass_marks_the_level_the_camera_justifies() {
             pools.table_generation(),
             &v,
             &requests,
-            frame,
         );
+        feedback.finish(&mut enc, frame, n);
         gpu.queue.submit([enc.finish()]);
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         (n, requests.len())
@@ -254,6 +258,7 @@ fn the_feedback_pass_marks_the_level_the_camera_justifies() {
         centre: glam::Vec3::ZERO,
         radius: 1.0,
         set,
+        vgeom: false,
     }];
     let (dispatched, requested) = run(&mut feedback, &lib, &pools, &on, 0);
     assert_eq!((dispatched, requested), (1, 1), "one surface, one map");
@@ -339,6 +344,7 @@ fn the_feedback_pass_marks_the_level_the_camera_justifies() {
             centre,
             radius: 1.0,
             set,
+            vgeom: false,
         }];
         let (n, _) = run(&mut feedback, &lib, &pools, &off, frame);
         assert_eq!(n, 1, "{label}: the request was not even dispatched");
@@ -380,6 +386,7 @@ fn a_refinement_never_evicts_the_floor_and_a_dropped_mask_is_the_floors_trace() 
         centre: glam::Vec3::ZERO,
         radius: 1.0,
         set,
+        vgeom: false,
     }];
     let floor = analytic_floor(&lib, &v, &coverage);
 
@@ -447,20 +454,23 @@ fn a_request_is_one_entry_per_bound_map() {
             centre: glam::Vec3::ZERO,
             radius: 1.0,
             set,
+            vgeom: false,
         },
         VtCoverage {
             centre: glam::Vec3::X,
             radius: 2.0,
             set,
+            vgeom: false,
         },
         // A surface that names nothing contributes no request at all.
         VtCoverage {
             centre: glam::Vec3::Y,
             radius: 1.0,
             set: inf_render::VtTextureSet::NONE,
+            vgeom: false,
         },
     ];
-    let reqs: Vec<FeedbackRequest> = feedback_requests(&lib, &layout, &coverage);
+    let reqs: Vec<FeedbackRequest> = feedback_requests(&lib, &layout, &coverage, false);
     assert_eq!(reqs.len(), 2, "one entry per bound map, and no more");
     assert_eq!(reqs[0].centre[3], 1.0);
     assert_eq!(reqs[1].centre[3], 2.0);
@@ -644,7 +654,7 @@ fn run_feedback(
     coverage: &[VtCoverage],
     frame: u64,
 ) -> Vec<inf_vt::VtWant> {
-    let requests = feedback_requests(lib, feedback.layout(), coverage);
+    let requests = feedback_requests(lib, feedback.layout(), coverage, false);
     assert!(!requests.is_empty(), "the fixture's coverage binds no map");
     let mut enc = gpu
         .device
@@ -657,8 +667,8 @@ fn run_feedback(
         pools.table_generation(),
         v,
         &requests,
-        frame,
     );
+    feedback.finish(&mut enc, frame, n);
     assert_eq!(
         n as usize,
         requests.len(),
@@ -789,6 +799,7 @@ fn the_feedback_and_the_floor_agree_about_what_is_on_screen() {
             centre,
             radius,
             set,
+            vgeom: false,
         }];
         let wants = run_feedback(
             &gpu,
@@ -845,16 +856,19 @@ fn the_coverage_mask_does_not_depend_on_the_request_order() {
             centre: glam::Vec3::new(0.0, 0.0, -1.0),
             radius: 0.5,
             set,
+            vgeom: false,
         },
         VtCoverage {
             centre: glam::Vec3::new(0.0, 0.0, -12.0),
             radius: 1.0,
             set,
+            vgeom: false,
         },
         VtCoverage {
             centre: glam::Vec3::new(0.5, 0.0, -60.0),
             radius: 2.0,
             set,
+            vgeom: false,
         },
     ];
     let forward = run_feedback(&gpu, &mut feedback, &lib, &pools, &v, &coverage, 0);
@@ -921,6 +935,7 @@ fn the_floor_holds_across_a_whole_scripted_path_and_repeats_exactly() {
                         centre: glam::Vec3::ZERO,
                         radius: 1.0,
                         set,
+                        vgeom: false,
                     }],
                 )
             })
