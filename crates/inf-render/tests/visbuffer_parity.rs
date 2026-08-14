@@ -237,9 +237,9 @@ fn render(gpu: &GpuContext, sc: &RenderScene, st: RenderSettings, ids: bool) -> 
 /// or a wrong gradient does not look like this — mutation-verified in the P28.1
 /// ledger, where transposing the resolve's `d_dx`/`d_dy` puts the worst delta at
 /// 60+ and the differing fraction past a third.
-const PARITY_MAX_STEP: u8 = 1;
+use inf_render::visbuffer::PARITY_MAX_STEP;
 /// The fraction of interior pixels allowed to sit on a rounding boundary.
-const PARITY_MAX_FRACTION: f64 = 0.02;
+use inf_render::visbuffer::PARITY_UNTEXTURED_MAX_FRACTION as PARITY_MAX_FRACTION;
 
 /// Forward vs resolved on every interior pixel.
 ///
@@ -862,7 +862,7 @@ fn parity_textured_virtual_texture() {
     // everywhere. A transposed or missing gradient does not look like this — it
     // reads a different mip over whole triangles, not at their boundaries.
     assert!(
-        frac < 0.12,
+        frac < inf_render::visbuffer::PARITY_TEXTURED_MAX_FRACTION,
         "textured: {bad} of {n} interior pixels ({:.2} %) disagree — past the \
          12 % this bound allows for the analytic-vs-quad-derivative mip \
          boundary, which means the gradients disagree about more than a boundary",
@@ -921,14 +921,16 @@ fn parity_textured_virtual_texture() {
         100.0 * touching as f64 / differing.len().max(1) as f64
     );
     assert!(
-        touching * 5 >= differing.len() * 4,
+        touching as f64
+            >= differing.len() as f64 * inf_render::visbuffer::PARITY_TEXTURED_MIN_BORDERING,
         "only {touching} of {} differing pixels border an AGREEING interior pixel \
          — the disagreement is a region, not a boundary, and 'the mip-transition \
          set' is the wrong name for it",
         differing.len()
     );
     assert!(
-        solid * 10 <= differing.len(),
+        (solid as f64)
+            <= differing.len() as f64 * inf_render::visbuffer::PARITY_TEXTURED_MAX_SOLID_CENTRES,
         "{solid} of {} differing pixels sit at the centre of a solid 3x3 block of \
          disagreement — a mip boundary is one or two pixels thick and this is a \
          patch, which is what a wrong gradient over a whole triangle looks like",

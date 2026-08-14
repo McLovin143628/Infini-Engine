@@ -335,6 +335,288 @@ impl VisBary {
 /// with `vis_resolve.wgsl`'s `VIS_DET_EPS` and pinned against it.
 pub const VIS_DET_EPS: f32 = 1e-20;
 
+// ── the parity criterion ─────────────────────────────────────────────────────
+//
+// **The P28.1 audit recorded a criterion and P28.5 has to execute it.** It is
+// stated here, once, so `tests/visbuffer_parity.rs` (the nucleus) and
+// `runtime/inf-player/tests/phase28_gate.rs` (the phase gate) measure the same
+// thing rather than two spellings of it that can drift apart. The ROADMAP's
+// wording, verbatim:
+//
+// > **byte-exact on interior pixels to `PARITY_MAX_STEP = 1`, on every row whose
+// > shading a derivative cannot reach; and on the textured row, bounded AND
+// > classified — under 12 % of interior pixels differing, ≥ 80 % of them
+// > bordering an agreeing pixel, ≤ 10 % of them centres of a solid 3 × 3
+// > block.** Silhouettes and intersection curves are excluded by construction
+// > (the interior test) and measured separately. No row may be exempted by a
+// > fraction bound alone.
+//
+// The last sentence is why [`ParityVerdict`] carries the two class counts beside
+// the population: a fraction is satisfied equally by a one-pixel mip boundary
+// and by a smear over whole triangles, and only the class counts tell them
+// apart. The GPU-free unit arms below hold a synthetic boundary and a synthetic
+// smear that the fraction bound cannot separate and [`parity_ok`] must.
+
+/// **The parity bound, and why it is one least-significant step rather than
+/// zero.**
+///
+/// The forward path's barycentrics come from the rasterizer's interpolators; the
+/// resolve solves for them. Those are the same numbers in exact arithmetic and
+/// not always the same `f32`, and the frame is written to an **8-bit** target, so
+/// a pixel whose shaded value sits within an f32 ulp of a `1/255` boundary can
+/// round the other way. That is a quantization artefact of the comparison, not a
+/// disagreement about shading — and the way to say so honestly is to bound it at
+/// exactly one step and forbid two.
+pub const PARITY_MAX_STEP: u8 = 1;
+
+/// The fraction of interior pixels a **non-textured** row may leave on a
+/// rounding boundary. A systematic offset looks exactly like a rounding boundary
+/// once it is smaller than a step, so the population is bounded as well as the
+/// magnitude.
+pub const PARITY_UNTEXTURED_MAX_FRACTION: f64 = 0.02;
+
+/// The fraction of interior pixels the **textured** row may leave differing.
+///
+/// The two paths are not expected to agree exactly there: the forward path's
+/// `dpdx(uv)` is a first-order finite difference over a 2 × 2 quad and the
+/// resolve's is the exact analytic derivative, so the two choose a different mip
+/// where a footprint sits on a level boundary — a different texel, which is a
+/// large delta rather than a rounding step.
+pub const PARITY_TEXTURED_MAX_FRACTION: f64 = 0.12;
+
+/// The fraction of the textured row's **differing** pixels that must border an
+/// AGREEING interior pixel. A mip boundary is a curve; a wrong gradient is a
+/// region, and a region's interior borders nothing that agrees.
+pub const PARITY_TEXTURED_MIN_BORDERING: f64 = 0.80;
+
+/// The fraction of the textured row's **differing** pixels that may sit at the
+/// centre of a solid 3 × 3 block of disagreement. A boundary one or two pixels
+/// thick has no such centres; a patch is made of them.
+pub const PARITY_TEXTURED_MAX_SOLID_CENTRES: f64 = 0.10;
+
+/// What one comparison of a forward frame against a resolved frame measured,
+/// over the interior pixels it was handed.
+///
+/// The three class counts are the criterion's own vocabulary: `differing` is the
+/// *population*, `bordering` and `solid_centres` are the *shape*, and a claim
+/// made on the population alone is the one the recorded criterion forbids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ParityVerdict {
+    /// Interior pixels compared.
+    pub interior: usize,
+    /// …of which this many differ in at least one of the four channels.
+    pub differing: usize,
+    /// The worst single-channel delta, in 8-bit steps.
+    pub worst_step: u8,
+    /// Differing pixels with an orthogonal neighbour that is interior AND
+    /// agreeing — the "this is a boundary" count.
+    pub bordering: usize,
+    /// Differing pixels at the centre of a solid 3 × 3 differing block — the
+    /// "this is a patch" count.
+    pub solid_centres: usize,
+}
+
+impl ParityVerdict {
+    /// Differing pixels as a fraction of the interior population. Zero over an
+    /// empty population, which [`parity_ok`] refuses separately rather than
+    /// letting it read as agreement.
+    pub fn differing_fraction(&self) -> f64 {
+        if self.interior == 0 {
+            return 0.0;
+        }
+        self.differing as f64 / self.interior as f64
+    }
+
+    /// Bordering pixels as a fraction of the **differing** ones. `1.0` when
+    /// nothing differs — a row with no disagreement has no disagreement that is
+    /// the wrong shape.
+    pub fn bordering_fraction(&self) -> f64 {
+        if self.differing == 0 {
+            return 1.0;
+        }
+        self.bordering as f64 / self.differing as f64
+    }
+
+    /// Solid-block centres as a fraction of the **differing** pixels.
+    pub fn solid_centre_fraction(&self) -> f64 {
+        if self.differing == 0 {
+            return 0.0;
+        }
+        self.solid_centres as f64 / self.differing as f64
+    }
+
+    /// One line, in the shape the parity suites already print.
+    pub fn summary(&self) -> String {
+        format!(
+            "{} interior, {} differing ({:.2} %), worst step {}, {:.1} % bordering \
+             an agreeing pixel, {} solid 3x3 centres ({:.1} %)",
+            self.interior,
+            self.differing,
+            100.0 * self.differing_fraction(),
+            self.worst_step,
+            100.0 * self.bordering_fraction(),
+            self.solid_centres,
+            100.0 * self.solid_centre_fraction(),
+        )
+    }
+}
+
+/// Compare two RGBA8 frames over the interior pixel set, and classify the
+/// disagreement.
+///
+/// `interior` is the pixel set the caller has already established a derivative
+/// cannot reach — in the renderer that is [`crate::passes::visbuffer::VisImage::interior`],
+/// a pixel whose four neighbours carry its own id. Silhouettes are excluded
+/// *there*, by construction, because a 4× MSAA resolve and a single-sample one
+/// are obliged to differ at partial coverage; this function measures only what
+/// it is handed.
+///
+/// Both frames are indexed as `((y * width + x) * 4)`, so they must be the same
+/// dimensions. Coordinates outside either buffer are skipped rather than
+/// panicking, which keeps a truncated readback a *small* population (which
+/// [`parity_ok`] refuses) rather than an abort.
+pub fn parity_verdict(
+    forward: &[u8],
+    resolved: &[u8],
+    width: u32,
+    interior: &[(u32, u32)],
+) -> ParityVerdict {
+    use std::collections::BTreeSet;
+
+    let set: BTreeSet<(u32, u32)> = interior.iter().copied().collect();
+    let mut v = ParityVerdict::default();
+    let mut differing: BTreeSet<(u32, u32)> = BTreeSet::new();
+
+    for &(x, y) in &set {
+        let i = ((y as usize * width as usize) + x as usize) * 4;
+        if i + 4 > forward.len() || i + 4 > resolved.len() {
+            continue;
+        }
+        v.interior += 1;
+        let mut differs = false;
+        for c in 0..4 {
+            let d = forward[i + c].abs_diff(resolved[i + c]);
+            if d > 0 {
+                differs = true;
+                v.worst_step = v.worst_step.max(d);
+            }
+        }
+        if differs {
+            differing.insert((x, y));
+        }
+    }
+    v.differing = differing.len();
+
+    for &(x, y) in &differing {
+        // A boundary: some orthogonal neighbour is interior and agrees.
+        let neighbours = [
+            (x.wrapping_sub(1), y),
+            (x + 1, y),
+            (x, y.wrapping_sub(1)),
+            (x, y + 1),
+        ];
+        if neighbours
+            .iter()
+            .any(|p| set.contains(p) && !differing.contains(p))
+        {
+            v.bordering += 1;
+        }
+        // A patch: the whole 3 × 3 around it differs.
+        if x >= 1
+            && y >= 1
+            && (0..3).all(|dy| (0..3).all(|dx| differing.contains(&(x + dx - 1, y + dy - 1))))
+        {
+            v.solid_centres += 1;
+        }
+    }
+    v
+}
+
+/// The recorded criterion, applied. `Err` carries the measurement AND the bound,
+/// because a verdict that says only "too different" cannot be acted on.
+///
+/// `textured` selects which half of the criterion the row is held to:
+///
+/// * `false` — a row whose shading a screen derivative cannot reach. Every
+///   interior pixel agrees to [`PARITY_MAX_STEP`], and no more than
+///   [`PARITY_UNTEXTURED_MAX_FRACTION`] of them sit on a rounding boundary.
+/// * `true` — the textured row. The magnitude is *not* bounded (a different mip
+///   is a different texel); the population is, at
+///   [`PARITY_TEXTURED_MAX_FRACTION`], **and so is the shape**, at
+///   [`PARITY_TEXTURED_MIN_BORDERING`] and
+///   [`PARITY_TEXTURED_MAX_SOLID_CENTRES`]. The recorded criterion's closing
+///   sentence — *no row may be exempted by a fraction bound alone* — is those
+///   two clauses.
+///
+/// An empty population is refused in both modes: a parity claim over no pixels
+/// is the vacuous shape the P19 audit named, and it is the failure mode a
+/// mis-wired fixture actually produces.
+pub fn parity_ok(v: &ParityVerdict, textured: bool) -> Result<(), String> {
+    if v.interior == 0 {
+        return Err(
+            "the comparison was handed no interior pixels; a parity claim over \
+             nothing is not one"
+                .to_string(),
+        );
+    }
+    if !textured {
+        if v.worst_step > PARITY_MAX_STEP {
+            return Err(format!(
+                "an interior pixel differs by {} of 255, past the {PARITY_MAX_STEP} \
+                 step this bound allows. The two paths agree to within 8-bit \
+                 rounding or they do not agree; anything past one step is a \
+                 disagreement about shading, not about quantization. ({})",
+                v.worst_step,
+                v.summary()
+            ));
+        }
+        if v.differing_fraction() > PARITY_UNTEXTURED_MAX_FRACTION {
+            return Err(format!(
+                "{:.2} % of interior pixels sit on a rounding boundary, past the \
+                 {:.0} % this bound allows — a systematic offset looks exactly \
+                 like this once it is smaller than a step. ({})",
+                100.0 * v.differing_fraction(),
+                100.0 * PARITY_UNTEXTURED_MAX_FRACTION,
+                v.summary()
+            ));
+        }
+        return Ok(());
+    }
+    if v.differing_fraction() >= PARITY_TEXTURED_MAX_FRACTION {
+        return Err(format!(
+            "{:.2} % of interior pixels disagree, past the {:.0} % this bound \
+             allows for the analytic-vs-quad-derivative mip boundary — the \
+             gradients disagree about more than a boundary. ({})",
+            100.0 * v.differing_fraction(),
+            100.0 * PARITY_TEXTURED_MAX_FRACTION,
+            v.summary()
+        ));
+    }
+    if v.bordering_fraction() < PARITY_TEXTURED_MIN_BORDERING {
+        return Err(format!(
+            "only {:.1} % of the differing pixels border an AGREEING interior \
+             pixel, under the {:.0} % this bound requires — the disagreement is a \
+             region, not a boundary, and 'the mip-transition set' is the wrong \
+             name for it. ({})",
+            100.0 * v.bordering_fraction(),
+            100.0 * PARITY_TEXTURED_MIN_BORDERING,
+            v.summary()
+        ));
+    }
+    if v.solid_centre_fraction() > PARITY_TEXTURED_MAX_SOLID_CENTRES {
+        return Err(format!(
+            "{:.1} % of the differing pixels sit at the centre of a solid 3x3 \
+             block of disagreement, past the {:.0} % this bound allows — a mip \
+             boundary is one or two pixels thick and this is a patch, which is \
+             what a wrong gradient over a whole triangle looks like. ({})",
+            100.0 * v.solid_centre_fraction(),
+            100.0 * PARITY_TEXTURED_MAX_SOLID_CENTRES,
+            v.summary()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1177,6 +1459,202 @@ mod tests {
         let (v2, dx2, _) = b.attr(0.0, 1.0, 2.0);
         assert!((v2 - b.lambda.dot(Vec3::new(0.0, 1.0, 2.0))).abs() < 1e-6);
         assert!((dx2 - b.d_dx.dot(Vec3::new(0.0, 1.0, 2.0))).abs() < 1e-9);
+    }
+
+    // ── the parity criterion, on synthetic frames ────────────────────────────
+
+    /// A synthetic pair of RGBA8 frames and the interior population over them.
+    ///
+    /// The interior is the whole frame inset by one pixel, which is what the
+    /// device's `VisImage::interior` produces for a fixture that fills the view:
+    /// a pixel needs its four neighbours to be *addressable* for the boundary
+    /// test to mean anything. `delta` is added to the red channel wherever
+    /// `differs` says so, which is the one-channel case an 8-bit comparison
+    /// actually sees.
+    fn synthetic(
+        w: u32,
+        h: u32,
+        delta: u8,
+        differs: impl Fn(u32, u32) -> bool,
+    ) -> (Vec<u8>, Vec<u8>, Vec<(u32, u32)>) {
+        let mut fwd = vec![128u8; (w * h * 4) as usize];
+        let mut res = fwd.clone();
+        let mut interior = Vec::new();
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                interior.push((x, y));
+                if differs(x, y) {
+                    let i = ((y * w + x) * 4) as usize;
+                    res[i] = 128u8.wrapping_add(delta);
+                }
+            }
+        }
+        // The frames are otherwise identical, so anything the verdict reports is
+        // the `differs` predicate and not the fixture.
+        fwd[0] = 128;
+        (fwd, res, interior)
+    }
+
+    const SYN: u32 = 64;
+
+    /// **The classifier separates a boundary from a smear, and the fraction
+    /// bound alone cannot.**
+    ///
+    /// This is the P28.1 audit's finding made executable. Both fixtures below
+    /// differ on a population the textured bound admits — 1.6 % and 10.4 %, both
+    /// under [`PARITY_TEXTURED_MAX_FRACTION`] — so a criterion made of the
+    /// fraction alone passes both. One of them is a one-pixel curve (what a mip
+    /// transition looks like) and the other is a patch (what a wrong gradient
+    /// over whole triangles looks like), and the two class counts are the only
+    /// thing that tells them apart.
+    #[test]
+    fn the_classifier_separates_a_mip_boundary_from_a_smear() {
+        // A one-pixel diagonal: every differing pixel has four agreeing
+        // orthogonal neighbours, and no 3 × 3 around it is solid.
+        let (fwd, res, interior) = synthetic(SYN, SYN, 40, |x, y| x == y);
+        let boundary = parity_verdict(&fwd, &res, SYN, &interior);
+        assert_eq!(boundary.interior, ((SYN - 2) * (SYN - 2)) as usize);
+        assert_eq!(boundary.differing, (SYN - 2) as usize);
+        assert_eq!(boundary.worst_step, 40, "the fixture's delta is mip-scale");
+        assert_eq!(
+            boundary.bordering, boundary.differing,
+            "every pixel of a one-pixel curve borders an agreeing pixel"
+        );
+        assert_eq!(
+            boundary.solid_centres, 0,
+            "a curve one pixel thick has no solid 3x3 centres"
+        );
+        assert_eq!(
+            parity_ok(&boundary, true),
+            Ok(()),
+            "{}",
+            boundary.summary()
+        );
+
+        // A 20 × 20 patch: 400 of 3 844 interior pixels, which is 10.4 % — under
+        // the same fraction bound the boundary passed.
+        let (fwd, res, interior) =
+            synthetic(SYN, SYN, 40, |x, y| (10..30).contains(&x) && (10..30).contains(&y));
+        let smear = parity_verdict(&fwd, &res, SYN, &interior);
+        assert_eq!(smear.differing, 400);
+        assert_eq!(smear.bordering, 76, "only the patch's rim borders agreement");
+        assert_eq!(smear.solid_centres, 324, "18 x 18 of the patch is interior");
+
+        // **THE POINT, asserted before the verdict**: the population bound does
+        // not separate them. If this ever fails the two fixtures have stopped
+        // being the pair this arm is about.
+        assert!(
+            smear.differing_fraction() < PARITY_TEXTURED_MAX_FRACTION,
+            "the smear is {:.2} % of the interior, which the fraction bound \
+             already rejects — this arm would then prove nothing about the class \
+             counts",
+            100.0 * smear.differing_fraction()
+        );
+
+        // …and the criterion rejects it anyway, by class.
+        let err = parity_ok(&smear, true).expect_err("a smear must be refused");
+        assert!(
+            err.contains("region, not a boundary"),
+            "the refusal does not name the class it refused on: {err}"
+        );
+        assert!(
+            err.contains("19.0 %") && err.contains("80 %"),
+            "a refusal must print the measurement AND the bound: {err}"
+        );
+    }
+
+    /// **The solid-block clause is load-bearing ON ITS OWN**, and this is the
+    /// fixture that says so.
+    ///
+    /// Five well-separated 3 × 3 patches. Eight of every nine pixels are rim, so
+    /// **88.9 % border an agreeing pixel** and the bordering clause is satisfied;
+    /// 1.2 % of the interior differs, so the population clause is satisfied too.
+    /// The only thing that sees these is the solid-centre count — one centre per
+    /// patch, **11.1 %**, past the 10 % bound. Drop that clause and this fixture
+    /// passes a criterion it must not.
+    #[test]
+    fn a_field_of_small_patches_is_refused_by_the_solid_clause_alone() {
+        const PATCHES: [(u32, u32); 5] = [(10, 10), (20, 20), (30, 30), (40, 40), (50, 50)];
+        let (fwd, res, interior) = synthetic(SYN, SYN, 40, |x, y| {
+            PATCHES
+                .iter()
+                .any(|(bx, by)| x.abs_diff(*bx) <= 1 && y.abs_diff(*by) <= 1)
+        });
+        let v = parity_verdict(&fwd, &res, SYN, &interior);
+        assert_eq!(v.differing, 45, "five 3x3 patches");
+        assert_eq!(v.bordering, 40, "eight rim pixels a patch");
+        assert_eq!(v.solid_centres, 5, "one centre a patch");
+        // The other two clauses are SATISFIED — asserted first, so the refusal
+        // below is attributable to the third and to nothing else.
+        assert!(
+            v.differing_fraction() < PARITY_TEXTURED_MAX_FRACTION,
+            "{}",
+            v.summary()
+        );
+        assert!(
+            v.bordering_fraction() >= PARITY_TEXTURED_MIN_BORDERING,
+            "{}",
+            v.summary()
+        );
+        let err = parity_ok(&v, true).expect_err("a field of patches is a smear");
+        assert!(err.contains("solid 3x3"), "{err}");
+        assert!(
+            err.contains("11.1 %") && err.contains("10 %"),
+            "a refusal must print the measurement AND the bound: {err}"
+        );
+    }
+
+    /// **The untextured half admits one step and forbids two** — the
+    /// `PARITY_MAX_STEP` clause, in both directions, plus the population bound
+    /// that catches a systematic offset hiding under a step.
+    #[test]
+    fn the_untextured_half_admits_one_step_and_forbids_two() {
+        // Sparse and one step: rounding, which is what the bound is for.
+        let sparse = |x: u32, y: u32| (x * 7 + y * 13) % 401 == 0;
+        let (fwd, res, interior) = synthetic(SYN, SYN, 1, sparse);
+        let v = parity_verdict(&fwd, &res, SYN, &interior);
+        assert_eq!(v.worst_step, 1);
+        assert!(v.differing > 0, "the fixture differs nowhere at all");
+        assert!(v.differing_fraction() < PARITY_UNTEXTURED_MAX_FRACTION);
+        assert_eq!(parity_ok(&v, false), Ok(()), "{}", v.summary());
+
+        // The same population, two steps: a disagreement about shading.
+        let (fwd, res, interior) = synthetic(SYN, SYN, 2, sparse);
+        let v = parity_verdict(&fwd, &res, SYN, &interior);
+        assert_eq!(v.worst_step, 2);
+        let err = parity_ok(&v, false).expect_err("two steps is not rounding");
+        assert!(err.contains("differs by 2 of 255"), "{err}");
+
+        // One step everywhere: the systematic offset the population bound is
+        // for. The magnitude clause is satisfied and the criterion still refuses.
+        let (fwd, res, interior) = synthetic(SYN, SYN, 1, |_, _| true);
+        let v = parity_verdict(&fwd, &res, SYN, &interior);
+        assert_eq!(v.worst_step, PARITY_MAX_STEP);
+        let err = parity_ok(&v, false).expect_err("a whole-frame offset is not rounding");
+        assert!(err.contains("rounding boundary"), "{err}");
+    }
+
+    /// **A parity claim over nothing is refused**, in both modes — the vacuous
+    /// shape a mis-wired fixture actually produces, and the one a fraction of
+    /// `0 / 0` would otherwise report as perfect agreement.
+    #[test]
+    fn a_parity_claim_over_no_interior_pixels_is_refused() {
+        let v = parity_verdict(&[0u8; 16], &[0u8; 16], 2, &[]);
+        assert_eq!(v, ParityVerdict::default());
+        for textured in [false, true] {
+            let err = parity_ok(&v, textured).expect_err("an empty population is not agreement");
+            assert!(err.contains("no interior pixels"), "{err}");
+        }
+        // …and a row that agrees everywhere over a real population is fine in
+        // both modes, so the refusal above is about the population and not about
+        // the absence of disagreement.
+        let (fwd, res, interior) = synthetic(SYN, SYN, 0, |_, _| false);
+        let v = parity_verdict(&fwd, &res, SYN, &interior);
+        assert_eq!(v.differing, 0);
+        assert_eq!(v.bordering_fraction(), 1.0);
+        assert_eq!(v.solid_centre_fraction(), 0.0);
+        assert_eq!(parity_ok(&v, false), Ok(()));
+        assert_eq!(parity_ok(&v, true), Ok(()));
     }
 
     /// A triangle in clip space through the renderer's own reverse-infinite-Z

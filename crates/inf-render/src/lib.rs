@@ -164,6 +164,14 @@ pub use inf_stream::{
     LANE_FEEDBACK, LANE_FLOOR, LANE_PREDICT,
 };
 pub use stream::StreamReport;
+// P28.5: the visibility path's parity criterion, hoisted out of the P28.1
+// nucleus so the phase gate executes the SAME rule rather than a second spelling
+// of it. The recorded criterion is one definition; `phase28_gate` reads it.
+pub use visbuffer::{
+    parity_ok, parity_verdict, ParityVerdict, PARITY_MAX_STEP, PARITY_TEXTURED_MAX_FRACTION,
+    PARITY_TEXTURED_MAX_SOLID_CENTRES, PARITY_TEXTURED_MIN_BORDERING,
+    PARITY_UNTEXTURED_MAX_FRACTION,
+};
 // P27.1 virtual shadow maps: the projections and the level rules (pure,
 // unit-tested with no adapter), the mirror, and the marking loop's counters.
 pub use vsm::{
