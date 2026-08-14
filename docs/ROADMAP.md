@@ -16453,5 +16453,305 @@ un-mutated by hand.
 
 ---
 
+## Hardening Wave B — correctness, panic paths & NaN (2026-08-14)
+
+The second repair wave of the final hardening campaign. Wave A closed the doors
+where the engine writes; this one closes the doors where the engine **reads** —
+imports, v1 bincode decode, and the guards in between — plus the class of bug
+where the engine records a thing it did not do.
+
+Three root-cause units and eleven point fixes, in eight commits on `main`.
+
+### Root unit U1 — one import door
+
+`crates/inf-mesh/src/validate.rs` is new, and it is the only place in the engine
+where numbers somebody else wrote become engine data. Three questions, asked in
+the phrasing NaN answers correctly: **is every float finite**, **does every index
+address its own vertex buffer**, **do two streams that claim to describe the same
+elements agree about how many there are**.
+
+| finding | what it was |
+|---|---|
+| C4-1 | an index past the vertex buffer reaching `meshopt::generate_vertex_remap` — a raw `unsafe` FFI whose C writes `remap[index]` with its assert compiled out under `-DNDEBUG`. An out-of-bounds heap **write**, not a panic |
+| C4-6 | `uvs[i]` / `tangents[i]` indexed raw beside `normals` using `.get(i).unwrap_or(..)` — the asymmetry visible in four adjacent lines |
+| C4-7 | NaN and non-increasing keyframe times; samplers whose output count differs from their input, which `Vec3Track::new` only `debug_assert`s (compiled out in release) while `sample()` indexes `values` by an index derived from `times` |
+| C4-8 | `str::parse::<f32>` accepts `"nan"`, `"inf"`, `"infinity"`, so `v nan nan nan` is a syntactically valid OBJ vertex line; glTF floats come out of the binary buffer with no parser between them and us at all |
+| C4-9 | a zero-count `POSITION` accessor with a populated index accessor, persisted as a valid-looking `.inf_mesh` whose every index dangles |
+| C4-16 | `(width * height) as usize` wrapping to 0 at 2³⁰ pixels — **and the downstream guard wrapping identically**, so `0 < 0` was false and the truncated buffer sailed through. Two wraps that cancelled into silence |
+| C4-20 | `JOINTS_0` unbounded against the skin: nothing panics, so the symptom is a silently wrong deformation that looks like the author's mistake |
+| C4-37 | `VertexSkin::normalized`'s `sum > 1e-6` correctly rejects NaN and **passes `+inf`**, so `inf / inf` manufactures a NaN out of an input that never held one — `Pod`, straight to a GPU vertex buffer |
+
+Retired with the cause, not separately: `inf_dcc::build`'s `bits3(NaN)` weld
+keys, `inf_vgeom::bounding_sphere`'s infinite centre with a **zero radius** (a
+cull bound the GPU-parity gate compares), and `resample_cubic`'s dropped
+`CUBICSPLINE` remainder — which now surfaces as a length disagreement instead of
+a shorter track.
+
+`optimize()` keeps a last check of its own before the `unsafe` call, for the
+callers that build their own index buffers (the DCC exporter, photogrammetry
+finish) and never crossed the door.
+
+### Root unit U6 — v1 payloads validate their own structure at decode
+
+The v2 containers check magic, version, section bounds and stride before anybody
+may hold one. The v1 bincode payloads beside them had the default `migrate()`,
+which asks only "is this newer than me" — and the Content Drawer scans every
+loose payload in the project directory.
+
+* **C4-5** `TextureAsset::migrate` now requires a size, at least one mip, and
+  that **every mip carries at least the bytes its own dimensions imply**. That
+  last check is what makes a dimension ceiling unnecessary: a payload claiming
+  65 536 × 65 536 would have to *contain* 16 GiB to pass. Two panics went with
+  it — `mips: []` indexed at `[0]`, and `decode_bc1`'s `width * height * 4`,
+  which in `u32` is **exactly zero** at 65 536² (2³²) and sized the buffer
+  `blit_block` then wrote past. The file that did all this is under 64 bytes,
+  which the arm asserts. This also closes lens 5's hand-off to lens 4.
+* **C4-4 (decode half)** `AnimClipAsset::migrate` validates the clip's timing —
+  finite non-negative duration, finite keyframe times, `times.len() ==
+  values.len()` on every channel.
+
+### Root unit U7 — the guards a NaN answers "false" and therefore passes
+
+Every ordering comparison a NaN takes part in is false, and `clamp`
+**propagates** rather than rejecting. Seven sites, rewritten as the predicate the
+code actually needs.
+
+* **C4-4 (guard half)**, all three mirrors of one integration —
+  `clip::resolve_time`, `pose::advance_clip_time`, `AnimPlayer::advance`:
+  `duration <= 0.0` passed a NaN into `clamp(0.0, NaN)`, which **panics**, every
+  frame, in editor, PIE and the shipped player. The looping branch never panicked
+  and was worse: `rem_euclid(NaN)` poisons `AnimPlayer.t`, which is persisted
+  into the `.inf_lvl`.
+* **C4-7 (consumer half)** `clip::locate` is now total. A NaN `t` failed **both**
+  range guards, `partition_point` returned 0, and `hi - 1` underflowed.
+* **C4-31** `Quat::normalize()` on a zero quaternion — legal bytes in a glTF
+  `ROTATION` accessor — is four NaNs, silently, because `glam` is pinned with no
+  `glam-assert` feature. It rode `pose_state_bytes`, the committed trace the
+  PIE-==-shipping parity gate compares, where a NaN does not fail the comparison
+  so much as make it meaningless.
+* **C4-36** `Falloff::weight` — the standing class verbatim, on the
+  `.inf_terrain` write path. The only thing in front of it was an accidental
+  `.max(0.0)` at the Tauri door, which guards `radius` and not `dist`, and which
+  no Ring-0 caller passes through at all.
+* **C4-35** the terrain sculpt. `as f32` **saturates** to infinity rather than
+  wrapping, so one unbounded dab made a tile infinite; a later `Smooth` computes
+  `inf − inf` = NaN and `Flatten` the same, and then `w <= 0.0` skipped nothing
+  and `new_off != old_off` committed **everything** (NaN equals nothing). Fixed
+  at three doors because the value crosses three: `SculptSettings::sanitized`
+  bounds both continuous parameters where every producer goes through,
+  `apply_local` drops a sample it could not compute, and `HeightRegion::set_height`
+  refuses to store one.
+* **C4-19** `grammar::span::frame_at` — two panics in two adjacent lines: `clamp`
+  with a NaN bound, and the **only** `partial_cmp().unwrap()` in production code
+  tree-wide, now `total_cmp` like every one of its siblings.
+* **C4-44 (gizmo)** `closest_on_line` / `ray_plane` — `denom.abs() < 1e-6` false
+  for NaN, `s < 0.0` false for NaN, so `ray_plane` returned `Some(NaN)` as an
+  intersection, and the result goes `GizmoDrag` → `GizmoDelta::Translate` →
+  `SceneDoc` → `.inf_lvl` unchecked.
+* **C4-45 (sampler)** unchecked `normalize()` then a `clamp` that propagates,
+  into `acos`'s domain. Scatter output is cooked content, so a wrong-but-stable
+  answer is a content difference.
+
+### C4-30 — the walk-through-walls fix
+
+`add_collider` returning `None` was followed by `r.col = snap.collider.clone()`
+— the **desired** descriptor written into the field the reconcile uses as its
+change detector. The next sync compared them, found nothing to do, and the entity
+kept a rigid body with no collider. No log, no counter, no advisory: the only
+symptom is a player walking through a cave wall, falling through a terrain tile,
+or shooting a fracture chunk that does not collide.
+
+Not a rare shape. The upstream `None` is `trimesh_with_flags(..,
+FIX_INTERNAL_EDGES).ok()?`, and `FIX_INTERNAL_EDGES` needs half-edge topology —
+which fails on exactly the non-manifold output Surface-Nets voxel chunks and
+Voronoi fracture hulls produce. **This repo's own seam-chord law measured ~10 %
+of meshes as affected.**
+
+Three parts: `to_shared_checked` says *why* as a `&'static str`;
+`BodyRecord.col` holds only what was achieved and `col_refused` holds what was
+tried and refused (which bounds the retry — `to_shared_checked` is a pure
+function of the descriptor, so re-attempting an identical one is
+trimesh-topology cost per fixed step for an answer that cannot change); and
+refusals are counted and attributed, warned once per entity.
+
+**Found while building the arm:** parry **panics** on a trimesh index outside its
+vertex buffer (`parry3d-f64 0.29`, `trimesh.rs:1280`) rather than returning
+`Err`. Every producer of that shape is internal, so it is an engine bug rather
+than a hostile file — but an engine bug taking the process down mid-step is not
+this bridge's failure mode. Bounded before the call.
+
+### C4-32 — a property edit builds into scratch and swaps only on success
+
+`apply_value`'s List arm ran `while list.pop().is_some() {}` **before** anything
+was validated, then rebuilt each element as a default and pushed it regardless.
+The second half is what made it critical: the function returned `false`, and
+`false` is read by `world.rs` as "nothing happened" (so `dirty = true` is
+skipped) and by `doc.rs` as "nothing to record" (so no undo command is pushed).
+The data was gone, the document did not know it had changed, there was no undo
+step, and the mutated state is what the next save writes. Both compound arms now
+build into a scratch value and commit only on full success.
+
+### The wire set — validation, not a schema move
+
+No wire byte changes, no version moves, and every committed fixture in the tree
+still loads.
+
+* **L5.F4** both `.inf_lvl` mirrors accepted `schema_version == 0` as v1.
+  `SceneFileV1` is `{u32, String, Vec<_>}` and bincode varint-encodes all three,
+  so **three zero bytes are a structurally valid v1 record** and
+  `decode_from_slice` ignores the tail: any all-zero buffer of ≥3 bytes loaded as
+  a valid, untitled, empty level — exactly what a preallocated, sparse or
+  filesystem-recovered partial write leaves behind. No writer has ever emitted
+  version 0. **Not** the recorded `AssetPayload::migrate` bound: different codec,
+  no pin, free fix. The refusal now names the right cause too. Lens 5 could only
+  derive the mechanism from struct shapes and varint semantics; the arm executes
+  it.
+* **L5.F5** `.inf_vmesh`'s `total_len` was documented as "a self-check" and never
+  checked, and nothing stopped N page entries from all pointing at one blob. The
+  sibling `.inf_tex` v2 parser pins both, with the measurement in its comment
+  (16 384 entries aliasing one blob → `level_bytes` asked for 1 GiB, **1 794×**).
+  `.inf_terrain` and `.inf_voxel` close it with a monotone walk; `.inf_vmesh` was
+  the one container of five with neither.
+* **L5.F6** schema **v6 had no committed fixture on either mirror** — the rung
+  that appended the joint and audio slots, with v5 below and v7 above both
+  byte-pinned. Blessed on both sides from each crate's own reference scene, plus
+  the editor cross-read arm the v10+ rungs already have.
+* **L5.F7** the wire-enum freeze-pin law covered **1 of 18**. bincode encodes an
+  externally-tagged enum as its declaration index, so inserting a variant
+  mid-list renumbers everything after it and every committed level's `Spot`
+  lights decode as `Point`s. One table, 18 enums, 59 variants, with a count
+  assertion so an enum joining the wire cannot be silently uncovered.
+* **L5.F12** `.inf_pack`'s `uncompressed_len` was parsed, published as a `pub`
+  field, and never verified. One comparison inside the branch already hashing.
+
+### The arithmetic — silent because the release profile has no `overflow-checks`
+
+`[profile.release]` sets `lto = "thin"` and nothing else. Every wrap below is
+silent in a shipping build and trips only in tests; that is what raises them from
+hygiene to findings.
+
+* **C4-15** sprite-sheet slicing from an editable TOML sidecar: `100_000 ×
+  100_000` wrapped `Vec::with_capacity` **small** and the loop then ran 10¹⁰
+  iterations pushing a heap `String` each. `(r * cols + c).to_string()` wrapped in
+  the same arithmetic and gave two cells one name. Now `u64`, bounded by
+  `MAX_GRID_CELLS`, with `exceeds_ceiling()` so a truncation can be reported.
+* **C4-17** terrain heightmap import: `(width as i32 - 1)` on a source legally
+  declaring `i32::MAX` wrapped negative, `.max(0)` pulled it to zero, and
+  `.max(1)` handed back **one tile** — reachable from `probe` alone, which reads
+  an 8-byte IHDR and no pixels.
+* **C4-18** `PartialRows` counted **writes, not coverage**: an EXR whose chunks
+  overlap (`filter_chunks` selects by layer and level only) drove the counter to
+  `width` while some columns had never been touched, and those columns were
+  persisted carrying their pooled or zero-initialized value. Replaced by a
+  per-column bitmask.
+* **L2.L4** the vgeom cull's `instance_count * meshlet_count` fed three places
+  that must agree — the `visible` buffer's size and two `dispatch_workgroups`
+  calls. Past 2³² pairs it wrapped small: an undersized buffer written by a
+  dispatch sized from the same wrapped number, which lands as GPU memory
+  corruption rather than a panic. One `visible_slots()` door.
+* **C4-45 (casts)** `as u32` on a float saturates and maps NaN to 0, so a
+  nonsense sprite rect clamped into the top-left corner and read as deliberate.
+
+### The doors where absent and broken were one answer
+
+* **C4-42a** `CellValue::parse` mapped a thousands separator, a locale decimal
+  comma or a unit suffix onto **zero** with no diagnostic. A `.inf_table` is
+  gameplay and balance data; the author cannot tell a real 0 from a column that
+  failed to import. `parse_checked` says which, the CSV importer turns it into
+  advisories naming the line and column, and `asset_table_import` returns them.
+  A **blank** cell is not a failure — an empty column is how a table says "no
+  value". C4-45's table half rides along: `flexible(true)` drops a long row's
+  extra cells and pads a short one, which is right for a hand-maintained
+  spreadsheet and wrong to do in silence.
+* **C4-42b** `PcgAsset::graph()` mapped a parse failure of `graph_json` onto the
+  same `None` that means "a v1 document-only payload". Every consumer reads
+  `None` as "use the lowered document mirror", and that mirror structurally
+  cannot carry grammar or building passes — so **every procedural building and
+  grammar pass silently disappeared** from the generated world, with its meshes.
+  Its write-side twin too: `to_string(..).ok()` dropped the authored graph while
+  `encode()` reported success.
+* **C4-42c** `load_blueprint_class` did `.ok()?` on both the read and the parse,
+  *after* the DB entry was found. Both consumers read `None` as "no blueprint
+  bound", so a corrupt or locked `.inf_act` means the actor runs with **no
+  gameplay logic**, zero diagnostics.
+* **C4-43** audio, two lies at once. A `Play` whose clip did not resolve returned
+  in silence and never reached `sources`, so every later `Stop` / `SetVolume` /
+  `SetPitch` for that source was **also** a silent no-op — under this crate's own
+  doctrine (the stream is a pure function of the sim state) the stream had
+  diverged and nothing measured it. And `if let Ok(handle) = manager.play(sound)`
+  dropped kira's error while the engine inserted the voice anyway: `is_playing()`
+  reported true for ever, `voice_count()` drifted upward, `drain_finished` could
+  never reap it, and the caller was told it worked. Both are now counted, with
+  one warning per GUID.
+
+### Findings closed, with their commits
+
+| finding | commit |
+|---|---|
+| C4-1, C4-6, C4-7, C4-8, C4-9, C4-16, C4-20, C4-37 (unit U1); C4-44 dcc-build + C4-45 vgeom-bounds retired | `4487f87` |
+| C4-4 (both halves), C4-5, C4-31, lens5→lens4 `.inf_tex` hand-off (unit U6 + U7 anim) | `82fc6b2` |
+| C4-19, C4-35, C4-36, C4-44 gizmo, C4-45 sampler (unit U7) | `d8830b7` |
+| C4-30 | `f751517`, `c897a63` |
+| C4-32 | `b2c67f6` |
+| L5.F4, F5, F6, F7, F12 | `ac6591d` |
+| C4-15, C4-17, C4-18, C4-45 casts, L2.L4 | `f26f451` |
+| C4-42 (×3), C4-43, C4-45 table advisory | `6cbf084` |
+
+### Deferred, with reasons
+
+* **`inf-scene`'s `fracture.rs:1226` `0 | 1` arm.** The same shape as L5.F4, and
+  lens 5 says so — but that one sits *inside* the recorded `AssetPayload::migrate`
+  bound, so closing it is a follow-on to that bound's deliberate bump rather than
+  this wave's free repair.
+* **A `graph_json` refusal at the PCG consumers.** `try_graph` exists and is
+  honest; wiring every consumer to *surface* the refusal (rather than fall back
+  to the mirror) touches the cook's advisory set, which is wave F's file.
+* **The remaining `Backend::play` callers' `Option` handling.** `play` now
+  returns `Option<SoundHandle>` and the engine's own paths are complete; the
+  direct-API callers outside this crate still `.unwrap()` in tests, which is
+  correct there and would be a refusal shape to design elsewhere.
+
+### Arms added
+
+23 new tests, every one of them mutation-verified:
+
+* `crates/inf-mesh/tests/import_door.rs` — **14 permanent refusal fixtures**,
+  each a real malformed `.gltf` with a real binary buffer or a real `.obj`, plus
+  two healthy controls so a refusal cannot pass by refusing everything.
+* the terrain sculpt arm asserts **the world** — every stored sample of every
+  tile, after a saturating Raise, a Smooth and a Flatten over one footprint.
+* the collider arm asserts the world (body yes, collider no), the ledger
+  (counted once, attributed), that an identical re-sync does **not** re-attempt,
+  that a repaired shape **is** retried, and that the repaired body then rests on
+  a floor instead of falling through it.
+
+### Measured mutations
+
+| un-fix | result |
+|---|---|
+| `reject_out_of_range` deleted | `an_index_past_the_vertex_buffer_is_refused` alone fails |
+| `parse_f32`'s `is_finite` deleted | `every_spelling_of_a_non_finite_obj_number_is_refused` alone fails, by importing successfully |
+| C4-37 reverted at **both** lines | `an_infinite_skin_weight_is_refused` alone fails; reverting only one leaves it green, which is why both were fixed |
+| `TextureAsset::migrate`'s validate deleted | the ~40-byte-file arm decodes successfully |
+| C4-4 guard, C4-7 `locate`, C4-31 quat reverted together | three arms fail, one each, nothing else |
+| C4-30 latch restored | the collider arm fails on the counter |
+| C4-32 destroy-then-build restored | the authored list is destroyed by a refused edit |
+| `unresolved_clips` counter deleted | the audio arm fails |
+| `CellValue` Int arm back to `unwrap_or(0)` | `"1,234" was accepted as an integer` |
+
+### A law earned here
+
+**A fix with two halves needs an accessor for the half that has no behaviour.**
+C4-30's `col_refused` is what bounds the retry, so a record that *also* latched
+`col` to the refused descriptor behaved identically through every public path —
+the latch-restoring mutation passed the whole suite. `attached_collider_desc`
+turns "the bridge never records a desired collider as achieved" from an assertion
+into a measurement, and with it that mutation fails by name. Measured both ways
+before the accessor was added; this campaign has already been caught once by an
+arm that could not see the thing it was named for.
+
+
+---
+
 *This roadmap is a living document. Each phase completion updates it; decision memos land in
 `docs/memos/`; deviations require a memo, not silence.*
