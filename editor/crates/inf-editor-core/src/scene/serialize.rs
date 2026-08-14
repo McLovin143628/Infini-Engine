@@ -6299,12 +6299,24 @@ pub fn encode_scene(doc: &SceneDoc, guid: Option<Uuid>) -> Result<EncodedScene, 
 
 /// Write a pre-[`encode_scene`]d scene to `path` (payload) + its `.toml` sidecar
 /// — the file-IO half of [`save`], callable after the doc lock is released.
+///
+/// **Both halves go down [`inf_asset::write_atomically`]** (C4-2). This is the
+/// most valuable file the product writes and it was the one document with no
+/// atomic story: `.inf_pack`, `.inf_terrain`, `.inf_voxel` and `.inf_vmesh` all
+/// had temp+rename, while Ctrl+S truncated the level in place. A power loss, an
+/// OOM kill or a full disk mid-write left the level destroyed with no backup —
+/// and the sidecar half was worse, because `AssetDb` falls back on an
+/// unparseable level sidecar to a **content-derived** id, so a torn sidecar
+/// re-registers the level under a GUID that churns with its contents and every
+/// cross-asset reference into it goes stale.
+///
+/// Payload first, sidecar second — the order every other writer in the engine
+/// uses. Neither is ever partial now, so the only reachable interleaving is
+/// "new payload, old sidecar", which is a stale `content_hash` (re-derivable)
+/// rather than a lost GUID.
 pub fn write_encoded(enc: &EncodedScene, path: &Path) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
-    }
-    std::fs::write(path, &enc.payload).map_err(|e| format!("write payload: {e}"))?;
-    std::fs::write(sidecar_path(path), &enc.sidecar_toml)
+    inf_asset::write_atomically(path, &enc.payload).map_err(|e| format!("write payload: {e}"))?;
+    inf_asset::write_atomically(&sidecar_path(path), &enc.sidecar_toml)
         .map_err(|e| format!("write sidecar: {e}"))?;
     Ok(())
 }
@@ -6345,9 +6357,17 @@ pub fn write_recovery(doc: &SceneDoc, dir: &Path) -> Result<(), String> {
 /// Write a pre-encoded recovery payload to `dir` — the file-IO half of
 /// [`write_recovery`], callable after the doc lock is released (the autosave
 /// command encodes under the lock, then writes outside it).
+///
+/// **Atomic** (C4-10). This is the file most likely to be mid-write when the
+/// process dies — that is its whole purpose — and a plain write meant every
+/// five-second autosave spent a window in which a crash destroyed the *previous*
+/// complete recovery without producing a new one. [`take_recovery`] would then
+/// correctly detect the corruption and move it aside, i.e. recovery is not used
+/// **and** the last good recovery is already gone. Temp+rename means the old
+/// recovery survives intact until the new one is whole.
 pub fn write_recovery_bytes(payload: &[u8], dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?;
-    std::fs::write(recovery_path(dir), payload).map_err(|e| format!("write recovery: {e}"))
+    inf_asset::write_atomically(&recovery_path(dir), payload)
+        .map_err(|e| format!("write recovery: {e}"))
 }
 
 // ── the streamed-terrain recovery note (P16.4b) ──────────────────────────
@@ -6374,10 +6394,8 @@ pub fn recovery_terrain_note_path(dir: &Path) -> PathBuf {
 pub fn write_recovery_terrain_note(dir: &Path, note: Option<&str>) -> Result<(), String> {
     let path = recovery_terrain_note_path(dir);
     match note {
-        Some(text) => {
-            std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?;
-            std::fs::write(&path, text).map_err(|e| format!("write terrain note: {e}"))
-        }
+        Some(text) => inf_asset::write_atomically(&path, text)
+            .map_err(|e| format!("write terrain note: {e}")),
         None => {
             let _ = std::fs::remove_file(&path);
             Ok(())
@@ -6407,6 +6425,21 @@ pub fn take_recovery_terrain_note(dir: &Path) -> Option<String> {
 /// never silently dropped — it is moved aside to `crash-recovery.inf_lvl.corrupt`
 /// and a warning is logged, so startup falls back cleanly to the last good save
 /// while the bad file is preserved for diagnosis.
+///
+/// # A spent recovery must never restore over newer work
+///
+/// The recovery file is *consumed* — by this function on a successful load, and
+/// by [`clear_recovery`] on a clean save. Both used to consume it with a
+/// discarded `let _ = remove_file(..)`, and the two failure modes are the worst
+/// outcomes this whole mechanism has: a failed removal here re-offers the same
+/// stale document on every subsequent boot, and a failed removal in
+/// `clear_recovery` restores it **over content the user has since saved**.
+///
+/// So a removal that fails leaves a [`recovery_superseded_path`] stamp instead,
+/// and one rule reads it: *a recovery no newer than the stamp is spent*. The
+/// comparison is by modification time, so a later autosave — which writes a
+/// genuinely newer recovery — is still honoured, and no path knowledge is
+/// needed (this function runs at boot, before any level is open).
 pub fn take_recovery(dir: &Path) -> Option<SceneDoc> {
     let path = recovery_path(dir);
     if !path.exists() {
@@ -6417,9 +6450,17 @@ pub fn take_recovery(dir: &Path) -> Option<SceneDoc> {
     if let Some(note) = take_recovery_terrain_note(dir) {
         tracing::warn!("crash recovery: {note}");
     }
+    if recovery_is_superseded(dir) {
+        tracing::warn!(
+            "crash-recovery file is older than the save that superseded it; discarding it \
+             rather than restoring it over newer saved content"
+        );
+        discard_recovery(dir);
+        return None;
+    }
     match load(&path) {
         Ok(doc) => {
-            let _ = std::fs::remove_file(&path);
+            consume_recovery_file(dir, "restoring it would repeat this recovery on every boot");
             Some(doc)
         }
         Err(e) => {
@@ -6428,21 +6469,106 @@ pub fn take_recovery(dir: &Path) -> Option<SceneDoc> {
                  falling back to the last saved level"
             );
             let aside = path.with_extension("inf_lvl.corrupt");
-            if std::fs::rename(&path, &aside).is_err() {
+            if let Err(rename_err) = std::fs::rename(&path, &aside) {
                 // If we cannot move it aside, remove it so it does not block the
                 // next boot — but never panic.
-                let _ = std::fs::remove_file(&path);
+                tracing::warn!(
+                    "could not preserve the corrupt crash-recovery file as {} ({rename_err}); \
+                     removing it instead",
+                    aside.display()
+                );
+                consume_recovery_file(dir, "it is corrupt and cannot be moved aside");
             }
             None
         }
     }
 }
 
+/// The stamp that marks the recovery file as **spent** when it could not be
+/// removed: `crash-recovery.superseded`.
+///
+/// A separate zero-length file rather than a flag inside the payload, for
+/// [`recovery_terrain_note_path`]'s reason — it is a fact *about* the recovery,
+/// not document content — and because writing into the payload is exactly the
+/// operation that has already been shown to fail when this stamp is needed.
+pub fn recovery_superseded_path(dir: &Path) -> PathBuf {
+    dir.join("crash-recovery.superseded")
+}
+
+/// True when a superseded stamp exists and the recovery file is no newer than
+/// it — i.e. the recovery has already been consumed or written over.
+///
+/// Unreadable timestamps fail **safe**: with no answer the recovery is treated
+/// as live, because losing a real recovery is worse than offering a spent one
+/// (the user is asked either way, and a spent one restores work they still have).
+fn recovery_is_superseded(dir: &Path) -> bool {
+    let stamp = recovery_superseded_path(dir);
+    let (Ok(stamp_at), Ok(recovery_at)) = (modified_at(&stamp), modified_at(&recovery_path(dir)))
+    else {
+        return false;
+    };
+    recovery_at <= stamp_at
+}
+
+fn modified_at(path: &Path) -> std::io::Result<std::time::SystemTime> {
+    std::fs::metadata(path)?.modified()
+}
+
+/// Remove the recovery file; if it will not go, leave the superseded stamp so
+/// the next boot refuses it. `why` names the consequence being prevented.
+fn consume_recovery_file(dir: &Path, why: &str) {
+    let path = recovery_path(dir);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(recovery_superseded_path(dir));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let _ = std::fs::remove_file(recovery_superseded_path(dir));
+        }
+        Err(e) => {
+            tracing::error!(
+                "could not remove the crash-recovery file {} ({e}) — {why}; marking it \
+                 superseded so it is not restored again",
+                path.display()
+            );
+            if let Err(stamp_err) = inf_asset::write_atomically(&recovery_superseded_path(dir), b"")
+            {
+                tracing::error!(
+                    "could not mark the crash-recovery file superseded either ({stamp_err}); a \
+                     stale recovery may be offered on the next boot"
+                );
+            }
+        }
+    }
+}
+
+/// Drop the recovery file and its stamp together (the refusal path).
+fn discard_recovery(dir: &Path) {
+    let _ = std::fs::remove_file(recovery_path(dir));
+    let _ = std::fs::remove_file(recovery_superseded_path(dir));
+    let _ = std::fs::remove_file(recovery_terrain_note_path(dir));
+}
+
 /// Remove the recovery file (called on a clean save / exit), and its
 /// unsaved-terrain-edits note with it — a clean save wrote the terrain too.
-pub fn clear_recovery(dir: &Path) {
-    let _ = std::fs::remove_file(recovery_path(dir));
+///
+/// Returns an error when the recovery file survived the attempt. That verdict is
+/// the point (C4-45): a recovery that outlives the save which superseded it is
+/// restored on the next boot **over the newer content**, which is the worst
+/// outcome in this module. The stamp written by `consume_recovery_file` makes
+/// the next boot refuse it, and the `Err` lets the save that failed to clear it
+/// say so instead of returning silent success.
+pub fn clear_recovery(dir: &Path) -> Result<(), String> {
+    consume_recovery_file(dir, "a later boot would restore it over the level just saved");
     let _ = std::fs::remove_file(recovery_terrain_note_path(dir));
+    if recovery_path(dir).exists() {
+        return Err(format!(
+            "the crash-recovery file {} could not be removed after a clean save; it is marked \
+             superseded so it will not be restored, but it should be deleted by hand",
+            recovery_path(dir).display()
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -6787,6 +6913,122 @@ mod tests {
         assert_eq!(v.graph, Some(uuid::Uuid::from_u128(0xABCD)));
     }
 
+    /// **A level save is atomic on both halves** (C4-2) — payload *and*
+    /// sidecar. A reader holding either file open never observes the rewrite,
+    /// which is the same thing as saying neither is ever truncated in place.
+    ///
+    /// The sidecar half is not decoration: `AssetDb` falls back on an
+    /// unparseable level sidecar to a content-derived id, so a torn sidecar
+    /// makes the level's GUID churn with its contents and every reference into
+    /// it dangle.
+    #[test]
+    fn saving_a_level_never_exposes_a_torn_payload_or_sidecar() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Levels").join("main.inf_lvl");
+
+        let mut doc = SceneDoc::with_demo();
+        let guid = save(&doc, &path, None).unwrap();
+        let payload_before = std::fs::read(&path).unwrap();
+        let sidecar_before = std::fs::read(sidecar_path(&path)).unwrap();
+
+        let mut live_payload = std::fs::File::open(&path).unwrap();
+        let mut live_sidecar = std::fs::File::open(sidecar_path(&path)).unwrap();
+
+        // A second, larger save over the same paths.
+        for i in 0..32 {
+            doc.edit_create(SpawnKind::Cube, &format!("Cube {i}"), None);
+        }
+        save(&doc, &path, Some(guid)).unwrap();
+
+        let mut seen = Vec::new();
+        live_payload.read_to_end(&mut seen).unwrap();
+        assert_eq!(
+            seen, payload_before,
+            "a live reader observed the payload rewrite"
+        );
+        let mut seen = Vec::new();
+        live_sidecar.read_to_end(&mut seen).unwrap();
+        assert_eq!(
+            seen, sidecar_before,
+            "a live reader observed the sidecar rewrite"
+        );
+
+        // …and the files on disk really are the new ones, whole.
+        assert_ne!(std::fs::read(&path).unwrap(), payload_before);
+        load(&path).expect("the rewritten level parses");
+        let strays: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "left temp files behind: {strays:?}");
+    }
+
+    /// **The autosave that destroyed the previous autosave** (C4-10): the
+    /// recovery file is rewritten every five seconds, so a plain write spent a
+    /// window on each one in which a crash left neither the old recovery nor a
+    /// new one. A reader holding the previous recovery open must not observe the
+    /// rewrite.
+    #[test]
+    fn rewriting_the_recovery_file_never_destroys_the_previous_one() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let mut doc = SceneDoc::with_demo();
+        write_recovery(&doc, dir.path()).unwrap();
+        let first = std::fs::read(recovery_path(dir.path())).unwrap();
+
+        let mut live = std::fs::File::open(recovery_path(dir.path())).unwrap();
+        for i in 0..32 {
+            doc.edit_create(SpawnKind::Cube, &format!("Cube {i}"), None);
+        }
+        write_recovery(&doc, dir.path()).unwrap();
+
+        let mut seen = Vec::new();
+        live.read_to_end(&mut seen).unwrap();
+        assert_eq!(seen, first, "an autosave observed the previous recovery");
+        assert_ne!(std::fs::read(recovery_path(dir.path())).unwrap(), first);
+    }
+
+    /// **A superseded recovery is refused, and a newer one is still honoured**
+    /// (C4-45). The stamp is what `clear_recovery` leaves when the recovery file
+    /// will not go away; the rule that reads it is a modification-time compare,
+    /// so both directions have to be asserted or the guard could simply be
+    /// "always refuse".
+    #[test]
+    fn a_recovery_older_than_its_superseded_stamp_is_never_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = SceneDoc::with_demo();
+
+        // A recovery that a clean save superseded but could not delete.
+        write_recovery(&doc, dir.path()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        inf_asset::write_atomically(&recovery_superseded_path(dir.path()), b"").unwrap();
+        assert!(
+            take_recovery(dir.path()).is_none(),
+            "a spent recovery must not restore over newer saved content"
+        );
+        assert!(
+            !recovery_path(dir.path()).exists(),
+            "the refusal consumes the stale file"
+        );
+        assert!(!recovery_superseded_path(dir.path()).exists());
+
+        // The other direction: an autosave *after* the stamp is a live recovery.
+        inf_asset::write_atomically(&recovery_superseded_path(dir.path()), b"").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_recovery(&doc, dir.path()).unwrap();
+        assert!(
+            take_recovery(dir.path()).is_some(),
+            "a recovery written after the stamp is still live"
+        );
+        assert!(
+            !recovery_superseded_path(dir.path()).exists(),
+            "consuming the recovery clears the stamp with it"
+        );
+    }
+
     #[test]
     fn recovery_round_trips_then_clears() {
         let dir = tempfile::tempdir().unwrap();
@@ -6888,7 +7130,7 @@ mod tests {
         // A clean save clears both, so the next boot warns about nothing.
         write_recovery(&doc, dir.path()).unwrap();
         write_recovery_terrain_note(dir.path(), Some("still unsaved")).unwrap();
-        clear_recovery(dir.path());
+        clear_recovery(dir.path()).unwrap();
         assert!(!recovery_path(dir.path()).exists());
         assert!(!recovery_terrain_note_path(dir.path()).exists());
 

@@ -1071,8 +1071,15 @@ pub async fn scene_save(
                 "scene_save: unsaved terrain/carve edits survived the save — keeping the \
                  crash-recovery file and its note"
             );
-        } else {
-            serialize::clear_recovery(&dir);
+        } else if let Err(msg) = serialize::clear_recovery(&dir) {
+            // A recovery file that outlives the save superseding it is restored
+            // on the next boot over the newer content (C4-45). `clear_recovery`
+            // has already stamped it superseded, so that cannot happen silently
+            // — but the failure is reported rather than swallowed. It goes to the
+            // Output Log rather than into `SaveResultDto`: the save itself
+            // succeeded, and the DTO's two warning lists name the two asset
+            // classes a save writes (terrain, voxels), neither of which this is.
+            tracing::error!("scene_save: {msg}");
         }
     }
     // Save As adopts the written path as the current level.
