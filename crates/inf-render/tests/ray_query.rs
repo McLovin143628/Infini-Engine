@@ -312,11 +312,18 @@ fn build_scene(gpu: &GpuContext) -> (RtScene, std::time::Duration) {
 /// anything the GPU was handed: the DAG's own vertices through this file's own
 /// transform arithmetic.
 fn world_triangles() -> Vec<[Vec3; 3]> {
+    world_triangles_of(&placements())
+}
+
+/// [`world_triangles`] over an arbitrary placement list, so an arm that wants a
+/// different instance transform gets the CPU side of the comparison from the
+/// same arithmetic and not from a second copy of it.
+fn world_triangles_of(placements: &[(Vec3, Quat, Vec3)]) -> Vec<[Vec3; 3]> {
     let m = mesh();
     let level = finest_level(&m);
     let src = RtBlasSource::from_meshlet_level(&m, level).expect("the finest level");
     let mut out = Vec::new();
-    for (t, r, s) in placements() {
+    for &(t, r, s) in placements {
         let rot = Mat3::from_quat(r) * Mat3::from_diagonal(s);
         for tri in src.indices.chunks_exact(3) {
             out.push([
@@ -642,6 +649,145 @@ fn a_blas_over_meshlet_clusters_traces_what_a_cpu_ray_caster_traces() {
     assert_eq!(stats.blas, 1);
     assert_eq!(stats.instances, 2);
     assert_eq!(stats.triangles, world_triangles().len() / 2);
+}
+
+/// **The TLAS's row-major transform convention, exercised by a ROTATION**
+/// (P28.5 audit — the arm that kills mutation Q5).
+///
+/// The measured fixture takes `Quat::IDENTITY` at both instances for a good
+/// reason — a rotation there stands a plane on edge and casts nothing — but the
+/// consequence is that its 3 × 4 affine is **diagonal**, and a diagonal matrix
+/// is its own transpose. So P28.5 transposed the TLAS transform, watched every
+/// arm stay green, and recorded the survivor as a property of the fixture: the
+/// zero-pixel agreement in `a_blas_over_meshlet_clusters_traces_what_a_cpu_ray_
+/// caster_traces` is a statement about translation and scale only.
+///
+/// This arm closes it **additively**, on its own placements, so not one number
+/// in `docs/memos/p28-5-ray-query.md` moves. One asset, two instances, a
+/// three-axis rotation on each — and the same CPU Möller–Trumbore caster,
+/// handed the same rotation through this file's own arithmetic rather than
+/// through the descriptor the GPU got.
+///
+/// Under a transposed transform the rotation becomes its inverse, the geometry
+/// lands somewhere else, and the two intersectors stop agreeing. The guard that
+/// makes that a *test* rather than a hope is `rotated_differs`: the rotated
+/// scene must produce a materially different image from the unrotated one, or a
+/// trace that quietly ignored the rotation entirely would agree with a CPU side
+/// that also ignored it.
+#[test]
+fn a_rotated_instance_is_traced_through_its_own_transform() {
+    let Some(gpu) = ray_query_or_skip("the rotated-instance arm") else {
+        return;
+    };
+    // Two asymmetric rotations. Neither is a symmetry of the displaced grid, so
+    // R and Rᵀ = R⁻¹ describe genuinely different surfaces; the scales are
+    // uniform so the transpose is exactly the inverse rotation and the mutation
+    // is a clean one.
+    let rotated: [(Vec3, Quat, Vec3); 2] = [
+        (
+            Vec3::new(0.0, -1.0, 0.0),
+            Quat::from_euler(glam::EulerRot::XYZ, 0.21, 0.62, 0.13),
+            Vec3::splat(9.0),
+        ),
+        (
+            Vec3::new(0.4, 2.4, 0.2),
+            Quat::from_euler(glam::EulerRot::XYZ, -0.45, 0.31, 0.77),
+            Vec3::splat(1.5),
+        ),
+    ];
+    let flat: [(Vec3, Quat, Vec3); 2] = [
+        (rotated[0].0, Quat::IDENTITY, rotated[0].2),
+        (rotated[1].0, Quat::IDENTITY, rotated[1].2),
+    ];
+
+    let m = mesh();
+    let level = finest_level(&m);
+    let src = RtBlasSource::from_meshlet_level(&m, level).expect("the finest level exists");
+    let build = |ps: &[(Vec3, Quat, Vec3)]| {
+        let instances: Vec<RtInstance> = ps
+            .iter()
+            .map(|&(t, r, s)| RtInstance {
+                blas: 0,
+                transform: xform(t, r, s),
+            })
+            .collect();
+        RtScene::build(&gpu, std::slice::from_ref(&src), &instances).expect("the build")
+    };
+
+    let pass = RtSunShadow::new(&gpu);
+    let v = wide_rt_view();
+    let rt = build(&rotated);
+    let gpu_verdicts = pass.trace(&gpu, &rt, &v, W, H);
+    let cpu = cpu_verdicts(&world_triangles_of(&rotated), &v);
+
+    // ANTI-VACUITY (1): all three verdicts on both sides, as the correctness arm
+    // requires, so "they agree" is not a statement about a blank frame.
+    for (name, mask) in [("gpu", &gpu_verdicts), ("cpu", &cpu)] {
+        for (label, want) in [
+            ("miss", RT_MISS),
+            ("lit", RT_LIT),
+            ("shadowed", RT_SHADOWED),
+        ] {
+            let n = mask.iter().filter(|x| **x == want).count();
+            assert!(
+                n > 64,
+                "{name} produced only {n} {label} pixels under rotation — this \
+                 fixture is not exercising the class"
+            );
+        }
+    }
+
+    // ANTI-VACUITY (2): the rotation must MATTER. Without this a trace that
+    // ignored the instance transform's rotation altogether would agree with a
+    // CPU side that ignored it too, and the arm would certify the bug.
+    let flat_rt = build(&flat);
+    let flat_gpu = pass.trace(&gpu, &flat_rt, &v, W, H);
+    let rotated_differs = (0..(W * H) as usize)
+        .filter(|i| flat_gpu[*i] != gpu_verdicts[*i])
+        .count();
+    assert!(
+        rotated_differs * 20 > (W * H) as usize,
+        "the rotated scene differs from the unrotated one on only \
+         {rotated_differs} of {} pixels — the rotation is not reaching the \
+         trace, so agreeing with a CPU caster proves nothing about it",
+        W * H
+    );
+
+    let differ: Vec<usize> = (0..(W * H) as usize)
+        .filter(|i| gpu_verdicts[*i] != cpu[*i])
+        .collect();
+    let interior = differ
+        .iter()
+        .filter(|i| {
+            let (x, y) = ((**i as u32) % W, (**i as u32) / W);
+            x > 0 && y > 0 && x + 1 < W && y + 1 < H
+        })
+        .filter(|i| {
+            let n = [**i - 1, **i + 1, **i - W as usize, **i + W as usize];
+            n.iter().all(|k| gpu_verdicts[*k] != cpu[*k])
+        })
+        .count();
+    println!(
+        "ROTATED TLAS vs CPU CASTER — {} of {} pixels differ ({:.4} %), {interior} \
+         interior to a differing block; the rotation moves {rotated_differs} pixels \
+         against the unrotated scene",
+        differ.len(),
+        W * H,
+        differ.len() as f64 / f64::from(W * H) * 100.0
+    );
+    assert!(
+        differ.len() * 200 < (W * H) as usize,
+        "the device and the CPU caster disagree on {} of {} pixels under a \
+         rotated instance — the TLAS's row-major 3 × 4 convention and this \
+         file's are not the same convention",
+        differ.len(),
+        W * H
+    );
+    assert_eq!(
+        interior, 0,
+        "{interior} disagreements are interior to a solid differing block under \
+         rotation, which is a wrong transform and not a rounding boundary"
+    );
 }
 
 /// **THE COMPARISON THE CLAUSE ASKS FOR**: ray-queried sun shadows against the
