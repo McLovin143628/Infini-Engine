@@ -369,6 +369,7 @@ fn cook_one(
     input: CookInput,
     opts: &CookOptions,
     fractures: &BTreeMap<AssetId, FractureRequest>,
+    clusters: &BTreeMap<AssetId, inf_vgeom::ClusterTextureSet>,
 ) -> Result<CookOutput> {
     let (guid, kind, name, raw) = match input {
         CookInput::Skipped(w) => return Ok(CookOutput::Skipped(w)),
@@ -533,7 +534,11 @@ fn cook_one(
     // ── derive virtualized geometry for dense meshes (for a mesh cooked == raw) ─
     let vmesh = if kind == AssetKind::Mesh && opts.vgeom.enabled {
         let _span = tracing::info_span!("derive_vmesh", %guid).entered();
-        match derive_vmesh(guid, &cooked, opts.vgeom.min_triangles)? {
+        let paired = clusters
+            .get(&guid)
+            .cloned()
+            .unwrap_or_else(inf_vgeom::ClusterTextureSet::none);
+        match derive_vmesh(guid, &cooked, opts.vgeom.min_triangles, &paired)? {
             Ok(bytes) => Some((derived_vmesh_id(guid), bytes)),
             // A mesh with real geometry that the threshold turned away ships as a
             // placeholder cube — say so (P18.3 audit). An empty mesh says nothing:
@@ -785,6 +790,147 @@ fn derive_fracture(
         message: e.to_string(),
     })?;
     Ok(Ok((bytes, chunks, requested)))
+}
+
+/// **Which texture tiles a mesh's cluster pages carry** (P28.2), and the hazards
+/// that make an answer impossible.
+///
+/// Same shape and same reason as [`plan_fractures`]: [`cook_one`] is a pure
+/// function of one asset's bytes, and "which textures does this mesh sample" is
+/// not a fact about the mesh. A `.inf_mesh` carries material **slot names**, not
+/// GUIDs; the binding lives on a *level entity*, where a `MeshRef` and a
+/// `Material` meet. So the plan walks levels serially and hands the closure
+/// read-only data.
+///
+/// The chain is the P26.3b wire, followed in the one direction it runs:
+///
+/// ```text
+///   entity(MeshRef.asset, Material.asset)          the level's binding
+///     → derive_material_bytes(.inf_mat)            the flattening (one door)
+///       → DerivedMaterial::texture_dependencies()  albedo → normal → ORM
+///         → TiledTextureReader::vt_desc()          the tile grid per mip
+/// ```
+///
+/// `texture_dependencies`' order **is** the residency contract (its own doc says
+/// so), so the pairing inherits it rather than choosing one; a mesh drawn with
+/// two materials gets the union, deduped by texture id, because a cluster page
+/// that is resident is resident for every instance of it.
+///
+/// Two hazards are advisories rather than silence, on the P16 doctrine:
+///
+/// * a bound material naming a texture the project does not have, or one that is
+///   still a **v1** `.inf_tex` — the cluster page then carries *no* tiles for
+///   that slot, so the coupling cannot protect it and the surface streams as it
+///   did before P28.2. (`unshippable_material_textures` reports the same two
+///   hazards against the *material*; this one reports them against the **mesh**,
+///   because it is the mesh's pages that silently lose their pairing.)
+/// * a mesh bound to a material whose `.inf_mat` bytes are not in the closure.
+fn plan_cluster_pairings(
+    inputs: &[CookInput],
+) -> (
+    BTreeMap<AssetId, inf_vgeom::ClusterTextureSet>,
+    Vec<String>,
+) {
+    let mut by_guid: BTreeMap<AssetId, (AssetKind, &[u8])> = BTreeMap::new();
+    for input in inputs {
+        if let CookInput::Asset {
+            guid, kind, raw, ..
+        } = input
+        {
+            by_guid.insert(*guid, (*kind, raw.as_slice()));
+        }
+    }
+
+    // mesh → the materials some entity draws it with, in GUID order.
+    let mut bound: BTreeMap<AssetId, BTreeSet<AssetId>> = BTreeMap::new();
+    for input in inputs {
+        let CookInput::Asset { kind, raw, .. } = input else {
+            continue;
+        };
+        if *kind != AssetKind::Level {
+            continue;
+        }
+        let Ok(level) = inf_scene::decode(raw) else {
+            continue;
+        };
+        for e in &level.entities {
+            let (Some(mesh), Some(mat)) = (
+                e.mesh.as_ref().and_then(|m| m.asset).map(AssetId),
+                e.material.as_ref().and_then(|m| m.asset).map(AssetId),
+            ) else {
+                continue;
+            };
+            bound.entry(mesh).or_default().insert(mat);
+        }
+    }
+
+    let mut plan: BTreeMap<AssetId, inf_vgeom::ClusterTextureSet> = BTreeMap::new();
+    let mut notes: BTreeSet<String> = BTreeSet::new();
+    for (mesh, materials) in bound {
+        let mut textures: Vec<inf_vgeom::ClusterTexture> = Vec::new();
+        let mut seen: BTreeSet<AssetId> = BTreeSet::new();
+        for mat in materials {
+            let Some((AssetKind::Material, raw)) = by_guid.get(&mat).copied() else {
+                notes.insert(unpairable_cluster_material_advisory(mesh, mat));
+                continue;
+            };
+            let Ok(derived) = inf_material::derive_material_bytes(raw) else {
+                // `undecodable_material_advisory` is raised for the same asset in
+                // `cook_one`; saying it twice in two voices is how advisories
+                // stop being read.
+                continue;
+            };
+            for tex in derived.texture_dependencies() {
+                if !seen.insert(tex) {
+                    continue;
+                }
+                let Some((AssetKind::Texture, bytes)) = by_guid.get(&tex).copied() else {
+                    notes.insert(unpairable_cluster_texture_advisory(mesh, mat, tex));
+                    continue;
+                };
+                match inf_material::tiles::TiledTextureReader::new(bytes) {
+                    Ok(r) => textures.push(inf_vgeom::ClusterTexture::from_desc(
+                        tex,
+                        &r.vt_desc(),
+                    )),
+                    Err(_) => {
+                        notes.insert(unpairable_cluster_texture_advisory(mesh, mat, tex));
+                    }
+                }
+            }
+        }
+        if !textures.is_empty() {
+            plan.insert(mesh, inf_vgeom::ClusterTextureSet { textures });
+        }
+    }
+    (plan, notes.into_iter().collect())
+}
+
+/// Advisory: a level draws `mesh` with a material whose bytes are not in the
+/// closure, so its cluster pages carry no tile pairing (P28.2).
+pub fn unpairable_cluster_material_advisory(mesh: AssetId, material: AssetId) -> String {
+    format!(
+        "mesh {mesh} is drawn with material {material}, which is not in the cook closure — \
+         its cluster pages ship with NO texture pairing, so a page-in cannot admit the \
+         mesh and its tiles together and the surface streams geometry and texture \
+         independently, as it did before P28.2. Re-import or re-bind the material."
+    )
+}
+
+/// Advisory: a bound material names a texture that cannot be paired — absent from
+/// the closure, or still a v1 `.inf_tex` with no tile grid to address (P28.2).
+pub fn unpairable_cluster_texture_advisory(
+    mesh: AssetId,
+    material: AssetId,
+    texture: AssetId,
+) -> String {
+    format!(
+        "mesh {mesh}, through material {material}, samples texture {texture}, which is \
+         missing from the cook closure or is not a v2 tiled container — that slot gets NO \
+         entry in the mesh's cluster pages, so nothing couples its tiles to the geometry \
+         and the \"detailed mesh, blurry texture\" case stays reachable for it. Re-import \
+         the texture (P26.1 emits the tiled container)."
+    )
 }
 
 /// Which meshes to fracture, and the parameters to fracture them with.
@@ -1042,10 +1188,23 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     };
     warnings.extend(fracture_notes);
 
+    // Which texture tiles a mesh's cluster pages carry is the same shape of
+    // cross-asset fact (P28.2): it lives on level entities, which is where a mesh
+    // and a material meet. Resolved serially here, handed in as read-only data.
+    let (cluster_plan, cluster_notes) = if opts.vgeom.enabled {
+        let _span = tracing::info_span!("plan_cluster_pairings").entered();
+        plan_cluster_pairings(&inputs)
+    } else {
+        (BTreeMap::new(), Vec::new())
+    };
+    warnings.extend(cluster_notes);
+
     // Parallel, deterministic (in-order) map: cook every asset on the job pool.
     let outputs: Vec<Result<CookOutput>> = {
         let _span = tracing::info_span!("cook_assets", assets = inputs.len()).entered();
-        inf_core::parallel_map(inputs, |input| cook_one(input, opts, &fracture_plan))
+        inf_core::parallel_map(inputs, |input| {
+            cook_one(input, opts, &fracture_plan, &cluster_plan)
+        })
     };
 
     // Serial fold in closure order → byte-identical pack + fail-fast first error.
@@ -1419,12 +1578,13 @@ fn derive_vmesh(
     guid: AssetId,
     raw: &[u8],
     min_triangles: usize,
+    textures: &inf_vgeom::ClusterTextureSet,
 ) -> Result<std::result::Result<Vec<u8>, VmeshSkip>> {
     let mesh: inf_mesh::MeshAsset = inf_asset::decode(raw).map_err(|e| CookError::Mesh {
         guid,
         message: e.to_string(),
     })?;
-    let (positions, normals, uvs, indices) = mesh.vgeom_streams();
+    let (positions, normals, uvs, tangents, indices) = mesh.vgeom_streams();
     if mesh.triangle_count() < min_triangles.max(1) || indices.len() < 3 {
         return Ok(Err(classify_skip(
             mesh.triangle_count(),
@@ -1436,15 +1596,17 @@ fn derive_vmesh(
         &positions,
         &normals,
         &uvs,
+        &tangents,
         &indices,
         inf_vgeom::BuildParams::default(),
     );
-    // P18.2: the packed payload is the **v2 paged image**, not `inf_asset::encode`
+    // P18.2: the packed payload is the **v3 paged image**, not `inf_asset::encode`
     // output. A bincode length prefix would shift every section off its 16-byte
     // boundary and defeat the whole layout — the same rule, and the same reason,
     // as `.inf_terrain`'s raw image (see `inf_vgeom::asset`). The image is a pure
-    // function of the DAG, so the cook stays byte-identical run to run.
-    let bytes = inf_vgeom::build_vgeom_asset(&vgeom)
+    // function of `(DAG, pairing)`, and both are pure functions of the closure, so
+    // the cook stays byte-identical run to run.
+    let bytes = inf_vgeom::build_vgeom_asset(&vgeom, textures)
         .map_err(|e| CookError::Mesh {
             guid,
             message: e.to_string(),

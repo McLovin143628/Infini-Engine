@@ -919,3 +919,310 @@ fn cook_advises_when_a_mesh_is_below_the_vgeom_threshold() {
         ok.warnings
     );
 }
+
+// ───────────────── P28.2: the cluster → tile pairing at cook ─────────────────
+
+/// An entity with every component slot empty — the same field list the terrain
+/// fixture above spells out, hoisted so a second fixture does not spell it again.
+fn bare_entity(guid: u128, name: &str) -> inf_scene::RuntimeEntity {
+    inf_scene::RuntimeEntity {
+        guid: uuid::Uuid::from_u128(guid),
+        name: name.into(),
+        parent: None,
+        transform: Default::default(),
+        visible: true,
+        mesh: None,
+        material: None,
+        light: None,
+        camera: None,
+        sprite: None,
+        tilemap: None,
+        nine_slice: None,
+        text2d: None,
+        light_2d: None,
+        rigid_body_2d: None,
+        collider_2d: None,
+        character_controller_2d: None,
+        rigid_body_3d: None,
+        collider_3d: None,
+        character_controller_3d: None,
+        actor: None,
+        terrain: None,
+        pcg_volume: None,
+        skeletal_mesh: None,
+        anim_player: None,
+        anim_state_machine: None,
+        root_motion: None,
+        attached_to: None,
+        joint_2d: None,
+        joint_3d: None,
+        audio_source: None,
+        audio_listener: None,
+        decal: None,
+        volume: None,
+        spline: None,
+        foliage: None,
+        streaming_source: None,
+        always_loaded: None,
+        time_of_day: None,
+        sky_atmosphere: None,
+        water_body: None,
+        buoyancy: None,
+        voxel_volume: None,
+        destructible: None,
+        ik_target: None,
+        cloth_sim: None,
+        hair_guides: None,
+    }
+}
+
+/// A 512² checker as a v2 tiled `.inf_tex` — a pyramid of 128-texel tiles, which
+/// is enough levels for the mip rule to have something to say at more than one
+/// page.
+fn tiled_texture_bytes() -> Vec<u8> {
+    let (w, h) = (512u32, 512u32);
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let on = ((x / 32) + (y / 32)) % 2 == 0;
+            let v = if on { 220u8 } else { 40u8 };
+            rgba.extend_from_slice(&[v, v / 2, 255 - v, 255]);
+        }
+    }
+    inf_material::tiles::build_tiled_texture(
+        rgba,
+        w,
+        h,
+        inf_material::texture::TextureImportSettings::default(),
+    )
+    .expect("tile the texture")
+    .as_bytes()
+    .to_vec()
+}
+
+/// [`make_mesh_project`] plus a `.inf_tex`, a `.inf_mat` that samples it, and a
+/// level whose one entity binds BOTH the mesh and the material — which is the
+/// only place in the tree where those two facts meet, and therefore the only
+/// place a cluster→tile pairing can be derived from.
+fn make_textured_mesh_project(root: &Path) -> (AssetId, AssetId, AssetId) {
+    let mesh_id = make_mesh_project(root);
+    let content = root.join("Content");
+
+    let tex_id = AssetId(uuid::Uuid::from_u128(0x2802_0001));
+    let tex_bytes = tiled_texture_bytes();
+    let tex_path = content.join("Checker.inf_tex");
+    std::fs::write(&tex_path, &tex_bytes).unwrap();
+    AssetSidecar::new(tex_id, AssetKind::Texture, ContentHash::of(&tex_bytes))
+        .save(&tex_path)
+        .unwrap();
+
+    let mat_id = AssetId(uuid::Uuid::from_u128(0x2802_0002));
+    let mat = inf_material::MaterialAsset {
+        base_color_texture: Some(tex_id),
+        ..Default::default()
+    };
+    let mat_bytes = inf_asset::encode(&mat).unwrap();
+    let mat_path = content.join("Checker.inf_mat");
+    std::fs::write(&mat_path, &mat_bytes).unwrap();
+    AssetSidecar::new(mat_id, AssetKind::Material, ContentHash::of(&mat_bytes))
+        .save(&mat_path)
+        .unwrap();
+
+    let mut e = bare_entity(0x2802_0010, "Prop");
+    e.mesh = Some(inf_ecs::components::MeshRef {
+        asset: Some(mesh_id.uuid()),
+        ..Default::default()
+    });
+    e.material = Some(inf_ecs::components::Material {
+        asset: Some(mat_id.uuid()),
+        ..Default::default()
+    });
+    let level = inf_scene::RuntimeLevel {
+        title: "Textured Cluster Pages".into(),
+        entities: vec![e],
+        settings: Default::default(),
+    };
+    let level_bytes = level.encode().unwrap();
+    let level_path = content.join("Prop.inf_lvl");
+    std::fs::write(&level_path, &level_bytes).unwrap();
+    AssetSidecar::new(
+        AssetId(uuid::Uuid::from_u128(0x2802_0011)),
+        AssetKind::Level,
+        ContentHash::of(&level_bytes),
+    )
+    .save(&level_path)
+    .unwrap();
+
+    (mesh_id, mat_id, tex_id)
+}
+
+/// **The cook pairs a cluster page with the tiles its materials sample** — the
+/// P28.2 clause-1 gate, asserted on the packed bytes rather than on the planner.
+///
+/// Falsifiable in three directions at once: the pairing has to be non-empty, it
+/// has to name the texture the LEVEL bound (not some other asset in the project),
+/// and the mip it names has to follow the stated rule against the page's own LOD
+/// level. A cook that emitted a plausible but empty tiles section passes none.
+#[test]
+fn cook_pairs_cluster_pages_with_the_tiles_their_materials_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let (mesh_id, _mat_id, tex_id) = make_textured_mesh_project(&proj);
+    let out = dir.path().join("out");
+    let report = cook(&proj, &out, &CookOptions::default()).expect("cook succeeds");
+    assert!(
+        report.warnings.is_empty(),
+        "a fully-bound project raised advisories: {:?}",
+        report.warnings
+    );
+
+    let reader = PackReader::open(&out.join(DEFAULT_PACK_NAME)).unwrap();
+    let vbytes = reader.read(derived_vmesh_id(mesh_id)).unwrap();
+    assert_eq!(
+        inf_vgeom::asset::container_version(&vbytes),
+        Some(inf_vgeom::VMESH_ASSET_SCHEMA_VERSION),
+        "the cook emits the current container"
+    );
+    let r = inf_vgeom::VgeomAssetReader::new(vbytes.as_slice()).expect("index");
+
+    // The texture's own mip grid, read from the packed `.inf_tex` — the pairing's
+    // second input, fetched independently of the planner that consumed it.
+    let tex = reader.read(tex_id).unwrap();
+    let desc = inf_material::tiles::TiledTextureReader::new(tex.as_slice())
+        .expect("v2 container")
+        .vt_desc();
+
+    let mut paired = 0usize;
+    for (p, e) in r.pages().iter().enumerate() {
+        let s = r.page_sections(p).expect("sections");
+        let refs = s.tile_refs();
+        assert_eq!(refs.len(), e.tile_count as usize);
+        assert!(!refs.is_empty(), "page {p} carries no pairing");
+        paired += refs.len();
+        let want_mip = inf_vgeom::tile_mip_for_lod(e.lod, desc.mip_count());
+        for t in refs {
+            assert_eq!(t.texture(), tex_id, "page {p} names a foreign texture");
+            assert_eq!(t.mip, want_mip, "page {p} paired the wrong mip");
+            let m = &desc.mips[t.mip as usize];
+            assert!(t.x < m.tiles_x && t.y < m.tiles_y, "tile outside the grid");
+        }
+    }
+    assert!(paired >= r.pages().len(), "every page paired something");
+
+    // The finest page reaches mip 0. This is the whole point of the rule — a
+    // pairing that capped one level short would leave "detailed mesh, blurry
+    // texture" reachable at exactly the range it exists to close.
+    let finest = r.pages().last().expect("pages");
+    assert_eq!(
+        inf_vgeom::tile_mip_for_lod(finest.lod, desc.mip_count()),
+        0,
+        "the finest cluster page must pair with the finest texture level"
+    );
+
+    // And the tiles the pages name are ADDRESSES into the packed `.inf_tex`, not
+    // copies of it — the measurement that chose references over embedded texels.
+    assert!(
+        (vbytes.len() as f64) < (tex.len() as f64) * 4.0,
+        "the pairing looks like embedded texels: vmesh {} B vs texture {} B",
+        vbytes.len(),
+        tex.len()
+    );
+}
+
+/// Two cooks of one paired project are byte-identical — the pairing is inside the
+/// cook's determinism guarantee, not beside it.
+#[test]
+fn cook_with_a_cluster_pairing_is_deterministic() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let (mesh_id, _, _) = make_textured_mesh_project(&proj);
+    let a = dir.path().join("a");
+    let b = dir.path().join("b");
+    cook(&proj, &a, &CookOptions::default()).expect("cook a");
+    cook(&proj, &b, &CookOptions::default()).expect("cook b");
+    let ra = PackReader::open(&a.join(DEFAULT_PACK_NAME)).unwrap();
+    let rb = PackReader::open(&b.join(DEFAULT_PACK_NAME)).unwrap();
+    let id = derived_vmesh_id(mesh_id);
+    assert_eq!(ra.read(id).unwrap(), rb.read(id).unwrap());
+    assert_eq!(
+        std::fs::read(a.join(DEFAULT_PACK_NAME)).unwrap(),
+        std::fs::read(b.join(DEFAULT_PACK_NAME)).unwrap(),
+        "two cooks of a paired project must be byte-identical"
+    );
+}
+
+/// **The control**: the same mesh, cooked with no level binding it to a material,
+/// gets a current container with EMPTY tile sections. Without this the arm above
+/// is satisfied by a cook that pairs every mesh with every texture in a project.
+#[test]
+fn an_unbound_mesh_cooks_a_container_with_no_pairing() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let mesh_id = make_mesh_project(&proj);
+    let out = dir.path().join("out");
+    let report = cook(
+        &proj,
+        &out,
+        &CookOptions {
+            roots: Some(vec![mesh_id]),
+            ..Default::default()
+        },
+    )
+    .expect("cook succeeds");
+    assert_eq!(report.meshlet_meshes_derived, 1);
+
+    let reader = PackReader::open(&out.join(DEFAULT_PACK_NAME)).unwrap();
+    let vbytes = reader.read(derived_vmesh_id(mesh_id)).unwrap();
+    let r = inf_vgeom::VgeomAssetReader::new(vbytes.as_slice()).expect("index");
+    assert!(r.pages().len() >= 2, "a real DAG, not an empty shell");
+    for e in r.pages() {
+        assert_eq!(e.tile_count, 0, "an unbound mesh paired something");
+    }
+}
+
+/// A bound material whose texture is a **v1** `.inf_tex` cannot be paired, and the
+/// cook says so against the MESH — the pages that silently lose their coupling —
+/// rather than only against the material.
+#[test]
+fn a_mesh_bound_to_an_unpageable_texture_raises_a_cluster_advisory() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let (mesh_id, _mat, tex_id) = make_textured_mesh_project(&proj);
+    // Overwrite the tiled container with a v1 bincode payload, keeping the GUID:
+    // this is exactly the shape of every project that predates P26.1.
+    let v1 = inf_asset::encode(&inf_material::TextureAsset {
+        schema_version: inf_material::TextureAsset::CURRENT_VERSION,
+        width: 4,
+        height: 4,
+        format: inf_material::TextureFormat::Rgba8,
+        srgb: true,
+        mips: vec![inf_material::TextureMip {
+            width: 4,
+            height: 4,
+            data: vec![255; 4 * 4 * 4],
+        }],
+    })
+    .unwrap();
+    let path = proj.join("Content").join("Checker.inf_tex");
+    std::fs::write(&path, &v1).unwrap();
+    AssetSidecar::new(tex_id, AssetKind::Texture, ContentHash::of(&v1))
+        .save(&path)
+        .unwrap();
+
+    let out = dir.path().join("out");
+    let report = cook(&proj, &out, &CookOptions::default()).expect("cook still succeeds");
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains(&mesh_id.to_string()) && w.contains("cluster pages")),
+        "no cluster-pairing advisory for an unpageable texture: {:?}",
+        report.warnings
+    );
+    let reader = PackReader::open(&out.join(DEFAULT_PACK_NAME)).unwrap();
+    let vbytes = reader.read(derived_vmesh_id(mesh_id)).unwrap();
+    let r = inf_vgeom::VgeomAssetReader::new(vbytes.as_slice()).expect("index");
+    for e in r.pages() {
+        assert_eq!(e.tile_count, 0, "an unpairable texture paired anyway");
+    }
+}
