@@ -1221,6 +1221,23 @@ mod tests {
         let desc = res.desc(light).expect("registered");
         for w in &spec {
             assert_eq!(w.priority, inf_vsm::VSM_PRIORITY_SPECULATIVE);
+            // **The lane itself, read off a produced want** (P28.4 audit). Not
+            // `VSM_PRIORITY_SPECULATIVE == LANE_PREDICT` between two `const`s —
+            // that is the comparison clippy const-folds and 9219204 rightly
+            // removed. This is the same claim as a runtime fact about what the
+            // producer emitted, and after that rewrite it is the *only* thing in
+            // the tree that holds the constant where P28.4 moved it: the audit's
+            // mutation matrix put it back at `LANE_FEEDBACK` and inf-vsm,
+            // inf-render, `vsm_marking`, `vsm_receiver` and inf-stream all
+            // stayed green.
+            assert_eq!(
+                w.priority,
+                inf_stream::LANE_PREDICT,
+                "the shadow speculation left LANE_PREDICT — the invariant P28.4 \
+                 moved it for is ONE statement over all three consumers, and a \
+                 speculation in the feedback lane makes it mean something \
+                 different here than next door"
+            );
             assert!(desc.contains(w.page), "{:?} is off the window", w.page);
         }
         // Nothing it emits is already a marked want — those would dedup into the
@@ -1228,6 +1245,70 @@ mod tests {
         let proved: std::collections::BTreeSet<_> =
             marked.iter().map(|w| w.page.entry_order()).collect();
         assert!(spec.iter().all(|w| !proved.contains(&w.page.entry_order())));
+    }
+
+    /// **A page the scroll carries off the window is dropped, not wrapped** —
+    /// the bound `speculative_shadow_wants`' own doc promises ("*a prediction
+    /// that runs off the edge of the window is dropped rather than clamped onto
+    /// a page that means something else*"), armed (P28.4 audit).
+    ///
+    /// The sibling arm above asserts `desc.contains` over every emitted want and
+    /// **cannot fail**: its dolly moves the window +2, so its marked block at
+    /// `x ∈ 2..5` lands at `x ∈ 0..3` and no page can leave by the high edge.
+    /// Deleting the `contains` guard outright left inf-render and `vsm_marking`
+    /// green — a vacuous check, which is the P19 law's exact shape.
+    ///
+    /// So this dollies the **other way**, which slides page indices *up*, over a
+    /// band parked against the window's high edge. Those pages have nowhere to
+    /// go; the trailing band that leaves by the low edge is the `x < 0` branch
+    /// and is covered above.
+    #[test]
+    fn a_speculation_scrolled_off_the_window_is_dropped_not_wrapped() {
+        const SIDE: u32 = 8;
+        let (mut res, _adv) = inf_vsm::VsmResidency::new(inf_vsm::VsmAtlasConfig::default());
+        let light = res
+            .register_light(inf_vsm::VsmLightDesc::clipmap(3, SIDE))
+            .expect("a three-level clipmap");
+        // Straddling the high edge under a two-page scroll: 5 lands on 7 and
+        // stays, 6 lands on 8 and has nowhere to be.
+        let marked: Vec<inf_vsm::VsmWant> = (5..SIDE - 1)
+            .flat_map(|x| (3..6u32).map(move |y| (x, y)))
+            .map(|(x, y)| inf_vsm::VsmWant::new(light, VsmPage::flat(0, x, y)))
+            .collect();
+
+        let eye = glam::DVec3::new(5.0, 2.0, -3.0);
+        let (right, _u, _f) = light_basis(Vec3::new(0.3, -0.9, 0.3).normalize());
+        let now = vec![sun_clipmap_at(eye)];
+        // **Backwards along the light's `right`** — the window's origin falls, so
+        // a page's index rises and the high edge is where pages leave.
+        let soon = vec![sun_clipmap_at(eye - right.as_dvec3() * 34.0)];
+        let shift = soon[0].clip_origins[0].0 - now[0].clip_origins[0].0;
+        assert_eq!(
+            shift, -2,
+            "the fixture's dolly is not two level-0 pages back"
+        );
+
+        let spec = speculative_shadow_wants(&marked, &now, &soon, &res);
+        let desc = res.desc(light).expect("registered");
+        // ANTI-VACUITY, both halves: the scroll has to have pushed something off
+        // (or the arm is about an empty set) and to have kept something on (or
+        // "everything was dropped" would pass with a producer that emits
+        // nothing).
+        assert_eq!(
+            spec.len(),
+            3,
+            "the fixture did not push exactly one of its two columns off the \
+             window: {spec:?}"
+        );
+        for w in &spec {
+            assert!(
+                desc.contains(w.page),
+                "{:?} is off the light's own window — a page index that means a \
+                 different world cell, or none",
+                w.page
+            );
+            assert_eq!(w.page.x, SIDE - 1, "the surviving column is x = 5 + 2");
+        }
     }
 
     /// **The speculative rank is strictly below the marked one**, asserted
