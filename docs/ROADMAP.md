@@ -13155,7 +13155,12 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
 > * **`voxel.wgsl` has an analytic 3D light loop and no receiver** — refused
 >   here with its reason and its arm; it gets shading parity when meshlet and
 >   voxel surfaces are shaded through one material pass with the env group bound
->   once.
+>   once. **P28.1 built that pass and this routing does not survive it** — the
+>   packing's meshlet field is a slot in the shared meshlet pool and a voxel
+>   chunk has none, and all thirty-two bits are spent. Re-routed to **P28.2**
+>   (meshletize voxel chunks); see the P28.1 STATUS block and `voxel.wgsl`'s own
+>   header. Left in place with the correction rather than rewritten, because a
+>   routing table a later phase silently edits is a table nobody can audit.
 > * **The marking signal is per-pixel and the VT feedback is per-surface** — the
 >   asymmetry `docs/memos/p26-4-feedback-mechanism.md` records; a VisBuffer makes
 >   a per-fragment texture mark reachable by the same argument that made the
@@ -13488,6 +13493,203 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
 > * **No golden pictures the visibility path.** Its quality claim is a *parity*
 >   claim against the forward path, which is stronger than a frozen frame and is
 >   why no fifty-fifth golden was added.
+
+> ## P28.1 AUDIT — the visibility buffer, adversarially re-measured (2026-08-14)
+>
+> Four fix commits (`beb4185`, `c91e6e1`, `835d2be`, `2814351`) plus this block.
+> Nine claims verified by re-measurement, **seven refuted or demoted**, and the
+> refutations are concentrated in exactly one place: the arms. Every number below
+> reproduces on this adapter.
+>
+> ### Verified as claimed, by re-measurement
+>
+> The twelve parity arms reproduce to the digit: interior populations 4 320 –
+> 6 465 a row, 0.06 % – 0.74 % at a rounding boundary, **worst channel step 1 of
+> 255** on all six untextured rows; textured **8.79 %** differing, worst **26**;
+> edge **58.9 %** of covered, **1 275** differing (2.21 % of frame); 43 814
+> meshlet-free pixels in the interleaved arm. The frame-budget ratios (+14 %,
+> −13 %) and the MSAA arithmetic re-derive. Goldens **54**, `git diff` over
+> `tests/goldens/` empty across audit and batch, content digest
+> `3e6182a6…22822fa5`. The packing round-trips over 1 048 064 cases (2 047 × 64 ×
+> 8, as claimed). `max_triangles` really is **124** with a `meshopt` clamp at 512;
+> `VgeomDemo.inf_lvl` really carries **325** entities (324 instances + a sun). The
+> 42 deleted lines contain **no assertion** — every one is a refactor move.
+> The handover really is exclusive: `skip_vgeom` and `FrameData::vt_feedback` are
+> the same predicate (`vgeom.enabled && vgeom.visbuffer`) read in one frame, so
+> the two producers cannot both mark. The polling fix lives **only** in
+> `tests/visbuffer_feedback.rs`; no `poll` was added to the frame loop, and a poll
+> that waits changes *whether* the pinned `frame − 2` read hits, never *which*
+> frame it reads.
+>
+> ### Withdrawn on measurement
+>
+> **1. "The resolve's number is the better one" — WITHDRAWN.** The phase's one
+> ruled parity exception rested on a comparison against taste. The audit built the
+> measurement it needed — a **16× supersampled** forward reference (1280 × 720,
+> box-downsampled to 320 × 180 in linear space) — and it refutes the direction:
+> forward MAE **0.065542**, resolve **0.065580**; on the 420 differing pixels the
+> resolve is closer on **47.6 %**. The design also lacks the power to find a small
+> effect, and the control proves it: the identical comparison with **no texture
+> bound** has a floor of **0.0868**, larger than the entire textured signal and
+> ~200× the difference between the paths; the isolated-texture variant gives
+> **51.2 %**. Demoted to the half that is measured — the resolve's gradient is the
+> exact analytic derivative and the forward path's is a first-order quad
+> difference, asserted on the twin as a convergence signature with a 400× control.
+> **Which mip makes a better image is undecided by measurement.**
+>
+> **2. The exception IS bounded as a class, and now checked.** 8.79 % is satisfied
+> equally by a boundary and by a smear. Measured shape: **431 of 451 (95.6 %)
+> differing pixels border an agreeing interior pixel, ZERO are the centre of a
+> solid 3 × 3 differing block**. Falsified — with the population bound disabled and
+> the uv x-gradient scaled 4×, the same measurement reads **0 %** and **1 320**
+> solid centres, and the class assertion is the killer.
+>
+> **THE GATE CRITERION, recorded for P28.5.** The visibility path's parity gate
+> is: **byte-exact on interior pixels to `PARITY_MAX_STEP = 1`, on every row whose
+> shading a derivative cannot reach; and on the textured row, bounded AND
+> classified — under 12 % of interior pixels differing, ≥ 80 % of them bordering
+> an agreeing pixel, ≤ 10 % of them centres of a solid 3 × 3 block.** Silhouettes
+> and intersection curves are excluded by construction (the interior test) and
+> measured separately. No row may be exempted by a fraction bound alone.
+>
+> **3. Three cited arms had never existed.** `the_resolves_gradients_match_the_
+> devices`, `the_per_pixel_mark_uses_the_same_mip_rule`, `the_visbuffer_edge_cost_
+> against_the_forward_path` — the P20 law three times, in the batch whose own
+> ledger celebrates catching it once in P27.5's. One written, one renamed to the
+> arm that works, one **withdrawn**: there is no device-vs-twin gradient
+> comparison and there cannot cheaply be one, because the id names a shared-pool
+> slot whose remap lives on the GPU. `VisBary` is a mirror (P24), and the doc now
+> says so.
+>
+> **4. The refusal's fallback arm did not falsify.** The ledger claims the refused
+> frame is asserted byte-identical to the forward frame *"because a refusal that
+> dropped the geometry would satisfy every counter"*. Both frames take the SAME
+> forward draw call: **mutation-measured, deleting it left the arm green** while
+> every parity row died, and the anti-vacuity guard (`p[3] > 0`) could not see it
+> because the sky writes an opaque alpha. Now compared against a geometry-free
+> frame — 8 096 of 57 600 pixels carry the handed-back geometry, 5 % required.
+>
+> **5. Two arms could not see their own subject.**
+> `the_resolve_spends_every_fragment_storage_binding_the_default_limit_grants`
+> asserted `4 + 4 == 8` with both fours as literals under a comment claiming they
+> were read off the constants; growing the environment group by a storage binding
+> left it green. `the_pool_ceiling_converts_bytes_to_slots_at_the_record_length`
+> re-implemented the division, so breaking `MESHLET_REC_LEN` inside `admit` left
+> it green. Both now read the real thing; both mutations now kill.
+>
+> **6. The degenerate guard was NaN-blind.** Every comparison against NaN is
+> false, so `abs(det) < VIS_DET_EPS` let a NaN clip coordinate through the guard
+> and out as `λ = (NaN, NaN, NaN)` — from a function whose doc said a degenerate
+> case resolves "rather than to a NaN". Fixed in the twin and both shaders, with
+> an arm sweeping a NaN through all twelve clip components. Recorded beside it:
+> the floor is a **finiteness** bound, not a conditioning one — a sliver at
+> ε = 1e-5, fifteen orders above it, already yields a gradient of 33.6 per pixel
+> and weights of (−0.40, 0.80, 0.60).
+>
+> **7. The meshlet ceiling was argued against the wrong quantity.** The ledger
+> justifies 14 bits with the flagship DAG's ~500 slots; `admit` is handed the
+> meshlet **pool capacity**, which the streamer grows toward `budget_bytes` and
+> which no DAG bounds. Measured: descriptors are **5.26 – 5.44 %** of a cooked
+> asset's pool bytes, so the field's 1 MiB refuses at **~18.4 – 19.0 MiB of
+> resident pool — about 7 % of the 256 MiB default budget**, not at 32× the
+> flagship. The refusal is correct and counted; the justification was not.
+>
+> ### The oracle's independence — its real boundary, measured
+>
+> The nucleus rests on the forward path being a second derivation (P27.5). It
+> partly is: the vertex pull, the barycentrics, the gradients and the BRDF are
+> written twice, and `the_resolve_derives_its_own_shading_rather_than_borrowing_
+> the_forward_paths` now fails the day one of them is de-duplicated into the
+> shared prelude. It partly is **not**, and the file claimed otherwise ("does not
+> share a function with it"): both shaders are `ShaderKind::Lit(2)`, so
+> `vt_sample`, `vsm_receive`, the environment lighting and the atmosphere are one
+> program for both. **Mutation-measured: `+ 1.0` inside `vt_sample.wgsl`'s
+> `vt_mip` — a wrong mip for the entire engine — leaves all twelve arms green.**
+> The nucleus gates the *reconstruction*, not the shading library, and the arm
+> marks where one stops and the other begins.
+>
+> ### Mutation matrix — 8 re-run + 22 new
+>
+> The batch's eight re-run: eight killed, and its one **stated** survivor
+> (transposed `d_dx`/`d_dy`, symmetric under `vt_mip`'s `max`) survives again,
+> exactly as the memo says it always will.
+>
+> | # | mutation | before | after |
+> |---|---|---|---|
+> | N1 | `VIS_TRI_BITS` 7 → 8 | killed (const assert) | — |
+> | N2 | the `+1` instance bias dropped | killed | — |
+> | N3 a/b/c | `pack`'s three range checks `>=` → `>` | killed ×3 | — |
+> | N4 a/b | `admit`'s triangle / instance ceiling `>` → `>=` | killed ×2 | — |
+> | N5 | `unpack`'s meshlet mask off by one | killed | — |
+> | N6 | a refusal counted against the wrong ceiling | killed | — |
+> | N7 | the degenerate guard removed | killed | — |
+> | **N8** | `MESHLET_REC_LEN` → 32 inside `admit` | **SURVIVED** | killed |
+> | **N9** | the env group grows a fragment storage binding | **SURVIVED** | killed |
+> | N10 | `frag_depth` loses its `/ dot(l, w)` | killed (interleaved-rigid) | — |
+> | N11 | the handover disabled | killed | — |
+> | N13 | the resolve's meshlet field shifted a bit | killed | — |
+> | N14 | the uv x-gradient scaled 4× | killed | — |
+> | N14b | `d_dx`/`d_dy` transposed | survived (STATED) | survived |
+> | N15 | the vt slots converted instead of bitcast | killed | — |
+> | N16 | `finish` gated on the per-surface count alone | killed | — |
+> | N18 | the handover applied to the wrong side | killed | — |
+> | N19 | the raster's instance bias off by one | killed | — |
+> | **N20** | the fallback's only draw deleted | **SURVIVED** the refusal arm | killed |
+> | **N21** | a wrong mip rule in the SHARED prelude | **SURVIVED** (structural) | survives — recorded |
+> | N22 | the uv x-gradient scaled 2.7× | killed | — |
+> | N23 | 4× gradient with the population bound disabled | — | killed by the CLASS assertion |
+>
+> ### The stale-script incident — verified clean
+>
+> `docs/ROADMAP.md` at HEAD is exactly its intended content. Across
+> `3340cb2..6bb4a61` it takes **one** change, `d1f4bd2`, **+175/−0**, and that is
+> the P28.1 STATUS block; no other commit in the batch touches it; the working
+> tree was clean; the `> ## ` heading set has no duplicate; the P27.5 AUDIT block
+> and the P28.1 STATUS block each occur exactly once; no orphan fragment. The
+> 245-line insertion a previous session's script made was reverted without residue.
+>
+> **What it DID leave**, found by counting bytes rather than reading: the
+> inserting script (`p281_roadmap.py`) wrote its 175 lines with **LF** into a file
+> that is otherwise CRLF, and — unlike its two predecessors in the same scratchpad
+> — carried neither a conversion nor the "no bare LF introduced" assertion they
+> both end with. The committed blob is unaffected (git normalizes text on
+> check-in, and `.gitattributes` gives `.md` no `-text`), so this is a working-tree
+> defect only; it is normalized here and the audit's own insertion is CRLF.
+>
+> ### Machine-ops
+>
+> * **Scratchpad scripts are session-namespaced but a wave reuses one session
+>   directory.** This audit's scratchpad is the P28.1 implementation session's:
+>   fourteen scripts that write `docs/ROADMAP.md` sit in it, three of them
+>   anchored on text that still exists. The namespace is not the isolation it
+>   looks like. A ROADMAP-writing script must (a) assert its anchor count is 1,
+>   (b) convert its payload to the file's own EOL, and (c) assert bare-LF count is
+>   unchanged — `insert_block.py` and `insert_ledger.py` do all three;
+>   `p281_roadmap.py` did none.
+> * Battery `-j 3`, then workspace clippy, both with `Start-Process` and both
+>   redirects, per the house note. Disk 95.4 GB free at start.
+>
+> ### Carried to P28.2, as amended
+>
+> * **The textured mip question is open**, not settled: it needs a fixture whose
+>   reference is not dominated by resolution-dependent shading — flat, unlit,
+>   texture-only. Until then the gate criterion above is the honest one.
+> * **The resolve shades pixels that lose to non-meshlet geometry** (it writes
+>   `frag_depth`, so no early-Z, and its buffer knows nothing of the rigid pass).
+>   Unmeasured waste; the fix is a depth pre-test and it belongs with P28.3's
+>   unified depth.
+> * **The visibility path has no device-vs-twin gradient arm** and cannot get one
+>   until a host can decode a pool slot — P28.3.
+> * **The meshlet field refuses at ~7 % of the default streaming budget.** The
+>   frame-derived split already routed to P28.3 is the answer; the number belongs
+>   with it.
+> * **An error inside the shared lit prelude is invisible to the parity nucleus.**
+>   Structural, stated, and not closable from inside this gate.
+> * Two latent shapes left alone and named: `flat_at[asset_id]` is an indexing
+>   panic if the flat-table loop and the draw loop ever filter differently (today
+>   they are character-identical), and `VisAudit::frames` increments on an
+>   admitted frame that goes on to draw nothing, which makes the renderer's
+>   "did anything produce" true on a frame where nothing did.
 
 - **P28.2 Interleaved cluster pages** — 1. cook emits mesh-page + referenced-texture-tile
   sections interleaved per virtual cluster page (`.inf_vmesh` v3 sections or a pack-layout
