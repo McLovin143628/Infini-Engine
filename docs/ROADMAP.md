@@ -15640,7 +15640,7 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
 > * **`voxel.wgsl` has no shadow receiver** — P28.1 refused the cheap door (the
 >   visibility packing's meshlet field is a slot in the shared pool and a voxel
 >   chunk has none, and all thirty-two bits are spent) and P28.2 split the
->   expensive one; it lands on B5 and R6, which is where it stays.
+>   expensive one; it lands on B5 and R5, which is where it stays.
 > * **Coarse-LOD terrain holes still do not propagate into the pyramid** —
 >   carried unchanged since P21, and named here because a plan that ends should
 >   not end by forgetting its oldest bound.
@@ -15963,6 +15963,313 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
 > The plan is finished. The engine is not, and no engine is; but every claim this
 > document makes about it has an arm that fails when it stops being true, and
 > that is the thing the plan was actually for.
+
+> ## P28.5 AUDIT — the master-plan-closing audit: five clauses certified, a
+> disposition table completed, and four gates that could not fail (2026-08-14)
+>
+> The adversarial pass over `886650f..0b16927`, run under the rule the whole wave
+> was run under: every phase is audited after it is declared complete. This is
+> the last one, so it also audits the closing statements themselves.
+>
+> **Seven commits**: `4f366d6` the two oracles the ruling broke, `4a5e5a3` the
+> parity criterion's second spelling, `e5aacd0` the TLAS rotation arm that kills
+> Q5, `fdcbfd5` the discriminator for the batch's own headline defect, `e5dd166`
+> the criterion pinned rather than printed, `f00d789` the rustdoc ratchet that
+> could not fail, `b436ab4` rustfmt. Plus this block.
+>
+> ### THE FIVE CERTIFICATION VERDICTS
+>
+> | clause | verdict |
+> |---|---|
+> | (i) VisBuffer shades at golden-parity **per the recorded criterion** | **AMENDED, THEN CERTIFIED** — the criterion was one door for its five constants and two spellings for its classifier; and its constants were printed by the gate and defended by nothing |
+> | (ii) one transaction admits a cluster page and its tiles; the artifact impossible as a state invariant | **CERTIFIED** — reproduced: 1 797 (page, tile) pairs over a fourteen-step churn, and the control REACHES the forbidden state at 782 of 784 tiles missing (99.7 %) |
+> | (iii) one streamer arbitrates all three under one budget and one ring | **CERTIFIED** — reproduced: stamps 1 108 < 1 113 < 1 122 < 1 129 across three crates, 496 coupled pairs, `within_grant()` true, and the `readers_agree()` control proven able to go false |
+> | (iv) the whip-pan A/B, fewer fallback frames with the predictor on, bit-exact | **CERTIFIED** — reproduced 131 → 105 from both fixtures, and the ledger squares "predictor on" with a shipped horizon of 0 honestly: the LANE is the shipped predictor and the LEAD is the refuted half, said in those words in the clause-answer |
+> | (v) the ray-query experiment is never load-bearing | **AMENDED, THEN CERTIFIED** — the goldens prove it and the arms hold, but the fix for the headless-skip defect was guarded by an arm that could only SKIP |
+>
+> **The lead-time ruling: CERTIFIED, and its memo is complete.** Both halves of
+> the deviation are reproduced on this machine, to the digit. The sweep: h = 0 at
+> **105** blur frames against 131 OFF and 108 / 113 / 115 / 115 / 112 / 124
+> across the band, arrival window **64 against 176**. The truth oracle: worst
+> angular error **2.107e-8 rad** at h = 0 and **0.289027 rad / 16.560°** at 18,
+> monotone every step, hold 0.040 against ramp 0.289. The memo states the
+> deviation rather than staying silent, gives the architecture premise (no
+> latency between admitted and sampleable), names the tripwires as *tests*, and
+> re-asserts the band by keeping `ROADMAP_PREDICT_HORIZON_TICKS` as the lead arm.
+> The oracle's independence is real: `whip_view(tick + h)` is the fixture's own
+> closed form, not the predictor's algebra, and Q2 confirms it — pointing it at
+> `whip_view(tick)` kills the arm.
+>
+> **The ray-query refusal: CERTIFIED, every verdict number re-derived.** 0 of
+> **36 864** against the CPU Möller–Trumbore caster; **98.88 %** against VSM with
+> **410 of 414 (99.0 %)** of disagreements at a shadow edge, traced shadowed
+> 4 180 against the shipped 4 594; the zero-offset arm at 830 → 7 697 device and
+> 830 → 14 123 CPU, differing on 10 852; the platform bound stated as
+> Vulkan-native-only and printed per arm. **One number is looser than the ledger
+> says**: BLAS + TLAS build measured **14.77 ms** here against the recorded
+> "13.6 – 13.9 ms", and the trace 4.08 ms against "3.43 – 3.46". Both are cold
+> wall-clock on a busy machine, both preserve the argument (a full rebuild is the
+> order of a whole 16.7 ms frame at 512 triangles), and the ledger's own
+> instruction to read the build "as a *shape*" is why this is an amendment to a
+> range and not to a conclusion. **Read the range as ~13.6 – 14.8 ms.**
+>
+> ### THE SIX FINDINGS
+>
+> **1. The lead-time ruling silently retired a gate, and the memo went on citing
+> a number the tree no longer produced.** `the_prediction_replays_from_the_
+> recorded_history_alone` is the *conformance* oracle — a second longhand
+> spelling of the prediction formula. It replayed at the shipped horizon, which
+> P28.5 took to **0**, and at zero lead the formula collapses in both spellings:
+> the secant scales by nothing, the arc turns by nothing, and each returns the
+> newest committed pose. The arm reported a worst error of **`0e0`** — not two
+> derivations agreeing, but neither doing anything. Its own anti-vacuity guard
+> could not see it, because `turned` counts ticks whose *history* turned, which
+> is true of the fixture at any horizon. Meanwhile
+> `docs/memos/p28-5-lead-time-ruling.md` §4 still cites the oracle's "worst error
+> of 4.04 × 10⁻¹⁶" — a measurement no arm in the tree had produced since the
+> ruling landed. Mutation-proved both ways: killing the reckoner's rotation half
+> entirely **SURVIVES** the arm as P28.5 shipped it and **KILLS** it now. It
+> replays at `ROADMAP_PREDICT_HORIZON_TICKS`, a `led` counter requires the
+> prediction to actually leave the committed pose (184 of 259), and the worst
+> error is back to **4.041272810440265e-16** — the memo's own number, reproduced.
+> *A ruling can retire a gate that nobody edited.* `4f366d6`
+>
+> **2. The truth oracle could not print its own headline number.** The h = 0 row
+> is the row that table exists to establish and `{:.6}` rendered it `0.000000`,
+> so the ledger's **2.1 × 10⁻⁸ rad** was not readable from the arm that measured
+> it. Now scientific: **2.107e-8**. *Withdrawn on measurement*: the suspicion
+> that the number was wrong. It was right; only unprintable. `4f366d6`
+>
+> **3. The parity criterion was one door for its constants and two for its
+> classifier.** The hoist re-pointed the twelve-arm nucleus at the five
+> constants and left `parity_verdict` and `parity_ok` — the classifier that
+> decides what *bordering* and *solid centre* mean, and the predicate that weighs
+> them — duplicated: the gate called the library, the nucleus kept its own
+> neighbour walk and its own three inequalities. The shape clauses are the
+> load-bearing half of the criterion (the P28.1 ruling is that no row may be
+> exempted by a fraction bound alone), so a change to what "bordering" means
+> would have moved the gate and left the nucleus green. Now one definition.
+> Nucleus 12 green through it, every recorded number unmoved, and no assertion
+> loosened — `parity_ok` adds the empty-population refusal the hand-written form
+> never had. **This makes the PHASE 28 COMPLETE sentence "the parity criterion is
+> a library function both the nucleus and the gate read" true; it was not, when
+> it was written.** `4a5e5a3`
+>
+> **4. The criterion was printed by the gate and defended by nothing.** Taking
+> `PARITY_MAX_STEP` from **1 to 60** left all seven gate arms and all twelve
+> nucleus arms **green** — a loosened bound is satisfied by every measurement
+> that satisfied the tight one. The phase's headline claim could have been
+> re-stated to "agree to within 60 of 255" by editing a `pub const`, with nothing
+> in the tree saying so. The five numbers are now pinned in the arm that executes
+> them. `e5dd166`
+>
+> **5. The batch's own headline defect fails GREEN.** P28.5 records that putting
+> `EXPERIMENTAL_RAY_QUERY` into `from_adapter`'s optional mask makes
+> `request_device` fail and takes every headless test in the tree down with it,
+> and states that `an_acceleration_structure_over_nothing_or_without_the_feature_
+> is_refused` "goes red the day it migrates back". **It does not.** That arm needs
+> a device to assert anything and the migration is what destroys the device, so
+> it skips. Reproduced: with the feature back in the mask, `ray_query` reports
+> **7 passed** and `visbuffer_parity` **12 passed** — nineteen green results,
+> every device arm skipped, in a third of the wall time, under a message that
+> misattributes the cause (*"no GPU adapter (request_device: Some experimental
+> features …)"*). The failure mode is invisible because it is **uniform**:
+> nothing looks broken when everything opts out at once.
+> `a_machine_with_an_adapter_must_get_the_shipped_device` is the discriminator —
+> no adapter at all is a legitimate skip, an adapter found and a descriptor
+> refused is a defect in this tree and fails. Green at HEAD, red under the
+> mutation. It guards the whole workspace's headless suite. *A skip is not a
+> pass.* `fdcbfd5`
+>
+> **6. The rustdoc ratchet went green on the loudest rustdoc failure there is.**
+> `set -uo pipefail` without `-e`, and the pipeline's status never read: a
+> `cargo doc` that **failed outright** left an error log, `grep -c '^warning: '`
+> found zero warnings in it, 0 ≤ 450, and the step exited **0**. Reproduced with
+> a controlled stand-in — `rustdoc warnings: 0 (ceiling 450)` and `STEP EXIT = 0`
+> on a `cargo doc` that exited 101. Same shape, quieter: the job restores a
+> `Swatinem/rust-cache`, and a `cargo doc` that recompiles nothing re-emits
+> nothing, so the ratchet would freeze an inventory it never counted. Both fixed;
+> the floor is on `Documenting` lines and **not** on the warning count, so the
+> repair campaign does not break the step by succeeding. `f00d789`
+>
+> ### THE DISPOSITION TABLE — NOT EXHAUSTIVE, and the premise is why
+>
+> The table is the P27.5 "sixteen lost remainders" finding answered — and it
+> repeats it, one level up, at the last boundary there is.
+>
+> **The scope statement's premise is false.** It sources Phases 26 and 27 from
+> *"the P27.5 completion block's 'carried, unrouted, and honest' set — which is
+> where the Phase 26 and Phase 27 remainders were consolidated by their own
+> audits."* The P27.5 carried set contains **zero** Phase 26 items: it is twenty
+> bullets and all twenty are shadow-map items. Phase 26's own consolidated set
+> lives in the PHASE 26 COMPLETE block (§"Honest remainders, routed", and "What
+> it did not do, in one place"), which the table's transitive closure never
+> reaches. So **Phase 26's carried set is structurally excluded**, and the two
+> Phase 26 items that do appear (B17 `unknown_texture`, B18 `inf_vt::fill`) got
+> there only because P28.3 happened to carry them.
+>
+> **Twenty-nine items are recovered.** Verified absent from the P28.5 block by
+> name. This is the enumeration the table's own rule demands: *a routing table
+> that summarises loses exactly the items nobody will miss.*
+>
+> **From Phase 26, never dispositioned** — bounds, all of them, and none a defect:
+>
+> | # | item |
+> |---|---|
+> | B29 | **Terrain does not sample through VT**; the occlusion map still multiplies ambient AO only |
+> | B30 | **A `--level` dev boot has no material content**, structurally |
+> | B31 | **The viewport host's call is a source pin** — `EngineHost::new` takes a real surface |
+> | B32 | **`upscale2x` has no non-test caller**, deliberately |
+> | B33 | **83 string literals tree-wide still carry an eaten `\`** — the P22 Python-continuation law's residue, a cleanup with no deadline |
+> | B34 | **The millisecond half of P26.5 arm (e) is a developer-machine gate** — no CI leg has a real adapter |
+> | B35 | **`VT_FLOOR_MAX_TILES` 16 → 64 changes nothing** — the floor's own bound is untested and wants a 2 048²-class fixture |
+> | B36 | **Inverting `lru_victim` fails nothing** — the eviction policy is inert to every gate; worth knowing before someone optimises the evictor and watches nothing move |
+> | B37 | **There is no `unregister_texture`** and no way to shrink a pool |
+> | B38 | **`VtPools` is built for one residency** and does not re-plan its atlas if handed another |
+> | B39 | **Multi-atlas layers stay deferred**; the 16-bit slot index and the 3 600-slot 8 192² ceiling are the two documented walls |
+> | B40 | **The tail mips are one whole tile each**, and the tail-packing follow-up has a number and no batch |
+> | B41 | **Photogrammetry's finish still writes v1**, and `lift_texture_asset` is a decode→re-encode: stable, not bit-identical |
+> | B42 | **A cooked pack carries the `.inf_mat` beside the `.inf_matd`** and nothing at runtime can read the former |
+> | B43 | **The blend enum is spelled four times**; consolidation needs a new Ring-0 crate plus a simultaneous schema migration, and the Ring-2 string map is not a compile error on rename |
+> | B44 | **The macOS VT-free control run is printed and has never been consumed** — it exists so the next macOS run can split the 49.55 ms between the paravirtual pass stack and paging, and no macOS run has taken it |
+>
+> **From Phase 27's twenty, present in P27.5 and absent here:**
+>
+> | # | item |
+> |---|---|
+> | B45 | **No per-meshlet page rejection** — a large asset overlapping a page by one meshlet draws its whole level into that page (the second half of the "classic LOD chain" bullet, which the table reproduced only the first half of) |
+> | B46 | **`the_shadow_summary_is_one_line_a_host_can_log` is the only mangled-literal guard of its kind in the crate** |
+> | B47 | **The working tree carries CRLF in every `.wgsl` and mixed endings in `passes/gi.rs`** despite `text eol=lf` — the P22 law's live exception |
+>
+> **From Phase 28's own blocks, absent from the table:**
+>
+> | # | item |
+> |---|---|
+> | B48 | **`VisReadback` is off by default** and records a full-viewport `copy_texture_to_buffer` when on; nothing on the shipping path turns it on |
+> | B49 | **No golden pictures the visibility path** — answered in the completion prose, never dispositioned as a row |
+> | B50 | **N14b: transposed `d_dx`/`d_dy` is a permanent stated mutation survivor** (symmetric under `vt_mip`'s `max`) — referenced by Q5's prose and never given a verdict of its own |
+> | B51 | **`pack_tangent` refuses more than its doc says** — \|t\| ≳ 1.8e19 or ≲ 1.1e-19 also become the sentinel; recorded rather than changed |
+> | B52 | **The golden content digest quoted in the P28.1 block (`3e6182a6…22822fa5`) matches nothing in the tree** — inherited, unbacked, and still standing in that block; the digest actually pinned is `23d41a61c31c28a17a20871b6c875707` |
+> | B53 | **The prediction is computed twice a frame** — once in `vt_stream`, once in the shadow sync; cheap and stated |
+> | B54 | **The shadow lane calls `vsm_projections` a second time** for the predicted layouts |
+> | B55 | **This tree has no committed input stream as a type** — `RuntimeInput` keeps one tick and the PIE wire has no input message, so clause 1's "committed input history" is implemented as committed *camera-pose* history. The correction is P28.4's and belongs beside the clause it corrects |
+> | B56 | **`flat_at[asset_id]` is a latent indexing panic** if the flat-table loop and the draw loop ever filter differently (today they are character-identical) |
+> | B57 | **The pairing staleness class stops being latent** the day anything ships an incremental cook, a patch pack or a mod override — and the format has nothing that would notice |
+>
+> **And one bound this audit is adding rather than recovering**, because the
+> experiment produced a finding about the SHIPPED path and the table filed it
+> under a CLOSED row (C10) where nobody tuning the receiver will look:
+>
+> | # | bound | reason | trigger to revisit |
+> |---|---|---|---|
+> | B58 | **On displaced geometry the shipped shadow map and the ray query agree on only 56.7 %**, nearly all of it in the direction "shipped says shadowed, trace says lit" — i.e. **shadow acne** from the raster's depth bias mis-firing along grazing slopes, which a ray query has no bias to mis-fire with | it is a *measurement of VSM's receiver bias*, taken by building its competitor, and the competitor was refused for coverage and cost — the finding outlives the experiment | anyone re-tuning `VSM` receiver bias or depth bias; the fixture is `ray_query.rs`'s displaced grid, and flattening it is what the comparison arm does to measure the cast shadow instead |
+>
+> **One dangling cross-reference, corrected in place.** The Phase 26–27 bullet
+> said `voxel.wgsl`'s receiver "lands on B5 and **R6**"; the REFUSED table has
+> R1–R5 and no R6. The intended row is **R5** (meshletizing voxel chunks) and it
+> now says so — a one-character fix to a pointer, called out here because this
+> block otherwise appends and edits nothing.
+>
+> ### MUTATION MATRIX — 10 re-run, 13 new
+>
+> **The batch's ten, re-run: 10 killed, 0 survivors.** Q1, Q2, Q3, Q4, Q6, Q7,
+> Q8, Q9 and Q10 all reproduce as recorded. **Q5's disposition changes**: the
+> stated survivor is **killed**, not recorded. The ledger's reason for recording
+> it — that a rotated instance moves every number in the memo — was true of the
+> *shared* fixture and not of the property. `a_rotated_instance_is_traced_
+> through_its_own_transform` is additive, on its own placements, so not one memo
+> number moves: two instances, three-axis rotations, uniform scale (so a
+> transpose is exactly the inverse rotation), **0 of 36 864 pixels differ**
+> against the CPU caster, and an anti-vacuity clause requiring the rotation to
+> matter — **5 075 pixels**, 13.8 % of the frame, against a 5 % bound — so a
+> trace that ignored the rotation cannot pass by agreeing with a CPU side that
+> ignored it too. Mutation-verified both ways: with the transpose applied the new
+> arm FAILS and the original correctness arm still PASSES, which is the recorded
+> survivor reproduced and then killed. *A survivor that is a property of the
+> fixture is a reason to add a fixture.*
+>
+> | # | new mutation | verdict |
+> |---|---|---|
+> | N1 | TLAS instance transform transposed, under a **rotated** fixture | survivor → new arm → **killed** |
+> | N2 | `EXPERIMENTAL_RAY_QUERY` back in the shipped optional mask | **SURVIVED — 19 green-by-skip** → new arm → killed (finding 5) |
+> | N3 | `PARITY_TEXTURED_MIN_BORDERING` 0.80 → 0.99, against the nucleus | killed |
+> | N4 | the same, against `phase28_gate` — **the one-door proof**: one edit, both files red | killed |
+> | N5 | `PARITY_MAX_STEP` 1 → 60, against `phase28_gate` | **SURVIVED** → pinned → killed (finding 4) |
+> | N6 | `RingLedger::readers_agree` hard-wired true | killed at (c)'s skew control |
+> | N7 | `dead_reckon`'s turn forced to 0 — the rotation half dead — against `whip_pan` | killed |
+> | N8 | the golden set digest zeroed | killed at (f) |
+> | N9 | `VgeomStreamer::pair` stops retracting a page whose tiles were refused | killed at (b) |
+> | N10 | N7, against the conformance oracle **as this audit fixed it** | killed |
+> | N11 | N7, against the conformance oracle **as P28.5 shipped it** (h = 0) | **SURVIVED** — finding 1, proved |
+> | N12 | the rustdoc ratchet, with a `cargo doc` that exits 101 | **SURVIVED** → fixed → killed (finding 6) |
+> | N13 | the rustdoc ratchet, with a cached no-op emitting nothing | **SURVIVED** → fixed → killed (finding 6) |
+>
+> Four of thirteen found a real defect, and three of those four are gates that
+> **could not fail**: an oracle collapsed by a ruling, a criterion nothing
+> defended, an arm that could only skip, and a CI step green on the failure it
+> was added to catch.
+>
+> ### WHAT THE CLOSING STATEMENTS STILL CLAIM, AFTER ALL OF THIS
+>
+> **PHASE 28 COMPLETE stands, with one sentence made true rather than amended**
+> (finding 3) and no clause-answer withdrawn. Every measured number in it
+> reproduced on this machine: parity 27 / 4 320 and 451 / 5 132 at 8.79 % with
+> 95.6 % bordering and zero solid centres; the invariant's 1 797 pairs and its
+> control at 99.7 %; the arbiter's interleaved stamps and its two controls; the
+> A/B's 131 → 105 from both fixtures; goldens **54**, digest
+> `23d41a61c31c28a17a20871b6c875707`, none added.
+>
+> **The MASTER PLAN COMPLETE statement stands unchanged, and it is the right
+> claim.** It says engineering-scope complete, it says the per-phase ledgers are
+> the truth, it says the disposition table is the list of what is known to be
+> missing, and it says human-verified work stays human-verified. That is not a
+> stronger claim than the evidence — it is measurably weaker than what a less
+> careful ledger would have written.
+>
+> Its one inaccuracy is arithmetic, and it errs downward: *"fifty or so places
+> where the engine does the right thing for a stated reason and a better thing
+> exists."* The B-numbered rows alone now number **58** — B1–B28 as written, plus
+> B29–B57 recovered here, plus B58 added — and the Phase 26–27 bullet list is on
+> top of that. Read "fifty or so" as **"sixty-odd numbered bounds and a bulleted
+> list"**. More bounds, not fewer, is the direction an honest closing table moves
+> in when somebody attacks it, and that is the whole argument for attacking it.
+> **A ledger nobody attacks is a ledger** — the wave's own closing sentence, and
+> this was the last chance anyone had to test it on the wave itself.
+>
+> ### Machine-ops
+>
+> **Battery green: 253 test binaries, 4 568 passed, 0 failed, 8 ignored** — 213
+> `Running` + 40 `Doc-tests` = 253, **matched** against 253 `test result:` lines,
+> and **zero** warnings and **zero** errors on stderr for the whole run (`-j 3`,
+> `--no-fail-fast`, `Start-Process` with both redirects, nothing else touching
+> cargo). That is P28.5's baseline of **253 / 4 566 / 0 / 8** plus this audit's
+> **two** new arms — `a_rotated_instance_is_traced_through_its_own_transform` and
+> `a_machine_with_an_adapter_must_get_the_shipped_device` — and **no** new
+> binary. The two edits to prior gates added assertions, not arms: the parity
+> nucleus stays at **12** and `phase28_gate` at **7**.
+>
+> `cargo clippy --workspace --all-targets` with `RUSTFLAGS=-D warnings`: **exit
+> 0, zero warnings**, run LAST per the machine note. `cargo fmt --all --check`
+> found two — an import list that fits one line and an `assert_eq!` that does
+> not, both this audit's — fixed in `b436ab4`, with the nucleus and the gate
+> re-run green after.
+>
+> `cargo doc --no-deps --workspace`: **exit 0, 450 warnings over 26 documented
+> crates** — *exactly* the ceiling `0cf8526` pinned, so this audit added none.
+> That run is also the first evidence the repaired ratchet works: 26 is the
+> `Documenting` floor the vacuity guard now requires, and it is what a cached
+> no-op would have reported as 0.
+>
+> Goldens **54**, `git diff` over `tests/goldens/` empty across all seven commits.
+> Disk **69 GB** free at the start, **68 GB** at the end; nothing deleted, no
+> `target/debug/incremental` sweep needed. **Nothing pushed.**
+>
+> A note for the repair campaign, which inherits this machine: P28.5's own
+> observation about block-buffered redirects held again. The `Running` lines in
+> the error log and the `test result:` lines in the output log advance in bursts
+> of tens, and the output log sat at **zero bytes** through the entire compile
+> phase — which looks exactly like a hang and is not. Count the process, not the
+> log tail.
 
 ---
 
