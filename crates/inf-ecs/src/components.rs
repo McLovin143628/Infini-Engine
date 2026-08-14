@@ -2097,12 +2097,21 @@ impl AnimPlayer {
     /// integration the runtime and editor Simulate ticks share (kept inline so
     /// the foundational ECS crate needs no `inf-anim` dependency; mirrors
     /// `inf_anim::advance_clip_time`).
+    ///
+    /// **`!(self.duration > 0.0)`, not `<= 0.0`** (C4-4). `duration` is a plain
+    /// `#[serde(default)]` field of the `.inf_lvl` `EntityRecord` — decoded by
+    /// bincode with no structural check on the way in — and every ordering
+    /// comparison a NaN takes part in is false, so a NaN used to pass this guard
+    /// and reach `next.clamp(0.0, NaN)`, which panics (`f64::clamp` asserts
+    /// `min <= max`). The looping branch is worse than a panic: `rem_euclid(NaN)`
+    /// writes a NaN into `self.t`, and `t` **is** persisted, so the poison
+    /// survives into the level file and out of it again.
     pub fn advance(&mut self, dt: f64) {
         if !self.playing {
             return;
         }
         let next = self.t + self.speed * dt;
-        self.t = if self.duration <= 0.0 {
+        self.t = if !(self.duration > 0.0) {
             next
         } else if self.looping {
             next.rem_euclid(self.duration)

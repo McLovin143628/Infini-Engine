@@ -124,6 +124,39 @@ impl AssetPayload for AnimClipAsset {
     fn schema_version(&self) -> u32 {
         self.schema_version
     }
+
+    /// Reject newer-than-current (the default rule), then **validate the clip's
+    /// timing** — the `BiomeSet::migrate` pattern, applied to the payload whose
+    /// numbers the frame loop divides by.
+    ///
+    /// # Why a decode-time check and not only a guard (C4-4)
+    ///
+    /// `duration`, and every keyframe time inside `tracks`, are plain serde
+    /// fields of a bincode payload with no structural check anywhere on the
+    /// path. A NaN `duration` used to reach `t.clamp(0.0, duration)`, which
+    /// **panics** (`assert!(min <= max)`) — every frame, in the editor, in PIE
+    /// and in the shipped player — because the guard in front of it was
+    /// `duration <= 0.0` and every ordering comparison a NaN takes part in is
+    /// false. The guards are fixed too ([`crate::clip::resolve_time`],
+    /// [`crate::clip::locate`]), but a guard that survives a poisoned value is
+    /// not the same as refusing to hold one: the looping branch has no panic and
+    /// instead writes `rem_euclid(NaN)` back into `AnimPlayer.t`, which is
+    /// persisted into the `.inf_lvl`. That is NaN in committed bytes, and the
+    /// place to stop it is the door.
+    fn migrate(self) -> inf_asset::Result<Self> {
+        let found = self.schema_version;
+        if found > Self::SCHEMA_VERSION {
+            return Err(inf_asset::AssetError::SchemaTooNew {
+                kind: Self::KIND.slug(),
+                found,
+                current: Self::SCHEMA_VERSION,
+            });
+        }
+        self.clip
+            .validate_timing()
+            .map_err(|e| inf_asset::AssetError::Decode(format!("invalid anim clip: {e}")))?;
+        Ok(self)
+    }
 }
 
 /// The `.inf_sm` payload: an authored animation [`StateMachine`] (P11.2).

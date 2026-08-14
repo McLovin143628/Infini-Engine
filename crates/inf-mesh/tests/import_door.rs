@@ -14,8 +14,19 @@
 //!
 //! The mutation that verifies this suite: delete the matching `reject_*` call
 //! from `gltf_import.rs` / the `is_finite` check from `obj_import::parse_f32`
-//! and the corresponding test fails — not by panicking somewhere unrelated, but
-//! by importing successfully.
+//! and **exactly one** test fails, the one that names that check. Measured, on
+//! three of them:
+//!
+//! * `reject_out_of_range` removed → `an_index_past_the_vertex_buffer_is_refused`
+//!   alone fails, in debug by panicking inside `compute_normals` (in release the
+//!   same input reaches meshopt's FFI instead, which is the finding);
+//! * `parse_f32`'s finiteness check removed →
+//!   `every_spelling_of_a_non_finite_obj_number_is_refused` alone fails, by
+//!   **importing successfully**;
+//! * the `WEIGHTS_0` refusal *and* `VertexSkin::normalized`'s `is_finite` both
+//!   reverted → `an_infinite_skin_weight_is_refused` alone fails, by importing
+//!   successfully. Reverting only one of the two leaves the fixture green, which
+//!   is the point of fixing both.
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::path::{Path, PathBuf};

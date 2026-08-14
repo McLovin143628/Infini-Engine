@@ -578,10 +578,24 @@ pub fn stored_page_format(bytes: &[u8]) -> Option<PageFormat> {
 // `TEXTURE_COMPRESSION_BC`, and the player does not link `inf-material`. The
 // ENCODER stays there, with its no-floating-point source gate.
 
+/// The RGBA8 byte count of a `width × height` image, in `usize`.
+///
+/// **Not `u32`** (C4-5): `width * height * 4` in `u32` is exactly zero at
+/// 65 536 × 65 536, the release profile has no `overflow-checks`, and the
+/// decoders below used to size their output buffer with it — asking for zero
+/// bytes and then writing into them at an offset computed by a *second* `u32`
+/// multiply. `TextureAsset::validate` refuses a payload whose declared
+/// dimensions outrun its data, so this is the arithmetic behind that door
+/// rather than in front of it; the VT transcode tier reaches these functions
+/// with header-validated dimensions and never crosses it at all.
+fn rgba8_len(width: u32, height: u32) -> usize {
+    width as usize * height as usize * 4
+}
+
 /// Decode a BC1 image to RGBA8 (opaque). Handles both the 4-color (c0 > c1) and
 /// 3-color+transparent (c0 ≤ c1) block modes.
 pub fn decode_bc1(data: &[u8], width: u32, height: u32) -> Vec<u8> {
-    let mut out = vec![0u8; (width * height * 4) as usize];
+    let mut out = vec![0u8; rgba8_len(width, height)];
     let mut p = 0;
     for by in 0..height.div_ceil(4) {
         for bx in 0..width.div_ceil(4) {
@@ -598,7 +612,7 @@ pub fn decode_bc1(data: &[u8], width: u32, height: u32) -> Vec<u8> {
 
 /// Decode a BC3 image to RGBA8 (with alpha).
 pub fn decode_bc3(data: &[u8], width: u32, height: u32) -> Vec<u8> {
-    let mut out = vec![0u8; (width * height * 4) as usize];
+    let mut out = vec![0u8; rgba8_len(width, height)];
     let mut p = 0;
     for by in 0..height.div_ceil(4) {
         for bx in 0..width.div_ceil(4) {
@@ -698,11 +712,17 @@ fn blit_block(
             }
             let n = (j * 4 + i) as usize;
             let c = colors[n];
-            let o = ((y * width + x) * 4) as usize;
-            out[o] = c[0];
-            out[o + 1] = c[1];
-            out[o + 2] = c[2];
-            out[o + 3] = alpha.map(|a| a[n]).unwrap_or(255);
+            // `usize`, and a slice rather than four indexed writes: `(y * width
+            // + x) * 4` in u32 wraps at 2³⁰ texels, and the `out` it addressed
+            // was sized by the *same* wrapping product (C4-5).
+            let o = (y as usize * width as usize + x as usize) * 4;
+            let Some(px) = out.get_mut(o..o + 4) else {
+                continue;
+            };
+            px[0] = c[0];
+            px[1] = c[1];
+            px[2] = c[2];
+            px[3] = alpha.map(|a| a[n]).unwrap_or(255);
         }
     }
 }

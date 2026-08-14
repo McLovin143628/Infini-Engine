@@ -439,7 +439,15 @@ fn texture_thumbnail(tex: &TextureAsset, size: u32) -> Vec<u8> {
         .rev()
         .find(|&l| tex.mips[l].width.max(tex.mips[l].height) >= size)
         .unwrap_or(0);
-    let mip = &tex.mips[level];
+    // `.get`, not `[level]` (C4-5): `unwrap_or(0)` above hands back level 0 for
+    // an EMPTY mip list, and this function is reached for every `.inf_tex` in
+    // the project during a Content Drawer scan. `TextureAsset::migrate` now
+    // refuses a payload with no mips, so this is the second line — but the
+    // wizard's `texture_preview_rgba` door takes a payload in hand rather than
+    // one that came through `decode`.
+    let Some(mip) = tex.mips.get(level) else {
+        return vec![0; (size as usize * size as usize) * 4];
+    };
     let rgba = tex.level_rgba8(level).unwrap_or_else(|| vec![0; 4]);
     resize_letterbox(&rgba, mip.width.max(1), mip.height.max(1), size)
 }

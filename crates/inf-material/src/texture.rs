@@ -26,9 +26,14 @@ pub enum TextureFormat {
 
 impl TextureFormat {
     /// Bytes one mip level of `w×h` occupies in this format.
+    ///
+    /// **`usize`, not `u32`** (C4-5): `w * h * 4` in `u32` is exactly `0` at
+    /// 65 536 × 65 536, and the release profile carries no `overflow-checks`, so
+    /// the wrap is silent. A `.inf_tex` declaring those dimensions used to ask
+    /// for a zero-byte buffer and then be written into as though it were 16 GiB.
     pub fn level_size(self, w: u32, h: u32) -> usize {
         match self {
-            TextureFormat::Rgba8 => (w * h * 4) as usize,
+            TextureFormat::Rgba8 => w as usize * h as usize * 4,
             TextureFormat::Bc1 => bc::compressed_size(w, h, false),
             TextureFormat::Bc3 => bc::compressed_size(w, h, true),
         }
@@ -90,6 +95,70 @@ impl TextureAsset {
             TextureFormat::Bc3 => bc::decode_bc3(&mip.data, mip.width, mip.height),
         })
     }
+
+    /// Structural validation of a decoded v1 payload — the check
+    /// [`AssetPayload::migrate`] runs before anybody may hold one.
+    ///
+    /// # Why this exists (C4-5, and lens 5's hand-off)
+    ///
+    /// The v2 tiled container ([`crate::tiles`]) validates thoroughly: magic,
+    /// version, `total_len` against the payload, every tile's offset pinned to
+    /// the uniform stride. The **v1** path beside it is plain `bincode` with the
+    /// default `migrate()`, i.e. no structural check at all — and it is the path
+    /// a Content Drawer scan takes for every loose `.inf_tex` in the project.
+    ///
+    /// Two panics followed from that, both in one function
+    /// (`thumbnail::texture_thumbnail`): `mips: []` indexed at `[0]`, and a
+    /// header declaring 65 536 × 65 536 over forty bytes of data, where
+    /// `decode_bc1`'s `width * height * 4` wrapped to zero and `blit_block` then
+    /// wrote past the end of the empty buffer it got back. A file that produces
+    /// either is ~40 bytes long.
+    ///
+    /// The three questions asked here are the ones the decoders assume the
+    /// answers to:
+    ///
+    /// 1. the image has a size at all;
+    /// 2. it has at least one mip, and every mip has a size;
+    /// 3. **every mip carries at least the bytes its own dimensions imply.**
+    ///
+    /// (3) is what makes a ceiling unnecessary: a payload claiming 65 536² would
+    /// have to *contain* 16 GiB to pass, so the absurd header is refused by
+    /// arithmetic rather than by an arbitrary limit somebody has to maintain.
+    /// It is `>=`, not `==`, because a level-0 buffer is stored as the importer
+    /// received it and a source decoder is entitled to hand back padding; short
+    /// is the direction that is unsafe.
+    pub fn validate(&self) -> Result<(), MaterialError> {
+        if self.width == 0 || self.height == 0 {
+            return Err(MaterialError::Image(format!(
+                "texture declares a {}×{} image",
+                self.width, self.height
+            )));
+        }
+        if self.mips.is_empty() {
+            return Err(MaterialError::Image(
+                "texture has no mip levels (every consumer reads level 0)".into(),
+            ));
+        }
+        for (i, mip) in self.mips.iter().enumerate() {
+            if mip.width == 0 || mip.height == 0 {
+                return Err(MaterialError::Image(format!(
+                    "texture mip {i} declares a {}×{} level",
+                    mip.width, mip.height
+                )));
+            }
+            let need = self.format.level_size(mip.width, mip.height);
+            if mip.data.len() < need {
+                return Err(MaterialError::Image(format!(
+                    "texture mip {i} declares {}×{} ({need} bytes in {:?}) and carries {}",
+                    mip.width,
+                    mip.height,
+                    self.format,
+                    mip.data.len()
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl AssetPayload for TextureAsset {
@@ -97,6 +166,24 @@ impl AssetPayload for TextureAsset {
     const SCHEMA_VERSION: u32 = Self::CURRENT_VERSION;
     fn schema_version(&self) -> u32 {
         self.schema_version
+    }
+
+    /// Reject newer-than-current (the default rule), then **validate** — the
+    /// [`BiomeSet`](inf_asset::AssetPayload) pattern, applied to the one v1
+    /// bincode payload whose consumers index straight into it. See
+    /// [`TextureAsset::validate`].
+    fn migrate(self) -> inf_asset::Result<Self> {
+        let found = self.schema_version;
+        if found > Self::SCHEMA_VERSION {
+            return Err(inf_asset::AssetError::SchemaTooNew {
+                kind: Self::KIND.slug(),
+                found,
+                current: Self::SCHEMA_VERSION,
+            });
+        }
+        self.validate()
+            .map_err(|e| inf_asset::AssetError::Decode(format!("invalid texture: {e}")))?;
+        Ok(self)
     }
 }
 
@@ -332,7 +419,11 @@ pub(crate) fn rgba_mip_chain(
     if width == 0 || height == 0 {
         return Err(MaterialError::Image("zero-sized texture".into()));
     }
-    if rgba.len() < (width * height * 4) as usize {
+    // `usize`, not `u32` (C4-16): this guard is the one that was supposed to
+    // notice a truncated buffer, and it wrapped *identically* to the producer
+    // that truncated it — `0 < 0` is false, so the empty buffer sailed through
+    // into `downsample_box`. Two wraps that cancelled into silence.
+    if rgba.len() < width as usize * height as usize * 4 {
         return Err(MaterialError::Image("truncated pixel buffer".into()));
     }
     let mut levels: Vec<(u32, u32, Vec<u8>)> = vec![(width, height, rgba)];
@@ -398,6 +489,135 @@ fn downsample_box(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
 mod tests {
     use super::*;
     use inf_asset::{decode, encode};
+
+    /// A `.inf_tex` v1 payload built **by hand**, so a test can declare
+    /// dimensions its data does not back — which is the whole finding.
+    fn handmade(width: u32, height: u32, format: TextureFormat, mips: Vec<TextureMip>) -> Vec<u8> {
+        encode(&TextureAsset {
+            schema_version: TextureAsset::CURRENT_VERSION,
+            width,
+            height,
+            format,
+            srgb: false,
+            mips,
+        })
+        .unwrap()
+    }
+
+    /// **C4-5 / the lens-5 hand-off — the ~40-byte `.inf_tex` that used to
+    /// panic the Content Drawer.**
+    ///
+    /// Two panics in one function, both reached by a Content Drawer scan
+    /// touching any `.inf_tex` in the project directory:
+    ///
+    /// * `mips: []` indexed at `[0]` by `texture_thumbnail`'s `unwrap_or(0)`;
+    /// * a header declaring 65 536 × 65 536 over a handful of bytes, where
+    ///   `decode_bc1`'s `width * height * 4` wrapped in `u32` to **exactly
+    ///   zero** (2³² pixels × 4) and `blit_block` then wrote past the end of the
+    ///   empty buffer it was handed.
+    ///
+    /// Both are refused at `migrate`, i.e. by `inf_asset::decode` itself, so no
+    /// consumer ever holds one. Un-fix mutation: drop the `self.validate()` call
+    /// from `TextureAsset::migrate` and every arm below decodes successfully.
+    #[test]
+    fn a_texture_that_lies_about_its_size_is_refused_at_decode() {
+        // The control: a real payload still decodes.
+        let good = texture_from_rgba8(
+            checker(4, 4, 255),
+            4,
+            4,
+            TextureImportSettings {
+                compression: TextureCompression::None,
+                generate_mips: false,
+                srgb: false,
+            },
+        )
+        .unwrap();
+        let bytes = encode(&good).unwrap();
+        decode::<TextureAsset>(&bytes).expect("a healthy texture must still decode");
+
+        // No mips at all.
+        let empty = handmade(4, 4, TextureFormat::Rgba8, Vec::new());
+        assert!(
+            decode::<TextureAsset>(&empty).is_err(),
+            "a texture with no mip levels decoded"
+        );
+        assert!(
+            empty.len() < 64,
+            "the whole hazard is that this file is tiny: {} bytes",
+            empty.len()
+        );
+
+        // The 65 536² header over forty bytes of data — the u32-wrap class.
+        let huge = handmade(
+            65_536,
+            65_536,
+            TextureFormat::Bc1,
+            vec![TextureMip {
+                width: 65_536,
+                height: 65_536,
+                data: vec![0u8; 8],
+            }],
+        );
+        assert!(
+            huge.len() < 64,
+            "the whole hazard is that this file is tiny: {} bytes",
+            huge.len()
+        );
+        let e = decode::<TextureAsset>(&huge).unwrap_err().to_string();
+        assert!(e.contains("carries 8"), "refusal did not name the gap: {e}");
+
+        // A zero-sized level, and a zero-sized image.
+        assert!(decode::<TextureAsset>(&handmade(
+            0,
+            4,
+            TextureFormat::Rgba8,
+            vec![TextureMip {
+                width: 4,
+                height: 4,
+                data: vec![0u8; 64]
+            }]
+        ))
+        .is_err());
+        assert!(decode::<TextureAsset>(&handmade(
+            4,
+            4,
+            TextureFormat::Rgba8,
+            vec![TextureMip {
+                width: 0,
+                height: 4,
+                data: Vec::new()
+            }]
+        ))
+        .is_err());
+
+        // A truncated RGBA8 level: one byte short is still short.
+        assert!(decode::<TextureAsset>(&handmade(
+            4,
+            4,
+            TextureFormat::Rgba8,
+            vec![TextureMip {
+                width: 4,
+                height: 4,
+                data: vec![0u8; 63]
+            }]
+        ))
+        .is_err());
+    }
+
+    /// The arithmetic that made the header believable: `level_size` in `u32`
+    /// answers **zero** for the image whose data would be 16 GiB.
+    #[test]
+    fn level_size_does_not_wrap_at_the_65536_squared_boundary() {
+        // 65 536² × 4 == 2³², which is 0 in u32 and 17 179 869 184 in usize.
+        assert_eq!(
+            TextureFormat::Rgba8.level_size(65_536, 65_536),
+            17_179_869_184usize
+        );
+        assert_eq!(TextureFormat::Bc1.level_size(65_536, 65_536), 2_147_483_648);
+        // Ordinary sizes are unchanged.
+        assert_eq!(TextureFormat::Rgba8.level_size(4, 4), 64);
+    }
 
     fn checker(w: u32, h: u32, alpha: u8) -> Vec<u8> {
         let mut v = Vec::with_capacity((w * h * 4) as usize);

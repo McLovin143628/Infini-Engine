@@ -81,11 +81,11 @@ impl QuatTrack {
     /// linear tracks. Empty tracks return `None`.
     pub fn sample(&self, t: f32) -> Option<Quat> {
         let (i0, i1, frac) = locate(&self.times, t)?;
-        let a = Quat::from_array(self.values[i0]).normalize();
+        let a = normalized_or_identity(self.values[i0]);
         if i0 == i1 || matches!(self.interp, Interpolation::Step) {
             return Some(a);
         }
-        let mut b = Quat::from_array(self.values[i1]).normalize();
+        let mut b = normalized_or_identity(self.values[i1]);
         // Shortest-path: negate the far quaternion so slerp takes the short arc.
         if a.dot(b) < 0.0 {
             b = -b;
@@ -95,6 +95,36 @@ impl QuatTrack {
         // the single most-travelled quaternion blend in the engine -- and its
         // result rides `state_bytes`. `pslerp` normalizes internally.
         Some(inf_math::pslerp(a, b, frac))
+    }
+}
+
+/// Normalize a stored quaternion, falling back to identity when the result is
+/// not a rotation.
+///
+/// # `Quat::normalize()` on a zero quaternion is NaN, silently (C4-31)
+///
+/// The workspace pins bare `glam = "0.33"` with **no `glam-assert` /
+/// `debug-glam-assert` feature**, so `normalize()` is `self * length_recip()`
+/// with the check compiled out — in debug as well as release. `[0, 0, 0, 0]` is
+/// legal bytes in a glTF `ROTATION` accessor and in a `.inf_anim`, and it comes
+/// back as four NaNs.
+///
+/// Where that goes is the reason this is not cosmetic: into
+/// `Pose.locals[].rotation`, and from there into
+/// `inf_ecs::pose::pose_state_bytes`, which folds `f32::to_le_bytes()` of every
+/// joint TRS into **the committed trace the PIE-==-shipping parity gate
+/// compares**. A NaN never equals itself, so the gate's own comparison becomes
+/// meaningless rather than failing usefully.
+///
+/// Identity is the right fallback for the same reason it is the right fallback
+/// in `JointTransform`: a joint with no usable rotation should sit at its bind
+/// orientation, not vanish.
+fn normalized_or_identity(v: [f32; 4]) -> Quat {
+    let q = Quat::from_array(v).normalize();
+    if q.is_finite() {
+        q
+    } else {
+        Quat::IDENTITY
     }
 }
 
@@ -156,14 +186,86 @@ impl AnimClip {
             tracks,
         }
     }
+
+    /// Whether this clip's timing is something the samplers can be handed.
+    ///
+    /// Called by `AnimClipAsset::migrate`, so no decoded `.inf_anim` reaches the
+    /// frame loop without it. Three facts, each one an assumption a consumer
+    /// already makes:
+    ///
+    /// * `duration` is finite and not negative — `resolve_time` clamps against
+    ///   it and `AnimPlayer::advance` takes a `rem_euclid` of it;
+    /// * every keyframe time is finite — [`locate`] binary-searches them;
+    /// * `times.len() == values.len()` on every channel — `sample()` indexes
+    ///   `values` with an index derived from `times`, and the constructors only
+    ///   `debug_assert` the agreement, which is compiled out in release.
+    ///
+    /// Monotonicity is checked at the **import** door
+    /// (`inf_mesh::validate::reject_non_increasing`) rather than here: a
+    /// committed clip that a P11-era build wrote is entitled to whatever key
+    /// spacing it has, and `locate` is now total over an unsorted list. A NaN
+    /// is not spacing.
+    pub fn validate_timing(&self) -> Result<(), String> {
+        if !self.duration.is_finite() || self.duration < 0.0 {
+            return Err(format!(
+                "clip {:?} has duration {}",
+                self.name, self.duration
+            ));
+        }
+        for tr in &self.tracks {
+            let check = |times: &[f32], values: usize, chan: &str| -> Result<(), String> {
+                if times.len() != values {
+                    return Err(format!(
+                        "clip {:?} joint {} {chan}: {} keyframe times against {values} values",
+                        self.name,
+                        tr.joint,
+                        times.len()
+                    ));
+                }
+                match times.iter().position(|t| !t.is_finite()) {
+                    Some(i) => Err(format!(
+                        "clip {:?} joint {} {chan}: keyframe time {i} is {}",
+                        self.name, tr.joint, times[i]
+                    )),
+                    None => Ok(()),
+                }
+            };
+            if let Some(c) = &tr.translation {
+                check(&c.times, c.values.len(), "translation")?;
+            }
+            if let Some(c) = &tr.rotation {
+                check(&c.times, c.values.len(), "rotation")?;
+            }
+            if let Some(c) = &tr.scale {
+                check(&c.times, c.values.len(), "scale")?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Map a raw sample time to a looped/clamped time within `[0, duration]`.
 ///
 /// Looping wraps with a Euclidean remainder (so negative times wrap too);
-/// non-looping clamps. A zero/negative duration collapses to `0`.
+/// non-looping clamps. A zero/negative **or non-finite** duration collapses to
+/// `0`.
+///
+/// # `!(duration > 0.0)`, not `duration <= 0.0` (C4-4)
+///
+/// This is the house's standing NaN-blind-guard class, and it was live in the
+/// frame loop. `NaN <= 0.0` is **false**, so a NaN duration passed the guard and
+/// reached `t.clamp(0.0, NaN)` — which panics, because `f32::clamp` asserts
+/// `min <= max`. `pose::sample_clip` calls this every frame, so the panic fired
+/// in the editor, in PIE and in the shipped player, from nothing worse than a
+/// `.inf_anim` with one poisoned float. In the looping branch there is no panic
+/// and `rem_euclid(NaN)` poisons `self.t` instead, which is persisted back into
+/// the `.inf_lvl`.
+///
+/// Written as the negation of the predicate the code actually needs — "is this a
+/// usable positive duration" — which is the one phrasing a NaN answers
+/// correctly.
 pub fn resolve_time(t: f32, duration: f32, looping: bool) -> f32 {
-    if duration <= 0.0 {
+    if !(duration > 0.0) {
         return 0.0;
     }
     if looping {
@@ -176,20 +278,34 @@ pub fn resolve_time(t: f32, duration: f32, looping: bool) -> f32 {
 /// Locate `t` within a strictly-increasing `times` list, returning the bracketing
 /// key indices and the `[0,1]` fraction between them. Clamps outside the range.
 /// `None` only when `times` is empty.
+///
+/// # Total over any `times` and any `t` (C4-7)
+///
+/// The range guards used to be `t <= times[0]` and `t >= times[last]`. A NaN `t`
+/// fails **both** — every ordering comparison a NaN takes part in is false — so
+/// it fell through to `partition_point`, whose predicate is also false for every
+/// key, which returns `0`, and `let i0 = hi - 1` underflowed: a panic in the
+/// shipped player. Asking `!(t > times[0])` instead puts NaN on the side that
+/// returns a value.
+///
+/// The `clamp` on `hi` is the second half: a committed clip whose keys are not
+/// sorted (nothing before the import door refused one) makes `partition_point`'s
+/// result meaningless rather than merely wrong, and index arithmetic on a
+/// meaningless number is how this class panics.
 fn locate(times: &[f32], t: f32) -> Option<(usize, usize, f32)> {
     match times.len() {
         0 => None,
         1 => Some((0, 0, 0.0)),
         _ => {
-            if t <= times[0] {
+            let last = times.len() - 1;
+            if !(t > times[0]) {
                 return Some((0, 0, 0.0));
             }
-            let last = times.len() - 1;
-            if t >= times[last] {
+            if !(t < times[last]) {
                 return Some((last, last, 0.0));
             }
             // Binary search for the first key strictly greater than t.
-            let hi = times.partition_point(|&k| k <= t);
+            let hi = times.partition_point(|&k| k <= t).clamp(1, last);
             let i0 = hi - 1;
             let i1 = hi;
             let span = times[i1] - times[i0];
@@ -277,5 +393,118 @@ mod tests {
         assert_eq!(resolve_time(-1.0, 2.0, false), 0.0);
         // Degenerate duration.
         assert_eq!(resolve_time(5.0, 0.0, true), 0.0);
+    }
+
+    /// **C4-4 — the NaN-blind-guard class, in the frame loop.**
+    ///
+    /// `duration <= 0.0` is false for NaN, so a NaN duration used to reach
+    /// `t.clamp(0.0, NaN)` — which panics, every frame, for as long as the clip
+    /// is playing. Un-fix mutation: put `duration <= 0.0` back and the
+    /// non-looping half of this test panics rather than failing.
+    ///
+    /// `+∞` is deliberately **not** in the refused set here: it is a positive
+    /// duration, `rem_euclid(∞)` and `clamp(0, ∞)` both answer sensibly, and a
+    /// decoded `.inf_anim` cannot carry one anyway (`AnimClipAsset::migrate`
+    /// refuses non-finite). The guard's job is NaN and non-positive.
+    #[test]
+    fn a_non_finite_duration_collapses_instead_of_panicking() {
+        for bad in [f32::NAN, f32::NEG_INFINITY, -1.0, 0.0] {
+            for looping in [true, false] {
+                assert_eq!(
+                    resolve_time(0.25, bad, looping),
+                    0.0,
+                    "duration {bad} looping={looping} did not collapse"
+                );
+            }
+        }
+        for looping in [true, false] {
+            assert!(resolve_time(0.25, f32::INFINITY, looping).is_finite());
+        }
+    }
+
+    /// **C4-7 — `locate` is total.**
+    ///
+    /// A NaN `t` failed both range guards, `partition_point` returned 0, and
+    /// `hi - 1` underflowed. An unsorted `times` (which a clip committed before
+    /// the import door existed may carry) made the search result meaningless in
+    /// the same arithmetic.
+    #[test]
+    fn locate_survives_a_nan_time_and_an_unsorted_key_list() {
+        let times = [0.0, 1.0, 2.0];
+        let (i0, i1, f) = locate(&times, f32::NAN).expect("NaN must locate, not panic");
+        assert_eq!((i0, i1), (0, 0));
+        assert_eq!(f, 0.0);
+        // Unsorted keys: whatever bracket comes back, it must be in range.
+        for probe in [-5.0f32, 0.5, 1.5, 9.0, f32::NAN] {
+            let (i0, i1, f) = locate(&[3.0, 1.0, 2.0, 0.5], probe).unwrap();
+            assert!(i0 < 4 && i1 < 4, "bracket ({i0}, {i1}) is out of range");
+            assert!((0.0..=1.0).contains(&f), "fraction {f} is not in [0,1]");
+        }
+        // The healthy path is unchanged.
+        let (i0, i1, f) = locate(&times, 1.5).unwrap();
+        assert_eq!((i0, i1), (1, 2));
+        assert!((f - 0.5).abs() < 1e-6);
+    }
+
+    /// **C4-31 — a zero quaternion is not a rotation.**
+    ///
+    /// `glam` is pinned without `glam-assert`, so `Quat::normalize()` on
+    /// `[0,0,0,0]` is four NaNs with no complaint — and they ride
+    /// `pose_state_bytes`, the trace the PIE-==-shipping parity gate compares.
+    /// Un-fix mutation: restore `Quat::from_array(..).normalize()` at both call
+    /// sites and this fails on `is_finite`.
+    #[test]
+    fn a_zero_quaternion_samples_as_identity_not_as_nan() {
+        let tr = QuatTrack::new(
+            vec![0.0, 1.0],
+            vec![[0.0, 0.0, 0.0, 0.0], Quat::IDENTITY.to_array()],
+            Interpolation::Linear,
+        );
+        for t in [0.0f32, 0.5, 1.0] {
+            let q = tr.sample(t).unwrap();
+            assert!(q.is_finite(), "sample({t}) produced {q:?}");
+        }
+        assert_eq!(tr.sample(0.0).unwrap(), Quat::IDENTITY);
+        // Step interpolation reads the same door.
+        let step = QuatTrack::new(vec![0.0], vec![[0.0, 0.0, 0.0, 0.0]], Interpolation::Step);
+        assert_eq!(step.sample(0.0).unwrap(), Quat::IDENTITY);
+    }
+
+    /// The decode-door check (C4-4's other half): a clip whose timing the
+    /// samplers cannot be handed is refused rather than guarded around.
+    #[test]
+    fn validate_timing_refuses_what_the_samplers_assume() {
+        let good = AnimClip::new(
+            "ok",
+            vec![{
+                let mut jt = JointTrack::new(0);
+                jt.translation = Some(Vec3Track::new(
+                    vec![0.0, 1.0],
+                    vec![[0.0; 3], [1.0; 3]],
+                    Interpolation::Linear,
+                ));
+                jt
+            }],
+        );
+        good.validate_timing().unwrap();
+
+        let mut nan_duration = good.clone();
+        nan_duration.duration = f32::NAN;
+        assert!(nan_duration.validate_timing().is_err());
+
+        let mut negative = good.clone();
+        negative.duration = -1.0;
+        assert!(negative.validate_timing().is_err());
+
+        // A stream-length disagreement: `sample()` indexes `values` with an
+        // index derived from `times`, and the constructor only debug_asserts it.
+        let mut short = good.clone();
+        short.tracks[0].translation.as_mut().unwrap().values.pop();
+        let e = short.validate_timing().unwrap_err();
+        assert!(e.contains("2 keyframe times against 1"), "{e}");
+
+        let mut nan_key = good.clone();
+        nan_key.tracks[0].translation.as_mut().unwrap().times[1] = f32::NAN;
+        assert!(nan_key.validate_timing().is_err());
     }
 }
