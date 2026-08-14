@@ -351,6 +351,20 @@ impl PhysicsBridge3D {
             .collect()
     }
 
+    /// The collider descriptor the bridge believes is **attached** to `guid`
+    /// (C4-30).
+    ///
+    /// Exists so the claim can be falsified. `col_refused` is what makes the
+    /// retry bounded, so a record that *also* latched `col` to the refused
+    /// descriptor would behave identically through every other public path —
+    /// which would leave the honesty of `col` an untestable assertion, and this
+    /// campaign has already been caught by one of those. Measured: without this
+    /// accessor the latch-restoring mutation passes the whole suite; with it,
+    /// it fails by name.
+    pub fn attached_collider_desc(&self, guid: Uuid) -> Option<&ColliderDesc3D> {
+        self.entities.get(&guid).and_then(|r| r.col.as_ref())
+    }
+
     /// The wrapped physics world (for scene queries, contact-event drain, etc.).
     pub fn world(&self) -> &PhysicsWorld3D {
         &self.world

@@ -219,6 +219,17 @@ fn a_collider_that_will_not_build_is_never_recorded_as_built() {
     // The ledger: counted once, attributed to the entity.
     assert_eq!(bridge.collider_refusals(), 1);
     assert_eq!(bridge.entities_missing_colliders(), vec![guid]);
+    // And the record does not CLAIM a shape it does not have. This is the
+    // assertion the finding is actually named for, and it needs its own
+    // accessor: `col_refused` is what bounds the retry, so a record that latched
+    // `col` as well would behave identically through every other path — an
+    // untestable claim, which is the shape of defect this campaign already met
+    // once ("an arm that observes only the endpoints cannot see a window
+    // between them").
+    assert!(
+        bridge.attached_collider_desc(guid).is_none(),
+        "the bridge records a collider descriptor as attached while the body has none"
+    );
 
     // Re-syncing the SAME descriptor must not re-attempt it: `to_shared_checked`
     // is a pure function of the descriptor, so a retry is trimesh-topology cost
