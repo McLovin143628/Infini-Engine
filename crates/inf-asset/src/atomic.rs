@@ -173,9 +173,23 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"original");
         assert!(no_temp_litter(dir.path()), "left temp files behind");
 
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_readonly(false);
-        std::fs::set_permissions(&path, perms).unwrap();
+        // Clear the bit again so the `TempDir` can actually delete itself —
+        // Windows refuses to unlink a read-only file, and a leaked one would
+        // sit in `%TEMP%` for ever.
+        //
+        // `clippy::permissions_set_readonly_false` fires because on **Unix**
+        // this clears every write bit to world-writable. This whole test is
+        // `#[cfg(windows)]`, where the flag is the single FILE_ATTRIBUTE_READONLY
+        // bit and clearing it restores exactly the state four lines of this test
+        // created, on a file inside a temp directory that is about to be removed.
+        // The narrow allow is the accurate statement; a `PermissionsExt` import
+        // would not compile on the only platform this test exists for.
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_readonly(false);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
     }
 
     /// Renaming **over an existing file** is the mechanism's whole premise, and

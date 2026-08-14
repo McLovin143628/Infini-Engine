@@ -71,7 +71,14 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
   applyChanged: (info) => {
     set({ current: info, showStartScreen: false, error: null });
-    void projectIpc.recent().then((recent) => set({ recent }));
+    // `project_recent` can now reject: a recent-projects list that exists but
+    // cannot be read is an error rather than an empty list (C4-38/F14), so that
+    // a corrupt one is never silently rewritten as empty. Without this catch the
+    // new arm would surface as an unhandled rejection.
+    void projectIpc
+      .recent()
+      .then((recent) => set({ recent }))
+      .catch((e) => console.error("project.recent failed", e));
     // The asset DB re-rooted to the new project; re-sync the Content Drawer.
     void useAssetStore.getState().refresh();
   },
