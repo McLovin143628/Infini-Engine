@@ -48,22 +48,59 @@ struct Meshlet {
     pad: u32,
 };
 
+// The flat instance table rides an `Rgba32Float` TEXTURE, one row an instance,
+// eleven used texels of sixteen. Not a storage buffer, and the reason is a
+// measured device ceiling rather than taste: `Limits::default()` grants eight
+// storage buffers a stage, the shared environment group already spends four (GI
+// SH, the VT table, the VSM table, its projections) and the four meshlet pools
+// are the other four. The ninth is refused by `create_pipeline_layout`. See
+// `VIS_FRAGMENT_STORAGE_BINDINGS` in `crates/inf-render/src/passes/visbuffer.rs`.
+//
+// `textureLoad` is valid in the vertex, fragment AND compute stages, so all
+// three visibility passes read the table through one representation.
+const VIS_INSTANCE_TEXELS: i32 = 16;
+
 struct Instance {
     model: mat4x4<f32>,
-    n0: vec4<f32>,
-    n1: vec4<f32>,
-    n2: vec4<f32>,
+    n0: vec3<f32>,
+    n1: vec3<f32>,
+    n2: vec3<f32>,
     color: vec4<f32>,
-    emissive: vec4<f32>,
-    threshold: f32,
+    emissive: vec3<f32>,
     metallic: f32,
     roughness: f32,
-    max_scale: f32,
-    pick_id: u32,
-    vt0: u32,
-    vt1: u32,
-    vt2: u32,
+    vt: vec3<u32>,
 };
+
+fn vis_instance(id: u32) -> Instance {
+    let y = i32(id);
+    let c0 = textureLoad(v_instance_tex, vec2<i32>(0, y), 0);
+    let c1 = textureLoad(v_instance_tex, vec2<i32>(1, y), 0);
+    let c2 = textureLoad(v_instance_tex, vec2<i32>(2, y), 0);
+    let c3 = textureLoad(v_instance_tex, vec2<i32>(3, y), 0);
+    let n0 = textureLoad(v_instance_tex, vec2<i32>(4, y), 0);
+    let n1 = textureLoad(v_instance_tex, vec2<i32>(5, y), 0);
+    let n2 = textureLoad(v_instance_tex, vec2<i32>(6, y), 0);
+    let col = textureLoad(v_instance_tex, vec2<i32>(7, y), 0);
+    let emi = textureLoad(v_instance_tex, vec2<i32>(8, y), 0);
+    // (threshold, metallic, roughness, max_scale)
+    let pbr = textureLoad(v_instance_tex, vec2<i32>(9, y), 0);
+    // (pick_id, vt0, vt1, vt2) — u32 words, so they are bitcast rather than
+    // rounded: a handle that went through an f32 round-trip would be a
+    // DIFFERENT handle for anything past 2^24.
+    let ids = textureLoad(v_instance_tex, vec2<i32>(10, y), 0);
+    var out: Instance;
+    out.model = mat4x4<f32>(c0, c1, c2, c3);
+    out.n0 = n0.xyz;
+    out.n1 = n1.xyz;
+    out.n2 = n2.xyz;
+    out.color = col;
+    out.emissive = emi.xyz;
+    out.metallic = pbr.y;
+    out.roughness = pbr.z;
+    out.vt = vec3<u32>(bitcast<u32>(ids.y), bitcast<u32>(ids.z), bitcast<u32>(ids.w));
+    return out;
+}
 
 // Group 3: the visibility buffer + the shared pools + the FLAT instance table.
 @group(3) @binding(0) var vis_buf: texture_2d<u32>;
@@ -71,7 +108,7 @@ struct Instance {
 @group(3) @binding(2) var<storage, read> v_meshlets: array<Meshlet>;
 @group(3) @binding(3) var<storage, read> v_meshlet_verts: array<u32>;
 @group(3) @binding(4) var<storage, read> v_meshlet_tris: array<u32>;
-@group(3) @binding(5) var<storage, read> v_instances: array<Instance>;
+@group(3) @binding(5) var v_instance_tex: texture_2d<f32>;
 
 // ── the packing contract (crates/inf-render/src/visbuffer.rs) ────────────────
 const VIS_TRI_BITS: u32 = 7u;
@@ -262,7 +299,7 @@ fn fs(in: VsOut) -> FsOut {
     let meshlet_id = (id >> VIS_MESHLET_SHIFT) & ((1u << VIS_MESHLET_BITS) - 1u);
     let tri = id & ((1u << VIS_TRI_BITS) - 1u);
 
-    let inst = v_instances[instance_id];
+    let inst = vis_instance(instance_id);
     let m = v_meshlets[meshlet_id];
 
     // The three corners, pulled exactly as the raster pulled them.
@@ -270,7 +307,7 @@ fn fs(in: VsOut) -> FsOut {
     var nrm3: array<vec3<f32>, 3>;
     var uv3: array<vec2<f32>, 3>;
     var clip: array<vec4<f32>, 3>;
-    let nmat = mat3x3<f32>(inst.n0.xyz, inst.n1.xyz, inst.n2.xyz);
+    let nmat = mat3x3<f32>(inst.n0, inst.n1, inst.n2);
     for (var k = 0u; k < 3u; k = k + 1u) {
         let local = read_tri_byte(m.triangle_offset + tri * 3u + k);
         let global_v = v_meshlet_verts[m.vertex_offset + local];
@@ -312,7 +349,7 @@ fn fs(in: VsOut) -> FsOut {
     let vt_dpx = wp[0] * b.d_dx.x + wp[1] * b.d_dx.y + wp[2] * b.d_dx.z;
     let vt_dpy = wp[0] * b.d_dy.x + wp[1] * b.d_dy.y + wp[2] * b.d_dy.z;
 
-    let vt_slots = vec3<u32>(inst.vt0, inst.vt1, inst.vt2);
+    let vt_slots = inst.vt;
 
     // The view-mode ramps, in the forward path's own order and above the unlit
     // short-circuit for the reason `vgeom_mesh.wgsl` records: `VtResidency` and
@@ -327,7 +364,7 @@ fn fs(in: VsOut) -> FsOut {
         return out;
     }
     if (view.flags.x > 0.5) {
-        out.color = vec4<f32>(inst.color.rgb + inst.emissive.rgb, inst.color.a);
+        out.color = vec4<f32>(inst.color.rgb + inst.emissive, inst.color.a);
         return out;
     }
 
@@ -399,7 +436,7 @@ fn fs(in: VsOut) -> FsOut {
     lo += amb * albedo * (1.0 - metallic) * ao;
     lo += gi_ambient_specular(world_pos, n, v, rough, f0, amb) * ao;
 
-    lo += inst.emissive.rgb;
+    lo += inst.emissive;
 
     let dist = length(world_pos - view.eye.xyz);
     let haze = 1.0 - exp(-dist * 0.004);

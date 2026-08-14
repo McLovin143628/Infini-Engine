@@ -314,6 +314,9 @@ pub struct FrameData<'a> {
     /// only when `enabled`, and the node records the readback copy. Off by
     /// default, so the shipping path pays nothing.
     pub vgeom_audit: &'a VgeomAuditResources,
+    /// P28.1 visibility-buffer readback: off by default, and the only way an id
+    /// ever leaves the GPU. See [`EngineRenderer::set_visbuffer_readback`].
+    pub vis_readback: &'a std::cell::RefCell<passes::visbuffer::VisReadback>,
     /// Instance-cull audit counters (P18.5): the scatter cull compute increments
     /// them only when `enabled`, and the node records the readback copy. Off by
     /// default, so the shipping path pays nothing.
@@ -504,8 +507,15 @@ pub struct EngineRenderer {
     gi_audit: passes::gi::SharedGiAudit,
     /// P18.1 occlusion-audit counters (see [`EngineRenderer::set_vgeom_audit`]).
     vgeom_audit: VgeomAuditResources,
+    /// P28.1 visibility-buffer readback. A `RefCell` because the node records the
+    /// copy through a `&FrameData` and may have to grow the staging buffer while
+    /// doing it — the same interior mutability `GenCache` needs and for the same
+    /// reason, one indirection lower.
+    vis_readback: std::cell::RefCell<passes::visbuffer::VisReadback>,
     /// P18.2 meshlet-streaming state, published by the vgeom node each frame.
     vgeom_stream: passes::vgeom::SharedStreamReport,
+    /// P28.1: the visibility path's frame/refusal counters, published by the node.
+    vis_report: passes::visbuffer::SharedVisReport,
     /// P18.5 instance-cull counters (see [`EngineRenderer::set_scatter_audit`]).
     scatter_audit: passes::scatter::ScatterAuditResources,
     /// Shared atmosphere LUTs + uniform (P17.2). Unlike `shadow`/`gi` these are
@@ -666,10 +676,12 @@ impl EngineRenderer {
         // unless RenderSettings.vgeom is enabled and the scene carries vmesh
         // instances (so the classic path stays byte-identical).
         let vgeom_stream = passes::vgeom::SharedStreamReport::default();
+        let vis_report = passes::visbuffer::SharedVisReport::default();
         graph.add(passes::vgeom::VgeomNode::new(
             gpu,
             &view_bgl,
             vgeom_stream.clone(),
+            vis_report.clone(),
         ));
         // Classic discrete-LOD fallback (P13.4): renders the SAME vgeom content as
         // the meshlet path but through the ordinary PBR mesh pipeline, only when
@@ -776,7 +788,9 @@ impl EngineRenderer {
             next_gi_generation: 2,
             gi_audit,
             vgeom_audit: VgeomAuditResources::new(gpu),
+            vis_readback: std::cell::RefCell::new(passes::visbuffer::VisReadback::new(gpu)),
             vgeom_stream,
+            vis_report,
             scatter_audit: passes::scatter::ScatterAuditResources::new(gpu),
             atmosphere,
             next_atmosphere_generation: 2,
@@ -1104,6 +1118,26 @@ impl EngineRenderer {
     /// is recorded, so the shipping frame is untouched. Turning it on costs four
     /// atomics per surviving (instance, meshlet) pair plus a 16-byte copy — a
     /// test/tools instrument, not a shipping counter.
+    /// Turn the P28.1 visibility-buffer readback on. Off by default: it records a
+    /// full-viewport `copy_texture_to_buffer` every frame the visibility path
+    /// runs, which no shipping frame should pay for.
+    pub fn set_visbuffer_readback(&mut self, enabled: bool) {
+        self.vis_readback.borrow_mut().set_enabled(enabled);
+    }
+
+    /// The ids the **last submitted** frame wrote, row padding removed. `None`
+    /// unless [`set_visbuffer_readback`](Self::set_visbuffer_readback) is on and
+    /// a frame has rasterized one. Blocking.
+    pub fn read_visbuffer(&self, gpu: &GpuContext) -> Option<passes::visbuffer::VisImage> {
+        self.vis_readback.borrow().read(gpu)
+    }
+
+    /// The P28.1 visibility path's audit counters — how many frames took it, and
+    /// which ceiling refused the ones that did not.
+    pub fn vis_audit(&self) -> passes::visbuffer::VisAudit {
+        self.vis_report.lock().map(|a| *a).unwrap_or_default()
+    }
+
     pub fn set_vgeom_audit(&mut self, enabled: bool) {
         self.vgeom_audit.enabled = enabled;
     }
@@ -1532,6 +1566,7 @@ impl EngineRenderer {
             shadow: &self.shadow,
             gi: &self.gi,
             vgeom_audit: &self.vgeom_audit,
+            vis_readback: &self.vis_readback,
             scatter_audit: &self.scatter_audit,
             atmosphere: &self.atmosphere,
             wetness: &self.wetness,

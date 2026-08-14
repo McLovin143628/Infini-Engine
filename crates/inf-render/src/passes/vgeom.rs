@@ -210,7 +210,7 @@ const _: () = assert!(std::mem::size_of::<inf_vgeom::MeshletRec>() == 64);
 /// `struct Instance`. `threshold` is the precomputed per-instance LOD scalar.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct VgeomInstanceGpu {
+pub(crate) struct VgeomInstanceGpu {
     model: [f32; 16],
     n0: [f32; 4],
     n1: [f32; 4],
@@ -1343,6 +1343,8 @@ pub struct VgeomNode {
     /// so a test can name the flat index a pixel's id decodes to without
     /// re-deriving the asset order.
     vis_bases: Vec<(u128, u32)>,
+    /// The audit counters, shared with the renderer.
+    vis_report: super::visbuffer::SharedVisReport,
 }
 
 impl VgeomNode {
@@ -1350,6 +1352,7 @@ impl VgeomNode {
         gpu: &GpuContext,
         view_bgl: &wgpu::BindGroupLayout,
         report: SharedStreamReport,
+        vis_report: super::visbuffer::SharedVisReport,
     ) -> Self {
         let cull = CullPipeline::new(gpu);
 
@@ -1538,13 +1541,8 @@ impl VgeomNode {
             lights_bgl: lights_bgl_kept,
             vis: None,
             vis_bases: Vec::new(),
+            vis_report,
         }
-    }
-
-    /// The P28.1 visibility path's audit counters — zero until a frame turns the
-    /// mode on, and the *reason* a frame did not take it once one has.
-    pub fn vis_audit(&self) -> super::visbuffer::VisAudit {
-        self.vis.as_ref().map(|v| v.audit).unwrap_or_default()
     }
 
     /// The per-asset bases the last visibility frame assigned into the flat
@@ -1695,11 +1693,7 @@ impl RenderNode for VgeomNode {
             let pool_bytes = self.pools.sizes[1];
             let vis = self.vis.as_mut().expect("built above");
             vis.ensure_targets(gpu, frame);
-            vis.ensure_instances(
-                gpu,
-                flat.len() as u32,
-                std::mem::size_of::<VgeomInstanceGpu>() as u64,
-            );
+            vis.ensure_instances(gpu, flat.len() as u32);
             vis.ensure_flags(gpu, flat_at.len());
             if vis
                 .admit(flat.len() as u32, pool_bytes, max_tri_all)
@@ -1707,10 +1701,15 @@ impl RenderNode for VgeomNode {
             {
                 vis.audit.frames += 1;
                 vis_on = true;
-                if !flat.is_empty() {
-                    gpu.queue
-                        .write_buffer(&vis.instances, 0, bytemuck::cast_slice(&flat));
-                }
+                vis.write_instances(
+                    gpu,
+                    bytemuck::cast_slice(&flat),
+                    std::mem::size_of::<VgeomInstanceGpu>(),
+                );
+            }
+            let audit = vis.audit;
+            if let Ok(mut r) = self.vis_report.lock() {
+                *r = audit;
             }
         }
 
@@ -1734,6 +1733,7 @@ impl RenderNode for VgeomNode {
             lights_bgl: _,
             vis,
             vis_bases,
+            vis_report: _,
         } = self;
         vis_bases.clear();
 
@@ -2045,6 +2045,7 @@ impl RenderNode for VgeomNode {
             if vis_cleared {
                 if let Some(v) = vis.as_ref() {
                     vis_resolve_and_feedback(gpu, encoder, v, pools, frame, lights_bg, &env_bg);
+                    vis_record_readback(gpu, encoder, v, frame);
                 }
             }
             // Single-pass still fills the counters (its one dispatch sees every
@@ -2161,6 +2162,7 @@ impl RenderNode for VgeomNode {
         if vis_cleared {
             if let Some(v) = vis.as_ref() {
                 vis_resolve_and_feedback(gpu, encoder, v, pools, frame, lights_bg, &env_bg);
+                vis_record_readback(gpu, encoder, v, frame);
             }
         }
 
@@ -2223,10 +2225,10 @@ fn vis_raster_draw(
                 resource: pools.mltris.as_entire_binding(),
             },
             // The FLAT table, not this asset's slice: the id the raster writes is
-            // a global index, so the buffer it indexes has to be the global one.
+            // a global index, so what it indexes has to be the global thing.
             wgpu::BindGroupEntry {
                 binding: 4,
-                resource: vis.instances.as_entire_binding(),
+                resource: wgpu::BindingResource::TextureView(&vis.instances_view),
             },
             wgpu::BindGroupEntry {
                 binding: 5,
@@ -2323,7 +2325,7 @@ fn vis_resolve_and_feedback(
             },
             wgpu::BindGroupEntry {
                 binding: first + 4,
-                resource: vis.instances.as_entire_binding(),
+                resource: wgpu::BindingResource::TextureView(&vis.instances_view),
             },
         ]
     };
@@ -2449,6 +2451,24 @@ fn vis_resolve_and_feedback(
         targets.size.1.div_ceil(8).max(1),
         1,
     );
+}
+
+/// Record the visibility-buffer copy, when a host asked for one. Recorded AFTER
+/// the resolve rather than beside the raster so that what a test reads is what
+/// the frame shaded from, not an intermediate state of it.
+fn vis_record_readback(
+    gpu: &GpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    vis: &super::visbuffer::VisState,
+    frame: &FrameData,
+) {
+    let Some(targets) = vis.targets.as_ref() else {
+        return;
+    };
+    frame
+        .vis_readback
+        .borrow_mut()
+        .record(gpu, encoder, targets);
 }
 
 // ── HZB: reverse-Z min-depth pyramid from the MSAA scene depth ───────────────

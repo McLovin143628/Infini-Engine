@@ -40,24 +40,59 @@ struct Meshlet {
     pad: u32,
 };
 
-// The flat instance record. Byte-for-byte `VgeomInstanceGpu`, because the flat
-// table IS the per-asset tables concatenated — one derivation, two destinations.
+// The flat instance table rides an `Rgba32Float` TEXTURE, one row an instance,
+// eleven used texels of sixteen. Not a storage buffer, and the reason is a
+// measured device ceiling rather than taste: `Limits::default()` grants eight
+// storage buffers a stage, the shared environment group already spends four (GI
+// SH, the VT table, the VSM table, its projections) and the four meshlet pools
+// are the other four. The ninth is refused by `create_pipeline_layout`. See
+// `VIS_FRAGMENT_STORAGE_BINDINGS` in `crates/inf-render/src/passes/visbuffer.rs`.
+//
+// `textureLoad` is valid in the vertex, fragment AND compute stages, so all
+// three visibility passes read the table through one representation.
+const VIS_INSTANCE_TEXELS: i32 = 16;
+
 struct Instance {
     model: mat4x4<f32>,
-    n0: vec4<f32>,
-    n1: vec4<f32>,
-    n2: vec4<f32>,
+    n0: vec3<f32>,
+    n1: vec3<f32>,
+    n2: vec3<f32>,
     color: vec4<f32>,
-    emissive: vec4<f32>,
-    threshold: f32,
+    emissive: vec3<f32>,
     metallic: f32,
     roughness: f32,
-    max_scale: f32,
-    pick_id: u32,
-    vt0: u32,
-    vt1: u32,
-    vt2: u32,
+    vt: vec3<u32>,
 };
+
+fn vis_instance(id: u32) -> Instance {
+    let y = i32(id);
+    let c0 = textureLoad(v_instance_tex, vec2<i32>(0, y), 0);
+    let c1 = textureLoad(v_instance_tex, vec2<i32>(1, y), 0);
+    let c2 = textureLoad(v_instance_tex, vec2<i32>(2, y), 0);
+    let c3 = textureLoad(v_instance_tex, vec2<i32>(3, y), 0);
+    let n0 = textureLoad(v_instance_tex, vec2<i32>(4, y), 0);
+    let n1 = textureLoad(v_instance_tex, vec2<i32>(5, y), 0);
+    let n2 = textureLoad(v_instance_tex, vec2<i32>(6, y), 0);
+    let col = textureLoad(v_instance_tex, vec2<i32>(7, y), 0);
+    let emi = textureLoad(v_instance_tex, vec2<i32>(8, y), 0);
+    // (threshold, metallic, roughness, max_scale)
+    let pbr = textureLoad(v_instance_tex, vec2<i32>(9, y), 0);
+    // (pick_id, vt0, vt1, vt2) — u32 words, so they are bitcast rather than
+    // rounded: a handle that went through an f32 round-trip would be a
+    // DIFFERENT handle for anything past 2^24.
+    let ids = textureLoad(v_instance_tex, vec2<i32>(10, y), 0);
+    var out: Instance;
+    out.model = mat4x4<f32>(c0, c1, c2, c3);
+    out.n0 = n0.xyz;
+    out.n1 = n1.xyz;
+    out.n2 = n2.xyz;
+    out.color = col;
+    out.emissive = emi.xyz;
+    out.metallic = pbr.y;
+    out.roughness = pbr.z;
+    out.vt = vec3<u32>(bitcast<u32>(ids.y), bitcast<u32>(ids.z), bitcast<u32>(ids.w));
+    return out;
+}
 
 // Group 1: the shared virtualized-geometry pools + this asset's visible list.
 // (Group 0 is the view uniform; there are no lights and no env here, so the
@@ -68,7 +103,7 @@ struct Instance {
 @group(1) @binding(1) var<storage, read> v_meshlets: array<Meshlet>;
 @group(1) @binding(2) var<storage, read> v_meshlet_verts: array<u32>;
 @group(1) @binding(3) var<storage, read> v_meshlet_tris: array<u32>; // packed u8
-@group(1) @binding(4) var<storage, read> v_instances: array<Instance>;
+@group(1) @binding(4) var v_instance_tex: texture_2d<f32>;
 @group(1) @binding(5) var<storage, read> v_visible: array<vec2<u32>>;
 @group(1) @binding(7) var<storage, read> v_remap: array<u32>;
 
@@ -140,7 +175,7 @@ fn vs(@builtin(vertex_index) vidx: u32, @builtin(instance_index) iidx: u32) -> V
     let base = global_v * 8u;
     let position = vec3<f32>(v_positions[base], v_positions[base + 1u], v_positions[base + 2u]);
 
-    let inst = v_instances[vis.flags.x + pair.x];
+    let inst = vis_instance(vis.flags.x + pair.x);
     // `view.view_proj` is the JITTERED matrix whenever TAA is on (the renderer
     // overwrites the uniform in place). Reading it — rather than rebuilding a
     // projection — is what keeps the resolve's reconstruction on the same

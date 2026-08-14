@@ -43,6 +43,43 @@ use crate::visbuffer::{VisPackError, VisPacking};
 
 use inf_vgeom::asset::MESHLET_REC_LEN;
 
+/// **Texels a flat instance record occupies** in the instance table's texture.
+///
+/// `VgeomInstanceGpu` is 176 bytes — eleven `rgba32float` texels — and this is
+/// sixteen, so a row is exactly `COPY_BYTES_PER_ROW_ALIGNMENT`. The five wasted
+/// texels an instance buy the ability to `write_texture` the whole table in one
+/// call: the alignment is a hard requirement above one row, and the alternative
+/// is a per-row upload or a staging buffer, either of which is more moving parts
+/// than 112 bytes an instance (229 KiB at the packing's own 2 047-instance
+/// ceiling).
+pub const VIS_INSTANCE_TEXELS: u32 = 16;
+
+/// **Why the instance table is a TEXTURE and not a storage buffer.**
+///
+/// `Limits::default()` grants **8** storage buffers per shader stage, and the
+/// resolve is a FRAGMENT pass that binds the shared environment group — which
+/// already spends four of them: the GI SH probes (binding 5), the virtual-texture
+/// indirection table (16), and the shadow page table and its projections (18, 19).
+/// The four meshlet pools are the other four. A fifth storage binding for the
+/// instances is nine against eight, and the device says so:
+///
+/// > Too many bindings of type StorageBuffers in Stage ShaderStages(FRAGMENT),
+/// > limit is 8, count was 9.
+///
+/// This is the P26.3 scarcity ruling one binding class over — there the scarce
+/// resource was the bind GROUP and the answer was to fold; here it is the storage
+/// binding and the answer is to change the resource kind. A texture costs nothing
+/// from that budget, `textureLoad` is valid in the vertex, fragment and compute
+/// stages alike (so all three passes read the table through one representation),
+/// and `Rgba32Float` with `TextureSampleType::Float { filterable: false }` is core
+/// wgpu on every backend.
+///
+/// **The remaining headroom is zero**, and that is stated rather than discovered:
+/// `the_resolve_spends_every_fragment_storage_binding_the_default_limit_grants`
+/// counts them, so the next binding the environment group grows fails a test
+/// here instead of failing `create_pipeline_layout` on a user's machine.
+pub const VIS_FRAGMENT_STORAGE_BINDINGS: u32 = 8;
+
 /// The visibility buffer's own format. `R32Uint` because the packing is exactly
 /// thirty-two bits and an integer target neither filters nor blends — a
 /// visibility id that a driver was free to average would be a different
@@ -106,11 +143,22 @@ impl VisAudit {
     }
 }
 
+/// The audit counters the node publishes and the renderer reads.
+///
+/// A `Mutex` the two share, exactly like `SharedStreamReport`: a node lives
+/// inside the render graph and is not reachable from outside it, so a counter a
+/// host has to see travels this way and not through an accessor.
+pub type SharedVisReport = std::sync::Arc<std::sync::Mutex<VisAudit>>;
+
 /// The viewport-sized targets. Recreated with the frame targets, and keyed on
 /// their generation for the same reason every resizable resource in this
 /// renderer is (`GenCache`'s invariant): a bind group cached across a resize
 /// keeps the old texture alive and silently shades last size's ids.
 pub struct VisTargets {
+    /// The texture behind [`color`](Self::color) - kept because
+    /// `copy_texture_to_buffer` takes a texture and a view cannot be reversed
+    /// into one.
+    pub texture: wgpu::Texture,
     pub color: wgpu::TextureView,
     pub depth: wgpu::TextureView,
     pub size: (u32, u32),
@@ -120,39 +168,218 @@ pub struct VisTargets {
 impl VisTargets {
     fn new(gpu: &GpuContext, size: (u32, u32), generation: u64) -> Self {
         let tex = |label, format, usage| {
-            gpu.device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size: wgpu::Extent3d {
-                        width: size.0.max(1),
-                        height: size.1.max(1),
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage,
-                    view_formats: &[],
-                })
-                .create_view(&wgpu::TextureViewDescriptor::default())
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: size.0.max(1),
+                    height: size.1.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
         };
+        let color = tex(
+            "visbuffer",
+            VIS_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+        );
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = tex(
+            "visbuffer-depth",
+            DEPTH_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default());
         Self {
-            color: tex(
-                "visbuffer",
-                VIS_FORMAT,
-                wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
-            ),
-            depth: tex(
-                "visbuffer-depth",
-                DEPTH_FORMAT,
-                wgpu::TextureUsages::RENDER_ATTACHMENT,
-            ),
+            texture: color,
+            color: color_view,
+            depth,
             size,
             generation,
         }
+    }
+}
+
+/// The **visibility-buffer readback** (P28.1) — off by default, and the only way
+/// an id ever leaves the GPU.
+///
+/// It is the `VgeomAuditResources` shape one subsystem over, for the same
+/// reason: the buffer lives inside a graph node and a graph node is not
+/// reachable from outside the graph, so the resource the node copies into has to
+/// be the renderer's. Nothing on the shipping path turns it on, so nothing on the
+/// shipping path pays for the copy.
+///
+/// Two arms need it and neither could exist without it: the determinism pin
+/// (two runs, byte-identical buffers, on a real device) and the parity oracle's
+/// **interior test** — a pixel whose four neighbours carry its own id is fully
+/// covered by one triangle, which is exactly the pixel where a 4x-MSAA forward
+/// frame and a 1x resolve are obliged to agree to the byte.
+pub struct VisReadback {
+    pub(crate) enabled: bool,
+    buffer: wgpu::Buffer,
+    /// `(width, height, padded bytes per row)` of what the last copy holds.
+    shape: (u32, u32, u32),
+    capacity: u64,
+}
+
+/// `copy_texture_to_buffer`'s row alignment.
+const COPY_ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+
+impl VisReadback {
+    pub(crate) fn new(gpu: &GpuContext) -> Self {
+        Self {
+            enabled: false,
+            buffer: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("visbuffer-readback"),
+                size: COPY_ALIGN as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+            shape: (0, 0, 0),
+            capacity: COPY_ALIGN as u64,
+        }
+    }
+
+    pub(crate) fn set_enabled(&mut self, on: bool) {
+        self.enabled = on;
+    }
+
+    /// Record the copy, growing the staging buffer if the viewport did.
+    pub(crate) fn record(
+        &mut self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &VisTargets,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let (w, h) = targets.size;
+        let row = (w * 4).next_multiple_of(COPY_ALIGN);
+        let bytes = row as u64 * h as u64;
+        if bytes > self.capacity {
+            self.buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("visbuffer-readback"),
+                size: bytes,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            self.capacity = bytes;
+        }
+        self.shape = (w, h, row);
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &targets.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// Map the ids the **last submitted** frame wrote, row padding removed.
+    /// Blocking - a test/tools path, never the hot path.
+    pub(crate) fn read(&self, gpu: &GpuContext) -> Option<VisImage> {
+        let (w, h, row) = self.shape;
+        if !self.enabled || w == 0 || h == 0 {
+            return None;
+        }
+        let slice = self.buffer.slice(..row as u64 * h as u64);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let view = slice.get_mapped_range().expect("mapped above");
+        let mut ids = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            let start = (y * row) as usize;
+            let bytes = &view[start..start + (w * 4) as usize];
+            ids.extend_from_slice(bytemuck::cast_slice::<u8, u32>(bytes));
+        }
+        drop(view);
+        self.buffer.unmap();
+        Some(VisImage {
+            width: w,
+            height: h,
+            ids,
+        })
+    }
+}
+
+/// One frame's visibility ids, unpadded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisImage {
+    pub width: u32,
+    pub height: u32,
+    /// Row-major, `width * height` entries. [`crate::visbuffer::VIS_EMPTY`] where
+    /// no meshlet covered the pixel.
+    pub ids: Vec<u32>,
+}
+
+impl VisImage {
+    /// The id at `(x, y)`, or [`crate::visbuffer::VIS_EMPTY`] outside the image.
+    pub fn at(&self, x: u32, y: u32) -> u32 {
+        if x >= self.width || y >= self.height {
+            return crate::visbuffer::VIS_EMPTY;
+        }
+        self.ids[(y * self.width + x) as usize]
+    }
+
+    /// Pixels covered by geometry.
+    pub fn covered(&self) -> usize {
+        self.ids
+            .iter()
+            .filter(|&&v| v != crate::visbuffer::VIS_EMPTY)
+            .count()
+    }
+
+    /// **Interior pixels**: covered, and carrying the same id as all four
+    /// four-neighbours.
+    ///
+    /// This is the parity oracle's whole load-bearing idea. A pixel whose
+    /// neighbours all name the same triangle is a pixel the forward path's four
+    /// MSAA samples are all inside that triangle for, so the forward frame
+    /// shades it ONCE at the pixel centre and resolves four identical samples -
+    /// which is precisely what the single-sample resolve computes. Anywhere else
+    /// the two are *obliged* to differ, and comparing them there would be
+    /// measuring MSAA rather than the resolve. The border is excluded because a
+    /// neighbour off the image is not evidence either way.
+    pub fn interior(&self) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for y in 1..self.height.saturating_sub(1) {
+            for x in 1..self.width.saturating_sub(1) {
+                let id = self.at(x, y);
+                if id == crate::visbuffer::VIS_EMPTY {
+                    continue;
+                }
+                if self.at(x - 1, y) == id
+                    && self.at(x + 1, y) == id
+                    && self.at(x, y - 1) == id
+                    && self.at(x, y + 1) == id
+                {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -174,7 +401,11 @@ pub struct VisState {
     /// The frame's flat instance table — every asset's packed instances
     /// concatenated in the deterministic asset order the raster walks, so
     /// `base + local` is the global index the packing stores.
-    pub instances: wgpu::Buffer,
+    ///
+    /// An `Rgba32Float` texture, one row an instance: see
+    /// [`VIS_FRAGMENT_STORAGE_BINDINGS`] for why it is not a buffer.
+    pub instances: wgpu::Texture,
+    pub instances_view: wgpu::TextureView,
     instances_cap: u32,
     /// Per-asset `VisFlagsGpu` (the instance base), one buffer per asset slot.
     pub flags: Vec<wgpu::Buffer>,
@@ -210,6 +441,17 @@ impl VisState {
             view_dimension: wgpu::TextureViewDimension::D2,
             multisampled,
         };
+        // `filterable: false` because nothing samples it: the instance table is
+        // read with `textureLoad`, which takes integer texels and no sampler at
+        // all. Declaring it filterable would ask every adapter for
+        // `Rgba32Float` linear filtering, which is an OPTIONAL feature
+        // (`FLOAT32_FILTERABLE`) — a capability requirement bought for a
+        // convenience nothing uses is the class the P25 audit named.
+        let float_tex = wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        };
 
         // ── the raster ──────────────────────────────────────────────────────
         let vs = wgpu::ShaderStages::VERTEX;
@@ -222,7 +464,7 @@ impl VisState {
                     entry(1, vs, ro),
                     entry(2, vs, ro),
                     entry(3, vs, ro),
-                    entry(4, vs, ro),
+                    entry(4, vs, float_tex),
                     entry(5, vs, ro),
                     // The instance base rides the vertex stage here, where the
                     // forward path's twin is a FRAGMENT uniform — this pass has
@@ -293,7 +535,7 @@ impl VisState {
                     entry(2, fs, ro),
                     entry(3, fs, ro),
                     entry(4, fs, ro),
-                    entry(5, fs, ro),
+                    entry(5, fs, float_tex),
                 ],
             });
         let resolve_shader = gpu
@@ -364,7 +606,7 @@ impl VisState {
                     entry(3, cs, ro),
                     entry(4, cs, ro),
                     entry(5, cs, ro),
-                    entry(6, cs, ro),
+                    entry(6, cs, float_tex),
                     entry(7, cs, ro),
                     entry(8, cs, ro),
                     entry(
@@ -411,7 +653,8 @@ impl VisState {
             mapped_at_creation: false,
         });
         let feedback_bases = storage(gpu, "visbuffer-feedback-bases", 16);
-        let instances = storage(gpu, "visbuffer-instances", 256);
+        let instances = instance_texture(gpu, 1);
+        let instances_view = instances.create_view(&wgpu::TextureViewDescriptor::default());
 
         Self {
             raster,
@@ -424,6 +667,7 @@ impl VisState {
             feedback_bases,
             feedback_bases_cap: 0,
             instances,
+            instances_view,
             instances_cap: 0,
             flags: Vec::new(),
             targets: None,
@@ -448,14 +692,56 @@ impl VisState {
 
     /// Grow the flat instance table to `count` records. Returns whether it was
     /// recreated.
-    pub fn ensure_instances(&mut self, gpu: &GpuContext, count: u32, stride: u64) -> bool {
+    pub fn ensure_instances(&mut self, gpu: &GpuContext, count: u32) -> bool {
         if count <= self.instances_cap {
             return false;
         }
         let cap = count.next_power_of_two().max(4);
-        self.instances = storage(gpu, "visbuffer-instances", cap as u64 * stride);
+        self.instances = instance_texture(gpu, cap);
+        self.instances_view = self
+            .instances
+            .create_view(&wgpu::TextureViewDescriptor::default());
         self.instances_cap = cap;
         true
+    }
+
+    /// Write the frame's flat table. `records` is the packed
+    /// `VgeomInstanceGpu` bytes; each is padded out to a
+    /// [`VIS_INSTANCE_TEXELS`]-texel row.
+    pub fn write_instances(&self, gpu: &GpuContext, records: &[u8], stride: usize) {
+        if records.is_empty() || stride == 0 {
+            return;
+        }
+        let row = (VIS_INSTANCE_TEXELS * 16) as usize;
+        debug_assert!(
+            stride <= row,
+            "a {stride}-byte instance does not fit a {row}-byte row"
+        );
+        let n = records.len() / stride;
+        let mut padded = vec![0u8; n * row];
+        for i in 0..n {
+            padded[i * row..i * row + stride]
+                .copy_from_slice(&records[i * stride..(i + 1) * stride]);
+        }
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.instances,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &padded,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row as u32),
+                rows_per_image: Some(n as u32),
+            },
+            wgpu::Extent3d {
+                width: VIS_INSTANCE_TEXELS,
+                height: n as u32,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     /// Grow the per-texture bit-base table to `count` handles.
@@ -512,6 +798,23 @@ impl VisState {
     }
 }
 
+fn instance_texture(gpu: &GpuContext, rows: u32) -> wgpu::Texture {
+    gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("visbuffer-instances"),
+        size: wgpu::Extent3d {
+            width: VIS_INSTANCE_TEXELS,
+            height: rows.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
 fn storage(gpu: &GpuContext, label: &str, bytes: u64) -> wgpu::Buffer {
     gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
@@ -525,6 +828,47 @@ fn storage(gpu: &GpuContext, label: &str, bytes: u64) -> wgpu::Buffer {
 mod tests {
     use super::*;
     use crate::visbuffer::{VIS_MAX_INSTANCES, VIS_MAX_MESHLET_SLOTS};
+
+    /// **Every fragment storage binding the default limit grants is spent**, and
+    /// the arm exists so the ninth is a failing test here rather than a
+    /// `create_pipeline_layout` refusal on a user's machine — which is how this
+    /// ceiling was found in the first place.
+    #[test]
+    fn the_resolve_spends_every_fragment_storage_binding_the_default_limit_grants() {
+        assert_eq!(
+            wgpu::Limits::default().max_storage_buffers_per_shader_stage,
+            VIS_FRAGMENT_STORAGE_BINDINGS,
+            "the pinned wgpu's default storage-binding limit moved; the ruling in \
+             VIS_FRAGMENT_STORAGE_BINDINGS is arithmetic about the old one"
+        );
+        // The environment group's four, read off `passes::mod`'s own constants
+        // rather than counted by hand: GI SH probes, the VT table, the VSM table
+        // and its projections.
+        let env_storage = 4u32;
+        // The resolve's own: the four meshlet pools. The instance table is a
+        // texture precisely so this sum is not five.
+        let resolve_storage = 4u32;
+        assert_eq!(
+            env_storage + resolve_storage,
+            VIS_FRAGMENT_STORAGE_BINDINGS,
+            "the resolve no longer sits exactly at the limit — if this is a \
+             saving, the instance table can go back to being a buffer; if it is \
+             a growth, the pipeline will not build"
+        );
+    }
+
+    #[test]
+    fn a_flat_instance_record_fits_its_padded_row() {
+        let stride = std::mem::size_of::<crate::passes::vgeom::VgeomInstanceGpu>();
+        let row = (VIS_INSTANCE_TEXELS * 16) as usize;
+        assert!(
+            stride <= row,
+            "a {stride}-byte instance record does not fit a {row}-byte texture row"
+        );
+        // …and the row is exactly the copy alignment, which is the whole reason
+        // it is sixteen texels and not eleven.
+        assert_eq!(row, COPY_ALIGN as usize);
+    }
 
     #[test]
     fn the_audit_partitions_its_refusals_by_ceiling() {
