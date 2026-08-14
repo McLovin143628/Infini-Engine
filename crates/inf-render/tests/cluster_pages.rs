@@ -171,17 +171,57 @@ fn oracle_tiles(
 
 // ── one step of the churn ───────────────────────────────────────────────────
 
+/// How one step of the churn is wired — the falsification switches, named.
+#[derive(Clone, Copy)]
+struct Churn {
+    /// Fold the cluster tiles into the want set and demand them at `pair`. With
+    /// it **off** the cluster tiles never enter the want set, which is precisely
+    /// the pre-P28.2 arrangement: two systems with no edge between them.
+    couple: bool,
+    /// Drop a cooked address the **registered image does not have** instead of
+    /// asking for it and refusing the page when it does not arrive (P28.2 audit;
+    /// `VtResidency::can_address` is the door the renderer uses). With it off,
+    /// a pairing that meets another image of its texture retracts the asset on
+    /// every frame for ever.
+    filter_stale: bool,
+}
+
+impl Churn {
+    /// The shipped arrangement.
+    const COUPLED: Self = Self {
+        couple: true,
+        filter_stale: true,
+    };
+    /// Pre-P28.2: geometry streams, textures stream, nothing joins them.
+    const UNCOUPLED: Self = Self {
+        couple: false,
+        filter_stale: false,
+    };
+    /// P28.2 as first landed: coupled, but unable to tell "not paged in" from
+    /// "no such tile".
+    const STALE_BLIND: Self = Self {
+        couple: true,
+        filter_stale: false,
+    };
+}
+
 /// The three-step page-in the renderer runs, with the virtual-texture half in the
-/// middle. `couple` is the falsification switch: with it off the cluster tiles
-/// never enter the want set, which is precisely the pre-P28.2 arrangement.
+/// middle.
+///
+/// `competing` is a second want class at **refinement** priority — what the
+/// feedback mask contributes in the real frame. It exists so the protection
+/// order inside `apply_wants` (touch every resident want, THEN admit misses) is
+/// under load rather than merely present.
 fn step(
     streamer: &mut VgeomStreamer,
     res: &mut VtResidency,
     by_guid: &BTreeMap<u128, VtTextureHandle>,
     src: &VgeomSource,
     threshold: f32,
-    couple: bool,
+    churn: Churn,
+    competing: &[VtWant],
 ) -> u32 {
+    let couple = churn.couple;
     // 1. the geometry half.
     let plan = streamer.plan(&[inf_vgeom::VgeomWant {
         asset: ASSET,
@@ -198,6 +238,14 @@ fn step(
                 s.tile_refs()
                     .iter()
                     .map(|t| (t.texture().uuid().as_u128(), t.coord()))
+                    .filter(|(g, t)| {
+                        // The renderer's own filter, through the same door: a
+                        // texture this level did not register, or an address the
+                        // registered image does not have, is not part of the
+                        // pairing.
+                        !churn.filter_stale
+                            || by_guid.get(g).is_some_and(|h| res.can_address(*h, *t))
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -215,6 +263,7 @@ fn step(
             }
         }
     }
+    wants.extend_from_slice(competing);
     let _txn = res.apply_wants(&wants);
 
     // 4. pair, or hand the page back. Uncoupled, the seat is unconditional —
@@ -304,7 +353,15 @@ fn a_resident_clusters_tiles_are_resident_after_every_transaction_of_a_churn() {
     let mut peak = 0usize;
     let mut checks = 0usize;
     for (i, t) in thresholds.iter().enumerate() {
-        let retracted = step(&mut streamer, &mut res, &by_guid, &src, *t, true);
+        let retracted = step(
+            &mut streamer,
+            &mut res,
+            &by_guid,
+            &src,
+            *t,
+            Churn::COUPLED,
+            &[],
+        );
         assert_eq!(
             retracted, 0,
             "step {i}: a comfortable budget retracted a page"
@@ -353,7 +410,15 @@ fn without_the_coupling_a_resident_cluster_loses_its_tiles() {
     // No cluster wants at all: the residency holds only its mandatory floor (the
     // coarsest level of each texture, pinned at registration).
     for t in [4.0f32, 0.5, 0.02, 0.001] {
-        step(&mut streamer, &mut res, &by_guid, &src, t, false);
+        step(
+            &mut streamer,
+            &mut res,
+            &by_guid,
+            &src,
+            t,
+            Churn::UNCOUPLED,
+            &[],
+        );
     }
     let resident = streamer.residency(ASSET).map_or(0, |r| r.resident_pages());
     assert!(
@@ -400,7 +465,15 @@ fn a_texture_budget_that_cannot_seat_the_tiles_hands_the_geometry_back() {
 
     let mut retracted_total = 0u32;
     for t in [4.0f32, 0.5, 0.05, 0.001, 0.001] {
-        retracted_total += step(&mut streamer, &mut res, &by_guid, &src, t, true);
+        retracted_total += step(
+            &mut streamer,
+            &mut res,
+            &by_guid,
+            &src,
+            t,
+            Churn::COUPLED,
+            &[],
+        );
         assert_invariant(&streamer, &res, &by_guid, &src, &mesh, "tight budget");
     }
     assert!(
@@ -453,5 +526,251 @@ fn the_renderers_cluster_sync_seats_the_texture_half_between_the_plan_and_the_pa
     assert!(
         fold < apply,
         "the cluster wants are added after the transaction that would protect them"
+    );
+}
+
+// ── the P28.2 audit's arms ──────────────────────────────────────────────────
+
+/// A paired image cooked against `cook`, to be met at runtime by whatever the
+/// caller registers — the constructed mismatch the staleness arm needs.
+fn source_paired_against(cook: &[(u128, VtTextureDesc)]) -> VgeomSource {
+    let mesh = inf_vgeom::test_support::build_grid_tangented(
+        24,
+        0.3,
+        inf_vgeom::test_support::GridNormals::Analytic,
+        true,
+    );
+    let set = ClusterTextureSet {
+        textures: cook
+            .iter()
+            .map(|(g, d)| ClusterTexture::from_desc(asset_id(*g), d))
+            .collect(),
+    };
+    VgeomSource::from_mesh_paired(&mesh, &set).expect("build the paired image")
+}
+
+/// **THE STALENESS ARM** (P28.2 audit). A `.inf_vmesh`'s tiles section holds
+/// `(guid, mip, x, y)` **addresses** into another asset's address space, and
+/// nothing in either container ties the two — no version, no digest, no extent.
+/// So the question is not whether a pairing can meet another image of its
+/// texture; it is what happens when it does.
+///
+/// The answer must not be "the asset disappears". `is_resident` reports *no such
+/// tile* exactly as it reports *not paged in*, and the first address a shrunken
+/// pyramid loses is the **root page's** coarsest mip — the page that makes
+/// "never a hole" true. Refuse it and residency goes to zero, on every frame,
+/// for ever, silently: no budget will ever seat a tile that does not exist.
+///
+/// The control is the arrangement as this batch first landed it, and it must
+/// reach that state, or this arm is measuring a fixture rather than the door.
+#[test]
+fn a_pairing_cooked_against_another_image_degrades_instead_of_erasing_the_asset() {
+    // Cooked against 2 048² / 1 024²; the session registers half-size images of
+    // the same GUIDs — two mips fewer, so the cooked coarse addresses do not
+    // exist at all and the surviving ones name a different level.
+    let src = source_paired_against(&descs());
+    let smaller: Vec<(u128, VtTextureDesc)> = vec![
+        (TEX_A, full_pyramid(512, 512, 128, 4, true)),
+        (TEX_B, full_pyramid(256, 256, 128, 4, false)),
+    ];
+    let register = || {
+        let (mut res, _adv) = VtResidency::new(VtPoolConfig {
+            budget_bytes: 64 * 1024 * 1024,
+            ..Default::default()
+        });
+        let mut by_guid = BTreeMap::new();
+        for (guid, desc) in &smaller {
+            let h = res.register_texture(desc.clone()).expect("the floor fits");
+            by_guid.insert(*guid, h);
+        }
+        (res, by_guid)
+    };
+    let thresholds = [4.0f32, 0.5, 0.02, 0.001, 0.001];
+
+    // THE CONTROL: blind to the difference between "not seated" and "not there".
+    let (mut res, by_guid) = register();
+    let mut streamer = VgeomStreamer::new(VgeomStreamBudget::default());
+    for t in thresholds {
+        step(
+            &mut streamer,
+            &mut res,
+            &by_guid,
+            &src,
+            t,
+            Churn::STALE_BLIND,
+            &[],
+        );
+    }
+    assert_eq!(
+        streamer.residency(ASSET).map_or(0, |r| r.resident_pages()),
+        0,
+        "the control must reach the forbidden state: a pairing asking for tiles \
+         no budget can seat has to erase the asset — page 0 included, because the \
+         root page's address is the first one a shrunken pyramid loses"
+    );
+
+    // THE DOOR: `can_address` separates the two answers, so a stale slot is
+    // uncoupled — exactly as a texture this level does not bind is — and the
+    // geometry streams.
+    let (mut res, by_guid) = register();
+    let mut streamer = VgeomStreamer::new(VgeomStreamBudget::default());
+    let mut retracted = 0u32;
+    for t in thresholds {
+        retracted += step(
+            &mut streamer,
+            &mut res,
+            &by_guid,
+            &src,
+            t,
+            Churn::COUPLED,
+            &[],
+        );
+    }
+    assert_eq!(retracted, 0, "a stale address must not retract a page");
+    assert_eq!(
+        streamer.residency(ASSET).map(|r| r.resident_pages()),
+        Some(src.pages().len()),
+        "with the stale addresses dropped, the asset streams to full residency"
+    );
+
+    // Anti-vacuity, both ways: the mismatch is real (addresses were dropped) and
+    // it is not total (the finer levels still exist in the smaller image, so the
+    // coupling still has something left to protect).
+    let mut dropped = 0usize;
+    let mut kept = 0usize;
+    for page in 0..src.pages().len() {
+        src.with_page_sections(page, |s| {
+            for t in s.tile_refs() {
+                let h = by_guid[&t.texture().uuid().as_u128()];
+                if res.can_address(h, t.coord()) {
+                    kept += 1;
+                } else {
+                    dropped += 1;
+                }
+            }
+        });
+    }
+    assert!(
+        dropped > 0,
+        "the two images address the same tiles — nothing was stale, so the arm \
+         proves nothing"
+    );
+    assert!(
+        kept > 0,
+        "every address was stale — the coupling is inert here"
+    );
+}
+
+/// **THE PROTECTION ORDER, UNDER LOAD** (P28.2 audit). `VtResidency::apply_wants`
+/// touches every want that is already resident *before* it offers a slot to any
+/// miss, and the memo calls that ordering the mechanism by which the invariant
+/// survives **between** transactions rather than only at one.
+///
+/// The batch's own churn cannot see it. With one want class and a comfortable
+/// budget nothing ever competes for a slot, so an `apply_wants` that protected
+/// nothing at all passes every other arm in this file. This one puts a second
+/// want class at **refinement** priority — a texture the mesh never samples,
+/// disjoint by construction, because a competing class drawn from the pairing's
+/// own tiles is deduped into the pairing and competes with nothing — against a
+/// pool that cannot hold both.
+///
+/// **What it establishes, and the bound it measures.** The protection is
+/// priority-**blind**: step 3 protects every want that is already resident, of
+/// any class, before step 4 admits any miss, of any class. So a refinement that
+/// got there first outranks a floor want that has not. The guarantee that
+/// survives is the one the invariant needs — *a resident cluster page never
+/// loses ground it already holds* — and the cost is that a competing class can
+/// stop the pairing gaining more. Measured here rather than asserted away: on
+/// this fixture the decoy costs the pairing its finest page.
+#[test]
+fn a_refinement_class_under_slot_pressure_cannot_cost_a_resident_page_its_tiles() {
+    let (src, mesh) = paired_source();
+    // A third texture, registered but NOT part of the pairing — a surface the
+    // feedback mask asks for and this mesh never samples.
+    const TEX_C: u128 = 0xA0A0_0000_0000_0000_0000_0000_0000_0003;
+    let residency_with_decoy = || {
+        let (mut res, _adv) = VtResidency::new(VtPoolConfig {
+            budget_bytes: 4 * 1024 * 1024,
+            ..Default::default()
+        });
+        let mut by_guid = BTreeMap::new();
+        for (guid, desc) in descs() {
+            by_guid.insert(guid, res.register_texture(desc).expect("the floor fits"));
+        }
+        let decoy = full_pyramid(2048, 2048, 128, 4, true);
+        let h = res.register_texture(decoy.clone()).expect("the floor fits");
+        let mut competing = Vec::new();
+        let m = &decoy.mips[0];
+        for y in 0..m.tiles_y {
+            for x in 0..m.tiles_x {
+                competing.push(VtWant::refine(h, TileCoord::new(0, x, y)));
+            }
+        }
+        by_guid.insert(TEX_C, h);
+        (res, by_guid, competing)
+    };
+    // Strictly refining, so "residency went backwards" can only mean the texture
+    // half took ground back — never that the camera asked for less.
+    let thresholds: Vec<f32> = vec![4.0, 0.5, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001];
+
+    let ladder = |competing: bool| -> (Vec<usize>, bool) {
+        let (mut res, by_guid, decoy) = residency_with_decoy();
+        let extra = if competing { decoy } else { Vec::new() };
+        let mut streamer = VgeomStreamer::new(VgeomStreamBudget::default());
+        let mut pages = Vec::new();
+        let mut contended = false;
+        for t in &thresholds {
+            step(
+                &mut streamer,
+                &mut res,
+                &by_guid,
+                &src,
+                *t,
+                Churn::COUPLED,
+                &extra,
+            );
+            contended |= res.stats().deferred > 0;
+            assert_invariant(
+                &streamer,
+                &res,
+                &by_guid,
+                &src,
+                &mesh,
+                if competing {
+                    "with a competing refinement class"
+                } else {
+                    "alone"
+                },
+            );
+            pages.push(streamer.residency(ASSET).map_or(0, |r| r.resident_pages()));
+        }
+        (pages, contended)
+    };
+
+    let (alone, _) = ladder(false);
+    let (contested, contended) = ladder(true);
+    assert!(
+        contended,
+        "the competing class never exhausted a slot — this arm is not under load,          so it cannot see the protection it exists to check"
+    );
+
+    // THE GUARANTEE: under a want that only ever refines, a resident cluster page
+    // is never handed back to seat somebody else's tile.
+    for w in contested.windows(2) {
+        assert!(
+            w[1] >= w[0],
+            "residency went backwards under a refining want: {contested:?}. A              competing class took a resident page's tiles, which is what the              protection order forbids."
+        );
+    }
+    // THE BOUND, measured: it may still cost detail not yet gained.
+    for (c, a) in contested.iter().zip(&alone) {
+        assert!(
+            c <= a,
+            "a competing class made the pairing stream MORE: {contested:?} against              {alone:?} — the arm's premise is inverted"
+        );
+    }
+    assert!(
+        contested.last() < alone.last(),
+        "the decoy cost the pairing nothing at all ({contested:?} against          {alone:?}) — then the pool is not contested enough for the bound above          to be the honest reading of this fixture"
     );
 }

@@ -1310,6 +1310,14 @@ pub struct VgeomStreamReport {
     /// not the meshlet budget, is what decided this frame's detail — the two now
     /// degrade together, and this is the number that says which one bound.
     pub retracted: u64,
+    /// Cooked cluster-tile addresses the **registered** image does not have,
+    /// cumulative (P28.2 audit). Non-zero means a `.inf_vmesh` is paired against
+    /// a different `.inf_tex` than the one this session registered — a re-tiled
+    /// or re-imported texture — and those slots are uncoupled: the surface
+    /// streams geometry and texture independently for them, as it did before
+    /// P28.2. It is reported rather than refused because refusing an address no
+    /// budget can ever seat retracts the asset for ever.
+    pub stale_tiles: u64,
 }
 
 /// The shared handle the renderer hands the node.
@@ -1384,6 +1392,12 @@ pub struct VgeomNode {
     /// refused, cumulative — the counter that says the texture budget, not the
     /// geometry budget, decided the detail.
     retracted: u64,
+    /// Cooked tile addresses the registered image does not have, cumulative — a
+    /// `.inf_vmesh` paired against a **different** `.inf_tex` than the one in
+    /// front of it. Never silence, on the P16 advisory doctrine: nothing else in
+    /// the tree can see it, because a stale address is indistinguishable from an
+    /// unseated one at `is_resident`.
+    stale_tiles: u64,
 }
 
 impl VgeomNode {
@@ -1585,6 +1599,7 @@ impl VgeomNode {
             page_tiles: BTreeMap::new(),
             pools_rebuilt: false,
             retracted: 0,
+            stale_tiles: 0,
         }
     }
 
@@ -1666,10 +1681,20 @@ impl VgeomNode {
     /// is already resident is *protected* by `VtResidency::apply_wants` before any
     /// miss is offered a slot, so a tile cannot be evicted out from under a page
     /// that is still resident.
+    ///
+    /// `addressable` answers *"does the registered texture have this tile at
+    /// all"* — not "is it paged in". A cooked address the live image does not
+    /// have is **stale**, and it is dropped from the pairing exactly as a texture
+    /// this level does not bind is, for a stronger reason: an unseated tile is a
+    /// budget answer a later transaction can change, while a non-existent one is
+    /// a statement about a different image, and refusing the page for it retracts
+    /// the asset for ever (P28.2 audit; measured, it went to **zero pages** —
+    /// the mesh vanished — because the root page's coarsest-mip address is the
+    /// first one a shrunken pyramid loses).
     pub fn cluster_tile_wants(
         &mut self,
         scene: &crate::scene::RenderScene,
-        known: impl Fn(u128) -> bool,
+        addressable: impl Fn(u128, inf_vt::TileCoord) -> bool,
     ) -> Vec<(u128, inf_vt::TileCoord)> {
         self.page_tiles.clear();
         let mut out: Vec<(u128, inf_vt::TileCoord)> = Vec::new();
@@ -1698,8 +1723,16 @@ impl VgeomNode {
                         // of the asset for ever — the mesh would collapse to its
                         // root page and never recover. So the coupling protects
                         // what is actually in play and says nothing about the rest.
-                        if known(guid) {
+                        //
+                        // The same sentence, for the same reason, covers an
+                        // address the registered image does not have: the pairing
+                        // was baked against a `.inf_tex` that is not the one in
+                        // front of us, and no budget will ever seat a tile that
+                        // does not exist.
+                        if addressable(guid, t.coord()) {
                             here.push((guid, t.coord()));
+                        } else {
+                            self.stale_tiles += 1;
                         }
                     }
                 });
@@ -1757,6 +1790,7 @@ impl VgeomNode {
         if let Ok(mut r) = self.report.lock() {
             r.stats = *self.streamer.stats();
             r.retracted = self.retracted;
+            r.stale_tiles = self.stale_tiles;
             r.floor_lod.clear();
             r.pages.clear();
             for (id, res) in self.streamer.assets() {
@@ -1906,6 +1940,7 @@ impl RenderNode for VgeomNode {
             page_tiles: _,
             pools_rebuilt: _,
             retracted: _,
+            stale_tiles: _,
             view_bgl: _,
             lights_bgl: _,
             vis,

@@ -1566,7 +1566,19 @@ impl EngineRenderer {
                 Some(n) => {
                     n.plan_cluster_pages(scene, view, &vsettings);
                     let lib = self.vt_textures.as_ref();
-                    n.cluster_tile_wants(scene, |g| lib.is_some_and(|l| l.handle(g).is_some()))
+                    // Registered AND addressable. `handle` alone was the P28.2
+                    // filter and it let a **stale** address through — a pairing
+                    // baked against another image of the same GUID, which
+                    // `is_resident` reports exactly as an unseated tile and which
+                    // no transaction can ever seat, so the page was retracted on
+                    // every frame for ever (measured: residency reached zero and
+                    // the mesh vanished). `can_address` separates the two.
+                    n.cluster_tile_wants(scene, |g, tile| {
+                        lib.is_some_and(|l| {
+                            l.handle(g)
+                                .is_some_and(|h| l.residency().can_address(h, tile))
+                        })
+                    })
                 }
                 None => Vec::new(),
             }

@@ -452,6 +452,33 @@ impl VtResidency {
         self.textures.get(tex.index()).map(|t| &t.desc)
     }
 
+    /// Whether this residency's registration of `tex` **has** the tile `at` —
+    /// i.e. whether the address exists at all, as opposed to existing and not
+    /// being seated yet.
+    ///
+    /// The distinction is the whole point and it is not cosmetic (P28.2 audit).
+    /// [`is_resident`](Self::is_resident) answers `false` for both "not paged in"
+    /// and "no such tile", and the two want opposite treatment from a caller
+    /// holding an address it did not compute this frame: *not paged in* is a
+    /// budget answer that a later transaction can change, while *no such tile* is
+    /// a statement about a **different image** than the one the address was
+    /// derived against, and no budget will ever change it. A consumer that
+    /// retries the first for ever is right; a consumer that retries the second
+    /// for ever never draws again.
+    ///
+    /// The producer is P28.2's cluster pairing, whose `.inf_vmesh` tiles section
+    /// holds `(texture guid, mip, x, y)` addresses baked at cook against the
+    /// `.inf_tex` of that cook. Nothing in either container ties the two, so a
+    /// `.inf_vmesh` that meets a re-tiled image of its texture is asking for
+    /// tiles that do not exist — measured, before this door existed: residency
+    /// went to **zero pages and stayed there**, silently, because the root page's
+    /// coarsest-mip tile is the first address a shrunken pyramid loses.
+    pub fn can_address(&self, tex: VtTextureHandle, at: TileCoord) -> bool {
+        self.textures
+            .get(tex.index())
+            .is_some_and(|t| t.desc.entry_index(at).is_some())
+    }
+
     /// **Register a virtual texture and seat its root pages.**
     ///
     /// The roots are seated *here*, not at the first want, because the mandatory
