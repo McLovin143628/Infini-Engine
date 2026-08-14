@@ -14937,6 +14937,323 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
 >   `stream_arbiter.rs`; a phase-level gate over the whole of P28 is P28.5's to
 >   build if the ledger wants one.
 
+> ### P28.4 AUDIT — adversarial pass, 2026-08-14
+>
+> Every number in the block above **reproduces exactly** at the batch's HEAD:
+> OFF 19 872 / 141 472 blur tiles over 131 frames against ON's 18 976 over 115;
+> admits 1 428 → 1 556, evicts 720 → 848, deferred 18 176 → 19 152; the sweep
+> 115 / 115 / 115 / 117 / 112 / 121 / 117; the proved set identical at all 260
+> ticks, peaking at 708 tiles under 19 152 deferrals and 137 584 speculative
+> wants; the starved arm's 30 812 floor fallbacks over 260 frames, byte-identical
+> in both arms; the oracle's 259 predictions, 184 through a real arc, worst
+> 4.041 272 810 440 265 × 10⁻¹⁶. Goldens **54**, `git diff` over `tests/goldens/`
+> empty across `02ed25b..fe6c481` and across the audit.
+>
+> The batch's own eleven mutations were re-run and **ten still die where the
+> matrix says**. Fourteen new ones were run; four survived, and all four are
+> below with the arm that now kills them.
+>
+> **Findings, fixed.**
+>
+> * **THE A/B DID NOT MEASURE THE PREDICTION** (`3b74296`). The gate compares
+>   the speculative lane against **no lane at all**, so what it establishes is
+>   that a CPU-side want set at the *refinement's* cap beats waiting for a mask
+>   that arrives `READBACK_LATENCY_FRAMES` late — the dead reckoning inside it is
+>   unmeasured. The control needs no mutation: `dead_reckon` at `h = 0` scales
+>   the secant by nothing and turns by nothing, so it is the committed pose, same
+>   lane, same cap, same rank, no lead. Measured against OFF's 131 / 19 872:
+>
+>   | lead (ticks) | 0 | 3 | 6 | 12 | **18** | 24 | 36 |
+>   |---|---|---|---|---|---|---|---|
+>   | blur frames | **105** | 108 | 113 | 115 | **115** | 112 | 124 |
+>   | blur tiles | **18 752** | 18 800 | 18 912 | 18 976 | **18 976** | 18 896 | 19 152 |
+>   | arrival blur / 1 728 | **64** | 96 | 144 | 176 | **176** | 128 | 224 |
+>
+>   **The lead is a cost on this fixture and the lane is the whole win.** The
+>   *arrival window* — tiles a surface justifies on the tick it enters view, the
+>   only class a lead time can serve, added by this audit — says it louder than
+>   the aggregate: 64 against 176, over 2 frames against 7, where OFF is 384 over
+>   15. The mechanism is this batch's own §4 refutation one class up:
+>   `apply_wants` seats a miss the frame it is offered, with no admission
+>   throttle and **no latency between admitted and sampleable**, so having asked
+>   earlier buys nothing anywhere in this loop and every want spent on where the
+>   camera will be is a slot not spent on where it is. The batch found the floor
+>   half of that argument and stopped one class short of the refinement half.
+>
+>   `a_lead_time_costs_this_fixture_what_the_lane_earns_it` pins it in the shape
+>   the floor's refutation already uses — the day a lead wins, the arm goes red
+>   and the ruling re-opens by a test rather than by memory. **The shipped
+>   horizon is unchanged by this audit**: 18 ticks is a ROADMAP clause, not an
+>   audit's to reverse, and it is routed to P28.5 with its measurement attached.
+>
+> * **The shipped predictive path had no arm anywhere** (`f9e9b83`). P28.4 proved
+>   its two producers as *functions* — `whip_pan.rs` calls `inf_math::dead_reckon`
+>   and `inf_render::speculative_wants` directly and builds no renderer;
+>   `EngineRenderer::commit_camera` had one caller in the tree
+>   (`inf_player::window`) and no test; `prediction()` had none. Measured:
+>   **`prediction()` hard-wired to `None` — the whole feature off in both
+>   consumers — leaves all twenty-two of `inf-render`'s test binaries green**,
+>   439 lib arms and every GPU arm included. So does deleting `vt_sync`'s
+>   speculative `extend` on its own. `a_committed_camera_reaches_the_shipped_
+>   streaming_loop` runs the chain on a real device and kills both, and gives
+>   `VtPopIn::predict_wants` its first reader.
+>
+> * **The equality had no anti-vacuity for its own lane** (`3b74296`). It read
+>   identical proved sets at all 260 ticks and asserted `deferred > 0` and
+>   `predict_wants > 0` — both satisfied by a lane that offers 137 584 wants and
+>   is handed nothing, which is *identical-because-inert* wearing
+>   *identical-because-protected*'s clothes. **VERDICT: protected.** The
+>   transaction now says which: speculation was **seated on 22 of the 260 ticks**
+>   (864 tiles — headroom existed) and **refused on 106** (13 472 tiles —
+>   headroom did not). Both regimes are present at the shipped horizon, so
+>   "a strictly-lower lane is exactly neutral to the classes above it" is a
+>   statement about the rank. Mutation-verified in both directions: a
+>   100 000-page pool kills the refusal half, a 96-page pool the admission half.
+>
+> * **`VSM_PRIORITY_SPECULATIVE = LANE_PREDICT` was pinned by nothing**
+>   (`ab5d388`). Moving it there is the batch's central ruling and matrix row
+>   **P10** records it dying at `a_shadow_speculation_ranks_below_every_proved_
+>   page` — true at `71225cd`, false at `9219204`, where the clippy const-fold
+>   fix correctly dropped the const-vs-const comparison and with it the only pin.
+>   Measured: putting the constant back to `LANE_FEEDBACK` leaves inf-vsm,
+>   inf-render, `vsm_marking`, `vsm_receiver` and inf-stream **all green**. The
+>   pin returns as a runtime fact — the lane read off a want the producer emitted
+>   — so clippy has nothing to fold. **A fix retiring a mutation kill is the
+>   P23 law running backwards, and the matrix is the thing that has to be re-run
+>   after the lint pass, not before it.**
+>
+> * **`speculative_shadow_wants`' window bound was a vacuous check** (`ab5d388`).
+>   Its doc promises a prediction running off the window is *dropped rather than
+>   clamped onto a page that means something else*, and the arm asserts
+>   `desc.contains` over every emitted want — but the fixture's dolly scrolls +2,
+>   so its band at `x ∈ 2..5` lands at `x ∈ 0..3` and nothing can leave by the
+>   high edge. Deleting the guard left inf-render and `vsm_marking` green.
+>   `a_speculation_scrolled_off_the_window_is_dropped_not_wrapped` dollies the
+>   other way over a band straddling the edge, so one column survives and one has
+>   nowhere to go.
+>
+> * **The purity claim's non-trig half was prose** (`ff69d03`). The module's
+>   header claims "no clock, no frame counter, no `Instant`, no adapter and no
+>   interior mutability" and the source arm pins only the libm spellings.
+>   Measured: **a wall clock scaled to `1e-9`
+>   (`SystemTime::now()…as_secs() % 2`) passes all 59 arms of `inf-math`** —
+>   `one_history_predicts_one_pose_bit_for_bit` re-asks inside one process and
+>   cannot see a reading that is constant for a process and differs between two,
+>   and `a_constant_spin…` compares against a closed form at `1e-6`.
+>   `the_predictor_reads_no_clock_and_holds_no_state` bans the twelve spellings
+>   over the same non-test scope, and carries its own falsification: the
+>   predicate over a poisoned copy of the real body must reject it.
+>
+> * **The control arm's own anti-vacuity read a still camera** (`dfea728`, and
+>   `10b7aa2` gave it the sweep it documents), found
+>   by mutating the audit's own fix. It checked `h = 0` at tick 259, inside the
+>   path's trailing still phase, where every horizon turns by nothing. Moved to
+>   the constant-rate hold, with the other direction added — the shipped horizon
+>   must be somewhere the committed camera is not.
+>
+> * **Four stale "no producer" disclosures** (`fc2322c`), comment-only.
+>   `inf_stream::Lane`, `LANE_PREDICT` and `couple`'s module doc all still said
+>   the lane has no producer, which P28.4 falsified; discharged the way
+>   `inf-vsm`'s was rather than deleted, and `couple`'s *refusal* re-stated
+>   because a producer in that lane still does not make a shadow page a coupling
+>   member. The fourth is a contradiction, not staleness:
+>   `VT_PRIORITY_PREDICT`'s doc says it is "*a third lane here and not `inf-vsm`'s
+>   treatment of the same idea*" — and `71225cd` moved `inf-vsm`'s to the same
+>   lane **in the same diff**, for the reason the sentence denies.
+>
+> **Withdrawn on measurement.**
+>
+> * **"the two numbers the A/B arm reads to decide whether it helped."** The
+>   `count_fallbacks` fix is correct and stands — three lanes and an `else` is a
+>   classifier that mis-files a class — but its stated consequence is
+>   counterfactual. `whip_pan.rs` computes its own floor counters from the want
+>   slice and **never reads `VtPopIn`**; `floor_fallback_frames`,
+>   `refine_fallback_frames`, `predict_wants` and `predict_fallback` had, before
+>   this audit, no reader outside the module that writes them. Nothing would have
+>   measured its own instrument, because nothing was reading the instrument. The
+>   correct statement is that the classifier was wrong for a host's log line and
+>   for the first gate that ever reads it — which is now
+>   `a_committed_camera_reaches_the_shipped_streaming_loop`.
+> * **"the horizon is a measured choice … every member of the band beats OFF."**
+>   True and now insufficient: every member of the band also **loses to the
+>   zero-lead control**, so what the sweep establishes is the flatness of a band,
+>   not the value of being in it. The 400 ms / 112-frame question the block
+>   raises is disposed of by the same measurement rather than by the
+>   "average hides a station" argument alone: 112 against 115 is noise inside a
+>   band uniformly worse than 105.
+> * **"PIE == shipping extends to the committed camera."** Not claimed by the
+>   block, and worth recording as the reason it is not: `commit_camera`'s only
+>   host caller is `PlayerApp::frame`, which is the **windowed** path. Every
+>   PIE==shipping replay gate in the tree runs `--headless`, which builds no
+>   `EngineRenderer` at all — so the two hosts agree about the camera history by
+>   both having none. Vacuously true, and P28.5's to close if it wants the claim.
+>
+> **What held, checked rather than assumed.**
+>
+> * **`dead_reckon`'s purity, mechanically.** A secant over six committed poses
+>   with the *tick* span as the divisor (`a_constant_dolly…` kills a sample-count
+>   divisor), Rodrigues about `a × b` in `psin64`/`pcos64`/`pacos64`, the horizon
+>   in ticks with `horizon_ticks` the only millisecond door, and a `commit` that
+>   refuses a non-advancing tick and **counts** it. The libm source pin is
+>   CRLF-tolerant by construction — it splits on the `#[cfg(test)]` attribute and
+>   iterates `lines()`, neither of which is a newline search — and it genuinely
+>   separates the halves: the scanned body contains `pub fn dead_reckon` and does
+>   not contain the fixtures' banned literals, both now asserted.
+> * **THE ORACLE IS INDEPENDENT — verdict, with its bound.** It is a separate
+>   longhand implementation in the test file, and it *falsifies*: a window
+>   off-by-one inside `dead_reckon` (take `samples[1]` as the secant's old end)
+>   passes all 60 `inf-math` arms and seven of the gate's eight, and **dies only
+>   here**. What it does not do is check accuracy: it shares the *specification*,
+>   so `4.04e-16` is the distance between two spellings of one formula
+>   (`arc * (h / span)` against `(arc * h) / span`) and not a statement about
+>   where the camera actually went. Read as conformance-to-spec, which is what
+>   the block claims; a truth oracle would compare the prediction against
+>   `whip_view(tick + h)` and is not built.
+> * **The floor-cannot-be-prefetched reversal**, and it is structural as stated:
+>   30 812 fallbacks over 260 frames byte-identical in both arms on a starved
+>   96-page pool, with 137 584 speculative wants demonstrably offered. Kept as a
+>   permanent arm; promoting the speculative rank to `LANE_FLOOR` breaks it,
+>   which is the rank invariant caught by an arm built for something else.
+> * **The classifier fix itself**: folding the predict arm back into the `else`
+>   dies at `the_pop_in_counters_keep_the_three_lanes_apart`, and the A/B
+>   inverts — `floor_wants` and `floor_fallback` rise with the predictor on.
+> * **The VSM producer's boundary.** P28.3 refused shadow pages as coupling
+>   *members* and P28.4 lands them as a *prediction*; the two are consistent
+>   because membership needs the per-page frustum verdict that says which group a
+>   page belongs to, and the producer works in page-index space over a light's
+>   whole proved set. The `LANE_FEEDBACK → LANE_PREDICT` move is inert as
+>   claimed, verified by history rather than assertion: at `02ed25b`
+>   `VsmWant::speculate` had **no caller outside `inf-vsm`'s own unit tests**, so
+>   no shipped want ever carried that lane.
+> * **The four P28.5 routings**, each against the code it cites. The clipmap
+>   scroll: `set_clip_origins`' doc says verbatim what the block quotes, and every
+>   page index is in range under a scroll, so there is no want to emit.
+>   Retraction: `VgeomReport::retracted` is documented as pages *"the texture half
+>   refused"* — a budget event, and the whip-pan's floor never falls back at all
+>   at 800 pages. Palette-union: nothing in P28.4 touches a caster bound and the
+>   P27.5 correction stands. Per-group shadow coupling: the reason is `couple`'s
+>   own module doc. All four are carried by name.
+> * **This audit changed no executable production line.** Every hunk in
+>   `predict.rs` and `vsm.rs` is inside `mod tests`; `lane.rs`, `couple.rs` and
+>   `inf-vt`'s `residency.rs` are `///`/`//!` only; the rest is two test files.
+>   Goldens 54, content digest `5b66efa343973734` over name+bytes, unmoved.
+> * **The three post-battery commits are comment-only where they claim to be.**
+>   `b080623` touches two `///` lines and the ROADMAP; `fe6c481` the ROADMAP only.
+>   `9219204` is the clippy commit and changes test code, which its own message
+>   says. **The two intra-doc links `b080623` names are gone**: `cargo doc
+>   --no-deps` over the five touched crates no longer mentions `clamp_mobile` or
+>   `VT_PRIORITY_PREDICT` anywhere. See the machine-ops note for what it *does*
+>   still mention.
+>
+> **Mutation matrix — 25 run (11 re-run, 14 new); five survived, and a sixth
+> exposed a vacuous check in the audit's own first fix. All 25 die now.**
+>
+> | # | mutated | died at |
+> |---|---|---|
+> | P1–P5 | the batch's `inf-math` five | as recorded |
+> | P6, P7, P9, P11a–c | the batch's other six | as recorded |
+> | **P8** | `speculative_wants` reads the committed view | `a_surface_the_committed_camera…` — **and no gate arm**, which is how the ruling above was found |
+> | **P10** | the shadow rank back to `LANE_FEEDBACK` | **survived** → `a_pure_rotation_produces_no_speculative_shadow_want` |
+> | A1 | the secant span `+ 1` | `a_constant_dolly…`, `a_constant_spin…` |
+> | A2 | Rodrigues axis `b × a` | `a_constant_spin…` |
+> | A3 | a nondeterministic wall clock in `dead_reckon` | `one_history_predicts_one_pose_bit_for_bit` |
+> | **A4** | the same clock scaled to `1e-9` | **survived** → `the_predictor_reads_no_clock_and_holds_no_state` |
+> | A5 | the secant's old end `samples[1]` | `the_prediction_replays_from_the_recorded_history_alone` (only) |
+> | A6 | `scrolled_page` off by one page | `a_scrolled_page…`, `a_pure_rotation…` |
+> | **A7** | `desc.contains` deleted | **survived** → `a_speculation_scrolled_off_the_window_is_dropped_not_wrapped` |
+> | A8 | the proved-overlap filter deleted | `a_pure_rotation…` |
+> | A9 | shipped horizon 18 → 27 | `every_horizon_in_the_roadmaps_band…` |
+> | **A10** | `prediction()` → `None` | **survived** → `a_committed_camera_reaches_the_shipped_streaming_loop` |
+> | **A11** | `vt_sync`'s speculative `extend` deleted | **survived** → the same arm |
+> | A12 | `h + 1`, so `h = 0` is not the committed pose | the oracle — **and not the audit's own control arm**, whose anti-vacuity read a still tick (`dfea728`); both now |
+> | A13 | the equality's pool → 100 000 pages | `…under_speculation` (the refusal half) |
+> | A14 | the equality's pool → 96 pages | the same arm (the admission half) |
+>
+> A5 is the one worth reading twice: it is the mutation that proves the oracle is
+> an oracle rather than a second call. A10 is the one worth reading three times —
+> the whole feature, switched off, seen by nothing. And A12 is the reminder that
+> an audit's own fix is a claim like any other: it caught the control arm reading
+> a phase of the path where every horizon gives the same answer.
+>
+> **Machine-ops.** Battery green: **250 test binaries, 4 540 passed, 0 failed,
+> 8 ignored** — 210 `Running` + 40 `Doc-tests` = 250 result lines, matched, and
+> **zero** warnings on stderr (`-j 3`, `--no-fail-fast`, `Start-Process` with
+> both redirects). Exactly the batch's 4 536 plus this audit's **four** new arms
+> — one in `inf-math::predict`, one in `inf-render`'s `vsm`, one in `whip_pan`,
+> one in `vt_sampling` — and **no new binary**, so the 250 is the batch's 250.
+> `cargo clippy --workspace --all-targets` with `RUSTFLAGS=-D warnings`: exit 0,
+> zero warnings, run LAST per the machine note. `cargo fmt --all --check` clean.
+> `cargo doc --no-deps` on the five touched crates (`inf-math`, `inf-stream`,
+> `inf-vt`, `inf-vsm`, `inf-render`) exits 0 and is **not silent**: 70 warnings
+> at 60 distinct locations. **None of them is at a line this batch or this audit
+> wrote** — checked mechanically, by intersecting every `-->` location with every
+> line added across `02ed25b..HEAD`, which comes out **empty**; `predict.rs`,
+> `vt_stream.rs`, `vsm.rs`, `renderer.rs`, `lane.rs` and `couple.rs` have zero
+> between them. They are a standing condition — unresolved `tests::` links and
+> public docs pointing at private items — and the P28.3 audit fixed four of the
+> same kind by hand. **`cargo doc` is in no CI leg**, which is why they
+> accumulate; routed to P28.5.
+>
+> One commit landed **after** the battery, on the batch's own precedent
+> (`b080623`): the control arm now runs and prints the seven-row sweep its header
+> tabulates, instead of documenting a measurement no arm reproduces. Test-only,
+> one file, and the one affected target was re-run — `whip_pan` 8 arms green.
+>
+> Disk 65.8 GB free when the battery started and 80.2 GB when clippy did; nothing
+> was deleted, no `target/debug/incremental` sweep was needed. **Nothing pushed.**
+>
+> ### P28.5 INHERITS — the whole list, because P28.5 is the last batch
+>
+> **From P28.4, new:**
+>
+> 1. **The lead time's ruling.** `a_lead_time_costs_this_fixture_what_the_lane_
+>    earns_it` measures the shipped 18-tick horizon as *worse than zero* on the
+>    only fixture that exists. Either build the fixture where a lead can win — a
+>    per-frame admission throttle, or a loader with latency between admitted and
+>    sampleable, neither of which this tree has — or default
+>    `PredictSettings::horizon_ticks` to 0 and say in the ROADMAP that clause 1's
+>    200–500 ms band was refuted by its own gate. **A phase may not close with
+>    its headline knob measured backwards and shipped anyway.**
+> 2. **The predictor reaches no host but one.** `commit_camera` has a single
+>    caller, `PlayerApp::frame`, on the windowed path; `--headless` never builds
+>    a renderer, so every PIE==shipping gate is predictor-free on both sides. A
+>    PIE==shipping claim about `CameraHistory` needs a windowed subprocess arm.
+> 3. **`Prediction::turn` / `clamped` and `CameraHistory::refused` reach no
+>    host.** `refused` now has a gate reader; the other two have none.
+> 4. **The shadow lane's producer has no end-to-end arm.**
+>    `VsmStreamStats::speculative_wants` has no reader outside `inf-render`'s own
+>    unit tests, and the `vsm_mark::sync` call site is unarmed the way `vt_sync`'s
+>    was until this audit.
+> 5. **The whip-pan models the feedback lane rather than running it**; a
+>    device-side A/B is not built.
+> 6. **No `phase28_gate`.**
+> 7. **The editor viewport gets no prefetch**, by construction — closing it means
+>    committing the flycam at a fixed step, which is a simulation question.
+> 8. **Per-group shadow-page coupling membership** — P28.3's reason unchanged.
+> 9. **The clipmap scroll**, as a `vsm_raster` content-stamp restructure, with
+>    the caster-pack correction: `caster_stamp` is a function of the packed
+>    `VsmCasterRaw`, so the pack is not skippable until that stops being true.
+> 10. **Retraction's cost in frames**, on a contended pool with the vgeom
+>     coupling in it — `cluster_pages`' shape, not the whip-pan's.
+> 11. **The palette-union caster bound**, on a real rig where joints far apart
+>     can make the union larger than the inflated bind sphere.
+> 12. **`cargo doc` reaches no CI leg.** 70 rustdoc warnings stand at 60
+>     locations across these five crates — unresolved `tests::` links and public
+>     docs pointing at private items. None is P28.4's, and the P28.3 audit fixed
+>     four of the same kind by hand, which is the pattern that says the check
+>     belongs in the workflow rather than in an auditor's habit.
+> 13. **A truth oracle for the prediction** — compare against `whip_view(tick +
+>     h)`, which is what "the prediction is right" would mean.
+>
+> **From P28.3 and earlier, unchanged and still open:** the terrain
+> deformation-window removal; the per-page meshlet cut and its tuning half; the
+> frame-derived visibility-bit split and a second geometry kind for voxels; the
+> resolve's occluded overdraw and `frag_depth` early-Z cost; a tangented parity
+> row with the skinned-tangent gate; the editor's unpaired derived `.inf_vmesh`;
+> the textured-mip fixture; the page-border re-weigh and the wider VSM kernel;
+> the ray-query experiment itself; and `stream_report`'s missing **host** caller
+> — it has a gate reader and the line a host logs is still a line nothing logs.
+
 - **P28.5 Ray-query shadow experiment (never load-bearing)** — 1. adapter/feature probe for
   ray queries in the pinned wgpu; where present, BLAS over meshlet clusters + per-frame TLAS,
   sun shadows via ray query compared against VSM output on goldens; 2. a memo with the

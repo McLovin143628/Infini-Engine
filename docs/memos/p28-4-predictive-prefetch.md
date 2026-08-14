@@ -281,3 +281,76 @@ not, and saying so is cheaper than a bound nobody could defend.
   question it could raise (a predicted depth buffer) is the one §5 refuses.
 * **No schema, no container version, no golden.** Goldens stay **54**.
 * **The editor viewport gets no prefetch**, by construction (§1).
+
+---
+
+## 9. AUDIT AMENDMENT (2026-08-14) — the measurement §3 and §4 did not take
+
+The adversarial pass over this batch ran the control neither section ran, and it
+changes what §3's sweep and §4's ruling are entitled to say. Recorded here
+rather than by editing the sections above, because the reasoning that produced
+them is the record.
+
+**The A/B measures the lane, not the lead.** `the_predictor_strictly_reduces_a_
+whip_pans_fallback_frames` compares the speculative lane against *no lane at
+all*. The control that separates the lane from the dead reckoning inside it
+needs no new code: `dead_reckon` at a horizon of **zero** scales the secant by
+nothing and turns by nothing, so it returns the newest committed pose — the same
+lane, the same cap, the same rank, no lead. Against OFF's 131 blur frames /
+19 872 tiles:
+
+| lead (ticks) | 0 | 3 | 6 | 12 | **18 (shipped)** | 24 | 36 |
+|---|---|---|---|---|---|---|---|
+| blur frames | **105** | 108 | 113 | 115 | **115** | 112 | 124 |
+| blur tiles | **18 752** | 18 800 | 18 912 | 18 976 | **18 976** | 18 896 | 19 152 |
+| arrival blur / 1 728 | **64** | 96 | 144 | 176 | **176** | 128 | 224 |
+
+The last row is the audit's own addition and it is the one that closes the
+argument: the **arrival window** counts only tiles justified by a surface on the
+tick it *enters view*, which is the sole class a lead time can serve. A metric
+over already-visible surfaces could be dismissed as structurally favouring
+"ask for what is needed now"; this one cannot, and it prefers the zero-lead
+control by 64 against 176.
+
+**Why, and it is §4's own argument one class up.** §4 refutes prefetching the
+floor because `apply_wants` seats a miss the frame it is offered, out of the
+same pool, with no admission throttle — so *having asked earlier* changes
+neither `demand` nor `pool`. That reasoning does not stop at the floor. There is
+also **no latency between admitted and sampleable** in this tree (P28.3 §8: the
+loader stages a page synchronously from an mmap slice), so nowhere in the loop
+does asking earlier buy anything, for any class. What the speculative lane
+actually buys is that it asks **on the CPU, at the refinement's cap, this
+frame**, instead of waiting `READBACK_LATENCY_FRAMES` for a mask. That is the
+whole 131 → 115, and the 18-tick displacement spends 10 frames of it.
+
+So §3's "every member of the band beats OFF" stands and is not the claim that
+matters: every member of the band also *loses to the zero-lead control*, which
+makes the sweep a measurement of the band's flatness rather than of the horizon's
+worth — and disposes of the 400 ms / 112-frame question by making it noise inside
+a band that is uniformly worse than 105.
+
+**Pinned, not just written down.** `a_lead_time_costs_this_fixture_what_the_lane_
+earns_it` asserts both halves — the lane beats OFF, and the shipped lead does not
+beat the zero-lead control — in the shape §4's own refutation uses, so the day a
+throttle or a real fetch latency appears the arm goes red and the ruling re-opens
+by a test rather than by memory.
+
+**The shipped horizon is unchanged by the audit.** 18 ticks is a ROADMAP clause,
+and reversing a clause is not an auditor's call. The decision — build the fixture
+where a lead can win, or default the horizon to 0 and record that clause 1's
+200–500 ms band was refuted by its own gate — is P28.5's, with this measurement
+attached to it by name.
+
+**Two smaller corrections in the same pass.**
+
+* §6's equality was *identical-because-protected*, and the arm could not have
+  told that from *identical-because-inert*: `deferred > 0` and `predict_wants >
+  0` are both satisfied by a lane that offers 137 584 wants and is handed
+  nothing. Measured now, at the shipped horizon: speculation was **seated on 22
+  of the 260 ticks** and **refused on 106**, so both regimes are present and the
+  neutrality claim is about the rank.
+* §1's purity argument is structurally right and was only half enforced. The
+  source pin read the libm spellings; a wall clock scaled below the arms'
+  tolerance passed all 59 of `inf-math`'s. The clock, entropy and
+  interior-mutability spellings are pinned now, by an arm that falsifies itself
+  against a poisoned copy of the body it scans.
