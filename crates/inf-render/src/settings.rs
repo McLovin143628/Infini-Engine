@@ -1449,7 +1449,9 @@ mod tests {
 
         // The messages name the field, because a host reads them (P27.2's rule
         // for this enum).
-        assert!(bad(|v| v.mark_stride = 0).to_string().contains("mark_stride"));
+        assert!(bad(|v| v.mark_stride = 0)
+            .to_string()
+            .contains("mark_stride"));
         assert!(bad(|v| v.pcf_radius = 9).to_string().contains("pcf_radius"));
     }
 }

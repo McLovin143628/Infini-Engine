@@ -1209,3 +1209,227 @@ fn the_tier_clamp_runs_vsm_on_high_and_medium_and_keeps_the_cascade_on_low() {
          changed nothing the eye could see"
     );
 }
+
+// ── P27.5: RECEIVER COMPLETENESS ────────────────────────────────────────────
+
+/// **Meshlet geometry and foliage receive the sun's shadow** (P27.5) — the
+/// P27.4 remainder closed rather than owned.
+///
+/// The ledger's own words: *"`vgeom_mesh.wgsl` and `scatter_mesh.wgsl` take the
+/// analytic term but not the directional one, because neither has ever called
+/// `shadow_factor` — virtualized geometry and foliage receive no sun shadow,
+/// from the cascade either."* Verified literally at the time: `git log -S` over
+/// both files' whole history returned nothing. A phase named Virtual Shadow
+/// MAPS whose flagship geometry path cannot RECEIVE a sun shadow is a hole, and
+/// the choice was close it or own it loudly. Closed.
+///
+/// The fixture is a **roof**: a slab three metres up, so everything under it is
+/// in shadow at a steep sun and the receiver/caster separation is metres rather
+/// than texels. Under it stand a virtualized-geometry instance and a scattered
+/// field, each in its own colour so a pixel can be attributed to the pipeline
+/// that drew it — which is the whole point, since a floor pixel darkening
+/// proves only what P27.4 already proved.
+///
+/// Anti-vacuity comes first and in both directions: each surface must actually
+/// cover pixels of the control frame, and each must darken. The control is the
+/// same scene with **no shadow term of any kind**, so what is measured is the
+/// shadow rather than the lighting.
+#[test]
+fn a_meshlet_surface_and_a_scattered_one_receive_the_suns_shadow() {
+    let Some(gpu) = gpu_or_skip("the P27.5 receiver completeness arm") else {
+        return;
+    };
+    let mesh = std::sync::Arc::new(inf_vgeom::test_support::dense_grid_mesh(16));
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        vgeom_assets: vec![
+            inf_render::VgeomAsset::from_mesh(0x2705, &mesh).expect("index the vmesh")
+        ],
+        scatter: vec![green_field()],
+        ..Default::default()
+    };
+    // The floor.
+    scene.instances.push(MeshInstance::lit(
+        glam::DVec3::new(0.0, -0.5, 0.0),
+        glam::Quat::IDENTITY,
+        glam::Vec3::new(40.0, 1.0, 40.0),
+        [0.55, 0.55, 0.56, 1.0],
+        1,
+    ));
+    // The roof, three metres up and wide enough that the whole fixture is under
+    // it. Lifted clear of the sight line so the camera sees under it.
+    scene.instances.push(MeshInstance::lit(
+        glam::DVec3::new(0.0, 3.0, 0.0),
+        glam::Quat::IDENTITY,
+        glam::Vec3::new(9.0, 0.4, 9.0),
+        [0.5, 0.5, 0.5, 1.0],
+        2,
+    ));
+    // The meshlet receiver: a MAGENTA grid on the floor, left of centre.
+    // Magenta and not blue, because the default sky IS blue and a
+    // "blue-dominant pixel" classifier finds a quarter of the frame
+    // (measured: 82 % of what the first draft of this arm called the meshlet
+    // surface was sky).
+    scene.vgeom_instances.push(inf_render::VgeomInstance::lit(
+        0x2705,
+        glam::DVec3::new(-1.8, 0.6, 0.0),
+        glam::Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        glam::Vec3::splat(1.2),
+        [0.85, 0.10, 0.75, 1.0],
+        3,
+    ));
+    scene.lights.push(sun(true));
+    scene.mark_dirty();
+
+    let view = look_view_fov(
+        glam::DVec3::new(0.0, 1.1, 7.5),
+        glam::DVec3::new(0.0, 0.6, 0.0),
+        45.0,
+    );
+    // The meshlet path itself, and generous scatter bands so the field draws as
+    // MESHES through `scatter_mesh.wgsl` rather than as impostors.
+    let tune = |s: &mut RenderSettings| {
+        s.vgeom.enabled = true;
+        s.scatter.mesh_distance_m = 300.0;
+        s.scatter.cull_distance_m = 600.0;
+    };
+
+    // The scatter cull audit is off by default (it costs atomics and a readback),
+    // so this arm runs its own loop with it ON — the counter is what says the
+    // field drew as MESHES through `scatter_mesh.wgsl` rather than through the
+    // impostor billboard or the CPU fallback, which are two other shaders.
+    let audited = |tune: &dyn Fn(&mut RenderSettings)| {
+        let target = HeadlessTarget::new(&gpu, FW, FH);
+        let mut renderer = EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+        let mut s = *renderer.settings();
+        tune(&mut s);
+        renderer
+            .try_set_settings(s)
+            .expect("the arm's settings are legal");
+        renderer.set_scatter_audit(true);
+        for _ in 0..FRAMES {
+            renderer.render(&gpu, &scene, &view, &target.view, (FW, FH));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        let img = target.read_rgba(&gpu).expect("readback");
+        (renderer, img)
+    };
+
+    let off = audited(&tune).1;
+    let (on, img) = audited(&|s: &mut RenderSettings| {
+        tune(s);
+        s.vsm = settings(128);
+    });
+    assert!(
+        on.vsm_receiver_frames() > 0,
+        "the atlas never reached the lit passes, so nothing below is about a \
+         receiver"
+    );
+
+    // Attribute each pixel by the CONTROL frame's colour, so the classification
+    // is a property of the geometry rather than of the shadow being measured.
+    let magenta: Vec<usize> = (0..(FW * FH) as usize)
+        .filter(|i| {
+            let p = &off[i * 4..i * 4 + 3];
+            p[0] > p[1] + 24 && p[2] > p[1] + 24
+        })
+        .collect();
+    let green: Vec<usize> = (0..(FW * FH) as usize)
+        .filter(|i| {
+            let p = &off[i * 4..i * 4 + 3];
+            p[1] > p[0] + 12 && p[1] > p[2] + 12
+        })
+        .collect();
+
+    // ANTI-VACUITY FIRST: both surfaces are IN the frame. Without this, "no
+    // pixel of the meshlet surface failed to darken" is satisfied by a frame
+    // with no meshlet surface in it.
+    assert!(
+        magenta.len() > 200,
+        "the virtualized-geometry instance covers {} pixels of the control \
+         frame — the fixture is not drawing it",
+        magenta.len()
+    );
+    assert!(
+        green.len() > 200,
+        "the scattered field covers {} pixels of the control frame — the \
+         fixture is not drawing it",
+        green.len()
+    );
+    // …and the SCATTER really went through the GPU meshes rather than the
+    // impostor band or the CPU fallback, or `scatter_mesh.wgsl` is not the
+    // shader under test.
+    let audit = on.scatter_audit(&gpu);
+    assert!(
+        audit.mesh > 0,
+        "no scattered instance drew as a MESH ({audit:?}); the shader under \
+         test is not the one that ran"
+    );
+
+    // THE CLAIM, per pipeline: a real share of each surface's pixels is darker
+    // with the page atlas bound than without it.
+    let darkened = |ids: &[usize]| {
+        ids.iter()
+            .filter(|i| luma(&img, **i) + 1.0 < luma(&off, **i))
+            .count()
+    };
+    let (db, dg) = (darkened(&magenta), darkened(&green));
+    assert!(
+        db * 4 > magenta.len(),
+        "only {db} of {} meshlet pixels darkened — `vgeom_mesh.wgsl` is not \
+         reading the sun's shadow",
+        magenta.len()
+    );
+    assert!(
+        dg * 4 > green.len(),
+        "only {dg} of {} scattered pixels darkened — `scatter_mesh.wgsl` is not \
+         reading the sun's shadow",
+        green.len()
+    );
+
+    // …and the CASCADE reaches them too, which is the other half of "demoted,
+    // not deleted": the call site is `shadow_factor`, one door, so closing the
+    // hole closed it for both mechanisms at once. Measured rather than argued.
+    let csm = audited(&|s: &mut RenderSettings| {
+        tune(s);
+        s.shadows.enabled = true;
+        s.shadows.max_distance = 60.0;
+    })
+    .1;
+    assert!(
+        csm != off,
+        "the cascaded path changed no pixel of a scene whose only receivers are \
+         a meshlet surface and a scattered one"
+    );
+}
+
+/// A green field of low cubes under the roof, dense enough that the classifier
+/// above finds it and small enough that it does not hide the floor.
+fn green_field() -> inf_render::ScatterBatch {
+    let n = 14u32;
+    let step = 5.0 / n as f64;
+    let mut out = Vec::with_capacity((n * n) as usize);
+    for i in 0..n * n {
+        let (gx, gz) = ((i % n) as f64, (i / n) as f64);
+        out.push(inf_render::ScatterInstance {
+            position: glam::DVec3::new(
+                1.0 + (gx - (n as f64 - 1.0) * 0.5) * step,
+                0.16,
+                (gz - (n as f64 - 1.0) * 0.5) * step,
+            ),
+            rotation: glam::Quat::IDENTITY,
+            scale: 0.3,
+            color: [0.12, 0.62, 0.14, 1.0],
+        });
+    }
+    inf_render::ScatterBatch::lit(
+        std::sync::Arc::new(inf_render::ScatterData::build(
+            inf_render::PrimMesh::Cube,
+            glam::DVec3::ZERO,
+            out,
+        )),
+        glam::DVec3::ZERO,
+        0.9,
+        91,
+    )
+}

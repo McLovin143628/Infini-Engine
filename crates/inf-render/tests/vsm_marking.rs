@@ -1088,8 +1088,11 @@ fn a_coarser_marking_stride_marks_a_subset_of_what_every_pixel_marks() {
     // top-left corner and loses the right cube's page, which is also a subset
     // and also smaller.
     let finest = dense.iter().map(|p| p.level).min().expect("non-empty");
-    let dense_finest: BTreeSet<VsmPage> =
-        dense.iter().copied().filter(|p| p.level == finest).collect();
+    let dense_finest: BTreeSet<VsmPage> = dense
+        .iter()
+        .copied()
+        .filter(|p| p.level == finest)
+        .collect();
     assert!(
         dense_finest.len() >= 2,
         "the two cubes did not reach two pages of the finest level ({dense_finest:?}), \

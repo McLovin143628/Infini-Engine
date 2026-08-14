@@ -47,6 +47,33 @@
 // mesh.wgsl (minus every env-group call) precisely so the two agree: a rock face
 // and the voxel cave cut into it must respond to the same light identically, and
 // two independently-tuned BRDFs would not.
+//
+// -- P27.5: VIRTUAL SHADOWS ARE REFUSED HERE, and it is a ruling ------------
+//
+// This is the one lit path in the engine with a full analytic 3D light loop and
+// no shadow receiver of any kind. P27.5 closed that hole in `vgeom_mesh.wgsl`
+// and `scatter_mesh.wgsl` — both bind the shared environment group, so
+// `shadow_factor` and `vsm_light_shadow` were already composed in and only the
+// call site was missing. Neither is true here.
+//
+// Giving this pass a receiver means giving it the env group, and the paragraph
+// above is the reason that is not a small edit: the group carries AO, the
+// cascade, GI, the atmosphere, the cloud shadow and wetness, and binding it to
+// get one of the six would make this surface *look* integrated while it still
+// casts no shadow, feeds no GI and is invisible to the depth prepass. The
+// honest shape is the one this header has had since P21.1 — one simple pass
+// that states what it does not do.
+//
+// So a voxel surface takes **no** virtual shadow, and the fix is not a call
+// site: it is P28.1's VisBuffer resolve, where meshlet and voxel surfaces are
+// shaded through one material pass and the env group is bound once for all of
+// them. `a_voxel_surface_is_refused_a_receiver_and_says_so` pins this paragraph
+// against the code, so the day the composition changes the refusal is a failing
+// test rather than a stale comment.
+//
+// `sprite.wgsl` has a `MAX_2D_LIGHTS` loop and no receiver either, and that is
+// a separate radial-falloff system rather than an oversight (the P27.4 audit's
+// amendment).
 
 struct VsIn {
     @location(0) pos: vec3<f32>,

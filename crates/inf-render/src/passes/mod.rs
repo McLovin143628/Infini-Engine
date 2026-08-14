@@ -507,6 +507,23 @@ pub(crate) const SHADER_TABLE: &[(&str, &str, ShaderKind)] = &[
     ),
 ];
 
+/// **How the named entry is composed** (P27.5) — the table read rather than
+/// remembered, so a claim about a shader's *bindings* can be asserted against
+/// the composition instead of against a comment.
+///
+/// The one caller is
+/// `vsm_receiver::every_env_bound_lit_path_receives_the_suns_shadow_and_voxel_is_refused`,
+/// whose refusal ruling rests entirely on `voxel.wgsl` being
+/// [`Plain`](ShaderKind::Plain): a Plain shader binds no environment group, so
+/// it *cannot* call `shadow_factor`, and the day that changes the refusal is a
+/// stale comment rather than a structural fact.
+pub(crate) fn shader_kind(label: &str) -> Option<&'static ShaderKind> {
+    SHADER_TABLE
+        .iter()
+        .find(|(l, ..)| *l == label)
+        .map(|(_, _, kind)| kind)
+}
+
 /// Compose the named [`SHADER_TABLE`] entry. Panics on an unknown label —
 /// that's a compile-time-adjacent programmer error, caught by the unit tests
 /// and by any pass constructor running at all.

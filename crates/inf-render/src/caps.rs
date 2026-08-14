@@ -712,10 +712,7 @@ mod tests {
         // The shipped default is the P27.1–P27.4 configuration, byte for byte:
         // one thread per pixel and the cascade's own 3 × 3.
         assert_eq!(s.vsm.mark_stride, 1);
-        assert_eq!(
-            s.vsm.pcf_radius,
-            crate::vsm_receiver::VSM_PCF_RADIUS as u32
-        );
+        assert_eq!(s.vsm.pcf_radius, crate::vsm_receiver::VSM_PCF_RADIUS as u32);
         // High is a no-op on BOTH, which is the sentence "the default path is
         // unchanged" made checkable.
         assert_eq!(RenderTier::High.apply(s).vsm, s.vsm);

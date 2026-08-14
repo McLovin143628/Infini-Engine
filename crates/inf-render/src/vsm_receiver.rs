@@ -1635,8 +1635,7 @@ mod tests {
         // plus `VsmReceiverParams::new`'s own arm — an exchange with one more
         // assertion in it than the two it retired, not a loosening.
         assert!(
-            !src.contains("const VSM_PCF_RADIUS")
-                && !src.contains("const VSM_SLOPE_BIAS_TEXELS"),
+            !src.contains("const VSM_PCF_RADIUS") && !src.contains("const VSM_SLOPE_BIAS_TEXELS"),
             "the shader declares a kernel constant again — it would be a second \
              answer to a question `VsmReceiverParams::new` already answers per \
              frame, and the tier clamp would stop reaching the kernel"
@@ -1668,6 +1667,103 @@ mod tests {
         assert!(
             none.contains(&format!("0x{:08X}u", VSM_ENTRY_NONE)),
             "the shader's absence sentinel is not `inf_vsm::VSM_ENTRY_NONE`: {none}"
+        );
+    }
+
+    /// **EVERY LIT PATH THAT CAN RECEIVE A SUN SHADOW DOES, AND THE ONE THAT
+    /// CANNOT SAYS SO** (P27.5 — the receiver-completeness ruling).
+    ///
+    /// The P27.4 ledger left this as a remainder: *"`vgeom_mesh.wgsl` and
+    /// `scatter_mesh.wgsl` take the analytic term but not the directional one,
+    /// because neither has ever called `shadow_factor` — virtualized geometry
+    /// and foliage receive no sun shadow, from the cascade either."* Closed:
+    /// both call it now, in the first-directional branch, spelled the way
+    /// `mesh.wgsl` spells it.
+    ///
+    /// This is the SOURCE half. The device half is
+    /// `vsm_receiver::a_meshlet_surface_and_a_scattered_one_receive_the_suns_shadow`,
+    /// which measures both surfaces darkening; this is what keeps the *set* of
+    /// call sites complete, because a device arm can only see the paths its own
+    /// fixture draws.
+    ///
+    /// Read as a SCOPE and not as a spelling (the P23 law): the call has to be
+    /// inside the `pos_dir.w < 0.5` branch, since a `shadow_factor` anywhere
+    /// else in the file — on a point light, say — would satisfy a bare
+    /// `contains`.
+    ///
+    /// And the REFUSAL is pinned in the same breath, because a refusal with no
+    /// arm decays into a stale comment: `voxel.wgsl` is `ShaderKind::Plain`, so
+    /// it binds no environment group and cannot call either function. Its own
+    /// header carries the ruling and P28.1's VisBuffer resolve is where it goes.
+    #[test]
+    fn every_env_bound_lit_path_receives_the_suns_shadow_and_voxel_is_refused() {
+        // The four that bind the shared environment group and shade a 3D
+        // analytic light loop. `terrain.wgsl` is here too: it shades the sun from
+        // `view.sun_dir` and has called `shadow_factor` since P13.3b.
+        for (name, src) in [
+            ("mesh", include_str!("shaders/mesh.wgsl")),
+            ("skinned_mesh", include_str!("shaders/skinned_mesh.wgsl")),
+            ("vgeom_mesh", include_str!("shaders/vgeom_mesh.wgsl")),
+            ("scatter_mesh", include_str!("shaders/scatter_mesh.wgsl")),
+        ] {
+            let at = src
+                .find("if (light.pos_dir.w < 0.5) {")
+                .unwrap_or_else(|| panic!("{name} has no directional branch"));
+            let end = src[at..]
+                .find("} else {")
+                .unwrap_or_else(|| panic!("{name}'s directional branch has no end"));
+            let branch = &src[at..at + end];
+            assert!(
+                branch.contains("shadow_factor(in.world_pos, n)"),
+                "{name} shades a directional light and never asks for its \
+                 shadow — a surface this engine draws cannot receive the sun"
+            );
+            assert!(
+                branch.contains("sun_shadowing_enabled()"),
+                "{name} calls shadow_factor unguarded; every golden with both \
+                 shadow paths off would take a different instruction stream"
+            );
+            // …and the analytic half, which P27.4 wired, is still there.
+            assert!(
+                src.contains("vsm_light_shadow(in.world_pos, n, light.params.w)"),
+                "{name} lost its point/spot receiver"
+            );
+        }
+
+        // THE REFUSAL, pinned against the code rather than left as prose.
+        let voxel = include_str!("shaders/voxel.wgsl");
+        assert!(
+            voxel.contains("light.pos_dir.w < 0.5"),
+            "voxel.wgsl no longer has an analytic light loop, so the refusal \
+             below is about nothing"
+        );
+        // Over CODE only — full-line comments stripped, `lines()`-based so a
+        // CRLF checkout cannot make it vacuous (the P27.1 GI-gate pattern). The
+        // ruling paragraph above NAMES both functions, so a bare `contains` over
+        // the whole file would fail on the comment that documents the refusal.
+        let voxel_code: String = voxel
+            .lines()
+            .map(|l| l.trim_end_matches('\r'))
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !voxel_code.contains("shadow_factor") && !voxel_code.contains("vsm_light_shadow"),
+            "voxel.wgsl calls a receiver it has no bindings for — it is composed \
+             `ShaderKind::Plain` and would not build"
+        );
+        assert!(
+            voxel.contains("P27.5: VIRTUAL SHADOWS ARE REFUSED HERE"),
+            "voxel.wgsl's refusal lost its ruling; a refusal with no sentence is \
+             indistinguishable from an oversight"
+        );
+        assert!(
+            matches!(
+                crate::passes::shader_kind("voxel"),
+                Some(crate::passes::ShaderKind::Plain)
+            ),
+            "voxel.wgsl gained an environment group — the refusal above is now a \
+             stale comment and the receiver is one call site away"
         );
     }
 
@@ -1899,7 +1995,7 @@ mod tests {
             0.05,
             VSM_SLOPE_BIAS_TEXELS,
         )
-            .expect("the point is inside the clipmap");
+        .expect("the point is inside the clipmap");
         // The displaced point, recovered by unprojecting the site's own NDC.
         let back = vp.inverse() * site.ndc.extend(1.0);
         let back = back.truncate() / back.w;
@@ -2134,7 +2230,11 @@ mod tests {
             });
         }
         let asked = crate::vsm::vsm_light_trees(&scene, &VsmSettings::default());
-        assert_eq!(asked.trees.len(), uniform, "a tree past the uniform's array");
+        assert_eq!(
+            asked.trees.len(),
+            uniform,
+            "a tree past the uniform's array"
+        );
         assert_eq!(asked.refused_past_shader_ceiling, 4);
         assert_eq!(asked.refused_past_projection_cap, 0);
         assert_eq!(asked.refused(), 4);
@@ -2184,7 +2284,11 @@ mod tests {
             });
         }
         let capped = crate::vsm::vsm_light_trees(&many, &VsmSettings::default());
-        assert_eq!(capped.trees.len(), 10, "10 x 6 = 60 fits, 11 x 6 = 66 does not");
+        assert_eq!(
+            capped.trees.len(),
+            10,
+            "10 x 6 = 60 fits, 11 x 6 = 66 does not"
+        );
         assert_eq!(capped.refused_past_projection_cap, 2);
         assert_eq!(
             capped.refused_past_shader_ceiling, 0,
@@ -2199,7 +2303,13 @@ mod tests {
     fn the_kernel_drops_the_taps_that_leave_the_page_and_never_double_counts() {
         let origin = (256u32, 128u32);
         // Dead centre: nine taps, all distinct.
-        let mid = vsm_pcf_taps(Vec2::new(64.3, 64.7), VSM_PAGE_SIZE, 0, origin, VSM_PCF_RADIUS);
+        let mid = vsm_pcf_taps(
+            Vec2::new(64.3, 64.7),
+            VSM_PAGE_SIZE,
+            0,
+            origin,
+            VSM_PCF_RADIUS,
+        );
         assert_eq!(mid.len(), 9);
         assert_eq!(
             mid.iter().collect::<std::collections::BTreeSet<_>>().len(),
@@ -2207,26 +2317,51 @@ mod tests {
             "a tap was counted twice"
         );
         // Top-left corner: four.
-        let corner = vsm_pcf_taps(Vec2::new(0.1, 0.1), VSM_PAGE_SIZE, 0, origin, VSM_PCF_RADIUS);
+        let corner = vsm_pcf_taps(
+            Vec2::new(0.1, 0.1),
+            VSM_PAGE_SIZE,
+            0,
+            origin,
+            VSM_PCF_RADIUS,
+        );
         assert_eq!(corner.len(), 4);
         assert!(
             corner.contains(&origin),
             "the corner texel itself must be in"
         );
         // Bottom-right corner: four, and none of them left the page.
-        let far = vsm_pcf_taps(Vec2::new(127.9, 127.9), VSM_PAGE_SIZE, 0, origin, VSM_PCF_RADIUS);
+        let far = vsm_pcf_taps(
+            Vec2::new(127.9, 127.9),
+            VSM_PAGE_SIZE,
+            0,
+            origin,
+            VSM_PCF_RADIUS,
+        );
         assert_eq!(far.len(), 4);
         for (x, y) in &far {
             assert!(*x < origin.0 + VSM_PAGE_SIZE && *y < origin.1 + VSM_PAGE_SIZE);
         }
         // An edge: six.
         assert_eq!(
-            vsm_pcf_taps(Vec2::new(64.0, 0.5), VSM_PAGE_SIZE, 0, origin, VSM_PCF_RADIUS).len(),
+            vsm_pcf_taps(
+                Vec2::new(64.0, 0.5),
+                VSM_PAGE_SIZE,
+                0,
+                origin,
+                VSM_PCF_RADIUS
+            )
+            .len(),
             6
         );
         // A stored border shifts every tap by it and drops none — the payload is
         // still what is addressed.
-        let bordered = vsm_pcf_taps(Vec2::new(64.3, 64.7), VSM_PAGE_SIZE, 4, origin, VSM_PCF_RADIUS);
+        let bordered = vsm_pcf_taps(
+            Vec2::new(64.3, 64.7),
+            VSM_PAGE_SIZE,
+            4,
+            origin,
+            VSM_PCF_RADIUS,
+        );
         assert_eq!(bordered.len(), 9);
         assert_eq!(bordered[0].0, mid[0].0 + 4);
         assert_eq!(bordered[0].1, mid[0].1 + 4);

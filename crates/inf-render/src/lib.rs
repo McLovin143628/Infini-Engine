@@ -144,8 +144,7 @@ pub use vsm::{
     clipmap_page_world, cube_face_matrix, light_basis, mark_page_for, page_clip_planes,
     quantize_light_dir, spot_fov_y, spot_matrix, vsm_justified_level, vsm_light_trees,
     vsm_page_matrix, vsm_page_sees_sphere, vsm_projections, vsm_sun_quantum, ClipmapLayout,
-    VsmTreeSet,
-    VsmMarkParams, VsmProjection, CUBE_FACE_BASES, VSM_DEPTH_CLEAR, VSM_DEPTH_COMPARE,
+    VsmMarkParams, VsmProjection, VsmTreeSet, CUBE_FACE_BASES, VSM_DEPTH_CLEAR, VSM_DEPTH_COMPARE,
     VSM_MAX_PROJECTIONS, VSM_PROJ_ORTHO, VSM_PROJ_PERSPECTIVE, VSM_SUN_REFERENCE_HEIGHT_M,
 };
 pub use vsm_atlas::{VsmApplyReport, VsmPools, VSM_PAGE_FORMAT};
@@ -163,10 +162,9 @@ pub use vsm_receiver::{
     receiver_slots, sun_slot, vsm_atlas_header, vsm_bias_ndc, vsm_blend_weight, vsm_block_header,
     vsm_cube_face, vsm_level_factor, vsm_level_ndc, vsm_ndc_per_metre, vsm_page_of, vsm_pcf_taps,
     vsm_receiver_level, vsm_receiver_site, vsm_shadow_factor, vsm_slope_bias_texels, vsm_slope_tan,
-    vsm_table_entry,
-    vsm_to_light, VsmEmptyPool, VsmReceiverParams, VsmReceiverResources, VsmReceiverSite,
-    VsmTableEntry, VSM_DEPTH_ULP_BIAS, VSM_MAX_SLOPE, VSM_NORMAL_BIAS_TEXELS, VSM_NO_DATA,
-    VSM_PCF_RADIUS, VSM_PCF_TAPS, VSM_SLOPE_BIAS_TEXELS,
+    vsm_table_entry, vsm_to_light, VsmEmptyPool, VsmReceiverParams, VsmReceiverResources,
+    VsmReceiverSite, VsmTableEntry, VSM_DEPTH_ULP_BIAS, VSM_MAX_SLOPE, VSM_NORMAL_BIAS_TEXELS,
+    VSM_NO_DATA, VSM_PCF_RADIUS, VSM_PCF_TAPS, VSM_SLOPE_BIAS_TEXELS,
 };
 // The shadow page space's own vocabulary, re-exported on `inf_vt`'s precedent so
 // a host or a gate that reads a residency does not have to add the GPU-free

@@ -383,15 +383,42 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var lo = vec3<f32>(0.0);
     let count = lights.count.x;
     if (count == 0u) {
-        lo += shade_light(n, v, normalize(view.sun_dir.xyz), vec3<f32>(3.0),
-                          albedo, metallic, rough, f0);
+        var d = shade_light(n, v, normalize(view.sun_dir.xyz), vec3<f32>(3.0),
+                            albedo, metallic, rough, f0);
+        if (sun_shadowing_enabled()) {
+            d = d * shadow_factor(in.world_pos, n);
+        }
+        lo += d;
     } else {
+        // The first directional light receives the sun's shadow factor — the
+        // virtual page atlas when one is bound, the cascade otherwise.
+        var shadowed = false;
         for (var i = 0u; i < count && i < MAX_LIGHTS; i = i + 1u) {
             let light = lights.items[i];
             let radiance_base = light.color.rgb * light.color.a;
             if (light.pos_dir.w < 0.5) {
-                lo += shade_light(n, v, normalize(light.pos_dir.xyz), radiance_base,
-                                 albedo, metallic, rough, f0);
+                // **P27.5: the sun's shadow reaches this surface at last.**
+                // Before this batch neither this path nor the other of the two
+                // had ever called `shadow_factor` — `git log -S` over both
+                // files' whole history returns nothing — so virtualized geometry
+                // and foliage took the analytic term and never the directional
+                // one, from the cascade either. A phase named Virtual Shadow
+                // MAPS whose flagship geometry path cannot RECEIVE a sun shadow
+                // is a hole, and this closes it.
+                //
+                // Spelled exactly as `mesh.wgsl` spells it, first directional
+                // only, and `sun_shadowing_enabled()` is false on every scene
+                // with both shadow paths off — which is every committed golden
+                // outside the four `vsm_*` ones, and those hold no meshlet and
+                // no scattered geometry. So this is present-and-false everywhere
+                // a golden looks.
+                var d = shade_light(n, v, normalize(light.pos_dir.xyz), radiance_base,
+                                    albedo, metallic, rough, f0);
+                if (sun_shadowing_enabled() && !shadowed) {
+                    d = d * shadow_factor(in.world_pos, n);
+                    shadowed = true;
+                }
+                lo += d;
             } else {
                 let to_light = light.pos_dir.xyz - in.world_pos;
                 let dist = length(to_light);
