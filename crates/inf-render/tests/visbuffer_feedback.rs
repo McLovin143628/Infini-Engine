@@ -242,6 +242,19 @@ fn run(gpu: &GpuContext, visbuffer: bool, hidden: bool, frames: usize) -> Run {
             .unwrap_or((VtTextureSet::NONE, VtTextureSet::NONE));
         let sc = scene(set, hidden.then_some(hidden_set));
         r.render(gpu, &sc, &v, &target.view, (W, H));
+        // **Wait for the device between frames.** The feedback ring reads frame
+        // `k`'s mask at `k + 2` and takes it only if the mapping has completed;
+        // it never blocks, because a renderer must not. A test that does not
+        // block instead measures how busy the GPU was — and under the full
+        // workspace battery, with a dozen test binaries sharing one device, all
+        // six reads missed and this suite failed while passing alone. `poll`
+        // here is the difference between asserting the streaming loop and
+        // asserting the machine's load.
+        for _ in 0..8 {
+            if gpu.device.poll(wgpu::PollType::wait_indefinitely()).is_ok() {
+                break;
+            }
+        }
     }
     let pop = r.vt_pop_in();
     // The RESIDENT set, read off the atlas's own slots. `resolved_table` was the
@@ -286,7 +299,7 @@ fn the_per_fragment_producer_feeds_the_same_pinned_ring() {
     let Some(gpu) = gpu_or_skip("the ring") else {
         return;
     };
-    let vis = run(&gpu, true, false, 6);
+    let vis = run(&gpu, true, false, 10);
     assert!(
         vis.feedback_frames > 0,
         "no feedback mask was ever read on the visibility path — the per-fragment \
@@ -338,7 +351,7 @@ fn the_per_fragment_signal_is_finer_and_a_hidden_surface_adds_nothing_to_it() {
     let Some(gpu) = gpu_or_skip("occlusion") else {
         return;
     };
-    const N: usize = 6;
+    const N: usize = 10;
     let fwd_alone = run(&gpu, false, false, N);
     let fwd_hidden = run(&gpu, false, true, N);
     let vis_alone = run(&gpu, true, false, N);
