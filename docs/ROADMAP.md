@@ -12096,6 +12096,302 @@ stamps, the feedback bitmask + pinned-latency ring, the Ring-0-first residency s
 > **The 16-light ceiling is the lights uniform's**, so a scene's seventeenth light
 > has no slot to carry — `VSM_MAX_PROJECTIONS` is 64 and `MAX_LIGHTS` is 16, and
 > the two ceilings have never been compared in one place.
+>
+> **P27.4 AUDIT — 2026-08-13.** Adversarial pass over `d961e73..8fbb4b9`. Four
+> commits appended, **none amended** (`cbb4bb4` the invalidation scatter's depth
+> envelope at both faces — the P27.3 audit's carried debt, `8d3bf89` five defects
+> the mutation round found in the batch's own arms, `118575a` three corrections
+> to the filtering memo, and this block) — the P27.1/P27.2/P27.3 precedent.
+>
+> Battery green at final HEAD: **242 binaries, 4 370 passed, 0 failed,
+> 8 ignored** — the STATUS block's 242 / 4 366 / 0 / 8 plus **four new arms and no
+> new binary**. `clippy --workspace --all-targets` under `-D warnings` and
+> `cargo fmt --all --check` clean, in that order and after the battery — and the
+> batch's own new machine-ops lesson was taken: the run's combined log was read
+> for clippy-class warnings **while it worked**, and it printed **none**, so
+> nothing had to move between the run and the lint. That is the outcome the
+> lesson is for.
+> **Goldens stay 54** and `git diff` over `tests/goldens/` is empty across this
+> audit as it is across the batch. **No schema moved**, no `.inf_lvl` payload
+> moved, **no new external dependency**, and **not one line was deleted** from
+> `crates/` or `runtime/` except the **forty-seven** this audit rewrote, all of
+> them inside `vsm_receiver.rs`'s module docs and the four arms it strengthened.
+>
+> ## THE ASSIGNED DEBT, PAID — and the envelope was already right
+>
+> The P27.3 audit's one carried *gap* (not a ruling): *"the invalidation scatter's
+> depth envelope is unarmed, and its fail direction is a stale page. P27.4 owes it
+> a caster at the far face."* P27.4 carried it forward untouched, correctly, as its
+> one unpaid inherited debt.
+>
+> `a_caster_straddling_the_depth_boxs_faces_still_invalidates_its_pages`
+> (`cbb4bb4`) is that fixture. A cube **1 m past a face** of the clipmap's own
+> 384 m box with a **6.93 m** bounding sphere — centre outside, three metres of
+> geometry inside, where they win the reverse-Z compare against a backdrop placed
+> just inside the same face. It then moves **half a metre along the light, and
+> along the light only**, so its NDC *rectangle* is identical at both positions and
+> the only thing that can invalidate the page is the depth envelope having admitted
+> it. The ruling is on the **atlas**: every texel that moved, moved by exactly
+> `STEP / range` = 1.302 × 10⁻³ in NDC and by nothing else, and a straddler that
+> never won its depth compare changes *no* texel, which fails the same count — so
+> "the caster is really in the page" needs no separate threshold. Premises asserted
+> first, off the **shipped** matrix: the centre is outside `[0, 1]` at both
+> positions, the sphere is inside `[−rz, 1 + rz]`, `vsm_page_sees_sphere` keeps it
+> on a resident page (so a scatter that drops it is a **miss** rather than the two
+> agreeing), and one more static frame rasterizes nothing.
+>
+> **Mutation-verified three ways, each naming the face it broke**: the whole
+> envelope tightened to the sphere's centre (`ndc.z ∈ [0, 1]` — the P27.3 audit's
+> own survivor) fails on the **near** face at 8 cached pages and 0 re-rasters; the
+> near half alone fails there too; the far half alone (`ndc.z < 0.0`) fails on the
+> **far** face at 4 cached and 0. All three dead.
+>
+> **And the envelope itself needed no change.** Re-derived rather than assumed:
+> `page_clip_planes` tests the far plane as `row2` and the near as `r − row2`, each
+> at `−radius` over the plane's own normal length, which for the ortho matrix is
+> `1/range` — so the cull rejects exactly at `ndc.z < −radius/range` and
+> `ndc.z > 1 + radius/range`, which is `[−rz, 1 + rz]` character for character.
+> The scatter is the cull's two planes and not an approximation of them. What was
+> owed was the **arm**, and an unarmed correct thing is what a carried gap is.
+>
+> ## The findings
+>
+> 1. **A source pin aimed at the line next to the one it protects** — `8d3bf89`,
+>    and it is the most instructive defect of the batch. The two "ruled survivors"
+>    each got a source pin; one of them works and one does not.
+>    `the_shaders_kernel_is_clamped_to_its_page_too` pinned
+>    `VSM_NORMAL_BIAS_TEXELS * texel0 * exp2(f32(level0))` — where `offset_m` is
+>    **computed** — so the shader may compute the offset and then project the
+>    **undisplaced** `world_pos`, which is precisely the mutation the pin exists to
+>    kill, and it **survived a second round**. (The fallback-address pin,
+>    `let gq = vsm_level_ndc(p, l, got);`, does name its own expression and killed
+>    its mutation.) The pin now names the application,
+>    `p.view_proj * vec4<f32>(world_pos + n * offset_m, 1.0)`. **The corollary the
+>    P23 law did not spell out**: a byte pin catches a deletion only in the bytes it
+>    reads, so a pin must name the expression whose *absence* is the defect and not
+>    the one whose presence is convenient to grep for.
+> 2. **Two more shader expressions no device fixture reaches had no pin at all** —
+>    `8d3bf89`, `the_shaders_bias_and_blend_are_the_expressions_this_module_derives`.
+>    Deleting `VSM_DEPTH_ULP_BIAS +` from the shader's bias survives every arm in
+>    the tree: it is 2.38 × 10⁻⁷ NDC against a slope term an order of magnitude
+>    larger at every angle these fixtures use, and it only becomes the *whole* bias
+>    as `n · l → 1`, where a 256 × 144 frame cannot see the acne it prevents.
+>    Replacing the blend's `max(w_res, w_con)` with `w_res` survives too, because
+>    the device blend arm's band is the **resolution** one — the footprint half (the
+>    clipmap ring) is measured on the Rust side alone. The coarse tap's own
+>    `level + 1u` bias is pinned in the same breath.
+> 3. **The cube-face tie-break's constructed seams covered two of three axis
+>    pairs** — `8d3bf89`. The batch replaced a sweep that measured **zero**
+>    diagonals with five hand-built ties, which is exactly the right instinct; the
+>    five are three X/Z and two Y/Z, and **no X/Y tie**. So weakening the rule's
+>    first comparison, `a.x >= a.y` → `a.x > a.y`, moves every X/Y diagonal from
+>    `+X` to `+Y` and **survived in both halves of the twin** — inside the arm whose
+>    name is the tie-break. Two rows added, the axis pairs counted rather than
+>    eyeballed off the list, and the shader's own three comparisons pinned by
+>    source, because a shaded pixel is a surface point and never lands exactly on a
+>    diagonal.
+> 4. **Two of the clamped kernel's four numbers were arithmetic identities** —
+>    `8d3bf89`. Numbers 1 and 2 call `pcf_crossing_fraction` and
+>    `pcf_resolution_cost`; numbers 3 and 4 asserted `3.0/9.0` equal to `3.0/9.0`
+>    and `shadowed · kept/kept` equal to `shadowed`, which pass whatever the kernel
+>    does. The vacuous-check law, met again, inside the arm the memo cites as the
+>    producer of every number it quotes. Number 3 now runs `vsm_level_factor` on a
+>    one-page tree with a uniform atlas at an interior texel, an edge and both
+>    corners and asserts the factor is *identical*; number 4 takes the dropped
+>    weights from `vsm_pcf_taps`'s own kept-tap counts (**9 / 6 / 4**). Measured: a
+>    kernel that renormalizes over the full nine taps instead of the kept ones now
+>    fails and did not before.
+> 5. **A factor of two in the unit ruling** — `118575a` and `8d3bf89`. The memo, the
+>    module docs and the STATUS block above all say the constant guard is **0.125
+>    texels** at the shipped defaults and **32** at the 16-level ceiling. It is
+>    **0.25** and **64**: the prose computed the guard at *two* ULP where the
+>    sentence beside it says `VSM_DEPTH_ULP_BIAS` is *four*. The arm had it right
+>    the whole time (`texels_at(8)` = 0.25, `texels_at(16)` = 64) and its tolerances
+>    — ±0.01 and ±2 — were wide enough to hold both readings, so *"every number
+>    below is produced by an arm"* was true of the arm and not of the document. The
+>    **ratio** the argument rests on, 256× across eight more levels, is right in
+>    both tellings, which is how a factor of two survives a reading. Held to 10⁻⁴
+>    now.
+> 6. **665 is 663.3** — `118575a` and `8d3bf89`. In the memo's table, in the module
+>    docs, in the depth-convention memo's amendment and in the STATUS block. The arm
+>    bounded the ratio at `600 < r < 700`, which cannot see the difference; it holds
+>    ±0.5 now. (Re-derived: slope 2.0230 × 10⁻⁶ + constant 2.3842 × 10⁻⁷ =
+>    2.2615 × 10⁻⁶, into 1.5 × 10⁻³, is **663.29**.)
+> 7. **"There is no comparison sampler in the environment bind group" is refutable
+>    by grep** — `118575a` and `8d3bf89`. There is one, at binding **3**: the
+>    CASCADE's `env-shadow`, a `LessEqual` comparison sampler over the forward-Z
+>    array — and its hardware 2 × 2 is *precisely* the pre-filter the next paragraph
+>    says this kernel gives up, so the sentence contradicts its own argument two
+>    lines later. The claim that survives the check is narrower and truer: **P27.4
+>    adds no sampler and the virtual path reads none**, and
+>    `the_receiver_adds_four_bindings_and_none_of_them_is_a_sampler` is the arm
+>    rather than the sentence — over `bind_group_layout_entries` *and* over the
+>    shader text.
+> 8. **The provenance paragraph's "14" is a filter, not a binary** — corrected
+>    here. `3538452`'s note says the three binaries whose sources moved were re-run
+>    at HEAD, *"14 / 9 / 100 passed"*. The 9 and the 100 are `tests/vsm_receiver`
+>    and `tests/golden` whole; `inf-render`'s **lib binary is 391**, and 14 is
+>    exactly the `vsm_receiver` module's own test count — so what was re-run there
+>    was `--lib vsm_receiver`, a filter over the binary and not the binary. The
+>    lint commit is still behaviour-neutral line by line (see below), so the
+>    conclusion stands and only the evidence for it was smaller than stated. **The
+>    numbers at HEAD are 391 / 9 / 100.**
+>
+> ## Verified as claimed, by re-measurement
+>
+> * **The clamped-kernel ruling's arithmetic, all of it.** `128² − 126² = 508` of
+>   16 384 = **3.1006 %**, and at radius 2, `1 − (124/128)²` = **6.152 %**. Nine
+>   taps against one resolution; **8** level records against **72**. The dropped
+>   weights are **3/9** at an edge and **5/9** at a corner, which is now the
+>   kernel's own `9 − 6` and `9 − 4`.
+> * **The re-derive-at-served-level ruling.** The sweep is real and it sweeps what
+>   it says: four **non-concentric** per-level offset shifts × a 64 × 64 NDC grid ×
+>   four target levels, asserting **> 5 000** clipmap addresses agree with
+>   `VsmLightDesc::ancestor_at` and **> 2 000** of them at level ≥ 2 — and the
+>   quadtree half is exact, `512 × 5 = 2 560`. The walk's own boundary is handled
+>   honestly (the arm claims agreement only where `ancestor_at` has an answer, which
+>   is the offsets' limit and not the re-derivation's). And the ruling's *why* — why
+>   `vt_sample.wgsl` may **not** do the same thing — is stated in `vsm_page_of`'s
+>   docs, in the shader beside the line that does it, and in the memo: all three
+>   places a maintainer of either shader will look.
+> * **The carried gate, under a third mutation.** The brief asked whether
+>   containment catches a *partial* misread: `VSM_ENTRY_NONE` returning **0.5**
+>   instead of `VSM_NO_DATA` — half-shadow on every missing page.
+>   `a_missing_page_reads_lit_and_the_frame_says_so` kills it, on the same
+>   containment and with the same message. Its anti-vacuity really is asserted
+>   first (`admits > 0`, `deferred > 0`, and a non-zero count of `NONE`-resolving
+>   pages read off the residency rather than off a counter), and its last assertion
+>   — the starved frame darkens *fewer* pixels than the full one — is what stops a
+>   coincidental equality passing as containment.
+> * **The cube seam is depth-continuous while the address jumps**: 401 samples
+>   across the +X/+Z diagonal, exactly **one** face change, and the stored depth
+>   moves by under **2 × 10⁻⁴** NDC across it.
+> * **`params.w == 0` is an exact `* 1.0` off-path.** The fifty pre-existing
+>   goldens are byte-identical across the batch — `git diff --name-status
+>   d961e73..8fbb4b9 -- tests/goldens/` is four `A` lines and nothing else — and
+>   both pins moved in `4bb307d`, the one commit that adds them.
+>   `the_golden_set_is_pinned_and_additive`'s digest and `phase18_gate`'s named
+>   inventory each fail under a one-character mutation, so both are live.
+> * **`vsm_raster.rs`, `csm.rs` and `passes/shadow.rs` are absent from the batch's
+>   diff** — verified by `git diff --name-only`, so the content stamp and the
+>   cached-==-fresh arms are untouched by construction, exactly as claimed. (This
+>   audit edits `vsm_raster.rs`'s **test** file only; its source is still
+>   untouched since P27.3.)
+> * **The P18 no-VT-in-shadow-pages law holds by construction, post-batch**:
+>   `vsm_caster.wgsl` and `vsm_skinned.wgsl` declare **zero** textures, samplers,
+>   `textureSample`s and `textureLoad`s between them.
+> * **Fifty-four deleted lines in `crates/` and `runtime/`** — `git diff --numstat`
+>   over the batch reports **4 487 added, 54 deleted**, to the line.
+> * **`3538452` changed no arm and no teeth**, checked edit by edit:
+>   `!(band > 0.0)` → `band.is_nan() || band <= 0.0` is the same predicate on every
+>   `f32` including NaN; a `for e in a..b { t[e] = … }` → iterator rewrite is
+>   identical; and three `..Default::default()` removals are inert *because* the
+>   literals name every field, which is what makes them compile at all. One dead
+>   helper removed, no assertion touched.
+> * **PIE == shipping is two hosts, not two spellings of one.** `vsm_pie.rs` builds
+>   the shipping side from a cooked pack (`PackLevelSource::open` →
+>   `build_world_from_pack` → `sim_from_built`) and the preview side from an editor
+>   payload (`build_scene_payload` → `sim_from_payload`) — two distinct boot paths
+>   over one cooked project — and shares only `project_scene`, deliberately, as the
+>   one door. Anti-vacuity in both directions: the trace moves along the walk
+>   (`windows(2).any(|w| w[0] != w[1])`) and the shadowed frame differs from the
+>   same frame with virtual shadows off.
+> * **The level blend's stated bound is exactly right.** `vsm_mark.wgsl`'s `cs_mark`
+>   computes **one** `level` per pixel per projection, breaks out of the containment
+>   walk on the first level that contains the point, and issues **one** `atomicOr` —
+>   there is no second mark at `level + 1u` anywhere in the file. So the blend's
+>   coarser partner is never *asked for* by the pixel that would use it.
+>
+> ## Withdrawn on measurement
+>
+> * **Face culling / the cutout rectangle.** Nothing to add: the refusal's argument
+>   (a terrain tile is an open surface, a cutout is a card, front-face casting makes
+>   both cast nothing) is sound, and its consequence — that the raster is not edited
+>   — is checkable and checks out.
+> * **The receiver's `re-derive` legality.** The brief asked whether the ruling's
+>   boundary is stated where both shaders' maintainers will read it. It is, in three
+>   places. No change.
+> * **The four goldens' strictness.** They go through `check_vsm_golden`, which
+>   compares against the committed PNG only under `INF_GOLDEN_STRICT` — the standing
+>   house convention since P2, not a P27.4 weakening. What the four are pinned by by
+>   default is determinism over a warm-up, the named inventory and the content
+>   digest, and the ledger does not claim more.
+>
+> ## The remainder list for P27.5, as amended
+>
+> Everything the STATUS block above lists stands, with three changes.
+>
+> * **PAID: the invalidation scatter's depth envelope** — armed at both faces
+>   (`cbb4bb4`), the envelope unchanged because it was already the cull's. Struck
+>   from the carried list.
+> * **AMENDED: the two light ceilings are compared now**, and the comparison found
+>   something worth carrying rather than nothing.
+>   `the_lights_uniform_ceiling_is_lower_than_the_projection_ceiling` states it:
+>   `MAX_LIGHTS` is **16** — the lights uniform's array and therefore the largest
+>   scene index whose `GpuLight::params.w` any lit shader can read — while
+>   `VsmSystem::for_scene` registers a tree for **every** shadow-casting light in
+>   scene order against `VSM_MAX_PROJECTIONS`'s **64**, with no reference to the
+>   first number. **A point or spot light at scene index ≥ 16 can therefore hold a
+>   page tree that marks, rasterizes and evicts pages no shader can ever sample.**
+>   The **sun** is exempt, and that is not luck: it rides in
+>   `VsmReceiverParams::counts.x` rather than in a light record, which is exactly
+>   why it was put there. **Not fixed here** — capping the tree list at `MAX_LIGHTS`
+>   changes *which* lights get pages, so it is a tier decision and belongs with
+>   P27.5's clause 1. Armed, so the day either ceiling moves it is a failing test
+>   rather than a paragraph.
+> * **AMENDED: `voxel.wgsl` is the one lit path with an analytic 3D light loop and
+>   no receiver** — verified (`ShaderKind::Plain` at `passes/mod.rs`, one `@group(1)`
+>   binding, a full point/spot loop, and zero occurrences of `vsm_light_shadow`).
+>   The word **3D** is the amendment: `sprite.wgsl` has a `MAX_2D_LIGHTS` loop and no
+>   receiver either, and it is a separate radial-falloff system rather than an
+>   oversight. `vgeom_mesh.wgsl` and `scatter_mesh.wgsl` take the analytic term and
+>   not the directional one, and *"neither has ever called `shadow_factor`"* is
+>   literally true — `git log -S` over both files' whole history returns nothing,
+>   and both files have real history back to P13.1 and P18.5.
+>
+> ## The mutation matrix
+>
+> **Forty mutations run.** The batch's own fifteen were re-run: **fourteen die**,
+> and the one that does not is the normal offset (finding 1) — its pin was aimed
+> next to it. The fallback-address survivor's pin, by contrast, *does* kill its
+> mutation, so the batch's response to that one was correct and the response to the
+> other only looked like it. **Twenty-two new**, of which four survived as shipped:
+> the shader's ULP bias term, the blend's footprint half, and the cube-face X/Y
+> tie-break in each half of the twin. **Three more** for the debt's envelope. After
+> `cbb4bb4` and `8d3bf89`: **zero survivors**, re-run to confirm rather than
+> assumed.
+>
+> Notable kills the batch did not have: `VSM_ENTRY_NONE` → **0.5** (half-shadow —
+> the containment ruling catches a partial misread, which was the open question);
+> the kernel renormalizing over nine taps instead of the kept ones; the kernel's
+> bounds test off by one at a page corner, in both halves; the blend's coarse tap
+> taking the fine level's bias; the receiver declaring a comparison sampler;
+> `MAX_LIGHTS` raised past the projection ceiling; `pcf_crossing_fraction` counting
+> one edge instead of two; `sun_slot` taking the first slot rather than the first
+> directional; and the golden digest and inventory pins under one changed
+> character each.
+>
+> ## Machine-ops
+>
+> The batch's own new lesson — *read the battery's combined log while it works* —
+> was taken and it is worth restating as a procedure rather than as a regret: the
+> run was launched detached with **both streams to one file** and a sentinel, and
+> the log was read for clippy-class warnings during the compile phase, which is
+> hours before `clippy` would have reached them.
+>
+> **And a sentinel that did not get written, which is worth the line it costs.**
+> The detached launcher's `"EXIT=$LASTEXITCODE" | Out-File` never ran — quoting,
+> through two shells — so the run finished with no completion file at all. The
+> check that replaced it is **better than the one that failed**, and it should be
+> the standing one: `Running` + `Doc-tests` lines against `test result` lines,
+> **242 = 242**, with `inf_water` last. A sentinel proves a *process* exited; a
+> matched count proves the *run reached the end*, which is the thing actually
+> being claimed — and it survives a launcher that dies, a log that truncates and
+> a shell that eats the exit code.
+>
+> Disk: **162 GB** free at both ends of this audit against a **42 GB** `target/`;
+> no clean was needed inside the window and none of P26.2's linker symptoms
+> appeared.
 - **P27.5 Tiers, retirement & the gate** — 1. High/Medium run VSM; Low keeps CSM (the clamp
   law); CSM code stays as the fallback, demoted not deleted; 2. GI keeps its own voxel
   occlusion (the P18 law: camera-driven residency never feeds lighting — VSM pages are
