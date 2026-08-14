@@ -119,7 +119,14 @@ jobs:
           # workspace crate to re-document (deps' rmeta stays cached), so the
           # count below is a count of the whole tree, every run.
           cargo clean --doc
-          if ! cargo doc --no-deps --workspace 2>&1 | tee /tmp/rustdoc.log; then
+          # The workflow sets CARGO_TERM_COLOR=always, which wraps every cargo
+          # status line in ANSI escapes — both greps below then count ZERO
+          # ("Documenting" and "warning:" never match at line start), and the
+          # anti-vacuity guard is all that stood between this step and a green
+          # run whose counted number was a count of colored nothing. Twice now
+          # the guard fired for a defect in this step's own environment; the
+          # greps need bytes, not colors.
+          if ! CARGO_TERM_COLOR=never cargo doc --no-deps --workspace 2>&1 | tee /tmp/rustdoc.log; then
             echo "::error::cargo doc FAILED. A ratchet over rustdoc warnings cannot count them if rustdoc did not finish."
             exit 1
           fi
