@@ -307,7 +307,7 @@ fn add_vertex(
         position: positions[v],
         normal: vn.map(|i| normals[i]).unwrap_or([0.0, 1.0, 0.0]),
         uv: vt.map(|i| uvs[i]).unwrap_or([0.0, 0.0]),
-        tangent: [1.0, 0.0, 0.0, 1.0],
+        tangent: crate::TANGENT_PLACEHOLDER,
     };
     let idx = sub.verts.len() as u32;
     sub.verts.push(vertex);

@@ -710,7 +710,7 @@ pub(crate) mod tests {
                     position: *position,
                     normal,
                     uv: uvs[k],
-                    tangent: [1.0, 0.0, 0.0, 1.0],
+                    tangent: inf_mesh::TANGENT_PLACEHOLDER,
                 });
             }
             indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);

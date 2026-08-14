@@ -84,7 +84,13 @@ use serde::{Deserialize, Serialize};
 use crate::topo::{FaceId, HalfId, Mesh, VertId};
 
 /// The tangent written when nothing better can be derived: `[1, 0, 0, 1]`.
-pub const TANGENT_FALLBACK: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+///
+/// **One definition, in `inf-mesh`** (P28.2 audit): this used to be a second
+/// literal that merely agreed with the importers', and P28.2 gave the value a
+/// consequence — `MeshAsset::vgeom_streams` reads it to decide whether a mesh
+/// has an authored tangent field at all, and a second spelling is a rule
+/// written twice (the P21 one-door law).
+pub const TANGENT_FALLBACK: [f32; 4] = inf_mesh::TANGENT_PLACEHOLDER;
 
 /// Where a written corner normal comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

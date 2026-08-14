@@ -9,6 +9,25 @@ use bytemuck::{Pod, Zeroable};
 use inf_asset::{AssetKind, AssetPayload};
 use serde::{Deserialize, Serialize};
 
+/// **The tangent an importer writes when the source file has none** — `[1, 0, 0, 1]`.
+///
+/// Named once, here, because it is not a direction: it is the absence of one,
+/// spelled as a value so [`MeshVertex`] can stay `Pod`. Every producer in the
+/// tree writes exactly this (`gltf_import`'s `unwrap_or`, `obj_import`
+/// unconditionally, `inf_dcc::TANGENT_FALLBACK` for a corner with no usable
+/// accumulation, and [`MeshVertex::default`]), and until P28.2 nothing on the
+/// meshlet path read the field, so the placeholder cost nothing.
+///
+/// It costs something now, which is why it has a name (P28.2 audit): a v3 cook
+/// packs whatever is in this field into `VgeomVertex::tangent`, and
+/// `pack_tangent` returns its `NO_TANGENT` sentinel only for a *non-finite or
+/// zero-length* input. `[1, 0, 0]` is neither. So an OBJ mesh, a glTF with no
+/// `TANGENT` attribute, or a UV-less DCC export would shade through a constant
+/// object-space +X tangent instead of the per-fragment derivative frame it used
+/// before the channel existed — a visible change to a surface whose author
+/// supplied nothing. [`MeshAsset::vgeom_streams`] is where that is stopped.
+pub const TANGENT_PLACEHOLDER: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+
 /// One interleaved vertex. `#[repr(C)]` + `Pod` so it uploads to a GPU buffer
 /// and feeds `meshopt` without a copy. 48 bytes, naturally aligned (no padding).
 #[repr(C)]
@@ -27,7 +46,7 @@ impl Default for MeshVertex {
             position: [0.0; 3],
             normal: [0.0, 1.0, 0.0],
             uv: [0.0; 2],
-            tangent: [1.0, 0.0, 0.0, 1.0],
+            tangent: TANGENT_PLACEHOLDER,
         }
     }
 }
@@ -216,6 +235,18 @@ impl MeshAsset {
     /// [`MeshVertex::tangent`] since P4 — read by nothing that reaches the meshlet
     /// path, which is exactly the gap `docs/memos/p26-5-vertex-streams.md`
     /// recorded and routed here.
+    ///
+    /// **A mesh whose every vertex carries [`TANGENT_PLACEHOLDER`] hands back an
+    /// EMPTY tangent stream** (P28.2 audit), which `build_vgeom` writes as
+    /// `NO_TANGENT` and the shader reads as "use the derivative frame". The
+    /// alternative was measured and is a regression: the importers substitute
+    /// `[1, 0, 0, 1]` when a source file has no tangents, `pack_tangent` refuses
+    /// only a non-finite or zero-length input, so every OBJ mesh and every
+    /// untangented glTF would have started shading through a constant +X tangent
+    /// the moment the container went to v3. The test is over the WHOLE mesh and
+    /// exact — never per vertex and never a tolerance — and it cannot misfire: a
+    /// surface whose authored tangent really is uniformly `+X` has axis-aligned
+    /// uvs, and the derivative frame derives `+X` for it too.
     #[allow(clippy::type_complexity)]
     pub fn vgeom_streams(
         &self,
@@ -241,6 +272,9 @@ impl MeshAsset {
             }
             indices.extend(sm.indices.iter().map(|&i| i + base));
         }
+        if tangents.iter().all(|t| *t == TANGENT_PLACEHOLDER) {
+            tangents.clear();
+        }
         (positions, normals, uvs, tangents, indices)
     }
 }
@@ -255,6 +289,48 @@ impl AssetPayload for MeshAsset {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// **The placeholder is not a direction, and `vgeom_streams` must not ship it
+    /// as one** (P28.2 audit). Exact and whole-mesh: one authored tangent
+    /// anywhere keeps the whole stream, because the placeholders beside it are
+    /// then corners of a real field rather than the absence of one.
+    #[test]
+    fn an_untangented_mesh_hands_the_vgeom_builder_no_tangent_stream() {
+        let quad = |tangent: Option<[f32; 4]>| {
+            let mut v = vec![MeshVertex::default(); 4];
+            if let Some(t) = tangent {
+                v[2].tangent = t;
+            }
+            MeshAsset::new(
+                vec![SubMesh {
+                    name: "q".into(),
+                    vertices: v,
+                    indices: vec![0, 1, 2, 0, 2, 3],
+                    material_slot: None,
+                    skin: Vec::new(),
+                }],
+                Vec::new(),
+            )
+        };
+
+        let (_, _, _, tangents, _) = quad(None).vgeom_streams();
+        assert!(
+            tangents.is_empty(),
+            "a mesh of nothing but placeholders offered the builder a direction"
+        );
+
+        let authored = [0.0, 0.0, 1.0, -1.0];
+        let (_, _, _, tangents, _) = quad(Some(authored)).vgeom_streams();
+        assert_eq!(
+            tangents.len(),
+            4,
+            "one authored tangent must keep the whole stream"
+        );
+        assert_eq!(tangents[2], authored);
+        assert_eq!(tangents[0], TANGENT_PLACEHOLDER);
+    }
+
     use super::*;
     use inf_asset::{decode, encode};
 

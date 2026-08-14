@@ -289,7 +289,7 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
                     tangent: tangents
                         .as_ref()
                         .map(|t| t[i])
-                        .unwrap_or([1.0, 0.0, 0.0, 1.0]),
+                        .unwrap_or(crate::TANGENT_PLACEHOLDER),
                 });
             }
 

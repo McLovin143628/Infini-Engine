@@ -1226,3 +1226,94 @@ fn a_mesh_bound_to_an_unpageable_texture_raises_a_cluster_advisory() {
         assert_eq!(e.tile_count, 0, "an unpairable texture paired anyway");
     }
 }
+
+/// **A bound material that is not in the cook closure** — the second of P28.2's
+/// two mesh-scoped hazards, which had no test caller at all until this audit
+/// (the P26.3b lesson: an advisory nobody calls is a sentence nobody reads).
+///
+/// The level binds `Prop` to a material GUID whose `.inf_mat` was deleted, so
+/// `plan_cluster_pairings` cannot flatten it, and the mesh's pages ship with no
+/// pairing for that slot.
+#[test]
+fn a_mesh_bound_to_a_material_outside_the_closure_raises_a_cluster_advisory() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let (mesh_id, mat_id, _tex) = make_textured_mesh_project(&proj);
+    // The binding survives on the level entity; the asset does not.
+    let content = proj.join("Content");
+    std::fs::remove_file(content.join("Checker.inf_mat")).unwrap();
+    std::fs::remove_file(content.join("Checker.inf_mat.toml")).ok();
+
+    let out = dir.path().join("out");
+    let report = cook(&proj, &out, &CookOptions::default()).expect("cook still succeeds");
+    assert!(
+        report.warnings.iter().any(|w| {
+            w.contains(&mesh_id.to_string())
+                && w.contains(&mat_id.to_string())
+                && w.contains("cluster pages")
+        }),
+        "no cluster-pairing advisory for a material outside the closure: {:?}",
+        report.warnings
+    );
+    let reader = PackReader::open(&out.join(DEFAULT_PACK_NAME)).unwrap();
+    let vbytes = reader.read(derived_vmesh_id(mesh_id)).unwrap();
+    let r = inf_vgeom::VgeomAssetReader::new(vbytes.as_slice()).expect("index");
+    for e in r.pages() {
+        assert_eq!(e.tile_count, 0, "an unflattenable material paired anyway");
+    }
+}
+
+/// **A mesh whose importer had no tangents cooks NO tangents** (P28.2 audit).
+///
+/// The container's tangent word means "use this frame"; `NO_TANGENT` means "use
+/// the derivative frame you always used". The distinction is only worth anything
+/// if the value that reaches the packer is the author's, and it was not: every
+/// importer in the tree substitutes `inf_mesh::TANGENT_PLACEHOLDER` when a source
+/// file carries no `TANGENT` attribute, `pack_tangent` refuses only a non-finite
+/// or zero-length input, and `[1, 0, 0]` is neither — so the first v3 cook of
+/// this very fixture packed a constant object-space +X tangent into every vertex
+/// and would have shaded every OBJ mesh and every untangented glTF through it.
+///
+/// `dense_mesh` is built with `..Default::default()`, which is exactly what an
+/// untangented import produces, so this arm reads the shipped bytes of the
+/// fixture the rest of this file already cooks.
+#[test]
+fn a_mesh_the_importer_gave_no_tangents_cooks_no_tangents() {
+    // The premise, stated where it can fail: the fixture really is untangented.
+    let m = dense_mesh();
+    assert!(
+        m.submeshes.iter().all(|s| s
+            .vertices
+            .iter()
+            .all(|v| v.tangent == inf_mesh::TANGENT_PLACEHOLDER)),
+        "the fixture carries authored tangents — this arm is about the ones that do not"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    let mesh_id = make_mesh_project(&proj);
+    let out = dir.path().join("out");
+    cook(
+        &proj,
+        &out,
+        &CookOptions {
+            roots: Some(vec![mesh_id]),
+            ..Default::default()
+        },
+    )
+    .expect("cook succeeds");
+
+    let reader = PackReader::open(&out.join(DEFAULT_PACK_NAME)).unwrap();
+    let vbytes = reader.read(derived_vmesh_id(mesh_id)).unwrap();
+    let r = inf_vgeom::VgeomAssetReader::new(vbytes.as_slice()).expect("index");
+    let mesh = r.to_mesh().expect("materialize the cooked DAG");
+    assert!(!mesh.vertices.is_empty(), "nothing was cooked");
+    assert!(
+        mesh.vertices
+            .iter()
+            .all(|v| v.tangent == inf_vgeom::NO_TANGENT),
+        "a v3 cook manufactured a tangent direction the importer never had — the \
+         meshlet path would shade this surface through a constant +X frame instead \
+         of the derivative one it used before the channel existed"
+    );
+}

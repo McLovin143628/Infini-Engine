@@ -158,7 +158,7 @@ mod tests {
                     position: [i as f32 / n as f32, j as f32 / n as f32, 0.0],
                     normal: [0.0, 0.0, 1.0],
                     uv: [i as f32 / n as f32, j as f32 / n as f32],
-                    tangent: [1.0, 0.0, 0.0, 1.0],
+                    tangent: crate::TANGENT_PLACEHOLDER,
                 });
             }
         }
