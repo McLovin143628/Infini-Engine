@@ -397,6 +397,53 @@ fn cpu_verdicts(tris: &[[Vec3; 3]], v: &RtView) -> Vec<u32> {
 
 // ── the never-load-bearing half (no adapter) ─────────────────────────────────
 
+/// **A machine that has an adapter must get the shipped device** — the arm the
+/// batch's own headline defect never had (P28.5 audit).
+///
+/// P28.5 found that putting `EXPERIMENTAL_RAY_QUERY` into `from_adapter`'s
+/// optional mask makes `request_device` fail outright, and that when it does,
+/// **every headless test in the tree skips for "no GPU adapter" on a machine
+/// with a discrete GPU**. The ledger records that
+/// `an_acceleration_structure_over_nothing_or_without_the_feature_is_refused`
+/// would go red the day the feature migrates back. It would not: that arm needs
+/// a device to make its assertion, the migration is precisely what destroys the
+/// device, and the arm skips. Reproduced by mutation at this audit — the whole
+/// `ray_query` and `visbuffer_parity` suites report **19 passed** with every
+/// device arm skipped.
+///
+/// A skip is not a pass, and the failure mode is invisible because it is
+/// *uniform*: nothing looks broken when everything opts out at once.
+///
+/// This arm is the discriminator, and it needs no device of its own.
+/// [`GpuContext::headless`] fails for exactly two reasons and says which:
+/// there is no adapter (hardware or fallback), which is a legitimate skip on a
+/// headless CI runner; or the adapter was found and `request_device` refused
+/// the descriptor, which is a **defect in this tree** and never a property of
+/// the machine. The first is tolerated, the second fails here.
+///
+/// Note the mutation's error text is also a lie the message would have told a
+/// reader for as long as it stood: *"no GPU adapter (request_device: Some
+/// experimental features … were requested)"*. Read a device failure against
+/// what actually failed before believing what it says — the P26.2 disk-full law,
+/// one layer down.
+#[test]
+fn a_machine_with_an_adapter_must_get_the_shipped_device() {
+    match GpuContext::headless() {
+        Ok(_) => eprintln!("shipped headless context: created"),
+        Err(e) => {
+            assert!(
+                e.starts_with("no adapter"),
+                "this machine HAS an adapter and the shipped headless context \
+                 still could not be built: {e}\n\nThat is a defect in this \
+                 tree's device descriptor, not a property of the machine — and \
+                 its symptom is that every device arm in the workspace SKIPS \
+                 and the battery goes green. A skip is not a pass."
+            );
+            eprintln!("SKIP ray_query (device probe): {e}");
+        }
+    }
+}
+
 /// **The experiment is off, and nothing in this tree turns it on.**
 ///
 /// The ROADMAP's clause has two halves — "default-off setting" and "VSM remains
