@@ -686,11 +686,41 @@ fn a_scene_past_a_ceiling_falls_back_to_the_forward_path_and_says_which() {
         "a refused frame is not the forward frame — the fallback dropped or \
          changed the geometry it was supposed to hand back"
     );
-    let painted = forward.rgba.chunks_exact(4).filter(|p| p[3] > 0).count();
+
+    // **THE ANTI-VACUITY THAT MATTERS, and the first draft did not have it**
+    // (P28.1 audit). Two frames agreeing is not evidence that either drew
+    // anything: both take the SAME `raster_draw` call site, so deleting that
+    // call leaves them identically empty and the assertion above green.
+    // Mutation-measured — the fallback's only draw was removed and this arm
+    // survived, while every parity row died. The old guard (`p[3] > 0`) could
+    // not see it either: the sky writes an opaque alpha over the whole frame.
+    //
+    // So the claim is made against a frame that provably has no meshlet geometry
+    // in it: the same scene with its instances removed. The refused frame must
+    // differ from THAT over a real population, which is the statement "the
+    // fallback handed the geometry back" rather than "two paths lost it
+    // together".
+    let bare = RenderScene {
+        grid_enabled: false,
+        vgeom_assets: vec![VgeomAsset::from_mesh(ASSET, &m).expect("index")],
+        ..Default::default()
+    };
+    let empty = render(&gpu, &bare, settings(false), false);
+    let painted = refused
+        .rgba
+        .chunks_exact(4)
+        .zip(empty.rgba.chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .count();
     assert!(
-        painted > 0,
-        "the fallback comparison is over an empty frame"
+        painted > (W * H / 20) as usize,
+        "the refused frame differs from a geometry-free frame on only {painted} \
+         of {} pixels — the fallback did not draw the asset it was handed, and \
+         'the refused frame equals the forward frame' is two empty frames \
+         agreeing",
+        W * H
     );
+    eprintln!("refusal fallback: {painted} pixels carry the handed-back geometry");
 }
 
 // ── the textured row (the analytic gradients' only device witness) ───────────
@@ -715,10 +745,31 @@ fn a_scene_past_a_ceiling_falls_back_to_the_forward_path_and_says_which() {
 /// the vast majority of interior pixels agree to within rounding, and the rest
 /// are the mip-boundary set.
 ///
-/// The resolve's gradient is the *better* number. It is exact where the forward
-/// path's is a first-order approximation quantized to a quad, which is precisely
-/// the sub-surface-variation win `docs/memos/p26-4-feedback-mechanism.md` item 3
-/// predicted a visibility buffer would buy.
+/// # What is claimed here, and what was withdrawn (P28.1 audit)
+///
+/// **Claimed and measured:** the resolve's gradient is the exact analytic
+/// derivative and the forward path's is a first-order quad difference — asserted
+/// on the Rust twin, in `crates/inf-render/src/visbuffer.rs`, by
+/// `the_analytic_gradient_is_the_limit_of_the_finite_difference`, as a
+/// convergence signature with a 400× wrong-formula control. That is a statement
+/// about the *gradient*.
+///
+/// **Withdrawn:** "the resolve's number is the better one", as a statement about
+/// the *image*. The audit built the measurement the claim needed — a 16×
+/// supersampled forward reference, box-downsampled in linear space — and it does
+/// not support it: over the 5 132 interior pixels the forward frame's mean
+/// absolute error against the reference is 0.06554 and the resolve's is 0.06558,
+/// and on the differing pixels alone the resolve is closer on **47.6 %** of them.
+/// A coin flip. Nor could the design have found a small effect: the reference's
+/// own noise floor, measured by running the identical comparison with **no
+/// texture bound**, is **0.0868** — larger than the whole textured signal and
+/// ~200× the difference between the two paths. Repeating it on the isolated
+/// texture contribution (textured minus untextured, which cancels the
+/// resolution-dependent shading) gives 51.2 %, the same coin flip.
+///
+/// So the honest bound is the one this arm asserts: the two agree except on a
+/// **thin boundary set**, and which of them is nearer the truth there is
+/// undecided by measurement.
 #[test]
 fn parity_textured_virtual_texture() {
     let Some(gpu) = gpu_or_skip("textured") else {
@@ -815,6 +866,72 @@ fn parity_textured_virtual_texture() {
          12 % this bound allows for the analytic-vs-quad-derivative mip \
          boundary, which means the gradients disagree about more than a boundary",
         100.0 * frac
+    );
+
+    // **THE EXCEPTION IS BOUNDED AS A CLASS, not merely as a population**
+    // (P28.1 audit). "8.79 % of pixels differ" is satisfied equally by a mip
+    // BOUNDARY — a curve, one or two pixels thick, where the footprint crosses a
+    // power of two — and by a broad smear over whole triangles, which is what a
+    // wrong gradient actually produces. The population bound above cannot tell
+    // them apart; these two do, and they are what lets the memo call this a mip
+    // boundary rather than merely hope it is one.
+    //
+    // Measured on this fixture: 94.8 % of the differing pixels touch an agreeing
+    // interior pixel and ZERO of them are the centre of a solid 3 x 3 differing
+    // block. The thresholds are loose against those numbers on purpose — the
+    // shape is the claim, not the digits, and a bound tuned to this adapter is
+    // the P25 one-platform class.
+    let interior_set: std::collections::BTreeSet<(u32, u32)> = ids.interior().into_iter().collect();
+    let differing: Vec<(u32, u32)> = interior_set
+        .iter()
+        .copied()
+        .filter(|&(x, y)| {
+            let i = ((y * ids.width + x) * 4) as usize;
+            (0..4).any(|c| fwd[i + c] != res[i + c])
+        })
+        .collect();
+    let dset: std::collections::BTreeSet<(u32, u32)> = differing.iter().copied().collect();
+    let touching = differing
+        .iter()
+        .filter(|&&(x, y)| {
+            [
+                (x.wrapping_sub(1), y),
+                (x + 1, y),
+                (x, y.wrapping_sub(1)),
+                (x, y + 1),
+            ]
+            .iter()
+            .any(|p| interior_set.contains(p) && !dset.contains(p))
+        })
+        .count();
+    let solid = differing
+        .iter()
+        .filter(|&&(x, y)| {
+            x >= 1
+                && y >= 1
+                && (0..3).all(|dy| (0..3).all(|dx| dset.contains(&(x + dx - 1, y + dy - 1))))
+        })
+        .count();
+    eprintln!(
+        "textured class: {}/{} differing pixels touch an agreeing one ({:.1} %), \
+         {solid} are the centre of a solid 3x3 differing block",
+        touching,
+        differing.len(),
+        100.0 * touching as f64 / differing.len().max(1) as f64
+    );
+    assert!(
+        touching * 5 >= differing.len() * 4,
+        "only {touching} of {} differing pixels border an AGREEING interior pixel \
+         — the disagreement is a region, not a boundary, and 'the mip-transition \
+         set' is the wrong name for it",
+        differing.len()
+    );
+    assert!(
+        solid * 10 <= differing.len(),
+        "{solid} of {} differing pixels sit at the centre of a solid 3x3 block of \
+         disagreement — a mip boundary is one or two pixels thick and this is a \
+         patch, which is what a wrong gradient over a whole triangle looks like",
+        differing.len()
     );
     // …and anti-vacuity in the other direction: the texture actually modulates
     // the surface, so "they agree" is a claim about sampling and not about two
