@@ -563,6 +563,14 @@ pub struct EngineRenderer {
     vt_feedback_dispatched: u32,
     /// P26.4 pop-in instruments — per tile class. See [`crate::VtPopIn`].
     vt_pop_in: crate::VtPopIn,
+    /// **The committed camera history the predictor reads** (P28.4).
+    ///
+    /// Empty until a host calls [`EngineRenderer::commit_camera`], and that is
+    /// the design rather than a lazy initialization: the history is the one
+    /// place the "committed input" premise can be enforced, so a host that
+    /// cannot honour it simply never fills this and gets the pre-P28.4
+    /// streaming loop exactly. The editor viewport is that host.
+    camera_history: inf_math::CameraHistory,
     /// **The one readback ledger** (P28.3): the two feedback consumers' hit and
     /// miss counts, under one pinned latency, so a gate can assert the property
     /// two independent rings cannot state — that both read the SAME source
@@ -811,6 +819,7 @@ impl EngineRenderer {
             vt_feedback_bases: Vec::new(),
             vt_feedback_dispatched: 0,
             vt_pop_in: crate::VtPopIn::default(),
+            camera_history: inf_math::CameraHistory::new(),
             stream_ring: inf_stream::RingLedger::default(),
             vt_absent: crate::vt::VtEmptyPool::new(&gpu.device),
             vt_engaged_frames: 0,
@@ -892,6 +901,55 @@ impl EngineRenderer {
     /// counts. **Zero on a textureless scene**, which is what makes "the goldens
     /// did not change" a measurement of the command stream.
     #[inline]
+    /// **Commit one camera pose at a fixed step** (P28.4) — the predictor's only
+    /// input, and the seam the whole determinism argument rests on.
+    ///
+    /// `tick` is the host's **fixed-step** index. `false` — and nothing is
+    /// stored — when it does not strictly advance, which is what a host wired to
+    /// the render loop instead of the sim loop gets. There is no default and no
+    /// fallback to a frame counter, deliberately: `self.frame_index` is right
+    /// there and using it would make the speculation a function of how fast the
+    /// machine draws, which is exactly the thing a learned predictor was
+    /// rejected for being.
+    ///
+    /// A host that never calls this streams as it did before P28.4 — see
+    /// [`PredictSettings`](crate::settings::PredictSettings).
+    pub fn commit_camera(&mut self, tick: u64, view: &RenderView) -> bool {
+        self.camera_history.commit(inf_math::CameraSample {
+            tick,
+            eye: view.eye_world,
+            forward: view.forward.as_dvec3(),
+            up: view.up.as_dvec3(),
+        })
+    }
+
+    /// Forget the committed camera history — a level switch, a camera cut, an
+    /// ejected PIE session. A secant across a cut is a teleport per tick.
+    pub fn reset_camera_history(&mut self) {
+        self.camera_history.clear();
+    }
+
+    /// The committed camera history, for a gate that wants to assert the
+    /// predictor's own input rather than its output.
+    #[inline]
+    pub fn camera_history(&self) -> &inf_math::CameraHistory {
+        &self.camera_history
+    }
+
+    /// **This frame's prediction**, or `None` when the history cannot support
+    /// one (fewer than two committed poses) or the predictor is clamped off.
+    ///
+    /// A pure function of `(committed history, settings)` and of nothing the
+    /// renderer holds — which is why it is safe for both consumers to ask for it
+    /// separately and get one answer.
+    pub fn prediction(&self) -> Option<inf_math::Prediction> {
+        let p = self.settings.stream.predict;
+        if !p.enabled {
+            return None;
+        }
+        inf_math::dead_reckon(&self.camera_history, p.horizon_ticks)
+    }
+
     pub fn vt_pop_in(&self) -> crate::VtPopIn {
         self.vt_pop_in
     }
@@ -939,6 +997,10 @@ impl EngineRenderer {
         encoder: &mut wgpu::CommandEncoder,
         cluster: &[(u128, inf_vt::TileCoord)],
     ) {
+        // **Before the residency is borrowed**, because the prediction is a pure
+        // function of the committed history and the settings and must not be
+        // able to read anything the transaction is about to change.
+        let predicted = self.prediction();
         let (Some(lib), Some(pools)) = (self.vt_textures.as_mut(), self.vt.as_mut()) else {
             return;
         };
@@ -990,6 +1052,30 @@ impl EngineRenderer {
             }
         }
         let floor_len = wants.len();
+
+        // 2b. **The speculative lane** (P28.4): the same footprint rule, asked
+        // at the camera the committed history says is coming, at
+        // `VT_PRIORITY_PREDICT`.
+        //
+        // Appended to the SAME want set, and that is load-bearing twice over.
+        // It is what makes the strictly-lower rank mean anything — one
+        // `apply_wants` walks the lanes in order, so a speculative miss is only
+        // ever offered slots no floor or feedback want has claimed, and a
+        // resident speculative tile is the first thing a floor miss takes. And
+        // it is what keeps the invariant a *world* property rather than a
+        // policy: there is no second transaction in which residency could dip
+        // below `floor ∪ feedback`, because there is no second transaction.
+        //
+        // `prediction()` is `None` on every host that does not commit a camera,
+        // which is every host that existed before this batch.
+        if let Some(p) = predicted {
+            wants.extend(crate::vt_stream::speculative_wants(
+                lib.residency(),
+                view,
+                &coverage,
+                &p,
+            ));
+        }
 
         // 3. frame F − 2's mask, or nothing. Never "whatever arrived".
         let landed = match feedback.take_wants(&gpu.device, lib, frame) {
@@ -1403,13 +1489,18 @@ impl EngineRenderer {
             self.vsm = crate::vsm_mark::VsmSystem::for_scene(gpu, scene, &self.settings.vsm);
         }
         let frame = self.frame_index;
+        // Read before the system is borrowed, and it is the SAME prediction the
+        // texture lane got this frame: one committed history, one dead
+        // reckoning, two consumers — so the two speculative sets cannot describe
+        // two different cameras.
+        let predicted = self.prediction();
         let Some(v) = self.vsm.as_mut() else {
             self.vsm_light_slots.clear();
             self.vsm_receiver_params = crate::vsm_receiver::VsmReceiverParams::absent();
             return;
         };
         let marks_before = v.stats().mark_frames;
-        v.sync(gpu, scene, view, &self.settings.vsm, frame);
+        v.sync(gpu, scene, view, &self.settings.vsm, frame, predicted);
         let landed = v.stats().mark_frames > marks_before;
         self.stream_ring
             .read(inf_stream::Consumer::Shadow, frame, |_| landed);

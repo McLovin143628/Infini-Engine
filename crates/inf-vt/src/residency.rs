@@ -87,6 +87,20 @@ pub const VT_PRIORITY_FLOOR: VtPriority = inf_stream::LANE_FLOOR;
 /// A refinement the GPU feedback asked for. Served after the whole floor.
 pub const VT_PRIORITY_FEEDBACK: VtPriority = inf_stream::LANE_FEEDBACK;
 
+/// **A tile the predictor speculated about** (P28.4) — the analytic floor
+/// rule asked at a *predicted* camera rather than at the committed one.
+///
+/// `inf_stream::LANE_PREDICT`, so it is strictly below both producers above it:
+/// a speculative want may never take a floor tile's slot nor a resident
+/// refinement's, and every one of them may take a speculative tile's. That is
+/// the ROADMAP's clause — *"speculative wants enter at strictly lower priority
+/// than the analytic floor and feedback"* — spelled as a rank the one admission
+/// walk already orders, rather than as a policy anything has to remember.
+///
+/// It is a *third* lane here and not `inf-vsm`'s treatment of the same idea,
+/// because this consumer has two producers above it and that one has one.
+pub const VT_PRIORITY_PREDICT: VtPriority = inf_stream::LANE_PREDICT;
+
 /// "This tile, please." The whole input language of residency — deliberately no
 /// camera and no budget: see the crate docs. Since P26.4 it carries a
 /// [`priority`](Self::priority), which is a *rank*, not a policy — the caller
@@ -117,6 +131,16 @@ impl VtWant {
             texture,
             tile,
             priority: VT_PRIORITY_FEEDBACK,
+        }
+    }
+
+    /// A **speculative** want ([`VT_PRIORITY_PREDICT`]) — what the dead-reckoning
+    /// predictor produces (P28.4).
+    pub const fn speculate(texture: VtTextureHandle, tile: TileCoord) -> Self {
+        Self {
+            texture,
+            tile,
+            priority: VT_PRIORITY_PREDICT,
         }
     }
 

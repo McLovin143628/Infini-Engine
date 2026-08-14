@@ -641,15 +641,76 @@ pub struct StreamSettings {
     /// Clamped down by [`RenderTier::apply`](crate::caps::RenderTier::apply)
     /// like every other capability knob.
     pub budget_bytes: u64,
+    /// **Predictive prefetch** (P28.4) — see [`PredictSettings`].
+    pub predict: PredictSettings,
 }
 
 impl Default for StreamSettings {
     fn default() -> Self {
         Self {
             budget_bytes: DEFAULT_STREAM_BUDGET_BYTES,
+            predict: PredictSettings::default(),
         }
     }
 }
+
+/// **The predictor's two knobs** (P28.4): whether it speculates, and how far
+/// ahead.
+///
+/// # Why `enabled` defaults to `true` and changes nothing
+///
+/// Every other streaming feature in this file ships off and is turned on by a
+/// host. This one ships on, and the reason is that its real enable flag is
+/// somewhere a settings struct cannot reach: the predictor consumes
+/// `inf_math::CameraHistory`, and a history is empty until a host **commits** a
+/// camera pose at its fixed step (`EngineRenderer::commit_camera`). A host that
+/// does not — the editor viewport, whose flycam is driven by OS input at render
+/// rate and is not committed input at all — gets `dead_reckon() == None`, emits
+/// no speculative want, and streams byte-for-byte as it did before P28.4.
+///
+/// So the flag is what a host with a committed camera turns *off*, and the
+/// default is the honest one: a host that can prove its camera is committed
+/// gets the prefetch without opting in twice.
+///
+/// # Why the horizon is in ticks
+///
+/// The ROADMAP's clause says 200–500 **ms**, and a millisecond is wall clock —
+/// which the predictor may not read, on pain of the whole determinism argument.
+/// A tick is committed, so the horizon is stored in ticks and a host converts
+/// once at its own door with `inf_math::horizon_ticks(ms, hz)` against its own
+/// fixed step. At the shipped 60 Hz step the default **18** is 300 ms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PredictSettings {
+    /// Whether speculative wants are emitted at all.
+    ///
+    /// [`RenderTier::apply`](crate::caps::RenderTier::apply) clears it on
+    /// **Low**, and [`RenderSettings::clamp_mobile`] clears it too. Speculation
+    /// spends slots a smaller pool does not have spare: on Low the unified
+    /// budget is 86 MiB against High's 344, and a lane that only ever takes
+    /// *idle* capacity has none to take. The clamp is the `vsm.enabled` shape —
+    /// wired with the feature rather than after it.
+    pub enabled: bool,
+    /// How many committed **ticks** ahead to dead-reckon.
+    ///
+    /// **18**, measured (`docs/memos/p28-4-predictive-prefetch.md` §3), which is
+    /// 300 ms at 60 Hz — the middle of the ROADMAP's band, and where the sweep
+    /// puts the knee.
+    pub horizon_ticks: u32,
+}
+
+impl Default for PredictSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            horizon_ticks: DEFAULT_PREDICT_HORIZON_TICKS,
+        }
+    }
+}
+
+/// **The shipped horizon**, in committed ticks — 18, i.e. 300 ms at the 60 Hz
+/// fixed step. See `docs/memos/p28-4-predictive-prefetch.md` §3 for the sweep
+/// that chose it over the rest of the ROADMAP's 200–500 ms band.
+pub const DEFAULT_PREDICT_HORIZON_TICKS: u32 = 18;
 
 /// **The page atlas's budget on the tier below High**, in bytes: 32 MiB — half
 /// the default, 512 pages.

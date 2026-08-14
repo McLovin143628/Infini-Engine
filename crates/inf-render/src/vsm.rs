@@ -258,6 +258,101 @@ pub fn clipmap_layout(
     }
 }
 
+/// **Where a page's world cell lands once the clipmap has scrolled** (P28.4).
+///
+/// A clipmap level's page grid is a *window* on a fixed world lattice, and
+/// [`ClipmapLayout::clip_origins`] is where the window starts. Page `x` under
+/// `now` holds world cell `now[L].0 + x`; the same cell is page
+/// `cell − soon[L].0 = x − Δ` under `soon`. So this is a translation in page
+/// index space and nothing else — no matrix, no projection, no basis.
+///
+/// `None` when the cell falls out of the predicted window (the trailing band,
+/// which the scroll is about to drop) or when either layout has no such level.
+pub fn scrolled_page(page: VsmPage, now: &ClipmapLayout, soon: &ClipmapLayout) -> Option<VsmPage> {
+    let a = now.clip_origins.get(page.level as usize)?;
+    let b = soon.clip_origins.get(page.level as usize)?;
+    let x = i64::from(page.x) + a.0 - b.0;
+    let y = i64::from(page.y) + a.1 - b.1;
+    if x < 0 || y < 0 {
+        return None;
+    }
+    Some(VsmPage::new(
+        page.face,
+        page.level,
+        u32::try_from(x).ok()?,
+        u32::try_from(y).ok()?,
+    ))
+}
+
+/// **The speculative shadow-page want set** (P28.4, clause 2): the pages the
+/// depth buffer has already proved are needed, moved to where the predicted
+/// camera puts them, at [`VSM_PRIORITY_SPECULATIVE`](inf_vsm::VSM_PRIORITY_SPECULATIVE).
+///
+/// # Why this is the shape a shadow-page prediction takes
+///
+/// P28.3 refused shadow pages as coupling members and said exactly why: *"which
+/// pages a caster reaches is decided by a per-page frustum test that runs over
+/// the pages that are already resident, after the marking mask has been read —
+/// so producing that membership at the sync point means deriving next frame's
+/// page set from last frame's casters, which is a prediction"*. This is that
+/// derivation, done deliberately in the lane the refusal named: last frame's
+/// *proved* set is the cone, and the predicted camera says where the cone will
+/// be. Nothing is guessed about which surfaces exist — only about where the
+/// window over them has moved to, which is arithmetic on two layouts.
+///
+/// # What it does NOT cover, stated
+///
+/// A camera that only **rotates** does not scroll a camera-centred clipmap, so
+/// a pure whip-pan produces an empty set here and the shadow lane contributes
+/// nothing to it. That is the truth about the mechanism rather than a gap in it,
+/// and it is measured rather than assumed
+/// (`docs/memos/p28-4-predictive-prefetch.md` §5). A rotating camera's *marked*
+/// set changes because different receivers become visible, and predicting that
+/// needs the depth buffer of a frame that has not been drawn.
+///
+/// Every want is bounds-checked against the light's own descriptor, so a
+/// prediction that runs off the edge of the window is dropped rather than
+/// clamped onto a page that means something else.
+pub fn speculative_shadow_wants(
+    marked: &[inf_vsm::VsmWant],
+    now: &[ClipmapLayout],
+    soon: &[ClipmapLayout],
+    res: &inf_vsm::VsmResidency,
+) -> Vec<inf_vsm::VsmWant> {
+    // Every page the mask already proved, so a speculation that lands on one is
+    // dropped here rather than deduped later. `inf_stream::normalize` keeps the
+    // strongest lane, so leaving them in would cost residency nothing and would
+    // make `speculative_wants` count wants that were never speculative — a
+    // counter that reports the shift's *overlap* as prefetch.
+    let proved: std::collections::BTreeSet<(u32, u32, u32, u32, u32)> = marked
+        .iter()
+        .map(|w| {
+            let e = w.page.entry_order();
+            (w.light.0, e.0, e.1, e.2, e.3)
+        })
+        .collect();
+    let mut out = Vec::new();
+    for w in marked {
+        let i = w.light.index();
+        let (Some(a), Some(b), Some(desc)) = (now.get(i), soon.get(i), res.desc(w.light)) else {
+            continue;
+        };
+        let Some(at) = scrolled_page(w.page, a, b) else {
+            continue;
+        };
+        let e = at.entry_order();
+        if !desc.contains(at) || proved.contains(&(w.light.0, e.0, e.1, e.2, e.3)) {
+            continue;
+        }
+        out.push(inf_vsm::VsmWant {
+            light: w.light,
+            page: at,
+            priority: inf_vsm::VSM_PRIORITY_SPECULATIVE,
+        });
+    }
+    out
+}
+
 /// The **level-0** `view_proj` of a directional light's clipmap: a reverse-Z
 /// orthographic box of `half_extent` about `centre`, looking along the light.
 ///
@@ -1024,6 +1119,126 @@ mod tests {
             glam::Vec4::new(0.0, 0.0, -far * inv, -1.0),
             glam::Vec4::new(0.0, 0.0, -far * near * inv, 0.0),
         )
+    }
+
+    // ── P28.4: the shadow lane's producer ────────────────────────────────────
+
+    /// A directional light's layout at `eye`, three levels of 8 pages a side.
+    fn sun_clipmap_at(eye: glam::DVec3) -> ClipmapLayout {
+        clipmap_layout(
+            Vec3::new(0.3, -0.9, 0.3).normalize(),
+            &inf_math::FloatingOrigin::new(glam::DVec3::ZERO),
+            eye,
+            64.0,
+            8,
+            3,
+        )
+    }
+
+    /// **The scroll is a translation in page-index space, and nothing else.**
+    ///
+    /// The claim the whole producer rests on: a page holds a world *cell*, the
+    /// window's start is `clip_origins`, so the same cell is `Δorigin` pages
+    /// away in the next window. Asserted as a round trip through the two
+    /// layouts, and against the layouts' own numbers rather than against a
+    /// second derivation of the snapping rule.
+    #[test]
+    fn a_scrolled_page_names_the_same_world_cell() {
+        let now = sun_clipmap_at(glam::DVec3::ZERO);
+        let soon = sun_clipmap_at(glam::DVec3::new(140.0, 0.0, -90.0));
+        // ANTI-VACUITY: the fixture has to have scrolled, or every assertion
+        // below is about the identity map.
+        assert_ne!(
+            now.clip_origins, soon.clip_origins,
+            "the two eyes did not move a level's window"
+        );
+        for level in 0..3u32 {
+            let (a, b) = (
+                now.clip_origins[level as usize],
+                soon.clip_origins[level as usize],
+            );
+            for x in 0..8u32 {
+                for y in 0..8u32 {
+                    let p = VsmPage::flat(level, x, y);
+                    let Some(q) = scrolled_page(p, &now, &soon) else {
+                        // Only ever off the low edge, which is the trailing band.
+                        assert!(i64::from(x) + a.0 - b.0 < 0 || i64::from(y) + a.1 - b.1 < 0);
+                        continue;
+                    };
+                    // The cell each address names, computed from the layouts.
+                    assert_eq!(i64::from(p.x) + a.0, i64::from(q.x) + b.0);
+                    assert_eq!(i64::from(p.y) + a.1, i64::from(q.y) + b.1);
+                    assert_eq!((q.level, q.face), (p.level, p.face));
+                }
+            }
+        }
+    }
+
+    /// **A camera that only turns does not scroll a camera-centred clipmap**, so
+    /// the shadow lane's producer is silent through a pure whip-pan.
+    ///
+    /// Printed as a measurement rather than left implicit, because it is the
+    /// honest bound on this producer and the A/B arm's shadow half rests on it:
+    /// a rotating camera's *marked* set changes because different receivers
+    /// become visible, and predicting that needs the depth buffer of a frame
+    /// nobody has drawn.
+    #[test]
+    fn a_pure_rotation_produces_no_speculative_shadow_want() {
+        let (mut res, _adv) = inf_vsm::VsmResidency::new(inf_vsm::VsmAtlasConfig::default());
+        let light = res
+            .register_light(inf_vsm::VsmLightDesc::clipmap(3, 8))
+            .expect("a three-level clipmap");
+        // A compact block, not a full row: the leading edge of a scroll is what
+        // is new, and a band that already spans the window has none. That is a
+        // property of the fixture rather than of the producer, and getting it
+        // wrong reads as "the predictor emits nothing".
+        let marked: Vec<inf_vsm::VsmWant> = (2..5u32)
+            .flat_map(|x| (3..6u32).map(move |y| (x, y)))
+            .map(|(x, y)| inf_vsm::VsmWant::new(light, VsmPage::flat(0, x, y)))
+            .collect();
+
+        // Same eye, and the layout is a function of the eye alone.
+        let now = vec![sun_clipmap_at(glam::DVec3::new(5.0, 2.0, -3.0))];
+        let same = vec![sun_clipmap_at(glam::DVec3::new(5.0, 2.0, -3.0))];
+        assert!(speculative_shadow_wants(&marked, &now, &same, &res).is_empty());
+
+        // …and the control: a camera that TRAVELS produces the moved cone, all
+        // of it at the speculative rank and all of it inside the window.
+        //
+        // Along the light's own `right`, because that is the axis the window
+        // slides on — a dolly in world X would move a different number of cells
+        // for every sun angle, and the fixture would be measuring the basis.
+        // Two level-0 pages (16 m each) is far enough to scroll and near enough
+        // that the proved band stays inside the eight-page window.
+        let (right, _u, _f) = light_basis(Vec3::new(0.3, -0.9, 0.3).normalize());
+        let soon = vec![sun_clipmap_at(
+            glam::DVec3::new(5.0, 2.0, -3.0) + right.as_dvec3() * 34.0,
+        )];
+        let shift = soon[0].clip_origins[0].0 - now[0].clip_origins[0].0;
+        assert_eq!(shift, 2, "the fixture's dolly is not two level-0 pages");
+        let spec = speculative_shadow_wants(&marked, &now, &soon, &res);
+        assert!(!spec.is_empty(), "a two-page dolly moved no level's window");
+        let desc = res.desc(light).expect("registered");
+        for w in &spec {
+            assert_eq!(w.priority, inf_vsm::VSM_PRIORITY_SPECULATIVE);
+            assert!(desc.contains(w.page), "{:?} is off the window", w.page);
+        }
+        // Nothing it emits is already a marked want — those would dedup into the
+        // stronger lane and the counter would over-report the speculation.
+        let proved: std::collections::BTreeSet<_> =
+            marked.iter().map(|w| w.page.entry_order()).collect();
+        assert!(spec.iter().all(|w| !proved.contains(&w.page.entry_order())));
+    }
+
+    /// **The speculative rank is strictly below the marked one**, which is the
+    /// half of clause 2 that lives in this crate's vocabulary.
+    #[test]
+    fn a_shadow_speculation_ranks_below_every_proved_page() {
+        assert!(inf_vsm::VSM_PRIORITY_SPECULATIVE > inf_vsm::VSM_PRIORITY_MARKED);
+        assert_eq!(inf_vsm::VSM_PRIORITY_MARKED, inf_stream::LANE_FLOOR);
+        // P28.4 moved it out of the feedback lane so one invariant covers all
+        // three consumers — see the constant's own docs.
+        assert_eq!(inf_vsm::VSM_PRIORITY_SPECULATIVE, inf_stream::LANE_PREDICT);
     }
 
     /// **THE DEPTH-CONVENTION MEASUREMENT** (P27.1 clause 4), and the numbers

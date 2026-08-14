@@ -140,12 +140,13 @@ pub use scene::{
 };
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
-    BloomSettings, GiSettings, RenderSettings, ScatterSettings, ShadowSettings, SsaoSettings,
-    StreamSettings, VgeomSettings, VirtualTextureSettings, VsmSettings, VsmSettingsError,
-    DEFAULT_STREAM_BUDGET_BYTES, STREAM_BUDGET_LOW_BYTES, STREAM_BUDGET_MEDIUM_BYTES,
-    VGEOM_BUDGET_LOW_BYTES, VGEOM_BUDGET_MEDIUM_BYTES, VSM_BUDGET_LOW_BYTES,
-    VSM_BUDGET_MEDIUM_BYTES, VSM_CLIPMAP_PAGES_MEDIUM, VSM_MARK_STRIDE_MEDIUM, VSM_MAX_MARK_STRIDE,
-    VSM_MAX_PCF_RADIUS, VSM_PCF_RADIUS_MEDIUM,
+    BloomSettings, GiSettings, PredictSettings, RenderSettings, ScatterSettings, ShadowSettings,
+    SsaoSettings, StreamSettings, VgeomSettings, VirtualTextureSettings, VsmSettings,
+    VsmSettingsError, DEFAULT_PREDICT_HORIZON_TICKS, DEFAULT_STREAM_BUDGET_BYTES,
+    STREAM_BUDGET_LOW_BYTES, STREAM_BUDGET_MEDIUM_BYTES, VGEOM_BUDGET_LOW_BYTES,
+    VGEOM_BUDGET_MEDIUM_BYTES, VSM_BUDGET_LOW_BYTES, VSM_BUDGET_MEDIUM_BYTES,
+    VSM_CLIPMAP_PAGES_MEDIUM, VSM_MARK_STRIDE_MEDIUM, VSM_MAX_MARK_STRIDE, VSM_MAX_PCF_RADIUS,
+    VSM_PCF_RADIUS_MEDIUM,
 };
 // P28.3: the streamer's audit, and the arbiter's own vocabulary re-exported for
 // the same reason `inf_vt`'s is below — a host or a gate that reads a
@@ -203,9 +204,9 @@ pub use vt_library::{
 // The P26.4 streaming loop: the floor's rules (pure, unit-tested with no
 // adapter), the GPU feedback pass, and the pop-in counters a gate asserts on.
 pub use vt_stream::{
-    analytic_floor, feedback_requests, justified_mip, ndc_margin, on_screen, projection_scale,
-    scene_coverage, screen_diameter_px, VtCoverage, VtFeedback, VtPopIn, VT_FEEDBACK_MAX_TILES,
-    VT_FLOOR_MAX_TILES,
+    analytic_floor, camera_wants, feedback_requests, justified_mip, ndc_margin, on_screen,
+    predicted_view, projection_scale, scene_coverage, screen_diameter_px, speculative_wants,
+    VtCoverage, VtFeedback, VtPopIn, VT_FEEDBACK_MAX_TILES, VT_FLOOR_MAX_TILES,
 };
 // The pool's own vocabulary, re-exported so a host that builds a VT level does
 // not have to depend on `inf-vt` itself: `VtTextures::new` takes a
@@ -213,7 +214,8 @@ pub use vt_stream::{
 // the crate to two hosts' manifests to spell four constants would put the
 // GPU-free half in dependency graphs that have no other use for it.
 pub use inf_vt::{
-    PageFormat, VtPoolConfig, DEFAULT_MAX_TEXTURE_DIM, DEFAULT_VT_BUDGET_BYTES, STORED_TILE_SIZE,
+    PageFormat, VtPoolConfig, VtWant, DEFAULT_MAX_TEXTURE_DIM, DEFAULT_VT_BUDGET_BYTES,
+    STORED_TILE_SIZE, VT_PRIORITY_FEEDBACK, VT_PRIORITY_FLOOR, VT_PRIORITY_PREDICT,
 };
 pub use water::{
     camera_underwater, RenderWater, RiverFrame, RiverPath, RiverProfile, Underwater, WaterFrame,

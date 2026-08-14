@@ -942,7 +942,7 @@ fn a_light_refused_at_registration_stops_the_list_it_is_in() {
         inf_render::VsmSystem::for_scene(&gpu, &s, &set).expect("the first spot registered");
     // `sync` is what builds the projection list the assertions below read; one
     // step is enough, and it needs no frame because nothing here is about depth.
-    sys.sync(&gpu, &s, &v, &set, 0);
+    sys.sync(&gpu, &s, &v, &set, 0, None);
     let sys = &sys;
 
     assert_eq!(

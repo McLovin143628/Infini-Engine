@@ -144,6 +144,7 @@ pub use pool::{
 pub use residency::{
     resolved_table, VtAdmit, VtError, VtEvict, VtPriority, VtResidency, VtResolved, VtStats,
     VtTextureHandle, VtTransaction, VtWant, VT_PRIORITY_FEEDBACK, VT_PRIORITY_FLOOR,
+    VT_PRIORITY_PREDICT,
 };
 pub use table::{
     pack_entry, unpack_entry, VtEntry, TABLE_HEADER_WORDS, TABLE_MAGIC, TABLE_MIP_REC_WORDS,

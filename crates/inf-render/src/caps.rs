@@ -223,6 +223,16 @@ impl RenderTier {
             RenderTier::Medium => crate::settings::STREAM_BUDGET_MEDIUM_BYTES,
             RenderTier::Low => crate::settings::STREAM_BUDGET_LOW_BYTES,
         });
+        // P28.4 — the predictor is a knob, and Low is where it goes off. An
+        // `&=`, so it only ever clears: a caller that already disabled it keeps
+        // it disabled and `apply` stays idempotent.
+        //
+        // The reason is the lane, not the arithmetic. A speculative want is
+        // `LANE_PREDICT`, which by construction takes only capacity nothing
+        // better wants — and on Low the unified budget is 86 MiB against High's
+        // 344, so there is no idle capacity for it to take. It would emit
+        // wants, be deferred, and cost a want-set walk per frame to learn that.
+        settings.stream.predict.enabled &= !matches!(self, RenderTier::Low);
         // …and the division itself, LAST, so it divides the numbers every clamp
         // above has already lowered. A grant is never larger than its request,
         // so this keeps `apply` a pure narrowing.
@@ -295,6 +305,9 @@ impl RenderTier {
             .stream
             .budget_bytes
             .min(crate::settings::STREAM_BUDGET_LOW_BYTES);
+        // …and no speculation on a phone (P28.4), for the Low tier's reason: a
+        // lane that only takes idle capacity has none to take out of 86 MiB.
+        settings.stream.predict.enabled = false;
         settings.arbitrate_budgets()
     }
 }

@@ -47,9 +47,7 @@
 use std::collections::BTreeMap;
 
 use glam::{Mat4, Vec3};
-use inf_vt::{
-    TileCoord, VtFeedbackLayout, VtTextureHandle, VtWant, VT_PRIORITY_FEEDBACK, VT_PRIORITY_FLOOR,
-};
+use inf_vt::{TileCoord, VtFeedbackLayout, VtTextureHandle, VtWant, VT_PRIORITY_FLOOR};
 
 use crate::camera::RenderView;
 use crate::readback::ReadbackRing;
@@ -152,6 +150,28 @@ pub struct VtPopIn {
     /// Bytes of page data written, summed over frames — the same signal in the
     /// unit a VRAM budget is spent in.
     pub page_upload_bytes: u64,
+    /// **Frames in which at least one floor want was at fallback** (P28.4) —
+    /// *the* A/B counter.
+    ///
+    /// A third reading of the same evidence, and the one the ROADMAP's clause
+    /// asks for by name (*"fallback-frame counters strictly reduced"*).
+    /// [`floor_fallback`](Self::floor_fallback) is summed over `(frame, want)`
+    /// pairs, so it moves when a *big* surface pops as well as when a frame
+    /// pops, and a predictor that halved the tiles of one bad frame would read
+    /// like one that removed a frame. This counts frames, so it answers the
+    /// question a player asks.
+    pub floor_fallback_frames: u64,
+    /// Speculative wants offered, summed over frames (P28.4) — the predictor's
+    /// **anti-vacuity** number: a predictor wired to an empty history and one
+    /// switched off produce the same residency, and only this tells them apart.
+    pub predict_wants: u64,
+    /// …of which resolved to an ancestor rather than to themselves.
+    ///
+    /// Not a failure: a speculative want is *expected* to be at fallback the
+    /// frame it is first offered — that is what prefetching means. What it
+    /// measures is how much of the speculation is still outstanding, and a ratio
+    /// that never falls is a horizon the budget cannot serve.
+    pub predict_fallback: u64,
 }
 
 impl VtPopIn {
@@ -161,8 +181,8 @@ impl VtPopIn {
     pub fn summary(&self) -> String {
         format!(
             "vt streaming: {} frames, {} admits ({} uploads, {:.2} MiB), {} deferred, \
-             floor {}/{} at fallback, refine {}/{} at fallback, feedback {} landed \
-             / {} missed",
+             floor {}/{} at fallback over {} frames, refine {}/{} at fallback, \
+             predict {}/{} at fallback, feedback {} landed / {} missed",
             self.frames,
             self.admits,
             self.page_uploads,
@@ -170,8 +190,11 @@ impl VtPopIn {
             self.deferred,
             self.floor_fallback,
             self.floor_wants,
+            self.floor_fallback_frames,
             self.refine_fallback,
             self.refine_wants,
+            self.predict_fallback,
+            self.predict_wants,
             self.feedback_frames,
             self.feedback_misses,
         )
@@ -350,6 +373,42 @@ pub fn scene_coverage(scene: &RenderScene, origin: &inf_math::FloatingOrigin) ->
 /// over one scene produce one want sequence, which is what the phase gate pins.
 pub fn analytic_floor(lib: &VtTextures, view: &RenderView, coverage: &[VtCoverage]) -> Vec<VtWant> {
     let mut out = lib.want_floor();
+    out.extend(camera_wants(
+        lib.residency(),
+        view,
+        coverage,
+        VT_PRIORITY_FLOOR,
+    ));
+    out
+}
+
+/// **The camera-driven half of [`analytic_floor`], at an arbitrary camera and an
+/// arbitrary lane** (P28.4).
+///
+/// One door, two callers, and the second one is why this exists: a speculative
+/// want is not a *different rule* about what a camera justifies, it is the
+/// **same rule asked at a camera the predictor says is coming**. Writing the
+/// predictor its own footprint rule would be two derivations of one fact (the
+/// P21 one-door law) and, worse, would let the two drift — a predictor that
+/// asked for a level the floor would never ask for is not prefetching, it is
+/// streaming something else.
+///
+/// The camera-free part ([`VtTextures::want_floor`]) is deliberately *not* here:
+/// it is a property of the registry, so a predicted camera adds nothing to it
+/// and re-emitting it would be a duplicate the dedup then has to eat.
+///
+/// **Deterministic in committed input.** Nothing here reads a clock, a frame
+/// counter or a previous frame's state, so two runs of one scripted camera path
+/// over one scene produce one want sequence — which holds for the predicted
+/// camera exactly as it holds for the committed one, because
+/// `inf_math::dead_reckon` is itself a pure function of the committed history.
+pub fn camera_wants(
+    res: &inf_vt::VtResidency,
+    view: &RenderView,
+    coverage: &[VtCoverage],
+    lane: inf_vt::VtPriority,
+) -> Vec<VtWant> {
+    let mut out = Vec::new();
     if coverage.is_empty() {
         return out;
     }
@@ -367,7 +426,7 @@ pub fn analytic_floor(lib: &VtTextures, view: &RenderView, coverage: &[VtCoverag
                 continue;
             }
             let handle = VtTextureHandle(slot - 1);
-            let Some(desc) = lib.residency().desc(handle) else {
+            let Some(desc) = res.desc(handle) else {
                 continue;
             };
             let extent = desc.mips[0].width.max(desc.mips[0].height);
@@ -381,15 +440,67 @@ pub fn analytic_floor(lib: &VtTextures, view: &RenderView, coverage: &[VtCoverag
             let m = desc.mips[lv as usize];
             for y in 0..m.tiles_y {
                 for x in 0..m.tiles_x {
-                    out.push(
-                        VtWant::new(handle, TileCoord::new(lv, x, y))
-                            .with_priority(VT_PRIORITY_FLOOR),
-                    );
+                    out.push(VtWant::new(handle, TileCoord::new(lv, x, y)).with_priority(lane));
                 }
             }
         }
     }
     out
+}
+
+/// **The view the predictor says is coming** — the committed view with its eye
+/// and frame replaced, everything else kept (P28.4).
+///
+/// The floating **origin** is deliberately the committed one: `VtCoverage`
+/// centres are render-local against it, so a predicted view with a predicted
+/// origin would compare a predicted eye against surfaces expressed in another
+/// frame. The cost is that the predicted eye is up to `horizon × speed` metres
+/// further from the origin than the real one — 15 m at 50 m/s and a 300 ms
+/// horizon, against `inf_math::REBASE_DISTANCE`'s 1 024 — so the f32 the
+/// footprint rule works in is unaffected.
+///
+/// A degenerate predicted direction falls back to the committed one rather than
+/// building a view matrix out of a zero vector.
+pub fn predicted_view(view: &RenderView, p: &inf_math::Prediction) -> RenderView {
+    let forward = p.forward.as_vec3().normalize_or_zero();
+    let up = p.up.as_vec3().normalize_or_zero();
+    RenderView {
+        eye_world: p.eye,
+        forward: if forward.length_squared() > 0.0 {
+            forward
+        } else {
+            view.forward
+        },
+        up: if up.length_squared() > 0.0 {
+            up
+        } else {
+            view.up
+        },
+        ..*view
+    }
+}
+
+/// **The speculative want set** (P28.4, clause 2): the analytic floor's own
+/// footprint rule, asked at the predicted camera, at [`VT_PRIORITY_PREDICT`].
+///
+/// Every one of these wants is strictly below both the floor and the feedback,
+/// so the whole set is free in the only sense that matters: it can take a slot
+/// nothing better wants, and it can never keep a slot something better wants.
+/// A prediction that is wrong therefore costs bytes that were idle and nothing
+/// else — which is what makes a 200–500 ms horizon a measurement rather than a
+/// risk.
+pub fn speculative_wants(
+    res: &inf_vt::VtResidency,
+    view: &RenderView,
+    coverage: &[VtCoverage],
+    prediction: &inf_math::Prediction,
+) -> Vec<VtWant> {
+    camera_wants(
+        res,
+        &predicted_view(view, prediction),
+        coverage,
+        inf_vt::VT_PRIORITY_PREDICT,
+    )
 }
 
 /// One feedback request as the compute shader reads it — 32 bytes.
@@ -471,16 +582,32 @@ pub fn feedback_requests(
 /// Split a want list into the floor and refinement classes — what the pop-in
 /// counters are summed over.
 pub(crate) fn count_fallbacks(lib: &VtTextures, wants: &[VtWant], stats: &mut VtPopIn) {
+    let mut floor_missed = false;
     for w in wants {
         let at_fallback = !lib.residency().is_resident(w.texture, w.tile);
-        if w.priority == VT_PRIORITY_FEEDBACK {
-            stats.refine_wants += 1;
-            stats.refine_fallback += u64::from(at_fallback);
-        } else {
-            stats.floor_wants += 1;
-            stats.floor_fallback += u64::from(at_fallback);
+        // **A match and not an `else`** (P28.4). Before the predictor existed
+        // the two classes were exhaustive and the `else` was harmless; with a
+        // third lane it would count every speculative want as a floor want, so
+        // switching the predictor on would *raise* `floor_wants` and
+        // `floor_fallback` — the two numbers the A/B arm reads to decide whether
+        // it helped. The gate would have measured its own instrument.
+        match w.priority {
+            inf_vt::VT_PRIORITY_FEEDBACK => {
+                stats.refine_wants += 1;
+                stats.refine_fallback += u64::from(at_fallback);
+            }
+            inf_vt::VT_PRIORITY_PREDICT => {
+                stats.predict_wants += 1;
+                stats.predict_fallback += u64::from(at_fallback);
+            }
+            _ => {
+                stats.floor_wants += 1;
+                stats.floor_fallback += u64::from(at_fallback);
+                floor_missed |= at_fallback;
+            }
         }
     }
+    stats.floor_fallback_frames += u64::from(floor_missed);
 }
 
 /// The GPU half of the loop: the coverage bitmask, its compute pass, and the
@@ -764,6 +891,160 @@ impl VtFeedback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── P28.4: the speculative lane's producer ───────────────────────────────
+
+    /// A view looking down `forward` from `eye`, 512 px tall.
+    fn look(eye: glam::DVec3, forward: Vec3) -> RenderView {
+        RenderView {
+            origin: inf_math::FloatingOrigin::new(glam::DVec3::ZERO),
+            eye_world: eye,
+            forward: forward.normalize(),
+            up: Vec3::Y,
+            fov_y: 60_f32.to_radians(),
+            near: 0.1,
+            width: 512,
+            height: 512,
+            ortho: None,
+        }
+    }
+
+    /// One 1 024² texture in an otherwise empty residency.
+    fn one_texture() -> (inf_vt::VtResidency, VtTextureHandle) {
+        let (mut res, _adv) = inf_vt::VtResidency::new(inf_vt::VtPoolConfig::default());
+        let h = res
+            .register_texture(inf_vt::full_pyramid(1024, 1024, 128, 4, true))
+            .expect("the floor fits the default budget");
+        (res, h)
+    }
+
+    fn cover(centre: Vec3, h: VtTextureHandle) -> VtCoverage {
+        VtCoverage {
+            centre,
+            radius: 1.0,
+            set: crate::scene::VtTextureSet {
+                albedo: h.0 + 1,
+                ..crate::scene::VtTextureSet::NONE
+            },
+            vgeom: false,
+        }
+    }
+
+    /// **One rule, two cameras** — the whole of clause 2's producer, stated as
+    /// the property that would break if the predictor grew a footprint rule of
+    /// its own: the speculative want set at a camera is the floor want set at
+    /// that same camera, with a different rank and nothing else different.
+    ///
+    /// A predictor with its own rule is not prefetching, it is streaming
+    /// something else — and the failure is silent, because both sets look
+    /// plausible on their own.
+    #[test]
+    fn a_speculative_want_is_the_floors_own_rule_at_another_camera() {
+        let (res, h) = one_texture();
+        let cov = [cover(Vec3::new(0.0, 0.0, -6.0), h)];
+        let view = look(glam::DVec3::ZERO, Vec3::NEG_Z);
+
+        let floor = camera_wants(&res, &view, &cov, inf_vt::VT_PRIORITY_FLOOR);
+        let spec = camera_wants(&res, &view, &cov, inf_vt::VT_PRIORITY_PREDICT);
+        assert!(!floor.is_empty(), "the fixture wants nothing at all");
+        assert_eq!(floor.len(), spec.len());
+        for (f, s) in floor.iter().zip(&spec) {
+            assert_eq!((f.texture, f.tile), (s.texture, s.tile));
+            assert_eq!(f.priority, inf_vt::VT_PRIORITY_FLOOR);
+            assert_eq!(s.priority, inf_vt::VT_PRIORITY_PREDICT);
+        }
+    }
+
+    /// **The prefetch, as a set difference.** A surface behind the camera is
+    /// wanted by nothing; the same surface, at the camera dead reckoning says is
+    /// coming, is wanted speculatively — which is the only thing the predictor
+    /// is for.
+    #[test]
+    fn a_surface_the_committed_camera_cannot_see_is_wanted_by_the_predicted_one() {
+        let (res, h) = one_texture();
+        // Behind and to the left, well outside a 60° frustum looking down −Z.
+        let cov = [cover(Vec3::new(-14.0, 0.0, 4.0), h)];
+        let view = look(glam::DVec3::ZERO, Vec3::NEG_Z);
+        assert!(
+            camera_wants(&res, &view, &cov, inf_vt::VT_PRIORITY_FLOOR).is_empty(),
+            "the fixture is visible already, so it cannot show a prefetch"
+        );
+
+        // A camera turning left at 0.06 rad/tick reaches it inside the horizon.
+        let mut hist = inf_math::CameraHistory::new();
+        for t in 0..6u64 {
+            let a = 0.06 * t as f64;
+            hist.commit(inf_math::CameraSample {
+                tick: t,
+                eye: glam::DVec3::ZERO,
+                forward: glam::DVec3::new(-inf_math::psin64(a), 0.0, -inf_math::pcos64(a)),
+                up: glam::DVec3::Y,
+            });
+        }
+        let p = inf_math::dead_reckon(&hist, 18).expect("six samples");
+        let spec = speculative_wants(&res, &view, &cov, &p);
+        assert!(
+            !spec.is_empty(),
+            "the predicted camera reaches nothing the committed one missed"
+        );
+        assert!(spec
+            .iter()
+            .all(|w| w.priority == inf_vt::VT_PRIORITY_PREDICT));
+    }
+
+    /// **The third class is a class**, not an `else`.
+    ///
+    /// Before P28.4 the classifier's two arms were exhaustive and its `else` was
+    /// harmless. With a third lane the `else` counts every speculative want as a
+    /// floor want, so switching the predictor on would *raise* `floor_wants` and
+    /// `floor_fallback` — the two numbers the A/B arm reads to decide whether it
+    /// helped. The gate would have measured its own instrument.
+    #[test]
+    fn the_pop_in_counters_keep_the_three_lanes_apart() {
+        let (mut lib, _adv) = crate::vt_library::VtTextures::new(inf_vt::VtPoolConfig::default());
+        let h = lib
+            .residency_mut()
+            .register_texture(inf_vt::full_pyramid(1024, 1024, 128, 4, true))
+            .expect("the floor fits");
+        // Mip 0 is never pinned, so every one of these is at fallback.
+        let t = |x| inf_vt::TileCoord::new(0, x, 0);
+        let wants = [
+            VtWant::new(h, t(0)),
+            VtWant::refine(h, t(1)),
+            VtWant::speculate(h, t(2)),
+        ];
+        let mut stats = VtPopIn::default();
+        count_fallbacks(&lib, &wants, &mut stats);
+        assert_eq!((stats.floor_wants, stats.floor_fallback), (1, 1));
+        assert_eq!((stats.refine_wants, stats.refine_fallback), (1, 1));
+        assert_eq!((stats.predict_wants, stats.predict_fallback), (1, 1));
+        assert_eq!(stats.floor_fallback_frames, 1);
+
+        // A frame whose floor is entirely resident does not count a fallback
+        // frame, however much speculation is outstanding — which is what makes
+        // the frame counter a statement about what the player sees.
+        let root = lib
+            .residency()
+            .desc(h)
+            .expect("registered")
+            .mip_count()
+            .saturating_sub(1);
+        let mut stats = VtPopIn::default();
+        count_fallbacks(
+            &lib,
+            &[
+                VtWant::new(h, inf_vt::TileCoord::new(root, 0, 0)),
+                VtWant::speculate(h, t(2)),
+            ],
+            &mut stats,
+        );
+        assert_eq!(
+            stats.floor_fallback, 0,
+            "the coarsest level is pinned at registration and must be resident"
+        );
+        assert_eq!(stats.floor_fallback_frames, 0);
+        assert_eq!(stats.predict_fallback, 1);
+    }
 
     /// The level rule: one texel per pixel, erring **coarse**, clamped into the
     /// pyramid at both ends.

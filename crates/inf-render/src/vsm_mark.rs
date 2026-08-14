@@ -74,6 +74,16 @@ pub struct VsmStreamStats {
     /// counter that says whether the snapping is doing anything, and the one an
     /// arm reads to prove a coarse level held still while a fine one did not.
     pub level_shifts: u64,
+    /// **Speculative wants offered**, summed over frames (P28.4) — the shadow
+    /// lane's **anti-vacuity** number.
+    ///
+    /// A predictor with an empty history, one clamped off by the tier, and one
+    /// whose camera only rotates all produce the same residency as no predictor
+    /// at all, and this is the only thing that tells the three apart. A pure
+    /// whip-pan reads **zero** here by construction — a camera-centred clipmap
+    /// does not scroll when the camera turns in place — and that is a
+    /// measurement the memo prints rather than a defect.
+    pub speculative_wants: u64,
     /// **Marking threads dispatched**, summed over frames (P27.5) — the tier
     /// knob's own engagement counter.
     ///
@@ -91,7 +101,7 @@ impl VsmStreamStats {
     pub fn summary(&self) -> String {
         format!(
             "vsm marking: {} frames, {} projections, {} admits / {} evicts, {} deferred, \
-             {} marked wants, mask {} landed / {} missed, {} level shifts, \
+             {} marked + {} speculative wants, mask {} landed / {} missed, {} level shifts, \
              {} marking threads",
             self.frames,
             self.projections,
@@ -99,6 +109,7 @@ impl VsmStreamStats {
             self.evicts,
             self.deferred,
             self.marked_wants,
+            self.speculative_wants,
             self.mark_frames,
             self.mark_misses,
             self.level_shifts,
@@ -675,6 +686,7 @@ impl VsmSystem {
         view: &RenderView,
         settings: &VsmSettings,
         frame: u64,
+        prediction: Option<inf_math::Prediction>,
     ) -> VsmTransaction {
         let (projections, layouts) = vsm_projections(
             scene,
@@ -703,7 +715,7 @@ impl VsmSystem {
         }
         self.stats.level_shifts += moved.len() as u64;
 
-        let wants = match self.marker.take_wants(&gpu.device, &self.residency, frame) {
+        let mut wants = match self.marker.take_wants(&gpu.device, &self.residency, frame) {
             Some(w) => {
                 self.stats.mark_frames += 1;
                 w
@@ -714,6 +726,31 @@ impl VsmSystem {
             }
         };
         self.stats.marked_wants += wants.len() as u64;
+        // **The speculative lane** (P28.4). The layouts the predicted eye would
+        // have produced, against the ones this frame did — the difference is a
+        // translation in page index space, and the proved page set moved through
+        // it is the predicted camera's cone.
+        //
+        // `vsm_projections` a second time, on the CPU, for at most
+        // `VSM_MAX_PROJECTIONS` matrices: cheaper than a second derivation of
+        // the snapping rule, and it cannot drift from the one that shipped
+        // because it IS the one that shipped (the P21 one-door law). Skipped
+        // entirely when there is no prediction, which is every host that does
+        // not commit a camera.
+        if let Some(p) = prediction {
+            let (_proj, soon) = vsm_projections(
+                scene,
+                &crate::vt_stream::predicted_view(view, &p),
+                settings,
+                &self.trees,
+                &self.blocks,
+                &self.bases,
+            );
+            let spec =
+                crate::vsm::speculative_shadow_wants(&wants, &self.layouts, &soon, &self.residency);
+            self.stats.speculative_wants += spec.len() as u64;
+            wants.extend(spec);
+        }
         let mut txn = self.residency.apply_wants(&wants);
         if !moved.is_empty() {
             txn.tables.extend(moved);

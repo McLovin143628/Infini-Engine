@@ -86,24 +86,30 @@ pub type VsmPriority = inf_stream::Lane;
 /// the budget allows.
 pub const VSM_PRIORITY_MARKED: VsmPriority = inf_stream::LANE_FLOOR;
 
-/// A page nothing has proved is needed yet — P28.4's dead-reckoning predictor,
-/// whose whole contract is that a speculative want *"enters at strictly lower
-/// priority than the analytic floor and feedback"*.
+/// A page nothing has proved is needed **yet** — the dead-reckoning predictor's
+/// rank, whose whole contract is that a speculative want *"enters at strictly
+/// lower priority than the analytic floor and feedback"*.
 ///
-/// **It has no producer in this tree, and that is stated rather than implied**
-/// (the `inf_vt::VtTransaction::unknown_texture` treatment). The rank mechanism
-/// ships now because the sort is the thing that has to be right, and a sort with
-/// one rank is a sort nothing exercises;
-/// [`tests::a_speculative_want_never_takes_a_marked_pages_slot`] is what makes
-/// it a tested property rather than a reserved constant.
+/// **P28.4 gives it its producer**: `inf_render::speculative_shadow_wants` takes
+/// the pages last frame's depth buffer proved were needed and moves them to
+/// where the predicted camera puts the clipmap window. It carried the
+/// `inf_vt::VtTransaction::unknown_texture` disclosure ("no producer in this
+/// tree, stated rather than implied") through P27.1 and P28.3; the disclosure is
+/// discharged rather than deleted, because a constant that has waited two phases
+/// for a producer should say which batch supplied it.
 ///
-/// **Since P28.3 it is `inf_stream::LANE_FEEDBACK`, not a third lane.** A shadow
-/// page has no feedback refinement class — the marking mask *is* the evidence
-/// and there is nothing finer to ask for — so the rank immediately below marked
-/// is the one a speculation takes, and `inf_stream::LANE_PREDICT` stays free for
-/// the consumer that has two producers under its floor. The numeric value is
-/// unchanged (1), which is why no committed trace moves.
-pub const VSM_PRIORITY_SPECULATIVE: VsmPriority = inf_stream::LANE_FEEDBACK;
+/// **P28.3 made it `inf_stream::LANE_FEEDBACK` and P28.4 makes it
+/// `LANE_PREDICT`.** P28.3's argument was that a shadow page has no feedback
+/// refinement class, so the rank immediately below marked is the one a
+/// speculation takes. That is still true of this consumer read alone, and it is
+/// the wrong reading now that the lane has a producer: the invariant P28.4 has
+/// to assert is one statement over all three consumers — *residency ⊇ floor ∪
+/// feedback under full speculative pressure* — and a speculation sitting in the
+/// feedback lane makes that statement mean something different here than it
+/// means next door. One producer, one lane, one proof. Nothing observable moves:
+/// no producer of this crate's has ever emitted `LANE_FEEDBACK`, so the walk
+/// sees the same two ranks in the same order and no committed trace changes.
+pub const VSM_PRIORITY_SPECULATIVE: VsmPriority = inf_stream::LANE_PREDICT;
 
 /// The most pages one light's virtual space may hold.
 ///
