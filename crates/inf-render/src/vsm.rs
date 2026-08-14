@@ -1230,15 +1230,43 @@ mod tests {
         assert!(spec.iter().all(|w| !proved.contains(&w.page.entry_order())));
     }
 
-    /// **The speculative rank is strictly below the marked one**, which is the
-    /// half of clause 2 that lives in this crate's vocabulary.
+    /// **The speculative rank is strictly below the marked one**, asserted
+    /// through the **walk** rather than between the two constants.
+    ///
+    /// Comparing the constants is a comparison clippy can const-fold, and it is
+    /// right to: an arm over two `const`s cannot fail at runtime, so it tests
+    /// the compiler rather than the order. What has to be true is that
+    /// `inf_stream::normalize` — the one pipeline both slot-pool consumers run
+    /// — puts a proved page ahead of a speculated one, and that a duplicate
+    /// resolves to the **stronger** lane. Both are runtime facts about the
+    /// shipped function.
     #[test]
     fn a_shadow_speculation_ranks_below_every_proved_page() {
-        assert!(inf_vsm::VSM_PRIORITY_SPECULATIVE > inf_vsm::VSM_PRIORITY_MARKED);
-        assert_eq!(inf_vsm::VSM_PRIORITY_MARKED, inf_stream::LANE_FLOOR);
-        // P28.4 moved it out of the feedback lane so one invariant covers all
-        // three consumers — see the constant's own docs.
-        assert_eq!(inf_vsm::VSM_PRIORITY_SPECULATIVE, inf_stream::LANE_PREDICT);
+        let marked = inf_vsm::VsmWant::new(inf_vsm::VsmLightHandle(0), VsmPage::flat(0, 9, 9));
+        let spec = inf_vsm::VsmWant {
+            light: inf_vsm::VsmLightHandle(0),
+            page: VsmPage::flat(0, 1, 1),
+            priority: inf_vsm::VSM_PRIORITY_SPECULATIVE,
+        };
+        // Offered speculation-first and at the LOW address, so payload order and
+        // lane order are opposed and the assertion is about the lane.
+        let out = inf_stream::normalize(&[spec, marked], |w| w.page.entry_order(), |w| w.priority);
+        assert_eq!(out, vec![marked, spec], "the walk did not rank the lanes");
+
+        // …and one address wanted by both classes is served as the PROVED one,
+        // which is the claim that matters when the predictor guesses right.
+        let both = inf_stream::normalize(
+            &[
+                inf_vsm::VsmWant {
+                    priority: inf_vsm::VSM_PRIORITY_SPECULATIVE,
+                    ..marked
+                },
+                marked,
+            ],
+            |w| w.page.entry_order(),
+            |w| w.priority,
+        );
+        assert_eq!(both, vec![marked]);
     }
 
     /// **THE DEPTH-CONVENTION MEASUREMENT** (P27.1 clause 4), and the numbers

@@ -304,8 +304,8 @@ fn run(predict: Option<u32>, pages: u64) -> Arm {
         // reads at tick `t` was written at `t − READBACK_LATENCY_FRAMES`, and it
         // could only mark surfaces that were visible then. Both halves of that
         // are the lag the predictor exists to close.
-        if tick >= READBACK_LATENCY_FRAMES as u64 {
-            let past = whip_view(tick - READBACK_LATENCY_FRAMES as u64);
+        if tick >= READBACK_LATENCY_FRAMES {
+            let past = whip_view(tick - READBACK_LATENCY_FRAMES);
             wants.extend(
                 justified_tiles(lib.residency(), &past, &cov)
                     .into_iter()
