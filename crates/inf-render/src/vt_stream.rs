@@ -191,8 +191,8 @@ impl VtPopIn {
     pub fn summary(&self) -> String {
         format!(
             "vt streaming: {} frames, {} admits ({} uploads, {:.2} MiB), {} deferred, \
-             floor {}/{} at fallback over {} frames, refine {}/{} at fallback, \
-             predict {}/{} at fallback, feedback {} landed / {} missed",
+             floor {}/{} at fallback over {} frames, refine {}/{} at fallback over \
+             {} frames, predict {}/{} at fallback, feedback {} landed / {} missed",
             self.frames,
             self.admits,
             self.page_uploads,
@@ -203,6 +203,13 @@ impl VtPopIn {
             self.floor_fallback_frames,
             self.refine_fallback,
             self.refine_wants,
+            // P28.5: `refine_fallback_frames` reached this line in NEITHER of the
+            // two batches that added it and its sibling. Its own doc calls it
+            // "the *other* A/B counter, and the one a whip-pan actually moves",
+            // and the summary printed the floor's frame count beside it and not
+            // its own — so the counter a player's question maps onto was the one
+            // number the host's line did not carry.
+            self.refine_fallback_frames,
             self.predict_fallback,
             self.predict_wants,
             self.feedback_frames,
@@ -1232,5 +1239,69 @@ mod tests {
         assert!((big - 2.0 * near).abs() < 1e-3);
         // A surface at the eye does not divide by zero.
         assert!(screen_diameter_px(eye, 1.0, eye, 500.0).is_finite());
+    }
+
+    /// **The pop-in line carries every counter the struct has** (P28.5).
+    ///
+    /// `refine_fallback_frames` landed in P28.4 beside `floor_fallback_frames`
+    /// and did not reach this line — so the one counter whose own doc says it
+    /// *"answers the question a player asks: how often did I look at something
+    /// blurry"* was the one number the host's line did not carry.
+    ///
+    /// Asserted as a **field count** and not as a list of tokens, because a list
+    /// enumerates what you thought of (the P22 law): every field is given a
+    /// distinct value and every value has to appear, so a counter added later
+    /// and forgotten fails here.
+    #[test]
+    fn the_pop_in_line_prints_every_counter_it_holds() {
+        let p = VtPopIn {
+            floor_wants: 11,
+            floor_fallback: 12,
+            refine_wants: 13,
+            refine_fallback: 14,
+            feedback_frames: 15,
+            feedback_misses: 16,
+            deferred: 17,
+            admits: 18,
+            frames: 19,
+            page_uploads: 20,
+            page_upload_bytes: 21 * 1024 * 1024,
+            floor_fallback_frames: 22,
+            predict_wants: 23,
+            predict_fallback: 24,
+            refine_fallback_frames: 25,
+        };
+        let s = p.summary();
+        for (n, name) in [
+            (11, "floor_wants"),
+            (12, "floor_fallback"),
+            (13, "refine_wants"),
+            (14, "refine_fallback"),
+            (15, "feedback_frames"),
+            (16, "feedback_misses"),
+            (17, "deferred"),
+            (18, "admits"),
+            (19, "frames"),
+            (20, "page_uploads"),
+            (22, "floor_fallback_frames"),
+            (23, "predict_wants"),
+            (24, "predict_fallback"),
+            (25, "refine_fallback_frames"),
+        ] {
+            assert!(
+                s.contains(&n.to_string()),
+                "`{name}` ({n}) is not in the host's line: {s}"
+            );
+        }
+        assert!(s.contains("21.00 MiB"), "{s}");
+        // …and the values really are distinguishable, which is what makes the
+        // check above a check: fifteen fields, fifteen distinct values.
+        let vals = [
+            11u64, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+        ];
+        assert_eq!(
+            vals.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            15
+        );
     }
 }

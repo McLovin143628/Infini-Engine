@@ -954,6 +954,61 @@ impl EngineRenderer {
         self.vt_pop_in
     }
 
+    /// **The one line a host logs about the predictor** (P28.5) — and the
+    /// reader `Prediction::turn`, `Prediction::clamped` and
+    /// `CameraHistory::refused` were declared for and never got.
+    ///
+    /// The P28.4 ledger carried all three as "reported diagnostics on a public
+    /// struct rather than dead counters — a host that wants to see the clamp
+    /// bind can", and the P28.4 audit inherited them to this batch under the
+    /// name they deserve: *a line nothing logs*. This is the line.
+    ///
+    /// `None` when no host has committed a camera, which is not the same as a
+    /// line of zeros: an empty history is the predictor's real enable flag, so
+    /// a host that prints nothing is saying "nothing here commits a pose" —
+    /// which is the true and permanent state of the editor viewport — and one
+    /// that prints zeros is saying "something does, and it is predicting
+    /// nothing".
+    ///
+    /// The four numbers answer four different questions and no one of them
+    /// implies another:
+    ///
+    /// * **`refused`** — pushes rejected for not advancing the tick. Non-zero
+    ///   means this host is wired to the render loop rather than to the fixed
+    ///   step, and it is the number that says so; without it such a host reads
+    ///   as "the predictor does nothing".
+    /// * **`turn`** — how far the prediction rotated the view this frame, in
+    ///   degrees. Zero at the shipped horizon of 0, and that is the point: it
+    ///   is what makes the lead-time ruling visible in a log.
+    /// * **`clamped`** — whether [`inf_math::PREDICT_MAX_TURN`] bound it.
+    /// * **`predict_wants` / `predict_fallback`** — the lane's own throughput,
+    ///   from `VtPopIn`, so one line answers "is the lane running" as well as
+    ///   "is the reckoner turning".
+    pub fn predict_summary(&self) -> Option<String> {
+        let h = &self.camera_history;
+        if h.is_empty() && h.refused() == 0 {
+            return None;
+        }
+        let p = self.prediction();
+        Some(format!(
+            "predict: {} committed poses ({} refused), horizon {} ticks — {}; \
+             lane {} wants, {} at fallback",
+            h.len(),
+            h.refused(),
+            self.settings.stream.predict.horizon_ticks,
+            match p {
+                None => "no prediction".to_string(),
+                Some(p) => format!(
+                    "turn {:.2} deg{}",
+                    p.turn.to_degrees(),
+                    if p.clamped { " (CLAMPED)" } else { "" }
+                ),
+            },
+            self.vt_pop_in.predict_wants,
+            self.vt_pop_in.predict_fallback,
+        ))
+    }
+
     /// **The one line a host logs about virtual texturing** (P26.5) — and the
     /// non-gate reader `VtStats::summary` and [`crate::VtPopIn::summary`] were
     /// both declared for.

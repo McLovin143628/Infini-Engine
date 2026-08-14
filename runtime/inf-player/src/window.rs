@@ -283,7 +283,19 @@ impl PlayerApp {
             .live
             .as_ref()
             .is_some_and(|l| l.host.vsm_summary().is_some());
-        if !terrain && !cells && !shadows {
+        // P28.5: and the three lines that had none. `vt_summary`,
+        // `stream_summary` and `predict_summary` each ship with the doc comment
+        // "the one line a host logs about …" and, until this batch, no host
+        // logged any of them — the "a line nothing logs" class the P28.4 audit
+        // inherited to the last batch of the plan. Same seam, same cadence,
+        // same rule: a subject that is absent produces no line at all rather
+        // than a line of zeros.
+        let paging = self.live.as_ref().is_some_and(|l| {
+            l.host.vt_summary().is_some()
+                || l.host.stream_summary().is_some()
+                || l.host.predict_summary().is_some()
+        });
+        if !terrain && !cells && !shadows && !paging {
             return;
         }
         self.stats_accum += dt;
@@ -304,6 +316,15 @@ impl PlayerApp {
             );
         }
         if let Some(line) = self.live.as_ref().and_then(|l| l.host.vsm_summary()) {
+            tracing::info!("inf-player: {line}");
+        }
+        if let Some(line) = self.live.as_ref().and_then(|l| l.host.vt_summary()) {
+            tracing::info!("inf-player: {line}");
+        }
+        if let Some(line) = self.live.as_ref().and_then(|l| l.host.stream_summary()) {
+            tracing::info!("inf-player: {line}");
+        }
+        if let Some(line) = self.live.as_ref().and_then(|l| l.host.predict_summary()) {
             tracing::info!("inf-player: {line}");
         }
     }

@@ -392,6 +392,35 @@ impl PlayerRenderHost {
         self.renderer.vsm_summary()
     }
 
+    /// **The three lines P28.5 gave a host** — virtual texturing, the unified
+    /// streamer, and the predictor.
+    ///
+    /// `vsm_summary` above closed the P27.1 remainder *"nothing logs
+    /// `vsm_summary` in a host"*. These three were the same shape and nobody
+    /// noticed: `EngineRenderer::vt_summary` (P26.5),
+    /// `EngineRenderer::stream_summary` (P28.3) and
+    /// `EngineRenderer::predict_summary` (P28.5) each carry the doc comment
+    /// *"the one line a host logs about …"* and, until this batch, **no host
+    /// logged any of them** — a gate read `stream_report` and nothing read the
+    /// line. The class ends with the plan.
+    ///
+    /// Each is `None` rather than a line of zeros when its subject is absent,
+    /// for the reason `vsm_summary` gives: a level with no virtual textures and
+    /// a level whose pool is idle are different states.
+    pub fn vt_summary(&self) -> Option<String> {
+        self.renderer.vt_summary()
+    }
+
+    /// See [`PlayerRenderHost::vt_summary`].
+    pub fn stream_summary(&self) -> Option<String> {
+        self.renderer.stream_summary()
+    }
+
+    /// See [`PlayerRenderHost::vt_summary`].
+    pub fn predict_summary(&self) -> Option<String> {
+        self.renderer.predict_summary()
+    }
+
     pub fn vgeom_enabled(&self) -> bool {
         self.vgeom_enabled
     }
