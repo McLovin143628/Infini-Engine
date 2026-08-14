@@ -803,7 +803,12 @@ fn pair_page_tiles(
         return Vec::new();
     }
     // The page's uv footprint, in wrapped uv space.
-    let (mut u0, mut u1, mut v0, mut v1) = (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY, f32::NEG_INFINITY);
+    let (mut u0, mut u1, mut v0, mut v1) = (
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+    );
     let mut any = false;
     for &mi in members {
         let m = &mesh.meshlets[mi as usize];
@@ -1689,8 +1694,12 @@ mod tests {
     #[test]
     fn build_is_byte_deterministic() {
         let m = dense_mesh(20);
-        let a = build_vgeom_asset(&m, &ClusterTextureSet::none()).unwrap().into_bytes();
-        let b = build_vgeom_asset(&m, &ClusterTextureSet::none()).unwrap().into_bytes();
+        let a = build_vgeom_asset(&m, &ClusterTextureSet::none())
+            .unwrap()
+            .into_bytes();
+        let b = build_vgeom_asset(&m, &ClusterTextureSet::none())
+            .unwrap()
+            .into_bytes();
         assert_eq!(a, b, "two builds of one mesh are byte-identical");
     }
 
@@ -1877,7 +1886,9 @@ mod tests {
             VgeomAssetError::TooShort
         );
         let m = dense_mesh(12);
-        let mut bytes = build_vgeom_asset(&m, &ClusterTextureSet::none()).unwrap().into_bytes();
+        let mut bytes = build_vgeom_asset(&m, &ClusterTextureSet::none())
+            .unwrap()
+            .into_bytes();
         bytes[8..12].copy_from_slice(&99u32.to_le_bytes());
         assert!(matches!(
             VgeomAssetImage::from_bytes(bytes).unwrap_err(),
@@ -1890,7 +1901,9 @@ mod tests {
     #[test]
     fn rejects_a_corrupt_directory() {
         let m = dense_mesh(12);
-        let mut bytes = build_vgeom_asset(&m, &ClusterTextureSet::none()).unwrap().into_bytes();
+        let mut bytes = build_vgeom_asset(&m, &ClusterTextureSet::none())
+            .unwrap()
+            .into_bytes();
         // Point page 0's meshlet section past the end of the payload.
         let off = HEADER_LEN as usize + 56;
         bytes[off..off + 8].copy_from_slice(&u64::MAX.to_le_bytes());
@@ -1910,7 +1923,9 @@ mod tests {
     #[test]
     fn rejects_a_record_whose_micro_index_range_escapes_its_page() {
         let m = dense_mesh(24);
-        let good = build_vgeom_asset(&m, &ClusterTextureSet::none()).unwrap().into_bytes();
+        let good = build_vgeom_asset(&m, &ClusterTextureSet::none())
+            .unwrap()
+            .into_bytes();
         // Page 1 (the coarsest non-root level) is small and definitely present.
         let page = 1usize;
         let recs_off = {
@@ -1954,7 +1969,9 @@ mod tests {
     #[test]
     fn rejects_header_counts_larger_than_the_payload() {
         let m = dense_mesh(16);
-        let good = build_vgeom_asset(&m, &ClusterTextureSet::none()).unwrap().into_bytes();
+        let good = build_vgeom_asset(&m, &ClusterTextureSet::none())
+            .unwrap()
+            .into_bytes();
         for off in [20usize, 16] {
             // 20 = vertex_count, 16 = meshlet_count.
             let mut bytes = good.clone();
@@ -2065,7 +2082,10 @@ mod tests {
                 }
             }
         }
-        assert!(total > r.pages().len(), "the pairing is not one tile a page");
+        assert!(
+            total > r.pages().len(),
+            "the pairing is not one tile a page"
+        );
     }
 
     /// No pairing, no section — and the bytes are the same as a build that never

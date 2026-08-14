@@ -196,12 +196,7 @@ pub fn build_grid(n: usize, amp: f64, normals: GridNormals) -> VgeomMesh {
 /// so `∂p/∂u = (1, ∂y/∂x, 0)` normalized, and the handedness is `+1` because
 /// `(u, v)` runs the same way as `(x, z)`. Derived in f64 and cast once, like the
 /// normals beside it — [`inf_math`]'s portable trig for the same P14 reason.
-pub fn build_grid_tangented(
-    n: usize,
-    amp: f64,
-    normals: GridNormals,
-    tangents: bool,
-) -> VgeomMesh {
+pub fn build_grid_tangented(n: usize, amp: f64, normals: GridNormals, tangents: bool) -> VgeomMesh {
     let (positions, nrms, uvs, indices) = displaced_grid(n, amp, normals);
     let tan = if tangents {
         grid_tangents(n, amp)

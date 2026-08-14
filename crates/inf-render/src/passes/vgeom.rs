@@ -1643,7 +1643,9 @@ impl VgeomNode {
                 let bounds = source.bounds();
                 let threshold = insts
                     .iter()
-                    .map(|i| pack_instance(&origin, view, bounds, i, settings.pixel_error).threshold)
+                    .map(|i| {
+                        pack_instance(&origin, view, bounds, i, settings.pixel_error).threshold
+                    })
                     .fold(f32::INFINITY, f32::min);
                 Some(inf_vgeom::VgeomWant {
                     asset: *asset,

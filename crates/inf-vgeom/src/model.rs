@@ -709,7 +709,8 @@ mod tangent_tests {
                     for h in [1.0f32, -1.0] {
                         let (back, hb) = unpack_tangent(pack_tangent(t, h)).expect("packed");
                         assert_eq!(hb, h, "handedness survives");
-                        let dot = (t[0] * back[0] + t[1] * back[1] + t[2] * back[2]).clamp(-1.0, 1.0);
+                        let dot =
+                            (t[0] * back[0] + t[1] * back[1] + t[2] * back[2]).clamp(-1.0, 1.0);
                         worst = worst.max(1.0 - dot);
                     }
                 }
@@ -726,7 +727,11 @@ mod tangent_tests {
     /// and it survives the round trip as "no tangent" rather than as a direction.
     #[test]
     fn a_degenerate_tangent_is_the_sentinel_and_not_a_direction() {
-        for t in [[0.0, 0.0, 0.0], [f32::NAN, 0.0, 0.0], [f32::INFINITY, 0.0, 0.0]] {
+        for t in [
+            [0.0, 0.0, 0.0],
+            [f32::NAN, 0.0, 0.0],
+            [f32::INFINITY, 0.0, 0.0],
+        ] {
             assert_eq!(pack_tangent(t, 1.0), NO_TANGENT, "{t:?}");
         }
         assert!(unpack_tangent(NO_TANGENT).is_none());

@@ -356,7 +356,10 @@ fn without_the_coupling_a_resident_cluster_loses_its_tiles() {
         step(&mut streamer, &mut res, &by_guid, &src, t, false);
     }
     let resident = streamer.residency(ASSET).map_or(0, |r| r.resident_pages());
-    assert!(resident > 0, "nothing streamed — the control proves nothing");
+    assert!(
+        resident > 0,
+        "nothing streamed — the control proves nothing"
+    );
 
     let mut missing = 0usize;
     let mut total = 0usize;

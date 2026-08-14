@@ -1805,7 +1805,8 @@ mod tests {
     #[test]
     fn a_page_that_does_not_fit_rolls_back_completely() {
         let shape = [62u64, 1, 64, 93];
-        let bytes = shape[0] * VERTEX_REC_LEN as u64 + shape[1] * MESHLET_REC_LEN as u64
+        let bytes = shape[0] * VERTEX_REC_LEN as u64
+            + shape[1] * MESHLET_REC_LEN as u64
             + shape[2] * 4
             + shape[3] * 4;
         let mut pools = VgeomPools::new(bytes - 4);
@@ -1822,7 +1823,8 @@ mod tests {
     #[test]
     fn a_roomy_budget_still_grows_speculatively() {
         let shape = [62u64, 1, 64, 93];
-        let bytes = shape[0] * VERTEX_REC_LEN as u64 + shape[1] * MESHLET_REC_LEN as u64
+        let bytes = shape[0] * VERTEX_REC_LEN as u64
+            + shape[1] * MESHLET_REC_LEN as u64
             + shape[2] * 4
             + shape[3] * 4;
         let mut pools = VgeomPools::new(bytes * 4096);

@@ -1555,9 +1555,10 @@ impl EngineRenderer {
         //   3. pair — or retract the pages whose tiles the transaction could not
         //      seat, releasing their pool blocks before anything can write them.
         //
-        // Disjoint field borrows: the node lives in `self.graph`, the registry in
-        // `self.vt_textures`, and the destructuring is what lets both be `&mut`
-        // at once.
+        // Disjoint field borrows: the node lives in `self.graph` and the texture
+        // registry in `self.vt_textures`, so `&mut self.graph` and
+        // `&self.vt_textures` coexist — which is why steps 1 and 3 can ask the
+        // registry a question while holding the node.
         let vsettings = self.settings.vgeom;
         let cluster_wants = {
             let node = self.graph.node_mut::<passes::vgeom::VgeomNode>();
@@ -1565,9 +1566,7 @@ impl EngineRenderer {
                 Some(n) => {
                     n.plan_cluster_pages(scene, view, &vsettings);
                     let lib = self.vt_textures.as_ref();
-                    n.cluster_tile_wants(scene, |g| {
-                        lib.is_some_and(|l| l.handle(g).is_some())
-                    })
+                    n.cluster_tile_wants(scene, |g| lib.is_some_and(|l| l.handle(g).is_some()))
                 }
                 None => Vec::new(),
             }

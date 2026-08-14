@@ -827,10 +827,7 @@ fn derive_fracture(
 /// * a mesh bound to a material whose `.inf_mat` bytes are not in the closure.
 fn plan_cluster_pairings(
     inputs: &[CookInput],
-) -> (
-    BTreeMap<AssetId, inf_vgeom::ClusterTextureSet>,
-    Vec<String>,
-) {
+) -> (BTreeMap<AssetId, inf_vgeom::ClusterTextureSet>, Vec<String>) {
     let mut by_guid: BTreeMap<AssetId, (AssetKind, &[u8])> = BTreeMap::new();
     for input in inputs {
         if let CookInput::Asset {
@@ -889,10 +886,7 @@ fn plan_cluster_pairings(
                     continue;
                 };
                 match inf_material::tiles::TiledTextureReader::new(bytes) {
-                    Ok(r) => textures.push(inf_vgeom::ClusterTexture::from_desc(
-                        tex,
-                        &r.vt_desc(),
-                    )),
+                    Ok(r) => textures.push(inf_vgeom::ClusterTexture::from_desc(tex, &r.vt_desc())),
                     Err(_) => {
                         notes.insert(unpairable_cluster_texture_advisory(mesh, mat, tex));
                     }
