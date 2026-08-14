@@ -1608,7 +1608,9 @@ impl EngineRenderer {
         };
         let vis_frames_before = self.vis_audit().frames;
         self.graph.run(gpu, &mut encoder, &frame);
-        drop(frame);
+        // No `drop(frame)`: `FrameData` implements no `Drop`, so NLL ends its
+        // borrow of `self` at the last use above — the line above — and clippy's
+        // `drop_non_drop` is right that spelling it out buys nothing.
 
         // **The virtual-texture feedback's ring copy** (P28.1), recorded here
         // rather than inside `VtFeedback::record`: the per-FRAGMENT producer
