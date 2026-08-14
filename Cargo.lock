@@ -3376,6 +3376,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.2",
  "inf-anim",
+ "inf-asset",
  "inf-core",
  "inf-material",
  "inf-math",
@@ -3390,6 +3391,7 @@ dependencies = [
  "png 0.18.1",
  "pollster",
  "tracing",
+ "uuid",
  "wgpu",
  "xxhash-rust",
 ]
