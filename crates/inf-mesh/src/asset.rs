@@ -290,6 +290,7 @@ impl AssetPayload for MeshAsset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use inf_asset::{decode, encode};
 
     /// **The placeholder is not a direction, and `vgeom_streams` must not ship it
     /// as one** (P28.2 audit). Exact and whole-mesh: one authored tangent
@@ -330,9 +331,6 @@ mod tests {
         assert_eq!(tangents[2], authored);
         assert_eq!(tangents[0], TANGENT_PLACEHOLDER);
     }
-
-    use super::*;
-    use inf_asset::{decode, encode};
 
     fn quad() -> SubMesh {
         let v = |x: f32, y: f32| MeshVertex {
