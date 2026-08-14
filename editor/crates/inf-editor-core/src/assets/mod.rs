@@ -868,7 +868,9 @@ mod tests {
         let d = proj.content_dir("tables").unwrap();
 
         let mut table = inf_asset::StructAsset::new("Doc");
-        let id = proj.write_asset(&d, "Doc", &table, None, vec![], None).unwrap();
+        let id = proj
+            .write_asset(&d, "Doc", &table, None, vec![], None)
+            .unwrap();
         let path = proj.db().get(id).unwrap().path.clone();
         let before = std::fs::read(&path).unwrap();
 
@@ -958,7 +960,10 @@ mod tests {
         let first = proj
             .write_asset_at(&path, &inf_asset::StructAsset::new("Forest"), vec![])
             .unwrap();
-        assert!(inf_asset::sidecar_path(&path).exists(), "no sidecar written");
+        assert!(
+            inf_asset::sidecar_path(&path).exists(),
+            "no sidecar written"
+        );
 
         let mut edited = inf_asset::StructAsset::new("Forest");
         edited.name = "Forest v2".into();

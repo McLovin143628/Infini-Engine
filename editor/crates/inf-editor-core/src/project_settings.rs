@@ -137,7 +137,8 @@ mod tests {
         ProjectSettings::default().save(dir.path()).unwrap();
         let path = settings_path(dir.path());
         let damaged = b"pixels_per_unit = \"one hundred\"
-".to_vec();
+"
+        .to_vec();
         std::fs::write(&path, &damaged).unwrap();
 
         let err = ProjectSettings::load_or_default(dir.path())

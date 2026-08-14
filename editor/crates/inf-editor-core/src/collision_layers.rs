@@ -222,7 +222,8 @@ mod tests {
 [[layers]]
 bit = 0
 =======
-".to_vec();
+"
+        .to_vec();
         std::fs::write(&path, &damaged).unwrap();
 
         let err = CollisionLayers::load_or_default(dir.path())

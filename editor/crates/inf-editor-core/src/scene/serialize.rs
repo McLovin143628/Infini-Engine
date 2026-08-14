@@ -6394,8 +6394,9 @@ pub fn recovery_terrain_note_path(dir: &Path) -> PathBuf {
 pub fn write_recovery_terrain_note(dir: &Path, note: Option<&str>) -> Result<(), String> {
     let path = recovery_terrain_note_path(dir);
     match note {
-        Some(text) => inf_asset::write_atomically(&path, text)
-            .map_err(|e| format!("write terrain note: {e}")),
+        Some(text) => {
+            inf_asset::write_atomically(&path, text).map_err(|e| format!("write terrain note: {e}"))
+        }
         None => {
             let _ = std::fs::remove_file(&path);
             Ok(())
@@ -6559,7 +6560,10 @@ fn discard_recovery(dir: &Path) {
 /// the next boot refuse it, and the `Err` lets the save that failed to clear it
 /// say so instead of returning silent success.
 pub fn clear_recovery(dir: &Path) -> Result<(), String> {
-    consume_recovery_file(dir, "a later boot would restore it over the level just saved");
+    consume_recovery_file(
+        dir,
+        "a later boot would restore it over the level just saved",
+    );
     let _ = std::fs::remove_file(recovery_terrain_note_path(dir));
     if recovery_path(dir).exists() {
         return Err(format!(

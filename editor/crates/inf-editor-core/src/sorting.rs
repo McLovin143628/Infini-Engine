@@ -189,7 +189,8 @@ mod tests {
         let path = layers_path(dir.path());
         let damaged = b"[[layers]]
 id = \"not a number\"
-".to_vec();
+"
+        .to_vec();
         std::fs::write(&path, &damaged).unwrap();
 
         let err = SortingLayers::load_or_default(dir.path())

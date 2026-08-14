@@ -122,7 +122,11 @@ mod tests {
         let mut seen = Vec::new();
         live.read_to_end(&mut seen).unwrap();
         assert_eq!(seen, old, "a live reader must not observe the rewrite");
-        assert_eq!(std::fs::read(&path).unwrap(), new, "the file is the new one");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            new,
+            "the file is the new one"
+        );
         assert!(no_temp_litter(dir.path()), "left temp files behind");
     }
 

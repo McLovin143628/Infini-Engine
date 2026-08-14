@@ -202,7 +202,10 @@ mod tests {
             RECENT_SCHEMA_VERSION
         );
 
-        let future = format!("{{\"schema_version\": {}, \"entries\": []}}", RECENT_SCHEMA_VERSION + 1);
+        let future = format!(
+            "{{\"schema_version\": {}, \"entries\": []}}",
+            RECENT_SCHEMA_VERSION + 1
+        );
         std::fs::write(&path, future.as_bytes()).unwrap();
         let err = RecentProjects::load_or_default(cfg.path())
             .expect_err("a newer list must be refused, not reinterpreted");

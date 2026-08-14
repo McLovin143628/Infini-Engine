@@ -159,7 +159,8 @@ pub async fn terrain_export_data_map(
     // Atomic (C4-29): the file name is deterministic, so a re-export overwrites
     // a committed PNG inside the content root that the watcher has registered as
     // an asset — a torn one is a broken asset, not a missing file.
-    inf_asset::write_atomically(&path, &png).map_err(|e| format!("write {}: {e}", path.display()))?;
+    inf_asset::write_atomically(&path, &png)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
 
     Ok(DataMapExportDto {
         map: kind.label().to_string(),
