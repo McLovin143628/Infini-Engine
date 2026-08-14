@@ -14884,7 +14884,20 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
 > warnings on stderr). Exactly the P28.3 baseline of 249 / 4 512 / 0 / 8 plus
 > this batch's **one** new binary (`whip_pan`) and **24** new arms — ten in
 > `inf-math::predict`, four in `vt_stream`, three in `vsm`, seven in the gate.
-> Disk 74.7 GB free at start, 72.6 GB at end.
+> Disk 74.7 GB free at start, 72.5 GB at end. `cargo clippy --workspace
+> --all-targets` with `RUSTFLAGS=-D warnings` **exit 0, zero warnings**, run
+> LAST per the machine note; `cargo fmt --all --check` clean. Clippy found
+> **two**, both in this batch's own test code and both fixed rather than
+> allowed: a redundant `as u64` on a constant already of that type, and
+> `a_shadow_speculation_ranks_below_every_proved_page` comparing two `const`s —
+> which clippy const-folds and is right to, because an arm over two constants
+> cannot fail at runtime and was therefore testing the compiler rather than the
+> rank. It now asserts the order through `inf_stream::normalize` itself, with
+> payload order and lane order deliberately opposed, plus the claim that
+> matters when the predictor guesses right: one address wanted by both classes
+> resolves to the **proved** lane. The affected targets were re-run after both
+> fixes (inf-render lib 439, `whip_pan` 7, `stream_arbiter` 8,
+> `cluster_pages` 6).
 >
 > **Three doc defects found by self-review after the battery**, all comment-only
 > and all in this batch's own text: a `[RenderSettings::clamp_mobile]` link that
