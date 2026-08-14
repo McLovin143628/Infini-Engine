@@ -6,6 +6,11 @@
 //! in the shared [`GltfImport`] container — and the `meshopt` post-process
 //! ([`optimize`]), and the cook-time Voronoi pre-fracture pipeline
 //! ([`fracture`]) that derives a mesh's `.inf_fracture` chunk set.
+//!
+//! Both importers cross one door on the way in — [`validate`] — which is where
+//! finiteness, index bounds and stream-length agreement are checked. It is the
+//! only place in the engine where numbers somebody else wrote become engine
+//! data, so it is the only place those questions get asked.
 
 pub mod asset;
 pub mod error;
@@ -16,6 +21,7 @@ pub mod gltf_import;
 pub mod obj_import;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod optimize;
+pub mod validate;
 
 pub use asset::{Aabb, MeshAsset, MeshVertex, SubMesh, VertexSkin, TANGENT_PLACEHOLDER};
 pub use error::MeshError;

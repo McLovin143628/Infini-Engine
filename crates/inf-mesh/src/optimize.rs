@@ -44,8 +44,34 @@ use meshopt::{SimplifyOptions, VertexDataAdapter};
 
 /// Optimize one submesh's vertex + index buffers in place-of-return. Safe on
 /// empty input (returns it unchanged).
+///
+/// # It will not hand an out-of-range index to the FFI
+///
+/// `meshopt::generate_vertex_remap` is a raw `unsafe` call into a C library
+/// with no Rust-side validation: it sizes its remap table from `vertices.len()`
+/// and the C writes `remap[index]`, with the `assert` that would have caught an
+/// overrun compiled out under `-DNDEBUG`. One index past the end of the vertex
+/// buffer is therefore an out-of-bounds heap **write**, not a panic — and the
+/// glTF importer used to collect its index accessor with `into_u32().collect()`
+/// and pass it straight here (C4-1).
+///
+/// The refusal that matters is at the import door
+/// ([`crate::validate::reject_out_of_range`]), where it can name the file and
+/// the attribute. This is the check that stands between that door and the
+/// `unsafe` call for every *other* caller — the DCC exporter, photogrammetry
+/// finish — which build their own index buffers. Returning the input untouched
+/// is the only honest answer available at a signature with no error channel: an
+/// unoptimized mesh is a mesh, and the alternative is corrupting the allocator.
 pub fn optimize(vertices: Vec<MeshVertex>, indices: Vec<u32>) -> (Vec<MeshVertex>, Vec<u32>) {
     if vertices.is_empty() || indices.is_empty() {
+        return (vertices, indices);
+    }
+    if indices.iter().any(|&i| i as usize >= vertices.len()) {
+        debug_assert!(
+            false,
+            "optimize() was handed an index outside its vertex buffer; the import door \
+             (inf_mesh::validate) is supposed to have refused this file already"
+        );
         return (vertices, indices);
     }
 

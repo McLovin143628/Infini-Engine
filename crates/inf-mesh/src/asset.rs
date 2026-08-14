@@ -79,9 +79,23 @@ impl Default for VertexSkin {
 impl VertexSkin {
     /// Normalize the weights so they sum to 1 (falls back to "all joint 0" when
     /// the weights are degenerate / zero).
+    ///
+    /// # `sum > 1e-6` catches NaN and lets `+inf` through (C4-37)
+    ///
+    /// The guard reads as though it rejects everything unusual, and it half
+    /// does: `NaN > 1e-6` is false, so a NaN weight takes the safe fallback.
+    /// `inf > 1e-6` is **true**, so `weights = [inf, 0, 0, 0]` passes and each
+    /// division is `inf / inf` — NaN, manufactured out of an input that never
+    /// held one. It is then serialized into the `.inf_mesh` skin stream, which
+    /// is `#[repr(C)] Pod` and uploaded straight to a GPU vertex buffer.
+    ///
+    /// The importers refuse a non-finite `WEIGHTS_0` at the door
+    /// ([`crate::validate`]), so this is the second line rather than the first;
+    /// it stays because `VertexSkin` is public and a caller who built one by
+    /// hand never crossed that door.
     pub fn normalized(mut self) -> Self {
         let sum: f32 = self.weights.iter().sum();
-        if sum > 1e-6 {
+        if sum.is_finite() && sum > 1e-6 && self.weights.iter().all(|w| w.is_finite()) {
             for w in &mut self.weights {
                 *w /= sum;
             }

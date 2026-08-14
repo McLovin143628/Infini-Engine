@@ -21,6 +21,10 @@ use inf_anim::{
 use crate::asset::{MeshAsset, MeshVertex, SubMesh, VertexSkin};
 use crate::error::MeshError;
 use crate::optimize::optimize;
+use crate::validate::{
+    reject_joint_indices, reject_length_mismatch, reject_non_finite, reject_non_increasing,
+    reject_out_of_range,
+};
 
 /// A decoded texture source, RGBA8, straight from the glTF image list.
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +123,10 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
                 .read_inverse_bind_matrices()
                 .map(|it| it.collect())
                 .unwrap_or_default();
+            // The import door (P-hardening B / C4-8): an inverse-bind matrix is
+            // raw IEEE-754 out of the binary buffer and rides into `.inf_skel`
+            // and from there into every skinning matrix.
+            reject_non_finite(&ibms, "inverseBindMatrices")?;
             let mut joints = Vec::with_capacity(joint_nodes.len());
             for (i, node) in joint_nodes.iter().enumerate() {
                 let parent = parent_of
@@ -126,6 +134,8 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
                     .and_then(|p| map.get(p))
                     .copied();
                 let (t, r, s) = node.transform().decomposed();
+                reject_non_finite(&[t, s], "node translation/scale")?;
+                reject_non_finite(&[r], "node rotation")?;
                 let inverse_bind = ibms
                     .get(i)
                     .map(|m| Mat4::from_cols_array_2d(m).to_cols_array())
@@ -191,20 +201,29 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
                 Some(it) => it.collect(),
                 None => continue,
             };
+            // The import door (C4-7). `inf_anim::clip::locate` binary-searches
+            // these, so a NaN or an unsorted list is not a cosmetic defect: it
+            // is a wrong bracket at best and, before the guard beside it, an
+            // index underflow in the shipped player.
+            let what = format!("animation {:?} sampler input", anim.name().unwrap_or(""));
+            reject_non_increasing(&times, &what)?;
             let entry = tracks_by_joint
                 .entry(joint)
                 .or_insert_with(|| JointTrack::new(joint));
             match reader.read_outputs() {
                 Some(gltf::animation::util::ReadOutputs::Translations(it)) => {
                     let vals = resample_cubic(it.collect(), cubic);
+                    check_track(&times, &vals, "translation", &what)?;
                     entry.translation = Some(Vec3Track::new(times, vals, interp));
                 }
                 Some(gltf::animation::util::ReadOutputs::Scales(it)) => {
                     let vals = resample_cubic(it.collect(), cubic);
+                    check_track(&times, &vals, "scale", &what)?;
                     entry.scale = Some(Vec3Track::new(times, vals, interp));
                 }
                 Some(gltf::animation::util::ReadOutputs::Rotations(rot)) => {
                     let vals = resample_cubic(rot.into_f32().collect(), cubic);
+                    check_track(&times, &vals, "rotation", &what)?;
                     entry.rotation = Some(QuatTrack::new(times, vals, interp));
                 }
                 _ => {}
@@ -250,6 +269,14 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
     // Meshes → submeshes.
     for mesh in doc.meshes() {
         let name = mesh.name().unwrap_or("Mesh").to_string();
+        // How many joints this mesh's skin actually has, so `JOINTS_0` can be
+        // bounded against it (C4-20). Zero when no skin resolved, in which case
+        // the influences are dropped rather than bound.
+        let skin_joints = mesh_to_skin
+            .get(&mesh.index())
+            .and_then(|si| out.skeletons.get(*si))
+            .map(|s| s.skeleton.len())
+            .unwrap_or(0);
         let mut submeshes = Vec::new();
         for (pi, prim) in mesh.primitives().enumerate() {
             if prim.mode() != gltf::mesh::Mode::Triangles {
@@ -261,6 +288,12 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
                 Some(p) => p.collect(),
                 None => continue, // a primitive with no positions is unusable
             };
+            if positions.is_empty() {
+                // A zero-count POSITION accessor. Skipping it here is what stops
+                // `SubMesh { vertices: [], indices: [..] }` from being persisted
+                // as a valid-looking `.inf_mesh` (C4-9).
+                continue;
+            }
             let indices: Vec<u32> = match reader.read_indices() {
                 Some(idx) => idx.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
@@ -278,6 +311,51 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
             let weights0: Option<Vec<[f32; 4]>> =
                 reader.read_weights(0).map(|w| w.into_f32().collect());
 
+            // ── The import door ─────────────────────────────────────────────
+            //
+            // Everything below this point either hands the index buffer to
+            // meshopt's raw FFI (C4-1), indexes a parallel stream by vertex
+            // ordinal (C4-6), or writes the numbers straight into `.inf_mesh`
+            // (C4-8). All three are checked here, once, and named for the
+            // attribute the exporter wrote.
+            let at = format!("{name} primitive {pi}");
+            reject_non_finite(&positions, &format!("{at} POSITION"))?;
+            reject_out_of_range(&indices, positions.len(), &format!("{at} indices"))?;
+            for (stream, label) in [
+                (normals.as_ref().map(Vec::len), "NORMAL"),
+                (uvs.as_ref().map(Vec::len), "TEXCOORD_0"),
+                (tangents.as_ref().map(Vec::len), "TANGENT"),
+                (joints0.as_ref().map(Vec::len), "JOINTS_0"),
+                (weights0.as_ref().map(Vec::len), "WEIGHTS_0"),
+            ] {
+                if let Some(len) = stream {
+                    reject_length_mismatch(
+                        len,
+                        positions.len(),
+                        &format!("{at} {label}"),
+                        "POSITION",
+                    )?;
+                }
+            }
+            if let Some(n) = normals.as_ref() {
+                reject_non_finite(n, &format!("{at} NORMAL"))?;
+            }
+            if let Some(u) = uvs.as_ref() {
+                reject_non_finite(u, &format!("{at} TEXCOORD_0"))?;
+            }
+            if let Some(t) = tangents.as_ref() {
+                reject_non_finite(t, &format!("{at} TANGENT"))?;
+            }
+            if let Some(w) = weights0.as_ref() {
+                // `VertexSkin::normalized` divides by the sum of these, so an
+                // infinity here manufactures a NaN out of finite-looking input
+                // (C4-37) and uploads it to a GPU vertex buffer.
+                reject_non_finite(w, &format!("{at} WEIGHTS_0"))?;
+            }
+            if let Some(j) = joints0.as_ref() {
+                reject_joint_indices(j, skin_joints, &format!("{at} JOINTS_0"))?;
+            }
+
             let normals = normals.unwrap_or_else(|| compute_normals(&positions, &indices));
 
             let mut verts = Vec::with_capacity(positions.len());
@@ -285,10 +363,13 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
                 verts.push(MeshVertex {
                     position: positions[i],
                     normal: *normals.get(i).unwrap_or(&[0.0, 1.0, 0.0]),
-                    uv: uvs.as_ref().map(|u| u[i]).unwrap_or([0.0, 0.0]),
+                    uv: uvs
+                        .as_ref()
+                        .and_then(|u| u.get(i).copied())
+                        .unwrap_or([0.0, 0.0]),
                     tangent: tangents
                         .as_ref()
-                        .map(|t| t[i])
+                        .and_then(|t| t.get(i).copied())
                         .unwrap_or(crate::TANGENT_PLACEHOLDER),
                 });
             }
@@ -355,6 +436,27 @@ fn find_joint(node_to_joint: &[HashMap<usize, u16>], node: usize) -> Option<(usi
         .find_map(|(si, map)| map.get(&node).map(|&j| (si, j)))
 }
 
+/// Check one resampled animation channel against the keyframe times it is
+/// indexed by, and against finiteness.
+///
+/// [`Vec3Track::new`] and [`QuatTrack::new`] only `debug_assert` the length
+/// agreement — compiled out in release — and `sample()` then indexes
+/// `self.values[i0]` with an index derived from `times`. So a sampler whose
+/// output count differs from its input count is a panic in the shipped player,
+/// deferred until somebody plays the clip. It is also how a `CUBICSPLINE`
+/// stream with a remainder shows up: [`resample_cubic`]'s `chunks_exact(3)`
+/// drops it, and the shortfall lands here (C4-45).
+fn check_track<T: crate::validate::AllFinite>(
+    times: &[f32],
+    values: &[T],
+    channel: &str,
+    sampler: &str,
+) -> Result<(), MeshError> {
+    let what = format!("{sampler} {channel} output");
+    reject_length_mismatch(values.len(), times.len(), &what, "its sampler input")?;
+    reject_non_finite(values, &what)
+}
+
 /// Resample a glTF animation output stream to one value per keyframe.
 ///
 /// A `CUBICSPLINE` sampler stores three values per key — `[in_tangent, value,
@@ -362,6 +464,10 @@ fn find_joint(node_to_joint: &[HashMap<usize, u16>], node: usize) -> Option<(usi
 /// **value** of each triple and drops the tangents (the curve is treated as
 /// linear between the preserved sample points). A `STEP`/`LINEAR` stream is one
 /// value per key and passes through unchanged.
+///
+/// A stream whose length is **not** a multiple of three loses its remainder
+/// here, silently — which is exactly why [`check_track`] compares the result
+/// against the input count rather than trusting it.
 fn resample_cubic<T: Copy>(values: Vec<T>, cubic: bool) -> Vec<T> {
     if cubic {
         values.chunks_exact(3).map(|c| c[1]).collect()
@@ -391,7 +497,14 @@ fn compute_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
 /// Expand a glTF image (any channel layout / bit depth we recognize) to RGBA8.
 fn to_rgba8(img: &gltf::image::Data) -> Vec<u8> {
     use gltf::image::Format;
-    let n = (img.width * img.height) as usize;
+    // **usize, not u32** (C4-16). `width * height` in u32 wraps to 0 at 2³⁰
+    // pixels and the release profile has no `overflow-checks`, so a hostile
+    // 65 536² image used to hand back an EMPTY buffer while `RawImage.width` /
+    // `.height` went on claiming the full size — and the downstream guard that
+    // was supposed to notice (`rgba.len() < (width * height * 4) as usize`)
+    // wrapped identically, so `0 < 0` was false and the truncation sailed
+    // through. Two wraps that cancelled into silence.
+    let n = img.width as usize * img.height as usize;
     let px = &img.pixels;
     let mut out = Vec::with_capacity(n * 4);
     match img.format {

@@ -383,9 +383,25 @@ fn next_f32<'a>(tokens: &mut impl Iterator<Item = &'a str>, ln: usize) -> Result
     parse_f32(tok, ln)
 }
 
+/// **The one numeric door of the OBJ importer** — every `v`, `vn` and `vt`
+/// component comes through here.
+///
+/// `str::parse::<f32>` accepts `"nan"`, `"inf"`, `"infinity"` and their signed
+/// and cased spellings, so `v nan nan nan` is a syntactically valid vertex line
+/// and nothing in the format forbids it (C4-8). The value would land in
+/// `.inf_mesh`, and then hide: `Aabb::grow` folds with `f32::min`/`max`, which
+/// *ignore* NaN, so the bounding box looks healthy over a poisoned buffer.
 fn parse_f32(tok: &str, ln: usize) -> Result<f32, MeshError> {
-    tok.parse::<f32>()
-        .map_err(|_| err(ln, &format!("invalid number {tok:?}")))
+    let v: f32 = tok
+        .parse()
+        .map_err(|_| err(ln, &format!("invalid number {tok:?}")))?;
+    if !v.is_finite() {
+        return Err(err(
+            ln,
+            &format!("{tok:?} is not a finite number (NaN or infinity)"),
+        ));
+    }
+    Ok(v)
 }
 
 /// Everything after the keyword on `line`, trimmed; `default` if empty.
@@ -462,9 +478,19 @@ fn load_mtl(
             }
             "Kd" => {
                 if let Some(i) = cur {
-                    let r = tokens.next().and_then(|t| t.parse().ok()).unwrap_or(1.0);
-                    let g = tokens.next().and_then(|t| t.parse().ok()).unwrap_or(1.0);
-                    let b = tokens.next().and_then(|t| t.parse().ok()).unwrap_or(1.0);
+                    // `Kd nan nan nan` parses (C4-8). A non-finite component is
+                    // treated the same as an unparseable one — the documented
+                    // white default — rather than written into `.inf_mat`,
+                    // because a `.mtl` is a degrade-friendly sidecar: this
+                    // whole block is skipped outright when the file is missing.
+                    let mut component = || {
+                        tokens
+                            .next()
+                            .and_then(|t| t.parse::<f32>().ok())
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(1.0)
+                    };
+                    let (r, g, b) = (component(), component(), component());
                     out.materials[i].base_color = [r, g, b, 1.0];
                 }
             }
