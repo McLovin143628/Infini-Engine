@@ -1160,7 +1160,10 @@ mod tests {
         assert_eq!((stats.floor_wants, stats.floor_fallback), (1, 1));
         assert_eq!((stats.refine_wants, stats.refine_fallback), (1, 1));
         assert_eq!((stats.predict_wants, stats.predict_fallback), (1, 1));
-        assert_eq!(stats.floor_fallback_frames, 1);
+        assert_eq!(
+            (stats.floor_fallback_frames, stats.refine_fallback_frames),
+            (1, 1)
+        );
 
         // A frame whose floor is entirely resident does not count a fallback
         // frame, however much speculation is outstanding — which is what makes
@@ -1184,7 +1187,10 @@ mod tests {
             stats.floor_fallback, 0,
             "the coarsest level is pinned at registration and must be resident"
         );
-        assert_eq!(stats.floor_fallback_frames, 0);
+        assert_eq!(
+            (stats.floor_fallback_frames, stats.refine_fallback_frames),
+            (0, 0)
+        );
         assert_eq!(stats.predict_fallback, 1);
     }
 
