@@ -38,7 +38,12 @@
 //!   without retrying;
 //! * **a resident want is touched even after the pool is exhausted** — running
 //!   out of slots must not make a lane's residents look old, or the *next*
-//!   frame evicts exactly what this frame proved was wanted.
+//!   frame evicts exactly what this frame proved was wanted;
+//! * **a transaction never re-admits what it just evicted** — the P28.3 audit's
+//!   finding, and the one the per-lane walk introduced: a miss takes an
+//!   *unwanted* slot before a weaker lane's resident one, so a tile this
+//!   transaction is about to want again is not evicted, moved and re-uploaded
+//!   for nothing. The rank is unchanged; only the choice between equals is.
 
 use std::collections::BTreeSet;
 
@@ -79,6 +84,12 @@ pub trait SlotPool {
     /// The lowest free slot, or the least-recently-stamped evictable one,
     /// never a `protected` slot and never a pinned one. `None` when neither
     /// exists.
+    ///
+    /// **A `None` must unseat nothing**, and that is a contract rather than an
+    /// observation: [`admit_by_lane`] asks twice — once over a set that also
+    /// spares the slots this transaction's own wants occupy, then over
+    /// `protected` alone — so an implementation that evicted before deciding it
+    /// had failed would evict twice for one admit.
     fn acquire(&mut self, protected: &BTreeSet<u32>) -> Option<Acquired<Self::Key>>;
 
     /// Put `key` in `slot`.
@@ -121,11 +132,32 @@ pub fn admit_by_lane<P: SlotPool>(
     protected: &mut BTreeSet<u32>,
 ) -> AdmitLog<P::Key> {
     let mut log = AdmitLog::default();
+    // **The slots this transaction's own wants are sitting in, in any lane** —
+    // `reserved` is `protected` plus those, and a miss tries it *first*.
+    //
+    // Without it the walk is correct and wasteful in one reachable case (the
+    // P28.3 audit measured it on a real `VtResidency`): a lane-0 miss picks the
+    // LRU victim over every unprotected slot, and a later lane's resident want
+    // can be older than a slot nothing wants at all — so the transaction evicts
+    // a tile it is about to want again, re-admits it into a different slot, and
+    // re-uploads its bytes for nothing. That also made `evicts` name an address
+    // that was resident again by the time the transaction returned, which is
+    // not what the field says it is.
+    //
+    // The rank is unchanged, and that is the point: a floor miss may still take
+    // a resident refinement's slot — it just takes an *unwanted* slot first if
+    // one exists. When none does, the fallback below is the pre-audit
+    // behaviour exactly, which is why `a_floor_want_outranks_a_resident_
+    // refinement` still measures what it always did.
+    let mut reserved: BTreeSet<u32> = protected.clone();
+    reserved.extend(wants.iter().filter_map(|(_, k)| pool.resident_slot(k)));
     // Once acquisition fails nothing in this transaction frees a slot — the
     // protected set only grows and every seat is immediately protected — so
     // every later miss fails too. Counting them without retrying is the same
     // answer for O(1) instead of O(n · slots), and it must survive across
-    // LANES, not only within one.
+    // LANES, not only within one. It is the **fallback** acquire that decides
+    // this: the reserved attempt failing means only that every spare slot is
+    // spoken for, not that the pool is out.
     let mut exhausted = false;
     for (_, from, to) in lane_runs(wants, |(l, _)| *l) {
         // (a) this lane's residents: touched and protected, *before* this lane
@@ -135,6 +167,7 @@ pub fn admit_by_lane<P: SlotPool>(
             match pool.resident_slot(key) {
                 Some(slot) => {
                     protected.insert(slot);
+                    reserved.insert(slot);
                     pool.touch(slot);
                 }
                 None => misses.push(*key),
@@ -146,7 +179,11 @@ pub fn admit_by_lane<P: SlotPool>(
                 log.deferred += (misses.len() - i) as u32;
                 break;
             }
-            let Some(a) = pool.acquire(protected) else {
+            // A slot nothing in this transaction wants, or — failing that —
+            // the weakest thing the rank allows. `acquire` is documented to
+            // return `None` without unseating anything, which is what makes
+            // the second attempt safe rather than a double eviction.
+            let Some(a) = pool.acquire(&reserved).or_else(|| pool.acquire(protected)) else {
                 exhausted = true;
                 log.deferred += (misses.len() - i) as u32;
                 break;
@@ -158,6 +195,7 @@ pub fn admit_by_lane<P: SlotPool>(
             // Immediately, and in every lane: a transaction may never evict
             // what it just brought in.
             protected.insert(a.slot);
+            reserved.insert(a.slot);
             log.admits.push((a.slot, *key));
         }
     }
@@ -362,10 +400,72 @@ mod tests {
         assert_eq!(txn.admits.len(), 2);
         assert_eq!(txn.deferred, 2);
         assert!(txn.evicts.is_empty(), "the pool ate its own work: {txn:?}");
+    }
+
+    /// **A transaction never re-admits what it just evicted**, and nothing it
+    /// reports as evicted is resident when it returns.
+    ///
+    /// The P28.3 audit measured this on a real `VtResidency`: the per-lane walk
+    /// let a lane-0 miss take the LRU victim over *every* unprotected slot, and
+    /// a later lane's resident want can be older than a slot nothing wants at
+    /// all. The transaction then evicted a tile it was about to want again,
+    /// re-admitted it into a different slot, and re-uploaded its bytes for
+    /// nothing — two evictions and two admissions to move one tile in and one
+    /// out — while `evicts` named an address that was resident again by the
+    /// time the caller read it.
+    ///
+    /// The fixture is the ordinary frame that produces it: a tile **demoted**
+    /// from the floor lane to the feedback lane on the frame a new floor tile
+    /// arrives. Nothing exotic, and nothing a budget prevents.
+    ///
+    /// The other half is the anti-vacuity one: the transaction has to have
+    /// evicted something, or this is a statement about an empty list — which is
+    /// exactly what the arm above turned out to be before this one existed.
+    #[test]
+    fn a_transaction_never_re_admits_what_it_just_evicted() {
+        let mut pool = TestPool::new(4);
+        // Seat in a known stamp order: 1 and 2 at the floor, then 3 and 4 at
+        // the feedback lane, so 1 < 2 < 3 < 4 and the pool is full.
+        run(
+            &mut pool,
+            &[
+                (LANE_FLOOR, 1),
+                (LANE_FLOOR, 2),
+                (LANE_FEEDBACK, 3),
+                (LANE_FEEDBACK, 4),
+            ],
+        );
+        // Tile 2 is DEMOTED to feedback and a new floor tile arrives. Tile 2's
+        // slot is the oldest thing the walk may take, and 3 and 4 are wanted by
+        // nothing this frame.
+        let txn = run(
+            &mut pool,
+            &[(LANE_FLOOR, 1), (LANE_FLOOR, 9), (LANE_FEEDBACK, 2)],
+        );
+        assert!(
+            !txn.evicts.is_empty(),
+            "the pool was never contested, so this arm asserts nothing: {txn:?}"
+        );
         let admitted: BTreeSet<u32> = txn.admits.iter().map(|(_, k)| *k).collect();
-        for (_, gone) in &txn.evicts {
-            assert!(!admitted.contains(gone));
+        for (slot, gone) in &txn.evicts {
+            assert!(
+                !admitted.contains(gone),
+                "slot {slot}'s occupant {gone} was evicted and re-admitted in one \
+                 transaction — its bytes are re-uploaded for nothing: {txn:?}"
+            );
+            assert!(
+                !pool.resident(*gone),
+                "{gone} is reported EVICTED and is resident: {txn:?}"
+            );
         }
+        // …and the demoted tile kept its slot rather than being moved, which is
+        // the whole of what the reserved set buys.
+        assert!(
+            pool.resident(2) && pool.resident(9) && pool.resident(1),
+            "{txn:?}"
+        );
+        assert_eq!(txn.admits.len(), 1, "one tile came in, once: {txn:?}");
+        assert_eq!(txn.evicts.len(), 1, "one tile left, once: {txn:?}");
     }
 
     /// **A resident want is touched even after the pool is exhausted.**

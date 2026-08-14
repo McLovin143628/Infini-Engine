@@ -461,6 +461,52 @@ mod tests {
         );
     }
 
+    /// **A floor larger than an even share is granted whole, and its owner
+    /// still takes an even share of what is left.**
+    ///
+    /// The edge the P28.3 audit found unpinned, and it is worth pinning because
+    /// the answer is not the one "water-fill" suggests. A hydraulic water-fill
+    /// equalizes *levels*: with a floor of 60 under a 90 ceiling it would leave
+    /// 60 alone and pour the remaining 30 into the other two. This one grants
+    /// every floor first and then splits the **remainder** evenly, so the same
+    /// case comes out 70/10/10 rather than 60/15/15.
+    ///
+    /// That is what the module docs say ("the remainder is water-filled") and
+    /// it is the right rule here — a floor is content the consumer may not drop,
+    /// not a head start it should be taxed for — but it is a choice, and an
+    /// unarmed choice is one a refactor may reverse without anything noticing.
+    #[test]
+    fn a_floor_larger_than_an_even_share_is_granted_whole() {
+        let req = [
+            BudgetRequest {
+                floor_bytes: 60,
+                want_bytes: 80,
+            },
+            BudgetRequest::want(100),
+            BudgetRequest::want(100),
+        ];
+        let g = arbitrate(90, &req).expect("60 of floor fits a 90 ceiling");
+        assert_eq!(g.bytes, [70, 10, 10], "floors first, then the remainder");
+        assert_eq!(g.total(), 90);
+        // The control: the level-equalizing reading, which this is NOT.
+        assert_ne!(g.bytes, [60, 15, 15]);
+        // A floor that is already the consumer's whole want takes nothing more,
+        // so the others split the rest between them and the arm above is about
+        // the floor rather than about the order.
+        let req = [
+            BudgetRequest {
+                floor_bytes: 50,
+                want_bytes: 50,
+            },
+            BudgetRequest::want(100),
+            BudgetRequest::want(100),
+        ];
+        assert_eq!(
+            arbitrate(100, &req).expect("the floor fits").bytes,
+            [50, 25, 25]
+        );
+    }
+
     /// The summary names every number it carries.
     #[test]
     fn the_budget_line_says_what_it_granted() {
