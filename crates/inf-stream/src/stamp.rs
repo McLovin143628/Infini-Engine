@@ -47,9 +47,13 @@
 //! what an LRU orders on. The two never meet — nothing evicts a terrain tile by
 //! comparing its version against a texture tile's recency — so merging them
 //! would couple three more crates to the streamer to buy an ordering nobody
-//! asks for. Enumerated rather than summarised: five counters exist, three
-//! merge here, two kinds stay apart, and the reason is the question each one
-//! answers.
+//! asks for. Enumerated rather than summarised, and counted the same way:
+//! **seven** counters exist — the three residency stamps that merge here, and
+//! four content versions that do not (`inf_terrain`'s one, `inf_voxel`'s two,
+//! `inf_dcc`'s one). Two *kinds*, seven counters; the split is by the question
+//! each one answers, not by how many crates they live in. (The first draft said
+//! "five", which contradicted the enumeration in the sentence above it — the
+//! P28.3 audit's arithmetic finding.)
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

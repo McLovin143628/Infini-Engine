@@ -1317,6 +1317,14 @@ pub struct VgeomStreamReport {
     /// streams geometry and texture independently for them, as it did before
     /// P28.2. It is reported rather than refused because refusing an address no
     /// budget can ever seat retracts the asset for ever.
+    ///
+    /// **Since P28.3 it counts one thing more, and the name is the wider one**:
+    /// every reference belonging to a texture whose `grid` claim was refused is
+    /// counted here too, and in the re-imported-*larger* direction those
+    /// addresses all exist. So this is *addresses dropped from the pairing* —
+    /// missing, or belonging to an image the cook did not pair against — and
+    /// `mismatched_textures` is the one that says which. Recorded rather than
+    /// left to read as "the image does not have them" (the P28.3 audit).
     pub stale_tiles: u64,
     /// Cluster pages currently coupled to their texture tiles (P28.3) — groups
     /// in `inf_stream::Coupling`, which is one per resident page of a paired

@@ -61,10 +61,21 @@ struct Entry<V> {
 
 struct Inner<V> {
     map: BTreeMap<u64, Entry<V>>,
-    /// LRU index: `last_use → key`. `last_use` is a process-unique monotonic
-    /// counter (bumped on every `get`/`insert`), so this is a bijection with the
-    /// live entries and the eviction victim is always its first pair — O(log n)
-    /// eviction instead of the old O(n) min-scan, with the identical victim.
+    /// LRU index: `last_use → key`. `last_use` is drawn from [`Inner::tick`],
+    /// which is monotone and unique **within this cache** (bumped on every
+    /// `get`/`insert`), so this is a bijection with the live entries and the
+    /// eviction victim is always its first pair — O(log n) eviction instead of
+    /// the old O(n) min-scan, with the identical victim.
+    ///
+    /// **Within this cache, not the process**, and the distinction is the P28.3
+    /// audit's: `tick` is a plain field reset to 0 by [`NodeCache::new`], so two
+    /// caches mint the same values and their `last_use` numbers are not
+    /// comparable with each other or with `inf_stream::next_stamp`'s residency
+    /// domain. That is correct and deliberate — this cache orders only its own
+    /// entries and nothing evicts across two of them — but the doc used to
+    /// claim "process-unique", which is a property with no mechanism behind it
+    /// and exactly the claim `inf-stream`'s one counter exists to make true
+    /// where it *is* needed.
     lru: BTreeMap<u64, u64>,
     ram_total: usize,
     tick: u64,

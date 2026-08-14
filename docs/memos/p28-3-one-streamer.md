@@ -74,8 +74,11 @@ payload is*, so a mirror can ask "are these the bytes I uploaded". A residency
 stamp records *when a slot was last wanted*, which is what an LRU orders on. The
 two never meet — nothing evicts a terrain tile by comparing its version against a
 texture tile's recency — so merging them would couple three more crates to the
-streamer to buy an ordering nobody asks for. Five counters existed; three
-merged; the split is by the question each one answers.
+streamer to buy an ordering nobody asks for. **Seven** counters existed; three merged
+here and four version content (`inf_terrain`'s one, `inf_voxel`'s two,
+`inf_dcc`'s one); the split is by the question each one answers. [P28.3 audit:
+this sentence said "five", contradicting the enumeration in the paragraph
+above it — two *kinds*, seven counters.]
 
 ### The law is easier to break now, in one specific way
 

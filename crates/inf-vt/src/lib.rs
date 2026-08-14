@@ -67,9 +67,9 @@
 //! gates pin.
 //!
 //! **3. A stamp is not a measurement.** Slot stamps come from a
-//! **process-global** monotone counter, for the reason
-//! `inf_vgeom::stream::NEXT_RESIDENCY_STAMP` and `inf_terrain`'s
-//! `NEXT_TILE_VERSION` both give: a GPU mirror caches "the table I last uploaded
+//! **process-global** monotone counter — `inf_stream::next_stamp` since P28.3,
+//! where this crate's own counter merged with `inf-vgeom`'s and `inf-vsm`'s —
+//! for the reason `inf_terrain`'s `NEXT_TILE_VERSION` also gives: a GPU mirror caches "the table I last uploaded
 //! for texture T was generation N", and a per-residency counter restarting at 1
 //! would let a freshly-built residency mint a generation a stale cache already
 //! holds — after a budget change, or after a level switch. A global counter never

@@ -658,7 +658,8 @@ pub struct AssetResidency {
     /// Stamped from the process-global monotone counter whenever the residency
     /// (and therefore `remap`) changes, so the render side re-uploads the table
     /// only when it moved — and can never mistake a fresh residency's stamp for
-    /// one it already holds. See [`NEXT_RESIDENCY_STAMP`].
+    /// one it already holds. See [`inf_stream::next_stamp`], the one stamp
+    /// domain this crate's own `NEXT_RESIDENCY_STAMP` merged into at P28.3.
     generation: u64,
     /// The finest page that could be read; pages at or past it are never
     /// requested again (the terrain blocked-set precedent, in prefix form).
@@ -744,7 +745,7 @@ impl AssetResidency {
 
     /// The residency stamp: strictly increasing, process-globally unique, and
     /// bumped whenever [`remap`](Self::remap) changes. A cache keyed on it can
-    /// never serve a stale table (see [`NEXT_RESIDENCY_STAMP`]).
+    /// never serve a stale table (see [`inf_stream::next_stamp`]).
     ///
     /// **Never put this in a trace, a golden, or any comparison between runs.** It
     /// is drawn from a process-global counter, so two runs of the same frame

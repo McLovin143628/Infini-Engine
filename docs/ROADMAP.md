@@ -14293,8 +14293,9 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
 > `the_three_consumers_draw_their_stamps_from_one_sequence`. The terrain, voxel
 > and DCC counters deliberately did **not** merge: they version *content*, not
 > recency, and nothing evicts a terrain tile by comparing its version against a
-> texture tile's. Five counters existed; three merged; the split is by the
-> question each one answers.
+> texture tile's. **Seven** counters existed; three merged here and four
+> version content (`inf_terrain`'s one, `inf_voxel`'s two, `inf_dcc`'s one);
+> the split is by the question each one answers.
 >
 > **One want pipeline, and THE PROTECTION ORDER IS FIXED.** `inf_stream::
 > normalize` replaces two hand-written copies of the same two passes;

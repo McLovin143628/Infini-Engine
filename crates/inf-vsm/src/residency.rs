@@ -328,7 +328,8 @@ pub enum VsmError {
 struct Slot {
     /// `(light index, page)` — `None` when free.
     occupant: Option<(u32, VsmPage)>,
-    /// Last touched. **A stamp, not a measurement** (see [`NEXT_VSM_STAMP`]).
+    /// Last touched. **A stamp, not a measurement** (see
+    /// [`inf_stream::next_stamp`], which `NEXT_VSM_STAMP` merged into at P28.3).
     stamp: u64,
 }
 

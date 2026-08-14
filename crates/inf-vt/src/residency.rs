@@ -339,7 +339,8 @@ pub enum VtError {
 struct Slot {
     /// `(texture index, tile)` — `None` when free.
     occupant: Option<(u32, TileCoord)>,
-    /// Last touched. **A stamp, not a measurement** (see [`NEXT_VT_STAMP`]).
+    /// Last touched. **A stamp, not a measurement** (see
+    /// [`inf_stream::next_stamp`], which `NEXT_VT_STAMP` merged into at P28.3).
     stamp: u64,
     /// A root: never evicted, for any reason, by anyone.
     pinned: bool,
