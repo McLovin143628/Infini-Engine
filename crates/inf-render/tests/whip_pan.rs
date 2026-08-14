@@ -708,11 +708,26 @@ fn residency_never_falls_below_the_proved_classes_under_speculation() {
 /// The prediction is re-derived here from the recorded camera path, longhand:
 /// the secant over the six-tick window, the arc between its ends, Rodrigues
 /// about their cross product. It is *not* `inf_math::dead_reckon` called twice.
+///
+/// **It replays at [`LEAD`] and not at the shipped [`HORIZON`], and that is the
+/// point** (P28.5 audit). This arm is an oracle of the *formula*, and at
+/// `h = 0` the formula collapses: the secant is scaled by nothing, the arc is
+/// turned by nothing, and both spellings return the newest committed pose. Run
+/// at the shipped zero it reported a worst error of `0e0` — not because the two
+/// derivations agree, but because neither of them does anything. The lead-time
+/// ruling would have silently retired this oracle; running it at the
+/// prescription keeps the rotation half live, which is the half a second
+/// spelling can actually disagree about.
+///
+/// `led` is the guard that says so: a prediction that never leaves the
+/// committed pose is the vacuous shape, and it fails here rather than passing
+/// quietly.
 #[test]
 fn the_prediction_replays_from_the_recorded_history_alone() {
-    let on = run(Some(HORIZON), PAGES);
+    let on = run(Some(LEAD), PAGES);
     let window = inf_math::PREDICT_HISTORY as u64;
     let (mut checked, mut worst, mut turned) = (0usize, 0.0f64, 0usize);
+    let mut led = 0usize;
 
     for tick in 0..TICKS {
         let Some((eye, forward)) = on.predicted[tick as usize] else {
@@ -725,7 +740,7 @@ fn the_prediction_replays_from_the_recorded_history_alone() {
         let oldest = tick.saturating_sub(window - 1);
         let (a, b) = (whip_view(oldest), whip_view(tick));
         let span = (tick - oldest) as f64;
-        let h = f64::from(HORIZON);
+        let h = f64::from(LEAD);
 
         assert_eq!(
             b.eye_world + (b.eye_world - a.eye_world) * (h / span),
@@ -755,11 +770,14 @@ fn the_prediction_replays_from_the_recorded_history_alone() {
             err < 1e-12,
             "tick {tick}: the replayed direction is {err} from the producer's"
         );
+        // Did the prediction actually LEAD the committed pose on this tick?
+        led += usize::from((forward - raw).length() > 1e-6);
         checked += 1;
     }
     println!(
-        "oracle: {checked} predictions replayed ({turned} through a real arc), \
-         worst direction error {worst:e}"
+        "oracle: {checked} predictions replayed ({turned} through a real arc, \
+         {led} that actually led the committed pose at h={LEAD}), worst \
+         direction error {worst:e}"
     );
     assert!(
         checked as u64 > TICKS - window,
@@ -769,6 +787,17 @@ fn the_prediction_replays_from_the_recorded_history_alone() {
         turned > SWEEP as usize / 2,
         "almost nothing in the path actually turned — the replay never exercised \
          the rotation half"
+    );
+    // **ANTI-VACUITY, and it is the guard the shipped horizon needed.**
+    // `turned` counts ticks whose HISTORY turned, which is a property of the
+    // fixture and stays true at any horizon — so it cannot see a lead of zero.
+    // This counts ticks whose PREDICTION turned, which is a property of the
+    // thing under test.
+    assert!(
+        led > SWEEP as usize / 2,
+        "only {led} of {checked} predictions differed from the committed pose — \
+         the replay is comparing two spellings of the identity, which is what \
+         this oracle reads as at a zero lead"
     );
 }
 
@@ -1087,8 +1116,13 @@ fn the_prediction_is_measured_against_where_the_camera_actually_went() {
 
     println!("prediction accuracy against whip_view(tick + h) — worst, radians:");
     for (h, worst, hold, ramp, eye, turned) in &table {
+        // **Scientific, not six decimals** (P28.5 audit): the h = 0 row is the
+        // one this table exists to establish, its value is ~1e-8, and `{:.6}`
+        // printed it as `0.000000` — so the ledger's headline number could not
+        // be read off the arm that measured it. An arm prints what its own
+        // header tabulates (the P28.4 audit's ruling, met again).
         println!(
-            "  h={h:<3} worst {worst:.6} rad ({:.3}°) | hold {hold:.6} | ramp {ramp:.6} | \
+            "  h={h:<3} worst {worst:.3e} rad ({:.4}°) | hold {hold:.3e} | ramp {ramp:.3e} | \
              eye {eye:.3e} m | {turned} ticks where the camera actually moved",
             worst.to_degrees()
         );
