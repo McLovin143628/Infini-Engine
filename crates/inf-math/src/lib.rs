@@ -15,6 +15,12 @@ pub use portable::{
     SLERP_LERP_THRESHOLD,
 };
 
+pub mod predict;
+pub use predict::{
+    dead_reckon, horizon_ticks, CameraHistory, CameraSample, Prediction, PREDICT_HISTORY,
+    PREDICT_MAX_TURN,
+};
+
 pub mod solar;
 pub use solar::{
     advance as advance_time_of_day, bodies as sky_bodies, moon_direction, sun_direction, SkyBodies,
