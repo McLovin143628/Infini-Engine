@@ -14257,6 +14257,264 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
   domain + one want pipeline (analytic floor ∪ feedback refinement ∪ predictor); 2. per-tier
   unified budgets replace the three local ones (ratchets keep CI honest); 3. eviction is
   cross-system aware (a cluster's tiles and pages age together).
+> ## P28.3 STATUS — one streamer: **COMPLETE** (2026-08-14)
+>
+> Five commits carry the work: `2c93dbd` the crate, `4eb6c14` the consumers
+> (stamp domain + want pipeline + the protection order), `5eac53d` the budget
+> and the coupling and the arbiter's gate, `c92f638` cross-consumer identity and
+> the two latent shapes, and the memo + this block. Named rather than counted,
+> on P28.2's ruling: a total goes stale the moment anything lands after the
+> block is written.
+>
+> `docs/memos/p28-3-one-streamer.md` carries the rulings and the measurements.
+> The ROADMAP's three clauses, answered against code, with the arm that fails if
+> each claim stops being true.
+>
+> ### Clause 1 — `inf-stream`: one arbiter, one ring, one stamp domain, one want pipeline
+>
+> **MET.** Ring 0, `thiserror` and nothing else — the third crate in this tree
+> with that manifest, and for the reason the other two give: it sits **strictly
+> below** the three residency brains, so anything it names becomes a dependency
+> of the cook and the shipped player. It names **none of its consumers**; what
+> crosses the seam is a `Lane`, a `Stamp`, a byte count and a slot index, plus
+> one trait the consumers implement over their own state.
+>
+> **One stamp domain.** `NEXT_RESIDENCY_STAMP`, `NEXT_VT_STAMP` and
+> `NEXT_VSM_STAMP` are gone; each had carried a comment naming the other two and
+> pointing here. The property three domains cannot offer is the one
+> cross-system eviction needs: *was this cluster page touched more recently than
+> that texture tile?* — two numbers from two sequences are two clocks started at
+> different times. Observed from outside all three crates by
+> `the_three_consumers_draw_their_stamps_from_one_sequence`. The terrain, voxel
+> and DCC counters deliberately did **not** merge: they version *content*, not
+> recency, and nothing evicts a terrain tile by comparing its version against a
+> texture tile's. Five counters existed; three merged; the split is by the
+> question each one answers.
+>
+> **One want pipeline, and THE PROTECTION ORDER IS FIXED.** `inf_stream::
+> normalize` replaces two hand-written copies of the same two passes;
+> `VtPriority` and `VsmPriority` are now `inf_stream::Lane`. The P28.2 audit's
+> §4(e) found the protection **priority-blind** — *"a refinement that got there
+> first outranks a floor want that has not"* — and **unfalsifiable in place**:
+> one want class over a comfortable budget never contests a slot, so an
+> `apply_wants` that protected nothing passed every arm in the invariant gate.
+> `admit_by_lane` protects and admits **one lane at a time**, so a floor miss
+> may take a resident refinement's slot and a refinement may never take a floor
+> tile's. Two new arms, one per consumer, and the second is worse in kind: a
+> deferred marked shadow page resolves to `VSM_ENTRY_NONE`, which a receiver
+> reads as **lit**, so a predictor that guessed wrong would have leaked light
+> through pages the depth buffer was certain about.
+>
+> Three properties a plausible implementation loses are armed: a transaction
+> never evicts what it just admitted *across a lane boundary* (the case the
+> single-pass walk could not reach); the deferral count is exact and O(1) across
+> every remaining lane; and a resident want is touched even after the pool is
+> exhausted — which needs a **pinned** slot to reach at all, and that is a
+> property of the fix rather than of the fixture.
+>
+> **One ring, or one DOMAIN — the measurement.** One buffer was refused
+> structurally, not on cost: the two masks are re-created on different events
+> (a texture registration, a light-set change), so one buffer means **registering
+> a texture drops an in-flight shadow mask** — two independent counted misses
+> become one coupled miss on a frame where nothing about shadows changed. The
+> saving would have been one `copy_buffer_to_buffer`. So two buffers, one
+> domain: `FEEDBACK_LATENCY_FRAMES` and the slot arithmetic move into
+> `inf_stream::ring`, `ReadbackRing` indexes through them, and both consumers
+> report into one `RingLedger` — which can state what two rings cannot, that
+> they read the **same** source frame or one of them missed.
+>
+> **`inf-vgeom` is deliberately NOT a `SlotPool`**, and that is the honest bound
+> on "one walk". Two of three consumers share the admission order. A meshlet
+> page is a variable number of bytes across four suballocated pools and its
+> residency is a **prefix**, not a set — there is no slot to take from anybody —
+> so forcing it through the trait would be a lie the arbiter then reasons on. It
+> surrenders the byte ceiling, the stamp domain and the coupling; it keeps its
+> worst-error-first auction, exactly as P18.2 left it.
+>
+> ### Clause 2 — per-tier unified budgets with ratchets
+>
+> **MET.** `RenderSettings::stream.budget_bytes` is one ceiling over the meshlet
+> pools, the virtual-texture page pool and the shadow-page atlas. The three
+> per-consumer numbers stay and become **requests**; `arbitrate` divides —
+> floors first, refused **by name** when they do not fit, then an even
+> water-fill clamped at each want. It is the last step of `RenderTier::apply`
+> and `clamp_mobile`, so every host goes through one door, and a grant is never
+> larger than its request, so it stays a pure narrowing.
+>
+> **Even and not proportional, measured.** Under a 64 MiB ceiling on the shipped
+> numbers, proportional gives the texture pool **5.78 MiB — below its own
+> Low-tier ceiling of 6 MiB — on a machine that asked for High**, against the
+> even split's 21.33. That is "high-poly mesh with a blurry texture", produced by
+> the arbiter that exists to prevent it. The control is written out in the test.
+>
+> **The identity is what keeps every golden and every gate.** The tier constants
+> are each tier's own three shares **summed** (High 256+24+64 = 344 MiB, Medium
+> 128+12+32 = 172, Low 64+6+16 = 86), and `arbitrate` is an identity when the
+> requests fit — so at the shipped defaults every consumer is handed the number
+> it had before there was an arbiter. Asserted as a `const` block: a share
+> lowered without the whole fails the **build**. What the unified number buys is
+> the case that had no bound at all — three 96 MiB requests under a 96 MiB
+> ceiling now come back as 32/32/32 instead of 288.
+>
+> **The meshlet pools get their first tier knob.** `VgeomStreamBudget::
+> budget_bytes` shipped in P18.2 and no tier ever touched it. It changes nothing
+> today (Medium and Low clear `vgeom.enabled`), which is why it can land: the
+> clamp exists before anything ships that forgets it — `vsm.enabled`'s shape,
+> wired at the start of P27 rather than at the end.
+>
+> **Two floors, two places.** `arbitrate_budgets` runs with **zero** floors
+> because a settings struct knows no content; `EngineRenderer::stream_report`
+> runs the same function per frame with the **live** floors — the virtual
+> texture's pinned roots and every resident asset's page 0 — and that is where
+> `StreamError::FloorExceedsBudget` has its producer over real numbers. One
+> function, two inputs: the settings-level call **sizes**, the live one
+> **audits**.
+>
+> **The ratchet** is `stream_arbiter`'s peak combined residency — a WORLD number
+> (bytes are bytes on every adapter, and the sequence is a pure function of
+> committed input), asserted unconditionally on the `VT_ADMITS_PER_FRAME_CEILING`
+> precedent. Measured **2.99 MiB** against an 8 MiB ceiling.
+>
+> ### Clause 3 — cross-system eviction
+>
+> **MET, with its bound stated.** `VgeomNode::page_tiles` becomes an
+> `inf_stream::Coupling`, and the difference is ownership: members are wanted
+> together (P28.2's mechanism, kept verbatim), touched together (one stamp
+> domain), and — the half a bare map could not do — **dropped together**, in the
+> frame `pair` retracts the page. `has_group` separates *"a page with no tiles"*
+> (legal: an unpaired asset) from *"a page the want pass never saw"* (refused),
+> which one empty slice could not say.
+>
+> **Aging together is a want, not a stamp copy.** A slot's stamp is the
+> residency's bookkeeping and the arbiter owns no residency; writing into one
+> from here would be two writers for one field at two points in the frame.
+>
+> **THE BOUND: a shadow page is not a member, and the reason is not effort.**
+> Which pages a caster reaches is decided by a per-page frustum test that runs
+> over the pages that are *already resident*, after the marking mask has been
+> read — so producing that membership at the sync point means deriving next
+> frame's page set from last frame's casters, which is a **prediction** and
+> enters at `LANE_PREDICT`. Recorded rather than approximated; `Coupling` is
+> generic in its member type, so a predictor's shadow membership is a second
+> `couple` call and not a rewrite.
+>
+> **Page 0 has no coupling** (the P28.2 audit's §1) and the guarantee is over
+> pages 1..N. Ruled here rather than closed: the root page's pairing is vacuous
+> because it takes the coarsest mip by fiat, and giving it a mip its own triangle
+> density justifies is a **cook** rule change that re-derives every committed
+> `.inf_vmesh`.
+>
+> ### The arbiter's own oracle
+>
+> `crates/inf-render/tests/stream_arbiter.rs`, **eight arms, no adapter**, over
+> the three real residencies. A gate cannot see an error the subsystems share,
+> and after this batch they share considerably more — so every claim is derived
+> from a quantity the arbiter does not compute: the want set **as offered**, kept
+> beside the transaction; a floor set recorded **before** and checked against the
+> evicts **after**; the three residencies' own `resident_bytes`, summed by the
+> test; `breaches` against a residency predicate the test derives from
+> `is_resident`; three crates' generations compared for strict interleaving.
+>
+> Want-set conservation, floor protection, byte-budget conservation, the
+> live-floor refusal by name, cross-system aging (with `cluster_pages`'
+> coupling-off control, which must **reach** the forbidden state),
+> function-of-state-not-history over two routes, cross-consumer identity, and one
+> stamp domain. Every bound has its anti-vacuity counter asserted non-zero
+> first — and **two of them fired while the file was being written**, which is
+> what says they can.
+>
+> ### The staleness class, closed structurally
+>
+> `ClusterTileRef`'s pad word becomes `grid`: a 32-bit digest of the tile grid
+> the address was cooked against. **No container version moves** — every v3 cook
+> wrote that word as zero, so a P28.2 image parses as *no claim*, the same
+> argument that let `tile_count` and `tiles_off` take v2's two zero pads.
+>
+> **A digest and not a mip count, measured**: a 2 048 × 2 048 pyramid and a
+> 2 048 × 1 024 one have the **same** mip count and a different grid at every
+> level. `grid_digest` folds the level count and every level's
+> `(tiles_x, tiles_y)` through owned FNV-1a arithmetic (a Ring-0 crate must not
+> grow a hash dependency to spell four numbers) and never returns 0, the
+> no-claim sentinel.
+>
+> Checked at **load, once per texture**, which is the structural half: a stale
+> image is detected from its FIRST tile reference — including the direction the
+> P28.2 runtime answer is blind to, where an image re-imported **larger** still
+> has every cooked address, `can_address` says yes to all of them, and the
+> surface streams the wrong detail level in silence. Counted as
+> `mismatched_textures`, a *stronger* fact than `stale_tiles` because it explains
+> every missing address that follows it.
+>
+> ### One gate deliberately retired, and it is a finding
+>
+> `cluster_pages::a_refinement_class_under_slot_pressure_cannot_cost_a_resident_
+> page_its_tiles` closed by asserting the **defect** as a measured bound — *"the
+> decoy costs the pairing its finest page"*. That defect is what this batch was
+> commissioned to remove and what the P28.2 audit routed here by name, so the
+> bound is **retired rather than weakened**: renamed `…_costs_a_resident_page_
+> nothing`, asserting `contested == alone` on the same fixture under the same
+> load, with the old measurement as its control (reverting the lane walk brings
+> the inequality back). **This is the batch's only deliberate gate edit.** One
+> byte pin was adjusted mechanically and is called out per-gate: the renderer
+> source-scan anchored on `"n.cluster_tile_wants(scene,"`, which rustfmt broke
+> over four lines when the grid check added a third argument; it now names the
+> function rather than one spelling of the call, and its four-way ordering
+> assertion is untouched.
+>
+> ### Green, unmodified
+>
+> `phase26_gate` (16), `phase27_gate` (7), `cluster_pages` (6, one arm renamed
+> and inverted as above), `visbuffer_parity` (12), `visbuffer_feedback` (4),
+> `inf-vt`/`inf-vsm` residency gates (8 each), `vt_feedback`, `vt_pools`,
+> `vt_sampling`, `vgeom_streaming`, `vgeom_occlusion`. Goldens stay **54**, count
+> and content digest, `git diff` over `tests/goldens/` empty across the batch. No
+> schema moved and no container version moved.
+>
+> ### Carried, honest
+>
+> * **A shadow page is not a coupling member** (clause 3's bound, above) — the
+>   membership is a prediction and belongs to P28.4.
+> * **The arbiter never re-divides mid-frame.** Re-budgeting a pool drops
+>   residency, so the division happens where the pools are sized and the
+>   per-frame call is an audit. A host that wants to re-divide live re-applies
+>   its tier.
+> * **`VtTransaction::unknown_texture` still has no producer**, and is **kept
+>   rather than retired**: the reason it has none is still true — every
+>   want-emitting path filters an unknown handle, and P28.3 introduced no cached
+>   want set that survives a level switch, because the coupling is cleared and
+>   rebuilt from the container every frame. Retiring it would remove the only
+>   thing that would notice the day a want set *does* persist, which is exactly
+>   what a predictor's horizon is.
+> * **`inf_vt::fill` still has no adoption site**, measured: `VtTextures::sync`
+>   applies and stages in one synchronous call from mmap slices, so a slot is
+>   never allocated with its bytes absent. The unified streamer changed the
+>   arbitration, not the loader. Replicate-wins, honoured by leaving it alone.
+> * **A fully-cached frame still packs its casters on the CPU**, and it is
+>   circular rather than unfinished: `pack_casters` computes the stamps that
+>   decide the dirty set, so skipping it needs the dirty set before the pack that
+>   produces it, and a second cheaper derivation of one fact is two derivations
+>   of it. Re-routed to **P28.5** as a `vsm_raster` restructure.
+> * **The clipmap scroll** → **P28.4**: the residency half landed in P27.3 (the
+>   pages keep their slots); re-keying a page's coordinates under the origin
+>   shift is a *content*-stamp question and belongs with the batch that predicts
+>   where the clipmap is going. **The palette-union caster bound** → **P28.4**,
+>   for the same reason (it changes what a mover invalidates).
+> * **To P28.5**: the terrain deformation-window removal; the per-page meshlet
+>   cut and its tuning half; the frame-derived visibility bit split and a second
+>   geometry kind for voxels (P28.3 supplies the number the split needed — the
+>   streamer publishes the meshlet pool's live bytes — and does not spend it,
+>   because moving the refusal out of registration is still the same trade and
+>   this batch added no frame-level door to take it at); the resolve's occluded
+>   overdraw and `frag_depth` early-Z cost; a tangented parity row with the
+>   skinned-tangent gate; the editor's unpaired derived `.inf_vmesh`; the
+>   textured-mip fixture.
+> * **The page-border re-weigh and the wider VSM kernel** → **P28.5**, and this
+>   batch does not repeat P28.2's mistake of arguing the premise away. The
+>   clauses name *"where interleaved cluster pages change what a page is"*;
+>   P28.2 satisfied that trigger on its face, and **P28.3 satisfies nothing of
+>   it** — it changed arbitration, not page geometry. A shadow page is still
+>   depth-only, still 128², still bordered by four texels.
+
 - **P28.4 Predictive prefetch** — 1. deterministic dead-reckoning over committed input
   history (camera velocity + angular momentum, 200–500 ms horizon — a pure function, the
   memo's neural-predictor deviation); 2. speculative wants enter at strictly lower priority
