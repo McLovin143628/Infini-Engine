@@ -538,6 +538,50 @@ mod tests {
         }
     }
 
+    /// **The structural reason a voxel surface is still not shaded here**
+    /// (P28.1's correction to P27.5's routing).
+    ///
+    /// P27.5 refused `voxel.wgsl` a shadow receiver and routed the fix to "the
+    /// VisBuffer resolve, where meshlet and voxel surfaces are shaded through one
+    /// material pass". Building the pass showed the sentence to be wrong: the
+    /// meshlet field is a slot in the **shared meshlet pool**, and a voxel chunk
+    /// — a Surface-Nets mesh in its own buffers, with no meshlet structure, no
+    /// DAG and no page — has none. Naming a second geometry kind would have to be
+    /// paid for out of one of the three fields, and all thirty-two bits are
+    /// spent.
+    ///
+    /// This arm is the falsifier: it fails the day the id space grows, which is
+    /// the day the voxel door genuinely opens, and it fails if any field is
+    /// widened at another's expense without the routing being revisited.
+    #[test]
+    fn the_visbuffer_id_space_has_no_room_for_a_second_geometry_kind() {
+        assert_eq!(
+            VIS_TRI_BITS + VIS_MESHLET_BITS + VIS_INSTANCE_BITS,
+            32,
+            "the packing no longer spends exactly one R32Uint; voxel.wgsl's \
+             refusal cites this arithmetic as the reason it has no door, and \
+             that reason has just changed"
+        );
+        // …and the refusal's own text, so the two cannot drift apart. Read over
+        // `lines()` because every `.wgsl` in the working tree is CRLF.
+        let voxel: Vec<&str> = include_str!("shaders/voxel.wgsl")
+            .lines()
+            .map(|l| l.trim_end_matches('\r'))
+            .collect();
+        for want in [
+            "P28.1: THE ROUTING WAS WRONG, AND HERE IS THE MEASUREMENT",
+            "the_visbuffer_id_space_has_no_room_for_a_second_geometry_kind",
+            "meshletize voxel chunks",
+        ] {
+            assert!(
+                voxel.iter().any(|l| l.contains(want)),
+                "voxel.wgsl's P28.1 correction lost `{want}` — a routing that \
+                 summarises instead of naming its blocker is the P27.5 finding, \
+                 one phase later"
+            );
+        }
+    }
+
     /// The determinant floor is one number in two languages too.
     #[test]
     fn the_degenerate_floor_is_one_number() {

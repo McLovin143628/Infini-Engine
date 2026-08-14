@@ -64,12 +64,45 @@
 // honest shape is the one this header has had since P21.1 — one simple pass
 // that states what it does not do.
 //
-// So a voxel surface takes **no** virtual shadow, and the fix is not a call
-// site: it is P28.1's VisBuffer resolve, where meshlet and voxel surfaces are
-// shaded through one material pass and the env group is bound once for all of
-// them. `a_voxel_surface_is_refused_a_receiver_and_says_so` pins this paragraph
-// against the code, so the day the composition changes the refusal is a failing
-// test rather than a stale comment.
+// So a voxel surface takes **no** virtual shadow.
+//
+// -- P28.1: THE ROUTING WAS WRONG, AND HERE IS THE MEASUREMENT ---------------
+//
+// P27.5 routed the fix to "P28.1's VisBuffer resolve, where meshlet and voxel
+// surfaces are shaded through one material pass". P28.1 built that pass and the
+// sentence does not survive contact with it: the visibility buffer addresses
+// `instance (+) meshlet (+) triangle` where the meshlet is a slot in the SHARED
+// MESHLET POOL, and a voxel chunk has no such slot. It is a Surface-Nets mesh in
+// its own vertex and index buffers, produced by `inf_voxel`'s mesher, with no
+// meshlet structure, no LOD DAG and no page. `vis_resolve.wgsl` cannot shade
+// what the packing cannot name, and the packing has **no spare bits to name it
+// with**: `crates/inf-render/src/visbuffer.rs` asserts
+// `VIS_TRI_BITS + VIS_MESHLET_BITS + VIS_INSTANCE_BITS == 32` as a `const`, so a
+// second geometry kind would have to be paid for out of one of the three fields
+// — and `the_visbuffer_id_space_has_no_room_for_a_second_geometry_kind` is the
+// arm that fails the day someone assumes otherwise.
+//
+// The two real doors, both measured rather than guessed:
+//
+//   * **meshletize voxel chunks** so a chunk becomes a virtualized-geometry
+//     asset and enters the buffer through the door that already exists. This is
+//     the one that also closes the OTHER three gaps this header names — a
+//     meshletized chunk casts shadows (P27.2 arms vgeom casters), feeds the GI
+//     voxelization and reaches the depth prepass — which is why it is the right
+//     one and not merely the cheap one. It belongs to **P28.2**, where the
+//     cluster page's contents are decided.
+//   * **the env group alone**, `ShaderKind::Lit(2)` plus two call sites. Cheap,
+//     and refused for the reason the paragraph above gives, which P28.1 did not
+//     weaken: it buys the LOOK of integration for a surface that still casts
+//     nothing, feeds nothing and is invisible to the prepass.
+//
+// `every_env_bound_lit_path_receives_the_suns_shadow_and_voxel_is_refused`
+// (`crates/inf-render/src/vsm_receiver.rs`) pins this refusal against the code,
+// so the day the composition changes it is a failing test rather than a stale
+// comment. It is named here because the P27.5 text named
+// `a_voxel_surface_is_refused_a_receiver_and_says_so`, which **has never
+// existed** in this tree — a cited gate that does not exist is worse than no
+// claim (the P20 law), and this is the correction.
 //
 // `sprite.wgsl` has a `MAX_2D_LIGHTS` loop and no receiver either, and that is
 // a separate radial-falloff system rather than an oversight (the P27.4 audit's
