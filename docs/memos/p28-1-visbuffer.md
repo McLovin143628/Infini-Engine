@@ -1,9 +1,13 @@
 # P28.1 — the visibility buffer: the packing, the gradients, and the MSAA ruling
 
-**Status:** decided 2026-08-14, during P28.1. Five rulings, each with the
-measurement that decided it. The ROADMAP's clause 3 asks for the MSAA ruling
+**Status:** decided 2026-08-14, during P28.1; **revised the same day by the P28.1
+audit**, which withdrew one of the five rulings on measurement and restated two
+others against the quantities their doors actually read. Five rulings, each with
+the measurement that decided it. The ROADMAP's clause 3 asks for the MSAA ruling
 "decided by goldens and frame budget, not taste"; §5 is that, and §1–§4 are the
-decisions the pass had to make to get there.
+decisions the pass had to make to get there. **§7 is the audit's ledger** — read
+it before citing §1's meshlet ceiling or §2's gradient ruling, both of which it
+changes.
 
 ---
 

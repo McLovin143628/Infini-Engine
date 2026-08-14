@@ -13666,8 +13666,21 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
 >   (b) convert its payload to the file's own EOL, and (c) assert bare-LF count is
 >   unchanged — `insert_block.py` and `insert_ledger.py` do all three;
 >   `p281_roadmap.py` did none.
-> * Battery `-j 3`, then workspace clippy, both with `Start-Process` and both
->   redirects, per the house note. Disk 95.4 GB free at start.
+> * **Battery green: 245 binaries, 4 429 passed, 0 failed, 8 ignored** (`-j 3`,
+>   `--no-fail-fast`, 206 test binaries run, 0 warnings) — exactly the baseline
+>   245 / 4 425 / 0 / 8 plus this audit's **four** new arms. `cargo clippy
+>   --workspace --all-targets` with `RUSTFLAGS=-D warnings` **exit 0, zero
+>   warnings**; `cargo fmt --all --check` clean. Clippy ran LAST, per the
+>   machine note. Goldens **54**, digest `3e6182a6…22822fa5`, untouched by the
+>   audit as by the batch. Both runs via `Start-Process` with both redirects.
+>   Disk 95.40 GB free at start, 94.4 GB at end.
+> * **The STATUS block's own commit count is short.** It opens "Six commits,
+>   `3f4e5f7..a544945`" — git range notation excludes `3f4e5f7`, which is the
+>   packing commit the block then spends a section on, and two more
+>   (`a032e23`, `6bb4a61`) landed after the block was written. The batch is
+>   **ten** commits, `3340cb2..6bb4a61`, over 19 files at +5 481 / −42 — and the
+>   42 deletions were re-read line by line here: every one is a refactor move,
+>   none is an assertion. No gate was weakened by the batch.
 >
 > ### Carried to P28.2, as amended
 >
