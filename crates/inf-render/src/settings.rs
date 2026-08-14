@@ -123,6 +123,9 @@ pub struct RenderSettings {
     /// meshlet pools, the virtual-texture page pool and the shadow-page atlas
     /// together. Inert at the default, by construction — see [`StreamSettings`].
     pub stream: StreamSettings,
+    /// **The ray-query shadow experiment** (P28.5) — off, and off on every
+    /// shipped path. See [`RaytraceSettings`].
+    pub raytrace: RaytraceSettings,
     /// GPU-capability auto-tier override (P13.4.2). `None` → the host probes the
     /// adapter and picks a [`RenderTier`](crate::caps::RenderTier)
     /// ([`detect_tier`](crate::caps::detect_tier)); `Some(tier)` forces it
@@ -1158,9 +1161,36 @@ impl Default for RenderSettings {
             vt: VirtualTextureSettings::default(),
             vsm: VsmSettings::default(),
             stream: StreamSettings::default(),
+            raytrace: RaytraceSettings::default(),
             tier_override: None,
         }
     }
+}
+
+/// **The ray-query shadow experiment's one knob** (P28.5) — default **off**,
+/// and there is no path in this tree that turns it on.
+///
+/// The ROADMAP's clause is explicit that the experiment *"lands behind a
+/// default-off setting with a `caps.rs` clamp"* and that *"VSM remains the
+/// shipped path on every tier"*. Both halves are structural here rather than
+/// documented:
+///
+/// * nothing inside [`EngineRenderer::render`](crate::EngineRenderer::render)
+///   reads this field — `crate::raytrace` has no render-graph node and the
+///   experiment's only caller in the tree is its own gate;
+/// * [`AdapterCaps::clamp_ray_query`](crate::caps::AdapterCaps::clamp_ray_query)
+///   only ever **clears** it, and no [`RenderTier`](crate::caps::RenderTier)
+///   or preset assigns it at all — asserted by
+///   `no_tier_or_preset_ever_turns_the_experiment_on`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RaytraceSettings {
+    /// Trace sun shadows against a per-frame TLAS instead of reading them from
+    /// the shadow path.
+    ///
+    /// **Never true on a shipped frame.** A gate sets it to run the comparison
+    /// `docs/memos/p28-5-ray-query.md` records, and turning it on changes what
+    /// the *experiment* does, not what the renderer draws.
+    pub sun_shadows: bool,
 }
 
 impl RenderSettings {

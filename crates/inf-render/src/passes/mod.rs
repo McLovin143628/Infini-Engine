@@ -1479,6 +1479,17 @@ mod shader_compose_tests {
             // P27.3's per-page clear — the module that replaces the whole-atlas
             // `LoadOp::Clear`, and the one the scissor became load-bearing for.
             ("vsm_clear", include_str!("../shaders/vsm_clear.wgsl")),
+            // P28.5's ray-query experiment. Standalone (it owns its `@group(0)`
+            // and prepends nothing — a trace has no camera uniform), and it is
+            // here for the reason the law exists: it is compiled on **one**
+            // adapter class in the whole tree, so without this row the only
+            // thing that would ever parse it is a machine that happens to have
+            // `VK_KHR_ray_query`. `Capabilities::all()` includes naga's
+            // `RAY_QUERY`, so every CI leg validates it with no device.
+            (
+                "rt_sun_shadow",
+                include_str!("../shaders/rt_sun_shadow.wgsl"),
+            ),
         ] {
             validate(label, source);
         }

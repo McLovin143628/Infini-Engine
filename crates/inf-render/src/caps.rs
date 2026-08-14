@@ -395,6 +395,17 @@ pub struct AdapterCaps {
     /// on most mobile). So [`choose_tier`] ignores it, and the clamp that reads
     /// it is [`clamp_bc_tiles`](AdapterCaps::clamp_bc_tiles).
     pub texture_compression_bc: bool,
+    /// Whether the adapter exposes `EXPERIMENTAL_RAY_QUERY` (P28.5) — i.e.
+    /// whether a shader on this machine can trace against an acceleration
+    /// structure at all.
+    ///
+    /// Independent of the render tier, exactly like
+    /// [`texture_compression_bc`](AdapterCaps::texture_compression_bc): it is a
+    /// *capability*, not a measure of how much GPU there is, and [`choose_tier`]
+    /// ignores it. The clamp that reads it is
+    /// [`clamp_ray_query`](AdapterCaps::clamp_ray_query), and it only ever turns
+    /// the experiment **off**.
+    pub ray_query: bool,
     /// Whether the adapter exposes `POLYGON_MODE_LINE` (R-P2 wireframe view mode).
     /// Independent of the render tier — a low-tier GPU may still raster lines, and
     /// a high-tier one may lack the feature — so [`choose_tier`] ignores it; it is
@@ -425,6 +436,10 @@ impl AdapterCaps {
                 .adapter
                 .features()
                 .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
+            ray_query: gpu
+                .adapter
+                .features()
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
             polygon_mode_line: gpu
                 .adapter
                 .features()
@@ -466,6 +481,28 @@ impl AdapterCaps {
         }
         settings = self.clamp_scatter(settings);
         settings = self.clamp_bc_tiles(settings);
+        settings = self.clamp_ray_query(settings);
+        settings
+    }
+
+    /// **Clamp the ray-query experiment off where the adapter cannot run it**
+    /// (P28.5) — and only ever off.
+    ///
+    /// The law this lands under is the one every clamp on this type obeys, and
+    /// the experiment is the case it matters most for: an adapter that *has*
+    /// ray queries does not enable
+    /// [`RaytraceSettings::sun_shadows`](crate::RaytraceSettings) for a caller
+    /// who did not ask, because the shipped shadow path is virtual shadow maps
+    /// on **every** tier and this is an experiment, not a feature. Idempotent,
+    /// so it composes with the tier clamp in any order.
+    ///
+    /// Losing ray queries costs the experiment and nothing else — there is no
+    /// fallback to write, because there is no shipped behaviour to fall back
+    /// from.
+    pub fn clamp_ray_query(&self, mut settings: RenderSettings) -> RenderSettings {
+        if !self.ray_query {
+            settings.raytrace.sun_shadows = false;
+        }
         settings
     }
 
@@ -605,6 +642,7 @@ mod tests {
             max_storage_textures_per_stage: VGEOM_OCCLUSION_MIN_STORAGE_TEXTURES_PER_STAGE,
             is_cpu: false,
             texture_compression_bc: true,
+            ray_query: true,
             polygon_mode_line: true,
         }
     }
@@ -646,6 +684,7 @@ mod tests {
             max_storage_textures_per_stage: 0,
             is_cpu: false,
             texture_compression_bc: false,
+            ray_query: false,
             polygon_mode_line: false,
         };
         assert_eq!(choose_tier(&c), RenderTier::Low);
@@ -670,6 +709,7 @@ mod tests {
             max_storage_textures_per_stage: 0,
             is_cpu: false,
             texture_compression_bc: false,
+            ray_query: true,
             polygon_mode_line: true,
         };
         assert_eq!(choose_tier(&low), RenderTier::Low);
@@ -1237,6 +1277,7 @@ mod tests {
             max_storage_textures_per_stage: 0,
             is_cpu: false,
             texture_compression_bc: true,
+            ray_query: false,
             polygon_mode_line: false,
         };
         assert_eq!(choose_tier(&low), RenderTier::Low);

@@ -28,6 +28,10 @@ pub mod pick;
 pub mod pipeline;
 pub mod precip;
 pub mod primitives;
+/// **The ray-query shadow experiment** (P28.5) — the ROADMAP's last clause,
+/// built to be measured and never load-bearing. Nothing in
+/// [`EngineRenderer::render`] reaches it.
+pub mod raytrace;
 /// The non-blocking GPU→CPU readback ring at a pinned frame latency (P26.4).
 /// Not a virtual-texturing detail: P27's shadow-page marking and P28's unified
 /// streamer read through this same primitive.
@@ -140,8 +144,10 @@ pub use scene::{
 };
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
-    BloomSettings, GiSettings, PredictSettings, RenderSettings, ScatterSettings, ShadowSettings,
-    SsaoSettings, StreamSettings, VgeomSettings, VirtualTextureSettings, VsmSettings,
+    BloomSettings, GiSettings, PredictSettings, RaytraceSettings, RenderSettings, ScatterSettings,
+    ShadowSettings,
+    SsaoSettings, StreamSettings, VgeomSettings,
+    VirtualTextureSettings, VsmSettings,
     VsmSettingsError, DEFAULT_PREDICT_HORIZON_TICKS, DEFAULT_STREAM_BUDGET_BYTES,
     ROADMAP_PREDICT_HORIZON_TICKS, STREAM_BUDGET_LOW_BYTES, STREAM_BUDGET_MEDIUM_BYTES,
     VGEOM_BUDGET_LOW_BYTES,

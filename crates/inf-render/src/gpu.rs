@@ -79,6 +79,83 @@ impl GpuContext {
         Self::from_adapter(instance, adapter)
     }
 
+    /// **A headless context for the P28.5 ray-query experiment, and for nothing
+    /// else.**
+    ///
+    /// Identical to [`headless`](GpuContext::headless) except that the device
+    /// additionally requests `EXPERIMENTAL_RAY_QUERY` — which in wgpu 30
+    /// requires the caller to sign `ExperimentalFeatures::enabled()`, an
+    /// `unsafe` token acknowledging that the implementation of an experimental
+    /// feature may contain undefined behaviour.
+    ///
+    /// **That signature is why this is a separate constructor.** It cannot go
+    /// on the shipped path: a token accepting possible UB is not something a
+    /// player's device should carry for a feature it never uses, and — measured
+    /// in this batch — putting the feature into the ordinary optional mask
+    /// makes `request_device` *fail* on a machine that has ray queries but no
+    /// token, taking every headless test in the tree down with it.
+    ///
+    /// `Err` when there is no adapter, and `Err` when the adapter has no ray
+    /// queries — which is every non-Vulkan backend and every software adapter.
+    /// The caller is the experiment's gate, and it skips on either.
+    pub fn headless_ray_query() -> Result<Self, String> {
+        let instance = create_instance();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            ..Default::default()
+        }))
+        .map_err(|e| format!("no adapter: {e}"))?;
+        if !adapter
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+        {
+            let info = adapter.get_info();
+            return Err(format!(
+                "{} ({:?}, {:?}) has no EXPERIMENTAL_RAY_QUERY",
+                info.name, info.backend, info.device_type
+            ));
+        }
+        let features = adapter.features()
+            & (wgpu::Features::POLYGON_MODE_LINE
+                | wgpu::Features::TEXTURE_COMPRESSION_BC
+                | wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        // The four acceleration-structure limits are **0** in
+        // `Limits::default()` — a device that requested the feature and not the
+        // limits fails at `create_blas` with "Limit `max_blas_geometry_count`
+        // is 0" and at `create_bind_group_layout` with "Too many bindings of
+        // type AccelerationStructures … limit is 0", which are two more ways
+        // the naive wiring would have looked like a driver problem and been a
+        // descriptor one. Taken from the adapter, because the experiment's size
+        // is its fixture's and not a policy.
+        let adapter_limits = adapter.limits();
+        let mut limits = wgpu::Limits::default();
+        limits.max_blas_primitive_count = adapter_limits.max_blas_primitive_count;
+        limits.max_blas_geometry_count = adapter_limits.max_blas_geometry_count;
+        limits.max_tlas_instance_count = adapter_limits.max_tlas_instance_count;
+        limits.max_acceleration_structures_per_shader_stage =
+            adapter_limits.max_acceleration_structures_per_shader_stage;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: features,
+            required_limits: limits,
+            // SAFETY: the acknowledgement wgpu 30 asks for. This device is
+            // built by the P28.5 experiment's gate and by nothing else; no
+            // shipped host constructs one, and the experiment traces a
+            // read-only acceleration structure it built itself.
+            experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+            ..Default::default()
+        }))
+        .map_err(|e| format!("request_device (ray query): {e}"))?;
+        Ok(Self {
+            instance,
+            adapter,
+            device,
+            queue,
+            lost: Arc::new(AtomicBool::new(false)),
+            uncaptured_errors: Arc::new(AtomicU32::new(0)),
+        })
+    }
+
     fn from_adapter(instance: wgpu::Instance, adapter: wgpu::Adapter) -> Result<Self, String> {
         tracing::info!("inf-render adapter: {:?}", adapter.get_info());
         // Request the optional features *only where the adapter exposes them*.
@@ -93,6 +170,22 @@ impl GpuContext {
         //    residency door at 8× the page bytes for BC1 and 4× for BC3.
         //    `caps::AdapterCaps` probes it and `clamp_bc_tiles` turns the setting
         //    off; no tier ever turns it on.
+        //
+        // **`EXPERIMENTAL_RAY_QUERY` is deliberately NOT in this mask** (P28.5),
+        // and the reason was measured rather than assumed. wgpu 30 refuses any
+        // `EXPERIMENTAL_*` feature unless the descriptor also carries
+        // `ExperimentalFeatures::enabled()`, which is an **`unsafe`** token the
+        // caller signs to accept possible undefined behaviour. Adding the
+        // feature to this mask the request-if-available way made
+        // `request_device` fail outright — *"Some experimental features,
+        // EXPERIMENTAL_RAY_QUERY, were requested, but experimental features are
+        // not enabled"* — so every headless test in the tree skipped for want
+        // of an adapter. Request-if-available is not a safe rule for a feature
+        // whose request can be refused for a reason unrelated to the adapter.
+        //
+        // The experiment therefore builds its own device
+        // ([`GpuContext::headless_ray_query`]) and the shipped one is exactly
+        // the device it was before this batch.
         let optional_features = adapter.features()
             & (wgpu::Features::POLYGON_MODE_LINE | wgpu::Features::TEXTURE_COMPRESSION_BC);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -149,6 +242,25 @@ impl GpuContext {
         self.device
             .features()
             .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+    }
+
+    /// Whether ray queries can be issued from a shader on this device (P28.5),
+    /// i.e. `EXPERIMENTAL_RAY_QUERY` was requested-and-granted at creation.
+    ///
+    /// Read at the **device** and not at the adapter, for
+    /// [`supports_texture_compression_bc`](GpuContext::supports_texture_compression_bc)'s
+    /// reason: what matters is what this device was built with.
+    ///
+    /// `false` on every non-Vulkan backend by construction — wgpu 30 documents
+    /// the feature as Vulkan-only and native-only — and on any Vulkan adapter
+    /// without `VK_KHR_ray_query`, which includes every software rasterizer.
+    /// **Nothing on the shipped path reads this**: it gates an experiment
+    /// (`crate::raytrace`), and virtual shadow maps remain the shadow path on
+    /// every tier whatever it answers.
+    pub fn supports_ray_query(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
     }
 
     /// Install a lenient uncaptured-error handler for interactive/editor
