@@ -866,15 +866,37 @@ fn a_lead_time_costs_this_fixture_what_the_lane_earns_it() {
         );
     }
 
-    // ANTI-VACUITY: a horizon of zero really is the committed pose, and the
-    // arrival window really has surfaces in it.
-    assert_eq!(
-        zero.predicted[TICKS as usize - 1]
-            .expect("a full window predicts")
-            .1,
-        whip_view(TICKS - 1).forward.as_dvec3(),
-        "h = 0 did not return the committed direction, so this is not the \
-         control it claims to be"
+    // ANTI-VACUITY, in both directions: a horizon of zero really is the
+    // committed pose, and the shipped horizon really is somewhere else. Without
+    // the second, "the control ties the shipped arm" would also be what two
+    // identical runs look like.
+    //
+    // Read **mid-sweep**, not at the last tick: the path ends still, and a still
+    // camera turns by nothing at every horizon, so a check there is satisfied by
+    // any `h` at all — measured, an `h + 1` mutation is invisible at tick 259
+    // and dies here.
+    //
+    // `1e-6` and not equality, because `pcos64(0.0)` is a portable
+    // approximation and is not bit-identically 1: the residual is f32-epsilon
+    // scale, well under a tile boundary, and the two runs' want sets come out
+    // the same as a committed-camera mutation's to the last page.
+    const TURNING: u64 = WARM + RAMP + 30;
+    let committed = whip_view(TURNING).forward.as_dvec3();
+    let at_zero = zero.predicted[TURNING as usize]
+        .expect("a full window predicts")
+        .1;
+    let at_shipped = shipped.predicted[TURNING as usize]
+        .expect("a full window predicts")
+        .1;
+    assert!(
+        (at_zero - committed).length() < 1e-6,
+        "h = 0 did not return the committed direction ({at_zero:?} against \
+         {committed:?}), so this is not the control it claims to be"
+    );
+    assert!(
+        (at_shipped - committed).length() > 0.5,
+        "the shipped horizon predicted the committed pose ({at_shipped:?}), so \
+         the two arms are the same camera and the comparison is empty"
     );
     assert!(zero.predict_wants > 0 && off.arrival_justified > 0);
 
