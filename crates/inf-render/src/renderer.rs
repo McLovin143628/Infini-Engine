@@ -563,6 +563,13 @@ pub struct EngineRenderer {
     vt_feedback_dispatched: u32,
     /// P26.4 pop-in instruments — per tile class. See [`crate::VtPopIn`].
     vt_pop_in: crate::VtPopIn,
+    /// **The one readback ledger** (P28.3): the two feedback consumers' hit and
+    /// miss counts, under one pinned latency, so a gate can assert the property
+    /// two independent rings cannot state — that both read the SAME source
+    /// frame. Its `Geometry` line reads zero for ever, and that is a statement:
+    /// the meshlet streamer's wants are CPU-derived by ruling
+    /// (`inf_vgeom::stream`'s "why not cull feedback"), so it has no ring.
+    stream_ring: inf_stream::RingLedger,
     /// The empty VT surface, created once and never recreated (so it adds no
     /// `passes::ResourceKey` component, on the `wetness` precedent).
     vt_absent: crate::vt::VtEmptyPool,
@@ -804,6 +811,7 @@ impl EngineRenderer {
             vt_feedback_bases: Vec::new(),
             vt_feedback_dispatched: 0,
             vt_pop_in: crate::VtPopIn::default(),
+            stream_ring: inf_stream::RingLedger::default(),
             vt_absent: crate::vt::VtEmptyPool::new(&gpu.device),
             vt_engaged_frames: 0,
             vsm: None,
@@ -984,13 +992,17 @@ impl EngineRenderer {
         let floor_len = wants.len();
 
         // 3. frame F − 2's mask, or nothing. Never "whatever arrived".
-        match feedback.take_wants(&gpu.device, lib, frame) {
+        let landed = match feedback.take_wants(&gpu.device, lib, frame) {
             Some(refine) => {
                 self.vt_pop_in.feedback_frames += 1;
                 wants.extend(refine);
+                true
             }
-            None => self.vt_pop_in.feedback_misses += 1,
-        }
+            None => {
+                self.vt_pop_in.feedback_misses += 1;
+                false
+            }
+        };
         debug_assert!(
             wants.len() >= floor_len,
             "the feedback removed a floor want"
@@ -1021,6 +1033,13 @@ impl EngineRenderer {
             view,
             &requests,
         );
+        // …and the read is recorded in the ONE ledger (P28.3). The ring told us
+        // *whether* the bytes arrived; the ledger pins *which frame* they were
+        // allowed to be, so two consumers reading at this frame are comparable
+        // — which is the property the two independent rings cannot state about
+        // each other and `RingLedger::readers_agree` asserts.
+        self.stream_ring
+            .read(inf_stream::Consumer::Texture, frame, |_| landed);
     }
 
     /// The live VT mirror, for a host that needs to apply a transaction to it.
@@ -1222,6 +1241,77 @@ impl EngineRenderer {
             .unwrap_or_default()
     }
 
+    /// **The unified streamer's audit** (P28.3) — what the three page systems
+    /// hold between them, what the arbiter would grant them from the live
+    /// floors, how much of it is coupled, and whether the readback ring's two
+    /// consumers agree.
+    ///
+    /// Free and always on: every number is a CPU counter the three consumers
+    /// already maintain, folded into one struct because the whole point of the
+    /// phase is that "how much streaming residency does this machine hold" was
+    /// a question with three answers and no sum.
+    ///
+    /// **This is where `StreamError::FloorExceedsBudget` has its producer.**
+    /// `RenderSettings::arbitrate_budgets` runs with zero floors, because a
+    /// settings struct knows no content; here the floors are the live ones —
+    /// the virtual texture's pinned roots, in bytes, and every resident asset's
+    /// page 0 — so a unified budget that cannot hold them is a refusal with two
+    /// real numbers in it rather than a constant nobody can reach.
+    pub fn stream_report(&self) -> crate::stream::StreamReport {
+        let vgeom = self.vgeom_stream_report();
+        let vt = self.vt_textures.as_ref().map(|l| l.residency());
+        let vsm = self.vsm.as_ref();
+
+        let texture_floor = vt.map_or(0, |r| u64::from(r.stats().roots) * r.page_bytes());
+        let resident = [
+            vgeom.stats.resident_bytes,
+            vt.map_or(0, |r| r.resident_bytes()),
+            vsm.map_or(0, |v| v.residency().resident_bytes()),
+        ];
+        let requests = [
+            inf_stream::BudgetRequest {
+                floor_bytes: vgeom.floor_bytes,
+                want_bytes: self.settings.vgeom.stream.budget_bytes,
+            },
+            inf_stream::BudgetRequest {
+                floor_bytes: texture_floor,
+                want_bytes: self.settings.vt.budget_bytes,
+            },
+            inf_stream::BudgetRequest::want(if self.settings.vsm.enabled {
+                self.settings.vsm.budget_bytes
+            } else {
+                0
+            }),
+        ];
+        crate::stream::StreamReport {
+            budget_bytes: self.settings.stream.budget_bytes,
+            grant: inf_stream::arbitrate(self.settings.stream.budget_bytes, &requests),
+            resident,
+            floors: [requests[0].floor_bytes, texture_floor, 0],
+            coupled_groups: vgeom.coupled_groups,
+            coupled_tiles: vgeom.coupled_tiles,
+            dropped_groups: vgeom.dropped_groups,
+            retracted: vgeom.retracted,
+            stale_tiles: vgeom.stale_tiles,
+            ring: self.stream_ring,
+        }
+    }
+
+    /// **The one line a host logs about streaming** (P28.3) — the three page
+    /// systems in one place, which is what a unified streamer is for.
+    ///
+    /// `None` when nothing streams at all, which is not the same as a line of
+    /// zeros: a host that prints nothing is saying "this level pages nothing",
+    /// one that prints zeros is saying "it pages something and that something is
+    /// doing nothing".
+    pub fn stream_summary(&self) -> Option<String> {
+        let r = self.stream_report();
+        if r.resident.iter().all(|b| *b == 0) && r.coupled_groups == 0 {
+            return None;
+        }
+        Some(r.summary())
+    }
+
     /// What the P18.4 GI voxelizer consumed on the **last rendered frame**:
     /// candidate primitives, how many fitted the per-frame budget, how many were
     /// dropped, the macro-cell bin size, terrain columns and probes updated.
@@ -1310,7 +1400,14 @@ impl EngineRenderer {
             self.vsm_receiver_params = crate::vsm_receiver::VsmReceiverParams::absent();
             return;
         };
+        let marks_before = v.stats().mark_frames;
         v.sync(gpu, scene, view, &self.settings.vsm, frame);
+        let landed = v.stats().mark_frames > marks_before;
+        self.stream_ring
+            .read(inf_stream::Consumer::Shadow, frame, |_| landed);
+        let Some(v) = self.vsm.as_mut() else {
+            return;
+        };
         // **THE RECEIVER'S SIDE OF THE SYNC POINT** (P27.4), here rather than
         // beside the marking pass, and the placement is the whole of why the lit
         // passes see this frame: `write_buffer` is staged on the queue and runs

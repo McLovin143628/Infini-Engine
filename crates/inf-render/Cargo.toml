@@ -44,6 +44,13 @@ inf-vt = { workspace = true }
 # nothing else. The two do not name each other; see `inf-vsm`'s crate docs for
 # the measurement that kept them apart, and P28.3 for where the brains merge.
 inf-vsm = { workspace = true }
+# The ONE virtual streamer (P28.3): the budget arbiter the three page systems'
+# ceilings are divided by, the lane vocabulary their want sets are ordered in,
+# the coupling that keeps a cluster page and its texture tiles aging together,
+# and the readback ledger the two feedback rings report into. Ring 0, thiserror
+# and nothing else, and it names none of the three consumers — this crate is
+# where the three meet, which is why it is the one that reads all four.
+inf-stream = { workspace = true }
 wgpu = { workspace = true }
 glam = { workspace = true }
 pollster = { workspace = true }

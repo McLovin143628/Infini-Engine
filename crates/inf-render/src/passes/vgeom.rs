@@ -1318,6 +1318,27 @@ pub struct VgeomStreamReport {
     /// P28.2. It is reported rather than refused because refusing an address no
     /// budget can ever seat retracts the asset for ever.
     pub stale_tiles: u64,
+    /// Cluster pages currently coupled to their texture tiles (P28.3) — groups
+    /// in `inf_stream::Coupling`, which is one per resident page of a paired
+    /// asset. **Zero on a scene with no paired `.inf_vmesh`**, which is what
+    /// makes a non-zero `coupled_tiles` evidence rather than an assumption.
+    pub coupled_groups: usize,
+    /// Distinct tiles those groups name, **deduplicated across pages** — a tile
+    /// shared by two pages is one, for the reason the P28.2 ledger refuses to
+    /// count its bytes twice.
+    pub coupled_tiles: usize,
+    /// Groups dropped since the node was built — the anti-vacuity number for
+    /// cross-system aging. See `VgeomNode`'s field of the same name.
+    pub dropped_groups: u64,
+    /// **The meshlet streamer's mandatory floor**, in bytes (P28.3): every
+    /// resident asset's page 0, which holds all its roots and is never evicted.
+    ///
+    /// The quantity the budget arbiter needs and nothing published before. It
+    /// is what makes "never a hole, only softer detail" true — a budget that
+    /// cannot hold it cannot draw the asset at all — and it is content-shaped,
+    /// which is why `RenderSettings::arbitrate_budgets` cannot know it and
+    /// `EngineRenderer::stream_report` can.
+    pub floor_bytes: u64,
 }
 
 /// The shared handle the renderer hands the node.
@@ -1384,7 +1405,14 @@ pub struct VgeomNode {
     /// check — is two derivations that agree only while nobody edits one of them
     /// (the P21 one-door law), and the thing they would disagree about is exactly
     /// the invariant this batch exists to make structural.
-    page_tiles: BTreeMap<(u128, usize), Vec<(u128, inf_vt::TileCoord)>>,
+    ///
+    /// **It is an `inf_stream::Coupling` since P28.3**, not a `BTreeMap`, and
+    /// the difference is ownership rather than shape: a group's members are
+    /// wanted together, touched together and — the half a bare map could not do
+    /// — **dropped together**, in the frame the group is retracted, so the
+    /// invariant becomes a property of a value anything can check
+    /// (`inf_stream::breaches`) instead of a property of one gate's fixture.
+    coupling: inf_stream::Coupling<(u128, usize), (u128, inf_vt::TileCoord)>,
     /// Whether the last commit reallocated a pool buffer, so `run`'s bind groups
     /// are stale. Set by [`Self::commit_cluster_pages`], read once in `run`.
     pools_rebuilt: bool,
@@ -1392,6 +1420,13 @@ pub struct VgeomNode {
     /// refused, cumulative — the counter that says the texture budget, not the
     /// geometry budget, decided the detail.
     retracted: u64,
+    /// Coupled groups this session's transactions dropped, cumulative (P28.3).
+    /// A group goes when the page it names leaves residency — evicted, retracted
+    /// or dropped with its asset — and its members stop being wanted in the same
+    /// call. **The anti-vacuity number for cross-system aging**: a coupling that
+    /// never lets anything go and one that is never populated both report zero
+    /// breaches, and only this tells them apart.
+    dropped_groups: u64,
     /// Cooked tile addresses the registered image does not have, cumulative — a
     /// `.inf_vmesh` paired against a **different** `.inf_tex` than the one in
     /// front of it. Never silence, on the P16 advisory doctrine: nothing else in
@@ -1596,9 +1631,10 @@ impl VgeomNode {
             vis_bases: Vec::new(),
             vis_report,
             pending: None,
-            page_tiles: BTreeMap::new(),
+            coupling: inf_stream::Coupling::new(),
             pools_rebuilt: false,
             retracted: 0,
+            dropped_groups: 0,
             stale_tiles: 0,
         }
     }
@@ -1696,10 +1732,9 @@ impl VgeomNode {
         scene: &crate::scene::RenderScene,
         addressable: impl Fn(u128, inf_vt::TileCoord) -> bool,
     ) -> Vec<(u128, inf_vt::TileCoord)> {
-        self.page_tiles.clear();
-        let mut out: Vec<(u128, inf_vt::TileCoord)> = Vec::new();
+        self.coupling.clear();
         if self.pending.is_none() {
-            return out;
+            return Vec::new();
         }
         let source_of: BTreeMap<u128, &inf_vgeom::VgeomSource> = scene
             .vgeom_assets
@@ -1736,13 +1771,34 @@ impl VgeomNode {
                         }
                     }
                 });
-                out.extend_from_slice(&here);
-                self.page_tiles.insert((asset, page), here);
+                self.coupling.couple((asset, page), here);
             }
         }
-        out.sort_unstable_by_key(|(g, t)| (*g, t.payload_order()));
-        out.dedup();
-        out
+        // The want list is the COUPLING's, deduplicated and in address order —
+        // one derivation, and the arbiter's own accessor rather than a second
+        // fold over the same map. A tile shared by two pages is one want, which
+        // is also the number `member_count` reports (the P28.2 ledger's refusal
+        // to count a shared tile's bytes twice, met on the addresses).
+        self.coupling
+            .wants(inf_stream::LANE_FLOOR)
+            .into_iter()
+            .map(|(_, m)| m)
+            .collect()
+    }
+
+    /// **The cluster coupling** — the arbiter's group map, for a host or a gate
+    /// that wants to check the invariant against a residency it derived itself.
+    ///
+    /// Published rather than kept private because the P28.2 audit's finding
+    /// about the invariant gate was that it could only be checked inside one
+    /// fixture: `inf_stream::breaches(node.cluster_coupling(), |t| …)` is that
+    /// check, over the live world, against whatever definition of "resident" the
+    /// caller can derive independently.
+    #[inline]
+    pub fn cluster_coupling(
+        &self,
+    ) -> &inf_stream::Coupling<(u128, usize), (u128, inf_vt::TileCoord)> {
+        &self.coupling
     }
 
     /// Pair the geometry half with the texture half, or hand the page back.
@@ -1760,13 +1816,16 @@ impl VgeomNode {
         let Some(plan) = self.pending.take() else {
             return;
         };
-        // The pairing is asked page by page, from the same `page_tiles` the want
+        // The pairing is asked page by page, from the same coupling the want
         // set was built out of — one derivation, read twice.
-        let page_tiles = &self.page_tiles;
+        let coupling = &self.coupling;
         let page_in = self.streamer.pair(plan, |asset, page| {
             // A page with no entry is a page the want pass never saw — a state
             // this sequence does not produce, and refusing it is the safe read.
-            let refs = page_tiles.get(&(asset, page))?;
+            if coupling.members(&(asset, page)).is_empty() && !coupling.has_group(&(asset, page)) {
+                return None;
+            }
+            let refs = coupling.members(&(asset, page));
             // An empty pairing is not a refusal: an unpaired asset, or one whose
             // textures this level does not bind, has nothing to keep in step and
             // streams exactly as it did before P28.2.
@@ -1780,6 +1839,18 @@ impl VgeomNode {
             Some(seated)
         });
         self.retracted += u64::from(page_in.retracted);
+        // **Cross-system aging, the eviction half** (P28.3, clause 3): a group
+        // the transaction retracted stops wanting its members *now*, not next
+        // frame. `pair` has already truncated residency, so this is the same
+        // fact read off the same value — and it is what makes the tiles and the
+        // page they belong to age out together instead of the tiles outliving
+        // the page by exactly one frame's want set.
+        let live: std::collections::BTreeSet<(u128, usize)> = self
+            .streamer
+            .assets()
+            .flat_map(|(a, r)| (0..r.resident_pages()).map(move |p| (a, p)))
+            .collect();
+        self.dropped_groups += self.coupling.retain(|g| live.contains(g)) as u64;
         self.pools_rebuilt = self.pools.ensure(gpu, self.streamer.pools());
         for p in page_in.pages() {
             self.pools.write_page(gpu, p.geometry());
@@ -1790,6 +1861,14 @@ impl VgeomNode {
         if let Ok(mut r) = self.report.lock() {
             r.stats = *self.streamer.stats();
             r.retracted = self.retracted;
+            r.dropped_groups = self.dropped_groups;
+            r.floor_bytes = self
+                .streamer
+                .assets()
+                .map(|(_, res)| res.pages().first().map_or(0, |p| p.resident_bytes()))
+                .sum();
+            r.coupled_groups = self.coupling.len();
+            r.coupled_tiles = self.coupling.member_count();
             r.stale_tiles = self.stale_tiles;
             r.floor_lod.clear();
             r.pages.clear();
@@ -1937,9 +2016,10 @@ impl RenderNode for VgeomNode {
             prev_view,
             report: _,
             pending: _,
-            page_tiles: _,
+            coupling: _,
             pools_rebuilt: _,
             retracted: _,
+            dropped_groups: _,
             stale_tiles: _,
             view_bgl: _,
             lights_bgl: _,

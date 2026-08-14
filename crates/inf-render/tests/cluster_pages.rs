@@ -686,16 +686,29 @@ fn a_pairing_cooked_against_another_image_degrades_instead_of_erasing_the_asset(
 /// own tiles is deduped into the pairing and competes with nothing — against a
 /// pool that cannot hold both.
 ///
-/// **What it establishes, and the bound it measures.** The protection is
-/// priority-**blind**: step 3 protects every want that is already resident, of
-/// any class, before step 4 admits any miss, of any class. So a refinement that
-/// got there first outranks a floor want that has not. The guarantee that
-/// survives is the one the invariant needs — *a resident cluster page never
-/// loses ground it already holds* — and the cost is that a competing class can
-/// stop the pairing gaining more. Measured here rather than asserted away: on
-/// this fixture the decoy costs the pairing its finest page.
+/// **What it established, the bound it measured, and what P28.3 did to that
+/// bound.** As written by the P28.2 audit this arm found the protection
+/// priority-**blind**: step 3 protected every resident want *of any class*
+/// before step 4 offered a slot to any miss *of any class*, so a refinement that
+/// got there first outranked a floor want that had not, and the arm's closing
+/// assertion measured the cost — *"on this fixture the decoy costs the pairing
+/// its finest page"*.
+///
+/// **That defect is what P28.3 was commissioned to fix**, and the audit routed
+/// it here by name (*"the protection order is priority-blind … a rank across
+/// classes"*). `inf_stream::admit_by_lane` protects and admits **one lane at a
+/// time**, so a floor miss may now take a resident refinement's slot. The
+/// measured bound is therefore **retired rather than weakened**, and this arm
+/// asserts the stronger claim in its place: under the same load, on the same
+/// fixture, **a competing refinement class costs the pairing nothing at all**.
+///
+/// It stays falsifiable in both directions. Reverting the lane walk makes
+/// `contested` fall strictly below `alone` again and the equality fails — the
+/// old assertion's own measurement, now the control. And `contended` still
+/// proves the pool ran out, or the equality would be a statement about a
+/// comfortable budget rather than about a rank.
 #[test]
-fn a_refinement_class_under_slot_pressure_cannot_cost_a_resident_page_its_tiles() {
+fn a_refinement_class_under_slot_pressure_costs_a_resident_page_nothing() {
     let (src, mesh) = paired_source();
     // A third texture, registered but NOT part of the pairing — a surface the
     // feedback mask asks for and this mesh never samples.
@@ -774,15 +787,19 @@ fn a_refinement_class_under_slot_pressure_cannot_cost_a_resident_page_its_tiles(
             "residency went backwards under a refining want: {contested:?}. A              competing class took a resident page's tiles, which is what the              protection order forbids."
         );
     }
-    // THE BOUND, measured: it may still cost detail not yet gained.
-    for (c, a) in contested.iter().zip(&alone) {
-        assert!(
-            c <= a,
-            "a competing class made the pairing stream MORE: {contested:?} against              {alone:?} — the arm's premise is inverted"
-        );
-    }
+    // **THE CLAIM P28.3 REPLACED THE BOUND WITH**: the decoy costs the pairing
+    // nothing, at every step of the ladder. Before the lane walk the last entry
+    // was strictly smaller here than in the uncontested run — that measurement
+    // is now this assertion's control, and reverting `admit_by_lane` to one pass
+    // brings it back.
+    assert_eq!(
+        contested, alone,
+        "a competing refinement class cost the pairing detail: {contested:?}          against {alone:?}. Since P28.3 a floor want outranks a RESIDENT          refinement, so the pairing's tiles must reach the atlas whatever the          feedback is asking for"
+    );
+    // ANTI-VACUITY, the other half: the ladder has to have gained ground at all,
+    // or two identical lists of the same number would satisfy the equality.
     assert!(
-        contested.last() < alone.last(),
-        "the decoy cost the pairing nothing at all ({contested:?} against          {alone:?}) — then the pool is not contested enough for the bound above          to be the honest reading of this fixture"
+        alone.last() > alone.first(),
+        "the pairing never refined even uncontested ({alone:?}) — this arm cannot          see a cost it was never in a position to pay"
     );
 }

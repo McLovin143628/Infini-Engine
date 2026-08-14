@@ -119,6 +119,10 @@ pub struct RenderSettings {
     /// Low, which is the P27.5 clause wired at the start of the phase rather than
     /// at the end of it.
     pub vsm: VsmSettings,
+    /// **The unified streaming budget** (P28.3): one VRAM ceiling over the
+    /// meshlet pools, the virtual-texture page pool and the shadow-page atlas
+    /// together. Inert at the default, by construction — see [`StreamSettings`].
+    pub stream: StreamSettings,
     /// GPU-capability auto-tier override (P13.4.2). `None` → the host probes the
     /// adapter and picks a [`RenderTier`](crate::caps::RenderTier)
     /// ([`detect_tier`](crate::caps::detect_tier)); `Some(tier)` forces it
@@ -563,6 +567,90 @@ impl Default for VirtualTextureSettings {
     }
 }
 
+/// **The meshlet pools' budget on the tier below High**, in bytes: 128 MiB.
+///
+/// Half the default, and the meshlet streamer's **first** tier knob (P28.3):
+/// `VgeomStreamBudget::budget_bytes` shipped in P18.2 and no tier ever touched
+/// it, so a Medium machine was handed the High ceiling by a settings struct that
+/// never said so. It changes nothing today — Medium and Low both clear
+/// `VgeomSettings::enabled`, so the pools are not allocated at all — and that is
+/// exactly why it can land: the clamp exists before anything can ship that
+/// forgets it, which is the shape `VsmSettings::enabled`'s own clamp took at the
+/// start of P27 rather than at the end.
+///
+/// What a smaller pool costs is the same thing it has always cost: a coarser
+/// meshlet cut. Softer detail, never a hole — residency is a prefix and page 0
+/// is the always-resident floor.
+pub const VGEOM_BUDGET_MEDIUM_BYTES: u64 = 128 * 1024 * 1024;
+
+/// **The meshlet pools' budget on Low**, in bytes: 64 MiB.
+pub const VGEOM_BUDGET_LOW_BYTES: u64 = 64 * 1024 * 1024;
+
+/// **The unified streaming budget on High**, in bytes: the **sum of the three
+/// consumers' own defaults** — 256 MiB of meshlet pools + 24 MiB of virtual
+/// texture pages + 64 MiB of shadow-page atlas = 344 MiB.
+///
+/// It is the sum on purpose, and that is the whole of why this batch moves no
+/// golden and no gate: `inf_stream::arbitrate` is an **identity** when the
+/// requests fit the total, so at the shipped defaults every consumer is handed
+/// exactly the number it had before there was an arbiter
+/// (`inf_stream::budget::tests::the_shipped_default_is_an_identity`).
+///
+/// What the number buys is that the sum is now **bounded by something**. Before
+/// P28.3 the three ceilings were independent and nothing anywhere said what a
+/// machine's total streaming residency could reach; a project that raised one of
+/// the three raised the total, silently. Lowering this one number now divides
+/// deterministically between the three instead — floors first, then an even
+/// water-fill clamped at each want.
+pub const DEFAULT_STREAM_BUDGET_BYTES: u64 =
+    inf_vgeom::DEFAULT_VGEOM_BUDGET_BYTES + crate::DEFAULT_VT_BUDGET_BYTES
+        + inf_vsm::DEFAULT_VSM_BUDGET_BYTES;
+
+/// **The unified streaming budget on Medium**, in bytes: the sum of that tier's
+/// three ceilings — 128 + 12 + 32 = 172 MiB.
+///
+/// Consistent with the per-consumer clamps by construction rather than by
+/// coincidence, so the tier's own arbitration is an identity too and the
+/// arbiter binds exactly when a *caller* asks for more than its tier's total.
+pub const STREAM_BUDGET_MEDIUM_BYTES: u64 =
+    VGEOM_BUDGET_MEDIUM_BYTES + VT_BUDGET_MEDIUM_BYTES + VSM_BUDGET_MEDIUM_BYTES;
+
+/// **The unified streaming budget on Low**, in bytes: 64 + 6 + 16 = 86 MiB.
+pub const STREAM_BUDGET_LOW_BYTES: u64 =
+    VGEOM_BUDGET_LOW_BYTES + VT_BUDGET_LOW_BYTES + VSM_BUDGET_LOW_BYTES;
+
+/// **The unified streaming budget** (P28.3, clause 2): one VRAM ceiling over
+/// the three page systems.
+///
+/// One knob and no enable flag, for `AtmosphereSettings`' reason: whether a
+/// level streams is a property of its content. What a host owns is how much
+/// VRAM the three of them may hold between them — which is a question nothing
+/// in this tree could ask before, because there were three ceilings and no
+/// fourth number over them.
+///
+/// The per-consumer numbers (`VgeomStreamBudget::budget_bytes`,
+/// `VirtualTextureSettings::budget_bytes`, `VsmSettings::budget_bytes`) stay,
+/// and they become **requests**: each consumer still says what it would use,
+/// this says what the three may have, and `inf_stream::arbitrate` divides.
+/// Keeping them is not a courtesy — a request is content-shaped (a level with
+/// one 8 k texture and no meshlets should not be handed a third of the budget
+/// for geometry), and an arbiter with no requests would have to guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamSettings {
+    /// The ceiling on the **sum** of the three consumers' residency, in bytes.
+    /// Clamped down by [`RenderTier::apply`](crate::caps::RenderTier::apply)
+    /// like every other capability knob.
+    pub budget_bytes: u64,
+}
+
+impl Default for StreamSettings {
+    fn default() -> Self {
+        Self {
+            budget_bytes: DEFAULT_STREAM_BUDGET_BYTES,
+        }
+    }
+}
+
 /// **The page atlas's budget on the tier below High**, in bytes: 32 MiB — half
 /// the default, 512 pages.
 ///
@@ -959,12 +1047,72 @@ impl Default for RenderSettings {
             water: crate::water::WaterSettings::default(),
             vt: VirtualTextureSettings::default(),
             vsm: VsmSettings::default(),
+            stream: StreamSettings::default(),
             tier_override: None,
         }
     }
 }
 
 impl RenderSettings {
+    /// **Divide the unified streaming budget between the three page systems**
+    /// (P28.3, clause 2) — the settings-level half of the arbiter.
+    ///
+    /// Each consumer's own `budget_bytes` is its **request**; this replaces the
+    /// three with `inf_stream::arbitrate`'s grants. It is the last step of
+    /// [`RenderTier::apply`](crate::caps::RenderTier::apply) and
+    /// [`RenderTier::clamp_mobile`](crate::caps::RenderTier::clamp_mobile), so
+    /// every host goes through one door, and it obeys the same law they do: a
+    /// grant is never larger than its request, so this **only ever lowers**.
+    ///
+    /// **Floors are zero here, deliberately.** A consumer's mandatory floor is a
+    /// fact about *content* — how many textures a level registers, how big an
+    /// asset's page 0 is — and a settings struct has none in scope. Refusing a
+    /// budget that cannot hold a floor therefore stays where it already lives
+    /// and where the numbers are known: `VtError::MandatoryFloorExceedsBudget`
+    /// at registration. What the live floors *are* is reported per frame by
+    /// [`EngineRenderer::stream_report`](crate::EngineRenderer::stream_report),
+    /// which is the arbiter's audit and where `StreamError::FloorExceedsBudget`
+    /// has its producer.
+    ///
+    /// **Idempotent**, and that is what lets it sit at the end of a clamp that
+    /// is itself idempotent: arbitrating an already-arbitrated set has requests
+    /// equal to the previous grants, whose sum is at most the total, so the
+    /// arbiter is an identity on it.
+    pub fn arbitrate_budgets(mut self) -> Self {
+        // A consumer that is not live asks for nothing, so its share is
+        // available to the two that are. `vgeom.enabled` and `vsm.enabled` are
+        // real switches; virtual texturing has none, because whether a level
+        // has virtual textures is a property of its content (the
+        // `VirtualTextureSettings` ruling) — so its request is always its
+        // budget, and a textureless level simply never registers a texture.
+        let requests = [
+            inf_stream::BudgetRequest::want(if self.vgeom.enabled {
+                self.vgeom.stream.budget_bytes
+            } else {
+                0
+            }),
+            inf_stream::BudgetRequest::want(self.vt.budget_bytes),
+            inf_stream::BudgetRequest::want(if self.vsm.enabled {
+                self.vsm.budget_bytes
+            } else {
+                0
+            }),
+        ];
+        // Infallible: every floor is zero, so the only refusal `arbitrate` can
+        // make is unreachable from here. `expect` rather than a silent `unwrap`
+        // so the day a floor arrives the message names why it could not.
+        let grant = inf_stream::arbitrate(self.stream.budget_bytes, &requests)
+            .expect("a zero floor fits every budget");
+        if self.vgeom.enabled {
+            self.vgeom.stream.budget_bytes = grant.get(inf_stream::Consumer::Geometry);
+        }
+        self.vt.budget_bytes = grant.get(inf_stream::Consumer::Texture);
+        if self.vsm.enabled {
+            self.vsm.budget_bytes = grant.get(inf_stream::Consumer::Shadow);
+        }
+        self
+    }
+
     /// Whether a single-sample scene-depth prepass is needed this frame (SSAO
     /// reads it for AO; TAA reprojects against it).
     ///

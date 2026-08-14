@@ -61,9 +61,16 @@ use std::sync::Arc;
 ///
 /// It is a **constant and not a setting** on purpose: it is the offset a trace
 /// is a pure function of, so a host that could tune it could make two machines
-/// disagree about one scripted path. P28.3's unified ring inherits the same
-/// rule.
-pub const READBACK_LATENCY_FRAMES: u64 = 2;
+/// disagree about one scripted path.
+///
+/// **Since P28.3 the constant lives in `inf_stream::ring`** and this is a
+/// re-export. The module's opening paragraph named *"P28.3's unified streamer,
+/// which folds all three into one ring"* as a consumer; what that fold turned
+/// out to be is one **domain** rather than one buffer — the latency, the slot
+/// arithmetic and the accounting are shared, the staging buffers are not, and
+/// `inf_stream::ring`'s docs carry the measurement that decided it (one buffer
+/// means a texture registration drops an in-flight shadow mask).
+pub use inf_stream::FEEDBACK_LATENCY_FRAMES as READBACK_LATENCY_FRAMES;
 
 /// What one slot is doing.
 ///
@@ -132,7 +139,7 @@ impl ReadbackRing {
     /// not a setting.
     pub fn with_latency(device: &wgpu::Device, label: &str, size: u64, latency: u64) -> Self {
         let size = size.next_multiple_of(4).max(4);
-        let slots = (0..latency + 1)
+        let slots = (0..inf_stream::ring_slots(latency))
             .map(|i| Slot {
                 buffer: device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(&format!("{label}-readback-{i}")),
@@ -204,7 +211,7 @@ impl ReadbackRing {
         frame: u64,
     ) -> bool {
         let n = self.slots.len() as u64;
-        let idx = (frame % n) as usize;
+        let idx = inf_stream::record_slot(frame, n) as usize;
         // Reclaim first: the slot this frame wants may still be holding the
         // mapping from `frame - slots`, which nothing consumed (a caller that
         // skipped a `take`, or a miss that was never collected).
@@ -277,11 +284,11 @@ impl ReadbackRing {
     /// answers were recorded before the ring existed — and that is a **miss**,
     /// counted like any other, not a silent zero.
     pub fn take<R>(&mut self, frame: u64, read: impl FnOnce(&[u8]) -> R) -> Option<R> {
-        let Some(want) = frame.checked_sub(self.latency) else {
+        let Some(want) = inf_stream::read_frame(frame, self.latency) else {
             self.misses += 1;
             return None;
         };
-        let idx = (want % self.slots.len() as u64) as usize;
+        let idx = inf_stream::record_slot(want, self.slots.len() as u64) as usize;
         if self.slots[idx].state != SlotState::Ready(want) {
             self.misses += 1;
             return None;
@@ -316,6 +323,11 @@ mod tests {
     /// makes the ring correct and it is one modular equation. `slots > latency`
     /// is exactly the condition, so it is asserted at both the shipped latency
     /// and at the boundary a smaller ring would sit on.
+    ///
+    /// Kept after P28.3 moved the arithmetic into `inf_stream::ring`, and
+    /// written against **this** module's spelling of it: the shared functions
+    /// are what the buffers are indexed by, so an arm that stopped reading them
+    /// here would stop being about this ring.
     #[test]
     fn a_recorded_slot_is_never_the_slot_read_in_the_same_frame() {
         for latency in 1..=4u64 {

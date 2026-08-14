@@ -3381,6 +3381,7 @@ dependencies = [
  "inf-material",
  "inf-math",
  "inf-render-2d",
+ "inf-stream",
  "inf-terrain",
  "inf-vgeom",
  "inf-voxel",

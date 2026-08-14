@@ -198,7 +198,35 @@ impl RenderTier {
             RenderTier::High => u32::MAX,
             RenderTier::Medium | RenderTier::Low => crate::settings::VSM_PCF_RADIUS_MEDIUM,
         });
-        settings
+        // P28.3 — the meshlet pools' **first** tier knob, and the unified
+        // ceiling over all three page systems. Two `min`s, so both only ever
+        // lower, `apply` stays idempotent and order-independent, High is a
+        // no-op, and a caller who already asked for less keeps less.
+        //
+        // The meshlet clamp changes nothing today: Medium and Low both clear
+        // `vgeom.enabled` above, so the pools are never allocated. It lands
+        // anyway for the reason `vsm.enabled`'s clamp landed at the start of
+        // P27 rather than at the end — the clamp exists before anything can be
+        // shipped that forgets it, and until P28.3 the meshlet budget was the
+        // one streaming ceiling no tier had an opinion about.
+        settings.vgeom.stream.budget_bytes = settings.vgeom.stream.budget_bytes.min(match self {
+            RenderTier::High => u64::MAX,
+            RenderTier::Medium => crate::settings::VGEOM_BUDGET_MEDIUM_BYTES,
+            RenderTier::Low => crate::settings::VGEOM_BUDGET_LOW_BYTES,
+        });
+        // The unified ceiling is each tier's own three shares summed, so the
+        // tier's arbitration is an identity by construction and the arbiter
+        // binds exactly when a CALLER asks for more than its tier's total —
+        // which is the case that had no bound at all before this batch.
+        settings.stream.budget_bytes = settings.stream.budget_bytes.min(match self {
+            RenderTier::High => u64::MAX,
+            RenderTier::Medium => crate::settings::STREAM_BUDGET_MEDIUM_BYTES,
+            RenderTier::Low => crate::settings::STREAM_BUDGET_LOW_BYTES,
+        });
+        // …and the division itself, LAST, so it divides the numbers every clamp
+        // above has already lowered. A grant is never larger than its request,
+        // so this keeps `apply` a pure narrowing.
+        settings.arbitrate_budgets()
     }
 
     /// The mobile baseline render profile (P14.1) — the [`RenderSettings`] a
@@ -253,7 +281,21 @@ impl RenderTier {
             .vt
             .budget_bytes
             .min(crate::settings::VT_BUDGET_LOW_BYTES);
-        settings
+        // …and the Low unified ceiling with it (P28.3), so a phone's *sum* is
+        // bounded and not only its texture pool. The meshlet pools take the Low
+        // clamp too, even though `vgeom.enabled` is cleared six lines above: a
+        // preset that only turns a feature off leaves its budget lying at High
+        // for whoever turns it back on.
+        settings.vgeom.stream.budget_bytes = settings
+            .vgeom
+            .stream
+            .budget_bytes
+            .min(crate::settings::VGEOM_BUDGET_LOW_BYTES);
+        settings.stream.budget_bytes = settings
+            .stream
+            .budget_bytes
+            .min(crate::settings::STREAM_BUDGET_LOW_BYTES);
+        settings.arbitrate_budgets()
     }
 }
 
@@ -887,6 +929,186 @@ mod tests {
                 "{tier:?} disabled the pool"
             );
         }
+    }
+
+    /// **The unified streaming budget is a tier knob, and so — at last — are
+    /// the meshlet pools** (P28.3, clause 2).
+    ///
+    /// Two clamps in one arm because they are one decision: the unified ceiling
+    /// is each tier's own three shares summed, so a ladder that descends for the
+    /// parts and not for the whole (or the other way round) is a table that
+    /// disagrees with itself. The `const` block makes that a **build** failure
+    /// rather than a test failure, on `the_vt_pool_budget_clamps_down_and_never_
+    /// up`'s precedent.
+    #[test]
+    fn the_unified_stream_budget_clamps_down_and_never_up() {
+        use crate::settings::{
+            DEFAULT_STREAM_BUDGET_BYTES, STREAM_BUDGET_LOW_BYTES, STREAM_BUDGET_MEDIUM_BYTES,
+            VGEOM_BUDGET_LOW_BYTES, VGEOM_BUDGET_MEDIUM_BYTES, VT_BUDGET_LOW_BYTES,
+            VT_BUDGET_MEDIUM_BYTES, VSM_BUDGET_LOW_BYTES, VSM_BUDGET_MEDIUM_BYTES,
+        };
+        let s = RenderSettings::default();
+        assert_eq!(s.stream.budget_bytes, DEFAULT_STREAM_BUDGET_BYTES);
+        assert_eq!(
+            s.vgeom.stream.budget_bytes,
+            inf_vgeom::DEFAULT_VGEOM_BUDGET_BYTES
+        );
+
+        // High is a no-op on both, so the default configuration on a capable
+        // machine is the pre-P28.3 one, byte for byte.
+        let h = RenderTier::High.apply(s);
+        assert_eq!(h.stream.budget_bytes, DEFAULT_STREAM_BUDGET_BYTES);
+        assert_eq!(
+            h.vgeom.stream.budget_bytes,
+            inf_vgeom::DEFAULT_VGEOM_BUDGET_BYTES
+        );
+        assert_eq!(
+            RenderTier::Medium.apply(s).stream.budget_bytes,
+            STREAM_BUDGET_MEDIUM_BYTES
+        );
+        assert_eq!(
+            RenderTier::Medium.apply(s).vgeom.stream.budget_bytes,
+            VGEOM_BUDGET_MEDIUM_BYTES
+        );
+        assert_eq!(
+            RenderTier::Low.apply(s).stream.budget_bytes,
+            STREAM_BUDGET_LOW_BYTES
+        );
+        assert_eq!(
+            RenderTier::Low.apply(s).vgeom.stream.budget_bytes,
+            VGEOM_BUDGET_LOW_BYTES
+        );
+
+        // **The unified number IS the sum of that tier's three shares**, at
+        // every tier — which is what makes the arbiter an identity per tier and
+        // what would break the instant somebody lowered one share and forgot
+        // the whole.
+        const {
+            assert!(
+                DEFAULT_STREAM_BUDGET_BYTES
+                    == inf_vgeom::DEFAULT_VGEOM_BUDGET_BYTES
+                        + crate::DEFAULT_VT_BUDGET_BYTES
+                        + inf_vsm::DEFAULT_VSM_BUDGET_BYTES
+            );
+            assert!(
+                STREAM_BUDGET_MEDIUM_BYTES
+                    == VGEOM_BUDGET_MEDIUM_BYTES + VT_BUDGET_MEDIUM_BYTES + VSM_BUDGET_MEDIUM_BYTES
+            );
+            assert!(
+                STREAM_BUDGET_LOW_BYTES
+                    == VGEOM_BUDGET_LOW_BYTES + VT_BUDGET_LOW_BYTES + VSM_BUDGET_LOW_BYTES
+            );
+            // …and both ladders really descend.
+            assert!(STREAM_BUDGET_LOW_BYTES < STREAM_BUDGET_MEDIUM_BYTES);
+            assert!(STREAM_BUDGET_MEDIUM_BYTES < DEFAULT_STREAM_BUDGET_BYTES);
+            assert!(VGEOM_BUDGET_LOW_BYTES < VGEOM_BUDGET_MEDIUM_BYTES);
+            assert!(VGEOM_BUDGET_MEDIUM_BYTES < inf_vgeom::DEFAULT_VGEOM_BUDGET_BYTES);
+        }
+
+        // A caller that already asked for LESS keeps its own number, on both,
+        // at every tier and on the mobile preset.
+        let mut frugal = s;
+        frugal.stream.budget_bytes = 8 * 1024 * 1024;
+        frugal.vgeom.stream.budget_bytes = 4 * 1024 * 1024;
+        for tier in [RenderTier::High, RenderTier::Medium, RenderTier::Low] {
+            let a = tier.apply(frugal);
+            assert_eq!(
+                a.stream.budget_bytes,
+                8 * 1024 * 1024,
+                "{tier:?} RAISED a caller's unified budget"
+            );
+            assert_eq!(
+                a.vgeom.stream.budget_bytes,
+                4 * 1024 * 1024,
+                "{tier:?} RAISED a caller's meshlet budget"
+            );
+        }
+        let mob = RenderTier::clamp_mobile(frugal);
+        assert_eq!(mob.stream.budget_bytes, 8 * 1024 * 1024);
+        assert_eq!(mob.vgeom.stream.budget_bytes, 4 * 1024 * 1024);
+        assert_eq!(
+            RenderTier::clamp_mobile(s).stream.budget_bytes,
+            STREAM_BUDGET_LOW_BYTES
+        );
+
+        // Idempotent, like every other clamp here — and no tier ever zeroes it,
+        // because a budget of nothing is a feature switch wearing a number's
+        // clothes.
+        for tier in [RenderTier::High, RenderTier::Medium, RenderTier::Low] {
+            let a = tier.apply(s);
+            assert_eq!(tier.apply(a), a, "{tier:?} is not idempotent");
+            assert!(a.stream.budget_bytes > 0, "{tier:?} disabled streaming");
+        }
+    }
+
+    /// **The arbiter divides, and at the shipped defaults it divides nothing**
+    /// (P28.3, clause 2) — through the real door, `RenderTier::apply`.
+    ///
+    /// Two halves, and the first is what keeps every golden and every P26/P27
+    /// gate byte-identical across this batch: on a High tier with everything a
+    /// host can turn on turned on, the three requests sum to exactly the unified
+    /// ceiling, so each consumer is handed the number it had before there was an
+    /// arbiter. The second is the case that had no bound at all before: a caller
+    /// that asks each consumer for more than the tier's whole budget is
+    /// **divided**, not granted the sum.
+    #[test]
+    fn the_arbiter_is_an_identity_at_the_defaults_and_divides_an_over_ask() {
+        use crate::settings::DEFAULT_STREAM_BUDGET_BYTES;
+        let mut live = RenderSettings::default();
+        live.vgeom.enabled = true;
+        live.vsm.enabled = true;
+        let h = RenderTier::High.apply(live);
+        assert_eq!(
+            h.vgeom.stream.budget_bytes,
+            inf_vgeom::DEFAULT_VGEOM_BUDGET_BYTES
+        );
+        assert_eq!(h.vt.budget_bytes, crate::DEFAULT_VT_BUDGET_BYTES);
+        assert_eq!(h.vsm.budget_bytes, inf_vsm::DEFAULT_VSM_BUDGET_BYTES);
+        assert_eq!(
+            h.vgeom.stream.budget_bytes + h.vt.budget_bytes + h.vsm.budget_bytes,
+            DEFAULT_STREAM_BUDGET_BYTES,
+            "the three shares no longer sum to the unified ceiling"
+        );
+
+        // An over-ask: each consumer wants the whole budget. Before P28.3 all
+        // three were granted, and the machine held three times the ceiling.
+        let mut greedy = live;
+        greedy.stream.budget_bytes = 96 * 1024 * 1024;
+        greedy.vgeom.stream.budget_bytes = 96 * 1024 * 1024;
+        greedy.vt.budget_bytes = 96 * 1024 * 1024;
+        greedy.vsm.budget_bytes = 96 * 1024 * 1024;
+        let g = RenderTier::High.apply(greedy);
+        let total = g.vgeom.stream.budget_bytes + g.vt.budget_bytes + g.vsm.budget_bytes;
+        assert_eq!(
+            total,
+            96 * 1024 * 1024,
+            "the sum of the three grants left the unified ceiling: {} / {} / {}",
+            g.vgeom.stream.budget_bytes,
+            g.vt.budget_bytes,
+            g.vsm.budget_bytes
+        );
+        // Evenly, since all three want the same thing and none saturates.
+        assert_eq!(g.vt.budget_bytes, 32 * 1024 * 1024);
+        assert_eq!(g.vsm.budget_bytes, 32 * 1024 * 1024);
+
+        // Idempotent through the door, which is what lets `apply` end with it.
+        assert_eq!(RenderTier::High.apply(g), g);
+        // A consumer that is OFF asks for nothing and leaves its share behind —
+        // so a shadowless project gets a bigger texture pool rather than a
+        // reserved third it cannot use.
+        let mut no_shadows = greedy;
+        no_shadows.vsm.enabled = false;
+        let n = RenderTier::High.apply(no_shadows);
+        assert!(
+            n.vt.budget_bytes > g.vt.budget_bytes,
+            "turning shadows off did not release their share: {} vs {}",
+            n.vt.budget_bytes,
+            g.vt.budget_bytes
+        );
+        assert_eq!(
+            n.vgeom.stream.budget_bytes + n.vt.budget_bytes,
+            96 * 1024 * 1024
+        );
     }
 
     #[test]

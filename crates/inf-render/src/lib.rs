@@ -35,6 +35,10 @@ pub mod readback;
 pub mod renderer;
 pub mod scene;
 pub mod settings;
+/// **The unified streamer's audit** (P28.3): the renderer's side of
+/// `inf-stream` — the three page systems' residency, the arbiter's verdict
+/// against the LIVE floors, the coupling's size, and the readback ledger.
+pub mod stream;
 pub mod surface;
 /// The P28.1 visibility buffer's **packing contract** — the thirty-two bits that
 /// name a triangle, the typed refusal a scene past them takes, and the Rust twin
@@ -137,10 +141,21 @@ pub use scene::{
 pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
     BloomSettings, GiSettings, RenderSettings, ScatterSettings, ShadowSettings, SsaoSettings,
-    VgeomSettings, VirtualTextureSettings, VsmSettings, VsmSettingsError, VSM_BUDGET_LOW_BYTES,
+    StreamSettings, VgeomSettings, VirtualTextureSettings, VsmSettings, VsmSettingsError,
+    DEFAULT_STREAM_BUDGET_BYTES, STREAM_BUDGET_LOW_BYTES, STREAM_BUDGET_MEDIUM_BYTES,
+    VGEOM_BUDGET_LOW_BYTES, VGEOM_BUDGET_MEDIUM_BYTES, VSM_BUDGET_LOW_BYTES,
     VSM_BUDGET_MEDIUM_BYTES, VSM_CLIPMAP_PAGES_MEDIUM, VSM_MARK_STRIDE_MEDIUM, VSM_MAX_MARK_STRIDE,
     VSM_MAX_PCF_RADIUS, VSM_PCF_RADIUS_MEDIUM,
 };
+// P28.3: the streamer's audit, and the arbiter's own vocabulary re-exported for
+// the same reason `inf_vt`'s is below — a host or a gate that reads a
+// `StreamReport` must be able to name a `Consumer` without adding `inf-stream`
+// to its manifest.
+pub use inf_stream::{
+    arbitrate, BudgetGrant, BudgetRequest, Consumer, Coupling, RingLedger, StreamError,
+    LANE_FEEDBACK, LANE_FLOOR, LANE_PREDICT,
+};
+pub use stream::StreamReport;
 // P27.1 virtual shadow maps: the projections and the level rules (pure,
 // unit-tested with no adapter), the mirror, and the marking loop's counters.
 pub use vsm::{

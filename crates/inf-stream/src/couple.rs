@@ -112,6 +112,19 @@ impl<G: Ord + Copy, M: Ord + Copy> Coupling<G, M> {
         self.groups.get(group).map_or(&[], Vec::as_slice)
     }
 
+    /// Whether `group` is coupled at all.
+    ///
+    /// Distinct from `members(g).is_empty()`, and the distinction is
+    /// load-bearing: **a group with no members is a legal state** (an unpaired
+    /// asset, or a paired one whose textures this level does not bind — it has
+    /// nothing to keep in step and streams as it did before the coupling
+    /// existed), while a group that was never declared is a page the want pass
+    /// never saw, which a consumer must refuse rather than admit unpaired. One
+    /// `&[]` cannot say both.
+    pub fn has_group(&self, group: &G) -> bool {
+        self.groups.contains_key(group)
+    }
+
     /// Every coupled group, in key order.
     pub fn groups(&self) -> impl Iterator<Item = (&G, &[M])> {
         self.groups.iter().map(|(g, m)| (g, m.as_slice()))
@@ -239,6 +252,22 @@ mod tests {
         assert_eq!(c.members(&(1, 0)), &[99]);
         let w: Vec<u16> = c.wants(LANE_FLOOR).into_iter().map(|(_, m)| m).collect();
         assert_eq!(w, vec![12, 13, 20, 99], "the old members lingered");
+    }
+
+    /// **An empty group is not an absent one.** A consumer reads the first as
+    /// "nothing to keep in step" and the second as "a page I never planned",
+    /// and admitting the second unpaired is exactly the state P28.2 made
+    /// unrepresentable.
+    #[test]
+    fn an_empty_group_and_an_absent_one_are_different_answers() {
+        let mut c: Coupling<(u8, u8), u16> = Coupling::new();
+        c.couple((1, 0), Vec::new());
+        assert!(c.has_group(&(1, 0)) && c.members(&(1, 0)).is_empty());
+        assert!(!c.has_group(&(9, 9)) && c.members(&(9, 9)).is_empty());
+        // An empty group still counts as a group, and contributes no wants.
+        assert_eq!(c.len(), 1);
+        assert!(c.wants(LANE_FLOOR).is_empty());
+        assert!(breaches(&c, |_| false).is_empty());
     }
 
     /// The invariant names the pair that broke it, and is empty when it holds.
