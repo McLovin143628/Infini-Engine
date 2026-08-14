@@ -684,7 +684,8 @@ pub struct PredictSettings {
     /// Whether speculative wants are emitted at all.
     ///
     /// [`RenderTier::apply`](crate::caps::RenderTier::apply) clears it on
-    /// **Low**, and [`RenderSettings::clamp_mobile`] clears it too. Speculation
+    /// **Low**, and [`RenderTier::clamp_mobile`](crate::caps::RenderTier::clamp_mobile)
+    /// clears it too. Speculation
     /// spends slots a smaller pool does not have spare: on Low the unified
     /// budget is 86 MiB against High's 344, and a lane that only ever takes
     /// *idle* capacity has none to take. The clamp is the `vsm.enabled` shape —

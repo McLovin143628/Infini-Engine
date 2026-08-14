@@ -437,7 +437,7 @@ pub const VT_PREDICT_MAX_TILES: u32 = VT_FEEDBACK_MAX_TILES;
 /// |---|---|---|---|
 /// | analytic floor | committed | `VT_PRIORITY_FLOOR` | [`VT_FLOOR_MAX_TILES`] (16) |
 /// | GPU refinement | committed | `VT_PRIORITY_FEEDBACK` | [`VT_FEEDBACK_MAX_TILES`] (256) |
-/// | speculation | **predicted** | `VT_PRIORITY_PREDICT` | [`VT_PREDICT_MAX_TILES`] (64) |
+/// | speculation | **predicted** | `VT_PRIORITY_PREDICT` | [`VT_PREDICT_MAX_TILES`] (256, = the refinement's) |
 ///
 /// The two existing classes already differed only by those two numbers and said
 /// so in prose (*"Both halves compute the level from the same rule"*); the third
@@ -532,8 +532,8 @@ pub fn predicted_view(view: &RenderView, p: &inf_math::Prediction) -> RenderView
 }
 
 /// **The speculative want set** (P28.4, clause 2): the one footprint rule, asked
-/// at the predicted camera, at [`VT_PRIORITY_PREDICT`], under
-/// [`VT_PREDICT_MAX_TILES`].
+/// at the predicted camera, at [`VT_PRIORITY_PREDICT`](inf_vt::VT_PRIORITY_PREDICT),
+/// under [`VT_PREDICT_MAX_TILES`].
 ///
 /// It predicts the **refinement** an arriving surface will need, not the floor,
 /// and that is a measured ruling rather than a preference: the floor is admitted

@@ -14641,6 +14641,289 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
   memo's neural-predictor deviation); 2. speculative wants enter at strictly lower priority
   than the analytic floor and feedback; 3. the A/B whip-pan gate arm: predictor off vs on,
   fallback-frame counters strictly reduced, bit-exact trace per arm.
+> ## P28.4 STATUS — predictive prefetch: **COMPLETE** (2026-08-14)
+>
+> The work: `eb04f8c` the pure function in `inf-math`, `71225cd` the lane's two
+> producers and the classifier defect they exposed, `5e3ed63` the A/B whip-pan
+> gate, `7868930` the shipped player's committed camera and the memo, `6d041fc`
+> one counter armed on self-review — plus whatever carries this block and the
+> battery's tail. Named rather than counted, on P28.2's ruling.
+>
+> `docs/memos/p28-4-predictive-prefetch.md` carries the rulings and the
+> measurements, including the two this batch took **against its own first
+> design**. The ROADMAP's three clauses, answered against code.
+>
+> ### Clause 1 — deterministic dead reckoning over committed input history
+>
+> **MET**, as `inf_math::dead_reckon(&CameraHistory, horizon_ticks)`: a secant
+> over the last six committed poses for linear velocity, and the arc/axis/rate
+> between the window's ends applied for the horizon by Rodrigues. Not a lerp of
+> the endpoints — a lerp is bounded by them and a whip-pan has to leave the
+> window, which `a_constant_spin_lands_where_the_spin_actually_goes` asserts
+> with an anti-vacuity bound read off the fixture.
+>
+> **What makes it a pure function, structurally**: no clock, no frame counter,
+> no adapter, no interior mutability; every transcendental is
+> `inf_math::portable`'s, pinned by a source arm that reads the **non-test half
+> only**, because the test carries every banned spelling as a literal and a scan
+> over the whole file would be satisfied by its own fixture; and the horizon is
+> in **ticks**, never milliseconds, because a millisecond is wall clock and a
+> tick is committed.
+>
+> **What rests on the host, named rather than assumed.** `CameraHistory::commit`
+> enforces the mechanical half — a tick that only ever advances, so a host wired
+> to the render loop cannot append twice for one step — and counts the refusals.
+> The rest is a property of the caller: the shipped player commits at
+> `RuntimeSim::steps()` because its camera is a fold of actor positions; a
+> gate's scripted path commits because it is a function of the step index; **the
+> editor viewport does not commit at all**, because its flycam is OS input at
+> render rate. So an empty history is the real enable flag, it fails safe
+> (`None` → no speculative want → exactly the analytic floor), and every gate
+> that existed before this batch is unmoved by construction rather than by luck.
+>
+> **One honest correction to the clause's own wording**: this tree has **no
+> committed input stream** as a type. `RuntimeInput` keeps one tick, the PIE
+> wire has no input message, and every trace in the repo steps with
+> `RuntimeInput::default()`. What is implemented is a pure function of the
+> committed *camera-pose* history, which is a pure function of committed input
+> wherever a host samples at the fixed step. That is the strongest statement the
+> tree supports today.
+>
+> **The horizon is a measured choice.** Swept over the whole 200–500 ms band on
+> the gate's own path, blur frames against **131** with the predictor off:
+> 115 / 115 / **115** / 117 / 112 / 121 / 117 at 12 / 15 / 18 / 21 / 24 / 27 /
+> 30 ticks. Every member of the band beats OFF, which is the property the gate
+> asserts. The shipped default is **18 ticks (300 ms)** and the honest reading
+> is that **the band is flat** — nine frames of 131 separate best from worst, so
+> the gate asserts the shipped horizon is no worse than either *end* rather than
+> that it is optimal, which one fixture cannot establish.
+>
+> ### Clause 2 — speculative wants at strictly lower priority
+>
+> **MET, and the measurement came out an EQUALITY, which is stronger than the
+> inequality asked for.** Over the whip-pan's 260 ticks the proved (floor ∪
+> feedback) resident set is **identical** in the two arms at every tick — not
+> merely a superset. Every proved want is offered a slot before any speculative
+> one, so a pool that can seat it seats it in both arms and one that cannot
+> seats it in neither: a strictly-lower lane is *exactly* neutral to the classes
+> above it. Under 19 152 deferrals and 137 584 speculative wants, with a proved
+> set peaking at 708 tiles, **zero** resident floor tiles were evicted in either
+> arm.
+>
+> **Two producers, one prediction.** The texture lane runs the one footprint
+> rule at the predicted camera (`camera_wants`, lifted out of `analytic_floor`
+> so the three classes stop being three copies of it — same rule, two numbers
+> changed: which camera, which lane, which cap). The shadow lane moves the pages
+> last frame's depth buffer **proved** were needed to where the predicted camera
+> puts the clipmap window, which is exactly the derivation P28.3 refused as a
+> coupling member and routed here by name. Both read one `EngineRenderer::
+> prediction()`, so the two speculative sets cannot describe two cameras.
+>
+> **`VSM_PRIORITY_SPECULATIVE` gets the producer it waited two phases for**, and
+> moves from `LANE_FEEDBACK` to `LANE_PREDICT`. P28.3's argument for the
+> feedback lane is still true of that consumer read alone and is the wrong
+> reading now the lane has a producer: the invariant here is one statement over
+> all three consumers. Nothing observable moves — no producer in that crate has
+> ever emitted `LANE_FEEDBACK`.
+>
+> **The shadow lane's bound is measured, and it is large**: a camera that only
+> *rotates* does not scroll a camera-centred clipmap, so a pure whip-pan
+> produces the empty set there. `a_pure_rotation_produces_no_speculative_shadow_
+> want` asserts it, with a two-page dolly along the light's own `right` as the
+> control, and `VsmStreamStats::speculative_wants` is the counter that tells
+> "predictor off", "history empty" and "the camera only turned" apart.
+>
+> **The meshlet streamer gets no speculative lane and cannot**: `inf-vgeom` is
+> deliberately not a `SlotPool` (P28.3), its residency is a *prefix* over a byte
+> auction, and a prefix has no rank to be strictly lower in. Asking the auction
+> for a finer cut than the camera justifies raises the floor rather than adding
+> a class beneath it. Stated, not attempted.
+>
+> ### Clause 3 — the A/B whip-pan gate
+>
+> **MET.** `crates/inf-render/tests/whip_pan.rs`, **seven arms, no adapter**,
+> over the real `VtResidency`: a scripted 360° whip-pan (still, ramp up,
+> constant, ramp down, still — one revolution in three seconds, a third of the
+> sweep at a rate dead reckoning is provably wrong about), run predictor OFF and
+> predictor ON.
+>
+> | | blur tiles | blur frames | admits | evicts | deferred |
+> |---|---|---|---|---|---|
+> | OFF | 19 872 / 141 472 | **131** | 1 428 | 720 | 18 176 |
+> | ON | 18 976 / 141 472 | **115** | 1 556 | 848 | 19 152 |
+>
+> **Bit-exact per arm and the two arms diverge** — both halves asserted, because
+> determinism alone is satisfied by a predictor that does nothing and difference
+> alone by one that is random.
+>
+> **Anti-vacuity on the OFF leg, in both directions**: it must be blurry on some
+> frame (a scene too small to miss proves nothing) *and* it must not be blurry
+> on every frame (a pool under the steady demand is a budget problem no
+> predictor can fix and must not be credited for).
+>
+> **The oracle is an independent replay**, not the producer re-run: 259
+> predictions re-derived from the recorded path with the file's own secant, arc
+> and Rodrigues — 184 through a real rotation — worst direction error
+> **4.04 × 10⁻¹⁶**. The blur counter is the file's own too: it asks what a
+> *visible* surface's footprint justifies and whether the pool holds it, and
+> consults no want class at all, because what a player sees is whether the level
+> is there.
+>
+> ### The refutation the gate produced, and the ruling it forced
+>
+> **The analytic floor cannot be prefetched.** `apply_wants` seats a miss the
+> frame it is offered, out of the same pool, and there is no per-frame admission
+> throttle anywhere in the loop (`VT_ADMITS_PER_FRAME_CEILING` is a *gate
+> ceiling*, not a governor; P28.3 §8 re-measured the loader and left it alone).
+> So the floor's fallback is `max(0, demand − pool)` — two numbers a prediction
+> changes neither of. Measured over the same 360° path with a starved 96-page
+> pool: **30 812 floor fallbacks over all 260 frames, byte-identical in both
+> arms**, while the predictor offered 137 584 speculative wants. Kept as an arm
+> (`a_saturated_floor_cannot_be_prefetched_and_the_arm_says_so`) so the day an
+> admission throttle appears the ruling re-opens as a red test.
+>
+> What lags the camera is the **refinement**: marked off a depth buffer, so it
+> can only ask for what is already visible, and it arrives
+> `READBACK_LATENCY_FRAMES` after that. That gap is what `VtPopIn`'s own header
+> calls "what pop-in **is**". So `VT_PREDICT_MAX_TILES` is the refinement's cap
+> **exactly** — a tile is an address, and a different cap settles on a different
+> mip and shares not one tile with the class it claims to prefetch for
+> (`a_prediction_at_a_finer_cap_names_addresses_the_floor_will_never_ask_for`
+> sweeps five pyramids and asserts the two sets **disjoint** where the caps
+> differ).
+>
+> A second correction on the way, recorded because the reasoning that produced
+> it never checked a real descriptor: the first reading concluded the floor's
+> camera-driven half is subsumed by the pinned camera-free floor on any square
+> pyramid. It is **false** — `full_pyramid` runs the chain to one *texel*, not
+> one tile, so a 512² has ten mips and the three pinned coarsest are one tile
+> each.
+>
+> ### One defect this batch's own instrument had
+>
+> `count_fallbacks` classified with two arms and an `else`. Exhaustive until a
+> third lane existed; with one, **every speculative want counts as a floor
+> want**, so switching the predictor ON would have *raised* `floor_wants` and
+> `floor_fallback` — the two numbers the A/B arm reads to decide whether it
+> helped. The gate would have measured its own instrument. It is a `match` now,
+> with `predict_wants`/`predict_fallback`, plus `floor_fallback_frames` and
+> `refine_fallback_frames`.
+>
+> ### Mutation matrix — eleven, eleven killed
+>
+> | # | what was mutated | died at |
+> |---|---|---|
+> | P1 | the Rodrigues sine sign | `a_constant_spin_lands_where_the_spin_actually_goes` |
+> | P2 | the tick span reduced to a sample count | `a_constant_dolly_extrapolates_at_the_windows_own_rate` |
+> | P3 | `pacos64` swapped for libm's `acos` | `the_predictor_spells_no_libm_transcendental` |
+> | P4 | `commit`'s refusal weakened to `<` | `a_repeated_tick_changes_neither_the_window_nor_the_answer` |
+> | P5 | the turn clamp disabled | `a_turn_past_half_a_revolution_is_clamped_and_reported` |
+> | P6 | the predict arm folded back into the `else` | `the_pop_in_counters_keep_the_three_lanes_apart` |
+> | P7 | `camera_wants` ignoring its lane | two arms |
+> | P8 | `speculative_wants` reading the committed view | `a_surface_the_committed_camera_cannot_see…` |
+> | P9 | `scrolled_page`'s shift sign | `a_scrolled_page_names_the_same_world_cell` |
+> | P10 | the shadow rank returned to `LANE_FEEDBACK` | `a_shadow_speculation_ranks_below_every_proved_page` |
+> | P11 | `speculative_wants` neutered / rank promoted to `LANE_FLOOR` / cap returned to the floor's | five, three and three whip-pan arms respectively |
+>
+> P11's middle case is the one worth reading: promoting the speculative rank to
+> `LANE_FLOOR` is caught by the **saturated-floor** arm, because the floor's
+> fallback stops being `demand − pool`. That is the rank invariant failing, seen
+> by an arm built to prove something else.
+>
+> ### The owed items, disposed of by name
+>
+> * **`VSM_PRIORITY_SPECULATIVE`'s producer** — **LANDED** (clause 2).
+> * **Shadow-page membership from a predicted camera cone** — **LANDED**. The
+>   per-**group** membership (a cluster page's shadow pages as `Coupling`
+>   members) is **not**: this producer works in page-index space over a light's
+>   whole proved set, and a coupling needs to know which group each page belongs
+>   to, which is still only knowable from the raster's per-page frustum verdict.
+>   **P28.5**, P28.3's reason unchanged.
+> * **The clipmap scroll (127 against 4 096)** — **REFUSED, and re-routed to
+>   P28.5 with the structural reason.** `VsmResidency::set_clip_origins`' own
+>   doc states it: *"The pages keep their slots. A page whose world cell changed
+>   is stale **content**, not a stale allocation."* Every page index is always
+>   in range under a scroll, so **there is no want a speculative lane could emit
+>   that would help** — the 127-against-4 096 saving is a *re-rasterization*
+>   number and it belongs with the `vsm_raster` caster-pack restructure P28.3
+>   already routed to P28.5.
+> * **Retraction's cost in frames** — **REFUSED, with the measurement that
+>   disposes of it.** P28.3 routed it here as *"your gate's own fixture"*; it is
+>   not. `retracted` counts cluster pages the **texture half refused** — a
+>   budget event — and the whip-pan is deliberately a *latency* fixture: at 800
+>   pages its floor never falls back at all (`floor 0 over 0 frames`), and in
+>   the budget regime the saturated arm proves both arms identical. A
+>   retraction-cost fixture is a contended pool with the vgeom coupling in it,
+>   which is `cluster_pages`' shape. **P28.5.**
+> * **The palette-union caster bound** — **RE-ROUTED BY NAME to P28.5, and the
+>   routing here was an error.** It changes what a *mover* invalidates, which is
+>   the CPU caster cache's contract; a mover's invalidation is not a camera
+>   question and the predictor has no bearing on it. P27.5's correction stands
+>   and is re-verified rather than repeated: the 67 %/30 % figures are the
+>   margin's own reciprocal on a one-joint fixture, so what has to be measured
+>   is a real rig where joints far apart can make the union *larger* than the
+>   inflated bind sphere.
+>
+> ### Schema, goldens, green
+>
+> No schema moved, no container version moved, no `.wgsl` moved. Goldens stay
+> **54**, count and content digest, `git diff` over `tests/goldens/` empty
+> across the batch. Every prior gate green **unmodified** — `phase26_gate`,
+> `phase27_gate`, `visbuffer_parity`, `visbuffer_feedback`, `cluster_pages`,
+> `stream_arbiter`, the `inf-vt`/`inf-vsm` residency gates, `vgeom_streaming`,
+> `vgeom_occlusion`, `vsm_marking`, `vsm_raster`, `vsm_receiver`. One test file
+> outside this batch's own was touched and it is a **signature** change with no
+> assertion in it: `vsm_marking.rs` passes `None` for the new prediction
+> argument.
+>
+> ### Machine-ops
+>
+> **Battery green: 250 test binaries, 4 536 passed, 0 failed, 8 ignored**
+> (`-j 3`, `--no-fail-fast`, `Start-Process` with both redirects; 210 `Running`
+> + 40 `Doc-tests` = 250 result lines, matched; `inf_water` last; **zero**
+> warnings on stderr). Exactly the P28.3 baseline of 249 / 4 512 / 0 / 8 plus
+> this batch's **one** new binary (`whip_pan`) and **24** new arms — ten in
+> `inf-math::predict`, four in `vt_stream`, three in `vsm`, seven in the gate.
+> Disk 74.7 GB free at start, 72.6 GB at end.
+>
+> **Three doc defects found by self-review after the battery**, all comment-only
+> and all in this batch's own text: a `[RenderSettings::clamp_mobile]` link that
+> names the wrong type (it is `RenderTier`'s) and does not resolve; a
+> `[VT_PRIORITY_PREDICT]` link in a module that does not import it; and a want-cap
+> table still printing **64** for `VT_PREDICT_MAX_TILES` after the measurement
+> moved it to 256. Rustdoc reports the first two and clippy does not — the P28.3
+> audit's finding, met again in the batch that read it. Landed after the battery
+> with the affected crates' tests re-run, because no `///` is executable.
+>
+> ### Carried, honest
+>
+> * **`Prediction::turn` and `clamped` have no reader outside `inf-math`'s own
+>   arms.** They are reported diagnostics on a public struct rather than dead
+>   counters — a host that wants to see the clamp bind can — but nothing in the
+>   tree looks, and that is the `VtTransaction::unknown_texture` shape rather
+>   than a defect.
+> * **`CameraHistory::refused` likewise reaches no host.** It is the number that
+>   would say "this host is wired to the render loop", and the only caller that
+>   could produce it is the one arm that asserts it.
+> * **The prediction is computed twice a frame** — once in `vt_stream`, once in
+>   the shadow sync — because it is a pure function of `(history, settings)` and
+>   caching it would be a field two paths write. Cheap and stated.
+> * **The shadow lane calls `vsm_projections` a second time** to get the
+>   predicted layouts, for at most `VSM_MAX_PROJECTIONS` matrices. Cheaper than
+>   a second derivation of the snapping rule, and it cannot drift from the one
+>   that shipped because it *is* the one that shipped.
+> * **The editor viewport gets no prefetch**, by construction, and closing that
+>   means committing the flycam at a fixed step — which is a *simulation*
+>   question about the editor camera, not a streaming one.
+> * **The whip-pan gate models the feedback lane rather than running it.** Its
+>   refinement wants are the level a surface's footprint justified
+>   `READBACK_LATENCY_FRAMES` ago, for the surfaces visible then, which is what
+>   `vt_feedback.wgsl` marks and when the ring lets the CPU see it — but it is a
+>   model, and a device-side A/B is not built.
+> * **No `phase28_gate`.** The A/B is `whip_pan.rs` and the arbitration is
+>   `stream_arbiter.rs`; a phase-level gate over the whole of P28 is P28.5's to
+>   build if the ledger wants one.
+
 - **P28.5 Ray-query shadow experiment (never load-bearing)** — 1. adapter/feature probe for
   ray queries in the pinned wgpu; where present, BLAS over meshlet clusters + per-frame TLAS,
   sun shadows via ray query compared against VSM output on goldens; 2. a memo with the
