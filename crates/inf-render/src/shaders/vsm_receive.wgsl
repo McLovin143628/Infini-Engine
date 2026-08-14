@@ -409,10 +409,6 @@ fn vsm_shadow(world_pos: vec3<f32>, n: vec3<f32>, slot: u32) -> f32 {
     return mix(f, nf, w);
 }
 
-// The analytic (point / spot) receiver term, for a lit pass's light loop.
-// `slot` is `GpuLight.params.w`, which is 0 on every light without a tree — so
-// this is exactly `1.0` on every scene that has no virtual shadows, and every
-// pre-P27.4 golden runs the identical arithmetic.
 // **The shadow-page residency ramp** (P27.5) — the VT heat-map's twin, one
 // virtual system over, driven by `view.flags.w` and `ViewMode::VsmPages`.
 //
@@ -439,7 +435,12 @@ fn vsm_shadow(world_pos: vec3<f32>, n: vec3<f32>, slot: u32) -> f32 {
 // which texels a filter reads. `vsm_shadow` is the sampling door and this is
 // not a second one — it reads the same table and the same projection and it
 // never returns a shadow factor.
+//
+// `n` is therefore UNUSED, and it is in the signature on purpose: this reads
+// `vsm_shadow(world_pos, n, slot)` at every call site, and a debug view whose
+// arguments differ from the thing it is a view OF is the shape that drifts.
 fn vsm_heat(world_pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    _ = n;
     let grey = vec3<f32>(0.06, 0.06, 0.07);
     let slot = vsm.counts.x;
     if (!vsm_bound(slot)) {
@@ -507,6 +508,10 @@ fn vsm_heat(world_pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(0.95, 0.08, 0.08);
 }
 
+// The analytic (point / spot) receiver term, for a lit pass's light loop.
+// `slot` is `GpuLight.params.w`, which is 0 on every light without a tree — so
+// this is exactly `1.0` on every scene that has no virtual shadows, and every
+// pre-P27.4 golden runs the identical arithmetic.
 fn vsm_light_shadow(world_pos: vec3<f32>, n: vec3<f32>, slot: f32) -> f32 {
     return vsm_shadow(world_pos, n, u32(max(slot, 0.0)));
 }

@@ -1702,8 +1702,14 @@ fn the_blend_partners_residency_is_measured_and_the_speculative_want_is_refused(
 
     // …and the mechanism the fix would use exists and is still unproduced, which
     // is the other half of routing it to P28.4 rather than building it here.
-    assert!(
-        inf_vsm::VSM_PRIORITY_SPECULATIVE > inf_vsm::VSM_PRIORITY_MARKED,
-        "the speculative rank is no longer strictly BELOW the marked one, so a          speculative want could take a page a visible pixel asked for"
-    );
+    // A `const` block on the P26.3b precedent: clippy is right that this is
+    // constant-valued, and its remedy is the stronger one — the day the two
+    // ranks are re-ordered this must fail the BUILD rather than a test.
+    const {
+        assert!(
+            inf_vsm::VSM_PRIORITY_SPECULATIVE > inf_vsm::VSM_PRIORITY_MARKED,
+            "the speculative rank is no longer strictly BELOW the marked one, \
+             so a speculative want could take a page a visible pixel asked for"
+        );
+    }
 }

@@ -3506,5 +3506,10 @@ fn the_palette_union_bound_is_tighter_than_the_shipped_pose_margin() {
         "the fixture's pose never leaves its bind sphere, so neither bound is \
          under test"
     );
-    assert!(inf_render::SKINNED_POSE_MARGIN > 0.0);
+    // The same `const` block, for the same reason: a margin of zero would make
+    // the shipped bound the bind pose exactly, and the comparison above would
+    // silently become "the union is tighter than the thing it equals".
+    const {
+        assert!(inf_render::SKINNED_POSE_MARGIN > 0.0);
+    }
 }
