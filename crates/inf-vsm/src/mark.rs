@@ -147,6 +147,21 @@ impl VsmMarkLayout {
             let Some(desc) = res.desc(handle) else {
                 continue;
             };
+            // `count` is this light's page count and the walk below visits
+            // exactly that many pages, so a bound on `entry` is arithmetic that
+            // cannot fire. It used to be spelled `if entry > count { break; }`
+            // here — the P27.1 audit's *"neither fires nor guards"*, routed to
+            // P28.3 as *"worth deleting when P28.3 rewrites the scan"* and
+            // deleted here. It was also wrong if it ever had fired: `break`
+            // leaves the innermost `x` loop and the walk carries on into the
+            // next row. What replaces it is the assertion that the premise
+            // holds, in debug, where a descriptor that disagreed with its own
+            // layout is a bug rather than a bound to be clamped.
+            debug_assert_eq!(
+                desc.page_count(),
+                count,
+                "the mark layout and the descriptor disagree about light {l}'s page count"
+            );
             let mut entry = 0u32;
             for face in 0..desc.faces() {
                 for level in 0..desc.level_count() {
@@ -155,9 +170,6 @@ impl VsmMarkLayout {
                         for x in 0..g.pages_x {
                             let bit = base + entry;
                             entry += 1;
-                            if entry > count {
-                                break;
-                            }
                             let word = (bit / VSM_MARK_BITS_PER_WORD) as usize;
                             let Some(w) = mask.get(word) else {
                                 return out;

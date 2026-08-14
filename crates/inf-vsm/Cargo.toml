@@ -21,4 +21,11 @@ publish = false
 # buy one 30-line `pack_entry` at the price of coupling shadow paging to a
 # texture container's tile geometry. P28.3 merges the two BRAINS; that merge is a
 # rewrite of both, not an edge added early.
+# P28.3: the ONE streamer's arbitration half. The paragraph above says this
+# crate does not name `inf-vt` and that "P28.3 merges the two BRAINS; that merge
+# is a rewrite of both, not an edge added early". The merge landed as a crate
+# strictly BELOW both, so the edge is to `inf-stream` and not to `inf-vt`: the
+# two address spaces are still different shapes, and what is shared is the
+# arbitration (lane order, stamp domain, budget) rather than the geometry.
+inf-stream = { workspace = true }
 thiserror = { workspace = true }

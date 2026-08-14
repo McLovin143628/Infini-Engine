@@ -20,4 +20,11 @@ publish = false
 # back rather than logged precisely so a host decides whether they are a warning,
 # a fatal, or a line in an import report. A dependency nothing reaches for is
 # weight, and here it would also have been a claim the crate did not honour.
+# P28.3: the ONE streamer's arbitration half — the stamp domain this crate's
+# residency draws from, the lane order its `apply_wants` admits in, and the
+# `SlotPool` trait it implements. It is the only crate `inf-vt` names, and the
+# rule above survives intact: `inf-stream` is this crate's own dependency list
+# (thiserror, nothing else) and names no consumer, so nothing new reaches the
+# shipped player through it.
+inf-stream = { workspace = true }
 thiserror = { workspace = true }

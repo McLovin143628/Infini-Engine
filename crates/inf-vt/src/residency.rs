@@ -26,15 +26,13 @@
 //! it.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::address::{DescError, TileCoord, VtTextureDesc};
 use crate::pool::{plan_pool, VtAdvisory, VtPoolConfig, VtPoolGeometry};
 use crate::table::{pack_entry, unpack_entry, TableImage, MAX_SLOT_INDEX};
 
-/// Source of residency stamps, **process-global and monotone** — the same
-/// construction, and the same reason, as `inf_vgeom::stream`'s
-/// `NEXT_RESIDENCY_STAMP` and `inf_terrain`'s `NEXT_TILE_VERSION`.
+/// Source of residency stamps: **`inf_stream::next_stamp`**, the one domain
+/// (P28.3, clause 1).
 ///
 /// A GPU mirror caches "the indirection block I last uploaded for texture T was
 /// generation N" and re-uploads only when the generation moved. A per-residency
@@ -45,18 +43,13 @@ use crate::table::{pack_entry, unpack_entry, TableImage, MAX_SLOT_INDEX};
 /// decreases, so a new residency's generation is strictly greater than any
 /// generation any cache can be holding.
 ///
-/// **Its own domain, for now.** `inf-vgeom`'s and `inf-terrain`'s counters are
-/// crate-private statics, so there is nothing to share without making one of them
-/// public and giving three streamers a reason to contend on one cache line. P28.3
-/// ("one stamp domain") is where that unification belongs; until then this is a
-/// third counter with identical semantics, and the three of them agree on the one
-/// property that matters — never decreasing.
-static NEXT_VT_STAMP: AtomicU64 = AtomicU64::new(1);
-
-/// The next stamp. Never 0, so 0 is safe as "nothing uploaded yet".
-fn next_stamp() -> u64 {
-    NEXT_VT_STAMP.fetch_add(1, Ordering::Relaxed)
-}
+/// **It used to be a third counter of its own**, with a comment saying so and
+/// naming P28.3 as where the three would merge. This is that merge, and what it
+/// buys is not tidiness: three domains agree on the property each was built for
+/// (never decreasing) and have no answer at all for the one cross-system
+/// eviction asks — whether a cluster page was touched more recently than a
+/// texture tile. See `inf_stream::stamp`.
+use inf_stream::next_stamp;
 
 /// A registered virtual texture. Index into the residency's texture list, and the
 /// `tex_id` a shader uses to find the texture's block in the indirection table.
@@ -80,14 +73,19 @@ impl VtTextureHandle {
 /// before a refinement is offered a slot — and a refinement can never take a
 /// slot from a floor tile the same transaction just admitted, because
 /// [`VtResidency::apply_wants`] protects what it has touched.
-pub type VtPriority = u8;
+///
+/// **Since P28.3 it is `inf_stream::Lane`**, the one lane vocabulary, so this
+/// crate's ranks and `inf-vsm`'s are the same numbers ordered by the same walk.
+/// The rank now also outranks a *resident* weaker want, which it did not before
+/// — see [`VtResidency::apply_wants`].
+pub type VtPriority = inf_stream::Lane;
 
 /// The analytic floor: residency may never drop below it while the budget
 /// allows. `0` so [`VtWant::new`]'s existing callers keep their exact behaviour.
-pub const VT_PRIORITY_FLOOR: VtPriority = 0;
+pub const VT_PRIORITY_FLOOR: VtPriority = inf_stream::LANE_FLOOR;
 
 /// A refinement the GPU feedback asked for. Served after the whole floor.
-pub const VT_PRIORITY_FEEDBACK: VtPriority = 1;
+pub const VT_PRIORITY_FEEDBACK: VtPriority = inf_stream::LANE_FEEDBACK;
 
 /// "This tile, please." The whole input language of residency — deliberately no
 /// camera and no budget: see the crate docs. Since P26.4 it carries a
@@ -594,28 +592,20 @@ impl VtResidency {
             t.warm = true;
         }
 
-        // ── 2. normalize the want set ──
+        // ── 2. normalize the want set ── (P28.3: `inf_stream::normalize`)
         //
-        // **Priority first, payload order as the tie-break** (P26.4) — the exact
-        // arrangement P26.2's crate docs promised for the day feedback arrived.
-        // Two passes, and the order of the two is the whole point:
-        //
-        // 1. sort by `(texture, PAYLOAD order, priority)` and dedup on
-        //    `(texture, tile)`. `dedup_by` keeps the FIRST of a run, which after
-        //    that sort is the **lowest** priority — so a tile the floor and the
-        //    feedback both ask for is a floor want, not two wants.
-        //    Payload order rather than `TileCoord`'s derived `Ord`, which sorts
-        //    (mip, x, y) while the tile directory is (mip, y, x) and would walk
-        //    the file sideways: the P26.1 audit's finding, used rather than
-        //    merely recorded.
-        // 2. **stable** sort by priority alone. Rust's `sort_by_key` is stable,
-        //    so the payload order established above survives inside each
-        //    priority class — one sequential scan of the container per class,
-        //    with the floor's scan first.
-        let mut sorted: Vec<VtWant> = wants.to_vec();
-        sorted.sort_by_key(|w| (w.texture.0, w.tile.payload_order(), w.priority));
-        sorted.dedup_by(|a, b| a.texture == b.texture && a.tile == b.tile);
-        sorted.sort_by_key(|w| w.priority);
+        // **Lane first, payload order as the tie-break** (P26.4) — the exact
+        // arrangement P26.2's crate docs promised for the day feedback arrived,
+        // and since P28.3 it is one function shared with `inf-vsm` rather than
+        // two copies of the same two passes. Payload order rather than
+        // `TileCoord`'s derived `Ord`, which sorts (mip, x, y) while the tile
+        // directory is (mip, y, x) and would walk the file sideways: the P26.1
+        // audit's finding, used rather than merely recorded.
+        let mut sorted: Vec<VtWant> = inf_stream::normalize(
+            wants,
+            |w| (w.texture.0, w.tile.payload_order()),
+            |w| w.priority,
+        );
         // An unknown handle is counted here rather than filtered in silence
         // (P26.4): see `VtTransaction::unknown_texture`. After the dedup, so one
         // stale tile asked for twice is one number.
@@ -629,49 +619,47 @@ impl VtResidency {
         self.stats.unknown_texture += u64::from(txn.unknown_texture);
         self.stats.wanted = sorted.len();
 
-        // ── 3. touch what is already there, collect the misses ──
-        let mut misses: Vec<VtWant> = Vec::new();
+        // ── 3. drop the wants this registry cannot hold, and count them ──
+        //
+        // Before the walk rather than inside it, because an out-of-range tile is
+        // a *want set computed against the wrong extent* and the arbiter's job
+        // starts at addresses that exist. `retain` keeps the lane-major order.
+        let mut lanes: Vec<(VtPriority, (u32, TileCoord))> = Vec::with_capacity(sorted.len());
         for w in &sorted {
             let t = &self.textures[w.texture.index()];
-            let Some(idx) = t.desc.entry_index(w.tile) else {
+            if t.desc.entry_index(w.tile).is_none() {
                 txn.out_of_range += 1;
                 continue;
-            };
-            match t.resident[idx as usize] {
-                Some(slot) => {
-                    protected.insert(slot);
-                    self.touch(slot);
-                }
-                None => misses.push(*w),
             }
+            lanes.push((w.priority, (w.texture.0, w.tile)));
         }
 
-        // ── 4. admit the misses, in order, against the slots that are left ──
-        let mut deferred = 0u32;
-        for (i, w) in misses.iter().enumerate() {
-            let Some((slot, evicted)) = self.acquire_slot(&protected) else {
-                // Nothing changes between iterations once acquisition fails, so
-                // every remaining miss fails too. Counting them without retrying
-                // is the same answer for O(1) instead of O(n·slots).
-                deferred = (misses.len() - i) as u32;
-                break;
-            };
-            if let Some(e) = evicted {
-                dirty.insert(e.texture);
-                txn.evicts.push(e);
-                self.stats.evicts += 1;
-            }
-            self.seat(slot, w.texture.0, w.tile, false);
-            protected.insert(slot);
-            dirty.insert(w.texture);
-            txn.admits.push(VtAdmit {
-                slot,
-                texture: w.texture,
-                tile: w.tile,
-            });
+        // ── 4. THE ADMISSION WALK (P28.3) ──
+        //
+        // `inf_stream::admit_by_lane`, which protects and admits **one lane at a
+        // time**. Before this batch the two steps were split the other way —
+        // every resident want of any class protected, then every miss of any
+        // class admitted — and the P28.2 audit named what that costs: *"a
+        // refinement that got there first outranks a floor want that has
+        // not"*, so a decoy feedback class could hold the pool while the
+        // cluster pairing's floor tiles were deferred for ever. Now a floor
+        // miss may take a resident refinement's slot, and a refinement may
+        // never take a floor tile's.
+        let log = inf_stream::admit_by_lane(&mut PoolView(self), &lanes, &mut protected);
+        for (slot, (t, tile)) in log.evicts {
+            let texture = VtTextureHandle(t);
+            dirty.insert(texture);
+            txn.evicts.push(VtEvict { slot, texture, tile });
+            self.stats.evicts += 1;
+        }
+        for (slot, (t, tile)) in log.admits {
+            let texture = VtTextureHandle(t);
+            dirty.insert(texture);
+            txn.admits.push(VtAdmit { slot, texture, tile });
             self.stats.admits += 1;
         }
 
+        let deferred = log.deferred;
         txn.deferred = deferred;
         txn.tables = dirty.into_iter().collect();
         self.stats.deferred = deferred;
@@ -914,6 +902,48 @@ impl VtResidency {
             texture: VtTextureHandle(t),
             tile,
         }
+    }
+}
+
+/// **The arbiter's view of this pool** (P28.3): the four operations
+/// `inf_stream::admit_by_lane` needs, and nothing else.
+///
+/// A private newtype rather than `impl SlotPool for VtResidency`, deliberately.
+/// The trait is public, so implementing it on the residency itself would make
+/// `seat` and `acquire` **public API** — a caller could seat a tile outside a
+/// transaction, which is exactly the one-door law (P21) the private `uploads`
+/// field and the private `PageUpload` constructor exist to keep in `inf-vgeom`.
+/// A private wrapper gives the walk everything it needs and gives an external
+/// caller nothing.
+struct PoolView<'a>(&'a mut VtResidency);
+
+impl inf_stream::SlotPool for PoolView<'_> {
+    /// `(texture index, tile)` — the residency's own address, unpacked from
+    /// [`VtWant`] before the walk so the arbiter never sees a handle it would
+    /// have to validate.
+    type Key = (u32, TileCoord);
+
+    fn resident_slot(&self, key: &Self::Key) -> Option<u32> {
+        let t = self.0.textures.get(key.0 as usize)?;
+        t.resident[t.desc.entry_index(key.1)? as usize]
+    }
+
+    fn touch(&mut self, slot: u32) {
+        self.0.touch(slot);
+    }
+
+    fn acquire(&mut self, protected: &BTreeSet<u32>) -> Option<inf_stream::Acquired<Self::Key>> {
+        let (slot, evicted) = self.0.acquire_slot(protected)?;
+        Some(inf_stream::Acquired {
+            slot,
+            evicted: evicted.map(|e| (e.texture.0, e.tile)),
+        })
+    }
+
+    fn seat(&mut self, slot: u32, key: Self::Key) {
+        // Never pinned: a root is seated at registration and is not reachable
+        // from a want, which is what makes `slot_is_root` a total answer.
+        self.0.seat(slot, key.0, key.1, false);
     }
 }
 
@@ -1176,6 +1206,61 @@ mod tests {
             refines[0].tile.payload_order() < floor.tile.payload_order(),
             "the fixture's refinements do not precede its floor want"
         );
+    }
+
+    /// **A floor want outranks a REFINEMENT THAT IS ALREADY RESIDENT** (P28.3,
+    /// clause 3) — the priority-blind protection order the P28.2 audit named.
+    ///
+    /// The arm above proves a floor *miss* beats a refinement *miss*, which was
+    /// true since P26.4. This is the case that was not: with every cache slot
+    /// held by refinements the feedback keeps asking for, a floor tile that is
+    /// not yet resident used to be deferred **for ever** — every slot was
+    /// protected before any miss was offered one — and on the audit's fixture
+    /// *"a decoy feedback class costs the pairing its finest page"*.
+    ///
+    /// It is the invariant's case, not a tuning one: a resident cluster page's
+    /// tiles ride at [`VT_PRIORITY_FLOOR`], so before this fix a refinement
+    /// could keep the pairing's tiles out of the atlas indefinitely and the
+    /// page would be retracted on every frame.
+    #[test]
+    fn a_floor_want_outranks_a_refinement_that_is_already_resident() {
+        let mut r = pool(4);
+        let h = r
+            .register_texture(full_pyramid(512, 512, 128, 4, true))
+            .expect("one root");
+        // 4 slots: 1 pinned root + 3 cache slots, all three filled by feedback.
+        assert_eq!(r.apply_wants(&[]).admits.len(), 1);
+        let refines = [
+            TileCoord::new(0, 0, 0),
+            TileCoord::new(0, 1, 0),
+            TileCoord::new(0, 2, 0),
+        ];
+        let warm = r.apply_wants(&refines.map(|t| VtWant::refine(h, t)));
+        assert_eq!(warm.admits.len(), 3, "the cache is not full: {}", warm.trace());
+
+        // The floor now wants a tile that is not resident, and the feedback
+        // asks for its same three — the steady state the defect hid in.
+        let floor = TileCoord::new(1, 1, 1);
+        let mut wants = vec![VtWant::new(h, floor)];
+        wants.extend(refines.map(|t| VtWant::refine(h, t)));
+        let txn = r.apply_wants(&wants);
+
+        assert!(
+            r.is_resident(h, floor),
+            "a resident refinement outranked a floor want: {}",
+            txn.trace()
+        );
+        assert_eq!(txn.admits.len(), 1, "{}", txn.trace());
+        assert_eq!(txn.evicts.len(), 1, "one refinement made room: {}", txn.trace());
+        assert_eq!(
+            txn.evicts[0].tile, refines[0],
+            "the least recently touched refinement is not the one that left: {}",
+            txn.trace()
+        );
+        assert_eq!(txn.deferred, 1, "the displaced refinement is the deferral");
+        // ANTI-VACUITY: the root is still pinned and still resident, so the
+        // floor did not simply take the only free slot in the pool.
+        assert!(r.slot_is_root(0) && r.stats().resident == 4);
     }
 
     /// One tile asked for by both the floor and the feedback is **one** want, at

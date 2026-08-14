@@ -32,6 +32,12 @@ uuid = { workspace = true }
 # shortest dependency list in the workspace (thiserror, nothing else) and names
 # no geometry crate, so it stays strictly below this one.
 inf-vt = { workspace = true }
+# P28.3: the ONE streamer's arbitration half — the stamp domain this crate's
+# residency draws from and the budget arbiter that decides its pool ceiling. The
+# streamer's own auction stays here: a meshlet page is a variable number of bytes
+# across four suballocated pools and residency is a PREFIX, so it is not a slot
+# pool and `inf-stream` deliberately does not make it one.
+inf-stream = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # Bit-portable trig for the SHARED FIXTURE MESHES (`test_support`, behind the

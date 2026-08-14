@@ -47,22 +47,21 @@
 //! [`VsmTransaction`] contains none.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::address::{VsmDescError, VsmLightDesc, VsmPage};
 use crate::atlas::{plan_atlas, VsmAdvisory, VsmAtlasConfig, VsmAtlasGeometry};
 use crate::table::{pack_entry, unpack_entry, TableImage, MAX_SLOT_INDEX, VSM_ENTRY_NONE};
 
-/// Source of residency stamps, **process-global and monotone**. Its own domain,
-/// for now — P28.3 ("one stamp domain") is where the four counters in this tree
-/// become one; until then this is a fourth with identical semantics, and they
-/// agree on the property that matters: never decreasing.
-static NEXT_VSM_STAMP: AtomicU64 = AtomicU64::new(1);
-
-/// The next stamp. Never 0, so 0 is safe as "nothing uploaded yet".
-fn next_stamp() -> u64 {
-    NEXT_VSM_STAMP.fetch_add(1, Ordering::Relaxed)
-}
+/// Source of residency stamps: **`inf_stream::next_stamp`**, the one domain
+/// (P28.3, clause 1).
+///
+/// This file used to open with a counter of its own and a comment saying *"its
+/// own domain, for now — P28.3 is where the four counters in this tree become
+/// one"*. Three of the four merged (the terrain and voxel counters version
+/// *content* rather than recency and deliberately did not — see
+/// `inf_stream::stamp`), and the merge is what makes a shadow page's recency
+/// comparable with a cluster page's.
+use inf_stream::next_stamp;
 
 /// A registered shadow-casting light. Index into the residency's light list, and
 /// the id a receiver uses to find the light's block in the indirection table.
@@ -77,12 +76,15 @@ impl VsmLightHandle {
 }
 
 /// How badly a page is wanted — **the primary sort key**, lower first.
-pub type VsmPriority = u8;
+///
+/// **Since P28.3 it is `inf_stream::Lane`**, the one lane vocabulary this crate
+/// and `inf-vt` now share, ordered by the one admission walk.
+pub type VsmPriority = inf_stream::Lane;
 
 /// **The depth buffer proved a visible pixel needs this page.** The only rank
 /// with a producer in P27.1, and the one residency may never drop below while
 /// the budget allows.
-pub const VSM_PRIORITY_MARKED: VsmPriority = 0;
+pub const VSM_PRIORITY_MARKED: VsmPriority = inf_stream::LANE_FLOOR;
 
 /// A page nothing has proved is needed yet — P28.4's dead-reckoning predictor,
 /// whose whole contract is that a speculative want *"enters at strictly lower
@@ -94,7 +96,14 @@ pub const VSM_PRIORITY_MARKED: VsmPriority = 0;
 /// one rank is a sort nothing exercises;
 /// [`tests::a_speculative_want_never_takes_a_marked_pages_slot`] is what makes
 /// it a tested property rather than a reserved constant.
-pub const VSM_PRIORITY_SPECULATIVE: VsmPriority = 1;
+///
+/// **Since P28.3 it is `inf_stream::LANE_FEEDBACK`, not a third lane.** A shadow
+/// page has no feedback refinement class — the marking mask *is* the evidence
+/// and there is nothing finer to ask for — so the rank immediately below marked
+/// is the one a speculation takes, and `inf_stream::LANE_PREDICT` stays free for
+/// the consumer that has two producers under its floor. The numeric value is
+/// unchanged (1), which is why no committed trace moves.
+pub const VSM_PRIORITY_SPECULATIVE: VsmPriority = inf_stream::LANE_FEEDBACK;
 
 /// The most pages one light's virtual space may hold.
 ///
@@ -510,21 +519,18 @@ impl VsmResidency {
         };
         let mut dirty: BTreeSet<VsmLightHandle> = BTreeSet::new();
 
-        // ── 1. normalize the want set ──
+        // ── 1. normalize the want set ── (P28.3: `inf_stream::normalize`)
         //
-        // **Priority first, entry order as the tie-break.** Two passes, and the
-        // order of the two is the point:
-        //
-        // 1. sort by `(light, ENTRY order, priority)` and dedup on
-        //    `(light, page)`. `dedup_by` keeps the FIRST of a run, which after
-        //    that sort is the **lowest** priority — so a page the mask and a
-        //    predictor both ask for is a marked want, not two wants.
-        // 2. **stable** sort by priority alone. Rust's `sort_by_key` is stable,
-        //    so the entry order established above survives inside each class.
-        let mut sorted: Vec<VsmWant> = wants.to_vec();
-        sorted.sort_by_key(|w| (w.light.0, w.page.entry_order(), w.priority));
-        sorted.dedup_by(|a, b| a.light == b.light && a.page == b.page);
-        sorted.sort_by_key(|w| w.priority);
+        // **Lane first, entry order as the tie-break** — one function shared
+        // with `inf-vt` since P28.3 rather than two copies of the same two
+        // passes. Entry order is this address space's payload order: the order
+        // the indirection table and the marking bitmask share, so a mask scan
+        // hands the walk a list already sorted the way it wants it.
+        let mut sorted: Vec<VsmWant> = inf_stream::normalize(
+            wants,
+            |w| (w.light.0, w.page.entry_order()),
+            |w| w.priority,
+        );
         sorted.retain(|w| {
             let known = w.light.index() < self.lights.len();
             if !known {
@@ -535,50 +541,40 @@ impl VsmResidency {
         self.stats.unknown_light += u64::from(txn.unknown_light);
         self.stats.wanted = sorted.len();
 
-        // ── 2. touch what is already there, collect the misses ──
-        let mut protected: BTreeSet<u32> = BTreeSet::new();
-        let mut misses: Vec<VsmWant> = Vec::new();
+        // ── 2. drop the wants this registry cannot hold, and count them ──
+        let mut lanes: Vec<(VsmPriority, (u32, VsmPage))> = Vec::with_capacity(sorted.len());
         for w in &sorted {
             let l = &self.lights[w.light.index()];
-            let Some(idx) = l.desc.entry_index(w.page) else {
+            if l.desc.entry_index(w.page).is_none() {
                 txn.out_of_range += 1;
                 continue;
-            };
-            match l.resident[idx as usize] {
-                Some(slot) => {
-                    protected.insert(slot);
-                    self.touch(slot);
-                }
-                None => misses.push(*w),
             }
+            lanes.push((w.priority, (w.light.0, w.page)));
         }
 
-        // ── 3. admit the misses, in order, against the slots that are left ──
-        let mut deferred = 0u32;
-        for (i, w) in misses.iter().enumerate() {
-            let Some((slot, evicted)) = self.acquire_slot(&protected) else {
-                // Nothing changes between iterations once acquisition fails, so
-                // every remaining miss fails too. Counting them without retrying
-                // is the same answer for O(1) instead of O(n·slots).
-                deferred = (misses.len() - i) as u32;
-                break;
-            };
-            if let Some(e) = evicted {
-                dirty.insert(e.light);
-                txn.evicts.push(e);
-                self.stats.evicts += 1;
-            }
-            self.seat(slot, w.light.0, w.page);
-            protected.insert(slot);
-            dirty.insert(w.light);
-            txn.admits.push(VsmAdmit {
-                slot,
-                light: w.light,
-                page: w.page,
-            });
+        // ── 3. THE ADMISSION WALK (P28.3) ──
+        //
+        // `inf_stream::admit_by_lane`, which protects and admits **one lane at
+        // a time** — so a marked page that is not resident outranks a
+        // speculation that is, which the previous protect-everything-then-admit
+        // split could not express (the P28.2 audit's priority-blind protection
+        // order, fixed for both consumers by one walk).
+        let mut protected: BTreeSet<u32> = BTreeSet::new();
+        let log = inf_stream::admit_by_lane(&mut PoolView(self), &lanes, &mut protected);
+        for (slot, (l, page)) in log.evicts {
+            let light = VsmLightHandle(l);
+            dirty.insert(light);
+            txn.evicts.push(VsmEvict { slot, light, page });
+            self.stats.evicts += 1;
+        }
+        for (slot, (l, page)) in log.admits {
+            let light = VsmLightHandle(l);
+            dirty.insert(light);
+            txn.admits.push(VsmAdmit { slot, light, page });
             self.stats.admits += 1;
         }
 
+        let deferred = log.deferred;
         txn.deferred = deferred;
         txn.tables = dirty.into_iter().collect();
         self.stats.deferred = deferred;
@@ -802,6 +798,42 @@ impl VsmResidency {
     }
 }
 
+/// **The arbiter's view of this atlas** (P28.3): the four operations
+/// `inf_stream::admit_by_lane` needs, and nothing else.
+///
+/// A private newtype rather than `impl SlotPool for VsmResidency`, for
+/// `inf-vt`'s reason: the trait is public, so implementing it on the residency
+/// would make `seat` and `acquire` public API and let a caller seat a page
+/// outside a transaction.
+struct PoolView<'a>(&'a mut VsmResidency);
+
+impl inf_stream::SlotPool for PoolView<'_> {
+    /// `(light index, page)` — the residency's own address, unpacked from
+    /// [`VsmWant`] before the walk.
+    type Key = (u32, VsmPage);
+
+    fn resident_slot(&self, key: &Self::Key) -> Option<u32> {
+        let l = self.0.lights.get(key.0 as usize)?;
+        l.resident[l.desc.entry_index(key.1)? as usize]
+    }
+
+    fn touch(&mut self, slot: u32) {
+        self.0.touch(slot);
+    }
+
+    fn acquire(&mut self, protected: &BTreeSet<u32>) -> Option<inf_stream::Acquired<Self::Key>> {
+        let (slot, evicted) = self.0.acquire_slot(protected)?;
+        Some(inf_stream::Acquired {
+            slot,
+            evicted: evicted.map(|e| (e.light.0, e.page)),
+        })
+    }
+
+    fn seat(&mut self, slot: u32, key: Self::Key) {
+        self.0.seat(slot, key.0, key.1);
+    }
+}
+
 /// The eviction rule: the smallest `(stamp, slot)`.
 ///
 /// A free function so the tie-break can be exercised directly. Stamps come from
@@ -1005,6 +1037,52 @@ mod tests {
             speculative[0].page.entry_order() < marked.page.entry_order(),
             "the fixture's speculations do not precede its marked want"
         );
+    }
+
+    /// **A marked want outranks a speculation THAT IS ALREADY RESIDENT**
+    /// (P28.3, clause 3).
+    ///
+    /// The arm above proves a marked *miss* beats a speculative *miss*, which
+    /// held from P27.1. This is the case that did not: with every slot held by
+    /// speculations the predictor keeps asking for, a page the depth buffer
+    /// proved a visible pixel needs used to be deferred — every resident want
+    /// of any class was protected before any miss of any class was offered a
+    /// slot — and a deferred marked page reads as `VSM_ENTRY_NONE`, i.e. **lit**.
+    /// A predictor that guessed wrong would have leaked light through the pages
+    /// the depth buffer was certain about.
+    ///
+    /// It ships before its producer for the same reason the rank itself does.
+    #[test]
+    fn a_marked_want_outranks_a_speculation_that_is_already_resident() {
+        let mut r = atlas(3);
+        let h = r.register_light(VsmLightDesc::clipmap(3, 8)).unwrap();
+        r.apply_wants(&[]);
+        let speculative = [
+            VsmPage::flat(0, 0, 0),
+            VsmPage::flat(0, 1, 0),
+            VsmPage::flat(0, 2, 0),
+        ];
+        let warm = r.apply_wants(&speculative.map(|p| VsmWant::speculate(h, p)));
+        assert_eq!(warm.admits.len(), 3, "the atlas is not full: {}", warm.trace());
+
+        let marked = VsmPage::flat(1, 4, 4);
+        let mut wants = vec![VsmWant::new(h, marked)];
+        wants.extend(speculative.map(|p| VsmWant::speculate(h, p)));
+        let txn = r.apply_wants(&wants);
+
+        assert!(
+            r.is_resident(h, marked),
+            "a resident speculation outranked the depth buffer: {}",
+            txn.trace()
+        );
+        assert_eq!(txn.admits.len(), 1, "{}", txn.trace());
+        assert_eq!(txn.evicts.len(), 1, "{}", txn.trace());
+        assert_eq!(
+            txn.evicts[0].page, speculative[0],
+            "the least recently touched speculation is not the one that left: {}",
+            txn.trace()
+        );
+        assert_eq!(txn.deferred, 1);
     }
 
     /// One page wanted at two ranks is **one** want at the stronger rank.

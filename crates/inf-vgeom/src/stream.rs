@@ -62,7 +62,6 @@
 //! so the instrument exists with no path from it to what gets loaded.
 
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::asset::{
     MeshletRec, VgeomPageEntry, VgeomPageSections, VgeomSource, MESHLET_REC_LEN, VERTEX_REC_LEN,
@@ -71,9 +70,8 @@ use crate::asset::{
 /// Sentinel in a remap table: this meshlet's page is not resident.
 pub const NOT_RESIDENT: u32 = u32::MAX;
 
-/// Source of residency stamps, **process-global and monotone** — the same
-/// construction, and the same reason, as terrain's per-tile version counter
-/// (P16.3).
+/// Source of residency stamps: **`inf_stream::next_stamp`**, the one domain
+/// (P28.3, clause 1).
 ///
 /// A renderer caches "the remap table I last uploaded for asset A was stamp N"
 /// and re-uploads only when the stamp moves. A per-residency counter restarting
@@ -83,12 +81,11 @@ pub const NOT_RESIDENT: u32 = u32::MAX;
 /// table describing pool slots that no longer exist. A global counter never
 /// decreases, so a new residency's stamp is strictly greater than any stamp any
 /// cache can be holding.
-static NEXT_RESIDENCY_STAMP: AtomicU64 = AtomicU64::new(1);
-
-/// The next residency stamp. Never 0, so 0 is safe as "nothing uploaded yet".
-fn next_stamp() -> u64 {
-    NEXT_RESIDENCY_STAMP.fetch_add(1, Ordering::Relaxed)
-}
+///
+/// It was a counter of this crate's own until P28.3, alongside `inf-vt`'s and
+/// `inf-vsm`'s; the merge is what lets a cluster page's recency be compared
+/// against the recency of the texture tiles it is coupled to.
+use inf_stream::next_stamp;
 
 // ── the suballocator ────────────────────────────────────────────────────────
 

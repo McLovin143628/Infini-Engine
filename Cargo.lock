@@ -3431,6 +3431,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "inf-stream"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "inf-studio"
 version = "0.1.0"
 dependencies = [
@@ -3514,6 +3521,7 @@ dependencies = [
  "inf-asset",
  "inf-core",
  "inf-math",
+ "inf-stream",
  "inf-vgeom",
  "inf-vt",
  "meshopt",
@@ -3567,6 +3575,7 @@ dependencies = [
 name = "inf-vsm"
 version = "0.1.0"
 dependencies = [
+ "inf-stream",
  "thiserror 2.0.19",
 ]
 
@@ -3574,6 +3583,7 @@ dependencies = [
 name = "inf-vt"
 version = "0.1.0"
 dependencies = [
+ "inf-stream",
  "thiserror 2.0.19",
 ]
 
