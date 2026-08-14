@@ -91,9 +91,39 @@ jobs:
           RUSTDOC_WARNING_CEILING: 450
         run: |
           set -uo pipefail
-          cargo doc --no-deps --workspace 2>&1 | tee /tmp/rustdoc.log
+          # P28.5 AUDIT — two ways this step passed without measuring anything.
+          #
+          # (1) `set -u -o pipefail` without `-e` does not abort on a failing
+          #     pipeline, and the pipeline's status was never read. A `cargo doc`
+          #     that FAILED outright therefore left an error log, `grep -c` found
+          #     zero `warning:` lines in it, 0 <= the ceiling, and the step went
+          #     GREEN. Reproduced with a controlled stand-in: the step printed
+          #     "rustdoc warnings: 0 (ceiling 450)" and exited 0 on a `cargo doc`
+          #     that exited 101. The one CI leg added to make rustdoc failures
+          #     visible was green on the loudest rustdoc failure there is.
+          #
+          # (2) Same shape, quieter: this job restores a cargo cache
+          #     (Swatinem/rust-cache), and a `cargo doc` that recompiles nothing
+          #     re-emits nothing. Zero warnings out of a no-op is indistinguishable
+          #     from zero warnings out of a clean tree, and the ratchet would
+          #     freeze an inventory it never counted.
+          #
+          # So the status is checked, and the run must show evidence it ran. The
+          # floor is on `Documenting` lines and NOT on the warning count, because
+          # the repair campaign is meant to drive that count to zero and must not
+          # break this step when it succeeds.
+          if ! cargo doc --no-deps --workspace 2>&1 | tee /tmp/rustdoc.log; then
+            echo "::error::cargo doc FAILED. A ratchet over rustdoc warnings cannot count them if rustdoc did not finish."
+            exit 1
+          fi
+          documented=$(grep -c '^ *Documenting ' /tmp/rustdoc.log || true)
+          if [ "$documented" -eq 0 ]; then
+            echo "::error::cargo doc documented no crate, so the warning count below is a count of nothing."
+            echo "A cached no-op emits no warnings and would pass this ratchet vacuously."
+            exit 1
+          fi
           n=$(grep -c '^warning: ' /tmp/rustdoc.log || true)
-          echo "rustdoc warnings: $n (ceiling ${RUSTDOC_WARNING_CEILING})"
+          echo "rustdoc warnings: $n (ceiling ${RUSTDOC_WARNING_CEILING}) over $documented documented crates"
           if [ "$n" -gt "${RUSTDOC_WARNING_CEILING}" ]; then
             echo "::error::rustdoc warnings rose to $n, above the pinned ceiling of ${RUSTDOC_WARNING_CEILING}."
             echo "The new ones are in the log above. Fix them, or re-pin the ceiling deliberately."
