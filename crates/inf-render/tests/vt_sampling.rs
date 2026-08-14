@@ -1955,3 +1955,143 @@ fn the_downlevel_tier_draws_a_textured_mesh_in_texels() {
          same thing"
     );
 }
+
+// ── (g) the shipped seam: a host that commits a camera (P28.4 audit) ─────────
+
+/// **THE SHIPPED PREDICTIVE PATH, ARMED** (P28.4 audit) — the first arm anywhere
+/// that runs `commit_camera → camera_history → prediction() → speculative_wants`
+/// through `EngineRenderer` rather than around it.
+///
+/// P28.4 proved its two producers as *functions*: `whip_pan.rs` calls
+/// `inf_math::dead_reckon` and `inf_render::speculative_wants` directly and
+/// never builds a renderer, and `commit_camera` had exactly one caller in the
+/// tree (`inf_player::window`) and no test at all. Measured in the audit's
+/// mutation matrix: **`EngineRenderer::prediction()` hard-wired to `None` —
+/// which turns the whole feature off in both consumers — left all twenty-two of
+/// this crate's test binaries green.** The gate proved the parts and nothing
+/// proved the wiring.
+///
+/// So this asserts the wiring and only the wiring, against the one counter that
+/// can see it: `VtPopIn::predict_wants`, which until now had no reader outside
+/// the module that writes it. The camera path is a slow yaw at the fixed step —
+/// it does not need to be a whip-pan, because what is being measured is that a
+/// committed pose reaches the want set, and `whip_pan.rs` owns the question of
+/// what the want set is worth.
+///
+/// **The `set_for` warm rule is why the surface is re-read every frame.** A
+/// texture is not in a `VtTextureSet` until a transaction has warmed it, so a
+/// set sampled before the first render is `NONE`, the coverage list is empty and
+/// the camera-driven half of every want class — floor and speculation alike — is
+/// empty with it. A fixture that takes the set once measures the camera-free
+/// floor and calls it a scene.
+#[test]
+fn a_committed_camera_reaches_the_shipped_streaming_loop() {
+    let Some(gpu) = gpu_or_skip("the committed-camera seam") else {
+        return;
+    };
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let mut renderer = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+    let (mut lib, _) = VtTextures::new(pool_cfg(PageFormat::Rgba8, 64));
+    lib.register_or_record(1, Arc::new(ramp_container(256, false)))
+        .expect("the fixture registers");
+    let pools = VtPools::new(&gpu.device, &gpu.queue, lib.residency(), false);
+    renderer.set_vt_level(Some((lib, pools)));
+
+    // An empty history is the real enable flag, and it fails safe: this is the
+    // editor viewport's state, and every gate that existed before P28.4.
+    assert!(
+        renderer.prediction().is_none(),
+        "a renderer nobody committed a camera to predicted something"
+    );
+    assert!(renderer.camera_history().is_empty());
+
+    let view_at = |tick: u64| {
+        let a = 0.02 * tick as f64;
+        inf_render::RenderView {
+            forward: glam::Vec3::new(inf_math::psin64(a) as f32, 0.0, -inf_math::pcos64(a) as f32)
+                .normalize(),
+            ..face_view()
+        }
+    };
+    let draw = |r: &mut inf_render::EngineRenderer, v: &inf_render::RenderView| {
+        let set = r
+            .vt_textures()
+            .map(|l| l.set_for(Some(1), None, None))
+            .unwrap_or(inf_render::VtTextureSet::NONE);
+        r.render(&gpu, &face_scene(set), v, &target.view, (FW, FH));
+        !set.is_none()
+    };
+
+    // Three frames with no committed camera. The control, and the anti-vacuity
+    // for the count below: the surface has to be *in* the coverage list by the
+    // end of it, or "no speculative want" is a statement about an empty scene.
+    let mut textured = false;
+    for tick in 0..3u64 {
+        textured |= draw(&mut renderer, &view_at(tick));
+    }
+    assert!(
+        textured,
+        "the fixture never warmed its texture, so nothing was ever covered"
+    );
+    assert!(
+        renderer.vt_pop_in().floor_wants > 3,
+        "the camera-driven floor is empty — the coverage list never had the \
+         surface in it and this fixture cannot see a speculation either"
+    );
+    assert_eq!(
+        renderer.vt_pop_in().predict_wants,
+        0,
+        "the loop speculated with an empty history — `None` does not mean `None`"
+    );
+
+    // …and now a host that commits at its fixed step, the way `inf_player`'s
+    // window does: the SIM's step count, once per frame.
+    for tick in 0..8u64 {
+        let v = view_at(tick);
+        assert!(
+            renderer.commit_camera(tick, &v),
+            "tick {tick} was refused by a history that should have taken it"
+        );
+        draw(&mut renderer, &v);
+    }
+    assert_eq!(
+        renderer.camera_history().len(),
+        inf_math::PREDICT_HISTORY,
+        "the window did not fill or did not bound"
+    );
+    assert!(renderer.prediction().is_some());
+    assert!(
+        renderer.vt_pop_in().predict_wants > 0,
+        "a committed camera produced no speculative want — `commit_camera` and \
+         the streaming loop are not connected"
+    );
+
+    // **The refusal reaches a host**, which is the one thing
+    // `CameraHistory::refused` is for: a frame that ran no fixed step commits
+    // nothing, and says so rather than appending twice for one step.
+    let seen = renderer.vt_pop_in().predict_wants;
+    assert!(
+        !renderer.commit_camera(7, &view_at(7)),
+        "a tick that did not advance was taken"
+    );
+    assert_eq!(renderer.camera_history().refused(), 1);
+
+    // **The knob is the knob.** With the predictor cleared the loop goes back to
+    // exactly the pre-P28.4 want set while the history stays full — so this is
+    // the settings gate, tested apart from the empty-history one above.
+    let mut off = *renderer.settings();
+    off.stream.predict.enabled = false;
+    renderer.set_settings(off);
+    assert!(renderer.prediction().is_none());
+    draw(&mut renderer, &view_at(8));
+    assert_eq!(
+        renderer.vt_pop_in().predict_wants,
+        seen,
+        "a disabled predictor still offered wants"
+    );
+
+    // …and a cut clears the window rather than spanning it.
+    renderer.reset_camera_history();
+    assert!(renderer.camera_history().is_empty());
+    assert!(renderer.prediction().is_none());
+}
