@@ -48,14 +48,23 @@
 //!    direction, on the 3.10 % of texels above, and it appears **because** the
 //!    filter was made more exact.
 //!
-//! The fifth reason is not about the kernel at all and it is why there is **no
-//! comparison sampler** in the env layout: hardware `textureSampleCompare`
-//! filtering is a 2 × 2 footprint in *atlas* space, and a page's atlas
-//! neighbour is `slot + 1` — an unrelated page of a possibly unrelated light.
-//! With no border there is nothing correct for the hardware to filter against,
-//! so the receiver `textureLoad`s integer texels and compares in the shader.
-//! That also makes the clamp exact rather than approximate: a tap is in or out
-//! of the page by integer arithmetic.
+//! The fifth reason is not about the kernel at all and it is why the receiver
+//! adds **no sampler of its own** — [`bind_group_layout_entries`] is a depth
+//! texture and three buffers, and
+//! `the_receiver_adds_four_bindings_and_none_of_them_is_a_sampler` is the arm.
+//! Hardware `textureSampleCompare` filtering is a 2 × 2 footprint in *atlas*
+//! space, and a page's atlas neighbour is `slot + 1` — an unrelated page of a
+//! possibly unrelated light. With no border there is nothing correct for the
+//! hardware to filter against, so the receiver `textureLoad`s integer texels and
+//! compares in the shader. That also makes the clamp exact rather than
+//! approximate: a tap is in or out of the page by integer arithmetic.
+//!
+//! (Said precisely, because this module's first draft said "no comparison
+//! sampler **in the env layout**" and that is refutable by grep: the env group
+//! holds one at binding **3** — the CASCADE's `env-shadow`, `LessEqual` over a
+//! forward-Z array — and its hardware 2 × 2 is exactly the pre-filter this
+//! kernel gives up. The claim is about what P27.4 *adds* and what the virtual
+//! path *reads*, and neither is a sampler.)
 //!
 //! # 2. The bias has exactly two terms, and each is derived
 //!
@@ -70,9 +79,9 @@
 //!   NDC it does **not** have to be re-derived per level, per light or per
 //!   settings value. (Expressed in *texels* it would not be constant at all:
 //!   the along-light box is `2·extent·2^(levels−1)` deep while a level-0 texel
-//!   is `2·extent/(N·128)` wide, so the same guard is 0.125 texels at the
-//!   shipped defaults and **32** at the 16-level ceiling. The unit is the whole
-//!   of why this term is not authored.)
+//!   is `2·extent/(N·128)` wide, so the same guard is **0.25** texels at the
+//!   shipped defaults and **64** at the 16-level ceiling — 256× across eight
+//!   more levels. The unit is the whole of why this term is not authored.)
 //! * **The slope term is a property of the PAGE'S TEXEL DENSITY**, which is what
 //!   the ROADMAP's clause asks for. A page stores one depth per texel, so
 //!   between two texel centres a tilted surface departs from the stored value by
@@ -86,7 +95,7 @@
 //!
 //! At the shipped defaults the two terms are 2.38 × 10⁻⁷ and — at a 45° surface,
 //! level 0 — `2.121 · 7.81 mm · 1.0 / 8 192 m` = 2.02 × 10⁻⁶ NDC. Together they
-//! are **1/665** of `ShadowSettings::depth_bias`'s 0.0015, which is what a
+//! are **1/663** of `ShadowSettings::depth_bias`'s 0.0015, which is what a
 //! cascade has to pay for having no per-texel density term to scale by.
 //!
 //! # 3. The fail direction, in the one place a receiver can violate it
@@ -984,35 +993,115 @@ mod tests {
         assert_eq!(reads, 8);
         assert_eq!(reads * VSM_PCF_TAPS, 72, "the per-tap resolve's worst case");
 
+        // The kept-tap counts come from the SHIPPED kernel, so numbers 3 and 4
+        // below are measurements of it rather than of three literals. (They were
+        // exactly that in this arm's first draft — `3.0/9.0` asserted equal to
+        // `3.0/9.0` — which the P27.4 audit found and which is the vacuous-check
+        // law met again: an arithmetic identity passes whatever the kernel does.)
+        let taps_at = |l: Vec2| vsm_pcf_taps(l, VSM_PAGE_SIZE, 0, (0, 0)).len();
+        let interior = taps_at(Vec2::new(64.5, 64.5));
+        let on_edge = taps_at(Vec2::new(0.5, 64.5));
+        let at_corner = taps_at(Vec2::new(0.5, 0.5));
+        assert_eq!((interior, on_edge, at_corner), (9, 6, 4));
+
         // 3. The clamped kernel is EXACT wherever the field is locally constant,
-        //    which is everywhere except a penumbra. Modelled directly: a 3×3
-        //    neighbourhood in which every tap agrees.
-        for shadowed in [0.0f32, 1.0] {
-            let full = shadowed;
-            for kept in 1..=9usize {
-                let clamped = shadowed * kept as f32 / kept as f32;
-                assert_eq!(clamped, full, "a constant field must survive clamping");
+        //    which is everywhere except a penumbra — measured THROUGH
+        //    `vsm_level_factor` on a one-page tree whose atlas is uniform, at an
+        //    interior texel (9 taps), an edge (6) and a corner (4).
+        let (table, desc, proj) = one_page_tree();
+        for (stored, want) in [(0.25f32, 1.0f32), (0.75, 0.0)] {
+            // The receiver's own depth is 0.5, so `stored` decides: 0.25 is a
+            // caster further from the light (lit) and 0.75 a nearer one (shadow).
+            let at = |q: Vec2| {
+                vsm_level_factor(
+                    &table,
+                    &proj,
+                    &desc,
+                    Vec3::new(q.x, q.y, 0.5),
+                    0,
+                    0.0,
+                    |_, _| stored,
+                )
+            };
+            for q in [
+                Vec2::ZERO,               // interior
+                Vec2::new(-0.999, 0.0),   // an edge
+                Vec2::new(-0.999, 0.999), // a corner
+                Vec2::new(0.999, -0.999), // the other corner
+            ] {
+                assert_eq!(
+                    at(q),
+                    want,
+                    "a LOCALLY CONSTANT shadow field did not survive clamping at \
+                     {q:?} — the clamped kernel is the full kernel restricted and \
+                     renormalized, so a constant field is exact"
+                );
             }
         }
-        // …and in a penumbra it is off by at most the dropped weight.
-        let edge_drop = 3.0f32 / 9.0;
-        let corner_drop = 5.0f32 / 9.0;
-        assert!((edge_drop - 0.3333).abs() < 1e-3 && (corner_drop - 0.5555).abs() < 1e-3);
+        // …and in a penumbra it is off by at most the DROPPED weight, which is
+        // the kernel's own tap counts and not a pair of typed fractions.
+        let edge_drop = (interior - on_edge) as f32 / interior as f32;
+        let corner_drop = (interior - at_corner) as f32 / interior as f32;
+        assert!((edge_drop - 3.0 / 9.0).abs() < 1e-6, "{edge_drop}");
+        assert!((corner_drop - 5.0 / 9.0).abs() < 1e-6, "{corner_drop}");
 
-        // 4. The per-tap resolve over an ABSENT neighbour is wrong on flat
-        //    ground, in the leak direction, by exactly the crossing weight —
-        //    the case the clamped kernel is exact in.
+        // 4. The per-tap resolve over an ABSENT neighbour is wrong on ground the
+        //    clamped kernel is EXACT on, in the leak direction, by that same
+        //    dropped weight.
         //
-        //    Fully-shadowed ground: every tap of the full kernel would read
-        //    "shadowed". Three of them land in a page that resolves to NONE,
-        //    which this phase reads as LIT.
-        let clamped_on_a_seam = 0.0f32; // 6 shadowed taps of 6 kept
-        let cross_page_with_an_absent_neighbour = 3.0f32 / 9.0;
-        assert_eq!(clamped_on_a_seam, 0.0);
-        assert!(
-            (cross_page_with_an_absent_neighbour - edge_drop).abs() < 1e-6,
-            "a bright line of exactly the dropped weight, along a page seam"
+        //    Uniformly shadowed ground at a page edge: the clamp reads 0.0 (all
+        //    six kept taps shadowed, measured above). The per-tap resolve keeps
+        //    the three that leave the page and re-addresses them — into a
+        //    neighbour that is `VSM_ENTRY_NONE`, which this phase reads as LIT.
+        let clamped_on_a_seam = vsm_level_factor(
+            &table,
+            &proj,
+            &desc,
+            Vec3::new(-0.999, 0.0, 0.5),
+            0,
+            0.0,
+            |_, _| 0.75,
         );
+        assert_eq!(clamped_on_a_seam, 0.0, "the clamp is exact here");
+        let per_tap_resolve = (interior - on_edge) as f32 / interior as f32;
+        assert!(
+            (per_tap_resolve - edge_drop).abs() < 1e-6,
+            "a bright line of exactly the dropped weight, along a page seam, on \
+             ground the clamped kernel gets right"
+        );
+        assert!(
+            per_tap_resolve > clamped_on_a_seam,
+            "the leak is in the LIT direction"
+        );
+    }
+
+    /// A one-light, one-level, one-page quadtree and the table that serves it —
+    /// the smallest tree `vsm_level_factor` can be measured on.
+    fn one_page_tree() -> (Vec<u32>, VsmLightDesc, VsmProjection) {
+        let desc = VsmLightDesc::quadtree(1);
+        let block = VSM_TABLE_HEADER_WORDS;
+        let entries = block + VSM_TABLE_LIGHT_HEADER_WORDS + VSM_TABLE_LEVEL_REC_WORDS;
+        let mut table = vec![0u32; entries + 1];
+        table[0] = inf_vsm::VSM_TABLE_MAGIC;
+        table[1] = 1;
+        table[2] = 1; // slots a row
+        table[3] = VSM_PAGE_SIZE; // stored page size
+        table[block] = 1; // levels
+        table[block + 1] = VSM_PAGE_SIZE;
+        table[block + 2] = 0; // border
+        table[block + 3] = inf_vsm::VsmTreeKind::Quadtree.wire() | (1 << 8);
+        let rec = block + VSM_TABLE_LIGHT_HEADER_WORDS;
+        table[rec] = 1; // pages_x
+        table[rec + 1] = 1; // pages_y
+        table[rec + 2] = entries as u32;
+        table[rec + 3] = 0;
+        table[entries] = inf_vsm::pack_entry(0, 0);
+        let proj = VsmProjection {
+            view_proj: Mat4::IDENTITY.to_cols_array(),
+            info: [block as u32, 0, 0, crate::vsm::VSM_PROJ_PERSPECTIVE],
+            ..Default::default()
+        };
+        (table, desc, proj)
     }
 
     /// The two bias terms, their derivations and the numbers the memo quotes.
@@ -1041,11 +1130,16 @@ mod tests {
         );
         // …which is three orders of magnitude under the cascade's flat constant,
         // and that ratio is the whole reason the terms are derived.
+        //
+        // Pinned to a HALF, not to a hundred-wide window: the P27.4 audit found
+        // the memo and the ledger quoting **665** against this arm's **663.3**,
+        // which a `600 < r < 700` bound cannot see. A number the prose repeats is
+        // a number the arm has to hold to the digit the prose prints.
         let csm = crate::settings::ShadowSettings::default().depth_bias;
+        let ratio = csm / bias;
         assert!(
-            csm / bias > 600.0 && csm / bias < 700.0,
-            "ratio to the cascade's flat bias: {}",
-            csm / bias
+            (ratio - 663.3).abs() < 0.5,
+            "ratio to the cascade's flat bias: {ratio}"
         );
 
         // The slope clamp bites before `tan` runs away.
@@ -1057,12 +1151,23 @@ mod tests {
 
         // The unit ruling, measured: expressed in TEXELS the constant term is not
         // constant at all — it is `2^(levels-1)` of itself.
+        //
+        // **0.25 and 64**, and the memo and the ledger said 0.125 and 32 until
+        // the P27.4 audit compared them with this line: the prose had computed
+        // the guard at TWO ULP where `VSM_DEPTH_ULP_BIAS` is four. The ratio it
+        // was making the argument about — 256× across eight more levels — was
+        // right in both tellings, which is how a factor of two survives a
+        // reading. Held to a tenth of a texel here so it cannot drift again.
         let texels_at = |levels: u32| {
             let r = 2.0 * s.first_level_extent_m * (1u32 << (levels - 1)) as f32;
             VSM_DEPTH_ULP_BIAS * r / texel0
         };
-        assert!((texels_at(8) - 0.25).abs() < 0.01, "{}", texels_at(8));
-        assert!((texels_at(16) - 64.0).abs() < 2.0, "{}", texels_at(16));
+        assert!((texels_at(8) - 0.25).abs() < 1e-4, "{}", texels_at(8));
+        assert!((texels_at(16) - 64.0).abs() < 1e-4, "{}", texels_at(16));
+        assert!(
+            (texels_at(16) / texels_at(8) - 256.0).abs() < 1e-3,
+            "eight more levels is 256 times the guard, in texels"
+        );
     }
 
     /// `∂ndc.z/∂m` in both branches, read off the shipped matrices.
@@ -1257,18 +1362,26 @@ mod tests {
         );
         // A spherical sweep at half-cell offsets never LANDS on a diagonal — it
         // measured 0 seams, which would leave the tie-break untested by a test
-        // that names it. The seams are constructed instead, one per axis pair,
-        // and each one is asserted to be contained by BOTH its faces (so the
-        // rule is choosing between two right answers rather than picking the
-        // only one).
+        // that names it. The seams are constructed instead, and each one is
+        // asserted to be contained by BOTH its faces (so the rule is choosing
+        // between two right answers rather than picking the only one).
+        //
+        // **All three axis pairs, because the rule is three comparisons.** The
+        // P27.4 audit's mutation round found the first draft's five seams covered
+        // `a.x >= a.z` and `a.y >= a.z` and never `a.x >= a.y` — so weakening the
+        // first comparison to `>` moved every X/Y diagonal from `+X` to `+Y` and
+        // survived, in both halves of the twin. The last two rows are that pair.
         assert_eq!(seams, 0, "the sweep is expected to miss the diagonals");
         let mut tied = 0u32;
+        let mut pairs = std::collections::BTreeSet::new();
         for (d, a, b) in [
             (Vec3::new(1.0, 0.2, 1.0), 0u32, 4u32),
             (Vec3::new(1.0, 0.2, -1.0), 0, 5),
             (Vec3::new(-1.0, 0.2, 1.0), 1, 4),
             (Vec3::new(0.2, 1.0, 1.0), 2, 4),
             (Vec3::new(0.2, -1.0, -1.0), 3, 5),
+            (Vec3::new(1.0, 1.0, 0.2), 0, 2),
+            (Vec3::new(-1.0, -1.0, 0.2), 1, 3),
         ] {
             let d = d.normalize();
             let world = pos + d * 9.0;
@@ -1290,9 +1403,38 @@ mod tests {
             // face of the pair wins, and it is stated here rather than left to a
             // comparison's accident.
             assert_eq!(vsm_cube_face(d), a.min(b), "the tie-break moved");
+            // The AXES the pair straddles, so "all three pairs" is counted rather
+            // than eyeballed off the list.
+            pairs.insert((a.min(b) / 2, a.max(b) / 2));
             tied += 1;
         }
-        assert_eq!(tied, 5);
+        assert_eq!(tied, 7);
+        assert_eq!(
+            pairs.len(),
+            3,
+            "the constructed seams cover {pairs:?} — the rule is three \
+             comparisons and an untested one is a tie-break nothing decides"
+        );
+
+        // **And the WGSL twin's own three comparisons, by SOURCE.** Everything
+        // above measures the Rust half; the shader's `vsm_cube_face` is a
+        // separate three comparisons, and no device fixture in this phase lands a
+        // fragment exactly on a cube diagonal (a shaded pixel is a surface point,
+        // not a swept direction). Weakening any `>=` to `>` there moves every
+        // seam direction to the next face and is invisible to every arm in the
+        // tree — the P27.4 audit's mutation round measured exactly that. Same
+        // honesty as the kernel's pin: this catches a deletion, not a
+        // re-derivation.
+        let src = include_str!("shaders/vsm_receive.wgsl");
+        for cmp in ["if (a.x >= a.y && a.x >= a.z) {", "if (a.y >= a.z) {"] {
+            assert!(
+                src.contains(cmp),
+                "`vsm_receive.wgsl`'s cube-face rule no longer spells `{cmp}` — \
+                 the tie-break at a diagonal is the axis ORDER, and the two \
+                 halves of the twin have to make the same choice on a direction \
+                 that is on the boundary of two faces"
+            );
+        }
     }
 
     /// **The cube seam is depth-continuous**, and that is a property rather than
@@ -1662,11 +1804,155 @@ mod tests {
         //   boundary, where the displacement changes which page is resolved.
         assert!(
             src.contains("let gq = vsm_level_ndc(p, l, got);"),
-            "the shader no longer re-derives the address at the level the table              SERVED — a fallback would sample the finer level's texel position              inside the coarser page's slot"
+            "the shader no longer re-derives the address at the level the table \
+             SERVED — a fallback would sample the finer level's texel position \
+             inside the coarser page's slot"
         );
+        // **The magnitude AND the application.** The P27.4 audit's mutation round
+        // found this pin aimed at the wrong line: it named where `offset_m` is
+        // COMPUTED, so a shader that computes the offset and then projects the
+        // undisplaced point passed it — which is exactly the mutation the pin
+        // exists for, and it survived. A pin has to name the expression whose
+        // deletion is the defect (the P23 law, met from the other side: a byte pin
+        // catches a deletion only where the deletion is in the bytes it reads).
         assert!(
             src.contains("VSM_NORMAL_BIAS_TEXELS * texel0 * exp2(f32(level0))"),
-            "the shader no longer displaces the receiver along its normal before              projecting it"
+            "the shader no longer sizes the normal offset at one texel of the \
+             level the receiver asks for"
+        );
+        assert!(
+            src.contains("p.view_proj * vec4<f32>(world_pos + n * offset_m, 1.0)"),
+            "the shader computes a normal offset and then projects the UNDISPLACED \
+             point — the offset is inert, and with no page border it is the \
+             address it was supposed to move"
+        );
+    }
+
+    /// **The bias's two terms and the blend's two proximities, pinned by
+    /// SOURCE** — the other three expressions of `vsm_shadow` that no device
+    /// fixture in this phase can reach, found by the P27.4 audit's mutation
+    /// round and armed here on the same terms as the kernel's own clamp.
+    ///
+    /// Measured, each one:
+    ///
+    /// * deleting `VSM_DEPTH_ULP_BIAS` from the shader's bias survives every
+    ///   device arm. It is 2.38 × 10⁻⁷ NDC against a slope term an order of
+    ///   magnitude larger at every angle those fixtures use, and it only becomes
+    ///   the *whole* bias as `n · l → 1`, where a 256 × 144 frame cannot see the
+    ///   acne it prevents;
+    /// * replacing `max(w_res, w_con)` with `w_res` survives every device arm —
+    ///   the blend arm's band is the RESOLUTION one, so the footprint half (the
+    ///   clipmap ring, the edge a quadtree does not have) is measured on the Rust
+    ///   side alone by `the_level_blend_is_a_band_at_both_of_a_levels_edges`;
+    /// * and the coarser level's bias is its own, `level + 1u` — a blend that
+    ///   biased the coarse tap at the fine level's texel density under-biases it
+    ///   by a factor of two.
+    ///
+    /// The same honesty as the kernel's pin: this catches a **deletion**, not a
+    /// re-derivation.
+    #[test]
+    fn the_shaders_bias_and_blend_are_the_expressions_this_module_derives() {
+        let src = include_str!("shaders/vsm_receive.wgsl");
+        assert!(
+            src.contains("let bias = VSM_DEPTH_ULP_BIAS + slope * texel0 * exp2(f32(level));"),
+            "the shader's bias is no longer the two derived terms — the depth \
+             FORMAT's constant plus the page's texel DENSITY times the slope"
+        );
+        assert!(
+            src.contains(
+                "let nbias = VSM_DEPTH_ULP_BIAS + slope * texel0 * exp2(f32(level + 1u));"
+            ),
+            "the blend's coarser tap no longer takes the coarser level's own \
+             bias, so it is under-biased by exactly the factor of two between \
+             their texel sizes"
+        );
+        assert!(
+            src.contains("    return max(w_res, w_con);"),
+            "the blend weight is no longer the LARGER of the two proximities — a \
+             clipmap level has two edges a receiver can approach and dropping \
+             either one puts the seam back at that edge"
+        );
+    }
+
+    /// **The receiver declares no sampler at all**, which is the ruling the
+    /// clamped kernel rests on — every tap is a `textureLoad` at an integer
+    /// texel, so the clamp is exact by integer arithmetic.
+    ///
+    /// Stated precisely, because the memo's first draft did not: the environment
+    /// bind group *does* hold a comparison sampler — binding 3, the **cascade's**
+    /// `env-shadow`, whose hardware 2 × 2 pre-filter is the 36-samples-for-9 the
+    /// memo compares against. What P27.4 adds is four bindings and **no sampler
+    /// among them**, and the virtual path never names the cascade's.
+    #[test]
+    fn the_receiver_adds_four_bindings_and_none_of_them_is_a_sampler() {
+        for e in bind_group_layout_entries(17) {
+            assert!(
+                !matches!(e.ty, wgpu::BindingType::Sampler(_)),
+                "binding {} is a sampler — with `VSM_PAGE_BORDER = 0` a hardware \
+                 2 x 2 footprint at a page edge reads the atlas slot NEXT DOOR",
+                e.binding
+            );
+        }
+        let src = include_str!("shaders/vsm_receive.wgsl");
+        assert!(
+            !src.contains("textureSampleCompare") && !src.contains("sampler_comparison"),
+            "the receiver filters through the hardware, over an atlas whose page \
+             neighbours are unrelated lights"
+        );
+        // …and it never reaches for the cascade's, either.
+        assert!(
+            !src.contains("shadow_sampler"),
+            "the receiver names the cascade's comparison sampler"
+        );
+    }
+
+    /// **The two light ceilings, compared in one place** — the P27.4 audit's
+    /// answer to a remainder that said they never had been.
+    ///
+    /// `MAX_LIGHTS` is **16**: the lights uniform's array, and therefore the
+    /// largest scene index whose `GpuLight::params.w` a lit shader can read.
+    /// `VSM_MAX_PROJECTIONS` is **64**: the marking pass's projection ceiling,
+    /// and `VsmSystem::for_scene` registers a tree for every shadow-casting light
+    /// in scene order with no reference to the first number.
+    ///
+    /// **The consequence, written down rather than left to be found:** a
+    /// point or spot light at scene index ≥ 16 can hold a page tree that marks,
+    /// rasterizes and evicts pages **no shader can ever sample**, because
+    /// `LightsUniform::from_scene` truncates at `MAX_LIGHTS` and its slot never
+    /// reaches a `GpuLight`. The **sun** is not affected: it rides in
+    /// `VsmReceiverParams::counts.x` rather than in a light record, which is
+    /// exactly why it was put there.
+    ///
+    /// Not fixed here — capping the tree list at `MAX_LIGHTS` changes which
+    /// lights get pages, so it is a tier decision and belongs with P27.5. Armed
+    /// so the day either ceiling moves, the relationship is a failing test rather
+    /// than a paragraph.
+    #[test]
+    fn the_lights_uniform_ceiling_is_lower_than_the_projection_ceiling() {
+        let uniform = crate::passes::mesh::MAX_LIGHTS;
+        let projections = crate::vsm::VSM_MAX_PROJECTIONS;
+        assert_eq!(uniform, 16, "the lights uniform's array");
+        assert_eq!(projections, 64, "the marking pass's projection ceiling");
+        assert!(
+            projections > uniform,
+            "the projection ceiling ({projections}) is no longer the larger of \
+             the two, so a tree can no longer outlive the slot that reads it and \
+             this arm's whole consequence is retired — say so in the ledger"
+        );
+        // A point light is six projections, so the projection ceiling is ten
+        // point lights; the uniform's is sixteen lights of any kind.
+        assert_eq!(projections / 6, 10);
+        // The slot mapping itself is over the WHOLE light list, which is where
+        // the two ceilings actually meet: light 16 gets slot 17 and no
+        // `GpuLight` to carry it.
+        let casts: Vec<bool> = (0..20).map(|_| true).collect();
+        let bases: Vec<u32> = (0..20).collect();
+        let slots = receiver_slots(casts, 20, &bases);
+        assert_eq!(slots.len(), 20);
+        assert_eq!(
+            slots[uniform], 17,
+            "the light after the uniform's last has a slot the uniform cannot \
+             carry"
         );
     }
 
