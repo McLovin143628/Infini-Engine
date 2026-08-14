@@ -2003,6 +2003,223 @@ fn a_mover_invalidates_exactly_the_pages_its_bounds_touch() {
     );
 }
 
+/// The straddling caster's cube side, in metres. Its bounding sphere's radius is
+/// `√3/2 · side` = **6.93 m**, and that is the number that has to exceed
+/// [`STRADDLE_OVERHANG`] for the sphere to still reach into the box after the
+/// centre has left it.
+const STRADDLE_SIDE: f32 = 8.0;
+/// How far **past a face of the depth box** the straddler's centre sits. Strictly
+/// between zero and the sphere's radius is the whole fixture: the centre is
+/// outside the box and the sphere is not.
+const STRADDLE_OVERHANG: f64 = 1.0;
+/// How far it then moves, **along the light and toward it**. Small enough that it
+/// is still straddling afterwards, large enough that the depth it writes moves by
+/// three orders of magnitude more than an `f32` step.
+const STRADDLE_STEP: f64 = 0.5;
+
+/// **A caster whose CENTRE is outside the depth box still invalidates the pages
+/// it writes** — the P27.3 audit's one carried *gap*, discharged at both faces.
+///
+/// # What was unarmed
+///
+/// `vsm_raster`'s `scatter_caster_stamps` folds a clipmap caster into a page's
+/// content stamp only if the caster's sphere is inside the light's depth box:
+/// `ndc.z ∈ [−rz, 1 + rz]`, where `rz` is the sphere's radius through the
+/// matrix's own row 2. Those are the **cull's** two planes with the same radius
+/// slack (`page_clip_planes` tests `z ≥ 0`, the far one, and `z ≤ w`, the near
+/// one, each at `−radius`), which is what makes the stamp conservative in the
+/// cull's direction: it may fold a caster into a page the cull then rejects, and
+/// can never miss a page the cull keeps.
+///
+/// The P27.3 audit's mutation round tightened that envelope to the sphere's
+/// **centre** — `ndc.z ∈ [0, 1]` — and **it survived the whole tree**, because
+/// every caster in every fixture up to this one sat well inside a box hundreds of
+/// metres deep. Its fail direction is the wrong one: a caster the cull draws but
+/// the scatter does not stamp leaves the page's key unmoved, so the page is
+/// served **from cache with the old caster in it**. A stale shadow, cached.
+///
+/// # The fixture, one per face
+///
+/// One cube 1 m past a face of the clipmap's own 384 m box, with a 6.93 m
+/// bounding sphere — so its centre is outside and metres of its geometry are
+/// inside, where they rasterize and **win** the reverse-Z compare against a
+/// backdrop placed just inside the same face. Then it moves half a metre **along
+/// the light**, and along the light only: its NDC *rectangle* does not move at
+/// all, so the page set it folds into is identical at both positions and the only
+/// thing that can invalidate the page is the depth envelope having admitted it in
+/// the first place.
+///
+/// The ruling is asserted on the **atlas**, not on a counter: every texel that
+/// moved, moved by exactly the metres the caster moved, converted by the box's
+/// own range. A tightened envelope leaves them byte-identical — and a straddler
+/// that never won its depth compare changes *nothing*, which fails the same
+/// assertion, so "the caster is really in the page" needs no separate threshold.
+#[test]
+fn a_caster_straddling_the_depth_boxs_faces_still_invalidates_its_pages() {
+    let Some(gpu) = gpu_or_skip("the VSM invalidation depth envelope") else {
+        return;
+    };
+    let set = settings_with(64);
+    let v = view(5.0);
+    // The along-light box `build_projections` gives a clipmap: the coarsest
+    // level's diameter, with the eye pulled back half of it — so with the light
+    // along `+Z` (`fwd` is `−Z`) the NEAR face sits at `+range/2` of the layout
+    // centre and the FAR face at `−range/2`. That centre is the origin for this
+    // view: `clipmap_layout` snaps the along-light coordinate at the coarsest
+    // stride, 48 m, and the eye is 5 m.
+    let range = 2.0 * set.first_level_extent_m * (1u32 << (set.clipmap_levels - 1)) as f32;
+    let half_box = f64::from(range) * 0.5;
+    let radius = inf_render::PrimMesh::Cube.bounding_radius() * STRADDLE_SIDE;
+
+    // (face name, the straddler's centre, the backdrop's own lit face). The
+    // backdrop is just INSIDE the same face in both cases, so the straddler's own
+    // surface is the one nearer the light and the page holds its depth.
+    for (face, centre_z, backdrop_z) in [
+        ("near", half_box + STRADDLE_OVERHANG, f64::from(BACKDROP_Z)),
+        ("far", -half_box - STRADDLE_OVERHANG, -half_box + 2.0),
+    ] {
+        let slab = |z: f64| {
+            inf_render::MeshInstance::lit(
+                glam::DVec3::new(0.0, 0.0, z - f64::from(BACKDROP_T)),
+                glam::Quat::IDENTITY,
+                glam::Vec3::new(40.0, 40.0, 2.0 * BACKDROP_T),
+                [1.0, 1.0, 1.0, 1.0],
+                9,
+            )
+        };
+        let straddler = |z: f64| {
+            inf_render::MeshInstance::lit(
+                glam::DVec3::new(0.0, 1.3, z),
+                glam::Quat::IDENTITY,
+                glam::Vec3::splat(STRADDLE_SIDE),
+                [1.0, 1.0, 1.0, 1.0],
+                3,
+            )
+        };
+        let mut base = RenderScene {
+            grid_enabled: false,
+            ..Default::default()
+        };
+        base.instances.push(slab(backdrop_z));
+        base.instances.push(straddler(centre_z));
+        base.lights.push(inf_render::RenderLight {
+            kind: inf_render::LightKind::Directional,
+            direction: glam::Vec3::Z,
+            cast_shadows: true,
+            ..Default::default()
+        });
+        base.mark_dirty();
+        let mut moved = base.clone();
+        moved.instances[1] = straddler(centre_z + STRADDLE_STEP);
+        moved.mark_dirty();
+
+        let (mut renderer, marks) = run_stepped(&gpu, &[(&base, 8)], &v, &set);
+
+        // ── the premises, before the ruling ──────────────────────────────────
+        //
+        // Read off the SHIPPED matrix, so the fixture cannot be straddling a box
+        // the renderer does not have.
+        let vp0 = {
+            let sys = renderer.vsm().expect("a live vsm system");
+            glam::Mat4::from_cols_array(&sys.projections()[0].view_proj)
+        };
+        let rz = radius * vp0.row(2).truncate().length();
+        for z in [centre_z, centre_z + STRADDLE_STEP] {
+            let c = vp0 * glam::Vec3::new(0.0, 1.3, z as f32).extend(1.0);
+            let n = c.z / c.w;
+            assert!(
+                !(0.0..=1.0).contains(&n),
+                "the {face}-face straddler's centre is INSIDE the depth box at \
+                 z = {z} (ndc.z = {n}), so an envelope tightened to the centre \
+                 admits it too and this arm proves nothing"
+            );
+            assert!(
+                n >= -rz && n <= 1.0 + rz,
+                "the {face}-face straddler's sphere left the box entirely at \
+                 z = {z} (ndc.z = {n} against ±{rz}), so the SHIPPED envelope \
+                 drops it as well"
+            );
+        }
+
+        // …and the CULL keeps it, which is what makes a scatter that drops it a
+        // MISS rather than the two agreeing.
+        let pages = resident_pages(&renderer);
+        assert!(
+            pages.len() >= 2,
+            "only {} pages were resident on the {face} face",
+            pages.len()
+        );
+        let centre = glam::Vec3::new(0.0, 1.3, centre_z as f32);
+        let seen = pages
+            .iter()
+            .filter(|(light, page, _)| {
+                inf_render::vsm_page_sees_sphere(&page_vp(&renderer, *light, *page), centre, radius)
+            })
+            .count();
+        assert!(
+            seen > 0,
+            "the per-page cull rejects the {face}-face straddler on every \
+             resident page, so the scatter dropping it would be agreement rather \
+             than a stale page"
+        );
+
+        // …and the cache is WARM: one more frame of the same scene rasterizes
+        // nothing at all.
+        let warm = marks[0];
+        let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+        renderer.render(&gpu, &base, &v, &target.view, (FW, FH));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let still = renderer.vsm_raster_stats().expect("stats");
+        assert_eq!(
+            still.pages, warm.pages,
+            "a static scene is still rasterizing pages on the {face} face, so \
+             'the move invalidated it' below is not a measurement ({warm:?} -> \
+             {still:?})"
+        );
+        let before = atlas_bits(&gpu, &renderer);
+
+        // ── THE RULING ───────────────────────────────────────────────────────
+        renderer.render(&gpu, &moved, &v, &target.view, (FW, FH));
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let after_stats = renderer.vsm_raster_stats().expect("stats");
+        assert!(
+            after_stats.pages > still.pages,
+            "the {face}-face straddler moved {STRADDLE_STEP} m along the light \
+             and NOT ONE page re-rasterized — its stamp never reached them, so \
+             every page it writes is served from cache with the old caster in it \
+             ({still:?} -> {after_stats:?})"
+        );
+        let after = atlas_bits(&gpu, &renderer);
+
+        // …and the WORLD moved with it. The straddler's NDC rectangle is
+        // identical at both positions, so a texel that changed at all is a texel
+        // the straddler owns — and it moved by `STEP / range` in NDC and by
+        // nothing else. A straddler that lost its depth compare everywhere
+        // changes NO texel and fails the count below.
+        let want = (STRADDLE_STEP / f64::from(range)) as f32;
+        let mut agreed = 0usize;
+        for (b, a) in before.iter().zip(&after) {
+            if b == a {
+                continue;
+            }
+            let (b, a) = (f32::from_bits(*b), f32::from_bits(*a));
+            assert!(
+                (a - b - want).abs() < 1e-4,
+                "a {face}-face straddler texel moved {} in NDC and the caster \
+                 moved {STRADDLE_STEP} m of a {range} m box, which is {want}",
+                a - b
+            );
+            agreed += 1;
+        }
+        assert!(
+            agreed > 256,
+            "only {agreed} atlas texels carried the {face}-face straddler's own \
+             depth — it never won its reverse-Z compare against the backdrop, so \
+             the page above re-rasterized to the same picture"
+        );
+    }
+}
+
 /// **The drain order is finest level first** (P27.3, clause 3's other half).
 ///
 /// When something invalidates every level at once — the sun crossing a quantum, a
