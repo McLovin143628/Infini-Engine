@@ -5521,6 +5521,113 @@ mod tests {
         );
     }
 
+    /// **The wire-enum law, applied to all eighteen** (L5.F7).
+    ///
+    /// `water_kind_discriminants_are_frozen` above states the law and its own
+    /// docstring is honest about its scope — *"applied to the **first new** scene
+    /// enum since it was written down"*. The other seventeen enums that reach
+    /// `.inf_lvl` bytes predate P19.2 and carried the identical exposure with no
+    /// test that would notice: bincode encodes an externally-tagged enum as its
+    /// **declaration index**, so inserting a variant mid-list renumbers
+    /// everything after it and every committed level's `Spot` lights decode as
+    /// `Point`s, its `Dynamic` bodies as `Kinematic`, its `Storm` as `Fog`.
+    ///
+    /// A law with a one-instance implementation is an aspiration. This is the
+    /// tripwire that makes it enforceable — one table, every enum, the encoded
+    /// first byte per variant in declaration order.
+    ///
+    /// **To add a variant: append it to the end of the enum AND to the end of
+    /// its row here.** Anything else is a wire break, and this test is what says
+    /// so.
+    #[test]
+    fn every_scene_wire_enum_has_frozen_discriminants() {
+        let cfg = bincode::config::standard();
+        /// One row: the enum's name, and its variants in declaration order.
+        /// `assert_row!` encodes each and pins it to its index.
+        macro_rules! frozen {
+            ($ty:ty => [$($variant:expr),+ $(,)?]) => {{
+                let variants: &[$ty] = &[$($variant),+];
+                for (i, v) in variants.iter().enumerate() {
+                    let bytes = bincode::serde::encode_to_vec(v, cfg).unwrap();
+                    assert_eq!(
+                        bytes.len(),
+                        1,
+                        "{}::{:?} encodes to {} bytes; a unit variant is one",
+                        stringify!($ty),
+                        v,
+                        bytes.len()
+                    );
+                    assert_eq!(
+                        bytes[0] as usize,
+                        i,
+                        "{}::{:?} moved from discriminant {i} to {} — every committed \
+                         level that stored it now decodes as a different variant",
+                        stringify!($ty),
+                        v,
+                        bytes[0]
+                    );
+                }
+                variants.len()
+            }};
+        }
+
+        let mut pinned = 0usize;
+        let mut enums = 0usize;
+        macro_rules! pin {
+            ($ty:ty => [$($variant:expr),+ $(,)?]) => {
+                pinned += frozen!($ty => [$($variant),+]);
+                enums += 1;
+            };
+        }
+
+        pin!(Primitive => [
+            Primitive::Cube, Primitive::Sphere, Primitive::Plane,
+            Primitive::Cylinder, Primitive::Cone,
+        ]);
+        pin!(BlendMode => [BlendMode::Opaque, BlendMode::Masked, BlendMode::Translucent]);
+        pin!(BillboardMode => [
+            BillboardMode::None, BillboardMode::Spherical, BillboardMode::Cylindrical,
+        ]);
+        pin!(TextAlign => [TextAlign::Left, TextAlign::Center, TextAlign::Right]);
+        pin!(LightKind => [LightKind::Directional, LightKind::Point, LightKind::Spot]);
+        pin!(BodyKind2D => [BodyKind2D::Static, BodyKind2D::Kinematic, BodyKind2D::Dynamic]);
+        pin!(ColliderShape2DKind => [
+            ColliderShape2DKind::Box, ColliderShape2DKind::Circle, ColliderShape2DKind::Capsule,
+        ]);
+        pin!(CombineRule => [
+            CombineRule::Average, CombineRule::Min, CombineRule::Multiply, CombineRule::Max,
+        ]);
+        pin!(BodyKind3D => [BodyKind3D::Static, BodyKind3D::Kinematic, BodyKind3D::Dynamic]);
+        pin!(ColliderShape3DKind => [
+            ColliderShape3DKind::Box, ColliderShape3DKind::Sphere, ColliderShape3DKind::Capsule,
+        ]);
+        pin!(JointKind3D => [
+            JointKind3D::Fixed, JointKind3D::Revolute, JointKind3D::Prismatic,
+            JointKind3D::Spherical, JointKind3D::Distance,
+        ]);
+        pin!(JointKind2D => [
+            JointKind2D::Fixed, JointKind2D::Revolute, JointKind2D::Prismatic,
+            JointKind2D::Distance,
+        ]);
+        pin!(RootMotionMode => [RootMotionMode::None, RootMotionMode::ApplyToEntity]);
+        pin!(DistanceModel => [
+            DistanceModel::Linear, DistanceModel::Inverse, DistanceModel::Exponential,
+        ]);
+        pin!(VolumeKind => [VolumeKind::Trigger, VolumeKind::Blocking]);
+        pin!(SplineInterp => [SplineInterp::Linear, SplineInterp::CatmullRom]);
+        pin!(WeatherPreset => [
+            WeatherPreset::Clear, WeatherPreset::Overcast, WeatherPreset::Storm,
+            WeatherPreset::Fog, WeatherPreset::Snow,
+        ]);
+        pin!(WaterKind => [WaterKind::Ocean, WaterKind::Lake, WaterKind::River]);
+
+        // The count is part of the pin: an enum ADDED to the scene wire and not
+        // added here would otherwise be silently uncovered, which is exactly the
+        // state this test was written to end. Bump both numbers deliberately.
+        assert_eq!(enums, 18, "a scene wire enum joined or left the table");
+        assert_eq!(pinned, 59, "a variant joined or left without a decision");
+    }
+
     #[test]
     fn the_water_presets_are_what_they_claim() {
         let lake = WaterBody::lake(12.0, Vec2d::new(40.0, 25.0));

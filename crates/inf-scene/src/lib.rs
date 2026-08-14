@@ -5232,7 +5232,13 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     let (header, _): (Header, usize) = bincode::serde::decode_from_slice(bytes, bincode_config())
         .map_err(|e| SceneError::Decode(format!("header: {e}")))?;
     match header.schema_version {
-        0 | 1 => {
+        // **`1`, not `0 | 1`** (L5.F4) — the Ring-0 half of the same fix; see
+        // the editor mirror's `decode` for the argument. Three zero bytes are a
+        // structurally valid `SceneFileV1` under bincode's varints, so an
+        // all-zero buffer used to load as a valid empty level rather than being
+        // refused. No writer has ever emitted version 0, so no committed file
+        // loses anything. Wire bytes unchanged.
+        1 => {
             let (v1, _): (SceneFileV1, usize) =
                 bincode::serde::decode_from_slice(bytes, bincode_config())
                     .map_err(|e| SceneError::Decode(format!("v1: {e}")))?;
@@ -5539,6 +5545,14 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                 settings: v22.settings,
             })
         }
+        // A refusal that names the wrong cause sends the user to the wrong fix
+        // (L5.F4). Version 0 is not a level from a newer build; it is not a
+        // level.
+        0 => Err(SceneError::Decode(
+            "schema version 0, which no build has ever written (a zero-filled or truncated \
+             file reads this way)"
+                .into(),
+        )),
         found => Err(SceneError::SchemaTooNew {
             found,
             current: SCHEMA_VERSION,
@@ -6048,6 +6062,127 @@ mod tests {
                 sim_hz: 120.0,
             },
         }
+    }
+
+    /// The **v6 rung** of the reference scene (L5.F6) — the same entities as
+    /// [`v7_scene_reference`], written through the frozen v6 record.
+    ///
+    /// v6 → v7 changed exactly one thing: `MeshRef` gained its `asset` field, so
+    /// the v6 record carries [`MeshRefV6`] (primitive only). That is a
+    /// *lossless* downgrade of this scene, whose meshes are all primitives —
+    /// which is why the fixture can be derived rather than invented, and why the
+    /// derivation is stated here rather than left for a reader to reconstruct.
+    fn v6_scene_reference() -> SceneFileV6 {
+        let v7 = v7_scene_reference();
+        SceneFileV6 {
+            schema_version: 6,
+            // Its own title, so a fixture that ends up in the wrong slot says so
+            // rather than passing as its neighbour.
+            title: "V6 Fixture Level".into(),
+            entities: v7
+                .entities
+                .into_iter()
+                .map(|e| EntityRecordV6 {
+                    guid: e.guid,
+                    name: e.name,
+                    parent: e.parent,
+                    transform: e.transform,
+                    visible: e.visible,
+                    mesh: e.mesh.map(MeshRefV6::from_current),
+                    material: e.material,
+                    light: e.light,
+                    camera: e.camera,
+                    sprite: e.sprite,
+                    tilemap: e.tilemap,
+                    nine_slice: e.nine_slice,
+                    text2d: e.text2d,
+                    light_2d: e.light_2d,
+                    rigid_body_2d: e.rigid_body_2d,
+                    collider_2d: e.collider_2d,
+                    character_controller_2d: e.character_controller_2d,
+                    rigid_body_3d: e.rigid_body_3d,
+                    collider_3d: e.collider_3d,
+                    character_controller_3d: e.character_controller_3d,
+                    actor: e.actor,
+                    terrain: e.terrain,
+                    pcg_volume: e.pcg_volume,
+                    skeletal_mesh: e.skeletal_mesh,
+                    anim_player: e.anim_player,
+                    anim_state_machine: e.anim_state_machine,
+                    root_motion: e.root_motion,
+                    attached_to: e.attached_to,
+                    joint_2d: e.joint_2d,
+                    joint_3d: e.joint_3d,
+                    audio_source: e.audio_source,
+                    audio_listener: e.audio_listener,
+                })
+                .collect(),
+            settings: v7.settings,
+        }
+    }
+
+    /// Bless the committed `scene_v6.inf_lvl` (L5.F6). See
+    /// [`bless_scene_v7_fixture`] for the discipline.
+    #[test]
+    fn bless_scene_v6_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v6_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 6);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v6.inf_lvl");
+        std::fs::write(&path, &bytes).unwrap();
+        eprintln!("blessed scene_v6 fixture: {}", path.display());
+    }
+
+    /// **v6 was the one rung of the ladder with no committed fixture on either
+    /// mirror** (L5.F6).
+    ///
+    /// v6 is the rung that appended `joint_2d` / `joint_3d` / `audio_source` /
+    /// `audio_listener`. Its frozen records were exercised only by round-tripping
+    /// the *current* definitions through themselves, so a silent edit to either
+    /// mirror's v6 rung — or a drift between the two mirrors at that rung —
+    /// failed no test. v5 below it and v7 above it are both byte-pinned; this
+    /// closes the gap between them.
+    #[test]
+    fn scene_v6_fixture_loads_forever_and_lifts() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v6.inf_lvl");
+        if !path.exists() {
+            eprintln!(
+                "SKIP: scene_v6 fixture not blessed yet ({})",
+                path.display()
+            );
+            return;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes[0], 6, "fixture is a genuine schema-v6 payload");
+        // Reproducibility lock: the committed bytes match the frozen writer.
+        let rebuilt =
+            bincode::serde::encode_to_vec(v6_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "committed v6 fixture matches the frozen writer"
+        );
+
+        let level = RuntimeLevel::decode(&bytes).expect("v6 fixture decodes");
+        assert_eq!(level.title, "V6 Fixture Level");
+        let by_name = |n: &str| level.entities.iter().find(|e| e.name == n).unwrap();
+        // The v6 slots this rung EXISTS for are carried, not defaulted away.
+        assert!(
+            by_name("Cube").joint_3d.is_some(),
+            "v6 is the rung that appended the joint slots; the fixture must exercise one"
+        );
+        // And the v7 field v6 does not have lifts to its default.
+        assert_eq!(by_name("Ground").mesh.unwrap().asset, None);
+        assert_eq!(
+            by_name("Ground").mesh.unwrap().primitive,
+            inf_ecs::components::Primitive::Plane
+        );
+        assert_eq!(level.settings.sim_hz, 120.0);
+        // Rewriting lifts to the current schema and re-decodes equal.
+        let out = level.encode().unwrap();
+        assert_eq!(out[0], SCHEMA_VERSION as u8);
+        assert_eq!(RuntimeLevel::decode(&out).unwrap(), level);
     }
 
     /// Bless the committed `scene_v7.inf_lvl` from [`v7_scene_reference`] under
@@ -10627,5 +10762,40 @@ mod tests {
             .unwrap()
         )
         .is_ok());
+    }
+
+    /// **L5.F4 — an all-zero buffer used to decode as a valid empty level.**
+    ///
+    /// `SceneFileV1` is `{ schema_version: u32, title: String, entities: Vec<_> }`
+    /// and `bincode::config::standard()` varint-encodes all three, so three zero
+    /// bytes are a *structurally valid* v1 record and `decode_from_slice`
+    /// ignores whatever follows them. Any zero-filled or sparse file of at least
+    /// three bytes therefore loaded as an untitled, empty level.
+    ///
+    /// This is the reasoning lens 5 could only derive from struct shapes and
+    /// varint semantics (it was read-only), executed. Un-fix mutation: restore
+    /// the `0 |` arm and the first assertion fails by decoding successfully.
+    #[test]
+    fn a_zero_filled_buffer_is_not_a_level() {
+        for len in [3usize, 8, 64, 4096] {
+            let zeros = vec![0u8; len];
+            let err = decode(&zeros)
+                .err()
+                .unwrap_or_else(|| panic!("{len} zero bytes decoded as a level"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("version 0"),
+                "the refusal must name the cause, not blame a newer build: {msg}"
+            );
+        }
+        // The control: a real v1-through-current payload still decodes. Version 0
+        // is a version no writer has ever emitted, which is why dropping it costs
+        // no committed file anything.
+        let level = RuntimeLevel {
+            title: "Real".into(),
+            entities: Vec::new(),
+            settings: RuntimeSettings::default(),
+        };
+        assert!(decode(&encode(&level).unwrap()).is_ok());
     }
 }

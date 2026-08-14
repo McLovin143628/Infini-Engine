@@ -929,6 +929,20 @@ impl PackReader {
                     "content hash mismatch for {guid} (corrupt pack)"
                 )));
             }
+            // **`uncompressed_len` was parsed, published, and never verified**
+            // (L5.F12). The content hash catches wrong *bytes*, so this is a
+            // truth-of-metadata question rather than a corruption one — but the
+            // field is `pub`, it reads as authoritative, and it costs one
+            // comparison inside a branch that is already hashing the payload.
+            // A header that says something the file does not is a header nobody
+            // can plan against.
+            if payload.len() as u64 != e.uncompressed_len {
+                return Err(AssetError::Pack(format!(
+                    "{guid} declares {} uncompressed bytes and yields {} (corrupt pack)",
+                    e.uncompressed_len,
+                    payload.len()
+                )));
+            }
             self.verified[slot].store(true, Ordering::Relaxed);
         }
         Ok(payload)
@@ -995,6 +1009,48 @@ mod tests {
         assert!(!r.entry(guid(2)).unwrap().compressed);
         assert_eq!(r.entry(guid(1)).unwrap().kind, AssetKind::Blueprint);
         assert_eq!(r.entry(guid(1)).unwrap().uncompressed_len, 4096);
+    }
+
+    /// **L5.F12 — `uncompressed_len` was parsed, published as a `pub` field,
+    /// and never verified.**
+    ///
+    /// The content hash catches wrong *bytes*, so this is a truth-of-metadata
+    /// question rather than a corruption one — but the field reads as
+    /// authoritative and it is the number a consumer would plan an allocation
+    /// against. The check costs one comparison inside the branch that is already
+    /// hashing.
+    ///
+    /// Un-fix mutation: delete the comparison in `read_ref`'s verify block and
+    /// the doctored read below succeeds.
+    #[test]
+    fn a_pack_entry_that_lies_about_its_uncompressed_length_is_refused() {
+        let mut w = PackWriter::new();
+        w.add_bytes(guid(1), AssetKind::Level, b"eleven-byte")
+            .unwrap();
+        let good = w.to_bytes().unwrap();
+        // The control: the honest pack reads.
+        let r = PackReader::from_bytes(good.clone()).unwrap();
+        assert_eq!(r.read(guid(1)).unwrap(), b"eleven-byte");
+        assert_eq!(r.entry(guid(1)).unwrap().uncompressed_len, 11);
+
+        // Doctor entry 0's `uncompressed_len` (bytes 52..60 of the entry)
+        // without touching the blob or its hash: the payload still hashes
+        // correctly, so only this check can catch it.
+        let at = HEADER_LEN as usize + 52;
+        assert_eq!(
+            u64::from_le_bytes(good[at..at + 8].try_into().unwrap()),
+            11,
+            "the fixture must be pointing at the length field"
+        );
+        let mut lying = good;
+        lying[at..at + 8].copy_from_slice(&99u64.to_le_bytes());
+        let r = PackReader::from_bytes(lying).expect("the header still parses");
+        assert_eq!(r.entry(guid(1)).unwrap().uncompressed_len, 99);
+        let e = r.read(guid(1)).unwrap_err().to_string();
+        assert!(
+            e.contains("declares 99 uncompressed bytes and yields 11"),
+            "{e}"
+        );
     }
 
     #[test]

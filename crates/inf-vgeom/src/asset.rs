@@ -1266,6 +1266,19 @@ fn parse(data: &[u8]) -> Result<(VgeomAssetHeader, Vec<VgeomPageEntry>)> {
     // page may legitimately store fewer than the header's count when some vertex
     // is referenced by nothing.)
     let payload_len = data.len() as u64;
+    // **`total_len` is documented as "a self-check" and was never checked**
+    // (L5.F5). The sibling `.inf_tex` v2 parser pins exactly this, and its
+    // comment records the measurement that motivated it: a 584 KiB payload whose
+    // 16 384 entries all aliased one blob made `level_bytes` ask for 1 GiB —
+    // 1 794x amplification. `.inf_vmesh` carried the same field with the same
+    // stated intent and no check, so the doc promised a guarantee the code did
+    // not provide. One comparison, and the promise is true.
+    if header.total_len != payload_len {
+        return Err(VgeomAssetError::Malformed(format!(
+            "header total_len {} against a {payload_len} B payload",
+            header.total_len
+        )));
+    }
     let vrec = vertex_rec_len(schema_version) as u64;
     for (count, stride, what) in [
         (header.vertex_count, vrec, "vertices"),
@@ -1305,6 +1318,20 @@ fn parse(data: &[u8]) -> Result<(VgeomAssetHeader, Vec<VgeomPageEntry>)> {
     let mut pages = Vec::with_capacity(page_count as usize);
     let mut next_vertex = 0u32;
     let mut meshlets_seen: u64 = 0;
+    // **The monotone section walk** (L5.F5). Bounds alone do not stop N page
+    // entries from all pointing at ONE blob: every offset would be aligned, at
+    // or past `page_base`, and inside the payload, and `resident_bytes` would
+    // then sum a figure the file does not contain — the `.inf_tex` v2 aliasing
+    // class, which its own parser closes by pinning every tile offset to the
+    // uniform stride. `.inf_terrain` and `.inf_voxel` close it with exactly this
+    // walk; `.inf_vmesh` was the one container of five without either.
+    //
+    // The writer lays the six sections of a page down together, page after page,
+    // each at `align_up(previous_end)` — so a section may start exactly where
+    // the last one ended (an empty section shares its neighbour's offset) but
+    // never before it. That makes the writer's laid-out order the property, not
+    // merely non-overlap.
+    let mut prev_end = header.page_base;
     for i in 0..page_count as usize {
         let b = HEADER_LEN as usize + i * PAGE_ENTRY_LEN as usize;
         let e = VgeomPageEntry {
@@ -1353,38 +1380,59 @@ fn parse(data: &[u8]) -> Result<(VgeomAssetHeader, Vec<VgeomPageEntry>)> {
             .checked_add(e.vertex_count)
             .ok_or_else(|| VgeomAssetError::Malformed("vertex block overflows".into()))?;
         meshlets_seen += e.meshlet_count as u64;
-        for (off, len, section) in [
-            (e.indices_off, e.meshlet_count as u64 * 4, "indices"),
+        // **`Option`, not an in-band sentinel.** A v2 image has no tiles lane at
+        // all — the guard above proved both its fields are zero — so it is the
+        // one slot with nothing to bound and nothing to order. Spelling that
+        // absence as a magic offset would make it indistinguishable from a
+        // *doctored* one carrying the same value, which is precisely the class
+        // this walk exists to catch.
+        for (span, section) in [
+            (Some((e.indices_off, e.meshlet_count as u64 * 4)), "indices"),
             (
-                e.meshlets_off,
-                e.meshlet_count as u64 * MESHLET_REC_LEN as u64,
+                Some((
+                    e.meshlets_off,
+                    e.meshlet_count as u64 * MESHLET_REC_LEN as u64,
+                )),
                 "meshlets",
             ),
-            (e.mlverts_off, e.mlvert_count as u64 * 4, "mlverts"),
-            (e.mltris_off, e.mltri_count as u64, "mltris"),
-            (e.vertices_off, e.vertex_count as u64 * vrec, "vertices"),
-            // A v2 image has no tiles lane at all — the guard above proved both
-            // its fields are zero, and a zero offset is not a section to bound.
-            // A v3 page always carries a real, aligned offset here, empty or not,
-            // so `(0, 0)` for v2 is the one pair this loop must not check.
-            if schema_version >= 3 {
-                (
-                    e.tiles_off,
-                    e.tile_count as u64 * TILE_REF_LEN as u64,
-                    "tiles",
-                )
-            } else {
-                (header.page_base, 0, "tiles")
-            },
+            (Some((e.mlverts_off, e.mlvert_count as u64 * 4)), "mlverts"),
+            (Some((e.mltris_off, e.mltri_count as u64)), "mltris"),
+            (
+                Some((e.vertices_off, e.vertex_count as u64 * vrec)),
+                "vertices",
+            ),
+            (
+                (schema_version >= 3)
+                    .then(|| (e.tiles_off, e.tile_count as u64 * TILE_REF_LEN as u64)),
+                "tiles",
+            ),
         ] {
+            let Some((off, len)) = span else {
+                continue;
+            };
             if !off.is_multiple_of(SECTION_ALIGN)
                 || off < header.page_base
                 || off.checked_add(len).is_none_or(|x| x > end)
             {
                 return Err(VgeomAssetError::SectionOutOfBounds { page: i, section });
             }
+            if off < prev_end {
+                return Err(VgeomAssetError::Malformed(format!(
+                    "page {i} {section} section starts at {off}, inside the section that ends at \
+                     {prev_end} (sections may not overlap or be reordered)"
+                )));
+            }
+            prev_end = off + len;
         }
         pages.push(e);
+    }
+    // The groups blob is written after every page section, and `total_len` after
+    // it — the same order, one level up.
+    if page_count > 0 && header.groups_off < prev_end {
+        return Err(VgeomAssetError::Malformed(format!(
+            "groups section starts at {}, inside the page sections that end at {prev_end}",
+            header.groups_off
+        )));
     }
     if next_vertex > header.vertex_count || meshlets_seen != header.meshlet_count as u64 {
         return Err(VgeomAssetError::Malformed(
@@ -2003,6 +2051,61 @@ mod tests {
             VgeomAssetImage::from_bytes(bytes).unwrap_err(),
             VgeomAssetError::SectionOutOfBounds { page: 0, .. }
         ));
+    }
+
+    /// **L5.F5 — `total_len` was documented as "a self-check" and never
+    /// checked, and nothing stopped every page section from aliasing one blob.**
+    ///
+    /// The sibling `.inf_tex` v2 parser pins both, and its comment records why:
+    /// a 584 KiB payload whose 16 384 entries all aliased one blob made
+    /// `level_bytes` ask for 1 GiB — 1 794x amplification. `.inf_terrain` and
+    /// `.inf_voxel` close it with a monotone walk; `.inf_vmesh` was the one
+    /// container of five with neither, while its own header doc promised the
+    /// first.
+    ///
+    /// Un-fix mutation: delete the `total_len` comparison and the first arm
+    /// parses successfully; delete the `off < prev_end` check and the second
+    /// does.
+    #[test]
+    fn a_header_that_lies_about_its_length_or_its_layout_is_refused() {
+        let m = dense_mesh(24);
+        let good = build_vgeom_asset(&m, &ClusterTextureSet::none())
+            .unwrap()
+            .into_bytes();
+        // The control: the real image parses, and its own header agrees with it.
+        let r = VgeomAssetReader::new(good.as_slice()).expect("the real image parses");
+        assert_eq!(r.header().total_len, good.len() as u64);
+        assert!(r.pages().len() > 2, "a fixture with sections to reorder");
+
+        // (a) `total_len` that disagrees with the payload.
+        let mut lying = good.clone();
+        lying[80..88].copy_from_slice(&(good.len() as u64 + 16).to_le_bytes());
+        let e = VgeomAssetImage::from_bytes(lying).unwrap_err();
+        assert!(
+            matches!(&e, VgeomAssetError::Malformed(m) if m.contains("total_len")),
+            "{e:?}"
+        );
+
+        // (b) Page 1's sections aliased onto page 0's. Every offset stays
+        // aligned, at or past `page_base`, and inside the payload — so the
+        // bounds check alone is perfectly happy, and `resident_bytes` would go
+        // on summing bytes the file does not contain.
+        let mut aliased = good.clone();
+        let (p0, p1) = {
+            let r = VgeomAssetReader::new(good.as_slice()).unwrap();
+            (r.pages()[0], r.pages()[1])
+        };
+        assert!(
+            p1.indices_off > p0.indices_off,
+            "the writer lays them in order"
+        );
+        let entry1 = HEADER_LEN as usize + PAGE_ENTRY_LEN as usize;
+        aliased[entry1 + 48..entry1 + 56].copy_from_slice(&p0.indices_off.to_le_bytes());
+        let e = VgeomAssetImage::from_bytes(aliased).unwrap_err();
+        assert!(
+            matches!(&e, VgeomAssetError::Malformed(m) if m.contains("sections may not overlap")),
+            "{e:?}"
+        );
     }
 
     /// A doctored meshlet record is rejected at **parse**, not at the slice.
