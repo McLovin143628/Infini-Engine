@@ -16,7 +16,7 @@ receiver exists"*. The receiver exists.
 
 ---
 
-## 1. The kernel: **clamped**, and there is no comparison sampler
+## 1. The kernel: **clamped**, and the receiver declares no sampler
 
 Pages are borderless (`VSM_PAGE_BORDER = 0`), so a 3 × 3 PCF kernel at a page
 edge has taps that leave the page. Two candidates:
@@ -58,16 +58,37 @@ is worse in (a resident neighbour at the same level, inside a penumbra) is
 bounded by the filter's own width, while the case it is better in (an absent
 neighbour) is not bounded at all.
 
+> **Numbers 3 and 4 are measurements now** (P27.4 audit). They shipped as
+> arithmetic identities inside the arm that names them — `3.0/9.0` asserted equal
+> to `3.0/9.0`, and `shadowed · kept/kept` asserted equal to `shadowed` — which
+> pass whatever the kernel does and are the vacuous-check law met again. Number 3
+> now runs `vsm_level_factor` on a one-page tree with a uniform atlas at an
+> interior texel, an edge and both corners and asserts the factor is *identical*;
+> number 4 takes the dropped weights from `vsm_pcf_taps`'s own kept-tap counts
+> (9 / 6 / 4) rather than from typed fractions. Mutation-verified: a kernel that
+> renormalizes over the full nine taps instead of the kept ones now fails, and
+> did not before.
+
 ### …and therefore no sampler
 
-There is no comparison sampler in the environment bind group, and that is part of
-the same ruling rather than an omission. Hardware `textureSampleCompare`
+The receiver declares **four bindings and no sampler**, and that is part of the
+same ruling rather than an omission. Hardware `textureSampleCompare`
 filtering is a 2 × 2 footprint in **atlas** space, and a page's atlas neighbour is
 slot `s + 1` — an unrelated page of a possibly unrelated light. With no border
 there is nothing correct for the hardware to filter against. So every tap is a
 `textureLoad` at an integer texel and the compare happens in the shader, which
 also makes the clamp *exact*: a tap is inside its page by integer arithmetic
 rather than by a texel-centre offset.
+`the_receiver_adds_four_bindings_and_none_of_them_is_a_sampler` is the arm, over
+`bind_group_layout_entries` and over the shader text.
+
+> **Corrected by the P27.4 audit.** This section's first draft said *"there is no
+> comparison sampler in the environment bind group"*, which is refutable by grep:
+> there is one, at binding **3** — the CASCADE's `env-shadow`, a `LessEqual`
+> comparison sampler over the forward-Z cascade array, and its hardware 2 × 2 is
+> precisely the pre-filter the paragraph below says this kernel gives up. The
+> claim that survives the check is the narrower and truer one: **P27.4 adds no
+> sampler and the virtual path reads none.**
 
 The cost is one binding saved and the hardware's 2 × 2 pre-filter given up. The
 kernel is 9 explicit taps where the cascade path gets 9 × 4 = 36 samples' worth
@@ -118,9 +139,20 @@ two of those. `VSM_DEPTH_ULP_BIAS` is **four**, i.e. `2 × f32::EPSILON =
 **The unit is the whole reason this term is not authored.** Expressed in *texels*
 it would not be constant at all: the along-light box is `2·extent·2^(levels−1)`
 deep while a level-0 texel is `2·extent/(N·128)` wide, so the same guard is
-**0.125 texels** at the shipped defaults and **32 texels** at the 16-level
-ceiling. In NDC it is one number for every configuration, and it does not have to
-be re-derived per level, per light or per settings value.
+**0.25 texels** at the shipped defaults and **64 texels** at the 16-level
+ceiling — 256× across eight more levels. In NDC it is one number for every
+configuration, and it does not have to be re-derived per level, per light or per
+settings value.
+
+> **Corrected by the P27.4 audit**, and it is a factor of two. This paragraph
+> shipped as *0.125* and *32*, which is the guard computed at **two** ULP where
+> `VSM_DEPTH_ULP_BIAS` is **four** — the value the sentence above it states.
+> `the_bias_is_two_derived_terms_and_neither_is_a_tuned_constant` had the right
+> numbers all along (`texels_at(8)` = 0.25, `texels_at(16)` = 64) and its
+> tolerances were wide enough to hold both, so "every number below is produced by
+> an arm" was true of the arm and not of the prose. The *ratio* the argument
+> actually rests on — 256× — was right in both tellings, which is how a factor of
+> two survives a reading. Both numbers are now held to 10⁻⁴ by that arm.
 
 ### The slope term is a property of the page's texel density
 
@@ -162,7 +194,7 @@ matrix** in both branches:
 | slope term at 45°, level 0 | **2.02 × 10⁻⁶** NDC (16.5 mm along the light) |
 | total at 45°, level 0 | **2.26 × 10⁻⁶** NDC |
 | `ShadowSettings::depth_bias` (the cascade's flat constant) | **1.5 × 10⁻³** |
-| ratio | **665×** |
+| ratio | **663.3×** (P27.4 audit: the table said 665; the arm now holds ±0.5) |
 
 A cascade pays a flat constant because it has no per-texel density term to scale
 by; three orders of magnitude is what that costs, and it is why a cascade's
@@ -196,6 +228,25 @@ already covers the acne it guards against at every configuration this tree
 builds. It is kept as the standard second guard, it costs one multiply and one
 matrix product, and `the_normal_offset_is_one_texel_of_the_asked_for_level` pins
 its magnitude so a reader can trust the number rather than the existence.
+
+> **The source pin was aimed at the wrong line** (P27.4 audit), and this is the
+> most instructive of the batch's defects. `the_shaders_kernel_is_clamped_to_its_
+> page_too` pinned `VSM_NORMAL_BIAS_TEXELS * texel0 * exp2(f32(level0))` — where
+> `offset_m` is **computed** — so a shader that computes the offset and then
+> projects `world_pos` undisplaced passed the pin, which is precisely the
+> mutation the pin exists to kill, and it survived a second round. The pin now
+> names the **application**, `p.view_proj * vec4<f32>(world_pos + n * offset_m,
+> 1.0)`. The P23 law says a byte pin catches a deletion and not a re-derivation;
+> the corollary it did not spell out is that it catches a deletion only in the
+> bytes it actually reads.
+>
+> Two more expressions were unarmed on the same terms and are now pinned by
+> `the_shaders_bias_and_blend_are_the_expressions_this_module_derives`: the
+> shader's `VSM_DEPTH_ULP_BIAS +` term (deleting it survives every device arm —
+> it is 2.38 × 10⁻⁷ against a slope term an order of magnitude larger at every
+> angle those fixtures use) and the blend's `max(w_res, w_con)` (dropping the
+> footprint half survives, because the device blend arm's band is the
+> *resolution* one).
 
 ### What the derivation refuses to do, and the fixture that proved it
 

@@ -120,7 +120,8 @@ state for the whole atlas.
   > constant in texels, which is the whole reason for the unit — plus
   > `(R + ½)·√2` texels of the page's own density times `tan θ`, converted
   > by the projection's `∂z/∂m` read off the shipped matrix. Together they
-  > are **1/665** of `ShadowSettings::depth_bias` at the shipped defaults,
+  > are **1/663** of `ShadowSettings::depth_bias` at the shipped defaults (the
+  > P27.4 audit corrected 665 against the arm's own 663.3),
   > and the perspective branch uses `z²/near` precisely because row 2 is the
   > degenerate one this memo's own convention creates.
 
