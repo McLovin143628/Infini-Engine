@@ -270,12 +270,20 @@ impl AssetProject {
         payload: &T,
         dependencies: Vec<AssetId>,
     ) -> Result<AssetId> {
-        if let Some(existing) = self.db.get_by_path(path) {
-            if existing.kind() == T::KIND {
-                let id = existing.id();
+        // A different *kind* already registered at this exact path cannot be
+        // rewritten in place — the payload codec differs — so it is evicted
+        // rather than left in `by_id` pointing at bytes that are no longer its
+        // own. (`by_path` would be re-keyed by the insert below either way; the
+        // stale `by_id` entry is what would linger.)
+        match self.db.get_by_path(path).map(|e| (e.id(), e.kind())) {
+            Some((id, kind)) if kind == T::KIND => {
                 self.rewrite_payload(id, payload, dependencies)?;
                 return Ok(id);
             }
+            Some((id, _)) => {
+                self.db.remove(id);
+            }
+            None => {}
         }
         let bytes = inf_asset::encode(payload)?;
         let hash = ContentHash::of(&bytes);

@@ -850,6 +850,17 @@ fn voxels_still_dirty(volumes: Option<&inf_editor_core::voxel_store::SharedVoxel
 /// viewport can keep rendering. An edit that lands in that window is genuinely
 /// *not* in the bytes on disk, so marking the document clean would lose it at
 /// the next close-without-prompt exactly as the pre-write `mark_saved` did.
+///
+/// `version` moves on *any* mutation, including the non-dirtying
+/// `write_prop_preview` a sequencer scrub uses, so the guard is conservative in
+/// one direction: a scrub command landing on another thread during the exact
+/// window of the write would leave the document dirty after a successful save.
+/// That is the safe direction — an extra recovery write and a live Save button,
+/// never a lost edit — and the alternative (an authored-edit counter beside
+/// `version`) is new document state for a case that costs nothing when it fires.
+/// `scene_save`'s body has no `.await` between the encode and this call, so the
+/// realistic mutator in that window is the viewport thread, whose gizmo
+/// writeback is a genuine authored edit and exactly what this must catch.
 fn mark_saved_if_unchanged(state: &SceneState, saved_version: u64) -> Result<(), String> {
     let mut doc = lock(&state.doc)?;
     if doc.version() == saved_version {

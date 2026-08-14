@@ -391,7 +391,14 @@ impl AssetDb {
         if is_sidecar(path) {
             return Ok(None);
         }
+        // Drop any advisory this path already has before re-reading it, so a
+        // watcher that fires a hundred times on one broken sidecar leaves one
+        // line and not a hundred. The list is then bounded by the number of
+        // damaged files, exactly as `collisions` is bounded by the number of
+        // colliding ones — a full `scan` clears it outright.
         let mut advisories = std::mem::take(&mut self.sidecar_advisories);
+        let prefix = format!("{}: ", path.display());
+        advisories.retain(|a| !a.starts_with(&prefix));
         let entry = read_entry(path, &mut advisories);
         self.sidecar_advisories = advisories;
         match entry? {
@@ -845,9 +852,17 @@ content_hash = \"0\"
         );
 
         // A rescan re-raises it (the advisory is a property of the content root,
-        // not a one-shot at boot).
-        db.rescan_path(&payload).unwrap();
-        assert!(!db.sidecar_advisories().is_empty());
+        // not a one-shot at boot) — and does not stack: a watcher firing
+        // repeatedly on one broken sidecar must leave one line, not a hundred.
+        for _ in 0..8 {
+            db.rescan_path(&payload).unwrap();
+        }
+        assert_eq!(
+            db.sidecar_advisories().len(),
+            1,
+            "advisories accumulated per watcher event: {:?}",
+            db.sidecar_advisories()
+        );
     }
 
     /// **A deleted asset leaves the index** (C4-39, the `by_path` half).
