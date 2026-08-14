@@ -1132,6 +1132,20 @@ impl EngineRenderer {
         self.vis_readback.borrow().read(gpu)
     }
 
+    /// **Requests the PER-SURFACE feedback pass dispatched on the last frame**
+    /// (P28.1).
+    ///
+    /// Zero is the observable form of the handover: with the visibility path on,
+    /// meshlet surfaces are marked per FRAGMENT and `feedback_requests` skips
+    /// them, so a scene whose only textured surfaces are meshlets dispatches
+    /// nothing here. It is exposed because that number is the only place the
+    /// handover is visible from outside — residency is `floor ∪ feedback` and the
+    /// floor dominates, so two producers and one producer settle on sets that
+    /// differ by ten tiles and by no structural property a test can name.
+    pub fn vt_feedback_requests(&self) -> u32 {
+        self.vt_feedback_dispatched
+    }
+
     /// The P28.1 visibility path's audit counters — how many frames took it, and
     /// which ceiling refused the ones that did not.
     pub fn vis_audit(&self) -> passes::visbuffer::VisAudit {

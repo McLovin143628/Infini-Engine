@@ -193,6 +193,18 @@ struct Run {
     feedback_frames: u64,
     /// Tiles resident at the end.
     resident: usize,
+    /// Requests the PER-SURFACE pass dispatched on the last frame — zero is
+    /// the observable form of the handover.
+    per_surface_requests: u32,
+    /// **Which** tiles - the set, not its size.
+    ///
+    /// The size cannot see the handover: with `skip_vgeom` off both producers
+    /// mark, so the visibility path's residency becomes the UNION and is still
+    /// larger than the per-surface path's. Mutation-measured - disabling the
+    /// handover left `the_per_fragment_signal_is_finer` green. A union is
+    /// distinguishable from a replacement only by asking whether the per-surface
+    /// path holds a tile the per-fragment path does not.
+    tiles: std::collections::BTreeSet<(u32, inf_vt::TileCoord)>,
 }
 
 /// Drive `frames` frames of one scene through the real renderer, with the real
@@ -232,6 +244,20 @@ fn run(gpu: &GpuContext, visbuffer: bool, hidden: bool, frames: usize) -> Run {
         r.render(gpu, &sc, &v, &target.view, (W, H));
     }
     let pop = r.vt_pop_in();
+    // The RESIDENT set, read off the atlas's own slots. `resolved_table` was the
+    // first draft and it is a different thing: it maps every registered tile to
+    // the ancestor a sample would resolve to, so it is the same 696 entries
+    // whatever is paged in — which made the non-subset assertion below compare a
+    // set with itself.
+    let tiles = r
+        .vt_textures()
+        .map(|l| {
+            let res = l.residency();
+            (0..res.geometry().slot_count())
+                .filter_map(|slot| res.slot_occupant(slot).map(|(h, c)| (h.0, c)))
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
     Run {
         admits: pop.admits,
         feedback_frames: pop.feedback_frames,
@@ -239,6 +265,8 @@ fn run(gpu: &GpuContext, visbuffer: bool, hidden: bool, frames: usize) -> Run {
             .vt_textures()
             .map(|l| l.residency().stats().resident as usize)
             .unwrap_or(0),
+        per_surface_requests: r.vt_feedback_requests(),
+        tiles,
     }
 }
 
@@ -357,6 +385,46 @@ fn the_per_fragment_signal_is_finer_and_a_hidden_surface_adds_nothing_to_it() {
         "occlusion direction: hidden surface cost the per-surface path \
          {fwd_growth} tiles and the per-fragment path {vis_growth} (both the \
          occlusion-blind analytic floor's, at this viewport)"
+    );
+
+    // **THE HANDOVER'S FALSIFIER**, and it took three attempts to find one that
+    // works — worth recording, because the two that failed both looked right.
+    //
+    // (a) Residency SIZE cannot see it: with the handover off both producers
+    //     mark, the visibility path's set becomes the UNION, and it is still
+    //     larger than the per-surface path's. Mutation-measured.
+    // (b) Residency as a SET cannot see it either, on this fixture: the
+    //     per-surface feedback adds nothing beyond the analytic floor here (the
+    //     floor's `VT_FLOOR_MAX_TILES` cap already covers the level
+    //     `justified_mip` names), so the per-surface set is a strict SUBSET of
+    //     the per-fragment one — 22 tiles inside 32 — and "the per-surface path
+    //     holds a tile the per-fragment path does not" is simply false whether
+    //     or not the handover is in effect.
+    //
+    // What IS observable is the per-surface pass's own dispatch count. This
+    // fixture's only textured surfaces are meshlets, so with the handover in
+    // effect it must dispatch ZERO — a direct reading of the switch rather than
+    // an inference from what the streamer did with it.
+    assert_eq!(
+        vis_alone.per_surface_requests, 0,
+        "the per-surface feedback pass dispatched {} requests on a scene whose          only textured surfaces are meshlets — the handover is not in effect and          the meshlet set is being marked twice, which makes every precision          claim in this file a claim about a union with a coarse mark",
+        vis_alone.per_surface_requests
+    );
+    assert!(
+        fwd_alone.per_surface_requests > 0,
+        "the per-surface pass dispatched nothing on the FORWARD path either, so          the zero above is not evidence of a handover"
+    );
+    eprintln!(
+        "handover: per-surface requests {} forward / {} visbuffer; resident sets          {} and {}, forward set {} the per-fragment one",
+        fwd_alone.per_surface_requests,
+        vis_alone.per_surface_requests,
+        fwd_alone.tiles.len(),
+        vis_alone.tiles.len(),
+        if fwd_alone.tiles.is_subset(&vis_alone.tiles) {
+            "inside"
+        } else {
+            "NOT inside"
+        }
     );
 }
 

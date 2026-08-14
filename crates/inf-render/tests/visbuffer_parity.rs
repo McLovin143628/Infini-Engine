@@ -833,3 +833,111 @@ fn parity_textured_virtual_texture() {
          was sampled and this row is about nothing"
     );
 }
+
+// ── the reconstructed depth (M8's answer) ────────────────────────────────────
+
+/// **The resolve's depth is the rasterizer's**, and a rigid object interleaved
+/// with the meshlet geometry is what makes that a claim.
+///
+/// The resolve does not store the visibility pass's depth; it recovers it from
+/// the same barycentric solve, on the identity that `vis_bary` solves
+/// `M · mu = (ndc.x, ndc.y, 1)` EXACTLY, so the reconstructed clip point is
+/// `(ndc.x, ndc.y, dot(mu, z), 1)`. It then writes it as `@builtin(frag_depth)`
+/// into the MSAA depth, which is where translucency, water and the shadow
+/// marking pass expect to find meshlet depth.
+///
+/// **Every other row in this file is blind to it.** With only meshlet geometry in
+/// the frame the MSAA depth buffer holds nothing else, so any depth passes the
+/// test and any depth writes the same colour — mutation-measured: replacing the
+/// whole expression with the constant `0.5` leaves `parity_three_light_kinds`
+/// green. This arm puts a rigid cube through the middle of the meshlet grid, so
+/// which of the two a pixel shows is decided by the depth comparison and nothing
+/// else.
+#[test]
+fn parity_interleaved_with_rigid_geometry() {
+    let Some(gpu) = gpu_or_skip("depth order") else {
+        return;
+    };
+    let mut sc = scene(2, 1.0, true);
+    // A slab between the two meshlet grids in depth: nearer than the far
+    // instance, further than the near one, and wide enough on screen that a
+    // mis-ordered frame is a population and not a rim.
+    //
+    // **Its z extent is chosen to INTERSECT neither**, and that is the arm's own
+    // finding rather than caution. The first draft used a 1.4 m half-depth slab
+    // at z = -1, which reaches z = -0.3 — inside the near grid's own
+    // displacement, which spans +/-0.66 m about z = 0. Along the intersection
+    // curve the two paths disagreed by up to 104 of 255 on **thirteen** pixels,
+    // and that is not a resolve defect: a 4x MSAA depth buffer resolves an
+    // intersection per SAMPLE and a single-sample reconstruction cannot, so the
+    // two are obliged to differ exactly there — the same obligation the
+    // silhouette carries, one geometric case over. Recorded in
+    // `docs/memos/p28-1-visbuffer.md` §5 beside the edge measurement, because it
+    // is the second thing a single-sample visibility buffer gives up.
+    //
+    // Near grid: z in [-0.66, 0.66]. Far grid: z in [-2.66, -1.34]. Slab:
+    // z in [-1.15, -0.85]. Clear of both.
+    sc.instances.push(inf_render::MeshInstance::lit(
+        DVec3::new(0.0, 0.0, -1.0),
+        Quat::IDENTITY,
+        Vec3::new(6.0, 1.4, 0.3),
+        [0.9, 0.2, 0.15, 1.0],
+        900,
+    ));
+    sc.mark_dirty();
+    let fwd = render(&gpu, &sc, settings(false), false);
+    let res = render(&gpu, &sc, settings(true), true);
+    let ids = res.ids.as_ref().expect("ids");
+    // Anti-vacuity: the cube has to be VISIBLE and has to OCCLUDE meshlet
+    // geometry, or the depth comparison this arm is about never happens.
+    let occluded = (0..ids.height)
+        .flat_map(|y| (0..ids.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| ids.at(x, y) == VIS_EMPTY)
+        .count();
+    assert!(
+        occluded > 1000,
+        "only {occluded} pixels are free of meshlet ids; the rigid cube is not \
+         in the frame and this arm compares what every other row already does"
+    );
+    let (n, bad, worst) = compare_interior(&fwd.rgba, &res.rgba, ids);
+    assert_parity("interleaved rigid", n, bad, worst, 100);
+    // …and the two frames agree about the CUBE's pixels too, which is the half
+    // that fails when the resolve writes a wrong depth: a meshlet pixel that
+    // should have lost the depth test paints over the cube.
+    let mut cube_bad = 0usize;
+    let mut cube_seen = 0usize;
+    for y in 1..ids.height - 1 {
+        for x in 1..ids.width - 1 {
+            // Empty AND surrounded by empty — the mirror of `interior()`, and
+            // needed for the mirror reason: a pixel whose CENTRE no meshlet
+            // covers can still have MSAA samples that one does, so the forward
+            // path blends a meshlet into it and the single-sample resolve cannot.
+            // Measured: 128 of 45 274 empty pixels differ without this, all of
+            // them one step off a silhouette.
+            if ids.at(x, y) != VIS_EMPTY
+                || ids.at(x - 1, y) != VIS_EMPTY
+                || ids.at(x + 1, y) != VIS_EMPTY
+                || ids.at(x, y - 1) != VIS_EMPTY
+                || ids.at(x, y + 1) != VIS_EMPTY
+            {
+                continue;
+            }
+            let i = ((y * ids.width + x) * 4) as usize;
+            cube_seen += 1;
+            if (0..4).any(|c| fwd.rgba[i + c].abs_diff(res.rgba[i + c]) > PARITY_MAX_STEP) {
+                cube_bad += 1;
+            }
+        }
+    }
+    assert_eq!(
+        cube_bad, 0,
+        "{cube_bad} of {cube_seen} pixels the visibility buffer calls EMPTY \
+         differ between the two paths by more than a rounding step — the \
+         resolve is writing a depth that loses or wins the wrong comparisons"
+    );
+    assert!(
+        cube_seen > 10_000,
+        "only {cube_seen} pixels are meshlet-free and surrounded by meshlet-free          pixels; the rigid slab and the background between them are what this          half of the arm is about"
+    );
+    eprintln!("parity interleaved rigid: {n} interior, {cube_seen} non-meshlet pixels");
+}
