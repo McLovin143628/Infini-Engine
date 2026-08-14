@@ -24,6 +24,14 @@ bytemuck = { workspace = true }
 # `derived_vmesh_id` (P18.3): the one place the `.inf_mesh` → `.inf_vmesh` id
 # bijection is defined, so the cook, the player and the editor cannot disagree.
 uuid = { workspace = true }
+# P28.2: a cluster page carries the virtual-texture tiles its materials sample,
+# so the container has to be able to NAME a tile. It names it in `inf-vt`'s own
+# spelling (`TileCoord`, `VtTextureDesc`) rather than minting a second one — the
+# P28.1 law that one quantity gets one conversion function, applied to an
+# address. The edge is free of weight and free of cycles: `inf-vt` is the
+# shortest dependency list in the workspace (thiserror, nothing else) and names
+# no geometry crate, so it stays strictly below this one.
+inf-vt = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # Bit-portable trig for the SHARED FIXTURE MESHES (`test_support`, behind the

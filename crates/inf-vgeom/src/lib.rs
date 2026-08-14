@@ -67,14 +67,16 @@ pub mod stream;
 pub mod test_support;
 
 pub use asset::{
-    build_vgeom_asset, MeshletRec, VgeomAssetError, VgeomAssetHeader, VgeomAssetImage,
-    VgeomAssetReader, VgeomAssetView, VgeomPageEntry, VgeomPageSections, VgeomSource,
+    build_vgeom_asset, tile_mip_for_lod, ClusterTexture, ClusterTextureSet, ClusterTileRef,
+    MeshletRec, VgeomAssetError, VgeomAssetHeader, VgeomAssetImage, VgeomAssetReader,
+    VgeomAssetView, VgeomPageEntry, VgeomPageSections, VgeomSource, TILE_REF_LEN,
     VMESH_ASSET_SCHEMA_VERSION,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use build::{build_vgeom, BuildParams};
 pub use model::{
-    pick_classic_level, ClassicLod, Group, LevelRange, Meshlet, VgeomMesh, VgeomVertex,
+    pack_tangent, pick_classic_level, unpack_tangent, ClassicLod, Group, LevelRange, Meshlet,
+    VgeomMesh, VgeomVertex, NO_TANGENT, TANGENT_EXP,
 };
 pub use stream::{
     ideal_page_count, AssetResidency, PageBlocks, PageUpload, PoolAllocator, PoolBlock, VgeomPools,

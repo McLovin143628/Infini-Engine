@@ -183,8 +183,57 @@ pub fn displaced_grid(n: usize, amp: f64, normals: GridNormals) -> MeshStreams {
 /// are two independent `meshopt` runs, and nothing relates their meshlet or page
 /// counts — on one platform or across two.
 pub fn build_grid(n: usize, amp: f64, normals: GridNormals) -> VgeomMesh {
+    build_grid_tangented(n, amp, normals, false)
+}
+
+/// [`build_grid`], optionally with the grid's **analytic tangent** stream.
+///
+/// Off by default and deliberately so: every fixture that predates P28.2 keeps
+/// its `NO_TANGENT` vertices, so no committed golden's shading moves when the
+/// tangent channel lands. The gate that needs a tangented asset asks for one.
+///
+/// The tangent is the surface's own `∂p/∂u`. The grid parametrizes `u` along `x`,
+/// so `∂p/∂u = (1, ∂y/∂x, 0)` normalized, and the handedness is `+1` because
+/// `(u, v)` runs the same way as `(x, z)`. Derived in f64 and cast once, like the
+/// normals beside it — [`inf_math`]'s portable trig for the same P14 reason.
+pub fn build_grid_tangented(
+    n: usize,
+    amp: f64,
+    normals: GridNormals,
+    tangents: bool,
+) -> VgeomMesh {
     let (positions, nrms, uvs, indices) = displaced_grid(n, amp, normals);
-    build_vgeom(&positions, &nrms, &uvs, &indices, BuildParams::default())
+    let tan = if tangents {
+        grid_tangents(n, amp)
+    } else {
+        Vec::new()
+    };
+    build_vgeom(
+        &positions,
+        &nrms,
+        &uvs,
+        &tan,
+        &indices,
+        BuildParams::default(),
+    )
+}
+
+/// The analytic `∂p/∂u` of [`displaced_grid`], vertex for vertex.
+pub fn grid_tangents(n: usize, amp: f64) -> Vec<[f32; 4]> {
+    let mut out = Vec::with_capacity((n + 1) * (n + 1));
+    for j in 0..=n {
+        for i in 0..=n {
+            let u = i as f32 / n as f32;
+            let v = j as f32 / n as f32;
+            let x = (u - 0.5) * 2.0;
+            let z = (v - 0.5) * 2.0;
+            // y = amp · sin(3x) · cos(3z)  ⇒  ∂y/∂x = 3·amp·cos(3x)·cos(3z).
+            let dydx = amp * 3.0 * pcos64(x as f64 * 3.0) * pcos64(z as f64 * 3.0);
+            let inv = 1.0 / (1.0 + dydx * dydx).sqrt();
+            out.push([inv as f32, (dydx * inv) as f32, 0.0, 1.0]);
+        }
+    }
+    out
 }
 
 /// The **DAG** fixture: a dense displaced grid with flat normals → a multi-level

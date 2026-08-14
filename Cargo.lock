@@ -3513,6 +3513,7 @@ dependencies = [
  "inf-core",
  "inf-math",
  "inf-vgeom",
+ "inf-vt",
  "meshopt",
  "serde",
  "thiserror 2.0.19",

@@ -255,7 +255,7 @@ fn triangles_per_level(mesh: &VgeomMesh) -> BTreeMap<u8, usize> {
 #[test]
 fn builds_a_multi_level_dag() {
     let (p, n, uv, idx) = wavy_grid(100);
-    let mesh = build_vgeom(&p, &n, &uv, &idx, BuildParams::default());
+    let mesh = build_vgeom(&p, &n, &uv, &[], &idx, BuildParams::default());
 
     assert!(mesh.level_count() >= 3, "levels: {}", mesh.level_count());
     // LOD 0 keeps the full input triangle count (welding merges only vertices).
@@ -272,7 +272,7 @@ fn builds_a_multi_level_dag() {
 #[test]
 fn levels_are_laid_out_coarsest_first_for_streaming() {
     let (p, n, uv, idx) = wavy_grid(80);
-    let mesh = build_vgeom(&p, &n, &uv, &idx, BuildParams::default());
+    let mesh = build_vgeom(&p, &n, &uv, &[], &idx, BuildParams::default());
 
     // levels[] descends in lod_level (coarse → fine) and the meshlet ranges are
     // contiguous and cover the whole meshlet array in order.
@@ -296,7 +296,7 @@ fn levels_are_laid_out_coarsest_first_for_streaming() {
 #[test]
 fn within_a_level_triangles_do_not_overlap() {
     let (p, n, uv, idx) = wavy_grid(90);
-    let mesh = build_vgeom(&p, &n, &uv, &idx, BuildParams::default());
+    let mesh = build_vgeom(&p, &n, &uv, &[], &idx, BuildParams::default());
 
     // For each level, no triangle (as an unordered vertex triple) appears twice —
     // build_meshlets partitions the level's index buffer.
@@ -324,7 +324,7 @@ fn within_a_level_triangles_do_not_overlap() {
 #[test]
 fn dag_errors_are_strictly_monotonic() {
     let (p, n, uv, idx) = wavy_grid(90);
-    let mesh = build_vgeom(&p, &n, &uv, &idx, BuildParams::default());
+    let mesh = build_vgeom(&p, &n, &uv, &[], &idx, BuildParams::default());
 
     for m in &mesh.meshlets {
         // The half-open interval [error, parent_error) is always non-empty.
@@ -367,7 +367,7 @@ fn cut_invariant_holds_at_every_threshold() {
     // The premise first: everything below asserts "≤ 2 triangles per edge", which
     // only means anything if the *input* had that property.
     assert_source_is_manifold(&p, &idx);
-    let mesh = build_vgeom(&p, &n, &uv, &idx, BuildParams::default());
+    let mesh = build_vgeom(&p, &n, &uv, &[], &idx, BuildParams::default());
 
     // The mesh rim: single-used edges of the finest (LOD-0) full surface.
     let lod0 = lod0_indices(&mesh);
@@ -456,6 +456,7 @@ fn cut_invariant_holds_under_many_clusterizations() {
             &p,
             &nrm,
             &uv,
+            &[],
             &idx,
             BuildParams {
                 max_vertices,
@@ -487,7 +488,7 @@ fn cut_invariant_holds_under_many_clusterizations() {
 #[test]
 fn simplification_reduces_triangle_count_per_level() {
     let (p, n, uv, idx) = wavy_grid(100);
-    let mesh = build_vgeom(&p, &n, &uv, &idx, BuildParams::default());
+    let mesh = build_vgeom(&p, &n, &uv, &[], &idx, BuildParams::default());
 
     let per = triangles_per_level(&mesh);
     // From fine (level 0) to coarse (level max), triangle totals strictly decrease.
@@ -507,7 +508,7 @@ fn simplification_reduces_triangle_count_per_level() {
 #[test]
 fn meshlet_bounds_contain_their_triangles() {
     let (p, n, uv, idx) = wavy_grid(80);
-    let mesh = build_vgeom(&p, &n, &uv, &idx, BuildParams::default());
+    let mesh = build_vgeom(&p, &n, &uv, &[], &idx, BuildParams::default());
 
     for (mi, m) in mesh.meshlets.iter().enumerate() {
         for t in 0..m.triangle_count as usize {
@@ -533,8 +534,8 @@ fn meshlet_bounds_contain_their_triangles() {
 #[test]
 fn build_is_deterministic_byte_identical() {
     let (p, n, uv, idx) = wavy_grid(90);
-    let a = build_vgeom(&p, &n, &uv, &idx, BuildParams::default());
-    let b = build_vgeom(&p, &n, &uv, &idx, BuildParams::default());
+    let a = build_vgeom(&p, &n, &uv, &[], &idx, BuildParams::default());
+    let b = build_vgeom(&p, &n, &uv, &[], &idx, BuildParams::default());
 
     let ba = inf_asset::encode(&a).unwrap();
     let bb = inf_asset::encode(&b).unwrap();
@@ -544,7 +545,7 @@ fn build_is_deterministic_byte_identical() {
 #[test]
 fn tiny_mesh_is_a_single_root_meshlet_with_no_dag() {
     let (p, n, uv, idx) = cube();
-    let mesh = build_vgeom(&p, &n, &uv, &idx, BuildParams::default());
+    let mesh = build_vgeom(&p, &n, &uv, &[], &idx, BuildParams::default());
 
     assert_eq!(mesh.meshlet_count(), 1, "a cube fits in one meshlet");
     assert_eq!(mesh.level_count(), 1, "no coarser levels");
@@ -562,7 +563,7 @@ fn tiny_mesh_is_a_single_root_meshlet_with_no_dag() {
 
 #[test]
 fn degenerate_empty_input_yields_no_meshlets() {
-    let mesh = build_vgeom(&[], &[], &[], &[], BuildParams::default());
+    let mesh = build_vgeom(&[], &[], &[], &[], &[], BuildParams::default());
     assert_eq!(mesh.meshlet_count(), 0);
     assert_eq!(mesh.level_count(), 0);
     assert!(mesh.groups.is_empty());
@@ -571,7 +572,7 @@ fn degenerate_empty_input_yields_no_meshlets() {
 #[test]
 fn round_trips_through_the_asset_payload() {
     let (p, n, uv, idx) = wavy_grid(60);
-    let mesh = build_vgeom(&p, &n, &uv, &idx, BuildParams::default());
+    let mesh = build_vgeom(&p, &n, &uv, &[], &idx, BuildParams::default());
     let bytes = inf_asset::encode(&mesh).unwrap();
     let back: VgeomMesh = inf_asset::decode(&bytes).unwrap();
     assert_eq!(mesh, back, "encode → decode round-trips");

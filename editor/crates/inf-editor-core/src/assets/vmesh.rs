@@ -179,11 +179,13 @@ pub fn build_vmesh(plan: &VmeshPlan) -> Result<Option<Vec<u8>>> {
     if mesh.triangle_count() < MIN_TRIANGLES {
         return Ok(None);
     }
-    let (positions, normals, uvs, indices) = mesh.vgeom_streams();
+    let (positions, normals, uvs, tangents, indices) = mesh.vgeom_streams();
     if indices.len() < 3 {
         return Ok(None);
     }
-    Ok(Some(build_payload(&positions, &normals, &uvs, &indices)?))
+    Ok(Some(build_payload(
+        &positions, &normals, &uvs, &tangents, &indices,
+    )?))
 }
 
 /// Write a built payload and register it. The short second lock phase.
@@ -376,6 +378,7 @@ pub fn build_payload(
     positions: &[[f32; 3]],
     normals: &[[f32; 3]],
     uvs: &[[f32; 2]],
+    tangents: &[[f32; 4]],
     indices: &[u32],
 ) -> Result<Vec<u8>> {
     let _span = tracing::info_span!(
@@ -388,12 +391,23 @@ pub fn build_payload(
         positions,
         normals,
         uvs,
+        tangents,
         indices,
         inf_vgeom::BuildParams::default(),
     );
-    Ok(inf_vgeom::build_vgeom_asset(&dag)
-        .map_err(|e| inf_asset::AssetError::Import(e.to_string()))?
-        .into_bytes())
+    // **Unpaired, deliberately** (P28.2). A cluster→tile pairing is a fact about
+    // the mesh's *materials*, and this door is handed one mesh's geometry with no
+    // project in scope; the cook resolves the material closure serially before it
+    // derives anything and is the only place that can. An unpaired v3 asset is
+    // not a degraded one — every page carries an empty tiles section, the runtime
+    // coupling is inert, and the editor viewport streams exactly as it did
+    // before. What the editor does *not* get is the coupling's guarantee, which
+    // is stated in the P28.2 memo rather than left to be discovered.
+    Ok(
+        inf_vgeom::build_vgeom_asset(&dag, &inf_vgeom::ClusterTextureSet::none())
+            .map_err(|e| inf_asset::AssetError::Import(e.to_string()))?
+            .into_bytes(),
+    )
 }
 
 /// The sidecar `import` table an editor-derived vmesh carries.
@@ -533,9 +547,9 @@ mod tests {
     #[test]
     fn derivation_is_byte_deterministic() {
         let mesh = grid_mesh(10);
-        let (p, n, u, i) = mesh.vgeom_streams();
-        let a = build_payload(&p, &n, &u, &i).unwrap();
-        let b = build_payload(&p, &n, &u, &i).unwrap();
+        let (p, n, u, t, i) = mesh.vgeom_streams();
+        let a = build_payload(&p, &n, &u, &t, &i).unwrap();
+        let b = build_payload(&p, &n, &u, &t, &i).unwrap();
         assert_eq!(a, b, "two derivations of one mesh must agree byte for byte");
         assert!(!a.is_empty());
     }

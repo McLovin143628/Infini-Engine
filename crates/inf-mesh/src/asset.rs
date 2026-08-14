@@ -203,18 +203,33 @@ impl MeshAsset {
     }
 
     /// Flatten every submesh into one combined `(positions, normals, uvs,
-    /// indices)` geometry — the raw streams the virtualized-geometry builder
-    /// (`inf-vgeom`) consumes at cook time. Submesh index buffers are rebased
-    /// onto the concatenated vertex buffer.
+    /// tangents, indices)` geometry — the raw streams the virtualized-geometry
+    /// builder (`inf-vgeom`) consumes at cook time. Submesh index buffers are
+    /// rebased onto the concatenated vertex buffer.
     ///
     /// v1 fuses all material slots into one geometry (virtualized geometry treats
     /// the whole mesh as one clusterizable surface); per-slot meshlet tagging is a
     /// documented follow-up. Additive: does not change any payload.
+    ///
+    /// **The tangent stream joined in P28.2**, where `.inf_vmesh` v3 gave
+    /// `VgeomVertex` somewhere to put one. It has been sitting in
+    /// [`MeshVertex::tangent`] since P4 — read by nothing that reaches the meshlet
+    /// path, which is exactly the gap `docs/memos/p26-5-vertex-streams.md`
+    /// recorded and routed here.
     #[allow(clippy::type_complexity)]
-    pub fn vgeom_streams(&self) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
+    pub fn vgeom_streams(
+        &self,
+    ) -> (
+        Vec<[f32; 3]>,
+        Vec<[f32; 3]>,
+        Vec<[f32; 2]>,
+        Vec<[f32; 4]>,
+        Vec<u32>,
+    ) {
         let mut positions = Vec::new();
         let mut normals = Vec::new();
         let mut uvs = Vec::new();
+        let mut tangents = Vec::new();
         let mut indices = Vec::new();
         for sm in &self.submeshes {
             let base = positions.len() as u32;
@@ -222,10 +237,11 @@ impl MeshAsset {
                 positions.push(v.position);
                 normals.push(v.normal);
                 uvs.push(v.uv);
+                tangents.push(v.tangent);
             }
             indices.extend(sm.indices.iter().map(|&i| i + base));
         }
-        (positions, normals, uvs, indices)
+        (positions, normals, uvs, tangents, indices)
     }
 }
 

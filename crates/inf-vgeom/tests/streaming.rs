@@ -557,7 +557,7 @@ fn pool_blocks_never_overlap_across_assets() {
 #[test]
 fn a_corrupt_page_blocks_and_degrades() {
     let (mesh, _) = fixture();
-    let mut bytes = build_vgeom_asset(&mesh)
+    let mut bytes = build_vgeom_asset(&mesh, &inf_vgeom::ClusterTextureSet::none())
         .expect("the fixture lays out as a v2 image")
         .into_bytes();
 
@@ -670,7 +670,7 @@ fn a_corrupt_page_blocks_and_degrades() {
 fn v1_and_v2_sources_stream_identically() {
     let (mesh, _) = fixture();
     let v1 = inf_asset::encode(&mesh).expect("v1 bincode encode");
-    let v2 = build_vgeom_asset(&mesh)
+    let v2 = build_vgeom_asset(&mesh, &inf_vgeom::ClusterTextureSet::none())
         .expect("the fixture lays out as a v2 image")
         .into_bytes();
 

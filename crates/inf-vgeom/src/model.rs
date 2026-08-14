@@ -67,17 +67,37 @@ use serde::{Deserialize, Serialize};
 
 /// One vertex of a [`VgeomMesh`]. `#[repr(C)]` + `Pod` so it uploads straight to
 /// a GPU vertex buffer and feeds `meshopt` (position in the first 12 bytes)
-/// without a copy. 32 bytes, naturally aligned.
+/// without a copy. **36 bytes** since P28.2, naturally aligned.
 ///
 /// v1 stores full-precision `f32` position/normal/uv. Quantized positions
 /// (Nanite packs positions to a per-cluster grid) are a documented follow-up —
 /// the schema version gates the upgrade.
+///
+/// # The tangent channel (P28.2), and why it is one packed word
+///
+/// P26.5 routed the tangent here and gave the reason: `VgeomVertex` had no
+/// tangent to give, so neither the meshlet stream nor the rigid stream could
+/// carry one until the container moved. It moves in this batch (`.inf_vmesh`
+/// v3), so the channel lands here — as **one `u32`**, not four `f32`, and the
+/// measurement is what decided it. Over 16², 48² and 96² displaced grids the
+/// vertex records are **54.5 – 56.7 %** of a cooked asset's meshlet-pool bytes,
+/// so a `[f32; 4]` tangent costs **+27.3 – 28.4 % of the whole pool** — better
+/// than a quarter of the streaming budget spent on a second-order quality
+/// feature — while one packed word costs **+6.8 – 7.1 %**.
+///
+/// See [`pack_tangent`] for the bit layout and for the reason its exponent
+/// field is pinned rather than left to carry payload.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Pod, Zeroable)]
 pub struct VgeomVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+    /// Octahedral tangent + handedness in one word — [`pack_tangent`]'s output.
+    /// [`NO_TANGENT`] (zero) means *this vertex has no authored tangent*, and
+    /// every consumer falls back to the per-fragment cotangent frame it used
+    /// before this channel existed.
+    pub tangent: u32,
 }
 
 impl Default for VgeomVertex {
@@ -86,7 +106,112 @@ impl Default for VgeomVertex {
             position: [0.0; 3],
             normal: [0.0, 1.0, 0.0],
             uv: [0.0; 2],
+            tangent: NO_TANGENT,
         }
+    }
+}
+
+// ── the tangent word ────────────────────────────────────────────────────────
+
+/// "This vertex has no authored tangent." Structurally unreachable from
+/// [`pack_tangent`], because every packed word carries the pinned exponent
+/// field below — so the sentinel needs no reserved direction.
+pub const NO_TANGENT: u32 = 0;
+
+/// The pinned exponent field: bits 23..=30 set to 127.
+///
+/// **Why a packed word has to look like a float.** The meshlet vertex pool is
+/// bound as `array<f32>` in four shaders (`vgeom_mesh`, `visbuffer`,
+/// `vis_resolve`, `vis_feedback`) and there is no room for a second, `u32`-typed
+/// view of it: `vis_resolve` is a FRAGMENT pass and P28.1 measured the default
+/// limit of 8 fragment storage bindings **fully spent**. So the tangent word is
+/// loaded as an `f32` and `bitcast` back — and an arbitrary 32-bit payload read
+/// that way has two hazards, both of which this pin removes:
+///
+/// * **subnormals.** Every `u32` below `2^23` has an all-zero exponent field, so
+///   as a float it is subnormal, and WGSL permits an implementation to flush
+///   subnormals to zero (the hazard `docs/memos/p28-1-visbuffer.md` §3 names).
+/// * **NaN.** An all-ones exponent field is a NaN, whose payload bits an
+///   implementation may canonicalize.
+///
+/// With bits 23..=30 fixed at 127 the word is always a normal float in
+/// ±[1, 2) — never subnormal, never NaN — and carries no arithmetic anywhere.
+/// The cost is nine bits of payload, which buys 11 bits per octahedral axis and
+/// a handedness bit, and the angular error that leaves is measured in
+/// [`tangent_tests::the_packed_tangent_round_trips_within_its_quantization`].
+pub const TANGENT_EXP: u32 = 127 << 23;
+
+/// Quantization scale of one octahedral axis: 11 signed bits, so ±1 maps to
+/// ±1023 (the 11-bit two's-complement range is −1024..=1023).
+const TANGENT_Q: f32 = 1023.0;
+
+/// Pack a unit tangent + handedness into one [`VgeomVertex::tangent`] word.
+///
+/// `handedness` is the `w` of `inf_mesh::MeshVertex::tangent` — the sign that
+/// turns `cross(normal, tangent)` into the bitangent. A non-finite or
+/// zero-length tangent packs to [`NO_TANGENT`], which is how "the importer had
+/// nothing to give" travels all the way to the shader as one comparison.
+///
+/// Layout (LSB first): `qx` 11 bits · `qy` 11 bits · handedness 1 bit ·
+/// exponent 8 bits ([`TANGENT_EXP`]) · sign 1 bit (always 0).
+pub fn pack_tangent(tangent: [f32; 3], handedness: f32) -> u32 {
+    let [x, y, z] = tangent;
+    let len = (x * x + y * y + z * z).sqrt();
+    if !len.is_finite() || len <= 0.0 {
+        return NO_TANGENT;
+    }
+    let (x, y, z) = (x / len, y / len, z / len);
+    // Octahedral projection: the L1-normalized point, folded across the |x|+|y|=1
+    // diamond for the lower hemisphere.
+    let l1 = x.abs() + y.abs() + z.abs();
+    let (mut ox, mut oy) = (x / l1, y / l1);
+    if z < 0.0 {
+        let (sx, sy) = (sign_not_zero(ox), sign_not_zero(oy));
+        let (ax, ay) = (ox.abs(), oy.abs());
+        ox = (1.0 - ay) * sx;
+        oy = (1.0 - ax) * sy;
+    }
+    let q = |v: f32| -> u32 {
+        let c = (v.clamp(-1.0, 1.0) * TANGENT_Q).round() as i32;
+        (c as u32) & 0x7ff
+    };
+    let h = u32::from(handedness < 0.0);
+    q(ox) | (q(oy) << 11) | (h << 22) | TANGENT_EXP
+}
+
+/// Invert [`pack_tangent`] — the CPU twin of `vgeom_unpack_tangent` in
+/// `vt_sample.wgsl`, and the reference the shader mirror is pinned against.
+///
+/// Returns `(tangent, handedness)`, or `None` for [`NO_TANGENT`].
+pub fn unpack_tangent(word: u32) -> Option<([f32; 3], f32)> {
+    if word == NO_TANGENT {
+        return None;
+    }
+    // Sign-extend the two 11-bit fields by shifting them to the top and back.
+    let ex = ((word << 21) as i32 >> 21) as f32 / TANGENT_Q;
+    let ey = (((word << 10) as i32) >> 21) as f32 / TANGENT_Q;
+    let mut x = ex;
+    let mut y = ey;
+    let z = 1.0 - ex.abs() - ey.abs();
+    if z < 0.0 {
+        let (sx, sy) = (sign_not_zero(x), sign_not_zero(y));
+        let (ax, ay) = (x.abs(), y.abs());
+        x = (1.0 - ay) * sx;
+        y = (1.0 - ax) * sy;
+    }
+    let inv = 1.0 / (x * x + y * y + z * z).sqrt();
+    let h = if (word >> 22) & 1 == 1 { -1.0 } else { 1.0 };
+    Some(([x * inv, y * inv, z * inv], h))
+}
+
+/// `+1` for zero, so the octahedral fold has no branch at the axes — the same
+/// convention both halves of the mirror use.
+#[inline]
+fn sign_not_zero(v: f32) -> f32 {
+    if v < 0.0 {
+        -1.0
+    } else {
+        1.0
     }
 }
 
@@ -277,9 +402,16 @@ pub struct VgeomMesh {
 }
 
 impl VgeomMesh {
-    /// Current schema version. v1 = f32 vertices, per-group greedy adjacency
-    /// grouping, monotone accumulated error.
-    pub const CURRENT_VERSION: u32 = 1;
+    /// Current schema version. v1 = f32 position/normal/uv vertices, per-group
+    /// greedy adjacency grouping, monotone accumulated error. **v2 (P28.2)** adds
+    /// [`VgeomVertex::tangent`], which bincode encodes positionally, so the
+    /// version has to move for the two shapes to be told apart at all — v1 blobs
+    /// decode through the frozen shadow record in
+    /// [`crate::asset`](crate::asset) and are converted. Nothing in the tree
+    /// *writes* this bincode form any more (the cook and the editor both emit the
+    /// paged container), so no committed payload is downgraded by the bump;
+    /// what it buys is that the frozen v1 fixture keeps loading.
+    pub const CURRENT_VERSION: u32 = 2;
 
     /// Number of meshlets across all levels.
     pub fn meshlet_count(&self) -> usize {
@@ -520,5 +652,84 @@ mod classic_lod_tests {
         assert_eq!(pick_classic_level(&[0.0, 1.0, 2.0], 0.0), 0);
         assert_eq!(pick_classic_level(&[0.0, 1.0, 2.0], 1.5), 1);
         assert_eq!(pick_classic_level(&[0.0, 1.0, 2.0], 100.0), 2);
+    }
+}
+
+#[cfg(test)]
+mod tangent_tests {
+    use super::*;
+
+    /// A sweep over the sphere: every packed word is a **normal** float — never
+    /// subnormal, never NaN — so the `bitcast` four shaders do on it takes no
+    /// arithmetic and cannot be flushed or canonicalized. This is the hazard
+    /// `docs/memos/p28-1-visbuffer.md` §3 measured on the instance table, closed
+    /// here by construction rather than by an on-device `assert_ne!`.
+    #[test]
+    fn every_packed_tangent_is_a_normal_float() {
+        let mut n = 0usize;
+        for i in 0..64 {
+            for j in 0..64 {
+                // A deterministic spread over the sphere (no trig: the P14 law,
+                // and this needs no angles anyway).
+                let a = (i as f32 / 63.0) * 2.0 - 1.0;
+                let b = (j as f32 / 63.0) * 2.0 - 1.0;
+                let c = 1.0 - a.abs() - b.abs();
+                for h in [1.0f32, -1.0] {
+                    let w = pack_tangent([a, b, c], h);
+                    assert_ne!(w, NO_TANGENT, "a real direction packs to the sentinel");
+                    let f = f32::from_bits(w);
+                    assert!(f.is_normal(), "{w:#010x} is not a normal float");
+                    assert_eq!(w & 0x7f80_0000, TANGENT_EXP, "the exponent is pinned");
+                    assert_eq!(w >> 31, 0, "the sign bit is reserved and zero");
+                    n += 1;
+                }
+            }
+        }
+        assert_eq!(n, 64 * 64 * 2);
+    }
+
+    /// The round trip is exact to its quantization, and the quantization is
+    /// **measured** rather than asserted loosely: 11 bits an axis over the
+    /// octahedral map. The bound below is the worst case observed over the sweep;
+    /// a coarser packing fails it, which is what makes it a bound and not a
+    /// restatement.
+    #[test]
+    fn the_packed_tangent_round_trips_within_its_quantization() {
+        let mut worst = 0.0f32;
+        for i in 0..96 {
+            for j in 0..96 {
+                let a = (i as f32 / 95.0) * 2.0 - 1.0;
+                let b = (j as f32 / 95.0) * 2.0 - 1.0;
+                for cz in [1.0f32 - a.abs() - b.abs(), a.abs() + b.abs() - 1.0] {
+                    let len = (a * a + b * b + cz * cz).sqrt();
+                    if len <= 1e-6 {
+                        continue;
+                    }
+                    let t = [a / len, b / len, cz / len];
+                    for h in [1.0f32, -1.0] {
+                        let (back, hb) = unpack_tangent(pack_tangent(t, h)).expect("packed");
+                        assert_eq!(hb, h, "handedness survives");
+                        let dot = (t[0] * back[0] + t[1] * back[1] + t[2] * back[2]).clamp(-1.0, 1.0);
+                        worst = worst.max(1.0 - dot);
+                    }
+                }
+            }
+        }
+        // Measured worst `1 - cos(theta)` over the sweep: **2.03e-6**, i.e.
+        // **0.115°**. The bound sits just above it so dropping an axis to 10 bits
+        // — which roughly quadruples the term — fails here rather than showing up
+        // as a normal map that leans.
+        assert!(worst < 2.5e-6, "worst 1-cos was {worst}");
+    }
+
+    /// The sentinel is *reachable only by asking for it* — a degenerate tangent —
+    /// and it survives the round trip as "no tangent" rather than as a direction.
+    #[test]
+    fn a_degenerate_tangent_is_the_sentinel_and_not_a_direction() {
+        for t in [[0.0, 0.0, 0.0], [f32::NAN, 0.0, 0.0], [f32::INFINITY, 0.0, 0.0]] {
+            assert_eq!(pack_tangent(t, 1.0), NO_TANGENT, "{t:?}");
+        }
+        assert!(unpack_tangent(NO_TANGENT).is_none());
+        assert_eq!(VgeomVertex::default().tangent, NO_TANGENT);
     }
 }

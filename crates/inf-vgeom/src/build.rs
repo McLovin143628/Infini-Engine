@@ -242,13 +242,28 @@ struct GroupResult {
 
 /// Build a meshlet LOD DAG from a mesh's vertex streams + index buffer.
 ///
-/// `normals` / `uvs` may be shorter than `positions` (missing entries default);
-/// `indices` is a triangle list into `positions`. Returns a [`VgeomMesh`] with
-/// meshlets laid out coarsest-first (streaming order).
+/// `normals` / `uvs` / `tangents` may be shorter than `positions` (missing
+/// entries default, and a missing tangent is [`crate::NO_TANGENT`] rather than a
+/// guess); `indices` is a triangle list into `positions`. Returns a
+/// [`VgeomMesh`] with meshlets laid out coarsest-first (streaming order).
+///
+/// # The tangent stream does not reach the clusterizer (P28.2)
+///
+/// `meshopt` sees positions through a [`VertexDataAdapter`] at
+/// [`VERTEX_STRIDE`], and the stride is the only thing the tangent word changes
+/// about what it sees. Nothing in `build_meshlets`, `simplify_with_locks` or the
+/// bounds/cone computation reads past the first twelve bytes of a record, so the
+/// DAG is a function of positions and indices exactly as it was before this
+/// channel existed — asserted, not assumed, by
+/// `tests::the_tangent_stream_does_not_move_the_dag`, which builds the same
+/// geometry with two different tangent streams and compares every meshlet.
+/// (The P18 law: `meshopt` output is not cross-platform, so a claim about it is
+/// only ever checked by mutating a clone and comparing *within* one run.)
 pub fn build_vgeom(
     positions: &[[f32; 3]],
     normals: &[[f32; 3]],
     uvs: &[[f32; 2]],
+    tangents: &[[f32; 4]],
     indices: &[u32],
     params: BuildParams,
 ) -> VgeomMesh {
@@ -268,6 +283,9 @@ pub fn build_vgeom(
             position: positions[i],
             normal: normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
             uv: uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+            tangent: tangents.get(i).map_or(crate::model::NO_TANGENT, |t| {
+                crate::model::pack_tangent([t[0], t[1], t[2]], t[3])
+            }),
         })
         .collect();
 
@@ -989,6 +1007,47 @@ mod tests {
     /// sheet), so simplification has real choices to make; a monotone bump is too
     /// tidy to provoke the seam collision. `psin64`/`pcos64` keep it bit-portable
     /// (the P14 LAW), and every position is distinct, so the input is manifold and
+    /// **The tangent stream is invisible to the clusterizer** (P28.2). Two builds
+    /// of one geometry with *different* tangents must produce the same DAG down
+    /// to every micro-index — `meshopt` reads the first twelve bytes of a vertex
+    /// record and the stride, and the stride is equal here, so what is being
+    /// falsified is that the new channel leaks into clusterization or
+    /// simplification. Mutating a clone within one run, because `meshopt`'s output
+    /// is not comparable across platforms (the P18 law).
+    #[test]
+    fn the_tangent_stream_does_not_move_the_dag() {
+        let n = 20;
+        let (p, nrm, uv, idx) =
+            crate::test_support::displaced_grid(n, 0.3, crate::test_support::GridNormals::Analytic);
+        let ones: Vec<[f32; 4]> = (0..p.len()).map(|_| [1.0, 0.0, 0.0, 1.0]).collect();
+        let varied: Vec<[f32; 4]> = (0..p.len())
+            .map(|i| {
+                let t = i as f32 / p.len() as f32;
+                [t, 1.0 - t, 0.25, if i % 2 == 0 { 1.0 } else { -1.0 }]
+            })
+            .collect();
+        let a = build_vgeom(&p, &nrm, &uv, &ones, &idx, BuildParams::default());
+        let b = build_vgeom(&p, &nrm, &uv, &varied, &idx, BuildParams::default());
+        let c = build_vgeom(&p, &nrm, &uv, &[], &idx, BuildParams::default());
+        assert!(a.levels.len() >= 3, "a fixture with a real DAG");
+        for (name, other) in [("varied", &b), ("absent", &c)] {
+            assert_eq!(a.meshlets, other.meshlets, "{name} moved the meshlets");
+            assert_eq!(a.meshlet_vertices, other.meshlet_vertices, "{name}");
+            assert_eq!(a.meshlet_triangles, other.meshlet_triangles, "{name}");
+            assert_eq!(a.levels, other.levels, "{name}");
+            assert_eq!(a.groups, other.groups, "{name}");
+        }
+        // And the channel really did travel — otherwise the equalities above are
+        // satisfied by a build that dropped it.
+        assert!(a.vertices.iter().all(|v| v.tangent != crate::NO_TANGENT));
+        assert!(c.vertices.iter().all(|v| v.tangent == crate::NO_TANGENT));
+        assert_ne!(
+            a.vertices.iter().map(|v| v.tangent).collect::<Vec<_>>(),
+            b.vertices.iter().map(|v| v.tangent).collect::<Vec<_>>(),
+            "two different tangent streams packed to the same words"
+        );
+    }
+
     /// nothing welds.
     fn fuzz_grid(n: usize) -> (Vec<VgeomVertex>, Vec<u32>) {
         let mut vertices = Vec::with_capacity(n * n);
@@ -1002,6 +1061,7 @@ mod tests {
                     position: [fx, y, fz],
                     normal: [0.0, 1.0, 0.0],
                     uv: [fx / n as f32, fz / n as f32],
+                    tangent: crate::model::NO_TANGENT,
                 });
             }
         }

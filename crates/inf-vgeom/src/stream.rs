@@ -1581,7 +1581,13 @@ mod tests {
                 [0, n, 0, 0],
             ]
         };
-        let bytes = |s: &[u64; 4]| s[0] * 32 + s[1] * 64 + s[2] * 4 + s[3] * 4;
+        // The pool unit sizes, read off the constants rather than transcribed:
+        // the vertex record widened from 32 to 36 bytes when the tangent channel
+        // landed (P28.2), and a literal here would have made this sweep measure
+        // the wrong budget while still passing.
+        let bytes = |s: &[u64; 4]| {
+            s[0] * VERTEX_REC_LEN as u64 + s[1] * MESHLET_REC_LEN as u64 + s[2] * 4 + s[3] * 4
+        };
         // The band the audit named, plus the boundary and well past it.
         let counts: Vec<u64> = (1..=48)
             .chain([
@@ -1620,7 +1626,9 @@ mod tests {
     #[test]
     fn a_page_that_does_not_fit_rolls_back_completely() {
         let shape = [62u64, 1, 64, 93];
-        let bytes = shape[0] * 32 + shape[1] * 64 + shape[2] * 4 + shape[3] * 4;
+        let bytes = shape[0] * VERTEX_REC_LEN as u64 + shape[1] * MESHLET_REC_LEN as u64
+            + shape[2] * 4
+            + shape[3] * 4;
         let mut pools = VgeomPools::new(bytes - 4);
         assert!(pools.alloc_page(shape).is_none(), "must not fit");
         assert_eq!(pools.used_bytes(), 0, "a failed page leaves nothing behind");
@@ -1635,7 +1643,9 @@ mod tests {
     #[test]
     fn a_roomy_budget_still_grows_speculatively() {
         let shape = [62u64, 1, 64, 93];
-        let bytes = shape[0] * 32 + shape[1] * 64 + shape[2] * 4 + shape[3] * 4;
+        let bytes = shape[0] * VERTEX_REC_LEN as u64 + shape[1] * MESHLET_REC_LEN as u64
+            + shape[2] * 4
+            + shape[3] * 4;
         let mut pools = VgeomPools::new(bytes * 4096);
         pools.alloc_page(shape).expect("fits with room to spare");
         assert!(

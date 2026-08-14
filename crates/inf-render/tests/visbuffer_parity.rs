@@ -633,6 +633,7 @@ fn a_scene_past_a_ceiling_falls_back_to_the_forward_path_and_says_which() {
         &pos,
         &nrm,
         &uv,
+        &[],
         &idx,
         inf_vgeom::BuildParams {
             // BOTH limits: `max_vertices` binds first at the default 64 (a
