@@ -1110,3 +1110,113 @@ fn a_coarser_marking_stride_marks_a_subset_of_what_every_pixel_marks() {
     // and every page trace in this phase unchanged by the knob existing.
     assert_eq!(VsmSettings::default().mark_stride, 1);
 }
+
+/// **THE SHADOW LANE'S SHIPPED SEAM** (P28.5, closing the P28.4 audit's fourth
+/// inherited item).
+///
+/// The audit's finding, verbatim: *"the shadow lane's producer has no
+/// end-to-end arm. `VsmStreamStats::speculative_wants` has no reader outside
+/// `inf-render`'s own unit tests, and the `vsm_mark::sync` call site is unarmed
+/// the way `vt_sync`'s was until this audit."* It built the virtual texture
+/// chain's arm (`a_committed_camera_reaches_the_shipped_streaming_loop`) and
+/// routed the shadow chain's here. This is it, and it runs the same chain the
+/// player runs: `EngineRenderer::commit_camera` → `prediction()` →
+/// `speculative_shadow_wants` → the marking transaction.
+///
+/// **The bound it records while proving the seam.** At the shipped horizon of
+/// **0** the lane is *inert by construction*: a predicted camera at zero lead
+/// IS the committed camera, so the scrolled page set equals the proved set and
+/// the producer's own overlap filter drops all of it. That is not a defect and
+/// it is not a dead producer — it is the lead-time ruling
+/// (`docs/memos/p28-5-lead-time-ruling.md`) seen from the shadow side. So the
+/// arm asserts **both**: zero wants at the shipped horizon, and a live producer
+/// at the horizon the ROADMAP prescribed.
+///
+/// Three things it is built to falsify, and each was a way the first draft
+/// could have passed while the chain was dead:
+///
+/// * a renderer nobody commits a camera to must speculate **nothing** — an
+///   empty history is the predictor's real enable flag;
+/// * the counter must **move** under a committed dolly at a real horizon, which
+///   is what says `vsm_mark::sync` reads `prediction()` at all;
+/// * and it must go back to zero when the predictor is switched off with the
+///   *same* history in place, which separates "the lane is running" from "the
+///   camera happened to move".
+#[test]
+fn a_committed_camera_reaches_the_shadow_lane() {
+    let Some(gpu) = gpu_or_skip("the shadow lane's shipped seam") else {
+        return;
+    };
+    // A dolly along the light's own `right`, which is the motion a
+    // camera-centred clipmap actually scrolls under — a pure rotation produces
+    // the empty set there and would prove nothing (P28.4's own bound).
+    let sun = glam::Vec3::new(0.0, 0.0, -1.0);
+    let sc = scene(&[sun]);
+    let target = inf_render::HeadlessTarget::new(&gpu, FW, FH);
+    let spec = |horizon: u32, commit: bool, enabled: bool| -> u64 {
+        let mut r = inf_render::EngineRenderer::new(&gpu, inf_render::HEADLESS_FORMAT);
+        let mut s = *r.settings();
+        s.vsm = settings();
+        s.stream.predict.enabled = enabled;
+        s.stream.predict.horizon_ticks = horizon;
+        r.set_settings(s);
+        for tick in 0..10u64 {
+            let mut v = view(9.0);
+            // 0.6 m a tick across the clipmap — several pages over the run.
+            v.eye_world.x += 0.6 * tick as f64;
+            if commit {
+                assert!(r.commit_camera(tick, &v), "tick {tick} was refused");
+            }
+            r.render(&gpu, &sc, &v, &target.view, (FW, FH));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        let sys = r.vsm().expect("a live vsm system");
+        assert!(
+            sys.stats().projections > 0,
+            "the shadow system never projected — this fixture proves nothing"
+        );
+        sys.stats().speculative_wants
+    };
+
+    const LEAD: u32 = inf_render::ROADMAP_PREDICT_HORIZON_TICKS;
+    let uncommitted = spec(LEAD, false, true);
+    let committed = spec(LEAD, true, true);
+    let switched_off = spec(LEAD, true, false);
+    let shipped = spec(inf_render::DEFAULT_PREDICT_HORIZON_TICKS, true, true);
+    println!(
+        "shadow speculation: uncommitted {uncommitted}, committed at h={LEAD} \
+         {committed}, predictor off {switched_off}, shipped horizon \
+         (h={}) {shipped}",
+        inf_render::DEFAULT_PREDICT_HORIZON_TICKS
+    );
+
+    assert_eq!(
+        uncommitted, 0,
+        "a renderer nobody committed a camera to speculated {uncommitted} \
+         shadow pages — `None` does not mean `None`"
+    );
+    assert!(
+        committed > 0,
+        "a committed dolly at the ROADMAP's own horizon produced no speculative \
+         shadow want — `vsm_mark::sync` is not reading `prediction()` and the \
+         producer is dead on the shipped path"
+    );
+    assert_eq!(
+        switched_off, 0,
+        "the predictor is switched off and the lane still emitted \
+         {switched_off} wants"
+    );
+    // **The bound**: inert at the shipped horizon, and inert for a reason.
+    assert_eq!(
+        inf_render::DEFAULT_PREDICT_HORIZON_TICKS,
+        0,
+        "the shipped horizon left zero and this bound needs re-measuring"
+    );
+    assert_eq!(
+        shipped, 0,
+        "at zero lead the predicted camera IS the committed camera, so the \
+         scrolled page set equals the proved set and the overlap filter drops \
+         it — {shipped} wants survived, which means one of those three is no \
+         longer true"
+    );
+}
