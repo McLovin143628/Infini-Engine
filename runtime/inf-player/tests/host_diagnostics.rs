@@ -77,10 +77,26 @@ fn the_shipped_host_logs_every_streaming_line_it_has() {
         "stream_summary",
         "predict_summary",
     ] {
+        // **The EMITTING spelling, not the mention.** The first draft of this
+        // arm asked for `host.{line}()` anywhere in the scope and was killed by
+        // its own mutation: three of the four are named twice — once in the
+        // early-return guard as `.is_some()` and once where the line is
+        // actually logged — so deleting the *log* left the guard's mention
+        // behind and the arm stayed green. A gate must aim at the thing it
+        // names (the P23 law), and the thing this one names is the emit.
+        let emit = format!("and_then(|l| l.host.{line}())");
         assert!(
-            body.contains(&format!("host.{line}()")),
-            "`log_stream_stats` does not call `{line}` — the line it produces is \
-             a line nothing logs, which is the class P28.5 closed"
+            body.contains(&emit),
+            "`log_stream_stats` does not LOG `{line}` — it may still mention it \
+             in the guard, which is exactly the shape this arm was rewritten to \
+             see. The line it produces would be a line nothing logs, which is \
+             the class P28.5 closed"
+        );
+        assert!(
+            body.matches(&emit).count() == 1,
+            "`{line}` is logged {} times — a duplicated emit means the once-a-\
+             second cadence prints it twice",
+            body.matches(&emit).count()
         );
     }
     // The gate itself must be falsifiable: the scope really is a scope, and a
