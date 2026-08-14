@@ -467,25 +467,35 @@ mod tests {
         assert_eq!(horizon_ticks(0, 60), 1);
     }
 
-    /// **No libm on this path.** The rotation is Rodrigues in portable trig, so
-    /// this is a source-level pin on the module that computes a want set two
-    /// hosts compare: the P14 law, armed where it is decided.
-    #[test]
-    fn the_predictor_spells_no_libm_transcendental() {
-        let src = include_str!("predict.rs");
-        // **The non-test half only, and comment lines dropped from it.** Two
-        // exclusions, each for a reason a green-because-it-cannot-see arm would
-        // have: the doc comments above name `f64::acos` in order to say why it
-        // is not used, and this very test carries every banned spelling as a
-        // string literal — a scan over the whole file would be satisfied by its
-        // own fixture, which is the P28.1 audit's finding in miniature.
-        let body = src
+    /// **The non-test half of this file, comment lines dropped** — what both
+    /// source pins below read.
+    ///
+    /// Two exclusions, each for a reason a green-because-it-cannot-see arm would
+    /// have: the doc comments above name `f64::acos` and `Instant` in order to
+    /// say why neither is used, and the pins themselves carry every banned
+    /// spelling as a string literal — a scan over the whole file would be
+    /// satisfied by its own fixture, which is the P28.1 audit's finding in
+    /// miniature.
+    ///
+    /// `split` on the attribute rather than on a line shape, and `lines` rather
+    /// than a newline search, so the scope it reads is the same one on a CRLF
+    /// checkout as on an LF one — the P22 law about a `.rs` file read by a test.
+    fn non_test_body() -> String {
+        include_str!("predict.rs")
             .split("#[cfg(test)]")
             .next()
             .expect("split always yields one")
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<String>();
+            .collect::<String>()
+    }
+
+    /// **No libm on this path.** The rotation is Rodrigues in portable trig, so
+    /// this is a source-level pin on the module that computes a want set two
+    /// hosts compare: the P14 law, armed where it is decided.
+    #[test]
+    fn the_predictor_spells_no_libm_transcendental() {
+        let body = non_test_body();
         for banned in [".acos(", ".asin(", ".atan2(", ".sin(", ".cos(", ".cbrt("] {
             assert!(
                 !body.contains(banned),
@@ -495,5 +505,73 @@ mod tests {
         // …and the anti-vacuity half: the portable ones ARE called, so this is
         // not a pin on a module that does no trigonometry.
         assert!(body.contains("psin64(") && body.contains("pcos64(") && body.contains("pacos64("));
+    }
+
+    /// **No clock, no entropy, no interior mutability** — the *other* half of
+    /// the purity claim, which was prose until the P28.4 audit measured what
+    /// happens without it.
+    ///
+    /// The module's own header says "no clock, no frame counter, no `Instant`
+    /// and no interior mutability", and the arms above enforce none of it. They
+    /// cannot: `one_history_predicts_one_pose_bit_for_bit` re-asks inside **one
+    /// process**, so an impurity whose reading is constant for a process and
+    /// differs between two of them is invisible to it, and
+    /// `a_constant_spin_lands_where_the_spin_actually_goes` compares against a
+    /// closed form at `1e-6`, so anything smaller than that sails through.
+    /// **Measured**, in the P28.4 audit's mutation matrix: a wall clock scaled
+    /// to `1e-9` (`SystemTime::now() … as_secs() % 2`) passed all 59 arms of
+    /// this crate. That is precisely the P14 failure — two hosts, two want sets
+    /// — and the only thing that can see it is a pin on the source.
+    ///
+    /// A ban list and not an allowlist, deliberately: the subject is *reaching
+    /// outside the argument*, and the spellings for that are few and stable;
+    /// the P23 law's allowlist shape is for statement sequences, which this is
+    /// not.
+    #[test]
+    fn the_predictor_reads_no_clock_and_holds_no_state() {
+        const BANNED: [&str; 12] = [
+            "Instant",
+            "SystemTime",
+            "std::time",
+            "elapsed(",
+            "process::id",
+            "thread_rng",
+            "random(",
+            "RefCell",
+            "AtomicU",
+            "AtomicI",
+            "OnceLock",
+            "static mut ",
+        ];
+        let offenders = |src: &str| -> Vec<&'static str> {
+            BANNED.iter().copied().filter(|b| src.contains(b)).collect()
+        };
+
+        let body = non_test_body();
+        assert!(
+            offenders(&body).is_empty(),
+            "the predictor reaches outside its argument: {:?} — a reading that is              constant for one process and differs between two is exactly what the              bit-for-bit arm cannot see (P14)",
+            offenders(&body)
+        );
+
+        // **The pin is built to falsify** (the P22 law): the same predicate over
+        // a poisoned copy of the real body must reject it. Without this the arm
+        // is a statement about a string that could be empty.
+        let poisoned = format!("{body} let h = h + std::time::SystemTime::now().elapsed();");
+        assert!(
+            !offenders(&poisoned).is_empty(),
+            "the pin cannot see a clock even when one is put in front of it"
+        );
+        // …and the scope really is this module's non-test half: the function the
+        // pin exists for is in it, and the fixtures that carry the banned
+        // spellings as literals are not.
+        assert!(
+            body.contains("pub fn dead_reckon"),
+            "the pin read no source"
+        );
+        assert!(
+            !body.contains("BANNED"),
+            "the split let this test's own fixture into the scanned scope"
+        );
     }
 }
