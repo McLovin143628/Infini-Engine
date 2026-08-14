@@ -1042,6 +1042,34 @@ pub(crate) fn map_u32(gpu: &GpuContext, buf: &wgpu::Buffer) -> Vec<u32> {
 
 // ── Per-asset dynamic draw state (owned by the node) ─────────────────────────
 
+/// The largest `instance_count × meshlet_count` product the cull path will size
+/// buffers for, or dispatch against.
+///
+/// 16.7 M (instance, meshlet) pairs is 128 MiB of `visible`, the same again for
+/// `visible_late`, and 64 MiB each for the two visibility bitsets — already an
+/// absurd asset by two orders of magnitude (P18's 10 M-triangle gate is ~78 k
+/// meshlets on one instance). The number exists to be a *ceiling*, not a
+/// target.
+const MAX_VISIBLE_SLOTS: u32 = 1 << 24;
+
+/// `instance_count × meshlet_count`, **in `u64`** and clamped (L2.L4).
+///
+/// The bare `u32` multiply this replaces fed three places that must agree: the
+/// `visible` buffer's size, and two `dispatch_workgroups(total.div_ceil(64))`
+/// calls. The release profile carries no `overflow-checks`, so past 2³² pairs
+/// the product wrapped **small** — an undersized buffer written by a dispatch
+/// sized from the same wrapped number, which is the 65 536² class one crate over
+/// and lands as GPU memory corruption rather than a panic.
+///
+/// Clamping rather than refusing, because this is a frame-loop sizing decision
+/// with no error channel and no user in front of it; an asset that reaches the
+/// ceiling is drawn from a truncated cull set, which is a visual artefact rather
+/// than a corrupt buffer. The single door is what makes the three sites agree by
+/// construction rather than by three copies of the same expression.
+fn visible_slots(instance_count: u32, meshlet_count: u32) -> u32 {
+    (u64::from(instance_count) * u64::from(meshlet_count)).min(MAX_VISIBLE_SLOTS as u64) as u32
+}
+
 /// What the persisted per-pair visibility (`prev_visible`) is only meaningful
 /// against. Any change invalidates it — slot `i` would name a different
 /// (instance, meshlet) pair, or the frame targets the HZB samples were
@@ -1183,7 +1211,7 @@ impl AssetDraw {
             self.instance_cap = cap;
             rebuilt = true;
         }
-        let total = instance_count * meshlet_count;
+        let total = visible_slots(instance_count, meshlet_count);
         if total > self.visible_cap {
             let cap = total.next_power_of_two().max(4);
             let mk = |label, size| {
@@ -2369,7 +2397,7 @@ impl RenderNode for VgeomNode {
                 &draw.vis_cur,
                 &frame.vgeom_audit.stats,
             );
-            let total = instance_count * meshlet_count;
+            let total = visible_slots(instance_count, meshlet_count);
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("vgeom-cull-early"),
@@ -2471,7 +2499,7 @@ impl RenderNode for VgeomNode {
                 &draw.vis_cur,
                 &frame.vgeom_audit.stats,
             );
-            let total = instance_count * meshlet_count;
+            let total = visible_slots(instance_count, meshlet_count);
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("vgeom-cull-late"),

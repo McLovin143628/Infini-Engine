@@ -73,18 +73,46 @@ pub struct ResolvedSlice {
     pub uv_max: [f64; 2],
 }
 
+/// The largest grid a sheet may be sliced into (C4-15).
+///
+/// `columns` and `rows` come out of the **sidecar** — an editable TOML file — so
+/// `100_000 × 100_000` is a value a text editor can produce. Without a ceiling
+/// that is 10¹⁰ iterations, each pushing a heap `String`, behind a
+/// `Vec::with_capacity` whose `u32` product wrapped *small*: the editor hangs
+/// and then dies, silently in release, from a file somebody hand-edited.
+///
+/// 64 Ki cells is far past any real atlas (a 4096² sheet of 16-pixel tiles is
+/// 65 536 cells exactly, which is the number this is) and is bounded work.
+const MAX_GRID_CELLS: u32 = 1 << 16;
+
 impl GridSlicing {
-    /// Row-major tile count.
+    /// Row-major tile count, bounded by [`MAX_GRID_CELLS`].
+    ///
+    /// **`u64`, not `u32`** (C4-15): `columns * rows` in `u32` wraps, and the
+    /// release profile has no `overflow-checks`, so `65_536 × 65_536` used to
+    /// report **zero** cells and `100_000 × 100_000` reported 1 410 065 408.
     pub fn count(&self) -> u32 {
-        self.columns.max(1) * self.rows.max(1)
+        (u64::from(self.columns.max(1)) * u64::from(self.rows.max(1))).min(MAX_GRID_CELLS as u64)
+            as u32
+    }
+
+    /// Whether this grid was clamped by [`MAX_GRID_CELLS`] — the fact an import
+    /// advisory needs, since a truncated slice list otherwise looks like an
+    /// author's choice.
+    pub fn exceeds_ceiling(&self) -> bool {
+        u64::from(self.columns.max(1)) * u64::from(self.rows.max(1)) > MAX_GRID_CELLS as u64
     }
 
     /// Resolve every cell to a [`ResolvedSlice`], named by its row-major index
     /// (`"0"`, `"1"`, …). Cell sizes are computed in `f64` so non-integer
     /// divisions stay precise in UV space; the reported pixel rect is rounded.
+    ///
+    /// Bounded by [`MAX_GRID_CELLS`]: the loop stops there rather than running
+    /// for the rest of the session.
     pub fn resolve(&self, tex_w: u32, tex_h: u32) -> Vec<ResolvedSlice> {
         let cols = self.columns.max(1);
         let rows = self.rows.max(1);
+        let budget = self.count() as usize;
         let tw = tex_w.max(1) as f64;
         let th = tex_h.max(1) as f64;
 
@@ -96,20 +124,26 @@ impl GridSlicing {
         let cell_w = usable_w / cols as f64;
         let cell_h = usable_h / rows as f64;
 
-        let mut out = Vec::with_capacity((cols * rows) as usize);
-        for r in 0..rows {
+        let mut out = Vec::with_capacity(budget);
+        'grid: for r in 0..rows {
             for c in 0..cols {
+                if out.len() >= budget {
+                    break 'grid;
+                }
                 let x0 = self.margin_x as f64 + c as f64 * (cell_w + self.padding_x as f64);
                 let y0 = self.margin_y as f64 + r as f64 * (cell_h + self.padding_y as f64);
                 let x1 = x0 + cell_w;
                 let y1 = y0 + cell_h;
                 out.push(ResolvedSlice {
-                    name: (r * cols + c).to_string(),
+                    // `u64`: `r * cols + c` in `u32` wraps at a large grid and
+                    // produced DUPLICATE slice names — two cells with one
+                    // identity (C4-15).
+                    name: (u64::from(r) * u64::from(cols) + u64::from(c)).to_string(),
                     px: [
-                        x0.round() as u32,
-                        y0.round() as u32,
-                        cell_w.round() as u32,
-                        cell_h.round() as u32,
+                        px_round(x0),
+                        px_round(y0),
+                        px_round(cell_w),
+                        px_round(cell_h),
                     ],
                     uv_min: [x0 / tw, y0 / th],
                     uv_max: [x1 / tw, y1 / th],
@@ -117,6 +151,22 @@ impl GridSlicing {
             }
         }
         out
+    }
+}
+
+/// A pixel coordinate from an `f64` computation, as `u32`.
+///
+/// `as u32` on a float **saturates** (negative → 0, huge → `u32::MAX`) and maps
+/// NaN to 0, so a negative or non-finite rect used to clamp silently to the
+/// top-left corner and read as a deliberate one (C4-45). This spells the
+/// arithmetic out so the clamp is a decision rather than a language rule nobody
+/// re-derives at the call site — and it puts **every** non-finite value at the
+/// origin, because an infinity is no more a pixel coordinate than a NaN is.
+fn px_round(v: f64) -> u32 {
+    if v.is_finite() {
+        v.round().clamp(0.0, u32::MAX as f64) as u32
+    } else {
+        0
     }
 }
 
@@ -384,5 +434,64 @@ mod tests {
         assert_eq!(a, b, "re-emit is byte-identical");
         let back: SpriteSheetSlices = toml::from_str(&a).unwrap();
         assert_eq!(back, model);
+    }
+
+    /// **C4-15 — the sidecar-fed grid that hung the editor.**
+    ///
+    /// `columns` and `rows` come out of an editable TOML sidecar. `Vec::with_capacity((cols * rows) as usize)`
+    /// was a `u32` multiply, and the release profile has no `overflow-checks`, so
+    /// `100_000 x 100_000` wrapped the capacity SMALL and the loop then ran
+    /// 10^10 iterations, each pushing a heap `String`. `(r * cols + c).to_string()`
+    /// wrapped in the same arithmetic and produced duplicate slice names.
+    ///
+    /// Un-fix mutation: restore either `u32` product and the corresponding
+    /// assertion fails (the count one instantly; the loop one by not returning).
+    #[test]
+    fn an_absurd_grid_is_bounded_rather_than_run() {
+        // The wrap the counts used to take: 65 536 x 65 536 is 2^32, i.e. ZERO
+        // in u32, and 100 000^2 is 1 410 065 408.
+        let g = |columns, rows| GridSlicing {
+            columns,
+            rows,
+            margin_x: 0,
+            margin_y: 0,
+            padding_x: 0,
+            padding_y: 0,
+        };
+        assert_eq!(g(65_536, 65_536).count(), MAX_GRID_CELLS);
+        assert_eq!(g(100_000, 100_000).count(), MAX_GRID_CELLS);
+        assert!(g(100_000, 100_000).exceeds_ceiling());
+        assert!(!g(64, 64).exceeds_ceiling());
+        // Ordinary grids are unchanged.
+        assert_eq!(g(8, 4).count(), 32);
+        assert_eq!(g(0, 0).count(), 1);
+
+        // The resolve loop is bounded, and every name it emits is unique — which
+        // the wrapped `r * cols + c` could not promise.
+        let slices = g(100_000, 100_000).resolve(1024, 1024);
+        assert_eq!(slices.len(), MAX_GRID_CELLS as usize);
+        let mut names: Vec<&str> = slices.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "two cells were given one name");
+    }
+
+    /// **C4-45 — a float-to-int cast saturates; it does not refuse.**
+    ///
+    /// `as u32` maps a negative to 0, a huge value to `u32::MAX`, and NaN to 0,
+    /// so a nonsense rect used to clamp silently into the top-left corner and
+    /// read as a deliberate one. Spelled out, the clamp is a decision.
+    #[test]
+    fn a_nonsense_pixel_rect_clamps_deliberately_rather_than_by_accident() {
+        // Neither a NaN nor an infinity is a pixel coordinate, so both take the
+        // origin rather than a saturating edge that would read as authored.
+        assert_eq!(px_round(f64::NAN), 0);
+        assert_eq!(px_round(f64::INFINITY), 0);
+        assert_eq!(px_round(f64::NEG_INFINITY), 0);
+        assert_eq!(px_round(-12.7), 0);
+        assert_eq!(px_round(1e30), u32::MAX);
+        assert_eq!(px_round(12.4), 12);
+        assert_eq!(px_round(12.6), 13);
     }
 }

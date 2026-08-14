@@ -200,11 +200,24 @@ pub struct HeightmapGrid {
 
 impl HeightmapGrid {
     /// The lattice `import` maps a `width × height` source onto.
+    ///
+    /// **The tile counts are derived in `i64`** (C4-17). `(width as i32 - 1)` on
+    /// a source that legally declares `i32::MAX` (or more — PNG width is a `u32`
+    /// field) wrapped negative, `.max(0)` pulled it to zero, and `.max(1)`
+    /// handed back **one tile**: a two-billion-sample source became a single
+    /// tile with no error, reachable from `probe` alone, which reads an 8-byte
+    /// IHDR and no pixels. `check_png_shape` now refuses those dimensions
+    /// outright; this is the arithmetic behind that door.
     pub fn new(width: u32, height: u32, import: &HeightmapImport) -> Self {
         let resolution = import.resolution();
         let cells = (resolution - 1) as i32;
-        let ntx = (((width as i32 - 1).max(0) + cells - 1) / cells).max(1);
-        let ntz = (((height as i32 - 1).max(0) + cells - 1) / cells).max(1);
+        let tiles = |n: u32| -> i32 {
+            let cells = i64::from(cells);
+            let span = (i64::from(n) - 1).max(0);
+            (((span + cells - 1) / cells).max(1)).min(i64::from(i32::MAX)) as i32
+        };
+        let ntx = tiles(width);
+        let ntz = tiles(height);
         Self {
             resolution,
             cells,
@@ -387,6 +400,7 @@ fn probe_png<R: BufRead + Seek>(src: R) -> Result<HeightmapProbe, TerrainError> 
     let (w, h) = (info.width, info.height);
     let depth = png_bit_depth(info.bit_depth);
     check_png_shape(info.color_type, info.bit_depth, info.interlaced)?;
+    check_dimensions(w, h)?;
     Ok(HeightmapProbe {
         format: HeightmapFormat::Png,
         width: w,
@@ -409,6 +423,35 @@ fn png_bit_depth(d: png::BitDepth) -> u32 {
 
 /// The PNG shapes the row decoder handles — see the module docs for why colour is
 /// refused rather than luma-averaged.
+/// The largest heightmap dimension the importer will accept, in samples.
+///
+/// 1 048 576 samples on a side is 2 TB of 16-bit source and a lattice of
+/// millions of tiles — comfortably past anything real, which is the point: the
+/// number is a ceiling that keeps every downstream `i32`/`u32` product exact,
+/// not a capability claim. Above it the file is refused with its own dimensions
+/// named, which is a better answer than a silent one-tile import (C4-17).
+const MAX_HEIGHTMAP_SIDE: u32 = 1 << 20;
+
+/// Refuse a source whose declared dimensions the lattice arithmetic cannot
+/// carry (C4-17).
+///
+/// Reachable from `probe` alone: a PNG's `IHDR` is eight bytes and declares two
+/// `u32`s, so this costs nothing and fires before a single pixel is read.
+fn check_dimensions(width: u32, height: u32) -> Result<(), TerrainError> {
+    if width == 0 || height == 0 {
+        return Err(TerrainError::Unsupported(format!(
+            "heightmap declares a {width}×{height} image"
+        )));
+    }
+    if width > MAX_HEIGHTMAP_SIDE || height > MAX_HEIGHTMAP_SIDE {
+        return Err(TerrainError::Unsupported(format!(
+            "heightmap is {width}×{height}; this importer accepts up to \
+             {MAX_HEIGHTMAP_SIDE} samples on a side"
+        )));
+    }
+    Ok(())
+}
+
 fn check_png_shape(
     color: png::ColorType,
     depth: png::BitDepth,
@@ -449,6 +492,7 @@ fn probe_exr<R: BufRead + Seek>(src: R) -> Result<HeightmapProbe, TerrainError> 
         exr::meta::attribute::SampleType::U32 => 32,
     };
     let float_samples = !matches!(sample_type, exr::meta::attribute::SampleType::U32);
+    check_dimensions(size.0 as u32, size.1 as u32)?;
     Ok(HeightmapProbe {
         format: HeightmapFormat::Exr,
         width: size.0 as u32,
@@ -522,6 +566,7 @@ fn decode_rows_png<R: BufRead + Seek>(
     let (width, height, depth) = {
         let info = reader.info();
         check_png_shape(info.color_type, info.bit_depth, info.interlaced)?;
+        check_dimensions(info.width, info.height)?;
         (info.width, info.height, info.bit_depth)
     };
     if width == 0 || height == 0 {
@@ -705,9 +750,18 @@ fn decode_rows_exr<R: BufRead + Seek>(
 /// Rows being filled in from EXR line fragments. A row leaves as soon as its
 /// full width is covered, so a scanline file never holds more than one block's
 /// worth and a tiled file never more than one tile-row's.
+/// Which columns of one open row have actually been written (C4-18).
+///
+/// A bitmask plus its popcount, kept incrementally so `write` stays `O(values)`
+/// rather than re-scanning the row.
+struct RowCoverage {
+    mask: Vec<u64>,
+    covered: usize,
+}
+
 struct PartialRows {
     width: usize,
-    open: std::collections::BTreeMap<usize, (Vec<f64>, usize)>,
+    open: std::collections::BTreeMap<usize, (Vec<f64>, RowCoverage)>,
     pool: Vec<Vec<f64>>,
 }
 
@@ -721,25 +775,50 @@ impl PartialRows {
     }
 
     /// Write `values` starting at column `x0` of row `y`; `true` when the row is
-    /// now complete.
+    /// now **covered**.
+    ///
+    /// # Coverage, not a write count (C4-18)
+    ///
+    /// This used to accumulate `filled += written` and call the row done at
+    /// `filled >= width`. An EXR with **overlapping** chunks — duplicate or
+    /// re-sent line fragments, which `filter_chunks` does not filter (it selects
+    /// by layer and level only) — drove that counter to `width` while some
+    /// columns had never been touched at all. Those columns kept the pooled or
+    /// zero-initialized value they were created with, and were persisted into
+    /// the `.inf_terrain` as elevations.
+    ///
+    /// A per-column bitmask answers the question the row actually needs — *has
+    /// every column been written* — rather than a proxy for it, and a second
+    /// write to an already-covered column costs nothing but is not counted
+    /// twice.
     fn write(&mut self, y: usize, x0: usize, values: impl Iterator<Item = f64>) -> bool {
         let width = self.width;
+        let words = width.div_ceil(64);
         let fresh = self.pool.pop();
-        let (row, filled) = self
-            .open
-            .entry(y)
-            .or_insert_with(|| (fresh.unwrap_or_else(|| vec![0.0; width]), 0));
+        let entry = self.open.entry(y).or_insert_with(|| {
+            (
+                fresh.unwrap_or_else(|| vec![0.0; width]),
+                RowCoverage {
+                    mask: vec![0u64; words],
+                    covered: 0,
+                },
+            )
+        });
+        let (row, cov) = entry;
         row.resize(width, 0.0);
-        let mut written = 0usize;
+        cov.mask.resize(words, 0);
         for (i, v) in values.enumerate() {
             let x = x0 + i;
             if x < width {
                 row[x] = v;
-                written += 1;
+                let (w, b) = (x / 64, x % 64);
+                if cov.mask[w] & (1u64 << b) == 0 {
+                    cov.mask[w] |= 1u64 << b;
+                    cov.covered += 1;
+                }
             }
         }
-        *filled += written;
-        *filled >= width
+        cov.covered >= width
     }
 
     fn take(&mut self, y: usize) -> Option<Vec<f64>> {
@@ -1132,5 +1211,88 @@ mod tests {
         // 2049 samples at 8 m = 16 384 m = 16.384 km across.
         assert_eq!(import.world_extent(2049, 1025).x, 16384.0);
         assert_eq!(import.world_extent(2049, 1025).y, 8192.0);
+    }
+
+    /// **C4-17 — a source that declares more samples than the lattice
+    /// arithmetic can carry.**
+    ///
+    /// `(width as i32 - 1)` on a PNG legally declaring `i32::MAX` wrapped
+    /// negative, `.max(0)` pulled it to zero, and `.max(1)` handed back **one
+    /// tile** — a two-billion-sample source silently became a single tile, from
+    /// nothing more than an 8-byte IHDR that `probe` reads without touching a
+    /// pixel.
+    ///
+    /// Un-fix mutation: restore the `i32` expression in `HeightmapGrid::new` and
+    /// the one-tile assertion below fails.
+    #[test]
+    fn an_absurd_source_size_never_collapses_to_a_single_tile() {
+        let import = HeightmapImport::default();
+        // Refused at the door, by name and with the dimensions in the message.
+        let e = check_dimensions(i32::MAX as u32, 1024)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("2147483647"), "{e}");
+        assert!(check_dimensions(0, 1024).is_err());
+        assert!(check_dimensions(1024, 0).is_err());
+        assert!(check_dimensions(MAX_HEIGHTMAP_SIDE, MAX_HEIGHTMAP_SIDE).is_ok());
+
+        // And the arithmetic behind that door does not wrap either: the lattice
+        // for a huge source is huge, not one tile.
+        let cells = (import.resolution() - 1) as i64;
+        for w in [u32::MAX, i32::MAX as u32, MAX_HEIGHTMAP_SIDE] {
+            let g = HeightmapGrid::new(w, 1024, &import);
+            let want = (((w as i64 - 1) + cells - 1) / cells).max(1);
+            assert_eq!(
+                g.ntx as i64, want,
+                "a {w}-sample source produced {} tiles across",
+                g.ntx
+            );
+            assert!(
+                g.ntx > 1,
+                "a {w}-sample source collapsed to {} tiles",
+                g.ntx
+            );
+        }
+        // Ordinary sizes are untouched.
+        let g = HeightmapGrid::new(2049, 1025, &import);
+        assert_eq!(g.ntx, HeightmapGrid::new(2049, 1025, &import).ntx);
+        assert!(g.ntx >= 1 && g.ntz >= 1);
+    }
+
+    /// **C4-18 — `PartialRows` counted writes, not coverage.**
+    ///
+    /// An EXR with overlapping chunks (duplicate or re-sent line fragments, which
+    /// `filter_chunks` does not filter — it selects by layer and level only)
+    /// drove the old `filled += written` counter to `width` while some columns
+    /// had never been touched. Those columns kept the pooled or zero-initialized
+    /// value and were persisted into the `.inf_terrain` as elevations.
+    ///
+    /// Un-fix mutation: restore the counter and the first assertion fails —
+    /// eight overlapping writes of the same four columns declare a 16-wide row
+    /// complete.
+    #[test]
+    fn overlapping_row_fragments_never_declare_a_row_covered() {
+        let mut rows = PartialRows::new(16);
+        // Eight writes of columns 0..4 — 32 values into a 16-wide row.
+        for _ in 0..8 {
+            assert!(
+                !rows.write(0, 0, [1.0, 2.0, 3.0, 4.0].into_iter()),
+                "the row was declared covered by re-writing four columns"
+            );
+        }
+        // Covering the rest completes it, exactly once.
+        assert!(rows.write(0, 4, (4..16).map(|i| i as f64)));
+        let row = rows.take(0).unwrap();
+        assert_eq!(row.len(), 16);
+        assert_eq!(row[0], 1.0);
+        assert_eq!(row[15], 15.0);
+
+        // A row written straight through in one go still completes on the last
+        // value, and not before it.
+        let mut rows = PartialRows::new(16);
+        for x in 0..15 {
+            assert!(!rows.write(1, x, std::iter::once(x as f64)));
+        }
+        assert!(rows.write(1, 15, std::iter::once(15.0)));
     }
 }
