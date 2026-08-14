@@ -13981,6 +13981,277 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
 >   stops being only depth") has not arrived. **Re-routed to P28.3**, which owns
 >   the VSM page cache's budget.
 
+> ## P28.2 AUDIT — the rule derived independently, an address with nothing
+> holding it, and a tangent the importer never gave (2026-08-14)
+>
+> Adversarial audit of `04d6465..4cc4d70` (nine commits, 29 files, +3 522 /
+> −160). Five fix commits, `934cfc4`, `659c79a`, `ccfdfe6`, `4111c82` and this
+> block. Goldens **54**, count, content digest and `git diff` over
+> `tests/goldens/` all unchanged across audit and batch alike. No schema moved.
+>
+> ### 1. THE MIP RULE: derived independently, and it is RIGHT
+>
+> The central question, because the gate cannot answer it: the oracle
+> **re-derives** `mip = min(mip_count − 1, lod / 2)`, so a rule that is *wrong*
+> rather than *shifted* is invisible to the whole churn — both sides say the
+> same thing. M1 killed a shifted rule because only one side moved. That is
+> consistency. And the memo's case for the rule is a refusal of one rival (the
+> density rule at `K = 64`, which never pairs mip 0), which argues against that
+> rival and not for `lod / 2`.
+>
+> Derived from the other end and **confirmed**. "Matched detail" means a page's
+> **texels per triangle** does not depend on which page it is. The builder's
+> `target_ratio` is 0.5 and a mip quarters texels, so `texels(m)/tris(L) =
+> D₀ · 2^L / 4^m` — constant exactly at `m = L/2`, geometrically divergent at
+> any other slope. Measured on the memo's own 96² fixture against 2 048², page
+> by page from finest to coarsest: **227.6 / 455.4 / 228.8 / 460.3 / 229.8 /
+> 476.6 / 169.8** texels per triangle. The factor-of-2 sawtooth integer
+> flooring predicts, and nothing else. The premise holds too — per-level
+> triangle ratios **0.4975 – 0.5025** over the deep ladder, drifting to 0.60 and
+> 0.95 at the two coarsest levels where the boundary locks bind. On a 40² grid
+> against a **1 024 × 256** texture the sawtooth is exact (81.92 / 163.0 / 81.92
+> / 164.1 / 81.92), so the rule is not an artefact of a square pyramid. Against
+> one mip per LOD level the spread is 86× instead of 2.8×.
+>
+> Pinned as an arm-level property, as a RATIO between candidate slopes measured
+> on one DAG — immune to `meshopt` building a different DAG elsewhere:
+> `the_mip_rule_is_the_slope_that_keeps_texel_density_invariant` (`4111c82`),
+> mutation-verified against `mip = lod`.
+>
+> **Two amendments the derivation forces.**
+>
+> * **The rounding direction is the whole argument, and it was not written
+>   down.** Measured, the spread *cannot* separate floor from ceil — they sit
+>   within a few percent. What separates them is direction: flooring hands the
+>   odd levels a texture up to 2× **denser** than matched, ceil hands them one
+>   2× **sparser**, and sparser-than-matched is the "detailed mesh, blurry
+>   texture" artifact by half a level, on the rule that exists to close it.
+> * **The root page is outside the rule, and its pairing is not just a no-op —
+>   it is vacuous.** It takes the coarsest mip by fiat; on a full pyramid that
+>   is the **1 × 1 texel** level, so page 0's 544 triangles pair against ONE
+>   texel: **0.002 texels per triangle against a band of 170 – 477**. Harmless,
+>   because that mip is pinned at registration and the pairing demands nothing —
+>   but "the root page costs the coupling nothing" also means **page 0 has no
+>   coupling at all**, and the invariant gate's page-0 checks are vacuous by
+>   construction (one deduped tile of 1 000+).
+>
+> ### 2. THE STALENESS STORY WAS ABSENT, and the failure mode is total
+>
+> The v3 tiles section holds `(guid, mip, x, y)` **addresses into another
+> asset's address space**. The memo contains the word "stale" zero times. There
+> is no version, no digest and no extent tying a `.inf_vmesh`'s pairing to the
+> `.inf_tex` it names, and P26.1 established no doctrine to inherit either — its
+> aliasing finding is *intra*-container (a v2 payload not containing the tiles
+> it declared). So this is a question the batch opened and did not answer.
+>
+> Constructed and measured. A `.inf_vmesh` paired against a 2 048² image, met at
+> runtime by a 512² image of the same GUID: **residency reached zero pages and
+> stayed there — the mesh vanished, silently, on every frame, for ever.** The
+> mechanism is that `VtResidency::is_resident` answers `false` for two different
+> facts — *not paged in* and *no such tile* — and the pairing read both as "the
+> budget refused". The first is an answer a later transaction can change; the
+> second is a statement about a different image, and no budget will ever seat a
+> tile that does not exist. The **root page's** coarsest-mip address is the
+> first one a shrunken pyramid loses, which is why the whole asset went rather
+> than its detail. The other direction (re-imported LARGER) is benign: every
+> cooked address still exists and over-supplies.
+>
+> Fixed in `934cfc4`: `VtResidency::can_address` separates the two answers, the
+> pairing drops a stale address exactly as it drops a texture this level does
+> not bind, and it is COUNTED (`VgeomStreamReport::stale_tiles`) because nothing
+> else in the tree can see it. Armed by
+> `a_pairing_cooked_against_another_image_degrades_instead_of_erasing_the_asset`,
+> whose control — the batch as it landed — must reach zero resident pages.
+>
+> **Reachability, honestly.** `inf_packager::cook` is the only producer of a
+> paired `.inf_vmesh` and it cooks the whole closure in one call, so a pack is
+> internally consistent today and the bug was latent. It stops being latent the
+> day anything ships an incremental cook, a patch pack or a mod override — and
+> the format has nothing that would notice.
+>
+> ### 3. THE TANGENT CHANNEL SHIPPED A DIRECTION THE IMPORTER NEVER GAVE
+>
+> The memo: *"a surface without one shades exactly as it did before this
+> batch"*, resting on `NO_TANGENT` being *"how 'the importer had nothing to
+> give' travels all the way to the shader as one comparison"*. True of pre-v3
+> **containers**. False of pre-v3 **content**, and that is most content.
+>
+> Every producer substitutes `[1, 0, 0, 1]` when a source file has no tangents —
+> `gltf_import`'s `unwrap_or`, `obj_import` unconditionally, `MeshVertex::
+> default`, `inf_dcc::TANGENT_FALLBACK` — `vgeom_streams` passed the field
+> through verbatim, and `pack_tangent` returns its sentinel only for a
+> **non-finite or zero-length** input. `[1, 0, 0]` is neither: it packs to
+> `0x3F8003FF`, `w = +1`. So a v3 cook of any OBJ mesh, any glTF without a
+> `TANGENT` attribute or any UV-less DCC export shaded through a **constant
+> object-space +X tangent** instead of the per-fragment cotangent frame it used
+> before the channel existed. Invisible to every arm in the batch: no golden
+> pairs a tangented meshlet asset with a VT normal map, and the cook's own
+> `dense_mesh` fixture is built with `..Default::default()` — the committed test
+> project was cooking the defect. Fixed in `659c79a` (one named constant; an
+> empty tangent stream when every vertex carries it; whole-mesh and exact, and
+> it cannot misfire because a surface whose authored tangent really is uniformly
+> +X has axis-aligned uvs and the derivative frame derives +X for it too).
+>
+> **Two more in the same channel, both arithmetic** (`ccfdfe6`):
+>
+> * **A tangent was transformed by the NORMAL matrix** in both consumers —
+>   `rotation · scale⁻¹`, correct for a normal, wrong for a tangent, which is
+>   contravariant and rides `rotation · scale`. Uniform scale hides it
+>   (proportional, and normalization erases the difference); **non-uniform
+>   instance scale** does not, and the result is a frame *worse* than the
+>   derivative one it replaced, which Gram-Schmidt cannot recover.
+> * **`vt_apply_normal_t` trusted the MAGNITUDE of `w`.** `vis_resolve` takes
+>   handedness from the nearest corner precisely so a uv-mirror seam cannot
+>   average +1 and −1 into 0 — and then `vgeom_mesh` hands the same function an
+>   ordinary interpolated `w`, so `cross(n, t) * w` returns a bitangent shorter
+>   than unit: the non-orthonormal frame the Gram-Schmidt two lines above exists
+>   to prevent. Two consumers of one function, disagreeing about it.
+>
+> ### 4. GATES THAT COULD NOT SEE THEIR SUBJECT — six, all now armed
+>
+> | # | the gate | what it could not see | fix |
+> |---|---|---|---|
+> | a | `the_shaders_tangent_unpack_is_the_rusts` | **the entire octahedral fold** — deleting it, swapping its two signs or dropping the x/y swap all passed green, and each is a hemisphere decoded wrong. Its Rust half round-tripped `[0, 0, 1]`, whose two quantized fields are both **zero**, so any shift amounts and any fold decoded it correctly | `ccfdfe6` |
+> | b | `the_shaders_vertex_stride_is_the_rusts` | `global_v * 10u` — it banned one literal spelling and never required the constant to be USED (a ban enumerates what you thought of) | `ccfdfe6` |
+> | c | `a_v2_image_claiming_a_tiles_section_is_refused` | the `tiles_off` half of a two-lane guard; narrowing the guard to `tile_count` passed green | `4111c82` |
+> | d | `unpairable_cluster_material_advisory` | **no test caller at all** — the P26.3b lesson the memo cites two paragraphs above the advisory it forgot to call | `659c79a` |
+> | e | the invariant churn | the protection order. One want class over a comfortable budget never contests a slot, so an `apply_wants` that protected **nothing** passes every arm in the file | `934cfc4` |
+> | f | the invariant churn, page 0 | vacuous by construction — the root page's tile is pinned at registration, so its check can never fail (§1) | stated, not closable here |
+>
+> Arm (e) also **measured a bound nobody had stated**: the protection is
+> priority-**blind**. Step 3 protects every want that is already resident, of
+> any class, before step 4 admits any miss, of any class — so a refinement that
+> got there first outranks a floor want that has not, and on the audit's fixture
+> a decoy feedback class costs the pairing its finest page. The guarantee that
+> survives is the one the invariant needs (a resident cluster page never loses
+> ground it holds, under a want that only refines) and it is asserted as that.
+>
+> ### 5. WITHDRAWN ON MEASUREMENT
+>
+> * **The pool-byte table's smallest-grid column does not reproduce.** 48² and
+>   96² reproduce to 0.02 points (55.38 / 54.49 % vertex records; 5.44 / 5.42 %
+>   descriptors). The row labelled **16²** matches no grid size at all — 16²
+>   measures 58.52 / 5.26 / 18.00 / 18.22 against the printed 56.7 / 5.50 /
+>   18.96 / 18.82. The corrected ranges over 16²/48²/96²: vertex records
+>   **54.5 – 58.5 %**, `[f32; 4]` **+27.3 – 29.3 %**, one packed word
+>   **+6.8 – 7.3 %**. The decision is untouched — the 4× ratio between the
+>   options is exact by construction.
+> * **And the claim beside the table is right about the wrong numbers.** The
+>   memo says its descriptor share *"reproduces P28.1's independently-measured
+>   5.26 – 5.44 %"*; the printed row's own range is 5.40 – 5.50, which does not
+>   contain 5.26 and exceeds 5.44. The **real** measurement is 5.26 / 5.44 /
+>   5.42 — range exactly 5.26 – 5.44. The reproduction is genuine; the table
+>   printed beside it is not the measurement that reproduced.
+> * **The quantization figure was a sample, not a bound.** `2.03 × 10⁻⁶` /
+>   `0.115°` came from a 96 × 96 × 2 sweep of *directions*, and the error is a
+>   function of where a direction falls inside a **cell**, not of the direction.
+>   A 2 M-direction sweep already beats it (2.21e-6). Searching the cell centres
+>   — where the maximum provably lives — gives **2.33 × 10⁻⁶ = 0.124°**, 21 %
+>   above the published number. Pinned as a searched bound (`4111c82`).
+> * **`pack_tangent` refuses more than the doc says.** "Non-finite or
+>   zero-length" understates it: any tangent whose *squared* length over- or
+>   underflows `f32` also becomes the sentinel, i.e. `|t| ≳ 1.8 × 10¹⁹` or
+>   `|t| ≲ 1.1 × 10⁻¹⁹`. Degrades safely (the derivative frame), unreachable
+>   from any importer in the tree, recorded rather than changed.
+>
+> ### 6. VERIFIED AND HELD
+>
+> * **The exponent pin closes the subnormal/NaN class completely.** Swept over
+>   NaN, ±∞, ∓0, subnormal, `MIN_POSITIVE` and huge-finite inputs, every output
+>   is either exactly `NO_TANGENT` or carries exponent 127 with sign 0; and the
+>   **exhaustive 2²³ sweep of every bit pattern the packer can emit** unpacks
+>   finite and unit (worst `|len − 1|` = 1.8e-7). `NO_TANGENT = 0` is
+>   structurally unreachable, since `TANGENT_EXP ≠ 0` is OR-ed into every word.
+> * **v2 compatibility, against the real bytes.** `PAGE_ENTRY_LEN` 96,
+>   `tile_count` at 40, `tiles_off` at 88, both zero in the committed
+>   `v2_dense12.inf_vmesh`; the v2 reader parses it at the 32-byte stride, the
+>   lift widens to 36 and invents neither a tangent nor a pairing.
+> * **v2 fixture provenance, without a worktree build.** The committed fixture's
+>   materialized DAG is identical to `dense_mesh(12)` rebuilt on this platform —
+>   6 meshlets, 169 vertices, 2 groups, 3 levels, 3 pages, every position,
+>   normal and uv equal. It is what it says it is.
+> * **The v1 shadow record is freeze-pinned** (`v1_records`, `Deserialize`-only,
+>   with the "never edit these" doc) and reached only through
+>   `peek_schema_version`.
+> * **The impossibility argument survives every route attacked.** `uploads` is
+>   private and `PageUpload`'s `indices` is too, so no external literal can
+>   construct one; registration is a whole-level operation through
+>   `set_vt_level`, *outside* `render`, so no layout rebuild can land between the
+>   want pass and the pair; `plan` and `commit` are unconditionally paired inside
+>   one `render`, and `plan_cluster_pages`'s three early-return conditions are
+>   character-identical to `run`'s, so a frame that stages nothing also draws
+>   nothing; a `pools_grew` re-stage re-asks `seat` for every already-resident
+>   page rather than writing it unchecked; and `cull_visible_source` really does
+>   go through `pair` with an empty texture half.
+> * **The sync hoist changed no other node's order.** The hoist is out of
+>   `VgeomNode::run` into `EngineRenderer::render`; no `graph.add` order moved
+>   and no other node was touched, and the meshlet sync still happens-before
+>   every consumer because `run` is reached only after `commit_cluster_pages`.
+> * **The lockfile record is two *workspace* dev-dependencies** (`inf-asset`,
+>   `uuid`) for `inf-render`. No new external crate.
+> * **The two mesh-scoped advisories fire through a REAL cook**, both of them,
+>   now that the second has a caller.
+>
+> ### 7. THE ROUTING TABLE — one misquote and one wrong owner
+>
+> The rule was followed structurally: `git diff` over `docs/ROADMAP.md` for the
+> whole batch is **263 insertions, 0 deletions**, a single appended hunk. No
+> earlier routing line was edited. But the re-routing paragraph itself has three
+> defects, and they are corrected here rather than in place, for the same
+> reason:
+>
+> * **The quoted premise is not memo text.** *"when a page stops being only
+>   depth"* is the **P27.5 audit's own bullet headline**, presented as what "the
+>   clauses named". What the clauses actually say is *"P28.2, where interleaved
+>   cluster pages change what a page* is*"* (`p27-1-page-geometry.md`) and the
+>   same phrase plus *"where a bordered page becomes cheap enough to re-weigh"*
+>   (`p27-4-receiver-filtering.md`). **P28.2 satisfied that trigger on its
+>   face.** The substantive defence — a geometry page is not a shadow page — is
+>   sound, but it is new reasoning, not a premise the memos stated, and the
+>   re-route should say so.
+> * **The wider VSM kernel was never routed to P28.2 by a memo.**
+>   `p27-4-receiver-filtering.md` routes it to **P27.5**. The P27.5 audit's own
+>   bullet text says so and the header above it contradicts it.
+> * **Four items were routed to P28.2, not two** — the two shadow-page clauses,
+>   P28.1's voxel-receiver re-route (handled, re-routed to P28.3) and P26.5's
+>   tangent channel (delivered). And of P28.1's six-item *"Carried to P28.2, as
+>   amended"* list, this batch re-enumerates **two**. Each of the other four
+>   carries its own onward routing inside P28.1's text so none is stranded, but
+>   for a phase whose stated law is *enumerate rather than summarise*, not
+>   re-listing them is the failure mode the P27.5 audit named.
+>
+> Unrelated and inherited, recorded because it is unbacked: the golden content
+> digest quoted in the P28.1 block (`3e6182a6…22822fa5`) **matches nothing in
+> the tree**. The digest actually pinned, in `phase26_gate` and `phase27_gate`
+> both, is `23d41a61c31c28a17a20871b6c875707`. P28.2's "count and content
+> digest" claim is backed by those constants and is sound.
+>
+> ### 8. REMAINDERS, as amended
+>
+> Everything the STATUS block carries still stands, plus:
+>
+> * **Nothing ties a pairing to the image it was cooked against.** The stale
+>   address is now counted and degrades instead of erasing, which is the right
+>   *runtime* answer; the *format* answer — a mip-count or a content digest in
+>   the tiles section, checked at load — belongs with P28.3's unified streamer,
+>   which is where cross-consumer identity is owned.
+> * **The `stale_tiles` counter has no reader.** It reaches
+>   `VgeomStreamReport` and no panel or gate consumes it; a cook-side advisory
+>   cannot exist, because the cook is the side that is right.
+> * **The protection order is priority-blind** (§4). A feedback class already
+>   resident outranks the pairing's floor wants; one budget over both consumers
+>   is P28.3's clause 2 and is where a rank across classes would live.
+> * **The tangent channel has ZERO execution coverage.** `vgeom_unpack_tangent`
+>   and `vt_apply_normal_t`'s non-fallback branch never run on a device: the
+>   only tangented fixture feeds the four GPU-free residency arms, and
+>   `visbuffer_parity` — the twelve-arm per-pixel nucleus — still cooks
+>   untangented. The mirror is now pinned line by line on both halves and that
+>   is the ceiling of a source pin. A tangented parity row is the fix and it
+>   belongs with P28.3's skinned-tangent gate, which needs the same thing.
+> * **Page 0 has no coupling** (§1), so the guarantee is over pages 1..N.
+> * **The editor's derived `.inf_vmesh` is unpaired** — unchanged, and the
+>   audit adds only that this is also what keeps the editor immune to §2.
+
 - **P28.3 One streamer** — 1. `inf-stream`: the vgeom planner, VT residency and VSM page
   cache become consumers of one budget arbiter + one feedback/readback ring + one stamp
   domain + one want pipeline (analytic floor ∪ feedback refinement ∪ predictor); 2. per-tier

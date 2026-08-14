@@ -116,6 +116,30 @@ Two consequences make it the right rule rather than a plausible one:
   is the virtual texture's own mandatory floor, pinned at registration. So the
   always-resident geometry costs the coupling nothing.
 
+> **AMENDED BY THE P28.2 AUDIT.** Both consequences above are true and neither
+> is an argument *for* `lod / 2` — the first rules out capping short, the second
+> is a property of the root page. The rule is now **independently derived**, and
+> it is right: "matched detail" means a page's texels-per-triangle does not
+> depend on which page it is, and with `target_ratio` 0.5 halving triangles and
+> a mip quartering texels, `texels(m)/tris(L) = D₀ · 2^L / 4^m` is constant
+> exactly at `m = L/2`. Measured on the 96²/2 048² pairing, finest page to
+> coarsest: **227.6 / 455.4 / 228.8 / 460.3 / 229.8 / 476.6 / 169.8** texels per
+> triangle — the factor-of-2 sawtooth integer flooring predicts and nothing
+> else — against **86×** spread for one mip per LOD level. Pinned by
+> `the_mip_rule_is_the_slope_that_keeps_texel_density_invariant`.
+>
+> Two things the derivation adds. **The rounding is DOWN and that is the whole
+> argument**: measured, spread cannot separate floor from ceil (within a few
+> percent), and what separates them is direction — floor gives the odd levels a
+> texture up to 2× *denser* than matched, ceil gives them one 2× *sparser*,
+> which is this phase's own artifact by half a level. And **the root page's
+> pairing is not merely a no-op, it is vacuous**: the coarsest mip of a full
+> pyramid is the 1 × 1 texel level, so page 0's 544 triangles pair against ONE
+> texel — 0.002 texels per triangle against a band of 170 – 477. It costs
+> nothing because that mip is pinned; it also *protects* nothing, so the
+> guarantee is over pages 1..N and the gate's page-0 checks are vacuous by
+> construction.
+
 **The alternative: a density rule** — pick the finest mip whose
 texels-per-triangle stays under a constant `K`. Measured on the 96² fixture
 (18 432 triangles at LOD 0) against a 2 048² texture: mip 0 is 4.19 M texels,
@@ -144,6 +168,11 @@ silently lose the coupling, and a reader chasing a mesh would not think to look
 under a material's name. Both say what is lost in the same sentence: that slot
 gets no entry in the cluster pages, so nothing couples its tiles to the geometry
 and the artifact stays reachable for it.
+
+> **AMENDED BY THE P28.2 AUDIT.** Only *one* of them had a test caller. The
+> material advisory was raised by nothing but `cook.rs` — the P26.3b lesson
+> named two paragraphs above the advisory that forgot it. It has one now
+> (`a_mesh_bound_to_a_material_outside_the_closure_raises_a_cluster_advisory`).
 
 ---
 
@@ -195,6 +224,18 @@ holds at the sync point and breaks on the very next frame.
 `the_renderers_cluster_sync_seats_the_texture_half_between_the_plan_and_the_pair`
 reads `renderer.rs` and pins the order, because the churn gate proves the
 mechanism and cannot see the caller.
+
+> **AMENDED BY THE P28.2 AUDIT.** The churn could not see the *protection*
+> either: one want class over a comfortable budget never contests a slot, so an
+> `apply_wants` that protected nothing at all passed every arm in the file. Put
+> under load (`a_refinement_class_under_slot_pressure_cannot_cost_a_resident_page_its_tiles`)
+> it establishes the guarantee — a resident cluster page never loses ground it
+> holds, under a want that only refines — and measures a bound this section did
+> not state: **the protection is priority-blind.** Step 3 protects every want
+> that is *already resident*, of any class, before step 4 admits any miss, of
+> any class. So a refinement that got there first outranks a floor want that has
+> not, and on the audit's fixture a decoy feedback class costs the pairing its
+> finest page. A rank across classes is P28.3's.
 
 ### Reaching the node: `RenderNode: Any`
 
@@ -287,6 +328,20 @@ meshlet-pool bytes:
 
 (The descriptor share reproduces P28.1's independently-measured 5.26 – 5.44 %.)
 
+> **AMENDED BY THE P28.2 AUDIT — the smallest column does not reproduce.** 48²
+> and 96² reproduce to 0.02 points (55.38 / 54.49 % vertex records, 5.44 /
+> 5.42 % descriptors). The row labelled **16²** matches no grid size at all:
+> 16² measures **58.52 / 5.26 / 18.00 / 18.22**. Corrected ranges over
+> 16²/48²/96²: vertex records **54.5 – 58.5 %**, `[f32; 4]` **+27.3 – 29.3 %**,
+> two `f32` +13.6 – 14.6 %, one packed word **+6.8 – 7.3 %**. The decision is
+> untouched — the 4× ratio between the options is exact by construction.
+>
+> And the parenthesis above is right about the wrong numbers: the printed row's
+> own descriptor range is 5.40 – 5.50, which does not contain 5.26 and exceeds
+> 5.44. The **real** measurement is 5.26 / 5.44 / 5.42 — range exactly
+> 5.26 – 5.44. The reproduction is genuine; the table beside it is not the
+> measurement that reproduced.
+
 So the widening options cost, **as a fraction of the whole streaming budget**:
 
 | tangent representation | bytes/vertex | pool cost |
@@ -319,6 +374,25 @@ The cost is nine bits of payload, which leaves 11 bits per octahedral axis and a
 handedness bit — measured worst `1 − cos θ` of **2.03 × 10⁻⁶**, i.e. **0.115°**,
 over a 96 × 96 × 2 sweep of both hemispheres.
 
+> **AMENDED BY THE P28.2 AUDIT — that is a sample, not a bound.** The error is a
+> function of where a direction falls inside a quantization **cell**, not of the
+> direction, so a grid of *directions* lands near cell centres only by luck. A
+> 2 M-direction random sweep already beats the figure above (2.21e-6). Searching
+> the cell centres — where the maximum provably lives for a nearest-value
+> quantizer — gives **2.33 × 10⁻⁶ = 0.124°**, at oct (−0.292, −0.378) in the
+> lower hemisphere: **21 % above the published number**. Pinned by
+> `the_quantization_bound_is_the_worst_cell_centre_not_the_luckiest_sample`.
+>
+> The exponent pin itself holds completely, verified by construction: over NaN,
+> ±∞, ∓0, subnormal, `MIN_POSITIVE` and huge-finite inputs every output is
+> either exactly `NO_TANGENT` or carries exponent 127 with sign 0, and an
+> **exhaustive 2²³ sweep** of every bit pattern the packer can emit unpacks
+> finite and unit (worst `|len − 1|` = 1.8e-7). One correction to the prose
+> beside it: "a non-finite or zero-length tangent packs to `NO_TANGENT`"
+> understates the refusal — any tangent whose *squared* length over- or
+> underflows `f32` does too, i.e. `|t| ≳ 1.8 × 10¹⁹` or `|t| ≲ 1.1 × 10⁻¹⁹`. It
+> degrades safely and no importer in the tree can reach it.
+
 A useful consequence: `NO_TANGENT` is **zero**, and zero is structurally
 unreachable from the packer, so the sentinel costs no direction and needs no
 reserved code.
@@ -334,6 +408,34 @@ when `w == 0`, which is every asset cooked before v3. The channel is additive:
 a surface without one shades exactly as it did before this batch, which is also
 why **no committed golden moves** (the shared grid fixture builds without
 tangents unless a caller asks).
+
+> **AMENDED BY THE P28.2 AUDIT — that was true of pre-v3 CONTAINERS and false of
+> pre-v3 CONTENT.** Nothing reaching `pack_tangent` was the author's answer:
+> every producer substitutes `[1, 0, 0, 1]` when a source file has no tangents
+> (`gltf_import`'s `unwrap_or`, `obj_import` unconditionally,
+> `MeshVertex::default`, `inf_dcc::TANGENT_FALLBACK`), `vgeom_streams` passed it
+> through verbatim, and the sentinel is returned only for a non-finite or
+> zero-length input — `[1, 0, 0]` packs to `0x3F8003FF`, `w = +1`. So a v3 cook
+> of any OBJ mesh, any untangented glTF or any UV-less DCC export shaded through
+> a **constant object-space +X tangent** instead of the derivative frame. No
+> golden could see it (none pairs a tangented meshlet asset with a VT normal
+> map) and the cook's own `dense_mesh` fixture was cooking it. `vgeom_streams`
+> now hands the builder an **empty** tangent stream when every vertex carries
+> the one named placeholder (`inf_mesh::TANGENT_PLACEHOLDER`) — whole-mesh and
+> exact, and it cannot misfire, because a surface whose authored tangent really
+> is uniformly +X has axis-aligned uvs and the derivative frame derives +X too.
+>
+> Two more, both arithmetic, both in the consumer. The tangent was transformed
+> by the **normal matrix** (`rotation · scale⁻¹`) in both `vgeom_mesh` and
+> `vis_resolve`; a tangent is contravariant and rides `rotation · scale`, and
+> under non-uniform instance scale the two part company by more than a positive
+> factor — a frame *worse* than the derivative one, which Gram-Schmidt cannot
+> recover. And `vt_apply_normal_t` used the **magnitude** of `w`: the resolve's
+> nearest-corner rule keeps its `w` at exactly ±1, but the forward path carries
+> `w` as an ordinary interpolated varying, so a uv-mirror seam delivers a
+> fractional one and `cross(n, t) * w` returns a short bitangent — the
+> non-orthonormal frame the Gram-Schmidt two lines above exists to prevent. It
+> reads the sign now.
 
 The resolve interpolates the tangent by its **solved** barycentrics and takes
 the handedness from the **nearest corner** rather than blending it: averaging
@@ -467,3 +569,42 @@ and P28.1 did not weaken.
 * **The textured mip question's fixture** (flat, unlit, texture-only) was not
   built here: the tile pairing work never needed one, so it stays routed to
   P28.3 with the gate criterion the P28.1 audit recorded.
+
+---
+
+## 9. STALENESS: what holds a tile ADDRESS to the image it addresses
+
+**Added by the P28.2 audit, because §1–§8 did not contain the word.**
+
+The tiles section holds `(guid, mip, x, y)` — addresses into *another asset's*
+address space — and nothing in either container ties the two: no version, no
+digest, no extent. P26.1 established no doctrine to inherit either; its aliasing
+finding is *intra*-container (a v2 payload not containing the tiles it
+declared). So this is a question this batch opened.
+
+**Measured, not reasoned.** A `.inf_vmesh` paired against a 2 048² image, met at
+runtime by a 512² image of the same GUID: **residency reached zero pages and
+stayed there.** Not a degraded mesh — no mesh, silently, on every frame, for
+ever. `VtResidency::is_resident` answers `false` for two different facts, *not
+paged in* and *no such tile*, and the pairing read both as "the budget refused";
+the first is an answer a later transaction can change, the second is a statement
+about a different image. The **root page's** coarsest-mip address is the first
+one a shrunken pyramid loses, which is why the whole asset went rather than its
+detail. The other direction — re-imported LARGER — is benign: every cooked
+address still exists and over-supplies.
+
+`VtResidency::can_address` separates the two answers. A stale address is dropped
+from the pairing exactly as a texture this level does not bind is — the same
+sentence for a stronger reason, since no amount of atlas can help — and counted
+(`VgeomStreamReport::stale_tiles`), because nothing else in the tree can see it.
+The control in
+`a_pairing_cooked_against_another_image_degrades_instead_of_erasing_the_asset`
+is this batch as it landed, and it must reach the erased state.
+
+**Reachability, honestly.** `inf_packager::cook` is the only producer of a paired
+`.inf_vmesh` and it cooks the whole closure in one call, so a pack is internally
+consistent and the defect was latent. It stops being latent the day anything
+ships an incremental cook, a patch pack or a mod override — and the *format*
+would still not notice. The format answer (a mip count or a content digest in
+the tiles section, checked at load) belongs with P28.3, which owns identity
+across consumers.
