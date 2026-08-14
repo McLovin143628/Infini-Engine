@@ -68,7 +68,7 @@ fn handle_lifecycle_and_no_device_fallback() {
     assert!(!engine.is_active(), "disabled engine must report inactive");
 
     let sound = test_sound();
-    let h = engine.play(&sound, PlaySettings::default());
+    let h = engine.play(&sound, PlaySettings::default()).unwrap();
     assert!(engine.is_playing(h));
     assert!(!engine.is_paused(h));
     assert_eq!(engine.voice_count(), 1);
@@ -93,8 +93,8 @@ fn handle_lifecycle_and_no_device_fallback() {
 fn distinct_handles_are_independent() {
     let mut engine = AudioEngine::disabled();
     let sound = test_sound();
-    let a = engine.play(&sound, PlaySettings::default());
-    let b = engine.play(&sound, PlaySettings::default());
+    let a = engine.play(&sound, PlaySettings::default()).unwrap();
+    let b = engine.play(&sound, PlaySettings::default()).unwrap();
     assert_ne!(a, b);
     engine.stop(a);
     assert!(!engine.is_playing(a));
@@ -107,7 +107,9 @@ fn bus_and_master_volume_scale_effective_gain() {
     let sound = test_sound();
 
     // Non-spatial SFX voice at base volume 0.5.
-    let h = engine.play(&sound, PlaySettings::on(Bus::Sfx).volume(0.5));
+    let h = engine
+        .play(&sound, PlaySettings::on(Bus::Sfx).volume(0.5))
+        .unwrap();
     assert_eq!(engine.effective_volume(h), Some(0.5)); // master 1 × sfx 1 × 0.5
 
     engine.set_bus_volume(Bus::Sfx, 0.5);
@@ -120,7 +122,9 @@ fn bus_and_master_volume_scale_effective_gain() {
     assert_eq!(engine.effective_panning(h), Some(0.0));
 
     // A Music-bus voice is unaffected by the SFX bus.
-    let m = engine.play(&sound, PlaySettings::on(Bus::Music).volume(1.0));
+    let m = engine
+        .play(&sound, PlaySettings::on(Bus::Music).volume(1.0))
+        .unwrap();
     assert_eq!(engine.effective_volume(m), Some(0.5)); // master 0.5 × music 1 × 1
 }
 
@@ -131,10 +135,12 @@ fn spatial_voice_attenuates_and_pans_with_listener() {
 
     // Linear attenuation 1..11; emitter 6 units away → gain 0.5 at the midpoint.
     let att = Attenuation::linear(1.0, 11.0);
-    let h = engine.play(
-        &sound,
-        PlaySettings::spatial(Bus::Sfx, DVec3::new(0.0, 0.0, -6.0), att),
-    );
+    let h = engine
+        .play(
+            &sound,
+            PlaySettings::spatial(Bus::Sfx, DVec3::new(0.0, 0.0, -6.0), att),
+        )
+        .unwrap();
     // Straight ahead of the default listener (faces -Z): centred, half volume.
     assert!((engine.effective_volume(h).unwrap() - 0.5).abs() < 1e-9);
     assert!(engine.effective_panning(h).unwrap().abs() < 1e-9);
@@ -206,14 +212,16 @@ fn occlusion_hook_multiplies_spatial_gain() {
     // A hook that halves gain for any obstructed pair.
     engine.set_occlusion_hook(Some(Box::new(|_l, _e| 0.5)));
     // A spatial voice within min_distance → spatial gain 1.0, so occlusion shows.
-    let h = engine.play(
-        &sound,
-        PlaySettings::spatial(
-            Bus::Sfx,
-            DVec3::new(0.0, 0.0, -0.5),
-            Attenuation::linear(1.0, 100.0),
-        ),
-    );
+    let h = engine
+        .play(
+            &sound,
+            PlaySettings::spatial(
+                Bus::Sfx,
+                DVec3::new(0.0, 0.0, -0.5),
+                Attenuation::linear(1.0, 100.0),
+            ),
+        )
+        .unwrap();
     assert!((engine.effective_volume(h).unwrap() - 0.5).abs() < 1e-9);
     // Clearing the hook and re-setting occlusion to 1.0 restores full gain.
     engine.set_occlusion(h, 1.0);
@@ -263,8 +271,10 @@ fn reap_removes_finished_one_shots_and_their_source_mappings() {
     let sound = test_sound();
 
     // A one-shot and a loop played directly.
-    let one = engine.play(&sound, PlaySettings::default());
-    let loops = engine.play(&sound, PlaySettings::default().looping(true));
+    let one = engine.play(&sound, PlaySettings::default()).unwrap();
+    let loops = engine
+        .play(&sound, PlaySettings::default().looping(true))
+        .unwrap();
     assert_eq!(engine.voice_count(), 2);
 
     engine.reap();
@@ -286,4 +296,57 @@ fn reap_removes_finished_one_shots_and_their_source_mappings() {
     // Reaping again is a no-op (only the loop remains).
     engine.reap();
     assert_eq!(engine.voice_count(), 1);
+}
+
+/// **C4-43 — an unresolvable clip used to leave the stream lying, permanently.**
+///
+/// A `Play` whose clip GUID does not resolve returned in silence and never
+/// reached `self.sources` — so every subsequent `Stop` / `SetVolume` /
+/// `SetPitch` for that source id was **also** a silent no-op. Under this crate's
+/// own doctrine (the stream is a pure function of the sim state) the stream has
+/// diverged from the simulation, and nothing measured it.
+///
+/// The fix is a counter and one warning per GUID, not a refusal: a missing clip
+/// must not take a level down. But it must be *countable*.
+///
+/// Un-fix mutation: delete `self.unresolved_clips += 1` and the first assertion
+/// fails.
+#[test]
+fn an_unresolvable_clip_is_counted_rather_than_silently_dropped() {
+    let mut engine = AudioEngine::disabled();
+    assert_eq!(engine.unresolved_clips(), 0, "a fresh engine has no misses");
+
+    // A resolver that knows nothing.
+    let nothing = |_: Uuid| None;
+    engine.drain(
+        &[
+            AudioCommand::Play(PlayCommand::new(1, Uuid::from_u128(0xA1), "sfx")),
+            AudioCommand::Play(PlayCommand::new(2, Uuid::from_u128(0xA2), "sfx")),
+            // The same clip again: counted again, warned once.
+            AudioCommand::Play(PlayCommand::new(3, Uuid::from_u128(0xA1), "sfx")),
+        ],
+        &nothing,
+    );
+    assert_eq!(engine.unresolved_clips(), 3);
+    // The world, not the report: no source, no voice.
+    for src in [1u64, 2, 3] {
+        assert!(engine.source_handle(src).is_none());
+    }
+    assert_eq!(engine.voice_count(), 0);
+    // The backend never refused anything — the clips simply were not there.
+    assert_eq!(engine.refused_voices(), 0);
+
+    // The control: a clip that DOES resolve still plays, and is not counted.
+    let sound = test_sound();
+    engine.drain(
+        &[AudioCommand::Play(PlayCommand::new(4, Uuid::nil(), "sfx"))],
+        &clip_stream(sound),
+    );
+    assert!(engine.source_handle(4).is_some());
+    assert_eq!(engine.voice_count(), 1);
+    assert_eq!(
+        engine.unresolved_clips(),
+        3,
+        "a good clip was counted a miss"
+    );
 }

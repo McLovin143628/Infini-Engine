@@ -173,7 +173,16 @@ pub fn create_default(
 }
 
 /// Import a CSV/JSON file into an existing table asset, replacing its contents.
-pub fn import_table_into(project: &mut AssetProject, id: AssetId, source: &Path) -> Result<()> {
+///
+/// Returns the import's **advisories** (C4-42): every cell that would not become
+/// its column's type, and every row whose cell count disagreed with the header.
+/// A `.inf_table` is gameplay and balance data, and "a cell that failed to parse
+/// became 0" is a difference the author cannot see in the result.
+pub fn import_table_into(
+    project: &mut AssetProject,
+    id: AssetId,
+    source: &Path,
+) -> Result<Vec<String>> {
     let bytes = std::fs::read(source)?;
     let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("csv");
     let name = project
@@ -181,9 +190,17 @@ pub fn import_table_into(project: &mut AssetProject, id: AssetId, source: &Path)
         .get(id)
         .map(|e| e.name.clone())
         .unwrap_or_else(|| "Table".into());
-    let table = table_import::import_table(&bytes, &name, ext)?;
+    let (table, report) = table_import::import_table_reported(&bytes, &name, ext)?;
     let deps = table.dependencies();
-    project.rewrite_payload(id, &table, deps)
+    project.rewrite_payload(id, &table, deps)?;
+    let mut out = report.advisories;
+    if report.total > out.len() {
+        out.push(format!(
+            "... and {} more import notes",
+            report.total - out.len()
+        ));
+    }
+    Ok(out)
 }
 
 /// The generated Rust source for a struct/enum (codegen preview / export).

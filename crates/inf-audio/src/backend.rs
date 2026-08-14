@@ -90,7 +90,14 @@ impl Backend {
 
     /// Start playing `data` as voice `id` with the given effective linear `gain`
     /// (`0..`), stereo `panning` (`-1..1`), playback `rate` (pitch factor), and a
-    /// `looping` flag (loop the whole clip). No-op when disabled.
+    /// `looping` flag (loop the whole clip).
+    ///
+    /// **Returns whether a voice now exists** (C4-43). The disabled backend
+    /// answers `true`: it tracks the voice in `null_voices` so the reap seam can
+    /// complete it, which is a voice as far as every caller is concerned. Only a
+    /// live device that refused the sound answers `false`, and that is the case
+    /// the engine must not record as a playing source — an untracked voice makes
+    /// `is_playing()` lie for the rest of the process.
     #[allow(unused_variables)]
     pub(crate) fn play(
         &mut self,
@@ -100,14 +107,14 @@ impl Backend {
         panning: f64,
         rate: f64,
         looping: bool,
-    ) {
+    ) -> bool {
         #[cfg(feature = "cpal")]
         if let Some(inner) = self.inner.as_mut() {
-            inner.play(id, data, gain, panning, rate, looping);
-            return;
+            return inner.play(id, data, gain, panning, rate, looping);
         }
         // No live device: track the voice so the reap seam can complete it.
         self.null_voices.insert(id, looping);
+        true
     }
 
     /// Push updated mix parameters onto a live voice. No-op when disabled or the
@@ -228,7 +235,7 @@ mod cpal_impl {
             panning: f64,
             rate: f64,
             looping: bool,
-        ) {
+        ) -> bool {
             let mut sound = data
                 .inner
                 .clone()
@@ -239,10 +246,19 @@ mod cpal_impl {
                 // Loop the whole clip (from 0 s to the end).
                 sound = sound.loop_region(0.0..);
             }
-            // `play` can fail if the command queue is momentarily full; a dropped
-            // one-shot is a non-fatal, no-op outcome for the facade.
-            if let Ok(handle) = self.manager.play(sound) {
-                self.voices.insert(id, handle);
+            // `play` can fail if the command queue is momentarily full. A dropped
+            // one-shot is non-fatal, but it is **not** a success: the old
+            // spelling swallowed the error and never inserted into `voices`, so
+            // the voice was invisible to `drain_finished`, its `sources` entry
+            // leaked for the process lifetime, `is_playing()` reported true for
+            // ever and `voice_count()` drifted upward — and the caller was told
+            // it worked (C4-43).
+            match self.manager.play(sound) {
+                Ok(handle) => {
+                    self.voices.insert(id, handle);
+                    true
+                }
+                Err(_) => false,
             }
         }
 

@@ -182,28 +182,97 @@ pub enum CellValue {
     },
 }
 
+/// One cell whose text would not become the column's type, so the import
+/// substituted the type's zero (C4-42).
+///
+/// Carried out of [`CellValue::parse_checked`] so the table importer can raise
+/// an advisory naming the row and column. Without it, a `.inf_table` full of
+/// zeros is indistinguishable from a table of zeros.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellParseIssue {
+    /// The trimmed source text, as written.
+    pub raw: String,
+    /// What the column wanted, phrased for a message ("an integer").
+    pub wanted: &'static str,
+}
+
 impl CellValue {
     /// Parse a raw string into a cell of the given column type (CSV/JSON import).
+    ///
+    /// **A cell that did not parse is a zero the author cannot tell from a real
+    /// one** (C4-42), which is why [`parse_checked`](Self::parse_checked) exists
+    /// and this delegates to it. Kept as the infallible spelling for the callers
+    /// that genuinely have nowhere to put a diagnostic.
     pub fn parse(raw: &str, ty: &FieldType) -> CellValue {
+        Self::parse_checked(raw, ty).0
+    }
+
+    /// Parse a cell, and say whether the value is the author's or a fallback.
+    ///
+    /// # Why the second return value exists (C4-42)
+    ///
+    /// `raw.trim().parse().unwrap_or(0)` maps a thousands separator, a locale
+    /// decimal comma, a unit suffix (`"12 kg"`), a stray quote or a blank cell
+    /// onto **zero**, with no diagnostic anywhere. The result is a `.inf_table`
+    /// of gameplay or balance data in which the author cannot distinguish a real
+    /// 0 from a column that failed to import — silent content corruption, at the
+    /// door where a spreadsheet becomes engine data.
+    ///
+    /// A blank cell is *not* a failure: an empty column is how a table says "no
+    /// value", and the type's zero is the documented answer for it. Only a
+    /// non-empty string that will not parse is reported.
+    pub fn parse_checked(raw: &str, ty: &FieldType) -> (CellValue, Option<CellParseIssue>) {
+        let t = raw.trim();
+        let issue = |kind: &'static str| {
+            Some(CellParseIssue {
+                raw: t.to_string(),
+                wanted: kind,
+            })
+        };
         match ty {
-            FieldType::Bool => CellValue::Bool {
-                value: matches!(
-                    raw.trim().to_ascii_lowercase().as_str(),
-                    "true" | "1" | "yes"
+            FieldType::Bool => (
+                CellValue::Bool {
+                    value: matches!(t.to_ascii_lowercase().as_str(), "true" | "1" | "yes"),
+                },
+                match t.to_ascii_lowercase().as_str() {
+                    "" | "true" | "1" | "yes" | "false" | "0" | "no" => None,
+                    _ => issue("a boolean"),
+                },
+            ),
+            FieldType::Int => match t.parse() {
+                Ok(value) => (CellValue::Int { value }, None),
+                Err(_) => (
+                    CellValue::Int { value: 0 },
+                    if t.is_empty() {
+                        None
+                    } else {
+                        issue("an integer")
+                    },
                 ),
             },
-            FieldType::Int => CellValue::Int {
-                value: raw.trim().parse().unwrap_or(0),
+            FieldType::Float => match t.parse::<f64>() {
+                Ok(value) if value.is_finite() => (CellValue::Float { value }, None),
+                _ => (
+                    CellValue::Float { value: 0.0 },
+                    if t.is_empty() {
+                        None
+                    } else {
+                        issue("a finite number")
+                    },
+                ),
             },
-            FieldType::Float => CellValue::Float {
-                value: raw.trim().parse().unwrap_or(0.0),
-            },
-            FieldType::AssetRef | FieldType::Enum { .. } => CellValue::Ref {
-                value: raw.trim().to_string(),
-            },
-            _ => CellValue::Text {
-                value: raw.to_string(),
-            },
+            FieldType::AssetRef | FieldType::Enum { .. } => (
+                CellValue::Ref {
+                    value: t.to_string(),
+                },
+                None,
+            ),
+            _ => (
+                CellValue::Text {
+                    value: raw.to_string(),
+                },
+                None,
+            ),
         }
     }
 
@@ -249,13 +318,28 @@ impl TableAsset {
     /// Add a row from raw strings, coercing each to its column type. Extra values
     /// are ignored; missing ones default.
     pub fn push_row_raw(&mut self, raw: &[String]) {
-        let row = self
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(i, c)| CellValue::parse(raw.get(i).map(|s| s.as_str()).unwrap_or(""), &c.ty))
-            .collect();
+        self.push_row_raw_checked(raw);
+    }
+
+    /// Append a row from raw strings, returning **which cells did not parse**
+    /// as `(column index, issue)` (C4-42).
+    ///
+    /// The importer raises an advisory from these; a caller that ignores the
+    /// return value gets the historical behaviour, which is what
+    /// [`push_row_raw`](Self::push_row_raw) is.
+    pub fn push_row_raw_checked(&mut self, raw: &[String]) -> Vec<(usize, CellParseIssue)> {
+        let mut issues = Vec::new();
+        let mut row = Vec::with_capacity(self.columns.len());
+        for (i, c) in self.columns.iter().enumerate() {
+            let (cell, issue) =
+                CellValue::parse_checked(raw.get(i).map(|s| s.as_str()).unwrap_or(""), &c.ty);
+            if let Some(issue) = issue {
+                issues.push((i, issue));
+            }
+            row.push(cell);
+        }
         self.rows.push(row);
+        issues
     }
 
     /// Every asset GUID this table references (ref/enum cells) — dependency edges.
@@ -418,5 +502,48 @@ mod tests {
         assert_eq!(sanitize_ident("!!!", "Fallback"), "Fallback");
         assert_eq!(sanitize_field("Some Field!"), "some_field");
         assert_eq!(sanitize_field("9lives"), "field_9lives");
+    }
+
+    /// **C4-42 — a cell that would not parse became a zero the author cannot
+    /// tell from a real one.**
+    ///
+    /// A `.inf_table` is gameplay and balance data. A thousands separator, a
+    /// locale decimal comma, a unit suffix or a stray quote all mapped onto `0`
+    /// with no diagnostic anywhere, and the import reported success.
+    ///
+    /// Un-fix mutation: make `parse_checked` return `None` for the issue and
+    /// the advisory assertions below go to zero.
+    #[test]
+    fn a_cell_that_will_not_parse_is_reported_not_silently_zeroed() {
+        // A blank cell is NOT a failure: an empty column is how a table says
+        // "no value", and the type's zero is the documented answer.
+        let (v, issue) = CellValue::parse_checked("", &FieldType::Int);
+        assert_eq!(v, CellValue::Int { value: 0 });
+        assert!(issue.is_none(), "an empty cell is not a parse failure");
+
+        // These are.
+        for (raw, ty, wanted) in [
+            ("1,234", FieldType::Int, "an integer"),
+            ("12 kg", FieldType::Int, "an integer"),
+            ("3,14", FieldType::Float, "a finite number"),
+            ("NaN", FieldType::Float, "a finite number"),
+            ("inf", FieldType::Float, "a finite number"),
+            ("maybe", FieldType::Bool, "a boolean"),
+        ] {
+            let (_, issue) = CellValue::parse_checked(raw, &ty);
+            let issue = issue.unwrap_or_else(|| panic!("{raw:?} was accepted as {wanted}"));
+            assert_eq!(issue.raw, raw);
+            assert_eq!(issue.wanted, wanted);
+        }
+        // And the healthy values still parse silently.
+        for (raw, ty) in [
+            ("42", FieldType::Int),
+            ("-1", FieldType::Int),
+            ("3.14", FieldType::Float),
+            ("true", FieldType::Bool),
+            ("", FieldType::Bool),
+        ] {
+            assert!(CellValue::parse_checked(raw, &ty).1.is_none(), "{raw:?}");
+        }
     }
 }

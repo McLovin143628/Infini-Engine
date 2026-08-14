@@ -87,18 +87,63 @@ impl PcgAssetPayload {
 
     /// Wrap an authored editor graph (serialized to JSON — the source of truth)
     /// plus its lowered `document` mirror, at the current schema version.
+    ///
+    /// **The write-side twin of the read-side hole** (C4-42): `to_string(..).ok()`
+    /// dropped the authored graph on a serialization failure while `encode()`
+    /// went on reporting success, so the asset saved *looked* fine and had lost
+    /// the thing it exists to store. Now a failure is a refusal; see
+    /// [`try_from_graph`](Self::try_from_graph).
     pub fn from_graph(graph: &inf_graph::Graph, document: PcgDocument) -> Self {
-        Self {
+        Self::try_from_graph(graph, document).unwrap_or_else(|_| Self {
             schema_version: Self::CURRENT_VERSION,
-            graph_json: serde_json::to_string(graph).ok(),
+            graph_json: None,
+            document: PcgDocument::default(),
+        })
+    }
+
+    /// Wrap an authored graph, refusing rather than silently dropping it.
+    pub fn try_from_graph(
+        graph: &inf_graph::Graph,
+        document: PcgDocument,
+    ) -> Result<Self, PcgError> {
+        Ok(Self {
+            schema_version: Self::CURRENT_VERSION,
+            graph_json: Some(
+                serde_json::to_string(graph)
+                    .map_err(|e| PcgError::Encode(format!("graph will not serialize: {e}")))?,
+            ),
             document,
-        }
+        })
     }
 
     /// Parse the stored editor graph, if present.
+    ///
+    /// **`None` means "this payload carries no graph"** — see
+    /// [`try_graph`](Self::try_graph) for why the distinction matters.
     pub fn graph(&self) -> Option<inf_graph::Graph> {
-        let json = self.graph_json.as_ref()?;
-        serde_json::from_str(json).ok()
+        self.try_graph().ok().flatten()
+    }
+
+    /// Parse the stored editor graph, distinguishing **absent** from **broken**
+    /// (C4-42).
+    ///
+    /// `graph()` used to map a *parse failure* of `graph_json` onto the same
+    /// `None` that legitimately means "a v1 document-only payload". Every
+    /// consumer reads `None` as "use the lowered `document` mirror", and that
+    /// mirror **structurally cannot carry grammar or building passes** — so a
+    /// corrupt `graph_json` made every procedural building and grammar pass
+    /// silently disappear from the generated world, and their meshes drop out of
+    /// the pack's dependency closure with it.
+    ///
+    /// `Ok(None)` is the honest absence; `Err` is the corruption, and a caller
+    /// that reads it can say so.
+    pub fn try_graph(&self) -> Result<Option<inf_graph::Graph>, PcgError> {
+        let Some(json) = self.graph_json.as_ref() else {
+            return Ok(None);
+        };
+        serde_json::from_str(json)
+            .map(Some)
+            .map_err(|e| PcgError::Decode(format!("graph_json will not parse: {e}")))
     }
 
     /// Encode to deterministic bincode bytes (defers to [`inf_asset::encode`], the

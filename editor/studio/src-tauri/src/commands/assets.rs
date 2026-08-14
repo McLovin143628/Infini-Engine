@@ -111,6 +111,14 @@ impl AssetState {
     /// the committed JSON payload. `None` if the asset is missing or not a
     /// blueprint. Used by Simulate to resolve a scene's persisted `ActorClass`
     /// bindings to runnable classes.
+    /// **A blueprint that is present but unreadable is logged, not silently
+    /// dropped** (C4-42).
+    ///
+    /// The DB entry was already found, so a failure past that point is a real
+    /// one — a corrupt, locked or half-written `.inf_act` — and both consumers
+    /// (`bound_actors` in Simulate, and the PIE payload builder) read `None` as
+    /// **"no blueprint bound"**. The actor then runs with no gameplay logic at
+    /// all, and nothing anywhere says why.
     pub fn load_blueprint_class(&self, id: AssetId) -> Option<inf_blueprint::BlueprintClass> {
         let guard = self.inner.lock().ok()?;
         let inner = guard.as_ref()?;
@@ -119,8 +127,30 @@ impl AssetState {
         if entry.kind() != inf_asset::AssetKind::Blueprint {
             return None;
         }
-        let bytes = std::fs::read(&entry.path).ok()?;
-        serde_json::from_slice(&bytes).ok()
+        let path = entry.path.clone();
+        match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(class) => Some(class),
+                Err(e) => {
+                    tracing::error!(
+                        asset = %id,
+                        path = %path.display(),
+                        "blueprint class will not parse ({e}); this actor will run with NO \
+                         gameplay logic"
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::error!(
+                    asset = %id,
+                    path = %path.display(),
+                    "blueprint class could not be read ({e}); this actor will run with NO \
+                     gameplay logic"
+                );
+                None
+            }
+        }
     }
 
     /// Load a `.inf_pcg` graph asset's **raw bytes** by its asset GUID (P10.6):
@@ -942,13 +972,19 @@ pub async fn asset_table_import(
     id: String,
     source: String,
     state: State<'_, AssetState>,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let id = parse_id(&id)?;
-    state.with_project(|p| {
+    // The advisories reach the caller (C4-42): a cell that would not become its
+    // column's type is imported as that type's zero, and a `.inf_table` full of
+    // zeros is indistinguishable from a table of zeros unless somebody says so.
+    let advisories = state.with_project(|p| {
         data::import_table_into(p, id, &PathBuf::from(&source)).map_err(|e| e.to_string())
     })?;
+    for note in &advisories {
+        tracing::warn!(target: "assets", "table import: {note}");
+    }
     emit_changed(&app, &state);
-    Ok(())
+    Ok(advisories)
 }
 
 /// The generated Rust source for a struct/enum asset (codegen preview).

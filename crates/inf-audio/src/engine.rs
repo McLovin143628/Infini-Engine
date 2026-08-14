@@ -165,6 +165,19 @@ pub struct AudioEngine {
     sources: BTreeMap<u64, SoundHandle>,
     /// Optional occlusion hook applied to spatial voices flagged `occlusion`.
     occlusion_hook: Option<OcclusionHook>,
+    /// **How many `Play` commands named a clip that did not resolve** (C4-43),
+    /// and which clips have already been complained about.
+    ///
+    /// A counter rather than a log line alone: the crate's doctrine is that the
+    /// audio stream is a pure function of the sim state, and an unresolvable
+    /// clip is precisely the case where it stops being one. A number is
+    /// something a test can assert and a session report can print; a silent
+    /// `return` was neither.
+    unresolved_clips: u64,
+    warned_clips: std::collections::BTreeSet<Uuid>,
+    /// How many voices the backend refused outright (a full command queue, or a
+    /// device that would not take the sound).
+    refused_voices: u64,
 }
 
 impl AudioEngine {
@@ -188,6 +201,9 @@ impl AudioEngine {
         let resolved = mixer.resolve();
         Self {
             backend,
+            unresolved_clips: 0,
+            warned_clips: std::collections::BTreeSet::new(),
+            refused_voices: 0,
             master_volume: 1.0,
             sfx_volume: 1.0,
             music_volume: 1.0,
@@ -332,10 +348,26 @@ impl AudioEngine {
 
     // ── Playback (direct API) ──────────────────────────────────────────────────
 
+    /// How many `Play` commands named a clip that did not resolve (C4-43).
+    /// Zero on a healthy level; every one of them is a source whose later
+    /// `Stop` / `SetVolume` / `SetPitch` commands are also silently ignored,
+    /// because the source never entered the table those commands look in.
+    pub fn unresolved_clips(&self) -> u64 {
+        self.unresolved_clips
+    }
+
+    /// How many voices the backend refused outright (C4-43).
+    pub fn refused_voices(&self) -> u64 {
+        self.refused_voices
+    }
+
     /// Start a sound and return its handle. In the no-device fallback this still
     /// allocates a handle and tracks the voice (so `is_playing`, `effective_*`,
     /// etc. behave consistently); only the audible output is skipped.
-    pub fn play(&mut self, data: &SoundData, settings: PlaySettings) -> SoundHandle {
+    ///
+    /// `None` when the backend refused the voice — see
+    /// [`play_voice`](Self::play_voice).
+    pub fn play(&mut self, data: &SoundData, settings: PlaySettings) -> Option<SoundHandle> {
         self.play_voice(
             data,
             Voice {
@@ -355,7 +387,15 @@ impl AudioEngine {
     /// Insert a fully-built voice, compute its mix (incl. occlusion hook), and
     /// hand it to the backend. Shared by [`play`](Self::play) and the command
     /// queue.
-    fn play_voice(&mut self, data: &SoundData, mut voice: Voice) -> SoundHandle {
+    /// Start a voice, or say the backend refused it (C4-43).
+    ///
+    /// `None` means **no voice exists** — the backend's queue was full, or the
+    /// device rejected the sound. The old spelling inserted into `self.voices`
+    /// unconditionally and returned a handle either way, so the engine held a
+    /// voice the backend did not: `is_playing()` reported `true` for ever,
+    /// `voice_count()` drifted upward, `drain_finished` could never reap it, and
+    /// the caller was told it worked.
+    fn play_voice(&mut self, data: &SoundData, mut voice: Voice) -> Option<SoundHandle> {
         let id = self.next_id;
         self.next_id += 1;
         // Apply the occlusion hook up front for hook-driven voices.
@@ -366,10 +406,16 @@ impl AudioEngine {
         }
         let (gain, pan) = self.compute(&voice);
         let looping = voice.looping;
+        let pitch = voice.pitch;
         self.voices.insert(id, voice);
-        self.backend
-            .play(id, data, gain, pan, self.voices[&id].pitch, looping);
-        SoundHandle(id)
+        if self.backend.play(id, data, gain, pan, pitch, looping) {
+            Some(SoundHandle(id))
+        } else {
+            // Never hold a voice the backend does not.
+            self.voices.remove(&id);
+            self.refused_voices += 1;
+            None
+        }
     }
 
     /// Stop a sound and forget its handle. Returns `false` if the handle was
@@ -540,9 +586,22 @@ impl AudioEngine {
             self.stop(h);
         }
         let Some(data) = resolve(p.clip) else {
-            return; // unresolvable clip → silent no-op
+            // **An unresolvable clip is counted and named once** (C4-43). This
+            // used to return in silence — and because the source never reached
+            // `self.sources`, every subsequent `Stop` / `SetVolume` / `SetPitch`
+            // for it was *also* a silent no-op. Under this crate's own doctrine
+            // ("the stream is a pure function of the sim state") the stream has
+            // diverged from the simulation, and nothing measured it.
+            self.unresolved_clips += 1;
+            if self.warned_clips.insert(p.clip) {
+                tracing::warn!(
+                    clip = %p.clip,
+                    "audio clip did not resolve; this source is silent and every later                      command for it will be ignored"
+                );
+            }
+            return;
         };
-        let handle = self.play_voice(
+        let Some(handle) = self.play_voice(
             &data,
             Voice {
                 bus: BusRef::Named(p.bus.clone()),
@@ -557,7 +616,9 @@ impl AudioEngine {
                 occlusion: false,
                 occlusion_gain: p.occlusion_gain.clamp(0.0, 1.0),
             },
-        );
+        ) else {
+            return; // the backend refused it; `play_voice` counted that
+        };
         self.sources.insert(p.source, handle);
     }
 

@@ -9,6 +9,9 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+# One warn-once line when a `Play` names a clip that will not resolve (hardening
+# wave B / C4-43). Workspace pin, already in the tree — no new external crate.
+tracing = { workspace = true }
 # kira supplies StaticSoundData decoding (symphonia) + the mixer/handle types.
 # The workspace pin has default-features off (symphonia decoders only, no device
 # backend). The real cpal output backend is pulled in only by our `cpal` feature
