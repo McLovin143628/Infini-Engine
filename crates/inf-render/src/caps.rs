@@ -172,6 +172,26 @@ impl RenderTier {
             RenderTier::High => u32::MAX,
             RenderTier::Medium | RenderTier::Low => crate::settings::VSM_CLIPMAP_PAGES_MEDIUM,
         });
+        // P27.5 — the two knobs the phase's tier clause owed beyond the atlas
+        // budget, and the pair is worth reading together because they clamp in
+        // **opposite arithmetic directions for the same reason**.
+        //
+        // `mark_stride` is a `max`: a larger stride dispatches fewer threads, so
+        // *raising* it lowers the cost, and `max` is therefore the operation that
+        // "never enables" is spelled with here. `pcf_radius` is a `min`: a larger
+        // radius loads more texels. Both are idempotent, both are no-ops on High,
+        // and both keep a caller who already asked for less — which is the half
+        // of the law a table of expected values cannot see.
+        settings.vsm.mark_stride = settings.vsm.mark_stride.max(match self {
+            // 1 is the legal floor `validate` enforces, so this is a no-op by
+            // construction rather than by coincidence.
+            RenderTier::High => 1,
+            RenderTier::Medium | RenderTier::Low => crate::settings::VSM_MARK_STRIDE_MEDIUM,
+        });
+        settings.vsm.pcf_radius = settings.vsm.pcf_radius.min(match self {
+            RenderTier::High => u32::MAX,
+            RenderTier::Medium | RenderTier::Low => crate::settings::VSM_PCF_RADIUS_MEDIUM,
+        });
         settings
     }
 
@@ -673,6 +693,83 @@ mod tests {
         // …and the mobile preset, which starts from a profile rather than from
         // the defaults, is off too.
         assert!(!RenderTier::mobile_default().vsm.enabled);
+    }
+
+    /// **P27.5's two tier knobs, and the pair is only interesting together**:
+    /// they clamp in **opposite arithmetic directions** and must both mean "never
+    /// raise quality".
+    ///
+    /// A `max` on the stride and a `min` on the radius look like a bug in a diff
+    /// and are the same law: a bigger stride dispatches fewer threads, a bigger
+    /// radius loads more texels. So the arm asserts the *cost* falls with the
+    /// tier rather than that two numbers move in some direction — which is what
+    /// a table of expected values cannot say, and what a future re-tune that
+    /// inverts one of them has to fail on.
+    #[test]
+    fn the_marking_stride_and_the_kernel_radius_clamp_cost_down_on_every_tier() {
+        use crate::settings::{VSM_MARK_STRIDE_MEDIUM, VSM_PCF_RADIUS_MEDIUM};
+        let s = RenderSettings::default();
+        // The shipped default is the P27.1–P27.4 configuration, byte for byte:
+        // one thread per pixel and the cascade's own 3 × 3.
+        assert_eq!(s.vsm.mark_stride, 1);
+        assert_eq!(
+            s.vsm.pcf_radius,
+            crate::vsm_receiver::VSM_PCF_RADIUS as u32
+        );
+        // High is a no-op on BOTH, which is the sentence "the default path is
+        // unchanged" made checkable.
+        assert_eq!(RenderTier::High.apply(s).vsm, s.vsm);
+
+        // The cost model, in the two units that matter: marking threads per
+        // pixel and kernel taps per shaded fragment. Both must FALL, and the
+        // ladder must really descend or the three tiers are one tier.
+        let cost = |t: RenderTier| {
+            let v = t.apply(s).vsm;
+            let threads = 1.0 / f64::from(v.mark_stride * v.mark_stride);
+            let taps = f64::from((2 * v.pcf_radius + 1) * (2 * v.pcf_radius + 1));
+            (threads, taps)
+        };
+        let (ht, hk) = cost(RenderTier::High);
+        let (mt, mk) = cost(RenderTier::Medium);
+        let (lt, lk) = cost(RenderTier::Low);
+        assert!(mt < ht, "Medium marks as densely as High");
+        assert!(mk < hk, "Medium filters as widely as High");
+        assert!(lt <= mt && lk <= mk, "Low is above Medium");
+        // The measured numbers, so the ledger's "a quarter of the threads, one
+        // tap instead of nine" is produced by an arm rather than by prose.
+        assert_eq!((ht, hk), (1.0, 9.0));
+        assert_eq!((mt, mk), (0.25, 1.0));
+
+        // A caller who already asked for LESS keeps it, on every tier — the half
+        // of "clamps, never enables" a table of expected values cannot see. A
+        // stride of 4 is *less* than Medium's 2, in quality, so it survives.
+        let mut frugal = s;
+        frugal.vsm.mark_stride = 4;
+        frugal.vsm.pcf_radius = 0;
+        for tier in [RenderTier::High, RenderTier::Medium, RenderTier::Low] {
+            let a = tier.apply(frugal);
+            assert_eq!(a.vsm.mark_stride, 4, "{tier:?} made the marking DENSER");
+            assert_eq!(a.vsm.pcf_radius, 0, "{tier:?} made the kernel WIDER");
+            assert_eq!(tier.apply(a).vsm, a.vsm, "{tier:?} is not idempotent");
+        }
+        // …and the ladder is a real ladder, at the BUILD (the P26.3b precedent):
+        // the day someone flattens these the compile fails rather than a test.
+        const {
+            assert!(VSM_MARK_STRIDE_MEDIUM > 1);
+            assert!(VSM_PCF_RADIUS_MEDIUM < crate::vsm_receiver::VSM_PCF_RADIUS as u32);
+        }
+
+        // **Everything a tier produces is a configuration the settings boundary
+        // accepts** — the P27.2 arm's rule, extended to the two new knobs, so a
+        // clamp can never hand `try_set_settings` something it refuses.
+        let mut asked = s;
+        asked.vsm.enabled = true;
+        for tier in [RenderTier::High, RenderTier::Medium, RenderTier::Low] {
+            tier.apply(asked)
+                .vsm
+                .validate()
+                .unwrap_or_else(|e| panic!("{tier:?} produced an illegal config: {e}"));
+        }
     }
 
     #[test]

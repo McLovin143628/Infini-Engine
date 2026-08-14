@@ -626,7 +626,7 @@ pub const VSM_PROJ_ORTHO: u32 = 0;
 /// See [`VSM_PROJ_ORTHO`].
 pub const VSM_PROJ_PERSPECTIVE: u32 = 1;
 
-/// The uniform the marking pass reads — 96 bytes.
+/// The uniform the marking pass reads — 112 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct VsmMarkParams {
@@ -637,7 +637,16 @@ pub struct VsmMarkParams {
     pub eye: [f32; 4],
     /// x = projection count, y = mask words, z = viewport width, w = height.
     pub counts: [u32; 4],
+    /// **x = the marking stride in screen pixels** (P27.5), yzw reserved.
+    ///
+    /// Its own `vec4` rather than a fifth slot of `counts`, which is full. At
+    /// the shipped `1` the shader's `gid.xy * stride` is `gid.xy` exactly, so
+    /// the default path's marked set — and therefore every page trace and every
+    /// committed golden — is unchanged.
+    pub stride: [u32; 4],
 }
+
+const _: () = assert!(std::mem::size_of::<VsmMarkParams>() == 112);
 
 /// **Which page tree each shadow-casting light in `scene` gets**, in scene order.
 ///

@@ -980,3 +980,130 @@ fn a_light_refused_at_registration_stops_the_list_it_is_in() {
     // ANTI-VACUITY: the refusal really happened — three casters, one tree.
     assert_eq!(casters.len(), 3, "the fixture lost a light");
 }
+
+// ── P27.5: the marking stride ─────────────────────────────────────
+
+/// **A coarser marking grid dispatches fewer threads and marks a SUBSET, never
+/// something new** (P27.5) — the tier knob's whole contract, in the two halves
+/// that can each fail on their own.
+///
+/// The containment is what makes the degradation safe to ship: the marked set at
+/// stride `s` is the union over a *subset* of the screen's pixels, so it can only
+/// lose pages, and a page that is lost is absent, and an absent page reads
+/// **lit** — the leak direction this phase chose at P27.1 and has never left. A
+/// stride that could mark a page the full grid does not would be asking the
+/// residency for shadow nothing on screen can see.
+///
+/// **And containment alone is not enough**, which is why the thread counter is
+/// here: a stride that reached neither the dispatch nor the pixel index produces
+/// exactly the dense page set, which is a subset of itself. `mark_threads` is the
+/// number that says the knob arrived — `workgroups × 64`, falling as `1/s²`.
+///
+/// The fixture spans the frame on purpose (two cubes, seven metres apart, one
+/// either side of the centre). That is what makes the third assertion sharp: at
+/// stride 4 the *correct* pass still samples both cubes and reproduces the dense
+/// set exactly, while a pass that dispatched `1/16` of the threads and forgot to
+/// scale `gid` would read only the frame's top-left corner and lose the right
+/// cube's pages — a subset, and not this one.
+#[test]
+fn a_coarser_marking_stride_marks_a_subset_of_what_every_pixel_marks() {
+    let Some(gpu) = gpu_or_skip("the P27.5 marking stride") else {
+        return;
+    };
+    let mut s = scene(&[glam::Vec3::new(0.0, 0.0, 1.0)]);
+    // A second caster, far enough across the frame that it lands in its own
+    // level-2 page: a page is 6 m there and these two are 7 m apart.
+    s.instances.push(inf_render::MeshInstance::lit(
+        glam::DVec3::new(3.5, CUBE_XY.1 as f64, 0.0),
+        glam::Quat::IDENTITY,
+        glam::Vec3::splat(SIDE),
+        [1.0, 1.0, 1.0, 1.0],
+        2,
+    ));
+    s.mark_dirty();
+    let v = view(5.0);
+
+    let strided = |stride: u32| {
+        let r = run(
+            &gpu,
+            &s,
+            &v,
+            &VsmSettings {
+                mark_stride: stride,
+                ..settings()
+            },
+            6,
+        );
+        let threads = r.vsm().expect("a live system").stats().mark_threads;
+        (resident_pages(&r, 0), threads)
+    };
+
+    let (dense, dense_threads) = strided(1);
+    let (coarse, coarse_threads) = strided(4);
+
+    // ANTI-VACUITY FIRST: an empty set is a subset of everything, and a fixture
+    // that marks one page cannot tell a lost page from a kept one.
+    assert!(
+        dense.len() >= 2,
+        "the dense pass marked {} page(s); the two cubes must reach at least two \
+         or the containment below is a statement about nothing",
+        dense.len()
+    );
+    assert!(
+        coarse.is_subset(&dense),
+        "a strided marking pass asked for pages the full grid never did: {:?}",
+        coarse.difference(&dense).collect::<Vec<_>>()
+    );
+
+    // THE KNOB ARRIVED. Sixteen times fewer threads, in the counter the dispatch
+    // itself produces — the half a page-set comparison structurally cannot make.
+    assert!(dense_threads > 0, "the marking pass dispatched nothing");
+    // A **band**, not `× 16`, and the reason is arithmetic rather than slack: the
+    // dispatch rounds up to whole 8 × 8 workgroups, so 320 × 180 is 40 × 23 groups
+    // at stride 1 and 10 × 6 at stride 4 — a ratio of 15.33, not 16. The band's
+    // lower edge is what has teeth (a stride that reached nothing is 1.0).
+    let ratio = dense_threads as f64 / coarse_threads as f64;
+    assert!(
+        (12.0..=16.0).contains(&ratio),
+        "stride 4 dispatched {coarse_threads} threads against stride 1's \
+         {dense_threads} — a ratio of {ratio:.2}, not the ~15.3 the workgroup \
+         rounding predicts; the knob did not reach the dispatch"
+    );
+
+    // IT COSTS SOMETHING, and what it costs is measured rather than described.
+    // Skipping fifteen pixels in sixteen loses the pages that only a few pixels
+    // asked for — here a COARSE level's page, reached by the far corner of a
+    // cube whose near face is on a finer one.
+    assert!(
+        coarse.len() < dense.len(),
+        "stride 4 marked the same {} pages as stride 1 — the knob is inert on \
+         this fixture, so the containment above is a statement about nothing",
+        dense.len()
+    );
+
+    // …and the pass still SEES the whole frame: every page at the FINEST level
+    // the dense pass reached survives, which is both cubes — one either side of
+    // the centre. This is the assertion that fails if the thread grid shrank and
+    // the pixel index did not scale with it: that pass reads the frame's
+    // top-left corner and loses the right cube's page, which is also a subset
+    // and also smaller.
+    let finest = dense.iter().map(|p| p.level).min().expect("non-empty");
+    let dense_finest: BTreeSet<VsmPage> =
+        dense.iter().copied().filter(|p| p.level == finest).collect();
+    assert!(
+        dense_finest.len() >= 2,
+        "the two cubes did not reach two pages of the finest level ({dense_finest:?}), \
+         so the coverage assertion below cannot tell a coarse pass from a cropped one"
+    );
+    assert!(
+        dense_finest.is_subset(&coarse),
+        "stride 4 lost a finest-level page the whole frame's geometry stands on: \
+         {:?} — the thread grid is covering PART of the frame rather than all of \
+         it coarsely",
+        dense_finest.difference(&coarse).collect::<Vec<_>>()
+    );
+
+    // The DEFAULT is the dense one, which is what makes every committed golden
+    // and every page trace in this phase unchanged by the knob existing.
+    assert_eq!(VsmSettings::default().mark_stride, 1);
+}

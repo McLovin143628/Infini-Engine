@@ -1469,6 +1469,11 @@ impl EngineRenderer {
                     // cursor.
                     jvp.inverse(),
                     self.frame_index,
+                    // P27.5: the tier's marking stride, read off the live
+                    // settings rather than baked into the pass, so a host that
+                    // re-clamps mid-session marks at the new density on the very
+                    // next frame.
+                    self.settings.vsm.mark_stride,
                 )
             }
             None => 0,

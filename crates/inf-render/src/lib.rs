@@ -134,7 +134,8 @@ pub use settings::{
     halton, halton_jitter, mip_chain_sizes, soft_knee_factor, ssao_hemisphere_kernel,
     BloomSettings, GiSettings, RenderSettings, ScatterSettings, ShadowSettings, SsaoSettings,
     VgeomSettings, VirtualTextureSettings, VsmSettings, VsmSettingsError, VSM_BUDGET_LOW_BYTES,
-    VSM_BUDGET_MEDIUM_BYTES, VSM_CLIPMAP_PAGES_MEDIUM,
+    VSM_BUDGET_MEDIUM_BYTES, VSM_CLIPMAP_PAGES_MEDIUM, VSM_MARK_STRIDE_MEDIUM, VSM_MAX_MARK_STRIDE,
+    VSM_MAX_PCF_RADIUS, VSM_PCF_RADIUS_MEDIUM,
 };
 // P27.1 virtual shadow maps: the projections and the level rules (pure,
 // unit-tested with no adapter), the mirror, and the marking loop's counters.
@@ -160,7 +161,8 @@ pub use vsm_receiver::{
     clipmap_resolution_reads, is_clipmap, pcf_crossing_fraction, pcf_resolution_cost,
     receiver_slots, sun_slot, vsm_atlas_header, vsm_bias_ndc, vsm_blend_weight, vsm_block_header,
     vsm_cube_face, vsm_level_factor, vsm_level_ndc, vsm_ndc_per_metre, vsm_page_of, vsm_pcf_taps,
-    vsm_receiver_level, vsm_receiver_site, vsm_shadow_factor, vsm_slope_tan, vsm_table_entry,
+    vsm_receiver_level, vsm_receiver_site, vsm_shadow_factor, vsm_slope_bias_texels, vsm_slope_tan,
+    vsm_table_entry,
     vsm_to_light, VsmEmptyPool, VsmReceiverParams, VsmReceiverResources, VsmReceiverSite,
     VsmTableEntry, VSM_DEPTH_ULP_BIAS, VSM_MAX_SLOPE, VSM_NORMAL_BIAS_TEXELS, VSM_NO_DATA,
     VSM_PCF_RADIUS, VSM_PCF_TAPS, VSM_SLOPE_BIAS_TEXELS,

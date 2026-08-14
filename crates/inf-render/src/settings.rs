@@ -556,6 +556,49 @@ pub const VSM_BUDGET_LOW_BYTES: u64 = 16 * 1024 * 1024;
 /// per level against High's 8 k.
 pub const VSM_CLIPMAP_PAGES_MEDIUM: u32 = 32;
 
+/// **The marking dispatch's stride below High** (P27.5): every second pixel on
+/// both axes, so the pass costs a **quarter** of the threads and a quarter of
+/// the depth loads.
+///
+/// The P27.1 ledger's own remainder — *"the marking dispatch is one thread per
+/// pixel with no stride, so there is no tier knob for its cost"* — closed as a
+/// knob rather than as a default: `VsmSettings::mark_stride` is **1** on High
+/// and everywhere else the caller does not lower quality, and the clamp is a
+/// `max` because a *larger* stride is *less* work.
+///
+/// What it costs is measured rather than adjectival, and it is the phase's own
+/// chosen direction: a page only a skipped pixel would have asked for is not
+/// marked, is not resident, and resolves to [`inf_vsm::VSM_ENTRY_NONE`] —
+/// which the receiver reads as **lit**. So a coarser marking grid leaks light
+/// at a silhouette rather than punching a hole in one.
+pub const VSM_MARK_STRIDE_MEDIUM: u32 = 2;
+
+/// **The PCF kernel's radius below High** (P27.5): `0`, a single tap — a hard
+/// shadow edge instead of the 3 × 3 filter.
+///
+/// The clamp is a `min` because a *larger* radius is *more* work: nine
+/// `textureLoad`s against one, over the same single table resolution
+/// (`crate::vsm_receiver::pcf_resolution_cost` — the clamped kernel resolves
+/// once whatever the radius). The derived slope bias follows the radius rather
+/// than staying at High's, because it *is* `(R + ½)·√2` and a bias sized for a
+/// kernel that is not running is peter-panning nobody asked for.
+pub const VSM_PCF_RADIUS_MEDIUM: u32 = 0;
+
+/// The largest [`VsmSettings::mark_stride`] the settings boundary accepts.
+///
+/// Eight is a 64× cost reduction and a 8 × 8-pixel marking grid; past it the
+/// signal stops being *screen-driven* in any useful sense — a 1 % of pixels
+/// sample is a sample of the depth buffer, not a coverage of it.
+pub const VSM_MAX_MARK_STRIDE: u32 = 8;
+
+/// The largest [`VsmSettings::pcf_radius`] the settings boundary accepts.
+///
+/// Three is a 7 × 7 kernel, 49 taps, and `pcf_crossing_fraction` at 128 texels
+/// says **9.1 %** of a page's texels would have a tap outside it. Past that the
+/// clamped kernel's error (the dropped weight at a page edge) stops being a
+/// bounded correction and becomes the filter.
+pub const VSM_MAX_PCF_RADIUS: u32 = 3;
+
 /// Virtual shadow maps (P27).
 ///
 /// Unlike [`VirtualTextureSettings`] this **does** carry an enable flag, and the
@@ -613,6 +656,28 @@ pub struct VsmSettings {
     /// not silently turn the clipmap's off with it — nor the reverse. The CSM's
     /// own knob is untouched by this batch.
     pub level_blend: f32,
+    /// **The marking dispatch's stride, in screen pixels** (P27.5) — one thread
+    /// per `stride × stride` block instead of one per pixel.
+    ///
+    /// `1` is the shipped default and is **bit-identical** to the P27.1–P27.4
+    /// pass: the shader indexes `gid.xy * stride`, which at 1 is `gid.xy`.
+    /// [`RenderTier::apply`](crate::caps::RenderTier::apply) raises it to
+    /// [`VSM_MARK_STRIDE_MEDIUM`] below High — a `max`, because a larger stride
+    /// is less work, so the clamp still only ever lowers quality.
+    pub mark_stride: u32,
+    /// **The receiver's PCF kernel radius, in page texels** (P27.5) — a
+    /// `(2R+1)²` grid of `textureLoad`s over one table resolution.
+    ///
+    /// `1` is the shipped default and is
+    /// [`VSM_PCF_RADIUS`](crate::vsm_receiver::VSM_PCF_RADIUS) — the cascade's
+    /// own 3 × 3 — so the default path is bit-identical to P27.4's. Clamped
+    /// **down** to [`VSM_PCF_RADIUS_MEDIUM`] below High.
+    ///
+    /// The slope bias is a function of it
+    /// ([`vsm_slope_bias_texels`](crate::vsm_receiver::vsm_slope_bias_texels))
+    /// and travels to the shader in the same uniform, so the two cannot
+    /// disagree about which kernel is running.
+    pub pcf_radius: u32,
 }
 
 /// A [`VsmSettings`] value outside the legal set — **the settings boundary's own
@@ -665,6 +730,12 @@ pub enum VsmSettingsError {
     /// A [`VsmSettings::level_blend`] that is not a fraction — zero is legal
     /// (the hard switch), a NaN is not.
     Blend { value: f32 },
+    /// A [`VsmSettings::mark_stride`] of zero (a dispatch that covers nothing)
+    /// or past [`VSM_MAX_MARK_STRIDE`] (P27.5).
+    MarkStride { stride: u32, max: u32 },
+    /// A [`VsmSettings::pcf_radius`] past [`VSM_MAX_PCF_RADIUS`] (P27.5). Zero
+    /// is legal — it is the single-tap kernel the tier below High runs.
+    PcfRadius { radius: u32, max: u32 },
 }
 
 impl std::fmt::Display for VsmSettingsError {
@@ -707,6 +778,18 @@ impl std::fmt::Display for VsmSettingsError {
                 f,
                 "`level_blend` is {value}; it must be a fraction in 0..=1 (0 is \
                  the hard level switch)"
+            ),
+            Self::MarkStride { stride, max } => write!(
+                f,
+                "`mark_stride` is {stride}; it must be 1..={max} (1 = one \
+                 marking thread per screen pixel, and a stride of 0 would \
+                 dispatch a grid that covers no pixel at all)"
+            ),
+            Self::PcfRadius { radius, max } => write!(
+                f,
+                "`pcf_radius` is {radius}; it must be 0..={max} (0 = a single \
+                 tap, and past the ceiling the clamped kernel's dropped-weight \
+                 error at a page edge stops being a correction)"
             ),
         }
     }
@@ -793,6 +876,22 @@ impl VsmSettings {
                 value: self.level_blend,
             });
         }
+        // P27.5's two tier knobs, at the same door as everything else. Both are
+        // refused **whatever `enabled` says**, for the reason above: a
+        // configuration that is illegal while the feature is off becomes illegal
+        // the moment somebody turns it on.
+        if self.mark_stride == 0 || self.mark_stride > VSM_MAX_MARK_STRIDE {
+            return Err(VsmSettingsError::MarkStride {
+                stride: self.mark_stride,
+                max: VSM_MAX_MARK_STRIDE,
+            });
+        }
+        if self.pcf_radius > VSM_MAX_PCF_RADIUS {
+            return Err(VsmSettingsError::PcfRadius {
+                radius: self.pcf_radius,
+                max: VSM_MAX_PCF_RADIUS,
+            });
+        }
         Ok(())
     }
 }
@@ -809,6 +908,8 @@ impl Default for VsmSettings {
             point_levels: 6,
             perspective_near_m: 0.05,
             level_blend: 0.1,
+            mark_stride: 1,
+            pcf_radius: crate::vsm_receiver::VSM_PCF_RADIUS as u32,
         }
     }
 }
@@ -1296,5 +1397,59 @@ mod tests {
             let len = (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt();
             assert!(len <= 1.0 + 1e-4, "sample outside unit ball: {len}");
         }
+    }
+
+    /// **The settings boundary refuses P27.5's two tier knobs out of range**,
+    /// and it refuses them **whatever `enabled` says** — the rule the rest of
+    /// `validate` already follows, restated here because these two are the first
+    /// knobs whose illegal values are *cheap* rather than catastrophic and would
+    /// therefore be easy to let through.
+    ///
+    /// A stride of 0 is the interesting one: `dispatch_workgroups(w / 0)` is a
+    /// division by zero on the CPU, and the shader's own `max(stride, 1u)` would
+    /// hide it — so the door has to be here, before the arithmetic.
+    #[test]
+    fn the_settings_boundary_refuses_an_illegal_stride_or_kernel() {
+        let ok = VsmSettings::default();
+        assert!(ok.validate().is_ok());
+
+        let bad = |f: fn(&mut VsmSettings)| {
+            let mut v = ok;
+            f(&mut v);
+            v.validate().expect_err("an illegal knob was accepted")
+        };
+        assert!(matches!(
+            bad(|v| v.mark_stride = 0),
+            VsmSettingsError::MarkStride { stride: 0, .. }
+        ));
+        assert!(matches!(
+            bad(|v| v.mark_stride = VSM_MAX_MARK_STRIDE + 1),
+            VsmSettingsError::MarkStride { .. }
+        ));
+        assert!(matches!(
+            bad(|v| v.pcf_radius = VSM_MAX_PCF_RADIUS + 1),
+            VsmSettingsError::PcfRadius { .. }
+        ));
+        // …and the refusal survives the feature being OFF, which is where a door
+        // that only guards a live system would let it through.
+        let mut off = ok;
+        off.enabled = false;
+        off.mark_stride = 0;
+        assert!(off.validate().is_err());
+
+        // BOUNDS, not bans: exactly ON the ceiling is legal, and a radius of
+        // zero — the single tap the tier below High runs — is legal too.
+        let mut edge = ok;
+        edge.mark_stride = VSM_MAX_MARK_STRIDE;
+        edge.pcf_radius = VSM_MAX_PCF_RADIUS;
+        assert!(edge.validate().is_ok());
+        let mut one_tap = ok;
+        one_tap.pcf_radius = 0;
+        assert!(one_tap.validate().is_ok());
+
+        // The messages name the field, because a host reads them (P27.2's rule
+        // for this enum).
+        assert!(bad(|v| v.mark_stride = 0).to_string().contains("mark_stride"));
+        assert!(bad(|v| v.pcf_radius = 9).to_string().contains("pcf_radius"));
     }
 }

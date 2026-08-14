@@ -52,9 +52,14 @@ const VSM_PROJ_ORTHO_KIND: u32 = 0u;
 // that module's docs and pinned by its arms; the numbers here are checked
 // against it character for character by
 // `the_receivers_two_halves_spell_one_set_of_constants`.
-const VSM_PCF_RADIUS: i32 = 1;
+// P27.5 RETIRED TWO OF THESE, and it is an exchange rather than a loss. The PCF
+// radius and its slope bias became a **tier knob** (`VsmSettings::pcf_radius`),
+// so they arrive per frame in `vsm.counts.z` and `vsm.params.w` — written by
+// `VsmReceiverParams::new`, which derives one from the other so a one-tap kernel
+// can never run a three-tap bias. What used to pin them here as constants is
+// pinned by `the_kernel_and_its_bias_are_read_from_the_uniform_the_tier_writes`,
+// which names the two expressions whose *absence* would be the defect.
 const VSM_DEPTH_ULP_BIAS: f32 = 2.3841858e-7;
-const VSM_SLOPE_BIAS_TEXELS: f32 = 2.1213203;
 const VSM_NORMAL_BIAS_TEXELS: f32 = 1.0;
 const VSM_MAX_SLOPE: f32 = 8.0;
 const VSM_NO_DATA: f32 = -1.0;
@@ -76,10 +81,14 @@ struct VsmProjection {
 
 struct VsmReceiver {
     // x = the clipmap level blend band, y = pixels per world unit at one metre,
-    // z = the perspective near plane (m), w reserved.
+    // z = the perspective near plane (m), w = the slope bias in page texels
+    // (P27.5: `inf_render::vsm_receiver::vsm_slope_bias_texels` of the frame's
+    // kernel radius — 2.1213203 at the default, which is what this file's
+    // constant used to spell).
     params: vec4<f32>,
     // x = the sun's projection index + 1 (0 = no directional tree),
-    // y = the projection count, zw reserved.
+    // y = the projection count, z = the PCF kernel radius in page texels
+    // (P27.5's tier knob), w reserved.
     counts: vec4<u32>,
 };
 
@@ -236,11 +245,17 @@ fn vsm_level_factor(p: VsmProjection, l: vec3<f32>, level: u32, bias: f32) -> f3
     // holds). See `inf_render::vsm_receiver`'s module docs for the four numbers
     // this ruling rests on. The centre tap is always inside, so the divisor is
     // never zero.
+    //
+    // **The radius is the frame's, not a constant** (P27.5): `vsm.counts.z`
+    // carries `VsmSettings::pcf_radius` after the tier clamp, and at the shipped
+    // default it is `VSM_PCF_RADIUS_DEFAULT` — so this loop is P27.4's, iteration
+    // for iteration, on every configuration that has not asked for less.
+    let radius = i32(vsm.counts.z);
     let base = vec2<i32>(floor(local));
     var sum = 0.0;
     var taps = 0.0;
-    for (var dy = -VSM_PCF_RADIUS; dy <= VSM_PCF_RADIUS; dy = dy + 1) {
-        for (var dx = -VSM_PCF_RADIUS; dx <= VSM_PCF_RADIUS; dx = dx + 1) {
+    for (var dy = -radius; dy <= radius; dy = dy + 1) {
+        for (var dx = -radius; dx <= radius; dx = dx + 1) {
             let t = base + vec2<i32>(dx, dy);
             if (t.x < 0 || t.y < 0 || t.x >= i32(page_size) || t.y >= i32(page_size)) {
                 continue;
@@ -362,7 +377,12 @@ fn vsm_shadow(world_pos: vec3<f32>, n: vec3<f32>, slot: u32) -> f32 {
     }
     let ndl = clamp(dot(n, to_light), 0.0, 1.0);
     let tan_t = min(sqrt(max(1.0 - ndl * ndl, 0.0)) / max(ndl, 0.05), VSM_MAX_SLOPE);
-    let slope = VSM_SLOPE_BIAS_TEXELS * tan_t * ndc_per_m;
+    // P27.5: `vsm.params.w`, the slope bias for the kernel `vsm.counts.z` names,
+    // rather than a constant sized for a kernel that may not be running. At the
+    // default it is `VSM_SLOPE_BIAS_TEXELS_DEFAULT` bit for bit — the Rust
+    // constant and this literal are the same `f32`, which is what makes the
+    // shipped path unchanged.
+    let slope = vsm.params.w * tan_t * ndc_per_m;
     let bias = VSM_DEPTH_ULP_BIAS + slope * texel0 * exp2(f32(level));
 
     var f = vsm_level_factor(p, l, level, bias);

@@ -58,6 +58,10 @@ struct VsmMarkParams {
     eye: vec4<f32>,
     // x = projection count, y = mask words, z = viewport width, w = height.
     counts: vec4<u32>,
+    // P27.5: x = the marking stride in screen pixels, yzw reserved. One thread
+    // per `stride x stride` block; at the shipped 1 the pixel index below is
+    // `gid.xy` exactly, so the default path's marked set is unchanged.
+    stride: vec4<u32>,
 };
 @group(0) @binding(0) var<uniform> params: VsmMarkParams;
 
@@ -97,20 +101,29 @@ fn justified_level(texel0: f32, pixel_world: f32, levels: u32) -> u32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_mark(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.counts.z || gid.y >= params.counts.w) {
+    // **The tier's marking stride** (P27.5). The dispatch is already divided by
+    // it, so this multiply is what turns thread (i, j) back into the pixel it
+    // stands for. At `stride = 1` — the shipped default and everything above
+    // Medium — `px` is `gid.xy` and every line below is the P27.1 pass.
+    //
+    // What a stride costs is a page a skipped pixel would have asked for, which
+    // is absent, which the receiver reads as LIT: the leak direction this whole
+    // phase chose, never a hole.
+    let px = gid.xy * max(params.stride.x, 1u);
+    if (px.x >= params.counts.z || px.y >= params.counts.w) {
         return;
     }
     // Reverse-Z: the clear value is 0 and it means "far / nothing was drawn".
     // A sky pixel therefore marks NOTHING, which is what makes an empty frame's
     // mask empty rather than a clipmap-wide claim — and is the control the
     // marking arms assert on.
-    let depth = textureLoad(scene_depth, vec2<i32>(gid.xy), 0);
+    let depth = textureLoad(scene_depth, vec2<i32>(px), 0);
     if (depth <= 0.0) {
         return;
     }
 
     // Pixel centre -> NDC -> render-local world.
-    let uv = (vec2<f32>(gid.xy) + vec2<f32>(0.5)) /
+    let uv = (vec2<f32>(px) + vec2<f32>(0.5)) /
              vec2<f32>(f32(params.counts.z), f32(params.counts.w));
     let ndc = vec3<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth);
     let h = params.inv_view_proj * vec4<f32>(ndc, 1.0);

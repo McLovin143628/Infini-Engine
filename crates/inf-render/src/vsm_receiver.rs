@@ -123,6 +123,13 @@ use inf_vsm::{
 /// `csm_cascade_pcf`), and matching it is deliberate — P27.5 demotes the CSM to
 /// a fallback, and a fallback that filters differently would make the tier a
 /// *look* change rather than a resolution one.
+///
+/// **P27.5 made it the DEFAULT rather than the only value.** The radius is a
+/// tier knob now ([`VsmSettings::pcf_radius`](crate::VsmSettings::pcf_radius),
+/// clamped **down** below High) and it travels to the shader in
+/// [`VsmReceiverParams::counts`]`[2]`. This constant is what a caller who has
+/// not asked for less gets, and what every function here defaults to when a
+/// caller has no params to read.
 pub const VSM_PCF_RADIUS: i32 = 1;
 
 /// Taps of the full kernel, `(2R+1)²`.
@@ -140,7 +147,26 @@ pub const VSM_DEPTH_ULP_BIAS: f32 = 2.0 * f32::EPSILON;
 /// The receiver may sit anywhere within its own texel (± ½) and the kernel
 /// reaches [`VSM_PCF_RADIUS`] further, on both axes. Derived rather than tuned —
 /// see the module docs.
+///
+/// P27.5: the value at the **default** radius. A tier that clamps the kernel
+/// down clamps this with it — [`vsm_slope_bias_texels`] is the derivation and
+/// this is `vsm_slope_bias_texels(1)`, asserted below rather than assumed.
 pub const VSM_SLOPE_BIAS_TEXELS: f32 = (VSM_PCF_RADIUS as f32 + 0.5) * std::f32::consts::SQRT_2;
+
+/// **The slope bias for a kernel of `radius` page texels**: `(R + ½)·√2`.
+///
+/// P27.5's tier knob made this a function of a setting rather than a constant,
+/// and the derivation is unchanged: the receiver may sit anywhere within its own
+/// texel (± ½) and the kernel reaches `R` further, on both axes.
+///
+/// A bias sized for a kernel that is not running is peter-panning nobody asked
+/// for, which is why the radius and this number travel together in one uniform
+/// ([`VsmReceiverParams`]) instead of one being a constant the other has to be
+/// kept in step with by hand.
+#[inline]
+pub fn vsm_slope_bias_texels(radius: u32) -> f32 {
+    (radius as f32 + 0.5) * std::f32::consts::SQRT_2
+}
 
 /// **The normal-offset bias, in page texels**: the receiver is pushed along its
 /// own normal by one texel before it is projected.
@@ -179,10 +205,12 @@ pub struct VsmReceiverParams {
     /// y = pixels per world unit at one metre (`vt_stream::projection_scale` —
     /// the same door the marking pass takes, so the receiver and the marker
     /// choose the same level), z = the perspective near plane in metres,
-    /// w reserved.
+    /// **w = the slope bias in page texels** (P27.5 —
+    /// [`vsm_slope_bias_texels`] of the frame's kernel radius; it was reserved).
     pub params: [f32; 4],
     /// x = the **first shadow-casting directional light's** projection index
-    /// **+ 1** (0 = there is none), y = the projection count, zw reserved.
+    /// **+ 1** (0 = there is none), y = the projection count, **z = the PCF
+    /// kernel radius in page texels** (P27.5 — it was reserved), w reserved.
     ///
     /// The sun rides in the uniform rather than in its light record because
     /// `terrain.wgsl` shades it from `view.sun_dir` and has no light index at
@@ -203,15 +231,35 @@ impl VsmReceiverParams {
 
     /// The params for a live system.
     pub fn new(settings: &VsmSettings, proj_scale: f32, sun_slot: u32, projections: u32) -> Self {
+        // P27.5: the kernel and its bias are **derived together, here**, so the
+        // shader can never run a one-tap kernel with a three-tap bias. The clamp
+        // is the settings boundary's ceiling restated (the boundary refuses past
+        // it; this is the second door, `VsmSettings::validate`'s own pattern).
+        let radius = settings.pcf_radius.min(crate::settings::VSM_MAX_PCF_RADIUS);
         Self {
             params: [
                 settings.level_blend.clamp(0.0, 1.0),
                 proj_scale,
                 settings.perspective_near_m.max(1e-3),
-                0.0,
+                vsm_slope_bias_texels(radius),
             ],
-            counts: [sun_slot, projections, 0, 0],
+            counts: [sun_slot, projections, radius, 0],
         }
+    }
+
+    /// The PCF kernel radius this frame's shader is running, as the `i32` the
+    /// tap loop counts with.
+    #[inline]
+    pub fn pcf_radius(&self) -> i32 {
+        self.counts[2] as i32
+    }
+
+    /// The slope bias in page texels this frame's shader is applying — always
+    /// [`vsm_slope_bias_texels`] of [`pcf_radius`](Self::pcf_radius), because
+    /// [`new`](Self::new) is the only thing that writes either.
+    #[inline]
+    pub fn slope_bias_texels(&self) -> f32 {
+        self.params[3]
     }
 }
 
@@ -257,9 +305,11 @@ pub fn vsm_slope_tan(n_dot_l: f32) -> f32 {
 /// `texel_m` is the world size of one texel of the page the receiver will read
 /// (`texel₀ · 2^level`), `ndc_per_m` the projection's own `∂z/∂m` along the
 /// light at this receiver, and `n_dot_l` the geometric term.
+/// `slope_texels` is [`vsm_slope_bias_texels`] of the frame's kernel radius —
+/// [`VSM_SLOPE_BIAS_TEXELS`] at the shipped default (P27.5).
 #[inline]
-pub fn vsm_bias_ndc(texel_m: f32, ndc_per_m: f32, n_dot_l: f32) -> f32 {
-    VSM_DEPTH_ULP_BIAS + VSM_SLOPE_BIAS_TEXELS * texel_m * vsm_slope_tan(n_dot_l) * ndc_per_m
+pub fn vsm_bias_ndc(texel_m: f32, ndc_per_m: f32, n_dot_l: f32, slope_texels: f32) -> f32 {
+    VSM_DEPTH_ULP_BIAS + slope_texels * texel_m * vsm_slope_tan(n_dot_l) * ndc_per_m
 }
 
 /// **How much a page's stored depth moves per metre of receiver travel toward
@@ -477,17 +527,22 @@ pub fn vsm_atlas_header(table: &[u32]) -> Option<(u32, u32)> {
 /// filter toward whatever the page's own edge happens to hold; dropping
 /// renormalizes and leaves the answer a mean of real data. The centre tap is
 /// always inside, so the divisor is never zero.
+///
+/// `radius` is the frame's kernel radius (P27.5): [`VSM_PCF_RADIUS`] on High,
+/// [`VSM_PCF_RADIUS_MEDIUM`](crate::settings::VSM_PCF_RADIUS_MEDIUM) below it.
 pub fn vsm_pcf_taps(
     local: Vec2,
     page_size: u32,
     border: u32,
     origin: (u32, u32),
+    radius: i32,
 ) -> Vec<(u32, u32)> {
     let base = (local.x.floor() as i32, local.y.floor() as i32);
     let side = page_size as i32;
-    let mut out = Vec::with_capacity(VSM_PCF_TAPS as usize);
-    for dy in -VSM_PCF_RADIUS..=VSM_PCF_RADIUS {
-        for dx in -VSM_PCF_RADIUS..=VSM_PCF_RADIUS {
+    let r = radius.max(0);
+    let mut out = Vec::with_capacity(((2 * r + 1) * (2 * r + 1)) as usize);
+    for dy in -r..=r {
+        for dx in -r..=r {
             let (tx, ty) = (base.0 + dx, base.1 + dy);
             if tx < 0 || ty < 0 || tx >= side || ty >= side {
                 continue;
@@ -518,6 +573,7 @@ pub fn vsm_level_factor(
     ndc: Vec3,
     level: u32,
     bias: f32,
+    radius: i32,
     mut depth: impl FnMut(u32, u32) -> f32,
 ) -> f32 {
     let block = proj.info[0];
@@ -551,7 +607,7 @@ pub fn vsm_level_factor(
         (entry.slot % slots_x.max(1)) * stored,
         (entry.slot / slots_x.max(1)) * stored,
     );
-    let taps = vsm_pcf_taps(local, page_size, border, origin);
+    let taps = vsm_pcf_taps(local, page_size, border, origin, radius);
     if taps.is_empty() {
         return VSM_NO_DATA;
     }
@@ -581,13 +637,18 @@ pub struct VsmReceiverSite {
     pub n_dot_l: f32,
     /// Levels in this light's tree.
     pub levels: u32,
+    /// The slope bias in page texels this frame's kernel earns (P27.5) —
+    /// [`vsm_slope_bias_texels`] of the radius, carried on the site so
+    /// [`bias`](Self::bias) cannot read a different kernel's number from the one
+    /// [`vsm_level_factor`] is about to tap with.
+    pub slope_texels: f32,
 }
 
 impl VsmReceiverSite {
     /// The bias for `level`, whose texel is `texel₀ · 2^level`.
     pub fn bias(&self, level: u32) -> f32 {
         let texel_m = self.texel0 * (1u64 << level.min(62)) as f32;
-        vsm_bias_ndc(texel_m, self.ndc_per_m, self.n_dot_l)
+        vsm_bias_ndc(texel_m, self.ndc_per_m, self.n_dot_l, self.slope_texels)
     }
 }
 
@@ -604,6 +665,7 @@ pub fn vsm_receiver_site(
     normal: Vec3,
     pixel_world: f32,
     near_m: f32,
+    slope_texels: f32,
 ) -> Option<VsmReceiverSite> {
     let vp = Mat4::from_cols_array(&proj.view_proj);
     let ortho = proj.info[3] == VSM_PROJ_ORTHO;
@@ -646,6 +708,7 @@ pub fn vsm_receiver_site(
         ndc_per_m: vsm_ndc_per_metre(&vp, ortho, ndc.z, near_m),
         n_dot_l: normal.dot(to_light).clamp(0.0, 1.0),
         levels,
+        slope_texels,
     })
 }
 
@@ -709,10 +772,18 @@ pub fn vsm_shadow_factor(
     params: &VsmReceiverParams,
     mut depth: impl FnMut(u32, u32) -> f32,
 ) -> f32 {
-    let Some(site) = vsm_receiver_site(proj, desc, world, normal, pixel_world, params.params[2])
-    else {
+    let Some(site) = vsm_receiver_site(
+        proj,
+        desc,
+        world,
+        normal,
+        pixel_world,
+        params.params[2],
+        params.slope_bias_texels(),
+    ) else {
         return 1.0;
     };
+    let radius = params.pcf_radius();
     let f = vsm_level_factor(
         table,
         proj,
@@ -720,6 +791,7 @@ pub fn vsm_shadow_factor(
         site.ndc,
         site.level,
         site.bias(site.level),
+        radius,
         &mut depth,
     );
     if f < 0.0 {
@@ -741,6 +813,7 @@ pub fn vsm_shadow_factor(
         site.ndc,
         site.level + 1,
         site.bias(site.level + 1),
+        radius,
         &mut depth,
     );
     if nf < 0.0 {
@@ -998,7 +1071,7 @@ mod tests {
         // exactly that in this arm's first draft — `3.0/9.0` asserted equal to
         // `3.0/9.0` — which the P27.4 audit found and which is the vacuous-check
         // law met again: an arithmetic identity passes whatever the kernel does.)
-        let taps_at = |l: Vec2| vsm_pcf_taps(l, VSM_PAGE_SIZE, 0, (0, 0)).len();
+        let taps_at = |l: Vec2| vsm_pcf_taps(l, VSM_PAGE_SIZE, 0, (0, 0), VSM_PCF_RADIUS).len();
         let interior = taps_at(Vec2::new(64.5, 64.5));
         let on_edge = taps_at(Vec2::new(0.5, 64.5));
         let at_corner = taps_at(Vec2::new(0.5, 0.5));
@@ -1020,6 +1093,7 @@ mod tests {
                     Vec3::new(q.x, q.y, 0.5),
                     0,
                     0.0,
+                    VSM_PCF_RADIUS,
                     |_, _| stored,
                 )
             };
@@ -1060,6 +1134,7 @@ mod tests {
             Vec3::new(-0.999, 0.0, 0.5),
             0,
             0.0,
+            VSM_PCF_RADIUS,
             |_, _| 0.75,
         );
         assert_eq!(clamped_on_a_seam, 0.0, "the clamp is exact here");
@@ -1123,7 +1198,7 @@ mod tests {
         assert_eq!(range, 8_192.0);
         let ndl = std::f32::consts::FRAC_1_SQRT_2;
         assert!((vsm_slope_tan(ndl) - 1.0).abs() < 1e-5, "45° is tan 1");
-        let bias = vsm_bias_ndc(texel0, 1.0 / range, ndl);
+        let bias = vsm_bias_ndc(texel0, 1.0 / range, ndl, VSM_SLOPE_BIAS_TEXELS);
         assert!(
             (bias - 2.26e-6).abs() < 5e-8,
             "the shipped defaults' bias at 45°, level 0: {bias}"
@@ -1147,7 +1222,10 @@ mod tests {
         assert_eq!(vsm_slope_tan(1.0), 0.0);
         // …and the constant term is what is left when the surface faces the
         // light, which is exactly the depth format's own step.
-        assert_eq!(vsm_bias_ndc(texel0, 1.0 / range, 1.0), VSM_DEPTH_ULP_BIAS);
+        assert_eq!(
+            vsm_bias_ndc(texel0, 1.0 / range, 1.0, VSM_SLOPE_BIAS_TEXELS),
+            VSM_DEPTH_ULP_BIAS
+        );
 
         // The unit ruling, measured: expressed in TEXELS the constant term is not
         // constant at all — it is `2^(levels-1)` of itself.
@@ -1549,14 +1627,23 @@ mod tests {
                 .parse::<f64>()
                 .unwrap_or_else(|e| panic!("`{name}` = `{rhs}` does not parse as a number: {e}"))
         };
-        assert_eq!(value("VSM_PCF_RADIUS"), f64::from(VSM_PCF_RADIUS));
+        // `VSM_PCF_RADIUS` and `VSM_SLOPE_BIAS_TEXELS` are deliberately NOT in
+        // this list any more (P27.5): both became tier knobs and now arrive in
+        // the uniform, so a constant here would be a second, silently divergent
+        // answer rather than a mirror. What replaced this pair is
+        // `the_kernel_and_its_bias_are_read_from_the_uniform_the_tier_writes`
+        // plus `VsmReceiverParams::new`'s own arm — an exchange with one more
+        // assertion in it than the two it retired, not a loosening.
+        assert!(
+            !src.contains("const VSM_PCF_RADIUS")
+                && !src.contains("const VSM_SLOPE_BIAS_TEXELS"),
+            "the shader declares a kernel constant again — it would be a second \
+             answer to a question `VsmReceiverParams::new` already answers per \
+             frame, and the tier clamp would stop reaching the kernel"
+        );
         assert!(
             (value("VSM_DEPTH_ULP_BIAS") - f64::from(VSM_DEPTH_ULP_BIAS)).abs() < 1e-14,
             "the constant bias differs between the two halves"
-        );
-        assert!(
-            (value("VSM_SLOPE_BIAS_TEXELS") - f64::from(VSM_SLOPE_BIAS_TEXELS)).abs() < 1e-6,
-            "the slope bias differs between the two halves"
         );
         assert_eq!(
             value("VSM_NORMAL_BIAS_TEXELS"),
@@ -1582,6 +1669,71 @@ mod tests {
             none.contains(&format!("0x{:08X}u", VSM_ENTRY_NONE)),
             "the shader's absence sentinel is not `inf_vsm::VSM_ENTRY_NONE`: {none}"
         );
+    }
+
+    /// **The kernel and its bias are read from the uniform the tier writes**
+    /// (P27.5) — the arm that replaces the two constants
+    /// `the_receivers_two_halves_spell_one_set_of_constants` used to mirror.
+    ///
+    /// It names the two expressions whose **absence** is the defect, which is
+    /// the P27.4-audit corollary a source pin exists to satisfy: pinning
+    /// `vsm.counts.z` somewhere in the file would pass while the loop still
+    /// counted to a constant. So the pin is the loop header and the multiply.
+    ///
+    /// And the Rust half is the one that makes them agree: `VsmReceiverParams`
+    /// derives the bias FROM the radius, in one place, so a tier that clamps the
+    /// kernel cannot leave a bias sized for the kernel it clamped away.
+    #[test]
+    fn the_kernel_and_its_bias_are_read_from_the_uniform_the_tier_writes() {
+        let src = include_str!("shaders/vsm_receive.wgsl");
+        assert!(
+            src.contains("let radius = i32(vsm.counts.z);"),
+            "the shader does not read its kernel radius from the uniform"
+        );
+        for header in [
+            "for (var dy = -radius; dy <= radius; dy = dy + 1) {",
+            "for (var dx = -radius; dx <= radius; dx = dx + 1) {",
+        ] {
+            assert!(
+                src.contains(header),
+                "the tap loop does not COUNT with the uniform's radius: `{header}`"
+            );
+        }
+        assert!(
+            src.contains("let slope = vsm.params.w * tan_t * ndc_per_m;"),
+            "the slope bias is not the uniform's — a tier could clamp the kernel \
+             and leave the bias sized for the one it clamped away"
+        );
+
+        // The Rust half, per tier, and the DERIVATION is the assertion: the two
+        // fields are never independent.
+        for radius in 0..=crate::settings::VSM_MAX_PCF_RADIUS {
+            let s = VsmSettings {
+                pcf_radius: radius,
+                ..Default::default()
+            };
+            let p = VsmReceiverParams::new(&s, 1.0, 1, 1);
+            assert_eq!(p.pcf_radius(), radius as i32);
+            assert_eq!(p.slope_bias_texels(), vsm_slope_bias_texels(radius));
+            // …and the taps the CPU twin would run are the `(2R+1)²` the shader's
+            // loop runs, at an interior texel where none is dropped.
+            assert_eq!(
+                vsm_pcf_taps(Vec2::splat(64.5), VSM_PAGE_SIZE, 0, (0, 0), p.pcf_radius()).len(),
+                ((2 * radius + 1) * (2 * radius + 1)) as usize
+            );
+        }
+        // The shipped default is the P27.4 configuration, bit for bit — which is
+        // the whole reason no golden moved.
+        let d = VsmReceiverParams::new(&VsmSettings::default(), 1.0, 1, 1);
+        assert_eq!(d.pcf_radius(), VSM_PCF_RADIUS);
+        assert_eq!(d.slope_bias_texels(), VSM_SLOPE_BIAS_TEXELS);
+        assert_eq!(VSM_SLOPE_BIAS_TEXELS, vsm_slope_bias_texels(1));
+        // …and the retired WGSL literal is that same `f32`, so "the constant the
+        // shader used to spell" is a measurement rather than a memory.
+        assert_eq!(VSM_SLOPE_BIAS_TEXELS, 2.121_320_3_f32);
+        // An absent system reads a zero radius and a zero bias — legal, because
+        // `vsm_active()` is false and nothing below it runs.
+        assert_eq!(VsmReceiverParams::absent().pcf_radius(), 0);
     }
 
     /// **One sampling door, one declaration site.**
@@ -1689,7 +1841,7 @@ mod tests {
         let (px, _, _) = vsm_page_of(&desc, 0, ndc.truncate()).expect("level 0");
         assert_eq!(px, 1, "the fixture's point is not in the right quadrant");
         let mut read = Vec::new();
-        let f = vsm_level_factor(&table, &proj, &desc, ndc, 0, 0.0, |x, y| {
+        let f = vsm_level_factor(&table, &proj, &desc, ndc, 0, 0.0, VSM_PCF_RADIUS, |x, y| {
             read.push((x, y));
             0.0
         });
@@ -1738,7 +1890,15 @@ mod tests {
         let pixel_world = texel0 * 6.0;
         let level0 = vsm_justified_level(texel0, pixel_world, desc.level_count());
         assert_eq!(level0, 3);
-        let site = vsm_receiver_site(&proj, &desc, world, Vec3::Y, pixel_world, 0.05)
+        let site = vsm_receiver_site(
+            &proj,
+            &desc,
+            world,
+            Vec3::Y,
+            pixel_world,
+            0.05,
+            VSM_SLOPE_BIAS_TEXELS,
+        )
             .expect("the point is inside the clipmap");
         // The displaced point, recovered by unprojecting the site's own NDC.
         let back = vp.inverse() * site.ndc.extend(1.0);
@@ -1766,7 +1926,7 @@ mod tests {
     fn the_shaders_kernel_is_clamped_to_its_page_too() {
         let src = include_str!("shaders/vsm_receive.wgsl");
         let at = src
-            .find("for (var dy = -VSM_PCF_RADIUS")
+            .find("for (var dy = -radius;")
             .expect("the kernel loop moved; this gate scopes on it");
         let end = src[at..]
             .find("return sum / taps;")
@@ -1962,7 +2122,7 @@ mod tests {
     fn the_kernel_drops_the_taps_that_leave_the_page_and_never_double_counts() {
         let origin = (256u32, 128u32);
         // Dead centre: nine taps, all distinct.
-        let mid = vsm_pcf_taps(Vec2::new(64.3, 64.7), VSM_PAGE_SIZE, 0, origin);
+        let mid = vsm_pcf_taps(Vec2::new(64.3, 64.7), VSM_PAGE_SIZE, 0, origin, VSM_PCF_RADIUS);
         assert_eq!(mid.len(), 9);
         assert_eq!(
             mid.iter().collect::<std::collections::BTreeSet<_>>().len(),
@@ -1970,26 +2130,26 @@ mod tests {
             "a tap was counted twice"
         );
         // Top-left corner: four.
-        let corner = vsm_pcf_taps(Vec2::new(0.1, 0.1), VSM_PAGE_SIZE, 0, origin);
+        let corner = vsm_pcf_taps(Vec2::new(0.1, 0.1), VSM_PAGE_SIZE, 0, origin, VSM_PCF_RADIUS);
         assert_eq!(corner.len(), 4);
         assert!(
             corner.contains(&origin),
             "the corner texel itself must be in"
         );
         // Bottom-right corner: four, and none of them left the page.
-        let far = vsm_pcf_taps(Vec2::new(127.9, 127.9), VSM_PAGE_SIZE, 0, origin);
+        let far = vsm_pcf_taps(Vec2::new(127.9, 127.9), VSM_PAGE_SIZE, 0, origin, VSM_PCF_RADIUS);
         assert_eq!(far.len(), 4);
         for (x, y) in &far {
             assert!(*x < origin.0 + VSM_PAGE_SIZE && *y < origin.1 + VSM_PAGE_SIZE);
         }
         // An edge: six.
         assert_eq!(
-            vsm_pcf_taps(Vec2::new(64.0, 0.5), VSM_PAGE_SIZE, 0, origin).len(),
+            vsm_pcf_taps(Vec2::new(64.0, 0.5), VSM_PAGE_SIZE, 0, origin, VSM_PCF_RADIUS).len(),
             6
         );
         // A stored border shifts every tap by it and drops none — the payload is
         // still what is addressed.
-        let bordered = vsm_pcf_taps(Vec2::new(64.3, 64.7), VSM_PAGE_SIZE, 4, origin);
+        let bordered = vsm_pcf_taps(Vec2::new(64.3, 64.7), VSM_PAGE_SIZE, 4, origin, VSM_PCF_RADIUS);
         assert_eq!(bordered.len(), 9);
         assert_eq!(bordered[0].0, mid[0].0 + 4);
         assert_eq!(bordered[0].1, mid[0].1 + 4);

@@ -74,6 +74,15 @@ pub struct VsmStreamStats {
     /// counter that says whether the snapping is doing anything, and the one an
     /// arm reads to prove a coarse level held still while a fine one did not.
     pub level_shifts: u64,
+    /// **Marking threads dispatched**, summed over frames (P27.5) — the tier
+    /// knob's own engagement counter.
+    ///
+    /// The page set a stride produces is a *containment* claim, and a good
+    /// stride loses nothing on a fixture whose casters are metres across — so
+    /// the page set alone cannot tell a stride that reached the dispatch from
+    /// one that was written down and never read. This can: it is
+    /// `workgroups × 64`, and it falls as `1/s²`.
+    pub mark_threads: u64,
 }
 
 impl VsmStreamStats {
@@ -82,7 +91,8 @@ impl VsmStreamStats {
     pub fn summary(&self) -> String {
         format!(
             "vsm marking: {} frames, {} projections, {} admits / {} evicts, {} deferred, \
-             {} marked wants, mask {} landed / {} missed, {} level shifts",
+             {} marked wants, mask {} landed / {} missed, {} level shifts, \
+             {} marking threads",
             self.frames,
             self.projections,
             self.admits,
@@ -92,6 +102,7 @@ impl VsmStreamStats {
             self.mark_frames,
             self.mark_misses,
             self.level_shifts,
+            self.mark_threads,
         )
     }
 }
@@ -307,11 +318,13 @@ impl VsmMarker {
         inv_view_proj: glam::Mat4,
         projections: &[VsmProjection],
         frame: u64,
-    ) -> u32 {
+        stride: u32,
+    ) -> (u32, u64) {
         let count = (projections.len() as u32).min(self.projection_cap);
         let (w, h) = (view.width.max(1), view.height.max(1));
+        let stride = stride.max(1);
         if count == 0 {
-            return 0;
+            return (0, 0);
         }
         // The projection BYTES are not written here: `upload_projections` staged
         // them at the frame's sync point, because the receiver reads the same
@@ -326,6 +339,7 @@ impl VsmMarker {
                     [e.x, e.y, e.z, projection_scale(view)]
                 },
                 counts: [count, self.layout.words() as u32, w, h],
+                stride: [stride, 0, 0, 0],
             }),
         );
         if self.bind.as_ref().map(|(t, d, _)| (*t, *d))
@@ -360,6 +374,7 @@ impl VsmMarker {
             self.bind = Some((table_generation, depth_generation, bind));
         }
         encoder.clear_buffer(&self.mask, 0, None);
+        let (groups_x, groups_y) = (w.div_ceil(8 * stride), h.div_ceil(8 * stride));
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("vsm-mark"),
@@ -367,10 +382,15 @@ impl VsmMarker {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind.as_ref().expect("just built").2, &[]);
-            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+            // **The stride is in the dispatch, not only in the shader** (P27.5):
+            // one thread per `stride × stride` block, so the tier knob buys
+            // threads back rather than making them return early. At `stride = 1`
+            // this is `w.div_ceil(8)`, character for character what P27.1
+            // dispatched.
+            pass.dispatch_workgroups(groups_x, groups_y, 1);
         }
         self.ring.record(encoder, &self.mask, frame);
-        count
+        (count, u64::from(groups_x) * u64::from(groups_y) * 64)
     }
 }
 
@@ -751,9 +771,10 @@ impl VsmSystem {
         view: &RenderView,
         inv_view_proj: glam::Mat4,
         frame: u64,
+        stride: u32,
     ) -> u32 {
         let table_generation = self.pools.table_generation();
-        let n = self.marker.record(
+        let (n, threads) = self.marker.record(
             &gpu.device,
             &gpu.queue,
             encoder,
@@ -765,8 +786,10 @@ impl VsmSystem {
             inv_view_proj,
             &self.projections,
             frame,
+            stride,
         );
         self.stats.projections += u64::from(n);
+        self.stats.mark_threads += threads;
         n
     }
 
