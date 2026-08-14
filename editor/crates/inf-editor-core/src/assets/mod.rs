@@ -48,6 +48,7 @@ impl AssetProject {
         std::fs::create_dir_all(&root)?;
         let mut db = AssetDb::new(&root);
         db.scan()?;
+        report_sidecar_advisories(&db);
         let cache = ImportCache::open(root.join(".inf").join("import-cache"))?;
         Ok(Self {
             root,
@@ -80,6 +81,7 @@ impl AssetProject {
     /// Rescan the whole content root from disk.
     pub fn rescan(&mut self) -> Result<usize> {
         let n = self.db.scan()?;
+        report_sidecar_advisories(&self.db);
         self.bump();
         Ok(n)
     }
@@ -589,6 +591,20 @@ impl AssetProject {
 
     pub(crate) fn cache_mut(&mut self) -> &mut ImportCache {
         &mut self.cache
+    }
+}
+
+/// Say out loud what the scan found (C4-39).
+///
+/// [`AssetDb::sidecar_advisories`] is the record; this is its surface. A
+/// payload whose sidecar exists but cannot be read is listed under a stand-in
+/// identity, so the Content Drawer shows it and nothing looks wrong — the whole
+/// point of the advisory is that the scan already *knew* and said nothing. It
+/// goes to the Output Log rather than into the snapshot DTO because that costs
+/// no wire change and the condition needs a human, not a UI affordance.
+fn report_sidecar_advisories(db: &AssetDb) {
+    for line in db.sidecar_advisories() {
+        tracing::warn!("content scan: {line}");
     }
 }
 
