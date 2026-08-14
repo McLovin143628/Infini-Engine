@@ -16408,6 +16408,49 @@ ones that read as thorough.
   cannot silently restore over newer content either way — the superseded stamp
   makes the next boot refuse it.
 
+### Machine-ops
+
+**Battery green: 253 test binaries, 4 592 passed, 0 failed, 8 ignored** — 213
+`Running` + 40 `Doc-tests` = 253, **matched** against 253 `test result:` lines,
+and **zero** warnings and **zero** errors on stderr for the whole run (`-j 3`,
+`--no-fail-fast`, `Start-Process` with both redirects, nothing else touching
+cargo). That is P28.5's baseline of **253 / 4 568 / 0 / 8** plus this wave's
+**24** new arms and **no** new binary — every arm landed inside a module that
+already had a test target.
+
+`cargo clippy --workspace --all-targets` with `RUSTFLAGS=-D warnings`, run LAST
+per the machine note: **exit 0, zero warnings** — on the second attempt. The
+first refused `permissions_set_readonly_false` in this wave's own Windows-only
+arm, where the cleanup clears the read-only bit so the `TempDir` can unlink the
+file. The lint's hazard is real on Unix (it drops every write bit to
+world-writable); the test is `#[cfg(windows)]`, where the flag is one attribute
+bit and clearing it restores the state the test itself created four lines
+earlier. Fixed with a narrow, stated allow in `73a1747`. **A lint no test could
+have caught, which is the whole reason clippy runs last and separately.**
+
+`cargo fmt --all --check`: **exit 0**. Run before *every* commit in this wave
+rather than once at the end, after two of its commits reached origin early on an
+unrelated CI push and turned the Format leg red for everyone (`86d9ea7`).
+
+`cargo doc --no-deps --workspace`: **exit 0, 450 warnings over 43 documented
+crates** — *exactly* the ceiling `0cf8526` pinned, so this wave added none. The
+one rustdoc warning inside a file this wave edited (`inf-asset/src/error.rs:42`)
+predates it and belongs to `SchemaTooOld`, not the new `SidecarUnreadable`.
+`target/doc` was removed before the run, so the count is a count of something
+(the vacuity guard's own lesson).
+
+Goldens **54**, `git diff` over `crates/inf-render/tests/goldens/` empty across
+all ten commits. The committed ts-rs bindings are drift-free — the battery's
+`bindings` test regenerated them identically. Disk **147 GB** free throughout;
+no `cargo clean` needed. **Nothing pushed.**
+
+A note the next wave inherits: `git checkout -- <file>` is the restore step in
+the mutation law, and it restores to **HEAD**, not to "before the mutation". Used
+on a file whose fix was still uncommitted it silently discards the fix — it did
+here, on `scene/serialize.rs`, and the whole edit had to be redone. **Commit the
+fix, then mutate.** Untracked new files have no restore at all and must be
+un-mutated by hand.
+
 ---
 
 *This roadmap is a living document. Each phase completion updates it; decision memos land in
