@@ -243,7 +243,10 @@ mod tests {
         assert_eq!(led.reader(Consumer::Texture).misses, 2);
         assert_eq!(led.reader(Consumer::Texture).hits, 4);
         assert_eq!(led.reader(Consumer::Geometry).reads(), 0);
-        assert!(led.readers_agree(), "a consumer that never reads is not evidence");
+        assert!(
+            led.readers_agree(),
+            "a consumer that never reads is not evidence"
+        );
 
         // FALSIFIABLE: a consumer that took an adjacent frame breaks agreement.
         let mut led = RingLedger::default();

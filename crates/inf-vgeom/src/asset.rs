@@ -932,7 +932,13 @@ fn pair_page_tiles(
         let (ty0, ty1) = (tile_of(v0, tiles_y), tile_of(v1, tiles_y));
         for y in ty0..=ty1 {
             for x in tx0..=tx1 {
-                out.push(ClusterTileRef::with_grid(tex.id, mip, x, y, tex.grid_digest()));
+                out.push(ClusterTileRef::with_grid(
+                    tex.id,
+                    mip,
+                    x,
+                    y,
+                    tex.grid_digest(),
+                ));
             }
         }
     }
@@ -2471,7 +2477,10 @@ mod tests {
         // …and the shrunken image the audit measured, which a mip count DOES
         // separate — the digest must separate it too.
         let small = inf_vt::full_pyramid(512, 512, 128, 4, true);
-        assert_ne!(a.grid_digest(), ClusterTexture::from_desc(id, &small).grid_digest());
+        assert_ne!(
+            a.grid_digest(),
+            ClusterTexture::from_desc(id, &small).grid_digest()
+        );
 
         // The record's claim answers about the descriptor it was cooked from
         // and refuses the others.
@@ -2485,7 +2494,10 @@ mod tests {
         assert!(ClusterTileRef::new(id, 0, 0, 0).grid_matches(&wide));
 
         // Deterministic, never zero, and a function of the grid alone.
-        assert_eq!(a.grid_digest(), ClusterTexture::from_desc(id, &square).grid_digest());
+        assert_eq!(
+            a.grid_digest(),
+            ClusterTexture::from_desc(id, &square).grid_digest()
+        );
         assert_ne!(a.grid_digest(), 0);
         for d in [&square, &wide, &small] {
             assert_ne!(
@@ -2494,8 +2506,15 @@ mod tests {
                 "0 is the no-claim sentinel and must be unreachable"
             );
         }
-        // The level COUNT is folded in, so a prefix of a pyramid is a different
-        // grid even when every level it does have agrees.
+        // A **prefix** of a pyramid is a different grid — the shape a
+        // re-import that dropped the coarsest levels makes.
+        //
+        // MEASURED, and the claim is narrower than the first draft's: this does
+        // NOT exercise the length fold. Commenting `fold(mips.len())` out leaves
+        // this assertion green, because dropping a level also drops its two
+        // words from the walk. The length is belt-and-braces over a sequence
+        // hash that already folds every element, and no fixture in this tree
+        // separates the two — recorded rather than dressed up as a test.
         let truncated: Vec<(u32, u32)> = a.mips[..a.mips.len() - 1].to_vec();
         assert_ne!(a.grid_digest(), grid_digest(truncated.into_iter()));
     }

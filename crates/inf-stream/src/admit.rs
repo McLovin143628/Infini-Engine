@@ -383,7 +383,10 @@ mod tests {
     #[test]
     fn exhaustion_does_not_stop_a_resident_want_from_being_touched() {
         let mut pool = TestPool::new(3);
-        run(&mut pool, &[(LANE_FLOOR, 1), (LANE_FLOOR, 2), (LANE_FLOOR, 3)]);
+        run(
+            &mut pool,
+            &[(LANE_FLOOR, 1), (LANE_FLOOR, 2), (LANE_FLOOR, 3)],
+        );
         let root = pool.resident_slot(&1).expect("just seated");
         pool.pin(root, true);
         let before = pool.stamp[root as usize];

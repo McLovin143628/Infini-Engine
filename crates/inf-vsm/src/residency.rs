@@ -526,11 +526,8 @@ impl VsmResidency {
         // passes. Entry order is this address space's payload order: the order
         // the indirection table and the marking bitmask share, so a mask scan
         // hands the walk a list already sorted the way it wants it.
-        let mut sorted: Vec<VsmWant> = inf_stream::normalize(
-            wants,
-            |w| (w.light.0, w.page.entry_order()),
-            |w| w.priority,
-        );
+        let mut sorted: Vec<VsmWant> =
+            inf_stream::normalize(wants, |w| (w.light.0, w.page.entry_order()), |w| w.priority);
         sorted.retain(|w| {
             let known = w.light.index() < self.lights.len();
             if !known {
@@ -1063,7 +1060,12 @@ mod tests {
             VsmPage::flat(0, 2, 0),
         ];
         let warm = r.apply_wants(&speculative.map(|p| VsmWant::speculate(h, p)));
-        assert_eq!(warm.admits.len(), 3, "the atlas is not full: {}", warm.trace());
+        assert_eq!(
+            warm.admits.len(),
+            3,
+            "the atlas is not full: {}",
+            warm.trace()
+        );
 
         let marked = VsmPage::flat(1, 4, 4);
         let mut wants = vec![VsmWant::new(h, marked)];
@@ -1078,7 +1080,8 @@ mod tests {
         assert_eq!(txn.admits.len(), 1, "{}", txn.trace());
         assert_eq!(txn.evicts.len(), 1, "{}", txn.trace());
         assert_eq!(
-            txn.evicts[0].page, speculative[0],
+            txn.evicts[0].page,
+            speculative[0],
             "the least recently touched speculation is not the one that left: {}",
             txn.trace()
         );

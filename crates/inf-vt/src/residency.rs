@@ -649,13 +649,21 @@ impl VtResidency {
         for (slot, (t, tile)) in log.evicts {
             let texture = VtTextureHandle(t);
             dirty.insert(texture);
-            txn.evicts.push(VtEvict { slot, texture, tile });
+            txn.evicts.push(VtEvict {
+                slot,
+                texture,
+                tile,
+            });
             self.stats.evicts += 1;
         }
         for (slot, (t, tile)) in log.admits {
             let texture = VtTextureHandle(t);
             dirty.insert(texture);
-            txn.admits.push(VtAdmit { slot, texture, tile });
+            txn.admits.push(VtAdmit {
+                slot,
+                texture,
+                tile,
+            });
             self.stats.admits += 1;
         }
 
@@ -1236,7 +1244,12 @@ mod tests {
             TileCoord::new(0, 2, 0),
         ];
         let warm = r.apply_wants(&refines.map(|t| VtWant::refine(h, t)));
-        assert_eq!(warm.admits.len(), 3, "the cache is not full: {}", warm.trace());
+        assert_eq!(
+            warm.admits.len(),
+            3,
+            "the cache is not full: {}",
+            warm.trace()
+        );
 
         // The floor now wants a tile that is not resident, and the feedback
         // asks for its same three — the steady state the defect hid in.
@@ -1251,9 +1264,15 @@ mod tests {
             txn.trace()
         );
         assert_eq!(txn.admits.len(), 1, "{}", txn.trace());
-        assert_eq!(txn.evicts.len(), 1, "one refinement made room: {}", txn.trace());
         assert_eq!(
-            txn.evicts[0].tile, refines[0],
+            txn.evicts.len(),
+            1,
+            "one refinement made room: {}",
+            txn.trace()
+        );
+        assert_eq!(
+            txn.evicts[0].tile,
+            refines[0],
             "the least recently touched refinement is not the one that left: {}",
             txn.trace()
         );

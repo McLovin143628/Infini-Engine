@@ -286,8 +286,16 @@ impl Streamer {
         Step {
             offered: offered.iter().map(|w| (w.texture.0, w.tile)).collect(),
             floor_before,
-            admits: txn.admits.iter().map(|a| (a.texture.0, a.tile)).collect(),
-            evicts: txn.evicts.iter().map(|e| (e.slot, e.texture.0, e.tile)).collect(),
+            admits: txn
+                .admits
+                .iter()
+                .map(|a| (a.slot, a.texture.0, a.tile))
+                .collect(),
+            evicts: txn
+                .evicts
+                .iter()
+                .map(|e| (e.slot, e.texture.0, e.tile))
+                .collect(),
             shadow_admits: shadow_txn.admits.len(),
             retracted: page_in.retracted,
             pages: resident,
@@ -299,7 +307,7 @@ impl Streamer {
 struct Step {
     offered: BTreeSet<(u32, TileCoord)>,
     floor_before: BTreeSet<(u32, TileCoord)>,
-    admits: Vec<(u32, TileCoord)>,
+    admits: Vec<(u32, u32, TileCoord)>,
     evicts: Vec<(u32, u32, TileCoord)>,
     shadow_admits: usize,
     retracted: u32,
@@ -332,10 +340,14 @@ fn nothing_is_admitted_that_no_consumer_wanted() {
     let mut admitted = 0usize;
     for (i, t) in LADDER.iter().enumerate() {
         let step = s.step(&src, *t, &marks_for(i), true);
-        for a in &step.admits {
+        for (slot, tex, tile) in &step.admits {
+            // A pinned root is admitted by REGISTRATION, not by a want — its
+            // bytes are emitted by the first transaction and it is never in the
+            // offered set. Excluded by naming what it is, not by a blanket
+            // escape: any other unwanted admit still fails.
             assert!(
-                step.offered.contains(a) || s.texture.slot_is_root(0),
-                "step {i}: {a:?} was admitted and nothing wanted it"
+                step.offered.contains(&(*tex, *tile)) || s.texture.slot_is_root(*slot),
+                "step {i}: slot {slot} took ({tex}, {tile:?}) and nothing wanted it"
             );
         }
         admitted += step.admits.len();
@@ -772,10 +784,7 @@ fn the_three_consumers_draw_their_stamps_from_one_sequence() {
         source: &src,
         threshold: 0.01,
     }]);
-    let g0 = geometry
-        .residency(ASSET)
-        .expect("planned")
-        .generation();
+    let g0 = geometry.residency(ASSET).expect("planned").generation();
 
     let (texture2, _) = texture_residency(4 * 1024 * 1024);
     let t1 = texture2.layout_generation();

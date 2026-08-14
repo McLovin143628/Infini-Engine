@@ -213,7 +213,10 @@ mod tests {
         stale.mismatched_textures = 1;
         let s = stale.summary();
         assert!(s.contains("[4 stale tile addresses]"), "{s}");
-        assert!(s.contains("[1 textures paired against another image]"), "{s}");
+        assert!(
+            s.contains("[1 textures paired against another image]"),
+            "{s}"
+        );
     }
 
     /// Residency past the grant is visible — the ratchet's own predicate.

@@ -193,10 +193,17 @@ mod tests {
         let runs = lane_runs(&three, |x| x.1);
         assert_eq!(
             runs,
-            vec![(LANE_FLOOR, 0, 1), (LANE_FEEDBACK, 1, 3), (LANE_PREDICT, 3, 4)]
+            vec![
+                (LANE_FLOOR, 0, 1),
+                (LANE_FEEDBACK, 1, 3),
+                (LANE_PREDICT, 3, 4)
+            ]
         );
         // The runs tile the list: no want is in two runs and none is in none.
-        assert_eq!(runs.iter().map(|(_, a, b)| b - a).sum::<usize>(), three.len());
+        assert_eq!(
+            runs.iter().map(|(_, a, b)| b - a).sum::<usize>(),
+            three.len()
+        );
         assert_eq!(runs.first().map(|r| r.1), Some(0));
         assert_eq!(runs.last().map(|r| r.2), Some(three.len()));
     }

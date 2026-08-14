@@ -77,7 +77,8 @@ pub const CONSUMERS: usize = 3;
 
 impl Consumer {
     /// Every consumer, in the arbiter's own order.
-    pub const ALL: [Consumer; CONSUMERS] = [Consumer::Geometry, Consumer::Texture, Consumer::Shadow];
+    pub const ALL: [Consumer; CONSUMERS] =
+        [Consumer::Geometry, Consumer::Texture, Consumer::Shadow];
 
     #[inline]
     pub const fn index(self) -> usize {
@@ -258,7 +259,10 @@ mod tests {
         let total: u64 = req.iter().map(|r| r.want_bytes).sum();
         let g = arbitrate(total, &req).expect("the floors fit");
         for (i, r) in req.iter().enumerate() {
-            assert_eq!(g.bytes[i], r.want_bytes, "consumer {i} did not get its want");
+            assert_eq!(
+                g.bytes[i], r.want_bytes,
+                "consumer {i} did not get its want"
+            );
         }
         assert_eq!(g.total(), total);
         // …and one byte more than the sum is still an identity, not a bonus.
@@ -446,7 +450,15 @@ mod tests {
         ];
         let g = arbitrate(100, &req).expect("the floors fit");
         assert_eq!(g.bytes, [8, 4, 0]);
-        assert_eq!(BudgetRequest { floor_bytes: 8, want_bytes: 2 }.normalized().want_bytes, 8);
+        assert_eq!(
+            BudgetRequest {
+                floor_bytes: 8,
+                want_bytes: 2
+            }
+            .normalized()
+            .want_bytes,
+            8
+        );
     }
 
     /// The summary names every number it carries.
@@ -455,7 +467,10 @@ mod tests {
         let g = arbitrate(64 * MIB, &shipped()).expect("the floors fit");
         let s = g.summary(64 * MIB);
         assert!(s.contains("stream budget"), "{s}");
-        assert!(s.contains("geometry") && s.contains("texture") && s.contains("shadow"), "{s}");
+        assert!(
+            s.contains("geometry") && s.contains("texture") && s.contains("shadow"),
+            "{s}"
+        );
         assert!(s.contains("64.0 MiB"), "{s}");
         for c in Consumer::ALL {
             assert!(s.contains(c.label()), "{s} is missing {c:?}");

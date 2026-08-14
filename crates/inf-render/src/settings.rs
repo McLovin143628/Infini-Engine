@@ -602,9 +602,9 @@ pub const VGEOM_BUDGET_LOW_BYTES: u64 = 64 * 1024 * 1024;
 /// the three raised the total, silently. Lowering this one number now divides
 /// deterministically between the three instead — floors first, then an even
 /// water-fill clamped at each want.
-pub const DEFAULT_STREAM_BUDGET_BYTES: u64 =
-    inf_vgeom::DEFAULT_VGEOM_BUDGET_BYTES + crate::DEFAULT_VT_BUDGET_BYTES
-        + inf_vsm::DEFAULT_VSM_BUDGET_BYTES;
+pub const DEFAULT_STREAM_BUDGET_BYTES: u64 = inf_vgeom::DEFAULT_VGEOM_BUDGET_BYTES
+    + crate::DEFAULT_VT_BUDGET_BYTES
+    + inf_vsm::DEFAULT_VSM_BUDGET_BYTES;
 
 /// **The unified streaming budget on Medium**, in bytes: the sum of that tier's
 /// three ceilings — 128 + 12 + 32 = 172 MiB.

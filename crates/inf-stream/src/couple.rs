@@ -148,12 +148,16 @@ impl<G: Ord + Copy, M: Ord + Copy> Coupling<G, M> {
         self.members_deduped().len()
     }
 
-    /// **Every member of every coupled group, once, in address order**, at
-    /// `lane`.
+    /// **Every member of every coupled group, once**, at `lane`, in the member
+    /// type's own `Ord`.
     ///
-    /// Address order rather than group order because the consumer's admission
-    /// walk wants one forward scan of its container per lane — the same reason
-    /// [`normalize`](crate::lane::normalize) sorts on the payload's order.
+    /// Member order rather than group order because a member shared by two
+    /// groups must be **one** want, and grouping would emit it twice. The order
+    /// is the member type's and deliberately *not* the consumer's payload
+    /// order: the arbiter does not know what a payload is, and the consumer
+    /// re-normalizes anyway ([`normalize`](crate::lane::normalize) sorts the
+    /// whole want set into payload order inside each lane). What this order has
+    /// to be is **deterministic**, which a `BTreeSet` makes it.
     pub fn wants(&self, lane: Lane) -> Vec<(Lane, M)> {
         self.members_deduped()
             .into_iter()
@@ -235,7 +239,11 @@ mod tests {
     fn a_retracted_groups_members_stop_being_wanted_at_once() {
         let mut c = fixture();
         assert_eq!(c.len(), 3);
-        assert_eq!(c.retain(|(a, _)| *a == 1), 1, "group (2,0) should have gone");
+        assert_eq!(
+            c.retain(|(a, _)| *a == 1),
+            1,
+            "group (2,0) should have gone"
+        );
         let w: Vec<u16> = c.wants(LANE_FLOOR).into_iter().map(|(_, m)| m).collect();
         assert_eq!(w, vec![10, 11, 12, 13]);
         c.clear();
@@ -291,7 +299,10 @@ mod tests {
     #[test]
     fn the_wants_carry_the_lane_they_were_asked_for() {
         let c = fixture();
-        assert!(c.wants(LANE_PREDICT).iter().all(|(l, _)| *l == LANE_PREDICT));
+        assert!(c
+            .wants(LANE_PREDICT)
+            .iter()
+            .all(|(l, _)| *l == LANE_PREDICT));
         assert!(c.wants(LANE_FLOOR).iter().all(|(l, _)| *l == LANE_FLOOR));
     }
 }

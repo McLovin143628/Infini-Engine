@@ -18,7 +18,7 @@
 //! | how many bytes a page costs | how many bytes the consumer may spend |
 //! | which counters it reports | the stamp every counter is keyed on |
 //!
-//! Four modules, one per surrendered thing:
+//! Five modules, one per surrendered thing:
 //!
 //! * [`stamp`] — **one stamp domain.** The three process-global monotone
 //!   counters merge into one. A stamp is not a measurement and never enters a
@@ -46,7 +46,8 @@
 //! thread, no map iteration order and no parallelism (bookkeeping is not
 //! compute — the P22.4 law). Two routes to one residency triple therefore
 //! produce identical arbitration, which is the property
-//! `tests/arbiter_gate.rs` pins as an oracle rather than as a unit assertion.
+//! `inf-render`'s `tests/stream_arbiter.rs` pins as an oracle over the three
+//! real residencies rather than as a unit assertion here.
 //!
 //! # The three consumers, and the one that shares only half
 //!
@@ -71,7 +72,7 @@ pub mod lane;
 pub mod ring;
 pub mod stamp;
 
-pub use admit::{admit_by_lane, AdmitLog, Acquired, SlotPool};
+pub use admit::{admit_by_lane, Acquired, AdmitLog, SlotPool};
 pub use budget::{arbitrate, BudgetGrant, BudgetRequest, Consumer, CONSUMERS};
 pub use couple::{breaches, Coupling};
 pub use lane::{normalize, Lane, LANE_FEEDBACK, LANE_FLOOR, LANE_PREDICT};

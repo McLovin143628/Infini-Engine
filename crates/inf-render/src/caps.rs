@@ -944,8 +944,8 @@ mod tests {
     fn the_unified_stream_budget_clamps_down_and_never_up() {
         use crate::settings::{
             DEFAULT_STREAM_BUDGET_BYTES, STREAM_BUDGET_LOW_BYTES, STREAM_BUDGET_MEDIUM_BYTES,
-            VGEOM_BUDGET_LOW_BYTES, VGEOM_BUDGET_MEDIUM_BYTES, VT_BUDGET_LOW_BYTES,
-            VT_BUDGET_MEDIUM_BYTES, VSM_BUDGET_LOW_BYTES, VSM_BUDGET_MEDIUM_BYTES,
+            VGEOM_BUDGET_LOW_BYTES, VGEOM_BUDGET_MEDIUM_BYTES, VSM_BUDGET_LOW_BYTES,
+            VSM_BUDGET_MEDIUM_BYTES, VT_BUDGET_LOW_BYTES, VT_BUDGET_MEDIUM_BYTES,
         };
         let s = RenderSettings::default();
         assert_eq!(s.stream.budget_bytes, DEFAULT_STREAM_BUDGET_BYTES);

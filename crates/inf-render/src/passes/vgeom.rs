@@ -1856,6 +1856,13 @@ impl VgeomNode {
         let page_in = self.streamer.pair(plan, |asset, page| {
             // A page with no entry is a page the want pass never saw — a state
             // this sequence does not produce, and refusing it is the safe read.
+            //
+            // MEASURED unreachable, not merely believed: `cluster_tile_wants`
+            // couples `0..resident_pages()` *after* `plan` has already extended
+            // the prefix, so every page `pair` can stage has a group. Bypassing
+            // this guard entirely kills no arm in the tree — it is defence in
+            // depth against a future caller that stages before it couples, and
+            // it is recorded as unarmed rather than counted as covered.
             if coupling.members(&(asset, page)).is_empty() && !coupling.has_group(&(asset, page)) {
                 return None;
             }
