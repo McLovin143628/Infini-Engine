@@ -32,6 +32,15 @@
 //! | mip | `tile_mip_for_lod` | the memo's formula, re-derived here |
 //! | source | the `.inf_vmesh` tiles section | `to_mesh()` + `VtTextureDesc` |
 //!
+//! **Two of the oracle's components are inert on this fixture** (P28.2 audit,
+//! measured by mutation): dropping the centroid sample, and swapping `tile_of`'s
+//! wrap for a clamp, both leave every arm green — the triangles are small enough
+//! that their corners already name every tile a centroid could, and the
+//! fixture's uvs never leave `[0, 1]`. They are kept as belt-and-braces for a
+//! coarser fixture rather than deleted, and the wrap/clamp decision itself is
+//! armed where it is MADE, by `inf_vgeom`'s
+//! `a_tiled_uv_wraps_onto_the_grid_and_a_nan_uv_asks_for_nothing`.
+//!
 //! Re-deriving the mip rule is deliberate: it is an **oracle**, not a unit pin,
 //! so a change to the rule in one place has to be a change in both, and a
 //! one-sided edit fails here. (The P28.1 audit's complaint about a re-implemented
@@ -443,6 +452,9 @@ fn without_the_coupling_a_resident_cluster_loses_its_tiles() {
     );
     // And it is not a rounding-scale miss: the finest pages sample tiles the
     // coarsest-mip floor cannot possibly serve.
+    // The stated bound is "more than half"; measured, the control is far above
+    // it — tightening this to 99 % still passes (P28.2 audit). Left at half
+    // because that is the claim the arm is making, with the margin recorded.
     assert!(
         missing * 2 > total,
         "only {missing} of {total} sampled tiles were missing without the coupling"

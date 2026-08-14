@@ -2031,6 +2031,82 @@ mod tests {
         }
     }
 
+    /// **THE WRAP, AND THE NaN** (P28.2 audit). Two decisions §2 of the memo
+    /// states and nothing exercised: a uv outside `[0, 1]` is **wrapped** rather
+    /// than clamped, because that is what a sampler does with the default
+    /// address mode; and a non-finite uv contributes **nothing**, because
+    /// `as u32` saturates and a NaN bound would quietly ask for every tile there
+    /// is. Both were invisible — swapping the wrap for a clamp passed every arm
+    /// in the tree, because every fixture's uvs already live in `[0, 1]`.
+    ///
+    /// Tiled uvs are ordinary authored content, and the two rules disagree
+    /// maximally on them: uvs running `1.0 ..= 2.0` wrap onto the whole `[0, 1)`
+    /// square (so the footprint is the whole grid) and clamp onto the single
+    /// point `1.0` (so it is the last tile alone). Mutating a clone's uvs rather
+    /// than building a second mesh — uvs do not enter clusterization, so the DAG
+    /// is the same one (the P18 law).
+    #[test]
+    fn a_tiled_uv_wraps_onto_the_grid_and_a_nan_uv_asks_for_nothing() {
+        let base = crate::test_support::dense_mesh(16);
+        let desc = inf_vt::full_pyramid(2048, 2048, 128, 4, true);
+        let set = ClusterTextureSet {
+            textures: vec![ClusterTexture::from_desc(
+                AssetId(uuid::Uuid::from_u128(0x2802_1234)),
+                &desc,
+            )],
+        };
+        let finest = |src: &VgeomSource| -> usize {
+            let last = src.pages().len() - 1;
+            src.with_page_sections(last, |s| s.tile_refs().len())
+                .unwrap_or(0)
+        };
+
+        let inside = VgeomSource::from_mesh_paired(&base, &set).expect("build");
+        let plain = finest(&inside);
+        assert!(
+            plain > 1,
+            "the fixture's finest page must span several tiles"
+        );
+
+        // Shifted a whole tile-repeat: identical geometry, uvs in [1, 2].
+        let mut tiled = base.clone();
+        for v in &mut tiled.vertices {
+            v.uv = [v.uv[0] + 1.0, v.uv[1] + 1.0];
+        }
+        let shifted = VgeomSource::from_mesh_paired(&tiled, &set).expect("build");
+        assert_eq!(
+            shifted.pages().len(),
+            inside.pages().len(),
+            "moving a uv must not move the DAG"
+        );
+        assert!(
+            finest(&shifted) >= plain,
+            "a uv shifted by one whole repeat paired {} tiles against {plain} — \
+             it was clamped to the last tile instead of wrapped onto the grid",
+            finest(&shifted)
+        );
+
+        // A non-finite uv contributes nothing rather than everything.
+        let mut nan = base.clone();
+        nan.vertices[0].uv = [f32::NAN, f32::NAN];
+        let with_nan = VgeomSource::from_mesh_paired(&nan, &set).expect("build");
+        assert!(
+            finest(&with_nan) <= plain,
+            "a NaN uv widened the footprint to {} tiles from {plain} — the \
+             saturating cast asked for every tile there is",
+            finest(&with_nan)
+        );
+        // ...and a mesh of nothing BUT non-finite uvs pairs nothing at all.
+        let mut all_nan = base.clone();
+        for v in &mut all_nan.vertices {
+            v.uv = [f32::NAN, f32::INFINITY];
+        }
+        let none = VgeomSource::from_mesh_paired(&all_nan, &set).expect("build");
+        for e in none.pages() {
+            assert_eq!(e.tile_count, 0, "a uv-less surface paired a tile");
+        }
+    }
+
     /// **THE MIP RULE, DERIVED — not restated** (P28.2 audit).
     ///
     /// The memo argues for `mip = lod / 2` by measuring ONE rival and refusing
