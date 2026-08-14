@@ -166,7 +166,10 @@ pub fn reject_length_mismatch(
 pub fn reject_non_increasing(times: &[f32], what: &str) -> Result<(), MeshError> {
     reject_non_finite(times, what)?;
     for i in 1..times.len() {
-        if !(times[i] > times[i - 1]) {
+        // `reject_non_finite` above has already established that every time is a
+        // real number, so this ordinary comparison is exact — a negated one
+        // would be neither clearer nor needed.
+        if times[i] <= times[i - 1] {
             return Err(MeshError::Malformed(format!(
                 "{what}: keyframe time {} at {i} does not increase past {} at {}",
                 times[i],

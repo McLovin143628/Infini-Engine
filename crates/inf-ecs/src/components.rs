@@ -2066,6 +2066,15 @@ pub struct AnimPlayer {
     pub duration: f64,
 }
 
+/// `v > 0.0`, written once so the **NaN-rejecting** form reads as intent rather
+/// than as a negated comparison — the `inf_pcg::grammar::span::positive`
+/// discipline, which exists so clippy's `neg_cmp_op_on_partial_ord` is not
+/// suppressed one `allow` at a time.
+#[inline]
+fn positive_duration(v: f64) -> bool {
+    v > 0.0
+}
+
 fn default_anim_speed() -> f64 {
     1.0
 }
@@ -2098,7 +2107,7 @@ impl AnimPlayer {
     /// the foundational ECS crate needs no `inf-anim` dependency; mirrors
     /// `inf_anim::advance_clip_time`).
     ///
-    /// **`!(self.duration > 0.0)`, not `<= 0.0`** (C4-4). `duration` is a plain
+    /// **`!positive_duration(..)`, not `<= 0.0`** (C4-4). `duration` is a plain
     /// `#[serde(default)]` field of the `.inf_lvl` `EntityRecord` — decoded by
     /// bincode with no structural check on the way in — and every ordering
     /// comparison a NaN takes part in is false, so a NaN used to pass this guard
@@ -2111,7 +2120,7 @@ impl AnimPlayer {
             return;
         }
         let next = self.t + self.speed * dt;
-        self.t = if !(self.duration > 0.0) {
+        self.t = if !positive_duration(self.duration) {
             next
         } else if self.looping {
             next.rem_euclid(self.duration)

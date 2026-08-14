@@ -265,7 +265,7 @@ impl AnimClip {
 /// usable positive duration" — which is the one phrasing a NaN answers
 /// correctly.
 pub fn resolve_time(t: f32, duration: f32, looping: bool) -> f32 {
-    if !(duration > 0.0) {
+    if !crate::positive(duration) {
         return 0.0;
     }
     if looping {
@@ -298,10 +298,18 @@ fn locate(times: &[f32], t: f32) -> Option<(usize, usize, f32)> {
         1 => Some((0, 0, 0.0)),
         _ => {
             let last = times.len() - 1;
-            if !(t > times[0]) {
+            // NaN first and by name, so the two range tests below are ordinary
+            // comparisons rather than negated ones: a NaN that reached them
+            // would fail BOTH (every ordering comparison it takes part in is
+            // false) and fall through to the index arithmetic, which is how this
+            // underflowed.
+            if !t.is_finite() {
                 return Some((0, 0, 0.0));
             }
-            if !(t < times[last]) {
+            if t <= times[0] {
+                return Some((0, 0, 0.0));
+            }
+            if t >= times[last] {
                 return Some((last, last, 0.0));
             }
             // Binary search for the first key strictly greater than t.

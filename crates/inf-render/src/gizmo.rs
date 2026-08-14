@@ -152,7 +152,9 @@ fn ray_plane(o: Vec3, rd: Vec3, p: Vec3, n: Vec3) -> Option<Vec3> {
         return None;
     }
     let s = n.dot(p - o) / denom;
-    if !(s >= 0.0) {
+    // NaN named rather than negated-compared: a NaN `s` fails `s < 0.0` as
+    // surely as it fails `s >= 0.0`, so it has to be asked about directly.
+    if s.is_nan() || s < 0.0 {
         return None;
     }
     let hit = o + rd * s;

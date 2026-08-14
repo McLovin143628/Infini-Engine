@@ -100,3 +100,28 @@ pub use template::{
     build_template, girdle_name, leg_suffix, BodyParams, BodyPlan, JointLimit, TemplateError,
     MAX_LEGS,
 };
+
+/// `v > 0.0`, written once so the **NaN-rejecting** form reads as intent rather
+/// than as a negated comparison.
+///
+/// Every duration guard in this crate goes through it: a clip whose length is
+/// not a number must behave like a zero-length one (collapse to `t = 0`) rather
+/// than like a positive one, and `!(v > 0.0)` is the only spelling that does
+/// that — `v <= 0.0` is **false** for a NaN and lets it through to
+/// `clamp(0.0, NaN)`, which panics.
+///
+/// Naming it keeps the meaning visible and keeps clippy's
+/// `neg_cmp_op_on_partial_ord` from being suppressed one `allow` at a time —
+/// the discipline `inf_pcg::grammar::span::positive` and this crate's own
+/// `ik::usable_length` already follow.
+#[inline]
+pub(crate) fn positive(v: f32) -> bool {
+    v > 0.0
+}
+
+/// [`positive`] for the `f64` half of the same integration
+/// ([`advance_clip_time`], which the runtime and editor Simulate ticks share).
+#[inline]
+pub(crate) fn positive64(v: f64) -> bool {
+    v > 0.0
+}

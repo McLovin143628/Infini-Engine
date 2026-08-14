@@ -359,9 +359,9 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
             let normals = normals.unwrap_or_else(|| compute_normals(&positions, &indices));
 
             let mut verts = Vec::with_capacity(positions.len());
-            for i in 0..positions.len() {
+            for (i, &position) in positions.iter().enumerate() {
                 verts.push(MeshVertex {
-                    position: positions[i],
+                    position,
                     normal: *normals.get(i).unwrap_or(&[0.0, 1.0, 0.0]),
                     uv: uvs
                         .as_ref()

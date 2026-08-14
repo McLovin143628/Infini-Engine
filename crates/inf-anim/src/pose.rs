@@ -143,7 +143,7 @@ pub fn skinning_matrices(skeleton: &Skeleton, pose: &Pose) -> Vec<Mat4> {
 /// (P11.1 deliverable 5). A non-positive `duration` (clip length unknown) leaves
 /// `t` free-running so pose sampling can wrap later.
 ///
-/// **`!(duration > 0.0)`, not `duration <= 0.0`** (C4-4): every ordering
+/// **`!positive64(duration)`, not `duration <= 0.0`** (C4-4): every ordering
 /// comparison a NaN takes part in is false, so a NaN duration used to pass this
 /// guard and reach `next.clamp(0.0, NaN)`, which panics (`f64::clamp` asserts
 /// `min <= max`). This is one of three mirrors of the same integration —
@@ -151,7 +151,7 @@ pub fn skinning_matrices(skeleton: &Skeleton, pose: &Pose) -> Vec<Mat4> {
 /// all three carried the identical guard.
 pub fn advance_clip_time(t: f64, speed: f64, dt: f64, duration: f64, looping: bool) -> f64 {
     let next = t + speed * dt;
-    if !(duration > 0.0) {
+    if !crate::positive64(duration) {
         return next;
     }
     if looping {
