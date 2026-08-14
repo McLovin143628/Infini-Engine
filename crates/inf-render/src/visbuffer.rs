@@ -1524,20 +1524,19 @@ mod tests {
             boundary.solid_centres, 0,
             "a curve one pixel thick has no solid 3x3 centres"
         );
-        assert_eq!(
-            parity_ok(&boundary, true),
-            Ok(()),
-            "{}",
-            boundary.summary()
-        );
+        assert_eq!(parity_ok(&boundary, true), Ok(()), "{}", boundary.summary());
 
         // A 20 × 20 patch: 400 of 3 844 interior pixels, which is 10.4 % — under
         // the same fraction bound the boundary passed.
-        let (fwd, res, interior) =
-            synthetic(SYN, SYN, 40, |x, y| (10..30).contains(&x) && (10..30).contains(&y));
+        let (fwd, res, interior) = synthetic(SYN, SYN, 40, |x, y| {
+            (10..30).contains(&x) && (10..30).contains(&y)
+        });
         let smear = parity_verdict(&fwd, &res, SYN, &interior);
         assert_eq!(smear.differing, 400);
-        assert_eq!(smear.bordering, 76, "only the patch's rim borders agreement");
+        assert_eq!(
+            smear.bordering, 76,
+            "only the patch's rim borders agreement"
+        );
         assert_eq!(smear.solid_centres, 324, "18 x 18 of the patch is interior");
 
         // **THE POINT, asserted before the verdict**: the population bound does
@@ -1610,7 +1609,7 @@ mod tests {
     #[test]
     fn the_untextured_half_admits_one_step_and_forbids_two() {
         // Sparse and one step: rounding, which is what the bound is for.
-        let sparse = |x: u32, y: u32| (x * 7 + y * 13) % 401 == 0;
+        let sparse = |x: u32, y: u32| (x * 7 + y * 13).is_multiple_of(401);
         let (fwd, res, interior) = synthetic(SYN, SYN, 1, sparse);
         let v = parity_verdict(&fwd, &res, SYN, &interior);
         assert_eq!(v.worst_step, 1);

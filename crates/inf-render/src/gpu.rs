@@ -129,12 +129,14 @@ impl GpuContext {
         // descriptor one. Taken from the adapter, because the experiment's size
         // is its fixture's and not a policy.
         let adapter_limits = adapter.limits();
-        let mut limits = wgpu::Limits::default();
-        limits.max_blas_primitive_count = adapter_limits.max_blas_primitive_count;
-        limits.max_blas_geometry_count = adapter_limits.max_blas_geometry_count;
-        limits.max_tlas_instance_count = adapter_limits.max_tlas_instance_count;
-        limits.max_acceleration_structures_per_shader_stage =
-            adapter_limits.max_acceleration_structures_per_shader_stage;
+        let limits = wgpu::Limits {
+            max_blas_primitive_count: adapter_limits.max_blas_primitive_count,
+            max_blas_geometry_count: adapter_limits.max_blas_geometry_count,
+            max_tlas_instance_count: adapter_limits.max_tlas_instance_count,
+            max_acceleration_structures_per_shader_stage: adapter_limits
+                .max_acceleration_structures_per_shader_stage,
+            ..wgpu::Limits::default()
+        };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: features,
             required_limits: limits,

@@ -11,11 +11,15 @@
 //!   **false** and no tier, preset or clamp ever sets it — the clamps only ever
 //!   clear it, which is [`AdapterCaps::clamp_ray_query`](crate::caps::AdapterCaps::clamp_ray_query),
 //!   the `vsm.enabled` shape one more time.
-//! * The device feature is requested **only where the adapter already exposes
-//!   it** (the standing request-if-available rule that `POLYGON_MODE_LINE` and
-//!   `TEXTURE_COMPRESSION_BC` established), so device creation cannot fail for
-//!   its absence and a machine without ray queries builds exactly the device it
-//!   built before this batch.
+//! * **The shipped device does not request the feature at all.** The standing
+//!   request-if-available rule (`POLYGON_MODE_LINE`, `TEXTURE_COMPRESSION_BC`)
+//!   turned out to be unsafe for an `EXPERIMENTAL_*` one: wgpu 30 refuses it
+//!   without an `unsafe` acknowledgement token, so adding it to the ordinary
+//!   optional mask made `request_device` **fail** and every headless test in
+//!   the tree skip for want of an adapter. The experiment builds its own
+//!   device ([`GpuContext::headless_ray_query`](crate::GpuContext::headless_ray_query)),
+//!   which is the only place in the tree that signs the token, and the shipped
+//!   context is exactly the one it was before this batch.
 //! * The 54 committed goldens are byte-frozen across the batch, which is the
 //!   measurement that says the shipped frame did not move.
 //!
@@ -197,7 +201,11 @@ impl RtScene {
             if src.indices.len() % 3 != 0 {
                 return Err(format!("source {i} has {} indices", src.indices.len()));
             }
-            if let Some(bad) = src.indices.iter().find(|i| **i as usize >= src.positions.len()) {
+            if let Some(bad) = src
+                .indices
+                .iter()
+                .find(|i| **i as usize >= src.positions.len())
+            {
                 return Err(format!(
                     "source {i} indexes vertex {bad} of {}",
                     src.positions.len()

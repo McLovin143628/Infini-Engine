@@ -15260,6 +15260,710 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
   measured verdict (quality, cost, coverage); VSM remains the shipped path on every tier;
   the experiment lands behind a default-off setting with a `caps.rs` clamp.
 
+> ## P28.5 STATUS — the ray-query experiment, the phase gate, and the final
+> disposition: **COMPLETE** (2026-08-14)
+>
+> The work: `ca027c1` the lead-time ruling and the truth oracle, `864b3de` the
+> ray-query experiment, `3d03da3` the three host lines, plus the phase gate, the
+> `cargo doc` CI leg, the memos and this block. **Named rather than counted**, on
+> P28.2's ruling and against P28.1's finding.
+>
+> Two memos carry the rulings: `docs/memos/p28-5-lead-time-ruling.md` and
+> `docs/memos/p28-5-ray-query.md`.
+>
+> This is the last batch of the master plan, so this block does something no
+> earlier one had to: **every open item in every Phase 26–28 ledger is
+> dispositioned by name**, into exactly one of CLOSED, REFUSED-with-measurement,
+> or RECORDED-as-a-known-bound. Nothing routes forward. There is no forward.
+>
+> ### A0 — THE LEAD-TIME RULING: a ROADMAP clause its own gate refuted
+>
+> P28.4's clause 1 prescribes a **200–500 ms horizon**. P28.4 shipped 18 ticks
+> out of that band and the P28.4 audit built the control the sweep never had —
+> `dead_reckon` at `h = 0`, which is the committed pose through the shipped API,
+> same lane, same cap, same rank, no lead. It refused to reverse a ROADMAP clause
+> from an audit and routed the ruling here, with the sentence this batch had to
+> answer: *"a phase may not close with its headline knob measured backwards and
+> shipped anyway."*
+>
+> **Ruled: `DEFAULT_PREDICT_HORIZON_TICKS` is 0.** Against 131 blur frames with
+> the predictor OFF: **105** at zero lead, 108 / 113 / 115 / 115 / 112 / 124 at
+> 3 / 6 / 12 / 18 / 24 / 36. The *arrival window* — tiles a surface justifies on
+> the tick it enters view, the only class a lead can serve — says it louder:
+> **64** against 176, over 2 frames against 7, where OFF is 384 over 15.
+>
+> **The mechanism is structural, not a tuning accident.** `apply_wants` seats a
+> miss the frame it is offered, with no admission throttle and **no latency
+> between admitted and sampleable**, so having asked earlier buys nothing in this
+> loop and every want spent on where the camera will be is a slot not spent on
+> where it is. It is P28.4's own floor refutation, one want class up.
+>
+> **The lane is kept and is the measured win**: a speculative want set at the
+> refinement's cap, ranked below every proved class, takes 131 blur frames to
+> 105 with no lead at all. The dead-reckoner, the clamp and the sweep all stay
+> behind the knob, and the ROADMAP's number survives by name as
+> `ROADMAP_PREDICT_HORIZON_TICKS = 18` — **the lead arm of the A/B**, because
+> deleting it would delete the falsification.
+>
+> Three arms carry the ruling, and two of them are P28.4's with their halves
+> swapped: `a_lead_time_costs_this_fixture_what_the_lane_earns_it` now runs the
+> shipped zero against the prescription and its inequality is unchanged;
+> `every_horizon_in_the_roadmaps_band_beats_the_predictor_being_off` keeps the
+> half of P28.4's claim that survived (every member of the band beats OFF) and
+> now asserts the shipped horizon beats **every row** of the band rather than
+> both of its ends — the flat band is exactly what P28.4's "no worse than either
+> end" could not see.
+>
+> **And the truth oracle the audit routed is built.**
+> `the_prediction_is_measured_against_where_the_camera_actually_went` compares
+> `dead_reckon(h)` against `whip_view(tick + h)` — the world, not a second
+> spelling of the same algebra. Worst angular error: **2.1 × 10⁻⁸ rad** at
+> `h = 0` (so the zero-lead control is the control it claims to be), then
+> 0.0168 / 0.0461 / 0.1424 / **0.2890** / 0.4859 / 0.9556 at 3 / 6 / 12 / 18 /
+> 24 / 36 — **16.6° wrong at the ROADMAP's own lead**, monotone every step. It
+> is right about what it assumes and wrong about what it does not: over the
+> constant-rate hold 18 ticks costs 0.040 rad, over the acceleration ramps
+> **0.289**, seven times worse, and the arm asserts the ratio. The linear half is
+> **exact** at every horizon — a secant extrapolates linear motion with no error
+> — so every number is angular and the cost of a lead here is entirely the cost
+> of guessing a turn.
+>
+> **The law, third instance**: *an unmeasured prescription can be backwards*
+> (P20, P25). The band was written before there was a loop to measure it
+> against, and it presumes a latency this streamer does not have.
+>
+> ### Clause 1 — the probe, the BLAS over meshlet clusters, the per-frame TLAS
+>
+> **MET, and it ran.** `inf_render::raytrace`, Ring 0, **no new dependency** —
+> the acceleration structures come through the pinned wgpu or not at all.
+> `RtBlasSource::from_meshlet_level` is the clause's "BLAS over meshlet clusters"
+> literally: it walks one LOD level's meshlets and asks each for its triangles
+> through `VgeomMesh::triangle`, over the DAG's own welded vertex buffer.
+> `RtScene::build` puts one BLAS per source and one TLAS over the instances into
+> **one** `build_acceleration_structures` call. `rt_sun_shadow.wgsl` casts a
+> primary ray and then a shadow ray per pixel, with three verdicts — *no surface
+> here* and *a surface the sun can see* are different facts and one bit cannot
+> say both.
+>
+> **Primary visibility is traced rather than read from a depth buffer**, which
+> costs a second trace and buys three things: no dependence on any shipped pass,
+> an explicit coverage bound, and a comparison naturally restricted to the pixels
+> the pass has an opinion about.
+>
+> **TWO THINGS THE OBVIOUS WIRING WOULD HAVE SHIPPED AS DEFECTS**, both found by
+> doing it the obvious way and watching the tree fall over:
+>
+> * **An `EXPERIMENTAL_*` feature cannot be requested the request-if-available
+>   way.** wgpu 30 refuses it unless the descriptor carries
+>   `ExperimentalFeatures::enabled()`, an **`unsafe`** token accepting possible
+>   undefined behaviour. Putting `EXPERIMENTAL_RAY_QUERY` into the standing
+>   optional mask made `request_device` fail outright, and **every headless test
+>   in the tree skipped for "no GPU adapter" — on a machine with a discrete
+>   GPU**. The shipped device therefore does not request it and the experiment
+>   builds its own (`GpuContext::headless_ray_query`, the only place in the tree
+>   that signs the token). `an_acceleration_structure_over_nothing_or_without_
+>   the_feature_is_refused` asserts the **shipped** context does not carry the
+>   feature *on a machine whose adapter has it*, so the day it migrates back the
+>   arm goes red.
+> * **The four acceleration-structure limits are `0` in `Limits::default()`** —
+>   `max_blas_primitive_count`, `max_blas_geometry_count`,
+>   `max_tlas_instance_count`, `max_acceleration_structures_per_shader_stage`.
+>   Two more failures that read like driver problems and are descriptor problems.
+>
+> **The platform bound, stated rather than discovered.** `EXPERIMENTAL_RAY_QUERY`
+> is Vulkan-only and native-only in wgpu 30 and this tree's instance is
+> `VULKAN | METAL` — so macOS has it by construction never, a software adapter
+> (lavapipe/WARP) never, wasm never. **Every number below is from one machine**:
+> NVIDIA GeForce RTX 4070 Ti, Vulkan, `DiscreteGpu`, Windows 11. The gate prints
+> that line before each device arm and prints a skip naming the adapter
+> otherwise; the probe, the clamp and the refusal arms run everywhere. The P25
+> one-platform law: say what ran where.
+>
+> ### Clause 2 — the memo with the measured verdict, and VSM stays shipped
+>
+> **MET. VERDICT: REFUSED as a shipped path, on coverage and cost, with quality
+> measured and narrowly in the ray query's favour** —
+> `docs/memos/p28-5-ray-query.md`.
+>
+> **Quality, against two oracles.** Against a CPU Möller–Trumbore caster written
+> out in the gate — no acceleration structure, no shared code, same triangles and
+> same rays — **0 of 36 864 pixels differ**, with all three verdict classes
+> present on both sides asserted first. Against the shipped virtual shadow map,
+> on a flat ground with a floating slab casting across it: **36 450 of 36 864
+> agree (98.88 %)**, 414 disagree, **410 of them (99.0 %) at a shadow edge**;
+> traced shadowed 4 180 against the shipped path's 4 594 — the shadow map's
+> filter and bias widening the umbra by about a pixel. The arm asserts the
+> *shape* (bordering, not a fraction alone) rather than a coincidence.
+>
+> **And the measurement that is really a finding about the SHIPPED path.** The
+> first fixture used the tree's standard **displaced** grid and the two masks
+> agreed on only **56.7 %** — nearly all of it in the direction *"the shipped
+> path says shadowed, the trace says lit"*, which is **shadow acne**: a
+> rasterized shadow map's depth bias mis-fires along every grazing slope and a
+> ray query has no bias to mis-fire with. The fixture was flattened so the
+> comparison is about the cast shadow; the 56.7 % is the number a reader should
+> carry, and it belongs to whoever next tunes the receiver bias.
+>
+> **Ray queries do not abolish the bias problem, they move it.**
+> `a_zero_surface_offset_shadows_every_surface_with_itself` takes
+> `RtView::shadow_bias` to zero: 830 shadowed of 19 322 covered at 1 mm becomes
+> **7 697** on the device and **14 123** in the CPU caster, and the two
+> intersectors — which agree **pixel for pixel** at the shipped offset —
+> disagree on **10 852** pixels at zero. It goes *noisy*, not dark, and
+> differently noisy on each intersector, because `eye + dir · t` lands
+> microscopically above or below its own triangle depending on the last bits.
+>
+> **Cost.** BLAS + TLAS build **13.6 – 13.9 ms** for 1 BLAS / 512 triangles /
+> 2 instances / 9.4 KiB of input; the trace **3.43 – 3.46 ms** for 73 728 rays.
+> Read the build as a *shape*: it is a cold full build including buffer creation
+> and a submit, and `AccelerationStructureUpdateMode::PreferUpdate` was **not**
+> measured — what it establishes is that a per-frame full rebuild is already the
+> order of a whole 16.7 ms frame at a scene size four orders of magnitude below
+> the flagship's 10 M triangles. Against that, P27's own gate asserts a static
+> scene re-rasterizes **zero** shadow pages after warm-up.
+>
+> **Coverage — the reason on its own.** The TLAS holds the meshlet clusters a
+> host put in it and nothing else. This engine's casters are meshlets *and*
+> skinned characters *and* terrain clipmaps *and* rigid primitives *and* GPU
+> scatter, and a sun shadow that only knows about meshlets is not a sun shadow —
+> it is a second one that disagrees with the first everywhere else. Bringing the
+> rest in is not tuning: terrain is a per-frame clipmap, skinned geometry deforms
+> every step, voxel volumes are carved at runtime and have no cooked DAG at all,
+> and scatter is a million GPU-culled instances with no CPU transform list.
+>
+> **Never load-bearing, structurally.** No render-graph node, no pass, no call
+> site inside `EngineRenderer::render`; `RaytraceSettings::sun_shadows` defaults
+> false; `AdapterCaps::clamp_ray_query` only ever clears — and an adapter that
+> **can** trace does not enable it for a caller who did not ask, which is the
+> half of the law a table of expected values cannot see. Goldens stay **54**,
+> count and content digest, `git diff` over `tests/goldens/` empty across the
+> batch.
+>
+> ### THE PHASE 28 GATE — composed, never duplicated
+>
+> `runtime/inf-player/tests/phase28_gate.rs`, **seven arms**. The rule it is
+> built under is the P27.5 precedent applied to gate logic: *where an arm
+> composes an existing criterion, compose it — do not duplicate the spelling.*
+> One door applies to gates too.
+>
+> **(a) `the_visbuffer_path_shades_at_parity_with_the_forward_path`** — device.
+> The P28.1 audit **recorded** the criterion in this ledger and left it as prose;
+> it is now `inf_render::visbuffer`'s — `PARITY_MAX_STEP`,
+> `PARITY_UNTEXTURED_MAX_FRACTION`, `PARITY_TEXTURED_MAX_FRACTION`,
+> `PARITY_TEXTURED_MIN_BORDERING`, `PARITY_TEXTURED_MAX_SOLID_CENTRES`,
+> `ParityVerdict`, `parity_verdict` and `parity_ok` — and the twelve-arm nucleus
+> is mechanically re-pointed at the same constants. **That re-point is the
+> batch's only edit to a prior gate**, it moved no assertion, and it is called
+> out here per the P28.3 precedent; the nucleus is 12 green through the new
+> door. Measured by the gate: untextured/scalar **27 of 4 320** interior pixels
+> differing (0.62 %) at worst step **1**; dir+point+spot 23 of 5 938 (0.39 %) at
+> worst step 1; textured **451 of 5 132 (8.79 %)** at worst step 26, **95.6 %
+> bordering an agreeing pixel and ZERO solid 3 × 3 centres** — the P28.1 ledger's
+> own numbers, reproduced by a second file that shares no code with the first.
+>
+> Four GPU-free arms in the library prove the classifier can **fail**: a
+> one-pixel diagonal (1.6 % of interior, 100 % bordering, 0 centres) passes; a
+> 20 × 20 patch at **10.4 % of interior — deliberately UNDER the 12 % fraction
+> bound, asserted first so the point is explicit** — is refused at 19.0 %
+> bordering; a field of small patches satisfies both the population (1.2 %) and
+> the bordering (88.9 %) clauses and is refused by the solid-centre clause
+> **alone**; and a parity claim over no interior pixels is refused outright.
+>
+> **(b) `one_transaction_admits_a_cluster_page_and_its_tiles`** — no adapter.
+> Composes the P28.2 invariant and its coupling-off control: **1 797
+> (page, tile) pairs** held over a fourteen-step churn at peak five resident
+> pages, with the oracle deriving the pairing by point-sampling triangles rather
+> than reading the container's tiles section. **The control reaches the forbidden
+> state**: coupling off, **782 of 784 sampled tiles missing (99.7 %)** against a
+> bound that demands more than half.
+>
+> **(c) `one_streamer_arbitrates_the_three_under_one_budget_with_one_ring`** — no
+> adapter. Composes the arbiter oracle's conservation arms over the three real
+> residencies: 167 admits / 82 evicts over eight steps, 8 of 8 wants contested,
+> 496 coupled pairs checked, six groups dropped, one stamp sequence observed from
+> **outside all three crates** and strictly interleaving (`1108 < 1113 < 1122 <
+> 1129`). `StreamReport` 1.3 MiB of 257.2 MiB with `within_grant()` true; the
+> ring at latency 2 with 18 landed / 6 missed and `readers_agree()` true — **plus
+> a control that skews one consumer's read and requires `readers_agree()` to go
+> FALSE**, so that predicate is proven able to fail rather than true by
+> construction.
+>
+> **(d) `the_predictor_strictly_reduces_a_scripted_whip_pans_fallback_frames`** —
+> no adapter, production doors only (`analytic_floor`, `speculative_wants`,
+> `dead_reckon`, a real `VtResidency`). OFF: blur **19 872 / 141 472 over 131
+> frames**, 1 428 admits, 720 evicts, zero speculative wants. ON at the **shipped**
+> horizon: **18 752 over 105 frames**, 1 300 admits, 592 evicts, 140 704
+> speculative wants offered. Bit-exact per arm, the two arms diverge, and
+> `floor_breaches == 0` in both. It reproduces `whip_pan.rs`'s 131 → 105 from a
+> second fixture.
+>
+> **(e) `the_unified_streamer_stays_inside_its_budgets`** — the three classes the
+> standing law separates: **LOAD** 4.27 ms of 5 000 (the paired derive, the
+> registration and streaming to full residency, measured once); **WORLD** peak
+> combined residency **2.99 MiB** of an 8 MiB ratchet (geometry 0.01 / texture
+> 1.98 / shadow 1.00), asserted unconditionally because bytes are bytes on every
+> adapter; **CLOCK** the visibility path's steady frame at 0.29 ms of 33, only on
+> a real device.
+>
+> **(f) `the_golden_set_is_pinned_and_additive_after_phase_28`** — **54** files,
+> content digest `23d41a61c31c28a17a20871b6c875707`, none added by the phase. A
+> third independent copy of the same computation `phase26_gate` and
+> `phase27_gate` carry, deliberately.
+>
+> **(g) `the_ray_query_experiment_is_never_load_bearing`** — off in both
+> defaults; all three tiers leave it alone in **both** directions;
+> `clamp_ray_query` clears on a non-tracing adapter and never sets on a tracing
+> one; `choose_tier` is unmoved by the capability; and VSM is the shadow path on
+> High and Medium while Low keeps CSM.
+>
+> **Two things the gate states rather than asserts**, and both are the right
+> call. The textured row's differing count is **printed, not required
+> non-zero** — zero would mean the two gradient constructions chose the same mip
+> on every interior pixel, which is *strictly better* than the recorded
+> measurement and must not fail a gate; what is asserted non-zero is the evidence
+> population (interior pixels, VT admits on both legs, textured ≠ untextured).
+> And `RenderTier::clamp_mobile` does **not** clear an experiment a host
+> explicitly asked for: the first draft asserted it did and went red, and the
+> true property — no preset has an opinion, only the adapter clamp decides — is
+> what is asserted now.
+>
+> ### THE FINAL DISPOSITION — every open item, by name
+>
+> The rule this table exists under is the one the P27.5 audit paid for: *a
+> routing table that summarises instead of enumerating loses exactly the items
+> nobody will miss — and a phase boundary is the last moment anyone can tell.*
+> This is the last phase boundary there is, so the table enumerates.
+>
+> Its scope is the **transitive closure of the audit chain's inheritance
+> lists**: the P28.4 audit's thirteen, its "from P28.3 and earlier" ten, the
+> P28.2 and P28.3 carried sets, the P28.1 audit's amendments, and the P27.5
+> completion block's "carried, unrouted, and honest" set — which is where the
+> Phase 26 and Phase 27 remainders were consolidated by their own audits. Three
+> verdicts, and every item takes exactly one.
+>
+> #### CLOSED HERE
+>
+> | # | item | routed from | what closed it |
+> |---|---|---|---|
+> | C1 | **The lead time's ruling** | P28.4 audit 1 | `DEFAULT_PREDICT_HORIZON_TICKS = 0`, the memo, and three arms — the clause is REFUSED (R1) and the *item* is closed |
+> | C2 | **A truth oracle for the prediction** | P28.4 audit 13 | `the_prediction_is_measured_against_where_the_camera_actually_went` — against `whip_view(tick + h)`, i.e. the world |
+> | C3 | **`Prediction::turn` / `clamped` / `CameraHistory::refused` reach no host** | P28.4 audit 3 | `EngineRenderer::predict_summary`, logged by `PlayerApp::log_stream_stats`, armed in `host_diagnostics.rs` |
+> | C4 | **`stream_report` has a gate reader and no HOST caller** | P28.3 audit, P28.4 audit "and earlier" | `PlayerRenderHost::stream_summary` + the host log + the source-scope arm |
+> | C5 | **`vt_summary` had no host caller either** | found this batch — the same shape, never named | same seam, same commit; the arm reads all four calls out of `log_stream_stats`'s scope |
+> | C6 | **`VtPopIn::refine_fallback_frames` never reached the summary** | found this batch | added, and armed by a **field count** rather than a token list (the P22 law) |
+> | C7 | **No `phase28_gate`** | P28.4 audit 6 | `runtime/inf-player/tests/phase28_gate.rs`, composing the recorded criteria |
+> | C8 | **`cargo doc` reaches no CI leg** | P28.4 audit 12 | a workflow step, as a **ratchet** against a pinned ceiling — the 70 standing warnings are inventory, the step stops new ones |
+> | C9 | **The ray-query experiment itself** | ROADMAP clause, P28.3 "and earlier" | built, measured, refused with numbers (R2) |
+> | C10 | **A rasterized page against an analytic hit** | P27.5 → P28.5, `p27-1-depth-convention.md` | this is that comparison: 98.88 % agreement on a flat fixture, **56.7 %** on a displaced one, and the difference is the shadow map's bias |
+> | C11 | **The shadow lane's producer has no end-to-end arm** | P28.4 audit 4 | `a_committed_camera_reaches_the_shadow_lane`, over a real `VsmSystem` — and it recorded a bound while doing it (B1) |
+>
+> #### REFUSED, with the measurement restated
+>
+> | # | refused | the measurement |
+> |---|---|---|
+> | R1 | **The ROADMAP's 200–500 ms predictive horizon as a shipped default** | h = 0 gives 105 blur frames against the band's 112–124 and OFF's 131, monotone in the lead, 64 against 176 on the arrival window. `apply_wants` seats a miss the frame it is offered and there is no latency between admitted and sampleable, so the lead has nothing to hide |
+> | R2 | **Ray-queried sun shadows as a shipped path** | coverage (the TLAS knows meshlets, not terrain / skinned / voxel / scatter); cost (13.6 ms to build 512 triangles against a 16.7 ms frame, where VSM re-rasterizes **zero** pages on a static scene); platform (Vulkan-only, one adapter class). Quality is the ray query's — 98.88 % agreement and no acne — and it does not outweigh the other three |
+> | R3 | **The clipmap scroll as a speculative want** | `set_clip_origins`' own doc: pages keep their slots, every page index is in range under a scroll — **there is no want a speculative lane could emit that would help.** The 127-against-4 096 saving is a *re-rasterization* number and belongs to B7 |
+> | R4 | **Retraction's cost measured on the whip-pan fixture** | `retracted` counts pages the *texture half refused* — a budget event — and the whip-pan is a *latency* fixture: at 800 pages its floor never falls back at all, and in the budget regime the saturated arm proves both arms identical. The fixture that could measure it is `cluster_pages`' shape (B8) |
+> | R5 | **Meshletizing voxel chunks** | `inf_vgeom::build` is host-only (it compiles `meshoptimizer`) and a `runtime_carve` volume has **no pre-cooked DAG to load**; and the cost is 0.75 / 1.45 / 3.19 ms at 128 / 512 / 1 152 triangles, on the fixed step, per dirty chunk, against a 16.7 ms frame. The honest shape is a second geometry kind in the visibility packing (B5) |
+>
+> #### RECORDED as a known bound
+>
+> Each with the reason it is a bound rather than a defect, and the trigger that
+> would re-open it. **A bound is not a defect**: the whole-codebase repair
+> campaign that follows this plan sweeps defect-shaped items, and nothing in
+> this list is one.
+>
+> **From Phase 28's own structure**
+>
+> | # | bound | reason | trigger to revisit |
+> |---|---|---|---|
+> | B1 | **At the shipped horizon the speculative SHADOW lane emits nothing** | a predicted camera at `h = 0` is the committed camera, so the scrolled page set equals the proved set and the overlap filter drops all of it. The producer is live and armed at a non-zero horizon | a non-zero `horizon_ticks` ships (see R1's trigger) |
+> | B2 | **The predictor reaches one host, and PIE == shipping cannot see it** | `commit_camera`'s only host caller is the **windowed** `PlayerApp::frame`; every PIE == shipping replay gate runs `--headless`, which builds no `EngineRenderer` at all, so the two hosts agree about the camera history by both having none. Vacuously true, and P28.5 **declines to claim it** rather than dressing a vacuity as a guarantee | a windowed subprocess gate, which needs a window in CI |
+> | B3 | **The whip-pan models the feedback lane rather than running it; no device-side A/B** | its refinement wants are the level a surface justified `READBACK_LATENCY_FRAMES` ago, which is what `vt_feedback.wgsl` marks and when the ring lets the CPU see it — a faithful model, and a model | a device A/B over a scripted path with a real feedback ring |
+> | B4 | **The editor viewport gets no prefetch** | its flycam is OS input at render rate, so it commits no pose; closing it means committing the flycam at a fixed step, which is a **simulation** question about the editor camera | the editor camera becomes a simulated body |
+> | B5 | **The frame-derived visibility bit split, and a second geometry kind for voxels** | P28.3 supplies the number the split needed (the streamer publishes the meshlet pool's live bytes) and does not spend it: moving the refusal out of registration is still the same trade, and the meshlet field refuses at **~7 % of the default streaming budget** (18.4 – 19.0 MiB of resident pool) | a frame-level door to derive the widths at, which no batch has yet needed |
+> | B6 | **Per-group shadow-page coupling membership** | which group a page belongs to is knowable only from the raster's per-page frustum verdict; `Coupling` is generic in its member type, so it is a second `couple` call and not a rewrite | the frustum verdict becomes available before the sync point |
+> | B7 | **The clipmap scroll as a `vsm_raster` content-stamp restructure** | and the P28.3 audit's correction is inherited rather than a cheaper number: `caster_stamp` is computed **from the packed `VsmCasterRaw`**, so the pack is not skippable until that stops being true | a caster stamp that is a function of the caster rather than of its packed record |
+> | B8 | **Retraction's cost in frames** | needs a contended pool with the vgeom coupling in it — `cluster_pages`' shape, not the whip-pan's | a budget fixture with the coupling live |
+> | B9 | **The palette-union caster bound** | P27.5's correction stands: the 67 % / 30 % figures are the margin's own reciprocal on a **one-joint** fixture, so what has to be measured is a real rig where joints far apart make the union *larger* than the inflated bind sphere | a rigged character fixture in the shadow suite |
+> | B10 | **The terrain deformation-window removal** | refused in P27 with its cost; the window is a render-side convenience the caster path reads | the caster path stops needing a window |
+> | B11 | **The per-page meshlet cut, and its tuning half** | a shadow page draws the LOD cut the camera picked, not the cut the page's own texel density justifies | a per-page error threshold, which needs the page's own projection at cull time |
+> | B12 | **The resolve's occluded overdraw and its `frag_depth` early-Z cost** | it writes `frag_depth`, so no early-Z, and its buffer knows nothing of the rigid pass. Unmeasured waste; the fix is a depth pre-test | a unified depth prepass across both paths |
+> | B13 | **A tangented parity row, and the skinned-tangent edit** | the tangent channel has **zero execution coverage** — `vgeom_unpack_tangent` and `vt_apply_normal_t`'s non-fallback branch never run on a device — and the skinned path's format question is answered (`Float32x3` at `@location(15)`, 64 → 68 bytes, no raised limit) while the **edit** is not made, because that path's only frame-level check is the byte-frozen golden set and a visible change would have no gate that could tell an improvement from a regression | a tangented fixture in `visbuffer_parity`, which the skinned gate needs too |
+> | B14 | **The editor's derived `.inf_vmesh` is unpaired** | `build_payload` is handed one mesh's geometry with no project in scope; an unpaired v3 asset is not a degraded one, but the editor viewport does not get the guarantee the shipped build gets. It is also what keeps the editor immune to the stale-address class | the editor's derivation gets the cook's serial material walk |
+> | B15 | **The textured-mip question** | it needs a fixture whose reference is not dominated by resolution-dependent shading — flat, unlit, texture-only. **Which mip makes a better image is undecided by measurement**, and the P28.1 audit's gate criterion is the honest statement until there is one | that fixture |
+> | B16 | **The page-border re-weigh and the wider VSM kernel** | both are shadow-*page* questions and no batch since has changed what a shadow page is: still depth-only, still 128², still bordered by four texels. P28.2 changed what a *geometry* page is and P28.3 changed arbitration | a page that stops being only depth |
+> | B17 | **`VtTransaction::unknown_texture` still has no producer** | kept rather than retired, and the reason is still true: every want-emitting path filters an unknown handle and nothing caches a want set across a level switch. Retiring it would remove the only thing that would notice the day one does | a want set that survives a level switch |
+> | B18 | **`inf_vt::fill` still has no adoption site** | `VtTextures::sync` applies and stages in one synchronous call from mmap slices, so a slot is never allocated with its bytes absent. Replicate-wins, honoured by leaving it alone | an asynchronous upload path — which is also R1's trigger |
+> | B19 | **The arbiter never re-divides mid-frame** | re-budgeting a pool drops residency, so the division happens where the pools are sized and the per-frame call is an audit. A host that wants to re-divide live re-applies its tier | a pool that can be resized without dropping residency |
+> | B20 | **Page 0 has no coupling, and the pairing is per PAGE not per meshlet** | the root page takes the coarsest mip by fiat, so its pairing is vacuous (0.002 texels per triangle against a band of 170 – 477); giving it a mip its own density justifies is a **cook** rule change that re-derives every committed `.inf_vmesh`. Per-meshlet pairing needs a residency granularity finer than the page | a cook version bump, which nothing else needs |
+> | B21 | **A runtime material override is outside the pairing guarantee** | the cook pairs against the materials the authored level binds, and the runtime filters to textures the VT library registered — because demanding a texture this level does not bind would retract every page of that asset for ever | a pairing that can name a texture set rather than a texture |
+> | B22 | **An error inside the shared lit prelude is invisible to the parity nucleus** | both shaders are `ShaderKind::Lit(2)`, so `vt_sample`, `vsm_receive`, the environment lighting and the atmosphere are one program for both — mutation-measured, a wrong mip for the entire engine leaves all twelve arms green. Structural, stated, and not closable from inside that gate | a second, independent shading library, which nobody wants |
+> | B23 | **The visibility path reaches shading and nothing else** | not the picker, the depth prepass, the HZB, or the shadow caster passes; every other consumer of meshlet geometry is unchanged | a consumer that needs per-pixel ids |
+> | B24 | **Zero fragment storage-binding headroom** | `Limits::default()` grants 8 and the env group spends 4; the flat instance table already moved to an `Rgba32Float` texture to fit, and an arm pins the count so a ninth binding fails a test rather than a pipeline on a user's machine | a raised limit, which is the P25 one-platform trap |
+> | B25 | **The visibility path has no device-vs-twin gradient arm** | the id names a shared-pool slot whose remap lives on the GPU, so a host cannot decode one; `VisBary` is a mirror and the doc says so | a host-readable pool remap |
+> | B26 | **`inf-vgeom` is deliberately not a `SlotPool`, and gets no speculative lane** | a meshlet page is a variable number of bytes across four suballocated pools and its residency is a **prefix**, not a set — there is no slot to take from anybody and no rank to be strictly lower in. Forcing it through the trait would be a lie the arbiter then reasons on | a byte auction that can express a rank |
+> | B27 | **70 rustdoc warnings at 60 locations** | unresolved `tests::` links and public docs pointing at private items, none of them P28.4's or P28.5's — the inventory C8's ratchet freezes, and the repair campaign's to clear | the campaign |
+> | B28 | **The MSAA ruling stands: VisBuffer + TAA is a setting, not the High default** | decided by goldens and frame budget in that order — 58.9 % of covered pixels are edge, 1 275 differ (2.21 % of the frame), and a default would have re-blessed fifty-four goldens to ship a mode whose quality recovery is itself off by default | TAA on by default, which is a product decision |
+>
+> **From Phases 26 and 27, as their own audits consolidated them**
+>
+> The P27.5 completion block carries these with the reason each is not a defect,
+> and this batch adds nothing to them and takes nothing away. They are recorded
+> here **by name** so that the closing table of the plan does not end with the
+> word "see":
+>
+> * **Shadows are OFF by default on every tier** — a *product* decision with a
+>   fifty-four-frame re-bless in it, not an engineering one.
+> * **The goal sentence's "16k-equivalent" ships at 8k on High** — 16 384 is a
+>   settings value the boundary accepts and no tier grants; the phase's own
+>   "Done when" says ≥ 8k and that is what is measured.
+> * **Face culling is refused** — front-face casting removes acne only for a
+>   *closed* caster, and a terrain tile is an open surface and a masked card is
+>   a quad; both would cast nothing at all.
+> * **A cut-out material shadows as its whole quad**; **the kernel is 3 × 3 with
+>   no soft-shadow width**; **a clamped kernel never crosses a cube face**; **the
+>   sun's quantum is per light, not per level**; **the draw count is per (page ×
+>   geometry group)**; **the atlas is allocated whole**; **no HZB and no two-pass
+>   occlusion in the page cull**; **the terrain caster mesh is decimated to
+>   `VSM_TERRAIN_CASTER_CELLS` = 64**, so a ridge thinner than the sample stride
+>   smooths; **virtualized geometry casts through its classic LOD chain**; **a
+>   light's `range` does not cull a marking projection**; **the CPU scatter pack's
+>   membership is camera-driven and scatter casts through it at all**; **the
+>   skinned cull sphere is the bind pose inflated 50 %**; **a stamp-only cache key
+>   would make part of a grid shift free**.
+> * **Coverage bounds with no arm**: `sprite.wgsl`'s `MAX_2D_LIGHTS` loop has no
+>   receiver; two ceilings' call sites have no device arm; Medium's marking
+>   stride and one-tap kernel have no golden; the TAA jitter fix has no
+>   falsifying arm; `vsm_heat` is a second reader of the indirection table.
+> * **`voxel.wgsl` has no shadow receiver** — P28.1 refused the cheap door (the
+>   visibility packing's meshlet field is a slot in the shared pool and a voxel
+>   chunk has none, and all thirty-two bits are spent) and P28.2 split the
+>   expensive one; it lands on B5 and R6, which is where it stays.
+> * **Coarse-LOD terrain holes still do not propagate into the pyramid** —
+>   carried unchanged since P21, and named here because a plan that ends should
+>   not end by forgetting its oldest bound.
+>
+> ### Mutation matrix — ten run, nine killed, one stated survivor, and one
+> survivor that produced a fix
+>
+> | # | mutated | verdict |
+> |---|---|---|
+> | Q1 | `DEFAULT_PREDICT_HORIZON_TICKS` back to 18 | killed at **three** whip-pan arms — `a_lead_time_costs_this_fixture_what_the_lane_earns_it`, `every_horizon_in_the_roadmaps_band…` and `the_prediction_is_measured_against_where_the_camera_actually_went` |
+> | Q2 | the truth oracle compares against `whip_view(tick)` instead of `tick + h` | killed at the truth oracle's monotone-growth clause — which is what says it measures the world and not the algebra |
+> | Q3 | `clamp_ray_query` **sets** instead of clearing | killed at `the_capability_clamp_only_ever_clears_the_experiment` |
+> | Q4 | the shader ignores `RtView::shadow_bias` and traces from `t = 0` | killed at `a_blas_over_meshlet_clusters_traces_what_a_cpu_ray_caster_traces` — the device and the CPU caster stop agreeing, which is exactly what a zero offset does |
+> | **Q5** | the TLAS instance transform transposed | **SURVIVED, and the reason is the fixture** — see below |
+> | Q6 | `predict_summary` hard-wired to `None` | killed at `the_predictors_line_appears_only_once_a_host_commits_a_pose` |
+> | **Q7** | one `host.*_summary()` **log** replaced with another | **survived the first draft** → the arm was rewritten, and now kills |
+> | Q8 | `refine_fallback_frames` dropped from `VtPopIn::summary` | killed at `the_pop_in_line_prints_every_counter_it_holds` |
+> | Q9 | `speculative_shadow_wants`' proved-overlap filter deleted | killed at `a_committed_camera_reaches_the_shadow_lane` |
+> | Q10 | the parity classifier's solid-centre clause removed | killed at `a_field_of_small_patches_is_refused_by_the_solid_clause_alone` |
+>
+> **Q7 is the finding.** The host-log arm asked whether `log_stream_stats`
+> *contains* `host.vt_summary()`. Three of the four summaries are named **twice**
+> in that scope — once in the early-return guard as `.is_some()` and once where
+> the line is actually logged — so replacing the *log* with a different
+> summary's left the guard's mention behind and the arm stayed **green** while
+> the line stopped being logged. That is the exact class of defect this batch
+> closed, reappearing inside the arm that closed it. It now requires the
+> **emitting** spelling (`and_then(|l| l.host.X_summary())`) and requires it
+> exactly once, and the same mutation kills. *A gate must aim at the thing it
+> names* — the P23 law, met again in the batch that quotes it.
+>
+> **Q5 is a bound, stated rather than dressed as a kill.** Both instances in the
+> ray-query fixture take `Quat::IDENTITY`, so the 3 × 4 affine is **diagonal**
+> and its transpose is itself — the mutation is a no-op on this fixture and no
+> arm can see it. So the TLAS's row-major transform convention is **unexercised
+> by rotation**, and the correctness arm's zero-pixel agreement is a statement
+> about translation and scale. Closing it means a rotated instance, which moves
+> every measured number in `docs/memos/p28-5-ray-query.md`; recorded here
+> instead, in the shape P28.1's N14b already set for a survivor that is a
+> property of the fixture rather than of the code.
+>
+> ### Machine-ops
+>
+> **Battery green: 253 test binaries, 4 566 passed, 0 failed, 8 ignored** — 213
+> `Running` + 40 `Doc-tests` = 253 result lines, **matched**, and **zero**
+> warnings on stderr (`-j 3`, `--no-fail-fast`, `Start-Process` with both
+> redirects). Exactly the P28.4 audit's baseline of **250 / 4 540 / 0 / 8** plus
+> this batch's **three** new binaries (`ray_query`, `host_diagnostics`,
+> `phase28_gate`) and **26** new arms — one in `whip_pan`, two in
+> `inf-render::raytrace`, six in `ray_query`, one in `inf-render::vt_stream`,
+> four in `host_diagnostics`, one in `vsm_marking`, four in
+> `inf-render::visbuffer`, seven in `phase28_gate`.
+>
+> `cargo clippy --workspace --all-targets` with `RUSTFLAGS=-D warnings`: **exit
+> 0, zero warnings**, run **LAST** per the machine note. It found **three**, all
+> in this batch's own code and all fixed rather than allowed — a field
+> assignment outside a `Default::default()` initializer in the experiment's
+> device constructor, a manual `is_multiple_of`, and a manual `Range::contains`
+> in the truth oracle's phase predicate. `cargo fmt --all --check` clean. The
+> affected targets were re-run after both passes: `inf-render` lib 447,
+> `whip_pan` 9, `ray_query` 6, `visbuffer_parity` 12, `vsm_marking` 12,
+> `host_diagnostics` 4, `phase28_gate` 7.
+>
+> `cargo doc --no-deps` on the touched crates (`inf-render`, `inf-math`,
+> `inf-player`) exits 0 and is not silent: 104 warnings at 66 locations. **None
+> of them is at a line this batch wrote** — the two in `inf-render` are
+> unresolved `AtmosphereQuality::High` and `GiQuality::High` links at
+> `settings.rs:100` and `:218`, both of which predate it. Workspace-wide the
+> count is **450**, exactly the ceiling the new CI ratchet pins, so this batch
+> added none.
+>
+> Goldens **54**, `git diff` over `tests/goldens/` empty across the batch. Disk
+> 80 GB free at the start and 72 GB at the end; nothing was deleted and no
+> `target/debug/incremental` sweep was needed. **Nothing pushed.**
+>
+> One note for whoever runs the next battery on this machine: it took **hours**,
+> not the ~50 minutes the CLAUDE.md note budgets, almost all of it in
+> `inf-studio`'s link and in the subprocess pool gates. Both redirects go to
+> files, and a file redirect is **block-buffered**, so `Running` lines in the
+> error log and `test result:` lines in the output log lag the real position by
+> tens of binaries — twice during this batch that looked exactly like a hang and
+> was not. Read the process table, not the log tail.
+
+> ## PHASE 28 COMPLETE — Nanite-native unification: one virtual streamer
+> (2026-08-14)
+>
+> The phase's "Done when", clause by clause, each against the arm that fails if
+> it stops being true.
+>
+> ### "the VisBuffer path shades meshlets with materials resolved from per-pixel primitive IDs at golden-parity with the forward path"
+>
+> **MET, and the criterion is stronger than the sentence.** `visbuffer.wgsl`
+> rasterizes `instance ⊕ meshlet ⊕ triangle` into an `R32Uint` target through the
+> meshlet path's own indirect, vertex-pulled draw; `vis_resolve.wgsl`
+> reconstructs barycentrics and **solves** the uv gradients rather than
+> differencing them. Parity is a **per-pixel byte compare against the forward
+> path on a real device**, twelve arms over seven shading rows — which is a
+> stronger claim than a frozen golden and is why no fifty-fifth golden was
+> added.
+>
+> The criterion the P28.1 audit recorded and this phase's gate executes: **byte
+> exact on interior pixels to `PARITY_MAX_STEP = 1` on every row a derivative
+> cannot reach, and on the textured row bounded AND classified** — under 12 %
+> differing, ≥ 80 % of them bordering an agreeing pixel, ≤ 10 % of them centres
+> of a solid 3 × 3 block. Measured: worst channel step **1 of 255** on all six
+> untextured rows; **8.79 %** on the textured row with **95.6 %** bordering and
+> **zero** solid centres. Silhouettes and intersection curves are excluded *by
+> construction* and measured separately, because at a silhouette the two paths
+> are obliged to differ and comparing there measures MSAA rather than the
+> resolve.
+>
+> **And the one thing the phase would not claim**: which mip makes a better
+> image is **undecided by measurement**. The first ledger said the resolve's was
+> better; the audit built a 16× supersampled reference and withdrew it (forward
+> MAE 0.065542, resolve 0.065580, with a control floor larger than the entire
+> signal). What is measured and kept is that the resolve's gradient is the exact
+> analytic derivative and the forward path's is a first-order quad difference.
+>
+> ### "a cluster page carries its texture tiles in one aligned pack page and a single transaction admits both — the 'high-poly mesh with a blurry texture' artifact asserted impossible as a state invariant"
+>
+> **MET, and the impossibility is a conjunction of four facts rather than a
+> convention**: `VgeomStreamPlan::uploads` is private; its one public source is
+> `VgeomStreamer::pair`, which **demands** the texture half; a page whose tiles
+> were refused is gone before the value exists; and the one other caller goes
+> through the same door with an empty texture half. There is no window, not even
+> a private one, in which the streamer believes a page is resident while its
+> tiles are not.
+>
+> The section holds **addresses, not texels** — measured: under mmap both halves
+> are already slices of one mapping, so a copy buys no I/O while costing
+> duplication across pages, across assets and against the pack's own copy. The
+> mip rule `mip(L) = min(mip_count − 1, L / 2)` was derived independently from
+> the other end by the audit and **confirmed**: texels per triangle is constant
+> exactly at that slope (227.6 / 455.4 / 228.8 / 460.3 / 229.8 / 476.6 / 169.8
+> against an 86× spread at one mip per level), and the *rounding direction* is
+> the whole argument — flooring hands the odd levels a denser texture, ceil a
+> sparser one, and sparser-than-matched **is** the artifact by half a level.
+>
+> The invariant is asserted as **world state after every transaction** of a
+> fourteen-step churn, 1 000+ (page, tile) pairs a run, with an oracle that
+> derives the pairing a **different way** (point-sampling every triangle) and a
+> **control that must reach the forbidden state** with more than half the
+> sampled tiles missing.
+>
+> ### "one streamer arbitrates vgeom + SVT + VSM under one budget with one feedback ring"
+>
+> **MET.** `inf-stream` is Ring 0 with `thiserror` and nothing else, sits
+> strictly below the three residency brains and names none of them. One stamp
+> domain (three counters merged; four content counters deliberately not, because
+> they version *content* and not recency), one want pipeline with the protection
+> order **fixed** — `admit_by_lane` protects and admits one lane at a time, so a
+> floor miss may take a resident refinement's slot and a refinement may never
+> take a floor tile's — one ceiling over all three pools, and one readback
+> **domain** with two buffers, refused as one buffer *structurally* rather than
+> on cost (one buffer means registering a texture drops an in-flight shadow
+> mask).
+>
+> The division is **even and not proportional**, measured: under a 64 MiB ceiling
+> proportional hands the texture pool 5.78 MiB — below its own Low-tier ceiling —
+> on a machine that asked for High. That is the artifact clause 2 exists to
+> prevent, produced by the arbiter that exists to prevent it. And the tier
+> constants are each tier's three shares **summed**, so at the shipped defaults
+> the arbiter is an identity and every golden and every prior gate is unmoved by
+> construction — pinned as a `const` block, so flattening a share fails the
+> **build**.
+>
+> The honest bound is named where it lives: `inf-vgeom` is deliberately **not** a
+> `SlotPool`, because a meshlet page is a variable number of bytes across four
+> suballocated pools and its residency is a *prefix*, not a set. It surrenders
+> the byte ceiling, the stamp domain and the coupling; it keeps its
+> worst-error-first auction.
+>
+> ### "a scripted 360° whip-pan shows measurably fewer fallback-frames with the predictor on than off (A/B inside the gate, counters not pixels)"
+>
+> **MET — and the A/B answered a question the clause did not ask, which is why
+> the shipped knob moved.** Over the scripted path: **131** blur frames with the
+> predictor off, **105** with it on, 19 872 blur tiles against 18 752, bit-exact
+> per arm and the two arms demonstrably diverge, with anti-vacuity on the OFF leg
+> in **both** directions (it must be blurry on some frame, and not on every
+> frame, because a pool under the steady demand is a budget problem no predictor
+> can fix and must not be credited for).
+>
+> **What earns it is the lane, not the lead.** The speculative class — a CPU-side
+> want set at the refinement's cap, ranked strictly below every proved class — is
+> the whole win; the dead-reckoning lead is a cost at every horizon on the only
+> fixture that exists, so `DEFAULT_PREDICT_HORIZON_TICKS` ships at **0** and the
+> ROADMAP's 200–500 ms band is refuted by its own gate
+> (`docs/memos/p28-5-lead-time-ruling.md`). The reason is structural:
+> `apply_wants` seats a miss the frame it is offered and there is **no latency
+> between admitted and sampleable**, so having asked earlier buys nothing here.
+>
+> Two refutations the phase kept as permanent arms rather than as prose: **the
+> analytic floor cannot be prefetched** (30 812 fallbacks over 260 frames,
+> byte-identical in both arms on a starved pool, while 137 584 speculative wants
+> were demonstrably offered) and **the lead time costs what the lane earns** —
+> both written so that the day an admission throttle or a real fetch latency
+> appears, the ruling re-opens as a **red test** rather than as a memory.
+>
+> ### The phase's own gate
+>
+> `runtime/inf-player/tests/phase28_gate.rs` composes the four clauses above plus
+> the standing budget and golden discipline, and it **composes rather than
+> duplicates**: the parity criterion is a library function both the nucleus and
+> the gate read, the invariant is checked through `inf_stream::breaches`, the
+> conservation arms are derived from quantities the arbiter does not compute, and
+> the A/B runs the same production doors the whip-pan gate runs.
+>
+> ### Schema, goldens, green
+>
+> **No scene schema moved in the whole phase** — v20 stands, as it has since P22.
+> `.inf_vmesh` moved **container v2 → v3** and `VgeomMesh`'s bincode schema 1 → 2
+> **once**, in P28.2, with a frozen v1 shadow record and a frozen v2 fixture
+> generated at the commit before that batch. Goldens stay **54**, count and
+> content digest, `git diff` over `tests/goldens/` empty across every batch and
+> every audit of the phase. Every prior gate green **unmodified**, with the two
+> deliberate exceptions each batch called out by name.
+
+> ## NEXT-GEN WAVE (Phases 16–28) COMPLETE — AND WITH IT THE MASTER PLAN
+> (2026-08-14)
+>
+> Phase 28 was the last phase of the Next-Gen Wave, and the Next-Gen Wave was the
+> last wave of the plan. **The master plan is done.**
+>
+> Thirteen phases, in the order they were approved on 2026-07-31 and in the order
+> they landed:
+>
+> | | phase | what it made true |
+> |---|---|---|
+> | 16 | world scale & streaming | mmap zero-copy packs, `.inf_terrain` tiles on **global monotone stamps**, world partition, multi-terrain |
+> | 17 | Ultra Dynamic Sky | a time-of-day sun, Bruneton/Hillaire atmosphere, volumetric clouds, weather |
+> | 18 | Lumen-class GI + Nanite completion | two-pass HZB occlusion, meshlet **streaming**, real meshes in the editor viewport, dynamic GI, GPU scatter |
+> | 19 | biomes, grammar, enterable structures | erosion maps, biome painting, a grammar DSL, and seven archetypes with **real colliders** |
+> | 20 | water & hydrology | surfaces, buoyancy and swim, underwater and wetness, rivers and lakes |
+> | 21 | volumetric terrain | SDF chunks, holes in the heightfield, exact-conservation excavation, runtime carving |
+> | 22 | deformation & destruction | a deformation field, deterministic Voronoi fracture, terrain colliders, structural collapse |
+> | 23 | embedded DCC v1 | a half-edge kernel, the Model Editor, sculpt and UV, and **editing during Simulate, proven** |
+> | 24 | DCC v2 — characters | templates, auto-fit, weights, IK, modular rigging, cloth and hair, and a wizard that derives locomotion **from the rig** |
+> | 25 | photogrammetry | SfM and MVS and a finish pipeline, all owned math, **zero new external dependencies** |
+> | 26 | streaming virtual texturing | tiled `.inf_tex`, a page pool, an analytic want floor and GPU feedback that refines it |
+> | 27 | virtual shadow maps | a page atlas, per-page culling and raster, a receiver, and a static scene that re-rasterizes **zero** pages |
+> | 28 | Nanite-native unification | a visibility buffer at per-pixel parity, interleaved cluster pages, **one** streamer, and a predictor whose lead its own gate refuted |
+>
+> ### The honest scope statement — the P15 precedent, restated because it still holds
+>
+> When Phase 15 closed the first sixteen phases, it said what "complete" means
+> here and the same sentence closes this one:
+>
+> **This is engineering-scope complete. The per-phase STATUS and AUDIT blocks
+> above are the truth, and the disposition table in P28.5 is the list of what is
+> known to be missing.** Every phase in this document ships with a gate that
+> fails when its claim stops being true, a mutation matrix that says the gate can
+> fail, and a carried-remainder list written by somebody trying to find the hole
+> rather than trying to close the phase. Nothing here claims a shipped product,
+> a content library, an art pipeline staffed by artists, or a hour of play. It
+> claims that the engineering exists, that it is measured, and that the
+> measurements are in this file.
+>
+> Three kinds of thing are deliberately **not** claimed:
+>
+> * **Human-verified work stays human-verified.** Demo recordings, DPI matrices,
+>   macOS hardware passes, live canvas interaction, an artist's hour in the
+>   editor — CI cannot run any of them and no block above says it did.
+> * **Bounds are not defects, and there are a lot of bounds.** The disposition
+>   table names them: fifty or so places where the engine does the right thing
+>   for a stated reason and a better thing exists. Each carries the reason and
+>   the trigger that would re-open it.
+> * **One platform is one platform.** The P25 law runs through the whole wave:
+>   several measurements in this document — the ray-query experiment most of
+>   all — ran on exactly one adapter, and every one of them says so.
+>
+> ### What the wave proved that the plan only hoped
+>
+> Four things are worth writing down at the end, because each of them was a
+> *bet* in the direction document and is now a measurement:
+>
+> * **An interpreter over the same IR as the transpiler gives parity for free**
+>   (P6), and the same substrate carried material graphs, PCG graphs and the
+>   texture bake afterwards.
+> * **A deterministic analytic predictor beats a learned one under house gates**
+>   — not because it predicts better, but because it can be *refuted*, and it
+>   was: P28.5 shipped its horizon at zero because the gate said so.
+> * **"Better than UE5" survived contact with measurement in the place it was
+>   aimed**: three page systems became one, with one budget, one stamp domain,
+>   one want pipeline and one ring, and a cluster page that cannot be resident
+>   without its texture tiles. The headline artifact is a *state invariant* with
+>   a control that must reach it.
+> * **And the audits earned their keep.** Every phase in this wave was audited
+>   adversarially after it was declared complete, and every audit found something
+>   — a cited arm that never existed, a gate that could not see its subject, a
+>   number that argued with its own list, a feature switched off that nothing
+>   noticed. The last of them found the headline knob of the last phase measured
+>   backwards. **A ledger nobody attacks is a ledger.**
+>
+> ### The laws, as a closing inventory
+>
+> The one-line versions, because they are the part of this document most likely
+> to outlive it:
+>
+> *Assert the world, not the report. Gates must be built to falsify, and a gate
+> must aim at the thing it names. A gate cannot see an error the subsystems
+> share. Cited arms must exist. A ban enumerates what you thought of; an
+> allowlist enumerates what is allowed. Counters must move and then zero.
+> Anti-vacuity first, in both directions. Enumerate rather than summarise — a
+> table that summarises loses exactly the items nobody will miss. Inference
+> dressed as measurement is worse than no measurement. An average hides a
+> station. One platform is one platform. **And an unmeasured prescription can be
+> backwards** — three times now, the last of them a clause in this very
+> document.*
+>
+> ### What comes next, and it is not a phase
+>
+> A whole-codebase repair campaign, which sweeps defect-shaped items across every
+> phase rather than adding a new one. The disposition table above is deliberately
+> **not** its input: bounds are not defects, and a campaign that treated them as
+> a backlog would spend itself re-litigating decisions that were made with
+> numbers. What it inherits is the inventory — the 450 rustdoc warnings the new
+> CI ratchet freezes, and whatever else a fresh adversarial pass over the whole
+> tree turns up.
+>
+> The plan is finished. The engine is not, and no engine is; but every claim this
+> document makes about it has an arm that fails when it stops being true, and
+> that is the thing the plan was actually for.
+
 ---
 
 *This roadmap is a living document. Each phase completion updates it; decision memos land in

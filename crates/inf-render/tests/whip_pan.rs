@@ -1049,7 +1049,7 @@ fn the_prediction_is_measured_against_where_the_camera_actually_went() {
     let holding = |t: u64| t > WARM + RAMP && t < WARM + SWEEP - RAMP;
     // The acceleration ramps, where the premise is false by construction.
     let ramping =
-        |t: u64| (t > WARM && t <= WARM + RAMP) || (t >= WARM + SWEEP - RAMP && t < WARM + SWEEP);
+        |t: u64| (t > WARM && t <= WARM + RAMP) || (WARM + SWEEP - RAMP..WARM + SWEEP).contains(&t);
 
     let mut table: Vec<(u32, f64, f64, f64, f64, u64)> = Vec::new();
     for h in [HORIZON, 3, 6, 12, LEAD, 24, 36] {

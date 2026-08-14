@@ -374,13 +374,14 @@ fn cpu_verdicts(tris: &[[Vec3; 3]], v: &RtView) -> Vec<u32> {
         for x in 0..W {
             let px = (x as f32 + 0.5) / W as f32 * 2.0 - 1.0;
             let py = 1.0 - (y as f32 + 0.5) / H as f32 * 2.0;
-            let dir =
-                (v.forward.normalize() + right * (px * half * aspect) + up * (py * half)).normalize();
+            let dir = (v.forward.normalize() + right * (px * half * aspect) + up * (py * half))
+                .normalize();
             let Some(t) = closest(v.eye, dir, tris, v.near, v.far) else {
                 continue;
             };
             let surface = v.eye + dir * t;
-            let occluded = closest(surface, v.sun.normalize(), tris, v.shadow_bias, v.far).is_some();
+            let occluded =
+                closest(surface, v.sun.normalize(), tris, v.shadow_bias, v.far).is_some();
             out[(y * W + x) as usize] = if occluded { RT_SHADOWED } else { RT_LIT };
         }
     }
@@ -571,7 +572,11 @@ fn a_blas_over_meshlet_clusters_traces_what_a_cpu_ray_caster_traces() {
     // ANTI-VACUITY, before anything is compared: all three verdicts have to be
     // present on both sides, or "they agree" is a statement about a blank frame.
     for (name, m) in [("gpu", &gpu_verdicts), ("cpu", &cpu)] {
-        for (label, want) in [("miss", RT_MISS), ("lit", RT_LIT), ("shadowed", RT_SHADOWED)] {
+        for (label, want) in [
+            ("miss", RT_MISS),
+            ("lit", RT_LIT),
+            ("shadowed", RT_SHADOWED),
+        ] {
             let n = m.iter().filter(|x| **x == want).count();
             assert!(
                 n > 64,
@@ -595,12 +600,7 @@ fn a_blas_over_meshlet_clusters_traces_what_a_cpu_ray_caster_traces() {
             x > 0 && y > 0 && x + 1 < W && y + 1 < H
         })
         .filter(|i| {
-            let n = [
-                **i - 1,
-                **i + 1,
-                **i - W as usize,
-                **i + W as usize,
-            ];
+            let n = [**i - 1, **i + 1, **i - W as usize, **i + W as usize];
             n.iter().all(|k| gpu_verdicts[*k] != cpu[*k])
         })
         .count();
@@ -776,7 +776,10 @@ fn the_ray_queried_sun_shadow_against_the_shipped_virtual_shadow_map() {
         disagree.len(),
         at_edge as f64 / disagree.len().max(1) as f64 * 100.0,
     );
-    println!("  traced shadowed {rt_dark}, shipped shadowed {vsm_dark}, of {} covered", covered.len());
+    println!(
+        "  traced shadowed {rt_dark}, shipped shadowed {vsm_dark}, of {} covered",
+        covered.len()
+    );
 
     assert!(
         agree * 10 >= covered.len() * 8,

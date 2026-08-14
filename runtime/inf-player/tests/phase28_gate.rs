@@ -792,9 +792,7 @@ fn one_transaction_admits_a_cluster_page_and_its_tiles() {
          residency"
     );
     assert_eq!(
-        streamer
-            .residency(PAIRED_ASSET)
-            .map(|r| r.resident_pages()),
+        streamer.residency(PAIRED_ASSET).map(|r| r.resident_pages()),
         Some(src.pages().len()),
         "the finest threshold must reach full residency"
     );
@@ -812,7 +810,10 @@ fn one_transaction_admits_a_cluster_page_and_its_tiles() {
     let resident = streamer
         .residency(PAIRED_ASSET)
         .map_or(0, |r| r.resident_pages());
-    assert!(resident > 0, "nothing streamed — the control proves nothing");
+    assert!(
+        resident > 0,
+        "nothing streamed — the control proves nothing"
+    );
     let (mut missing, mut total) = (0usize, 0usize);
     for page in 0..resident {
         for (guid, tile) in oracle_tiles(&src, &mesh, page) {
@@ -1694,7 +1695,10 @@ fn the_predictor_strictly_reduces_a_scripted_whip_pans_fallback_frames() {
     // …and the win was not bought out of the classes above it: speculation may
     // never cost a resident FLOOR tile its slot (the P26.4 floor law extended to
     // the lane P28.4 added).
-    assert_eq!(off.floor_breaches, 0, "the OFF arm evicted a resident FLOOR tile");
+    assert_eq!(
+        off.floor_breaches, 0,
+        "the OFF arm evicted a resident FLOOR tile"
+    );
     assert_eq!(
         on.floor_breaches, 0,
         "speculation cost a resident FLOOR tile its slot"
@@ -1853,7 +1857,11 @@ fn the_unified_streamer_stays_inside_its_budgets() {
         audit.refused(),
     );
     // ANTI-VACUITY: the frames timed were visibility frames.
-    assert_eq!(audit.refused(), 0, "the visibility path was refused: {audit:?}");
+    assert_eq!(
+        audit.refused(),
+        0,
+        "the visibility path was refused: {audit:?}"
+    );
     assert!(
         audit.frames >= 8,
         "only {} of 8 frames rasterized a visibility buffer, so the clock above is \

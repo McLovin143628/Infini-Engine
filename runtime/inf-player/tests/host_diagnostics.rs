@@ -46,10 +46,7 @@ fn fn_body(src: &str, signature: &str) -> String {
     let start = src
         .find(signature)
         .unwrap_or_else(|| panic!("`{signature}` is not in window.rs"));
-    let open = src[start..]
-        .find('{')
-        .expect("the function has a body")
-        + start;
+    let open = src[start..].find('{').expect("the function has a body") + start;
     let mut depth = 0usize;
     for (i, c) in src[open..].char_indices() {
         match c {
@@ -192,7 +189,13 @@ fn the_predictors_line_appears_only_once_a_host_commits_a_pose() {
 
     let line = r.predict_summary().expect("a committed history has a line");
     println!("{line}");
-    for token in ["predict:", "6 committed poses", "(1 refused)", "horizon", "lane"] {
+    for token in [
+        "predict:",
+        "6 committed poses",
+        "(1 refused)",
+        "horizon",
+        "lane",
+    ] {
         assert!(line.contains(token), "{token:?} missing from {line}");
     }
     // The shipped horizon is zero, so the reckoner turns by nothing — and the
