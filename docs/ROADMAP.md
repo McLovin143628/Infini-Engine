@@ -13718,6 +13718,259 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
   `max_vertex_attributes: 16` exactly (asserted as a `const` in `passes::skinned`), so a
   tangent there needs a packed attribute (uv.xy + an octahedral tangent in one
   `Float32x4`) or the renderer's first raised limit — the memo has both.
+
+> ## P28.2 STATUS — interleaved cluster pages: **COMPLETE** (2026-08-14)
+>
+> Five commits, `cb5f550..` this block. The ROADMAP's three clauses answered
+> against code, with the arm that fails if each claim stops being true, and two
+> owed channels ruled on with the measurement that ruled them.
+>
+> ### Clause 1 — cook emits mesh-page + texture-tile sections interleaved
+>
+> **MET, as `.inf_vmesh` v3 sections**, and the choice between that and a
+> pack-layout extension was decided at cook by measurement
+> (`docs/memos/p28-2-cluster-pages.md` §1). The pack has **no sub-entry to
+> extend** — a 16-byte header, a flat index of 60-byte fixed-stride records, one
+> blob per GUID, `read_ref` returning one `Cow` — so "a pack-layout extension" is
+> `PACK_FORMAT_VERSION` 2 → 3, every reader and the committed back-compat
+> fixture, and it would buy nothing a payload section cannot already do, because
+> a `.inf_vmesh` entry is uncompressed and 16-byte aligned and a section inside
+> it is already a borrowed slice of the mmap.
+>
+> **The section holds ADDRESSES, not texels**, and that is the second
+> measurement. Under mmap both halves are already slices of ONE mapping
+> (`.inf_tex` also cooks uncompressed, P26.1), so two slices are one read and a
+> copy buys no I/O — while costing duplication in three independent directions:
+> across pages (a page is a whole LOD level, so its footprint is the whole
+> texture), across assets (one material's textures are shared by every mesh drawn
+> with it), and against the pack's own copy, which ships regardless. The cook arm
+> measures it rather than restating it: the derived `.inf_vmesh` stays well under
+> the size of the single `.inf_tex` it pairs against, which an embedding cannot
+> satisfy.
+>
+> Layout: page 0's `indices · meshlets · mlverts · mltris · vertices · TILES`,
+> then page 1's six, so a cluster page's geometry and its texture addresses are
+> contiguous bytes and the page directory names both. `PAGE_ENTRY_LEN` is still
+> **96** — `tile_count` took the `u32` pad at offset 40 and `tiles_off` the `u64`
+> pad at 88, both of which v2 wrote as zeros, so a v2 directory parses as *"no
+> pairing"*, which is the truth about it rather than a default standing in for
+> one. A v2 image carrying non-zero values there is **refused**
+> (`a_v2_image_claiming_a_tiles_section_is_refused`).
+>
+> **The pairing, stated and pinned.** A `.inf_mesh` carries material *slot
+> names*; the binding lives on a level entity where a `MeshRef` and a `Material`
+> meet — a cross-asset fact, so `plan_cluster_pairings` is the `plan_fractures`
+> shape: a serial walk before the parallel stage, handed to the pure per-asset
+> closure as read-only data. It follows the P26.3b wire in the one direction it
+> runs (entity binding → `derive_material_bytes` → `texture_dependencies()` →
+> `vt_desc()`) and inherits that order rather than choosing one, because it is
+> already the residency contract.
+>
+> **The mip rule**: a LOD level halves triangles and a mip level quarters texels,
+> so one mip is worth two LOD levels — `mip(L) = min(mip_count − 1, L / 2)`, root
+> page on the coarsest. Two consequences make it right rather than plausible: the
+> **finest geometry pairs with mip 0** (a rule that capped one level short leaves
+> the artifact reachable at exactly the range it exists to close), and the root
+> page's pairing is a **no-op** against the virtual texture's own mandatory
+> floor. The alternative — a **density** rule, finest mip under `K` texels per
+> triangle — is measured and refused: on the 96² fixture against a 2 048² texture
+> mip 0 is **227 texels/triangle** and `K = 64` settles on mip 1 at **57**, so
+> the finest texture level is never paired at all.
+>
+> **Two hazards are advisories, never silence** — a bound material absent from
+> the closure, and a texture missing or still a **v1** `.inf_tex` — reported
+> against the **MESH**, because it is the mesh's pages that lose the coupling and
+> a reader chasing a mesh would not look under a material's name.
+>
+> ### Clause 2 — one transaction, partial admission impossible by construction
+>
+> **MET.** Four facts, and the claim is their conjunction:
+>
+> 1. `VgeomStreamPlan::uploads` is **private** — a `PageUpload` has exactly one
+>    public source in the tree;
+> 2. that source is `VgeomStreamer::pair`, which **demands the texture half** and
+>    answers with `ClusterPageIn`, whose every `ClusterPage` carries both;
+>    `ClusterPage::geometry` is the only way to a `PageUpload` and is reached
+>    through a value that already holds `ClusterPage::tiles`;
+> 3. a page whose tiles were refused is **gone before the value exists** — pool
+>    blocks released, residency truncated, inside `pair` — so the streamer's
+>    residency and the transaction's contents are produced together by one
+>    function and there is no window, not even a private one, in which the
+>    streamer believes a page is resident while its tiles are not;
+> 4. the one other caller (`cull_visible_source`) goes through the same door with
+>    an empty texture half — a complete page-in, not a partial one — which keeps
+>    `uploads` reachable from exactly one function (the P21 one-door law).
+>
+> **The order is part of the argument.** The meshlet sync point is hoisted out of
+> `VgeomNode::run` (several graph nodes deep) to `EngineRenderer::render`, beside
+> the virtual texture's: stage the geometry half → fold the tiles every resident
+> cluster page samples into the **same want set** as the analytic floor and the
+> previous frame's feedback → one `apply_wants` → pair or retract. One want set
+> is the mechanism, not a convenience: `apply_wants` protects every already-
+> resident want before any miss is offered a slot, so a resident page's tiles
+> cannot be evicted **between** transactions. A second transaction would satisfy
+> the invariant at the sync point and break it on the next frame.
+> `RenderNode: Any` + `RenderGraph::node_mut` reaches the node; a shared `Mutex`
+> was the alternative and is a lock over a value one thread ever touches.
+>
+> ### Clause 3 — the tangent channel P26.5 routed here
+>
+> **MET on the meshlet path; the skinned path is ruled on and routed.**
+>
+> `VgeomVertex` gains **one `u32`, not four `f32`**, and the measurement decided
+> it: vertex records are **54.5 – 56.7 %** of a cooked asset's pool bytes (16²,
+> 48², 96² grids; the descriptor share reproduces P28.1's independently-measured
+> 5.26 – 5.44 %), so `[f32; 4]` costs **+27.3 – 28.4 % of the whole streaming
+> budget** and one packed word costs **+6.8 – 7.1 %**. The word is an octahedral
+> direction at 11 bits an axis plus a handedness bit with its **exponent field
+> pinned** to 127 — because four shaders read the pool as `array<f32>` and P28.1
+> measured the fragment storage bindings fully spent, so the word is loaded as a
+> float and bitcast, and an arbitrary payload read that way is subnormal below
+> `2^23` and NaN at the top. Pinning makes every word a normal float in ±[1, 2)
+> and makes `NO_TANGENT = 0` **structurally unreachable** from the packer.
+> Measured quantization: worst `1 − cos θ` of **2.03 × 10⁻⁶** = **0.115°**.
+>
+> `vt_apply_normal_t` consumes it, Gram-Schmidt against the interpolated normal,
+> falling back to the per-fragment cotangent frame when `w == 0` — every asset
+> cooked before v3 — so the channel is **additive** and no committed golden
+> moves. The resolve interpolates by its solved barycentrics and takes the
+> handedness from the **nearest corner**: averaging +1 and −1 across a uv seam
+> gives 0, which the frame reads as "no tangent".
+>
+> **`the_tangent_stream_does_not_move_the_dag`**: one geometry, two different
+> tangent streams and one with none, every meshlet/micro-index/level compared —
+> mutating a clone within one run, because `meshopt` output is not comparable
+> across platforms (the P18 law).
+>
+> **The skinned wall: the format question is answered, the edit is not made.**
+> `MAX_VERTEX_ATTRIBUTES = 16` and `@location(15)` is P26.5's uv. Raising the
+> limit is the wrong door (P25's one-platform class: it fails at
+> `create_pipeline_layout` on a user's machine, not in CI). The **pack is now
+> provably safe** — P26.5 sketched "uv.xy + an octahedral tangent bitcast into a
+> `Float32x4`", which is exactly the subnormal/NaN class, and the exponent pin
+> removes it: `Float32x3` at `@location(15)` = `(u, v, bitcast(tangent))` carries
+> it exactly, at `SkinnedVertex` **64 → 68 bytes**, no new attribute, no raised
+> limit. What is not done is the edit, and the honest reason is that unlike the
+> meshlet path — which has a twelve-arm per-pixel parity nucleus — the skinned
+> path's only frame-level check is the byte-frozen golden set, so a visible
+> change to skinned shading would have no gate that could tell an improvement
+> from a regression. **Routed to P28.3** as a recipe rather than a decision.
+>
+> ### The invariant gate
+>
+> `crates/inf-render/tests/cluster_pages.rs`, **four arms, no adapter** — both
+> halves are the GPU-free halves by construction, so the churn runs on every CI
+> leg and is exhaustive rather than sampled.
+>
+> The invariant is asserted as **world state** after *every* transaction of a
+> fourteen-step churn that admits, evicts and re-admits: for every page the
+> streamer says is resident, every tile the geometry samples is in the atlas —
+> 1 000+ (page, tile) pairs a run.
+>
+> **The oracle derives the pairing a different way**, because a gate cannot see
+> an error two subsystems share: the cook takes an axis-aligned uv **bound** over
+> a page's referenced vertices and turns it into a tile rectangle; the oracle
+> **point-samples every triangle** (three corners + a centroid), places each
+> sample with arithmetic written out in the test, re-derives the mip rule, and
+> reads `to_mesh()` + the `VtTextureDesc` rather than the container's tiles
+> section. Re-deriving the rule is deliberate — this is an oracle, not a unit
+> pin, so a one-sided edit fails here; the opposite of the P28.1 audit's finding,
+> where a *pin* re-implemented its subject and could not see it move.
+>
+> **The control exists to fail**: the identical churn with the coupling off — no
+> cluster wants and a `pair` that seats unconditionally, i.e. the pre-P28.2
+> arrangement — must **reach** the forbidden state with more than half the
+> sampled tiles missing. Without it the invariant arm is satisfied by a fixture
+> whose analytic floor happens to cover everything.
+>
+> **The other direction is measured**: a 1 MiB atlas cannot seat the finest
+> pages' tiles and the GEOMETRY is handed back — softer geometry and softer
+> texture together — with the invariant still holding over the reduced residency
+> and page 0 still there.
+>
+> ### Mutation matrix — three aimed at the invariant, three killed
+>
+> | # | what was mutated | died at |
+> |---|---|---|
+> | M1 | the mip rule shifted a level (`lod / 2` → `lod / 2 + 1`) | the churn **and** the tight-budget arm; the CONTROL survives, which is what says it measures the coupling and not the rule |
+> | M2 | the retraction disabled inside `pair` | the tight-budget arm — the arm that exists for it |
+> | M3 | the cook pairing only its first texture | the churn, on the second texture's tiles (the fixture carries two pyramids for exactly this: one texture lets a mixed-up pairing pass by symmetry) |
+>
+> ### Meshletizing voxel chunks — SPLIT, and re-routed with the reason
+>
+> P28.1 re-routed `voxel.wgsl`'s missing receiver here on the finding that the
+> visibility packing's meshlet field is a slot in the **shared meshlet pool** and
+> a voxel chunk has none. Building the pairing does not change that, and two
+> facts split it out:
+>
+> 1. **The builder is host-only by design** — `inf_vgeom::build` is
+>    `#[cfg(not(target_arch = "wasm32"))]` because it compiles `meshoptimizer`'s
+>    C++, and the browser player loads pre-cooked DAGs (P14.2). A volume with
+>    `runtime_carve` on (P21.4) has **no pre-cooked DAG to load**: its surface is
+>    a function of what the player dug thirty milliseconds ago.
+> 2. **The cost is not incidental.** Measured on this machine, release,
+>    `build_vgeom` on Surface-Nets-chunk-shaped inputs: **0.75 ms** at 128
+>    triangles, **1.45 ms** at 512, **3.19 ms** at 1 152 — on the fixed step, per
+>    dirty chunk, against a 16.7 ms frame, for a stage P15.1's own span calls the
+>    heaviest in the cook.
+>
+> So the honest shape is not "meshletize voxel chunks" but **"give the visibility
+> packing a second geometry kind"**, which is the frame-derived bit split P28.1
+> already routed to **P28.3**, where one streamer knows the field widths before a
+> frame starts. **Re-routed to P28.3**, with the correction left in place rather
+> than rewritten (the P27.5 rule: a routing table a later phase silently edits is
+> a table nobody can audit).
+>
+> ### Schema + goldens
+>
+> `.inf_vmesh` **container v2 → v3** (the tiles section + the 36-byte vertex
+> record). `VgeomMesh`'s own **bincode schema 1 → 2**, because bincode is
+> positional and the vertex grew: v1 blobs decode through a **frozen shadow
+> record** and are converted, and nothing in the tree writes that form any more,
+> so **no committed payload is downgraded** — what the bump buys is that the
+> frozen v1 fixture keeps loading. **A frozen v2 fixture joins it**, generated at
+> the commit before this batch in a clean worktree, because the live writer emits
+> v3 and can never reproduce those bytes. No scene schema moved. Goldens stay
+> **54**, count and content digest, `git diff` over `tests/goldens/` empty across
+> the batch.
+>
+> ### Carried, honest
+>
+> * **The editor's derived `.inf_vmesh` is unpaired.** `build_payload` is handed
+>   one mesh's geometry with no project in scope. An unpaired v3 asset is not a
+>   degraded one — empty tiles sections, inert coupling, unchanged streaming —
+>   but the **editor viewport does not get the guarantee the shipped build
+>   gets**. Closing it means giving the editor's derivation the cook's serial
+>   material walk.
+> * **A runtime material override is outside the guarantee.** The cook pairs
+>   against the materials the authored level binds, and the runtime filters the
+>   pairing to textures the VT library registered — because demanding a texture
+>   this level does not bind would retract every page of that asset for ever.
+> * **The pairing is per PAGE, not per meshlet.** A page is a whole LOD level of
+>   the whole surface, so a camera looking at one corner of a large mesh pins the
+>   whole level. Correct but coarse; per-meshlet pairing needs a residency
+>   granularity finer than the page.
+> * **`resident_bytes` counts geometry only** — a page's tiles are spent out of
+>   the VT budget by the same transaction, and counting them twice would be
+>   worse. A *combined* number is literally P28.3's clause 2.
+> * **Nothing measures the retraction's cost in frames.** `retracted` counts
+>   pages handed back; how long an asset then sits at a coarser cut waiting for
+>   atlas room is a predictor question (P28.4).
+> * **The P28.1 audit's two latent shapes are untouched**, as left:
+>   `flat_at[asset_id]`'s indexing panic if the two loops ever filter
+>   differently, and `VisAudit::frames` on an admitted frame that draws nothing.
+>   This batch changed neither loop.
+> * **The textured mip question's fixture** (flat, unlit, texture-only) was not
+>   built — the pairing work never needed one — so it stays routed to P28.3 with
+>   the gate criterion the P28.1 audit recorded.
+> * **The page border re-weigh and the wider VSM kernel**, the two items the
+>   P27.5 audit routed to P28.2 from memo revisit clauses, are **not answered**.
+>   Both are shadow-page questions (`p27-1-page-geometry.md`,
+>   `p27-4-receiver-filtering.md`) and this batch changed what a *geometry* page
+>   is, not what a shadow page is — the premise those clauses named ("when a page
+>   stops being only depth") has not arrived. **Re-routed to P28.3**, which owns
+>   the VSM page cache's budget.
+
 - **P28.3 One streamer** — 1. `inf-stream`: the vgeom planner, VT residency and VSM page
   cache become consumers of one budget arbiter + one feedback/readback ring + one stamp
   domain + one want pipeline (analytic floor ∪ feedback refinement ∪ predictor); 2. per-tier
