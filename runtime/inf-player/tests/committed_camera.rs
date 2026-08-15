@@ -130,13 +130,15 @@ fn the_position_maps_are_ordered_containers() {
     .expect("the sim module is readable")
     .replace("\r\n", "\n");
 
-    let declares = |field: &str| -> bool {
-        src.contains(&format!("{field}: BTreeMap<Uuid, DVec3>,"))
-            && !src.contains(&format!("{field}: HashMap<Uuid, DVec3>"))
+    // Parameterized on the text, so the poisoned copy below goes through the
+    // SAME predicate rather than through a hand-written echo of it.
+    let declares = |text: &str, field: &str| -> bool {
+        text.contains(&format!("{field}: BTreeMap<Uuid, DVec3>,"))
+            && !text.contains(&format!("{field}: HashMap<Uuid, DVec3>"))
     };
     for field in ["prev_positions", "cur_positions"] {
         assert!(
-            declares(field),
+            declares(&src, field),
             "`{field}` is not a `BTreeMap<Uuid, DVec3>` — a hashed container's \
              iteration order is seeded per process, and the camera fold over it \
              is a non-associative f64 sum (P14 / L6.F1)"
@@ -161,9 +163,12 @@ fn the_position_maps_are_ordered_containers() {
         "cur_positions: HashMap<Uuid, DVec3>,",
     );
     assert!(
-        !poisoned.contains("cur_positions: BTreeMap<Uuid, DVec3>,")
-            && poisoned.contains("cur_positions: HashMap<Uuid, DVec3>"),
+        !declares(&poisoned, "cur_positions"),
         "the pin cannot see a hashed position map even when one is put in front \
          of it"
     );
+    // …and the poison really is the only thing it rejected: the sibling field,
+    // untouched, still passes. Without this the arm above would be green for a
+    // predicate that rejects everything.
+    assert!(declares(&poisoned, "prev_positions"));
 }
