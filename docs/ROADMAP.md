@@ -16750,6 +16750,49 @@ into a measurement, and with it that mutation fails by name. Measured both ways
 before the accessor was added; this campaign has already been caught once by an
 arm that could not see the thing it was named for.
 
+### Machine ops, and three things the verification found that reading did not
+
+**The numbers.** `cargo test --workspace --no-fail-fast -j 3`: **254 binaries,
+4 641 passed, 0 failed, 8 ignored**, against the recorded baseline of 253 / 4 592
+/ 0 / 8. The `+1` binary is `crates/inf-mesh/tests/import_door.rs`; the `+49`
+tests are this wave's arms. Workspace clippy with `-D warnings` and
+`cargo fmt --all --check`: clean. Rustdoc ratchet: **450 warnings over 43
+documented crates**, exactly the pinned ceiling — so `ci.yml` does not move.
+Goldens: **54, unchanged**; the only committed bytes this wave adds are the two
+new `scene_v6.inf_lvl` fixtures.
+
+**The battery caught a regression that reading could not have.** C4-31
+*un-broke* a gate's fixture: `a_goal_on_a_non_finite_pose_refuses_instead_of_panicking`
+manufactured its poisoned pose with a `[NaN; 4]` rotation key, and sanitizing
+that at the sampler made the pose finite, the solve legitimately run, and the
+trace move. The gate was right to go red. Its property is unchanged, so the
+fixture moved to the channel the docstring's own mechanism describes — and then
+mutation found the *second* problem: **byte equality cannot carry that arm's
+claim at all.** A poisoned pose puts NaNs in both traces, and two identical NaN
+bit patterns compare equal as bytes, so a solve that ran on not-numbers and wrote
+not-numbers back is invisible to it. Measured on all three channels. The arm now
+asserts the recorded `IkOutcome::Refused(NonFinite)` verdict, and re-measured:
+removing `solve_chain`'s local-TRS guard *and* its model-space-position guard
+together fails it by name.
+
+**Clippy has an opinion about the fix, and it is right.** `-D warnings` refused
+`!(duration > 0.0)` under `neg_cmp_op_on_partial_ord` — the spelling is
+load-bearing and unexplained at the call site. The house already answered this
+twice (`inf_pcg::grammar::span::positive`, whose docstring says the point is not
+to suppress the lint one `allow` at a time; and this crate's own
+`ik::usable_length`). Followed rather than reinvented.
+
+**The disk-full incident, third time, same disguise.** After clippy the targeted
+re-test failed with `link.exe` exit **1140** — which reads as an MSVC PDB-size
+ceiling and is not. `Get-PSDrive C` said **0.02 GB free**: clippy keeps its own
+artifact set on top of the test one, and together they were the whole headroom.
+`cargo clean` removed 169 885 files / **214.7 GiB** and everything went green
+from cold. The ROADMAP has said "read a link error against `df` before believing
+what it says" since P26.2; it is now also true that **clippy after a full battery
+is what fills the volume**, so the clean belongs between them and not only
+between phases.
+
+
 
 ---
 
