@@ -5640,11 +5640,116 @@ mod tests {
         ]);
         pin!(WaterKind => [WaterKind::Ocean, WaterKind::Lake, WaterKind::River]);
 
-        // The count is part of the pin: an enum ADDED to the scene wire and not
-        // added here would otherwise be silently uncovered, which is exactly the
-        // state this test was written to end. Bump both numbers deliberately.
+        // The counts are part of the pin. **They count TABLE ROWS, not enums in
+        // the module** (round-2 finding R2.D) — so a nineteenth enum added to
+        // the scene wire and never added here leaves both numbers at 18/59 and
+        // passes green, which is exactly the state this test was written to end.
+        // `the_freeze_table_covers_every_wire_enum_in_this_module` below is the
+        // census that closes it; these two stay because they are what makes an
+        // edit to an EXISTING row deliberate.
         assert_eq!(enums, 18, "a scene wire enum joined or left the table");
         assert_eq!(pinned, 59, "a variant joined or left without a decision");
+        assert_eq!(
+            enums,
+            FROZEN_ENUMS.len(),
+            "the freeze table and its name list disagree about how many enums it              covers; the census below reads the names"
+        );
+    }
+
+    /// The names in the freeze table above, as data the census can read.
+    ///
+    /// A second copy of the list, deliberately: the `pin!` macro's rows are
+    /// *types*, and Rust has no way to reflect a module's enums back out of the
+    /// type system. So the correspondence is asserted from two directions — the
+    /// row count against this list's length, and this list against the module's
+    /// own source.
+    const FROZEN_ENUMS: &[&str] = &[
+        "Primitive",
+        "BlendMode",
+        "BillboardMode",
+        "TextAlign",
+        "LightKind",
+        "BodyKind2D",
+        "ColliderShape2DKind",
+        "CombineRule",
+        "BodyKind3D",
+        "ColliderShape3DKind",
+        "JointKind3D",
+        "JointKind2D",
+        "RootMotionMode",
+        "DistanceModel",
+        "VolumeKind",
+        "SplineInterp",
+        "WeatherPreset",
+        "WaterKind",
+    ];
+
+    /// **Round-2 finding R2.D: the count guard counted the wrong thing.**
+    ///
+    /// `assert_eq!(enums, 18)` counts the rows somebody wrote, so it fires when
+    /// a row is *removed* and never when an enum is *added* — the direction
+    /// that matters. A nineteenth wire enum shipped with no pin at all and the
+    /// whole file stayed green, which is the eighth vacuous-gate shape of this
+    /// campaign.
+    ///
+    /// The in-kind fix is L7.M7's drift-gate shape: a **census** of the module's
+    /// own source. Every `pub enum` in `components.rs` that derives `Serialize`
+    /// reaches `.inf_lvl` bytes by construction — this file *is* the scene wire
+    /// — so the census needs no judgement call and carries no exclusion list to
+    /// rot.
+    #[test]
+    fn the_freeze_table_covers_every_wire_enum_in_this_module() {
+        // The P22 CRLF law: a `.rs` read by a test is normalized first.
+        let src = include_str!("components.rs").replace(
+            "
+", "
+",
+        );
+        let lines: Vec<&str> = src.lines().collect();
+
+        let mut on_the_wire: Vec<String> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Some(rest) = line.strip_prefix("pub enum ") else {
+                continue;
+            };
+            let name = rest.trim_end_matches(" {").trim().to_string();
+            // Its derives sit in the few lines above, past the doc comment.
+            let derives = lines[i.saturating_sub(8)..i].join(
+                "
+",
+            );
+            if derives.contains("Serialize") {
+                on_the_wire.push(name);
+            }
+        }
+
+        assert!(
+            on_the_wire.len() >= 18,
+            "the census found only {} serializable enums in components.rs — it is              not reading what it thinks it is, and a census that finds nothing              covers everything",
+            on_the_wire.len()
+        );
+
+        let pinned: std::collections::BTreeSet<&str> = FROZEN_ENUMS.iter().copied().collect();
+        let missing: Vec<&String> = on_the_wire
+            .iter()
+            .filter(|n| !pinned.contains(n.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these enums reach `.inf_lvl` bytes and no row of the freeze table              pins their discriminants: {missing:?}. bincode encodes an
+             externally-tagged enum as its DECLARATION INDEX, so inserting a              variant mid-list renumbers everything after it in every committed              level. Add a `pin!` row and a name to FROZEN_ENUMS."
+        );
+
+        let found: std::collections::BTreeSet<&str> =
+            on_the_wire.iter().map(String::as_str).collect();
+        let stale: Vec<&&str> = FROZEN_ENUMS
+            .iter()
+            .filter(|n| !found.contains(*n))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "FROZEN_ENUMS names {stale:?}, which no longer exist in this module — a               pin about nothing, which the next enum to take that name inherits"
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod data;
 pub mod import;
 pub mod material_instance;
 pub mod queue;
+pub mod skeleton_binding;
 pub mod snapshot;
 pub mod sprite_sheet;
 pub mod table_import;
@@ -50,12 +51,14 @@ impl AssetProject {
         db.scan()?;
         report_sidecar_advisories(&db);
         let cache = ImportCache::open(root.join(".inf").join("import-cache"))?;
-        Ok(Self {
+        let me = Self {
             root,
             db,
             cache,
             version: 1,
-        })
+        };
+        me.report_binding_advisories();
+        Ok(me)
     }
 
     pub fn root(&self) -> &Path {
@@ -82,8 +85,21 @@ impl AssetProject {
     pub fn rescan(&mut self) -> Result<usize> {
         let n = self.db.scan()?;
         report_sidecar_advisories(&self.db);
+        self.report_binding_advisories();
         self.bump();
         Ok(n)
+    }
+
+    /// Surface the animation/skeleton identity advisories (round-2 finding
+    /// R2.C) on the same channel every other content-scan advisory uses.
+    ///
+    /// Here rather than inside `report_sidecar_advisories` because the check
+    /// needs the whole **project** (it resolves a dependency into a second
+    /// asset's sidecar), not just the database's own view of one entry.
+    fn report_binding_advisories(&self) {
+        for line in skeleton_binding::advisories(self) {
+            tracing::warn!("content scan: {line}");
+        }
     }
 
     /// Absolute default import destination folder (created if missing).

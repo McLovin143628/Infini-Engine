@@ -320,7 +320,14 @@ fn import_mesh_container(
         let asset = inf_anim::AnimClipAsset::new(clip.clip.clone(), skel_bytes);
         let deps: Vec<AssetId> = skel_id.into_iter().collect();
         let name = format!("{}_{}", file_stem(source), clip.name);
-        let id = project.write_asset(dest_dir, &name, &asset, source_rel.clone(), deps, None)?;
+        // **The identity tie** (round-2 finding R2.C): the clip's coupling to
+        // its rig is POSITIONAL — `track.joint` is an index into the pose,
+        // which is index-aligned to the skeleton's joint list — while the
+        // binding it records is a GUID. The skeleton's content hash goes in the
+        // sidecar so a re-imported rig can be NOTICED. Sidecar-only, so neither
+        // bincode payload moves.
+        let import = super::skeleton_binding::import_table(project, skel_id);
+        let id = project.write_asset(dest_dir, &name, &asset, source_rel.clone(), deps, import)?;
         produced.push(id);
     }
 
