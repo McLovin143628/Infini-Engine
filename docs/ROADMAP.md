@@ -23,7 +23,8 @@ interchangeably, because graphs transpile to real Rust source and stay bidirecti
 9. [Platform strategy](#9-platform-strategy)
 10. [Porting inventory](#10-porting-inventory)
 11. [Post-plan status — UE-Parity Wave 1](#11-post-plan-status--ue-parity-wave-1-2026-07-22-complete)
-12. [Next-Gen Wave — Phases 16–28](#12-next-gen-wave--phases-1625-planned-2026-07-31) — 13 phases
+12. [Next-Gen Wave — Phases 16–28](#12-next-gen-wave--phases-1628-planned-2026-07-31-extended-2026-08-10-p16p23-complete) — 13 phases
+13. [Anim & Movement Wave — Phase 29](#13-anim--movement-wave--phase-29-planned-2026-08-15) — the mandate's first item
 
 ---
 
@@ -16270,6 +16271,121 @@ scripted 360° whip-pan shows measurably fewer fallback-frames with the predicto
 > of tens, and the output log sat at **zero bytes** through the entire compile
 > phase — which looks exactly like a hang and is not. Count the process, not the
 > log tail.
+
+## 13. Anim & Movement Wave — Phase 29 (planned 2026-08-15)
+
+The post-campaign mandate's first item, and the opening phase of a new wave: **animation state
+machines v2 and character movement**, built on UE5's method and past it. The substrate already
+exists — `inf-anim` + `.inf_sm` (P11.2), the rig-derived locomotion generator (P24.5), and the
+one-IR Blueprint↔Rust parity (P6) that makes "authorable from code AND from graphs" an existing
+property rather than a new subsystem — so this phase is depth, not bring-up.
+
+### The UE5 baseline, measured rather than assumed
+
+The reference the mandate names (`OpenWorld_Project 5.8`) was read before this plan was written,
+and the reading is itself the first finding: its character stack is Epic's stock **Game Animation
+Sample, untouched**. Not one file under it is newer than the day it was imported, while the same
+project has **261** newer files and every one of them is landscape or PCG. The author built a
+world and never opened the animation graphs. The reason is visible in the file format rather than
+in the author: an `AnimBlueprint` is a binary `.uasset`, so it cannot be diffed, reviewed, merged
+or edited outside the editor, and the cost of understanding somebody else's is high enough that
+the stock one gets shipped as delivered.
+
+What the stock content *contains* is the rest of the baseline: **891 clips**, **7** AnimModifiers
+that must be **run by hand** over them, **41** pose-search databases, and a hybrid
+blend-stack-plus-chooser architecture. And Epic's own comments inside it confess **five
+workarounds**: a chooser limitation routed around in the graph; an orientation-warping curve
+applied by a hack; a thread-unsafe curve read replaced by a dummy animation; a fixed **0.75 s**
+magic number; and a blend-space/transition incompatibility avoided rather than fixed. Those five
+are not incidental blemishes — they are where the design's seams are, and designing them out is
+what "beat it" has to mean here (pillar **S7**).
+
+**Engine reality, on the other side of the ledger, stated as plainly.** `.inf_sm` v1 is credible
+and small: AND-only conditions over untyped floats, a cross-fade whose **outgoing pose is frozen**
+(`state_machine.rs`'s own comment says so), an `exit_time` field with **no period resolver in
+production**, and no layers, additive, masks, any-state, sub-machines or notifies. Two things are
+already ahead of UE and must not be lost: locomotion **derived from the rig** (P24.5) instead of
+hand-authored per character, and a machine that is a plain typed model instead of a binary graph.
+The gap is movement: a character's tunables are **three fields**, `autostep` is never called (so
+stairs do not work), there is no `anim.*` or `character.*` Blueprint kit, and the character wizard
+emits no controller at all.
+
+**Goal:** animation and movement that are faster to set up, easier to tune and cheaper to maintain
+than UE5's, authorable from code and from graphs interchangeably, and reviewable as text. **Done
+when:** `samples/phase29-locomotion` — a wizard-produced character driven by a v2 machine over a
+real movement component — runs in PIE with **PIE == shipping on the (pose, movement-mode) trace**,
+replays bit-exactly across two independent cooks, agrees between its Blueprint driver and its
+transpiled Rust (the P6 parity gate), holds foot-slide under a bound **measured in metres**, and
+shows a one-line authoring change as a one-line diff.
+
+### The seven surpass pillars
+
+- **S1 — text-diffable machines.** A `.inf_sm` is a typed model with a deterministic TOML sidecar,
+  so a transition tweak is a reviewable line rather than an opaque binary blob. This is the direct
+  answer to the untouched-sample finding.
+- **S2 — derive at import.** The curves Epic bakes with hand-run AnimModifiers (stride, turn rate,
+  foot phase) are derived from the clips at import time, by code, every time.
+- **S3 — propose the graph.** Given a clip set and a rig, the engine proposes a state graph and
+  its thresholds instead of asking the author to build one from an empty canvas.
+- **S4 — live tuning.** Machine and movement parameters are editable **during** Simulate, which
+  P23.6 already proved is possible in this editor and which UE cannot do for an AnimBlueprint.
+- **S5 — bit-exact replay.** The pose is sim state (P24.1), folded into `state_bytes`, so an
+  animation bug is reproducible from a trace rather than from a description.
+- **S6 — one IR.** The same `anim.*` semantics run interpreted in the editor and compiled in the
+  ship build, because both sides are the same IR (P6). No "graph does one thing, C++ does another".
+- **S7 — design out the five workarounds.** Each of Epic's confessed five is a named acceptance
+  test of this design, not a footnote.
+
+### Risk register
+
+- **Schema pressure.** Four schemas are in reach in one phase (`.inf_sm`, `.inf_anim`, the scene,
+  `ScenePayload`). The P22 discipline holds unchanged: the **scene** schema bumps **exactly once**,
+  in P29.3, and each asset-internal schema bumps in the sub-phase that owns it, with the full
+  ladder every time — a frozen previous-version record built from **ladder-local literals** (never
+  trimmed off a live encoding), the committed fixture re-blessed through its generator, the
+  downgrade refusal named with a remedy, and `migrate` doing **structural validation** rather than
+  a version compare (the campaign's U6 standard). `skip_serializing_if` remains banned on every
+  bincode-bound type; a wire enum that reaches the scene is freeze-pinned into the ECS census.
+- **Portable math.** `crates/inf-anim/tests/portable_pose.rs` bans 36 `std` transcendentals and 8
+  glam constructors across the sim path, and `state_machine.rs` is on its list. Every new blend
+  curve, warp and easing is therefore a polynomial or an `inf_math` `p*` helper — budgeted at
+  design time, not discovered when the gate goes red.
+- **Two host mirrors.** The fixed step is already **one function**
+  (`inf_ecs::pose::step_pose_evaluation`), which is the strong form of the mirror rule and is why
+  P29.1 can change evaluation without touching either host. The Blueprint **dispatch** is not: it
+  is a hand-maintained pair, so P29.4's `anim.*` kit is bound by the registry-versus-hosts source
+  gate (`crates/inf-blueprint/src/nodekit.rs:1564`), which can see an id spelled wrong in *both*
+  hosts — a host-versus-host text compare cannot.
+- **Deliberately out of scope.** PIE-in-viewport UX (Possess, editing during embedded PIE) is the
+  mandate's *second* item and gets its own phase; folding it in here would dilute both. The
+  `preview_character` warm-path cost (F5) lands naturally in P29.5 and is not chased before then.
+
+- **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
+  consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed
+  compares) replacing the flat AND list; 3. transition **priority** + an interruption model (which
+  in-progress fades may be cut into, and what the outgoing pose is when they are); 4. blend curves
+  + per-joint blend profiles; 5. the outgoing pose **advances** through a cross-fade (the frozen
+  frame); 6. a period resolver so `exit_time` is live in production; 7. any-state transitions;
+  8. nested sub-machines; 9. state enter/exit events — the notify seam P29.4 consumes. Schema
+  `.inf_sm` **v2**.
+- **P29.2 Blending depth** — 1. additive clips, layers and per-bone masks; 2. Delaunay 2D blend
+  spaces (the P11.2 IDW-k3 deferral); 3. sync markers/groups so a walk↔run blend keeps its feet;
+  4. blend-space authoring in the panel. Schema `.inf_anim` **v2**.
+- **P29.3 The movement component** — 1. the full tunable set (acceleration, braking, friction, air
+  control, step height, slope limit, crouch, sprint, …); 2. a `MovementMode` enum that absorbs the
+  P20 swim latch; 3. `autostep` actually wired, so stairs work; 4. scene schema **v22→v23, once**,
+  `ScenePayload` **8→9**, and the P24 ScenePayload-v8 garment gap closed or re-ledgered.
+- **P29.4 The bridge** — 1. the `anim.*` node kit (set parameter, set trigger, query state,
+  consume notify) dispatched by **both** hosts in lockstep under the registry gate; 2. root motion
+  for machine-driven characters; 3. foot IK against terrain over P24.2's solver; 4. a foot-slide
+  gate measured in metres.
+- **P29.5 Authoring** — 1. the condition rule builder over the v2 trees; 2. live tuning during
+  Simulate (S4); 3. import-time derivation of the curves UE bakes by hand and **proposed** state
+  graphs from a clip set (S2/S3); 4. the `preview_character` warm-path fix.
+- **P29.6 The gate** — 1. the character wizard emits a real `.inf_act` controller; 2.
+  `samples/phase29-locomotion`; 3. `phase29_gate` — PIE == shipping on the (pose, mode) trace,
+  bit-exact replay across two independent cooks, Blueprint-vs-transpiled parity, and the
+  one-line-diff demonstration that is pillar S1's acceptance test.
 
 ## Hardening Wave A — save integrity & data loss (2026-08-14)
 
