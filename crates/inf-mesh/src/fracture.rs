@@ -1790,13 +1790,23 @@ fn polygon_area_m2(points: &[DVec3]) -> f64 {
     let v = normal.cross(u);
     // Angle-order around the centre, then sum the shoelace. Ties break by the
     // input index, so the order is a function of the geometry alone.
+    //
+    // **Through [`pseudo_angle`], never through `atan2`** (Hardening Wave C,
+    // L6.F3). `f64::atan2` is a libm call and libm is not bit-identical across
+    // targets (the P14 law); the order this key produces decides the shoelace
+    // sum, the sum is the shared face's area, the area is compared against a
+    // threshold by `prune_faceless_adjacency`, and the surviving adjacency is
+    // what a cook writes into a derived `.inf_fracture` — which this module's own
+    // header claims two hosts derive identically. That header already said
+    // "angular ordering uses `pseudo_angle`"; this line was the one place it was
+    // not true.
     let mut planar: Vec<(u64, usize, f64, f64)> = points
         .iter()
         .enumerate()
         .map(|(i, p)| {
             let d = *p - centre;
             let (x, y) = (d.dot(u), d.dot(v));
-            (total_order_key(y.atan2(x)), i, x, y)
+            (total_order_key(pseudo_angle(x, y)), i, x, y)
         })
         .collect();
     planar.sort_by_key(|(k, i, _, _)| (*k, *i));
@@ -2996,6 +3006,283 @@ mod tests {
         }
         // Distinct meshes never collide.
         assert_ne!(derived_fracture_id(guid(1)), derived_fracture_id(guid(2)));
+    }
+}
+
+/// **The shared-face sort is the module's own `pseudo_angle`, and the module
+/// calls nothing libm does** (Hardening Wave C, L6.F3).
+///
+/// The module header has claimed since it was written that "angular ordering
+/// uses [`pseudo_angle`], which is exact division only — the P14 law".
+/// `polygon_area_m2` was the one place that was untrue: it keyed the corner sort
+/// on `y.atan2(x)`, and that order decides a shoelace sum, which is the shared
+/// face's area, which `prune_faceless_adjacency` compares against a threshold to
+/// decide which adjacency edges a derived `.inf_fracture` carries. The claim is
+/// now true, and these arms are what keep it true.
+#[cfg(test)]
+mod portable_face_order {
+    use super::*;
+
+    /// A deterministic spread of directions as `(x, y)`: 720 distinct angles
+    /// visited in a scrambled order (so the arms below compare a real
+    /// permutation, not the identity), each at its own radius across eight
+    /// decades — an angular sort must not care about length — plus four pairs a
+    /// hair apart, which is where a monotone stand-in is likeliest to disagree
+    /// with the real thing.
+    ///
+    /// **No two entries share an angle**, and that is a statement about what is
+    /// being claimed rather than a convenience. Two vectors at the *same* angle
+    /// and different radii are perturbed differently by the two key functions
+    /// (`(-1, 0)` and `(-1e-4, 6.1e-21)` are one such pair: `atan2` answers
+    /// exactly `-π/2` for both and the pseudo-angle separates them). Their
+    /// relative order is genuinely undefined between the two, and asking for
+    /// agreement there would be asking a portable stand-in to reproduce libm's
+    /// rounding — the opposite of the claim. Adjacent angles here are 0.0087 rad
+    /// apart and the near-tie pairs 1e-9, both far above either key's
+    /// resolution. The exact axes and diagonals are checked in
+    /// `the_pseudo_angle_increases_with_the_angle` instead, where a value is
+    /// asserted rather than an order against libm.
+    fn directions() -> Vec<(f64, f64)> {
+        let radii = [1.0e-4_f64, 1.0, 7.25, 1.0e4];
+        // 313 is coprime with 720, so `i * 313 % 720` visits every angle once.
+        let mut out: Vec<(f64, f64)> = (0..720u32)
+            .map(|i| {
+                let k = (i * 313) % 720;
+                let t = (k as f64) * std::f64::consts::TAU / 720.0 - std::f64::consts::PI;
+                let r = radii[(i as usize) % radii.len()];
+                (r * t.cos(), r * t.sin())
+            })
+            .collect();
+        for (x, y) in [
+            (1.0, 1.0e-9),
+            (1.0, -1.0e-9),
+            (-1.0, 1.0e-9),
+            (-1.0, -1.0e-9),
+        ] {
+            out.push((x, y));
+        }
+        out
+    }
+
+    /// **The cyclic order is `atan2`'s cyclic order — rotated, not reshuffled.**
+    ///
+    /// This is the property the shoelace needs, and it is worth being exact
+    /// about what "the same" means. `atan2`'s branch cut is at `−X` and the
+    /// diamond angle's is at `+X`, so the two sorted sequences start at
+    /// different corners; a shoelace sum with its `(i + 1) % n` wrap is
+    /// invariant under that rotation, so the polygon is the same polygon and the
+    /// area is the same area. What would NOT be tolerable is a different cyclic
+    /// order — a corner swapped past its neighbour turns a convex face into a
+    /// bow-tie and halves its area — and that is exactly what this measures.
+    ///
+    /// The residue: the terms are *summed* starting from a different corner, so
+    /// the last bits of the area may move. Nothing pins them (there is no
+    /// `.inf_fracture` on disk, and `prune_faceless_adjacency`'s threshold is
+    /// 4e-8 m² at a 2 m extent — many orders of magnitude from a low-bit move),
+    /// and the alternative was leaving a libm call under a header that says
+    /// there is none.
+    #[test]
+    fn the_face_order_is_a_rotation_of_the_atan2_order() {
+        let dirs = directions();
+        let n = dirs.len();
+
+        let mut by_pseudo: Vec<usize> = (0..n).collect();
+        by_pseudo.sort_by_key(|&i| (total_order_key(pseudo_angle(dirs[i].0, dirs[i].1)), i));
+        let mut by_atan2: Vec<usize> = (0..n).collect();
+        by_atan2.sort_by_key(|&i| (total_order_key(dirs[i].1.atan2(dirs[i].0)), i));
+
+        let offset = (0..n).find(|&s| (0..n).all(|j| by_pseudo[(s + j) % n] == by_atan2[j]));
+        assert!(
+            offset.is_some(),
+            "the portable key orders {n} directions in a different CYCLE from \
+             `atan2`, not merely from a different starting corner — a shared \
+             face would measure a bow-tie's area"
+        );
+
+        // Not vacuous, twice over: the sorted sequence is a real permutation of
+        // the input (so the comparison had something to disagree about), and the
+        // rotation is a real rotation (so this arm is not the trivially-true
+        // `offset == 0` in disguise).
+        let identity: Vec<usize> = (0..n).collect();
+        assert_ne!(by_pseudo, identity, "the sweep was already sorted");
+        assert_ne!(
+            offset,
+            Some(0),
+            "the two branch cuts coincided — this sweep no longer exercises the \
+             rotation the arm is about"
+        );
+    }
+
+    /// Strictly increasing in the angle over its documented `[0, 4)`, measured
+    /// from `+X` — which is all a sort needs, and all the function claims.
+    #[test]
+    fn the_pseudo_angle_increases_with_the_angle() {
+        let mut last = f64::NEG_INFINITY;
+        for i in 0..4096u32 {
+            let t = (i as f64) * std::f64::consts::TAU / 4096.0;
+            let a = pseudo_angle(t.cos(), t.sin());
+            assert!(
+                a > last,
+                "not increasing at θ={t}: {a} follows {last} — a non-monotone key \
+                 is not an angular order at all"
+            );
+            last = a;
+        }
+        // The documented quadrant boundaries, exactly.
+        assert_eq!(pseudo_angle(1.0, 0.0), 0.0);
+        assert_eq!(pseudo_angle(0.0, 1.0), 1.0);
+        assert_eq!(pseudo_angle(-1.0, 0.0), 2.0);
+        assert_eq!(pseudo_angle(0.0, -1.0), 3.0);
+        // A corner exactly on the centre has no direction, and answers a value.
+        assert_eq!(pseudo_angle(0.0, 0.0), 0.0);
+    }
+
+    /// The area itself, over a face whose corners arrive in a scrambled order —
+    /// the shape `shared_face_area_between` actually hands this function.
+    #[test]
+    fn a_shared_face_measures_its_own_area_whatever_order_its_corners_arrive_in() {
+        // A 2 m × 3 m rectangle in a tilted plane (so `u`/`v` are not the axes).
+        let n = DVec3::new(1.0, 2.0, 3.0).normalize();
+        let e0 = n.cross(DVec3::X).normalize();
+        let e1 = n.cross(e0);
+        let centre = DVec3::new(11.0, -4.0, 2.5);
+        let corners: Vec<DVec3> = [(-1.0, -1.5), (1.0, -1.5), (1.0, 1.5), (-1.0, 1.5)]
+            .iter()
+            .map(|(a, b)| centre + e0 * *a + e1 * *b)
+            .collect();
+
+        let expected = 6.0;
+        assert!(
+            (polygon_area_m2(&corners) - expected).abs() < 1.0e-9,
+            "a 2×3 face measured {} m²",
+            polygon_area_m2(&corners)
+        );
+        // Every rotation and the reversal answer the same area: the ordering is a
+        // function of the geometry, not of how the two hulls happened to list it.
+        //
+        // A **tolerance and not a bit compare**, honestly. The angular order this
+        // fix is about is identical under a rotation of the input, but the
+        // centroid one line above it is an `f64` sum whose *terms* the rotation
+        // reorders, and that is a rounding the sort has no say in.
+        let reference = polygon_area_m2(&corners);
+        for shift in 0..corners.len() {
+            let mut rotated = corners.clone();
+            rotated.rotate_left(shift);
+            assert!(
+                (polygon_area_m2(&rotated) - reference).abs() < 1.0e-12,
+                "shift {shift} measured {}",
+                polygon_area_m2(&rotated)
+            );
+            rotated.reverse();
+            assert!(
+                (polygon_area_m2(&rotated) - reference).abs() < 1.0e-12,
+                "reversed shift {shift} measured {}",
+                polygon_area_m2(&rotated)
+            );
+        }
+        // Degenerate inputs bound no area rather than a NaN.
+        assert_eq!(polygon_area_m2(&corners[..2]), 0.0);
+        assert_eq!(polygon_area_m2(&[centre; 3]), 0.0);
+    }
+
+    /// **The source pin, and it is the only arm that can see the defect.**
+    ///
+    /// Every value arm above passes just as happily with `atan2` back at line
+    /// 1799 — they establish that the two orders agree, which is precisely what
+    /// makes the swap safe and precisely why they cannot object to the swap
+    /// being undone. The property is *which function the code is allowed to
+    /// call*, and only a read of the source is that.
+    ///
+    /// It is also the enforcement the module header has been missing since it
+    /// was written: "no `std` trig (angular ordering uses `pseudo_angle` …)" was
+    /// prose, and prose is how one of the two angular sorts in this file came to
+    /// use `atan2` without anything noticing.
+    ///
+    /// The scope is the module's production half — everything before the first
+    /// `#[cfg(test)]`, which in this file is all of it (the three test modules
+    /// are the tail). Comment lines are blanked because `pseudo_angle`'s doc
+    /// names `atan2` while explaining why it is banned — the P24.1 F1 finding,
+    /// which is the sentence such a gate is likeliest to be written next to.
+    #[test]
+    fn the_face_order_calls_no_libm() {
+        // Normalized: `core.autocrlf = true` checks `.rs` out CRLF on Windows,
+        // where a newline-delimited search finds nothing (the P22 law).
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fracture.rs"),
+        )
+        .expect("the module is readable")
+        .replace("\r\n", "\n");
+        let cut = src.find("#[cfg(test)]").expect("this module exists");
+        let code: String = src[..cut]
+            .lines()
+            .map(|l| {
+                if l.trim_start().starts_with("//") {
+                    ""
+                } else {
+                    l
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        const BANNED: [&str; 23] = [
+            ".sin()",
+            ".cos()",
+            ".tan()",
+            ".asin()",
+            ".acos()",
+            ".atan()",
+            ".atan2(",
+            ".sin_cos()",
+            ".cbrt()",
+            ".powf(",
+            ".exp()",
+            ".ln()",
+            "f32::sin(",
+            "f64::sin(",
+            "f32::cos(",
+            "f64::cos(",
+            "f32::atan2(",
+            "f64::atan2(",
+            "f32::powf(",
+            "f64::powf(",
+            "from_rotation_arc",
+            "from_axis_angle",
+            "from_euler",
+        ];
+        let offenders = |text: &str| -> Vec<&'static str> {
+            BANNED
+                .iter()
+                .copied()
+                .filter(|b| text.contains(b))
+                .collect()
+        };
+
+        assert!(
+            offenders(&code).is_empty(),
+            "`inf-mesh`'s fracture module calls {:?} — libm is not bit-portable \
+             (the P14 law), and this module's shared-face area decides which \
+             adjacency edges survive into a committed `.inf_fracture` that is \
+             claimed to be identical on every host",
+            offenders(&code)
+        );
+
+        // Built to falsify (the P22 law), and not vacuous: the scope really does
+        // contain the two functions the claim is about, and the predicate really
+        // does reject the call it was written for.
+        assert!(
+            code.contains("fn pseudo_angle(") && code.contains("fn polygon_area_m2("),
+            "the split cut the functions this pin exists for out of its own scope"
+        );
+        assert!(
+            code.lines().filter(|l| !l.trim().is_empty()).count() > 500,
+            "the scope reduced to nothing after blanking comments"
+        );
+        let poisoned = format!("{code}\n    let k = total_order_key(y.atan2(x));");
+        assert!(
+            !offenders(&poisoned).is_empty(),
+            "the pin cannot see an `atan2` even when one is put in front of it"
+        );
     }
 }
 
