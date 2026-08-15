@@ -246,9 +246,18 @@ pub struct RuntimeSim {
     /// Total fixed steps run.
     steps: u64,
     /// World-space translations one fixed step ago, for render interpolation.
-    prev_positions: HashMap<Uuid, DVec3>,
-    /// World-space translations at the current fixed step.
-    cur_positions: HashMap<Uuid, DVec3>,
+    ///
+    /// **`BTreeMap`, and the container is the contract** (Wave C, L6.F1). These
+    /// two were the only `HashMap`s in a struct that is otherwise `BTreeMap`
+    /// throughout, and [`camera_centroid`] folds `cur_positions` *by iteration*.
+    /// `HashMap`'s iteration order is a function of a per-process random seed, so
+    /// a non-associative `f64` sum over it makes the committed camera a function
+    /// of which process is running — see [`camera_centroid`] for what depends on
+    /// that answer.
+    prev_positions: BTreeMap<Uuid, DVec3>,
+    /// World-space translations at the current fixed step. `BTreeMap` for the
+    /// reason spelled out on [`Self::prev_positions`].
+    cur_positions: BTreeMap<Uuid, DVec3>,
     /// Optional sandboxed WASM mods, ticked each fixed step (P14.5). `None` on
     /// the browser player + any run without `--mods`.
     mods: Option<Box<dyn ModHook>>,
@@ -309,6 +318,43 @@ pub struct RuntimeSim {
     /// This step's fracture audit — how many chunks the structural solve dropped,
     /// how many the budget reclaimed, how much debris is live. Read by gates.
     fracture_audit: FractureAudit,
+}
+
+/// The **committed camera fold**: the centroid of a set of world positions,
+/// summed in ascending `Guid` order.
+///
+/// # Why this is a free function with its own name
+///
+/// It is the arithmetic behind [`RuntimeSim::camera_focus`], and
+/// `inf_math::predict`'s module header names that method by hand as its
+/// worked example of a *committed* pose — "a fold of actor positions, which is
+/// a pure function of the committed input — it commits". Two things read the
+/// answer and neither is cosmetic:
+///
+/// * the shipped player's camera, which drives the terrain-residency cut
+///   (`terrain_stream::sync_render`'s want set), and
+/// * [`inf_math::dead_reckon`], whose prediction is compared between hosts.
+///
+/// `f64` addition is not associative, so a fold's answer is a function of the
+/// **order** it visits its terms in as well as of the terms. Until Wave C the
+/// source was a `HashMap`, whose iteration order is seeded per process — so the
+/// low bits of the camera, and therefore the residency cut and the prediction,
+/// differed between two runs of the same build on the same machine. The
+/// purity pin one crate over reads `predict.rs` and could never see it.
+///
+/// Extracted rather than left inline so that the order is a property something
+/// can be *pointed at*: `the_committed_camera_folds_in_guid_order` in
+/// `tests/committed_camera.rs` compares this against an independent
+/// ascending-`Guid` sum and against a descending one, over terms chosen so the
+/// two really do differ.
+pub fn camera_centroid(positions: &BTreeMap<Uuid, DVec3>) -> DVec3 {
+    if positions.is_empty() {
+        return DVec3::ZERO;
+    }
+    // `BTreeMap::values()` is ascending by key, so the visit order is a function
+    // of the Guid set alone.
+    let sum: DVec3 = positions.values().copied().sum();
+    sum / positions.len() as f64
 }
 
 /// The obstruction gain (linear) applied to an occluded spatial source — a −12 dB
@@ -374,8 +420,8 @@ impl RuntimeSim {
             audio_started: BTreeSet::new(),
             audio_log: Vec::new(),
             steps: 0,
-            prev_positions: HashMap::new(),
-            cur_positions: HashMap::new(),
+            prev_positions: BTreeMap::new(),
+            cur_positions: BTreeMap::new(),
             mods: None,
             terrain: crate::terrain_stream::TerrainStreaming::default(),
             cells: crate::cell_stream::CellStreaming::default(),
@@ -735,12 +781,11 @@ impl RuntimeSim {
     /// The camera focus point: the centroid of the actors' current positions
     /// (a simple follow target for the windowed player). `DVec3::ZERO` with no
     /// actors.
+    ///
+    /// The fold itself is [`camera_centroid`], which explains why the order it
+    /// visits positions in is load-bearing rather than incidental.
     pub fn camera_focus(&self) -> DVec3 {
-        if self.cur_positions.is_empty() {
-            return DVec3::ZERO;
-        }
-        let sum: DVec3 = self.cur_positions.values().copied().sum();
-        sum / self.cur_positions.len() as f64
+        camera_centroid(&self.cur_positions)
     }
 
     /// Advance by a frame's elapsed time via the fixed-step accumulator (0..N
