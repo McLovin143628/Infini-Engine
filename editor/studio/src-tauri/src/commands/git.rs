@@ -327,7 +327,7 @@ mod tests {
         #[cfg(not(windows))]
         let bad_paths: &[&str] = &["../secrets.txt", "src/../../secrets.txt", "/etc/passwd"];
 
-        for bad in bad_paths.iter().copied() {
+        for &bad in bad_paths {
             assert!(
                 confined_paths(&root, &[bad.to_string()]).is_err(),
                 "{bad} would have been deleted by git_discard"

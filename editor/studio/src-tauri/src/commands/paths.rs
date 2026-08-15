@@ -187,7 +187,7 @@ mod tests {
         #[cfg(not(windows))]
         let bad_paths: &[&str] = &["../secrets", "src/../../secrets", "/etc/passwd"];
 
-        for bad in bad_paths.iter().copied() {
+        for &bad in bad_paths {
             assert!(
                 confine_under(root, bad).is_err(),
                 "must refuse {bad:?} — this is the argument `git_discard` deletes"
