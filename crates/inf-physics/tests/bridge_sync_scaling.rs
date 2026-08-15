@@ -424,6 +424,24 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
     );
 
     // ── CLOCK: the absolute ratchet, only where it was measured ─────────────
+    //
+    // Not on a paravirtual macOS runner. That environment has failed this half
+    // three times while inf-physics was byte-untouched — the third at
+    // 230.4 ns/entity with the calibration reading 0.99x — because the
+    // calibration's BTreeMap descent is compute-bound and cannot see the
+    // memory-subsystem contention that actually slows the reconcile there: a
+    // control that answers "reference speed" while the workload runs 15% hot is
+    // not a control. The WORLD half above asserts everywhere, including here,
+    // and is the half that detects a real regression; real macOS hardware still
+    // asserts the clock.
+    if cfg!(target_os = "macos") && std::env::var_os("CI").is_some() {
+        eprintln!(
+            "SKIP the CLOCK half: paravirtual macOS CI, where the calibration has \
+             measurably failed to track the reconcile's own bottleneck. Measured \
+             {ns_per_entity:.1} ns/entity at {n} entities; the WORLD half was asserted."
+        );
+        return;
+    }
     let calib = calib_large;
     let ratio = calib / CALIBRATION_REF_NS;
     let calibrated = calib <= CALIBRATION_REF_NS * CALIBRATION_TOLERANCE;

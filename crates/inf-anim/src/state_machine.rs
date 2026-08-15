@@ -1033,7 +1033,7 @@ impl StateMachine {
     /// trigger state occupies in [`SmRuntime::triggers`]).
     ///
     /// **Bounded by [`MAX_PARAMS`]**, and that is not belt-and-braces: the index
-    /// this returns is shifted into a `u64` by [`trigger_armed`] and
+    /// this returns is shifted into a `u64` by `trigger_armed` and
     /// `collect_true_triggers`, and `1u64 << 64` is a debug panic (`attempt to
     /// shift left with overflow`) and a *silent wrap to bit 0* in release.
     /// [`StateMachine::validate`] refuses a table past the limit, so no decoded
