@@ -1106,6 +1106,11 @@ pub fn apply_seam(volumes: &mut [RenderVoxelVolume], terrains: &[RenderTerrain],
 /// (`layers`, `macro_variation`, `biome_palette`) and the whole tile sequence in
 /// the order it is emitted — level 0 ascending, then the coarse pyramid
 /// ascending, which is the order both hosts build it in and the order this walks.
+// Eight, and the alternative is worse: a struct grouping the six scalars would
+// be constructed at each of the two mirrored call sites and destructured here,
+// which is the same six values written twice more with a name in between. The
+// precedent is `project_scene_full`'s and `VsmRaster::record`'s.
+#[allow(clippy::too_many_arguments)]
 pub fn take_unchanged_terrain(
     prev: &mut Vec<RenderTerrain>,
     id: u64,
@@ -1117,12 +1122,14 @@ pub fn take_unchanged_terrain(
     tiles: impl Iterator<Item = (TerrainTileKey, DVec3, u64)>,
 ) -> Option<RenderTerrain> {
     let at = prev.iter().position(|t| t.id == id)?;
-    if !prev[at].tiles_match(tiles)
-        || prev[at].tile_resolution != tile_resolution
+    // The scalars first, so a layer edit or a grid change short-circuits before
+    // the tile walk rather than after it.
+    if prev[at].tile_resolution != tile_resolution
         || prev[at].meters_per_sample != meters_per_sample
-        || prev[at].layers != *layers
         || prev[at].macro_variation != macro_variation
+        || prev[at].layers != *layers
         || prev[at].biome_palette != biome_palette
+        || !prev[at].tiles_match(tiles)
     {
         return None;
     }
