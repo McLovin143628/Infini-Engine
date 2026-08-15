@@ -6340,10 +6340,39 @@ pub fn encode_scene(doc: &SceneDoc, guid: Option<Uuid>) -> Result<EncodedScene, 
 /// uses. Neither is ever partial now, so the only reachable interleaving is
 /// "new payload, old sidecar", which is a stale `content_hash` (re-derivable)
 /// rather than a lost GUID.
+///
+/// # …and that argument holds for a RE-save only (round-2 finding B11)
+///
+/// "New payload, old sidecar" presumes there *is* an old sidecar. On a **first**
+/// save there is not, so a failed sidecar write leaves a `.inf_lvl` with none —
+/// and `AssetDb`'s scan then synthesizes one with a **content-derived** GUID.
+/// That id changes every time the level's contents change, so it churns on
+/// every subsequent save and every cross-asset reference into the level goes
+/// stale: exactly the outcome the atomic pair exists to prevent, reached
+/// through the gap between the two atomic writes rather than through a torn
+/// one.
+///
+/// So the pair rolls back, the way `AssetProject::write_asset` already does
+/// (`assets/mod.rs`): if the sidecar cannot be written and the payload was not
+/// there before this call, the payload is removed again. A **re-save** keeps
+/// its old behaviour deliberately — the previous payload has already been
+/// replaced by then, and deleting a level the user just saved because its
+/// metadata file failed would be a far worse answer than a stale
+/// `content_hash`.
 pub fn write_encoded(enc: &EncodedScene, path: &Path) -> Result<(), String> {
+    // Asked BEFORE the payload write, because after it the answer is always
+    // "yes" and the question means nothing. It is the PAYLOAD's prior
+    // existence that decides, not the sidecar's: removing a payload this call
+    // created restores the previous state exactly, whatever was or was not
+    // beside it.
+    let payload_existed = path.exists();
     inf_asset::write_atomically(path, &enc.payload).map_err(|e| format!("write payload: {e}"))?;
-    inf_asset::write_atomically(&sidecar_path(path), &enc.sidecar_toml)
-        .map_err(|e| format!("write sidecar: {e}"))?;
+    if let Err(e) = inf_asset::write_atomically(&sidecar_path(path), &enc.sidecar_toml) {
+        if !payload_existed {
+            let _ = std::fs::remove_file(path);
+        }
+        return Err(format!("write sidecar: {e}"));
+    }
     Ok(())
 }
 
@@ -6994,6 +7023,58 @@ mod tests {
             .filter(|n| n.ends_with(".tmp"))
             .collect();
         assert!(strays.is_empty(), "left temp files behind: {strays:?}");
+    }
+
+    /// **Round-2 finding B11: the FIRST save is the harmful one.**
+    ///
+    /// C4-2's doc argued that the only reachable interleaving is "new payload,
+    /// old sidecar" — a stale `content_hash`, re-derivable. That presumes there
+    /// IS an old sidecar. On a first save there is not, so a failed sidecar
+    /// write leaves a `.inf_lvl` alone on disk, and `AssetDb`'s scan then
+    /// synthesizes one with a **content-derived** GUID: an id that changes
+    /// every time the level changes, so it churns on every later save and every
+    /// cross-asset reference into the level goes stale. That is the outcome the
+    /// atomic pair exists to prevent, reached through the gap BETWEEN the two
+    /// atomic writes rather than through a torn one.
+    ///
+    /// The failure is injected by parking a **directory** where the sidecar
+    /// goes: `write_atomically` ends in a rename, and no platform will replace
+    /// a directory with a file.
+    #[test]
+    fn a_failed_sidecar_on_a_first_save_leaves_no_orphan_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let levels = dir.path().join("Levels");
+        std::fs::create_dir_all(&levels).unwrap();
+        let path = levels.join("main.inf_lvl");
+
+        // A directory exactly where the sidecar must land.
+        std::fs::create_dir_all(sidecar_path(&path)).unwrap();
+
+        let mut doc = SceneDoc::with_demo();
+        let err = save(&doc, &path, None).expect_err("the sidecar write must fail");
+        assert!(err.contains("sidecar"), "{err}");
+        assert!(
+            !path.exists(),
+            "the payload survived a failed FIRST save with no sidecar beside it              — the next scan gives this level a content-derived GUID that churns              with its contents"
+        );
+
+        // A RE-save keeps the old behaviour on purpose: by then the previous
+        // payload has already been replaced, and deleting a level the author
+        // just saved because its metadata file failed is a worse answer than a
+        // stale content_hash.
+        std::fs::remove_dir_all(sidecar_path(&path)).unwrap();
+        let guid = save(&doc, &path, None).expect("a clean first save works");
+        let good = std::fs::read(&path).unwrap();
+        std::fs::remove_file(sidecar_path(&path)).unwrap();
+        std::fs::create_dir_all(sidecar_path(&path)).unwrap();
+        doc.edit_create(SpawnKind::Cube, "Another", None);
+        assert!(save(&doc, &path, Some(guid)).is_err());
+        assert!(path.exists(), "a re-save must not delete the level");
+        assert_ne!(
+            std::fs::read(&path).unwrap(),
+            good,
+            "the re-save's payload did land, which is why it must not be removed"
+        );
     }
 
     /// **The autosave that destroyed the previous autosave** (C4-10): the

@@ -524,20 +524,56 @@ fn zstd_encode(_payload: &[u8]) -> Result<Vec<u8>> {
 /// streaming decoder (the browser player reads packs it fetched over HTTP). Both
 /// produce identical bytes, so the content-hash integrity check downstream is
 /// backend-agnostic.
-#[cfg(not(target_arch = "wasm32"))]
-fn zstd_decode(stored: &[u8]) -> Result<Vec<u8>> {
-    zstd::decode_all(stored).map_err(|e| AssetError::Pack(format!("zstd: {e}")))
-}
-
-#[cfg(target_arch = "wasm32")]
-fn zstd_decode(stored: &[u8]) -> Result<Vec<u8>> {
-    use std::io::Read;
-    let mut decoder = ruzstd::decoding::StreamingDecoder::new(stored)
-        .map_err(|e| AssetError::Pack(format!("ruzstd init: {e}")))?;
-    let mut out = Vec::new();
-    decoder
-        .read_to_end(&mut out)
-        .map_err(|e| AssetError::Pack(format!("ruzstd: {e}")))?;
+///
+/// # The decode is bounded by the index's own promise (round-2 finding B12)
+///
+/// `limit` is the entry's `uncompressed_len`. Every other field this reader
+/// touches is meticulously bounded before it is used; this one was **parsed,
+/// published, and then checked after the decode had already happened**
+/// (L5.F12's fix sits in `read_ref`'s verify block). A zstd frame's declared
+/// content size is written by whoever made the pack, so a doctored or damaged
+/// entry could ask for an arbitrary allocation before a single byte of it was
+/// compared to anything — a 40-byte pack entry expanding to gigabytes is the
+/// classic shape, and this reader runs in the shipped player over a file it
+/// fetched.
+///
+/// One extra byte is allowed past `limit` so the caller's own equality check
+/// still gets to fire with its better message: `>` here means "not even the
+/// right order of magnitude", `!=` there means "the header lied".
+fn zstd_decode(stored: &[u8], limit: u64) -> Result<Vec<u8>> {
+    let ceiling = limit.saturating_add(1);
+    #[cfg(not(target_arch = "wasm32"))]
+    let out = {
+        use std::io::Read;
+        let mut decoder = zstd::stream::Decoder::new(stored)
+            .map_err(|e| AssetError::Pack(format!("zstd init: {e}")))?;
+        let mut out = Vec::new();
+        decoder
+            .by_ref()
+            .take(ceiling)
+            .read_to_end(&mut out)
+            .map_err(|e| AssetError::Pack(format!("zstd: {e}")))?;
+        out
+    };
+    #[cfg(target_arch = "wasm32")]
+    let out = {
+        use std::io::Read;
+        let mut decoder = ruzstd::decoding::StreamingDecoder::new(stored)
+            .map_err(|e| AssetError::Pack(format!("ruzstd init: {e}")))?;
+        let mut out = Vec::new();
+        decoder
+            .by_ref()
+            .take(ceiling)
+            .read_to_end(&mut out)
+            .map_err(|e| AssetError::Pack(format!("ruzstd: {e}")))?;
+        out
+    };
+    if out.len() as u64 > limit {
+        return Err(AssetError::Pack(format!(
+            "a {} byte entry declares {limit} uncompressed bytes and expands past it              (corrupt pack)",
+            stored.len()
+        )));
+    }
     Ok(out)
 }
 
@@ -913,7 +949,7 @@ impl PackReader {
         let start = e.offset as usize;
         let stored = &self.data.as_slice()[start..start + e.stored_len as usize];
         let payload: Cow<'_, [u8]> = if e.compressed {
-            Cow::Owned(zstd_decode(stored).map_err(|err| {
+            Cow::Owned(zstd_decode(stored, e.uncompressed_len).map_err(|err| {
                 AssetError::Pack(format!("zstd decode {guid}: {err} (corrupt pack?)"))
             })?)
         } else {
@@ -1581,6 +1617,41 @@ mod tests {
             assert_eq!(vmesh.kind, AssetKind::MeshletMesh);
             assert!(vmesh.compressed, "v1 compressed vmeshes stay readable");
             assert!(!PackWriter::compresses_kind(AssetKind::MeshletMesh));
+        }
+    }
+
+    /// **Round-2 finding B12**: the decode is bounded by the index's own
+    /// promise, before the allocation rather than after it.
+    ///
+    /// L5.F12 gave `read_ref` an `uncompressed_len` truth-check — and put it
+    /// *after* the decode, so a doctored entry still got its arbitrary
+    /// allocation first. Every other field this reader touches is bounded
+    /// before use; this one is read by the shipped player out of a file it
+    /// fetched over HTTP.
+    #[test]
+    fn a_compressed_entry_cannot_expand_past_the_length_it_declares() {
+        // A megabyte of zeros compresses to a few dozen bytes: the classic
+        // shape of the hazard, without needing a hand-built adversarial frame.
+        let payload = vec![0u8; 1 << 20];
+        let stored = zstd_encode(&payload).unwrap();
+        assert!(
+            stored.len() < payload.len() / 100,
+            "the fixture does not actually expand, so this arm is vacuous"
+        );
+
+        // Honest metadata decodes.
+        let out = zstd_decode(&stored, payload.len() as u64).unwrap();
+        assert_eq!(out.len(), payload.len());
+
+        // A lie does not — and the refusal happens at the ceiling, naming it,
+        // rather than after a megabyte has already been allocated.
+        for lie in [0u64, 16, (payload.len() as u64) - 1] {
+            let e = zstd_decode(&stored, lie)
+                .expect_err("an entry expanded past the length it declared");
+            assert!(
+                e.to_string().contains("expands past it"),
+                "the refusal must be the ceiling's, not a downstream one: {e}"
+            );
         }
     }
 }
