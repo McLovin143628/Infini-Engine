@@ -145,6 +145,12 @@ struct BodyRecord {
     /// ever, at trimesh-topology cost per fixed step. With it the retry happens
     /// exactly when it can succeed: when the shape *changes*. Which is what a
     /// re-carve, a re-fracture or a terrain edit does.
+    ///
+    /// It is read as **one half of `decided`** (`col.or(col_refused)`), not as
+    /// a second conjunct — see the reconcile in `sync_retaining` and round-2
+    /// finding B1. Removing the component clears it, so an entity that stops
+    /// asking for a collider stops being reported by
+    /// [`entities_missing_colliders`](PhysicsBridge3D::entities_missing_colliders).
     col_refused: Option<ColliderDesc3D>,
     /// The joint this entity owns (P12.1): its handle, the other body it was
     /// built against, and the last-synced snapshot (for change detection).
@@ -376,6 +382,18 @@ impl PhysicsBridge3D {
     /// (C4-30). Zero on a healthy level.
     pub fn collider_refusals(&self) -> u64 {
         self.collider_refusals
+    }
+
+    /// How many entities the bridge is still holding a "already warned about
+    /// this one" marker for (round-2 finding R2-3).
+    ///
+    /// Exists so the prune can be falsified. `collider_refusals` is a
+    /// monotone *counter* and must stay one — it is the rate — so it cannot
+    /// see the set beside it growing without bound, and nothing else in this
+    /// struct reads `warned_colliders` at all. Without this accessor,
+    /// deleting the `remove` in the despawn sweep passes every arm.
+    pub fn warned_collider_count(&self) -> usize {
+        self.warned_colliders.len()
     }
 
     /// The entities that asked for a collider and have none, in `Guid` order
@@ -1180,8 +1198,21 @@ impl PhysicsBridge3D {
                 // them per tracked entity per fixed step deep-copied every voxel
                 // chunk's and every terrain tile's geometry to answer a question
                 // that is a comparison.
-                let col_changed =
-                    rec.col.as_ref() != snap.collider.as_ref() && rec.col_refused != snap.collider;
+                //
+                // The comparison is against the descriptor the record last
+                // **acted on** — attached (`col`) or tried and refused
+                // (`col_refused`), never both, because `attach_collider`
+                // returns exactly one of them. Round-2 finding B1: written as
+                // two conjuncts (`col != want && col_refused != want`) the
+                // second one also suppressed a legitimate *removal*, because
+                // `Some(A) -> None` leaves `col_refused == None == want` and
+                // the whole predicate false. The shape in rapier then outlived
+                // the component for the session. One `decided` term is the
+                // same bound with no hole, and it is exactly the 2D mirror's
+                // `rec_col != snap.col` once `col_refused` is folded in — so
+                // the two bridges say the same thing again.
+                let decided = rec.col.as_ref().or(rec.col_refused.as_ref());
+                let col_changed = decided != snap.collider.as_ref();
                 let has_joint_work = snap.joint.is_some() || rec.joint.is_some();
                 let old_collider = rec.collider;
                 let body = rec.body;
@@ -1282,6 +1313,18 @@ impl PhysicsBridge3D {
             if let Some(rec) = self.entities.remove(&guid) {
                 self.world.remove_body(rec.body);
             }
+            // Round-2 finding R2-3: the warn set is keyed by the same guid and
+            // was the one map in this struct that only ever grew. Its keys are
+            // not authored — a refused voxel chunk, terrain tile or fracture
+            // piece is a *synthetic* guid minted per chunk key, and the
+            // seam-chord law's own figure for how often a Surface-Nets or
+            // Voronoi hull fails to build is ~10 %, so a session that streams
+            // a cave in and out accumulates one `Uuid` per failed chunk per
+            // visit, for ever. Pruned here, beside `voxel_stamps`,
+            // `terrain_stamps`, `fracture_stamps`, `grounded` and `swimming`,
+            // which are all retained against the live set already. Exact and
+            // O(log n) per despawn rather than a sweep per step.
+            self.warned_colliders.remove(&guid);
         }
 
         // 4. Reconcile joints (P12.1), now that every body exists. In Guid
