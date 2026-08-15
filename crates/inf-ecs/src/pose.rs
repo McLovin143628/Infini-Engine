@@ -519,6 +519,29 @@ pub fn evaluated_pose(world: &EcsWorld, guid: Uuid) -> Option<&EvaluatedPose> {
         .and_then(|r| r.0.get(&guid))
 }
 
+/// The notify names `guid`'s machine emitted **this fixed step** — its exited
+/// state's `on_exit` followed by its entered state's `on_enter`, in that order.
+///
+/// Empty on a step where nothing happened, which is the common case: the
+/// resource is absent unless something fired, so this reads as `&[]` without
+/// touching the world's storage. That is the same absent-costs-nothing rule
+/// [`PoseStoreRes`] follows, and it is what keeps a level whose states name no
+/// notifies byte-identical to its pre-P29.1 self.
+///
+/// **The read door P29.4's `anim.*` kit goes through.** It exists in this batch
+/// rather than that one because a resource with no reader is a resource nothing
+/// can prove is written — the shape the P24.1 audit closed on
+/// `inf_anim::eval_pose`, which had zero production callers while its docs
+/// claimed the machine drove the pose.
+pub fn anim_events(world: &EcsWorld, guid: Uuid) -> &[String] {
+    world
+        .world()
+        .get_resource::<AnimEventsRes>()
+        .and_then(|r| r.0.get(&guid))
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
 /// How many entities the sim posed this step (`0` on a world that has never
 /// posed one).
 pub fn posed_count(world: &EcsWorld) -> usize {
@@ -547,6 +570,10 @@ pub fn posed_count(world: &EcsWorld) -> usize {
 /// leak `clear_deformation` exists to stop, one level up.
 pub fn clear_poses(world: &mut EcsWorld) {
     world.world_mut().remove_resource::<PoseStoreRes>();
+    // …and the notifies (P29.1), for the same reason and through the same door:
+    // an event is a statement about a fixed step, and a stopped session's last
+    // step is not this one.
+    world.world_mut().remove_resource::<AnimEventsRes>();
     clear_ik_goals(world);
 }
 
@@ -973,6 +1000,73 @@ mod tests {
         }
     }
 
+    /// **The notify seam is written, readable, and does not go stale** (P29.1).
+    ///
+    /// Three claims, and the third is the one a resource gets wrong: the events
+    /// appear on the step the transition fires, they are the exited state's
+    /// `on_exit` followed by the entered state's `on_enter` in that order, and a
+    /// **quiet** step reports nothing rather than repeating the last step's
+    /// answer. A store that is merged rather than replaced passes the first two
+    /// and fails the third, which is why the third is here.
+    #[test]
+    fn the_notify_seam_reports_this_step_and_only_this_step() {
+        let guid = Uuid::from_u128(30);
+        let mut idle = SmState::clip("idle", IDLE);
+        idle.on_enter = vec!["idle_begin".into()];
+        idle.on_exit = vec!["idle_end".into()];
+        let mut wave = SmState::clip("wave", WAVE);
+        wave.on_enter = vec!["wave_begin".into()];
+        let noisy = StateMachine {
+            states: vec![idle, wave],
+            transitions: vec![
+                SmTransition::on(0, 1, 0.0, "moving", inf_anim::CmpOp::Gt, 0.5),
+                // The way back, so the closing "control: it fired" step has
+                // something to fire — a control that cannot fire is a control
+                // that proves nothing.
+                SmTransition::on(1, 0, 0.0, "moving", inf_anim::CmpOp::Lt, 0.5),
+            ],
+            entry: 0,
+            ..Default::default()
+        };
+        let skeleton = skeleton_asset();
+        let clip = wave_clip();
+        let mut world = world_with_character(guid);
+        let step = |world: &mut EcsWorld, dt: f64, moving: f64| {
+            let machines = |g: Uuid| (g == SM).then_some(&noisy);
+            let skeletons = |g: Uuid| (g == SKEL).then_some(&skeleton);
+            let clips = |c: ClipRef| (c == WAVE).then_some(&clip);
+            let vars = |_: Uuid| BTreeMap::from([("moving".to_string(), moving)]);
+            step_pose_evaluation(world, dt, &machines, &skeletons, &clips, &vars);
+        };
+
+        // Entering the entry state is itself an event -- which v1 told nobody.
+        step(&mut world, 0.1, 0.0);
+        assert_eq!(anim_events(&world, guid), ["idle_begin".to_string()]);
+
+        // The transition: exit before the entry it caused.
+        step(&mut world, 0.1, 1.0);
+        assert_eq!(
+            anim_events(&world, guid),
+            ["idle_end".to_string(), "wave_begin".to_string()]
+        );
+
+        // A quiet step says NOTHING -- the store is replaced, not merged.
+        step(&mut world, 0.1, 1.0);
+        assert!(
+            anim_events(&world, guid).is_empty(),
+            "a quiet step repeated the previous step's notifies: {:?}",
+            anim_events(&world, guid)
+        );
+        // …and an entity nobody has heard of reads empty rather than panicking.
+        assert!(anim_events(&world, Uuid::from_u128(999)).is_empty());
+
+        // The Simulate stop door forgets them, like the poses and the IK goals.
+        step(&mut world, 0.1, 0.0);
+        assert!(!anim_events(&world, guid).is_empty(), "control: it fired");
+        clear_poses(&mut world);
+        assert!(anim_events(&world, guid).is_empty());
+    }
+
     /// **The host really passes a period resolver** (P29.1).
     ///
     /// `exit_time` was inert for four phases not because the model lacked the
@@ -1014,7 +1108,9 @@ mod tests {
         assert_eq!(
             state_of(&mut world),
             0,
-            "0.5 s into a 1 s clip the 0.8 gate is not met — the host is still              building its context without a clip-length resolver, so every              exit_time reads as satisfied"
+            "0.5 s into a 1 s clip the 0.8 gate is not met — the host is still \
+             building its context without a clip-length resolver, so every \
+             exit_time reads as satisfied"
         );
         step(&mut world, 0.4);
         assert_eq!(state_of(&mut world), 1, "crossing 0.8 s must fire it");

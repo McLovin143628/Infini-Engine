@@ -170,9 +170,18 @@ pub enum SmCondDto {
     Compare {
         param: String,
         op: String,
-        /// The typed operand: exactly one of these is set, chosen by `valueKind`.
+        /// The typed operand, as a number; `valueKind` says how to read it.
         value: f64,
-        /// `"bool"` / `"int"` / `"float"`.
+        /// `"bool"` / `"int"` / `"float"` / `"trigger"`.
+        ///
+        /// **Renamed explicitly.** `rename_all = "camelCase"` on a tagged enum
+        /// renames the *variants*, not their fields, so this crossed the IPC
+        /// boundary as `value_kind` while the hand-written TypeScript mirror
+        /// read `valueKind` — every typed compare would have parsed as
+        /// `undefined` on the far side. Caught by the round-trip's
+        /// wire-spelling arm; the field-name check is why that arm asserts on
+        /// the JSON rather than only on the decoded value.
+        #[serde(rename = "valueKind")]
         value_kind: String,
     },
     Trigger {
@@ -414,9 +423,19 @@ fn value_to_dto(v: SmValue) -> (f64, &'static str) {
     }
 }
 
+/// The typed operand, back from the numeric wire.
+///
+/// **`"trigger"` is here, and its absence was a real lossiness bug** that
+/// `machine_dto_round_trips_every_v2_shape` caught on the first battery: a
+/// `Trigger` parameter's default is `SmValue::Bool(false)`, and a `_ =>` arm
+/// turned it into `Float(0.0)` on every round-trip. The two compare identically
+/// through `as_f64`, so nothing downstream would have noticed — the machine
+/// would simply have been re-saved with a different declared default than the one
+/// it was authored with, for ever.
 fn dto_to_value(value: f64, kind: &str) -> SmValue {
     match kind {
-        "bool" => SmValue::Bool(value > 0.5),
+        // A trigger's operand is a flag, exactly like a bool's.
+        "bool" | "trigger" => SmValue::Bool(value > 0.5),
         "int" => SmValue::Int(value as i64),
         _ => SmValue::Float(value),
     }
