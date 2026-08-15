@@ -374,7 +374,7 @@ mod tests {
             .expect("the player's schema version is a literal");
         assert_eq!(
             LAUNCH_CONFIG_SCHEMA_VERSION, value,
-            "the exporter writes player.toml schema {LAUNCH_CONFIG_SCHEMA_VERSION} and              the player speaks {value}; the loader refuses a config newer than its own,              so every exported bundle would refuse to boot"
+            "the exporter writes player.toml schema {LAUNCH_CONFIG_SCHEMA_VERSION} and the player speaks {value}; the loader refuses a config newer than its own, so every exported bundle would refuse to boot"
         );
     }
 }
