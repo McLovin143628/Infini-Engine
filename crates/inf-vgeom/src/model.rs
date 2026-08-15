@@ -588,31 +588,72 @@ impl VgeomMesh {
     /// implements `AssetPayload`, whose whole point is that a caller can decode
     /// it generically. `asset::validate` now delegates here, so there is one
     /// rule with two entrances rather than two rules.
+    ///
+    /// **Round 3 added the third entrance and two missing questions.** The
+    /// entrance is `VgeomAssetReader::to_mesh`, which assembles a `VgeomMesh`
+    /// out of a shipped pack's bytes and never came through either of the other
+    /// two; the questions are the micro-triangle locals (`meshlet_triangles` is
+    /// the buffer `triangle()` actually indexes with, and nothing looked at it)
+    /// and 32-bit arithmetic (`u32 + u32` in a `usize` is exact on a 64-bit host
+    /// and wraps on `wasm32`).
     pub fn validate(&self) -> Result<(), String> {
         for (i, m) in self.meshlets.iter().enumerate() {
-            let v_end = m.vertex_offset as usize + m.vertex_count as usize;
-            let t_end = m.triangle_offset as usize + m.triangle_count as usize * 3;
-            if v_end > self.meshlet_vertices.len() || t_end > self.meshlet_triangles.len() {
+            // **`u64`, not `usize`** (round 3), the pattern `asset::validate_records`
+            // states three hundred lines away and this sibling did not follow. On
+            // `wasm32` a `usize` is 32 bits, so `vertex_offset as usize +
+            // vertex_count as usize` is a `u32` sum in a `u32`: `0xFFFF_FFF0 + 32`
+            // wraps to 16, which is inside every buffer, and the release profile
+            // has no overflow checks to notice. The `* 3` on the triangle end is
+            // the same hazard with a multiplier in front of it. Widening first
+            // makes the arithmetic exact on both targets.
+            let v_end = u64::from(m.vertex_offset) + u64::from(m.vertex_count);
+            let t_end = u64::from(m.triangle_offset) + u64::from(m.triangle_count) * 3;
+            if v_end > self.meshlet_vertices.len() as u64
+                || t_end > self.meshlet_triangles.len() as u64
+            {
                 return Err(format!("meshlet {i} micro-index range is out of bounds"));
             }
-            if self.meshlet_vertices[m.vertex_offset as usize..v_end]
+            let lo = m.vertex_offset as usize;
+            if self.meshlet_vertices[lo..lo + m.vertex_count as usize]
                 .iter()
                 .any(|&v| v as usize >= self.vertices.len())
             {
                 return Err(format!("meshlet {i} references a vertex past the buffer"));
             }
+            // **The micro-triangle bytes** (round 3). `meshlet_triangles` holds
+            // indices *local to this meshlet*, and [`VgeomMesh::triangle`] reads
+            // `meshlet_vertices[vertex_offset + local]` with no check at all —
+            // its own doc says it "panics on out-of-range indices". A `u8` local
+            // of 200 over a 64-vertex meshlet does not usually panic: it lands
+            // in the NEXT meshlet's slice of the same concatenated buffer and
+            // draws another meshlet's vertex, silently, in a mesh that decoded
+            // clean. Past the last meshlet it panics — in the editor, in PIE and
+            // in the shipped player reading a cooked pack.
+            let tlo = m.triangle_offset as usize;
+            let thi = tlo + m.triangle_count as usize * 3;
+            if let Some(&bad) = self.meshlet_triangles[tlo..thi]
+                .iter()
+                .find(|&&t| u32::from(t) >= m.vertex_count)
+            {
+                return Err(format!(
+                    "meshlet {i} micro-triangle index {bad} addresses outside its own \
+                     {}-vertex list",
+                    m.vertex_count
+                ));
+            }
         }
         // The level table, which `classic_lods` indexes with equally bare
-        // `[]`. `asset::validate` never looked at it.
+        // `[]`. `asset::validate` never looked at it. (`u64` for the same
+        // reason as above — these are `u32` fields off a decoded payload.)
         for (i, l) in self.levels.iter().enumerate() {
-            let end = l.meshlet_start as usize + l.meshlet_count as usize;
-            if end > self.meshlets.len() {
+            let end = u64::from(l.meshlet_start) + u64::from(l.meshlet_count);
+            if end > self.meshlets.len() as u64 {
                 return Err(format!("lod level {i} names meshlets past the buffer"));
             }
         }
         for (i, g) in self.groups.iter().enumerate() {
-            let end = g.produced_start as usize + g.produced_count as usize;
-            if end > self.meshlets.len() {
+            let end = u64::from(g.produced_start) + u64::from(g.produced_count);
+            if end > self.meshlets.len() as u64 {
                 return Err(format!("group {i} produced meshlets past the buffer"));
             }
         }
@@ -902,13 +943,67 @@ mod payload_door_tests {
             "a level range past the meshlet buffer decoded as valid"
         );
 
-        // And a group producing meshlets past the buffer.
-        if !good.groups.is_empty() {
-            let mut m = good.clone();
-            m.groups[0].produced_start = m.meshlets.len() as u32;
-            m.groups[0].produced_count = 1;
-            let bytes = inf_asset::encode(&m).unwrap();
-            assert!(inf_asset::decode::<VgeomMesh>(&bytes).is_err());
-        }
+        // And a group producing meshlets past the buffer. **Unconditional**
+        // (round 3): this arm used to be wrapped in `if !good.groups.is_empty()`
+        // and would have gone on passing the day the fixture stopped producing
+        // a multi-level DAG — the vacuous-gate shape this campaign has been
+        // caught by nine times. `dense(24)` builds several levels, so the
+        // groups are a property of the fixture and are asserted as one.
+        assert!(
+            !good.groups.is_empty(),
+            "the fixture built no DAG groups, so the group arm below is vacuous"
+        );
+        let mut m = good.clone();
+        m.groups[0].produced_start = m.meshlets.len() as u32;
+        m.groups[0].produced_count = 1;
+        let bytes = inf_asset::encode(&m).unwrap();
+        assert!(inf_asset::decode::<VgeomMesh>(&bytes).is_err());
+    }
+
+    /// **Round 3: the buffer `triangle()` actually indexes with.**
+    ///
+    /// `meshlet_triangles` holds `u8` indices *local to a meshlet's own vertex
+    /// list*, and nothing checked them. `VgeomMesh::triangle` reads
+    /// `meshlet_vertices[vertex_offset + local]` bare. Over a 64-vertex meshlet
+    /// a local of 200 is usually **in bounds of the concatenated buffer** — it
+    /// draws the neighbouring meshlet's vertex, silently — and off the end of
+    /// the last meshlet it panics, in the editor, in PIE and in the shipped
+    /// player.
+    #[test]
+    fn a_micro_triangle_index_past_its_own_meshlet_is_refused_at_decode() {
+        let good = dense(24);
+        let m0 = good.meshlets[0];
+        assert!(
+            m0.triangle_count > 0 && m0.vertex_count < 255,
+            "the fixture must leave a local index above its own vertex count"
+        );
+        // The control decodes.
+        inf_asset::decode::<VgeomMesh>(&inf_asset::encode(&good).unwrap())
+            .expect("a healthy DAG must still decode");
+
+        let mut m = good.clone();
+        let at = m0.triangle_offset as usize;
+        m.meshlet_triangles[at] = m0.vertex_count as u8;
+        // In bounds of the whole buffer — this is the silent case, not a panic.
+        assert!(
+            (m0.vertex_offset as usize + m0.vertex_count as usize) < m.meshlet_vertices.len(),
+            "the poisoned local must still land inside the concatenated buffer"
+        );
+        let bytes = inf_asset::encode(&m).unwrap();
+        let e = inf_asset::decode::<VgeomMesh>(&bytes)
+            .expect_err("a micro-triangle naming another meshlet's vertex decoded as valid");
+        assert!(
+            e.to_string().contains("micro-triangle"),
+            "the refusal must name what it refused: {e}"
+        );
+
+        // `u8::MAX` over the same meshlet is the same refusal.
+        let mut m = good.clone();
+        m.meshlet_triangles[at] = u8::MAX;
+        assert!(
+            inf_asset::decode::<VgeomMesh>(&inf_asset::encode(&m).unwrap()).is_err(),
+            "255 over a {}-vertex meshlet decoded as valid",
+            m0.vertex_count
+        );
     }
 }

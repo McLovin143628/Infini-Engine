@@ -1173,7 +1173,7 @@ impl<B: AsRef<[u8]>> VgeomAssetReader<B> {
             }
         }
 
-        Ok(VgeomMesh {
+        let mesh = VgeomMesh {
             schema_version: VgeomMesh::CURRENT_VERSION,
             vertices,
             meshlets,
@@ -1183,7 +1183,24 @@ impl<B: AsRef<[u8]>> VgeomAssetReader<B> {
             levels,
             center: h.center,
             radius: h.radius,
-        })
+        };
+        // **The third entrance** (round 3). `VgeomMesh::validate` is the rule
+        // for a payload nobody has vouched for, and it had two entrances: the
+        // `AssetPayload` decode and `asset::validate` on the build side. This is
+        // the one that starts from a **shipped pack** — `classic_vgeom` reaches
+        // it as `to_mesh().ok()?` — and it assembled the struct field by field
+        // without either ever running.
+        //
+        // `parse` now establishes the micro-index values, so the meshlet half is
+        // a re-check. The `groups` blob is not: it is bincode decoded out of the
+        // trailing section by `self.groups()` above, and nothing in `parse` has
+        // ever looked inside it, while `VgeomMesh::validate` bounds every
+        // `produced_start + produced_count` against the meshlet list. Paying one
+        // linear scan on the non-streaming door is what makes the type's rule
+        // true of every `VgeomMesh` in the process rather than of two of the
+        // three ways to get one.
+        mesh.validate().map_err(VgeomAssetError::Malformed)?;
+        Ok(mesh)
     }
 }
 
@@ -1447,6 +1464,30 @@ fn parse(data: &[u8]) -> Result<(VgeomAssetHeader, Vec<VgeomPageEntry>)> {
 /// `O(meshlets)`: a linear scan of records already in the page cache, microseconds
 /// even for a six-figure meshlet count, and paid once when the asset is indexed
 /// rather than on every fetch.
+///
+/// # The ranges were checked; one VALUE was not (round 3)
+///
+/// Everything above establishes that each record's micro-index *ranges* fit its
+/// page's sections. That says nothing about what is stored **in** those ranges,
+/// and both buffers behind them hold indices. They are not in the same
+/// position, and the difference decides where each is checked:
+///
+/// * `mlverts` holds indices into the image's vertex buffer, and **both**
+///   consumers already bound them. `stream::stage_page` maps every one through
+///   `AssetResidency::pool_vertex` and refuses a page whose micro index names a
+///   vertex it cannot be resident with — the stricter rule, in the place that
+///   needs it. [`VgeomAssetReader::to_mesh`] did not, and now runs
+///   [`VgeomMesh::validate`] on its way out. Adding a third, weaker copy here
+///   would make the streamer's guard unreachable from a file and retire a live
+///   arm — this campaign's own law, met from the other side.
+/// * `mltris` holds `u8` indices into the record's **own** vertex list, and
+///   nothing anywhere looked at them. A local of 200 over a 64-vertex meshlet
+///   is in bounds of the concatenated buffer both paths carry, so it silently
+///   draws the neighbouring meshlet's vertex — on the CPU through
+///   `VgeomMesh::triangle`'s bare index, and on the GPU through a
+///   pool-absolute `meshlet_vertices` fetch that naga bounds-checks against the
+///   whole buffer rather than against the meshlet. This is the one question
+///   only the parse can ask, so it is asked here.
 fn validate_records(data: &[u8], pages: &[VgeomPageEntry]) -> Result<()> {
     for (page, e) in pages.iter().enumerate() {
         let lo = e.meshlets_off as usize;
@@ -1454,6 +1495,8 @@ fn validate_records(data: &[u8], pages: &[VgeomPageEntry]) -> Result<()> {
         // The section itself was bounds-checked above; this cast is exact because
         // `MeshletRec` is `Pod` and the slice length is a multiple of its size.
         let recs: &[MeshletRec] = bytemuck::cast_slice(&data[lo..hi]);
+        let mltris: &[u8] =
+            &data[e.mltris_off as usize..e.mltris_off as usize + e.mltri_count as usize];
         for (index, r) in recs.iter().enumerate() {
             let bad = |what| VgeomAssetError::RecordOutOfBounds { page, index, what };
             let v_end = u64::from(r.vertex_offset)
@@ -1467,6 +1510,14 @@ fn validate_records(data: &[u8], pages: &[VgeomPageEntry]) -> Result<()> {
                 .ok_or_else(|| bad("triangle"))?;
             if t_end > u64::from(e.mltri_count) {
                 return Err(bad("triangle"));
+            }
+            // The range is now known to fit, so this slice is safe.
+            let tlo = r.triangle_offset as usize;
+            if mltris[tlo..t_end as usize]
+                .iter()
+                .any(|&t| u32::from(t) >= r.vertex_count)
+            {
+                return Err(bad("triangle value"));
             }
         }
     }
@@ -2140,6 +2191,82 @@ mod tests {
             VgeomAssetError::RecordOutOfBounds { .. }
         ));
         // The untouched image still opens, so the test is not passing by accident.
+        assert!(VgeomAssetImage::from_bytes(good).is_ok());
+    }
+
+    /// **Round 3: the ranges were checked and the VALUES were not.**
+    ///
+    /// **Round 3: the ranges were checked and the micro-triangle VALUES were
+    /// not** — and `to_mesh` is a third entrance nobody's rule ran at.
+    ///
+    /// Two poisons, both written as **bytes in the image**, which is how they
+    /// would arrive: out of a shipped pack, past a build side that never ran.
+    ///
+    /// (a) A micro-triangle local past the meshlet's own vertex list. It is in
+    /// bounds of its section, so every range check is happy; over a 64-vertex
+    /// meshlet a local of 200 lands in the neighbouring meshlet's slice of the
+    /// concatenated buffer and silently draws its vertex. Only the parse can
+    /// see this, so the parse asks it.
+    ///
+    /// (b) A micro *vertex* index past the image's own vertex buffer. This one
+    /// deliberately still parses — `stream::stage_page` bounds it for the GPU
+    /// path (`streaming::a_corrupt_page_blocks_and_degrades` is that arm) — and
+    /// is caught on the CPU path by the `VgeomMesh::validate` that `to_mesh`
+    /// now runs on its way out. Before round 3 it was caught by neither: the
+    /// mesh came back with an index `triangle()` dereferences bare.
+    #[test]
+    fn rejects_a_record_whose_micro_index_values_escape_their_meaning() {
+        let m = dense_mesh(24);
+        let good = build_vgeom_asset(&m, &ClusterTextureSet::none())
+            .unwrap()
+            .into_bytes();
+        let (mlverts_off, mltris_off, image_vertices, vcount) = {
+            let r = VgeomAssetReader::new(good.as_slice()).unwrap();
+            let e = r.pages()[0];
+            let rec: &[MeshletRec] = bytemuck::cast_slice(
+                &good[e.meshlets_off as usize
+                    ..e.meshlets_off as usize + e.meshlet_count as usize * MESHLET_REC_LEN],
+            );
+            assert!(rec[0].vertex_count > 0 && rec[0].triangle_count > 0);
+            (
+                e.mlverts_off as usize,
+                e.mltris_off as usize,
+                r.header().vertex_count,
+                rec[0].vertex_count,
+            )
+        };
+
+        // (a) — refused at the door.
+        assert!(
+            vcount < 255,
+            "the fixture must leave room above its own count"
+        );
+        let mut bytes = good.clone();
+        bytes[mltris_off] = vcount as u8;
+        let err = VgeomAssetImage::from_bytes(bytes).unwrap_err();
+        assert!(
+            matches!(&err, VgeomAssetError::RecordOutOfBounds { what, .. } if *what == "triangle value"),
+            "expected a triangle-value refusal, got {err}"
+        );
+
+        // (b) — parses, and `to_mesh` refuses it.
+        let mut bytes = good.clone();
+        bytes[mlverts_off..mlverts_off + 4].copy_from_slice(&image_vertices.to_le_bytes());
+        let reader = VgeomAssetReader::new(bytes.as_slice())
+            .expect("the page directory is byte-for-byte valid, so this must still parse");
+        let err = reader
+            .to_mesh()
+            .expect_err("a micro index past the vertex buffer materialized as a valid mesh");
+        assert!(
+            matches!(&err, VgeomAssetError::Malformed(m) if m.contains("vertex past the buffer")),
+            "the refusal must name what it refused: {err}"
+        );
+
+        // The untouched image still opens and still materializes.
+        VgeomAssetReader::new(good.as_slice())
+            .unwrap()
+            .to_mesh()
+            .expect("the control must still materialize");
         assert!(VgeomAssetImage::from_bytes(good).is_ok());
     }
 

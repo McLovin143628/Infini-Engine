@@ -580,6 +580,13 @@ fn a_corrupt_page_blocks_and_degrades() {
     // Point one micro vertex index past every page's vertex block. The page
     // *directory* stays byte-for-byte valid — this survives `parse` and only fails
     // in `stage_page`, which is exactly the "loads, then cannot be used" shape.
+    //
+    // **Round 3 kept it that way deliberately.** The micro *vertex* values are
+    // bounded by their two consumers — `stage_page`'s `pool_vertex` here, and
+    // `VgeomMesh::validate` on `to_mesh`'s way out — and not a third time at
+    // parse, because a parse-side copy would make this arm unreachable from a
+    // file. The micro *triangle* locals, which nothing else could see, ARE
+    // checked at parse (`validate_records`).
     bytes[mlverts_off..mlverts_off + 4].copy_from_slice(&u32::MAX.to_le_bytes());
 
     let src = VgeomSource::from_image(bytes).expect("a corrupt section still parses");
