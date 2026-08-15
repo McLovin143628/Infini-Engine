@@ -2898,7 +2898,7 @@ mod advisory_source_gate {
                 // Trailing whitespace is not an interior run either.
                 if i < b.len() {
                     let run = i - start;
-                    if run >= EATEN && best.map_or(true, |b| run > b) {
+                    if run >= EATEN && best.is_none_or(|b| run > b) {
                         best = Some(run);
                     }
                 }
