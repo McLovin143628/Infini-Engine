@@ -74,9 +74,18 @@ impl EventHandler for EventCollector {
         event: CollisionEvent,
         _contact_pair: Option<&ContactPair>,
     ) {
-        if let Ok(mut guard) = self.events.lock() {
-            guard.push(event);
-        }
+        // **Recover from a poisoned lock rather than dropping the event**
+        // (Hardening Wave C, L6.F10). `append_into`, twenty lines up, already
+        // does exactly this with `into_inner()`; this half silently discarded a
+        // contact instead. Poisoning means some earlier holder panicked, and the
+        // buffer it panicked over is a `Vec<CollisionEvent>` with no invariant
+        // to violate half-way — so the data is sound and the only thing the
+        // `if let` bought was a step whose collision set is a function of
+        // whether an unrelated panic had happened. That is a determinism defect
+        // dressed as defensiveness: it makes `state_bytes` depend on the
+        // process's history rather than on its inputs.
+        let mut guard = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        guard.push(event);
     }
 
     fn handle_contact_force_event(

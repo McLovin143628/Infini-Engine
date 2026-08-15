@@ -139,6 +139,12 @@ impl SimScheduleBuilder {
         // [`SimSchedule::conflict_report`] can resolve system names — the empty
         // conflict-report test is the hard gate (deliverable 2), backed by the
         // replay-determinism harness (§8).
+        //
+        // **A warning is not enforcement**, and `conflict_report`'s doc used to
+        // claim this line said `Error`. It does not, on purpose; the consequence
+        // is that the report is the whole of the enforcement, so it is driven
+        // over every configuration this builder can produce rather than over the
+        // one the first test happened to build (Hardening Wave C, L6.F11).
         schedule.set_build_settings(ScheduleBuildSettings {
             ambiguity_detection: LogLevel::Warn,
             ..Default::default()
@@ -269,8 +275,23 @@ impl SimSchedule {
     /// the discipline holds (all overlapping-access systems are ordered), so the
     /// step is order-independent and therefore pool-size-invariant.
     ///
-    /// `build()` already sets `ambiguity_detection = Error`, so an undisciplined
-    /// schedule fails to build; this helper is the explicit, test-friendly probe.
+    /// # This is the enforcement, not a convenience (Hardening Wave C, L6.F11)
+    ///
+    /// This doc used to say that `build()` sets `ambiguity_detection = Error`
+    /// "so an undisciplined schedule fails to build", and that this helper was
+    /// merely "the explicit, test-friendly probe". It does not: `build()` sets
+    /// **`Warn`**, deliberately and with its reasons written out beside it — a
+    /// schedule that refused to build could not have its system *names* resolved
+    /// here, so the error level that sounds stricter would leave the failure
+    /// unreadable. A warning goes to a log nobody reads in CI.
+    ///
+    /// So this helper is the only thing standing between an undisciplined
+    /// schedule and a green build, and a helper is worth exactly the
+    /// configurations somebody calls it on. It was called on one
+    /// (`engine_default(Serial)`), and [`SimScheduleBuilder`] has eight phase
+    /// combinations across two modes;
+    /// `every_builder_configuration_is_free_of_unordered_conflicts` now drives
+    /// all of them.
     pub fn conflict_report(&mut self, world: &mut EcsWorld) -> Vec<(String, String)> {
         let w = world.world_mut();
         // Build the schedule against the real world so component ids resolve.
@@ -376,6 +397,113 @@ mod tests {
             conflicts.is_empty(),
             "conflicting systems without an ordering edge: {conflicts:?}"
         );
+    }
+
+    /// **Every configuration the builder can produce, not the one the first test
+    /// happened to build** (Hardening Wave C, L6.F11).
+    ///
+    /// `build()` sets `ambiguity_detection = Warn`, deliberately — an `Error`
+    /// would refuse to build and then `conflict_report` could not resolve the
+    /// system *names* that make the failure readable. A warning goes to a log
+    /// nobody reads in CI, so this report is the whole of the enforcement, and
+    /// enforcement is worth exactly the configurations somebody calls it on. It
+    /// was called on `engine_default(Serial)`. `propagation_only` was not
+    /// covered at all, and it is a *different graph*: no `director`, no
+    /// spawn/despawn sync points, so every ordering edge those systems carried
+    /// is absent.
+    ///
+    /// Both modes, because `mode` is part of the builder's configuration. The
+    /// executor cannot change the dependency graph — `conflict_report`
+    /// initializes rather than runs — and that is a claim worth having a test
+    /// make rather than a comment assert.
+    #[test]
+    fn every_builder_configuration_is_free_of_unordered_conflicts() {
+        // Idempotent and process-global; done up front so the parallel half
+        // never depends on a lazy init inside `initialize`. No test in this
+        // crate reads the count back, so a fixed small pool is free here.
+        init_ecs_task_pool(2);
+
+        let mut checked = 0u32;
+        for mode in [ScheduleMode::Serial, ScheduleMode::Parallel] {
+            for gameplay in [false, true] {
+                for structural in [false, true] {
+                    for propagation in [false, true] {
+                        let mut w = seeded_world();
+                        let mut sched = SimScheduleBuilder::new()
+                            .mode(mode)
+                            .gameplay(gameplay)
+                            .structural(structural)
+                            .propagation(propagation)
+                            .build();
+                        let conflicts = sched.conflict_report(&mut w);
+                        assert!(
+                            conflicts.is_empty(),
+                            "{mode:?} gameplay={gameplay} structural={structural} \
+                             propagation={propagation}: conflicting systems without \
+                             an ordering edge: {conflicts:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            checked, 16,
+            "the builder's configuration space changed size; the sweep above is \
+             no longer exhaustive"
+        );
+    }
+
+    /// A resource nothing else in the crate touches, so a conflict over it is
+    /// unambiguously the one this test injected.
+    #[derive(Resource, Default)]
+    struct AmbiguityProbe(u32);
+
+    fn probe_bump_a(mut p: ResMut<AmbiguityProbe>) {
+        p.0 += 1;
+    }
+
+    fn probe_bump_b(mut p: ResMut<AmbiguityProbe>) {
+        p.0 += 2;
+    }
+
+    /// **The report can see a conflict, and it NAMES it.**
+    ///
+    /// Every other arm here asserts the report is *empty*, which a
+    /// `conflict_report` that always returned empty would satisfy perfectly —
+    /// a failed `initialize`, a bevy upgrade that moved `conflicting_systems`,
+    /// a filter that dropped everything. And the name resolution is its own
+    /// silent failure: `name_of` falls back to `<unknown>` when `systems()`
+    /// errors, so a report of `("<unknown>", "<unknown>")` pairs would be
+    /// useless and no emptiness assertion could tell.
+    ///
+    /// Two systems that both take `ResMut<AmbiguityProbe>` and carry no ordering
+    /// edge are exactly the state the report exists to detect.
+    #[test]
+    fn the_conflict_report_can_see_a_conflict_and_names_it() {
+        let mut w = seeded_world();
+        w.world_mut().insert_resource(AmbiguityProbe::default());
+
+        let mut sched = SimSchedule::engine_default(ScheduleMode::Serial);
+        sched.schedule.add_systems((probe_bump_a, probe_bump_b));
+
+        let conflicts = sched.conflict_report(&mut w);
+        assert!(
+            !conflicts.is_empty(),
+            "two unordered systems writing one resource were not reported — this \
+             report cannot see the thing every other arm here trusts it to see"
+        );
+        let named: Vec<&str> = conflicts
+            .iter()
+            .flat_map(|(a, b)| [a.as_str(), b.as_str()])
+            .collect();
+        for want in ["probe_bump_a", "probe_bump_b"] {
+            assert!(
+                named.iter().any(|n| n.contains(want)),
+                "the report does not name `{want}`: {conflicts:?} — an unreadable \
+                 report is what `ambiguity_detection = Warn` was chosen to avoid"
+            );
+        }
     }
 
     #[test]

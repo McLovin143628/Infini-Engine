@@ -63,7 +63,23 @@ pub fn ref_dto(project: &AssetProject, id: inf_asset::AssetId) -> AssetRefDto {
 /// Build the full content snapshot.
 pub fn build(project: &AssetProject) -> AssetSnapshot {
     let mut assets: Vec<AssetDto> = project.db().iter().map(|e| asset_dto(project, e)).collect();
-    assets.sort_by_key(|a| a.name.to_lowercase());
+    // **The GUID breaks the tie, and the source is why.** `AssetDb::iter` is
+    // documented "all entries, unordered" — it walks a `HashMap` — and
+    // lower-cased display names are *not* unique: `Rock.inf_mesh` and
+    // `rock.inf_mesh` in two folders, or the same name in `props/` and `env/`,
+    // collide. A sort on a non-total key over an unordered source leaves the
+    // colliding pair in whatever order the hash walk produced, so the Content
+    // Drawer's grid could reorder between two snapshots of an unchanged project
+    // — a row moving under a click. `sort_by_key` is stable, which preserves the
+    // input order for ties and therefore preserves exactly the thing that has no
+    // order. The GUID is the identity the drawer already keys its rows on, so it
+    // is the tie-break that costs nothing.
+    assets.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.id.cmp(&b.id))
+    });
 
     // Derive the folder tree from asset folders (+ all ancestors, + root).
     let mut counts: BTreeMap<String, u32> = BTreeMap::new();
