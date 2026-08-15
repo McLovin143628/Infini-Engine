@@ -43,6 +43,14 @@ impl RenderGraph {
             .find_map(|n| (n.as_mut() as &mut dyn std::any::Any).downcast_mut::<T>())
     }
 
+    /// The first node of type `T`, immutably — [`node_mut`](Self::node_mut)'s
+    /// read-only twin, for the accessors that publish a node's counters.
+    pub fn node<T: RenderNode>(&self) -> Option<&T> {
+        self.nodes
+            .iter()
+            .find_map(|n| (n.as_ref() as &dyn std::any::Any).downcast_ref::<T>())
+    }
+
     pub fn run(&mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, frame: &FrameData) {
         for node in &mut self.nodes {
             let _span = tracing::trace_span!("render_node", name = node.name()).entered();

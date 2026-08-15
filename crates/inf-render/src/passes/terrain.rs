@@ -1048,6 +1048,17 @@ impl TerrainNode {
         }
     }
 
+    /// How many tiles the per-tile GPU texture cache is holding, and for how many
+    /// terrains a splat-material slot exists.
+    ///
+    /// Published for the same reason [`super::fracture::FractureNode::cached_chunks`]
+    /// is: a claim that a cache was *released* is a claim about the map, and a gate
+    /// that cannot read the map can only assert that no pixels changed — which an
+    /// unreleased cache satisfies perfectly.
+    pub fn cached_counts(&self) -> (usize, usize) {
+        (self.textures.len(), self.materials.len())
+    }
+
     /// Reconcile the per-tile GPU texture cache with the projection (P16.3b1).
     ///
     /// Per-tile version-gated: [`plan_tile_cache`] names exactly the tiles whose
@@ -1436,6 +1447,26 @@ impl RenderNode for TerrainNode {
         // No terrain (or nothing resident in any of them) → byte-identical to
         // pre-P10.1: the node encodes nothing at all.
         if terrains.iter().all(|t| t.tiles.is_empty()) {
+            // Releasing the caches HERE is the whole point of the branch having a
+            // body. `sync_textures` owns the only two eviction paths there are
+            // (`plan_tile_cache`'s `evict` and the `materials` retain) and it runs
+            // *below* this early-out, so the transition the guard would otherwise
+            // hide — the last tile of the last terrain leaving the scene, i.e. a
+            // level switch, New Level, or every tile streaming out — stranded four
+            // textures per tile (≈840 KiB at 256²) for the renderer's whole life.
+            // Verbatim `VoxelNode::run` and `FractureNode::run`, including the
+            // reason their comments give: this is a plain map drop, not an encoder
+            // touch, so the byte-stability guarantee for the committed goldens is
+            // untouched.
+            //
+            // The cost of the mirror is the same one voxel pays: a frame in which
+            // residency momentarily reaches zero re-uploads afterwards. That is a
+            // re-upload, not a hole, and it is the price of the cache never
+            // outliving its content.
+            self.textures.clear();
+            self.materials.clear();
+            self.instances = None;
+            self.instance_capacity = 0;
             return;
         }
         self.sync_textures(gpu, terrains, frame.deform);

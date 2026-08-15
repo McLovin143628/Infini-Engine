@@ -1247,6 +1247,21 @@ impl EngineRenderer {
         self.voxel.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// `(cached tile textures, cached splat-material slots)` held by the terrain
+    /// pass right now (Hardening D).
+    ///
+    /// The instrument for a claim a pixel comparison structurally cannot make:
+    /// "the cache was RELEASED". A stranded cache draws exactly the same frames a
+    /// released one does — that is what let the terrain node hold four textures
+    /// per tile (≈840 KiB at 256²) for the renderer's whole life after the last
+    /// tile left the scene. `(0, 0)` when the graph carries no terrain node.
+    pub fn terrain_cache_counts(&self) -> (usize, usize) {
+        self.graph
+            .node::<passes::terrain::TerrainNode>()
+            .map(|n| n.cached_counts())
+            .unwrap_or((0, 0))
+    }
+
     /// The active HDR/post settings.
     pub fn settings(&self) -> &RenderSettings {
         &self.settings

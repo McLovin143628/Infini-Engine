@@ -1215,6 +1215,9 @@ impl RenderNode for ScatterNode {
             self.uploads.clear();
             self.scratch.clear();
             self.fallback_key = None;
+            // Hardening D: the HZB is a full-resolution mip pyramid (~44 MiB at
+            // 4K) and it was the one thing this release path did not name.
+            self.hzb.release();
             return;
         }
         if !frame.settings.scatter.gpu {
@@ -1241,6 +1244,9 @@ impl RenderNode for ScatterNode {
         let occlusion = frame.settings.scatter.occlusion;
         if occlusion {
             self.hzb.build(gpu, encoder, frame);
+        } else {
+            // Nothing samples the pyramid this frame; see `HzbChain::release`.
+            self.hzb.release();
         }
         let hzb_dims = if occlusion {
             self.hzb

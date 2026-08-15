@@ -1724,6 +1724,7 @@ impl VgeomNode {
     ) {
         self.pending = None;
         if !settings.enabled || scene.vgeom_instances.is_empty() || scene.vgeom_assets.is_empty() {
+            self.release_all();
             return;
         }
         let mut by_asset: BTreeMap<u128, Vec<&VgeomInstance>> = BTreeMap::new();
@@ -1935,6 +1936,63 @@ impl VgeomNode {
         for asset in &page_in.dropped {
             self.draws.remove(asset);
         }
+        self.publish_report();
+    }
+
+    /// **Release everything on the off-transition** (Hardening D).
+    ///
+    /// `plan_cluster_pages` returns early when the meshlet path is switched off or
+    /// the scene stops carrying vgeom, and the *only* eviction chain there is runs
+    /// below that guard (`plan → plan.dropped → commit_cluster_pages →
+    /// draws.remove`). So the two transitions the guard hides — vgeom turned off,
+    /// and the last vgeom asset leaving the scene — used to leave every
+    /// `AssetResidency` registered, every suballocated block claimed in
+    /// `VgeomPools`, and ~13 buffers per asset in `draws`, all with zero consumers
+    /// and no other door: `VgeomStreamer` has no `reset`, and `set_budget` (which
+    /// does clear) is itself only called *inside* `plan_cluster_pages`.
+    ///
+    /// This is `ClassicVgeomNode`'s rule, one node over: P18.3 put `retain_live`
+    /// *before* that node's early-out with the comment "the two transitions the
+    /// early-out would otherwise make invisible", and the meshlet node is the
+    /// sibling that did not get it.
+    ///
+    /// `plan(&[])` is the release: with no wants, step 1 of the plan frees every
+    /// asset entirely and reports them in `dropped`, and every later step is a
+    /// walk over an empty target set. Republishing afterwards is the second half
+    /// of the finding — `stream_report` kept publishing the stale `resident_bytes`
+    /// and `floor_bytes`, so `inf_stream::arbitrate` went on reserving a floor for
+    /// content nothing draws.
+    fn release_all(&mut self) {
+        // The two viewport-sized allocations first, and outside the guard below:
+        // `run` releases them on *their own* settings' off-transitions, but it
+        // never runs at all when this node is switched off, so that is the one
+        // transition only this function can see.
+        self.hzb.release();
+        self.vis = None;
+        if self.draws.is_empty() && self.streamer.assets().next().is_none() {
+            // Idempotent and free on the steady off-state: a node that has nothing
+            // must not republish a report every frame it is switched off.
+            return;
+        }
+        let plan = self.streamer.plan(&[]);
+        for asset in &plan.dropped {
+            self.draws.remove(asset);
+        }
+        // `dropped` is exhaustive by construction (every asset is "leaving" a want
+        // set that is empty), so this can only be a no-op — kept because a draw
+        // entry that outlived its residency is precisely the state this function
+        // exists to make unreachable.
+        self.draws.clear();
+        self.coupling.clear();
+        self.publish_report();
+    }
+
+    /// Publish the streamer's counters into the shared report.
+    ///
+    /// One derivation, two callers: the frame's commit and the off-transition
+    /// release. Split out so the release cannot publish a *different* set of
+    /// numbers than the frame does — the report is what the unified arbiter reads.
+    fn publish_report(&mut self) {
         if let Ok(mut r) = self.report.lock() {
             r.stats = *self.streamer.stats();
             r.retracted = self.retracted;
@@ -2045,6 +2103,14 @@ impl RenderNode for VgeomNode {
         // raster, which P28.1 keeps precisely so there is somewhere to fall back
         // to, and the counter says which ceiling.
         let mut vis_on = false;
+        // The visbuffer's targets are full-viewport (an id texture, a depth, and an
+        // `Rgba32Float` instance texture) and `self.vis` was only ever *built*,
+        // never put back to `None` — so turning the setting off mid-session held
+        // them for the renderer's life. Released here, on the off-transition, for
+        // the same reason the terrain and vgeom caches are.
+        if !settings.visbuffer {
+            self.vis = None;
+        }
         if settings.visbuffer {
             if self.vis.is_none() {
                 self.vis = Some(super::visbuffer::VisState::new(
@@ -2152,6 +2218,9 @@ impl RenderNode for VgeomNode {
             if !two_pass {
                 hzb_chain.build(gpu, encoder, frame);
             }
+        } else {
+            // Occlusion off ⇒ nothing reads the pyramid. See `HzbChain::release`.
+            hzb_chain.release();
         }
         let hzb_dims = if occlusion {
             hzb_chain
@@ -3060,6 +3129,30 @@ impl HzbChain {
     /// [`build`]: HzbChain::build
     pub(crate) fn full_view(&self) -> Option<&wgpu::TextureView> {
         self.full_view.as_ref()
+    }
+
+    /// Drop the pyramid and every view/bind group into it (Hardening D).
+    ///
+    /// `ensure` is only ever reached under the `occlusion` setting, so with
+    /// occlusion switched off mid-session the chain — a full-resolution `R32Float`
+    /// mip pyramid, ≈1.33 · W · H · 4 bytes, i.e. ~44 MiB at 4K, per chain and
+    /// there are two — stayed allocated for the renderer's life with no consumer.
+    /// The voxel/fracture rule again: release on the transition the guard hides.
+    ///
+    /// `generation` is bumped rather than reset: it is the invalidation half of
+    /// every `HzbKey`, and a monotonic stamp that goes backwards would let a
+    /// cached bind group holding a dead view be mistaken for a live one.
+    pub(crate) fn release(&mut self) {
+        if self.texture.is_none() {
+            return;
+        }
+        self.texture = None;
+        self.mip_views.clear();
+        self.full_view = None;
+        self.size = (0, 0);
+        self.generation = self.generation.wrapping_add(1);
+        self.copy_bg = super::GenCache::default();
+        self.down_bgs = super::GenCache::default();
     }
 
     /// Build the pyramid from the frame's **MSAA scene depth** into [`full_view`].
