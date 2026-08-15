@@ -171,6 +171,26 @@ pub struct EngineHost {
     selected_guids: Vec<Uuid>,
     /// Document version the current projection reflects (skip redundant rebuilds).
     synced_version: Option<u64>,
+    /// **The seam owes a recompute** (round-2 finding B9).
+    ///
+    /// Hardening Wave E made `apply_seam` skippable: when every volume and
+    /// every terrain was carried forward unchanged, last frame's per-vertex
+    /// terms are still right. That argument is sound for the player, whose
+    /// only writer of `scene.terrains` is `project_scene` itself. This host has
+    /// **two more**: `sync_streamed_terrain` (the camera advanced the cut) and
+    /// `after_terrain_edit` (a sculpt dab), both of which re-project a terrain
+    /// **in place**, outside `rebuild_scene`. By the time the next projection
+    /// runs, its carry comparison is against the already-updated list — every
+    /// signature matches, nothing is dropped, and the skip fires. A cave mouth
+    /// beside a streamed terrain then keeps seam terms computed against
+    /// pre-dab, pre-page heights for the rest of the session, while the shipped
+    /// build recomputes them — a new editor-vs-shipping divergence in the exact
+    /// seam the mirrored-pair discipline exists to protect.
+    ///
+    /// Invalidating `synced_version` alone does not close it: it forces the
+    /// projection to *run*, and the run then carries everything and skips.
+    /// This is the term that makes the run recompute.
+    seam_dirty: bool,
     /// Active projection: perspective (3D) or orthographic (2D editor). Drives
     /// the gizmo handle set and the grid plane; the camera itself lives in the
     /// platform loop (which keeps a separate pose per mode). (P8.2c)
@@ -944,6 +964,7 @@ impl EngineHost {
             spline_polylines: HashMap::new(),
             selected_guids: Vec::new(),
             synced_version: None,
+            seam_dirty: false,
             mode: ViewportMode::Perspective,
             snap_2d: Snap2DSettings::default(),
             selected_2d: HashMap::new(),
@@ -2357,16 +2378,24 @@ impl EngineHost {
         // is skipped whole. `carried == pushed && prev.is_empty()` is the exact
         // statement of "nothing changed on this axis": the first half sees an
         // addition or a rebuild, the second sees a removal.
-        if !(prev_terrains.is_empty()
-            && prev_voxels.is_empty()
-            && terrains_before - prev_terrains.len() == self.scene.terrains.len()
-            && voxels_before - prev_voxels.len() == self.scene.voxels.len())
+        //
+        // Round-2 finding B9: `seam_dirty` is the third term, and it is what
+        // makes the other two honest in THIS host. The two out-of-band writers
+        // re-project a terrain in place, so the comparison above runs against
+        // an already-updated list and answers "nothing changed" about a change
+        // it made itself. See the field's doc.
+        if self.seam_dirty
+            || !(prev_terrains.is_empty()
+                && prev_voxels.is_empty()
+                && terrains_before - prev_terrains.len() == self.scene.terrains.len()
+                && voxels_before - prev_voxels.len() == self.scene.voxels.len())
         {
             inf_render::apply_seam(
                 &mut self.scene.voxels,
                 &self.scene.terrains,
                 inf_render::DEFAULT_SEAM_BAND_M,
             );
+            self.seam_dirty = false;
         }
 
         self.scene.hovered = None;
@@ -4527,6 +4556,13 @@ impl EngineHost {
                 *dst = projected.or_else(|| prev.pop()).unwrap_or_default();
             }
         }
+        // **Round-2 finding B9.** `sync_render` said the cut moved, so heights
+        // under any neighbouring voxel volume's seam band may have changed.
+        // `synced_version` forces the projection to run at all (the camera does
+        // not bump the document version); `seam_dirty` makes that run recompute
+        // the seam rather than carry the list it has just written itself.
+        self.synced_version = None;
+        self.seam_dirty = true;
     }
 
     /// `true` while a sculpt stroke is in progress.
@@ -4709,6 +4745,11 @@ impl EngineHost {
         if let Some(dst) = self.scene.terrains.get_mut(index) {
             *dst = projected.or_else(|| prev.pop()).unwrap_or_default();
         }
+        // **Round-2 finding B9**, the other out-of-band writer: a sculpt dab
+        // moves ground a neighbouring cave mouth blends against. Same pair of
+        // invalidations, same reason — see `seam_dirty`.
+        self.synced_version = None;
+        self.seam_dirty = true;
     }
 
     /// Rebuild the brush-ring loop points around `center` (terrain-local XZ on
