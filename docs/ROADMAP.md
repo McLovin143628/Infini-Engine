@@ -17583,3 +17583,168 @@ memo (allowed, with the reason that a struct would write the same six values
 twice more), `clone_on_copy` on an `ErosionParamsDto` that is `Copy`,
 `needless_range_loop` in the prefix-sum pin, and a public doc linking to the
 private `insert_normalized`.
+
+## Hardening Wave F (2026-08-15) — editor, IPC & ship-blockers
+
+The wave with three fronts and one theme: **the engine already knew, and
+returned success anyway.** A cook with no boot scene exited 0. A save that
+refused the stroke on screen answered `ok: true`. A malformed `player.toml`
+booted the engine's own demo instead of the customer's game. Every repair here
+is the same shape — a refusal that existed, reached nobody, and now decides an
+exit code, a DTO field, or a line in the Output Log.
+
+### The ship path
+
+* **C4-33 — a malformed `player.toml` booted the built-in demo.**
+  `toml::from_str(..).ok()?` collapsed "malformed" into "absent", so a
+  double-clicked exported game whose title had been hand-edited into a syntax
+  error started the engine's platformer, exit 0. `load_from_dir` now answers
+  `Ok(None)` **only** for absence; a present-but-broken file is a `ConfigError`
+  and `run()` refuses with a message naming the file. `schema_version` is
+  validated (zero and future both refuse) — it was parsed and never read.
+* **C4-40 — ship-blocking cook failures exited 0.** `CookReport` carries a
+  `blocking` list — the cannot-ship subset of `warnings` — and `inf cook` /
+  `inf export` exit non-zero on it. Carried as its own list rather than
+  recovered from the message text, because *which advisories block shipping is a
+  decision, not a spelling*. First member: "no levels in cook".
+* **C4-40 — the wasm export could not tell "not installed" from "failed to
+  compile".** `try_build_wasm(..).unwrap_or(false)` discarded
+  `CookError::Export` and collapsed both into one `false`, so `inf export
+  --target web` shipped an `index.html` importing an `inf_player.js` that was
+  never produced, exit 0. `WasmOutcome` separates them; only `Failed` blocks.
+  And `build_mod_wasm` classifies by **asking the toolchain** rather than
+  sniffing "target \`wasm32-unknown-unknown\`" out of stderr — a phrase an
+  ordinary compile error for that target routinely contains.
+* **C4-41 — an undecodable payload contributed no dependency edges.** Its
+  `.inf_tex`/clip/skeleton/mesh references silently left the pack, with no
+  advisory. Every arm of `asset_deps` now raises a blocking advisory naming the
+  asset, and `grammar_module_refs` distinguishes a v1 document-only payload
+  (absent) from an unparseable authored graph (broken) through `try_graph` —
+  Wave B's deferral, closed.
+* **`mod_init` — a mod's BeginPlay was compiled, shipped and never called.**
+  `inf-packager` has emitted the export since P14.5 and `inf_mod::infinity_mod!`
+  documents it; `inf-wasm-host` only ever looked up `mod_update`. `WasmMod::init`
+  runs it once, and `update` runs it before the first tick, so the tick path —
+  every production caller — cannot forget it.
+* **L7.H7 — a sidecar recorded an absolute source path.** Committed TOML,
+  carrying the importing machine's layout and (on Windows) its OS username into
+  every checkout. One helper for all three importers records `None` outside the
+  project root; the lost re-import is raised as an advisory rather than left
+  silent. It had never fired in-repo only because every committed sample is
+  built programmatically.
+* **L7.L2 — build-machine paths in a crash report.** `sanitize_location` strips
+  them out of `CrashReport.location`. The compile-time half is
+  `[profile.release] trim-paths`, which **cargo 1.97 has not stabilized** — the
+  line is written into the root manifest as a comment with the version gate,
+  because adding it makes the manifest unparseable. The runtime half does not
+  care how the binary was built.
+
+### The IPC surface
+
+* **L7.H6 — eight of nine filesystem doors took an unconfined absolute path.**
+  `file_read` of an ssh key was a valid request from the webview, and
+  `git_discard` could be pointed at any repository on the machine and told to
+  throw its working tree away. The correct guard already existed in
+  `shell_reveal` and was applied there and nowhere else; it is now
+  `commands::paths`, called by all of them, with a may-not-exist-yet variant for
+  writes and a relative-argument variant that refuses `..` and a Windows drive
+  prefix (the C4-28 mechanism, met again).
+* **C4-34 — `dcc_save` returned a hardcoded `ok: true`.** `settle` is
+  `#[must_use]`, so dropping its refusal does not compile, and one
+  `settle_reported` wrapper is the single door across twelve call sites. A
+  refused stroke rides out in `advisories` and decides `ok`; it outranks
+  `dcc_apply`'s and `dcc_drag_begin`'s own refusals; and the two groom doors
+  refuse outright rather than cut a garment from a mesh that is not what the
+  author sees.
+* **C4-44 cluster.** `apply_edits`' rejected count surfaced at all three
+  canvases, and the journal snapshot taken before and recorded only when
+  something landed — a fully-rejected batch left a dead undo step. The blueprint
+  lowerer refuses an unregistered node type instead of emitting a zero-argument
+  call that runs against entity 0. `validate_class` walks `class.variables`.
+  The capture wizard's `focal_ratio`/`k1`/`k2` are validated like the
+  `metres_per_unit` two fields below them. `level.rs` separates an absent
+  manifest from an unreadable one. The hot-reload guest prints the serde error
+  and the type name — the field name never left the plugin. The mod watcher
+  reloads on `notify`'s `Err` arm, which is exactly what a cargo rebuild
+  produces, so mods stopped hot-reloading after the build that matters most.
+  The PIE window handle latches on success, not on a dropped write.
+* **L7.L3/L4 + C4-45.** `path_to_uri` percent-encodes properly — it escaped the
+  space and nothing else, so any `#`/`%`/non-ASCII path named a *different*
+  document to the server and every diagnostic for it was dropped. `didChange`
+  carries a per-document increasing version instead of the literal 2. A
+  malformed LSP frame is no longer indistinguishable from EOF, which used to
+  kill the reader thread and all diagnostics silently. `pty_write` releases the
+  sessions map before the blocking write, the read loop batches 32 KiB instead
+  of 4, and `pty_close` reaps the child. Import-settings serialization failures
+  and a failed import-cache write are said out loud rather than becoming "no
+  recorded import settings" a week later.
+* **`AssetDb::collisions()` has a production consumer.** The scan has refused a
+  second payload claiming an existing GUID since P26.5 and then said nothing, so
+  the symptom an author meets is an asset that is in the folder and not in the
+  drawer. `IdCollision` already wrote itself in the P16 advisory shape; the
+  sentence existed and had no reader.
+
+### The editor
+
+Twelve lens-7 findings, one root: **an initializer whose "already running" guard
+is set after its first `await` cannot survive React StrictMode's double mount.**
+Setting it synchronously is not enough on its own — that reproduces M2 exactly,
+because the second mount gets a no-op disposer while the first cleanup tears
+everything down. One refcounted `refCountedInit` closes both: the in-flight memo
+stops the double-subscribe and the synchronous holder count stops the premature
+teardown, which is why LSP was dead in `tauri dev`. The dcc/skel tombstone
+pattern is ported to the four graph stores; undo/redo no longer drop rejections;
+the panel-window bridge diff-syncs (key-level diffing alone fixes neither named
+case, because `lines` and `nodes` *are* the keys that change); the thumbnail
+cache is a `Map` keyed by `content_hash` with LRU eviction; and `--max-warnings
+0` went in last, after the warn tier was clean.
+
+### THE NUMBERS
+
+| item | before | after |
+|---|---|---|
+| `SceneDoc::snapshot` @ 1 000 entities | 13.105 ms | 0.192 ms (68x) |
+| `SceneDoc::snapshot` @ 5 000 | 337.968 ms | 1.009 ms (335x) |
+| `SceneDoc::snapshot` @ 15 000 | **3 277.484 ms** | **3.232 ms (1 014x)** |
+| one `world://delta` round trip @ 15 000 | 3 279.836 ms | 5.480 ms (598x) |
+
+Lens 3's P23 filed this as ~30 000 string allocations per input event. **The
+strings were never the term.** `node_of` derived each node's `children` by
+scanning the entire `order` list and resolving `entity_of`/`parent_of`/`guid_of`
+for every candidate — O(n^2) entity lookups, paid on every gizmo-drag mouse-move
+and every sculpt dab.
+
+DECLINED with those numbers: the touched-set delta the lens prescribed. `diff`
+is 2.2 ms of the remaining 5.5, and a per-`EditCommand` dirty set is a Ring-1
+change across every mutation path.
+
+### NEW LAWS
+
+* **A backslash typed into a tool argument is not a backslash.** The P22 law's
+  seventh catch, and the first with a stated mechanism: a `\\` in a JSON tool
+  parameter decodes to one `\`, which the shell then hands to Python as a *line
+  continuation*, which eats it. Eleven of this wave's own advisory strings
+  shipped with the source indentation inside the sentence. Build the character
+  with `chr(92)`, or do not script the edit at all.
+* **A source pin cannot see a line break either.** The P23 law ("a byte pin
+  cannot see a semantic change") has a smaller sibling. The first pin over the
+  P23 hoist looked for `self.order` and survived its mutation, because rustfmt
+  writes the rescan as `self` and `.order` on two lines — which is exactly how
+  the original read, so the pin could never have caught the defect it was
+  written for. Match whitespace-stripped.
+* **A guard's gate must check the guard's ARGUMENTS, not only that it was
+  called.** The confinement source gate verified that every `git_*` command
+  confined its *repo*; gutting `confined_paths` so every file name sailed
+  through left it green. A gate that stops at the first call site is a gate over
+  half the door.
+* **`git checkout -- <file>` during mutation testing reverts uncommitted work.**
+  Wave E wrote this law; this wave broke it anyway and lost the P23 hoist mid-run
+  (the mutation then "survived" against unmutated original code, which is how the
+  vacuous pin above was found — the only good thing about it).
+
+Five vacuous gates were caught in this campaign before this wave; this wave found
+the sixth and seventh. Both were found by mutation, neither by reading.
+
+### VERIFICATION
+
+Battery, clippy, fmt, rustdoc, npm: see the machine-ops block below.
