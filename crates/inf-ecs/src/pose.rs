@@ -973,6 +973,53 @@ mod tests {
         }
     }
 
+    /// **The host really passes a period resolver** (P29.1).
+    ///
+    /// `exit_time` was inert for four phases not because the model lacked the
+    /// field but because this function built its context with `SmContext::new`.
+    /// The model's own tests prove a resolved context gates correctly; only an
+    /// arm HERE can prove the host supplies one — which is the difference
+    /// between the fix and a fix that is written down. It is aimed at the wiring
+    /// it names: the machine below is unconditional and gated at 80% of a **1 s**
+    /// clip, so it fires late or it fires immediately, and "immediately" is
+    /// exactly what the v1 fallback looks like.
+    #[test]
+    fn the_host_resolves_clip_lengths_so_exit_time_is_live() {
+        let guid = Uuid::from_u128(29);
+        // wave is a 1 s clip; the entry state plays it, and the only transition
+        // out of it waits for 80% of a loop.
+        let gated = StateMachine {
+            states: vec![SmState::clip("wave", WAVE), SmState::clip("idle", IDLE)],
+            transitions: vec![inf_anim::SmTransition::new(0, 1, 0.0).with_exit_time(0.8)],
+            entry: 0,
+            ..Default::default()
+        };
+        let skeleton = skeleton_asset();
+        let clip = wave_clip();
+        let mut world = world_with_character(guid);
+        let step = |world: &mut EcsWorld, dt: f64| {
+            let machines = |g: Uuid| (g == SM).then_some(&gated);
+            let skeletons = |g: Uuid| (g == SKEL).then_some(&skeleton);
+            let clips = |c: ClipRef| (c == WAVE).then_some(&clip);
+            let vars = |_: Uuid| BTreeMap::new();
+            step_pose_evaluation(world, dt, &machines, &skeletons, &clips, &vars);
+        };
+        let state_of = |world: &mut EcsWorld| -> usize {
+            let w = world.world_mut();
+            let mut q = w.query::<&AnimStateMachine>();
+            q.iter(w).next().expect("the character").runtime.current
+        };
+
+        step(&mut world, 0.5);
+        assert_eq!(
+            state_of(&mut world),
+            0,
+            "0.5 s into a 1 s clip the 0.8 gate is not met — the host is still              building its context without a clip-length resolver, so every              exit_time reads as satisfied"
+        );
+        step(&mut world, 0.4);
+        assert_eq!(state_of(&mut world), 1, "crossing 0.8 s must fire it");
+    }
+
     /// **The headline gate.** A character in a non-entry machine state is posed
     /// DIFFERENTLY from one in the entry state — which is the whole defect: before
     /// this module the machine advanced and the drawn pose never moved.
