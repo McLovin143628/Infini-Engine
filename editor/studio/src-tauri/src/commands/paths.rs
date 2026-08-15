@@ -235,6 +235,24 @@ mod tests {
                     || body.contains("confined_repo");
                 if !guarded {
                     unguarded.push(format!("{module}::{name}"));
+                    continue;
+                }
+                // …and the PATH ARGUMENTS, separately. Confining the repo says
+                // nothing about the file names inside it, and `git_discard`
+                // deletes whatever it is handed. The first version of this gate
+                // checked only the line above and a gutted `confined_paths`
+                // survived its mutation — a vacuous half, caught the way the
+                // campaign's other three were.
+                let signature = body.split('{').next().unwrap_or("");
+                let takes_paths =
+                    signature.contains("paths: Vec<String>") || signature.contains("path: String");
+                if takes_paths
+                    && !(body.contains("confined_paths")
+                        || body.contains("confine_under")
+                        || body.contains("confine_existing")
+                        || body.contains("confine_for_write"))
+                {
+                    unguarded.push(format!("{module}::{name} (path arguments)"));
                 }
             }
         }
@@ -246,5 +264,21 @@ mod tests {
             unguarded.is_empty(),
             "these filesystem commands take a path from the webview and never confine it: {unguarded:?}"
         );
+    }
+
+    /// The gate's own falsifier: it must be able to see an unguarded command.
+    /// A source gate that reads the wrong thing passes forever.
+    #[test]
+    fn the_gate_can_see_an_unguarded_command() {
+        // The shape it must reject: a command with a path argument, whose body
+        // confines the repo and nothing else.
+        let body = "\npub async fn git_wipe(repo: String, paths: Vec<String>) -> R {\n    \
+                    let root = confined_repo(&app, &project, &repo)?;\n}";
+        let signature = body.split('{').next().unwrap_or("");
+        assert!(signature.contains("paths: Vec<String>"));
+        assert!(!body.contains("confined_paths"));
+        // …and the shape it must accept.
+        let fixed = format!("{body}\n    let paths = confined_paths(&root, &paths)?;");
+        assert!(fixed.contains("confined_paths"));
     }
 }
