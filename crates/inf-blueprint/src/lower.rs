@@ -304,13 +304,15 @@ impl Lowerer<'_> {
             .ok_or(LowerError::UnknownType(node, String::new()))
     }
 
+    /// **Refuses an unregistered type** (C4-44), rather than classifying it as a
+    /// pure call with no exec input — which is what `unwrap_or(false)` did, and
+    /// is how an unknown node reached `build_call` at all.
     fn role(&self, node: NodeId) -> Result<NodeRole, LowerError> {
         let type_id = self.type_id(node)?;
-        let has_exec_in = self
-            .reg
-            .get(type_id)
-            .map(|d| d.inputs.iter().any(|p| p.ty.is_exec()))
-            .unwrap_or(false);
+        let Some(def) = self.reg.get(type_id) else {
+            return Err(LowerError::UnknownType(node, type_id.to_string()));
+        };
+        let has_exec_in = def.inputs.iter().any(|p| p.ty.is_exec());
         Ok(role_of(type_id, has_exec_in))
     }
 
@@ -610,7 +612,7 @@ impl Lowerer<'_> {
         prelude: &mut Vec<Stmt>,
     ) -> Result<Expr, LowerError> {
         let path: Vec<String> = host_call_path(type_id);
-        let ports = self.data_input_ports(node);
+        let ports = self.data_input_ports(node)?;
         let mut args = Vec::new();
         for port in ports {
             args.push(self.resolve_input(node, &port, prelude)?);
@@ -628,18 +630,27 @@ impl Lowerer<'_> {
     }
 
     /// The non-exec, non-param-pin input port names of `node`, in order.
-    fn data_input_ports(&self, node: NodeId) -> Vec<String> {
-        self.graph
-            .node(node)
-            .and_then(|n| self.reg.get(&n.type_id))
-            .map(|def| {
-                def.inputs
-                    .iter()
-                    .filter(|p| !p.ty.is_exec() && !p.param_pin)
-                    .map(|p| p.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
+    ///
+    /// **Refuses an unregistered type** (C4-44). This returned
+    /// `unwrap_or_default()` — an *empty* port list — when the node's `type_id`
+    /// was not in the registry, so `build_call` emitted `Expr::Call` with **zero
+    /// arguments** and the interpreter substituted defaults: a blueprint holding
+    /// a node type this build does not know (a graph authored against a larger
+    /// node kit, or with a plugin uninstalled) silently ran against entity 0 with
+    /// zero motion instead of saying it could not run at all.
+    fn data_input_ports(&self, node: NodeId) -> Result<Vec<String>, LowerError> {
+        let Some(n) = self.graph.node(node) else {
+            return Err(LowerError::UnknownType(node, String::new()));
+        };
+        let Some(def) = self.reg.get(&n.type_id) else {
+            return Err(LowerError::UnknownType(node, n.type_id.clone()));
+        };
+        Ok(def
+            .inputs
+            .iter()
+            .filter(|p| !p.ty.is_exec() && !p.param_pin)
+            .map(|p| p.name.clone())
+            .collect())
     }
 
     /// Resolve a data input to an [`Expr`]: follow its wire, or fall back to a

@@ -324,9 +324,30 @@ fn doc_dto(doc: &DccDoc, session: &MeshSession) -> DccDocDto {
 /// note there. The logic itself is `inf_editor_core::dcc::settle_drag`, in Ring 1,
 /// because a `#[tauri::command]` cannot be driven from a test and this is the
 /// rule the whole doctrine rests on.
+#[must_use = "a refused stroke is a stroke the author can see on screen and the \
+              file will not contain — say so (C4-34)"]
 fn settle(doc: &mut DccDoc, session: &mut MeshSession) -> Option<String> {
     let pending = doc.pending.take();
     dcc::settle_drag(session, &mut doc.selection, doc.mode, pending)
+}
+
+/// Settle the stroke in flight and **say so if it was refused** (C4-34).
+///
+/// `settle` consumes `doc.pending` whether or not the stroke commits, and its
+/// `Option<String>` was dropped at ten of the eleven doors — including
+/// `dcc_save`, which returned a hardcoded `ok: true`. So a save could write the
+/// asset *without* the dabs the author was looking at and report success, which
+/// is the one thing the comment above that call forbids in those words.
+///
+/// `#[must_use]` on `settle` makes dropping the refusal a compile error under
+/// `-D warnings`. This helper is the answer for a door whose DTO has nowhere to
+/// put it: the Output Log is a real surface, and silence is not.
+fn settle_reported(doc: &mut DccDoc, session: &mut MeshSession, door: &str) -> Option<String> {
+    let refusal = settle(doc, session);
+    if let Some(why) = &refusal {
+        tracing::warn!("{door}: the stroke in flight was REFUSED and is not in the model — {why}");
+    }
+    refusal
 }
 
 /// Bring the selection up to the session's stamp, the only way a caller is
@@ -472,13 +493,13 @@ pub async fn dcc_apply(
         let (doc, session) = s.pair(&id)?;
         // A tool press with a drag still in flight settles it first: the author's
         // dabs become a real edit, and the tool runs on the mesh they can see.
-        settle(doc, session);
+        let settled = settle_reported(doc, session, "dcc_apply");
         sync(doc, session);
         let ops = build_ops(doc, session, &tool)?;
         if ops.is_empty() {
             return Ok(DccApplyDto {
                 ok: false,
-                refusal: Some("nothing is selected".into()),
+                refusal: Some(settled.unwrap_or_else(|| "nothing is selected".to_string())),
                 doc: doc_dto(doc, session),
             });
         }
@@ -504,6 +525,10 @@ pub async fn dcc_apply(
                 }
             }
         }
+        // C4-34: a refused settle outranks a successful tool press — the stroke
+        // the author is looking at is NOT in the model, and reporting `ok: true`
+        // because the *next* op worked is the save that lied, one command early.
+        let refusal = settled.or(refusal);
         Ok(DccApplyDto {
             ok: refusal.is_none(),
             refusal,
@@ -689,7 +714,9 @@ pub async fn dcc_select(
 ) -> Result<DccDocDto, String> {
     state.with(|s| {
         let (doc, session) = s.pair(&id)?;
-        settle(doc, session);
+        // This door answers with a bare `DccDocDto`, which has nowhere to
+        // carry a refusal; `settle_reported` has already said it out loud.
+        let _ = settle_reported(doc, session, "dcc_select");
         sync(doc, session);
         let mesh = session.mesh();
         match action {
@@ -745,7 +772,9 @@ pub async fn dcc_pick(
 ) -> Result<DccDocDto, String> {
     state.with(|s| {
         let (doc, session) = s.pair(&id)?;
-        settle(doc, session);
+        // This door answers with a bare `DccDocDto`, which has nowhere to
+        // carry a refusal; `settle_reported` has already said it out loud.
+        let _ = settle_reported(doc, session, "dcc_pick");
         sync(doc, session);
         let mesh = session.mesh();
         let proj = Projector::new(doc.view, size.max(1));
@@ -805,7 +834,9 @@ pub async fn dcc_set_gizmo(
 ) -> Result<DccDocDto, String> {
     state.with(|s| {
         let (doc, session) = s.pair(&id)?;
-        settle(doc, session);
+        // This door answers with a bare `DccDocDto`, which has nowhere to
+        // carry a refusal; `settle_reported` has already said it out loud.
+        let _ = settle_reported(doc, session, "dcc_set_gizmo");
         doc.gizmo = mode.map(gizmo_mode_of);
         Ok(doc_dto(doc, session))
     })
@@ -831,7 +862,7 @@ pub async fn dcc_drag_begin(
         let (doc, session) = s.pair(&id)?;
         // A second `begin` without an `end` — a lost pointer-up — settles the
         // first rather than discarding it.
-        settle(doc, session);
+        let settled = settle_reported(doc, session, "dcc_drag_begin");
         sync(doc, session);
         let proj = Projector::new(doc.view, size.max(1));
         let (px, py) = (x as f32, y as f32);
@@ -925,7 +956,9 @@ pub async fn dcc_drag_begin(
                     return Ok(DccDragBeginDto {
                         grabbed: false,
                         handle: None,
-                        refusal: Some("nothing is selected, so the gizmo has no pivot".into()),
+                        refusal: Some(settled.unwrap_or_else(|| {
+                            "nothing is selected, so the gizmo has no pivot".to_string()
+                        })),
                         doc: doc_dto(doc, session),
                     });
                 };
@@ -968,7 +1001,9 @@ pub async fn dcc_drag_begin(
         Ok(DccDragBeginDto {
             grabbed,
             handle,
-            refusal: None,
+            // The PREVIOUS stroke's refusal, if there was one: this drag beginning
+            // is not evidence that the last one landed (C4-34).
+            refusal: settled,
             doc: doc_dto(doc, session),
         })
     })?;
@@ -1034,7 +1069,7 @@ pub async fn dcc_drag_end(
 ) -> Result<DccApplyDto, String> {
     let out = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
-        let refusal = settle(doc, session);
+        let refusal = settle_reported(doc, session, "dcc_drag_end");
         Ok(DccApplyDto {
             ok: refusal.is_none(),
             refusal,
@@ -1108,7 +1143,9 @@ pub async fn dcc_undo(
         let (doc, session) = s.pair(&id)?;
         // Settle FIRST, so Ctrl+Z during a drag undoes that drag rather than the
         // edit before it and then losing the drag entirely.
-        settle(doc, session);
+        // This door answers with a bare `DccDocDto`, which has nowhere to
+        // carry a refusal; `settle_reported` has already said it out loud.
+        let _ = settle_reported(doc, session, "dcc_undo");
         session.undo();
         sync(doc, session);
         Ok(doc_dto(doc, session))
@@ -1126,7 +1163,9 @@ pub async fn dcc_redo(
 ) -> Result<DccDocDto, String> {
     let dto = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
-        settle(doc, session);
+        // This door answers with a bare `DccDocDto`, which has nowhere to
+        // carry a refusal; `settle_reported` has already said it out loud.
+        let _ = settle_reported(doc, session, "dcc_redo");
         session.redo();
         sync(doc, session);
         Ok(doc_dto(doc, session))
@@ -1278,12 +1317,20 @@ pub async fn dcc_save(
     assets: State<'_, super::assets::AssetState>,
     viewport: State<'_, super::ViewportState>,
 ) -> Result<DccSaveDto, String> {
-    let (asset, mesh, generation) = state.with(|s| {
+    let (asset, mesh, generation, settled) = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
         // A save with a stroke in flight writes the stroke: the author can see it
         // on screen, so a file that did not contain it would be a save that lied.
-        settle(doc, session);
-        Ok((doc.asset, session.mesh().clone(), session.generation()))
+        // **And when the stroke is REFUSED, the file does not contain it** — which
+        // is what this door reported `ok: true` over (C4-34). The refusal now
+        // rides out in `advisories` and decides `ok`.
+        let settled = settle_reported(doc, session, "dcc_save");
+        Ok((
+            doc.asset,
+            session.mesh().clone(),
+            session.generation(),
+            settled,
+        ))
     })?;
 
     // ONE call, in Ring 1, where a test can reach it — see the module docs.
@@ -1312,9 +1359,18 @@ pub async fn dcc_save(
     let _ = app.emit("assets://changed", ());
     let _ = app.emit("dcc://sync", id);
 
+    let mut advisories = advisories(&report);
+    if let Some(why) = &settled {
+        advisories.insert(
+            0,
+            format!(
+                "the stroke in flight was REFUSED and is NOT in the file you just saved — {why}"
+            ),
+        );
+    }
     Ok(DccSaveDto {
-        ok: true,
-        advisories: advisories(&report),
+        ok: settled.is_none(),
+        advisories,
         export: export_dto(&report),
         vmesh: vmesh.into(),
     })
@@ -1377,7 +1433,7 @@ pub async fn dcc_unwrap(
 ) -> Result<DccUnwrapDto, String> {
     let out = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
-        settle(doc, session);
+        let settled = settle_reported(doc, session, "dcc_unwrap");
         sync(doc, session);
         match inf_dcc::unwrap(session.mesh()) {
             Ok(unwrapped) => {
@@ -1388,8 +1444,10 @@ pub async fn dcc_unwrap(
                         // author has selected still name what they named.
                         doc.selection.carry(session.generation(), session.mesh());
                         Ok(DccUnwrapDto {
-                            ok: true,
-                            refusal: None,
+                            // C4-34: the unwrap succeeded, the stroke before it
+                            // did not, and the file will not contain it.
+                            ok: settled.is_none(),
+                            refusal: settled,
                             charts: report.charts.len() as u32,
                             corners: report.corners as u32,
                             seams: report.seams as u32,
@@ -1506,7 +1564,9 @@ pub async fn dcc_merge_asset(
 
     let out = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
-        settle(doc, session);
+        // This door answers with a bare `DccDocDto`, which has nowhere to
+        // carry a refusal; `settle_reported` has already said it out loud.
+        let _ = settle_reported(doc, session, "dcc_merge_asset");
         sync(doc, session);
         let here = dcc::tessellate(session.mesh()).bounds;
         let there = dcc::tessellate(&incoming.mesh).bounds;
@@ -1615,16 +1675,25 @@ pub async fn dcc_make_garment(
         Ok(r) => r,
         Err(e) => return Ok(groom_refusal(e)),
     };
-    let (source, mesh, selection, doc_name) = state.with(|s| {
+    let (source, mesh, selection, doc_name, settled) = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
-        settle(doc, session);
+        let settled = settle_reported(doc, session, "dcc_make_garment");
         Ok((
             doc.asset,
             session.mesh().clone(),
             doc.selection.clone(),
             doc.name.clone(),
+            settled,
         ))
     })?;
+    // C4-34: the garment is cut from a mesh that does NOT contain the stroke the
+    // author can see. Refuse rather than build a garment they did not model.
+    if let Some(why) = settled {
+        return Ok(groom_refusal(format!(
+            "the stroke in flight was refused, so the mesh this would be cut from is not \
+             what is on screen — {why}"
+        )));
+    }
 
     let built = inf_editor_core::groom::garment_from_session(
         &mesh,
@@ -1705,16 +1774,24 @@ pub async fn dcc_grow_hair(
         Ok(r) => r,
         Err(e) => return Ok(groom_refusal(e)),
     };
-    let (source, mesh, selection, doc_name) = state.with(|s| {
+    let (source, mesh, selection, doc_name, settled) = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
-        settle(doc, session);
+        let settled = settle_reported(doc, session, "dcc_grow_hair");
         Ok((
             doc.asset,
             session.mesh().clone(),
             doc.selection.clone(),
             doc.name.clone(),
+            settled,
         ))
     })?;
+    // C4-34, as above: a scalp taken from a mesh missing the author's last stroke.
+    if let Some(why) = settled {
+        return Ok(groom_refusal(format!(
+            "the stroke in flight was refused, so the scalp this would be grown on is not \
+             what is on screen — {why}"
+        )));
+    }
 
     let built = inf_editor_core::groom::groom_from_session(
         &mesh,
@@ -2042,7 +2119,7 @@ mod tests {
                 let f = session.mesh().face_ids().next().unwrap();
                 doc.selection.set_face(f, true);
                 doc.pending = Some(stroke_of(session));
-                settle(doc, session);
+                let _ = settle_reported(doc, session, "dcc_grow_hair");
                 sync(doc, session);
                 assert_eq!(doc.selection.len(SelectMode::Face), 1);
                 assert!(doc.selection.contains_face(f));
@@ -2195,7 +2272,11 @@ mod tests {
 
         for (name, policy) in DRAG_POLICY {
             let body = body_of(SOURCE, &format!("pub async fn {name}("));
-            let settles = body.contains("settle(doc, session)");
+            // C4-34: the spelling is `settle_reported`, the ONE door, because
+            // `settle` is now `#[must_use]` and a caller that dropped its refusal
+            // would not compile. Looking for the bare `settle(` would also match
+            // the wrapper's own definition and pass for a door that never calls it.
+            let settles = body.contains("settle_reported(doc, session");
             match policy {
                 DragPolicy::Settles => assert!(
                     settles,
@@ -2374,10 +2455,15 @@ mod tests {
     /// statement in this door, of any name, fails until somebody adds it here on
     /// purpose. The P22 law one layer up — **a ban enumerates what you thought of,
     /// an allowlist what is allowed.**
-    const DCC_SAVE_TAIL: [&str; 5] = [
+    const DCC_SAVE_TAIL: [&str; 8] = [
         "viewport.refresh_asset_index(super::Target::All);",
         "let _ = app.emit(\"assets://changed\", ());",
         "let _ = app.emit(\"dcc://sync\", id);",
+        // C4-34: the refused stroke becomes the first advisory and decides `ok`.
+        // Two statements, added deliberately, which is what this pin is for.
+        "let mut advisories = advisories(&report);",
+        "if let Some(why) = &settled {",
+        "}",
         "Ok(DccSaveDto {",
         "})",
     ];

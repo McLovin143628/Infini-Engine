@@ -136,14 +136,42 @@ impl TerrainImportSettings {
         (e.x, e.y)
     }
 
+    /// C4-45: `None` means the sidecar records no import settings, and
+    /// `reimport_terrain` then refuses with "no recorded import settings" — the
+    /// wizard's every choice, lost with no stated cause.
     fn to_table(&self) -> Option<toml::Table> {
-        toml::Value::try_from(self)
-            .ok()
-            .and_then(|v| v.as_table().cloned())
+        match toml::Value::try_from(self) {
+            Ok(toml::Value::Table(t)) => Some(t),
+            Ok(other) => {
+                tracing::warn!(
+                    "terrain import settings serialized as {} rather than a table; \
+                     re-import will refuse",
+                    other.type_str()
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "terrain import settings will not serialize ({e}); re-import will refuse"
+                );
+                None
+            }
+        }
     }
 
+    /// `None` means the recorded block is not these settings — an older schema,
+    /// or a hand-edited sidecar. Said out loud for the same reason.
     fn from_table(table: &toml::Table) -> Option<Self> {
-        toml::Value::Table(table.clone()).try_into().ok()
+        match toml::Value::Table(table.clone()).try_into() {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(
+                    "a terrain sidecar's recorded import settings will not read back ({e}); \
+                     re-import will refuse rather than guess"
+                );
+                None
+            }
+        }
     }
 }
 

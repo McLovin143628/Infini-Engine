@@ -18,6 +18,8 @@ mod layout;
 mod lsp;
 mod material;
 mod package;
+// L7.H6: the one path-confinement rule every filesystem door goes through.
+mod paths;
 mod pcg;
 // P25.4 the capture wizard: photographs to a standard asset.
 mod photogrammetry;

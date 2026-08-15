@@ -118,7 +118,28 @@ unsafe extern "C" fn deserialize_raw<T: HotComponent>(data: *const u8, len: usiz
     };
     match catch_unwind(AssertUnwindSafe(|| serde_json::from_slice::<T>(bytes))) {
         Ok(Ok(value)) => Box::into_raw(Box::new(value)).cast(),
-        _ => std::ptr::null_mut(),
+        // C4-44: a serde error and a panic used to collapse into the same null,
+        // and the host can only report "deserialize returned null" — so the
+        // everyday cause, a field added without `#[serde(default)]`, was
+        // undiagnosable because **the field name never left the plugin**. The ABI
+        // has no channel for a message here (the signature is fixed and shared
+        // with every already-built plugin), so the reason goes to the guest's
+        // stderr, which is the host process's stderr: same terminal, same log.
+        Ok(Err(e)) => {
+            eprintln!(
+                "inf-hotreload guest: state migration failed for {} — {e}. \
+                 A field added since the last build needs #[serde(default)].",
+                std::any::type_name::<T>()
+            );
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            eprintln!(
+                "inf-hotreload guest: state migration PANICKED for {}; the old state is kept.",
+                std::any::type_name::<T>()
+            );
+            std::ptr::null_mut()
+        }
     }
 }
 

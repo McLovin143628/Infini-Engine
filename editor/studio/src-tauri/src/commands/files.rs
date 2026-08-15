@@ -8,6 +8,10 @@ use std::path::Path;
 
 use ignore::WalkBuilder;
 use inf_editor_core::ipc::FileEntryDto;
+use tauri::{AppHandle, State};
+
+use super::paths::{confine_existing, confine_for_write};
+use super::project::ProjectState;
 
 /// Max text-file size we'll hand to the editor (bytes).
 const MAX_FILE: u64 = 5 * 1024 * 1024;
@@ -15,16 +19,26 @@ const MAX_FILE: u64 = 5 * 1024 * 1024;
 const MAX_ENTRIES: usize = 8000;
 
 /// Read a UTF-8 text file. Errors on binary or over-large files.
+///
+/// **Confined** (L7.H6): the path must resolve inside the open project or the
+/// editor's app-data dir. It took a bare absolute path before, so
+/// `file_read("~/.ssh/id_rsa")` was a valid IPC request from the webview.
 #[tauri::command]
-pub async fn file_read(path: String) -> Result<String, String> {
+pub async fn file_read(
+    app: AppHandle,
+    project: State<'_, ProjectState>,
+    path: String,
+) -> Result<String, String> {
+    let path = confine_existing(&app, &project, &path)?;
     // Reading up to MAX_FILE of a possibly-slow disk is blocking IO — keep it
     // off the async workers (mirrors package.rs).
     tauri::async_runtime::spawn_blocking(move || {
-        let meta = std::fs::metadata(&path).map_err(|e| format!("stat {path}: {e}"))?;
+        let shown = path.display().to_string();
+        let meta = std::fs::metadata(&path).map_err(|e| format!("stat {shown}: {e}"))?;
         if meta.len() > MAX_FILE {
             return Err(format!("file is larger than {} MB", MAX_FILE / 1024 / 1024));
         }
-        let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {shown}: {e}"))?;
         String::from_utf8(bytes).map_err(|_| "not a UTF-8 text file".to_string())
     })
     .await
@@ -38,11 +52,19 @@ pub async fn file_read(path: String) -> Result<String, String> {
 /// notice the damage: a truncated `.rs` fails to compile with a message about
 /// the wrong thing, and a truncated `Cargo.toml` may still parse as
 /// valid-but-wrong.
+/// **Confined** (L7.H6) through the may-not-exist-yet door: a new file inherits
+/// its parent directory's verdict, and a tail containing `..` is refused.
 #[tauri::command]
-pub async fn file_write(path: String, content: String) -> Result<(), String> {
+pub async fn file_write(
+    app: AppHandle,
+    project: State<'_, ProjectState>,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let path = confine_for_write(&app, &project, &path)?;
     tauri::async_runtime::spawn_blocking(move || {
-        inf_asset::write_atomically(Path::new(&path), content)
-            .map_err(|e| format!("write {path}: {e}"))
+        let shown = path.display().to_string();
+        inf_asset::write_atomically(&path, content).map_err(|e| format!("write {shown}: {e}"))
     })
     .await
     .map_err(|e| format!("file_write task failed to run: {e}"))?
@@ -51,12 +73,17 @@ pub async fn file_write(path: String, content: String) -> Result<(), String> {
 /// List the project's files (gitignore-aware; skips `target/`, `.git/`, …),
 /// as paths relative to `root`. Capped at [`MAX_ENTRIES`].
 #[tauri::command]
-pub async fn list_project_files(root: String) -> Result<Vec<FileEntryDto>, String> {
+pub async fn list_project_files(
+    app: AppHandle,
+    project: State<'_, ProjectState>,
+    root: String,
+) -> Result<Vec<FileEntryDto>, String> {
+    let root = confine_existing(&app, &project, &root)?;
     // Walking the whole project tree is blocking IO — run it off the async workers.
     tauri::async_runtime::spawn_blocking(move || {
-        let root_path = Path::new(&root);
+        let root_path: &Path = root.as_ref();
         if !root_path.is_dir() {
-            return Err(format!("{root} is not a directory"));
+            return Err(format!("{} is not a directory", root_path.display()));
         }
         let mut out = Vec::new();
         let walker = WalkBuilder::new(root_path)

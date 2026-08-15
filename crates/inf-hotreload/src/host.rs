@@ -454,9 +454,16 @@ impl HotWorld {
             // SAFETY: new vtable comes from a validated, immortal Plugin.
             let new_state = unsafe { (new_vtable.deserialize)(buffer.as_ptr(), buffer.len()) };
             if new_state.is_null() {
-                report
-                    .failed
-                    .push((id, "deserialize returned null".to_owned()));
+                // C4-44: the ABI carries no message back, so the cause is on the
+                // guest's stderr (`guest::deserialize_raw` prints the serde error
+                // and the type). Say where to look rather than leaving a reader
+                // with three words and no field name.
+                report.failed.push((
+                    id,
+                    "deserialize returned null — the plugin printed the reason \
+                     (usually a new field without #[serde(default)]) on stderr"
+                        .to_owned(),
+                ));
                 continue;
             }
             let migrated = new_vtable.schema_hash != instance.vtable.schema_hash;

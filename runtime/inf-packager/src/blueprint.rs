@@ -31,6 +31,26 @@ pub struct BlueprintIssue {
 /// function body. Returns the first issue found, if any.
 pub fn validate_class(class: &mut BlueprintClass) -> Option<BlueprintIssue> {
     class.migrate();
+    // C4-44: this module's doc says "every float literal is finite", and
+    // `validate_expr` enforces it inside bodies — but the walk skipped
+    // `class.variables`, whose `default: Lit::Float` is (per
+    // `inf_blueprint::semantics`) "the other place a float persists". A
+    // non-finite default escaped the cook and reached `inf-transpile`, which has
+    // no Rust spelling for it: a **ship-time compile failure** instead of a cook
+    // error. Checked first, because a variable is read before any handler runs.
+    for v in &class.variables {
+        if let Lit::Float(x) = v.default {
+            if !x.is_finite() {
+                return Some(BlueprintIssue {
+                    handler: format!("variable {}", v.name),
+                    message: format!(
+                        "default is {x}, which is not finite; the IR contract is that every \
+                         float literal has a Rust spelling, and this one does not"
+                    ),
+                });
+            }
+        }
+    }
     for binding in &class.events {
         if let Some(msg) = validate_fn(&binding.body) {
             return Some(BlueprintIssue {

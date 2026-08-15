@@ -5,6 +5,10 @@
 use ignore::WalkBuilder;
 use inf_editor_core::ipc::{SearchHitDto, SearchOptsDto};
 use regex::RegexBuilder;
+use tauri::{AppHandle, State};
+
+use super::paths::confine_existing;
+use super::project::ProjectState;
 
 /// Max hits returned (a broad query is capped rather than streamed).
 const MAX_HITS: usize = 500;
@@ -14,8 +18,14 @@ const MAX_FILE: u64 = 2 * 1024 * 1024;
 const MAX_LINE: usize = 400;
 
 /// Search `root` for `query`. Returns up to [`MAX_HITS`] hits.
+///
+/// **Confined** (L7.H6): `root` must resolve inside the open project or the
+/// editor's app-data dir. A content search is a read of every file it walks, so
+/// an unconfined root is `file_read` with a wildcard.
 #[tauri::command]
 pub async fn search_workspace(
+    app: AppHandle,
+    project: State<'_, ProjectState>,
     root: String,
     query: String,
     opts: SearchOptsDto,
@@ -23,6 +33,7 @@ pub async fn search_workspace(
     if query.is_empty() {
         return Ok(vec![]);
     }
+    let root = confine_existing(&app, &project, &root)?;
     // The ignore-walk + per-file read is heavy synchronous IO — run it off the
     // async workers so a broad query can't starve the runtime (mirrors package.rs).
     tauri::async_runtime::spawn_blocking(move || {
@@ -36,9 +47,9 @@ pub async fn search_workspace(
             .build()
             .map_err(|e| format!("bad pattern: {e}"))?;
 
-        let root_path = std::path::Path::new(&root);
+        let root_path: &std::path::Path = root.as_ref();
         if !root_path.is_dir() {
-            return Err(format!("{root} is not a directory"));
+            return Err(format!("{} is not a directory", root_path.display()));
         }
 
         let mut hits = Vec::new();

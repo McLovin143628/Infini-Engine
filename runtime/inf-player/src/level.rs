@@ -1496,9 +1496,34 @@ impl PackLevelSource {
             (path.to_path_buf(), path.with_file_name(MANIFEST_FILE))
         };
 
-        let manifest: Option<BootManifest> = std::fs::read_to_string(&manifest_path)
-            .ok()
-            .and_then(|t| toml::from_str(&t).ok());
+        // C4-44 / unit U5: absent, unreadable and corrupt used to collapse into
+        // one `None`, and `root_level` then silently booted the **lowest-GUID
+        // level in the pack** instead of the one cooked as root — a shipped build
+        // starting a different level than it was built to, with no log. Absence
+        // is still fine (a bare `--pack` with no manifest beside it); the other
+        // two are said out loud.
+        let manifest: Option<BootManifest> = match std::fs::read_to_string(&manifest_path) {
+            Ok(text) => match toml::from_str(&text) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    tracing::warn!(
+                        "{} is present but will not parse ({e}); booting the pack's \
+                         lowest-GUID level instead of its cooked root",
+                        manifest_path.display()
+                    );
+                    None
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                tracing::warn!(
+                    "{} could not be read ({e}); booting the pack's lowest-GUID level \
+                     instead of its cooked root",
+                    manifest_path.display()
+                );
+                None
+            }
+        };
 
         // A manifest may name a non-default pack file (only meaningful for a dir).
         let pack_path = match (&manifest, path.is_dir()) {

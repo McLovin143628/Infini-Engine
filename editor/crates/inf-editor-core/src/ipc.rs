@@ -3593,11 +3593,26 @@ impl CaptureSettingsDto {
     /// An overlay rather than a construction, because the solvers' committed
     /// constants are not on the wire and a `CaptureConfig::default()` here would
     /// silently reset any that a future caller had set.
+    /// The three camera numbers are **validated** (C4-44) before they are
+    /// copied: `focal_ratio = 0` makes `to_normalized` divide by zero, which is
+    /// `0.0/0.0` = NaN at the principal point, and those NaN observations feed
+    /// triangulation, the SfM poses and the finished `.inf_mesh` under
+    /// `Content/Scans`. `metres_per_unit`, two lines below, has been validated
+    /// since P25.4; these were copied through unchecked. An unusable camera
+    /// leaves `base`'s camera exactly as it was.
     pub fn to_config(&self, base: &crate::capture::CaptureConfig) -> crate::capture::CaptureConfig {
         let mut cfg = base.clone();
-        cfg.camera.focal_ratio = self.camera.focal_ratio;
-        cfg.camera.k1 = self.camera.k1;
-        cfg.camera.k2 = self.camera.k2;
+        let camera = crate::capture::AssumedCamera {
+            focal_ratio: self.camera.focal_ratio,
+            k1: self.camera.k1,
+            k2: self.camera.k2,
+        };
+        match camera.validate() {
+            Ok(()) => cfg.camera = camera,
+            Err(why) => tracing::warn!(
+                "capture settings: the camera was not applied ({why}); keeping the previous lens"
+            ),
+        }
         cfg.finish.metres_per_unit = self.metres_per_unit;
         cfg.finish.target_triangles = self.target_triangles as usize;
         cfg.finish.bake.size = self.atlas_size;

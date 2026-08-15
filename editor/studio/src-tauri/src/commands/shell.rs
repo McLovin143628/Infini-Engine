@@ -10,8 +10,9 @@
 
 use std::path::{Path, PathBuf};
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
+use super::paths::confine_existing;
 use super::project::ProjectState;
 
 /// Reveal `path` in the OS file browser — selecting the entry when it is a file,
@@ -23,26 +24,10 @@ pub async fn shell_reveal(
     project: State<'_, ProjectState>,
     path: String,
 ) -> Result<(), String> {
-    // Canonicalize for both the existence check and the containment check.
-    let target = std::fs::canonicalize(&path).map_err(|e| format!("path not found: {e}"))?;
-
-    // Allowed roots: the open project root (covers Content assets + Build
-    // output) and the app-data dir (loose Content + quicksaves before a project
-    // is opened). Canonicalize each so the `starts_with` compares like-for-like.
-    let mut allowed: Vec<PathBuf> = Vec::new();
-    if let Some(root) = project.current_root() {
-        if let Ok(c) = std::fs::canonicalize(&root) {
-            allowed.push(c);
-        }
-    }
-    if let Ok(dir) = app.path().app_data_dir() {
-        if let Ok(c) = std::fs::canonicalize(&dir) {
-            allowed.push(c);
-        }
-    }
-    if !allowed.iter().any(|root| target.starts_with(root)) {
-        return Err("refusing to reveal a path outside the project or app data".into());
-    }
+    // The guard this function used to spell out inline. It is now
+    // `super::paths::confine_existing`, applied at every filesystem door in the
+    // IPC surface rather than at this one (L7.H6).
+    let target = confine_existing(&app, &project, &path)?;
 
     let is_dir = target.is_dir();
     tauri::async_runtime::spawn_blocking(move || reveal_in_os(&target, is_dir))

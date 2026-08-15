@@ -456,4 +456,41 @@ mod tests {
             "{issues:?}"
         );
     }
+
+    /// C4-44: `focal_ratio = 0` divides the projection by zero — `0.0/0.0` is
+    /// NaN at the principal point — and those observations feed triangulation,
+    /// the SfM poses and the finished `.inf_mesh`. The wizard's own
+    /// `metres_per_unit`, two fields away, has been validated since P25.4;
+    /// these three were copied through unchecked.
+    #[test]
+    fn an_impossible_lens_is_refused_rather_than_copied_through() {
+        let mut session = PhotogrammetrySession::new();
+        let good = CaptureSettingsDto::from_config(&CaptureConfig::default());
+        let before = session.config().camera;
+
+        for bad in [
+            (0.0, 0.0, 0.0),
+            (-1.0, 0.0, 0.0),
+            (f64::NAN, 0.0, 0.0),
+            (0.9375, f64::INFINITY, 0.0),
+            (0.9375, 0.0, f64::NAN),
+        ] {
+            let mut dto = good.clone();
+            dto.camera.focal_ratio = bad.0;
+            dto.camera.k1 = bad.1;
+            dto.camera.k2 = bad.2;
+            session.set_config(dto.to_config(session.config()));
+            assert_eq!(
+                session.config().camera,
+                before,
+                "the lens {bad:?} was copied into the config"
+            );
+        }
+
+        // …and a usable one still lands, so the guard is not simply "refuse".
+        let mut ok = good;
+        ok.camera.focal_ratio = 0.9375;
+        session.set_config(ok.to_config(session.config()));
+        assert_eq!(session.config().camera.focal_ratio, 0.9375);
+    }
 }

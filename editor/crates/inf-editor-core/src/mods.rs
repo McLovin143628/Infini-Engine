@@ -76,11 +76,24 @@ impl ModsSession {
         let mut debouncer = new_debouncer(
             Duration::from_millis(250),
             None,
-            move |res: DebounceEventResult| {
-                if let Ok(events) = res {
+            move |res: DebounceEventResult| match res {
+                Ok(events) => {
                     if !events.is_empty() {
                         dirty.store(true, Ordering::Relaxed);
                     }
+                }
+                // C4-44: `notify` delivers queue-overflow / rescan-required as
+                // `Err`, and that is exactly what a `cargo build` touching many
+                // files at once produces — so the silent `if let Ok` meant mods
+                // did NOT hot-reload after the build that matters most. An error
+                // means "the watcher lost track", which is a reason to reload,
+                // not a reason to do nothing. `watch.rs:55` has handled the
+                // identical callback correctly since P4.
+                Err(errors) => {
+                    for e in &errors {
+                        tracing::warn!("mods watcher lost events ({e}); reloading anyway");
+                    }
+                    dirty.store(true, Ordering::Relaxed);
                 }
             },
         )

@@ -5,9 +5,34 @@
 //! list (no shell), a `--` separator before paths, and an exit-code whitelist.
 //! (stash / blame / log / push / pull are deferred — see TODOs.)
 
+use std::path::PathBuf;
 use std::process::Command;
 
 use inf_editor_core::ipc::{GitFileDto, GitStatusDto};
+use tauri::{AppHandle, State};
+
+use super::paths::{confine_existing, confine_under};
+use super::project::ProjectState;
+
+/// Resolve + confine a `repo` argument (L7.H6).
+///
+/// Every command in this module shells out to `git -C <repo>`, and `repo`
+/// arrived from the webview as a bare absolute path — so `git_discard` could be
+/// pointed at any repository on the machine and told to throw away its working
+/// tree. The guard is `shell_reveal`'s, hoisted into `super::paths`.
+fn confined_repo(app: &AppHandle, project: &ProjectState, repo: &str) -> Result<PathBuf, String> {
+    confine_existing(app, project, repo)
+}
+
+/// Validate every path argument as living **inside** the confined repo, and hand
+/// back the relative spellings git wants. A `..` or an absolute path is refused
+/// rather than normalized: neither is something the panel produced.
+fn confined_paths(root: &PathBuf, paths: &[String]) -> Result<Vec<String>, String> {
+    for p in paths {
+        confine_under(root, p)?;
+    }
+    Ok(paths.to_vec())
+}
 
 /// Run `git -C <repo> <args>`, returning stdout. Errors unless the exit code is
 /// 0 or in `allowed`.
@@ -35,7 +60,12 @@ fn is_repo(repo: &str) -> bool {
 
 /// Working-tree status via `--porcelain=v2 --branch`.
 #[tauri::command]
-pub async fn git_status(repo: String) -> Result<GitStatusDto, String> {
+pub async fn git_status(
+    app: AppHandle,
+    project: State<'_, ProjectState>,
+    repo: String,
+) -> Result<GitStatusDto, String> {
+    let _root = confined_repo(&app, &project, &repo)?;
     // Shelling out to git can block for a long time on a big repo — keep the
     // blocking work off the async workers (mirrors package.rs).
     tauri::async_runtime::spawn_blocking(move || {
@@ -132,7 +162,14 @@ fn push_xy(files: &mut Vec<GitFileDto>, rest: &str, field_count: usize, rename: 
 }
 
 #[tauri::command]
-pub async fn git_stage(repo: String, paths: Vec<String>) -> Result<(), String> {
+pub async fn git_stage(
+    app: AppHandle,
+    project: State<'_, ProjectState>,
+    repo: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    let root = confined_repo(&app, &project, &repo)?;
+    let paths = confined_paths(&root, &paths)?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut args = vec!["add", "--"];
         args.extend(paths.iter().map(String::as_str));
@@ -143,7 +180,14 @@ pub async fn git_stage(repo: String, paths: Vec<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn git_unstage(repo: String, paths: Vec<String>) -> Result<(), String> {
+pub async fn git_unstage(
+    app: AppHandle,
+    project: State<'_, ProjectState>,
+    repo: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    let root = confined_repo(&app, &project, &repo)?;
+    let paths = confined_paths(&root, &paths)?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut args = vec!["restore", "--staged", "--"];
         args.extend(paths.iter().map(String::as_str));
@@ -156,7 +200,15 @@ pub async fn git_unstage(repo: String, paths: Vec<String>) -> Result<(), String>
 /// Discard working-tree changes (unstage + restore from HEAD). Untracked files
 /// are removed.
 #[tauri::command]
-pub async fn git_discard(repo: String, paths: Vec<String>) -> Result<(), String> {
+pub async fn git_discard(
+    app: AppHandle,
+    project: State<'_, ProjectState>,
+    repo: String,
+    paths: Vec<String>,
+) -> Result<(), String> {
+    // The one door here that DESTROYS work, and the one the finding named.
+    let root = confined_repo(&app, &project, &repo)?;
+    let paths = confined_paths(&root, &paths)?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut args = vec!["restore", "--staged", "--worktree", "--"];
         args.extend(paths.iter().map(String::as_str));
@@ -172,7 +224,13 @@ pub async fn git_discard(repo: String, paths: Vec<String>) -> Result<(), String>
 }
 
 #[tauri::command]
-pub async fn git_commit(repo: String, message: String) -> Result<String, String> {
+pub async fn git_commit(
+    app: AppHandle,
+    project: State<'_, ProjectState>,
+    repo: String,
+    message: String,
+) -> Result<String, String> {
+    let _root = confined_repo(&app, &project, &repo)?;
     tauri::async_runtime::spawn_blocking(move || run_git(&repo, &["commit", "-m", &message], &[]))
         .await
         .map_err(|e| format!("git_commit task failed to run: {e}"))?
@@ -180,7 +238,15 @@ pub async fn git_commit(repo: String, message: String) -> Result<String, String>
 
 /// Unified diff of a single file (worktree vs index, or index vs HEAD if staged).
 #[tauri::command]
-pub async fn git_file_diff(repo: String, path: String, staged: bool) -> Result<String, String> {
+pub async fn git_file_diff(
+    app: AppHandle,
+    project: State<'_, ProjectState>,
+    repo: String,
+    path: String,
+    staged: bool,
+) -> Result<String, String> {
+    let root = confined_repo(&app, &project, &repo)?;
+    confine_under(&root, &path)?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut args = vec!["diff"];
         if staged {
@@ -195,7 +261,12 @@ pub async fn git_file_diff(repo: String, path: String, staged: bool) -> Result<S
 }
 
 #[tauri::command]
-pub async fn git_branches(repo: String) -> Result<Vec<String>, String> {
+pub async fn git_branches(
+    app: AppHandle,
+    project: State<'_, ProjectState>,
+    repo: String,
+) -> Result<Vec<String>, String> {
+    let _root = confined_repo(&app, &project, &repo)?;
     tauri::async_runtime::spawn_blocking(move || {
         let out = run_git(&repo, &["branch", "--format=%(refname:short)"], &[])?;
         Ok(out
@@ -209,7 +280,14 @@ pub async fn git_branches(repo: String) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-pub async fn git_init(repo: String) -> Result<(), String> {
+pub async fn git_init(
+    app: AppHandle,
+    project: State<'_, ProjectState>,
+    repo: String,
+) -> Result<(), String> {
+    // `git init` creates the repo, so the DIRECTORY must exist and be confined —
+    // the `.git` it makes inside is the new part.
+    let _root = confined_repo(&app, &project, &repo)?;
     tauri::async_runtime::spawn_blocking(move || run_git(&repo, &["init"], &[]).map(|_| ()))
         .await
         .map_err(|e| format!("git_init task failed to run: {e}"))?

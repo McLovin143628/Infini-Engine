@@ -81,7 +81,16 @@ pub fn import_file(
     };
 
     if let Some(primary) = outcome.primary {
-        let _ = project.cache_mut().put(key, primary, &bytes);
+        // C4-45: a failed cache write used to be invisible, so every re-import
+        // silently re-decoded the same bytes and wrote a DUPLICATE asset. The
+        // import itself succeeded, so this is an advisory, not a failure.
+        if let Err(e) = project.cache_mut().put(key, primary, &bytes) {
+            tracing::warn!(
+                "import cache could not record {}: {e}; re-importing this file will \
+                 create a duplicate asset instead of reusing it",
+                source.display()
+            );
+        }
     }
     Ok(outcome)
 }
@@ -126,9 +135,24 @@ fn import_audio(
 /// Serialize audio import settings into the sidecar's `import` TOML table
 /// (mirrors [`settings_table`] for textures).
 fn audio_settings_table(settings: &AudioImportSettings) -> Option<toml::Table> {
-    toml::Value::try_from(settings)
-        .ok()
-        .and_then(|v| v.as_table().cloned())
+    match toml::Value::try_from(settings) {
+        Ok(toml::Value::Table(t)) => Some(t),
+        Ok(other) => {
+            tracing::warn!(
+                "audio import settings serialized as {} rather than a table; the sidecar \
+                 will record none and re-import will refuse",
+                other.type_str()
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                "audio import settings will not serialize ({e}); the sidecar will record \
+                 none and re-import will refuse"
+            );
+            None
+        }
+    }
 }
 
 /// A single image → one **v2 tiled** texture asset (sRGB base-color defaults).
@@ -376,10 +400,31 @@ fn outside_root_advisories(project: &AssetProject, source: &Path) -> Vec<String>
 }
 
 /// Serialize texture import settings into the sidecar `import` table.
+///
+/// C4-45: `None` here means the sidecar records **no import settings**, and a
+/// later re-import then fails with "no recorded import settings" — the author
+/// loses every wizard choice with no explanation of why. It cannot happen for
+/// these types (they are plain serde structs), which is exactly why a silent
+/// `.ok()` was cheap and a log line is cheaper.
 fn settings_table(settings: &TextureImportSettings) -> Option<toml::Table> {
-    toml::Value::try_from(settings)
-        .ok()
-        .and_then(|v| v.as_table().cloned())
+    match toml::Value::try_from(settings) {
+        Ok(toml::Value::Table(t)) => Some(t),
+        Ok(other) => {
+            tracing::warn!(
+                "texture import settings serialized as {} rather than a table; the sidecar \
+                 will record none and re-import will refuse",
+                other.type_str()
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                "texture import settings will not serialize ({e}); the sidecar will record \
+                 none and re-import will refuse"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]

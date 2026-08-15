@@ -56,6 +56,12 @@ pub struct GraphApplyResult {
     pub issues: Vec<GraphIssue>,
     pub can_undo: bool,
     pub can_redo: bool,
+    /// **How many of the submitted edits the backend REFUSED** (C4-44).
+    ///
+    /// Non-zero means the canvas and the graph disagree: the canvas is
+    /// fully controlled, so it must re-derive from the backend rather than
+    /// keep drawing a wire that does not exist.
+    pub rejected: u32,
 }
 
 /// Result of a preview run through the interpreter.
@@ -166,13 +172,28 @@ pub async fn graph_apply(
             .get_mut(&id)
             .ok_or_else(|| format!("no graph `{id}`"))?;
         let journal = s.journals.get_mut(&id).ok_or("missing journal")?;
-        journal.record(label, doc.graph.clone());
-        apply_edits(&mut doc.graph, registry, &edits);
+        // C4-44: `apply_edits` returns how many edits took effect, and all three
+        // canvases discarded it. `apply_edit` answers `false` for a Connect that
+        // would cycle, a missing node or an unknown param — so a fully-controlled
+        // canvas kept drawing a wire the backend had rejected, `validate()`
+        // reported nothing (the wire is not in the graph to be invalid), and the
+        // command returned `Ok`.
+        //
+        // The snapshot is also taken BEFORE and recorded only when something
+        // landed: journalling first left a dead undo step for a batch that
+        // changed nothing.
+        let before = doc.graph.clone();
+        let applied = apply_edits(&mut doc.graph, registry, &edits);
+        let rejected = edits.len() - applied;
+        if applied > 0 {
+            journal.record(label, before);
+        }
         let issues = validate(&doc.graph, registry);
         Ok(GraphApplyResult {
             issues,
             can_undo: journal.can_undo(),
             can_redo: journal.can_redo(),
+            rejected: rejected as u32,
         })
     })?;
     let _ = app.emit("graph://sync", id);

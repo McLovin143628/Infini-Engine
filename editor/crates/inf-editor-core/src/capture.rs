@@ -143,10 +143,55 @@ impl Default for AssumedCamera {
 }
 
 impl AssumedCamera {
+    /// The smallest focal ratio that describes a lens rather than a singularity.
+    ///
+    /// `fx = fy = focal_ratio * max(w, h)`, and `to_normalized` divides by it —
+    /// so a zero gives `0.0 / 0.0` = **NaN** at the principal point and ±inf
+    /// everywhere else, and `undistort`'s `if f.abs() < 1e-12` is NaN-blind.
+    /// A hundredth of the frame is roughly a 180°-plus fisheye: below it the
+    /// number is a typo, not a lens.
+    pub const MIN_FOCAL_RATIO: f64 = 0.01;
+
+    /// Whether these three numbers describe a usable lens (C4-44).
+    ///
+    /// The wizard's `metres_per_unit`, two fields further down the same DTO, has
+    /// been validated since P25.4 — these three were copied through unchecked,
+    /// and they are the ones that reach the projection.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.focal_ratio.is_finite() || self.focal_ratio < Self::MIN_FOCAL_RATIO {
+            return Err(format!(
+                "focal ratio {} is not a lens: it must be finite and at least {} of the \
+                 image's longer side, or the projection divides by ~zero",
+                self.focal_ratio,
+                Self::MIN_FOCAL_RATIO
+            ));
+        }
+        if !self.k1.is_finite() || !self.k2.is_finite() {
+            return Err(format!(
+                "radial coefficients must be finite (k1 = {}, k2 = {})",
+                self.k1, self.k2
+            ));
+        }
+        Ok(())
+    }
+
     /// The intrinsics this describes for a `width x height` photograph.
+    ///
+    /// Falls back to [`Default`] when [`validate`](Self::validate) refuses — the
+    /// door that *takes* the numbers refuses first (`CaptureSettingsDto::
+    /// to_config`), so reaching this fallback means an internal caller built an
+    /// impossible camera, and a default lens is a wrong picture where NaN
+    /// intrinsics are a wrong picture that also poisons every pose.
     pub fn intrinsics(&self, width: u32, height: u32) -> Intrinsics {
-        let focal = self.focal_ratio * width.max(height) as f64;
-        Intrinsics::centred(width, height, focal).with_radial(self.k1, self.k2)
+        let safe = match self.validate() {
+            Ok(()) => *self,
+            Err(why) => {
+                tracing::warn!("assumed camera rejected ({why}); using the default lens");
+                Self::default()
+            }
+        };
+        let focal = safe.focal_ratio * width.max(height) as f64;
+        Intrinsics::centred(width, height, focal).with_radial(safe.k1, safe.k2)
     }
 }
 

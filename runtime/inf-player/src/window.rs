@@ -512,8 +512,21 @@ impl ApplicationHandler for PlayerApp {
                 if let Some(pie) = self.pie.as_mut() {
                     if !pie.hwnd_reported {
                         let handle = window_handle_i64(&window);
-                        let _ = write_msg(&mut pie.out, &PlayerToEditor::Window { handle });
-                        pie.hwnd_reported = true;
+                        // C4-44 / unit U4 ("failure latched as applied"): the
+                        // write's `Err` was dropped and the latch set anyway, so
+                        // the ONE report of the native handle could be lost and
+                        // embedded PIE stayed a blank hole for the whole session
+                        // with nothing to retry it. Latch on success only; on a
+                        // failed write the editor has closed our stdout, which
+                        // every other protocol site treats as "exit"
+                        // (`main.rs:272/379/431`).
+                        match write_msg(&mut pie.out, &PlayerToEditor::Window { handle }) {
+                            Ok(()) => pie.hwnd_reported = true,
+                            Err(e) => tracing::warn!(
+                                "PIE: could not report the window handle ({e}); \
+                                 retrying on the next frame"
+                            ),
+                        }
                     }
                 }
                 window.request_redraw();

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -31,7 +31,14 @@ struct PtyExit {
 
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    /// The shell's stdin, behind **its own** lock (L7.L4).
+    ///
+    /// It used to live directly in `PtySession`, so `pty_write` held the whole
+    /// `sessions` map locked across a blocking `write_all` + `flush` to a pipe —
+    /// one terminal with a full buffer stalled `pty_resize` and `pty_close` for
+    /// every other session. An `Arc` so the write happens after the map lock is
+    /// released.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn Child + Send + Sync>,
 }
 
@@ -103,15 +110,24 @@ pub async fn pty_create(
         id.clone(),
         PtySession {
             master: pair.master,
-            writer,
+            writer: Arc::new(Mutex::new(writer)),
             child,
         },
     );
     Ok(id)
 }
 
+/// How many bytes one read (and therefore one `pty://output` event) may carry.
+///
+/// 4 KiB before (L7.L4). `Read::read` returns as soon as *any* bytes are
+/// available, up to the buffer size, so a bigger buffer costs nothing on an idle
+/// shell and coalesces a burst into far fewer events: a `cargo build`'s output
+/// used to cross the IPC boundary — base64'd, JSON-wrapped, one webview event
+/// each — every four kilobytes.
+const READ_CHUNK: usize = 32 * 1024;
+
 fn read_loop(app: AppHandle, id: String, mut reader: Box<dyn Read + Send>) {
-    let mut buf = [0u8; 4096];
+    let mut buf = vec![0u8; READ_CHUNK];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
@@ -133,16 +149,22 @@ fn read_loop(app: AppHandle, id: String, mut reader: Box<dyn Read + Send>) {
 /// Write user input (UTF-8 text) to a session's shell.
 #[tauri::command]
 pub async fn pty_write(state: State<'_, PtyState>, id: String, data: String) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().map_err(|e| e.to_string())?;
-    let session = sessions.get_mut(&id).ok_or("no such pty session")?;
-    session
-        .writer
-        .write_all(data.as_bytes())
-        .map_err(|e| format!("pty write: {e}"))?;
-    session
-        .writer
-        .flush()
-        .map_err(|e| format!("pty flush: {e}"))
+    // L7.L4: take a handle to this session's writer, then DROP the map lock
+    // before the blocking write. Writing to a pipe whose reader is not draining
+    // blocks, and it used to block every other terminal command with it.
+    let writer = {
+        let sessions = state.sessions.lock().map_err(|e| e.to_string())?;
+        let session = sessions.get(&id).ok_or("no such pty session")?;
+        session.writer.clone()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut w = writer.lock().map_err(|e| e.to_string())?;
+        w.write_all(data.as_bytes())
+            .map_err(|e| format!("pty write: {e}"))?;
+        w.flush().map_err(|e| format!("pty flush: {e}"))
+    })
+    .await
+    .map_err(|e| format!("pty_write task failed to run: {e}"))?
 }
 
 /// Resize a session (on the xterm `FitAddon` fit).
@@ -171,14 +193,25 @@ pub async fn pty_resize(
 /// Close a session and kill its shell.
 #[tauri::command]
 pub async fn pty_close(state: State<'_, PtyState>, id: String) -> Result<(), String> {
-    if let Some(mut session) = state
+    let session = state
         .sessions
         .lock()
         .map_err(|e| e.to_string())?
-        .remove(&id)
-    {
+        .remove(&id);
+    let Some(mut session) = session else {
+        return Ok(());
+    };
+    // L7.L4: `kill` without `wait` leaves a **zombie** on Unix — the process is
+    // dead and its entry stays in the table until the parent reaps it, and the
+    // editor is a long-lived parent that opens a terminal per tab. `wait` blocks,
+    // so it goes off the async workers; the map entry is already gone, so nothing
+    // else can reach this session while we reap it.
+    tauri::async_runtime::spawn_blocking(move || {
         let _ = session.child.kill();
-    }
+        let _ = session.child.wait();
+    })
+    .await
+    .map_err(|e| format!("pty_close task failed to run: {e}"))?;
     Ok(())
 }
 
