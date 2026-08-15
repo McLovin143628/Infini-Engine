@@ -277,6 +277,16 @@ impl MeshSession {
         self.checkpoints.len()
     }
 
+    /// **Which** snapshots are held, ascending (Hardening D).
+    ///
+    /// The count alone cannot see *which* ones survived, and the eviction rule is
+    /// "nearest the cursor" — so a restore that evicted in a different order than
+    /// the incremental path would leave the same NUMBER of checkpoints in the
+    /// wrong places, replaying more ops per undo and reporting nothing.
+    pub fn checkpoint_keys(&self) -> Vec<usize> {
+        self.checkpoints.keys().copied().collect()
+    }
+
     pub fn can_undo(&self) -> bool {
         self.cursor > 0
     }
@@ -354,19 +364,11 @@ impl MeshSession {
     /// Retain the snapshots nearest the cursor; drop the farthest, breaking ties
     /// toward the older one.
     fn evict(&mut self) {
-        while self.checkpoints.len() > MAX_CHECKPOINTS {
-            let cursor = self.cursor;
-            let victim = self
-                .checkpoints
-                .keys()
-                .copied()
-                .max_by_key(|&k| (k.abs_diff(cursor), std::cmp::Reverse(k)))
-                .expect("non-empty while over the cap");
-            self.checkpoints.remove(&victim);
-        }
+        evict_checkpoints(&mut self.checkpoints, self.cursor);
     }
 
-    /// Replay an op sequence onto a base mesh. **The definition of the journal**:
+    /// Replay an op sequence onto a base mesh (see [`evict_checkpoints`] for the
+    /// bound the two insertion points share). **The definition of the journal**:
     /// `replay(base, &session.ops()[..session.cursor()])` is byte-identical to
     /// `session.mesh()`, and that is property-tested.
     pub fn replay(base: &Mesh, ops: &[Op]) -> Result<Mesh, OpError> {
@@ -458,13 +460,26 @@ impl MeshSession {
     }
 
     /// Re-derive the checkpoints around the cursor after a restore.
+    ///
+    /// **`evict` runs inside the loop, not after it** (Hardening D). The module
+    /// bounds itself to `MAX_CHECKPOINTS` whole-mesh snapshots; evicting only at
+    /// the end held `cursor / CHECKPOINT_INTERVAL` of them at once — one per
+    /// interval of the restored history, each a full `Mesh` — so restoring a long
+    /// session peaked at a multiple of the bound the module claims. Every other
+    /// insertion point (`seek`) already evicts on the spot, and the eviction rule
+    /// is cursor-relative, so applying it per insertion is not merely cheaper: it
+    /// is the same answer, reached without the peak.
     fn rebuild_checkpoints(&mut self) {
         let mut mesh = self.base.clone();
-        for (i, op) in self.ops[..self.cursor].iter().enumerate() {
+        // The free function rather than `self.evict()`: the loop holds `&self.ops`,
+        // and the eviction rule needs nothing but the map and the cursor.
+        let cursor = self.cursor;
+        for (i, op) in self.ops[..cursor].iter().enumerate() {
             ops::apply(&mut mesh, op).expect("the prefix was replayed by `restore`");
             let count = i + 1;
             if count.is_multiple_of(CHECKPOINT_INTERVAL) {
                 self.checkpoints.insert(count, mesh.clone());
+                evict_checkpoints(&mut self.checkpoints, cursor);
             }
         }
         self.evict();
@@ -497,6 +512,24 @@ impl PartialEq for MeshSession {
     /// equal to the session it came from.
     fn eq(&self, other: &Self) -> bool {
         self.base == other.base && self.ops == other.ops && self.cursor == other.cursor
+    }
+}
+
+/// Retain the `MAX_CHECKPOINTS` snapshots nearest `cursor`; drop the farthest,
+/// breaking ties toward the older one.
+///
+/// A free function so it can be applied while `&self.ops` is borrowed — see
+/// [`MeshSession::rebuild_checkpoints`], where evicting per insertion rather
+/// than once at the end is the difference between holding the module's bound and
+/// holding `cursor / CHECKPOINT_INTERVAL` whole meshes at once.
+fn evict_checkpoints(checkpoints: &mut BTreeMap<usize, Mesh>, cursor: usize) {
+    while checkpoints.len() > MAX_CHECKPOINTS {
+        let victim = checkpoints
+            .keys()
+            .copied()
+            .max_by_key(|&k| (k.abs_diff(cursor), std::cmp::Reverse(k)))
+            .expect("non-empty while over the cap");
+        checkpoints.remove(&victim);
     }
 }
 
@@ -645,6 +678,74 @@ mod tests {
             s.checkpoint_count()
         );
         assert!(s.checkpoint_count() > 0, "and it does checkpoint at all");
+    }
+
+    /// **A restore reaches the same checkpoint set the live session had**
+    /// (Hardening D), which is the load-bearing half of moving `evict` inside
+    /// `rebuild_checkpoints`' loop: the eviction rule is cursor-relative, the
+    /// cursor does not move during a rebuild, and the keys are inserted in
+    /// increasing order *toward* it — so the farthest is always the earliest
+    /// inserted and evicting as we go drops exactly what evicting at the end
+    /// would have. Asserted rather than argued, because "the answer is the same"
+    /// is precisely the claim a peak-memory fix must not get wrong.
+    #[test]
+    fn a_restore_keeps_the_checkpoints_a_live_session_kept() {
+        let mut live = MeshSession::new(plane(2.0));
+        for i in 0..(CHECKPOINT_INTERVAL * MAX_CHECKPOINTS * 3) {
+            live.apply(Op::TranslateVerts {
+                verts: vec![],
+                delta: [i as f64, 0.0, 0.0],
+            })
+            .unwrap();
+        }
+        let restored = MeshSession::restore(live.save()).expect("a live session restores");
+        assert_eq!(
+            restored.checkpoint_keys(),
+            live.checkpoint_keys(),
+            "the rebuild must reach the same snapshots, not merely the same count"
+        );
+        assert!(
+            restored.checkpoint_count() <= MAX_CHECKPOINTS,
+            "held {}",
+            restored.checkpoint_count()
+        );
+        assert_eq!(restored.mesh(), live.mesh(), "and the same mesh");
+    }
+
+    /// **The peak, which no value can see** (Hardening D).
+    ///
+    /// `rebuild_checkpoints` used to evict once, after its loop, so restoring a
+    /// session held one whole `Mesh` per `CHECKPOINT_INTERVAL` of replayed
+    /// history at once — `cursor / 32` snapshots against a documented bound of
+    /// 8. Nothing observable survives that moment: the *final* count was always
+    /// correct, which is why `checkpoints_stay_bounded_over_a_long_session`
+    /// passed throughout. So the enforcement is a source pin on the placement.
+    #[test]
+    fn the_rebuild_evicts_inside_its_loop() {
+        // The P22 CRLF law: normalize before searching a `.rs`.
+        let src = include_str!("journal.rs").replace("\r\n", "\n");
+        let start = src
+            .find("fn rebuild_checkpoints(&mut self) {")
+            .expect("`rebuild_checkpoints` occurs nowhere — was it renamed?");
+        let body = &src[start..];
+        let end = body
+            .find("\n    }\n")
+            .expect("`rebuild_checkpoints` does not terminate at method indentation");
+        let body = &body[..end];
+        let insert = body
+            .find("self.checkpoints.insert(count, mesh.clone());")
+            .expect("the rebuild no longer inserts a checkpoint");
+        let evict = body
+            .find("evict_checkpoints(&mut self.checkpoints, cursor);")
+            .expect(
+                "`rebuild_checkpoints` no longer evicts inside its loop — restoring a long \
+                 session peaks at one whole Mesh per CHECKPOINT_INTERVAL of history, which \
+                 is a multiple of the bound this module documents and which no value can see",
+            );
+        assert!(
+            evict > insert,
+            "the eviction must follow the insertion it bounds"
+        );
     }
 
     #[test]

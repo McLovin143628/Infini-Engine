@@ -157,6 +157,15 @@ impl SplatDelta {
     pub fn sample_count(&self) -> usize {
         self.patches.iter().map(SplatPatch::sample_count).sum()
     }
+
+    /// Approximate heap footprint of the stored before/after buffers, in bytes.
+    /// The `HeightDelta::memory_bytes` sibling, at the weights layer — a paint
+    /// stroke on the undo stack is charged by what it holds, not by a flat
+    /// per-entry guess.
+    pub fn memory_bytes(&self) -> usize {
+        self.sample_count()
+            .saturating_mul(2 * std::mem::size_of::<[u8; 4]>())
+    }
 }
 
 /// `coord → (i, j) → first-touch before weight` — the sparse accumulator keyed

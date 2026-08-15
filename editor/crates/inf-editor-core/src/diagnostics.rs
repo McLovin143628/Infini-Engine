@@ -42,6 +42,16 @@ pub struct MemoryReport {
     pub undo_depth: u64,
     /// Redo-stack depth.
     pub redo_depth: u64,
+    /// **Estimated bytes the undo + redo stacks hold** (Hardening D), summed
+    /// from each record's own payload — the terrain/voxel deltas' `memory_bytes`,
+    /// which existed for exactly this and had no caller.
+    ///
+    /// This replaces a flat 512-bytes-per-entry charge that under-reported the
+    /// single largest thing the editor holds by orders of magnitude: one sculpt
+    /// stroke over a 1024² patch is megabytes, and the report called it 512
+    /// bytes. It is still an *estimate* — see `EditCommand::memory_bytes` for
+    /// what is charged exactly and what is charged by assumption.
+    pub undo_bytes: u64,
     /// Total terrain tiles across all `Terrain` entities in the scene.
     pub terrain_tiles: u64,
     /// Estimated terrain heightfield + splat-weight bytes (a subset of
@@ -58,11 +68,6 @@ pub struct MemoryReport {
     /// caches (terrain is already inside `scene_bytes`, so it is not re-added).
     pub total_estimate_bytes: u64,
 }
-
-/// A crude per-undo-entry size estimate (an `EntityRecord`/transform delta), used
-/// only for the informational total — the exact figure is unknowable without
-/// walking every boxed record.
-const UNDO_ENTRY_ESTIMATE: u64 = 512;
 
 impl MemoryReport {
     /// Compute the scene-derivable fields from `doc`. Renderer/runtime cache
@@ -96,6 +101,7 @@ impl MemoryReport {
             scene_bytes,
             undo_depth,
             redo_depth,
+            undo_bytes: doc.undo_bytes() as u64,
             terrain_tiles,
             terrain_bytes,
             ..Default::default()
@@ -112,18 +118,19 @@ impl MemoryReport {
             .saturating_add(self.texture_cache_bytes)
             .saturating_add(self.vgeom_bytes)
             .saturating_add(self.audio_bytes)
-            .saturating_add(self.undo_depth.saturating_mul(UNDO_ENTRY_ESTIMATE));
+            .saturating_add(self.undo_bytes);
     }
 
     /// A one-line human summary for the Output Log / a `stats` console command.
     pub fn summary(&self) -> String {
         format!(
-            "memory: {} entities · scene {} KiB · undo {}/{} · terrain {} tiles ({} KiB) · \
+            "memory: {} entities · scene {} KiB · undo {}/{} ({} KiB) · terrain {} tiles ({} KiB) · \
              tex {} KiB · vgeom {} KiB · audio {} KiB · ~total {} KiB",
             self.entities,
             self.scene_bytes / 1024,
             self.undo_depth,
             self.redo_depth,
+            self.undo_bytes / 1024,
             self.terrain_tiles,
             self.terrain_bytes / 1024,
             self.texture_cache_bytes / 1024,

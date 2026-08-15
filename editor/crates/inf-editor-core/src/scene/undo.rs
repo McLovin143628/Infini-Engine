@@ -26,6 +26,26 @@ use crate::voxel_store::SharedVoxelVolumes;
 /// The default history depth (well past the phase gate's 50 steps).
 pub const HISTORY_LIMIT: usize = 256;
 
+/// **The history's byte ceiling** (Hardening D) — 256 MiB of undo records.
+///
+/// [`HISTORY_LIMIT`] bounds the history by *count*, which is a bound on entries
+/// and not on memory: one sculpt stroke over a 1024² terrain patch is megabytes,
+/// and 256 of them is the count-bound being honoured while the editor holds a
+/// gigabyte of undo. Whichever ceiling binds first wins; the byte one is
+/// deliberately generous, because dropping undo history is a worse outcome than
+/// holding it and the number exists to stop the *pathological* case.
+pub const HISTORY_BYTE_LIMIT: usize = 256 * 1024 * 1024;
+
+/// What one [`EntityRecord`] is charged in [`EditCommand::memory_bytes`].
+///
+/// A record has no size accessor and its real cost is dominated by the
+/// components it carries (a `Terrain`'s tiles, a `Tilemap`'s chunks), so this is
+/// an ESTIMATE and is named rather than buried: an entity's own scalar
+/// components, generously. Closing it properly means a `memory_bytes` on
+/// `EntityRecord`, which is a walk over every component slot — recorded as the
+/// honest remainder rather than left as an implied claim of accuracy.
+const RECORD_ESTIMATE: usize = 4096;
+
 pub(crate) enum EditCommand {
     /// `at` is the entity's slot in the creation-order list. The record is boxed
     /// so this variant doesn't bloat the whole enum (an `EntityRecord` grew with
@@ -200,6 +220,60 @@ pub(crate) enum EditCommand {
 }
 
 impl EditCommand {
+    /// **Approximate heap footprint of this record, in bytes** (Hardening D).
+    ///
+    /// The history used to be bounded by [`HISTORY_LIMIT`] alone — a *count* —
+    /// and the memory diagnostics charged a flat 512 bytes per entry. Both are
+    /// wrong in the same direction and by orders of magnitude: 256 sculpt strokes
+    /// over a 1024² terrain is hundreds of megabytes reported as 128 KiB, and the
+    /// count-only bound means the undo stack's real ceiling is
+    /// "256 × whatever the largest stroke was".
+    ///
+    /// Every payload that can be large already had a `memory_bytes()` and none of
+    /// them had a caller: `HeightDelta`, `SplatDelta` (added here),
+    /// `BiomeDelta`, `DataMapDelta`, `HoleDelta` (added here) and `VoxelDelta`.
+    /// This is the one place they are summed.
+    ///
+    /// The small variants are charged their `size_of` and no more — the estimate
+    /// is for *budgeting*, and a rename's `String` is noise beside a stroke. The
+    /// one that is neither small nor delta-shaped is an [`EntityRecord`], which
+    /// has no size accessor and whose cost is dominated by whatever components it
+    /// carries; it is charged its `size_of` too, and that is stated rather than
+    /// hidden — see [`RECORD_ESTIMATE`].
+    pub(crate) fn memory_bytes(&self) -> usize {
+        let base = std::mem::size_of::<EditCommand>();
+        let payload = match self {
+            EditCommand::Create { .. } => RECORD_ESTIMATE,
+            EditCommand::Delete { items, .. } => items.len().saturating_mul(RECORD_ESTIMATE),
+            EditCommand::SwapComponents { .. } => 2 * RECORD_ESTIMATE,
+            EditCommand::SculptTerrain { delta, .. } => delta.memory_bytes(),
+            EditCommand::PaintSplat { delta, .. } => delta.memory_bytes(),
+            EditCommand::PaintBiome { delta, .. } => delta.memory_bytes(),
+            EditCommand::WriteDataMaps { delta, .. } => delta.memory_bytes(),
+            EditCommand::SetTiles { cells, .. } => cells
+                .len()
+                .saturating_mul(std::mem::size_of::<(i32, i32, u32, u32)>()),
+            EditCommand::PaintFoliage { added, removed, .. } => added
+                .len()
+                .saturating_add(removed.len())
+                .saturating_mul(std::mem::size_of::<FoliageInstance>()),
+            EditCommand::CarveVoxels { delta, holes, .. } => delta
+                .memory_bytes()
+                .saturating_add(holes.iter().map(|(_, h)| h.memory_bytes()).sum::<usize>()),
+            // Value swaps: the enum's own footprint is the whole cost.
+            EditCommand::Rename { .. }
+            | EditCommand::Reparent { .. }
+            | EditCommand::SetVisible { .. }
+            | EditCommand::SetTransform { .. }
+            | EditCommand::SetProp { .. }
+            | EditCommand::SetSprite { .. }
+            | EditCommand::SetActor { .. }
+            | EditCommand::SetMaterialAsset { .. }
+            | EditCommand::SetLevelSettings { .. } => 0,
+        };
+        base.saturating_add(payload)
+    }
+
     /// Do (or redo) the edit.
     pub(crate) fn apply(&self, doc: &mut SceneDoc) {
         match self {
@@ -1363,6 +1437,17 @@ pub(crate) struct Transaction {
     pub commands: Vec<EditCommand>,
 }
 
+impl Transaction {
+    /// Approximate heap footprint of this entry — the sum of its commands' (see
+    /// [`EditCommand::memory_bytes`]).
+    fn memory_bytes(&self) -> usize {
+        self.commands
+            .iter()
+            .map(EditCommand::memory_bytes)
+            .fold(self.label.len(), usize::saturating_add)
+    }
+}
+
 /// The undo/redo stacks plus the currently-open transaction.
 pub struct EditHistory {
     undo: Vec<Transaction>,
@@ -1373,6 +1458,8 @@ pub struct EditHistory {
     /// brings this back to zero, so begin/begin/commit/commit nests correctly.
     depth: u32,
     limit: usize,
+    /// Byte ceiling for the two stacks together (see [`HISTORY_BYTE_LIMIT`]).
+    byte_limit: usize,
 }
 
 impl Default for EditHistory {
@@ -1383,6 +1470,7 @@ impl Default for EditHistory {
             open: None,
             depth: 0,
             limit: HISTORY_LIMIT,
+            byte_limit: HISTORY_BYTE_LIMIT,
         }
     }
 }
@@ -1496,10 +1584,36 @@ impl EditHistory {
         }
     }
 
+    /// **Approximate heap footprint of both stacks** (Hardening D).
+    ///
+    /// Walked rather than cached, because the alternative — a running total —
+    /// has to be kept in step with `take_undo`/`push_redo`/`take_redo`/`clear`
+    /// and every path that moves an entry between the stacks, and a byte counter
+    /// that drifts is worse than one that costs a walk. The walk is over at most
+    /// `2 × HISTORY_LIMIT` entries of arithmetic (`memory_bytes` sums patch
+    /// *counts*, it does not touch the buffers), and its two callers are `push`
+    /// and a diagnostics command.
+    pub fn memory_bytes(&self) -> usize {
+        self.undo
+            .iter()
+            .chain(&self.redo)
+            .map(Transaction::memory_bytes)
+            .fold(0usize, usize::saturating_add)
+    }
+
     fn push(&mut self, txn: Transaction) {
         self.redo.clear();
         self.undo.push(txn);
         if self.undo.len() > self.limit {
+            self.undo.remove(0);
+        }
+        // **And the byte ceiling** — the count bound is a bound on entries, not
+        // on memory: one sculpt stroke over a large terrain patch is megabytes,
+        // and 256 of them honour `HISTORY_LIMIT` perfectly. Oldest-first, like
+        // the count eviction, and never past the last entry: a single edit that
+        // is on its own over the ceiling stays, because a history that can throw
+        // away the thing you just did is not a history.
+        while self.undo.len() > 1 && self.memory_bytes() > self.byte_limit {
             self.undo.remove(0);
         }
     }

@@ -2990,6 +2990,16 @@ impl SceneDoc {
         self.history.redo_len()
     }
 
+    /// **Approximate bytes the undo + redo stacks are holding** (Hardening D).
+    ///
+    /// The number the P15 memory diagnostics report instead of
+    /// `undo_depth × 512`: a sculpt or paint stroke on the stack is megabytes,
+    /// and a flat per-entry charge under-reported the largest thing the editor
+    /// holds by orders of magnitude. See `EditCommand::memory_bytes`.
+    pub fn undo_bytes(&self) -> usize {
+        self.history.memory_bytes()
+    }
+
     /// Undo the most recent transaction. Returns whether anything was undone.
     pub fn undo(&mut self) -> bool {
         self.history.commit();

@@ -297,6 +297,13 @@ impl HoleDelta {
         self.patches.iter().map(HolePatch::sample_count).sum()
     }
 
+    /// Approximate heap footprint of the stored before/after buffers, in bytes
+    /// (one `u8` flag each way) — the [`HeightDelta::memory_bytes`] sibling at
+    /// the hole-mask layer.
+    pub fn memory_bytes(&self) -> usize {
+        self.sample_count().saturating_mul(2)
+    }
+
     /// How many samples this edit **opens** (surface → hole) minus how many it
     /// closes. Positive for a carve that broke through, negative for a fill that
     /// healed one, zero for a wash. The number the editor's readout quotes.
