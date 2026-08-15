@@ -224,6 +224,24 @@ pub fn export_android(
 /// two used to be the same `Ok(false)`, which is why `inf export --target web`
 /// shipped a page importing JS that was never produced, exit 0 (C4-40).
 fn try_build_wasm(out_dir: &Path) -> Result<WasmOutcome> {
+    // **The target itself is a tool** (round-2 finding B14). This probed
+    // `wasm-bindgen` and never `wasm32-unknown-unknown`, even though the
+    // sibling `mods.rs` grew exactly that question in the same wave. Without
+    // the target, step 1 exits non-zero -> `Failed` -> `has_blocking()` ->
+    // `FAILURE`, so `inf export --target web` **hard-fails** where it used to
+    // ship a skeleton with instructions — contradicting `ToolAbsent`'s own doc
+    // that a missing tool is not a failure. `run_toolchain: true` is the
+    // default path, so this is what an author with a stock rustup hits.
+    //
+    // Only a definite `Absent` short-circuits: an `Unknown` is not evidence
+    // (B14b), so the build is attempted and cargo gets to answer.
+    if crate::mods::wasm_target() == crate::mods::WasmTarget::Absent {
+        return Ok(WasmOutcome::ToolAbsent(
+            "the wasm32-unknown-unknown target is not installed \
+             (rustup target add wasm32-unknown-unknown)"
+                .into(),
+        ));
+    }
     // wasm-bindgen-cli must be installed for the second step.
     if Command::new("wasm-bindgen")
         .arg("--version")
@@ -255,6 +273,17 @@ fn try_build_wasm(out_dir: &Path) -> Result<WasmOutcome> {
         .status()
         .map_err(|e| CookError::Export(format!("cargo build wasm: {e}")))?;
     if !status.success() {
+        // B14, the other side: the target can be uninstalled between the probe
+        // and the build, and a toolchain override inside the workspace can put
+        // the build on a rustc the probe never asked. Classify by asking again
+        // rather than by assuming the probe above still holds.
+        if crate::mods::wasm_target() == crate::mods::WasmTarget::Absent {
+            return Ok(WasmOutcome::ToolAbsent(
+                "the wasm32-unknown-unknown target is not installed \
+                 (rustup target add wasm32-unknown-unknown)"
+                    .into(),
+            ));
+        }
         return Ok(WasmOutcome::Failed(format!(
             "cargo build --target wasm32-unknown-unknown -p inf-player exited {status}"
         )));
@@ -425,5 +454,52 @@ mod tests {
         let note = android_build_note("G");
         assert!(note.contains("cargo ndk"));
         assert!(note.contains("ANDROID_NDK_HOME"));
+    }
+
+    /// **Round-2 finding B14**: `inf export --target web` probes the tool and
+    /// not the target.
+    ///
+    /// `try_build_wasm` checked `wasm-bindgen --version` and never
+    /// `wasm32-unknown-unknown`, though the sibling `mods.rs` grew exactly that
+    /// question in the same wave. Without the target, step 1 exits non-zero ->
+    /// `WasmOutcome::Failed` -> `has_blocking()` -> `FAILURE`, so the export
+    /// **hard-fails** where it used to ship a skeleton with instructions —
+    /// contradicting `ToolAbsent`'s own doc that a missing tool is not a
+    /// failure. `run_toolchain: true` is the default path.
+    ///
+    /// A source pin: reaching the branch needs a machine without the target and
+    /// a full release wasm build, neither of which a test can arrange.
+    #[test]
+    fn the_web_export_probes_the_target_and_not_only_the_tool() {
+        let src = include_str!("targets.rs").replace("\r\n", "\n");
+        let at = src
+            .find("fn try_build_wasm(")
+            .expect("`try_build_wasm` occurs nowhere — was it renamed?");
+        let rest = &src[at..];
+        let body = &rest[..rest.find("\n}\n").unwrap_or(rest.len())];
+
+        let probe = body
+            .find("wasm_target()")
+            .expect("`try_build_wasm` never asks whether the wasm target is installed");
+        let build = body
+            .find("wasm32-unknown-unknown\",")
+            .expect("`try_build_wasm` no longer runs the cargo build this pin is about");
+        assert!(
+            probe < build,
+            "the target probe happens AFTER the build it is supposed to make \
+             unnecessary"
+        );
+        assert!(
+            body.contains("WasmTarget::Absent"),
+            "the probe no longer requires a DEFINITE absence, so an unanswerable \
+             one would report a missing tool (B14b)"
+        );
+        assert_eq!(
+            body.matches("WasmOutcome::ToolAbsent").count(),
+            4,
+            "this pin is calibrated against three ToolAbsent sites: the target \
+             probe, the wasm-bindgen probe, and the re-classification of a failed \
+             step 1"
+        );
     }
 }

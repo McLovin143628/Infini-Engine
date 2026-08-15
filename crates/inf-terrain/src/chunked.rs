@@ -1038,7 +1038,7 @@ mod tests {
             assert_eq!(
                 tile.sample(4, 1, 1),
                 12.5,
-                "a {poison} height was stored into a tile that is about to be                  bincoded into a committed .inf_terrain"
+                "a {poison} height was stored into a tile that is about to be bincoded into a committed .inf_terrain"
             );
         }
     }

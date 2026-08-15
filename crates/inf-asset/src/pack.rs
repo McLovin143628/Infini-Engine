@@ -570,7 +570,7 @@ fn zstd_decode(stored: &[u8], limit: u64) -> Result<Vec<u8>> {
     };
     if out.len() as u64 > limit {
         return Err(AssetError::Pack(format!(
-            "a {} byte entry declares {limit} uncompressed bytes and expands past it              (corrupt pack)",
+            "a {} byte entry declares {limit} uncompressed bytes and expands past it (corrupt pack)",
             stored.len()
         )));
     }

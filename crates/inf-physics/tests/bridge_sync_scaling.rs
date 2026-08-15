@@ -352,7 +352,7 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
     let calib = calibration_ns();
     assert!(
         calib > 0.0 && calib.is_finite(),
-        "the calibration measured {calib} ns/entry — the workload was optimized          away, so the class check below is not a check"
+        "the calibration measured {calib} ns/entry — the workload was optimized away, so the class check below is not a check"
     );
     let ratio = calib / CALIBRATION_REF_NS;
     let calibrated = calib <= CALIBRATION_REF_NS * CALIBRATION_TOLERANCE;

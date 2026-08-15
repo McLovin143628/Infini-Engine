@@ -7055,7 +7055,7 @@ mod tests {
         assert!(err.contains("sidecar"), "{err}");
         assert!(
             !path.exists(),
-            "the payload survived a failed FIRST save with no sidecar beside it              — the next scan gives this level a content-derived GUID that churns              with its contents"
+            "the payload survived a failed FIRST save with no sidecar beside it — the next scan gives this level a content-derived GUID that churns with its contents"
         );
 
         // A RE-save keeps the old behaviour on purpose: by then the previous

@@ -131,7 +131,12 @@ pub enum ModBuildOutcome {
 /// `wasm32-unknown-unknown` when the toolchain is present, else return
 /// [`ModBuildOutcome::ToolchainMissing`] with instructions.
 pub fn build_mod_wasm(crate_dir: &Path) -> Result<ModBuildOutcome> {
-    if !wasm_target_installed() {
+    // Round-2 finding B14b: only a definite `Absent` skips the build. An
+    // `Unknown` — rustc unrunnable, a libdir that could not be read — is not
+    // evidence that the target is missing, and reporting one as
+    // `ToolchainMissing` is a green `inf cook-mods` with no wasm in it. When
+    // the question cannot be asked, ask cargo instead by trying.
+    if wasm_target() == WasmTarget::Absent {
         return Ok(ModBuildOutcome::ToolchainMissing(
             TOOLCHAIN_INSTRUCTIONS.to_string(),
         ));
@@ -164,10 +169,24 @@ pub fn build_mod_wasm(crate_dir: &Path) -> Result<ModBuildOutcome> {
         // "toolchain missing", which `inf cook-mods` then exits 0 on. The probe
         // ran before the build too, so if it still says installed, the failure is
         // the code's.
-        if !wasm_target_installed() {
-            return Ok(ModBuildOutcome::ToolchainMissing(
-                TOOLCHAIN_INSTRUCTIONS.to_string(),
-            ));
+        match wasm_target() {
+            WasmTarget::Absent => {
+                return Ok(ModBuildOutcome::ToolchainMissing(
+                    TOOLCHAIN_INSTRUCTIONS.to_string(),
+                ))
+            }
+            // B14b again, and this is the half that ships: an unreadable libdir
+            // used to answer "absent" here, so a mod that genuinely does not
+            // compile was re-classified as a missing toolchain and the cook
+            // exited 0. It is a build failure, and the reason the probe could
+            // not confirm otherwise travels with it.
+            WasmTarget::Unknown(why) => {
+                return Err(CookError::Mod(format!(
+                    "mod build failed, and the wasm32-unknown-unknown target could \
+                     not be verified ({why}):\n{stderr}"
+                )))
+            }
+            WasmTarget::Present => {}
         }
         return Err(CookError::Mod(format!("mod build failed:\n{stderr}")));
     }
@@ -184,19 +203,33 @@ pub fn build_mod_wasm(crate_dir: &Path) -> Result<ModBuildOutcome> {
     Ok(ModBuildOutcome::Built(wasm))
 }
 
-/// Whether the `wasm32-unknown-unknown` target's **standard library** is
-/// installed for the active toolchain.
+/// What this machine can say about the `wasm32-unknown-unknown` target's
+/// **standard library** (round-2 finding **B14b**).
+///
+/// Three answers, not two. The boolean version collapsed *"the toolchain says
+/// this target is not installed"* into the same value as *"this question could
+/// not be asked"* — `rustc` unrunnable, a non-zero exit, a libdir that could
+/// not be read — and every one of those made `build_mod_wasm` report a mod with
+/// a genuine compile error as `ToolchainMissing`, which `inf cook-mods` exits
+/// **0** on with no wasm produced. That is the silent-ship outcome C4-40
+/// closed, reached through another door.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WasmTarget {
+    /// The libdir exists and holds a `libstd` rlib.
+    Present,
+    /// The toolchain answered, and the standard library is not there.
+    Absent,
+    /// The question could not be asked. **Not** a synonym for `Absent`: a
+    /// caller must not report a missing toolchain on this, because it has no
+    /// evidence of one.
+    Unknown(String),
+}
+
+/// Ask the toolchain directly.
 ///
 /// # Why the exit status is not the answer
 ///
-/// `rustc --print target-libdir` *computes* a path; it does not look for one. It
-/// exits **0 for a target that is not installed at all**, printing the directory
-/// where that target's `libstd` would live — verified on this toolchain against
-/// `thumbv7em-none-eabihf`, which prints its libdir and does not have one.
-///
-/// So this probe answered "installed" everywhere, and the only thing that made
-/// [`build_mod_wasm`] classify correctly was a substring sniff over cargo's
-/// stderr (`"may not be installed"`). C4-40 removed that sniff — rightly, since
+/// The first cut classified by reading `cargo`'s stderr for the target triple;
 /// it also matched ordinary compile errors naming the target — and thereby
 /// exposed the false positive underneath: on a machine without the target, the
 /// build failed with `can't find crate for 'std'` and was reported as a **build
@@ -206,8 +239,8 @@ pub fn build_mod_wasm(crate_dir: &Path) -> Result<ModBuildOutcome> {
 /// Checking that the libdir exists **and holds a `libstd` rlib** asks the
 /// toolchain the question directly, and keeps the property C4-40 was for: a
 /// genuine compile error is still an error, because the target is still there.
-pub fn wasm_target_installed() -> bool {
-    let Ok(out) = Command::new("rustc")
+pub fn wasm_target() -> WasmTarget {
+    let out = match Command::new("rustc")
         .args([
             "--print",
             "target-libdir",
@@ -215,23 +248,62 @@ pub fn wasm_target_installed() -> bool {
             "wasm32-unknown-unknown",
         ])
         .output()
-    else {
-        return false;
+    {
+        Ok(out) => out,
+        Err(e) => return WasmTarget::Unknown(format!("could not run rustc: {e}")),
     };
     if !out.status.success() {
-        return false;
+        return WasmTarget::Unknown(format!(
+            "rustc --print target-libdir exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
-    let dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return false;
+    classify_libdir(&PathBuf::from(
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    ))
+}
+
+/// The verdict a target libdir carries — split out of [`wasm_target`] so the
+/// three answers can be driven from a test (the rest of that function needs a
+/// `rustc`, and the machine running the test already has the real one).
+fn classify_libdir(dir: &Path) -> WasmTarget {
+    // **The B14b line.** A libdir that cannot be READ is not a libdir that is
+    // not there — a permission error, a half-unpacked toolchain, a busy network
+    // share or a path that is a file all land here, and reporting them as "the
+    // target is not installed" turns a broken environment into a green cook
+    // with no wasm in it. `NotFound` is the one error that really does mean
+    // absent.
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return WasmTarget::Absent,
+        Err(e) => {
+            return WasmTarget::Unknown(format!(
+                "could not read the target libdir at {}: {e}",
+                dir.display()
+            ))
+        }
     };
     // `flatten`, not `filter_map(Result::ok)`: this crate aliases `Result<T>` to
     // its own `CookError` result, which makes the path-qualified form ambiguous.
-    entries.flatten().any(|e| {
+    if entries.flatten().any(|e| {
         e.file_name()
             .to_str()
             .is_some_and(|n| n.starts_with("libstd-") && n.ends_with(".rlib"))
-    })
+    }) {
+        WasmTarget::Present
+    } else {
+        WasmTarget::Absent
+    }
+}
+
+/// [`wasm_target`] as a boolean, for the callers that genuinely want one.
+///
+/// **`Unknown` reads as `false` here**, so this is only safe where "not proven
+/// present" is the conservative answer — never where the `false` becomes a
+/// *report* that the toolchain is missing. See B14b.
+pub fn wasm_target_installed() -> bool {
+    wasm_target() == WasmTarget::Present
 }
 
 const TOOLCHAIN_INSTRUCTIONS: &str = "\
@@ -447,5 +519,94 @@ mod tests {
     fn sanitizes_odd_class_names() {
         assert_eq!(sanitize_crate_name("My Cool Actor!"), "my-cool-actor-mod");
         assert_eq!(sanitize_crate_name("___"), "mod-mod");
+    }
+
+    /// **Round-2 finding B14b**: "the question could not be asked" is not "the
+    /// answer is no".
+    ///
+    /// `wasm_target_installed` collapsed an unreadable libdir into `false`, so
+    /// a mod with a genuine compile error was re-classified as
+    /// `ToolchainMissing` and `inf cook-mods` exited **0 with no wasm** — the
+    /// silent-ship outcome C4-40 closed, through another door.
+    #[test]
+    fn an_unreadable_libdir_is_not_an_absent_target() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Absent: nothing there at all.
+        assert_eq!(
+            classify_libdir(&dir.path().join("nope")),
+            WasmTarget::Absent,
+            "a libdir that does not exist really is absent"
+        );
+
+        // Absent: a real directory with no standard library in it.
+        let empty = dir.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        std::fs::write(empty.join("libcore-1234.rlib"), b"").unwrap();
+        assert_eq!(
+            classify_libdir(&empty),
+            WasmTarget::Absent,
+            "a libdir with no libstd is absent"
+        );
+
+        // Present: the thing being looked for.
+        let full = dir.path().join("full");
+        std::fs::create_dir(&full).unwrap();
+        std::fs::write(full.join("libstd-deadbeef.rlib"), b"").unwrap();
+        assert_eq!(classify_libdir(&full), WasmTarget::Present);
+
+        // UNKNOWN: the libdir path is a file. `read_dir` fails with something
+        // that is not `NotFound` on every platform — which is the whole class
+        // (a permission error, a half-unpacked toolchain, a network share) in
+        // the one shape a test can produce portably.
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        match classify_libdir(&file) {
+            WasmTarget::Unknown(why) => assert!(
+                why.contains("could not read"),
+                "the reason must travel with the verdict: {why}"
+            ),
+            other => panic!("an unreadable libdir classified as {other:?}"),
+        }
+
+        // …and the boolean face reads Unknown as "not proven present", which is
+        // only safe because no caller turns that `false` into a report.
+        assert!(!matches!(classify_libdir(&file), WasmTarget::Present));
+    }
+
+    /// The two `build_mod_wasm` call sites act on `Absent` and never on
+    /// `Unknown` — a source pin, because reaching either branch needs a machine
+    /// whose libdir cannot be read.
+    #[test]
+    fn the_toolchain_missing_verdict_is_only_ever_reported_for_absent() {
+        let src = include_str!("mods.rs").replace("\r\n", "\n");
+        let body = {
+            let at = src
+                .find("pub fn build_mod_wasm(")
+                .expect("`build_mod_wasm` occurs nowhere — was it renamed?");
+            let rest = &src[at..];
+            let end = rest.find("\n}\n").unwrap_or(rest.len());
+            rest[..end].to_string()
+        };
+        assert_eq!(
+            body.matches("ToolchainMissing").count(),
+            3,
+            "this pin is calibrated against `build_mod_wasm`'s two report sites plus the one mention in the comment that explains them"
+        );
+        assert!(
+            !body.contains("!wasm_target_installed()"),
+            "`build_mod_wasm` classifies with the boolean face again, which reads \
+             `Unknown` as `false` and turns an unreadable libdir into a green cook \
+             with no wasm in it (B14b)"
+        );
+        assert!(
+            body.contains("wasm_target() == WasmTarget::Absent"),
+            "`build_mod_wasm`'s pre-build probe no longer requires a DEFINITE absence"
+        );
+        assert!(
+            body.contains("WasmTarget::Unknown(why)"),
+            "`build_mod_wasm` no longer distinguishes an unanswerable probe from an \
+             absent target when a build fails"
+        );
     }
 }
