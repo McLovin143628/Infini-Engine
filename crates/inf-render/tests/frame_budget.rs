@@ -122,6 +122,127 @@ fn frame_stays_under_budget() {
     );
 }
 
+/// **The version-churning regime** (Hardening Wave E, 2026-08-14) — the frame a
+/// SHIPPED PLAYER renders, which this file did not previously measure at all.
+///
+/// [`frame_stays_under_budget`] above renders **one** `RenderScene` sixty times
+/// and never touches its `version`. Every version-gated cache in the renderer
+/// therefore misses once and hits on all fifty-nine frames after it. That is the
+/// *opposite* of the regime a host produces: `project_scene_full` — in both
+/// hosts — ends in `scene.mark_dirty()`, so every frame the player draws arrives
+/// carrying a version nobody has seen before, and each of `mesh.rs`,
+/// `depth_prepass.rs`, `shadow.rs`, `skinned.rs`, `sprite.rs`, `mask.rs` and
+/// `vgeom.rs` re-does its work.
+///
+/// A budget that measures only the still regime is **structurally blind** to the
+/// cost of the churn, which is why the churn has stood as a RECORDED-open item
+/// since P18.4 with a green gate beside it: the number this file printed was the
+/// number of a frame that does not exist.
+///
+/// So this arm renders the same scene in the same process in **both** regimes and
+/// asserts the budget against the churning one — the honest side. The still
+/// regime is kept, measured and printed, because the *difference* between the two
+/// is the only direct price of `scene.version` this tree can quote.
+///
+/// The difference itself is deliberately **not** asserted: it is a subtraction of
+/// two wall clocks, noisier than either, and §8 numbers are tripwires rather than
+/// hardware claims (see `inf_player::budget`'s header for the full rule). What is
+/// asserted is (1) the churning frame stays inside `FRAME_BUDGET_MS` on real
+/// hardware, and (2) the arm is not vacuous — the two regimes really did present
+/// different version sequences to the renderer.
+#[test]
+fn frame_stays_under_budget_under_version_churn() {
+    let Ok(gpu) = GpuContext::headless() else {
+        eprintln!("SKIP frame_budget churn: no GPU adapter");
+        return;
+    };
+    let info = gpu.adapter.get_info();
+    let virtualized = {
+        let n = info.name.to_ascii_lowercase();
+        n.contains("paravirtual") || n.contains("virtualbox") || n.contains("vmware")
+    };
+    let software = info.device_type == wgpu::DeviceType::Cpu || virtualized;
+
+    let view = overlook_view();
+    let target = HeadlessTarget::new(&gpu, W, H);
+    const WARMUP: u32 = 10;
+    const MEASURED: u32 = 60;
+
+    // `churn` reproduces what a host does between frames: bump the version. The
+    // scene CONTENT is byte-identical in both runs — only the stamp moves — so
+    // the difference is exactly what the stamp buys and nothing else.
+    let measure = |churn: bool| -> (f64, u64) {
+        let mut scene = cube_field(11);
+        let first = scene.version;
+        let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+        for _ in 0..WARMUP {
+            if churn {
+                scene.mark_dirty();
+            }
+            renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+        }
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let start = std::time::Instant::now();
+        for _ in 0..MEASURED {
+            if churn {
+                scene.mark_dirty();
+            }
+            renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000.0 / f64::from(MEASURED);
+        (ms, scene.version.wrapping_sub(first))
+    };
+
+    let (still_ms, still_bumps) = measure(false);
+    let (churn_ms, churn_bumps) = measure(true);
+
+    eprintln!(
+        "frame_budget churn: still {still_ms:.3} ms/frame | churning {churn_ms:.3} ms/frame \
+         (+{:.3} ms, {:+.1}%) over {MEASURED} frames of {} instances on {} ({:?}); \
+         budget {FRAME_BUDGET_MS} ms{}",
+        churn_ms - still_ms,
+        (churn_ms - still_ms) / still_ms * 100.0,
+        cube_field(11).instances.len(),
+        info.name,
+        info.device_type,
+        if software {
+            " [software — smoke only]"
+        } else {
+            ""
+        }
+    );
+
+    // ANTI-VACUITY. The whole point of this arm is that the two runs presented
+    // *different* version sequences; if `mark_dirty` ever stopped bumping, both
+    // runs would be the still one and the arm would measure nothing while staying
+    // green. This is a pure assertion — it holds with no GPU at all.
+    assert_eq!(
+        still_bumps, 0,
+        "the still regime must hold `version` fixed — otherwise both halves \
+         measure the same thing"
+    );
+    assert_eq!(
+        churn_bumps,
+        u64::from(WARMUP + MEASURED),
+        "the churning regime must bump `version` once per frame, exactly as \
+         `project_scene_full` does"
+    );
+
+    if software {
+        // A CPU rasterizer's timing is not representative; the pipeline having
+        // run in both regimes is the whole claim here.
+        return;
+    }
+    assert!(
+        churn_ms < FRAME_BUDGET_MS,
+        "a version-churning frame mean {churn_ms:.3} ms exceeded the \
+         {FRAME_BUDGET_MS} ms budget on {} (the §8 budget only ratchets DOWN — \
+         investigate the regression, do not raise it)",
+        info.name
+    );
+}
+
 /// **The Phase 17 sky-stack budget** (P17.4): what the whole living sky —
 /// atmosphere LUTs, volumetric clouds, cloud shadows and precipitation — costs a
 /// frame, per render tier, measured against the same frame with each layer off.

@@ -128,6 +128,57 @@
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
 pub const LOAD_BUDGET_MS: f64 = 5000.0;
 
+/// Hard **mean** budget, in milliseconds, for ONE sim→render **projection** —
+/// `inf_player::render::project_scene_full` over a streamed world (Hardening
+/// Wave E, 2026-08-14).
+///
+/// # A fourth class, because the seam had none
+///
+/// The three classes above cover the render (`inf_core::FRAME_BUDGET_MS`), the
+/// fixed step ([`STREAMED_STEP_BUDGET_MS`]) and the one-shot build
+/// ([`LOAD_BUDGET_MS`]). Between the second and the first sits the projection:
+/// the function that turns an `EcsWorld` into the `RenderScene` the renderer is
+/// then measured against. **Nothing in this tree measured it**, which is how
+/// three per-frame deep copies of every resident terrain tile, voxel chunk and
+/// fracture chunk stood against change stamps their own consumers honour — the
+/// producers ignored the stamps, the consumers discarded the payloads, and the
+/// entire cost landed in a function no budget could see.
+///
+/// # It is asserted EVERYWHERE, unlike the frame budget
+///
+/// A projection touches no GPU: it is CPU work over CPU data, and the whole
+/// reason `inf-render`'s `frame_budget.rs` skips software and paravirtualized
+/// adapters — that their milliseconds do not represent a frame — simply does not
+/// apply. So `runtime/inf-player/tests/projection_budget.rs` asserts this on
+/// every runner of every operating system, which makes it one of the few
+/// wall-clock arms in the tree that is not conditional. The ~4× shared-runner
+/// factor from [`LOAD_BUDGET_MS`]'s docs *is* a CPU factor, and it is carried in
+/// the number below rather than in a skip.
+///
+/// # The number, and what it is seeded from
+///
+/// Measured on a developer machine (Windows, dev profile with optimizations)
+/// over the gate fixture — 36 level-0 tiles at 129², a 55-chunk / 19 623-vertex
+/// voxel slab and 200 props — at **6.37 ms/projection**. That is six and a third
+/// milliseconds of a shipped player's frame, every frame, producing payloads the
+/// renderer discards on a version match.
+///
+/// **48 ms** is that measurement × ~7.5, which is ~1.9× after the ~4×
+/// shared-runner factor — the [`STREAMED_STEP_BUDGET_MS`] margin, for the same
+/// reason: loose enough that a loaded runner of three operating systems cannot
+/// flake it, tight enough that a projector that started rebuilding something
+/// *else* per frame trips it.
+///
+/// It is deliberately seeded from the **unrepaired** measurement, because a
+/// budget minted after a fix cannot certify that the fix is what moved the
+/// number. This constant exists first, at the cost it found; the same wave then
+/// ratchets it down against the repaired one, and the two commits are the
+/// before/after pair. **That ratchet is the point** — read the git log of this
+/// line, not just its value.
+///
+/// **RATCHET RULE (§8): this constant may only ever DECREASE.**
+pub const PROJECTION_BUDGET_MS: f64 = 48.0;
+
 /// Hard **mean** fixed-step budget, in milliseconds, for a step that also runs
 /// cell streaming and terrain sim-residency at its top (the composed gate scene).
 ///
