@@ -58,3 +58,57 @@ fn runtime_autoplay_source_emits_one_deterministic_play_command() {
     assert_eq!(p.pitch, 1.25);
     assert_eq!(p.position, Some(DVec3::new(-4.0, 1.0, 0.0)));
 }
+
+/// **The audio log is bounded, and it says what it dropped** (Hardening D).
+///
+/// `audio_log` accumulated the whole session's drained command stream **in the
+/// shipped player** — at least one `SetListener` per fixed step whenever a
+/// listener exists, i.e. ~216 000 commands an hour — for a value whose only
+/// consumer is `audio_command_log()`, a test accessor. It is an
+/// `inf_core::BoundedLog` now: a hard ceiling plus a count of what fell off the
+/// front, so a test that reasons about the *first* command can tell that it is
+/// reading a tail.
+#[test]
+fn the_audio_command_log_cannot_grow_without_bound() {
+    let listener = Uuid::from_u128(0xD0A0_11E5);
+    let mut world = EcsWorld::new();
+    let e = world.spawn_with_guid(listener, "Listener", None);
+    world
+        .world_mut()
+        .entity_mut(e)
+        .insert(Transform::from_translation(DVec3::ZERO));
+    world
+        .world_mut()
+        .entity_mut(e)
+        .insert(inf_ecs::components::AudioListener { active: true });
+    world.mark_dirty();
+
+    let mut sim = RuntimeSim::new(world, vec![], DVec2::ZERO, 60.0);
+    let steps = inf_core::DEFAULT_LOG_CAPACITY + 512;
+    for _ in 0..steps {
+        sim.step_once(RuntimeInput::default());
+    }
+
+    // The premise: this really is a per-step producer. Without it the bound below
+    // would be satisfied by a stream that never grew at all.
+    assert!(
+        sim.dropped_audio_commands() > 0,
+        "the fixture must actually overflow the ring — {} steps produced no eviction",
+        steps
+    );
+    assert!(
+        sim.audio_command_log().len() <= inf_core::DEFAULT_LOG_CAPACITY,
+        "the retained window is {} commands, past the {} ceiling",
+        sim.audio_command_log().len(),
+        inf_core::DEFAULT_LOG_CAPACITY
+    );
+    // And the newest command survives: a ring that kept the head would be worse
+    // than no ring, because the interesting end of a command stream is the end.
+    assert!(
+        matches!(
+            sim.audio_command_log().last(),
+            Some(AudioCommand::SetListener(_))
+        ),
+        "the most recent step's command must be retained"
+    );
+}

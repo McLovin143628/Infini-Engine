@@ -14,6 +14,7 @@
 //! ```
 
 pub mod job;
+pub mod log;
 
 /// The composed-frame budget, in milliseconds — the §8 verification-strategy
 /// figure every phase gate measures against.
@@ -35,3 +36,4 @@ pub use job::{
     bounded_channel, channel, global, join, parallel_for, parallel_map, parallel_map_ref, scope,
     JobPool,
 };
+pub use log::{BoundedLog, DEFAULT_LOG_CAPACITY};

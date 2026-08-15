@@ -50,6 +50,7 @@ use inf_blueprint::interp::{
 };
 use inf_blueprint::semantics::run_event;
 use inf_blueprint::{ActorInstance, BlueprintClass, EventKind, Host, InterpDebug, RunError, Value};
+use inf_core::BoundedLog;
 use inf_ecs::components::{
     AnimPlayer, AudioListener, AudioSource, CharacterController2D, CharacterController3D,
     Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, Destructible, DistanceModel,
@@ -225,7 +226,13 @@ pub struct RuntimeSim {
     /// MIRROR of `SimSession::drained_overlaps`.
     drained_overlaps: Vec<OverlapEvent>,
     /// Accumulated `debug.print` output.
-    logs: Vec<String>,
+    ///
+    /// **Bounded** (Hardening D). This is the shipped player, the only consumers
+    /// are [`logs`](Self::logs) and the gates that read it, and the growth rate is
+    /// reachable from authored content — a failed event dispatch pushes a
+    /// formatted `String` *every tick*. See [`BoundedLog`] for why a ring and not
+    /// a drain, and [`dropped_logs`](Self::dropped_logs) for the honest half.
+    logs: BoundedLog<String>,
     /// Last `move_and_slide` grounded result per actor.
     grounded: BTreeMap<Uuid, bool>,
     /// P12.3 audio (the shipped mirror of the editor `SimSession`): the long-lived
@@ -242,7 +249,11 @@ pub struct RuntimeSim {
     /// Entity `Guid`s whose autoplay `AudioSource` has already started.
     audio_started: BTreeSet<Uuid>,
     /// Accumulated drained audio command stream (determinism telemetry / test seam).
-    audio_log: Vec<AudioCommand>,
+    ///
+    /// **Bounded** (Hardening D): a listener command is enqueued at least once per
+    /// fixed step, so at 60 Hz this grew by ~216 000 commands an hour in the
+    /// SHIPPED player for a value only tests read.
+    audio_log: BoundedLog<AudioCommand>,
     /// Total fixed steps run.
     steps: u64,
     /// World-space translations one fixed step ago, for render interpolation.
@@ -412,13 +423,13 @@ impl RuntimeSim {
             bindings: BTreeMap::new(),
             dispatch_queue: VecDeque::new(),
             drained_overlaps: Vec::new(),
-            logs: Vec::new(),
+            logs: BoundedLog::default(),
             grounded: BTreeMap::new(),
             audio: AudioEngine::new(),
             audio_clips: BTreeMap::new(),
             audio_cmds: Vec::new(),
             audio_started: BTreeSet::new(),
-            audio_log: Vec::new(),
+            audio_log: BoundedLog::default(),
             steps: 0,
             prev_positions: BTreeMap::new(),
             cur_positions: BTreeMap::new(),
@@ -616,7 +627,16 @@ impl RuntimeSim {
     /// The accumulated audio command stream (P12.3): the deterministic play/stop/
     /// set sequence a headless test asserts against instead of device output.
     pub fn audio_command_log(&self) -> &[AudioCommand] {
-        &self.audio_log
+        self.audio_log.as_slice()
+    }
+
+    /// How many audio commands fell off the front of
+    /// [`audio_command_log`](Self::audio_command_log)'s ring (Hardening D).
+    ///
+    /// Non-zero means the slice is a **tail**, not the whole session's stream — a
+    /// test that reasons about the first command must assert this is zero first.
+    pub fn dropped_audio_commands(&self) -> u64 {
+        self.audio_log.dropped()
     }
 
     /// The owned world (read-only projection for the renderer / trace).
@@ -747,7 +767,13 @@ impl RuntimeSim {
     }
 
     pub fn logs(&self) -> &[String] {
-        &self.logs
+        self.logs.as_slice()
+    }
+
+    /// How many log lines fell off the front of [`logs`](Self::logs)'s ring
+    /// (Hardening D). Non-zero means the slice is a tail, not the whole session.
+    pub fn dropped_logs(&self) -> u64 {
+        self.logs.dropped()
     }
 
     /// A live member variable of an actor (tests / debug HUD).
@@ -1618,7 +1644,7 @@ struct RuntimeHost<'a> {
     input: &'a RuntimeInput,
     just_pressed: &'a BTreeSet<String>,
     entities: &'a BTreeMap<i64, Uuid>,
-    logs: &'a mut Vec<String>,
+    logs: &'a mut BoundedLog<String>,
     grounded: &'a mut BTreeMap<Uuid, bool>,
     /// The P12.3 audio command sink: `audio.*` nodes enqueue here.
     audio_cmds: &'a mut Vec<AudioCommand>,
@@ -2593,7 +2619,7 @@ fn terrain_height_at(world: &EcsWorld, voxels: &BTreeMap<Uuid, VoxelData>, x: f6
 fn runtime_voxel_op(
     world: &mut EcsWorld,
     voxels: &mut BTreeMap<Uuid, VoxelData>,
-    logs: &mut Vec<String>,
+    logs: &mut BoundedLog<String>,
     entity: Uuid,
     op: &inf_voxel::VoxelOp,
     op_name: &str,
@@ -2701,7 +2727,7 @@ fn runtime_destruct_damage(
     bridge3d: &mut PhysicsBridge3D,
     fractures: &mut BTreeMap<Uuid, FractureState>,
     world: &EcsWorld,
-    logs: &mut Vec<String>,
+    logs: &mut BoundedLog<String>,
     entity: Uuid,
     energy_j: f64,
 ) -> f64 {

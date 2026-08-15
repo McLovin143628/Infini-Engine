@@ -491,7 +491,13 @@ pub struct CellStreaming {
     blocked: BTreeSet<CellCoord>,
     stats: CellStreamStats,
     /// The activation trace (the gate's comparison unit).
-    events: Vec<CellEvent>,
+    ///
+    /// **Bounded** (Hardening D): this accumulated one entry per activation and
+    /// per deactivation for the whole session, in the shipped player, for a value
+    /// only gates read. A player walking a partitioned world crosses cell
+    /// boundaries indefinitely. See [`dropped_events`](CellStreaming::dropped_events)
+    /// for the half that keeps the trace honest.
+    events: inf_core::BoundedLog<CellEvent>,
     /// Whether the last sync was already over [`ACTIVATION_SOFT_CEILING`], so a
     /// stable oversized set warns once instead of every fixed step.
     warned_ceiling: bool,
@@ -533,7 +539,7 @@ impl CellStreaming {
             loaded: BTreeMap::new(),
             blocked: BTreeSet::new(),
             stats: CellStreamStats::default(),
-            events: Vec::new(),
+            events: inf_core::BoundedLog::default(),
             warned_ceiling: false,
             logged_unresolved: BTreeSet::new(),
         }
@@ -576,7 +582,17 @@ impl CellStreaming {
 
     /// The activation/deactivation trace, in order.
     pub fn events(&self) -> &[CellEvent] {
-        &self.events
+        self.events.as_slice()
+    }
+
+    /// How many trace entries fell off the front of the ring (Hardening D).
+    ///
+    /// **A trace gate that compares two runs must assert this is equal on both**
+    /// — two runs that dropped different prefixes are not comparable, and the
+    /// count is what says so instead of the comparison quietly passing on two
+    /// matching tails.
+    pub fn dropped_events(&self) -> u64 {
+        self.events.dropped()
     }
 
     /// **SIM (deterministic).** Reconcile cell residency with the streaming

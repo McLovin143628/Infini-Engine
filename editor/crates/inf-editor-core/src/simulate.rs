@@ -50,6 +50,7 @@ use inf_blueprint::semantics::run_event;
 use inf_blueprint::{
     ActorInstance, BlueprintClass, EventKind, Host, InterpDebug, RunError, Trace, Value,
 };
+use inf_core::BoundedLog;
 use inf_ecs::components::{
     AnimPlayer, AnimStateMachine, AudioListener, AudioSource, CharacterController2D,
     CharacterController3D, Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind,
@@ -242,7 +243,13 @@ pub struct SimSession {
     /// Cleared and refilled every step; the trigger-volume gameplay seam.
     drained_overlaps: Vec<OverlapEvent>,
     /// Accumulated `debug.print` output (surfaced to the log panel).
-    logs: Vec<String>,
+    ///
+    /// **Bounded** (Hardening D), for the reason `RuntimeSim::logs` is: a failed
+    /// event dispatch pushes a formatted `String` every tick, so the growth rate
+    /// is reachable from authored content. The sibling `debug_events` beside it
+    /// has always been *drained* (`take_debug_events`); this one is read as a
+    /// borrow by every caller, so it rings instead. See [`BoundedLog`].
+    logs: BoundedLog<String>,
     /// Last `move_and_slide` grounded result per actor (a debug/telemetry read).
     grounded: BTreeMap<Uuid, bool>,
     /// P12.3 audio: the long-lived host `AudioEngine` (a no-device fallback in the
@@ -261,7 +268,10 @@ pub struct SimSession {
     /// Accumulated drained audio command stream (P12.3 determinism telemetry): the
     /// exact play/stop/set sequence, the observable a headless test asserts against
     /// (the deterministic-queue payoff — the command stream, not device output).
-    audio_log: Vec<AudioCommand>,
+    ///
+    /// **Bounded** (Hardening D): at least one listener command is enqueued per
+    /// fixed step, so this grew for the whole session at the step rate.
+    audio_log: BoundedLog<AudioCommand>,
     /// Total fixed steps run (a determinism/telemetry counter).
     steps: u64,
     /// B-P4 tier A′ seam: per-class debugger config (breakpoints + wire capture),
@@ -415,13 +425,13 @@ impl SimSession {
             bindings: BTreeMap::new(),
             dispatch_queue: VecDeque::new(),
             drained_overlaps: Vec::new(),
-            logs: Vec::new(),
+            logs: BoundedLog::default(),
             grounded: BTreeMap::new(),
             audio: AudioEngine::new(),
             audio_clips: BTreeMap::new(),
             audio_cmds: Vec::new(),
             audio_started: BTreeSet::new(),
-            audio_log: Vec::new(),
+            audio_log: BoundedLog::default(),
             steps: 0,
             debug: BTreeMap::new(),
             debug_events: Vec::new(),
@@ -700,7 +710,14 @@ impl SimSession {
 
     /// The `debug.print` log accumulated so far.
     pub fn logs(&self) -> &[String] {
-        &self.logs
+        self.logs.as_slice()
+    }
+
+    /// How many log lines fell off the front of [`logs`](Self::logs)'s ring
+    /// (Hardening D) — non-zero means the slice is a tail, not the whole session.
+    /// MIRROR of `RuntimeSim::dropped_logs`.
+    pub fn dropped_logs(&self) -> u64 {
+        self.logs.dropped()
     }
 
     /// How many fixed steps have run.
@@ -1385,7 +1402,13 @@ impl SimSession {
     /// set sequence drained across every step. The headless command-stream test
     /// asserts against this rather than device output.
     pub fn audio_command_log(&self) -> &[AudioCommand] {
-        &self.audio_log
+        self.audio_log.as_slice()
+    }
+
+    /// How many audio commands fell off the front of the ring (Hardening D).
+    /// MIRROR of `RuntimeSim::dropped_audio_commands`.
+    pub fn dropped_audio_commands(&self) -> u64 {
+        self.audio_log.dropped()
     }
 
     /// The P12.3 audio step (runs last in a fixed step): pick the listener, enqueue
@@ -1619,7 +1642,7 @@ struct SimHost<'a> {
     input: &'a SimInput,
     just_pressed: &'a BTreeSet<String>,
     entities: &'a BTreeMap<i64, Uuid>,
-    logs: &'a mut Vec<String>,
+    logs: &'a mut BoundedLog<String>,
     grounded: &'a mut BTreeMap<Uuid, bool>,
     /// The P12.3 audio command sink: `audio.*` nodes enqueue here; drained after
     /// the step in [`SimSession::audio_step`].
@@ -2544,7 +2567,7 @@ fn terrain_height_at(world: &EcsWorld, voxels: &BTreeMap<Uuid, VoxelData>, x: f6
 fn runtime_voxel_op(
     world: &mut EcsWorld,
     voxels: &mut BTreeMap<Uuid, VoxelData>,
-    logs: &mut Vec<String>,
+    logs: &mut BoundedLog<String>,
     entity: Uuid,
     op: &inf_voxel::VoxelOp,
     op_name: &str,
@@ -2652,7 +2675,7 @@ fn runtime_destruct_damage(
     bridge3d: &mut PhysicsBridge3D,
     fractures: &mut BTreeMap<Uuid, FractureState>,
     world: &EcsWorld,
-    logs: &mut Vec<String>,
+    logs: &mut BoundedLog<String>,
     entity: Uuid,
     energy_j: f64,
 ) -> f64 {

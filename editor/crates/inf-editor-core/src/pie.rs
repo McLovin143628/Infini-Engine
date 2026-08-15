@@ -52,7 +52,7 @@ pub struct PieSession {
     child: Child,
     stdin: ChildStdin,
     events: Receiver<PlayerToEditor>,
-    stderr_lines: Arc<Mutex<Vec<String>>>,
+    stderr_lines: Arc<Mutex<StderrCapture>>,
     /// Signalled once by the stderr reader when it reaches **EOF** — i.e. when
     /// every byte the player ever wrote is in `stderr_lines`.
     ///
@@ -74,6 +74,70 @@ pub struct PieSession {
 /// so instead of quietly comparing against a truncated string.
 pub const STDERR_TRUNCATED_MARKER: &str =
     "<inf: the player's stderr did not reach EOF within the deadline — output below is PARTIAL>";
+
+/// Lines kept from the **start** of the player's stderr — the banner, the adapter
+/// it picked, what it loaded. The half a crash report needs for context.
+const STDERR_HEAD_LINES: usize = 256;
+/// Lines kept from the **end**. A panic message and its backtrace are the last
+/// thing a player writes, and they are the reason anybody reads this capture at
+/// all, so the tail is the generous half.
+const STDERR_TAIL_LINES: usize = 1024;
+
+/// The player's captured stderr, bounded head-and-tail (Hardening D).
+///
+/// This grew without limit for the life of a PIE session — a chatty player, a
+/// long play-test, or a log loop is unbounded editor memory. It is **not** a
+/// plain ring, because the two ends carry different information: the head is the
+/// session's provenance and the tail is the panic. So both are kept and the
+/// middle is what goes, with an elision line synthesized at read time so a
+/// failure message can never quietly present a gapped capture as a whole one.
+#[derive(Debug, Default)]
+struct StderrCapture {
+    head: Vec<String>,
+    tail: std::collections::VecDeque<String>,
+    dropped: u64,
+}
+
+impl StderrCapture {
+    fn push(&mut self, line: String) {
+        if self.head.len() < STDERR_HEAD_LINES {
+            self.head.push(line);
+            return;
+        }
+        self.tail.push_back(line);
+        while self.tail.len() > STDERR_TAIL_LINES {
+            self.tail.pop_front();
+            self.dropped = self.dropped.saturating_add(1);
+        }
+    }
+
+    /// `true` when the newest retained line is `s` — the "marker already pushed"
+    /// test, which must read the *end* of the capture whichever half holds it.
+    fn last_is(&self, s: &str) -> bool {
+        self.tail
+            .back()
+            .or_else(|| self.head.last())
+            .map(String::as_str)
+            == Some(s)
+    }
+
+    /// Head + (elision line, when anything was dropped) + tail.
+    fn lines(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(self.head.len() + self.tail.len() + 1);
+        out.extend(self.head.iter().cloned());
+        if self.dropped > 0 {
+            out.push(format!(
+                "<inf: {} line(s) of the player's stderr elided between the first {} and the \
+                 last {}>",
+                self.dropped,
+                self.head.len(),
+                self.tail.len()
+            ));
+        }
+        out.extend(self.tail.iter().cloned());
+        out
+    }
+}
 
 impl PieSession {
     /// Spawn `player_bin --pie`, wire the reader threads, and complete the
@@ -104,7 +168,7 @@ impl PieSession {
         // Player logs (and panic messages) line-buffered off stderr. The reader
         // signals `eof_tx` when the pipe closes, which is the only moment the
         // capture is known to be complete.
-        let stderr_lines = Arc::new(Mutex::new(Vec::new()));
+        let stderr_lines = Arc::new(Mutex::new(StderrCapture::default()));
         let sink = Arc::clone(&stderr_lines);
         let (eof_tx, stderr_eof) = mpsc::channel();
         std::thread::spawn(move || {
@@ -296,7 +360,7 @@ impl PieSession {
             Ok(()) => self.stderr_drained = true,
             Err(_) => {
                 let mut sink = self.stderr_lines.lock().expect("stderr sink poisoned");
-                if sink.last().map(String::as_str) != Some(STDERR_TRUNCATED_MARKER) {
+                if !sink.last_is(STDERR_TRUNCATED_MARKER) {
                     sink.push(STDERR_TRUNCATED_MARKER.to_string());
                 }
             }
@@ -311,11 +375,16 @@ impl PieSession {
 
     /// Everything the player wrote to stderr so far (its logs; after a
     /// crash, the panic message).
+    ///
+    /// **Bounded head-and-tail** (Hardening D): the first
+    /// [`STDERR_HEAD_LINES`] and the last [`STDERR_TAIL_LINES`], with an elision
+    /// line between them naming how many went, so the panic tail is always
+    /// present and a gapped capture always says it is one.
     pub fn stderr_lines(&self) -> Vec<String> {
         self.stderr_lines
             .lock()
             .expect("stderr sink poisoned")
-            .clone()
+            .lines()
     }
 
     fn describe_exit(&mut self) -> String {
