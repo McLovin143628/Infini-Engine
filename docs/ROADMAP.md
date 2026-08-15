@@ -17834,3 +17834,212 @@ JSON, so neither is a safe place to type the character at all. Build it with
 
 The sentence above was itself corrupted twice while being written, which is why
 it now names the character instead of spelling it.
+
+## Hardening Wave G (2026-08-15) — performance tier 2, and the campaign's close
+
+The last repair wave, and the one that had to say **no** most often. Wave E
+declined four items with numbers and set the bar; this wave declined six, and
+the ones it took are the ones a measurement pointed at.
+
+One theme, and it is the same one Wave E found one level up: **the fixed step
+paid for the whole world, every step, to learn that the world had not moved.**
+`PhysicsBridge3D::sync` was the largest single term in the shipped player's
+fixed step — Wave E left it named at 6.0 ms on 13 000 static colliders and had
+no arm over it — and every cost inside it was the cost of re-asserting a fact
+that was already true.
+
+### The numbers (this machine, dev profile, which is what the battery runs)
+
+| item | before | after |
+|---|---|---|
+| `PhysicsBridge3D::sync` @ 13 000 | **6.0752 ms** | **1.2135 ms** (5.0×) |
+| `sync_from_world` 3D, whole pass @ 13 000 | **9.59 ms** | **2.2676 ms** (4.2×) |
+| — of which `snaps` re-growth alone | 1.75 ms | 0 |
+| — of which the despawn sweep | 0.49 ms | merge, sequential |
+| `sync_from_world` 2D on a pure-3D level | 0.2994 ms | **0.0000 ms** |
+| whole physics reconcile per fixed step | **9.89 ms** | **2.27 ms** (4.4×) |
+| `BodyRecord` boxed (measured, declined) | 1.1570 ms | 1.1133 ms (3.8 %) |
+
+`CEILING_NS_PER_ENTITY` was **minted at 700** against the unrepaired 467.3
+ns/entity in its own commit, and **ratcheted to 200** against the repaired 93.2
+in the next one — the Wave E law, kept: *a budget minted after the fix cannot
+certify the fix.*
+
+### What the reconcile stopped paying for
+
+* **The pose write, and lens 3's P6 from the other end.** Every static and
+  kinematic body had `set_body_translation` + `set_body_rotation` pushed at it
+  per step. Each is a `RigidBodySet::get_mut` — which marks the body modified
+  before anything is written — plus a wake, plus `query_dirty = true`, which
+  discards the whole query BVH. That last one is why the BVH *looked* like it
+  was rebuilt once per moving character: it was invalidated once per **step** by
+  this path regardless, and every rebuild after the first was the bridge's doing
+  rather than the character's. `set_body_pose_if_moved` compares first.
+
+  The comparison is against **rapier's own state**, not a copy the bridge
+  remembers writing, and that is the whole design: a remembered copy cannot see
+  a body something else moved — a debug teleport, a gameplay shove through
+  `world_mut` — and would leave it displaced for the rest of the session while
+  the snapshot went on saying it belonged elsewhere. Reading is also cheaper
+  than the `get_mut` it replaces. Exact equality, because these are `f64` values
+  *copied* out of a `Transform` and never computed, so "unchanged" is
+  bit-equality and an epsilon would only invent a pose the world declines to
+  reach. That third case — a body moved behind the bridge's back — is an arm.
+
+* **P30 — `reconcile_joint` for every entity, jointless or not.** Two to three
+  `BTreeMap` probes each, to be told there is nothing to reconcile, on a level
+  with no joints at all. The pass now runs over the entities that have a joint
+  or had one, and is skipped entirely when that list is empty.
+
+* **Two `ColliderDesc3D` clones per entity per step**, forced by the borrow
+  checker and never needed: the comparison happens through the borrow now. Those
+  descriptors own trimesh and hull buffers, so the reconcile had been
+  deep-copying every voxel chunk's and every terrain tile's geometry to answer a
+  question that is `!=`.
+
+* **P32 — the sets and the buffers.** `seen` is a sorted `Vec` rather than a
+  `BTreeSet` (`live` was just sorted into it), and the despawn sweep is a cursor
+  merge over two guid-ordered sequences rather than a random tree descent per
+  tracked entity. `snaps` is a reused buffer — the `water_scratch` pattern,
+  applied to the biggest `Vec` in the file: `EntitySync3D` is **408 bytes**, and
+  re-growing 13 000 of them from zero every step cost **1.75 ms**, more than the
+  entire reconcile it was feeding. It is cleared on the way *out* as well as on
+  the way in, because a capacity kept alive between steps must not keep voxel
+  and fracture geometry alive with it.
+
+* **P12 — three archetype early-outs behind one new door.**
+  `EcsWorld::has_component::<T>()` answers "does any live entity carry `T`" from
+  the archetype table, without visiting an entity: O(distinct component
+  combinations), which is tens, instead of O(entities), which is tens of
+  thousands. The 2D bridge is called unconditionally by both hosts, so a level
+  that never had a 2D component walked all 13 000 of its entities per step to
+  build an empty list; the `PcgVolume` and `Terrain` gathers did the same on
+  levels without them.
+
+  Empty archetypes are skipped, because bevy keeps an archetype alive after its
+  last entity leaves and "an archetype mentions `T`" is not the claim being
+  made. Each guard carries a **second clause over its own tracked set**, because
+  the level whose last volume was just deleted must still reach the despawn
+  sweep — `gather_voxels`' two-clause shape, for the same reason — and that is
+  the arm, driven through the transition rather than asserted.
+
+### The two per-step walks outside the bridge
+
+* **P34** — `audio_step` built a `BTreeSet` of every guid in the world per fixed
+  step, in **both** hosts, so that the despawn sweep could ask a handful of
+  started emitters whether they still existed. The same walk now records only
+  the started emitters it saw alive: the same source of truth, the same answer,
+  one small lookup per entity instead of one node allocation.
+
+* **P29** — four sort comparators evaluated `distance_to` **twice per
+  comparison**, and `distance_to` builds a box and takes a `sqrt`: ~2 n log n
+  square roots for n distinct values, in the terrain and voxel want rules, per
+  frame. Decorate-sort-undecorate brings it to n, with an order identical by
+  construction (`total_cmp` on the same `f64`, tie-broken by the same key
+  comparison, both pure functions of the input), so no committed byte and no
+  residency trace moves.
+
+### The eaten `\`-continuations: 86 repaired, and a guard that sees the tree
+
+Wave F closed the three sites that reach a user and left the rest per the
+original split. This closes them: **86 string literals in 38 files across nine
+crates**, each an assertion message, a log line or a `println!` that would
+render with a fourteen-to-twenty-two-space hole in the middle of a sentence the
+day it fired. The repair restores the continuation the script ate — `text \` +
+newline + indent, which rustc collapses to exactly one space — and where the run
+followed a literal `\n`, the continuation is `\n\` so the stray indentation goes
+rather than the line break.
+
+**The law, seventh catch.** The repair script never writes a backslash: the
+character is `chr(92)` throughout and its own docstring is raw, because a lone
+backslash before a newline in a non-raw Python string is a *Python* continuation
+— which is how these were eaten in the first place. Every rewrite was verified
+before a byte was written: the repaired group is re-rendered by rustc's own rule
+and compared against the original with its run collapsed, and a repair that
+changed the message aborts the run. Zero mismatches over 87 candidates.
+
+23 sites stay, each read before it was listed: seven module-header box-drawing
+tables, two doc-comment code blocks, a TOML sample, eight `inf-transpile`
+fixtures whose literal **is** a Rust program, three source-pin needles that must
+equal the indented line they pin, and one aligned report table.
+
+The guard is now the **workspace**, not one crate. `advisory_source_gate` sweeps
+`crates/`, `editor/`, `runtime/` and `tools/` with a per-root file-count floor —
+a sweep that stopped reaching a tree would go on passing, and this campaign has
+been caught twice by a check looking at nothing — and its exception list stays an
+allowlist of **function names** rather than files, so a whole-file exemption
+cannot take real coverage out with the one line it was written for.
+
+Comment lines are exempt as a class, and the exemption paid for itself in the
+same hour. The one doc-comment hit that read like prose turned out to be a doc
+*quoting the mangled advisory it is about*, so the run of spaces is the
+evidence. Repairing it destroyed the sentence and **only the compiler noticed** —
+a `\`-continuation inside a `///` line is not a continuation at all, it is the
+end of the doc comment. That hole is written into the gate's doc rather than
+implied.
+
+### Declined, with numbers
+
+* **Boxing `BodyRecord`'s fat fields.** The record is 512 bytes and what remains
+  of the reconcile is the `BTreeMap` descent through them, so this looked like
+  the next win. Measured: 1.1570 → 1.1133 ms, **3.8 %**, for an allocation on
+  every collider change and churn through the C4-30 refusal machinery. Noise.
+* **P33 `var_snapshot`.** The lens's "per posed character per tick" is bounded
+  by the **character** count, not the world: at this tree's own character-demo
+  scale that is tens of small `String` clones per step. The fix changes a Ring-0
+  `dyn Fn` signature both hosts mirror. *A lens's premise is a measurement too*
+  — Wave E's law, applied to a lens finding rather than to a repair.
+* **P26 `ChunkCatalog::keys`.** One `Vec` of the asset's chunk keys per volume
+  per frame: ~120 KB at the lens's own 10⁴ figure, 7 MB/s at 60 Hz. Real, and an
+  order of magnitude under what this wave already moved; the fix changes an
+  object-safe trait that every test implements directly.
+* **P14, L2.M4, L2.L6 and the whole per-frame bind-group / GPU-container
+  class.** Wave E left one honest bound over it: the entire version-churn regime
+  is **+0.026 ms/frame** on the available 484-instance fixture, so no member of
+  it is where the milliseconds are — and it asked for a heavier fixture. There
+  is a second, structural reason not to build one: **a render-side perf arm
+  cannot run in this repo's CI.** Every fixture heavy enough to price a bind
+  group needs an adapter, the golden suite skips without one, and CI has none.
+  A number measured only on the author's desktop, protected by nothing, is the
+  shape this campaign has spent seven waves refusing.
+* **P16–P22, P25, P27, P28, P35–P40 and the LOW pile.** Same class, same reason:
+  they are per-frame renderer and streamer costs whose only honest instrument is
+  a GPU fixture nothing can protect. Recorded, not repaired.
+* **P9 `pack_bucketed` ×4 consumers.** The four calls key on `(scene.version,
+  origin)`, which churns (P4) — but P4 is a **recorded-open** bound with a named
+  fix (a projection fingerprint), and packing once behind `FrameData` reshapes a
+  seam four render nodes read. It belongs with P4's repair, not before it.
+* **P3 `project_fracture`, P6 BVH incremental, P13, P15c, P23's touched-set
+  delta.** Carried from Wave E's deferral list with their reasons intact, plus
+  one update: **P6's mechanism is closed from the other side.** The BVH is no
+  longer invalidated once per step by the bridge, so "rebuilt once per moving
+  character" is now literally true instead of an undercount — and an incremental
+  `set_aabb` patch is worth what a moving character costs, not what the whole
+  level does.
+
+### Found en route
+
+* **`inf-dcc`'s `build.rs` and `export.rs` were sitting CRLF** in the working
+  tree, against `.gitattributes`' `*.rs text eol=lf` — the only two in the
+  workspace. `export.rs` is read by its own source pin, which survives on the
+  accident that `\r\n` contains `\n`. Normalised. The P22 law ("`.rs` is read by
+  TESTS, so it needs `text eol=lf`") had the attribute and not the working tree.
+
+### New laws, earned here
+
+* **A skip is only sound if it compares against the authority, not against your
+  memory of it.** The pose skip reads rapier's own body state. A version keyed
+  on what the bridge last *wrote* is faster and wrong the first time anything
+  else writes, and the failure is silent and permanent.
+* **The arm that catches a regression is often not the arm that covers it.** The
+  audio narrowing broke autoplay, and what failed was a test counting `Play`s —
+  because nothing at all covered the despawn→`Stop` sweep, which is the thing
+  the change was entirely about. A gate that fires is not evidence of coverage;
+  it can be evidence of its absence somewhere else.
+* **An optimisation's own instrument can hide its cost.** `sync()` measured
+  6.07 ms and `sync_from_world` measured 9.59; the 3.5 ms between them was a
+  `Vec` re-growing, invisible to an arm that took a pre-built slice. Measure the
+  function the shipped code calls, not the one the fix is inside.
+* **A number you cannot protect is not a result.** Half of this wave's assigned
+  items are renderer per-frame costs, and this repo's CI has no GPU. Declining
+  them for that reason is a stronger statement than fixing them would have been.
