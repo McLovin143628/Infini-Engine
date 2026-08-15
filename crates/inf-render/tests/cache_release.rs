@@ -22,12 +22,12 @@
 
 use std::sync::Arc;
 
-use glam::{DVec3, Quat, Vec3};
+use glam::{DVec3, Mat4, Quat, Vec3};
 use inf_math::FloatingOrigin;
 use inf_render::{
-    EngineRenderer, GpuContext, HeadlessTarget, RenderScene, RenderSettings, RenderTerrain,
-    RenderTerrainTile, RenderView, TerrainTileKey, VgeomAsset, VgeomInstance, VgeomMesh,
-    VgeomSettings, HEADLESS_FORMAT,
+    EngineRenderer, GiSettings, GpuContext, HeadlessTarget, RenderScene, RenderSettings,
+    RenderTerrain, RenderTerrainTile, RenderView, SkinnedInstance, SkinnedMeshData, SkinnedVertex,
+    TerrainTileKey, VgeomAsset, VgeomInstance, VgeomMesh, VgeomSettings, HEADLESS_FORMAT,
 };
 use inf_vgeom::test_support::dense_grid_mesh;
 
@@ -302,5 +302,164 @@ fn vgeom_releases_residency_when_the_setting_goes_off() {
     assert!(
         renderer.vgeom_stream_report().stats.resident_bytes > 0,
         "the release must not be a one-way door"
+    );
+}
+
+/// A one-triangle skinned mesh whose every vertex is dominated by joint 0.
+fn skinned_mesh() -> Arc<SkinnedMeshData> {
+    let v = |x: f32, y: f32| SkinnedVertex {
+        pos: [x, y, 0.0],
+        normal: [0.0, 0.0, 1.0],
+        uv: [0.0, 0.0],
+        joints: [0, 0, 0, 0],
+        weights: [1.0, 0.0, 0.0, 0.0],
+    };
+    Arc::new(SkinnedMeshData {
+        vertices: vec![v(-0.5, 0.0), v(0.5, 0.0), v(0.0, 1.0)],
+        indices: vec![0, 1, 2],
+    })
+}
+
+fn gi_settings(enabled: bool) -> RenderSettings {
+    RenderSettings {
+        gi: GiSettings {
+            enabled,
+            ..GiSettings::default()
+        },
+        vgeom: VgeomSettings {
+            enabled: true,
+            occlusion: false,
+            two_pass: false,
+            visbuffer: false,
+            ..VgeomSettings::default()
+        },
+        ..RenderSettings::default()
+    }
+}
+
+/// **The GI finding (lens 1 M1 / m8, lens 2 H4 / M1).** `joint_boxes` was keyed on
+/// `Arc::as_ptr` **without holding the `Arc`** — an address is an identity only
+/// while its allocation lives — and neither it nor `meshlet_spheres` was ever
+/// evicted. Both are now retained to what the frame's scene names, and the
+/// joint-box entry holds the mesh, which is what makes the pointer key sound.
+///
+/// The `ptr_eq` guard itself is unarmed **by construction**, exactly as
+/// `vsm_raster::sync_skinned` records of its own: with the `Arc` held it can never
+/// be false for a live key. It is there so that dropping the field breaks a
+/// compile-visible invariant instead of silently lighting with a dead mesh.
+#[test]
+fn gi_holds_only_the_content_the_scene_still_names() {
+    let Some(gpu) = gpu_or_skip("gi_holds_only_the_content_the_scene_still_names") else {
+        return;
+    };
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    renderer.set_settings(gi_settings(true));
+    let view = view();
+    let mesh = dense_grid_mesh(24);
+    let mesh = Arc::new(mesh);
+
+    let mut scene = vgeom_scene(&mesh, true);
+    scene.skinned_meshes.push(skinned_mesh());
+    scene.skinned.push(SkinnedInstance {
+        vt: Default::default(),
+        translation: DVec3::ZERO,
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+        color: [0.7, 0.6, 0.5, 1.0],
+        metallic: 0.0,
+        roughness: 0.6,
+        emissive: [0.0; 3],
+        id: 2,
+        mesh: 0,
+        palette: vec![Mat4::IDENTITY],
+    });
+    scene.mark_dirty();
+    renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+    assert_eq!(
+        renderer.gi_cache_counts(),
+        (1, 1),
+        "one skinned mesh and one vgeom asset should be cached"
+    );
+
+    // A *different* skinned mesh and a *different* asset id: the editor's
+    // content-addressed re-import, in miniature. The superseded entries must not
+    // accrete.
+    let mut swapped = vgeom_scene(&mesh, true);
+    swapped.vgeom_assets[0].id = ASSET ^ 0xFF;
+    swapped.vgeom_instances[0].asset = ASSET ^ 0xFF;
+    swapped.skinned_meshes.push(skinned_mesh());
+    swapped.skinned.push(SkinnedInstance {
+        vt: Default::default(),
+        translation: DVec3::ZERO,
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+        color: [0.7, 0.6, 0.5, 1.0],
+        metallic: 0.0,
+        roughness: 0.6,
+        emissive: [0.0; 3],
+        id: 2,
+        mesh: 0,
+        palette: vec![Mat4::IDENTITY],
+    });
+    swapped.mark_dirty();
+    renderer.render(&gpu, &swapped, &view, &target.view, (W, H));
+    assert_eq!(
+        renderer.gi_cache_counts(),
+        (1, 1),
+        "re-imported content replaces its predecessor rather than accreting beside it"
+    );
+
+    // And the content leaving empties both.
+    let empty = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    renderer.render(&gpu, &empty, &view, &target.view, (W, H));
+    assert_eq!(
+        renderer.gi_cache_counts(),
+        (0, 0),
+        "a cache must not outlive every last piece of the content it caches"
+    );
+}
+
+/// GI's own off-transition: the node returns before it stages anything, so the
+/// caches — which hold whole skinned meshes — are released in that branch.
+#[test]
+fn gi_releases_its_caches_when_the_setting_goes_off() {
+    let Some(gpu) = gpu_or_skip("gi_releases_its_caches_when_the_setting_goes_off") else {
+        return;
+    };
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    renderer.set_settings(gi_settings(true));
+    let view = view();
+    let mesh = Arc::new(dense_grid_mesh(24));
+
+    let mut scene = vgeom_scene(&mesh, true);
+    scene.skinned_meshes.push(skinned_mesh());
+    scene.skinned.push(SkinnedInstance {
+        vt: Default::default(),
+        translation: DVec3::ZERO,
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+        color: [0.7, 0.6, 0.5, 1.0],
+        metallic: 0.0,
+        roughness: 0.6,
+        emissive: [0.0; 3],
+        id: 2,
+        mesh: 0,
+        palette: vec![Mat4::IDENTITY],
+    });
+    scene.mark_dirty();
+    renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+    assert_eq!(renderer.gi_cache_counts(), (1, 1));
+
+    renderer.set_settings(gi_settings(false));
+    renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+    assert_eq!(
+        renderer.gi_cache_counts(),
+        (0, 0),
+        "GI off means nothing reads either cache"
     );
 }

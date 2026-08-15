@@ -1262,6 +1262,17 @@ impl EngineRenderer {
             .unwrap_or((0, 0))
     }
 
+    /// `(joint-box meshes, meshlet-sphere assets)` the GI node is caching right
+    /// now (Hardening D) — the same kind of instrument as
+    /// [`terrain_cache_counts`](Self::terrain_cache_counts), for a cache whose
+    /// entries hold a whole skinned mesh's vertices.
+    pub fn gi_cache_counts(&self) -> (usize, usize) {
+        self.graph
+            .node::<passes::gi::GiNode>()
+            .map(|n| n.cached_counts())
+            .unwrap_or((0, 0))
+    }
+
     /// The active HDR/post settings.
     pub fn settings(&self) -> &RenderSettings {
         &self.settings

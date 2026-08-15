@@ -346,8 +346,22 @@ pub struct GiNode {
     /// Per-skinned-mesh joint boxes in **bind space**, keyed by the shared
     /// `SkinnedMeshData`'s pointer identity (the same key the skinned pass caches
     /// its GPU buffers on since P18.3).
-    joint_boxes: HashMap<usize, Arc<Vec<(Vec3, Vec3)>>>,
+    ///
+    /// **The entry holds the `Arc`, and that is what makes the key sound.** An
+    /// address is only an identity while the allocation it names is alive: with
+    /// the mesh dropped, the allocator may hand the same address to a *different*
+    /// `SkinnedMeshData`, which would then hit this entry and voxelize the
+    /// previous mesh's joint boxes into the bounce lighting — no validation error,
+    /// no black frame, just wrong light. Verbatim `passes::skinned`'s
+    /// `mesh_cache` and `vsm_raster`'s `SkinnedCasterGeom::mesh`, which is the
+    /// half the P27.3 audit put back there for the same reason.
+    joint_boxes: HashMap<usize, (Arc<crate::scene::SkinnedMeshData>, Arc<Vec<(Vec3, Vec3)>>)>,
     /// Per-vgeom-asset root-page meshlet spheres (local space), keyed by asset id.
+    ///
+    /// Retained to the frame's asset list: in the editor an asset id is
+    /// **content-addressed**, so re-importing a mesh mints a new key and the
+    /// superseded entry would accumulate for the life of the session — verbatim
+    /// the reasoning P18.3 used to give `ClassicVgeomNode` its `retain_live`.
     meshlet_spheres: HashMap<u128, Arc<Vec<(Vec3, f32)>>>,
     /// The deterministic amortization cursor + the key that resets it.
     schedule: ProbeSchedule,
@@ -530,8 +544,16 @@ impl GiNode {
         mesh: &Arc<crate::scene::SkinnedMeshData>,
     ) -> Arc<Vec<(Vec3, Vec3)>> {
         let key = Arc::as_ptr(mesh) as usize;
-        if let Some(cached) = self.joint_boxes.get(&key) {
-            return cached.clone();
+        // `ptr_eq` and not `contains_key`, so the soundness condition is written
+        // in the code that depends on it (`vsm_raster::sync_skinned`'s rule): an
+        // entry is reused only when it is the same allocation the scene is
+        // handing over. With the `Arc` held this can never be false for a live
+        // key — and that is the point: the day someone drops the field, this line
+        // recomputes instead of lighting with a dead mesh's boxes.
+        if let Some((held, cached)) = self.joint_boxes.get(&key) {
+            if Arc::ptr_eq(held, mesh) {
+                return cached.clone();
+            }
         }
         let mut lo: Vec<Vec3> = Vec::new();
         let mut hi: Vec<Vec3> = Vec::new();
@@ -565,8 +587,46 @@ impl GiNode {
             })
             .collect();
         let arc = Arc::new(boxes);
-        self.joint_boxes.insert(key, arc.clone());
+        // The clone is the whole point: it is what stops the address this entry is
+        // filed under from being handed to another mesh while the entry lives.
+        self.joint_boxes.insert(key, (mesh.clone(), arc.clone()));
         arc
+    }
+
+    /// Drop cache entries the frame's scene no longer names.
+    ///
+    /// Both maps grew for the session before this existed. The joint boxes are
+    /// keyed on a pointer whose allocation the entry now holds, so eviction is
+    /// what stops a session-long hold on every skinned mesh that ever appeared;
+    /// the meshlet spheres are keyed on a content-addressed asset id, so eviction
+    /// is what stops a re-import from accreting its own history.
+    ///
+    /// Runs before the staging loops below, on the live scene — the placement
+    /// `ClassicVgeomNode::run` uses, and for the same reason: it also covers the
+    /// frames where the content left entirely.
+    fn retain_live(&mut self, scene: &crate::scene::RenderScene) {
+        if !self.joint_boxes.is_empty() {
+            let live: std::collections::BTreeSet<usize> = scene
+                .skinned_meshes
+                .iter()
+                .map(|m| Arc::as_ptr(m) as usize)
+                .collect();
+            self.joint_boxes.retain(|k, _| live.contains(k));
+        }
+        if !self.meshlet_spheres.is_empty() {
+            let live: std::collections::BTreeSet<u128> =
+                scene.vgeom_assets.iter().map(|a| a.id).collect();
+            self.meshlet_spheres.retain(|k, _| live.contains(k));
+        }
+    }
+
+    /// How many entries the two per-content caches hold (Hardening D).
+    ///
+    /// `(joint-box meshes, meshlet-sphere assets)`. Published for the reason every
+    /// release instrument in this tree is: a cache that was never evicted lights
+    /// exactly the same frames an evicted one does.
+    pub fn cached_counts(&self) -> (usize, usize) {
+        (self.joint_boxes.len(), self.meshlet_spheres.len())
     }
 
     /// Local-space meshlet spheres of a vgeom asset's **root page** — the coarsest
@@ -682,11 +742,18 @@ impl RenderNode for GiNode {
             if let Ok(mut a) = self.audit.lock() {
                 *a = GiAudit::default();
             }
+            // GI off ⇒ nothing reads either cache. The off-transition is the one
+            // the guard would otherwise hide (`VoxelNode::run`'s rule), and the
+            // joint-box entries hold an `Arc` to a whole skinned mesh's vertices.
+            self.joint_boxes.clear();
+            self.meshlet_spheres.clear();
             return;
         }
         // The enabled path writes the real uniform below, so a later disable must
         // re-publish the disabled block.
         self.published_disabled = false;
+        // Hold exactly what this frame's scene names (see `retain_live`).
+        self.retain_live(frame.scene);
 
         let quality = frame.gi.quality;
         let dim = quality.voxel_dim();
