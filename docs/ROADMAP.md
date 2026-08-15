@@ -17049,6 +17049,305 @@ in 51 s, because the check fingerprints from the previous wave's clippy were
 still valid for everything this wave did not touch.
 
 
+## Hardening Wave D — resource lifetimes (2026-08-14)
+
+The fourth repair wave of the final hardening campaign. Waves A and B closed the
+doors where the engine writes and reads; Wave C closed the places where its
+answer depended on something other than its inputs. This one closes the places
+where the engine **keeps** something after the reason for keeping it is gone.
+
+Twenty-two findings assigned, twenty-one closed, in twelve commits on `main`.
+They fall into seven patterns,
+and the patterns matter more than the sites: every one of them had a **sibling in
+the same tree already doing it right**, which is what made them findable at all
+and what every fix is copied from.
+
+### The unifying difficulty: none of this is visible
+
+A stranded cache renders exactly the same frames a released one does. A log that
+grows for ever returns the same slice its consumers asked for. A palette buffer
+recreated per frame draws the same pixels as one written in place. There is no
+golden, no pixel, no command-stream counter and no value anywhere in the tree
+that can tell any of these apart from their fixed versions — which is precisely
+why they survived every gate in the repository.
+
+So the arms this wave adds read **maps, counters and source text**: after the
+last tile leaves, the cache map is empty; after the last asset leaves, the
+streamer's resident bytes are zero and the arbiter's floor is zero; after
+8 704 fixed steps, the audio command log holds at most its ceiling and says how
+many commands it dropped. *Assert the WORLD, not the report* (P21), applied to
+the one class of defect where the report is all there normally is.
+
+### 1. The early-out that strands the cache
+
+`VoxelNode` and `FractureNode` have released their caches **on** the early-out
+since P21/P22, with a comment naming the reason: *"the one transition the
+early-out would otherwise hide: the last volume leaving the scene."*
+`ClassicVgeomNode` has run `retain_live` **before** its early-out since P18.3,
+with the same sentence in different words. These are the siblings that did not.
+
+| finding | site | what was stranded |
+|---|---|---|
+| L2.H1 | `passes/terrain.rs` — `run` returns before `sync_textures`, which owns both eviction paths there are | four textures per tile (~840 KiB at 256²) plus a splat-material slot per terrain, for the renderer's life, on every level switch and every full stream-out |
+| L2.H2 | `passes/vgeom.rs` — `plan_cluster_pages` returns before the streamer's plan, and `plan → dropped → draws.remove` is the only eviction chain | every `AssetResidency`, every claimed pool block, ~13 buffers per asset — **and** `stream_report` went on publishing a stale `floor_bytes`, which is what `inf_stream::arbitrate` reserves against |
+| L2.M3 | `passes/vgeom.rs` + `passes/scatter.rs` | an `HzbChain` (a full-res `R32Float` pyramid, ~44 MiB at 4K) and a full-viewport `VisState`, each built when its setting turned on and never released when it turned off — twice, because the scatter node holds a second chain |
+
+`VgeomNode::release_all` is `plan(&[])` — with no wants, step 1 of the plan frees
+every asset entirely and reports them in `dropped` — plus the draws, the coupling
+and a republished report. One derivation, not a second eviction path.
+
+### 2. The pointer key that does not hold its allocation
+
+**Third recurrence of a documented class.** `passes::skinned::mesh_cache` holds
+the `Arc` beside the buffers ("so the pointer used as the key can never be
+recycled under a live entry"); `vsm_raster`'s `SkinnedCasterGeom::mesh` is the
+half the P27.3 audit put back for the same reason.
+
+`GiNode::joint_boxes` was a `HashMap<usize, _>` keyed on `Arc::as_ptr` of a
+`SkinnedMeshData` **without holding the `Arc`**. An address is an identity only
+while its allocation lives: once the scene stops naming a mesh, the allocator may
+hand that address to a different one, which then hits the stale entry and
+voxelizes the previous mesh's joint boxes into the bounce lighting. No validation
+error, no black frame — just wrong light. Neither that map nor `meshlet_spheres`
+beside it was ever evicted, and the second is keyed on a **content-addressed**
+asset id, so in the editor a re-import mints a new key and the superseded entry
+accretes for the session.
+
+The entry holds the `Arc` and is reused only on `ptr_eq` — the soundness
+condition written in the code that depends on it. **That guard is unarmed BY
+CONSTRUCTION and is recorded as such**, exactly as `vsm_raster` records of its
+own: with the `Arc` held it can never be false for a live key. It exists so that
+dropping the field breaks something visible instead of lighting with a dead mesh.
+
+### 3. Session logs that grow at the step rate
+
+Four `Vec`s accumulated one entry per fixed step, per streaming event or per line
+of subprocess output for the life of a session, and every one had **only test
+consumers**:
+
+| finding | site | rate |
+|---|---|---|
+| L1.M4 | `RuntimeSim::audio_log`, `SimSession::audio_log` | ≥1 `SetListener` per fixed step — ~216 000 commands an hour, **in the shipped player** |
+| L1.M5 | `RuntimeSim::logs`, `SimSession::logs` | `debug.print` **and** a failed event dispatch, which pushes a formatted `String` every tick: reachable from authored content |
+| L1.m6 | `CellStreaming::events` | one per activation and per deactivation, session long, in the shipped player |
+| L1.m9 | `PieSession`'s captured stderr | every line the player ever writes |
+
+`inf_core::BoundedLog` is the one door: a hard ceiling, batch eviction of the
+oldest (so the accessor still hands out a contiguous `&[T]` and every caller is
+unchanged), and a `dropped()` count beside it — because dropping silently would
+turn *"the audio stream is exactly this"* into *"the audio stream ends with
+this"*, which is a different claim and a weaker gate.
+`CellStreaming::dropped_events` carries the rule for trace gates: **two runs that
+dropped different prefixes are not comparable**, and the count is what says so
+instead of the comparison quietly passing on two matching tails.
+
+The PIE stderr capture is bounded **head-and-tail** rather than as a ring,
+because its two ends carry different information: the head is the session's
+provenance and the tail is the panic message that is the whole reason anybody
+reads it. The middle goes, and an elision line synthesized at read time names how
+many lines went.
+
+### 4. Retain against the live set
+
+| finding | site | what outlived what |
+|---|---|---|
+| L1.m7 | `RuntimeSim::grounded` + the `SimSession` mirror | written per `move_and_slide`, never pruned; `audio_started` beside it drops a despawned emitter and Stops it, and the position maps are rebuilt every step |
+| L1.h13 | `inf-viewport`'s `biome_palettes` + `water_hints` | the two per-entity side tables the projection does not rebuild (Ring 2 pushes them in), so a deleted terrain's palette and a deleted water body's per-spline hints outlived them for the life of the host |
+| L2.M2 | `passes/sprite.rs` `SpriteTextures` | **two defects in one cache** — see below |
+
+The sprite cache was eviction-free *and* keyed on a GUID-derived handle with no
+content in the identity. The first is a leak; the second is a **defect the author
+can see**: `ingest` skipped on `contains_key`, so editing or re-importing a
+sprite texture in place never updated on screen again for the rest of the
+session. Identity is an xxh3-128 over dimensions and pixels now (the `CachedTile`
+rule), and the live set is the **scene's reference list** — deliberately not the
+frame's draw batches, because a tilemap chunk that culled out is off *camera*,
+not out of the level, and evicting on that would make a texture's residency a
+function of where somebody is looking.
+
+The re-import half is armed **in pixels**, because that is where it lives: same
+handle, different bytes, the frames must differ.
+
+### 5. Device-loss completeness
+
+The editor viewport's loss branch rebuilt `gpu`, `chain`, `renderer` and `picker`
+and stopped, on a comment — *"every remaining field on `self` is plain CPU/scene
+data"* — that was true when it was written and stopped being true at P26.3/R-P4.
+A fresh `EngineRenderer` starts with `vt: None`, `RenderSettings::default()` and
+`ViewMode::Lit`, while the host keeps **memos of what it already pushed into the
+dead one**, and every memo gates an early return:
+
+| memo | the early return it gates | what the author sees |
+|---|---|---|
+| `vt_level_key` | `sync_vt_bindings` | every virtual-textured surface renders **untextured for the rest of the session** |
+| `applied_render` | `apply_render_settings` | the level's authored post/exposure/vgeom/VSM/SSAO block silently replaced by crate defaults |
+| `synced_version` | `sync_from_doc` | the new renderer holds no scene |
+| `render_tier` / `render_caps` | the cached adapter probes | a clamp computed for the OLD adapter, which a TDR can change |
+
+The view mode lives only in the renderer, so it is read off the dying one and
+re-pushed. **The player has done this correctly since P14** —
+`PlayerRenderHost::rebuild_vt` exists for exactly this case — which is the
+asymmetry that made it findable.
+
+Both hosts also built a second `wgpu::Instance` + `Surface` for the same window
+while the old chain was still alive (L2.L3); `SurfaceChain::release` drops the
+swapchain in place first, and a released chain acquires `None` — the
+occluded-window answer every caller already handles.
+
+**Enforcement is a source gate** (`inf-viewport/tests/device_loss.rs`): a device
+cannot be made to be lost from a test, `EngineHost` needs a real window, and the
+failure mode is silence. *Where a fix's correctness is "the code still does
+this", only a source pin is enforcement* (Wave C's law, met again).
+
+### 6. GPU objects that outlive their frame
+
+`passes::skinned::sync` allocated one storage buffer **and** one bind group per
+skinned instance **per frame**, and `vsm_raster::sync_skinned` did the same on
+its own path — 4N wgpu objects a frame for N characters, all of it
+deferred-destroy traffic. The payload is what animation changes; the objects are
+not. Both grow a persistent per-instance buffer (power-of-two ceiling) written
+with `write_buffer` — the `AssetDraw::params` rule, the same trade the water
+pass's `UNIFORM_STRIDE` makes. `Picker` likewise allocated a fresh 256-byte
+`MAP_READ` staging buffer per click, at a size that is a constant.
+
+One thing the reuse makes newly load-bearing: `vsm_raster`'s palette slot carries
+the mesh **pointer key** the draw looks its geometry up by, and a reused slot
+with a stale key is exactly the defect that key exists to prevent — so it is
+re-stamped every frame. No golden moved: the bytes written are identical, and
+nothing in the tree reads `arrayLength` of a palette, so a padded buffer is
+invisible to every shader that indexes it by joint.
+
+### 7. The undo stack's byte budget
+
+`EditHistory` was bounded by `HISTORY_LIMIT` — a **count**, which bounds entries
+and not memory: 256 sculpt strokes over a large terrain patch honour it perfectly
+while the editor holds hundreds of megabytes. And `MemoryReport` charged every
+entry a flat **512 bytes**, so the largest thing the editor holds was reported as
+one of the smallest.
+
+Every delta type in the tree already had a `memory_bytes()` — `HeightDelta`,
+`BiomeDelta`, `DataMapDelta`, `VoxelDelta` — and **not one of them had a
+caller**. `SplatDelta` and `HoleDelta` get theirs here;
+`EditCommand::memory_bytes` sums them; `push` evicts oldest-first on a 256 MiB
+ceiling as well as the count one, never past the last entry, because a history
+that can throw away the thing you just did is not a history.
+
+`inf-dcc`'s `rebuild_checkpoints` is the same class one crate over: it evicted
+**after** its loop rather than inside it, so restoring a session held one whole
+`Mesh` per `CHECKPOINT_INTERVAL` of replayed history at once — a multiple of the
+bound the module documents, and invisible because the *final* count was always
+right.
+
+### Commits
+
+| commit | finding(s) |
+|---|---|
+| `dbfb638` | L2.H1, L2.H2, L2.M3 — the early-out releases, `release_all`, `HzbChain::release`, the `cache_release` arms |
+| `343b07f` | L1.M1 / L2.H4, L1.m8 / L2.M1 — the GI pointer key holds its `Arc`; both caches retained |
+| `7b8fe42` | L1.M4, L1.M5, L1.m6, L1.m9 — `inf_core::BoundedLog` and its four consumers |
+| `5478778` | L1.m7, L1.h13, L2.M2 — retain against the live set, and the sprite content hash |
+| `03ffb34` | L2.H3, L2.L3 — the device-loss memos + `SurfaceChain::release` + the source gate |
+| `6639fcd` | L2.M5, L2.L2 — persistent palette buffers (both subsystems), pooled pick staging |
+| `a70cdbb` | L1.M2, L1.M3 — the undo byte budget, an honest `MemoryReport`, the dcc checkpoint peak |
+| `93c7d81` | L1.m10, L1.h11, L1.h12 — the LSP pending entry, the memoized plugin image |
+| `bb3d0e6` | the two hosts' `grounded` predicate made identical |
+| `f3125e6` | four mechanical clippy lints on this wave's own lines |
+| `cc33240` | two intra-doc links from public items to private ones |
+
+### Verification
+
+`cargo test --workspace --no-fail-fast -j 3` = **260 binaries / 4 689 passed /
+0 failed / 8 ignored**, against a measured baseline of **257 / 4 668 / 0 / 8**
+at this wave's start (Wave C's own battery reported 4 666 + 1 failed; its
+follow-up `057d01a` closed that arm and added two, and both of those show up in
+a name-by-name diff of the two runs as *not this wave's*). Every one of the
++3 binaries and +21 tests is named in that diff and is this wave's.
+
+Workspace clippy `-D warnings` clean; `cargo fmt --all --check` clean; rustdoc
+**450 / ceiling 450** over 43 crates with `target/doc` cleared first, so ci.yml's
+ceiling does **not** move — the three warnings this wave first added were its own
+intra-doc links to private items and are fixed, not absorbed. Goldens **54,
+unchanged**, and the 100-test golden suite is green: no committed byte moved, and
+none of these fixes can move one.
+
+### Mutations: 9 applied, 9 killed — and one that was NOT
+
+Every fix in this wave was reverted against its own arm:
+
+* removing the terrain clear and `release_all` fails all four `cache_release`
+  stranding arms;
+* removing the GI retain fails the accretion arm (2,2 against 1,1) and removing
+  the disabled-branch clear fails the off-transition arm;
+* making `BoundedLog::push` never evict fails three of the type's own arms and
+  the host-level audio arm;
+* restoring `contains_key` in the sprite ingest fails the pixel arm; dropping the
+  sprite retain fails the eviction arm;
+* dropping one line from `reset_device_scoped_state` fails the source gate **by
+  name, with the consequence in the message**;
+* hard-wiring `EditCommand::memory_bytes` to a flat 512 leaves a sculpt stroke
+  charged 526 bytes against a rename's 518, and fails both undo arms;
+* removing the dcc per-insertion eviction fails the placement pin.
+
+**The one that was not** is the wave's argument. The first version of the
+hotreload arm read the **memo's length** — and a second `dlopen` re-inserts the
+same key, so the map stays at one entry while a second `Library` is leaked. It
+passed against a hard-disabled memo. It counts `dlopen`s now, and the mutation
+kills it (2 against 1). *A gate must be built to falsify* (P22), and **"the cache
+has one entry" is not the same claim as "the image was opened once"** — the
+second vacuous-gate catch of the campaign, after Wave B's window-between-the-
+endpoints.
+
+### Deferred, with reasons
+
+* **L2.L6** — `VsmSystem::matches` allocates a full `VsmTreeSet` every frame
+  purely to compare. Every clean fix either **duplicates the light→tree
+  derivation** (a digest folded over the inputs is a second copy of the rule this
+  tree's own laws forbid) or restructures the producer behind a sink
+  abstraction — for at most seventeen small allocations per frame, and only on
+  scenes with shadow-casting lights. Perf-shaped and LOW: **Wave E owns measured
+  perf**, and an unmeasured restructure of a producer is exactly what that wave
+  exists to prevent.
+* **L2.M4** (per-frame bind-group churn) and **L2.M6** (the thumbnailer's
+  per-thumbnail pipeline compile) were already assigned to Wave E by the triage,
+  for the same reason: both are explicitly "needs measurement".
+* **L1.h12** — `HotWorld::instances` stays grow-only, **with its reason written
+  into the field**: an `InstanceId` is an index, so a despawn needs a generational
+  id and a `drop` through the vtable. That is a feature, not a repair, and no
+  caller needs it.
+
+### Honest remainders
+
+* **`EntityRecord` has no size accessor**, so the undo budget charges
+  Create/Delete/SwapComponents a named `RECORD_ESTIMATE` (4 KiB) rather than a
+  walk over their component slots. Named in the source rather than buried; a
+  `memory_bytes` on `EntityRecord` is what closes it.
+* **`RenderScene::pending_texture_uploads` has no production producer today** —
+  the viewport projects sprite handles with no bytes (a documented P8 follow-up),
+  so the sprite cache's two defects are reachable only from the golden tests
+  until that lands. Fixed now because the fix is cheap and the defect is
+  *shaped*, not because it is firing.
+* The stranding numbers (840 KiB/tile, ~44 MiB of HZB at 4K) are **computed from
+  descriptors, not measured**: they are what the allocations say they are, and
+  no VRAM instrument in this tree can weigh them.
+
+### Machine ops
+
+**Deleting `target/debug/incremental` between the battery and clippy is now the
+routine**, not the emergency: 26.3 GB, taking the volume from 61.5 GB free to
+84.9 GB, and clippy then ran three times over its own artifact set without
+coming near the wall. Wave B's law said a `cargo clean` belongs between those
+two steps; Wave C found the cheap half; this wave just did it, and nothing went
+red.
+
+**A `Start-Process` wait loop that polls for an exit file races the script that
+deletes it.** Three clippy runs here reported `EXIT 101` within seconds of
+launch because the waiter read the *previous* run's exit file before the new
+script had removed it — and the error text it then printed was mid-run
+scrollback from the run still going. The clean readings came from removing the
+exit file in the launching shell *before* `Start-Process`. Reported here because
+a stale-file race in a verification harness reads exactly like a real failure,
+which is the worst thing a harness can do.
+
 
 ---
 
