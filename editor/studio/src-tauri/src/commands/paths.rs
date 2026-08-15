@@ -207,7 +207,7 @@ mod tests {
         assert!(confine_under(Path::new("C:/proj"), "../../secrets").is_err());
     }
 
-    /// **The source gate** (L7.H6).
+    /// **The source gate** (L7.H6, widened by round-2 finding **B13**).
     ///
     /// `confine_*` can only protect a door that calls it, and the whole finding
     /// is that seven of eight doors did not. Nothing observable distinguishes a
@@ -218,12 +218,105 @@ mod tests {
     ///
     /// The list is of MODULES, not of functions, so a new command added to any
     /// of them is covered the day it is written.
+    ///
+    /// # Round 2: the scope was four modules, and six more doors took paths
+    ///
+    /// `asset_import`, `asset_table_import`, `photo_load`, `terrain_import`,
+    /// `terrain_probe_heightmap` and `project_package` all take a path from the
+    /// webview, and this gate's module list could not see any of them.
+    ///
+    /// Widening it needed a decision rather than a `confine_existing`, because
+    /// those doors are **imports**: reading a `.gltf` off the Desktop is the
+    /// product's core workflow, and confining them to the project root would
+    /// make importing impossible. So the rule has two ways to be satisfied —
+    /// confine the path, or appear in [`READ_ANYWHERE`] **with the reason
+    /// written down**. That converts an invisible gap into a recorded decision,
+    /// and it is an allowlist rather than a ban list per the P22 law: a new
+    /// command in any of these modules fails this gate until somebody decides
+    /// which of the two it is.
+    ///
+    /// The *write* halves are confined regardless, and separately:
+    /// `AssetProject::content_dir` refuses a destination folder with any
+    /// non-`Normal` component (it was `root.join(sub)` + `create_dir_all`, so
+    /// `"../../../Users/Public"` escaped), and `project_package` refuses a
+    /// relative `out_dir` (which resolved against the *editor process's*
+    /// working directory).
+    const FS_MODULES: &[&str] = &[
+        "files.rs",
+        "git.rs",
+        "search.rs",
+        "shell.rs",
+        "assets.rs",
+        "terrain.rs",
+        "photogrammetry.rs",
+        "package.rs",
+    ];
+
+    /// Commands that deliberately accept a path **outside** the project, each
+    /// with the reason and what it exposes (round-2 finding B13).
+    ///
+    /// Every entry is an import door whose whole purpose is to read a file the
+    /// author picked from anywhere on their disk. None of them returns the
+    /// file's *bytes* to the webview: the import doors copy content into the
+    /// project (where it becomes a visible asset), the probe returns a header,
+    /// and the packager writes.
+    const READ_ANYWHERE: &[(&str, &str)] = &[
+        (
+            "assets.rs::asset_import",
+            "the Content Drawer's Import: reads the author's chosen source files \
+             and copies them into the project. Its DESTINATION is confined by \
+             AssetProject::content_dir.",
+        ),
+        (
+            "assets.rs::asset_table_import",
+            "imports a CSV/JSON the author picked into an existing .inf_table.",
+        ),
+        (
+            "photogrammetry.rs::photo_load",
+            "loads the author's photographs from wherever the camera dumped them.",
+        ),
+        (
+            "terrain.rs::terrain_import",
+            "imports the author's heightmap; the destination is TERRAIN_IMPORT_FOLDER \
+             under the content root.",
+        ),
+        (
+            "terrain.rs::terrain_probe_heightmap",
+            "reads a heightmap HEADER for the wizard — dimensions and bit depth, \
+             never pixels.",
+        ),
+        (
+            "package.rs::project_package",
+            "cooks into an output directory the author chose (exporting a build to \
+             the Desktop is the point). Refuses a RELATIVE out_dir, which would \
+             resolve against the editor process's working directory.",
+        ),
+    ];
+
+    /// Whether a command signature takes something path-shaped from the
+    /// webview. Deliberately generous: a false positive costs one allowlist
+    /// entry, a false negative is the finding.
+    fn takes_a_path(signature: &str) -> bool {
+        // The PARAMETER LIST only. The first draft searched the whole
+        // signature and matched `asset_rust_source` on its own name — a gate
+        // that reads the wrong text is the failure mode this file exists to
+        // avoid, met on its first run.
+        let Some(args) = signature.split_once('(').map(|(_, rest)| rest) else {
+            return false;
+        };
+        args.split(',')
+            .filter_map(|arg| arg.split(':').next())
+            .map(|name| name.trim().trim_start_matches("mut ").to_ascii_lowercase())
+            .any(|n| n.contains("path") || n.contains("source") || n.contains("dir") || n == "repo")
+    }
+
     #[test]
     fn every_filesystem_command_reaches_the_confinement_helper() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
         let mut unguarded = Vec::new();
         let mut checked = 0usize;
-        for module in ["files.rs", "git.rs", "search.rs", "shell.rs"] {
+        let mut with_paths = 0usize;
+        for module in FS_MODULES {
             let text = std::fs::read_to_string(dir.join(module))
                 .unwrap_or_else(|e| panic!("{module} is readable: {e}"));
             // Split on the attribute so each chunk is one command's body.
@@ -238,13 +331,23 @@ mod tests {
                     .unwrap_or("?")
                     .trim()
                     .to_string();
+                let qualified = format!("{module}::{name}");
+                let signature = body.split('{').next().unwrap_or("");
+                if !takes_a_path(signature) {
+                    continue;
+                }
+                with_paths += 1;
                 // Either the command confines directly, or it calls a helper in
-                // its own module that does (`confined_repo` in git.rs).
+                // its own module that does (`confined_repo` in git.rs), or it is
+                // a recorded read-anywhere import door.
                 let guarded = body.contains("confine_existing")
                     || body.contains("confine_for_write")
-                    || body.contains("confined_repo");
-                if !guarded {
-                    unguarded.push(format!("{module}::{name}"));
+                    || body.contains("confined_repo")
+                    || body.contains("confined_paths")
+                    || body.contains("confine_under");
+                let allowed = READ_ANYWHERE.iter().any(|(q, _)| *q == qualified);
+                if !guarded && !allowed {
+                    unguarded.push(qualified.clone());
                     continue;
                 }
                 // …and the PATH ARGUMENTS, separately. Confining the repo says
@@ -253,16 +356,16 @@ mod tests {
                 // checked only the line above and a gutted `confined_paths`
                 // survived its mutation — a vacuous half, caught the way the
                 // campaign's other three were.
-                let signature = body.split('{').next().unwrap_or("");
-                let takes_paths =
+                let takes_named_paths =
                     signature.contains("paths: Vec<String>") || signature.contains("path: String");
-                if takes_paths
+                if takes_named_paths
+                    && !allowed
                     && !(body.contains("confined_paths")
                         || body.contains("confine_under")
                         || body.contains("confine_existing")
                         || body.contains("confine_for_write"))
                 {
-                    unguarded.push(format!("{module}::{name} (path arguments)"));
+                    unguarded.push(format!("{qualified} (path arguments)"));
                 }
             }
         }
@@ -271,9 +374,38 @@ mod tests {
             "the gate found only {checked} commands — it is not reading what it thinks it is"
         );
         assert!(
-            unguarded.is_empty(),
-            "these filesystem commands take a path from the webview and never confine it: {unguarded:?}"
+            with_paths >= 12,
+            "the gate found only {with_paths} path-taking commands across {} modules; \
+             it is calibrated against a list that includes six import doors, so a \
+             smaller number means `takes_a_path` no longer matches the signatures",
+            FS_MODULES.len()
         );
+        assert!(
+            unguarded.is_empty(),
+            "these commands take a path from the webview and neither confine it nor \
+             appear in READ_ANYWHERE with a reason: {unguarded:?}"
+        );
+    }
+
+    /// The allowlist may not rot: every entry must still name a command that
+    /// exists, or it is a decision recorded about nothing — and the next
+    /// command to take that name inherits an exemption nobody granted it.
+    #[test]
+    fn every_read_anywhere_entry_still_names_a_live_command() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
+        for (qualified, reason) in READ_ANYWHERE {
+            let (module, name) = qualified.split_once("::").expect("module::name");
+            let text = std::fs::read_to_string(dir.join(module))
+                .unwrap_or_else(|e| panic!("{module} is readable: {e}"));
+            assert!(
+                text.contains(&format!("fn {name}(")),
+                "READ_ANYWHERE names {qualified}, which no longer exists"
+            );
+            assert!(
+                reason.len() > 40,
+                "{qualified}'s exemption reason is too short to be a reason: {reason:?}"
+            );
+        }
     }
 
     /// The gate's own falsifier: it must be able to see an unguarded command.

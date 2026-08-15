@@ -154,8 +154,34 @@ pub async fn project_package(
     })?;
 
     // Output directory: explicit (non-empty) or the default `<project>/Build`.
+    //
+    // Round-2 finding B13: an explicit `out_dir` must be ABSOLUTE. It arrives
+    // from the webview, and a relative one resolved against the *editor
+    // process's* working directory — which is wherever the app happened to be
+    // launched from, so `"../.."` wrote a whole cooked build somewhere nobody
+    // named. Exporting to an arbitrary absolute directory stays legal on
+    // purpose: putting a build on the Desktop is what this door is for, and
+    // `package.rs::project_package` is in `paths.rs`'s `READ_ANYWHERE` table
+    // with that reason written down.
     let out = match out_dir {
-        Some(s) if !s.trim().is_empty() => PathBuf::from(s.trim()),
+        Some(s) if !s.trim().is_empty() => {
+            let p = PathBuf::from(s.trim());
+            if !p.is_absolute() {
+                return Err(PackageErrorDto {
+                    class: "bad_out_dir".into(),
+                    message: format!(
+                        "output directory {:?} is relative; it would resolve against the \
+                         editor's working directory rather than anything you named. Give \
+                         an absolute path, or leave it empty for <project>/Build.",
+                        s.trim()
+                    ),
+                    blueprint_class: None,
+                    handler: None,
+                    guid: None,
+                });
+            }
+            p
+        }
         _ => root.join("Build"),
     };
 

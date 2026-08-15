@@ -87,7 +87,35 @@ impl AssetProject {
     }
 
     /// Absolute default import destination folder (created if missing).
+    ///
+    /// # `sub` is a folder NAME, not a path (round-2 finding B13)
+    ///
+    /// It arrives from the webview — `asset_import`'s `dest_folder`,
+    /// `asset_create`'s `folder` — and `root.join(sub)` followed by
+    /// `create_dir_all` was an **arbitrary-directory-write primitive**:
+    /// `"../../../Users/Public"` joins onto an escape, and `join` with an
+    /// absolute path discards `root` entirely. L7.H6's confinement guard reads
+    /// four Ring-2 modules and cannot see this call at all.
+    ///
+    /// So the components are checked here, at the door, rather than at each of
+    /// the sixteen call sites: every component must be `Normal`. A `..`, a root,
+    /// a drive prefix or an empty spelling is refused by name. That is the whole
+    /// legitimate vocabulary — every caller in the tree passes a literal like
+    /// `"Imported"`, `"Materials"` or `"data"`, and a nested `"a/b"` still works
+    /// because both halves are `Normal`. `""` is the content root itself — it
+    /// has no components, so it cannot escape, and the Content Drawer sends it
+    /// when the author is standing at the top level.
     pub fn content_dir(&self, sub: &str) -> Result<PathBuf> {
+        let rel = Path::new(sub);
+        if let Some(bad) = rel
+            .components()
+            .find(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(AssetError::Import(format!(
+                "content folder {sub:?} contains {bad:?}; a destination folder is a \
+                 name under the content root, not a path"
+            )));
+        }
         let dir = self.root.join(sub);
         std::fs::create_dir_all(&dir)?;
         Ok(dir)
@@ -1061,6 +1089,46 @@ mod tests {
                 .name,
             "Forest v2"
         );
+    }
+
+    /// **Round-2 finding B13**: a destination folder is a NAME under the
+    /// content root, not a path.
+    ///
+    /// It arrives from the webview (`asset_import`'s `dest_folder`,
+    /// `asset_create`'s `folder`) and `root.join(sub)` + `create_dir_all` was
+    /// an arbitrary-directory-write primitive. L7.H6's confinement guard reads
+    /// four Ring-2 modules and could not see this call at all.
+    #[test]
+    fn a_content_folder_cannot_leave_the_content_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = AssetProject::open(dir.path()).unwrap();
+
+        // The whole legitimate vocabulary still works, nesting included — and
+        // "" is the content root itself, which the Content Drawer sends when
+        // the author is standing in it. It has no components, so it cannot
+        // escape, and refusing it would break creating an asset at the top
+        // level.
+        for good in ["Imported", "Materials", "a/b", ""] {
+            let made = proj.content_dir(good).unwrap();
+            assert!(
+                made.starts_with(dir.path()),
+                "{good} left the root: {made:?}"
+            );
+            assert!(made.is_dir());
+        }
+
+        for bad in ["../escape", "a/../../escape", "..", "/etc"] {
+            let e = proj
+                .content_dir(bad)
+                .err()
+                .unwrap_or_else(|| panic!("content_dir accepted {bad:?}"));
+            assert!(
+                e.to_string().contains("destination folder"),
+                "{bad:?} was refused for the wrong reason: {e}"
+            );
+        }
+        // …and nothing was created outside the root on the way to refusing.
+        assert!(!dir.path().parent().unwrap().join("escape").exists());
     }
 
     fn no_temp_litter(dir: &Path) -> bool {
