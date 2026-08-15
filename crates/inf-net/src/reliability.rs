@@ -369,11 +369,21 @@ impl Endpoint {
         }
         if seq > self.recv_highest {
             let d = seq - self.recv_highest;
-            if d <= 64 {
-                self.recv_bits = (self.recv_bits << d) | (1u64 << (d - 1));
-            } else {
-                self.recv_bits = 0;
-            }
+            // **`d == 64` is `u64 << 64`** (round-2, the net MED cluster): a
+            // panic in dev and a *masked* `<< 0` in release, which silently
+            // keeps every stale bit in the dedup window and makes the acks we
+            // send a lie. The sibling four lines down gets it right with
+            // `(1..=64)`, which is what makes this one look correct at a
+            // glance. A jump of exactly 64 is one burst loss of 64 packets —
+            // an ordinary event on a bad link, not an adversarial one.
+            self.recv_bits = match d {
+                0 => self.recv_bits,
+                1..=63 => (self.recv_bits << d) | (1u64 << (d - 1)),
+                // The old highest lands on the last bit of the window and
+                // everything before it has fallen out of it.
+                64 => 1u64 << 63,
+                _ => 0,
+            };
             self.recv_highest = seq;
         } else {
             let d = self.recv_highest - seq;
@@ -410,9 +420,42 @@ impl Endpoint {
         }
     }
 
+    /// Buffer an out-of-order reliable message until its predecessors arrive.
+    ///
+    /// # The window is bounded by what a peer may legally have in flight
+    ///
+    /// Round-2 finding **R2-5**. `reliable_recv_buffer` accepted any id at all
+    /// and held it for ever: both sibling containers in this struct are capped
+    /// (`sent_packets` by `sent_history`, the in-flight set by
+    /// `max_in_flight`), and this one — the only one filled by *the peer's*
+    /// numbers rather than our own — was not. A peer that sends ids
+    /// `1, 3, 5, 7, …` and never the evens fills memory with messages that can
+    /// never be released, because the contiguous prefix never advances.
+    ///
+    /// A well-behaved peer cannot exceed `reliable_recv_next + max_in_flight`
+    /// by construction: that is exactly the in-flight cap its own sender obeys,
+    /// and an id beyond it means a message we have not seen was already acked,
+    /// which cannot happen. So the bound is the protocol's own, not a tuning
+    /// constant — and a refusal is safe, because the reliable layer's whole
+    /// contract is that an undelivered message is retransmitted.
+    ///
+    /// There is **no production caller of this crate yet** (P14.3 built the
+    /// sans-io core ahead of its consumers), so this is protocol-core debt
+    /// rather than a live hazard — which is the reason to fix it before there
+    /// is a shipped client whose memory it is.
     fn recv_reliable(&mut self, id: u64, msg: Message) {
         if id < self.reliable_recv_next {
             return; // already delivered
+        }
+        if id
+            >= self
+                .reliable_recv_next
+                .saturating_add(self.cfg.max_in_flight as u64)
+        {
+            // Past anything the peer's own in-flight cap allows. Dropped, not
+            // buffered: it will be retransmitted once the gap ahead of it
+            // closes.
+            return;
         }
         if self.reliable_recv_buffer.contains_key(&id) {
             return; // duplicate, still buffered
@@ -437,11 +480,13 @@ impl Endpoint {
         }
         if id > self.unreliable_recv_highest {
             let d = id - self.unreliable_recv_highest;
-            if d <= 64 {
-                self.unreliable_recv_bits = (self.unreliable_recv_bits << d) | (1u64 << (d - 1));
-            } else {
-                self.unreliable_recv_bits = 0;
-            }
+            // The same `u64 << 64` as `track_received` — see the comment there.
+            self.unreliable_recv_bits = match d {
+                0 => self.unreliable_recv_bits,
+                1..=63 => (self.unreliable_recv_bits << d) | (1u64 << (d - 1)),
+                64 => 1u64 << 63,
+                _ => 0,
+            };
             self.unreliable_recv_highest = id;
             self.incoming.push_back(msg);
         } else {
@@ -783,6 +828,118 @@ mod tests {
             got,
             (0..n).collect::<Vec<_>>(),
             "exactly-once, in order after recovery"
+        );
+    }
+
+    /// **Round-2, the net MED cluster**: a burst loss of exactly 64 is
+    /// `u64 << 64` — a panic in dev, and in release a *masked* `<< 0` that
+    /// keeps every stale bit in the dedup window.
+    ///
+    /// The window itself is asserted, not the delivery: a forward jump always
+    /// delivers, so the only observable of the shift is the bitfield the acks
+    /// are built from. (Measured: an arm that drove packets through the public
+    /// path and checked what arrived left the `<< 0` mutation green.)
+    #[test]
+    fn a_gap_of_exactly_sixty_four_does_not_shift_a_u64_by_its_own_width() {
+        // `track_received` (the packet-seq window). Start with two received
+        // packets so there is a stale bit for a masked shift to keep.
+        let mut e = Endpoint::new(EndpointConfig::default());
+        e.track_received(1);
+        e.track_received(2);
+        assert_eq!(e.recv_bits, 1, "packet 1 sits one below the highest");
+
+        e.track_received(2 + 64);
+        assert_eq!(e.recv_highest, 66, "the window did not advance");
+        assert_eq!(
+            e.recv_bits,
+            1u64 << 63,
+            "a gap of exactly 64 must leave ONLY the old highest, at the far end              of the window; a masked `<< 0` keeps every stale bit and makes the              acks we send a lie"
+        );
+
+        // 63 and 65 bracket it, so the arm cannot pass by accident.
+        let mut e = Endpoint::new(EndpointConfig::default());
+        e.track_received(1);
+        e.track_received(2);
+        e.track_received(2 + 63);
+        assert_eq!(e.recv_bits, (1u64 << 63) | (1u64 << 62));
+
+        let mut e = Endpoint::new(EndpointConfig::default());
+        e.track_received(1);
+        e.track_received(2);
+        e.track_received(2 + 65);
+        assert_eq!(e.recv_bits, 0, "past the window, nothing survives");
+
+        // The unreliable mirror, same shape and the same bug.
+        let mut e = Endpoint::new(EndpointConfig::default());
+        let m = |i: u8| Message {
+            channel: ch(),
+            payload: vec![i],
+        };
+        e.recv_unreliable(1, m(1));
+        e.recv_unreliable(2, m(2));
+        assert_eq!(e.unreliable_recv_bits, 1);
+        e.recv_unreliable(2 + 64, m(3));
+        assert_eq!(
+            e.unreliable_recv_bits,
+            1u64 << 63,
+            "the unreliable window shifted by its own width"
+        );
+    }
+
+    /// **Round-2 finding R2-5**: the reliable reorder buffer is bounded by what
+    /// the peer's own in-flight cap allows.
+    ///
+    /// Both sibling containers in this struct are capped — `sent_packets` by
+    /// `sent_history`, the in-flight set by `max_in_flight`. This one, the only
+    /// one filled by the PEER's numbers rather than our own, was not. A peer
+    /// that sends only odd ids fills memory with messages that can never be
+    /// released, because the contiguous prefix never advances.
+    #[test]
+    fn the_reliable_reorder_buffer_cannot_grow_past_the_in_flight_cap() {
+        let cfg = EndpointConfig {
+            max_in_flight: 8,
+            ..EndpointConfig::default()
+        };
+        let mut e = Endpoint::new(cfg);
+
+        // Ids 2..=200, all out of order (1 never arrives), so nothing is ever
+        // released and every one of them wants to be buffered.
+        for id in 2..=200u64 {
+            e.recv_reliable(
+                id,
+                Message {
+                    channel: ch(),
+                    payload: vec![id as u8],
+                },
+            );
+        }
+        assert!(
+            e.reliable_recv_buffer.len() <= cfg.max_in_flight,
+            "the reorder buffer holds {} of an 8-message window — it accepted ids              the peer cannot legally have in flight",
+            e.reliable_recv_buffer.len()
+        );
+        assert!(
+            !e.reliable_recv_buffer.is_empty(),
+            "nothing was buffered at all, so this arm is vacuous"
+        );
+
+        // …and the messages inside the window are still delivered once the gap
+        // closes: a bound that loses legitimate traffic is not a bound.
+        e.recv_reliable(
+            1,
+            Message {
+                channel: ch(),
+                payload: vec![1],
+            },
+        );
+        let mut seen = Vec::new();
+        while let Some(m) = e.poll_recv() {
+            seen.push(m.payload[0]);
+        }
+        assert_eq!(
+            seen,
+            (1..=8u8).collect::<Vec<_>>(),
+            "the in-window prefix was not released in order"
         );
     }
 }

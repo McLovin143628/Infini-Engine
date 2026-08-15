@@ -56,6 +56,40 @@ impl InputState {
         }
     }
 
+    /// **Release everything the device is holding** (round-2 finding R2-9).
+    ///
+    /// The raw sets — `keys_down`, `buttons_down`, `axes_raw` — accumulate
+    /// across events and are only ever cleared by the matching *release*. So
+    /// they outlive the device that made them: a gamepad unplugged mid-sprint,
+    /// a window that loses focus with W held, an app suspended with a stick
+    /// pushed forward. The OS sends no release for any of those, and the
+    /// character keeps running for the rest of the session — through PIE,
+    /// through a level change, and into the replay trace a parity gate
+    /// compares.
+    ///
+    /// One frame is committed as part of the release, so
+    /// [`just_released`](Self::just_released) fires for everything that was
+    /// down: gameplay that ends an ability on the release edge must see it,
+    /// or "release everything" becomes "the ability never ends".
+    ///
+    /// The map is kept — this is a device event, not a rebind.
+    pub fn release_all(&mut self) {
+        self.keys_down.clear();
+        self.buttons_down.clear();
+        self.axes_raw.clear();
+        self.commit_frame();
+    }
+
+    /// Whether any raw device input is currently held.
+    ///
+    /// Exists so [`release_all`](Self::release_all) can be falsified: every
+    /// public query answers from the RESOLVED snapshot, which a bound-to-nothing
+    /// key never reaches, so a release that cleared the actions and left the raw
+    /// sets standing would look identical through all of them.
+    pub fn anything_held(&self) -> bool {
+        !self.keys_down.is_empty() || !self.buttons_down.is_empty() || !self.axes_raw.is_empty()
+    }
+
     /// The map in use.
     pub fn map(&self) -> &InputMap {
         &self.map
@@ -174,5 +208,72 @@ impl InputState {
     /// The resolved value of `axis` in `[-1, 1]` (0 if unbound).
     pub fn axis(&self, axis: &str) -> f32 {
         self.axis_values.get(axis).copied().unwrap_or(0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ActionSource, AxisSource, GamepadAxis, GamepadButton, InputEvent};
+    use crate::InputMap;
+
+    /// **Round-2 finding R2-9**: raw device state outlives the device.
+    ///
+    /// `keys_down`/`buttons_down`/`axes_raw` accumulate across events and are
+    /// cleared only by the matching release. The OS sends none when a window
+    /// loses focus with W held, when an app suspends with a stick pushed, or
+    /// when a pad is unplugged mid-sprint — so the character kept running for
+    /// the rest of the session.
+    #[test]
+    fn releasing_everything_clears_the_raw_state_and_fires_the_edges() {
+        let mut map = InputMap::default();
+        map.bind_action("sprint", ActionSource::Key("KeyW".into()));
+        map.bind_axis(
+            "move_x",
+            AxisSource::GamepadAxis {
+                axis: GamepadAxis::LeftStickX,
+                scale: 1.0,
+            },
+        );
+        let mut st = InputState::new(map);
+
+        st.apply(&[
+            InputEvent::Key {
+                code: "KeyW".into(),
+                pressed: true,
+            },
+            InputEvent::GamepadAxis {
+                axis: GamepadAxis::LeftStickX,
+                value: 1.0,
+            },
+            InputEvent::GamepadButton {
+                button: GamepadButton::South,
+                pressed: true,
+            },
+        ]);
+        assert!(st.pressed("sprint"), "the fixture never held anything");
+        assert_eq!(st.axis("move_x"), 1.0);
+        assert!(st.anything_held());
+
+        // The window loses focus. No release arrives from anywhere.
+        st.release_all();
+
+        assert!(!st.pressed("sprint"), "the action is still held");
+        assert_eq!(st.axis("move_x"), 0.0, "the stick is still pushed");
+        assert!(
+            !st.anything_held(),
+            "the RAW sets survived — every public query answers from the resolved              snapshot, so a release that cleared only the actions would look              identical through all of them"
+        );
+        assert!(
+            st.just_released("sprint"),
+            "the release edge did not fire, so gameplay that ends an ability on it              never ends the ability"
+        );
+
+        // …and the state is live again: a fresh press works.
+        st.apply(&[InputEvent::Key {
+            code: "KeyW".into(),
+            pressed: true,
+        }]);
+        assert!(st.pressed("sprint") && st.just_pressed("sprint"));
     }
 }

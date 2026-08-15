@@ -662,6 +662,26 @@ impl ApplicationHandler for PlayerApp {
                     live.pending.extend(synth);
                 }
             }
+            // **Focus loss releases everything** (round-2 finding R2-9). The
+            // raw device sets accumulate across events and are cleared only by
+            // the matching release — and the OS sends none when the window
+            // stops being focused with W held or a stick pushed. The character
+            // otherwise keeps running for the rest of the session, through PIE,
+            // through a level change, and into the trace a parity gate compares.
+            //
+            // The touch strand goes with it: a suspend delivers no `Ended`
+            // either, so an in-flight virtual stick stays pushed.
+            WindowEvent::Focused(false) => {
+                #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+                {
+                    let synth = self.touch.cancel_all();
+                    self.input_state.apply(&synth);
+                }
+                self.input_state.release_all();
+                if let Some(live) = self.live.as_mut() {
+                    live.pending.clear();
+                }
+            }
             WindowEvent::RedrawRequested => self.frame(event_loop),
             _ => {}
         }

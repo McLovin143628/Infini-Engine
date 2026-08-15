@@ -184,6 +184,24 @@ impl TouchControls {
     /// [`InputEvent::Touch`] events are consumed; anything else is ignored (the
     /// caller applies those directly). The returned events set gamepad axes/
     /// buttons that the [`InputMap`](crate::InputMap) resolves to actions/axes.
+    /// **Cancel every in-flight touch and emit its release** (round-2 finding
+    /// R2-9, the touch strand).
+    ///
+    /// A finger's lifetime is tracked from `Started` to `Ended`/`Cancelled`. A
+    /// suspend, a window losing focus, or a browser tab going to the background
+    /// delivers neither — so a virtual stick stays pushed and a virtual button
+    /// stays held for the rest of the session. The returned events are the
+    /// synthetic releases, in the same shape `process` emits, so the caller
+    /// feeds them to `InputState::apply` exactly as it feeds a real frame.
+    pub fn cancel_all(&mut self) -> Vec<InputEvent> {
+        let mut out = Vec::new();
+        let ids: Vec<u64> = self.active.keys().copied().collect();
+        for id in ids {
+            self.on_up(id, &mut out);
+        }
+        out
+    }
+
     pub fn process(&mut self, events: &[InputEvent]) -> Vec<InputEvent> {
         let mut out = Vec::new();
         for ev in events {
@@ -458,5 +476,52 @@ mod tests {
         state.apply(&release);
         assert!(!state.pressed("jump"));
         assert_eq!(state.axis("move_x"), 0.0);
+    }
+
+    /// **Round-2 finding R2-9, the touch strand**: a suspend delivers no
+    /// `Ended`, so an in-flight virtual stick stays pushed for ever.
+    #[test]
+    fn cancelling_every_touch_releases_the_controls_it_was_driving() {
+        let mut c = TouchControls::new();
+        c.add_stick(
+            GamepadAxis::LeftStickX,
+            GamepadAxis::LeftStickY,
+            VirtualStick::new([100.0, 100.0], 50.0),
+        );
+        c.add_button(
+            GamepadButton::South,
+            TouchButton::new(Rect::new([200.0, 200.0], [260.0, 260.0])),
+        );
+
+        let down = |id: u64, position: [f32; 2]| InputEvent::Touch {
+            id,
+            phase: TouchPhase::Started,
+            position,
+        };
+        let synth = c.process(&[down(1, [140.0, 100.0]), down(2, [230.0, 230.0])]);
+        assert_eq!(c.active_touches(), 2, "the fixture grabbed nothing");
+        assert!(
+            synth
+                .iter()
+                .any(|e| matches!(e, InputEvent::GamepadAxis { value, .. } if *value != 0.0)),
+            "the stick never moved, so this arm is vacuous"
+        );
+
+        let released = c.cancel_all();
+        assert_eq!(c.active_touches(), 0, "a finger survived the cancel");
+        assert!(
+            released
+                .iter()
+                .any(|e| matches!(e, InputEvent::GamepadAxis { value, .. } if *value == 0.0)),
+            "the stick was not re-centred: {released:?}"
+        );
+        assert!(
+            released
+                .iter()
+                .any(|e| matches!(e, InputEvent::GamepadButton { pressed: false, .. })),
+            "the button was not released: {released:?}"
+        );
+        // Idempotent — a second cancel has nothing to say.
+        assert!(c.cancel_all().is_empty());
     }
 }
