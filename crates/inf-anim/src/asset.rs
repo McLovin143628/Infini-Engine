@@ -188,7 +188,8 @@ impl AssetPayload for AnimClipAsset {
     }
 }
 
-/// The `.inf_sm` payload: an authored animation [`StateMachine`] (P11.2).
+/// The `.inf_sm` payload: an authored animation [`StateMachine`] (P11.2 v1,
+/// **P29.1 v2**).
 ///
 /// The machine is a plain typed model (states + transitions + layout), not an
 /// `inf-graph` document, so it stores directly here — no JSON-string escape hatch
@@ -196,6 +197,28 @@ impl AssetPayload for AnimClipAsset {
 /// fields does not apply: [`StateMachine`] and everything it contains is
 /// serde-clean). The optional `skeleton` GUID records the dependency edge (raw
 /// bytes, keeping the crate `uuid`-free), like [`AnimClipAsset`].
+///
+/// # The v2 ladder, and why v1 cannot be upgraded in place
+///
+/// v2 (P29.1) did not *append* to this schema — it changed shapes **inside** it:
+/// a transition's `conditions: Vec<SmCondition>` became a `condition: SmCond`
+/// tree, its `from: usize` became an [`SmSource`](crate::state_machine::SmSource)
+/// enum, and typed parameters and blend profiles joined the machine. bincode is
+/// **positional**, so a v1 payload's bytes are not a prefix of a v2 one and no
+/// `#[serde(default)]` can rescue the read. That is what `schema_version` is for,
+/// and — because it is this type's **first** field —
+/// [`inf_asset::peek_schema_version`] reads it without decoding and the failure
+/// arrives as [`AssetError::SchemaTooOld`](inf_asset::AssetError::SchemaTooOld)
+/// carrying [`UPGRADE_REMEDY`](AssetPayload::UPGRADE_REMEDY), rather than as
+/// `Decode("UnexpectedEnd")`.
+///
+/// The remedy is a real instruction because a `.inf_sm` has two doors that both
+/// write a current-schema machine: the State Machine editor, and the character
+/// wizard (which derives one from the rig). The one committed v1 `.inf_sm` in the
+/// tree (`samples/character-demo/Locomotion.inf_sm`) is regenerated from its
+/// generator under `INF_BLESS_SAMPLES=1` — the downgrade-bless — and the v1 wire
+/// shape it *used* to have is pinned below from ladder-local literals, so a
+/// future field cannot be added without this ladder noticing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StateMachineAsset {
     pub schema_version: u32,
@@ -205,7 +228,9 @@ pub struct StateMachineAsset {
 }
 
 impl StateMachineAsset {
-    pub const CURRENT_VERSION: u32 = 1;
+    /// v2 (P29.1) — typed parameters, condition trees, priority/interruption,
+    /// blend curves and profiles, any-state sources, sub-machines, notifies.
+    pub const CURRENT_VERSION: u32 = 2;
 
     /// Wrap a machine (optionally bound to a skeleton GUID) as a current-schema
     /// asset.
@@ -221,8 +246,42 @@ impl StateMachineAsset {
 impl AssetPayload for StateMachineAsset {
     const KIND: AssetKind = AssetKind::StateMachine;
     const SCHEMA_VERSION: u32 = Self::CURRENT_VERSION;
+    // Two doors, and a user reading this message is looking at a project authored
+    // before P29.1.
+    const UPGRADE_REMEDY: &'static str =
+        "re-create the machine in the State Machine editor, or regenerate the character through the New Character wizard (which derives one from the rig)";
     fn schema_version(&self) -> u32 {
         self.schema_version
+    }
+
+    /// Reject newer-than-current, then ask the decoded machine
+    /// [`StateMachine::validate`]'s questions — the campaign's U6 standard, and
+    /// for this payload it is not a formality.
+    ///
+    /// `StateMachine`'s fields are public and it derives `Deserialize`, so serde
+    /// builds it straight off the wire and no constructor's validation runs on
+    /// the decode path. Everything the evaluator would then have to trust is a
+    /// plain decoded number: a transition's `to` indexes `sm.states`, a
+    /// `profile` indexes `sm.profiles`, an `entry` seeds the runtime, a
+    /// `duration` divides the cross-fade alpha, and a condition tree is walked
+    /// **recursively** in the fixed step — in the editor, in PIE and in the
+    /// shipped player reading a cooked pack. A NaN duration or exit time is the
+    /// quiet one: every ordering comparison a NaN takes part in is false, so the
+    /// machine simply never transitions and looks like content that was authored
+    /// wrong.
+    fn migrate(self) -> inf_asset::Result<Self> {
+        let found = self.schema_version;
+        if found > Self::SCHEMA_VERSION {
+            return Err(inf_asset::AssetError::SchemaTooNew {
+                kind: Self::KIND.slug(),
+                found,
+                current: Self::SCHEMA_VERSION,
+            });
+        }
+        self.machine
+            .validate()
+            .map_err(|e| inf_asset::AssetError::Decode(format!("invalid state machine: {e}")))?;
+        Ok(self)
     }
 }
 
@@ -446,34 +505,308 @@ mod tests {
         assert_eq!(back.skeleton, Some([7u8; 16]));
     }
 
-    #[test]
-    fn state_machine_asset_round_trips_deterministically() {
-        use crate::state_machine::{SmState, SmTransition, StateMachine};
-        let machine = StateMachine {
+    /// A v2 machine that exercises **every** shape the schema grew, so the
+    /// round-trip below is a statement about v2 and not about v1 re-encoded.
+    fn v2_machine() -> StateMachine {
+        use crate::state_machine::{
+            BlendCurve, BlendProfile, CmpOp, InterruptBlend, InterruptSource, JointBlendWeight,
+            SmCond, SmInterrupt, SmParam, SmParamKind, SmState, SmTransition,
+        };
+        let sub = StateMachine {
+            states: vec![
+                SmState::clip("stand", [3; 16]),
+                SmState::clip("crouch", [4; 16]),
+            ],
+            transitions: vec![SmTransition::on(0, 1, 0.1, "crouching", CmpOp::Gt, 0.5)],
+            entry: 0,
+            ..Default::default()
+        };
+        StateMachine {
             states: vec![
                 SmState::clip("idle", [1; 16]),
                 SmState::clip("walk", [2; 16]),
+                SmState::sub_machine("ground", sub),
             ],
-            transitions: vec![SmTransition {
-                from: 0,
-                to: 1,
-                duration: 0.2,
-                conditions: vec![crate::state_machine::SmCondition {
-                    var: "moving".into(),
-                    op: crate::state_machine::CmpOp::Gt,
-                    value: 0.5,
-                }],
-                exit_time: Some(0.8),
-            }],
+            transitions: vec![
+                SmTransition::on(0, 1, 0.2, "moving", CmpOp::Gt, 0.5)
+                    .with_exit_time(0.8)
+                    .with_priority(3)
+                    .with_curve(BlendCurve::EaseInOut)
+                    .with_profile(0)
+                    .with_interrupt(SmInterrupt {
+                        source: InterruptSource::SourceOrDestination,
+                        blend: InterruptBlend::Carry,
+                    }),
+                SmTransition::any(2, 0.05).when(SmCond::Or(vec![
+                    SmCond::Trigger("land".into()),
+                    SmCond::Not(Box::new(SmCond::bool("airborne", true))),
+                ])),
+            ],
             entry: 0,
-        };
-        let a = StateMachineAsset::new(machine, Some([9u8; 16]));
+            params: vec![
+                SmParam::float("moving"),
+                SmParam::trigger("land"),
+                SmParam::new("airborne", SmParamKind::Bool),
+                SmParam::new("stance", SmParamKind::Int),
+            ],
+            profiles: vec![BlendProfile::new(
+                "upper-body",
+                vec![JointBlendWeight {
+                    joint: 1,
+                    weight: 0.25,
+                }],
+            )],
+        }
+    }
+
+    #[test]
+    fn state_machine_asset_round_trips_deterministically() {
+        let a = StateMachineAsset::new(v2_machine(), Some([9u8; 16]));
+        assert_eq!(a.schema_version, 2);
         let e1 = encode(&a).unwrap();
         let e2 = encode(&a).unwrap();
         assert_eq!(e1, e2, "re-encoding is byte-identical");
         let back: StateMachineAsset = decode(&e1).unwrap();
-        assert_eq!(back, a);
+        assert_eq!(back, a, "every v2 shape survived the wire");
         assert_eq!(back.skeleton, Some([9u8; 16]));
+    }
+
+    /// The **v1 wire shape** of a `.inf_sm`, spelled out from ladder-local
+    /// literals.
+    ///
+    /// Real shadow structs, not a v2 encoding with bytes trimmed off: the
+    /// trimming trick is *derived from the live encoder*, so it reproduces
+    /// whatever the encoder currently does and pins nothing. This says what v1
+    /// **was** — a flat `Vec<SmCondition>` of `var`/`op`/`value`, a `usize`
+    /// source, and a machine with no parameter table and no profiles.
+    mod v1 {
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        pub struct SmCondition {
+            pub var: String,
+            pub op: u32,
+            pub value: f64,
+        }
+        #[derive(Serialize)]
+        pub enum Motion {
+            Clip([u8; 16]),
+        }
+        #[derive(Serialize)]
+        pub struct SmState {
+            pub name: String,
+            pub motion: Motion,
+            pub looping: bool,
+            pub speed: f64,
+            pub position: (f32, f32),
+        }
+        #[derive(Serialize)]
+        pub struct SmTransition {
+            pub from: usize,
+            pub to: usize,
+            pub duration: f64,
+            pub conditions: Vec<SmCondition>,
+            pub exit_time: Option<f64>,
+        }
+        #[derive(Serialize)]
+        pub struct StateMachine {
+            pub states: Vec<SmState>,
+            pub transitions: Vec<SmTransition>,
+            pub entry: usize,
+        }
+        #[derive(Serialize)]
+        pub struct StateMachineAsset {
+            pub schema_version: u32,
+            pub machine: StateMachine,
+            pub skeleton: Option<[u8; 16]>,
+        }
+    }
+
+    fn v1_sm_bytes() -> Vec<u8> {
+        bincode::serde::encode_to_vec(
+            &v1::StateMachineAsset {
+                schema_version: 1,
+                machine: v1::StateMachine {
+                    states: vec![v1::SmState {
+                        name: "idle".into(),
+                        motion: v1::Motion::Clip([1; 16]),
+                        looping: true,
+                        speed: 1.0,
+                        position: (0.0, 0.0),
+                    }],
+                    transitions: vec![v1::SmTransition {
+                        from: 0,
+                        to: 0,
+                        duration: 0.2,
+                        conditions: vec![v1::SmCondition {
+                            var: "moving".into(),
+                            op: 0,
+                            value: 0.5,
+                        }],
+                        exit_time: None,
+                    }],
+                    entry: 0,
+                },
+                skeleton: Some([9u8; 16]),
+            },
+            inf_asset::bincode_config(),
+        )
+        .unwrap()
+    }
+
+    /// **The v1 → v2 break is a NAMED refusal that says what to do.**
+    ///
+    /// v2 changed shapes *inside* the payload (a condition list became a tree, a
+    /// `usize` source became an enum), so v1 bytes are not a prefix of v2 bytes
+    /// and no `#[serde(default)]` rescues the read. What matters is that a user
+    /// with a pre-P29.1 project sees `SchemaTooOld` carrying this type's remedy —
+    /// the `.inf_skel` ladder's ruling, applied to the format that has *two*
+    /// authoring doors.
+    #[test]
+    fn a_v1_state_machine_is_refused_by_name_and_names_the_remedy() {
+        let err =
+            decode::<StateMachineAsset>(&v1_sm_bytes()).expect_err("v1 must not decode as v2");
+        match err {
+            inf_asset::AssetError::SchemaTooOld {
+                kind,
+                found,
+                current,
+                remedy,
+            } => {
+                assert_eq!(kind, "state_machine");
+                assert_eq!((found, current), (1, StateMachineAsset::CURRENT_VERSION));
+                // An INSTRUCTION, not a restatement — and it names both doors.
+                assert!(remedy.contains("State Machine editor"), "{remedy}");
+                assert!(remedy.contains("wizard"), "{remedy}");
+                // …and it is READABLE: a run of spaces inside a user-facing
+                // literal is the scripted-edit law's signature (a `\` line
+                // continuation eaten by a non-raw Python string).
+                assert!(
+                    !remedy.contains("  "),
+                    "the remedy carries a run of spaces — a line continuation was \
+                     eaten: {remedy:?}"
+                );
+            }
+            other => panic!("expected SchemaTooOld, got {other:?}"),
+        }
+        let msg = decode::<StateMachineAsset>(&v1_sm_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("State Machine editor"), "{msg}");
+    }
+
+    /// The other direction: a payload from a newer build decodes structurally and
+    /// is rejected by `migrate`.
+    #[test]
+    fn a_future_state_machine_is_refused_as_too_new() {
+        let mut a = StateMachineAsset::new(v2_machine(), None);
+        a.schema_version = StateMachineAsset::CURRENT_VERSION + 1;
+        let bytes = encode(&a).unwrap();
+        assert!(matches!(
+            decode::<StateMachineAsset>(&bytes),
+            Err(inf_asset::AssetError::SchemaTooNew { .. })
+        ));
+    }
+
+    /// **`migrate` asks the structural questions, not a version question** (U6).
+    ///
+    /// The hostile machines are built through the public fields and encoded —
+    /// which is exactly how a corrupt or hand-edited `.inf_sm` arrives — and each
+    /// one is a value the fixed step would otherwise index, divide by, or recurse
+    /// through.
+    #[test]
+    fn a_structurally_broken_state_machine_is_refused_at_decode() {
+        use crate::state_machine::{CmpOp, SmCond, SmState, SmTransition};
+        let healthy = || StateMachine {
+            states: vec![
+                SmState::clip("idle", [1; 16]),
+                SmState::clip("walk", [2; 16]),
+            ],
+            transitions: vec![SmTransition::on(0, 1, 0.2, "moving", CmpOp::Gt, 0.5)],
+            entry: 0,
+            ..Default::default()
+        };
+        // Control: it decodes.
+        let bytes = encode(&StateMachineAsset::new(healthy(), None)).unwrap();
+        decode::<StateMachineAsset>(&bytes).expect("a healthy machine must decode");
+
+        let refused = |name: &str, f: &dyn Fn(&mut StateMachine)| {
+            let mut m = healthy();
+            f(&mut m);
+            let bytes = encode(&StateMachineAsset::new(m, None)).unwrap();
+            let e = decode::<StateMachineAsset>(&bytes)
+                .err()
+                .unwrap_or_else(|| panic!("{name} decoded as a valid machine"));
+            assert!(
+                e.to_string().contains("invalid state machine"),
+                "{name}: {e}"
+            );
+        };
+        // An index into `states` that the evaluator would follow.
+        refused("a transition past the end", &|m| m.transitions[0].to = 9);
+        refused("an entry past the end", &|m| m.entry = 9);
+        // A NaN the fixed step divides the fade alpha by — the quiet one.
+        refused("a NaN duration", &|m| m.transitions[0].duration = f64::NAN);
+        refused("a NaN exit time", &|m| {
+            m.transitions[0].exit_time = Some(f64::NAN)
+        });
+        // A recursion the fixed step walks.
+        refused("an over-deep condition", &|m| {
+            let mut c = SmCond::Always;
+            for _ in 0..crate::state_machine::MAX_COND_DEPTH + 1 {
+                c = SmCond::Not(Box::new(c));
+            }
+            m.transitions[0].condition = c;
+        });
+        // A profile index the blend would follow.
+        refused("a profile past the end", &|m| {
+            m.transitions[0].profile = Some(0)
+        });
+        // Two levels of sub-machine — no slot to keep the play state in.
+        refused("a doubly nested sub-machine", &|m| {
+            let inner = StateMachine {
+                states: vec![SmState::clip("x", [1; 16])],
+                ..Default::default()
+            };
+            let mid = StateMachine {
+                states: vec![SmState::sub_machine("mid", inner)],
+                ..Default::default()
+            };
+            m.states.push(SmState::sub_machine("outer", mid));
+        });
+    }
+
+    /// **The v2 wire SHAPE is pinned, so a tail field cannot be appended without a
+    /// bump.**
+    ///
+    /// Two claims, and the second is the load-bearing one: the three fields decode
+    /// positionally in this order, **and** the decode consumes every byte of the
+    /// encoding. A fourth field appended to `StateMachineAsset` leaves bytes
+    /// unaccounted for here and fails — the exact check an encoder-derived
+    /// fixture cannot make, because it asks the encoder what it emitted.
+    #[test]
+    fn the_state_machine_wire_shape_is_pinned_field_for_field() {
+        #[derive(Deserialize)]
+        struct Wire {
+            schema_version: u32,
+            machine: StateMachine,
+            skeleton: Option<[u8; 16]>,
+        }
+        let want = StateMachineAsset::new(v2_machine(), Some([9u8; 16]));
+        let bytes = encode(&want).unwrap();
+        let (wire, consumed): (Wire, usize) =
+            bincode::serde::decode_from_slice(&bytes, inf_asset::bincode_config())
+                .expect("the v2 shape decodes the v2 wire");
+        assert_eq!(
+            consumed,
+            bytes.len(),
+            "the encoding carries bytes the pinned three-field shape does not \
+             account for — a field was appended to `StateMachineAsset` without \
+             bumping `CURRENT_VERSION`"
+        );
+        assert_eq!(wire.schema_version, StateMachineAsset::CURRENT_VERSION);
+        assert_eq!(wire.machine, want.machine);
+        assert_eq!(wire.skeleton, want.skeleton);
     }
 
     /// **Round-2 finding B2's sweep, the one that was a live crash.**

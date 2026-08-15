@@ -100,6 +100,34 @@ pub fn blend_poses(a: &Pose, b: &Pose, alpha: f32) -> Pose {
     Pose { locals }
 }
 
+/// Blend two poses with a **per-joint** alpha (P29.1) — the pose half of a
+/// [`crate::state_machine::BlendProfile`].
+///
+/// `alphas[i]` is joint `i`'s weight; a joint past the end of `alphas` uses `0`
+/// (fully `a`), which is the conservative reading — a mask that does not mention
+/// a joint holds the outgoing pose there rather than snapping it. Callers build
+/// the slice through [`crate::state_machine::BlendProfile::alphas`], which starts
+/// from the transition's own alpha, so "not mentioned" and "not weighted" are
+/// different things at that layer and only this one is ambiguous.
+///
+/// Identical to [`blend_poses`] in every other respect — the same `lerp` +
+/// `inf_math::pslerp`, for the same reason (see that function's note on why
+/// `Quat::slerp` is banned on this path).
+pub fn blend_poses_weighted(a: &Pose, b: &Pose, alphas: &[f32]) -> Pose {
+    let n = a.locals.len().min(b.locals.len());
+    let mut locals = Vec::with_capacity(n);
+    for i in 0..n {
+        let alpha = alphas.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        let la = &a.locals[i];
+        let lb = &b.locals[i];
+        let t = la.translation_vec().lerp(lb.translation_vec(), alpha);
+        let s = la.scale_vec().lerp(lb.scale_vec(), alpha);
+        let r = inf_math::pslerp(la.rotation_quat(), lb.rotation_quat(), alpha);
+        locals.push(JointTransform::from_trs(t, r, s));
+    }
+    Pose { locals }
+}
+
 /// Propagate a local [`Pose`] to **global** (model-space) matrices — one per
 /// joint. Because the skeleton is topologically ordered, a single forward pass
 /// suffices: `global[i] = global[parent] · local[i]` (roots use `local[i]`).

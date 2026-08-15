@@ -69,7 +69,7 @@ use crate::asset::SkeletonAsset;
 use crate::blend_space::ClipRef;
 use crate::clip::{AnimClip, Interpolation, JointTrack, QuatTrack, Vec3Track};
 use crate::skeleton::Skeleton;
-use crate::state_machine::{CmpOp, Motion, SmCondition, SmState, SmTransition, StateMachine};
+use crate::state_machine::{BlendCurve, CmpOp, SmParam, SmState, SmTransition, StateMachine};
 use crate::template::{leg_suffix, BodyPlan};
 
 /// τ, as `f64`. Written out rather than imported so the reduction inside
@@ -345,27 +345,14 @@ pub fn locomotion_machine(
 ) -> StateMachine {
     let walk_at = set.walk_threshold_m_s();
     let run_at = set.run_threshold_m_s();
-    let state = |name: &str, clip: ClipRef, x: f32| SmState {
-        name: name.to_string(),
-        motion: Motion::Clip(clip),
-        looping: true,
-        speed: 1.0,
-        position: (x, 0.0),
-    };
-    let edge = |from: usize, to: usize, op: CmpOp, value: f64| SmTransition {
-        from,
-        to,
-        // The cross-fade `samples/character-demo` uses; long enough to hide the
-        // pose discontinuity between two cycles at different cadences, short
-        // enough that the character is not still blending when the player has
-        // let go of the stick.
-        duration: 0.15,
-        conditions: vec![SmCondition {
-            var: SPEED_VAR.to_string(),
-            op,
-            value,
-        }],
-        exit_time: None,
+    let state = |name: &str, clip: ClipRef, x: f32| SmState::clip_at(name, clip, (x, 0.0));
+    // The cross-fade `samples/character-demo` uses; long enough to hide the pose
+    // discontinuity between two cycles at different cadences, short enough that
+    // the character is not still blending when the player has let go of the
+    // stick. `EaseInOut` (v2) is what makes a fade that short read as deliberate:
+    // zero slope at both ends, and it costs nothing — it is a polynomial.
+    let edge = |from: usize, to: usize, op: CmpOp, value: f64| {
+        SmTransition::on(from, to, 0.15, SPEED_VAR, op, value).with_curve(BlendCurve::EaseInOut)
     };
     StateMachine {
         states: vec![
@@ -380,6 +367,14 @@ pub fn locomotion_machine(
             edge(2, 1, CmpOp::Le, run_at),
         ],
         entry: 0,
+        // **The generated machine DECLARES its parameter** (v2). Nothing forces
+        // it to — an undeclared name still reads as a `Float` defaulting to 0,
+        // which is v1's rule — but a declared table is what the editor's rule
+        // builder, the `anim.*` kit and a reviewer read to know what this machine
+        // expects from gameplay. A machine derived by a generator should not be
+        // the one that leaves that implicit.
+        params: vec![SmParam::float(SPEED_VAR)],
+        profiles: Vec::new(),
     }
 }
 
@@ -1064,9 +1059,20 @@ mod tests {
         assert_eq!(sm.states.len(), 3);
         assert_eq!(sm.transitions.len(), 4);
         for t in &sm.transitions {
-            assert_eq!(t.conditions.len(), 1);
-            assert_eq!(t.conditions[0].var, SPEED_VAR);
+            let flat = t
+                .condition
+                .as_flat_and()
+                .expect("the generated edges stay the flat float compares v1 authored");
+            assert_eq!(flat.len(), 1);
+            assert_eq!(flat[0].param, SPEED_VAR);
         }
+        // v2: the generator DECLARES the one parameter it drives, so a reader (and
+        // the rule builder) can see what this machine expects from gameplay.
+        assert_eq!(sm.params.len(), 1);
+        assert_eq!(sm.params[0].name, SPEED_VAR);
+        assert_eq!(sm.params[0].kind, crate::state_machine::SmParamKind::Float);
+        // …and the whole machine passes the door a decoded one has to pass.
+        sm.validate().expect("the generated machine must validate");
         assert!(set.walk_threshold_m_s() < set.run_threshold_m_s());
     }
 

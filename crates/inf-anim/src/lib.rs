@@ -86,15 +86,18 @@ pub use merge::{
     SkeletonMergeError,
 };
 pub use pose::{
-    advance_clip_time, blend_poses, global_transforms, sample_clip, skinning_matrices, Pose,
+    advance_clip_time, blend_poses, blend_poses_weighted, global_transforms, sample_clip,
+    skinning_matrices, Pose,
 };
 pub use retarget::{humanoid_joint_names, retarget_pose, RetargetMap};
 pub use root_motion::{root_delta, root_delta_world, root_joint_index, RootMotionDelta};
 pub use skeleton::{Joint, JointTransform, Skeleton, SkeletonError};
 pub use sockets::{find_socket, socket_transform, socket_transforms, Socket};
 pub use state_machine::{
-    eval_pose, sample_motion, step, CmpOp, Motion, SmCondition, SmContext, SmRuntime, SmState,
-    SmTransition, StateMachine,
+    eval_condition, eval_pose, motion_period, sample_motion, step, BlendCurve, BlendProfile, CmpOp,
+    InterruptBlend, InterruptSource, JointBlendWeight, Motion, SmCompare, SmCond, SmContext,
+    SmError, SmInterrupt, SmParam, SmParamKind, SmRuntime, SmSource, SmState, SmStep, SmSub,
+    SmTransition, SmValue, StateMachine, MAX_COND_DEPTH, MAX_COND_NODES, MAX_PARAMS,
 };
 pub use template::{
     build_template, girdle_name, leg_suffix, BodyParams, BodyPlan, JointLimit, TemplateError,
