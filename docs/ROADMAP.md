@@ -16794,6 +16794,262 @@ between phases.
 
 
 
+## Hardening Wave C — determinism edges (2026-08-14)
+
+The third repair wave of the final hardening campaign. Waves A and B closed the
+doors where the engine writes and reads; this one closes the places where the
+engine's answer depends on **something other than its inputs** — which libm is
+linked, which process is running, which thread got there first.
+
+Eleven findings, in nine commits on `main`. Seven of them are one law:
+**`std` transcendentals are not bit-identical across targets** (P14, paid for on
+the Ubuntu runner). That law has been enforced by five source gates since P22,
+and every one of them was enforcing it over a scope somebody chose by hand — a
+function span, a four-file list, one crate. This wave is what happens when you
+ask each of those scopes what it *could not see*.
+
+### The seven libm sites, and why each gate missed its own
+
+| finding | site | what the gate that should have caught it was reading |
+|---|---|---|
+| L6.F2 | `inf-physics` `d3/fracture.rs` — `powf(2/3)` prices **every destruction bond** | `the_chunk_radius_uses_the_portable_cube_root` read the twenty lines of `chunk_radius_m`. `.powf(` was **already on its ban list**; the three calls were two hundred lines below its span |
+| L6.F3 | `inf-mesh` `fracture.rs:1799` — `atan2` orders the shared-face corners | nothing. The module *header* has claimed "angular ordering uses `pseudo_angle`, exact division only" since it was written, and `pseudo_angle` was forty lines from the one sort that did not use it |
+| L6.F4 | `inf-pcg` `scatter.rs` — `from_rotation_y` + `from_rotation_arc` on every scattered instance | nothing. The crate had no source gate, and both spellings reach `sin_cos` **inside glam**, where a grep of this crate would never find them. `grammar/span.rs` had been portable since P19.4, one module over |
+| L6.F5 | both fixed steps — `from_rotation_y` applies the root delta | `portable_pose`'s `SIM_PATH`, which lists eight files in `inf-anim`. P24.2 made `root_delta` portable and pinned it; the multiply that *uses* the delta is one call downstream, in two files the list does not reach. The fix stopped exactly where the gate's vision stopped |
+| L6.F7 | `inf-terrain` `erosion.rs` + `inf-editor-core` `erosion_gpu` — `tan` for the talus threshold, **twice** | nothing. `erosion.wgsl` never calls `tan()`, it reads a uniform, so the two Rust lines *are* the CPU/GPU parity envelope — and the parity arms compare at `1e-3 × height_range`, three orders too loose to see them disagree |
+
+Two more were not about libm but about the same question:
+
+| finding | site | the defect |
+|---|---|---|
+| L6.F1 | `runtime_sim.rs` — the committed camera | an `f64` sum over a `HashMap`'s values: the only two `HashMap`s in a struct that is `BTreeMap` throughout. Addition is not associative and the iteration order is seeded per process, so the camera's low bits — and the terrain-residency cut and `dead_reckon`'s prediction — were a function of *which process was running*. `inf-math`'s purity pin names this method by hand as its worked example of a committed pose |
+| L6.F6 | `commands/pie.rs` — starting PIE | `session.is_some()` read, lock released for the whole payload build and process spawn, lock retaken to install. Two overlapping calls both see `None`, both spawn a player, the second overwrites the first — an orphan process plus a monitor thread polling a `PieState` that no longer describes it, for the life of the editor |
+
+And three edges of the same shape, lower down:
+
+| finding | site | the defect |
+|---|---|---|
+| L6.F9 | `assets/snapshot.rs` | the Content Drawer sorted by lower-cased name over `AssetDb::iter` — documented "unordered", a `HashMap` walk — and lower-cased names are not unique. A stable sort preserves the input order for ties, which is exactly the thing that has no order |
+| L6.F10 | `d3/events.rs` + its 2D twin | a collision event **dropped** on a poisoned lock, while `append_into` twenty lines up already recovers. The buffer is a `Vec` with no invariant to violate half-way, so the `if let` bought only a step whose collision set depends on whether an unrelated panic had happened |
+| L6.F11 | `inf-ecs` `schedule.rs` | `conflict_report`'s doc claimed `build()` sets `ambiguity_detection = Error`. It sets `Warn`, deliberately — an `Error` refuses to build and then the report cannot resolve the system *names* that make the failure readable. So the report is the whole of the enforcement, and it was driven over one configuration out of sixteen |
+
+### Commits
+
+| commit | finding(s) |
+|---|---|
+| `ea1c80d` | L6.F1 — `BTreeMap` both maps, `camera_centroid` named, the arm beside the fold |
+| `599d6e6` | L6.F2 — `area_from_volume` = `pcbrt(v)²`; the source gate widened from a span to the module |
+| `fc10d0b` | L6.F3 — the module's own `pseudo_angle`; `portable_face_order` |
+| `37d7e9c` | L6.F4 — `axis_quat` + `tilt_onto`; the crate's first source gate |
+| `cef91d7` | L6.F5 — `root_delta_world`, one door for both hosts; `SIM_PATH` extended to them |
+| `b4732d2` | L6.F7 — `talus_tan`, one door for the CPU pass and the GPU uniform |
+| `d79a17f` | L6.F6 — the `starting` latch + `StartGuard` + `install_monitor` |
+| `d345936` | L6.F9, L6.F10, L6.F11 |
+| `b5bc022` | the camera pin's falsifier runs the same predicate as the pin |
+
+### Nothing was re-blessed
+
+Five of these changes move committed bytes: bond energies (F2), shared-face
+areas (F3), scatter rotations (F4), root-motion transforms (F5), eroded terrain
+(F7). Every fixture, golden and trace that consumes those five paths was
+enumerated **before** the first byte changed, and the answer was the same every
+time: **there is nothing on disk to re-bless.**
+
+* **No `.inf_fracture` exists in the repository.** Fractures are derived at cook
+  under `derived_fracture_id`, and bond energies are never serialized at all —
+  `FractureState::bits()` folds pose and detach state, not prices.
+* **`PcgVolume::evaluated` is `#[serde(skip)]`.** The eleven committed `.inf_pcg`
+  files carry graphs and lowered parameters; not one instance rotation is on disk.
+  Every committed sample also authors `align_to_normal: false`, so the
+  `from_rotation_arc` half was unreachable from shipped content.
+* **Nothing stores a post-yaw transform.** The committed `.inf_anim` clips are
+  *inputs* to `root_delta`, upstream of the multiply that changed.
+* **No committed `.inf_terrain` is produced by erosion.** `samples.rs` contains
+  no `erode`; erosion is an editor tool.
+* **Goldens: 54, unchanged**, and not by luck. `golden.rs` builds its scatter
+  fields from an integer hash with `rotation: Quat::IDENTITY` — with a comment
+  saying it does so because "committed golden pixels may not depend on a
+  platform's libm" — never imports `inf_pcg`, never constructs an `AnimPlayer`,
+  authors every terrain height from a closure, and renders no fracture chunk.
+
+Every gate that *does* read these paths compares two **live** derivations —
+cook against editor, PIE against shipping, two loads, two pool sizes — so both
+sides moved together. That is why F5 had to change both fixed steps in one
+commit: a partial edit was the only dangerous version of it.
+
+The one place where the new answer is *deliberately* different from the old is
+recorded rather than smuggled: at exactly 90° `pcos64` returns exactly `-0.0`
+(its range reduction lands on `sin(π)`), so `talus_tan` answers `+INFINITY`
+where `f64::tan` answered `1.6e16`. Both mean "nothing moves"; the first means
+it by rule and the second by luck, and an unguarded division would have answered
+`-INFINITY` and liquefied the terrain in one step.
+
+### New arms, and what each one is for
+
+| arm | crate | what only it can see |
+|---|---|---|
+| `the_committed_camera_folds_in_guid_order` | `inf-player` | the fold visits positions in ascending `Guid` order — pinned against an independent sum over terms where ascending and descending genuinely disagree, so it can tell one order from another at all |
+| `the_position_maps_are_ordered_containers` | `inf-player` | the container. A value arm cannot: `HashMap`'s seed is drawn once per process, so two runs in one binary agree and two machines need not |
+| `the_destruction_module_calls_no_libm` | `inf-physics` | the whole module, not a function span, with the UFCS spellings and the glam constructors, and an assertion that the module still has no `#[cfg(test)]` region for the scan to have to strip |
+| `the_face_order_is_a_rotation_of_the_atan2_order` | `inf-mesh` | that the cyclic order is identical and only the starting corner moves — the difference between "the same polygon summed from a different corner" and "a bow-tie" |
+| `the_face_order_calls_no_libm` | `inf-mesh` | the module header's oldest claim, enforced for the first time |
+| `the_scatter_tilt_matches_glams_rotation_arc_bit_for_bit` | `inf-pcg` | that 1600 slopes produce **identical bits**, so the only branch that behaves differently is the one that used to call libm |
+| `committed_placement_uses_no_platform_dependent_trigonometry` | `inf-pcg` | the crate's first source gate, over `scatter.rs` and `grammar/span.rs` |
+| `the_ban_covers_both_spellings_of_the_functions_it_names` | `inf-pcg` | that the ban list is a rule (twelve functions × two widths) rather than a sample |
+| `the_world_delta_preserves_length_and_is_exact_at_zero_yaw` | `inf-anim` | the renormalization: 2.2e-16 of length drift over a full turn against 1.1e-7 raw, measured both ways in the same arm |
+| `the_animation_blend_uses_no_platform_dependent_trigonometry` | `inf-anim` | now also the two fixed steps, which is where the P24.2 fix stopped |
+| `the_talus_threshold_matches_tan_without_libm` | `inf-terrain` | agreement with `tan` to 4.9e-8 relative across the whole range an angle of repose can take |
+| `a_vertical_talus_angle_moves_nothing` | `inf-terrain` | the degenerate branch, end to end: the cliff that relaxes under 33° does not move one bit under 90°, **and does move under 33°** |
+| `the_talus_threshold_calls_no_libm_on_either_side` + `both_erosion_passes_read_one_threshold` | `inf-editor-core` | that two crates and a shader agree about one number, including that the shader still *reads* the uniform rather than deriving it |
+| `installing_a_monitor_retires_the_one_it_replaces` | `inf-studio` | a thread that goes on working correctly against state that has moved on — which nothing else in the tree can observe |
+| `the_start_latch_is_released_however_the_start_ends` | `inf-studio` | that a failed start does not refuse every later Play |
+| `the_start_path_claims_the_latch_before_it_releases_the_lock` | `inf-studio` | the ORDER of five statements, which is the defect |
+| `the_conflict_report_can_see_a_conflict_and_names_it` | `inf-ecs` | that the report is not always empty, **and that it resolves names** — `name_of` falls back to `<unknown>` and no emptiness assertion could tell |
+| `every_builder_configuration_is_free_of_unordered_conflicts` | `inf-ecs` | sixteen configurations instead of one; `propagation_only` is a different graph and was never checked |
+| `assets_whose_names_differ_only_in_case_are_ordered_by_guid` | `inf-editor-core` | eight colliding spellings, so dropping the tie-break has to win 8! to 1 rather than a coin toss |
+| `a_contact_is_recorded_even_after_the_buffer_was_poisoned` | `inf-physics` ×2 | that a step's collision set is not a function of whether an unrelated panic happened earlier in the process |
+
+### Laws earned
+
+**A gate's scope is a claim about what it can see, and it is almost always
+smaller than the claim it is quoted for.** Five gates, five blind spots, and
+every one of them was *correct about what it read*: a function span that banned
+`.powf(` while three `powf`s sat two hundred lines below it; a file list that
+covered `root_delta` and not the two callers that use it; a module header that
+asserted a property in prose with nothing enforcing it; a crate with no gate at
+all whose committed rotations went through glam; and a claim spanning two crates
+with a gate in neither. When a gate is written, write down what it *cannot* see
+— `portable_pose`'s `LEDGERED_EXCLUSIONS` is the shape, and it is the only one
+of the five that had it.
+
+**Where a fix's correctness is "the answer is the same", only a source pin is
+enforcement.** `the_face_order_is_a_rotation_of_the_atan2_order` establishes
+that the portable order equals `atan2`'s — which is exactly why it cannot object
+to `atan2` coming back. Measured, not argued: the mutation that restores the
+libm call leaves every value arm green.
+
+**Two copies of one expression across a language boundary are a contract nobody
+is measuring.** The erosion shader never calls `tan`; the two Rust lines that
+feed it *are* the CPU/GPU agreement, and the parity gates that exist compare at
+a tolerance three orders too loose to see them part company.
+
+**A guard that trades determinism for defensiveness is a defect.** `if let
+Ok(guard) = lock()` reads as caution and buys a step whose collision set depends
+on the process's history rather than on its inputs.
+
+**A doc that overstates the enforcement removes the reason to add any.**
+`conflict_report` said `build()` sets `Error`; it sets `Warn`, on purpose and
+with good reasons. Believing the doc is why the only probe that *is* the
+enforcement was driven over one configuration out of sixteen for six phases.
+
+**A scripted edit to a Rust string literal will eat its own line continuations
+— and so will the script that repairs it.** The P22 law, met for the fourth and
+fifth time in one hour: a Python template ate two `\`-continuations, and the
+scripted repair replaced them with a two-character `\n` escape. Written with the
+editor the third time. The corollary the ROADMAP did not have: *the repair for
+an eaten backslash must not itself be a script.*
+
+### Mutation results — thirteen applied, thirteen killed
+
+Each mutation is one edit to production source, one targeted test binary,
+restore. The interesting column is the last one: the arms that must **survive**,
+because an arm that catches everything is not measuring anything in particular.
+
+| mutation | the arm it killed | arms that correctly survived |
+|---|---|---|
+| the camera fold reversed | `the_committed_camera_folds_in_guid_order` | — |
+| `powf(2/3)` restored in `bond_energies` | `the_destruction_module_calls_no_libm` | — |
+| **`atan2` restored at the face sort** | `the_face_order_calls_no_libm` | **both value arms — the rotation arm AND the area arm passed** |
+| `from_rotation_y` restored in scatter | `committed_placement_uses_no_platform_dependent_trigonometry` | — |
+| `1.0 + dot` → `1.0 - dot` in `tilt_onto` | `the_scatter_tilt_matches_glams_rotation_arc_bit_for_bit` | — |
+| the renormalization dropped from `root_delta_world` | `the_world_delta_preserves_length_and_is_exact_at_zero_yaw` | the 1e-6 agreement arm — a 1.1e-7 scale error is inside its tolerance |
+| `from_rotation_y` re-inlined in the player's fixed step | `the_animation_blend_uses_no_platform_dependent_trigonometry` | — |
+| the GPU talus re-copied as its own `tan` | `the_talus_threshold_calls_no_libm_on_either_side` | — |
+| the `c > 0.0` guard removed from `talus_tan` | `a_vertical_talus_angle_moves_nothing` | the `tan`-agreement arm — the guard only fires past vertical |
+| `install_monitor` reduced to a bare assignment | `installing_a_monitor_retires_the_one_it_replaces` | the latch arm |
+| **`conflict_report` made to always answer empty** | `the_conflict_report_can_see_a_conflict_and_tells_the_systems_apart` | **both emptiness arms — which is the vacuity this wave was sent to find** |
+| the snapshot tie-break removed | `assets_whose_names_differ_only_in_case_are_ordered_by_guid` | — |
+| the `if let Ok(..)` restored on the event lock | `a_contact_is_recorded_even_after_the_buffer_was_poisoned` | — |
+
+Two rows are the wave's argument in miniature. Restoring `atan2` at the face
+sort leaves **every value arm green** — they were written to establish that the
+two orders agree, so of course they cannot object to the libm call returning.
+And a `conflict_report` hard-wired to answer empty leaves **both** of the
+emptiness assertions green, including the sixteen-configuration sweep added in
+this same wave. Where a fix's correctness is "the answer is the same", the
+source pin is not a belt-and-braces addition; it is the only enforcement there is.
+
+### The battery found something reading could not
+
+`the_conflict_report_can_see_a_conflict_and_names_it` — written to prove the
+report is not vacuous — failed on its first run, and the failure was the finding
+rather than a fixture problem. `System::name()` returns a `DebugName`, and
+without `bevy_ecs`'s `debug` feature (off by default) **every** system
+stringifies to `"<Enable the debug feature to see the name>"`. A report of a
+real conflict was three pairs of identical placeholders.
+
+That retired the justification `build()` has carried since P9.1a for choosing
+`Warn` over `Error` — "so `conflict_report` can resolve system names". It never
+could. What survives is the half that was always true: an `Error` refuses to
+*build*, so the schedule panics at construction and the probe never runs at all.
+
+The `debug` feature is deliberately **not** enabled — it would keep every
+system's type name in the shipped player for a helper only tests call — so a
+nameless system is now identified by its `SystemKey`, which distinguishes the
+halves of a pair and can be looked up in a debugger. The arm asks for that
+property instead of a name, and a second arm pins *why*, so the day bevy starts
+resolving names a test says so rather than the report quietly improving in
+silence.
+
+### Verification
+
+`cargo test --workspace --no-fail-fast -j 3` = **257 binaries / 4 666 passed /
+1 failed / 8 ignored** against the Wave-B baseline of **254 / 4 641 / 0 / 8**.
+The three extra binaries are exactly the three new integration files —
+`inf-player/tests/committed_camera.rs`, `inf-pcg/tests/portable_placement.rs`,
+`inf-editor-core/tests/erosion_talus_mirror.rs` — and the +25 tests are this
+wave's arms. (The run itself reported one failure, the schedule arm above; it is
+counted green here because the commit that answers it re-ran `inf-ecs` to
+**165 passed / 0 failed**, +2 over the 163 that binary carried before.)
+
+Workspace `cargo clippy --all-targets` under `RUSTFLAGS=-D warnings`: **clean**,
+and it re-checked all nine changed crates plus every dependent.
+`cargo fmt --all --check`: **clean**. `cargo doc --workspace --no-deps`:
+**450 warnings over 43 documented crates, against a ceiling of 450** — so
+ci.yml's ratchet does not move, and this wave's several hundred lines of new doc
+comment added **none**. The doc cache was cleared first (`target/doc` plus the
+`doc-*` fingerprints), because the ratchet counts warnings only over crates it
+actually documents and a warm run would have counted a subset and passed
+vacuously — the same trap ci.yml's own `documented -eq 0` guard exists for.
+
+Goldens: **54, and the working tree stayed clean through the whole battery** —
+the strongest available statement that no committed image moved.
+
+### Machine ops
+
+**A PowerShell script that redirects a native command with `1> file 2> file`
+buffers everything until the process exits.** The first battery ran for five
+minutes with two zero-byte logs and no way to see a compile error; the Wave-B
+form — `Start-Process -RedirectStandardOutput/-RedirectStandardError` — streams
+line by line. Worth the note because the whole value of running the battery
+detached is being able to watch it fail early.
+
+**A `--no-run` pre-flight is worth its cost when the tail is long.** The
+workspace's ~250 test binaries take longer to *link* than the library graph
+takes to compile, so a compile error in a late crate surfaces forty minutes
+after one in an early crate. `cargo test --workspace --no-run` puts every
+compile error up front for the same total work; the run that found the
+`rapier3_f64` typo would otherwise have spent that time first.
+
+**Deleting `target/debug/incremental` is the cheap half of the disk law.** It
+was 37 GB of a 149 GB `target/`, and removing it took the volume from 55 GB free
+to 90 GB — enough headroom for clippy's own artifact set without the full
+`cargo clean` that Wave B needed. Clippy after that clean re-checked 18 crates
+in 51 s, because the check fingerprints from the previous wave's clippy were
+still valid for everything this wave did not touch.
+
+
+
 ---
 
 *This roadmap is a living document. Each phase completion updates it; decision memos land in
