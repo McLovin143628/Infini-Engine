@@ -264,6 +264,22 @@ pub async fn photo_preview(
     // render itself must not hold it, or an orbit would block the tick that is
     // reporting the run behind it.
     let job = state.with(|s| {
+        // **The stamp is the run counter, not a property of the geometry**
+        // (round 3). `render_geometry_view` skips the vertex-buffer upload when
+        // the stamp it is handed equals the one the session holds, and this
+        // passed `report.final_triangles` — a *description* of the mesh, not an
+        // identity for it. The triangle budget is a TARGET, so two finishes at
+        // the same budget land on the same count routinely: re-finish with a
+        // different scale, a different atlas size or a re-run over new photos,
+        // and the preview goes on drawing the previous scan's geometry with the
+        // new atlas beside it. That is R2.F4's defect at the wizard next door,
+        // and the fix is the same one — a real generation counter.
+        //
+        // `run_id` already existed and is exactly that: `begin` bumps it for
+        // both `start` and `refinish`, and it is read here **inside the same
+        // `with` as the product**, so the number and the geometry it stamps
+        // come from one observation of the session rather than two.
+        let run = s.run_id();
         s.with_product(|p| {
             let (verts, indices) = p.preview_geometry();
             (
@@ -271,12 +287,15 @@ pub async fn photo_preview(
                 indices,
                 p.finished.mesh.bounds,
                 p.finished.albedo.clone(),
-                p.finished.report.final_triangles as u64,
+                run,
             )
         })
         .ok_or_else(|| "there is no finished reconstruction to preview".to_string())
     })?;
     let (verts, indices, bounds, albedo, stamp) = job;
+    // A product exists, so a run has completed, so `run` is at least 1 — which
+    // is what keeps it clear of `PreviewSession`'s `0`, the built-in sphere.
+    debug_assert!(stamp > 0, "a product without a run");
 
     // The base colour is CPU-decoded, so it is there on every machine.
     let atlas = {
@@ -410,6 +429,54 @@ fn spawn_tick(app: &AppHandle) {
 mod tests {
     use super::*;
     use inf_editor_core::capture::CaptureConfig;
+
+    /// **The source pin for round 3's preview stamp.** Same instrument, and the
+    /// same reason, as `commands::dcc`'s `the_preview_uploads_on_the_cache_s_own
+    /// _stamp`: the defect is a *skipped upload*, and no instrument in this repo
+    /// can see one — the command returns a PNG either way, and only a human
+    /// looking at last scan's mesh knows. `photo_preview` takes `State<'_, …>`
+    /// and is not constructible in a unit test, so the property is pinned on the
+    /// text.
+    ///
+    /// The banned spelling is the whole finding: `final_triangles` is a
+    /// *description* of the mesh, and the triangle budget is a TARGET, so two
+    /// finishes at the same budget agree about it routinely.
+    #[test]
+    fn the_preview_stamps_on_the_run_and_not_on_a_triangle_count() {
+        // The P22 CRLF law: a `.rs` read by a test is normalized first.
+        let src = include_str!("photogrammetry.rs").replace("\r\n", "\n");
+        let at = src
+            .find("pub async fn photo_preview(")
+            .expect("photo_preview is declared in this module");
+        // The command's own text, up to the next `pub async fn`.
+        let body = &src[at..];
+        let body = &body[..body[1..]
+            .find("\npub async fn ")
+            .map(|i| i + 1)
+            .unwrap_or(body.len())];
+        // Comments are stripped, because the comment above the fix NAMES the
+        // spelling the fix removed — a gate that read it would fail on its own
+        // explanation (`commands::dcc`'s `code_only`, in miniature).
+        let code: String = body
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("let run = s.run_id();"),
+            "the preview must stamp on the session's run counter, which `begin` \
+             bumps for both `start` and `refinish`"
+        );
+        assert!(
+            !code.contains("final_triangles"),
+            "…and must not stamp on a property of the geometry: a re-finish that \
+             lands on the same triangle count would skip the upload and go on \
+             drawing the previous scan"
+        );
+    }
 
     /// The panel's whole state is a projection of the session and decides
     /// nothing: an idle session shows its pre-flight, and a session with a

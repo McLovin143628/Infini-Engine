@@ -1848,13 +1848,23 @@ pub struct PreviewCache {
 /// FNV-1a over the two halves rather than a shift-and-or, because `step` is a
 /// hash itself for a gizmo drag (see [`drag_step`]) and a packing would collide
 /// on its high bits.
+///
+/// **`| 1`, because zero is not a stamp** (round 3).
+/// `PreviewSession::geometry_stamp`'s own doc says `0` **is the built-in
+/// sphere** — the value the session holds before anything has been uploaded —
+/// and `set_geometry` skips the upload when the stamp it is handed equals the
+/// one it holds. A fold that landed on zero would therefore leave the Model
+/// Editor drawing the material preview's sphere until the next edit, which is
+/// R2.F4's symptom arriving by a different route. One bit of a 64-bit hash buys
+/// the guarantee outright, and it is cheaper than making the sentinel an
+/// `Option` at a public signature four other callers pass through.
 fn fold_key(generation: u64, step: u64) -> u64 {
     let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
     for x in [generation, step] {
         acc ^= x;
         acc = acc.wrapping_mul(0x1000_0000_01b3);
     }
-    acc
+    acc | 1
 }
 
 /// The step half of a committed (no drag in flight) key. `u64::MAX` because a
@@ -1988,7 +1998,7 @@ impl PreviewCache {
             // the key one integer without pretending a float is a step count.
             PendingDrag::Gizmo(g) => drag_step(&g.xform),
         };
-        let key = (session.generation(), step);
+        let key = (session.generation(), step ^ selection_step(selection, mode));
         if self.scratch_key != Some(key)
             || self.scratch_geometry.is_none()
             || self.scratch_mesh.is_none()
@@ -2005,6 +2015,47 @@ impl PreviewCache {
             self.scratch_mesh.clone().expect("just filled"),
         )
     }
+}
+
+/// The **selection and the mode**, reduced to one integer for the scratch key
+/// (round 3 — the carried half of R2.F4).
+///
+/// `PendingDrag::scratch` takes `(session, selection, mode)` and the key took
+/// `(generation, step)`, so two of its three inputs were outside it. A gizmo
+/// drag's ops are built from the selected ids: change the selection — or switch
+/// Vert→Edge→Face, which changes *which* ids the same op set reads — while the
+/// pointer is down and the drag's `step` hash does not move, because the
+/// transform did not. The cache then serves the mesh built for the OLD
+/// selection, and the shaded surface shows the previous elements moving while
+/// the CPU-composited overlay draws the new ones.
+///
+/// Ids rather than a count: `{v1, v2}` and `{v3, v4}` are the same size and a
+/// different drag. `BTreeSet` iteration is ordered, so the hash is a function of
+/// the set and not of the order it was assembled in.
+fn selection_step(selection: &SelectionSet, mode: SelectMode) -> usize {
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |x: u64| {
+        acc ^= x;
+        acc = acc.wrapping_mul(0x1000_0000_01b3);
+    };
+    mix(match mode {
+        SelectMode::Vert => 1,
+        SelectMode::Edge => 2,
+        SelectMode::Face => 3,
+    });
+    mix(selection.generation());
+    for v in selection.verts() {
+        mix(v.index() as u64);
+    }
+    mix(0xffff_ffff_ffff_fff1);
+    for e in selection.edges() {
+        mix(e.index() as u64);
+    }
+    mix(0xffff_ffff_ffff_fff2);
+    for f in selection.faces() {
+        mix(f.index() as u64);
+    }
+    acc as usize
 }
 
 /// A gizmo transform reduced to one integer, so an unchanged drag is a cache hit.
@@ -3570,6 +3621,95 @@ mod tests {
             "an abandoned drag returns to exactly the geometry it started from"
         );
         assert_ne!(cache.upload_stamp(), second);
+    }
+
+    /// **Round 3, the carried half of R2.F4**: the scratch key took two of the
+    /// three inputs the scratch is built from.
+    ///
+    /// `PendingDrag::scratch(session, selection, mode)` reads the selected ids —
+    /// a gizmo drag's ops ARE the selection transformed — and the key was
+    /// `(generation, step)`. Change the selection while the pointer is down, or
+    /// switch Vert→Edge→Face so the same op set reads different ids, and the
+    /// transform has not moved: same step, same generation, cache hit, and the
+    /// shaded surface keeps drawing the elements that are no longer selected.
+    ///
+    /// Asserted on the cache's own observable state (`scratch_tessellations`)
+    /// as well as the stamp, so "it re-tessellated" is a measurement rather than
+    /// an inference from the key having changed.
+    #[test]
+    fn the_scratch_key_sees_the_selection_and_the_mode() {
+        let s = MeshSession::new(cube(1.0));
+        let mut sel = SelectionSet::new(s.generation());
+        let verts: Vec<_> = s.mesh().vert_ids().collect();
+        assert!(verts.len() >= 2, "the fixture needs two vertices");
+        sel.set_vert(verts[0], true);
+
+        let pending = PendingDrag::Gizmo(Box::new(GizmoInFlight {
+            drag: GizmoDrag::begin(
+                GizmoMode::Translate,
+                GizmoAxis::X,
+                glam::Quat::IDENTITY,
+                Vec3::ZERO,
+                Vec3::new(0.0, 0.0, 5.0),
+                Vec3::new(0.0, 0.0, -1.0),
+            ),
+            pivot: DVec3::ZERO,
+            xform: VertTransform::Translate(DVec3::new(0.25, 0.0, 0.0)),
+            soft: None,
+        }));
+        let mut cache = PreviewCache::new();
+        cache.get_with_pending(&s, &sel, SelectMode::Vert, Some(&pending));
+        let first = cache.upload_stamp();
+        let tess = cache.scratch_tessellations();
+
+        // Same transform, same generation — a different SELECTION.
+        let mut other = SelectionSet::new(s.generation());
+        other.set_vert(verts[1], true);
+        cache.get_with_pending(&s, &other, SelectMode::Vert, Some(&pending));
+        assert_ne!(
+            cache.upload_stamp(),
+            first,
+            "the drag moved a different vertex and the preview served the old mesh"
+        );
+        assert_eq!(
+            cache.scratch_tessellations(),
+            tess + 1,
+            "…and it really re-tessellated rather than only re-keying"
+        );
+
+        // Same transform, same selection — a different MODE. The ids are the
+        // same integers and they name different elements.
+        let second = cache.upload_stamp();
+        cache.get_with_pending(&s, &other, SelectMode::Face, Some(&pending));
+        assert_ne!(
+            cache.upload_stamp(),
+            second,
+            "Vert and Face read the same id set as different geometry"
+        );
+
+        // And the warm path survives: an unchanged frame is still free.
+        let third = cache.upload_stamp();
+        let tess = cache.scratch_tessellations();
+        cache.get_with_pending(&s, &other, SelectMode::Face, Some(&pending));
+        assert_eq!(cache.upload_stamp(), third, "an orbit mid-drag is free");
+        assert_eq!(cache.scratch_tessellations(), tess);
+    }
+
+    /// **Round 3**: `0` is `PreviewSession`'s built-in sphere, so no stamp this
+    /// cache serves may be zero — a fold that landed there would skip the
+    /// upload and draw a ball where the model is.
+    #[test]
+    fn no_stamp_this_cache_serves_is_the_sphere_sentinel() {
+        assert_ne!(fold_key(0, 0), 0, "the all-zero fold is the dangerous one");
+        for g in 0..64u64 {
+            for step in [0u64, 1, u64::MAX, COMMITTED_STEP] {
+                assert_ne!(fold_key(g, step), 0);
+            }
+        }
+        let s = MeshSession::new(cube(1.0));
+        let mut cache = PreviewCache::new();
+        cache.get(&s);
+        assert_ne!(cache.upload_stamp(), 0);
     }
 
     #[test]

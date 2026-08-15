@@ -1520,6 +1520,7 @@ pub async fn dcc_unwrap(
                 "the model changed while the unwrap was solving — nothing was written; \
                  run Unwrap again"
                     .to_string(),
+                settled,
                 seams,
             ));
         }
@@ -1551,11 +1552,18 @@ pub async fn dcc_unwrap(
                         doc,
                         session,
                         refusal_text(&e),
+                        settled,
                         report.seams as u32,
                     )),
                 }
             }
-            Err(e) => Ok(unwrap_refused(doc, session, refusal_text(&e), seams_before)),
+            Err(e) => Ok(unwrap_refused(
+                doc,
+                session,
+                refusal_text(&e),
+                settled,
+                seams_before,
+            )),
         }
     })?;
     let _ = app.emit("dcc://sync", id);
@@ -1563,10 +1571,25 @@ pub async fn dcc_unwrap(
 }
 
 /// An unwrap that wrote nothing, as a value the panel prints (the P21 law).
-fn unwrap_refused(doc: &DccDoc, session: &MeshSession, why: String, seams: u32) -> DccUnwrapDto {
+///
+/// `settled` is the **stroke-in-flight** refusal this door has already reported
+/// to the log, and it is chained rather than replaced (round 3). Every one of
+/// this command's three refusal exits dropped it: the success path carried it
+/// (that is C4-34's own arm), and the three failures answered with their own
+/// message alone — so an author whose sculpt stroke was discarded AND whose
+/// unwrap then refused was told about the second and not the first, which is
+/// the half that says their file will not contain what they were looking at.
+/// `dcc_apply`'s `settled.or(refusal)` is the same decision one door over.
+fn unwrap_refused(
+    doc: &DccDoc,
+    session: &MeshSession,
+    why: String,
+    settled: Option<String>,
+    seams: u32,
+) -> DccUnwrapDto {
     DccUnwrapDto {
         ok: false,
-        refusal: Some(why),
+        refusal: Some(chain_refusals(settled, why)),
         charts: 0,
         corners: 0,
         seams,
@@ -1575,6 +1598,20 @@ fn unwrap_refused(doc: &DccDoc, session: &MeshSession, why: String, seams: u32) 
         flipped: 0,
         triangles: 0,
         doc: doc_dto(doc, session),
+    }
+}
+
+/// Two refusals into the one slot a DTO has for them, **settle first**.
+///
+/// The order is the chronology: the stroke was discarded before the operation
+/// refused, and the first sentence an author reads should be the one about work
+/// they had already done. One `refusal` field can hold both because it is
+/// prose — the panel prints it — and dropping either is the failure round 3
+/// found at three of `dcc_unwrap`'s exits and two of `dcc_merge_asset`'s.
+fn chain_refusals(settled: Option<String>, why: String) -> String {
+    match settled {
+        Some(first) => format!("{first} Also: {why}"),
+        None => why,
     }
 }
 
@@ -1651,7 +1688,9 @@ pub async fn dcc_merge_asset(
 
     let out = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
-        // **The eleventh C4-34 door** (round-2 finding R2.F5). The comment that
+        // **The SIXTH C4-34 door** (round-2 finding R2.F5; the count corrected
+        // in round 3 — five doors drop the refusal, and this is the one that
+        // must not). The comment that
         // stood here said this door "answers with a bare `DccDocDto`, which has
         // nowhere to carry a refusal" — and it does not: it answers with a
         // `DccApplyDto`, whose `refusal` field it populates twenty lines below
@@ -1687,8 +1726,15 @@ pub async fn dcc_merge_asset(
                     // what the author was looking at, so it is not an `ok` merge
                     // even when the geometry landed.
                     ok: merged && settled.is_none(),
+                    // Round 3: the `(false, _)` arm used to answer with the
+                    // merge's own message alone and drop the settle refusal —
+                    // the same defect R2.F5 closed at this door, in the branch
+                    // beside the one it closed.
                     refusal: match (merged, settled) {
-                        (false, _) => Some("the dropped mesh had no faces".to_string()),
+                        (false, s) => Some(chain_refusals(
+                            s,
+                            "the dropped mesh had no faces".to_string(),
+                        )),
                         (true, Some(why)) => Some(why),
                         (true, None) => None,
                     },
@@ -1697,7 +1743,7 @@ pub async fn dcc_merge_asset(
             }
             Err(e) => Ok(DccApplyDto {
                 ok: false,
-                refusal: Some(refusal_text(&e)),
+                refusal: Some(chain_refusals(settled, refusal_text(&e))),
                 doc: doc_dto(doc, session),
             }),
         }
@@ -2694,12 +2740,18 @@ mod tests {
 
     /// **Round-2 finding R2.F5, as the class rather than the instance.**
     ///
-    /// `settle_reported` is `#[must_use]`-shaped and ten doors legitimately drop
-    /// its answer with `let _ =`, because the DTO they return has nowhere to put
-    /// it. `dcc_merge_asset` did the same over a comment saying exactly that —
-    /// and it returns a `DccApplyDto`, which has a `refusal` field it populates
-    /// twenty lines further down. The structural gate could not see it: it
-    /// checked only that `settle_reported` had been *called*.
+    /// `settle_reported` is `#[must_use]`-shaped and **five** doors legitimately
+    /// drop its answer with `let _ =`, because the DTO they return has nowhere
+    /// to put it. `dcc_merge_asset` did the same over a comment saying exactly
+    /// that — and it returns a `DccApplyDto`, which has a `refusal` field it
+    /// populates twenty lines further down. The structural gate could not see
+    /// it: it checked only that `settle_reported` had been *called*.
+    ///
+    /// **The count in this sentence was wrong** (round 3). It said "ten doors",
+    /// and the list below — which the census holds the module to — has always
+    /// had five; the closing arm called `dcc_merge_asset` "the eleventh door"
+    /// on the same arithmetic. Corrected rather than deleted, because the
+    /// numbers are the only part of a doc a reader can check.
     ///
     /// So the pin is the correspondence itself. Every door that drops the
     /// refusal must return a DTO that genuinely cannot carry one, and that is
@@ -2775,7 +2827,7 @@ mod tests {
              decision that its DTO cannot carry the refusal, and it has to be made"
         );
 
-        // The eleventh door, from the other side: it must NOT drop it.
+        // The sixth door, from the other side: it must NOT drop it.
         let merge = code_only(&body_of(SOURCE, "pub async fn dcc_merge_asset("));
         assert!(
             !merge.contains("let _ = settle_reported("),
@@ -2788,6 +2840,73 @@ mod tests {
         assert!(
             carries_a_refusal(&ipc, "DccApplyDto"),
             "the slot it goes in"
+        );
+    }
+
+    /// **Round 3: carrying a refusal on the success path is not carrying it.**
+    ///
+    /// R2.F5 gave `dcc_unwrap` and `dcc_merge_asset` a settle refusal to carry,
+    /// and both carried it only where the operation *succeeded*. Every failure
+    /// exit answered with its own message alone — so the author whose sculpt
+    /// stroke was discarded and whose unwrap then refused was told the second
+    /// thing and not the first, which is the one that says their file will not
+    /// contain what they were looking at.
+    ///
+    /// The chaining rule is unit-testable (it is a pure function) and the call
+    /// sites are not, so both halves are asserted: the rule's behaviour, and
+    /// that every refusal exit of the two commands goes through it.
+    #[test]
+    fn every_refusal_exit_carries_the_settle_refusal_too() {
+        // The rule: settle first (it happened first), both survive, and a door
+        // with nothing to chain is unchanged.
+        assert_eq!(chain_refusals(None, "boom".into()), "boom");
+        let both = chain_refusals(Some("the stroke was discarded".into()), "boom".into());
+        assert!(
+            both.contains("the stroke was discarded") && both.contains("boom"),
+            "both halves must reach the panel: {both}"
+        );
+        assert!(
+            both.starts_with("the stroke was discarded"),
+            "the earlier event reads first: {both}"
+        );
+
+        // The call sites, on the text — `dcc_unwrap` and `dcc_merge_asset` take
+        // `State<'_, DccState>` and are not constructible here.
+        let unwrap = code_only(&body_of(SOURCE, "pub async fn dcc_unwrap("));
+        let refused = unwrap.matches("unwrap_refused(").count();
+        assert_eq!(
+            refused, 3,
+            "dcc_unwrap has three refusal exits; the count is the thing this arm \
+             would otherwise drift past"
+        );
+        for call in unwrap.split("unwrap_refused(").skip(1) {
+            // The argument list, up to the call's own closing `))`. Every inner
+            // `)` in these calls is followed by a `,`, so the first `))` is the
+            // end of the list.
+            let args = &call[..call.find("))").unwrap_or(call.len())];
+            assert!(
+                args.contains("settled"),
+                "a refusal exit hands `unwrap_refused` no settle refusal: {args}"
+            );
+        }
+
+        let merge = code_only(&body_of(SOURCE, "pub async fn dcc_merge_asset("));
+        assert_eq!(
+            merge.matches("chain_refusals(").count(),
+            2,
+            "the no-faces arm and the kernel-error arm both dropped it"
+        );
+
+        // …and the helper is the ONLY way a refusal is combined, so a third
+        // door cannot invent a different sentence for the same situation.
+        let production = SOURCE
+            .split_once("#[cfg(test)]")
+            .map(|(head, _)| head)
+            .expect("this module has a test half");
+        assert_eq!(
+            code_only(production).matches("fn chain_refusals(").count(),
+            1,
+            "one rule, one spelling"
         );
     }
 

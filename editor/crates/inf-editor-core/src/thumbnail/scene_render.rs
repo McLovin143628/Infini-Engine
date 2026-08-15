@@ -648,6 +648,13 @@ impl PreviewSession {
     }
 
     /// The geometry stamp currently uploaded. `0` is the built-in sphere.
+    ///
+    /// **So `0` is not available to a caller** (round 3): handing it over means
+    /// "the sphere is already up", the upload is skipped, and the panel draws
+    /// the material preview's ball where its model should be. Every producer in
+    /// the tree is clear of it and says so where it is computed —
+    /// `inf_editor_core::dcc`'s `fold_key` ends `| 1`, and the capture wizard
+    /// passes a run counter that is at least 1 whenever a product exists.
     pub fn geometry_stamp(&self) -> u64 {
         self.geometry_stamp
     }
