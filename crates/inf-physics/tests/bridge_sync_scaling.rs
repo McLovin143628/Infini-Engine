@@ -31,14 +31,20 @@
 //!   rather than a remembered copy: a remembered copy cannot see a body someone
 //!   else moved.
 //! * **The cost does not grow the way it used to.** In P26.5's budget classes:
-//!   **WORLD** — a per-entity *scaling ratio* across world sizes, measured in
-//!   one process (the `ground_seam_scaling` reasoning: no GPU in it, CPU work
-//!   over CPU data), asserted on every machine because both legs are slowed by
-//!   the same factor; and **CLOCK** — the absolute per-entity ceiling, asserted
-//!   only where a same-process micro-calibration says the machine is in the
-//!   class the number was measured on. The first draft asserted the ceiling
-//!   unconditionally and was red on the shared ubuntu runner at 276.9 ns/entity
-//!   against 93.2 here, with nothing wrong with the code.
+//!   **WORLD** — a per-entity *scaling ratio* across world sizes, divided by the
+//!   scaling of a bare `BTreeMap` descent measured over the SAME two populations
+//!   in the SAME process (the `ground_seam_scaling` reasoning: no GPU in it, CPU
+//!   work over CPU data); and **CLOCK** — the absolute per-entity ceiling,
+//!   asserted only where that same micro-calibration says the machine is in the
+//!   class the number was measured on.
+//!
+//!   Both halves are that shape because both of the first two drafts were red on
+//!   a runner with nothing wrong with the code: the ceiling unconditionally, at
+//!   276.9 ns/entity on ubuntu against 93.2 here; then a FIXED growth ceiling of
+//!   3x, at 3.32x on macOS against 1.39–1.62 here. A `BTreeMap` descent is
+//!   `O(log n)` and its working set leaves cache between the two populations, so
+//!   the growth is machine-sensitive too — dividing by the calibration's own
+//!   growth is what cancels both.
 //!
 //! Measured on the Wave G machine, steady-state sync, 60 iterations, dev
 //! profile (which is what the battery runs), **before any repair**:
@@ -173,25 +179,31 @@ fn the_world_is_exactly_what_the_snapshot_says() {
     );
 }
 
-/// **The reference workload the CLOCK ceiling below is calibrated against.**
+/// **The reference workload both halves below are calibrated against**, at a
+/// population of `n`.
 ///
 /// Returns nanoseconds per entry for one pass, measured in **this** process, on
 /// **this** machine, moments before the arm that uses it.
 ///
 /// It is deliberately the steady-state sync's own dominant term and nothing
-/// else: an ordered descent through a `BTreeMap` keyed by `Uuid` with 13 000
-/// entries, comparing a few `f64`s per entry. That is what the reconcile does
-/// per tracked entity once every skip has fired — so a machine that runs this
-/// at the calibrating machine's speed runs the reconcile at it too, and a
-/// machine that does not is not a machine the absolute ceiling was measured on.
+/// else: an ordered descent through a `BTreeMap` keyed by `Uuid`, comparing a
+/// few `f64`s per entry. That is what the reconcile does per tracked entity
+/// once every skip has fired — so a machine that runs this at the calibrating
+/// machine's speed runs the reconcile at it too, and a machine that does not is
+/// not a machine the absolute ceiling was measured on.
+///
+/// **It is parameterised on `n` because the WORLD half needs its GROWTH**, not
+/// just its speed — see the arm below. A `BTreeMap` descent is `O(log n)` per
+/// lookup and its working set at 13 000 entries does not fit the caches that
+/// hold it at 1 000, so this function's own cost per entry rises with `n` by
+/// exactly the amount the reconcile's does, on whatever machine is running it.
 ///
 /// `black_box` on both ends: the whole loop is dead code otherwise.
-fn calibration_ns() -> f64 {
+fn calibration_ns(n: u32) -> f64 {
     use std::collections::BTreeMap;
     use std::hint::black_box;
 
-    const N: u32 = 13_000;
-    let map: BTreeMap<Uuid, [f64; 4]> = (0..N)
+    let map: BTreeMap<Uuid, [f64; 4]> = (0..n)
         .map(|i| {
             (
                 Uuid::from_u128(BASE + u128::from(i)),
@@ -199,7 +211,7 @@ fn calibration_ns() -> f64 {
             )
         })
         .collect();
-    let keys: Vec<Uuid> = (0..N)
+    let keys: Vec<Uuid> = (0..n)
         .map(|i| Uuid::from_u128(BASE + u128::from(i)))
         .collect();
 
@@ -223,7 +235,7 @@ fn calibration_ns() -> f64 {
         }
     }
     black_box(acc);
-    t0.elapsed().as_secs_f64() * 1e9 / f64::from(N)
+    t0.elapsed().as_secs_f64() * 1e9 / f64::from(n)
 }
 
 /// The steady-state cost, measured as a **scaling ratio** (WORLD — asserted
@@ -239,15 +251,34 @@ fn calibration_ns() -> f64 {
 /// machine is not a contract*, and the repair is that precedent's LOAD / WORLD /
 /// CLOCK split.
 ///
-/// * **WORLD** — the *scaling* property. Thirteen times the entities must cost
-///   at most `MAX_PER_ENTITY_GROWTH` times as much **per entity**. That is a
-///   claim about the shape of the function; it is a ratio of two measurements
-///   taken in the same process seconds apart, so it holds on any machine
-///   because both legs are slowed by the same factor. It is what protects the
-///   repair's shape: a per-entity `contains` over the seen set, a scan per
-///   contact, a rebuild of the reverse map — any re-introduction of work
-///   proportional to the *population* inside the per-entity step makes this
-///   ratio climb without bound.
+/// * **WORLD** — the *scaling* property, measured **against the calibration's
+///   own scaling**. The reconcile's per-entity cost may grow from 1 000 to
+///   13 000 entities by at most `GROWTH_MARGIN` times as much as a bare
+///   `BTreeMap` descent does over the same two populations, in the same
+///   process, on the same machine.
+///
+///   **A fixed ratio ceiling here was wrong, and this arm's own failure is the
+///   measurement.** The first cut of the split asserted a flat `< 3x`, measured
+///   1.39–1.62 on the calibrating machine — and the macOS runner returned
+///   **3.32x** (108.7 -> 360.9 ns/entity) with nothing reintroduced. Two
+///   legitimate reasons, both of which this arm's own analysis already supplies
+///   and neither of which is population-work:
+///
+///   * the dominant term is a **`BTreeMap` descent**, which is `O(log n)` per
+///     entity — `log(13000)/log(1000)` is ~1.37x from the *size alone*, before
+///     any machine effect; and
+///   * the 13 000-entity working set is ~5 MB and falls out of a slow runner's
+///     cache, while the 1 000-entity set (~400 KB) does not, so the memory
+///     hierarchy inflates the ratio by a factor that is a property of the
+///     **machine**, not of the code.
+///
+///   A number that mixes both cannot be a constant. Dividing by the
+///   calibration's growth cancels them: every figure in the comparison shares
+///   one machine, one cache hierarchy, one load, and one instant. What is left
+///   is the only thing the arm was ever claiming — that the reconcile does not
+///   scale *worse than a map lookup*, which is what a per-entity `contains`
+///   over the seen set, a scan per contact or a rebuild of the reverse map
+///   would make it do, without bound.
 /// * **CLOCK** — the 200 ns/entity ratchet. Real, and still the honest number
 ///   for the class of machine it was measured on, so it is kept rather than
 ///   loosened to fit the slowest runner (which would retire it). It asserts
@@ -269,8 +300,14 @@ fn calibration_ns() -> f64 {
 /// every `BTreeMap` probe is one level deeper and the tracked records no longer
 /// fit in cache. Collapsing the constant made that more visible, not less. The
 /// ratio bound is a **superlinearity** bound; the ceiling is the ratchet. They
-/// are two different claims, and this file now states them separately instead
-/// of resting both on one wall-clock number.
+/// are two different claims, and this file states them separately instead of
+/// resting both on one wall-clock number.
+///
+/// And those two sentences are exactly why the ratio needs a *measured*
+/// divisor rather than a constant: "one level deeper" and "no longer fit in
+/// cache" are both properties of the machine the numbers were taken on, and a
+/// slower machine with a smaller cache pays more for both. `GROWTH_MARGIN`
+/// divides them out.
 #[test]
 fn the_steady_state_sync_does_not_scale_like_the_world() {
     const ITERS: u32 = 60;
@@ -292,16 +329,32 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
     /// ~3x the shared CI runner measured, and comfortably outside run-to-run
     /// noise on a desktop.
     const CALIBRATION_TOLERANCE: f64 = 1.6;
-    /// **WORLD**: 13x the entities may cost at most this much more *per
-    /// entity*. Measured 1.49 unrepaired and 1.56 repaired on the calibrating
-    /// machine, over four runs: **1.39, 1.50, 1.58, 1.62**. 3.0 leaves room for
-    /// a slower cache hierarchy and a noisy shared runner without admitting
-    /// anything superlinear — a term linear in the population inside the
-    /// per-entity step would show 13x here, not 3x.
-    const MAX_PER_ENTITY_GROWTH: f64 = 3.0;
+    /// **WORLD**: how much faster than the CALIBRATION's own per-entity growth
+    /// the reconcile's may grow, over the same two populations in the same
+    /// process. See the function docs for why this is a ratio of ratios and not
+    /// a constant.
+    ///
+    /// Measured on the calibrating machine over **fourteen** runs
+    /// (`measured / calibration`): 0.69, 1.11, 1.12, 1.19, 1.22, 1.24, 1.27,
+    /// 1.33, 1.35, 1.36, 1.36, 1.39, 1.42, **1.45**. `3.0` is a little over
+    /// twice the worst of those, which is the headroom a shared runner under
+    /// load needs — and it is still far below what the defect looks like: a
+    /// term linear in the population inside the per-entity step makes the
+    /// measured growth ~13x while the calibration's stays at its `log n`-plus-
+    /// cache figure of ~1.3–1.6x, so the slack lands near **9x**, three times
+    /// clear of the margin in the other direction.
+    ///
+    /// Both readings below 1.0 are the divisor being noisy upward (one run saw
+    /// a 2.43x calibration growth), which is the safe direction: noise in the
+    /// calibration can only *pass* a regression it cannot cause.
+    const GROWTH_MARGIN: f64 = 3.0;
+    /// The two populations the growth is measured across. Named so the arm and
+    /// the calibration cannot drift apart about which sizes they compare.
+    const GROWTH_SMALL: u32 = 1_000;
+    const GROWTH_LARGE: u32 = 13_000;
 
     let mut report: Vec<(u32, f64)> = Vec::new();
-    for n in [1_000u32, 5_000, 13_000] {
+    for n in [GROWTH_SMALL, 5_000, GROWTH_LARGE] {
         let snaps = town(n);
         let mut bridge = PhysicsBridge3D::new(DVec3::new(0.0, -9.81, 0.0));
         bridge.sync(&snaps); // the spawn pass — not what is being measured
@@ -334,26 +387,44 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
     let ns_per_entity = ms * 1e6 / f64::from(n);
     let small_ns_per_entity = small_ms * 1e6 / f64::from(small_n);
 
-    // ── WORLD: the scaling shape, on every machine ──────────────────────────
+    // ── WORLD: the scaling shape, against this machine's own ────────────────
+    //
+    // Both calibration legs are taken here, back to back with the measurement
+    // above and with each other, so the ratio of ratios is a single machine's
+    // answer under a single load.
+    let calib_small = calibration_ns(GROWTH_SMALL);
+    let calib_large = calibration_ns(GROWTH_LARGE);
+    assert!(
+        calib_small > 0.0
+            && calib_small.is_finite()
+            && calib_large > 0.0
+            && calib_large.is_finite(),
+        "the calibration measured {calib_small} / {calib_large} ns/entry — the \
+         workload was optimized away, so neither claim below is a check"
+    );
+
     let growth = ns_per_entity / small_ns_per_entity;
+    let calib_growth = calib_large / calib_small;
+    let slack = growth / calib_growth;
     eprintln!(
-        "per-entity growth {small_n} -> {n}: {growth:.2}x (ceiling {MAX_PER_ENTITY_GROWTH}x)"
+        "per-entity growth {small_n} -> {n}: {growth:.2}x against a calibration \
+         growth of {calib_growth:.2}x ({calib_small:.1} -> {calib_large:.1} ns/entry) \
+         = {slack:.2}x (margin {GROWTH_MARGIN}x)"
     );
     assert!(
-        growth < MAX_PER_ENTITY_GROWTH,
+        slack < GROWTH_MARGIN,
         "per-entity steady-state sync cost grew {growth:.2}x from {small_n} to {n} \
-         entities ({small_ns_per_entity:.1} -> {ns_per_entity:.1} ns/entity, ceiling \
-         {MAX_PER_ENTITY_GROWTH}x). Work proportional to the POPULATION has been \
-         re-introduced inside the per-entity step — a `contains` over the seen set, \
-         a scan per contact, a rebuild of the reverse map."
+         entities ({small_ns_per_entity:.1} -> {ns_per_entity:.1} ns/entity) while a \
+         bare BTreeMap descent over the same two populations, on this machine, in \
+         this process, grew {calib_growth:.2}x — {slack:.2}x more than it should, \
+         against a margin of {GROWTH_MARGIN}x. Work proportional to the POPULATION \
+         has been re-introduced inside the per-entity step: a `contains` over the \
+         seen set, a scan per contact, a rebuild of the reverse map. (A slower \
+         machine cannot fail this by being slow — the divisor is measured on it.)"
     );
 
     // ── CLOCK: the absolute ratchet, only where it was measured ─────────────
-    let calib = calibration_ns();
-    assert!(
-        calib > 0.0 && calib.is_finite(),
-        "the calibration measured {calib} ns/entry — the workload was optimized away, so the class check below is not a check"
-    );
+    let calib = calib_large;
     let ratio = calib / CALIBRATION_REF_NS;
     let calibrated = calib <= CALIBRATION_REF_NS * CALIBRATION_TOLERANCE;
     eprintln!(
