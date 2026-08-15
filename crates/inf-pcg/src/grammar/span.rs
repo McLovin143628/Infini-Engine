@@ -182,28 +182,46 @@ pub fn yaw_onto(dir: DVec3) -> DQuat {
     DQuat::from_xyzw(0.0, sin_t / (2.0 * c), 0.0, c)
 }
 
-/// A world-space euler-degree rotation (`YXZ`, matching
-/// `inf_ecs::components::Transform`) built from **bit-portable** trigonometry.
+/// **One axis-angle quaternion from bit-portable trigonometry** — the single
+/// door every angle-derived rotation this crate commits goes through.
 ///
-/// Two details that are load-bearing rather than defensive:
+/// `radians`, not degrees: the two callers arrive in different units (an
+/// authored `rot` is degrees, a scattered yaw is a hashed fraction of `TAU`) and
+/// converting at the door would make one of them convert twice.
 ///
+/// Three details, all load-bearing rather than defensive:
+///
+/// * **`DQuat::from_axis_angle` cannot be used.** It is `sin_cos` inside glam,
+///   where no grep of this crate would ever see it, and the P14 law says libm is
+///   not bit-identical across targets. Both callers write committed content: a
+///   grammar module's placement, and a scatter instance's rotation, which the
+///   hosts re-derive independently and which collider placement follows.
 /// * **A zero angle short-circuits to the exact identity.** `pcos64(0)` is the
 ///   polynomial's value `0.999_999_943_741_051_1` — short of `1` by
 ///   **5.63e-8** — which is accurate enough to place a rotated module and *not*
 ///   accurate enough for the overwhelmingly common `rot 0,0,0`, where anything
 ///   but an exact identity would make an unrotated fence post carry a residual
 ///   tilt.
-/// * Each axis quaternion is **normalized**, because a ~1e-7 sine is not exactly
-///   on the unit sphere and three of them compose.
+/// * **The result is normalized**, because a ~1e-7 sine is not exactly on the
+///   unit sphere; `euler_deg_to_quat` composes three of these, and an
+///   un-normalized quaternion is a rotation *and a scale* (the P23 law). `sqrt`
+///   is exactly specified by IEEE-754, so normalizing costs no portability.
+///
+/// `axis` is assumed unit; a caller with a direction normalizes first.
+pub fn axis_quat(axis: DVec3, radians: f64) -> DQuat {
+    if radians == 0.0 {
+        return DQuat::IDENTITY;
+    }
+    let h = radians * 0.5;
+    let (s, c) = (inf_math::portable::psin64(h), inf_math::portable::pcos64(h));
+    DQuat::from_xyzw(axis.x * s, axis.y * s, axis.z * s, c).normalize()
+}
+
+/// A world-space euler-degree rotation (`YXZ`, matching
+/// `inf_ecs::components::Transform`) built from **bit-portable** trigonometry —
+/// three [`axis_quat`]s composed.
 pub fn euler_deg_to_quat(deg: DVec3) -> DQuat {
-    let axis = |degrees: f64, ax: DVec3| {
-        if degrees == 0.0 {
-            return DQuat::IDENTITY;
-        }
-        let h = degrees.to_radians() * 0.5;
-        let (s, c) = (inf_math::portable::psin64(h), inf_math::portable::pcos64(h));
-        DQuat::from_xyzw(ax.x * s, ax.y * s, ax.z * s, c).normalize()
-    };
+    let axis = |degrees: f64, ax: DVec3| axis_quat(ax, degrees.to_radians());
     axis(deg.y, DVec3::Y) * axis(deg.x, DVec3::X) * axis(deg.z, DVec3::Z)
 }
 

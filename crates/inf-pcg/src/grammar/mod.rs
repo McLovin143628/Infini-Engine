@@ -60,6 +60,6 @@ pub use expand::{
     SpanSource, LAYOUT_UNITS, MAX_DEPTH, MAX_SLOTS,
 };
 pub use span::{
-    euler_deg_to_quat, footprint_perimeter, footprint_rows, yaw_onto, Frame, NoSplines, RowAxis,
-    Span, SpanSet, SplineInterp, SplinePath, SplineSource, DEFAULT_SPLINE_SAMPLES,
+    axis_quat, euler_deg_to_quat, footprint_perimeter, footprint_rows, yaw_onto, Frame, NoSplines,
+    RowAxis, Span, SpanSet, SplineInterp, SplinePath, SplineSource, DEFAULT_SPLINE_SAMPLES,
 };

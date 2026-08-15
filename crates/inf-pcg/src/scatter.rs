@@ -36,6 +36,7 @@ use glam::{DQuat, DVec3};
 
 use inf_core::JobPool;
 
+use crate::grammar::span::axis_quat;
 use crate::hash::Hash64;
 use crate::height::HeightProvider;
 use crate::sampler::DensityField;
@@ -46,6 +47,62 @@ const SALT_JITTER_Z: u64 = 0xB2;
 const SALT_ACCEPT: u64 = 0xC3;
 const SALT_SCALE: u64 = 0xD4;
 const SALT_YAW: u64 = 0xE5;
+
+/// Above this `|dot|` with `+Y`, [`tilt_onto`] takes its degenerate branch.
+///
+/// glam's own `from_rotation_arc` threshold, kept **character for character**
+/// (`1 - 2ε`) rather than rounded to something readable, because this function
+/// is that one's portable twin and the two must agree about which inputs are
+/// degenerate. A looser threshold here would answer `IDENTITY` for near-flat
+/// ground that glam gives a real (if tiny) tilt to, and that is committed
+/// content, not a rounding.
+const ARC_ONE_MINUS_EPS: f64 = 1.0 - 2.0 * f64::EPSILON;
+
+/// The shortest-arc rotation taking `+Y` onto the unit vector `n` — a terrain
+/// normal — built without any transcendental.
+///
+/// # Why not `DQuat::from_rotation_arc`
+///
+/// Its ordinary branch is already `sqrt`-only, and its **antiparallel** branch
+/// is `from_axis_angle`, which is `sin_cos` inside glam where no grep of this
+/// crate can see it. The P14 law says libm is not bit-identical across targets,
+/// and a scattered instance's rotation is committed content that *both* hosts
+/// re-derive independently and that collider placement follows — so a rotation
+/// this crate produces may not have a libm call anywhere inside it, including
+/// down a branch. This is `inf_anim::ik::rotation_between`'s shape, one crate
+/// over, for the same reason.
+///
+/// The half-turn is taken about `+X`. Any axis perpendicular to `Y` maps `Y` to
+/// `-Y`, so the choice is arbitrary — but it must be *fixed*, and `+X` is
+/// perpendicular to `Y` for all time, which is why no search is needed. The
+/// branch is unreachable from a heightfield in any case: it is a ground normal
+/// pointing straight down.
+///
+/// # A degenerate normal answers the identity rather than a NaN
+///
+/// The call site used to be `n.normalize()`, which on a zero-length normal is a
+/// vector of NaNs, and `from_rotation_arc` carries those straight through into a
+/// NaN rotation and from there into an instance transform. `normalize_or_zero`
+/// answers `ZERO`, whose dot with `+Y` is `0` and whose cross with it is `ZERO`,
+/// so the general branch below builds the exact identity. Stated rather than
+/// left to fall out, because "it happens to work" is the kind of claim that
+/// stops being true without saying so.
+fn tilt_onto(n: DVec3) -> DQuat {
+    let n = n.normalize_or_zero();
+    let dot = DVec3::Y.dot(n);
+    // The comparisons are glam's, strict side for strict side, so that every
+    // input takes the same branch here that it took there.
+    if dot > ARC_ONE_MINUS_EPS {
+        // Already `+Y`: the arc is empty.
+        return DQuat::IDENTITY;
+    }
+    if dot < -ARC_ONE_MINUS_EPS {
+        // Antiparallel: a half turn, about `+X` by fixed choice.
+        return DQuat::from_xyzw(1.0, 0.0, 0.0, 0.0);
+    }
+    let c = DVec3::Y.cross(n);
+    DQuat::from_xyzw(c.x, c.y, c.z, 1.0 + dot).normalize()
+}
 
 /// How a scattered instance's yaw is chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -286,16 +343,14 @@ fn scatter_cell(
             );
 
             let tilt = if params.align_to_normal {
-                normal
-                    .map(|n| DQuat::from_rotation_arc(DVec3::Y, n.normalize()))
-                    .unwrap_or(DQuat::IDENTITY)
+                normal.map(tilt_onto).unwrap_or(DQuat::IDENTITY)
             } else {
                 DQuat::IDENTITY
             };
             let rotation = match params.rotation {
                 RotationMode::RandomYaw => {
                     let yaw = slot.mix_u64(SALT_YAW).unit() * std::f64::consts::TAU;
-                    tilt * DQuat::from_rotation_y(yaw)
+                    tilt * axis_quat(DVec3::Y, yaw)
                 }
                 RotationMode::AlignNormal => tilt,
             };
@@ -491,5 +546,82 @@ mod tests {
         let out = scatter_region(&p, &Noise(ValueNoise::default()), &flat(), region);
         // Noise density averages ~0.5, so expect a large-but-not-full population.
         assert!(out.len() > 20_000, "only {} instances", out.len());
+    }
+
+    // ── portable placement (Hardening Wave C, L6.F4) ─────────────────────────
+
+    /// The portable yaw agrees with `DQuat::from_rotation_y` everywhere.
+    ///
+    /// A tolerance and not a bit compare, because it is a *different* function:
+    /// `psin64`/`pcos64` are polynomials accurate to ~1e-7 and `sin_cos` is
+    /// libm. The point is not that they agree bit for bit — that is impossible
+    /// and would defeat the purpose — but that the portable one is the same
+    /// rotation to well inside anything a placement can express, while being a
+    /// function of its argument on every target rather than of the C library.
+    #[test]
+    fn the_scatter_yaw_matches_glams_rotation_y() {
+        for step in 0..720u32 {
+            let yaw = std::f64::consts::TAU * step as f64 / 720.0;
+            let got = axis_quat(DVec3::Y, yaw);
+            let want = DQuat::from_rotation_y(yaw);
+            // Quaternions double-cover: compare the rotated basis, not the
+            // components.
+            for basis in [DVec3::X, DVec3::Z] {
+                let (a, b) = (got * basis, want * basis);
+                assert!((a - b).length() < 1e-7, "yaw={yaw}: {a:?} vs {b:?}");
+            }
+            assert!((got.length() - 1.0).abs() < 1e-12, "not unit at yaw={yaw}");
+        }
+        // An unrotated instance is EXACTLY unrotated — the short-circuit the
+        // `axis_quat` doc explains, worth 5.63e-8 of residual tilt otherwise.
+        assert_eq!(axis_quat(DVec3::Y, 0.0), DQuat::IDENTITY);
+    }
+
+    /// The portable tilt is **bit-identical** to `DQuat::from_rotation_arc` on
+    /// every input a heightfield can produce.
+    ///
+    /// It can be a bit compare, unlike the yaw above, because glam's ordinary
+    /// branch is already `sqrt`-only and this reproduces it operation for
+    /// operation; only the antiparallel branch differed, and only that branch
+    /// called libm. So the arm says two things at once: no committed placement
+    /// moves, and the branch that used to reach `sin_cos` is the only one that
+    /// behaves differently.
+    ///
+    /// The reference is fed `raw.normalize()` because that is literally what the
+    /// call site used to write — `from_rotation_arc(Y, n.normalize())` — and the
+    /// comparison has to be of two expressions over one input, not of two
+    /// functions over two slightly different unit vectors.
+    #[test]
+    fn the_scatter_tilt_matches_glams_rotation_arc_bit_for_bit() {
+        let mut checked = 0u32;
+        for i in 0..40u32 {
+            for j in 0..40u32 {
+                // Slopes up to ~57°, far past anything walkable, and never
+                // exactly flat (integer `i` cannot land on 19.5).
+                let (sx, sz) = (i as f64 * 0.08 - 1.56, j as f64 * 0.08 - 1.56);
+                let raw = DVec3::new(-sx, 1.0, -sz);
+                let got = tilt_onto(raw);
+                let want = DQuat::from_rotation_arc(DVec3::Y, raw.normalize());
+                assert_eq!(
+                    got.to_array().map(f64::to_bits),
+                    want.to_array().map(f64::to_bits),
+                    "normal {raw:?}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 1600, "the sweep shrank");
+
+        // The two ends of the arc, exactly.
+        assert_eq!(tilt_onto(DVec3::Y), DQuat::IDENTITY);
+        assert_eq!(
+            tilt_onto(DVec3::NEG_Y) * DVec3::Y,
+            DVec3::NEG_Y,
+            "the antiparallel branch must still turn +Y onto -Y"
+        );
+        // A degenerate normal answers the identity rather than the NaN rotation
+        // `n.normalize()` used to hand `from_rotation_arc`.
+        assert_eq!(tilt_onto(DVec3::ZERO), DQuat::IDENTITY);
+        assert_eq!(tilt_onto(DVec3::splat(f64::NAN)), DQuat::IDENTITY);
     }
 }
