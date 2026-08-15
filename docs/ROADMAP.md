@@ -18919,12 +18919,13 @@ clean, `eslint . --max-warnings 0` clean, vitest **61 files / 576 tests** (from
 Wave I's 61 / 575). Goldens **54, unchanged** — the diff contains no `.png` and
 no `.inf_*` at all. **16 mutations, 16 killed.** NOT PUSHED.
 
-Commits (on `main`, **NOT pushed**, 9 + this ledger): 1cd0957 (the partial
-triangle), 1a3263a (the vgeom sweep), 6de35d9 (the rig binding), 3506556 (three
-stamps and the refusal chain), 9223706 (the two arms that could not kill their
-own mutations), 4b84534 (the try, the false sentences, the eaten escapes),
-84f3004 (the two spot-check caveats), 292d873 (the contract inversion), 6afbdfb
-(the cook fixture the battery caught).
+Commits (on `main`, **NOT pushed** — twelve: the nine below, this ledger, and
+two corrections to it, the second being the commit that makes this count
+correct): 1cd0957 (the partial triangle), 1a3263a (the vgeom sweep), 6de35d9
+(the rig binding), 3506556 (three stamps and the refusal chain), 9223706 (the
+two arms that could not kill their own mutations), 4b84534 (the try, the false
+sentences, the eaten escapes), 84f3004 (the two spot-check caveats), 292d873
+(the contract inversion), 6afbdfb (the cook fixture the battery caught).
 
 ### THE MUTATIONS
 
@@ -18983,8 +18984,8 @@ The battery went **4 568 → 4 811** over 267 binaries; the frontend went
 54 now** — not one re-blessed across ten waves, through repairs that moved
 committed bond energies, shared-face areas, scatter rotations, root-motion
 transforms and eroded terrain, because every consumer was enumerated before the
-first byte changed. **130 `Hardening` commits** carry the campaign by
-`git log --grep`, of which **this wave's ten are the only ones not on the
+first byte changed. **132 `Hardening` commits** carry the campaign by
+`git log --grep`, of which **this wave's twelve are the only ones not on the
 remote**; Wave I's block said 118 at a point where the same grep says 120, which
 is the smallest possible example of this section's last paragraph.
 
@@ -19040,8 +19041,14 @@ entries. **Waves A through I are on the remote and have a CI verdict**; each
 block's "NOT PUSHED" was true when it was written and stopped being true minutes
 later, when the wave was pushed. A ledger that records a moment and is never
 revisited will say that moment for ever. What is genuinely unpushed is **Wave J
-alone** — these ten commits, by instruction — so the campaign's *closing* CI
+alone** — these twelve commits, by instruction — so the campaign's *closing* CI
 verdict is the one that does not exist yet.
+
+A count that includes the commit stating it terminates only if the number is
+written for the state *after* the write. That is why the figures above are
+twelve and 132 rather than the ten and 130 measured a moment before them, and it
+is the whole discipline in miniature: **write the number the reader will be able
+to check, not the one you can see.**
 
 **Wave H's correction, stated because a ledger that only accumulates is not a
 record.** Wave H's block opens on round 1 having closed C4-30 with "its own
