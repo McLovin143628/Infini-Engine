@@ -613,7 +613,16 @@ pub struct VsmRaster {
     /// so an index that changed *meshes* invalidates and an index that did not
     /// costs nothing.
     skinned_keys: Vec<usize>,
-    skinned_palettes: Vec<(wgpu::Buffer, wgpu::BindGroup, usize)>,
+    /// Per-instance palette `(buffer, bind group, mesh pointer key, capacity)`.
+    ///
+    /// **Persistent** (Hardening D): the payload changes every animated frame but
+    /// the *objects* do not need to. This used to `clear()` and rebuild one
+    /// storage buffer + one bind group per skinned instance on every
+    /// `scene.version` move, and `passes::skinned` did the same on its own path —
+    /// 4N wgpu objects per frame for N characters across the two. They are grown
+    /// on demand and written with `write_buffer` now (the `AssetDraw::params`
+    /// rule), which is the same trade the water pass's `UNIFORM_STRIDE` makes.
+    skinned_palettes: Vec<(wgpu::Buffer, wgpu::BindGroup, usize, u64)>,
     /// Static caster meshes for terrain tiles, keyed `(terrain id, tile key)` and
     /// rebuilt when that tile's version, its hole mask or the origin moves.
     terrain: std::collections::BTreeMap<(u64, crate::scene::TerrainTileKey), TerrainCasterGeom>,
@@ -1351,7 +1360,7 @@ impl VsmRaster {
                             }
                             GroupSource::Skinned { instance } => {
                                 let Some(mesh_index) =
-                                    self.skinned_palettes.get(instance).map(|(_, _, m)| *m)
+                                    self.skinned_palettes.get(instance).map(|(_, _, m, _)| *m)
                                 else {
                                     continue;
                                 };
@@ -1747,39 +1756,56 @@ impl VsmRaster {
         }
         self.skinned_keys = keys;
 
-        // The palette half: rebuilt whole on a scene-version move, because a
-        // palette changes every frame by construction.
+        // The palette half: re-WRITTEN on a scene-version move, because a palette
+        // changes every frame by construction — but the buffers and bind groups
+        // it is written into are reused. See the field's doc comment.
         if self.skinned_version == Some(scene.version) {
             return;
         }
         self.skinned_version = Some(scene.version);
-        self.skinned_palettes.clear();
-        for inst in &scene.skinned {
+        self.skinned_palettes.truncate(scene.skinned.len());
+        for (i, inst) in scene.skinned.iter().enumerate() {
             let n = inst.palette.len().max(1);
-            let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("vsm-skinned-palette"),
-                size: (n * std::mem::size_of::<glam::Mat4>()) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+            let bytes = (n * std::mem::size_of::<glam::Mat4>()) as u64;
+            let fits = self
+                .skinned_palettes
+                .get(i)
+                .is_some_and(|(_, _, _, cap)| *cap >= bytes);
+            if !fits {
+                // A power-of-two ceiling: a slot that takes a different character
+                // reallocates O(log joints) times over a session, not per frame.
+                let capacity = bytes.next_power_of_two().max(64);
+                let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("vsm-skinned-palette"),
+                    size: capacity,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("vsm-skinned-palette"),
+                    layout: &self.palette_bgl,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                });
+                let slot = (buffer, bind, 0usize, capacity);
+                match self.skinned_palettes.get_mut(i) {
+                    Some(existing) => *existing = slot,
+                    None => self.skinned_palettes.push(slot),
+                }
+            }
             if !inst.palette.is_empty() {
                 let raw: Vec<[f32; 16]> = inst.palette.iter().map(|m| m.to_cols_array()).collect();
                 gpu.queue
-                    .write_buffer(&buffer, 0, bytemuck::cast_slice(&raw));
+                    .write_buffer(&self.skinned_palettes[i].0, 0, bytemuck::cast_slice(&raw));
             }
-            let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("vsm-skinned-palette"),
-                layout: &self.palette_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                }],
-            });
             // The **pointer key**, not the scene index: the group that draws this
             // instance looks its geometry up by identity, so an index that changed
-            // meshes cannot be handed the previous mesh's buffers.
-            let key = self.skinned_keys.get(inst.mesh).copied().unwrap_or(0);
-            self.skinned_palettes.push((buffer, bind, key));
+            // meshes cannot be handed the previous mesh's buffers. Re-stamped
+            // every frame now that the slot outlives the frame — a reused slot
+            // whose key was left standing would be exactly that defect.
+            self.skinned_palettes[i].2 = self.skinned_keys.get(inst.mesh).copied().unwrap_or(0);
         }
     }
 

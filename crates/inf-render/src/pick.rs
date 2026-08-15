@@ -32,6 +32,14 @@ pub struct Picker {
     translucent_ranges: [Range<u32>; 5],
     target: Option<(u32, u32, wgpu::Texture, wgpu::TextureView)>,
     depth: Option<(u32, u32, wgpu::TextureView)>,
+    /// The one-row readback staging buffer, **kept** (Hardening D).
+    ///
+    /// Its size is a constant (`COPY_BYTES_PER_ROW_ALIGNMENT`, 256 bytes — one
+    /// texel, row-aligned) and it is unmapped again before the pick returns, so
+    /// there was never anything for a fresh allocation per click to adapt to.
+    /// Built lazily so a `Picker` that is never used allocates nothing, and
+    /// rebuilt with the picker itself on a device loss.
+    readback: Option<wgpu::Buffer>,
 }
 
 impl Picker {
@@ -131,6 +139,7 @@ impl Picker {
             translucent_ranges: EMPTY_RANGES,
             target: None,
             depth: None,
+            readback: None,
         }
     }
 
@@ -278,11 +287,13 @@ impl Picker {
 
         // Copy just the one texel. R32Uint = 4 bytes; bytes_per_row must be
         // 256-aligned, so we copy a 1-row 256-byte buffer.
-        let read = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pick-readback"),
-            size: wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
+        let read = self.readback.get_or_insert_with(|| {
+            gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pick-readback"),
+                size: wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
         });
         let (_, _, id_tex, _) = self.target.as_ref().unwrap();
         encoder.copy_texture_to_buffer(

@@ -212,9 +212,22 @@ struct GpuSkinnedMesh {
 }
 
 /// One uploaded skinned instance: which mesh it draws + its palette bind group.
+///
+/// **The buffer and the bind group are persistent** (Hardening D). The palette
+/// *contents* change every animated frame — that is what animation is — but a
+/// storage buffer big enough for a skeleton stays big enough for it, so the GPU
+/// objects are created once per instance and only replaced when the payload
+/// outgrows them. Before this, `sync` allocated one storage buffer **and** one
+/// bind group per skinned instance per frame, and `vsm_raster` did the same on
+/// its own path: 4N wgpu objects per frame for N characters, all of them
+/// deferred-destroy traffic. The rule is `AssetDraw::params`': write the bytes,
+/// keep the object.
 struct GpuSkinnedInstance {
     mesh: usize,
+    palette: wgpu::Buffer,
     palette_bg: wgpu::BindGroup,
+    /// Allocated size in bytes — the grow test.
+    capacity: u64,
 }
 
 pub struct SkinnedMeshNode {
@@ -455,26 +468,32 @@ impl SkinnedMeshNode {
             buf
         });
 
-        // Per-instance palette storage buffers + bind groups.
-        self.instances = frame
-            .scene
-            .skinned
-            .iter()
-            .map(|inst| {
-                // Non-empty so the storage buffer is never zero-sized.
-                let palette: Vec<[f32; 16]> = if inst.palette.is_empty() {
-                    vec![glam::Mat4::IDENTITY.to_cols_array()]
-                } else {
-                    inst.palette.iter().map(|m| m.to_cols_array()).collect()
-                };
+        // Per-instance palette storage buffers + bind groups — **reused across
+        // frames**, written per frame. See `GpuSkinnedInstance`.
+        self.instances.truncate(frame.scene.skinned.len());
+        for (i, inst) in frame.scene.skinned.iter().enumerate() {
+            // Non-empty so the storage buffer is never zero-sized.
+            let palette: Vec<[f32; 16]> = if inst.palette.is_empty() {
+                vec![glam::Mat4::IDENTITY.to_cols_array()]
+            } else {
+                inst.palette.iter().map(|m| m.to_cols_array()).collect()
+            };
+            let bytes = std::mem::size_of_val(palette.as_slice()) as u64;
+            let fits = self
+                .instances
+                .get(i)
+                .is_some_and(|slot| slot.capacity >= bytes);
+            if !fits {
+                // Grow to a power of two so a skeleton that gains a joint (a
+                // re-rig, a different character in the same slot) reallocates
+                // O(log joints) times over a session rather than every frame.
+                let capacity = bytes.next_power_of_two().max(64);
                 let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("skinned-palette"),
-                    size: std::mem::size_of_val(palette.as_slice()) as u64,
+                    size: capacity,
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
-                gpu.queue
-                    .write_buffer(&buf, 0, bytemuck::cast_slice(&palette));
                 let palette_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("skinned-palette"),
                     layout: &self.joints_bgl,
@@ -483,13 +502,22 @@ impl SkinnedMeshNode {
                         resource: buf.as_entire_binding(),
                     }],
                 });
-                // The buffer is kept alive by the bind group.
-                GpuSkinnedInstance {
+                let slot = GpuSkinnedInstance {
                     mesh: inst.mesh,
+                    palette: buf,
                     palette_bg,
+                    capacity,
+                };
+                match self.instances.get_mut(i) {
+                    Some(existing) => *existing = slot,
+                    None => self.instances.push(slot),
                 }
-            })
-            .collect();
+            }
+            let slot = &mut self.instances[i];
+            slot.mesh = inst.mesh;
+            gpu.queue
+                .write_buffer(&slot.palette, 0, bytemuck::cast_slice(&palette));
+        }
     }
 }
 
