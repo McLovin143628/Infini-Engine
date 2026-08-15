@@ -687,8 +687,26 @@ mod tests {
                     assert!(done <= total && total > 0);
                     ticks += 1;
                 }
-                ImportProgress::Finished { id: j, primary, .. } => {
+                ImportProgress::Finished {
+                    id: j,
+                    primary,
+                    advisories,
+                    ..
+                } => {
                     assert_eq!(j, id);
+                    // **Round-2 finding R2.F7.** This arm hard-coded
+                    // `advisories: Vec::new()` under a comment reasoning only
+                    // about TEXTURE advisories, so the channel to the Content
+                    // Drawer's badge posted empty — and the terrain wizard is
+                    // the one importer where an outside-the-project source is
+                    // the NORM, which is exactly what L7.H7's advisory says.
+                    // The heightmap here lives in its own tempdir, outside the
+                    // project, so the note must arrive with the finish.
+                    assert_eq!(advisories.len(), 1, "{advisories:?}");
+                    assert!(
+                        advisories[0].contains("outside the project"),
+                        "{advisories:?}"
+                    );
                     produced = primary;
                     break;
                 }
