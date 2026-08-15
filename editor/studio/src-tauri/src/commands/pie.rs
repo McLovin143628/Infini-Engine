@@ -47,6 +47,56 @@ struct PieInner {
     /// Signals the monitor thread to stop (a fresh one is made per session).
     monitor_run: Option<Arc<AtomicBool>>,
     last_frame: u64,
+    /// **`true` between `pie_start`'s decision to start and the session landing
+    /// in `session`.**
+    ///
+    /// `pie_start` reads `session`, releases the lock to build the payload and
+    /// spawn the process — hundreds of milliseconds, dominated by serializing
+    /// the whole live scene — and only then takes the lock again to install what
+    /// it made. Without this latch two overlapping calls both see `None`, both
+    /// spawn a player, and the second overwrites the first: one orphan process
+    /// nobody holds a handle to, plus its monitor thread polling a `PieState`
+    /// that no longer describes it, for the life of the editor. Two calls are
+    /// not exotic — the toolbar button and the `F5` chord are two paths to one
+    /// command, and the `async` command runs on Tauri's pool.
+    ///
+    /// Cleared on **every** exit path by [`StartGuard`], including the `?`
+    /// returns between the latch and the install.
+    starting: bool,
+}
+
+impl PieInner {
+    /// Install a fresh monitor stop-flag, **retiring the one it replaces**.
+    ///
+    /// Overwriting `monitor_run` drops the only handle that could ever have
+    /// stopped the previous thread, and that thread's loop condition is the flag
+    /// it still holds — so it goes on polling this same `PieState` every 40 ms
+    /// for the life of the editor, reading a session it does not own and
+    /// competing with the live monitor for the lock. A method rather than two
+    /// lines at the call site so that the retirement is a property something can
+    /// be pointed at: see `installing_a_monitor_retires_the_one_it_replaces`.
+    fn install_monitor(&mut self, run: Arc<AtomicBool>) {
+        if let Some(old) = self.monitor_run.take() {
+            old.store(false, Ordering::SeqCst);
+        }
+        self.monitor_run = Some(run);
+    }
+}
+
+/// Clears [`PieInner::starting`] however `pie_start` leaves.
+///
+/// A guard rather than three `inner.starting = false` lines, because two of the
+/// three exits are `?` on a `Result` — the payload build and the spawn — and a
+/// latch that survives a failed start is worse than no latch: it refuses every
+/// subsequent Play until the editor is restarted.
+struct StartGuard<'a>(&'a Mutex<PieInner>);
+
+impl Drop for StartGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.0.lock() {
+            inner.starting = false;
+        }
+    }
 }
 
 /// The `pie://state` event payload (hand-mirrored in the frontend, like the
@@ -77,9 +127,20 @@ pub async fn pie_start(
     assets: State<'_, AssetState>,
     pie: State<'_, PieState>,
 ) -> Result<(), String> {
-    // Already running? Resume if paused, else no-op.
-    {
+    // Already running, or already starting? Resume if paused, else no-op.
+    //
+    // The `starting` half is the whole point: everything between here and the
+    // install below happens with the lock RELEASED, so `session.is_some()` alone
+    // answers "no session yet" to a second caller that arrived a millisecond
+    // later, and two players get spawned.
+    let _start_guard = {
         let mut inner = pie.inner.lock().map_err(|_| "pie lock poisoned")?;
+        if inner.starting {
+            // A start is already in flight. Not an error — the second press of a
+            // button is not a failure — and not a resume either, because there is
+            // nothing yet to resume.
+            return Ok(());
+        }
         if inner.session.is_some() {
             if inner.paused {
                 inner
@@ -105,7 +166,11 @@ pub async fn pie_start(
             }
             return Ok(());
         }
-    }
+        // Nothing running and nothing in flight: claim the start, and hand the
+        // guard out of this scope so the claim is released however we leave.
+        inner.starting = true;
+        StartGuard(&pie.inner)
+    };
 
     // Build the payload from the live scene (embedded/window are both windowed).
     let payload = {
@@ -157,7 +222,10 @@ pub async fn pie_start(
         inner.paused = false;
         inner.embedded = false;
         inner.last_frame = 0;
-        inner.monitor_run = Some(Arc::clone(&run));
+        // Retires the previous flag first. Unreachable while `starting` holds —
+        // and this is what keeps a stray monitor from outliving its session if
+        // the latch is ever wrong.
+        inner.install_monitor(Arc::clone(&run));
     }
 
     spawn_monitor(app.clone(), run, embedded);
@@ -427,4 +495,132 @@ pub async fn pie_is_running(pie: State<'_, PieState>) -> Result<bool, String> {
         .map_err(|_| "pie lock poisoned")?
         .session
         .is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A monitor thread must never outlive the flag that stops it**
+    /// (Hardening Wave C, L6.F6).
+    ///
+    /// Built to falsify: replace `install_monitor`'s body with a bare
+    /// `self.monitor_run = Some(run)` and the middle assertion fails. Nothing
+    /// else in the tree can see the difference, because the symptom is a thread
+    /// that keeps working correctly on a `PieState` that has moved on.
+    #[test]
+    fn installing_a_monitor_retires_the_one_it_replaces() {
+        let mut inner = PieInner::default();
+
+        let first = Arc::new(AtomicBool::new(true));
+        inner.install_monitor(Arc::clone(&first));
+        assert!(
+            first.load(Ordering::SeqCst),
+            "installing a monitor must not stop it"
+        );
+
+        let second = Arc::new(AtomicBool::new(true));
+        inner.install_monitor(Arc::clone(&second));
+        assert!(
+            !first.load(Ordering::SeqCst),
+            "the replaced monitor was never told to stop; its thread polls this \
+             PieState every 40 ms for the life of the editor"
+        );
+        assert!(
+            second.load(Ordering::SeqCst),
+            "the new monitor was stopped along with the old one"
+        );
+
+        // Only ever one flag held, so `pie_stop` can always find the live one.
+        assert!(Arc::ptr_eq(
+            inner.monitor_run.as_ref().expect("a flag is installed"),
+            &second
+        ));
+    }
+
+    /// **The start latch is released however the start ends** — including the
+    /// two `?` returns between claiming it and installing the session.
+    ///
+    /// A latch that survives a failed start is worse than no latch: it refuses
+    /// every subsequent Play until the editor is restarted, and the failure that
+    /// set it is exactly the one an author retries.
+    #[test]
+    fn the_start_latch_is_released_however_the_start_ends() {
+        let state = Mutex::new(PieInner::default());
+
+        // The claim, as `pie_start` makes it.
+        let claimed = {
+            let mut inner = state.lock().expect("fresh mutex");
+            let free = !inner.starting && inner.session.is_none();
+            if free {
+                inner.starting = true;
+            }
+            free
+        };
+        assert!(claimed, "a fresh state must admit a starter");
+
+        {
+            let _guard = StartGuard(&state);
+            assert!(
+                state.lock().expect("not poisoned").starting,
+                "the latch must hold for the whole window the lock is released \
+                 over — that window is where the payload is built and the process \
+                 spawned, and it is the only reason this latch exists"
+            );
+            // …and here the spawn fails, `?`-style.
+        }
+
+        assert!(
+            !state.lock().expect("not poisoned").starting,
+            "a failed start left the latch set — every later Play would be \
+             silently refused"
+        );
+
+        // And a second starter is admitted again afterwards.
+        let mut inner = state.lock().expect("not poisoned");
+        assert!(!inner.starting && inner.session.is_none());
+        inner.starting = true;
+    }
+
+    /// **The claim happens before the lock is released**, which is the whole of
+    /// the fix — a source pin, because the property is an *ordering* between two
+    /// statements and no value assertion in one thread can see it.
+    ///
+    /// The window is not theoretical: `build_scene_payload` serializes the
+    /// entire live scene, and the toolbar button and the `F5` chord are two
+    /// paths into one `async` command running on Tauri's pool.
+    #[test]
+    fn the_start_path_claims_the_latch_before_it_releases_the_lock() {
+        // Normalized: `core.autocrlf = true` checks `.rs` out CRLF on Windows,
+        // where a newline-delimited search finds nothing (the P22 law).
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/pie.rs"),
+        )
+        .expect("this module is readable")
+        .replace("\r\n", "\n");
+
+        let refuses = src
+            .find("if inner.starting {")
+            .expect("`pie_start` no longer turns a second starter away");
+        let claims = src
+            .find("inner.starting = true;")
+            .expect("`pie_start` no longer claims the latch");
+        let guard = src
+            .find("StartGuard(&pie.inner)")
+            .expect("the claim is no longer released by a guard");
+        let builds = src
+            .find("build_scene_payload(")
+            .expect("`pie_start` no longer builds a payload");
+        let installs = src
+            .find("inner.install_monitor(")
+            .expect("`pie_start` no longer installs its monitor through the retiring door");
+
+        assert!(
+            refuses < claims && claims < guard && guard < builds && builds < installs,
+            "the start sequence is out of order (refuse {refuses}, claim {claims}, \
+             guard {guard}, build {builds}, install {installs}): the latch must be \
+             claimed and guarded BEFORE the lock is dropped for the payload build, \
+             or two overlapping calls both see no session and both spawn a player"
+        );
+    }
 }
