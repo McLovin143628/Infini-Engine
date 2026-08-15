@@ -158,12 +158,27 @@ fn diagonal_plank() -> MeshAsset {
             }
         }
     }
-    let n = vertices.len() as u32;
+    // **A real closed box, not `(0..8)`** (Hardening Wave J). This fixture used
+    // to hand over its eight corner indices in order, which is two triangles
+    // and two leftover indices — not a whole number of triangles, and not the
+    // box the doc above describes. It cooked anyway because nothing on this
+    // path read the index buffer; `MeshAsset::validate` now refuses it at the
+    // decode, which is how it was found. The corner index is
+    // `4·(x>0) + 2·(y>0) + (z>0)`, in the generation order above.
+    #[rustfmt::skip]
+    let indices = vec![
+        0, 1, 3,  0, 3, 2, // -x
+        4, 6, 7,  4, 7, 5, // +x
+        0, 4, 5,  0, 5, 1, // -y
+        2, 3, 7,  2, 7, 6, // +y
+        0, 2, 6,  0, 6, 4, // -z
+        1, 5, 7,  1, 7, 3, // +z
+    ];
     MeshAsset::new(
         vec![SubMesh {
             name: "plank".into(),
             vertices,
-            indices: (0..n).collect(),
+            indices,
             material_slot: Some(0),
             skin: Vec::new(),
         }],
