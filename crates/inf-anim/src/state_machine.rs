@@ -929,7 +929,7 @@ impl StateMachine {
     }
 
     /// **The structural questions a decoded machine must answer** — asked by
-    /// [`crate::asset::StateMachineAsset::migrate`], so a corrupt or hostile
+    /// `crate::asset::StateMachineAsset`'s `migrate`, so a corrupt or hostile
     /// `.inf_sm` is refused at the door rather than in the fixed step.
     ///
     /// The campaign's U6 standard: a `migrate` that only compares a version number
@@ -1646,7 +1646,7 @@ fn trigger_armed(sm: &StateMachine, name: &str, triggers: u64) -> bool {
 /// [`StateMachine::validate`] refuses one that declares its own.
 ///
 /// `triggers` is [`SmRuntime::triggers`] — the armed set. **Side-effect free**:
-/// consumption is decided by [`collect_true_triggers`] on the transition that
+/// consumption is decided by `collect_true_triggers` on the transition that
 /// actually fires, which is what keeps the answer independent of how many
 /// candidates were scanned first.
 pub fn eval_condition(cond: &SmCond, sm: &StateMachine, ctx: &SmContext, triggers: u64) -> bool {

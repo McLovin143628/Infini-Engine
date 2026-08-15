@@ -16360,6 +16360,103 @@ shows a one-line authoring change as a one-line diff.
   mandate's *second* item and gets its own phase; folding it in here would dilute both. The
   `preview_character` warm-path cost (F5) lands naturally in P29.5 and is not chased before then.
 
+> **STATUS: P29.1 COMPLETE** (2026-08-15) — **local gates green; NOT PUSHED.** Battery
+> **267 binaries / 4 843 passed / 0 failed / 9 ignored** against the 267 / 4 811 / 0 / 9
+> baseline (+32 arms, no binary added); `clippy -D warnings`, `cargo fmt --check` and
+> `cargo doc --no-deps` clean; `tsc --noEmit`, eslint and the editor's vitest suite green.
+> Goldens stay **54** (nothing here draws a pixel). Scene schema **does not move** —
+> `.inf_sm` is an asset, and the live runtime it grew is `#[serde(skip)]`.
+>
+> **What v2 is, in one line each.** Typed parameters (`Bool`/`Int`/`Float`/`Trigger`) with
+> an undeclared name still reading as v1's `Float` defaulting to 0; condition **trees**
+> (`And`/`Or`/`Not`) replacing the flat AND list; transition **priority** with declaration
+> order kept as the tie-break; an interruption model naming both halves — which fades may
+> be cut into, and what the outgoing pose is when they are; blend **curves** (every one a
+> polynomial, because this file is on the portable-math ban list) and per-joint blend
+> **profiles**; the outgoing pose that **advances** through a cross-fade; a live
+> `exit_time`; **any-state** transitions; one level of nested **sub-machines**; and state
+> enter/exit **events** reported through `SmStep` rather than dispatched.
+>
+> **The two measurements this batch owed.**
+> (1) **The interruption.** v1 snapped: the new fade's outgoing pose was the incoming state
+> at full weight, discarding the blend that was on screen. Measured across the interrupting
+> step on a three-clip fixture: **47.9°** of pose discontinuity under `Snap`, **0.06°**
+> under `Carry`.
+> (2) **The `exit_time` retiming**, which P24.1 ledgered as the reason not to wire a period
+> resolver ("turning it on would move every existing machine's transition timing"). Measured
+> **before** turning it on: **no authored machine in this repository gates on `exit_time` at
+> all** — not the character-demo sample, not the wizard's generated locomotion, which is
+> every machine a project gets without an author typing one. The two `Some(0.8)`s in the
+> tree are round-trip fixtures that are never evaluated. The retiming was real in principle
+> and **empty in fact**, and `phase24_gate` plus character_demo's PIE == shipping trace
+> confirm it: unchanged. The claim is now an assertion
+> (`no_authored_machine_gates_on_exit_time_so_the_live_resolver_retimed_nothing`) rather
+> than a paragraph, because it has an expiry date — the first authored `exit_time` in
+> committed content makes it false and **this block has to be rewritten** rather than
+> quietly outlived.
+>
+> **Schema `.inf_sm` v1 → v2, the full ladder.** v2 changed shapes *inside* the payload (a
+> condition list became a tree, a `usize` source became an enum), so v1 bytes are not a
+> prefix of v2 bytes and no `#[serde(default)]` rescues the read: the refusal is
+> `SchemaTooOld` **by name**, carrying a remedy that names both authoring doors (the State
+> Machine editor and the character wizard). The v1 wire shape is pinned from **ladder-local
+> literals**; the v2 shape is pinned field-for-field **with a byte-consumption check**, so a
+> tail field cannot be appended without a bump; and `migrate` asks the **structural**
+> questions (U6) — every index the evaluator would follow, every float it would divide by,
+> and the recursion it would walk. The committed `Locomotion.inf_sm` is downgrade-blessed
+> through `INF_BLESS_SAMPLES`.
+>
+> **Neither host changed a line**, and that is the mirror rule paying out: the fixed step is
+> already one function (`inf_ecs::pose::step_pose_evaluation`) and it already resolves the
+> clips it samples the pose through, so the clip-length resolver `exit_time` needed was
+> derived from those. The hand-copied `SmRuntimeState` POD mirror is **retired** — it was a
+> field-for-field copy kept for a boundary that expired at P24.1, and v2 would have grown it
+> from seven fields to fifteen; it is a `pub type` alias now, and the round-trip test it had
+> is gone with it (a round-trip a field missing from *both* halves passes perfectly).
+>
+> **The Ring-2 DTO carries every v2 shape**, in this batch rather than with P29.5's UI,
+> because `sm_save` writes whatever `dto_to_machine` produces: a DTO missing a field is the
+> editor **deleting** a condition tree, a priority or a nested machine the moment somebody
+> opens a file and presses save. The condition wire therefore has two fields — `condition`
+> is always the whole tree, and `conditions` is the flat AND-of-float view offered **only**
+> when the tree is one. A UI that can only draw the list receives `null`, renders a
+> read-only summary, and sends the tree back untouched.
+>
+> **Mutation matrix (9 of 9 caught).** Freezing the outgoing play-head fails the frozen-frame
+> arm; forcing `Snap` fails the continuity measurement; building the host's context with
+> `SmContext::new` fails the wiring arm and nothing else; resolving a sub-machine's
+> parameters against its own table fails the nested-parameter arm; making the flat view
+> claim it can represent any tree fails both the model's and the DTO's lossless-ness arms;
+> ignoring `priority` fails the priority arm; consuming every trigger a tree *mentions*
+> fails the scope arm; reducing `migrate` to a version compare fails the structural-refusal
+> arm; dropping one v2 field from the DTO fails the round-trip.
+>
+> **What the first battery found in this batch's own work**, recorded because a wave's own
+> report is not evidence: a scripted edit ate a `\`-continuation inside the new host arm's
+> failure message (the chr(92) law's fourth catch, and the first where it caught the author
+> writing the arm that cites it); the DTO turned a `Trigger` parameter's `Bool(false)`
+> default into `Float(0.0)` on every round-trip, which `as_f64` reads identically so nothing
+> downstream would ever have noticed; and `valueKind` crossed the wire as `value_kind`,
+> because `rename_all = "camelCase"` on a tagged enum renames the *variants*, not their
+> fields — caught only because the round-trip arm asserts on the **JSON spelling** and not
+> merely on the decoded value.
+>
+> **Honest remainders, carried into P29.2–P29.5.** The canvas has **no v2 authoring UI** —
+> parameters, priority, curve, interruption, profiles, any-state and sub-machines round-trip
+> losslessly and are read-only in the inspector (P29.5's rule builder owns them), and an
+> any-state edge is drawn from its own target because there is no any-state node yet. The
+> notify seam has a **reader and no consumer** (`anim_events`; P29.4's `anim.*` kit). Blend
+> profiles have no joint picker and no authored profile in any sample. Sub-machines are
+> **one level**; fading from one sub-machine state into another poses the outgoing one at
+> rest for that fade (one slot, `Copy` runtime), and a sub-machine's own interruption always
+> snaps. An interruption **carry is one deep** — a second interruption while a carry is live
+> drops it. Triggers are edge-detected from a *level* and capped at the 64-parameter
+> bitmask; `anim.set_trigger` is P29.4's. `exit_time` is measured against the state the
+> machine is **in**, so a `SourceOrDestination` transition leaving `prev` gates on
+> `current`'s phase. A blend space's period is the weight-blended duration; **sync markers**
+> are P29.2's. And the committed sample was deliberately kept **behaviour-identical**, so no
+> shipped content yet exercises sub-machines, triggers or profiles.
+
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
   consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed
   compares) replacing the flat AND list; 3. transition **priority** + an interruption model (which
