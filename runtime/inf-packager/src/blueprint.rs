@@ -245,4 +245,37 @@ mod tests {
         assert_eq!(issue.handler, "tick");
         assert!(issue.message.contains("n7"));
     }
+
+    /// C4-44: this module's docs say "every float literal is finite", and the
+    /// walk covered `events` and `functions` and **not** `class.variables` —
+    /// whose `default: Lit::Float` is the other place a float persists. A
+    /// non-finite default escaped the cook and reached `inf-transpile`, which
+    /// has no Rust spelling for it: a ship-time compile failure instead of a
+    /// cook error, which is the whole point of validating at cook.
+    #[test]
+    fn a_variable_default_that_is_not_finite_fails_the_cook() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut class = BlueprintClass::new("act:x", "X");
+            class.variables = vec![inf_blueprint::Variable {
+                name: "speed".into(),
+                ty: inf_blueprint::Ty::Float,
+                default: Lit::Float(bad),
+                exposed: true,
+            }];
+            let issue = validate_class(&mut class)
+                .unwrap_or_else(|| panic!("a {bad} default must not ship"));
+            assert_eq!(issue.handler, "variable speed", "anchored to the variable");
+            assert!(issue.message.contains("not finite"), "{}", issue.message);
+        }
+
+        // The control: a finite default passes, so the check is not "refuse".
+        let mut ok = BlueprintClass::new("act:x", "X");
+        ok.variables = vec![inf_blueprint::Variable {
+            name: "speed".into(),
+            ty: inf_blueprint::Ty::Float,
+            default: Lit::Float(3.5),
+            exposed: true,
+        }];
+        assert!(validate_class(&mut ok).is_none());
+    }
 }
