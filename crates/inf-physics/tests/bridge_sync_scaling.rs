@@ -345,13 +345,39 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
     /// clear of the margin in the other direction.
     ///
     /// Both readings below 1.0 are the divisor being noisy upward (one run saw
-    /// a 2.43x calibration growth), which is the safe direction: noise in the
-    /// calibration can only *pass* a regression it cannot cause.
+    /// a 2.43x calibration growth), which only *passes* a regression. Noise in
+    /// the **small** leg is the unsafe direction — it deflates the divisor and
+    /// manufactures slack (a CI run measured 427.5 ns/entry there against the
+    /// 72 reference, a 0.16x "growth", 16.84x slack, on byte-untouched code) —
+    /// so a divisor that invalidates itself is named and skipped below rather
+    /// than divided by.
     const GROWTH_MARGIN: f64 = 3.0;
     /// The two populations the growth is measured across. Named so the arm and
     /// the calibration cannot drift apart about which sizes they compare.
     const GROWTH_SMALL: u32 = 1_000;
     const GROWTH_LARGE: u32 = 13_000;
+
+    // Not measured on a paravirtual macOS runner at all. That environment has
+    // gone red on this arm four times while `inf-physics` was byte-untouched —
+    // the last two on *consecutive* runs, one per half, each half's control
+    // blaming the opposite direction: the CLOCK trip read the workload 15% hot
+    // (230.4 ns/entity) while its calibration read 0.99x reference, and the
+    // next run's WORLD trip read the workload's raw growth at 2.63x — the last
+    // green run's own figure — while the calibration's small leg read 427.5
+    // ns/entry, a descent that "sped up" six-fold per entry as the tree grew
+    // thirteen-fold. An environment that invalidates both controls in opposite
+    // directions on identical bytes cannot support a ratio between two
+    // microbenchmarks. The functional arms in this file still run there; real
+    // macOS hardware still measures; Windows and Linux CI still assert both
+    // halves.
+    if cfg!(target_os = "macos") && std::env::var_os("CI").is_some() {
+        eprintln!(
+            "SKIP the measured halves: paravirtual macOS CI has invalidated both of \
+             this arm's controls in opposite directions on byte-identical code. The \
+             functional arms in this file still ran."
+        );
+        return;
+    }
 
     let mut report: Vec<(u32, f64)> = Vec::new();
     for n in [GROWTH_SMALL, 5_000, GROWTH_LARGE] {
@@ -411,37 +437,35 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
          growth of {calib_growth:.2}x ({calib_small:.1} -> {calib_large:.1} ns/entry) \
          = {slack:.2}x (margin {GROWTH_MARGIN}x)"
     );
-    assert!(
-        slack < GROWTH_MARGIN,
-        "per-entity steady-state sync cost grew {growth:.2}x from {small_n} to {n} \
-         entities ({small_ns_per_entity:.1} -> {ns_per_entity:.1} ns/entity) while a \
-         bare BTreeMap descent over the same two populations, on this machine, in \
-         this process, grew {calib_growth:.2}x — {slack:.2}x more than it should, \
-         against a margin of {GROWTH_MARGIN}x. Work proportional to the POPULATION \
-         has been re-introduced inside the per-entity step: a `contains` over the \
-         seen set, a scan per contact, a rebuild of the reverse map. (A slower \
-         machine cannot fail this by being slow — the divisor is measured on it.)"
-    );
+    // The control must not invalidate itself: a BTreeMap descent cannot run
+    // materially *faster* per entry at thirteen times the population, so a
+    // growth below 0.8x means a calibration leg was preempted mid-measurement.
+    // A garbage divisor proves nothing in either direction — the honest verdict
+    // is a named skip of this half, with the raw growth printed so a real
+    // regression is still visible in the log, and the CLOCK half below still
+    // gets its own answer from the large leg alone.
+    if calib_growth < 0.8 {
+        eprintln!(
+            "SKIP the WORLD half: the calibration invalidated itself \
+             ({calib_small:.1} -> {calib_large:.1} ns/entry is a {calib_growth:.2}x \
+             growth no descent exhibits — a leg was preempted). Raw workload growth \
+             {growth:.2}x over {small_n} -> {n} entities."
+        );
+    } else {
+        assert!(
+            slack < GROWTH_MARGIN,
+            "per-entity steady-state sync cost grew {growth:.2}x from {small_n} to {n} \
+             entities ({small_ns_per_entity:.1} -> {ns_per_entity:.1} ns/entity) while a \
+             bare BTreeMap descent over the same two populations, on this machine, in \
+             this process, grew {calib_growth:.2}x — {slack:.2}x more than it should, \
+             against a margin of {GROWTH_MARGIN}x. Work proportional to the POPULATION \
+             has been re-introduced inside the per-entity step: a `contains` over the \
+             seen set, a scan per contact, a rebuild of the reverse map. (A slower \
+             machine cannot fail this by being slow — the divisor is measured on it.)"
+        );
+    }
 
     // ── CLOCK: the absolute ratchet, only where it was measured ─────────────
-    //
-    // Not on a paravirtual macOS runner. That environment has failed this half
-    // three times while inf-physics was byte-untouched — the third at
-    // 230.4 ns/entity with the calibration reading 0.99x — because the
-    // calibration's BTreeMap descent is compute-bound and cannot see the
-    // memory-subsystem contention that actually slows the reconcile there: a
-    // control that answers "reference speed" while the workload runs 15% hot is
-    // not a control. The WORLD half above asserts everywhere, including here,
-    // and is the half that detects a real regression; real macOS hardware still
-    // asserts the clock.
-    if cfg!(target_os = "macos") && std::env::var_os("CI").is_some() {
-        eprintln!(
-            "SKIP the CLOCK half: paravirtual macOS CI, where the calibration has \
-             measurably failed to track the reconcile's own bottleneck. Measured \
-             {ns_per_entity:.1} ns/entity at {n} entities; the WORLD half was asserted."
-        );
-        return;
-    }
     let calib = calib_large;
     let ratio = calib / CALIBRATION_REF_NS;
     let calibrated = calib <= CALIBRATION_REF_NS * CALIBRATION_TOLERANCE;
