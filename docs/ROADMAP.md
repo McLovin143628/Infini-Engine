@@ -18110,3 +18110,283 @@ changed. That constraint was the campaign's real difficulty and it is its most
 load-bearing result: the tree is measurably faster, materially safer against
 data loss, and byte-for-byte the same where it counts. The rediscovery round
 follows separately, and these numbers are what it will be measured against.
+
+## Hardening Wave H (round 2) — engine/Rust
+
+The first repair wave of the **re-discovery** round. Round 1's seven lenses were
+re-run against the repaired tree; this wave takes the Rust-side half of what they
+found — lens 3+4's B-items, lens 5+6's R2.A–D, lens 1+2's R2-1/2/3/5/6/9, and the
+MED/LOW/test-integrity clusters. Lens 7's TypeScript front and the two
+cross-confirmed items (B4/B10) are Wave I's.
+
+### The headline: a closure that was BROKEN, not standing
+
+Round 1 closed C4-30 — *"a collider that will not build is never recorded as
+built"* — and its own report certified the fix. It was wrong, and the correction
+is the campaign's own law biting: **a fix with two halves needs an accessor for
+the half that has no behaviour**, and nothing measured what the added conjunct
+*suppressed*.
+
+`rec.col.as_ref() != snap.collider.as_ref() && rec.col_refused != snap.collider`
+bounds the retry correctly. It also kills a legitimate **removal**: with
+`col = Some(A)`, `col_refused = None` and a component taken away,
+`snap.collider = None` makes the second conjunct `None != None` = **false**, so
+`remove_collider` never runs and the shape stays in rapier for the rest of the
+session. Ghost mode, a disabled trigger, a Details edit during Simulate all take
+that path. The 2D mirror kept the plain `rec_col != snap.col` and its comment
+says it needs no brake — so **the two bridges disagreed**, and both PIE and
+shipping drive the 3D one, which is why every parity gate was blind to it.
+
+One `decided` term (`col.or(col_refused)` — never both, because
+`attach_collider` returns exactly one) is the same bound with no hole, and it is
+literally the 2D predicate once the refusal is folded in. Five arms in
+`tests/collider_map.rs`, which had no removal transition at all; they assert
+**rapier's own state**, because the bridge's record was consistent with the stale
+world and every accessor answered from it.
+
+### What else landed
+
+**The import door had a second entrance (B2).** `inf_mesh::validate`'s module doc
+says a mesh from outside is checked "before any of it becomes engine data", and
+for `.gltf`/`.glb`/`.obj` that is true. A `.inf_mesh` **on disk** is also bytes
+somebody else wrote, and `MeshAsset` used the default `AssetPayload::migrate`,
+which reads one integer. Both production consumers hand its index buffer to
+`meshopt::generate_vertex_remap` through raw FFI — C4-1's out-of-bounds heap
+**write**, verbatim, at a door the validator never sees. `MeshAsset::migrate` now
+asks the three `validate.rs` questions plus the `skin.len() == vertices.len()`
+invariant `SubMesh`'s own doc states and nothing enforced, and `build_vgeom` has
+`optimize()`'s backstop.
+
+Then the **sweep**: the remaining twelve default-`migrate` implementors were
+dispositioned against one question — *does any production consumer use a field
+as an index, an allocation size, a divisor or an FFI argument with no bound of
+its own?* The table lives in `AssetPayload::migrate`'s doc so a new implementor
+has to answer it. Two more needed one:
+
+* **`SkeletonAsset`** — and this was a live crash. `Skeleton::joints` is private
+  and `Skeleton` derives `Deserialize`, and serde's derive is expanded in
+  `skeleton.rs` itself, so it builds the struct straight from the wire and
+  `Skeleton::new`'s validation **never runs on the decode path**. A `.inf_skel`
+  naming a parent past its own joint list decoded cleanly, and
+  `pose::global_transforms` does `globals[p as usize]` with no bound —
+  reachable from every posed character, every socket resolve, every cloth and
+  hair seed, and the IK solve, in the editor, in PIE and in the shipped player
+  reading a cooked pack.
+* **`VgeomMesh`** — safe today only because every production path happens to go
+  through `VgeomSource`, while `triangle()`'s own doc says it panics on a corrupt
+  payload. It implements `AssetPayload`, so a generic caller can decode one
+  without reaching that module at all. The rule moved onto the type and now also
+  covers the `levels` and `groups` tables, which the container-side validator
+  never looked at.
+
+**A NaN from a third-party EXR reached committed terrain (B3).** NaN is the
+*conventional* no-data value in a float height EXR. `map_sample` reads like the
+guard and is not: `Normalized` does `v.clamp(0.0, 1.0)`, and Rust's `clamp`
+returns `self` when neither comparison fires — exactly what a NaN does to both —
+while `FloatMeters`, which the wizard offers whenever the source is float,
+returns `v` untouched. Downstream is `.inf_terrain`, rapier heightfields,
+`terrain.height_at`, the clipmap and erosion, and `height_bounds` uses
+`f32::min`/`max`, which ignore NaN, so the tile's bounds look healthy the whole
+way. Refused at the `decode_rows` sink, so both tilers are covered by one check
+and cannot disagree; `TerrainTile::set_sample` got its sibling's C4-35 guard for
+the seven writers that cross no door.
+
+**The LSP client (B5/B6 + the pending-sender MED).** `Content-Length` was parsed
+into a `usize` and handed to `vec![0u8; len]` before a body byte was read.
+Replies were discriminated on `id` alone — but JSON-RPC server→client *requests*
+carry one too, and rust-analyzer sends three; each took the reply branch and
+resolved a real completion or hover with `Null`, indistinguishable from "no
+results". And every pending `Sender` lived in the map rather than on the reader's
+stack, so the reader dying closed no channel and `recv_timeout` burned its full
+timeout against a server that had already exited — ~25 parked blocking threads
+steady-state after Wave E moved `send_request` onto `spawn_blocking`.
+
+**The PIE retry that did not exist (B7).** C4-44's success-only latch is right,
+but the block lives in `ApplicationHandler::resumed`, whose first statement
+returns early once `live` is set and whose same arm sets it — so it runs **once
+per process**, and `hwnd_reported` had exactly one reader: itself. The warning
+said "retrying on the next frame" and nothing did. Now called from `frame()` too,
+bounded so a genuinely closed pipe is not written to sixty times a second.
+
+**The seam skip was blind to the editor's own writers (B9).** Wave E's
+`apply_seam` skip is sound in the *player*, whose only writer of
+`scene.terrains` is `project_scene`. This host has two more —
+`sync_streamed_terrain` and `after_terrain_edit` — which re-project **in place**,
+outside `rebuild_scene`, because neither a camera step nor a sculpt dab bumps the
+document version. Neither could be caught by the skip, because the skip compares
+the projection **against itself**: by the next rebuild every signature matches
+and everything is carried. Invalidating `synced_version` alone does not close it
+— that forces the projection to *run*, and the run then skips. `seam_dirty` is
+the term that makes the run recompute. The enforcement is a source gate over the
+**whole rule**: every assignment into `scene.terrains` outside the projection
+must arm the flag, with an anti-vacuity floor, so a third writer fails by name.
+
+**Two save-path corrections.** `zstd_decode` had no output ceiling and L5.F12's
+`uncompressed_len` check sits *after* the decode (B12). And the level's two-file
+commit: C4-2's argument that the only reachable interleaving is "new payload, old
+sidecar" presumes there *is* an old sidecar — on a **first** save there is not,
+so a failed sidecar write leaves a `.inf_lvl` alone and `AssetDb` synthesizes a
+**content-derived** GUID that then churns with the level's contents on every
+later save (B11). The pair rolls back the way `write_asset` already does, decided
+on the **payload's** prior existence; a re-save keeps its behaviour on purpose.
+
+**The confinement gate's scope (B13).** L7.H6's source gate enumerates four
+modules and six more commands take a path from the webview. Widening it needed a
+*decision*, not a `confine_existing`: reading a `.gltf` off the Desktop is the
+product's core workflow. So the rule now has two ways to be satisfied — confine
+the path, or appear in `READ_ANYWHERE` **with the reason and the exposure written
+down** — which turns an invisible gap into a recorded one, allowlist-shaped per
+the P22 law. The *write* halves are confined regardless:
+`AssetProject::content_dir` refuses a destination folder with any non-`Normal`
+component (it was `root.join(sub)` + `create_dir_all` over a webview string), and
+`project_package` refuses a relative `out_dir`, which resolved against the
+**editor process's** working directory.
+
+**"Cannot tell" is not "no" (B14/B14b).** `inf export --target web` probed
+`wasm-bindgen` and never `wasm32-unknown-unknown`, so without the target it
+hard-failed where it used to ship a skeleton — contradicting `ToolAbsent`'s own
+doc. And `wasm_target_installed()` collapsed an unreadable libdir into `false`,
+so a mod with a genuine compile error was re-classified `ToolchainMissing` and
+`inf cook-mods` exited **0 with no wasm**: the silent-ship outcome C4-40 closed,
+through another door. `wasm_target()` is tri-state; `NotFound` is the one io
+error that really means absent; both call sites act only on a definite `Absent`.
+
+**The rename that drops the mode (R2.A).** Wave A's own doing: before it these
+writes were `std::fs::write`, which keeps the destination inode and therefore its
+permission bits. Temp-plus-rename creates a new file at the umask's mode, so an
+executable script saved through the IDE's Ctrl+S came back non-executable —
+invisible to CI, because the only leg that drives that door is Windows. The
+symlink question is now documented rather than implicit: this door **replaces**
+the link, because writing through it cannot be atomic without staging in the
+target's directory.
+
+**The libm ban list, once (R2.B).** Six hand-copies existed and had diverged: the
+erosion mirror banned `f64::cos(` over a module whose parameters are `f32`; the
+fracture gate was missing sixteen UFCS twins including `f64::cbrt(` — the exact
+function the P22.4 widening was for — and every glam entry; the physics gate had
+no `.atan()`. None was a live escape, which is precisely the problem.
+`inf_math::libm_ban` is the one list and `covers_both_spellings` the per-gate
+completeness meta-arm (the `inf-pcg` pattern, hoisted).
+
+**The clip-to-rig identity tie (R2.C).** `AnimClipAsset::skeleton` records a
+GUID while the coupling is **positional** — `track.joint` is a `u16` index into
+`Pose::locals`, index-aligned to `Skeleton::joints`. A rig re-imported with a
+joint inserted re-binds every track past the edit, **in range**, so nothing
+refuses it and the character animates the wrong bones; every parity gate is blind
+because both sides read the same two assets and both are wrong together. The tie
+is the `.inf_vmesh` derivation's own `recorded_source_hash` pattern in the
+sidecar, so **no schema moves** — which matters, both payloads being positional
+bincode. An advisory rather than a refusal, per the cook doctrine. This **widens
+recorded bound B57's decision to five instances**; the other three are recorded
+as data in `DEFERRED_INSTANCES` with what each would need.
+
+**The freeze table's count guard counted the wrong thing (R2.D).** It counts
+table *rows*, so it fires when a row is removed and never when an enum is
+*added* — a nineteenth wire enum ships with no discriminant pin and the file
+stays green. The eighth vacuous-gate shape of this campaign. The fix is L7.M7's
+drift-gate shape: a **census** of the module's own source, in both directions.
+
+**And the lifetime/correctness cluster:** the editor's skinned cache keyed by
+`(mesh, skeleton)` while its value never looked at the skeleton, so N characters
+on N rigs held N byte-identical copies and uploaded N times (R2-1); `DebrisCache`
+never retained against the live fracture set, so a despawned actor's packed
+payload outlived the session (R2-2); `warned_colliders`, the one map in the
+physics bridge that could only grow, with synthetic per-chunk keys (R2-3);
+`u64 << 64` on a burst loss of exactly 64, and the reliable reorder buffer — the
+only container in that struct filled by the *peer's* numbers — uncapped (R2-5);
+the power-of-two palette tail, which Wave D's note called unreadable and which
+the shader reads because wgpu clamps against the **binding's** length rather
+than `joint_count`, plus the `!is_empty()` gate that made a reused VSM slot
+rasterize with the previous instance's matrices (R2-6); and raw input state that
+outlives its device, so a window losing focus with W held left the character
+running for the session (R2-9).
+
+### DECLINED / DEFERRED, with the reason
+
+* **The three remaining L5.F11 staleness instances** (`DerivedMaterial`, the
+  cloth garment and hair scalp bindings, which are index-aligned to *vertices*)
+  — recorded as data in `skeleton_binding::DEFERRED_INSTANCES`. They challenge
+  recorded bound **B57**'s scope, and a recorded bound is changed deliberately
+  with its own bump.
+* **`build_vgeom`'s arm is not mutation-verified by removing the guard.** Doing
+  that makes the test perform the out-of-bounds heap write it exists to prevent,
+  which is the finding rather than a verification of it. It carries a
+  clusterizing control instead, so it can only pass while the branch is taken.
+* **`project_package`'s absolute `out_dir` stays unconfined.** Putting a build on
+  the Desktop is what the door is for; it is in `READ_ANYWHERE` with that reason.
+* **The remainder of the MED/LOW/test-integrity cluster** — see the round-2
+  triage ledger's ROUND 2 lines for the per-item disposition.
+
+### The laws this wave earned
+
+* **A closure certified by the same reading that made it is not verified.** B1
+  stood in round 1's own report and was broken; the correction came from
+  re-deriving the predicate from the *other* starting state. Check a two-armed
+  predicate from every state, not from the one the fix was written against.
+* **A guard that only forces a recomputation to RUN has not made it recompute.**
+  B9's prescribed `synced_version = None` is necessary and not sufficient,
+  because the comparison that decides is against a list the writer already
+  updated. A skip that compares a projection against itself needs a term from
+  outside it.
+* **"The question could not be asked" is not "the answer is no."** B14b, and the
+  general shape of every probe that returns a `bool`.
+* **A count of what somebody wrote cannot see what somebody added.** R2.D, and
+  the reason a census reads the source rather than the table.
+* **Where two copies of a value straddle a crate boundary with no dependency
+  between them, the pin is a source read.** The `player.toml` schema, and
+  Wave C's law applied to a number rather than an expression.
+
+### VERIFICATION
+
+`cargo test --workspace --no-fail-fast -j 3` = **267 binaries / 4 779 passed /
+0 failed / 9 ignored** against a baseline of **266 / 4 738 / 0 / 9** (Wave G,
+plus the two pushed fixture-fix commits, which added no tests). The delta is
+**+1 binary** (`editor/crates/inf-viewport/tests/seam_out_of_band.rs`) and
+**+41 tests**, attributed name by name against Wave G's own run: **40 names
+added, 0 removed**, the 41st being `this_gate_bans_everything_the_canonical_
+list_does`, which exists once in `inf-anim` and once in `inf-pcg`.
+
+Workspace clippy `-D warnings` clean; `cargo fmt --all --check` clean; rustdoc **450 / ceiling 450**
+with the doc cache cleared first, so ci.yml's ceiling does **not** move. Goldens **54,
+unchanged** — no `.png` and no `.inf_*` in this wave's diff at all. No
+TypeScript touched. **NOT PUSHED.**
+
+**MUTATIONS: 6 applied, 6 killed.**
+
+* Restoring the two-conjunct collider predicate fails exactly three of the five
+  removal arms and nothing else.
+* Deleting the `warned_colliders` prune fails only `the_warned_set_is_pruned_
+  with_its_entity` — which is why `warned_collider_count()` had to exist: the
+  refusal counter is monotone by design and cannot see the set beside it.
+* Neutering the `decode_rows` finiteness predicate fails only the EXR arm.
+* Blanking one of the two `seam_dirty = true` assignments fails the source
+  gate's writer arm and nothing else.
+* An arm that drove packets through the public receive path left the `u64 << 0`
+  mutation **green** — a forward jump always delivers, so the shift's only
+  observable is the bitfield. Re-written to assert `recv_bits` directly, where
+  it dies. (Counted as the fifth and sixth: the failed arm and its replacement.)
+
+Not mutation-verified, deliberately: `build_vgeom`'s guard (see the DEFERRED
+section — removing it makes the test do the out-of-bounds heap write).
+
+### MACHINE OPS
+
+* **`git checkout -- <file>` destroyed an uncommitted fix again.** The same
+  Wave-E incident, in the same shape: a mutation was reverted with `git
+  checkout` while the *repair itself* was still uncommitted, and the whole
+  inf-net change went with it. It had to be redone from the scratchpad script.
+  **COMMIT BEFORE MUTATING** is not advice, and it now has two scars.
+* **The eaten-`\` law bit four times in one wave** — every one a scripted edit
+  to a Rust string literal where a lone `\` before a newline in a non-raw
+  Python string is a *Python* continuation. Wave G's workspace guard
+  (`inf-packager`'s `advisory_source_gate`) caught all four, on its own first
+  run over this wave's code each time, which is exactly what it is for. Use a
+  raw string or a heredoc, and run the guard before committing rather than
+  after.
+* `cargo test --workspace --no-run -j 3` from warm took **>10 minutes** and blew
+  a foreground timeout; the battery itself then took **~4 minutes**, because the
+  pre-flight had already built it. Run the pre-flight detached too.
+* `target/debug/incremental` alone was **57 GB** at the end of the battery, with
+  39 GB free on the volume. Deleting it recovered the disk to 95 GB before
+  clippy — which is Wave B's law (*it is clippy-after-a-battery that fills the
+  volume*) obeyed cheaply, without a full `cargo clean` and its cold rebuild.

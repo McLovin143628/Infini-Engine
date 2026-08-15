@@ -1011,8 +1011,7 @@ mod tests {
                 &mut noop_progress(),
                 &never_cancel(),
             )
-            .err()
-            .expect("the chunked tiler accepted a non-finite sample");
+            .expect_err("the chunked tiler accepted a non-finite sample");
             assert!(
                 e.to_string().contains("finite"),
                 "the two tilers disagree about a non-finite sample: {e}"
