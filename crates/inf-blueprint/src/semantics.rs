@@ -10,9 +10,18 @@
 //! so a Tick handler can read/write `vars::*` and call engine APIs through the
 //! same [`Host`](crate::interp::Host) boundary the transpiled Rust uses.
 //!
-//! Enums here use serde's **default (externally-tagged) representation** so the
-//! `.inf_act`/`.inf_fn` bincode payloads round-trip (bincode rejects
-//! internally-tagged enums).
+//! Enums here use serde's **default (externally-tagged) representation** — kept
+//! that way because bincode rejects internally-tagged enums, and because it is
+//! what makes a variant travel as its *name*.
+//!
+//! **The wire is pretty JSON, not bincode** (lens 5 F15, Hardening Wave G).
+//! `BlueprintClass` carries `skip_serializing_if` fields, which a
+//! non-self-describing stream cannot round-trip, so `.inf_act`/`.inf_fn` are
+//! written by `inf_editor_core::samples::encode_actor` as JSON. This paragraph
+//! said "bincode payloads" and had done since P6, which reads as the positional
+//! rule — reorder-unsafe, rename-safe — and the truth is the exact opposite:
+//! reordering these enums is wire-safe and **renaming a variant is not**. The
+//! full contract, with its pin, is on [`EventKind`]'s water block below.
 
 use std::collections::{BTreeMap, HashMap};
 

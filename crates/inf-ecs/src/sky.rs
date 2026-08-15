@@ -331,17 +331,52 @@ pub fn reset_orphan_atmosphere_warning() {
 /// Latched, because `resolve_sky` runs every frame in two projectors. Cheap after
 /// the first hit (one relaxed atomic load), and cheap before it too: the query is
 /// archetype-scoped exactly like [`sky_authority`].
+/// **Which** `SkyAtmosphere` the warning below names: the one with the lowest
+/// `Guid` that is not the authority's (lens 6 F12, Hardening Wave G).
+///
+/// The pick used to be `find`, i.e. whichever the archetypes happened to yield
+/// first. [`sky_authority`] twenty lines up chooses its winner by an explicit
+/// comparison for exactly this reason, and this pick is quoted at an author *by
+/// name*: a level with two stray atmospheres would name a different one
+/// depending on the order its entities were spawned in, so the same level could
+/// produce two different warnings on two runs and the second author to read the
+/// log would go looking at the wrong entity.
+///
+/// A **separate function** rather than an inline fold because a `tracing` field
+/// is not something a test can read — Wave B's law, that a fix with two halves
+/// needs an accessor for the half that has no behaviour. This is the door the
+/// warning goes through and the door the arm reads, so there is one answer to be
+/// right about rather than two.
+///
+/// An entity with no `Guid` sorts after every entity that has one, and wins only
+/// when nothing else is there.
+#[doc(hidden)]
+pub fn orphan_atmosphere(world: &EcsWorld, authority: Option<Entity>) -> Option<Entity> {
+    let w = world.world();
+    let mut q = w.try_query_filtered::<(Entity, Option<&Guid>), With<SkyAtmosphere>>()?;
+    let mut best: Option<(bool, Option<Uuid>, Entity)> = None;
+    for (entity, guid) in q.iter(w) {
+        if Some(entity) == authority {
+            continue;
+        }
+        // `None` must sort *after* every `Some`, which is the opposite of what
+        // `Option`'s own order does, so the key leads with the presence bit.
+        let key = (guid.is_none(), guid.map(|g| g.0), entity);
+        if best.is_none_or(|b| key < b) {
+            best = Some(key);
+        }
+    }
+    best.map(|(_, _, e)| e)
+}
+
 fn warn_orphan_atmosphere(world: &EcsWorld, authority: Option<Entity>) {
     if ORPHAN_ATMOSPHERE_WARNED.load(Ordering::Relaxed) {
         return;
     }
+    let Some(orphan) = orphan_atmosphere(world, authority) else {
+        return;
+    };
     let w = world.world();
-    let Some(mut q) = w.try_query_filtered::<Entity, With<SkyAtmosphere>>() else {
-        return;
-    };
-    let Some(orphan) = q.iter(w).find(|e| Some(*e) != authority) else {
-        return;
-    };
     if ORPHAN_ATMOSPHERE_WARNED.swap(true, Ordering::Relaxed) {
         return; // another thread won the race; it logged.
     }
@@ -1050,6 +1085,40 @@ mod tests {
             "the authority's own (defaulted) atmosphere is what was used"
         );
         assert_eq!(orphan_atmosphere_warnings(), 1);
+
+        // Shape 3 (Hardening Wave G): with TWO strays, the one named is the
+        // lowest `Guid`, not whichever archetype order yields first. The
+        // fixture spawns them in DESCENDING guid order on purpose — under the
+        // old `find` the answer was the higher guid, and this arm is the only
+        // thing that can see which one the log will point an author at.
+        reset_orphan_atmosphere_warning();
+        let mut w = EcsWorld::new();
+        let clock = w.spawn_with_guid(uuid(1), "Sky", None);
+        w.world_mut().entity_mut(clock).insert(TimeOfDay::default());
+        let high = w.spawn_with_guid(uuid(9), "Stray High", None);
+        w.world_mut()
+            .entity_mut(high)
+            .insert(SkyAtmosphere::default());
+        let low = w.spawn_with_guid(uuid(2), "Stray Low", None);
+        w.world_mut()
+            .entity_mut(low)
+            .insert(SkyAtmosphere::default());
+        assert_ne!(high, low, "the fixture must have two distinct strays");
+        assert_eq!(
+            orphan_atmosphere(&w, sky_authority(&w)),
+            Some(low),
+            "the orphan quoted at the author must be the lowest-Guid one, not              the one the archetypes happen to yield first"
+        );
+        // And the authority itself is never the orphan, even once it carries an
+        // atmosphere of its own.
+        w.world_mut()
+            .entity_mut(clock)
+            .insert(SkyAtmosphere::default());
+        assert_eq!(
+            orphan_atmosphere(&w, sky_authority(&w)),
+            Some(low),
+            "the authority's own atmosphere was reported as an orphan"
+        );
 
         // The healthy shape — atmosphere ON the authority — must stay silent.
         reset_orphan_atmosphere_warning();

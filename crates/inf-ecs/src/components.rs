@@ -2346,10 +2346,20 @@ pub enum DistanceModel {
 /// drained host-side into the long-lived `inf_audio::AudioEngine`. Nothing here is
 /// a device handle — only the authoring intent.
 ///
-/// Additive component: every field carries `#[serde(default)]`. Like the anim
-/// components it is **not yet an `EntityRecord` slot** — the v6 `.inf_lvl`
-/// migration is pinned (`audio_components_serde_round_trip` documents the gap); no
-/// schema bump is made here.
+/// Additive component: every field carries `#[serde(default)]`.
+///
+/// ## Persistence
+///
+/// **Persisted since scene v6.** `EntityRecord` carries `audio_source` and
+/// `audio_listener` slots (`inf_scene`), and the v5 downgrade path strips
+/// exactly those two. This block used to say the opposite — "not yet an
+/// `EntityRecord` slot … no schema bump is made here" — describing the state of
+/// the tree at the moment it was written, one batch before the v6 bump that
+/// closed it, and it was still here at v20. The same sentence, in the same
+/// words, was stale on [`SkeletalMesh`] for fifteen schema versions (lens 5
+/// F15, Hardening Wave G): *a "not yet" in a doc comment has no expiry and
+/// nothing checks it*, which is why the claim now names the version it became
+/// true at rather than the one it was false at.
 #[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[reflect(Component, Default)]
 pub struct AudioSource {
