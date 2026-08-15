@@ -135,8 +135,9 @@ impl SimScheduleBuilder {
 
         // Flag unordered conflicting systems: within a fixed step, any two systems
         // with overlapping access MUST carry an ordering edge, or the step is not
-        // deterministic. `Warn` (not `Error`) so the schedule always builds and
-        // [`SimSchedule::conflict_report`] can resolve system names — the empty
+        // deterministic. `Warn` (not `Error`) so the schedule always BUILDS —
+        // an `Error` panics at construction, which would take the probe below
+        // down with it and hand CI a panic instead of a report. The empty
         // conflict-report test is the hard gate (deliverable 2), backed by the
         // replay-determinism harness (§8).
         //
@@ -145,6 +146,10 @@ impl SimScheduleBuilder {
         // is that the report is the whole of the enforcement, so it is driven
         // over every configuration this builder can produce rather than over the
         // one the first test happened to build (Hardening Wave C, L6.F11).
+        //
+        // The rationale this comment used to carry — "so `conflict_report` can
+        // resolve system names" — was never true: without `bevy_ecs`'s `debug`
+        // feature every name is one placeholder string. See that function's docs.
         schedule.set_build_settings(ScheduleBuildSettings {
             ambiguity_detection: LogLevel::Warn,
             ..Default::default()
@@ -213,6 +218,16 @@ impl SimScheduleBuilder {
         sched
     }
 }
+
+/// What `bevy_ecs` puts in a system's name when its `debug` feature is off.
+///
+/// The full string is `"<Enable the debug feature to see the name>"`. Matched by
+/// prefix rather than in full so a reworded message still reads as "nameless"
+/// instead of silently becoming a name, and pinned by
+/// `a_nameless_system_is_reported_by_key` so the day the feature is turned on —
+/// or the string changes — a test says so rather than the report quietly
+/// degrading.
+const NAMELESS_PREFIX: &str = "<Enable the debug feature";
 
 /// A runtime sim schedule over an [`EcsWorld`]. Wraps a `bevy_ecs` [`Schedule`]
 /// without exposing it.
@@ -292,6 +307,29 @@ impl SimSchedule {
     /// combinations across two modes;
     /// `every_builder_configuration_is_free_of_unordered_conflicts` now drives
     /// all of them.
+    ///
+    /// # The pairs are KEYS, not names, and that is the honest half
+    ///
+    /// The rewritten doc above still overstated one thing, and the arm written
+    /// to check it found out within the hour: `System::name()` returns a
+    /// `DebugName`, which without `bevy_ecs`'s `debug` feature is the literal
+    /// string `"<Enable the debug feature to see the name>"` for **every**
+    /// system. So the original justification for `Warn` — "so the names can be
+    /// resolved" — was never true in this build, and a report of a real conflict
+    /// was a list of identical placeholders.
+    ///
+    /// The feature is deliberately **not** enabled: it would keep every system's
+    /// type name in the *shipped player* for the sake of a helper only tests
+    /// call. Instead a nameless system is identified by its [`SystemKey`], which
+    /// distinguishes the two halves of a pair and can be matched against
+    /// `systems()` in a debugger. Turn `bevy_ecs`'s `debug` feature on locally
+    /// and the names come back automatically.
+    ///
+    /// What survives of the `Warn` rationale is the half that was always true:
+    /// an `Error` refuses to *build*, so the schedule would panic at
+    /// construction and this probe could never run at all — CI would see a
+    /// panic instead of a report, and the propagation-only schedule would take
+    /// the whole editor down with it.
     pub fn conflict_report(&mut self, world: &mut EcsWorld) -> Vec<(String, String)> {
         let w = world.world_mut();
         // Build the schedule against the real world so component ids resolve.
@@ -315,15 +353,22 @@ impl SimSchedule {
             Ok(iter) => iter.map(|(k, s)| (k, format!("{}", s.name()))).collect(),
             Err(_) => std::collections::HashMap::new(),
         };
-        let name_of = |k: &SystemKey| {
-            names
-                .get(k)
-                .cloned()
-                .unwrap_or_else(|| "<unknown>".to_string())
+        // **A key when there is no name** (Hardening Wave C). `System::name()` is
+        // a `DebugName`, and without `bevy_ecs`'s `debug` feature every one of
+        // them stringifies to the literal
+        // `"<Enable the debug feature to see the name>"` — so a report of a real
+        // conflict used to be a list of identical placeholders, naming nothing
+        // and distinguishing nothing. The `SystemKey` is not a name, but it is
+        // *an identity*: two entries of a pair differ, and the key can be looked
+        // up against `systems()` in a debugger. A failure a human can act on
+        // beats a prettier one they cannot.
+        let identify = |k: &SystemKey| match names.get(k) {
+            Some(n) if !n.starts_with(NAMELESS_PREFIX) => n.clone(),
+            _ => format!("{k:?}"),
         };
         pairs
             .into_iter()
-            .map(|(a, b)| (name_of(&a), name_of(&b)))
+            .map(|(a, b)| (identify(&a), identify(&b)))
             .collect()
     }
 }
@@ -467,20 +512,25 @@ mod tests {
         p.0 += 2;
     }
 
-    /// **The report can see a conflict, and it NAMES it.**
+    /// **The report can see a conflict, and it distinguishes the two systems.**
     ///
     /// Every other arm here asserts the report is *empty*, which a
-    /// `conflict_report` that always returned empty would satisfy perfectly —
-    /// a failed `initialize`, a bevy upgrade that moved `conflicting_systems`,
-    /// a filter that dropped everything. And the name resolution is its own
-    /// silent failure: `name_of` falls back to `<unknown>` when `systems()`
-    /// errors, so a report of `("<unknown>", "<unknown>")` pairs would be
-    /// useless and no emptiness assertion could tell.
+    /// `conflict_report` that always returned empty would satisfy perfectly — a
+    /// failed `initialize`, a bevy upgrade that moved `conflicting_systems`, a
+    /// filter that dropped everything. Two systems that both take
+    /// `ResMut<AmbiguityProbe>` and carry no ordering edge are exactly the state
+    /// the report exists to detect.
     ///
-    /// Two systems that both take `ResMut<AmbiguityProbe>` and carry no ordering
-    /// edge are exactly the state the report exists to detect.
+    /// **What this arm found when it was first run**, and why it no longer asks
+    /// for names: the report answered three pairs of
+    /// `"<Enable the debug feature to see the name>"` — `bevy_ecs`'s placeholder
+    /// for every system when its `debug` feature is off, which is the default
+    /// and which this crate deliberately does not turn on (see
+    /// [`SimSchedule::conflict_report`]). So the property worth asserting is not
+    /// the *name* but the **identity**: a report that cannot tell its two
+    /// systems apart is one nobody can act on.
     #[test]
-    fn the_conflict_report_can_see_a_conflict_and_names_it() {
+    fn the_conflict_report_can_see_a_conflict_and_tells_the_systems_apart() {
         let mut w = seeded_world();
         w.world_mut().insert_resource(AmbiguityProbe::default());
 
@@ -493,17 +543,60 @@ mod tests {
             "two unordered systems writing one resource were not reported — this \
              report cannot see the thing every other arm here trusts it to see"
         );
-        let named: Vec<&str> = conflicts
-            .iter()
-            .flat_map(|(a, b)| [a.as_str(), b.as_str()])
-            .collect();
-        for want in ["probe_bump_a", "probe_bump_b"] {
+        for (a, b) in &conflicts {
             assert!(
-                named.iter().any(|n| n.contains(want)),
-                "the report does not name `{want}`: {conflicts:?} — an unreadable \
-                 report is what `ambiguity_detection = Warn` was chosen to avoid"
+                !a.is_empty() && !b.is_empty(),
+                "an empty identifier in {conflicts:?}"
+            );
+            assert_ne!(
+                a, b,
+                "the report cannot tell the two conflicting systems apart: \
+                 {conflicts:?} — a failure nobody can act on is not a gate"
+            );
+            assert!(
+                !a.starts_with(NAMELESS_PREFIX) && !b.starts_with(NAMELESS_PREFIX),
+                "the report is still handing back bevy's nameless placeholder \
+                 instead of a key: {conflicts:?}"
             );
         }
+    }
+
+    /// **Why the identifiers are keys**, asserted rather than assumed.
+    ///
+    /// The fallback in `conflict_report` is only correct while `bevy_ecs`'s
+    /// `debug` feature is off *and* its placeholder still reads the way
+    /// [`NAMELESS_PREFIX`] expects. Both are somebody else's decisions. If either
+    /// changes, this fails and the report can be tightened back to real names —
+    /// which is the outcome to want, and the reason to notice.
+    #[test]
+    fn a_nameless_system_is_reported_by_key() {
+        let mut w = seeded_world();
+        w.world_mut().insert_resource(AmbiguityProbe::default());
+        let mut sched = SimSchedule::engine_default(ScheduleMode::Serial);
+        sched.schedule.add_systems((probe_bump_a, probe_bump_b));
+        let _ = sched.conflict_report(&mut w);
+
+        let raw: Vec<String> = sched
+            .schedule
+            .systems()
+            .expect("the schedule is initialized")
+            .map(|(_, s)| format!("{}", s.name()))
+            .collect();
+        assert!(!raw.is_empty(), "the schedule has no systems to name");
+
+        let nameless = raw
+            .iter()
+            .filter(|n| n.starts_with(NAMELESS_PREFIX))
+            .count();
+        assert_eq!(
+            nameless,
+            raw.len(),
+            "bevy is resolving {} of {} system names now — `debug` has been \
+             enabled or the placeholder changed. `conflict_report` can go back \
+             to reporting names; see its docs.",
+            raw.len() - nameless,
+            raw.len()
+        );
     }
 
     #[test]
