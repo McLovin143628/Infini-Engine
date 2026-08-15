@@ -462,9 +462,13 @@ mod tests {
     /// written from the same pixels.
     #[test]
     fn an_imported_image_is_a_tiled_container_that_still_reads_as_v1() {
-        let src = tempfile::tempdir().unwrap();
         let proj_dir = tempfile::tempdir().unwrap();
-        let png = write_corner_png(src.path(), "Corners", 260, 132);
+        // **Inside the project** (L7.H7). A source outside it records no path
+        // and raises an advisory saying so, which is a different test — see
+        // `a_source_outside_the_project_records_no_path`.
+        let src = proj_dir.path().join("Source");
+        std::fs::create_dir_all(&src).unwrap();
+        let png = write_corner_png(&src, "Corners", 260, 132);
 
         let mut proj = AssetProject::open(proj_dir.path()).unwrap();
         let dest = proj.content_dir("imported").unwrap();
@@ -503,13 +507,82 @@ mod tests {
         assert!(r.tile(0, 2, 1).is_some());
     }
 
+    /// **L7.H7 — a source outside the project records no path.**
+    ///
+    /// A sidecar is committed TOML. An absolute path in it carries the importing
+    /// machine's directory layout — and, on Windows, its OS username — into
+    /// every other checkout of the project. It had never fired in this repo only
+    /// because every committed sample is built programmatically rather than
+    /// imported.
+    ///
+    /// The capability given up is real and is pinned here rather than
+    /// discovered: re-import needs the recorded path, so a file imported from
+    /// outside the project cannot be re-imported until a copy lives under it.
+    /// The advisory says exactly that at import time.
+    #[test]
+    fn a_source_outside_the_project_records_no_path() {
+        let outside = tempfile::tempdir().unwrap();
+        let proj_dir = tempfile::tempdir().unwrap();
+        let png = write_corner_png(outside.path(), "Elsewhere", 260, 132);
+        let mut proj = AssetProject::open(proj_dir.path()).unwrap();
+        let dest = proj.content_dir("imported").unwrap();
+
+        let out = proj.import_file(&png, &dest).unwrap();
+        let id = out.primary.unwrap();
+        let sidecar = &proj.db().get(id).unwrap().sidecar;
+        assert_eq!(
+            sidecar.source, None,
+            "the sidecar records a path from outside the project: {:?}",
+            sidecar.source
+        );
+
+        // …and it is SAID, so the lost re-import is not a silent absence.
+        let note = out
+            .advisories
+            .iter()
+            .find(|a| a.contains("outside the project"))
+            .unwrap_or_else(|| panic!("no H7 advisory in {:?}", out.advisories));
+        assert!(note.contains("Elsewhere"), "names the file: {note}");
+        assert!(note.contains("re-import"), "names what is lost: {note}");
+
+        // The control: an image from INSIDE the project records its path,
+        // relative and forward-slashed, and raises no such note.
+        //
+        // **Different dimensions on purpose.** `write_corner_png` is a pure
+        // function of `(w, h)`, so a same-sized image has the same bytes, the
+        // same `ImportKey`, and comes straight back out of the import cache as
+        // the asset above — with that asset's `source: None`. The first draft of
+        // this control failed for exactly that reason and looked like the fix
+        // was broken.
+        let inside = proj_dir.path().join("Source");
+        std::fs::create_dir_all(&inside).unwrap();
+        let here = write_corner_png(&inside, "Local", 264, 132);
+        let ok = proj.import_file(&here, &dest).unwrap();
+        let rec = proj
+            .db()
+            .get(ok.primary.unwrap())
+            .unwrap()
+            .sidecar
+            .source
+            .clone();
+        assert_eq!(rec.as_deref(), Some("Source/Local.png"));
+        assert!(
+            !ok.advisories
+                .iter()
+                .any(|a| a.contains("outside the project")),
+            "{:?}",
+            ok.advisories
+        );
+    }
+
     /// The advisories reach the outcome, all three of them, and a large
     /// well-shaped texture raises none.
     #[test]
     fn import_reports_the_dimension_and_tail_cost_advisories() {
-        let src = tempfile::tempdir().unwrap();
         let proj_dir = tempfile::tempdir().unwrap();
-        let awkward = write_corner_png(src.path(), "Strip", 126, 15);
+        let src = proj_dir.path().join("Source");
+        std::fs::create_dir_all(&src).unwrap();
+        let awkward = write_corner_png(&src, "Strip", 126, 15);
         let mut proj = AssetProject::open(proj_dir.path()).unwrap();
         let dest = proj.content_dir("imported").unwrap();
 
@@ -535,7 +608,7 @@ mod tests {
         // …and the CONTROL: a 1024² material raises nothing at all, so the three
         // above are measuring their triggers rather than an importer that warns
         // about everything.
-        let fine = write_corner_png(src.path(), "Fine", 1024, 1024);
+        let fine = write_corner_png(&src, "Fine", 1024, 1024);
         let ok = proj.import_file(&fine, &dest).unwrap();
         assert!(ok.advisories.is_empty(), "{:?}", ok.advisories);
     }

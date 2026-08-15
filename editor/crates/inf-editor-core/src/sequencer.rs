@@ -353,10 +353,24 @@ pub fn list_sequences(root: &Path) -> Vec<String> {
             if path.extension().and_then(|e| e.to_str()) != Some("toml") {
                 continue;
             }
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                if let Ok(seq) = toml::from_str::<Sequence>(&text) {
-                    names.push(seq.name);
-                }
+            // C4-45: a file that is there and will not parse used to vanish from
+            // the list with no trace, so an author whose sequence stopped
+            // appearing had a directory listing and nothing else to go on. It is
+            // still skipped — a listing that refuses wholesale would be worse —
+            // but it is now said.
+            match std::fs::read_to_string(&path) {
+                Ok(text) => match toml::from_str::<Sequence>(&text) {
+                    Ok(seq) => names.push(seq.name),
+                    Err(e) => tracing::warn!(
+                        "{} will not parse as a sequence ({e}); it is on disk and not in \
+                         the list",
+                        path.display()
+                    ),
+                },
+                Err(e) => tracing::warn!(
+                    "{} could not be read ({e}); it is on disk and not in the list",
+                    path.display()
+                ),
             }
         }
     }

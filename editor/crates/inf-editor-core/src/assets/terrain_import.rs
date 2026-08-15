@@ -550,6 +550,16 @@ mod tests {
         let proj_dir = tempfile::tempdir().unwrap();
         let png = write_png(src.path(), "World.png", 65, 65);
         let mut proj = AssetProject::open(proj_dir.path()).unwrap();
+        // **Inside the project** (L7.H7): a heightmap outside it records no
+        // source path, so a reimport refuses by name. That is the deliberate
+        // trade and it has its own arm below.
+        let png = {
+            let inside = proj_dir.path().join("Source");
+            std::fs::create_dir_all(&inside).unwrap();
+            let dest = inside.join(png.file_name().unwrap());
+            std::fs::copy(&png, &dest).unwrap();
+            dest
+        };
         let s = TerrainImportSettings {
             tile_resolution: 17,
             meters_per_sample: 12.5,
@@ -580,6 +590,33 @@ mod tests {
         assert_eq!(again.path, first.path);
         assert_eq!(std::fs::read(&again.path).unwrap(), first_bytes);
         assert_eq!(proj.db().len(), 1, "reimport must not duplicate the asset");
+    }
+
+    /// L7.H7's other half, for the terrain wizard: a heightmap outside the
+    /// project records no source, so `reimport` refuses **by name** rather than
+    /// guessing a path. The refusal is the point — the alternative was a sidecar
+    /// carrying this machine's layout into every checkout.
+    #[test]
+    fn a_heightmap_outside_the_project_records_no_source_and_refuses_reimport() {
+        let outside = tempfile::tempdir().unwrap();
+        let proj_dir = tempfile::tempdir().unwrap();
+        let png = write_png(outside.path(), "Away.png", 129, 129);
+        let mut proj = AssetProject::open(proj_dir.path()).unwrap();
+        let s = TerrainImportSettings::default();
+        let built =
+            import_terrain(&mut proj, &png, &s, None, &mut |_| {}, &CancelToken::new()).unwrap();
+
+        assert_eq!(
+            proj.db().get(built.asset).unwrap().sidecar.source,
+            None,
+            "the sidecar records a path from outside the project"
+        );
+        let err = reimport(&mut proj, built.asset, &mut |_| {}, &CancelToken::new())
+            .expect_err("reimport must refuse rather than guess");
+        assert!(
+            err.to_string().contains("no import source"),
+            "the refusal must say why: {err}"
+        );
     }
 
     #[test]

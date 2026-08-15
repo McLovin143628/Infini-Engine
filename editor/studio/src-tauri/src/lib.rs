@@ -9,7 +9,10 @@
 mod commands;
 mod logging;
 // L7.M7: the drift gate for the four hand-written TypeScript wire mirrors that
-// sit outside the ts-rs bindings check. Test-only content.
+// sit outside the ts-rs bindings check. **Test-only**, and gated as such — its
+// helpers have no non-test caller, so a plain `mod` is three `dead_code`
+// warnings in the shipped build (and three clippy errors under `-D warnings`).
+#[cfg(test)]
 mod wire_mirror;
 
 use tauri::Manager as _;
