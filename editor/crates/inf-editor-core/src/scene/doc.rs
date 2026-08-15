@@ -10,6 +10,8 @@
 //! GUIDs, not bevy `Entity` ids, are the identity that crosses every boundary:
 //! entity ids are reused across despawn and never serialized.
 
+use std::collections::HashMap;
+
 use glam::{DVec2, DVec3};
 use inf_ecs::components::{
     AnimStateMachine, AtlasRect, Camera, Collider3D, ColliderShape3DKind, Foliage, FoliageInstance,
@@ -3040,21 +3042,34 @@ impl SceneDoc {
     pub fn snapshot(&mut self) -> SceneSnapshot {
         self.world.propagate();
 
+        // **One pass for the whole hierarchy** (lens 3, P23). `node_of` used to
+        // derive each node's `children` by scanning the ENTIRE `order` list and
+        // resolving `entity_of`/`parent_of`/`guid_of` for every candidate — so a
+        // snapshot was O(n^2) entity lookups, and a snapshot is what every
+        // `world://delta` costs, on every gizmo-drag mouse-move and every sculpt
+        // dab. Measured on this machine (release, `tests/delta_cost_bench.rs`):
+        // 13.1 ms at 1 000 entities, 338.0 ms at 5 000, **3 277.5 ms at 15 000**.
+        // The lens filed it as ~30 000 string allocations; the strings were never
+        // the term.
+        //
+        // The parent link is read once per entity here, and creation order is
+        // preserved because `order` is walked in order.
+        let mut children_of: HashMap<Uuid, Vec<String>> = HashMap::new();
+        let mut roots: Vec<String> = Vec::new();
+        for &g in &self.order {
+            let Some(e) = self.world.entity_of(g) else {
+                continue;
+            };
+            match self.world.parent_of(e).and_then(|p| self.world.guid_of(p)) {
+                Some(parent) => children_of.entry(parent).or_default().push(g.to_string()),
+                None => roots.push(g.to_string()),
+            }
+        }
+
         let nodes: Vec<SceneNode> = self
             .order
             .iter()
-            .filter_map(|&guid| self.node_of(guid))
-            .collect();
-        let roots: Vec<String> = self
-            .order
-            .iter()
-            .filter(|&&g| {
-                self.world
-                    .entity_of(g)
-                    .map(|e| self.world.parent_of(e).is_none())
-                    .unwrap_or(false)
-            })
-            .map(|g| g.to_string())
+            .filter_map(|&guid| self.node_of(guid, &children_of))
             .collect();
 
         SceneSnapshot {
@@ -3071,7 +3086,10 @@ impl SceneDoc {
         }
     }
 
-    fn node_of(&self, guid: Uuid) -> Option<SceneNode> {
+    /// `children_of` is [`snapshot`](Self::snapshot)'s single-pass parent index.
+    /// Passed in rather than rebuilt because rebuilding it per node is what made
+    /// a 15 000-entity snapshot take three and a quarter seconds.
+    fn node_of(&self, guid: Uuid, children_of: &HashMap<Uuid, Vec<String>>) -> Option<SceneNode> {
         let e = self.world.entity_of(guid)?;
         let name = self.world.name_of(e).unwrap_or("").to_string();
         let visible = self
@@ -3091,19 +3109,8 @@ impl SceneDoc {
             .parent_of(e)
             .and_then(|p| self.world.guid_of(p))
             .map(|g| g.to_string());
-        // Children in creation order (scan the order list).
-        let children: Vec<String> = self
-            .order
-            .iter()
-            .filter(|&&g| {
-                self.world
-                    .entity_of(g)
-                    .and_then(|ce| self.world.parent_of(ce))
-                    .and_then(|pe| self.world.guid_of(pe))
-                    == Some(guid)
-            })
-            .map(|g| g.to_string())
-            .collect();
+        // Children in creation order — from the index built once per snapshot.
+        let children: Vec<String> = children_of.get(&guid).cloned().unwrap_or_default();
 
         Some(SceneNode {
             guid: guid.to_string(),

@@ -614,6 +614,18 @@ fn report_sidecar_advisories(db: &AssetDb) {
     for line in db.sidecar_advisories() {
         tracing::warn!("content scan: {line}");
     }
+    // **`AssetDb::collisions()`'s first production consumer** (P26.5's record,
+    // Wave A's hand-off). The scan has detected two payloads claiming one GUID
+    // since P26.5 and refused the second — correctly, since silently
+    // re-pointing every edge in the graph at the intruder is the worse answer —
+    // and then said nothing, so the symptom an author meets is an asset that is
+    // in the folder and not in the drawer. A record nothing reads is not a
+    // report.
+    // `IdCollision` already writes itself in the P16 advisory shape (asset,
+    // consequence, remedy) — the sentence existed and had no reader.
+    for c in db.collisions() {
+        tracing::warn!("content scan: {c}");
+    }
 }
 
 /// The value an import records in its sidecar's `source` field — **`None` when
