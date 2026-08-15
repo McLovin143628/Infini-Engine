@@ -2809,6 +2809,33 @@ mod tests {
         );
     }
 
+    /// **The source pin for R2.F14.** The finding is that a seconds-long solve
+    /// ran inside `DccState::with`, and a command taking `State<'_, DccState>`
+    /// plus an `AppHandle` is not constructible in a unit test — the same reason
+    /// every settle check in this module is a source gate. So the two properties
+    /// are pinned on the text: the solve is **outside** the lock, and the apply
+    /// re-checks the stamp it solved against.
+    #[test]
+    fn the_unwrap_solves_outside_the_store_lock() {
+        let body = code_only(&body_of(SOURCE, "pub async fn dcc_unwrap("));
+        assert!(
+            body.contains("spawn_blocking"),
+            "`inf_dcc::unwrap` is a conjugate-gradient solve, seconds on a dense              mesh; `dcc.rs` states the rule 240 lines above and `dcc_save` follows it"
+        );
+        // The solve must not appear inside a `state.with(` block. Both `with`
+        // blocks close before it, so the call sits at the function's own
+        // statement level — which is exactly what `statements` measures.
+        let stmts = statements(&body_of(SOURCE, "pub async fn dcc_unwrap("), 4);
+        assert!(
+            stmts.iter().any(|l| l.contains("spawn_blocking")),
+            "the solve must be a statement of the command, not of a closure holding              the store lock: {stmts:?}"
+        );
+        assert!(
+            body.contains("session.generation() != solved_at"),
+            "an Op::Unwrap carries the corner list it solved for; applying it to a              mesh that moved meanwhile writes UVs onto corners nobody measured"
+        );
+    }
+
     /// **Round-2 finding R2.F15**: a project switch strands every open session.
     ///
     /// Asserted as WORLD state (the store is empty) rather than as "the call was
