@@ -692,6 +692,56 @@ impl PhysicsWorld3D {
         }
     }
 
+    /// Place the body **only if it is not already there** — the door the ECS
+    /// bridge pushes an authoritative (static / kinematic) pose through on every
+    /// fixed step (Hardening Wave G).
+    ///
+    /// Returns `true` if the body exists, whether or not anything was written.
+    ///
+    /// # Why the comparison is against rapier, and why it is exact
+    ///
+    /// The bridge re-asserts every static body's `Transform` sixty times a
+    /// second, and on a furnished town essentially none of them has moved since
+    /// the level loaded. Each assertion was two `RigidBodySet::get_mut`s — which
+    /// *mark the body modified* on their own, before anything is written — a
+    /// wake, and `query_dirty = true`, which throws away the whole query BVH.
+    /// That last one is why the BVH looked like it was being rebuilt once per
+    /// moving character: it was being invalidated once per *step* regardless, by
+    /// this path, and every rebuild after the first was the bridge's fault
+    /// rather than the character's.
+    ///
+    /// The comparison reads the **body's own state** rather than a copy the
+    /// bridge remembers writing. A remembered copy cannot see a body that
+    /// something else moved (a debug teleport, a gameplay shove through
+    /// [`world_mut`](super::PhysicsBridge3D::world_mut)), and would leave it
+    /// displaced for the rest of the session while the snapshot kept saying it
+    /// belonged elsewhere. Reading is also strictly cheaper than the `get_mut`
+    /// it replaces.
+    ///
+    /// Exact equality on purpose: these are `f64` values *copied* from the
+    /// entity's `Transform`, never computed, so "unchanged" is bit-equality and
+    /// an epsilon would only introduce a pose the world declines to reach.
+    ///
+    /// Dynamic bodies must never come through here — their pose is solver-owned
+    /// and the bridge does not push it — and that is the caller's rule, not
+    /// this function's.
+    pub fn set_body_pose_if_moved(
+        &mut self,
+        body: BodyId3D,
+        translation: DVec3,
+        rotation: DQuat,
+    ) -> bool {
+        let Some(rb) = self.bodies.get(body.0) else {
+            return false;
+        };
+        if rb.translation() == translation && *rb.rotation() == rotation {
+            return true;
+        }
+        self.set_body_translation(body, translation);
+        self.set_body_rotation(body, rotation);
+        true
+    }
+
     /// The body's linear velocity.
     pub fn body_linvel(&self, body: BodyId3D) -> Option<DVec3> {
         self.bodies.get(body.0).map(|rb| rb.linvel())

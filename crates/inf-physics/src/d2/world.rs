@@ -352,6 +352,29 @@ impl PhysicsWorld2D {
         }
     }
 
+    /// Place the body **only if it is not already there** — the 2D mirror of
+    /// [`PhysicsWorld3D::set_body_pose_if_moved`](crate::d3::PhysicsWorld3D::set_body_pose_if_moved),
+    /// which carries the full argument: the comparison is against rapier's own
+    /// state rather than a remembered copy, and it is exact because these are
+    /// values copied out of a `Transform` rather than computed.
+    ///
+    /// The angle is compared as the *stored* rotation rather than as the
+    /// caller's radians, so a body already at `angle` — however that angle was
+    /// spelled — is left alone. `Rotation::new` is the only construction either
+    /// side uses, so the two agree bit for bit.
+    pub fn set_body_pose_if_moved(&mut self, body: BodyId, translation: DVec2, angle: f64) -> bool {
+        let want = Rotation::new(angle);
+        let Some(rb) = self.bodies.get(body.0) else {
+            return false;
+        };
+        if rb.translation() == translation && *rb.rotation() == want {
+            return true;
+        }
+        self.set_body_translation(body, translation);
+        self.set_body_rotation(body, angle);
+        true
+    }
+
     /// The body's linear velocity.
     pub fn body_linvel(&self, body: BodyId) -> Option<DVec2> {
         self.bodies.get(body.0).map(|rb| rb.linvel())

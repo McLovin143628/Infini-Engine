@@ -61,6 +61,39 @@ impl EcsWorld {
         &self.registry
     }
 
+    /// **Does any live entity carry `T`?** — answered from the archetype table,
+    /// without visiting a single entity (Hardening Wave G).
+    ///
+    /// The door for the "this whole pass has nothing to do" early-out. Several
+    /// per-fixed-step passes exist to find a component that most levels do not
+    /// have at all — the 2D physics bridge on a pure-3D level, the `PcgVolume`
+    /// solid gather on a hand-authored one, the `Terrain` tile gather on an
+    /// interior — and each of them proved it by walking every entity in the
+    /// world with a component lookup apiece, sixty times a second, to find
+    /// nothing. This is O(archetypes), and an archetype count is a function of
+    /// how many distinct component *combinations* a level uses (tens), not of
+    /// how many entities it has (tens of thousands).
+    ///
+    /// Empty archetypes are skipped: bevy keeps an archetype alive after its
+    /// last entity leaves, so "an archetype mentions `T`" is not the same claim
+    /// as "something has a `T`", and a pass that early-outed on the first is
+    /// exactly as wrong as one that never early-outed at all — in the other
+    /// direction, and silently.
+    ///
+    /// A `false` here is a guarantee, not a hint: a caller may skip work
+    /// entirely. A `true` says only that the walk is worth doing.
+    pub fn has_component<T: bevy_ecs::component::Component>(&self) -> bool {
+        let Some(id) = self.world.component_id::<T>() else {
+            // The type has never been registered in this world, so nothing can
+            // be carrying it.
+            return false;
+        };
+        self.world
+            .archetypes()
+            .iter()
+            .any(|a| !a.is_empty() && a.contains(id))
+    }
+
     // ── reflection-driven properties (Details, P3.3) ─────────────────────
 
     /// Editable component properties for `entity` (registry order).

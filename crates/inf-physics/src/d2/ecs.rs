@@ -169,6 +169,25 @@ impl PhysicsBridge2D {
     /// bodies/colliders, update changed ones, and despawn bodies whose entity
     /// (or its physics components) disappeared. Runs in `Guid` order.
     pub fn sync_from_world(&mut self, world: &EcsWorld) {
+        // 0. **The pure-3D level's whole cost** (lens 3 P12, Hardening Wave G).
+        //    Both hosts call this unconditionally from the fixed step, so a
+        //    level that has never had a 2D component walked every one of its
+        //    entities — three component lookups apiece, thirteen thousand of
+        //    them on a furnished town — sixty times a second, to build an empty
+        //    `live` and reconcile nothing against nothing.
+        //
+        //    The tracked-set half of the guard is not decoration: a level whose
+        //    last 2D component was just deleted must still reach the despawn
+        //    sweep below, or its bodies would stay in the solver for ever.
+        //    `gather_voxels`' guard is the same two-clause shape for the same
+        //    reason.
+        if self.entities.is_empty()
+            && !world.has_component::<RigidBody2D>()
+            && !world.has_component::<Collider2D>()
+        {
+            return;
+        }
+
         // 1. Gather participating entities (RigidBody2D and/or Collider2D) in
         //    deterministic Guid order.
         let mut live: Vec<(Uuid, EntitySnapshot)> = Vec::new();
@@ -201,10 +220,11 @@ impl PhysicsBridge2D {
         // 2. Spawn / update. (Joints reconciled in a second pass, once every body
         //    exists, so a joint can always resolve its other body.)
         let mut seen: Vec<Uuid> = Vec::with_capacity(live.len());
+        // The d3 mirror's P30 filter: only an entity that has a joint or had one
+        // needs pass 4.
         let mut joint_desires: Vec<(Uuid, Option<JointSync2D>)> = Vec::new();
         for (guid, snap) in live {
             seen.push(guid);
-            joint_desires.push((guid, snap.joint));
             let kind = to_phys_kind(snap.rb.map(|r| r.kind).unwrap_or(BodyKind2D::Static));
             let (pos, rot) = transform_pose(&snap.transform);
 
@@ -214,6 +234,9 @@ impl PhysicsBridge2D {
                 let rec_col = rec.col;
                 let old_collider = rec.collider;
                 let body = rec.body;
+                if snap.joint.is_some() || rec.joint.is_some() {
+                    joint_desires.push((guid, snap.joint));
+                }
 
                 if rec_kind != kind {
                     self.world.set_body_kind(body, kind);
@@ -221,10 +244,12 @@ impl PhysicsBridge2D {
                         r.kind = kind;
                     }
                 }
-                // Static/kinematic follow their Transform; dynamic is solver-owned.
+                // Static/kinematic follow their Transform; dynamic is
+                // solver-owned — and the write is skipped when the body is
+                // already there, against rapier's own state. See the d3
+                // `set_body_pose_if_moved` for the argument and the numbers.
                 if kind != BodyKind::Dynamic {
-                    self.world.set_body_translation(body, pos);
-                    self.world.set_body_rotation(body, rot);
+                    self.world.set_body_pose_if_moved(body, pos, rot);
                 }
                 if rec_rb != snap.rb {
                     if let Some(rb) = snap.rb.as_ref() {
@@ -254,6 +279,9 @@ impl PhysicsBridge2D {
                     }
                 }
             } else {
+                if snap.joint.is_some() {
+                    joint_desires.push((guid, snap.joint));
+                }
                 // New entity → create its body, apply props, attach a collider.
                 let body = self.world.add_body(kind, pos, rot);
                 if let Some(rb) = snap.rb.as_ref() {
@@ -280,13 +308,19 @@ impl PhysicsBridge2D {
 
         // 3. Despawn: any tracked guid not seen this sync is gone. Removing the
         //    body drops its colliders AND any joints attached to it (rapier).
-        let seen: std::collections::BTreeSet<Uuid> = seen.into_iter().collect();
-        let gone: Vec<Uuid> = self
-            .entities
-            .keys()
-            .filter(|g| !seen.contains(g))
-            .copied()
-            .collect();
+        //    A merge over two guid-ordered sequences, not a set probe per
+        //    tracked entity — the d3 mirror's reasoning.
+        let mut gone: Vec<Uuid> = Vec::new();
+        let mut cursor = 0usize;
+        for guid in self.entities.keys() {
+            while cursor < seen.len() && seen[cursor] < *guid {
+                cursor += 1;
+            }
+            if seen.get(cursor) == Some(guid) {
+                continue;
+            }
+            gone.push(*guid);
+        }
         for guid in gone {
             self.collider_map_dirty = true;
             if let Some(rec) = self.entities.remove(&guid) {

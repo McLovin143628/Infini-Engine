@@ -179,11 +179,12 @@ fn the_world_is_exactly_what_the_snapshot_says() {
 #[test]
 fn the_steady_state_sync_does_not_scale_like_the_world() {
     const ITERS: u32 = 60;
-    /// Nanoseconds per entity per steady-state sync. **Minted at 700 against
-    /// the unrepaired 467.3** (13 000 entities, 6.0752 ms) — headroom for a
-    /// loaded machine, and a tripwire against the cost growing further while
-    /// the repair is being written.
-    const CEILING_NS_PER_ENTITY: f64 = 700.0;
+    /// Nanoseconds per entity per steady-state sync. Minted at **700** against
+    /// the unrepaired **467.3** (13 000 entities, 6.0752 ms); **ratcheted to
+    /// 200** against the repaired **93.2** (1.2116 ms) in the commit that
+    /// repaired it. The headroom is for a loaded machine, and 200 is still less
+    /// than half the cost this arm was born measuring.
+    const CEILING_NS_PER_ENTITY: f64 = 200.0;
 
     let mut report: Vec<(u32, f64)> = Vec::new();
     for n in [1_000u32, 5_000, 13_000] {
@@ -213,14 +214,93 @@ fn the_steady_state_sync_does_not_scale_like_the_world() {
          has grown back"
     );
 
-    // And the growth is not worse than linear: 13x the entities for under 26x
-    // the time. (The unrepaired ratio is 19.4x — the per-entity constant grows
-    // with the population because every `BTreeMap` probe is one level deeper —
-    // so this fails loudly only if the reconcile becomes quadratic.)
+    // A QUADRATIC TRIPWIRE, and deliberately only that. 13x the entities is
+    // 19.4x the time unrepaired and 21.7x repaired — the per-entity constant
+    // grows with the population either way, because every `BTreeMap` probe is
+    // one level deeper and the tracked records no longer fit in cache, and
+    // collapsing the constant made that *more* visible rather than less. So the
+    // honest claim here is "not quadratic" (which would be 169x), not "flat".
     let small = report[0].1;
     assert!(
-        ms < small * 26.0,
-        "sync grew {:.1}x from 1 000 to 13 000 entities — super-linear",
+        ms < small * 40.0,
+        "sync grew {:.1}x from 1 000 to 13 000 entities — quadratic in the \
+         tracked population",
         ms / small
     );
+}
+
+/// The three archetype early-outs (lens 3 P12) answer the same as the walks
+/// they replaced — including in the case that makes them dangerous.
+///
+/// `has_component` is a claim about the archetype table, and an early-out built
+/// on it is only sound if the pass it skips had nothing to do. The failure mode
+/// is not "slower": it is a level whose last `PcgVolume` or last `Terrain` or
+/// last 2D body was just deleted, whose colliders would then stay in the solver
+/// for ever because the sweep that removes them was skipped. Each guard
+/// therefore carries a second clause over its own tracked set, and this arm
+/// drives exactly that transition.
+#[test]
+fn the_archetype_early_outs_still_reach_the_despawn_sweep() {
+    use inf_ecs::components::{
+        BodyKind2D, Collider2D, ColliderShape2DKind, RigidBody2D, Transform,
+    };
+    use inf_ecs::{EcsWorld, Vec3d};
+    use inf_physics::PhysicsBridge2D;
+
+    use glam::DVec2;
+
+    let mut w = EcsWorld::new();
+    assert!(
+        !w.has_component::<RigidBody2D>(),
+        "an empty world claims to carry a 2D body"
+    );
+
+    let e = w.spawn_with_guid(Uuid::from_u128(0x2D01), "Body", None);
+    let mut t = Transform::IDENTITY;
+    t.translation = Vec3d::new(1.0, 2.0, 0.0);
+    w.world_mut().entity_mut(e).insert((
+        RigidBody2D {
+            kind: BodyKind2D::Static,
+            ..Default::default()
+        },
+        Collider2D {
+            shape_kind: ColliderShape2DKind::Box,
+            half_extents: inf_ecs::Vec2d::new(0.5, 0.5),
+            ..Default::default()
+        },
+        t,
+    ));
+    w.mark_dirty();
+    assert!(
+        w.has_component::<RigidBody2D>(),
+        "a world that just gained a 2D body says it has none — every 2D level \
+         would silently stop simulating"
+    );
+
+    let mut bridge = PhysicsBridge2D::new(DVec2::new(0.0, -9.81));
+    bridge.sync_from_world(&w);
+    assert!(bridge.body_of(Uuid::from_u128(0x2D01)).is_some());
+
+    // THE TRANSITION. The entity survives; only its physics components go. The
+    // archetype table now says there is no 2D body anywhere — and the tracked
+    // set says otherwise, which is the clause that has to win.
+    w.world_mut()
+        .entity_mut(e)
+        .remove::<RigidBody2D>()
+        .remove::<Collider2D>();
+    w.mark_dirty();
+    assert!(
+        !w.has_component::<RigidBody2D>(),
+        "the fixture did not actually empty the archetype, so this arm is vacuous"
+    );
+    bridge.sync_from_world(&w);
+    assert!(
+        bridge.body_of(Uuid::from_u128(0x2D01)).is_none(),
+        "the last 2D body was deleted and its rapier body is still in the world"
+    );
+
+    // And from there the pass really is skipped: a further sync on a world with
+    // no 2D archetype and no tracked body is a no-op, not a rebuild.
+    bridge.sync_from_world(&w);
+    assert!(bridge.body_of(Uuid::from_u128(0x2D01)).is_none());
 }

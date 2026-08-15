@@ -286,6 +286,22 @@ pub struct PhysicsBridge3D {
     swimming: BTreeMap<Uuid, bool>,
     /// This step's crossings, drained by the host in the collision slot.
     water_events: Vec<WaterEvent3D>,
+    /// The per-step entity snapshot buffer, **reused** (lens 3 P32, Hardening
+    /// Wave G) — the [`water_scratch`](Self::water_scratch) pattern, applied to
+    /// the biggest buffer in the file.
+    ///
+    /// `sync_from_world_sim` gathers one [`EntitySync3D`] per physics entity per
+    /// fixed step, and that type is 408 bytes (it embeds a whole
+    /// [`ColliderDesc3D`], whose trimesh and hull variants own buffers). Built
+    /// into a fresh `Vec::new()`, a 13 000-entity level re-grew it from zero
+    /// every step — fourteen reallocations, each copying what was there — which
+    /// measured **1.75 ms per fixed step**, more than the entire reconcile it
+    /// was feeding.
+    ///
+    /// Cleared on the way out as well as on the way in, deliberately: the
+    /// descriptors hold voxel and fracture geometry, and a capacity kept alive
+    /// between steps must not keep *contents* alive with it.
+    snaps_scratch: Vec<EntitySync3D>,
 }
 
 impl PhysicsBridge3D {
@@ -312,6 +328,7 @@ impl PhysicsBridge3D {
             buoyant: BuoyantMap::new(),
             swimming: BTreeMap::new(),
             water_events: Vec::new(),
+            snaps_scratch: Vec::new(),
         }
     }
 
@@ -510,7 +527,8 @@ impl PhysicsBridge3D {
             .filter(|(_, s)| !s.is_intact())
             .map(|(g, _)| *g)
             .collect();
-        let mut snaps: Vec<EntitySync3D> = Vec::new();
+        let mut snaps: Vec<EntitySync3D> = std::mem::take(&mut self.snaps_scratch);
+        snaps.clear();
         // P20.2: the water gather rides in THIS walk rather than in a second one.
         // A furnished town is 13 000 entities, and walking them twice per fixed
         // step to learn that a lake has not moved is the cost the change stamp
@@ -596,6 +614,8 @@ impl PhysicsBridge3D {
         self.gather_fracture(fractures, &mut snaps, &mut retained);
         // `sync` sorts by Guid internally, so the gather order here is irrelevant.
         self.sync_retaining(&snaps, &retained);
+        snaps.clear();
+        self.snaps_scratch = snaps;
     }
 
     /// Bring the water index and the buoyant set in line with what the walk
@@ -660,6 +680,14 @@ impl PhysicsBridge3D {
         snaps: &mut Vec<EntitySync3D>,
     ) -> BTreeSet<Uuid> {
         let mut retained: BTreeSet<Uuid> = BTreeSet::new();
+        // A level with no `PcgVolume` at all — every hand-authored one — used to
+        // walk every entity in the world per fixed step to establish that
+        // (lens 3 P12). The stamp-map clause is what keeps the *last* volume's
+        // disappearance reaching the prune below; `gather_voxels`' guard is the
+        // same shape.
+        if self.structure_stamps.is_empty() && !world.has_component::<PcgVolume>() {
+            return retained;
+        }
         let mut live_volumes: BTreeSet<Uuid> = BTreeSet::new();
         for entity in world.world().iter_entities() {
             let Some(guid) = entity.get::<inf_ecs::Guid>().map(|g| g.0) else {
@@ -847,6 +875,14 @@ impl PhysicsBridge3D {
         snaps: &mut Vec<EntitySync3D>,
         retained: &mut BTreeSet<Uuid>,
     ) {
+        // An interior level, or any level with no `Terrain` component, walked
+        // every entity per fixed step to find out (lens 3 P12). The audit is
+        // still published — a zeroed audit is the honest answer for a world with
+        // no terrain in it, and it is what the previous walk produced too.
+        if self.terrain_stamps.is_empty() && !world.has_component::<Terrain>() {
+            self.terrain_audit = TerrainColliderAudit::default();
+            return;
+        }
         let mut live: BTreeSet<(Uuid, (i32, i32))> = BTreeSet::new();
         let mut described = 0_u32;
         let mut resident = 0_u32;
@@ -1116,11 +1152,21 @@ impl PhysicsBridge3D {
 
         // 2. Spawn / update. (Joints are reconciled in a second pass, below, once
         //    every body exists, so a joint can always resolve its other body.)
-        let mut seen: BTreeSet<Uuid> = BTreeSet::new();
+        //
+        // `seen` is a **sorted `Vec`, not a `BTreeSet`** (Hardening Wave G):
+        // `live` was just sorted by guid, so pushing is already sorted, and the
+        // one consumer — the despawn sweep below — needs `contains`, which a
+        // `binary_search` answers at the same complexity without one B-tree node
+        // allocation per tracked entity per fixed step.
+        let mut seen: Vec<Uuid> = Vec::with_capacity(live.len());
+        // Only entities that HAVE a joint or that HAD one need pass 4 (P30). A
+        // level with no joints — which is most of them, and all of the 13 000
+        // static colliders a furnished town is made of — leaves this empty and
+        // skips the pass entirely, instead of paying two `BTreeMap` probes per
+        // entity to be told there is nothing to reconcile.
         let mut joint_desires: Vec<(Uuid, Option<JointSync3D>)> = Vec::new();
         for snap in live {
-            seen.insert(snap.guid);
-            joint_desires.push((snap.guid, snap.joint));
+            seen.push(snap.guid);
             let kind = snap.body.map(|b| b.kind).unwrap_or(BodyKind3D::Static);
             let pos = snap.translation;
             let rot = snap.rotation;
@@ -1128,21 +1174,33 @@ impl PhysicsBridge3D {
             if let Some(rec) = self.entities.get(&snap.guid) {
                 let rec_kind = rec.kind;
                 let rec_rb = rec.rb;
-                let rec_col = rec.col.clone();
-                let rec_refused = rec.col_refused.clone();
+                // Compared **through the borrow**, never cloned (Hardening Wave
+                // G). These are `ColliderDesc3D`s, and the trimesh and hull
+                // variants own their vertex and index buffers: cloning both of
+                // them per tracked entity per fixed step deep-copied every voxel
+                // chunk's and every terrain tile's geometry to answer a question
+                // that is a comparison.
+                let col_changed =
+                    rec.col.as_ref() != snap.collider.as_ref() && rec.col_refused != snap.collider;
+                let has_joint_work = snap.joint.is_some() || rec.joint.is_some();
                 let old_collider = rec.collider;
                 let body = rec.body;
 
+                if has_joint_work {
+                    joint_desires.push((snap.guid, snap.joint));
+                }
                 if rec_kind != kind {
                     self.world.set_body_kind(body, kind);
                     if let Some(r) = self.entities.get_mut(&snap.guid) {
                         r.kind = kind;
                     }
                 }
-                // Static/kinematic follow their Transform; dynamic is solver-owned.
+                // Static/kinematic follow their Transform; dynamic is
+                // solver-owned. The write is skipped when the body is already
+                // there — see `set_body_pose_if_moved` for why the comparison is
+                // against rapier's own state and what it costs not to skip.
                 if kind != BodyKind3D::Dynamic {
-                    self.world.set_body_translation(body, pos);
-                    self.world.set_body_rotation(body, rot);
+                    self.world.set_body_pose_if_moved(body, pos, rot);
                 }
                 if rec_rb != snap.body {
                     if let Some(rb) = snap.body.as_ref() {
@@ -1156,7 +1214,7 @@ impl PhysicsBridge3D {
                 // unless this exact descriptor has already been tried and
                 // refused, in which case retrying is a pure function returning
                 // the same answer at trimesh-topology cost per step (C4-30).
-                if rec_col != snap.collider && rec_refused != snap.collider {
+                if col_changed {
                     if let Some(old) = old_collider {
                         self.world.remove_collider(old);
                     }
@@ -1170,6 +1228,9 @@ impl PhysicsBridge3D {
                     }
                 }
             } else {
+                if snap.joint.is_some() {
+                    joint_desires.push((snap.guid, snap.joint));
+                }
                 // New entity → create its body, apply props, attach a collider.
                 let body = self.world.add_body(kind, pos, rot);
                 if let Some(rb) = snap.body.as_ref() {
@@ -1197,12 +1258,25 @@ impl PhysicsBridge3D {
         //    body drops its colliders AND any joints attached to it (rapier), so a
         //    joint whose endpoint despawns is cleaned up here; the owning record's
         //    stale handle is reconciled to `None` in pass 4.
-        let gone: Vec<Uuid> = self
-            .entities
-            .keys()
-            .filter(|g| !seen.contains(g) && !retained.contains(g))
-            .copied()
-            .collect();
+        //
+        //    A **merge**, not a probe per entity (Hardening Wave G). Both sides
+        //    are already in guid order — `seen` because `live` was just sorted
+        //    into it, `entities` because it is a `BTreeMap` — so one cursor
+        //    walked forward answers in a linear sequential pass what a
+        //    `contains` per tracked entity answered with a random descent
+        //    through a 13 000-entry tree, sixty times a second, to conclude that
+        //    nothing had despawned.
+        let mut gone: Vec<Uuid> = Vec::new();
+        let mut cursor = 0usize;
+        for guid in self.entities.keys() {
+            while cursor < seen.len() && seen[cursor] < *guid {
+                cursor += 1;
+            }
+            if seen.get(cursor) == Some(guid) || retained.contains(guid) {
+                continue;
+            }
+            gone.push(*guid);
+        }
         for guid in gone {
             self.collider_map_dirty = true;
             if let Some(rec) = self.entities.remove(&guid) {
@@ -1210,14 +1284,17 @@ impl PhysicsBridge3D {
             }
         }
 
-        // 4. Reconcile joints (P12.1), now that every body exists. In Guid order.
+        // 4. Reconcile joints (P12.1), now that every body exists. In Guid
+        //    order, over the entities that have a joint or had one — an entity
+        //    that has never had one has nothing for this pass to reconcile and
+        //    is not in the list (P30).
         for (guid, desire) in joint_desires {
             self.reconcile_joint(guid, desire);
         }
 
         // 5. Rebuild the reverse collider→Guid map for this step's event drain
-        //    (Wave 3). Cheap (one pass over the tracked entities) and always
-        //    consistent with the handles just reconciled above.
+        //    (Wave 3), when a handle moved. Always consistent with the handles
+        //    just reconciled above — see `collider_map_dirty`.
         if self.collider_map_dirty {
             self.collider_to_guid = self
                 .entities
