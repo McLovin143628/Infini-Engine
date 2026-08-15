@@ -167,6 +167,24 @@ async fn send_request_async(
     .map_err(|e| format!("lsp request task failed to run: {e}"))?
 }
 
+/// The largest LSP message body this client will allocate for (round-2
+/// finding **B5**).
+///
+/// `Content-Length` is a number in a header written by a subprocess, parsed
+/// into a `usize` and handed straight to `vec![0u8; len]` — the allocation
+/// happens *before* a single body byte is read, so a server that emits
+/// `Content-Length: 18446744073709551615` (or is simply confused after a
+/// framing slip) aborts the editor on an allocation failure rather than
+/// failing one request. Wave F hardened the framing-*error* path in this same
+/// function and did not add the ceiling.
+///
+/// 64 MiB is far above anything real: rust-analyzer's largest ordinary message
+/// is a `workspace/symbol` or a full-file semantic-token response, kilobytes to
+/// low megabytes. A body past this is a broken stream, and the reader says so
+/// and stops — which is what a framing error already does, because after one
+/// the stream position is guesswork.
+const MAX_LSP_BODY: usize = 64 * 1024 * 1024;
+
 /// Read one framed message body from the server stream.
 ///
 /// `Ok(None)` is EOF — the server exited and the reader thread stops. Every
@@ -198,6 +216,12 @@ fn read_message(reader: &mut impl BufRead) -> Result<Option<Value>, String> {
     let Some(len) = content_length else {
         return Err("a message arrived with no Content-Length header".into());
     };
+    if len > MAX_LSP_BODY {
+        return Err(format!(
+            "a message declared a {len}-byte body, past the {MAX_LSP_BODY}-byte ceiling; \
+             the stream is not framed LSP"
+        ));
+    }
     let mut body = vec![0u8; len];
     reader
         .read_exact(&mut body)
@@ -230,7 +254,17 @@ fn reader_loop(
                 break;
             }
         };
-        if let Some(id) = msg.get("id").and_then(Value::as_i64) {
+        // **A reply is a message with an `id` and NO `method`** (round-2
+        // finding B6). Discriminating on `id` alone is wrong in JSON-RPC:
+        // server→client *requests* carry one too, and rust-analyzer sends
+        // several (`client/registerCapability`, `workspace/configuration`,
+        // `window/workDoneProgress/create`). Each used to take the reply
+        // branch and `pending.remove(&id)`; the server's ids and ours both
+        // start low and are both dense, so a collision **resolved a real
+        // completion or hover with `Null`** — indistinguishable, at every
+        // caller, from "the server had no results". The comment three lines
+        // down described behaviour the code did not have.
+        if let Some(id) = reply_id(&msg) {
             // A reply to one of our requests (result or error).
             let payload = msg
                 .get("result")
@@ -255,9 +289,50 @@ fn reader_loop(
                 let _ = app.emit("lsp://diagnostics", DiagnosticsEvent { uri, diagnostics });
             }
         }
-        // Server-to-client requests (e.g. workspace/configuration) are ignored
-        // in this MVP; rust-analyzer tolerates the missing reply.
+        // Server-to-client requests (e.g. `workspace/configuration`) are
+        // ignored in this MVP; rust-analyzer tolerates the missing reply. They
+        // reach here — rather than the reply branch above — because that
+        // branch requires the message to carry no `method`.
     }
+    // **The reader owns the answer, so it must own the end of it** (round-2
+    // MED, the lsp pending-sender cluster).
+    //
+    // Every `Sender` lives in this map, not on the reader's stack, so dropping
+    // the reader thread did not close a single channel: `send_request`'s
+    // `recv_timeout` had no `Disconnected` to see and burned its FULL timeout
+    // against a server that had already exited — five seconds per keystroke on
+    // the completion path, thirty on `initialize`. Harmless until Wave E moved
+    // `send_request` onto `spawn_blocking`; after that it is ~25 parked
+    // blocking threads in the steady state, and once that pool queues, every
+    // other `spawn_blocking` in the editor stalls behind it.
+    //
+    // Clearing the map drops the senders, so every waiter returns immediately
+    // with the error it should have had.
+    if let Ok(mut p) = pending.lock() {
+        let stranded = p.len();
+        p.clear();
+        if stranded > 0 {
+            tracing::warn!(stranded, "lsp reader stopped; in-flight requests released");
+        }
+    }
+}
+
+/// **Round-2 findings B5 and B6**, as two predicates a test can hold.
+///
+/// Both defects lived in code that needs a live subprocess to reach, which is
+/// why neither had an arm: `read_message` takes a `BufRead` (so it is
+/// drivable), but `reader_loop` takes a `ChildStdout` and an `AppHandle` (so
+/// it is not). The routing rule is therefore lifted into a function *the loop
+/// itself calls*, per the campaign's rule that a claim about behaviour needs
+/// a door a test can open.
+///
+/// Returns the id to resolve, or `None` when the message is not a reply to one
+/// of our requests.
+fn reply_id(msg: &Value) -> Option<i64> {
+    if msg.get("method").is_some() {
+        return None;
+    }
+    msg.get("id").and_then(Value::as_i64)
 }
 
 // ── rust-analyzer resolution ────────────────────────────────────────────────
@@ -661,5 +736,117 @@ mod tests {
                 "{why} must be an error, not end-of-stream"
             );
         }
+    }
+
+    /// **Round-2 finding B5**: `Content-Length` is a number a subprocess
+    /// writes, and `vec![0u8; len]` allocates it before a body byte is read.
+    #[test]
+    fn a_body_past_the_ceiling_is_refused_before_it_is_allocated() {
+        // The declared length is the whole finding — nothing follows it, so a
+        // reader that got as far as `read_exact` would fail differently (and,
+        // at these sizes, only after trying to allocate).
+        for len in [MAX_LSP_BODY + 1, usize::MAX] {
+            let bytes = format!(
+                "Content-Length: {len}
+
+"
+            )
+            .into_bytes();
+            let mut r: &[u8] = &bytes;
+            let e = read_message(&mut r).expect_err("a {len}-byte body was accepted");
+            assert!(
+                e.contains("ceiling"),
+                "the refusal must name the ceiling rather than fail later: {e}"
+            );
+        }
+        // The ceiling is not so tight that a real message trips it: a body at
+        // exactly the ceiling is allowed through to the (short) read.
+        let bytes = format!(
+            "Content-Length: {MAX_LSP_BODY}
+
+"
+        )
+        .into_bytes();
+        let mut r: &[u8] = &bytes;
+        let e = read_message(&mut r).expect_err("a short body must still fail");
+        assert!(
+            !e.contains("ceiling"),
+            "a body AT the ceiling was refused by it: {e}"
+        );
+    }
+
+    /// The reader owning the end of the answer: when the pending map is
+    /// cleared, a waiting `recv_timeout` returns `Disconnected` at once
+    /// instead of burning its full timeout.
+    ///
+    /// This drives `std::sync::mpsc` directly rather than `reader_loop`, which
+    /// needs an `AppHandle` and a real `ChildStdout` — the arm is over the
+    /// mechanism the loop's last statement relies on, and it is the mechanism
+    /// that was missing, not the call.
+    #[test]
+    fn clearing_the_pending_map_releases_a_waiting_request() {
+        let pending: Arc<Mutex<HashMap<i64, Sender<Value>>>> = Arc::default();
+        let (tx, rx) = channel::<Value>();
+        pending.lock().unwrap().insert(7, tx);
+
+        // While the sender is held, the wait really does block to its timeout.
+        let t0 = std::time::Instant::now();
+        assert!(rx.recv_timeout(Duration::from_millis(60)).is_err());
+        assert!(
+            t0.elapsed() >= Duration::from_millis(50),
+            "the control did not actually wait, so the arm below is vacuous"
+        );
+
+        // Dropping it — which is what the reader's exit does — is immediate.
+        pending.lock().unwrap().clear();
+        let t0 = std::time::Instant::now();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(5)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        ));
+        assert!(
+            t0.elapsed() < Duration::from_secs(1),
+            "a released request still waited out its timeout"
+        );
+    }
+
+    /// **Round-2 finding B6**: a server→client *request* carries an `id` too,
+    /// and routing on `id` alone resolved one of our pending requests with
+    /// `Null` — indistinguishable from "the server had no results".
+    #[test]
+    fn a_server_request_is_not_mistaken_for_a_reply() {
+        // Ours: an id and no method.
+        assert_eq!(
+            reply_id(&json!({"jsonrpc":"2.0","id":3,"result":{}})),
+            Some(3)
+        );
+        assert_eq!(
+            reply_id(&json!({"jsonrpc":"2.0","id":3,"error":{"code":-32601}})),
+            Some(3)
+        );
+
+        // Theirs: an id AND a method. These are the three rust-analyzer
+        // actually sends, and each one used to resolve pending request `id`.
+        for method in [
+            "client/registerCapability",
+            "workspace/configuration",
+            "window/workDoneProgress/create",
+        ] {
+            assert_eq!(
+                reply_id(&json!({"jsonrpc":"2.0","id":3,"method":method,"params":{}})),
+                None,
+                "{method} was routed as a reply to our request 3"
+            );
+        }
+
+        // Notifications have a method and no id, and were never replies.
+        assert_eq!(
+            reply_id(&json!({
+                "jsonrpc":"2.0",
+                "method":"textDocument/publishDiagnostics",
+                "params":{}
+            })),
+            None
+        );
     }
 }

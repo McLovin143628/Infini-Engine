@@ -47,6 +47,74 @@ struct PieLink {
     control: Receiver<EditorToPlayer>,
     out: Box<dyn Write>,
     hwnd_reported: bool,
+    /// How many times the window-handle report has been tried and failed
+    /// (round-2 finding B7). Bounds the retry — see
+    /// [`PieLink::report_window_handle`].
+    hwnd_attempts: u32,
+}
+
+/// How many frames the window-handle report may be re-attempted before the
+/// player gives up on embedded PIE (round-2 finding **B7**).
+///
+/// ~2 seconds at 60 Hz. A failed write means the editor has not read its end of
+/// our stdout yet, or has closed it; the first is transient and the second is
+/// permanent, and nothing on this side can tell them apart except by trying
+/// again. Retrying for ever would write into a broken pipe sixty times a
+/// second for the life of the session, which is why this is bounded and says
+/// so once when it runs out.
+const MAX_HWND_ATTEMPTS: u32 = 120;
+
+impl PieLink {
+    /// Report the native window handle to the editor, **once**, on the first
+    /// write that succeeds.
+    ///
+    /// # The retry the warning promised did not exist (round-2 finding B7)
+    ///
+    /// C4-44 made the latch success-only, which is right: a dropped `Err` used
+    /// to mark the handle reported when it was not, and embedded PIE stayed a
+    /// blank hole for the session. The warning it wrote said *"retrying on the
+    /// next frame"* — but the whole block lived inside
+    /// `ApplicationHandler::resumed`, whose first statement is `if
+    /// self.live.is_some() { return; }` and whose same arm ends by setting
+    /// `self.live`. `resumed` therefore runs its body exactly once per process.
+    /// There was no next frame for it, and `hwnd_reported` had exactly one
+    /// reader — itself. So the fix half-landed: the false latch was gone and
+    /// the outcome was identical.
+    ///
+    /// This is that retry, called from `frame()` as well, and bounded by
+    /// [`MAX_HWND_ATTEMPTS`] so a genuinely closed pipe is not written to sixty
+    /// times a second for ever.
+    ///
+    /// Returns `true` while the report is still outstanding — i.e. the caller
+    /// should try again next frame.
+    fn report_window_handle(&mut self, handle: i64) -> bool {
+        if self.hwnd_reported || self.hwnd_attempts >= MAX_HWND_ATTEMPTS {
+            return false;
+        }
+        match write_msg(&mut self.out, &PlayerToEditor::Window { handle }) {
+            Ok(()) => {
+                self.hwnd_reported = true;
+                false
+            }
+            Err(e) => {
+                self.hwnd_attempts += 1;
+                if self.hwnd_attempts == 1 {
+                    tracing::warn!(
+                        "PIE: could not report the window handle ({e}); \
+                         retrying on the next frame"
+                    );
+                } else if self.hwnd_attempts >= MAX_HWND_ATTEMPTS {
+                    tracing::error!(
+                        "PIE: the window handle could not be reported after \
+                         {MAX_HWND_ATTEMPTS} attempts ({e}); the editor cannot \
+                         reparent this window, so embedded PIE will stay blank"
+                    );
+                    return false;
+                }
+                true
+            }
+        }
+    }
 }
 
 /// The native window handle as an `i64` for the PIE `Window` report (HWND on
@@ -345,6 +413,14 @@ impl PlayerApp {
 
     /// One frame: fold input, advance the sim by the elapsed time, project, draw.
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
+        // **The window-handle re-attempt** (round-2 finding B7). `resumed`
+        // runs its body once per process, so a failed report there had nothing
+        // to retry it despite saying it would. Behind the latch, so a
+        // successful report costs one `bool` per frame; bounded, so a closed
+        // pipe is not written to sixty times a second for ever.
+        if let (Some(pie), Some(live)) = (self.pie.as_mut(), self.live.as_ref()) {
+            pie.report_window_handle(window_handle_i64(&live.window));
+        }
         // Elapsed time + drain this frame's input into the resolved state.
         let (dt, events) = {
             let Some(live) = self.live.as_mut() else {
@@ -509,25 +585,13 @@ impl ApplicationHandler for PlayerApp {
                 });
                 // Report our native window handle so the editor can reparent us
                 // into the viewport slot (embedded PIE).
+                // C4-44 / unit U4 ("failure latched as applied") made this
+                // latch success-only; round-2 finding B7 gave it the retry the
+                // warning already claimed — `frame()` calls the same door, and
+                // this arm runs once per process. See
+                // `PieLink::report_window_handle`.
                 if let Some(pie) = self.pie.as_mut() {
-                    if !pie.hwnd_reported {
-                        let handle = window_handle_i64(&window);
-                        // C4-44 / unit U4 ("failure latched as applied"): the
-                        // write's `Err` was dropped and the latch set anyway, so
-                        // the ONE report of the native handle could be lost and
-                        // embedded PIE stayed a blank hole for the whole session
-                        // with nothing to retry it. Latch on success only; on a
-                        // failed write the editor has closed our stdout, which
-                        // every other protocol site treats as "exit"
-                        // (`main.rs:272/379/431`).
-                        match write_msg(&mut pie.out, &PlayerToEditor::Window { handle }) {
-                            Ok(()) => pie.hwnd_reported = true,
-                            Err(e) => tracing::warn!(
-                                "PIE: could not report the window handle ({e}); \
-                                 retrying on the next frame"
-                            ),
-                        }
-                    }
+                    pie.report_window_handle(window_handle_i64(&window));
                 }
                 window.request_redraw();
                 self.live = Some(Live {
@@ -694,6 +758,7 @@ pub fn run_pie(
         control,
         out,
         hwnd_reported: false,
+        hwnd_attempts: 0,
     });
     event_loop
         .run_app(&mut app)
@@ -765,4 +830,128 @@ pub fn run_web(
     app.canvas = Some(canvas);
     event_loop.spawn_app(app);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::mpsc::channel;
+
+    /// A writer that fails the first write of each of its first `fail_for`
+    /// messages, then succeeds — the shape of an editor that has not yet
+    /// drained its end of our stdout.
+    ///
+    /// `attempts` counts *messages started* (a `write_msg` issues several
+    /// `write` calls for one frame), so the two counters below mean what their
+    /// names say.
+    struct Flaky {
+        fail_for: usize,
+        attempts: Arc<AtomicUsize>,
+        delivered: Arc<AtomicUsize>,
+        mid_message: bool,
+    }
+
+    impl Write for Flaky {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if !self.mid_message {
+                let n = self.attempts.fetch_add(1, AtomicOrdering::Relaxed);
+                if n < self.fail_for {
+                    return Err(Error::new(ErrorKind::WouldBlock, "pipe is not ready"));
+                }
+                self.mid_message = true;
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.mid_message {
+                self.mid_message = false;
+                self.delivered.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            Ok(())
+        }
+    }
+
+    /// `(link, attempts, delivered)`.
+    fn link(fail_for: usize) -> (PieLink, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let (_tx, control) = channel();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delivered = Arc::new(AtomicUsize::new(0));
+        (
+            PieLink {
+                control,
+                out: Box::new(Flaky {
+                    fail_for,
+                    attempts: attempts.clone(),
+                    delivered: delivered.clone(),
+                    mid_message: false,
+                }),
+                hwnd_reported: false,
+                hwnd_attempts: 0,
+            },
+            attempts,
+            delivered,
+        )
+    }
+
+    /// **Round-2 finding B7.** The success-only latch was correct and the retry
+    /// it promised did not exist: the whole block lived in `resumed`, which
+    /// returns early once `live` is set and therefore runs its body once per
+    /// process. `hwnd_reported` had exactly one reader — itself.
+    #[test]
+    fn a_failed_handle_report_is_re_attempted_until_it_lands() {
+        let (mut pie, _, _) = link(3);
+
+        // Three failures: each says "try me again".
+        for attempt in 1..=3 {
+            assert!(
+                pie.report_window_handle(0x1234),
+                "attempt {attempt} did not ask to be retried"
+            );
+            assert!(!pie.hwnd_reported, "attempt {attempt} latched on a failure");
+        }
+        // The fourth write succeeds and latches.
+        assert!(
+            !pie.report_window_handle(0x1234),
+            "a successful report still asked to be retried"
+        );
+        assert!(pie.hwnd_reported);
+    }
+
+    /// The latch really is a latch: a reported handle is never written twice,
+    /// however many frames call the door.
+    #[test]
+    fn a_reported_handle_is_written_exactly_once() {
+        let (mut pie, _, delivered) = link(0);
+        for _ in 0..50 {
+            pie.report_window_handle(0x1234);
+        }
+        assert_eq!(
+            delivered.load(AtomicOrdering::Relaxed),
+            1,
+            "the handle was reported more than once"
+        );
+    }
+
+    /// And the retry is bounded: a permanently closed pipe is not written to
+    /// sixty times a second for the life of the session.
+    #[test]
+    fn the_retry_gives_up_rather_than_spinning_on_a_dead_pipe() {
+        let (mut pie, attempts, delivered) = link(usize::MAX);
+        for _ in 0..(MAX_HWND_ATTEMPTS as usize * 3) {
+            pie.report_window_handle(0x1234);
+        }
+        assert!(!pie.hwnd_reported);
+        assert_eq!(delivered.load(AtomicOrdering::Relaxed), 0);
+        assert_eq!(
+            attempts.load(AtomicOrdering::Relaxed),
+            MAX_HWND_ATTEMPTS as usize,
+            "the retry is not bounded by MAX_HWND_ATTEMPTS"
+        );
+        assert!(
+            !pie.report_window_handle(0x1234),
+            "an exhausted retry still asked to be called again"
+        );
+    }
 }
