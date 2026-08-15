@@ -2776,13 +2776,10 @@ mod tests {
                 .find(&header)
                 .unwrap_or_else(|| panic!("ipc.rs declares no `{dto}`"))
                 + header.len();
-            let end = start
-                + ipc[start..]
-                    .find(
-                        "
-}",
-                    )
-                    .expect("the struct closes");
+            // `"\n}"` — the same escapes a scripted edit ate elsewhere in this
+            // wave. Behaviourally identical (the source above is normalized), and
+            // spelled so the next reader does not have to count blank lines.
+            let end = start + ipc[start..].find("\n}").expect("the struct closes");
             ipc[start..end].contains("pub refusal:")
         }
 

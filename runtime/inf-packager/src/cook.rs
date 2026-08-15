@@ -3021,6 +3021,31 @@ mod advisory_source_gate {
     /// evidence; repairing it destroyed the sentence, and only the compiler
     /// noticed, because a `\`-continuation inside a `///` line is not a
     /// continuation at all — it is the end of the doc comment.
+    ///
+    /// # The second shape, recorded and NOT guarded (round 3)
+    ///
+    /// The eaten backslash has a sibling this sweep cannot see: an escape eaten
+    /// out of the *middle* of a literal, leaving a **bare newline inside a
+    /// non-raw string**. `"\r\n"` becomes a real CR/LF pair, `"\n"` becomes a
+    /// real line break, and the result is legal Rust that compiles and reads
+    /// wrong. Round 3 found three — two CRLF-normalization calls that normalized
+    /// nothing (`inf_ecs::components`'s census and `inf_packager::bundle`'s
+    /// schema pin) and the LSP framing fixture's `\r\n\r\n` — and **clippy saw
+    /// none of them**: the workspace was clippy-clean with `replace("\n", "\n")`
+    /// in it, because `no_effect_replace` did not fire on literals spelled that
+    /// way.
+    ///
+    /// It is not guarded here, and the reason is a measurement rather than a
+    /// preference. A run of spaces is a lexical accident a line-based sweep can
+    /// recognise; a bare newline inside a literal can only be found by tracking
+    /// string state across lines — a lexer that knows raw strings, byte strings,
+    /// escapes, char literals and both comment forms. `inf-editor-core`'s
+    /// test-support module already has exactly that lexer, in a crate this one
+    /// does not depend on and must not (`inf-packager` is a runtime crate,
+    /// `inf-editor-core` is Ring 1). A second copy of a lexer to catch three
+    /// instances is a worse trade than writing down where they came from, which
+    /// is what this paragraph is. What actually stops them being written is the
+    /// scripted-edit law (`chr(92)`, raw strings, heredocs).
     #[test]
     fn no_string_literal_in_the_workspace_carries_an_eaten_continuation() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

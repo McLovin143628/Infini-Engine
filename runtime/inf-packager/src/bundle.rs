@@ -356,11 +356,11 @@ mod tests {
     /// and a source pin is the enforcement available.
     #[test]
     fn the_launch_config_schema_matches_the_player_s() {
-        let src = include_str!("../../inf-player/src/config.rs").replace(
-            "
-", "
-",
-        );
+        // **Round 3: this call did nothing** — the same eaten escapes as
+        // `inf_ecs::components`'s census, and invisible to clippy for the same
+        // reason (`no_effect_replace` did not fire on a literal spelled as a
+        // real newline, in a tree that was clippy-clean).
+        let src = include_str!("../../inf-player/src/config.rs").replace("\r\n", "\n");
         let decl = "pub const CONFIG_SCHEMA_VERSION: u32 = ";
         let at = src
             .find(decl)

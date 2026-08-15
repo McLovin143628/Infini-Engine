@@ -195,21 +195,51 @@ export function refCountedInit(
   return async function acquire(): Promise<() => void> {
     // Synchronous, BEFORE the await below — this is the whole fix.
     holders += 1;
-    // **The partial-start sink** (round-2 finding R2-7). `start` obtains its
-    // disposers one `await` at a time; if a later one REJECTS it never returns
-    // a teardown, so every handle it had already taken is orphaned — subscribed
-    // for the life of the process with nothing holding a reference to release
-    // it. The failure is exactly the kind that happens in a batch (the IPC
-    // bridge going away), so it strands all of them at once.
+    // **The partial-start sink** (round-2 finding R2-7). A `start` that takes
+    // more than one disposer takes them one `await` at a time; if a later one
+    // REJECTS it never returns a teardown, so every handle it had already taken
+    // is orphaned — subscribed for the life of the process with nothing holding
+    // a reference to release it. `start` pushes each disposer here as it takes
+    // it, and a rejection drains the sink.
     //
-    // `start` pushes each disposer here as it takes it, and a rejection drains
-    // the sink. A `start` that ignores the argument keeps the old behaviour,
-    // which is why it is a parameter rather than a required return.
+    // **Which starts this actually protects, counted** (round 3). The sink is
+    // wired at all eight call sites and it can only ever hold something at
+    // three of them:
+    //
+    //  - `initAssetSync` (four listens, sequential) and `initSimSync` (two) are
+    //    the shape the finding describes, and a rejection on the second or
+    //    later really does drain handles taken before it;
+    //  - `initLsp` takes three at once under `Promise.allSettled` and then
+    //    throws the first rejection deliberately, precisely so every survivor
+    //    is in the sink first — that one is designed around this mechanism;
+    //  - the other five (`initCaptureSync`, `initPieSync`, `initProjectSync`,
+    //    `initSceneSync`, `initTerrainImportSync`) take **exactly one**
+    //    disposer, and everything they await after it either cannot reject
+    //    (`refresh`/`snapshot`/`isRunning` all catch internally) or is not
+    //    awaited at all. Their sinks are structurally empty at every rejection
+    //    that can reach the `catch` below: **they never drain.**
+    //
+    // That is not a reason to remove them — a second listen added to any of the
+    // five would silently re-open R2-7 — but the earlier version of this
+    // comment claimed the sink was what stood between the IPC bridge going away
+    // and eight stranded subscriptions, and it is not. A bridge that goes away
+    // rejects EVERY listen, which leaves the sink empty and strands nothing;
+    // what the sink catches is the *partial* failure, where some listens
+    // resolved and a later one did not.
     const collected: UnlistenFn[] = [];
     const sink: DisposerSink = (d) => collected.push(d);
-    const p = (pending ??= start(sink));
     let teardown: () => void;
+    let p: Promise<() => void> | null = null;
     try {
+      // **Inside the try** (round 3). `start` is a caller's function and is
+      // entitled to throw *synchronously* — before its first `await`, a
+      // destructure of an undefined module, a getter that is not there. Called
+      // outside, that throw escaped the `catch` below with `holders` already
+      // incremented and never decremented, so the count could never return to
+      // zero and the LAST holder's release stopped tearing anything down: the
+      // subscription leak this function exists to prevent, arriving through the
+      // door that prevents it.
+      p = pending ??= start(sink);
       teardown = await p;
     } catch (e) {
       holders -= 1;

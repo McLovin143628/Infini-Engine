@@ -5700,11 +5700,16 @@ mod tests {
     #[test]
     fn the_freeze_table_covers_every_wire_enum_in_this_module() {
         // The P22 CRLF law: a `.rs` read by a test is normalized first.
-        let src = include_str!("components.rs").replace(
-            "
-", "
-",
-        );
+        //
+        // **Round 3: this call did nothing.** A scripted edit ate the escapes
+        // and left `replace("\n", "\n")` — spelled as two literals each holding
+        // a real newline, which is why clippy's `no_effect_replace` never fired
+        // (the tree was clippy-clean with it in). The census survived only
+        // because `str::lines()` strips a trailing `\r` of its own accord, so
+        // the normalization it names was decoration on a path that happened not
+        // to need it. Restored, because the next reader of this file will
+        // believe the comment.
+        let src = include_str!("components.rs").replace("\r\n", "\n");
         let lines: Vec<&str> = src.lines().collect();
 
         let mut on_the_wire: Vec<String> = Vec::new();
@@ -5714,10 +5719,7 @@ mod tests {
             };
             let name = rest.trim_end_matches(" {").trim().to_string();
             // Its derives sit in the few lines above, past the doc comment.
-            let derives = lines[i.saturating_sub(8)..i].join(
-                "
-",
-            );
+            let derives = lines[i.saturating_sub(8)..i].join("\n");
             if derives.contains("Serialize") {
                 on_the_wire.push(name);
             }

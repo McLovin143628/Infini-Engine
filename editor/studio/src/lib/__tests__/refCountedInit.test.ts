@@ -150,14 +150,57 @@ describe("refCountedInit", () => {
   });
 
   /**
+   * **A `start` that throws SYNCHRONOUSLY** (round 3).
+   *
+   * `start` is a caller's function and is entitled to throw before its first
+   * `await` — a destructure of an undefined module, a getter that is not there.
+   * The call sat outside the `try`, so that throw escaped the `catch` with
+   * `holders` already incremented and never decremented. The count could then
+   * never return to zero, so the LAST holder's release stopped tearing anything
+   * down: the subscription leak this helper exists to prevent, arriving through
+   * the door that prevents it.
+   *
+   * Asserted through the observable consequence — a later, successful holder's
+   * release must still tear its subscription down — because `holders` is a
+   * closure variable and a test that could read it would be reading the fix
+   * rather than its effect.
+   */
+  it("a start that throws synchronously does not leak the hold", async () => {
+    let boom = true;
+    const teardown = vi.fn();
+    const acquire = refCountedInit(() => {
+      if (boom) throw new Error("start threw before its first await");
+      return Promise.resolve(teardown);
+    });
+
+    await expect(acquire()).rejects.toThrow("before its first await");
+
+    // The count must be back to zero, so this holder is the 0 → 1 transition
+    // and its release is the last one.
+    boom = false;
+    const dispose = await acquire();
+    expect(teardown, "the retry subscribed").not.toHaveBeenCalled();
+    dispose();
+    expect(teardown, "the hold leaked, so the last release tore nothing down").toHaveBeenCalledTimes(
+      1,
+    );
+  });
+
+  /**
    * **The partial start** (round-2 finding R2-7).
    *
-   * A `start` takes its disposers one `await` at a time. When a later one
-   * rejects it never returns a teardown, so everything it had already
-   * subscribed was orphaned: live for the life of the process, with no
-   * reference anywhere that could release it. The failure that causes this is
-   * exactly the kind that hits a whole batch (the IPC bridge going away), so it
-   * stranded all of them at once.
+   * A `start` that takes more than one disposer takes them one `await` at a
+   * time. When a later one rejects it never returns a teardown, so everything
+   * it had already subscribed was orphaned: live for the life of the process,
+   * with no reference anywhere that could release it.
+   *
+   * **Round 3 corrected this comment.** It used to say the failure "is exactly
+   * the kind that hits a whole batch (the IPC bridge going away), so it
+   * stranded all of them at once" — which is backwards. A bridge that goes away
+   * rejects EVERY listen, so nothing was ever collected and nothing is
+   * stranded. What the sink catches is the *partial* failure, where some
+   * listens resolved and a later one did not; see `refCountedInit`'s own
+   * comment for which three of the eight call sites can actually reach it.
    */
   it("releases what a failed start had already taken", async () => {
     const first = vi.fn();

@@ -858,12 +858,14 @@ mod tests {
         // reader that got as far as `read_exact` would fail differently (and,
         // at these sizes, only after trying to allocate).
         for len in [MAX_LSP_BODY + 1, usize::MAX] {
-            let bytes = format!(
-                "Content-Length: {len}
-
-"
-            )
-            .into_bytes();
+            // `\r\n\r\n` — LSP framing, and the same escapes a scripted edit ate
+            // out of two CRLF-normalization calls (round 3). `read_message`
+            // reads header lines with `read_line` + `trim_end`, so it tolerates
+            // bare LF and this fixture passed either way; the arm below asserts
+            // that a body AT the ceiling is refused by something OTHER than the
+            // ceiling, which any framing error satisfies — so the wrong bytes
+            // would have made that half vacuous rather than red.
+            let bytes = format!("Content-Length: {len}\r\n\r\n").into_bytes();
             let mut r: &[u8] = &bytes;
             let e = read_message(&mut r).expect_err("a {len}-byte body was accepted");
             assert!(
@@ -873,12 +875,7 @@ mod tests {
         }
         // The ceiling is not so tight that a real message trips it: a body at
         // exactly the ceiling is allowed through to the (short) read.
-        let bytes = format!(
-            "Content-Length: {MAX_LSP_BODY}
-
-"
-        )
-        .into_bytes();
+        let bytes = format!("Content-Length: {MAX_LSP_BODY}\r\n\r\n").into_bytes();
         let mut r: &[u8] = &bytes;
         let e = read_message(&mut r).expect_err("a short body must still fail");
         assert!(
