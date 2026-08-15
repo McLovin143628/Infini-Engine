@@ -190,4 +190,58 @@ mod tests {
         let env = snap.folders.iter().find(|f| f.path == "props/env").unwrap();
         assert_eq!(env.asset_count, 1);
     }
+
+    /// **The grid's order is total** (Hardening Wave C, L6.F9).
+    ///
+    /// `AssetDb::iter` is documented "all entries, unordered" — it walks a
+    /// `HashMap` — and lower-cased display names are not unique. A stable sort
+    /// preserves the input order for ties, so before the GUID tie-break a
+    /// colliding group came out in whatever order the hash walk produced: rows
+    /// that can move under a click between two snapshots of a project nobody
+    /// touched.
+    ///
+    /// **Eight** spellings, not two, and that is what makes this an arm rather
+    /// than a coin toss. With two, dropping the tie-break leaves a 50/50 chance
+    /// of the hash walk agreeing with the GUID order by accident. With eight the
+    /// mutation has to win 8! to 1.
+    #[test]
+    fn assets_whose_names_differ_only_in_case_are_ordered_by_guid() {
+        const SPELLINGS: [&str; 8] = [
+            "Rock", "rock", "ROCK", "roCk", "rOck", "RocK", "rOCK", "ROck",
+        ];
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut proj = AssetProject::open(dir.path()).unwrap();
+        // One folder each: the names collide case-insensitively, and on Windows
+        // two of these in one directory would collide as *files* too, which is a
+        // different bug and not the one under test.
+        for (i, name) in SPELLINGS.iter().enumerate() {
+            let folder = proj.content_dir(&format!("lot{i}")).unwrap();
+            proj.write_asset(&folder, name, &MaterialAsset::default(), None, vec![], None)
+                .unwrap();
+        }
+
+        let snap = build(&proj);
+        assert_eq!(snap.assets.len(), SPELLINGS.len());
+
+        // Every row really does collide on the primary key, so the tie-break is
+        // deciding all eight of them.
+        let keys: BTreeSet<String> = snap.assets.iter().map(|a| a.name.to_lowercase()).collect();
+        assert_eq!(
+            keys.len(),
+            1,
+            "the fixture stopped colliding on the sort key: {keys:?}"
+        );
+
+        // …and the order they come out in is the GUIDs', ascending.
+        let ids: Vec<&str> = snap.assets.iter().map(|a| a.id.as_str()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            ids, sorted,
+            "the Content Drawer's rows are in the asset database's hash-walk \
+             order, not in a total one — the grid can reorder between two \
+             snapshots of an unchanged project"
+        );
+    }
 }

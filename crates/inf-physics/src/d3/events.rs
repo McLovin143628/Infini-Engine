@@ -99,3 +99,61 @@ impl EventHandler for EventCollector {
         // Contact-force events are not part of the P9.1b facade surface.
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rapier3_f64::prelude::CollisionEventFlags;
+
+    /// **A contact survives a poisoned buffer** (Hardening Wave C, L6.F10).
+    ///
+    /// The handler used to write `if let Ok(mut guard) = self.events.lock()`,
+    /// which drops the event when the mutex is poisoned — while
+    /// [`EventCollector::append_into`], twenty lines up, already recovers with
+    /// `into_inner()`. Poisoning means some earlier holder panicked, and the
+    /// buffer it panicked over is a `Vec<CollisionEvent>` with no invariant to
+    /// violate half-way, so the data is sound. What the `if let` bought was a
+    /// step whose collision set is a function of **whether an unrelated panic
+    /// had happened** — which makes `state_bytes` depend on the process's
+    /// history rather than on its inputs. That is a determinism defect wearing
+    /// defensiveness as a disguise.
+    ///
+    /// The panic below is deliberate and its message reaches the test log; it is
+    /// raised on its own thread so the process-wide panic hook is left alone for
+    /// every other test in this binary.
+    #[test]
+    fn a_contact_is_recorded_even_after_the_buffer_was_poisoned() {
+        let collector = EventCollector::default();
+
+        // Poison it exactly the way production would: a holder that panics.
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = collector
+                .events
+                .lock()
+                .expect("a fresh mutex is not poisoned");
+            panic!("an unrelated panic, raised while the event buffer was held");
+        }));
+        assert!(poisoned.is_err(), "the panic did not unwind");
+        assert!(
+            collector.events.lock().is_err(),
+            "the mutex is not poisoned, so this arm is testing nothing"
+        );
+
+        let h = ColliderSet::invalid_handle();
+        collector.handle_collision_event(
+            &RigidBodySet::new(),
+            &ColliderSet::new(),
+            CollisionEvent::Started(h, h, CollisionEventFlags::empty()),
+            None,
+        );
+
+        let mut out = Vec::new();
+        collector.append_into(&mut out);
+        assert_eq!(
+            out.len(),
+            1,
+            "the contact was dropped because an unrelated panic had happened              earlier in the process — the step's collision set is not a function              of its inputs"
+        );
+        assert_eq!(out[0].phase, ContactPhase::Started);
+    }
+}
