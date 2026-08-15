@@ -1107,7 +1107,8 @@ mod tests {
         assert_eq!(
             orphan_atmosphere(&w, sky_authority(&w)),
             Some(low),
-            "the orphan quoted at the author must be the lowest-Guid one, not              the one the archetypes happen to yield first"
+            "the orphan quoted at the author must be the lowest-Guid one, \
+             not the one the archetypes happen to yield first"
         );
         // And the authority itself is never the orphan, even once it carries an
         // atmosphere of its own.
