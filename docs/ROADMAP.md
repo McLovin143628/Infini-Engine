@@ -17523,3 +17523,63 @@ rule (`prev_voxels`, the shared predicate, and the leftovers-see-a-removal gate)
 so both hosts are still pinned to carrying volumes the same way — a stronger pin
 than the one it replaced. Battery, clippy, fmt and rustdoc figures are in the
 machine-ops note appended after the run.
+
+### Wave E — one more thing the seam skip rests on
+
+The `apply_seam` skip (run it only when every terrain **and** every volume was
+carried) has a second premise worth writing down, because the editor has a path
+that replaces a terrain in the scene *without* re-seaming — `sync_streamed_terrain`
+and `after_terrain_edit`, both of which re-project one slot in place and have never
+called `apply_seam`.
+
+That is safe, and for a reason that predates this wave:
+[`RenderTerrain::seam_sample`] reads the **residency floor**, which is pinned for
+the stream's whole life, so fine-page churn under a cave mouth cannot move a single
+seam value. The seam is therefore invariant under exactly the thing those two paths
+change. What *can* move it — the floor arriving for the first time, a terrain
+entering or leaving the scene, a volume re-meshing — all show up as a terrain or a
+volume that was **not** carried, which is precisely the condition that re-runs the
+seam. The documented P21.2 residual (a stream whose floor has not arrived yet
+projects no tiles at all, so its host pushes no `RenderTerrain` and the volume keeps
+`NO_SEAM` until the document next changes) is unchanged by this wave: that terrain
+is absent from the carried list, so the projection that finally includes it is a
+miss and re-seams.
+
+### Wave E — machine-ops
+
+**COMMIT BEFORE MUTATING is not advice.** A `git checkout -- <file>` used to undo a
+mutation reverted an **uncommitted** fix in the same file and silently invalidated
+the two mutation runs after it — both reported "killed" against code that no longer
+contained the change being tested. The tell was two different mutations failing the
+same arm.
+
+**Mutate by line index, not by substring.** The follow-up script deleted
+`"                self.collider_map_dirty = true;\n"` (16 spaces) and matched it as
+a *substring* of the 24-space line eight characters further in, so two of the three
+"killed" results were the same site twice. Re-run against exact line indices, all
+three fail the arm that names them and only that arm — which is the claim the test
+module makes, and it was not true of the first run.
+
+### Wave E — verification, measured
+
+`cargo test --workspace --no-fail-fast -j 3` = **263 binaries / 4 701 passed /
+0 failed / 8 ignored** against a start-of-wave baseline of **260 / 4 689 / 0 /
+8**. The +3 binaries are this wave's three new test files
+(`runtime/inf-player/tests/projection_budget.rs`,
+`runtime/inf-player/tests/ground_seam_scaling.rs`,
+`crates/inf-physics/tests/collider_map.rs`) and the +12 tests are their nine
+plus the three arms added to existing modules (`frame_budget`'s churn regime,
+`inf-render`'s seam idempotency, `inf-asset`'s streaming-digest pin) —
+name-for-name, with nothing unaccounted.
+
+Workspace clippy `-D warnings` clean; `cargo fmt --all --check` clean; rustdoc
+**450 / ceiling 450** over 43 crates with `cargo clean --doc` first, so ci.yml's
+ceiling does **not** move. Goldens **54, unchanged** — this wave commits no new
+bytes to `tests/goldens/`.
+
+Three lints and one rustdoc warning were this wave's own and were **fixed rather
+than absorbed**, per the Wave D precedent: `too_many_arguments` on the terrain
+memo (allowed, with the reason that a struct would write the same six values
+twice more), `clone_on_copy` on an `ErosionParamsDto` that is `Copy`,
+`needless_range_loop` in the prefix-sum pin, and a public doc linking to the
+private `insert_normalized`.

@@ -2955,9 +2955,9 @@ mod tests {
         // one, which is where an off-by-one would hide.
         let prefix = group_prefix(&groups);
         assert_eq!(prefix.len(), groups.len());
-        for g in 0..groups.len() {
+        for (g, &base) in prefix.iter().enumerate() {
             assert_eq!(
-                prefix[g],
+                base,
                 group_first(&groups, g),
                 "the hoisted prefix disagrees with the definition at group {g}"
             );

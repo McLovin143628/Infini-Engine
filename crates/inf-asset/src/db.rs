@@ -214,7 +214,8 @@ impl AssetDb {
     /// Normalizes `entry.path` first, because a caller that built the entry by
     /// hand may hand in a relative or symlinked path and every index here is
     /// keyed on the canonical one. The **scan** path does not go through here —
-    /// see [`insert_normalized`](Self::insert_normalized).
+    /// see `insert_normalized` (private, and deliberately: "this path is
+    /// already canonical" is a fact only the scan can assert).
     pub fn insert(&mut self, mut entry: AssetEntry) {
         entry.path = normalize(&entry.path);
         self.insert_normalized(entry);

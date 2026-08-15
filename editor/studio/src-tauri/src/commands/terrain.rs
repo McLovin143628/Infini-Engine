@@ -109,7 +109,6 @@ pub async fn terrain_erode(
     // Ring-1 redesign and not this wave's repair.
     let doc = Arc::clone(&scene.doc);
     let host = Arc::clone(&erosion.host);
-    let params = params.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut doc = doc.lock().map_err(|e| e.to_string())?;
         let mut host = host.lock().map_err(|e| e.to_string())?;
