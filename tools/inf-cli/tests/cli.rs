@@ -93,6 +93,61 @@ fn export_bundles_with_an_explicit_player_bin() {
     assert!(exe.exists(), "renamed exe in bundle");
 }
 
+/// **C4-40 at the process level** (the round-3 spot-check).
+///
+/// C4-40 is the cook that produced an unbootable pack and exited 0, so CI
+/// shipped it green. The fix is two lines in `cmd_cook` — `if
+/// report.has_blocking() { ExitCode::FAILURE }` — and **nothing failed when
+/// they were reverted.** The suite covered the `Err(e)` path (a broken
+/// blueprint, "cook failed" on stderr), which is a different branch entirely:
+/// `cook` returns `Ok(report)` here, the report renders, and the only thing
+/// that distinguishes success from failure is the exit code. Round 2 closed the
+/// same gap on the *editor's* side (B10 == R2.F8, the Package dialog's verdict);
+/// this is the CLI's, and it is the one CI actually runs.
+///
+/// A project with content but **no levels** is the blocking advisory that needs
+/// no fixture to manufacture: `cook.rs` raises "no levels in cook — the build
+/// has no boot scene", and everything else about the run succeeds. So the arm
+/// distinguishes the two failure modes rather than just "non-zero": stdout must
+/// carry the rendered blocking line, and stderr must NOT say "cook failed",
+/// because that would mean the cook errored and this test had drifted onto the
+/// branch the other one already covers.
+#[test]
+fn cook_exits_nonzero_on_a_blocking_advisory_it_reported_as_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    write_project(&proj, "blank-3d");
+    // Content, but no `.inf_lvl` — a cook that succeeds and must not ship.
+    let sample = workspace_root().join("samples/platformer-2d");
+    std::fs::copy(
+        sample.join("Coyote.inf_act"),
+        proj.join("Content").join("Coyote.inf_act"),
+    )
+    .unwrap();
+
+    let out = Command::new(inf())
+        .args(["cook", "--project"])
+        .arg(&proj)
+        .output()
+        .expect("inf cook runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        stderr.is_empty() || !stderr.contains("cook failed"),
+        "this arm exists for the Ok(report) branch; the cook itself failed: {stderr}"
+    );
+    assert!(
+        stdout.contains("blocking issue"),
+        "the report must say the build must not ship: {stdout}"
+    );
+    assert!(
+        !out.status.success(),
+        "a cook with a blocking advisory exited {:?} — CI would ship it green",
+        out.status.code()
+    );
+}
+
 #[test]
 fn cook_fails_nonzero_on_a_broken_blueprint() {
     let dir = tempfile::tempdir().unwrap();

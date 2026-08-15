@@ -114,12 +114,14 @@ impl TextureAsset {
     /// wrote past the end of the empty buffer it got back. A file that produces
     /// either is ~40 bytes long.
     ///
-    /// The three questions asked here are the ones the decoders assume the
-    /// answers to:
+    /// The questions asked here are the ones the decoders assume the answers
+    /// to:
     ///
     /// 1. the image has a size at all;
     /// 2. it has at least one mip, and every mip has a size;
     /// 3. **every mip carries at least the bytes its own dimensions imply.**
+    /// 4. **the chain is the pyramid the header describes** (the round-3
+    ///    spot-check).
     ///
     /// (3) is what makes a ceiling unnecessary: a payload claiming 65 536² would
     /// have to *contain* 16 GiB to pass, so the absurd header is refused by
@@ -127,6 +129,33 @@ impl TextureAsset {
     /// It is `>=`, not `==`, because a level-0 buffer is stored as the importer
     /// received it and a source decoder is entitled to hand back padding; short
     /// is the direction that is unsafe.
+    ///
+    /// # (4), and why the v2 container's own reasoning asks for it
+    ///
+    /// The first three questions are all per-mip. Nothing tied the mips to
+    /// **each other**, or to the `width`/`height` beside them — so a payload
+    /// whose header says 2048² while `mips[0]` is 64², or whose "chain" is four
+    /// unrelated images, passed every one of them. Two consequences, both
+    /// silent:
+    ///
+    /// * `thumbnail::texture_thumbnail` selects a level by comparing *mip*
+    ///   extents against the requested size and then letterboxes with the same
+    ///   mip's extents, while every framing decision above it reads
+    ///   `TextureAsset::width`/`height`. Disagreeing numbers give a thumbnail
+    ///   scaled to an aspect the image does not have.
+    /// * `tiles::lift_texture_asset` builds the v2 tile grid from each mip's own
+    ///   extents (`w.div_ceil(TILE_SIZE)`), and the sampler walks the pyramid by
+    ///   **halving**: `VtTextureDesc::ancestor` assumes level `n + 1` covers the
+    ///   same surface as level `n` at half the resolution. A chain that does not
+    ///   halve makes that walk address a tile of a different picture — the
+    ///   "odd-halving pyramid" the VT tests already treat as load-bearing, with
+    ///   the pyramid itself no longer a pyramid.
+    ///
+    /// The rule is exactly the one `rgba_mip_chain` produces: `mips[0]` is the
+    /// declared extent, and each level after it is `(prev / 2).max(1)`. A chain
+    /// that **stops early** is legal (`generate_mips: false` is one level, and a
+    /// partial pyramid is a real import setting); a chain that changes shape is
+    /// not.
     pub fn validate(&self) -> Result<(), MaterialError> {
         if self.width == 0 || self.height == 0 {
             return Err(MaterialError::Image(format!(
@@ -154,6 +183,26 @@ impl TextureAsset {
                     mip.height,
                     self.format,
                     mip.data.len()
+                )));
+            }
+            // (4) The chain, against the header and against itself.
+            let (want_w, want_h) = match i {
+                0 => (self.width, self.height),
+                _ => {
+                    let p = &self.mips[i - 1];
+                    ((p.width / 2).max(1), (p.height / 2).max(1))
+                }
+            };
+            if (mip.width, mip.height) != (want_w, want_h) {
+                return Err(MaterialError::Image(format!(
+                    "texture mip {i} is {}×{}, but the {} is {want_w}×{want_h}",
+                    mip.width,
+                    mip.height,
+                    if i == 0 {
+                        "image it declares"
+                    } else {
+                        "halving of the level above it"
+                    }
                 )));
             }
         }
@@ -603,6 +652,82 @@ mod tests {
             }]
         ))
         .is_err());
+    }
+
+    /// **The round-3 spot-check on C4-5: the mips were checked one at a time,
+    /// and never against each other or against the header.**
+    ///
+    /// A payload can pass all three of the original questions and still not be
+    /// a pyramid — 2048² in the header over a 64² level 0, or four unrelated
+    /// images stacked as "mips". `texture_thumbnail` picks a level by *mip*
+    /// extent and letterboxes by it while its callers frame by the header's,
+    /// and the v2 tiler derives every grid from the mip's own extent while the
+    /// sampler walks the pyramid by halving. Neither notices.
+    ///
+    /// Every case here is a payload the three original questions accept: the
+    /// data is long enough for the dimensions it declares, and no extent is
+    /// zero. The controls are the two legal shapes — one level
+    /// (`generate_mips: false`) and a full chain — so this cannot pass by
+    /// refusing everything.
+    #[test]
+    fn a_mip_chain_that_is_not_the_header_s_pyramid_is_refused_at_decode() {
+        let rgba = |w: u32, h: u32| TextureMip {
+            width: w,
+            height: h,
+            data: vec![0u8; (w as usize) * (h as usize) * 4],
+        };
+
+        // Controls. One level is legal (generate_mips: false), and so is the
+        // real chain — including one that stops before 1×1.
+        for mips in [
+            vec![rgba(8, 4)],
+            vec![rgba(8, 4), rgba(4, 2)],
+            vec![rgba(8, 4), rgba(4, 2), rgba(2, 1), rgba(1, 1)],
+        ] {
+            let bytes = handmade(8, 4, TextureFormat::Rgba8, mips);
+            decode::<TextureAsset>(&bytes).expect("a real pyramid must decode");
+        }
+
+        // Level 0 disagreeing with the header it is the level 0 OF.
+        let e = decode::<TextureAsset>(&handmade(
+            2048,
+            2048,
+            TextureFormat::Rgba8,
+            vec![rgba(64, 64)],
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("mip 0") && e.contains("image it declares"),
+            "the refusal must name the disagreement: {e}"
+        );
+
+        // A chain that does not halve: same-size twice, a quarter step, and a
+        // level that grows. All three break the sampler's ancestor walk.
+        for (bad, what) in [
+            (vec![rgba(8, 4), rgba(8, 4)], "did not shrink"),
+            (vec![rgba(8, 4), rgba(2, 1)], "skipped a level"),
+            (vec![rgba(8, 4), rgba(16, 8)], "grew"),
+        ] {
+            let e = decode::<TextureAsset>(&handmade(8, 4, TextureFormat::Rgba8, bad))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                e.contains("mip 1") && e.contains("halving"),
+                "a chain that {what} decoded, or was refused for the wrong reason: {e}"
+            );
+        }
+
+        // The floor: a non-square chain keeps halving the axis that can, and
+        // `1` stays `1` — this is `rgba_mip_chain`'s own rule and it must not
+        // be refused as a non-halving step.
+        decode::<TextureAsset>(&handmade(
+            4,
+            1,
+            TextureFormat::Rgba8,
+            vec![rgba(4, 1), rgba(2, 1), rgba(1, 1)],
+        ))
+        .expect("the max(1) floor is the chain the importer produces");
     }
 
     /// The arithmetic that made the header believable: `level_size` in `u32`
