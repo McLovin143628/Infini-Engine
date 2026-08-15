@@ -45,6 +45,41 @@ function saveBreakpoints(graphId: string, bps: Set<number>): void {
   }
 }
 
+// ── The tombstone (F-lens L7.M3) ─────────────────────────────────────────────
+//
+// A deliberate port of `dccStore`'s pattern, for a store that holds exactly ONE
+// document. `dccStore.ts` carries the full reasoning; what it costs here is the
+// same two module-level slots, and what it buys is two distinct defects:
+//
+//  1. **The double create.** `init` guarded on `get().ready`, which is set after
+//     three awaits. React StrictMode's mount → cleanup → mount runs both mounts
+//     before the first `graph_list` returns, so both saw `ready === false`, both
+//     found no existing document, and both called `graph_create("Main")` —
+//     minting two backend documents (each with its own journal) and adopting
+//     one. The other lived for the process. Unlike `dcc_open`, `graph_create`
+//     takes no asset key, so it cannot be made idempotent on the backend: a
+//     second `init` must JOIN the first instead of racing it.
+//  2. **The close that had nothing to name.** `close` reads `get().doc`, which
+//     is null while the create is still in flight — so it sent no `graph_close`
+//     at all, and the document the reply was about to hand over leaked.
+//
+// The rule, exactly as `dccStore` states it: a tombstoned document accepts no
+// state, and its `init` reply is answered with a `close` — because the document
+// it just created is exactly the one the first close could not name. And, also
+// exactly as `dccStore.open` does it, a fresh `init` CLEARS the tombstone first:
+// a re-open supersedes a close that has not landed, which is what makes the
+// StrictMode remount adopt rather than tear down.
+let opening: Promise<void> | null = null;
+let openGen = 0;
+let tombstoned = false;
+
+/** Test-only: forget any in-flight init and clear the tombstone. */
+export function __resetBlueprintInitForTest(): void {
+  opening = null;
+  openGen += 1;
+  tombstoned = false;
+}
+
 interface BlueprintState {
   registry: NodeDef[];
   registryById: Record<string, NodeDef>;
@@ -101,29 +136,55 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
 
   init: async () => {
     if (get().ready) return;
-    try {
-      const registry = await graphIpc.registry();
-      const registryById: Record<string, NodeDef> = {};
-      for (const d of registry) registryById[d.typeId] = d;
-      const existing = await graphIpc.list();
-      const doc = existing[0] ?? (await graphIpc.create("Main"));
-      set({
-        registry,
-        registryById,
-        doc,
-        ready: true,
-        // Restore this graph's persisted breakpoints.
-        debugBreakpoints: loadBreakpoints(doc.id),
-      });
-    } catch (e) {
-      console.error("blueprint.init failed", e);
-    }
+    // Both synchronous, before any await — see the tombstone note above.
+    tombstoned = false;
+    if (opening) return opening;
+    const gen = ++openGen;
+    opening = (async () => {
+      try {
+        const registry = await graphIpc.registry();
+        const registryById: Record<string, NodeDef> = {};
+        for (const d of registry) registryById[d.typeId] = d;
+        const existing = await graphIpc.list();
+        const doc = existing[0] ?? (await graphIpc.create("Main"));
+        if (tombstoned) {
+          // Closed while this was in flight. The document exists NOW, and the
+          // `close` that already ran had no id to name — so it is closed here.
+          try {
+            await graphIpc.close(doc.id);
+          } catch (e) {
+            console.error("graph.close failed", e);
+          }
+          return;
+        }
+        set({
+          registry,
+          registryById,
+          doc,
+          ready: true,
+          // Restore this graph's persisted breakpoints.
+          debugBreakpoints: loadBreakpoints(doc.id),
+        });
+      } catch (e) {
+        console.error("blueprint.init failed", e);
+      } finally {
+        // Only the LATEST init clears the memo — an older one resolving late
+        // must not free a newer one's slot.
+        if (openGen === gen) opening = null;
+      }
+    })();
+    return opening;
   },
 
   // Discard the editing surface: free the backend document (+ journal) and reset
   // to an un-inited state so a later re-open starts fresh instead of leaking the
   // old doc for the session. Called when the canvas panel unmounts (panel close).
+  //
+  // `opening` is deliberately left alone: an init still in flight has to keep
+  // its memo so a StrictMode remount JOINS it rather than minting a second
+  // document, and it clears the memo itself in its own `finally`.
   close: async () => {
+    tombstoned = true;
     const doc = get().doc;
     set({
       doc: null,
@@ -197,18 +258,32 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
     }
   },
 
+  // Undo/redo carry the same `try`/`catch` every other backend call in this
+  // store has (F-lens L7.M4). They used to be the exception: a bare `await` in a
+  // path whose callers are `void undo()` (the toolbar button) and
+  // `void scope.undo()` (the Ctrl+Z routing), so a rejected `graph_undo` — a
+  // closed document, a backend panic, a serialization mismatch — surfaced only
+  // as an unhandled promise rejection with nothing shown to the author.
   undo: async () => {
     const doc = get().doc;
     if (!doc) return;
-    const restored = await graphIpc.undo(doc.id);
-    if (restored) set({ doc: restored, canRedo: true });
+    try {
+      const restored = await graphIpc.undo(doc.id);
+      if (restored) set({ doc: restored, canRedo: true });
+    } catch (e) {
+      console.error("graph.undo failed", e);
+    }
   },
 
   redo: async () => {
     const doc = get().doc;
     if (!doc) return;
-    const restored = await graphIpc.redo(doc.id);
-    if (restored) set({ doc: restored, canUndo: true });
+    try {
+      const restored = await graphIpc.redo(doc.id);
+      if (restored) set({ doc: restored, canUndo: true });
+    } catch (e) {
+      console.error("graph.redo failed", e);
+    }
   },
 
   clearOutput: () => set({ runResult: null, generated: null }),

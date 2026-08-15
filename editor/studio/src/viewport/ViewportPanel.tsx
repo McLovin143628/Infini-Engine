@@ -47,6 +47,15 @@ export default function ViewportPanel({ params }: { panelId?: string; params?: s
     // triggered reached a backend whose viewport map was still empty and was
     // dropped — the native child then attached and drew straight over the open
     // overlay, which is the exact case registration exists for.
+    //
+    // `disposed` closes the async-setup vs sync-cleanup race (F-lens L7.L1):
+    // `attach` resolves after the effect may already have been cleaned up, and
+    // without the guard `unregister` is assigned into an abandoned closure — the
+    // viewport stays in the overlay registry for the life of the session, so
+    // every later overlay hides a viewport that no longer exists. It survives
+    // today only because `registerViewport` happens to be an idempotent set;
+    // relying on that from here is relying on another module's implementation.
+    let disposed = false;
     let unregister: (() => void) | undefined;
     const report = () => {
       const rect = toPhysicalRect(el.getBoundingClientRect(), window.devicePixelRatio);
@@ -60,6 +69,7 @@ export default function ViewportPanel({ params }: { panelId?: string; params?: s
     viewport
       .attach(id)
       .then(() => {
+        if (disposed) return;
         report();
         unregister = registerViewport(id);
       })
@@ -86,12 +96,14 @@ export default function ViewportPanel({ params }: { panelId?: string; params?: s
     armDprListener();
 
     return () => {
+      disposed = true;
       ro.disconnect();
       window.removeEventListener("resize", schedule);
       mql?.removeEventListener("change", onDprChange);
       cancelAnimationFrame(raf);
-      // May be undefined if `attach` has not resolved yet — the disposer is
-      // assigned inside the same `.then`, so there is nothing to release.
+      // Undefined when `attach` has not resolved yet — and in that case the
+      // `.then` now sees `disposed` and never registers at all, so there is
+      // genuinely nothing to release rather than something unreachable.
       unregister?.();
     };
   }, [id]);

@@ -15,6 +15,30 @@ import type { BpDoc, BpEdit, BpIssue, NodeDef } from "../lib/blueprintTypes";
 import type { PcgBiomeResult, PcgCompileResult, PcgEvaluateResult } from "../lib/pcgTypes";
 import { applyEditsLocal } from "../panels/blueprint/reducer";
 
+// ── The tombstone (F-lens L7.M3) ─────────────────────────────────────────────
+//
+// Ported from `dccStore` by way of `blueprintStore`, which carries the long
+// version. Short form: `init` guarded on `ready`, which is set three awaits in,
+// so React StrictMode's mount → cleanup → mount ran both mounts before
+// `pcg_list` returned, both found no document, and both called
+// `pcg_create("Main")` — two backend documents, two journals, one adopted and
+// one leaked for the process. And `close` reads `get().doc`, which is null while
+// the create is in flight, so it sent no `pcg_close` at all.
+//
+// A tombstoned document accepts no state and its `init` reply is answered with a
+// `close`; a fresh `init` clears the tombstone first, so a StrictMode remount
+// adopts rather than tears down.
+let opening: Promise<void> | null = null;
+let openGen = 0;
+let tombstoned = false;
+
+/** Test-only: forget any in-flight init and clear the tombstone. */
+export function __resetPcgInitForTest(): void {
+  opening = null;
+  openGen += 1;
+  tombstoned = false;
+}
+
 interface PcgState {
   registry: NodeDef[];
   registryById: Record<string, NodeDef>;
@@ -61,23 +85,49 @@ export const usePcgStore = create<PcgState>((set, get) => ({
 
   init: async () => {
     if (get().ready) return;
-    try {
-      const registry = await pcgIpc.registry();
-      const registryById: Record<string, NodeDef> = {};
-      for (const d of registry) registryById[d.typeId] = d;
-      const existing = await pcgIpc.list();
-      const doc = existing[0] ?? (await pcgIpc.create("Main"));
-      set({ registry, registryById, doc, ready: true });
-      void get().compile();
-    } catch (e) {
-      console.error("pcg.init failed", e);
-    }
+    // Both synchronous, before any await — see the tombstone note above.
+    tombstoned = false;
+    if (opening) return opening;
+    const gen = ++openGen;
+    opening = (async () => {
+      try {
+        const registry = await pcgIpc.registry();
+        const registryById: Record<string, NodeDef> = {};
+        for (const d of registry) registryById[d.typeId] = d;
+        const existing = await pcgIpc.list();
+        const doc = existing[0] ?? (await pcgIpc.create("Main"));
+        if (tombstoned) {
+          // Closed while this was in flight. The document exists NOW, and the
+          // `close` that already ran had no id to name — so it is closed here.
+          try {
+            await pcgIpc.close(doc.id);
+          } catch (e) {
+            console.error("pcg.close failed", e);
+          }
+          return;
+        }
+        set({ registry, registryById, doc, ready: true });
+        void get().compile();
+      } catch (e) {
+        console.error("pcg.init failed", e);
+      } finally {
+        // Only the LATEST init clears the memo — an older one resolving late
+        // must not free a newer one's slot.
+        if (openGen === gen) opening = null;
+      }
+    })();
+    return opening;
   },
 
   // Discard the editing surface: free the backend document (+ journal) and reset
   // to an un-inited state so a later re-open starts fresh instead of leaking the
   // old doc for the session. Called when the canvas panel unmounts (panel close).
+  //
+  // `opening` is deliberately left alone: an init still in flight has to keep
+  // its memo so a StrictMode remount JOINS it rather than minting a second
+  // document, and it clears the memo itself in its own `finally`.
   close: async () => {
+    tombstoned = true;
     const doc = get().doc;
     set({
       doc: null,
@@ -170,23 +220,35 @@ export const usePcgStore = create<PcgState>((set, get) => ({
     }
   },
 
+  // Undo/redo carry the same `try`/`catch` every other backend call in this
+  // store has (F-lens L7.M4) — their callers are `void undo()` (the toolbar) and
+  // `void scope.undo()` (Ctrl+Z), so a rejection was an unhandled promise
+  // rejection with nothing shown to the author.
   undo: async () => {
     const doc = get().doc;
     if (!doc) return;
-    const restored = await pcgIpc.undo(doc.id);
-    if (restored) {
-      set({ doc: restored, canRedo: true });
-      void get().compile();
+    try {
+      const restored = await pcgIpc.undo(doc.id);
+      if (restored) {
+        set({ doc: restored, canRedo: true });
+        void get().compile();
+      }
+    } catch (e) {
+      console.error("pcg.undo failed", e);
     }
   },
 
   redo: async () => {
     const doc = get().doc;
     if (!doc) return;
-    const restored = await pcgIpc.redo(doc.id);
-    if (restored) {
-      set({ doc: restored, canUndo: true });
-      void get().compile();
+    try {
+      const restored = await pcgIpc.redo(doc.id);
+      if (restored) {
+        set({ doc: restored, canUndo: true });
+        void get().compile();
+      }
+    } catch (e) {
+      console.error("pcg.redo failed", e);
     }
   },
 

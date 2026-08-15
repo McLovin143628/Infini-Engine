@@ -168,3 +168,115 @@ describe("ptyRegistry", () => {
     expect(fakes.backend.write).toHaveBeenCalledWith("pty-0", "cargo build\r");
   });
 });
+
+/**
+ * **`disposed` after EVERY await** (F-lens L7.M9).
+ *
+ * Wiring a session is three awaits — `create`, then the output and exit
+ * listeners — and only the first was guarded. `closePtySession` runs
+ * synchronously: it sets `disposed`, DRAINS `session.unlisten`, and disposes the
+ * terminal. A listener whose `listen` resolved after that drain was pushed into
+ * an array nobody would ever read again — permanently subscribed, writing PTY
+ * bytes into a disposed xterm on every `pty://output` for the rest of the
+ * process, per closed terminal panel.
+ */
+describe("the close race while a session is still wiring up (L7.M9)", () => {
+  /** Deps whose two `listen` calls can be resolved on demand. */
+  function gatedListeners() {
+    const outUnlisten = vi.fn();
+    const exitUnlisten = vi.fn();
+    let releaseOut!: () => void;
+    let releaseExit!: () => void;
+    const outGate = new Promise<void>((r) => (releaseOut = r));
+    const exitGate = new Promise<void>((r) => (releaseExit = r));
+    return {
+      outUnlisten,
+      exitUnlisten,
+      releaseOut: () => releaseOut(),
+      releaseExit: () => releaseExit(),
+      deps: {
+        listenOutput: vi.fn(async () => {
+          await outGate;
+          return outUnlisten;
+        }),
+        listenExit: vi.fn(async () => {
+          await exitGate;
+          return exitUnlisten;
+        }),
+      },
+    };
+  }
+
+  it("releases the OUTPUT listener that resolves after the close", async () => {
+    const g = gatedListeners();
+    __setPtyDepsForTest(g.deps);
+
+    const s = acquirePtySession("terminal", "/proj");
+    // Let `create` land so the session has an id, then close mid-wiring.
+    await Promise.resolve();
+    await Promise.resolve();
+    closePtySession("terminal");
+    expect(s.disposed).toBe(true);
+
+    g.releaseOut();
+    g.releaseExit();
+    await s.ready;
+
+    // Both handles released, and neither was parked in the drained array.
+    expect(g.outUnlisten).toHaveBeenCalledTimes(1);
+    expect(s.unlisten).toHaveLength(0);
+  });
+
+  it("releases BOTH listeners when the close lands between them", async () => {
+    const g = gatedListeners();
+    __setPtyDepsForTest(g.deps);
+
+    const s = acquirePtySession("terminal", "/proj");
+    await Promise.resolve();
+    await Promise.resolve();
+    // The output listener is up; the exit listener is not.
+    g.releaseOut();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    closePtySession("terminal");
+    g.releaseExit();
+    await s.ready;
+
+    expect(g.outUnlisten).toHaveBeenCalledTimes(1);
+    expect(g.exitUnlisten).toHaveBeenCalledTimes(1);
+    // Released exactly once each — the drain must not double-call them either.
+    expect(s.unlisten).toHaveLength(0);
+  });
+
+  it("keeps both handles when nothing closed", async () => {
+    // The other half: the guard must not release a listener the session still
+    // wants. Without this, "always release" would pass the two cases above.
+    const g = gatedListeners();
+    __setPtyDepsForTest(g.deps);
+
+    const s = acquirePtySession("terminal", "/proj");
+    g.releaseOut();
+    g.releaseExit();
+    await s.ready;
+
+    expect(g.outUnlisten).not.toHaveBeenCalled();
+    expect(g.exitUnlisten).not.toHaveBeenCalled();
+    expect(s.unlisten).toHaveLength(2);
+  });
+
+  it("does not write a failure banner into a terminal that was disposed", async () => {
+    __setPtyDepsForTest({
+      backend: {
+        create: vi.fn(() => Promise.reject(new Error("no pty available"))),
+        write: vi.fn(async () => {}),
+        resize: vi.fn(async () => {}),
+        close: vi.fn(async () => {}),
+      },
+    });
+    const s = acquirePtySession("terminal", "/proj");
+    closePtySession("terminal");
+    await s.ready;
+    expect(s.term.writeln).not.toHaveBeenCalled();
+  });
+});

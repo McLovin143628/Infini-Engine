@@ -12,7 +12,7 @@ import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
 import type { ProjectTemplateDto } from "../bindings/ProjectTemplateDto";
 import type { RecentProjectDto } from "../bindings/RecentProjectDto";
 import { getCommand, registerCommand, setCommandHandler } from "../lib/commands";
-import { listenTo, type UnlistenFn } from "../lib/events";
+import { listenTo, refCountedInit } from "../lib/events";
 import { project as projectIpc } from "../lib/ipc";
 import { RECENT_PROJECTS_MAX } from "../lib/menus";
 import { useAssetStore } from "./assetStore";
@@ -156,21 +156,18 @@ export function registerProjectCommands(): void {
   }
 }
 
-let unlisten: UnlistenFn | null = null;
-
 /**
  * Load templates + recent + current and subscribe to `project://changed`.
- * Idempotent (StrictMode-safe); returns a disposer.
+ * Returns a disposer.
+ *
+ * **Refcounted** (`refCountedInit`, F-lens L7.M1): the guard used to be set
+ * after the first `await`, so StrictMode's double mount subscribed twice and
+ * orphaned the first handle.
  */
-export async function initProjectSync(): Promise<() => void> {
-  if (unlisten) return () => {};
-  unlisten = await listenTo("project://changed", (info) =>
+export const initProjectSync = refCountedInit(async () => {
+  const unlisten = await listenTo("project://changed", (info) =>
     useProjectStore.getState().applyChanged(info),
   );
   await useProjectStore.getState().refresh();
-  const dispose = unlisten;
-  return () => {
-    dispose?.();
-    unlisten = null;
-  };
-}
+  return () => unlisten();
+});

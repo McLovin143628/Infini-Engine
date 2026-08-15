@@ -743,14 +743,17 @@ function AssetCell({
   onOpen: (asset: AssetDto) => void;
   onContext: (x: number, y: number, asset: AssetDto) => void;
 }) {
-  const thumb = useAssetStore((s) => s.thumbnails[asset.id]);
+  // Keyed by CONTENT HASH, not asset id (F-lens L7.H5): a re-import keeps the
+  // GUID and changes the bytes, and an id-keyed cache answered "already have
+  // it" and left the old picture on screen for the rest of the session.
+  const thumb = useAssetStore((s) => s.thumbnails.get(asset.content_hash));
   const loadThumbnail = useAssetStore((s) => s.loadThumbnail);
   const [ghost, setGhost] = useState<{ x: number; y: number } | null>(null);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const dragging = useRef(false);
 
   useEffect(() => {
-    if (asset.previewable) loadThumbnail(asset.id);
+    if (asset.previewable) loadThumbnail(asset.id, asset.content_hash);
   }, [asset.id, asset.previewable, asset.content_hash, loadThumbnail]);
 
   const onPointerDown = (e: React.PointerEvent) => {

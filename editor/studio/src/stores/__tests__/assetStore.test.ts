@@ -22,7 +22,8 @@ vi.mock("../../lib/ipc", () => ({
 
 import type { AssetDto } from "../../bindings/AssetDto";
 import type { CollectionDto } from "../../bindings/CollectionDto";
-import { collections as collectionsIpc } from "../../lib/ipc";
+import type { ImportEventDto } from "../../bindings/ImportEventDto";
+import { assets as assetsIpc, collections as collectionsIpc } from "../../lib/ipc";
 import { useAssetStore, visibleAssets } from "../assetStore";
 
 function asset(id: string, name: string, kind = "mesh", folder = ""): AssetDto {
@@ -113,5 +114,170 @@ describe("collection state + actions", () => {
     vi.mocked(collectionsIpc.rename).mockResolvedValue([{ name: "New", ids: [] }]);
     await useAssetStore.getState().renameCollection("Old", "New");
     expect(useAssetStore.getState().activeCollection).toBe("New");
+  });
+});
+
+/**
+ * **The thumbnail cache** (F-lens L7.H5) — three defects in ten lines of code:
+ *
+ *  1. **Keyed by asset id.** A re-import keeps the GUID and changes the bytes,
+ *     so the "already requested" guard answered yes and the drawer showed the
+ *     PREVIOUS picture for the rest of the session. The `content_hash` is the
+ *     backend's own thumbnail key (`inf_editor_core::thumbnail::ThumbnailCache`)
+ *     and it is what this now keys on too.
+ *  2. **Spread-copied on every insert.** `{ ...s.thumbnails, [id]: url }` copies
+ *     the whole cache per thumbnail, so filling a grid of N assets was O(N²).
+ *  3. **Unbounded.** Base64 PNG data-URLs, one per previewable asset ever
+ *     scrolled past, held for the life of the session.
+ */
+describe("thumbnail cache (L7.H5)", () => {
+  const CAP = 256;
+
+  beforeEach(() => {
+    useAssetStore.setState({ thumbnails: new Map() });
+    vi.clearAllMocks();
+    vi.mocked(assetsIpc.thumbnail).mockImplementation((id: string) =>
+      Promise.resolve(`data:image/png;base64,${id}`),
+    );
+  });
+  afterEach(() => vi.clearAllMocks());
+
+  const cache = () => useAssetStore.getState().thumbnails;
+
+  it("keys on content_hash, so a re-import re-renders", async () => {
+    // THE defect. Same asset id, new bytes → a new key, so the request is made
+    // again rather than short-circuited by a stale entry.
+    useAssetStore.getState().loadThumbnail("asset-1", "hash-before");
+    await vi.waitFor(() => expect(cache().get("hash-before")).toContain("asset-1"));
+    expect(vi.mocked(assetsIpc.thumbnail)).toHaveBeenCalledTimes(1);
+
+    useAssetStore.getState().loadThumbnail("asset-1", "hash-after");
+    expect(vi.mocked(assetsIpc.thumbnail)).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(cache().get("hash-after")).toContain("asset-1"));
+  });
+
+  it("asks once per content, however many assets share it", async () => {
+    // The other side of hashing: two identical files are one thumbnail. The
+    // second asset is answered from the cache without a round trip.
+    useAssetStore.getState().loadThumbnail("asset-1", "same-hash");
+    await vi.waitFor(() => expect(cache().get("same-hash")).toBeTruthy());
+    useAssetStore.getState().loadThumbnail("asset-2", "same-hash");
+    expect(vi.mocked(assetsIpc.thumbnail)).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-request while the first request is still in flight", async () => {
+    // The placeholder "" entry is what holds that shut; it must count as
+    // "asked for", not as "absent".
+    useAssetStore.getState().loadThumbnail("asset-1", "h");
+    useAssetStore.getState().loadThumbnail("asset-1", "h");
+    expect(vi.mocked(assetsIpc.thumbnail)).toHaveBeenCalledTimes(1);
+    expect(cache().get("h")).toBe("");
+  });
+
+  it("is a Map, and is not copied on insert", () => {
+    // The O(N²) half: the container is mutated in place and the STATE object is
+    // what changes, so subscribers still re-run their selectors.
+    const before = cache();
+    useAssetStore.getState().loadThumbnail("asset-1", "h1");
+    expect(cache()).toBeInstanceOf(Map);
+    expect(cache()).toBe(before);
+  });
+
+  it("evicts least-recently-used entries past the cap", async () => {
+    for (let i = 0; i < CAP + 10; i++) {
+      useAssetStore.getState().loadThumbnail(`asset-${i}`, `hash-${i}`);
+    }
+    await vi.waitFor(() => expect(cache().get(`hash-${CAP + 9}`)).toBeTruthy());
+
+    expect(cache().size).toBe(CAP);
+    // The oldest ten are gone; the newest are held.
+    expect(cache().has("hash-0")).toBe(false);
+    expect(cache().has("hash-9")).toBe(false);
+    expect(cache().has("hash-10")).toBe(true);
+    expect(cache().has(`hash-${CAP + 9}`)).toBe(true);
+  });
+
+  it("a re-read renews an entry, so it survives the next eviction", async () => {
+    // What makes it an LRU rather than a FIFO: the entry still being asked for
+    // is the one that must not be dropped.
+    useAssetStore.getState().loadThumbnail("asset-0", "hash-0");
+    await vi.waitFor(() => expect(cache().get("hash-0")).toBeTruthy());
+    for (let i = 1; i < CAP; i++) {
+      useAssetStore.getState().loadThumbnail(`asset-${i}`, `hash-${i}`);
+    }
+    // Touch the oldest entry — the grid scrolling back over it.
+    useAssetStore.getState().loadThumbnail("asset-0", "hash-0");
+    // …then push one more in, which evicts whatever is now oldest.
+    useAssetStore.getState().loadThumbnail("asset-new", "hash-new");
+
+    expect(cache().size).toBe(CAP);
+    expect(cache().has("hash-0")).toBe(true);
+    expect(cache().has("hash-1")).toBe(false);
+  });
+});
+
+/**
+ * **The import-job ring** (F-lens L7.M11). `importAdvisories` next door was
+ * already capped at 20; `imports` kept every job the backend ever reported, for
+ * the life of the session, in a record that is spread-copied on every event.
+ */
+describe("import job pruning (L7.M11)", () => {
+  const IMPORT_CAP = 50;
+
+  function event(job: number, phase: string): ImportEventDto {
+    return {
+      job,
+      source: `file-${job}.png`,
+      phase,
+      produced: [],
+      primary: null,
+      cached: false,
+      error: null,
+      done: null,
+      total: null,
+      stage: null,
+      advisories: [],
+    };
+  }
+
+  beforeEach(() => {
+    useAssetStore.setState({ imports: {}, importAdvisories: [] });
+    vi.clearAllMocks();
+    vi.mocked(assetsIpc.snapshot).mockResolvedValue({
+      assets: [],
+      folders: [],
+      root: "",
+      version: 0n as unknown as bigint,
+    } as never);
+  });
+  afterEach(() => vi.clearAllMocks());
+
+  const jobs = () => useAssetStore.getState().imports;
+
+  it("keeps at most the newest cap of finished jobs", () => {
+    for (let i = 0; i < IMPORT_CAP + 25; i++) {
+      useAssetStore.getState().applyImportEvent(event(i, "finished"));
+    }
+    expect(Object.keys(jobs())).toHaveLength(IMPORT_CAP);
+    expect(jobs()[0]).toBeUndefined();
+    expect(jobs()[IMPORT_CAP + 24]).toBeDefined();
+  });
+
+  it("never evicts a job that is still running", () => {
+    // The progress strip is the only place a long terrain import reports
+    // itself; pruning it mid-import would make the bar vanish.
+    useAssetStore.getState().applyImportEvent(event(0, "progress"));
+    for (let i = 1; i < IMPORT_CAP + 25; i++) {
+      useAssetStore.getState().applyImportEvent(event(i, "finished"));
+    }
+    expect(jobs()[0]?.phase).toBe("progress");
+    expect(Object.keys(jobs())).toHaveLength(IMPORT_CAP + 1);
+  });
+
+  it("leaves a small set completely alone", () => {
+    for (let i = 0; i < 5; i++) {
+      useAssetStore.getState().applyImportEvent(event(i, "finished"));
+    }
+    expect(Object.keys(jobs())).toHaveLength(5);
   });
 });

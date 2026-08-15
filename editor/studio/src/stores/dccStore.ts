@@ -328,23 +328,47 @@ export const useDccStore = create<DccState>((set, get) => {
       }
     },
 
+    // Found alongside L7.M4: the last bare `await` in this store, and its only
+    // caller is `void frame(assetId)` on the Model Editor toolbar — so a refused
+    // `dcc_frame` was an unhandled promise rejection with nothing shown. Framing
+    // is a camera move, so like `orbit` it reports to the console rather than
+    // occupying the refusal slot an author reads for tool feedback.
     frame: async (assetId) => {
       const doc = entry(assetId).doc;
       if (!doc) return;
-      await dccIpc.frame(doc.id);
-      await pump(assetId);
+      try {
+        await dccIpc.frame(doc.id);
+        await pump(assetId);
+      } catch (e) {
+        console.error("dcc.frame failed", e);
+      }
     },
 
+    // Undo/redo surface a rejection as a `refusal`, like every other action in
+    // this store (F-lens L7.M4). They were the two bare `await`s left — and
+    // their callers are `void undo(assetId)` (the toolbar) and
+    // `void useDccStore.getState().undo(params)` (the `"model"` undo scope), so
+    // a rejected `dcc_undo` was an unhandled promise rejection and the panel
+    // showed nothing at all. `skelStore.run` already does exactly this, for the
+    // reason written above it.
     undo: async (assetId) => {
       const doc = entry(assetId).doc;
       if (!doc) return;
-      adopt(assetId, await dccIpc.undo(doc.id));
+      try {
+        adopt(assetId, await dccIpc.undo(doc.id));
+      } catch (e) {
+        patch(assetId, { refusal: String(e) });
+      }
     },
 
     redo: async (assetId) => {
       const doc = entry(assetId).doc;
       if (!doc) return;
-      adopt(assetId, await dccIpc.redo(doc.id));
+      try {
+        adopt(assetId, await dccIpc.redo(doc.id));
+      } catch (e) {
+        patch(assetId, { refusal: String(e) });
+      }
     },
 
     save: async (assetId) => {

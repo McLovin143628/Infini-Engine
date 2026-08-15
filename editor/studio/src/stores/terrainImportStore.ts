@@ -20,7 +20,7 @@ import type { ImportEventDto } from "../bindings/ImportEventDto";
 import type { TerrainImportPlanDto } from "../bindings/TerrainImportPlanDto";
 import type { TerrainImportResultDto } from "../bindings/TerrainImportResultDto";
 import type { TerrainImportSettingsDto } from "../bindings/TerrainImportSettingsDto";
-import { listenTo, type UnlistenFn } from "../lib/events";
+import { listenTo, refCountedInit } from "../lib/events";
 import { terrain as terrainIpc } from "../lib/ipc";
 
 /** Where the wizard is. */
@@ -300,19 +300,16 @@ export const useTerrainImportStore = create<TerrainImportState>((set, get) => ({
   reset: () => set(initialMachine()),
 }));
 
-let unlisten: UnlistenFn | null = null;
-
 /**
- * Subscribe the wizard to `assets://import`. Idempotent (StrictMode
- * double-mounts); returns a disposer.
+ * Subscribe the wizard to `assets://import`. Returns a disposer.
+ *
+ * **Refcounted** (`refCountedInit`, F-lens L7.M1): the guard used to be set
+ * after the first `await`, so StrictMode's double mount subscribed twice and
+ * orphaned the first handle.
  */
-export async function initTerrainImportSync(): Promise<() => void> {
-  if (unlisten) return () => {};
-  unlisten = await listenTo("assets://import", (e) =>
+export const initTerrainImportSync = refCountedInit(async () => {
+  const unlisten = await listenTo("assets://import", (e) =>
     useTerrainImportStore.getState().applyImportEvent(e),
   );
-  return () => {
-    unlisten?.();
-    unlisten = null;
-  };
-}
+  return () => unlisten();
+});

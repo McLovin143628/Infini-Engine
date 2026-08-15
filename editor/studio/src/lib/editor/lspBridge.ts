@@ -6,7 +6,13 @@
  * diagnostics update the Problems store and, for the active file, paint
  * squiggles. Kept out of both stores to avoid an import cycle.
  */
-import { onLspDiagnostics, onLspStarted, onLspStopped, type UnlistenFn } from "../events";
+import {
+  onLspDiagnostics,
+  onLspStarted,
+  onLspStopped,
+  refCountedInit,
+  type UnlistenFn,
+} from "../events";
 import { lsp } from "../ipc";
 import { useProjectStore } from "../../stores/projectStore";
 import {
@@ -79,14 +85,36 @@ async function activateForActive(): Promise<void> {
   if (known) pushDiagnostics(view, known);
 }
 
-let disposers: UnlistenFn[] = [];
-let unsubscribeStore: (() => void) | null = null;
-let inited = false;
-
-/** Start the bridge: subscribe to events + active-tab changes. Idempotent. */
-export async function initLsp(): Promise<() => void> {
-  if (inited) return () => {};
-  inited = true;
+/**
+ * Start the bridge: subscribe to events + active-tab changes.
+ *
+ * **Refcounted, not flag-guarded** (F-lens L7.M2 — this was the LSP-is-dead
+ * bug). The previous shape was `if (inited) return () => {}; inited = true;`,
+ * which looks StrictMode-safe because the guard is set before the first
+ * `await`. It is not, because of what the *second* caller is handed. React runs
+ * mount → cleanup → mount synchronously in one commit:
+ *
+ *  1. mount #1 sets `inited` and starts subscribing;
+ *  2. cleanup #1 marks itself disposed and arms `.then((fn) => fn())`;
+ *  3. mount #2 sees `inited` still true (nothing has resolved) and receives a
+ *     **no-op disposer** — it holds nothing;
+ *  4. the subscriptions resolve, cleanup #1's armed disposer fires and tears
+ *     down every `lsp://` listener plus the editor-store subscription, and
+ *     resets `inited = false`.
+ *
+ * Net result in `tauri dev`: no listeners, no re-init, **no LSP at all** — no
+ * diagnostics, no squiggles, and `activateForActive` never runs again, so
+ * rust-analyzer is never even started. Counting holders instead of flipping a
+ * flag makes step 3 a real second holder, so step 4 decrements to 1 rather than
+ * to 0; and when the last holder does release, `refCountedInit` clears its
+ * memo so a genuine remount re-subscribes.
+ *
+ * `started`/`openedUris`/`installedForPath` above are deliberately NOT reset by
+ * the teardown: they describe the *backend server's* state, which outlives this
+ * bridge's listeners.
+ */
+export const initLsp = refCountedInit(async () => {
+  const disposers: UnlistenFn[] = [];
 
   disposers.push(
     await onLspStarted((p) => useLspStore.getState().setStatus(p.language, "running")),
@@ -105,7 +133,7 @@ export async function initLsp(): Promise<() => void> {
 
   // React to the active tab changing.
   let lastActive: string | null = null;
-  unsubscribeStore = useEditorStore.subscribe((s) => {
+  const unsubscribeStore = useEditorStore.subscribe((s) => {
     if (s.activeId !== lastActive) {
       lastActive = s.activeId;
       void activateForActive();
@@ -116,9 +144,7 @@ export async function initLsp(): Promise<() => void> {
 
   return () => {
     disposers.forEach((d) => d());
-    disposers = [];
-    unsubscribeStore?.();
-    unsubscribeStore = null;
-    inited = false;
+    disposers.length = 0;
+    unsubscribeStore();
   };
-}
+});

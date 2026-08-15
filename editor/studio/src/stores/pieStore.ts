@@ -14,7 +14,7 @@
  */
 import { create } from "zustand";
 
-import { listenTo, type PieStateEvent, type UnlistenFn } from "../lib/events";
+import { listenTo, refCountedInit, type PieStateEvent } from "../lib/events";
 import { pie as pieIpc } from "../lib/ipc";
 import { bindKey } from "../lib/keybindings";
 import { registerCommands } from "../lib/commands";
@@ -198,26 +198,23 @@ export function registerPieCommands(): void {
   bindKey({ chord: "Shift+Alt+P", command: "pie.play" });
 }
 
-let unlisten: UnlistenFn | null = null;
-
 /**
  * Sync running state from `pie_is_running()` on mount and subscribe to
- * `pie://state`. Idempotent (React StrictMode double-mounts); returns a disposer.
+ * `pie://state`. Returns a disposer.
+ *
+ * **Refcounted** (`refCountedInit`, F-lens L7.M1): the guard used to be set
+ * after the first `await`, so StrictMode's double mount subscribed twice and
+ * orphaned the first handle.
  */
-export async function initPieSync(): Promise<() => void> {
-  if (unlisten) return () => {};
-  unlisten = await listenTo("pie://state", (ev) => usePieStore.getState().syncState(ev));
+export const initPieSync = refCountedInit(async () => {
+  const unlisten = await listenTo("pie://state", (ev) => usePieStore.getState().syncState(ev));
   try {
     usePieStore.getState().syncRunning(await pieIpc.isRunning());
   } catch (e) {
     console.error("pie.isRunning failed", e);
   }
-  const dispose = unlisten;
-  return () => {
-    dispose?.();
-    unlisten = null;
-  };
-}
+  return () => unlisten();
+});
 
 /** Test-only: reset the store between cases. */
 export function __resetPieForTest(): void {

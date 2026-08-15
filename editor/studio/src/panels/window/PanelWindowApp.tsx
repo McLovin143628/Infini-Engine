@@ -44,7 +44,14 @@ export default function PanelWindowApp() {
       setReady(true);
       const win = getCurrentWindow();
       await win.show().catch(() => {});
+      // Re-checked after EVERY await, not only the first (F-lens L7.M8). The
+      // guard above covered the mirror and nothing after it, so a StrictMode
+      // remount — or a window closed while `show()` was in flight — still ran
+      // the rest of this block and emitted a second `panel://ready`, which the
+      // manager reads as another window coming up.
+      if (!mounted) return;
       await win.setFocus().catch(() => {});
+      if (!mounted) return;
       // Activation belt: a window spawned by a TEAR-OUT comes up the
       // instant a captured pointer drag releases outside the main window,
       // and WebView2 can bring it up without input focus — leaving the
@@ -65,18 +72,28 @@ export default function PanelWindowApp() {
   // (the manager reacts to the layout change and destroys us).
   useEffect(() => {
     const win = getCurrentWindow();
+    let disposed = false;
     let unlisten: (() => void) | undefined;
+    // `onCloseRequested` resolves ASYNC while this cleanup runs sync: without
+    // the guard a StrictMode remount pushes the handle into an abandoned
+    // closure and the listener LEAKS, so one close emits `panel://closed`
+    // twice (F-lens L7.M8). The self-executing late unlisten is the same shape
+    // `storeBridge.startStoreBridgeHost` uses.
     void win
       .onCloseRequested(() => {
         void emitTo("main", "panel://closed", { panelId });
       })
-      .then((u) => (unlisten = u));
-    return () => unlisten?.();
+      .then((u) => (disposed ? u() : (unlisten = u)));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [panelId]);
 
   // Geometry reports (debounced) → main persists windowRect.
   useEffect(() => {
     const win = getCurrentWindow();
+    let disposed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const report = () => {
       if (timer) clearTimeout(timer);
@@ -84,6 +101,10 @@ export default function PanelWindowApp() {
         void (async () => {
           try {
             const [pos, size] = await Promise.all([win.outerPosition(), win.outerSize()]);
+            // The timer can fire microseconds before cleanup; clearing it then
+            // does not unwind an already-running callback, so the emit is
+            // guarded too (F-lens L7.M8).
+            if (disposed) return;
             void emitTo("main", "panel://geometry", {
               panelId,
               x: pos.x,
@@ -97,12 +118,20 @@ export default function PanelWindowApp() {
         })();
       }, 400);
     };
+    // Both `onMoved`/`onResized` resolve async while this cleanup runs sync: a
+    // handle pushed after teardown is a LEAKED listener, and two live move
+    // handlers report `panel://geometry` twice for every drag (F-lens L7.M8).
     const unlistens: Array<() => void> = [];
-    void win.onMoved(report).then((u) => unlistens.push(u));
-    void win.onResized(report).then((u) => unlistens.push(u));
+    const track = (p: Promise<() => void>) => {
+      void p.then((u) => (disposed ? u() : unlistens.push(u)));
+    };
+    track(win.onMoved(report));
+    track(win.onResized(report));
     return () => {
+      disposed = true;
       if (timer) clearTimeout(timer);
       for (const u of unlistens) u();
+      unlistens.length = 0;
     };
   }, [panelId]);
 

@@ -137,6 +137,81 @@ export function listenToDynamic<T>(
   return listen<T>(channel, (event) => handler(event.payload));
 }
 
+/**
+ * **Refcounted, StrictMode-safe subscription lifetime** (F-lens L7.M1/M2).
+ *
+ * Every `init*Sync` in `src/stores` is an `async` function that subscribes and
+ * returns a disposer, and every caller in `App.tsx` is the same effect shape:
+ *
+ * ```ts
+ * useEffect(() => {
+ *   let dispose, disposed = false;
+ *   initXSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+ *   return () => { disposed = true; dispose?.(); };
+ * }, []);
+ * ```
+ *
+ * React StrictMode runs that **mount → cleanup → mount** synchronously, inside
+ * one commit. Two shapes were tried before this one and both are broken:
+ *
+ *  - **A guard set AFTER the first `await`** (`if (unlisten) return; unlisten =
+ *    await listenTo(…)`) — the seven stores' original shape. Both mounts pass
+ *    the guard while the first `listen` is still in flight, so the channel is
+ *    subscribed **twice** and the second assignment overwrites the first handle:
+ *    one listener can never be released, and the first disposer then nulls the
+ *    module slot so a later re-init subscribes a *third* time.
+ *  - **A guard set synchronously that hands the second caller a no-op**
+ *    (`if (inited) return () => {}; inited = true;` — `initLsp`'s original
+ *    shape). Mount #2 holds a disposer that does nothing while cleanup #1 tears
+ *    the *whole* bridge down once its promise resolves. Nothing is left
+ *    subscribed and nothing ever re-subscribes: this is why LSP was dead in
+ *    `tauri dev`.
+ *
+ * The fix is to count holders instead of guarding a flag. `holders` is
+ * incremented **synchronously, before any `await`**, so the second mount is
+ * seen; both mounts share one in-flight `start()`; and teardown runs only when
+ * the *last* holder releases — after which `pending` is cleared so a genuine
+ * remount re-subscribes from scratch.
+ *
+ * Ordering-independent by construction: whether cleanup #1 lands before or after
+ * `start()` resolves, the count is 1 when the dust settles and exactly one set
+ * of listeners is live.
+ *
+ * @param start Subscribe and return the teardown. Called at most once per
+ *   0 → 1 holder transition.
+ */
+export function refCountedInit(
+  start: () => Promise<() => void>,
+): () => Promise<() => void> {
+  let holders = 0;
+  let pending: Promise<() => void> | null = null;
+
+  return async function acquire(): Promise<() => void> {
+    // Synchronous, BEFORE the await below — this is the whole fix.
+    holders += 1;
+    const p = (pending ??= start());
+    let teardown: () => void;
+    try {
+      teardown = await p;
+    } catch (e) {
+      holders -= 1;
+      if (pending === p) pending = null;
+      throw e;
+    }
+    let released = false;
+    return () => {
+      // Idempotent: a caller that disposes twice must not drop the count twice
+      // and tear down a listener another holder is still using.
+      if (released) return;
+      released = true;
+      holders -= 1;
+      if (holders > 0) return;
+      if (pending === p) pending = null;
+      teardown();
+    };
+  };
+}
+
 // ── Terminal (P5.3): per-session parameterized channels ────────────────────
 
 /** `pty://output/{id}` payload — base64-encoded shell bytes. */

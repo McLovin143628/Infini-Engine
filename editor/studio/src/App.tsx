@@ -76,7 +76,9 @@ export default function App() {
   useEffect(() => {
     let dispose: (() => void) | undefined;
     let disposed = false;
-    initSceneSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    void initSceneSync()
+      .then((fn) => (disposed ? fn() : (dispose = fn)))
+      .catch((e) => console.error("initSceneSync failed", e));
     return () => {
       disposed = true;
       dispose?.();
@@ -88,7 +90,9 @@ export default function App() {
   useEffect(() => {
     let dispose: (() => void) | undefined;
     let disposed = false;
-    initAssetSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    void initAssetSync()
+      .then((fn) => (disposed ? fn() : (dispose = fn)))
+      .catch((e) => console.error("initAssetSync failed", e));
     return () => {
       disposed = true;
       dispose?.();
@@ -100,7 +104,9 @@ export default function App() {
   useEffect(() => {
     let dispose: (() => void) | undefined;
     let disposed = false;
-    initTerrainImportSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    void initTerrainImportSync()
+      .then((fn) => (disposed ? fn() : (dispose = fn)))
+      .catch((e) => console.error("initTerrainImportSync failed", e));
     return () => {
       disposed = true;
       dispose?.();
@@ -113,7 +119,9 @@ export default function App() {
   useEffect(() => {
     let dispose: (() => void) | undefined;
     let disposed = false;
-    initCaptureSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    void initCaptureSync()
+      .then((fn) => (disposed ? fn() : (dispose = fn)))
+      .catch((e) => console.error("initCaptureSync failed", e));
     return () => {
       disposed = true;
       dispose?.();
@@ -124,7 +132,9 @@ export default function App() {
   useEffect(() => {
     let dispose: (() => void) | undefined;
     let disposed = false;
-    initProjectSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    void initProjectSync()
+      .then((fn) => (disposed ? fn() : (dispose = fn)))
+      .catch((e) => console.error("initProjectSync failed", e));
     return () => {
       disposed = true;
       dispose?.();
@@ -143,7 +153,9 @@ export default function App() {
   useEffect(() => {
     let dispose: (() => void) | undefined;
     let disposed = false;
-    initSimSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    void initSimSync()
+      .then((fn) => (disposed ? fn() : (dispose = fn)))
+      .catch((e) => console.error("initSimSync failed", e));
     return () => {
       disposed = true;
       dispose?.();
@@ -154,7 +166,9 @@ export default function App() {
   useEffect(() => {
     let dispose: (() => void) | undefined;
     let disposed = false;
-    initPieSync().then((fn) => (disposed ? fn() : (dispose = fn)));
+    void initPieSync()
+      .then((fn) => (disposed ? fn() : (dispose = fn)))
+      .catch((e) => console.error("initPieSync failed", e));
     return () => {
       disposed = true;
       dispose?.();
@@ -183,7 +197,9 @@ export default function App() {
   useEffect(() => {
     let dispose: (() => void) | undefined;
     let disposed = false;
-    initLsp().then((fn) => (disposed ? fn() : (dispose = fn)));
+    void initLsp()
+      .then((fn) => (disposed ? fn() : (dispose = fn)))
+      .catch((e) => console.error("initLsp failed", e));
     return () => {
       disposed = true;
       dispose?.();

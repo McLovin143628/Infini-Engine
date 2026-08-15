@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownToLine, Ban, Pause, Play, Search } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { LogLevel } from "../bindings/LogLevel";
+import type { LogLine } from "../bindings/LogLine";
 import { stripAnsi } from "../lib/ansi";
 import { cn } from "../lib/utils";
 import { LOG_LEVELS, useLogStore } from "../stores/logStore";
@@ -19,6 +20,64 @@ const LEVEL_STYLE: Record<LogLevel, string> = {
   error: "text-(--ink-error)",
 };
 
+/** How long typing settles before the 5000-line filter re-runs (F-lens L7.M12). */
+const SEARCH_DEBOUNCE_MS = 150;
+
+/**
+ * Per-line derived text, computed once (F-lens L7.M12).
+ *
+ * `stripAnsi` is a global regex over the whole message. The filter ran it on
+ * **every line, on every flush** — the batcher flushes ~16×/s and the ring holds
+ * 5000 — and the row renderer ran it again for each visible row. A `LogLine` is
+ * immutable and reaches the store by reference, so its stripped form can only
+ * be computed once; a `WeakMap` means the entry dies with the line when the ring
+ * trims it, with no cap to tune and nothing to evict.
+ *
+ * `needle` folds the message AND the target into one lower-cased string so the
+ * search test is a single `includes` rather than two `toLowerCase()` calls per
+ * line per keystroke.
+ */
+interface LineText {
+  message: string;
+  needle: string;
+}
+const LINE_TEXT = new WeakMap<LogLine, LineText>();
+
+function lineText(l: LogLine): LineText {
+  let t = LINE_TEXT.get(l);
+  if (!t) {
+    const message = stripAnsi(l.message);
+    t = { message, needle: `${message}\n${l.target}`.toLowerCase() };
+    LINE_TEXT.set(l, t);
+  }
+  return t;
+}
+
+/**
+ * The lines `next` gained over `prev`, or `null` when `next` is not `prev`
+ * plus a head-trim and a tail-append (F-lens L7.M12).
+ *
+ * `logStore.appendMany` merges a batch and then trims the front to `LOG_CAP` —
+ * a capped ring — so consecutive `lines` arrays overlap in a run. Recognising
+ * that run turns a flush from "re-test all 5000" into "test the three that
+ * arrived". The whole overlap is verified element by element (reference
+ * identity — the store keeps the very objects the events delivered), because a
+ * mis-detected overlap would silently drop lines from the panel.
+ *
+ * Exported for the unit test that holds the recognition honest.
+ */
+export function appendedLines(prev: LogLine[], next: LogLine[]): LogLine[] | null {
+  if (prev.length === 0) return next;
+  const j = next.lastIndexOf(prev[prev.length - 1]!);
+  if (j < 0) return null;
+  const trim = prev.length - 1 - j;
+  if (trim < 0) return null;
+  for (let i = 0; i <= j; i++) {
+    if (prev[trim + i] !== next[i]) return null;
+  }
+  return next.slice(j + 1);
+}
+
 export default function OutputLogPanel() {
   const lines = useLogStore((s) => s.lines);
   const enabled = useLogStore((s) => s.enabled);
@@ -29,16 +88,71 @@ export default function OutputLogPanel() {
   const [follow, setFollow] = useState(true);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
+  // The search box holds its own text and pushes it to the store on a timer
+  // (F-lens L7.M12). Typing "error" used to re-filter the whole ring five
+  // times — and, because `search` is bridged, ship five store patches. The
+  // draft is deliberately not re-synced from the store: a detached window's
+  // `setSearch` forwards to main and comes back, and snapping the caret onto a
+  // late echo is worse than the two staying briefly apart.
+  const [draft, setDraft] = useState(search);
+  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onSearchChange = (v: string) => {
+    setDraft(v);
+    if (debounce.current) clearTimeout(debounce.current);
+    debounce.current = setTimeout(() => setSearch(v), SEARCH_DEBOUNCE_MS);
+  };
+  useEffect(
+    () => () => {
+      if (debounce.current) clearTimeout(debounce.current);
+    },
+    [],
+  );
+
+  // The previous filter result, so a flush extends it instead of redoing it.
+  // A cache, not state: nothing renders because of it, it is read and written
+  // only inside the `useMemo` below, and a miss is always safe (full re-filter).
+  const filtered = useRef<{
+    lines: LogLine[];
+    enabled: Record<LogLevel, boolean>;
+    needle: string;
+    visible: LogLine[];
+  } | null>(null);
+
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return lines.filter((l) => {
-      if (!enabled[l.level]) return false;
-      if (!needle) return true;
-      return (
-        stripAnsi(l.message).toLowerCase().includes(needle) ||
-        l.target.toLowerCase().includes(needle)
-      );
-    });
+    // `lineText` is memoized per line, so a test is a level check plus at most
+    // one `includes` over a string that was lower-cased once in its life — no
+    // regex and no allocation.
+    const keep = (l: LogLine) =>
+      enabled[l.level] && (!needle || lineText(l).needle.includes(needle));
+
+    const prev = filtered.current;
+    // Only the LINES may have moved: a filter change invalidates every verdict,
+    // so those fall through to the full pass.
+    const appended =
+      prev && prev.enabled === enabled && prev.needle === needle
+        ? appendedLines(prev.lines, lines)
+        : null;
+
+    let out: LogLine[];
+    if (prev && appended) {
+      // Drop whatever the ring trimmed off the front. `seq` is a per-session
+      // monotonic counter, so "older than the oldest line still held" is exactly
+      // the set that left.
+      const oldest = lines.length > 0 ? lines[0]!.seq : Number.POSITIVE_INFINITY;
+      let head = 0;
+      while (head < prev.visible.length && prev.visible[head]!.seq < oldest) head += 1;
+      const tail = appended.filter(keep);
+      out =
+        head === 0 && tail.length === 0
+          ? prev.visible
+          : [...prev.visible.slice(head), ...tail];
+    } else {
+      out = lines.filter(keep);
+    }
+
+    filtered.current = { lines, enabled, needle, visible: out };
+    return out;
   }, [lines, enabled, search]);
 
   // Row virtualization: only the visible window of rows is in the DOM, so the
@@ -69,8 +183,8 @@ export default function OutputLogPanel() {
         <div className="flex h-6 min-w-32 flex-1 items-center gap-1 rounded border border-(--ink-border) bg-(--ink-bg-2) px-1.5 focus-within:border-(--ink-accent)">
           <Search size={12} className="shrink-0 text-(--ink-text-faint)" />
           <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={draft}
+            onChange={(e) => onSearchChange(e.target.value)}
             placeholder="Search log…"
             className="w-full bg-transparent text-xs outline-none placeholder:text-(--ink-text-faint)"
           />
@@ -154,7 +268,7 @@ export default function OutputLogPanel() {
                     {l.level}
                   </span>
                   <span className="shrink-0 text-(--ink-text-faint)">{l.target}</span>
-                  <span>{stripAnsi(l.message)}</span>
+                  <span>{lineText(l).message}</span>
                 </div>
               );
             })}

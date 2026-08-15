@@ -171,6 +171,14 @@ function createSession(key: string, cwd: string | null): PtySession {
   session.dataSub = term.onData((d) => {
     if (session.id) void deps.backend.write(session.id, d);
   });
+  // `disposed` is re-checked after EVERY await, not only the first (F-lens
+  // L7.M9). The original only guarded the `create`, leaving a two-await gap:
+  // `closePtySession` runs synchronously, drains `session.unlisten` and calls
+  // `term.dispose()`, and the two `listen` handles that resolved afterwards were
+  // pushed into the now-drained array — permanently subscribed, writing PTY
+  // bytes into a disposed xterm on every `pty://output` for the life of the
+  // process. Each handle is released the moment it is seen to be late, and the
+  // failure path stops writing into a terminal that no longer exists.
   session.ready = (async () => {
     try {
       const id = await deps.backend.create(cwd, term.cols || 80, term.rows || 24);
@@ -179,9 +187,31 @@ function createSession(key: string, cwd: string | null): PtySession {
         return;
       }
       session.id = id;
-      session.unlisten.push(await deps.listenOutput(id, term));
-      session.unlisten.push(await deps.listenExit(id, term));
+
+      // Collected locally and published only once BOTH listens have resolved.
+      // Pushing them one at a time would put the first handle into an array
+      // `closePtySession` may drain before the second resolves — and a drained
+      // array cannot release what lands in it afterwards. From here on
+      // `session.id` is set, so the teardown closes the backend PTY itself;
+      // only the listeners need releasing here.
+      const handles: UnlistenFn[] = [];
+      const releaseLate = () => {
+        for (const u of handles) {
+          try {
+            u();
+          } catch {
+            /* ignore */
+          }
+        }
+      };
+
+      handles.push(await deps.listenOutput(id, term));
+      if (session.disposed) return releaseLate();
+      handles.push(await deps.listenExit(id, term));
+      if (session.disposed) return releaseLate();
+      session.unlisten.push(...handles);
     } catch (e) {
+      if (session.disposed) return;
       term.writeln(`\r\n\x1b[31mfailed to start terminal: ${String(e)}\x1b[0m`);
     }
   })();

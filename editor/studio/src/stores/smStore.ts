@@ -56,6 +56,32 @@ interface SmStore {
   save: (name: string) => Promise<string | null>;
 }
 
+// ── The tombstone (F-lens L7.M3) ─────────────────────────────────────────────
+//
+// Ported from `dccStore` by way of `blueprintStore`, which carries the long
+// version. Short form: `init` guarded on `ready`, which is set after the list
+// (and the clip list), so React StrictMode's mount → cleanup → mount ran both
+// mounts before `sm_list` returned, both found no document, and both called
+// `sm_create("Main")` — two backend documents, one adopted and one leaked for
+// the process. And `close` reads `get().doc`, which is null while the create is
+// in flight, so it sent no `sm_close` at all.
+//
+// A tombstoned document accepts no state and its `init` reply is answered with a
+// `close`; a fresh `init` clears the tombstone first, so a StrictMode remount
+// adopts rather than tears down. The tombstone is re-checked after the CLIP
+// list too — this store has an await after the document exists, so a close can
+// land in that window as well.
+let opening: Promise<void> | null = null;
+let openGen = 0;
+let tombstoned = false;
+
+/** Test-only: forget any in-flight init and clear the tombstone. */
+export function __resetSmInitForTest(): void {
+  opening = null;
+  openGen += 1;
+  tombstoned = false;
+}
+
 /** Produce a new machine from `doc` via `mut`, keeping the reducer pure. */
 function editMachine(doc: SmDoc, mut: (m: SmMachineDto) => void): SmDoc {
   const machine = structuredClone(doc.machine);
@@ -72,25 +98,59 @@ export const useSmStore = create<SmStore>((set, get) => ({
 
   init: async () => {
     if (get().ready) return;
-    try {
-      const existing = await smIpc.list();
-      const doc = existing[0] ?? (await smIpc.create("Main"));
-      let clips: SmClipDto[] = [];
+    // Both synchronous, before any await — see the tombstone note above.
+    tombstoned = false;
+    if (opening) return opening;
+    const gen = ++openGen;
+    opening = (async () => {
       try {
-        clips = await smIpc.listClips();
-      } catch {
-        clips = []; // no open project yet
+        const existing = await smIpc.list();
+        const doc = existing[0] ?? (await smIpc.create("Main"));
+        if (tombstoned) {
+          // Closed while this was in flight. The document exists NOW, and the
+          // `close` that already ran had no id to name — so it is closed here.
+          try {
+            await smIpc.close(doc.id);
+          } catch (e) {
+            console.error("sm.close failed", e);
+          }
+          return;
+        }
+        let clips: SmClipDto[] = [];
+        try {
+          clips = await smIpc.listClips();
+        } catch {
+          clips = []; // no open project yet
+        }
+        if (tombstoned) {
+          try {
+            await smIpc.close(doc.id);
+          } catch (e) {
+            console.error("sm.close failed", e);
+          }
+          return;
+        }
+        set({ doc, clips, ready: true });
+      } catch (e) {
+        console.error("sm.init failed", e);
+      } finally {
+        // Only the LATEST init clears the memo — an older one resolving late
+        // must not free a newer one's slot.
+        if (openGen === gen) opening = null;
       }
-      set({ doc, clips, ready: true });
-    } catch (e) {
-      console.error("sm.init failed", e);
-    }
+    })();
+    return opening;
   },
 
   // Discard the editing surface: free the backend document and reset to an
   // un-inited state so a later re-open starts fresh instead of leaking the old
   // doc for the session. Called when the canvas panel unmounts (panel close).
+  //
+  // `opening` is deliberately left alone: an init still in flight has to keep
+  // its memo so a StrictMode remount JOINS it rather than minting a second
+  // document, and it clears the memo itself in its own `finally`.
   close: async () => {
+    tombstoned = true;
     const doc = get().doc;
     set({ doc: null, ready: false, selectedTransition: null });
     if (doc) {

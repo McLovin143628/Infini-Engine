@@ -17,7 +17,7 @@ import type { CollectionDto } from "../bindings/CollectionDto";
 import type { DeleteResult } from "../bindings/DeleteResult";
 import type { ImportEventDto } from "../bindings/ImportEventDto";
 import { getCommand, setCommandHandler } from "../lib/commands";
-import { listenTo, type UnlistenFn } from "../lib/events";
+import { listenTo, refCountedInit } from "../lib/events";
 import { fuzzyMatch } from "../lib/fuzzy";
 import { assets as assetsIpc, collections as collectionsIpc, skel as skelIpc } from "../lib/ipc";
 
@@ -73,8 +73,12 @@ interface AssetState {
   collections: CollectionDto[];
   /** Name of the collection whose members filter the grid, or null (E-P8). */
   activeCollection: string | null;
-  /** Thumbnail data-URLs by asset id ("" = requested/none). */
-  thumbnails: Record<string, string>;
+  /**
+   * Thumbnail data-URLs keyed by **`content_hash`** ("" = requested, no answer
+   * yet). See `THUMBNAIL_CAP` / `loadThumbnail` for why it is a hash, a `Map`,
+   * and bounded.
+   */
+  thumbnails: Map<string, string>;
   /** Active/recent import jobs by job id. */
   imports: Record<number, ImportJob>;
   /** Undismissed advisories from finished imports (P26.5). */
@@ -107,7 +111,11 @@ interface AssetState {
   addToCollection: (name: string, id: string) => Promise<void>;
   removeFromCollection: (name: string, id: string) => Promise<void>;
 
-  loadThumbnail: (id: string) => void;
+  /**
+   * Request the thumbnail for `id`'s current content, keyed by `contentHash`.
+   * A no-op if that exact content has already been asked for.
+   */
+  loadThumbnail: (id: string, contentHash: string) => void;
   importFiles: (sources: string[], dest?: string | null) => Promise<void>;
   createMaterial: () => Promise<void>;
   /**
@@ -129,6 +137,90 @@ interface AssetState {
   deleteAsset: (id: string, force?: boolean) => Promise<DeleteResult>;
   rename: (id: string, name: string) => Promise<void>;
   duplicate: (id: string) => Promise<void>;
+}
+
+/**
+ * How many finished import jobs the progress strip keeps (F-lens L7.M11).
+ *
+ * `importAdvisories` next door was already capped at 20 for exactly this
+ * reason; `imports` was not, and every job the backend has ever reported stayed
+ * in the store for the life of the session. Only `started`/`progress` rows are
+ * ever *rendered* (`ContentDrawer`'s `activeImports`), so the finished ones are
+ * pure ballast — but they are ballast in a bridged-adjacent store that is
+ * spread-copied on every event, and importing a folder of a few thousand files
+ * makes each subsequent event O(jobs).
+ */
+const IMPORT_CAP = 50;
+
+/**
+ * How many rendered thumbnails stay in memory (F-lens L7.H5).
+ *
+ * A thumbnail is a base64 PNG data-URL — order 10–100 KB each — and the cache
+ * had **no bound at all**: scrolling a content root of a few thousand
+ * previewable assets accumulated every one of them for the life of the session,
+ * as strings, in a zustand store.
+ *
+ * 256 covers several screens of the virtualized grid in both scroll directions,
+ * which is what a cache in front of a scroll view is for. Beyond that the answer
+ * is cheap to re-fetch (the backend keeps its own content-hash PNG cache on
+ * disk — `inf_editor_core::thumbnail::ThumbnailCache`), so evicting here costs
+ * an IPC round trip, not a re-render.
+ */
+const THUMBNAIL_CAP = 256;
+
+/**
+ * Look a thumbnail up and mark it most-recently-used; `true` if present.
+ *
+ * `Map` iterates in insertion order, so "delete then re-set" IS the LRU touch —
+ * it moves the key to the end, and `putThumbnail` evicts from the front.
+ */
+function touchThumbnail(cache: Map<string, string>, key: string): boolean {
+  const hit = cache.get(key);
+  if (hit === undefined) return false;
+  cache.delete(key);
+  cache.set(key, hit);
+  return true;
+}
+
+/**
+ * Insert (or refresh) a thumbnail, evicting the least-recently-used entries.
+ *
+ * **Mutates in place.** The old shape was `{ ...s.thumbnails, [id]: url }`,
+ * which copied the entire cache — every string reference in it — on every single
+ * insert, so filling a grid of N assets was O(N²) copies. The store is still
+ * notified (`set({ thumbnails: cache })` builds a fresh *state* object, which is
+ * what zustand compares), so subscribers re-run their selectors and see the new
+ * value; what is skipped is duplicating the container itself.
+ */
+function putThumbnail(cache: Map<string, string>, key: string, url: string): void {
+  cache.delete(key);
+  cache.set(key, url);
+  while (cache.size > THUMBNAIL_CAP) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    cache.delete(oldest.value);
+  }
+}
+
+/**
+ * Keep the newest `IMPORT_CAP` jobs, never dropping one that is still running.
+ *
+ * Jobs are numbered by the backend in issue order, so "newest" is the highest
+ * job number. An active job is retained regardless of its age: the strip is the
+ * only place a long-running terrain import reports itself, and evicting it would
+ * make the progress bar vanish mid-import.
+ */
+function capImports(jobs: Record<number, ImportJob>): Record<number, ImportJob> {
+  const keys = Object.keys(jobs);
+  if (keys.length <= IMPORT_CAP) return jobs;
+  const sorted = keys.map(Number).sort((a, b) => b - a);
+  const keep = new Set(sorted.slice(0, IMPORT_CAP));
+  const out: Record<number, ImportJob> = {};
+  for (const k of sorted) {
+    const job = jobs[k]!;
+    if (keep.has(k) || job.phase === "started" || job.phase === "progress") out[k] = job;
+  }
+  return out;
 }
 
 function assetMap(list: AssetDto[]): Record<string, AssetDto> {
@@ -158,7 +250,7 @@ export const useAssetStore = create<AssetState>((set, get) => ({
   favorites: [],
   collections: [],
   activeCollection: null,
-  thumbnails: {},
+  thumbnails: new Map(),
   imports: {},
   importAdvisories: [],
 
@@ -181,7 +273,7 @@ export const useAssetStore = create<AssetState>((set, get) => ({
 
   applyImportEvent: (e) => {
     set((state) => ({
-      imports: {
+      imports: capImports({
         ...state.imports,
         [e.job]: {
           job: Number(e.job),
@@ -191,7 +283,7 @@ export const useAssetStore = create<AssetState>((set, get) => ({
           done: e.done == null ? null : Number(e.done),
           total: e.total == null ? null : Number(e.total),
         },
-      },
+      }),
     }));
     // On finish, re-fetch and reveal the primary asset.
     if (e.phase === "finished") {
@@ -303,13 +395,18 @@ export const useAssetStore = create<AssetState>((set, get) => ({
     }
   },
 
-  loadThumbnail: (id) => {
-    if (get().thumbnails[id] !== undefined) return; // already requested
-    set((s) => ({ thumbnails: { ...s.thumbnails, [id]: "" } }));
+  loadThumbnail: (id, contentHash) => {
+    const cache = get().thumbnails;
+    if (touchThumbnail(cache, contentHash)) return; // this content already asked for
+    putThumbnail(cache, contentHash, "");
+    set({ thumbnails: cache });
     assetsIpc
       .thumbnail(id)
       .then((url) => {
-        if (url) set((s) => ({ thumbnails: { ...s.thumbnails, [id]: url } }));
+        if (!url) return;
+        const live = get().thumbnails;
+        putThumbnail(live, contentHash, url);
+        set({ thumbnails: live });
       })
       .catch((e) => console.error("asset.thumbnail failed", e));
   },
@@ -437,29 +534,28 @@ export async function importViaDialog(): Promise<void> {
   await useAssetStore.getState().importFiles(files);
 }
 
-let unlistenChanged: UnlistenFn | null = null;
-let unlistenImport: UnlistenFn | null = null;
-let unlistenCollections: UnlistenFn | null = null;
-let unlistenProject: UnlistenFn | null = null;
-
 /**
  * Load the initial snapshot + collections and subscribe to `assets://changed`,
  * `assets://import`, `collections://changed`, and `project://changed` (the last
- * re-roots content → re-fetch collections). Idempotent (StrictMode
- * double-mounts); returns a disposer.
+ * re-roots content → re-fetch collections). Returns a disposer.
+ *
+ * **Refcounted** (`refCountedInit`, F-lens L7.M1): the previous shape set its
+ * `unlistenChanged` guard *after* the first `await`, so React StrictMode's
+ * mount → cleanup → mount subscribed all four channels twice and leaked the
+ * first set of handles. See `refCountedInit` for why a plain synchronous flag
+ * is not enough either.
  */
-export async function initAssetSync(): Promise<() => void> {
-  if (unlistenChanged) return () => {};
-  unlistenChanged = await listenTo("assets://changed", () =>
+export const initAssetSync = refCountedInit(async () => {
+  const unlistenChanged = await listenTo("assets://changed", () =>
     void useAssetStore.getState().refresh(),
   );
-  unlistenImport = await listenTo("assets://import", (e) =>
+  const unlistenImport = await listenTo("assets://import", (e) =>
     useAssetStore.getState().applyImportEvent(e),
   );
-  unlistenCollections = await listenTo("collections://changed", () =>
+  const unlistenCollections = await listenTo("collections://changed", () =>
     void useAssetStore.getState().fetchCollections(),
   );
-  unlistenProject = await listenTo("project://changed", () =>
+  const unlistenProject = await listenTo("project://changed", () =>
     void useAssetStore.getState().fetchCollections(),
   );
   await Promise.all([
@@ -467,13 +563,9 @@ export async function initAssetSync(): Promise<() => void> {
     useAssetStore.getState().fetchCollections(),
   ]);
   return () => {
-    unlistenChanged?.();
-    unlistenImport?.();
-    unlistenCollections?.();
-    unlistenProject?.();
-    unlistenChanged = null;
-    unlistenImport = null;
-    unlistenCollections = null;
-    unlistenProject = null;
+    unlistenChanged();
+    unlistenImport();
+    unlistenCollections();
+    unlistenProject();
   };
-}
+});

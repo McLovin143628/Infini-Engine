@@ -19,7 +19,7 @@ import type { SceneNode } from "../bindings/SceneNode";
 import type { SceneSnapshot } from "../bindings/SceneSnapshot";
 import type { SpawnKind } from "../bindings/SpawnKind";
 import { getCommand, setCommandHandler } from "../lib/commands";
-import { listenTo, type UnlistenFn } from "../lib/events";
+import { listenTo, refCountedInit } from "../lib/events";
 import { scene as sceneIpc } from "../lib/ipc";
 import { dispatchRedo, dispatchUndo } from "../lib/undoScopes";
 import { registerBridgedStore } from "../panels/window/storeBridge";
@@ -379,8 +379,21 @@ export const useSceneStore = create<SceneState>((set, get) => ({
     }
   },
 
-  undo: () => void sceneIpc.undo(),
-  redo: () => void sceneIpc.redo(),
+  // `void`-ing a promise drops its REJECTION too (F-lens L7.M4). `scene_undo`
+  // rejects whenever the backend refuses — an empty history is the common one —
+  // and Ctrl+Z reaches here through `void scope.undo()`, so the failure used to
+  // land as an unhandled promise rejection with nothing in the status bar. Every
+  // other command in this store already reports through `pushStatus`.
+  undo: () =>
+    void sceneIpc.undo().catch((e) => {
+      console.error("scene.undo failed", e);
+      useShellStore.getState().pushStatus(`Undo failed: ${errText(e)}`);
+    }),
+  redo: () =>
+    void sceneIpc.redo().catch((e) => {
+      console.error("scene.redo failed", e);
+      useShellStore.getState().pushStatus(`Redo failed: ${errText(e)}`);
+    }),
 }));
 
 registerBridgedStore("scene", useSceneStore);
@@ -496,23 +509,23 @@ export function registerSceneCommands(): void {
   wire("file.openLevel", async () => s().applySnapshot(await sceneIpc.open()));
 }
 
-let unlisten: UnlistenFn | null = null;
-
 /**
- * Load the initial snapshot and subscribe to `world://delta`. Idempotent
- * (React StrictMode double-mounts); returns a disposer.
+ * Load the initial snapshot and subscribe to `world://delta`. Returns a
+ * disposer.
+ *
+ * **Refcounted** (`refCountedInit`, F-lens L7.M1): the guard used to be set
+ * after the first `await`, so StrictMode's double mount subscribed twice — and
+ * `world://delta` is the hottest channel in the editor, so every scene change
+ * was reduced into the store twice over.
  */
-export async function initSceneSync(): Promise<() => void> {
-  if (unlisten) return () => {};
-  unlisten = await listenTo("world://delta", (delta) => useSceneStore.getState().applyDelta(delta));
+export const initSceneSync = refCountedInit(async () => {
+  const unlisten = await listenTo("world://delta", (delta) =>
+    useSceneStore.getState().applyDelta(delta),
+  );
   try {
     useSceneStore.getState().applySnapshot(await sceneIpc.snapshot());
   } catch (e) {
     console.error("scene.snapshot failed", e);
   }
-  const dispose = unlisten;
-  return () => {
-    dispose?.();
-    unlisten = null;
-  };
-}
+  return () => unlisten();
+});

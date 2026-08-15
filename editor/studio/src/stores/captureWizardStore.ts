@@ -31,7 +31,7 @@ import type { CapturePreviewDto } from "../bindings/CapturePreviewDto";
 import type { CaptureProgressDto } from "../bindings/CaptureProgressDto";
 import type { CaptureSettingsDto } from "../bindings/CaptureSettingsDto";
 import type { CaptureStatusDto } from "../bindings/CaptureStatusDto";
-import { listenTo, type UnlistenFn } from "../lib/events";
+import { listenTo, refCountedInit } from "../lib/events";
 import { photogrammetry as photoIpc } from "../lib/ipc";
 
 /** Where the wizard is. */
@@ -351,19 +351,16 @@ export const useCaptureStore = create<CaptureState>((set, get) => ({
   },
 }));
 
-let unlisten: UnlistenFn | null = null;
-
 /**
- * Subscribe the wizard to `photogrammetry://progress`. Idempotent (StrictMode
- * double-mounts); returns a disposer.
+ * Subscribe the wizard to `photogrammetry://progress`. Returns a disposer.
+ *
+ * **Refcounted** (`refCountedInit`, F-lens L7.M1): the guard used to be set
+ * after the first `await`, so StrictMode's double mount subscribed twice and
+ * orphaned the first handle.
  */
-export async function initCaptureSync(): Promise<() => void> {
-  if (unlisten) return () => {};
-  unlisten = await listenTo("photogrammetry://progress", (e) =>
+export const initCaptureSync = refCountedInit(async () => {
+  const unlisten = await listenTo("photogrammetry://progress", (e) =>
     useCaptureStore.getState().applyProgress(e),
   );
-  return () => {
-    unlisten?.();
-    unlisten = null;
-  };
-}
+  return () => unlisten();
+});

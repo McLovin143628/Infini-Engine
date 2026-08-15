@@ -90,7 +90,7 @@ export function activeUndoParams(): string | null {
 export function dispatchUndo(): boolean {
   const scope = activeUndoScope();
   if (!scope) return false;
-  void scope.undo(activeUndoParams());
+  void run(scope.undo(activeUndoParams()), "undo");
   return true;
 }
 
@@ -98,8 +98,23 @@ export function dispatchUndo(): boolean {
 export function dispatchRedo(): boolean {
   const scope = activeUndoScope();
   if (!scope) return false;
-  void scope.redo(activeUndoParams());
+  void run(scope.redo(activeUndoParams()), "redo");
   return true;
+}
+
+/**
+ * Swallow a scope's rejection at the routing boundary (F-lens L7.M4).
+ *
+ * The stores each catch their own failures now, so in practice nothing reaches
+ * here — but an `UndoScope` is a public registration point that any panel may
+ * implement, and `void`-ing whatever it returns would turn one careless
+ * registration into an unhandled promise rejection in the keybinding path. The
+ * router is the last place that can be sure, so it is sure.
+ */
+function run(result: void | Promise<void>, what: string): Promise<void> {
+  return Promise.resolve(result).catch((e: unknown) => {
+    console.error(`undo scope ${what} failed`, e);
+  });
 }
 
 /** Test-only: reset global registry state between cases. */

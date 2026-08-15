@@ -25,7 +25,7 @@
  */
 import { create } from "zustand";
 
-import { listenTo, type UnlistenFn } from "../lib/events";
+import { listenTo, refCountedInit } from "../lib/events";
 import { sim as simIpc } from "../lib/ipc";
 import { bindKey } from "../lib/keybindings";
 import { registerCommands } from "../lib/commands";
@@ -258,25 +258,25 @@ export function registerSimCommands(): void {
   bindKey({ chord: "Alt+P", command: "sim.play" });
 }
 
-let unlisten: UnlistenFn | null = null;
-let unlistenDebug: UnlistenFn | null = null;
-
 /**
  * Sync running state from `sim_is_running()` on mount and subscribe to
- * `sim://state` + `sim://debug`. Idempotent (React StrictMode double-mounts);
- * returns a disposer.
+ * `sim://state` + `sim://debug`. Returns a disposer.
  *
  * The `sim://debug` listener pauses Simulate whenever a step hit a breakpoint
  * (B-P4 tier A′). Node-level hit highlighting on the canvas activates once
  * `.inf_act` classes carry graph provenance (the events currently carry IR
  * `LocalId`s, not canvas `NodeId`s) — pausing already works and is harmless.
+ *
+ * **Refcounted** (`refCountedInit`, F-lens L7.M1): the guard used to be set
+ * after the first `await`, so StrictMode's double mount subscribed both
+ * channels twice — and a doubled `sim://debug` handler pauses Simulate twice
+ * per breakpoint hit.
  */
-export async function initSimSync(): Promise<() => void> {
-  if (unlisten) return () => {};
-  unlisten = await listenTo("sim://state", (running) =>
+export const initSimSync = refCountedInit(async () => {
+  const unlisten = await listenTo("sim://state", (running) =>
     useSimStore.getState().syncRunning(running),
   );
-  unlistenDebug = await listenTo("sim://debug", (events) => {
+  const unlistenDebug = await listenTo("sim://debug", (events) => {
     if (events.some((e) => e.hits.length > 0)) {
       useSimStore.getState().pause();
     }
@@ -286,15 +286,11 @@ export async function initSimSync(): Promise<() => void> {
   } catch (e) {
     console.error("sim.isRunning failed", e);
   }
-  const dispose = unlisten;
-  const disposeDebug = unlistenDebug;
   return () => {
-    dispose?.();
-    disposeDebug?.();
-    unlisten = null;
-    unlistenDebug = null;
+    unlisten();
+    unlistenDebug();
   };
-}
+});
 
 /** Test-only: tear down the driver + reset global state between cases. */
 export function __resetSimForTest(): void {
