@@ -137,17 +137,54 @@ unsafe fn str_from_raw(ptr: *const u8, len: usize) -> Result<&'static str, HostE
 /// Loads plugin dylibs through content-addressed shadow copies.
 pub struct PluginHost {
     shadow_dir: PathBuf,
+    /// Loaded images by content hash (Hardening D).
+    ///
+    /// The module docs have always said "the hash makes re-loading an unchanged
+    /// file a no-op", and that was true of the *shadow copy* and false of the
+    /// load: every `load()` call `dlopen`ed the image again and `Box::leak`ed
+    /// another `Library`, unchanged bytes or not. Immortality is the doctrine —
+    /// an unloaded image's exports are dangling function pointers — but
+    /// immortality per *image*, not per call.
+    ///
+    /// Behind a `Mutex` so `load` keeps its `&self` signature (its callers hold
+    /// the host immutably), and because two threads racing on the same bytes is
+    /// the case the shadow write already has to handle.
+    loaded: std::sync::Mutex<std::collections::HashMap<u64, &'static libloading::Library>>,
+    /// How many times an image was actually `dlopen`ed.
+    ///
+    /// **Not the map's length**, and the difference is the whole finding: a
+    /// second `dlopen` of the same bytes re-inserts the same key, so the map
+    /// stays at one entry while a second `Library` is leaked. A gate reading the
+    /// map size cannot falsify the defect — measured, on the first attempt at
+    /// this arm.
+    opens: std::sync::atomic::AtomicU64,
 }
 
 impl PluginHost {
     pub fn new(shadow_dir: impl Into<PathBuf>) -> Result<Self, HostError> {
         let shadow_dir = shadow_dir.into();
         fs::create_dir_all(&shadow_dir)?;
-        Ok(PluginHost { shadow_dir })
+        Ok(PluginHost {
+            shadow_dir,
+            loaded: std::sync::Mutex::new(std::collections::HashMap::new()),
+            opens: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    /// How many times this host has `dlopen`ed an image (Hardening D).
+    ///
+    /// The instrument for "re-loading an unchanged file is a no-op": the shadow
+    /// path and the content hash were equal across a repeat load long before the
+    /// *image* was, so only this number can tell the two claims apart — and it
+    /// has to be a **count of opens**, not the size of the memo, because a
+    /// re-open re-inserts the same key and leaves the memo at one entry.
+    pub fn images_opened(&self) -> u64 {
+        self.opens.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Copy `path` to its shadow location, load it, and validate the entry.
-    /// Loading the same file contents twice reuses the same shadow copy.
+    /// Loading the same file contents twice reuses the same shadow copy **and
+    /// the same loaded image**.
     pub fn load(&self, path: &Path) -> Result<Plugin, HostError> {
         let bytes = fs::read(path)?;
         let hash = xxh3_64(&bytes);
@@ -178,9 +215,26 @@ impl PluginHost {
                 }
             }
         }
-        // Immortal by doctrine: never unload (see module docs).
-        let library: &'static libloading::Library =
-            Box::leak(Box::new(unsafe { libloading::Library::new(&shadow) }?));
+        // Immortal by doctrine, and loaded ONCE per image (see `loaded`): a
+        // second `load()` of unchanged bytes hands back the image already open
+        // rather than `dlopen`ing and leaking another.
+        let library: &'static libloading::Library = {
+            let mut loaded = self
+                .loaded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match loaded.get(&hash) {
+                Some(lib) => *lib,
+                None => {
+                    let lib: &'static libloading::Library =
+                        Box::leak(Box::new(unsafe { libloading::Library::new(&shadow) }?));
+                    self.opens
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    loaded.insert(hash, lib);
+                    lib
+                }
+            }
+        };
         let entry: libloading::Symbol<'static, EntryFn> = unsafe { library.get(ENTRY_SYMBOL) }?;
         let vtable_ptr = unsafe { entry() };
         if vtable_ptr.is_null() {
@@ -237,6 +291,15 @@ struct Instance {
 /// deliberately `!Send`.
 #[derive(Default)]
 pub struct HotWorld {
+    /// **Grow-only, and that is a bound rather than a defect** (Hardening D).
+    ///
+    /// There is no despawn: an [`InstanceId`] is an index into this vec, so
+    /// removing an entry would either invalidate every id issued after it or
+    /// leave a tombstone, and the world has no caller that needs either — the
+    /// Spike-C loop spawns a component per script and lives as long as the
+    /// session. Adding a despawn is a **feature** (a generational id and a
+    /// `drop` through the vtable), not a repair, and it is recorded here so the
+    /// day something does need it, the shape is stated rather than rediscovered.
     instances: Vec<Instance>,
     logs: Vec<LogRecord>,
 }

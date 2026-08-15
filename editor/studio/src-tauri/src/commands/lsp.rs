@@ -80,10 +80,19 @@ fn send_request(
     let id = next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = channel::<Value>();
     pending.lock().map_err(|e| e.to_string())?.insert(id, tx);
-    write_message(
+    // **The entry is removed on the write failure too** (Hardening D). The
+    // timeout arm below already does this; the `?` here used to leave the
+    // `Sender` in the map for ever, so once the server's stdin is a broken pipe
+    // — which it is for the rest of the session, since nothing respawns it —
+    // every subsequent request leaked one more entry, and the map grew at the
+    // rate the editor sends requests (one per keystroke on the completion path).
+    if let Err(e) = write_message(
         stdin,
         &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
-    )?;
+    ) {
+        pending.lock().ok().and_then(|mut p| p.remove(&id));
+        return Err(e);
+    }
     match rx.recv_timeout(timeout) {
         Ok(v) => Ok(v),
         Err(_) => {

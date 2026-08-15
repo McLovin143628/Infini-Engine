@@ -192,6 +192,27 @@ fn loading_is_content_addressed() {
     let b = host.load(v1_path).unwrap();
     assert_eq!(a.content_hash(), b.content_hash());
     assert_eq!(a.shadow_path(), b.shadow_path());
+    // **And the IMAGE is the same image** (Hardening D). The two assertions above
+    // held before the memoization did — the shadow copy was content-addressed and
+    // the second load merely skipped writing it, then `dlopen`ed the file again
+    // and `Box::leak`ed another `Library`. The module docs said "a no-op"; this is
+    // the number that makes that true rather than nearly true.
+    //
+    // It counts OPENS, not memo entries: the first version of this arm read the
+    // memo's length, and a re-open re-inserts the same key, so it passed against
+    // a hard-disabled memo. Measured, not assumed.
+    assert_eq!(
+        host.images_opened(),
+        1,
+        "unchanged bytes must not open a second image"
+    );
+
+    // A genuinely different plugin is a second image, so the memo is not a cache
+    // that answers everything with its first entry.
+    let (_, v2_path) = fixture_dylibs();
+    let c = host.load(v2_path).unwrap();
+    assert_ne!(a.content_hash(), c.content_hash());
+    assert_eq!(host.images_opened(), 2);
 }
 
 /// The Windows file-lock dance: because the host loads a shadow copy, the
