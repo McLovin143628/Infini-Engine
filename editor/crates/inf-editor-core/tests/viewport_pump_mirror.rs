@@ -727,7 +727,8 @@ fn the_document_swap_abandon_precedes_every_settler() {
             .unwrap_or_else(|| panic!("no `{settler}`"));
         assert!(
             abandon < at,
-            "`{settler}` is called BEFORE the document-swap abandon, so a File > Open during a              drag commits the old level's edit into the new document"
+            "`{settler}` is called BEFORE the document-swap abandon, so a File > Open during a \
+             drag commits the old level's edit into the new document"
         );
     }
 }

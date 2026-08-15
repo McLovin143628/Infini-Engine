@@ -247,7 +247,8 @@ fn a_grammar_building_bakes_into_one_mesh_that_fractures_and_cooks() {
             let got = input.slot_names[part.slot as usize].as_str();
             assert_eq!(
                 got, want,
-                "part slot {} names `{got}` where the assembler's instance named                  module `{want}`",
+                "part slot {} names `{got}` where the assembler's instance named \
+                 module `{want}`",
                 part.slot
             );
             checked += 1;
@@ -322,7 +323,9 @@ fn a_grammar_building_bakes_into_one_mesh_that_fractures_and_cooks() {
     let ratio = total / boxes;
     assert!(
         (3.0..8.0).contains(&ratio),
-        "the fracture holds {total:.1} m³ against {boxes:.1} m³ of baked parts          ({ratio:.1}x) — outside the hull-filling band this was measured at, so          either the bake lost geometry or the fracture changed what it chunks"
+        "the fracture holds {total:.1} m³ against {boxes:.1} m³ of baked parts \
+         ({ratio:.1}x) — outside the hull-filling band this was measured at, so \
+         either the bake lost geometry or the fracture changed what it chunks"
     );
     assert!(
         total > 1.0,

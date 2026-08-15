@@ -550,7 +550,9 @@ mod tests {
         let body = non_test_body();
         assert!(
             offenders(&body).is_empty(),
-            "the predictor reaches outside its argument: {:?} — a reading that is              constant for one process and differs between two is exactly what the              bit-for-bit arm cannot see (P14)",
+            "the predictor reaches outside its argument: {:?} — a reading that is \
+             constant for one process and differs between two is exactly what the \
+             bit-for-bit arm cannot see (P14)",
             offenders(&body)
         );
 

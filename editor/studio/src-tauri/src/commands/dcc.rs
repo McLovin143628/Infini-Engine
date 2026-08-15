@@ -461,7 +461,8 @@ pub async fn dcc_close(asset_id: String, state: State<'_, DccState>) -> Result<(
     let id: AssetId = asset_id.parse().map_err(|e| format!("bad asset id: {e}"))?;
     if state.close(&format!("dcc:{id}"))? {
         tracing::info!(
-            "the Model Editor for {id} closed with a drag in flight; it was              discarded (the session it would have been journalled into is gone)"
+            "the Model Editor for {id} closed with a drag in flight; it was \
+             discarded (the session it would have been journalled into is gone)"
         );
     }
     Ok(())
@@ -2146,7 +2147,8 @@ mod tests {
             .unwrap();
         assert!(
             state.close("dcc:1").unwrap(),
-            "the close must REPORT the abandon — without that the decision is              unobservable, and a close that settled instead would pass this test"
+            "the close must REPORT the abandon — without that the decision is \
+             unobservable, and a close that settled instead would pass this test"
         );
         state
             .with(|s| {
@@ -2528,8 +2530,10 @@ mod tests {
         // that block and not whatever else the tick happens to contain.
         let tick = body_of(ASSETS_SOURCE, "fn spawn_tick(");
         assert!(
-            tick.lines().any(|l| l == "            if outcome.index_stale {"),
-            "`if outcome.index_stale` is no longer a statement of the tick loop              itself - something else now decides whether the viewport is told"
+            tick.lines()
+                .any(|l| l == "            if outcome.index_stale {"),
+            "`if outcome.index_stale` is no longer a statement of the tick loop \
+             itself - something else now decides whether the viewport is told"
         );
         let block = body_of(ASSETS_SOURCE, "if outcome.index_stale {");
         let chain: Vec<String> = block
@@ -2543,7 +2547,9 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>(),
-            "the asset tick's refresh guard chain changed. It is pinned line by              line because the nesting here is legitimate and therefore the one              place an extra condition would look natural."
+            "the asset tick's refresh guard chain changed. It is pinned line by \
+             line because the nesting here is legitimate and therefore the one \
+             place an extra condition would look natural."
         );
 
         for (name, body) in [("dcc_save", &save), ("spawn_tick", &tick)] {

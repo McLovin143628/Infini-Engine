@@ -1350,7 +1350,8 @@ mod tests {
 
         assert!(
             v4.len() > v3.len(),
-            "the shadow v4 is not longer than v3, so nothing was appended and              this test is measuring nothing"
+            "the shadow v4 is not longer than v3, so nothing was appended and \
+             this test is measuring nothing"
         );
         // The asymmetric claim: v4 bytes decode as a v3 `SessionSave` — that is
         // what makes an un-bumped append silent — and the decoder does NOT
@@ -1363,7 +1364,9 @@ mod tests {
         );
         assert!(
             consumed < v4.len(),
-            "an appended tail field left NO trailing bytes, so              `a_v3_save_decodes_consuming_every_byte` could not see it either —              the ladder has no forcing function at all"
+            "an appended tail field left NO trailing bytes, so \
+             `a_v3_save_decodes_consuming_every_byte` could not see it either — \
+             the ladder has no forcing function at all"
         );
         assert_eq!(
             v4.len() - consumed,

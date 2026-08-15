@@ -674,7 +674,8 @@ fn parse(data: &[u8]) -> Result<(VoxelAssetHeader, Vec<ChunkDirEntry>)> {
         // Reserved, on the same rule as the header's — see the module docs.
         if u32::from_le_bytes(data[base + 12..base + 16].try_into().unwrap()) != 0 {
             return Err(VoxelAssetError::Malformed(format!(
-                "chunk directory entry {i} has a non-zero reserved word; a v1                  payload may not use it"
+                "chunk directory entry {i} has a non-zero reserved word; a v1 \
+                 payload may not use it"
             )));
         }
         let offset = u64::from_le_bytes(data[base + 16..base + 24].try_into().unwrap());

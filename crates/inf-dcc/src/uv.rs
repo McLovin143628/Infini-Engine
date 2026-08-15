@@ -1341,7 +1341,8 @@ mod tests {
             let out = unwrap(&m).expect("a flat plane unwraps");
             let c = &out.report.charts[0];
             println!(
-                "subdivide x{n}: {verts} verts, {} tris, {} iters | residual {:.3e}                  convergence {:.3e} flipped {}",
+                "subdivide x{n}: {verts} verts, {} tris, {} iters | residual {:.3e} \
+                 convergence {:.3e} flipped {}",
                 c.triangles,
                 cg_iterations(c.verts.saturating_sub(2)),
                 c.residual,

@@ -384,7 +384,8 @@ impl FractureState {
         if !asymmetric.is_empty() {
             tracing::warn!(
                 "inf-physics: fracture asset has {} one-sided adjacency edge(s) \
-                 {asymmetric:?} — support propagates through them in one direction                  only. Re-cook: the fracture pipeline prunes to symmetry as of P22.3.",
+                 {asymmetric:?} — support propagates through them in one direction \
+                 only. Re-cook: the fracture pipeline prunes to symmetry as of P22.3.",
                 asymmetric.len()
             );
         }
@@ -460,7 +461,8 @@ impl FractureState {
                 self.degenerate_warned = true;
                 tracing::warn!(
                     "inf-physics: a destructible's transform is degenerate \
-                     (|det| = {det}); keeping its last good placement. A zero or                      non-finite scale would make every bond in it free."
+                     (|det| = {det}); keeping its last good placement. A zero or \
+                     non-finite scale would make every bond in it free."
                 );
             }
             return;

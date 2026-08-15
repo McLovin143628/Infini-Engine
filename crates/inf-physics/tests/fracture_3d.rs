@@ -464,7 +464,9 @@ fn removing_a_towers_support_collapses_it_and_not_its_neighbour() {
     );
     assert_eq!(
         solve_dropped, 4,
-        "the structural solve reported {solve_dropped} collapsed chunk(s) for a          four-chunk tower it dropped with no damage spent — the audit counter is          not counting what it says it counts"
+        "the structural solve reported {solve_dropped} collapsed chunk(s) for a \
+         four-chunk tower it dropped with no damage spent — the audit counter is \
+         not counting what it says it counts"
     );
     assert_eq!(
         attached_count(&fractures, WALL_B),
@@ -1111,7 +1113,8 @@ fn a_dynamic_body_in_the_support_skin_does_not_hide_the_ground() {
     assert!(
         (0.0..0.02).contains(&slab_y),
         "the fixture's slab is at y = {slab_y}, not inside the 2 cm support skin \
-         ABOVE the ground — a one-sided `< 0.02` would admit a slab at −0.5, which          is not in the skin at all and would make this test prove nothing"
+         ABOVE the ground — a one-sided `< 0.02` would admit a slab at −0.5, which \
+         is not in the skin at all and would make this test prove nothing"
     );
 }
 

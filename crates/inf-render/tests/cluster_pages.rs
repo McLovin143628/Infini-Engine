@@ -781,7 +781,8 @@ fn a_refinement_class_under_slot_pressure_costs_a_resident_page_nothing() {
     let (contested, contended) = ladder(true);
     assert!(
         contended,
-        "the competing class never exhausted a slot — this arm is not under load,          so it cannot see the protection it exists to check"
+        "the competing class never exhausted a slot — this arm is not under load, \
+         so it cannot see the protection it exists to check"
     );
 
     // THE GUARANTEE: under a want that only ever refines, a resident cluster page
@@ -789,7 +790,9 @@ fn a_refinement_class_under_slot_pressure_costs_a_resident_page_nothing() {
     for w in contested.windows(2) {
         assert!(
             w[1] >= w[0],
-            "residency went backwards under a refining want: {contested:?}. A              competing class took a resident page's tiles, which is what the              protection order forbids."
+            "residency went backwards under a refining want: {contested:?}. A \
+             competing class took a resident page's tiles, which is what the \
+             protection order forbids."
         );
     }
     // **THE CLAIM P28.3 REPLACED THE BOUND WITH**: the decoy costs the pairing
@@ -799,12 +802,16 @@ fn a_refinement_class_under_slot_pressure_costs_a_resident_page_nothing() {
     // brings it back.
     assert_eq!(
         contested, alone,
-        "a competing refinement class cost the pairing detail: {contested:?}          against {alone:?}. Since P28.3 a floor want outranks a RESIDENT          refinement, so the pairing's tiles must reach the atlas whatever the          feedback is asking for"
+        "a competing refinement class cost the pairing detail: {contested:?} \
+         against {alone:?}. Since P28.3 a floor want outranks a RESIDENT \
+         refinement, so the pairing's tiles must reach the atlas whatever the \
+         feedback is asking for"
     );
     // ANTI-VACUITY, the other half: the ladder has to have gained ground at all,
     // or two identical lists of the same number would satisfy the equality.
     assert!(
         alone.last() > alone.first(),
-        "the pairing never refined even uncontested ({alone:?}) — this arm cannot          see a cost it was never in a position to pay"
+        "the pairing never refined even uncontested ({alone:?}) — this arm cannot \
+         see a cost it was never in a position to pay"
     );
 }

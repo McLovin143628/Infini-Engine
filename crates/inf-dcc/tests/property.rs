@@ -633,7 +633,8 @@ proptest! {
                     session.mesh().face_count() == 0
                         || report.coincident_vertices > 0
                         || report.reused_diagonals > 0,
-                    "the reader found no geometry in an asset written from {}                      face(s), with nothing in the report to blame: {:?}",
+                    "the reader found no geometry in an asset written from {} \
+                     face(s), with nothing in the report to blame: {:?}",
                     session.mesh().face_count(),
                     report
                 );

@@ -1209,7 +1209,8 @@ mod tests {
         for (path, line, text) in &hits {
             assert!(
                 !text.contains(&assign),
-                "{}:{line} assigns the cloud tier after construction, which would                  change the cloud textures under an unchanged generation:
+                "{}:{line} assigns the cloud tier after construction, which would \
+                 change the cloud textures under an unchanged generation:
   {text}",
                 path.display()
             );

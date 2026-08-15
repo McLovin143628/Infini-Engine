@@ -597,7 +597,8 @@ impl AudioEngine {
             if self.warned_clips.insert(p.clip) {
                 tracing::warn!(
                     clip = %p.clip,
-                    "audio clip did not resolve; this source is silent and every later                      command for it will be ignored"
+                    "audio clip did not resolve; this source is silent and every later \
+                     command for it will be ignored"
                 );
             }
             return;

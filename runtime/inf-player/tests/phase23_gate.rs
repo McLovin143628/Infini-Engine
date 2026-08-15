@@ -278,7 +278,8 @@ fn the_prop_unwraps_into_the_unit_square_without_folding() {
     // always have been.
     assert!(
         hi[0] - lo[0] > PHASE23_ATLAS_U_SPAN,
-        "the atlas spans only {} on u; the packer is leaving {}% of the square          empty",
+        "the atlas spans only {} on u; the packer is leaving {}% of the square \
+         empty",
         hi[0] - lo[0],
         (100.0 * (1.0 - (hi[0] - lo[0]))).round()
     );
@@ -300,7 +301,8 @@ fn the_prop_unwraps_into_the_unit_square_without_folding() {
         .collect();
     assert!(
         stalled.is_empty(),
-        "charts {stalled:?} did not converge; every chart of this prop must reach          machine epsilon"
+        "charts {stalled:?} did not converge; every chart of this prop must reach \
+         machine epsilon"
     );
 }
 
@@ -502,7 +504,8 @@ fn the_bevel_refuses_the_corner_it_cannot_save() {
             inf_dcc::from_mesh_asset(&twin_asset),
             Err(inf_dcc::ImportError::NonManifoldEdge { .. })
         ),
-        "coincident vertices must really make an asset unopenable, or the bevel's          refusal is a superstition"
+        "coincident vertices must really make an asset unopenable, or the bevel's \
+         refusal is a superstition"
     );
 
     // (3) …AND THE OP IS STILL A TOOL. Two edges that do not meet bevel cleanly,

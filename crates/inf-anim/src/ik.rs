@@ -938,7 +938,8 @@ mod tests {
                         .eq(tip.to_array().iter().map(|v| v.to_bits()));
                 assert!(
                     (m.is_finite() && t.is_finite()) || unchanged,
-                    "{bad} at case {case}: produced {m:?} / {t:?}, which is                      neither a finite answer nor the untouched input"
+                    "{bad} at case {case}: produced {m:?} / {t:?}, which is \
+                     neither a finite answer nor the untouched input"
                 );
             }
         }

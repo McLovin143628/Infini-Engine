@@ -850,7 +850,8 @@ mod tests {
         );
         assert!(
             arm_d < spine_d,
-            "the fixture must make the ARM's bone the nearer one, or distance              alone decides this and visibility is untested ({arm_d} vs {spine_d})"
+            "the fixture must make the ARM's bone the nearer one, or distance \
+             alone decides this and visibility is untested ({arm_d} vs {spine_d})"
         );
         assert!(
             !visible(&bvh, probe, arm_bone),
@@ -858,7 +859,8 @@ mod tests {
         );
         assert!(
             visible(&bvh, probe, spine_bone),
-            "...and the torso's own bone must be visible, or the refusal above is              a broken ray rather than a wall"
+            "...and the torso's own bone must be visible, or the refusal above is \
+             a broken ray rather than a wall"
         );
 
         // TWO FULL SOLVES over the same mesh and skeleton.
@@ -870,7 +872,9 @@ mod tests {
         // "no undo step that does nothing" rule). That is the *point* — the arm
         // gets in only when the term is severed.
         let without_op = without_op.expect(
-            "the severed solve assigned nothing at all; the arm's bone is not              winning any vertex even with the wall ignored, so this fixture              cannot measure the term",
+            "the severed solve assigned nothing at all; the arm's bone is not \
+             winning any vertex even with the wall ignored, so this fixture \
+             cannot measure the term",
         );
 
         // (1) **The severing has a footprint**, stated as the two things that
@@ -880,7 +884,11 @@ mod tests {
         //     `without_op` had just been `.expect()`ed into `Some`).
         assert!(
             with_op.is_none(),
-            "with visibility ON, every torso vertex's nearest VISIBLE bone is the              spine's, so the solve reproduces the rigid default and journals              nothing. It journalled {with_op:?} instead — the fixture no longer              isolates the term, and the capture count below would be measuring              something else."
+            "with visibility ON, every torso vertex's nearest VISIBLE bone is the \
+             spine's, so the solve reproduces the rigid default and journals \
+             nothing. It journalled {with_op:?} instead — the fixture no longer \
+             isolates the term, and the capture count below would be measuring \
+             something else."
         );
         // …and with it OFF a table appears at all. Together: the term is the
         // whole difference between "no weights change" and "these do".
@@ -914,7 +922,10 @@ mod tests {
         );
         assert!(
             captured > 0,
-            "{captured} of {wall} far-wall vertices were captured by the              neighbouring limb's bone when visibility was severed; the term is              not what keeps them apart, and this test does not measure what its              name says"
+            "{captured} of {wall} far-wall vertices were captured by the \
+             neighbouring limb's bone when visibility was severed; the term is \
+             not what keeps them apart, and this test does not measure what its \
+             name says"
         );
     }
 

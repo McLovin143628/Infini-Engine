@@ -68,7 +68,8 @@ impl CollisionLayers {
         match std::fs::read_to_string(&path) {
             Ok(text) => toml::from_str(&text).map_err(|e| {
                 format!(
-                    "{} exists but cannot be read ({e}); it is left untouched rather than                      replaced by defaults — repair or delete it",
+                    "{} exists but cannot be read ({e}); it is left untouched rather than \
+                     replaced by defaults — repair or delete it",
                     path.display()
                 )
             }),

@@ -1345,7 +1345,8 @@ mod tests {
         );
         assert_ne!(
             after_key, before_key,
-            "the source key did not notice a neighbour leaving — a max alone              cannot, which is the entire reason for the residency mask"
+            "the source key did not notice a neighbour leaving — a max alone \
+             cannot, which is the entire reason for the residency mask"
         );
 
         let report = cache.sync(&v);
@@ -1371,7 +1372,8 @@ mod tests {
         // neighbourhood spans x ∈ [1, 3], which never contained `a`.
         assert!(
             !report.remeshed.contains(&c),
-            "{c:?} re-meshed over an eviction it cannot see — the invalidation is              not supposed to be a thundering herd: {report:?}"
+            "{c:?} re-meshed over an eviction it cannot see — the invalidation is \
+             not supposed to be a thundering herd: {report:?}"
         );
     }
 
@@ -1456,7 +1458,9 @@ mod tests {
 
         assert_eq!(
             aliases, 0,
-            "the sequence story is true after all: a source key repeated while the              mesh differed. Put the eviction/restore justification back on              CachedMesh::version, beside the width one."
+            "the sequence story is true after all: a source key repeated while the \
+             mesh differed. Put the eviction/restore justification back on \
+             CachedMesh::version, beside the width one."
         );
         // The brute force has to actually revisit keys, or "zero aliases" is
         // vacuous — the vacuous-checks lesson from P19, applied to a negative
@@ -1488,7 +1492,8 @@ mod tests {
         assert_ne!(
             a.version(key),
             b.version(key),
-            "two caches minted the same stamp for one chunk key — a key-addressed              GPU cache would serve one volume's walls as the other's"
+            "two caches minted the same stamp for one chunk key — a key-addressed \
+             GPU cache would serve one volume's walls as the other's"
         );
         assert!(b.version(key) > a.version(key));
         assert_eq!(

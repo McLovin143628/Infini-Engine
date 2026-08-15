@@ -1004,7 +1004,8 @@ fn both_hosts_agree_on_a_fixture_that_really_interpolates() {
     assert_eq!(
         p,
         editor(),
-        "the editor's Simulate and the player's runtime disagree once a real          quaternion blend is in the picture"
+        "the editor's Simulate and the player's runtime disagree once a real \
+         quaternion blend is in the picture"
     );
 }
 

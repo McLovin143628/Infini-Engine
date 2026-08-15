@@ -253,7 +253,8 @@ fn the_crates_float_at_their_draughts_and_the_swimmer_surfaces() {
     let heavy = final_y(&trace, PHASE20_SEA_CRATES - 1);
     assert!(
         light - heavy > NOMINAL_GAP_M * 0.5,
-        "a 350 kg/m³ crate must ride about {NOMINAL_GAP_M:.2} m higher than a 600 kg/m³ one,          and rides {:.3} m higher ({light} vs {heavy})",
+        "a 350 kg/m³ crate must ride about {NOMINAL_GAP_M:.2} m higher than a 600 kg/m³ one, \
+         and rides {:.3} m higher ({light} vs {heavy})",
         light - heavy
     );
 

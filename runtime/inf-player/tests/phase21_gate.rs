@@ -316,7 +316,8 @@ fn assert_not_vacuous(trace: &[Frame]) {
         assert_eq!(
             f64::from_bits(f[3]),
             PHASE21_ROOM_FLOOR_Y,
-            "tick {i}: `voxel.ground_height` disagrees with `terrain.height_at`              over a holed sample, where the combined query IS the voxel one"
+            "tick {i}: `voxel.ground_height` disagrees with `terrain.height_at` \
+             over a holed sample, where the combined query IS the voxel one"
         );
     }
     // The per-tick cut really varies (sub-voxel steps overlap), so "equal traces"
@@ -352,7 +353,9 @@ fn assert_not_vacuous(trace: &[Frame]) {
     let rock_top = phase21_height(blx, blz);
     assert!(
         (resting - (rock_top + half)).abs() < 0.6,
-        "half-way through the run the boulder is at {resting}, not resting on the          rock at {} - nothing is holding it up, so the voxel colliders are absent          rather than merely stale",
+        "half-way through the run the boulder is at {resting}, not resting on the \
+         rock at {} - nothing is holding it up, so the voxel colliders are absent \
+         rather than merely stale",
         rock_top + half
     );
 
@@ -360,7 +363,8 @@ fn assert_not_vacuous(trace: &[Frame]) {
     let crown = PHASE21_BORE_START.1 + PHASE21_BORE_RADIUS_M;
     assert!(
         last < crown,
-        "the boulder rests at {last}, above the trench crown at {crown} - the borer          removed the rock under it in the SIM and the solver never heard"
+        "the boulder rests at {last}, above the trench crown at {crown} - the borer \
+         removed the rock under it in the SIM and the solver never heard"
     );
 
     // 3. ...and LANDED ON THE TRENCH FLOOR rather than falling out of the world,
@@ -368,7 +372,8 @@ fn assert_not_vacuous(trace: &[Frame]) {
     let floor = PHASE21_BORE_START.1 - PHASE21_BORE_RADIUS_M;
     assert!(
         last > floor - 2.0,
-        "the boulder ended at {last}, well below the trench floor at {floor} - it          fell through everything, so nothing caught it"
+        "the boulder ended at {last}, well below the trench floor at {floor} - it \
+         fell through everything, so nothing caught it"
     );
 }
 
@@ -665,12 +670,14 @@ fn the_render_side_reflects_the_runtime_carve() {
     );
     assert!(
         store.overlaid_len(PHASE21_CAVERN_GUID.as_u128()) > 0,
-        "the FIRST sync of the session copied nothing, so a one-shot dig on the          first Tick would never be drawn"
+        "the FIRST sync of the session copied nothing, so a one-shot dig on the \
+         first Tick would never be drawn"
     );
     let after_one = store.triangle_count();
     assert_ne!(
         after_one, authored,
-        "after one tick of carving the render store still draws the authored          surface — the first carve was baselined away"
+        "after one tick of carving the render store still draws the authored \
+         surface — the first carve was baselined away"
     );
 
     // …and the rest of the run keeps reaching it.
@@ -690,11 +697,14 @@ fn the_render_side_reflects_the_runtime_carve() {
     let pinned = sim.terrain_streaming().overlaid_len(PHASE21_TERRAIN_GUID);
     assert!(
         pinned > 0,
-        "no terrain tile was pinned into the render streamer, so an asset-backed          terrain keeps drawing solid ground over the mouth the carve opened"
+        "no terrain tile was pinned into the render streamer, so an asset-backed \
+         terrain keeps drawing solid ground over the mouth the carve opened"
     );
     assert!(
         pinned <= inf_terrain::StreamBudget::default().max_resident_tiles,
-        "the pin set ({pinned}) is not bounded by the residency budget — past it          `pin_ceiling` clamps the camera cut to 1 and the terrain silently stops          streaming"
+        "the pin set ({pinned}) is not bounded by the residency budget — past it \
+         `pin_ceiling` clamps the camera cut to 1 and the terrain silently stops \
+         streaming"
     );
 }
 
@@ -1068,9 +1078,11 @@ fn the_runtime_carve_is_identical_across_pool_sizes() {
             .unwrap_or_else(|| panic!("probe printed {key}="));
         for (n, run) in sizes.iter().zip(&runs) {
             assert_eq!(
-                run.get(key).unwrap_or_else(|| panic!("probe printed {key}=")),
+                run.get(key)
+                    .unwrap_or_else(|| panic!("probe printed {key}=")),
                 reference,
-                "the runtime carve's {key} depends on the ECS pool size                  (threads={n}) — it is not replay-safe"
+                "the runtime carve's {key} depends on the ECS pool size \
+                 (threads={n}) — it is not replay-safe"
             );
         }
     }

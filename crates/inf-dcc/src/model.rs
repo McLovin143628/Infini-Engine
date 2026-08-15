@@ -1805,7 +1805,9 @@ mod tests {
         assert_eq!(
             out.faces.len(),
             1,
-            "the outcome is the CAP ALONE -- an outcome carrying the walls \n             makes the successor selection contain the base vertices, and the \n             next drag flattens the extrusion"
+            "the outcome is the CAP ALONE -- an outcome carrying the walls \n\
+             makes the successor selection contain the base vertices, and the \n\
+             next drag flattens the extrusion"
         );
         assert_eq!(out.verts.len(), 4, "and the four vertices it is built on");
         assert_eq!(m.vert_count(), 12);
@@ -1857,7 +1859,8 @@ mod tests {
         assert_eq!(
             m.face_count(),
             before + 4,
-            "two caps replace two faces and FOUR walls are added -- the \n             shared edge is interior to the region and gets none"
+            "two caps replace two faces and FOUR walls are added -- the \n\
+             shared edge is interior to the region and gets none"
         );
         assert_eq!(euler(&m), 2);
         assert!(m.half_ids().all(|h| m.is_boundary(h) == Some(false)));
@@ -2007,7 +2010,8 @@ mod tests {
         assert_eq!(
             out.faces.len(),
             1,
-            "the outcome is the INNER face -- inset-then-inset must shrink \n             inward, not walk the ring outward"
+            "the outcome is the INNER face -- inset-then-inset must shrink \n\
+             inward, not walk the ring outward"
         );
         assert_eq!(m.vert_count(), 12);
         assert_eq!(euler(&m), 2);
@@ -2084,7 +2088,8 @@ mod tests {
         assert_eq!(
             out.faces.len(),
             1,
-            "the outcome is the chamfer STRIP -- the two faces it was cut out \n             of are not what the author now has hold of"
+            "the outcome is the chamfer STRIP -- the two faces it was cut out \n\
+             of are not what the author now has hold of"
         );
         assert_eq!(m.face_loop(out.faces[0]).expect("live").len(), 4);
         assert_eq!(m.vert_count(), 12, "the 8 corners plus 4 offsets");
@@ -2367,7 +2372,8 @@ mod tests {
         assert_eq!(
             out.halfs.len(),
             3,
-            "the outcome is the NEW LOOP -- one rung per cut quad, not the \n             twenty edges of the strip it ran through"
+            "the outcome is the NEW LOOP -- one rung per cut quad, not the \n\
+             twenty edges of the strip it ran through"
         );
         assert_eq!(m.vert_count(), 12);
         assert_eq!(validate(&m), Ok(()));

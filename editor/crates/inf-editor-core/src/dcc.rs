@@ -3538,12 +3538,14 @@ mod tests {
             let scratch_ms = t.elapsed().as_secs_f64() * 1000.0 / frames as f64;
 
             println!(
-                "live-drag frame cost: {verts} verts, {} tris | tessellate                  {committed_ms:.2} ms | clone+apply+tessellate {scratch_ms:.2} ms",
+                "live-drag frame cost: {verts} verts, {} tris | tessellate \
+                 {committed_ms:.2} ms | clone+apply+tessellate {scratch_ms:.2} ms",
                 plain.indices.len() / 3
             );
             assert!(
                 scratch_ms < 2_000.0,
-                "a scratch frame took {scratch_ms:.1} ms on {verts} vertices — that                  is not a constant factor over the {committed_ms:.1} ms tessellation"
+                "a scratch frame took {scratch_ms:.1} ms on {verts} vertices — that \
+                 is not a constant factor over the {committed_ms:.1} ms tessellation"
             );
         }
     }
@@ -3622,7 +3624,8 @@ mod tests {
         assert_ne!(hot, rgba, "selecting a face must change the UV picture");
         assert!(
             hot.chunks_exact(4).any(|p| p[0..3] == style.selected),
-            "a selected face's outline must beat the seam colour: the selection              is what the author is pointing at"
+            "a selected face's outline must beat the seam colour: the selection \
+             is what the author is pointing at"
         );
 
         // An undersized buffer is refused, like every other compositor here.

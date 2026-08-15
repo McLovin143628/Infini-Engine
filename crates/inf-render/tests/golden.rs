@@ -2454,7 +2454,8 @@ fn vgeom_cpu_gpu_cut_parity() {
     );
     assert_eq!(
         cpu_meshlets, unclamped,
-        "the cut at the streamer's own wanted floor must equal the unclamped cut —          streaming may cost VRAM, never detail the camera asked for"
+        "the cut at the streamer's own wanted floor must equal the unclamped cut — \
+         streaming may cost VRAM, never detail the camera asked for"
     );
 
     // And the CPU reference (frustum passes everything here) equals the offline
@@ -4439,13 +4440,15 @@ fn atmosphere_quality_switch_rebuilds_the_env_bind() {
     };
     let covered = differing(&frames[0], &bare);
     eprintln!(
-        "quality switch: wall covers {covered} bytes; whole frame Low-vs-High {};          wall region Low-vs-High {}",
+        "quality switch: wall covers {covered} bytes; whole frame Low-vs-High {}; \
+         wall region Low-vs-High {}",
         differing(&frames[1], &frames[0]),
         differing(&wall(&frames[1]), &wall(&frames[0]))
     );
     assert!(
         covered > 20_000,
-        "the lit wall covers almost nothing ({covered} bytes) — the env bind group          is not being sampled, so this test would pass with a stale key"
+        "the lit wall covers almost nothing ({covered} bytes) — the env bind group \
+         is not being sampled, so this test would pass with a stale key"
     );
 
     // The env-bind assertion: the LIT region must change with the LUT. A stale
@@ -4455,7 +4458,8 @@ fn atmosphere_quality_switch_rebuilds_the_env_bind() {
     assert_ne!(
         wall(&frames[1]),
         wall(&frames[0]),
-        "the lit wall is byte-identical at Low and High — the env bind group is          still holding the previous quality's LUT views"
+        "the lit wall is byte-identical at Low and High — the env bind group is \
+         still holding the previous quality's LUT views"
     );
     // And the whole frame differs too (the sky path, separately keyed).
     assert_ne!(
@@ -4782,7 +4786,8 @@ fn golden_clouds_scattered() {
     );
     assert!(
         covered < 0.9,
-        "no clear sky survives at the default coverage ({covered:.3}) — that is          overcast, and the default is meant to be broken cumulus"
+        "no clear sky survives at the default coverage ({covered:.3}) — that is \
+         overcast, and the default is meant to be broken cumulus"
     );
 }
 
@@ -4850,7 +4855,8 @@ fn golden_clouds_night() {
     eprintln!("clouds_night field {field:.3} peak {peak:.3} (starless {peak_starless:.3})");
     assert!(
         peak > peak_starless + 0.04,
-        "no stars survive the gaps: the brightest pixel barely moves when the          starfield is switched off ({peak:.3} vs {peak_starless:.3})"
+        "no stars survive the gaps: the brightest pixel barely moves when the \
+         starfield is switched off ({peak:.3} vs {peak_starless:.3})"
     );
     assert!(peak > field + 0.05, "no star contrast at all");
     assert_ne!(img, bare, "night clouds drew nothing");
@@ -5425,7 +5431,8 @@ fn cloud_quality_switch_rebuilds_the_cloud_binds() {
         let shape = a.read_cloud_shape(&gpu).expect("shape readback");
         assert!(
             shape.iter().any(|&b| b != 0),
-            "{q:?}: the volume is all zeros after the switch — the bake wrote into              a previous tier's texture, so a cloud bind group is stale"
+            "{q:?}: the volume is all zeros after the switch — the bake wrote into \
+             a previous tier's texture, so a cloud bind group is stale"
         );
         // Stronger than "not zero": it must be the field this tier should hold, at
         // this tier's resolution. A stale *render* bind group cannot be caught by
@@ -5442,7 +5449,8 @@ fn cloud_quality_switch_rebuilds_the_cloud_binds() {
             for c in 0..4 {
                 assert!(
                     got[c].abs_diff(want[c]) <= CPU_GPU_TEXEL_TOLERANCE,
-                    "{q:?}: texel ({x},{y},{z}) channel {c} is {} not {} — the                      volume does not hold this tier's field",
+                    "{q:?}: texel ({x},{y},{z}) channel {c} is {} not {} — the \
+                     volume does not hold this tier's field",
                     got[c],
                     want[c]
                 );
@@ -7377,7 +7385,8 @@ fn voxel_off_path_never_engages() {
         assert_eq!(
             renderer.voxel_engaged_frames(),
             0,
-            "the voxel pass touched the encoder on a scene with no volumes — every              golden that predates P21.1 depends on it not doing that"
+            "the voxel pass touched the encoder on a scene with no volumes — every \
+             golden that predates P21.1 depends on it not doing that"
         );
     }
     let without = target.read_rgba(&gpu).expect("readback");
@@ -7389,7 +7398,8 @@ fn voxel_off_path_never_engages() {
     assert_eq!(
         renderer.voxel_engaged_frames(),
         1,
-        "the voxel pass did not engage on a scene full of caves — the off-path          assertions above are vacuous"
+        "the voxel pass did not engage on a scene full of caves — the off-path \
+         assertions above are vacuous"
     );
     let with = target.read_rgba(&gpu).expect("readback");
 
@@ -7398,7 +7408,8 @@ fn voxel_off_path_never_engages() {
     let (mean, max) = image_diff(&without, &with, W, H);
     assert!(
         mean > 0.02 && max > 0.2,
-        "the engaged frame is indistinguishable from the volume-free one (mean          {mean}, max {max}) — the pass ran but drew nothing"
+        "the engaged frame is indistinguishable from the volume-free one (mean \
+         {mean}, max {max}) — the pass ran but drew nothing"
     );
 
     // A volume list that is present but carries no DRAWABLE chunk must also stay
@@ -7536,7 +7547,8 @@ fn golden_cave_mouth() {
         .count();
     assert!(
         (60..400).contains(&holed),
-        "{holed} holed samples — the mouth must be a real opening, and not the          whole tile"
+        "{holed} holed samples — the mouth must be a real opening, and not the \
+         whole tile"
     );
     // The packed mask is bits, not bytes: a 33-sample row costs two words.
     assert_eq!(tile.holes.len(), 2 * res as usize);
@@ -7584,7 +7596,8 @@ fn golden_cave_mouth() {
     );
     assert!(
         greener(mouth) + 8 < greener(surround),
-        "the mouth is as green as the ground around it — the hole did not          discard: mouth {mouth:?} vs surround {surround:?}"
+        "the mouth is as green as the ground around it — the hole did not \
+         discard: mouth {mouth:?} vs surround {surround:?}"
     );
     // … and both surfaces are actually present in quantity, so neither claim is
     // resting on a single lucky texel.

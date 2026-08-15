@@ -184,7 +184,8 @@ mod tests {
             .expect("the fixture has feedback wants");
         assert!(
             coarsest_feedback < finest_floor,
-            "the fixture's lanes and addresses are not opposed: feedback reaches              {coarsest_feedback}, floor starts at {finest_floor}"
+            "the fixture's lanes and addresses are not opposed: feedback reaches \
+             {coarsest_feedback}, floor starts at {finest_floor}"
         );
     }
 

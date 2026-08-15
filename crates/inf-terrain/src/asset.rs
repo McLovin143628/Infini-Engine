@@ -1228,7 +1228,8 @@ mod tests {
         assert_eq!(
             asset.reader().tile_bytes(key).unwrap().len(),
             old.tile_bytes(key).unwrap().len() + 2,
-            "an unpainted, un-carved tile costs exactly one extra byte per layer              added since v3"
+            "an unpainted, un-carved tile costs exactly one extra byte per layer \
+             added since v3"
         );
     }
 

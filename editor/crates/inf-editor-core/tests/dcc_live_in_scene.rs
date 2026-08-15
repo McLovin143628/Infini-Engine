@@ -212,7 +212,8 @@ fn a_mesh_edited_in_the_model_editor_re_keys_and_redraws_in_the_scene() {
     assert_eq!(
         back.mesh.face_count(),
         20,
-        "16 kernel faces, of which the 4 walls are quads that the asset carries          as triangle pairs"
+        "16 kernel faces, of which the 4 walls are quads that the asset carries \
+         as triangle pairs"
     );
     assert_eq!(back.report.boundary_edges, 0, "still a closed solid");
     assert_eq!(inf_dcc::validate(&back.mesh), Ok(()));

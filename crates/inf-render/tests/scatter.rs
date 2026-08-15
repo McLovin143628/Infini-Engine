@@ -573,7 +573,9 @@ fn scatter_casts_cascaded_shadows() {
     let rigid_cast = ground_darkened(&render(&rigid, &shadows_off), &render(&rigid, &shadows_on));
     assert!(
         rigid_cast > 100,
-        "the FIXTURE cannot show a shadow at all ({rigid_cast} ground px from eight          rigid cubes) — retune the sun angle or the camera before trusting the          scatter measurement below"
+        "the FIXTURE cannot show a shadow at all ({rigid_cast} ground px from eight \
+         rigid cubes) — retune the sun angle or the camera before trusting the \
+         scatter measurement below"
     );
 
     let with_on = render(&scene, &shadows_on);

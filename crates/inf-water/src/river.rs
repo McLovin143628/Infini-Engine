@@ -1203,7 +1203,8 @@ mod tests {
         assert!(net > 5.0, "the fixture must really climb: {net}");
         assert!(
             uphill_spans(&profile, 0.5).is_empty(),
-            "the sawtooth escape closed — if this is deliberate, update the docs              on `uphill_spans` and the cook's tolerance constant in the same commit"
+            "the sawtooth escape closed — if this is deliberate, update the docs \
+             on `uphill_spans` and the cook's tolerance constant in the same commit"
         );
         // …and each individual span really is under the tolerance, which is WHY it
         // escapes — not because the merging is broken.

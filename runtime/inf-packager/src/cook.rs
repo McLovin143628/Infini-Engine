@@ -2873,10 +2873,55 @@ fn dangling_grammar_modules(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
 /// the P23 law: a ban enumerates what you thought of.
 #[cfg(test)]
 mod advisory_source_gate {
-    /// Functions that legitimately align columns inside a literal. Every one
-    /// writes a **file for a human to read** (build instructions, an HTML page)
-    /// rather than an advisory, so its alignment is the point.
-    const ALIGNED_ON_PURPOSE: &[&str] = &["web_build_note", "android_build_note"];
+    /// Functions that legitimately align columns inside a literal, or hold
+    /// **source text** in one.
+    ///
+    /// Widened tree-wide in Hardening Wave G. The first two write a file for a
+    /// human to read (build instructions, an HTML page), so their alignment is
+    /// the point. The rest hold Rust source: either a transpiler fixture whose
+    /// literal *is* the emitted program, or a source-pin needle that has to
+    /// match the indented line it pins — in both cases the run of spaces is the
+    /// assertion, and collapsing it would break the test it belongs to.
+    ///
+    /// An allowlist of functions, not of spellings (the P23 law), and not of
+    /// files: a whole-file exemption would take real coverage out with the one
+    /// line it was written for.
+    const ALIGNED_ON_PURPOSE: &[&str] = &[
+        // Human-facing files this crate writes.
+        "web_build_note",
+        "android_build_note",
+        // `inf-transpile`'s hand-edit corpus: each literal is a Rust program.
+        "if_else_lifts",
+        "else_if_chain_lifts_nested",
+        "while_loop_lifts",
+        "early_return_lifts",
+        "for_loop_becomes_snippet",
+        "match_becomes_snippet",
+        "if_let_becomes_snippet",
+        "nested_block_tail_expr_becomes_snippet",
+        // Source pins: the needle must equal the indented line it looks for.
+        "the_skinned_optimize_skip_is_the_engines_one_doctrine",
+        "the_shared_deform_projector_is_not_a_stub",
+        "the_save_pushes_its_invalidation_unconditionally",
+        // A report table whose columns are aligned deliberately.
+        "the_composed_frame_stays_inside_the_frame_budget",
+    ];
+
+    /// The workspace roots the sweep walks, relative to this crate's manifest
+    /// directory's grandparent.
+    ///
+    /// Named rather than discovered so the gate can assert it found source
+    /// under **each** of them — a sweep that silently stopped reaching
+    /// `editor/` would go on passing, and this campaign has already been caught
+    /// twice by a check that was looking at nothing. The count beside each is
+    /// the floor that assertion uses; `tools/` really is two files (the CLI and
+    /// its test), which is why the floor is per-root rather than shared.
+    const ROOTS: &[(&str, usize)] = &[
+        ("crates", 200),
+        ("editor", 50),
+        ("runtime", 50),
+        ("tools", 2),
+    ];
 
     /// The run length that means a continuation was eaten.
     const EATEN: usize = 8;
@@ -2928,52 +2973,103 @@ mod advisory_source_gate {
         String::new()
     }
 
-    #[test]
-    fn no_string_literal_in_this_crate_carries_an_eaten_continuation() {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    /// Every `.rs` under `root`, sorted.
+    fn sources_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         let mut files = Vec::new();
-        let mut stack = vec![src.clone()];
+        let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).expect("crate src is readable") {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
                 let path = entry.expect("dir entry").path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if path.is_dir() {
-                    stack.push(path);
+                    // `target/` holds generated source (build scripts, `OUT_DIR`
+                    // codegen) that this rule has no authority over.
+                    if name != "target" && name != "node_modules" {
+                        stack.push(path);
+                    }
                 } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
                     files.push(path);
                 }
             }
         }
-        assert!(
-            files.len() >= 5,
-            "the gate found almost no source — it is not looking where it thinks it is"
-        );
         files.sort();
+        files
+    }
+
+    /// **Tree-wide since Hardening Wave G.**
+    ///
+    /// The rule was crate-scoped when it was written, because the three sites
+    /// that had reached a user were in this crate. The lens's own enumeration
+    /// said otherwise: eighty-seven more literals carried the shape, in
+    /// thirty-nine files across nine crates, every one of them an assertion
+    /// message or a log line that would render with a hole in it the day it
+    /// fired. A guard that only watches the crate where the defect was first
+    /// noticed is a guard against noticing it again.
+    ///
+    /// Comment lines are exempt as a **class**: a module header's box-drawing
+    /// table and a doc comment's indented code block are alignment on purpose,
+    /// and neither is a string a user will ever be shown. It is a real hole —
+    /// an eaten continuation inside *prose* in a doc comment is invisible here
+    /// — and it is written down rather than implied.
+    ///
+    /// The exemption paid for itself immediately. The one doc-comment hit that
+    /// read like prose (`inf_material::texture`) turned out to be a doc
+    /// *quoting the mangled advisory it is about*, so the run of spaces is the
+    /// evidence; repairing it destroyed the sentence, and only the compiler
+    /// noticed, because a `\`-continuation inside a `///` line is not a
+    /// continuation at all — it is the end of the doc comment.
+    #[test]
+    fn no_string_literal_in_the_workspace_carries_an_eaten_continuation() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("this crate lives two levels under the workspace root")
+            .to_path_buf();
 
         let mut offences = Vec::new();
-        for path in &files {
-            let text = std::fs::read_to_string(path).expect("source is utf-8");
-            let lines: Vec<&str> = text.lines().collect();
-            for (i, line) in lines.iter().enumerate() {
-                if !line.contains('"') {
-                    continue;
+        let mut swept = 0usize;
+        for (dir, floor) in ROOTS {
+            let files = sources_under(&root.join(dir));
+            assert!(
+                files.len() >= *floor,
+                "the sweep found {} source files under `{dir}`, under its floor \
+                 of {floor} — it is not looking where it thinks it is, and a \
+                 sweep that stopped reaching a tree would go on passing",
+                files.len()
+            );
+            swept += files.len();
+            for path in &files {
+                let text = std::fs::read_to_string(path).expect("source is utf-8");
+                let lines: Vec<&str> = text.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    if !line.contains('"') || line.trim_start().starts_with("//") {
+                        continue;
+                    }
+                    let Some(run) = interior_space_run(line) else {
+                        continue;
+                    };
+                    if ALIGNED_ON_PURPOSE.contains(&enclosing_fn(&lines, i).as_str()) {
+                        continue;
+                    }
+                    offences.push(format!(
+                        "{}:{} — a run of {run} spaces inside a literal: {}",
+                        path.strip_prefix(&root).unwrap_or(path).display(),
+                        i + 1,
+                        line.trim()
+                    ));
                 }
-                let Some(run) = interior_space_run(line) else {
-                    continue;
-                };
-                if ALIGNED_ON_PURPOSE.contains(&enclosing_fn(&lines, i).as_str()) {
-                    continue;
-                }
-                offences.push(format!(
-                    "{}:{} — a run of {run} spaces inside a literal: {}",
-                    path.display(),
-                    i + 1,
-                    line.trim()
-                ));
             }
         }
         assert!(
+            swept >= 500,
+            "only {swept} source files were swept; this workspace has thousands"
+        );
+        assert!(
             offences.is_empty(),
-            "eaten `\\`-continuations reach a user from this crate:\n{}",
+            "eaten `\\`-continuations survive in the workspace:\n{}",
             offences.join("\n")
         );
     }

@@ -2394,7 +2394,8 @@ impl RenderNode for VgeomNode {
             let Some(&(flat_base, flat_count)) = flat_at.get(asset_id) else {
                 debug_assert!(
                     false,
-                    "the flat instance table and the draw loop disagree about                      asset {asset_id:#034x}"
+                    "the flat instance table and the draw loop disagree about \
+                     asset {asset_id:#034x}"
                 );
                 continue;
             };

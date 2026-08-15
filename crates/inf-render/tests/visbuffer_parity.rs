@@ -637,7 +637,9 @@ fn a_scene_past_a_ceiling_falls_back_to_the_forward_path_and_says_which() {
     let over = sc.vgeom_assets[0].source.max_tri();
     assert!(
         over > 128,
-        "the fixture cooked {over} triangles a meshlet, inside the 7-bit field —          meshopt did not honour the parameter and this arm would assert a          refusal that cannot happen"
+        "the fixture cooked {over} triangles a meshlet, inside the 7-bit field — \
+         meshopt did not honour the parameter and this arm would assert a \
+         refusal that cannot happen"
     );
     let refused = render(&gpu, &sc, settings(true), true);
     assert_eq!(
@@ -968,7 +970,9 @@ fn parity_interleaved_with_rigid_geometry() {
     );
     assert!(
         cube_seen > 10_000,
-        "only {cube_seen} pixels are meshlet-free and surrounded by meshlet-free          pixels; the rigid slab and the background between them are what this          half of the arm is about"
+        "only {cube_seen} pixels are meshlet-free and surrounded by meshlet-free \
+         pixels; the rigid slab and the background between them are what this \
+         half of the arm is about"
     );
     eprintln!(
         "parity interleaved rigid: {} interior, {cube_seen} non-meshlet pixels",

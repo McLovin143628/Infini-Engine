@@ -635,7 +635,8 @@ mod tests {
         );
         assert!(
             moved_end < 1e-9,
-            "the grabbed region walked: the vertex under the drag's END moved by              {moved_end}, which is what recomputing the influence per dab does"
+            "the grabbed region walked: the vertex under the drag's END moved by \
+             {moved_end}, which is what recomputing the influence per dab does"
         );
     }
 

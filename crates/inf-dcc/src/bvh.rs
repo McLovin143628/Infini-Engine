@@ -945,7 +945,8 @@ pub(crate) mod tests {
         assert!(candidates > 5_000, "{candidates} candidates is too few");
         assert!(
             real_hits > candidates / 4,
-            "only {real_hits} of {candidates} candidates hit anything; two              agreeing `None`s are not a measurement"
+            "only {real_hits} of {candidates} candidates hit anything; two \
+             agreeing `None`s are not a measurement"
         );
     }
 

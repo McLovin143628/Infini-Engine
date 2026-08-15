@@ -425,15 +425,20 @@ fn the_per_fragment_signal_is_finer_and_a_hidden_surface_adds_nothing_to_it() {
     // an inference from what the streamer did with it.
     assert_eq!(
         vis_alone.per_surface_requests, 0,
-        "the per-surface feedback pass dispatched {} requests on a scene whose          only textured surfaces are meshlets — the handover is not in effect and          the meshlet set is being marked twice, which makes every precision          claim in this file a claim about a union with a coarse mark",
+        "the per-surface feedback pass dispatched {} requests on a scene whose \
+         only textured surfaces are meshlets — the handover is not in effect and \
+         the meshlet set is being marked twice, which makes every precision \
+         claim in this file a claim about a union with a coarse mark",
         vis_alone.per_surface_requests
     );
     assert!(
         fwd_alone.per_surface_requests > 0,
-        "the per-surface pass dispatched nothing on the FORWARD path either, so          the zero above is not evidence of a handover"
+        "the per-surface pass dispatched nothing on the FORWARD path either, so \
+         the zero above is not evidence of a handover"
     );
     eprintln!(
-        "handover: per-surface requests {} forward / {} visbuffer; resident sets          {} and {}, forward set {} the per-fragment one",
+        "handover: per-surface requests {} forward / {} visbuffer; resident sets \
+         {} and {}, forward set {} the per-fragment one",
         fwd_alone.per_surface_requests,
         vis_alone.per_surface_requests,
         fwd_alone.tiles.len(),

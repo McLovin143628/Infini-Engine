@@ -2118,7 +2118,8 @@ mod tests {
         ] {
             assert!(
                 !fixed_point(&m),
-                "{name}: if this now holds, the smooth-fan derivation became                  triangulation-independent and the docs above are stale"
+                "{name}: if this now holds, the smooth-fan derivation became \
+                 triangulation-independent and the docs above are stale"
             );
         }
         // The DEFAULT policy is a fixed point on all four — that is what
