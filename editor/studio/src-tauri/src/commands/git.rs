@@ -292,3 +292,43 @@ pub async fn git_init(
         .await
         .map_err(|e| format!("git_init task failed to run: {e}"))?
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L7.H6: the source gate can see that `git_discard` *calls* the guard; it
+    /// cannot see whether the guard does anything — a gutted `confined_paths`
+    /// survived that mutation while the gate stayed green (P23's "a byte pin
+    /// cannot see a semantic change", met on a source pin). This is the value
+    /// half, over the function that decides what `git restore --worktree` and
+    /// `git clean -fq` are handed.
+    #[test]
+    fn a_path_argument_that_leaves_the_repo_is_refused() {
+        let root = PathBuf::from("C:/proj");
+        assert_eq!(
+            confined_paths(&root, &["src/main.rs".into(), "Cargo.toml".into()]).unwrap(),
+            vec!["src/main.rs".to_string(), "Cargo.toml".to_string()],
+            "ordinary paths pass through unchanged — git wants them relative"
+        );
+
+        for bad in [
+            "../secrets.txt",
+            "src/../../secrets.txt",
+            "/etc/passwd",
+            "C:/Windows/System32/drivers/etc/hosts",
+        ] {
+            assert!(
+                confined_paths(&root, &[bad.to_string()]).is_err(),
+                "{bad} would have been deleted by git_discard"
+            );
+            // …and one bad entry poisons the whole batch, rather than being
+            // filtered out of it: a partial discard is not what the user asked
+            // for either.
+            assert!(
+                confined_paths(&root, &["src/main.rs".into(), bad.to_string()]).is_err(),
+                "a batch containing {bad} must be refused whole"
+            );
+        }
+    }
+}
