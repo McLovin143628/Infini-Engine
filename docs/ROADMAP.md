@@ -18658,3 +18658,384 @@ wave's own report is not evidence.** Four of this round's findings were defects
 *introduced by the waves that fixed something else*, and three more were fixes
 whose gates could not fail. The only claims that survived re-discovery were the
 ones with a mechanism that could see them break.
+
+## Hardening Wave J — the campaign close
+
+The **third** round, and the last wave. Waves H and I answered the re-discovery
+round; the lenses were then run a third time, over the tree those two waves left
+behind, and were **still not dry**. This wave is the disposition of what round 3
+found: twelve findings, two spot-check caveats against closures round 1 had
+certified, and one **contract inversion** the campaign created between two of
+its own waves.
+
+### The headline: the campaign broke a law with two correct changes
+
+`inf_dcc::to_mesh_asset` counted a non-finite position/normal/UV and wrote it
+through, on a written-down ruling: the value came from the author's imported
+glTF, the kernel's own ops refuse to create one, and refusing at the writer
+would mean an author who opened a bad file cannot save their work at all.
+
+Hardening Wave H then gave `MeshAsset` a `migrate` that refuses a non-finite
+vertex attribute at the decode — equally correctly, because a NaN position
+poisons every cull bound derived from it and `f32::min`/`max` ignore NaN, so the
+bounds look healthy and nothing downstream is looking.
+
+Between them the two halves inverted a contract nobody re-read. From Wave H's
+commit on, the Model Editor's save **reported success**, its advisory said the
+vertices "will render as holes", and the asset **could never be opened again** —
+P23.6's own law (*a modelling op must not manufacture a file its own reader
+rejects*) broken by two changes neither of which was wrong alone.
+
+The ruling is **sanitize at export and count it**, and the concern that decides
+it is the one the original ruling was built on: an author must be able to save
+their work. Refusing at export takes the whole session hostage over a value they
+did not create; relaxing the reader re-opens C4-1's class at every consumer;
+sanitizing changes geometry that was already not geometry, since a NaN position
+is not a place. It is component-wise (`finite_or`), so a vertex whose `z` is NaN
+keeps the `x` and `y` its author placed; a non-finite normal takes `+Y` whole,
+because a direction patched per component can come out zero-length; the skin
+stream goes through `VertexSkin::normalized` for the fourth stream the reader
+checks. Both advisory texts now say what happened instead of predicting holes,
+and the guarantee is **pinned**: the arm that plants a NaN runs `validate()` on
+the produced payload and round-trips it through `inf_asset::decode`.
+
+### The compiled-out C assert had another half
+
+C4-1 is `meshopt`'s remap table sized from `vertices.len()` with the assert that
+would catch an overrun compiled out — an out-of-bounds heap **write** from one
+index past the end. Round 3 found the arity beside the bound: every `meshopt`
+entry point this workspace calls opens with `assert(index_count % 3 == 0)`, and
+nothing anywhere checked it. Verified in `meshopt-0.4.1/vendor/src`:
+
+* `meshopt_optimizeVertexCacheTable` floors `face_count = index_count / 3`, then
+  enters its emit loop over a **second** compiled-out
+  `assert(output_triangle < face_count)` and reads
+  `indices[current_triangle * 3 + 2]`. With two indices that is one `u32` past
+  the end of the input **and** past the end of the destination the Rust wrapper
+  allocated at `indices.len()`;
+* `meshopt::build_meshlets` ends with `meshlets[count - 1]`, and a floored
+  triangle count of zero returns `count == 0`;
+* the entry points that floor drop the trailing indices silently while their
+  wrappers still return a buffer of the original length, so the tail comes back
+  as a fabricated `[0, 0, …]` triangle that was in nobody's file.
+
+A glTF primitive with a **count-2 index accessor** is a perfectly parseable file
+that produces the first of those. `reject_partial_triangle` is wired at all four
+doors this campaign has established for the class: the import door (where the
+file and the primitive can be named), `MeshAsset::validate` (a `.inf_mesh` on
+disk is bytes somebody else wrote), `optimize()`'s own backstop, and
+`build_vgeom`'s guard beside `addressable`.
+
+**The mutation is the evidence, and it said something the doc did not.** With
+the guard removed, the dev-profile build does not corrupt the heap — it
+*aborts*: `Assertion failed: !indices || index_count % 3 == 0,
+indexgenerator.cpp:207`, `STATUS_STACK_BUFFER_OVERRUN`. The `cc` build defines
+`NDEBUG` only in the release profile, so the assert this workspace has been
+calling "compiled out" since Wave B is compiled out in **shipping builds** and
+live in the battery. Both halves matter: the battery would have met a partial
+triangle as a crash, and a player would have taken the write.
+
+The battery then found one, immediately, in the tree: `cook_fracture`'s
+`diagonal_plank` fixture handed over `(0..8)` as its index buffer — two
+triangles and two leftover indices, not the closed box its own doc describes.
+It had cooked for two phases because nothing on the fracture path reads the
+index buffer.
+
+### Two entrances were three
+
+`VgeomMesh::validate` bounded the meshlet ranges and the `mlvert` values, and
+never looked at `meshlet_triangles` — the buffer `triangle()` actually
+dereferences, as `meshlet_vertices[vertex_offset + local]`, with a `u8` local
+off a decoded payload. Over a 64-vertex meshlet a local of 200 does not usually
+panic: it lands in the **next** meshlet's slice of the same concatenated buffer
+and draws another meshlet's vertex, silently, in a mesh that decoded clean. Past
+the last meshlet it panics — editor, PIE and shipped player alike.
+
+And the rule had a third entrance nobody had counted:
+`VgeomAssetReader::to_mesh` assembles a `VgeomMesh` field by field out of a
+**shipped pack** and hands it back without either of the other two ever running
+(`classic_vgeom` reaches it as `to_mesh().ok()?`). It validates on the way out
+now, which also covers the `groups` blob — bincode-decoded from the trailing
+section, and never looked inside by `parse`.
+
+**The container half is deliberately asymmetric, and the asymmetry is a
+finding.** The micro-TRIANGLE locals are checked at parse because nothing else
+can see them. The micro-VERTEX values are **not**, because both consumers
+already bound them — `stream::stage_page`'s `pool_vertex` for the GPU path,
+`VgeomMesh::validate` for the CPU one — and a third copy at parse would have
+made `streaming::a_corrupt_page_blocks_and_degrades` unreachable from a file.
+That is not reasoning; it was measured. The parse-side copy was written first,
+and that arm went red.
+
+Beside it, R3-5: `VgeomMesh::validate` computed `vertex_offset as usize +
+vertex_count as usize` while `validate_records` three hundred lines away
+explains in its own doc why that must be `u64`. On `wasm32` a `usize` is 32 bits,
+so `0xFFFF_FFF0 + 32` wraps to 16 — inside every buffer — and the release
+profile has no overflow checks.
+
+### The advisory with one producer
+
+`skeleton_binding` (round 2's R2.C) compares a recorded rig content hash against
+the rig an animation asset points at. It can only compare a hash somebody wrote,
+and it had exactly **one** producer: the glTF importer. So the two doors in this
+engine that *author* skeleton-bound animation recorded nothing and were invisible
+to the entire mechanism.
+
+* The **character wizard** writes three clips and a state machine against a rig
+  it has just written. Regenerating that rig into the same GUID renumbers every
+  track index — in range, so nothing refuses it — and the path is live, not
+  hypothetical: `write_asset` on an existing path routes to `rewrite_payload`,
+  which keeps the GUID and keeps the sidecar's provenance with it.
+* **`sm_save`** is the harder half, because a `.inf_sm` names no skeleton of its
+  own — the editor's DTO has no rig field. The rig is resolved the only way it
+  can be, from the clips the machine plays (`StateMachine::clip_refs`), and the
+  same resolution supplies the **dependency edges** this door wrote as
+  `Vec::new()`: until now nothing recorded that a machine used a clip at all, so
+  the delete-with-references guard and the drawer's reference view were blind to
+  it, and the cook closed the edge only through the clips.
+
+The body mesh is deliberately *not* bound. Its skin stream is index-aligned to
+the same joints and it is the same class, but `advisories` scans clips and
+machines only, so a key there would be one nothing reads — it is the
+garment/scalp shape, and it stays with the two `DEFERRED_INSTANCES` that already
+name it.
+
+### A key that could not see two of its three inputs
+
+R2.F4 gave the Model Editor's preview an `upload_stamp` because the journal
+generation cannot see a live drag. Round 3 found the same defect twice more:
+
+* `PendingDrag::scratch(session, selection, mode)` builds the scratch mesh from
+  three inputs and the key held two. A gizmo drag's ops **are** the selection
+  transformed, so changing the selection mid-drag — or switching
+  Vert/Edge/Face, which makes the same op set read different ids — leaves the
+  transform, the step hash and the generation all unmoved. Cache hit; the shaded
+  surface goes on moving elements that are no longer selected while the CPU
+  overlay draws the new ones.
+* The **capture wizard's** preview stamped on `report.final_triangles` — a
+  *description* of the mesh rather than an identity for it. The triangle budget
+  is a target, so two finishes at the same budget agree about it routinely: a
+  re-finish at a different scale or atlas size goes on drawing the previous
+  scan's geometry with the new atlas beside it. `PhotogrammetrySession::run_id`
+  already was the generation counter (`begin` bumps it for `start` **and**
+  `refinish`); it is now read inside the same `with` as the product, so the
+  number and the geometry it stamps come from one observation.
+
+And `0` is not available as a stamp: `PreviewSession::geometry_stamp`'s own doc
+says zero **is** the built-in sphere, and `set_geometry` early-returns on
+equality. `fold_key` ends `| 1`.
+
+### The rest, by disposition
+
+**R3-6** — `start(sink)` sat outside the `try` in `refCountedInit`. `start` is a
+caller's function and may throw *synchronously*, before its first `await`; that
+throw escaped the `catch` with `holders` already incremented and never
+decremented, so the count could never return to zero and the last holder's
+release stopped tearing anything down. The subscription leak the helper exists
+to prevent, arriving through the door that prevents it.
+
+**R3-7** — two false sentences in the same helper, and an honest count. The
+comment claimed `start` "obtains its disposers one `await` at a time" and that
+the failure "is exactly the kind that happens in a batch (the IPC bridge going
+away), so it strands all of them at once". The second is backwards: a bridge
+that goes away rejects **every** listen, so nothing was collected and nothing is
+stranded — what the sink catches is the *partial* failure. Counted: of the eight
+call sites, three can ever hold anything (`initAssetSync`'s four sequential
+listens, `initSimSync`'s two, and `initLsp`, which is designed around it), and
+the other five take exactly one disposer with nothing after it that can reject.
+**Their sinks never drain.** Kept, because a second listen in any of the five
+silently re-opens R2-7 — but recorded as what it is.
+
+**R3-8** — three eaten escapes of a shape clippy cannot see. Two
+CRLF-normalization calls normalized nothing (`inf_ecs::components`'s wire-enum
+census and `inf_packager::bundle`'s schema pin): a scripted edit had left
+`replace("\n", "\n")` spelled as two literals each holding a **real** newline,
+which is why `no_effect_replace` never fired — the workspace was clippy-clean
+with them in. Found en route, same family: the LSP ceiling fixture's `\r\n\r\n`
+framing had become bare LFs.
+
+Wave G's workspace guard is **not** extended to this shape, and the cook gate's
+doc now says why. A run of spaces is a lexical accident a line-based sweep can
+recognise; a bare newline inside a literal needs a lexer that knows raw strings,
+byte strings, escapes, char literals and both comment forms.
+`inf-editor-core`'s test support already has exactly that lexer, in a crate
+`inf-packager` does not depend on and must not. A second copy of a lexer to
+catch three instances is a worse trade than writing down where they came from.
+
+**R3-9** — the group-range case in `VgeomMesh`'s payload-door arm sat under
+`if !good.groups.is_empty()`, so it would have gone on passing the day the
+fixture stopped producing a multi-level DAG. Unconditional now, with the
+fixture's groups asserted.
+
+**R3-11** — R2.F5 gave `dcc_unwrap` and `dcc_merge_asset` a settle refusal to
+carry and both carried it only where the operation **succeeded**. All three of
+the unwrap's refusal exits and both of the merge's answered with their own
+message alone, so an author whose stroke was discarded and whose unwrap then
+refused heard about the second and not the first — the half that says the file
+will not contain what they were looking at. One `chain_refusals` rule, settle
+first because it happened first. The gate's own doc said "ten doors" and called
+the merge "the eleventh"; the list it holds the module to has always had five.
+
+### The two spot-check caveats
+
+**C4-5's mip chain.** `TextureAsset::validate` asked three questions and all
+three were per-mip: nothing tied the levels to each other or to the
+`width`/`height` beside them, so a payload declaring 2048² over a 64² level 0 —
+or four unrelated images stacked as "mips" — passed every one. The v2
+container's own reasoning is what asks for the fourth question:
+`lift_texture_asset` derives every tile grid from the mip's own extent while the
+sampler walks the pyramid by **halving** (`VtTextureDesc::ancestor` assumes level
+`n+1` covers level `n`'s surface at half resolution), and `texture_thumbnail`
+selects and letterboxes by mip extent while its callers frame by the header's.
+The rule is exactly what `rgba_mip_chain` produces, and a chain that stops early
+stays legal because `generate_mips: false` and partial pyramids are real import
+settings.
+
+**C4-40's exit code.** The fix for C4-40 is two lines in `cmd_cook`, and
+reverting them left the whole battery green. The suite covered the `Err(e)`
+branch — a broken blueprint, "cook failed" on stderr — which is a different path
+entirely: on the `Ok(report)` branch the report renders and the exit code is the
+**only** thing that distinguishes a build that must not ship. Round 2 closed the
+same gap on the editor's side (B10 == R2.F8, the Package dialog's verdict); this
+closes it on the door CI actually runs, with a real subprocess, and separates the
+two failure modes so it cannot drift onto the branch already covered.
+
+### VERIFICATION
+
+Battery `cargo test --workspace --no-fail-fast -j 3` = **267 binaries / 4 811
+passed / 0 failed / 9 ignored** against Wave I's **267 / 4 796 / 0 / 9**. +15
+tests, **no new binaries** — every arm went into an existing module — and the
+fifteen are attributed one by one: `inf_mesh::validate` +1,
+`inf-mesh/tests/import_door` +2, `inf_vgeom::build` +1, `inf_vgeom::model` +1,
+`inf_vgeom::asset` +1, `inf_editor_core::character` +1,
+`inf_editor_core::dcc` +2, `commands::sm` +2, `commands::dcc` +1,
+`commands::photogrammetry` +1, `inf_material::texture` +1, `inf-cli/tests/cli`
++1.
+
+Workspace clippy `-D warnings` clean; `cargo fmt --all --check` clean; rustdoc
+**450 / ceiling 450 over 43 documented crates** with the doc cache cleared first (the CI step's own
+anti-vacuity rule), so ci.yml's ceiling does **not** move. npm: `tsc --noEmit`
+clean, `eslint . --max-warnings 0` clean, vitest **61 files / 576 tests** (from
+Wave I's 61 / 575). Goldens **54, unchanged** — the diff contains no `.png` and
+no `.inf_*` at all. **16 mutations, 16 killed.** NOT PUSHED.
+
+Commits (on `main`, **NOT pushed**, 9 + this ledger): 1cd0957 (the partial
+triangle), 1a3263a (the vgeom sweep), 6de35d9 (the rig binding), 3506556 (three
+stamps and the refusal chain), 9223706 (the two arms that could not kill their
+own mutations), 4b84534 (the try, the false sentences, the eaten escapes),
+84f3004 (the two spot-check caveats), 292d873 (the contract inversion), 6afbdfb
+(the cook fixture the battery caught).
+
+### THE MUTATIONS
+
+Sixteen applied, sixteen killed — **two of them only after the arms they exposed
+were rewritten**, which is the part worth writing down:
+
+- `fold_key`'s `| 1` reduced to `acc & !1` **survived**. The arm asserted
+  `fold_key(..) != 0` over a few hundred keys, which is a claim about 2⁻⁶⁴ of the
+  input space that no finite arm can check — a probabilistic property hiding a
+  deleted guarantee. The property is now **oddness**, which is the mechanism
+  `| 1` provides and which implies non-zero for every input at once.
+- `unwrap_refused` reduced to `Some(why)` **survived**. The arm walked the call
+  sites for the `settled` argument and never looked inside the helper: passing
+  an argument is not carrying it. It now reads the helper's own body.
+
+The rest died first time, each to exactly the arm that names it: the `% 3`
+clause at the decode door and at `build_vgeom` (the latter by *process abort*,
+see above); the micro-triangle bound; `to_mesh`'s validate; the mltri value
+clause; the group arm's poison; the wizard's four writes reverted to `None`;
+`sm_save`'s rig resolution; the scratch key's selection fold; the capture
+preview's stamp; `start(sink)` moved back outside the `try`; the mip-chain
+clause; the CLI's blocking exit code; and the export's sanitize reverted to a
+write-through.
+
+### MACHINE OPS
+
+**Wave E's mutation law, met a THIRD time — and this time it produced a false
+result, not just lost work.** `git checkout -- <file>` after a mutation reverted
+an **uncommitted arm** along with the mutation, twice: once taking two
+strengthened assertions with it, and once taking the whole `events.ts` fix. The
+second occasion is the instructive one, because the re-run then reported
+"survives" for a mutation whose arm was no longer in the tree. COMMIT BEFORE
+MUTATING is not hygiene: a mutation run over an uncommitted fix measures
+something that is not there.
+
+The round-3 report itself was not on disk — its task-output file was zero bytes
+— so this wave reconstructed all fifteen dispositions from the code its
+orchestrator's summary named. Worth recording as an operational fact rather than
+as a complaint: **every finding was re-derivable from the source**, and the two
+the summary described only by shape (`| 1`, "the line inside the try") were found
+by looking for the mechanism rather than for the words.
+
+`target/` stood at 123 GB with 80 GB free before the battery and 71 GB after —
+above the 20 GB floor throughout, so no `incremental` deletion was needed.
+
+### THE CAMPAIGN CLOSES
+
+Three rounds, ten waves (A–J), **156 findings closed**: 89 in round 1, 52 in
+round 2, 15 dispositioned in round 3. Twelve declined with numbers in round 1
+and two more here; deferred, round 1's thirteen plus Wave H's named Rust
+MED/LOW remainder and `skeleton_binding`'s three recorded instances — each still
+carrying the decision it waits on.
+
+The battery went **4 568 → 4 811** over 267 binaries; the frontend went
+**423 → 576** over 61 files. **Goldens were 54 when the campaign opened and are
+54 now** — not one re-blessed across ten waves, through repairs that moved
+committed bond energies, shared-face areas, scatter rotations, root-motion
+transforms and eroded terrain, because every consumer was enumerated before the
+first byte changed. **130 `Hardening` commits** carry the campaign by
+`git log --grep`; Wave I's block said 118 at a point where the same grep says
+120, which is the smallest possible example of this section's last paragraph.
+
+**The laws this campaign minted**, in the order they were paid for:
+
+1. **A repair wave's own report is not evidence** (round 2). Four of round 2's
+   findings were defects introduced by the waves that fixed something else, and
+   three more were fixes whose gates could not fail.
+2. **Adding a check can retire a gate downstream** — and it cuts both ways.
+   Round 3 wrote a parse-side value check that was *correct* and would have made
+   a live streaming arm unreachable from a file; the arm going red is what said
+   so. Each door checks what its own consumers need, and no more.
+3. **A probabilistic property cannot kill a mutation.** "This hash is never zero"
+   passes with the guarantee deleted. Assert the mechanism (oddness), not the
+   consequence.
+4. **Passing an argument is not carrying it.** A gate that walks call sites and
+   never reads the callee is a gate on spelling.
+5. **A contract has two ends and a campaign can move one of them.** Wave H's
+   decode refusal and P23.6's write-through ruling were each right when written;
+   together they made a save that could not be re-opened. When a wave hardens a
+   reader, it owes the writers a re-read.
+6. **The compiled-out assert is compiled out where it matters.** The dev profile
+   keeps `meshopt`'s asserts, so the battery meets an abort and the shipped
+   player meets the heap write. A guard verified only in a test build is verified
+   in the configuration that did not need it.
+
+Each round found what the round before it could not see, and that is the
+campaign's real result. Round 1 found defects in the code. Round 2 found defects
+in round 1's **fixes**. Round 3 found defects in the **shape of round 2's
+evidence**: a validator answering three of the four questions its consumers ask,
+a contract whose two ends were moved by two different waves, a key that could
+not see two of its three inputs — and, in this wave's own first draft, two arms
+asserting consequences their mutations happened not to reach.
+
+### VERIFICATION INTEGRITY
+
+Round 3's closing note, carried here: **a wave's ledger claims local truth; CI
+is the evidence.** Every number in every block of this campaign was measured on
+one Windows machine, in the dev profile, by the wave that wrote it. That is the
+strongest claim a wave can make and it is not the same as a green tree on three
+operating systems: none of these ten waves has been pushed, and the campaign's
+CI verdict does not exist yet. The dev/release split is not academic here —
+R3-1's mutation *aborted* the battery on a live C assert that is compiled out of
+every shipping build, so the configuration that proves the guard is not the
+configuration that needed it.
+
+**Wave H's correction, stated because a ledger that only accumulates is not a
+record.** Wave H's block opens on round 1 having closed C4-30 with "its own
+report certified the fix" — and round 3 found the same shape in Wave H's own
+work. The default-`migrate` sweep that wave ran gave `MeshAsset` a validator
+missing the arity question its consumers ask, and left `inf_dcc`'s writer on the
+far side of the new refusal, manufacturing files that reader rejects. Neither is
+a criticism of the wave. Both are one measurement: **a fix is closed when
+something that can see it break is watching, and a report saying so is not that
+thing.**
