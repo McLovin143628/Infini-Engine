@@ -3698,18 +3698,44 @@ mod tests {
     /// **Round 3**: `0` is `PreviewSession`'s built-in sphere, so no stamp this
     /// cache serves may be zero — a fold that landed there would skip the
     /// upload and draw a ball where the model is.
+    ///
+    /// Asserted as **ODDNESS**, not as `!= 0`. "This hash is never zero" is a
+    /// claim about 2⁻⁶⁴ of the input space and no finite arm can check it: a
+    /// test that tries a few thousand keys passes just as happily with the
+    /// guarantee deleted, which is how a probabilistic property hides a
+    /// mutation (measured — `acc & !1` survived the first version of this arm).
+    /// Oddness is the mechanism `| 1` actually provides, it implies non-zero for
+    /// every input at once, and it fails the moment the bit stops being set.
     #[test]
     fn no_stamp_this_cache_serves_is_the_sphere_sentinel() {
-        assert_ne!(fold_key(0, 0), 0, "the all-zero fold is the dangerous one");
         for g in 0..64u64 {
-            for step in [0u64, 1, u64::MAX, COMMITTED_STEP] {
-                assert_ne!(fold_key(g, step), 0);
+            for step in [0u64, 1, 7, u64::MAX, COMMITTED_STEP] {
+                let k = fold_key(g, step);
+                assert_eq!(
+                    k % 2,
+                    1,
+                    "fold_key({g}, {step}) = {k} is even, so some other input \
+                     folds to 0 — the built-in sphere"
+                );
+                assert_ne!(k, 0);
             }
         }
+        // …and the served stamp is the folded one, on both channels.
         let s = MeshSession::new(cube(1.0));
+        let sel = SelectionSet::new(s.generation());
         let mut cache = PreviewCache::new();
         cache.get(&s);
-        assert_ne!(cache.upload_stamp(), 0);
+        assert_eq!(cache.upload_stamp() % 2, 1);
+        let pending = PendingDrag::Stroke(StrokeInFlight {
+            mode: inf_dcc::SculptMode::Draw,
+            radius: 0.8,
+            strength: 0.1,
+            falloff: inf_dcc::SculptFalloff::Smooth,
+            path: vec![DVec3::new(0.5, 0.5, 0.5)],
+            last_normal: DVec3::Y,
+        });
+        cache.get_with_pending(&s, &sel, SelectMode::Face, Some(&pending));
+        assert_eq!(cache.upload_stamp() % 2, 1);
     }
 
     #[test]

@@ -2890,6 +2890,16 @@ mod tests {
             );
         }
 
+        // …and the helper they hand it to must USE it. Passing an argument is
+        // not carrying it: `unwrap_refused` could take `settled` and answer with
+        // `why` alone, and every call site above would still read correctly.
+        // (Measured: that mutation survived the first version of this arm.)
+        let helper = code_only(&body_of(SOURCE, "fn unwrap_refused("));
+        assert!(
+            helper.contains("chain_refusals(settled, why)"),
+            "unwrap_refused takes the settle refusal and must combine it: {helper}"
+        );
+
         let merge = code_only(&body_of(SOURCE, "pub async fn dcc_merge_asset("));
         assert_eq!(
             merge.matches("chain_refusals(").count(),
