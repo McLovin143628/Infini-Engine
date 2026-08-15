@@ -37,7 +37,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use glam::{DQuat, DVec2, DVec3};
+use glam::{DVec2, DVec3};
 use uuid::Uuid;
 
 use inf_anim::state_machine::StateMachine;
@@ -1264,9 +1264,11 @@ impl RuntimeSim {
                 .get::<Transform>(entity)
                 .copied()
                 .unwrap_or(Transform::IDENTITY);
-            let yaw_rad = t.rotation.y.to_radians();
-            let local = DVec3::new(d.translation.x as f64, 0.0, d.translation.z as f64);
-            let world_delta = DQuat::from_rotation_y(yaw_rad) * local;
+            // Root motion is expressed in the character's facing frame → rotate
+            // the ground-plane delta into world space through the ONE door both
+            // fixed steps share. `DQuat::from_rotation_y` is `sin_cos` inside
+            // glam, and this transform is folded into `state_bytes` (L6.F5).
+            let world_delta = inf_anim::root_delta_world(t.rotation.y, d.translation);
             let new_yaw_deg = t.rotation.y + d.yaw.to_degrees() as f64;
             let pos = t.translation.to_dvec3();
 

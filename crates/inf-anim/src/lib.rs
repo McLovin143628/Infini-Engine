@@ -89,7 +89,7 @@ pub use pose::{
     advance_clip_time, blend_poses, global_transforms, sample_clip, skinning_matrices, Pose,
 };
 pub use retarget::{humanoid_joint_names, retarget_pose, RetargetMap};
-pub use root_motion::{root_delta, root_joint_index, RootMotionDelta};
+pub use root_motion::{root_delta, root_delta_world, root_joint_index, RootMotionDelta};
 pub use skeleton::{Joint, JointTransform, Skeleton, SkeletonError};
 pub use sockets::{find_socket, socket_transform, socket_transforms, Socket};
 pub use state_machine::{

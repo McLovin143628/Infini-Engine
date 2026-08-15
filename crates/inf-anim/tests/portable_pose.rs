@@ -30,7 +30,23 @@
 
 /// Files whose **whole item text** must be free of `std` transcendentals, with
 /// the reason each one is on the list.
-const SIM_PATH: [(&str, &str, &str); 8] = [
+///
+/// # The last two are not in this crate, and that is the point
+///
+/// P24.2 made `root_delta` portable and put `root_motion.rs` on this list. The
+/// *application* of that delta — `DQuat::from_rotation_y(yaw) * local`, which is
+/// `sin_cos` inside glam — is one call downstream, in the two fixed steps
+/// themselves, and this list did not reach them. So the fix stopped exactly
+/// where the gate's vision stopped, and stayed stopped for four phases (L6.F5).
+/// The multiply now lives in `root_motion::root_delta_world`, one door for both
+/// hosts; these two entries are what stops a future edit re-inlining it.
+///
+/// `include_str!` across crate boundaries is unusual and deliberate. It creates
+/// no Cargo dependency and violates no ring rule — a gate that greps a file is
+/// not a consumer of its types — and the alternative is a *second* copy of this
+/// ban list somewhere else, which is how a list becomes two lists that disagree.
+/// Both files are workspace members whose paths are as stable as this file's own.
+const SIM_PATH: [(&str, &str, &str); 10] = [
     (
         "pose.rs",
         include_str!("../src/pose.rs"),
@@ -70,6 +86,16 @@ const SIM_PATH: [(&str, &str, &str); 8] = [
         "locomotion.rs",
         include_str!("../src/locomotion.rs"),
         "the P24.5 generator writes the KEYFRAMES of a committed `.inf_anim`, which is a strictly stronger claim than the rest of this list: everything above produces values that ride state_bytes for one session, and this produces bytes that go on disk, into a cook, into a pack, and are compared by a golden. `Quat::from_rotation_x` is `f32::sin_cos`, so the whole clip is written out through the half-angle identity by hand",
+    ),
+    (
+        "inf_player::runtime_sim",
+        include_str!("../../../runtime/inf-player/src/runtime_sim.rs"),
+        "the SHIPPED fixed step: everything it writes into an entity's Transform is folded into state_bytes, and `apply_root_motion` was rotating the root delta with `DQuat::from_rotation_y` one call below a `root_delta` this gate had already certified",
+    ),
+    (
+        "inf_editor_core::simulate",
+        include_str!("../../../editor/crates/inf-editor-core/src/simulate.rs"),
+        "the EDITOR fixed step, and the other half of every `PIE == shipping` claim in the repository — the two are compared byte for byte, so a libm call in either one is a libm call in the comparison",
     ),
 ];
 
