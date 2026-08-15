@@ -83,7 +83,19 @@ pub fn expand_text(params: &TextParams) -> Vec<SpriteInstance> {
     let advance = gw * (1.0 + params.tracking);
     let cols = params.glyph_cols.max(1);
     let rows = params.glyph_rows.max(1);
-    let cell_count = cols * rows;
+    // **Round-2, the render-2d MED**: `cols * rows` in `u32` over two
+    // serde-persisted `Text2D` fields. The release profile has no
+    // overflow-checks, so `65_536 x 65_536` wraps to **0**, `cell_count` is 0,
+    // every codepoint fails the atlas test below, and the text SILENTLY
+    // VANISHES — the exact defect `sprite_sheet.rs` documents and guards, in
+    // the sibling that was missed. `glyph_uv` guards its divisions three lines
+    // down; the multiply was the hole.
+    //
+    // Saturating rather than refusing: this is a per-frame draw path with no
+    // error channel, and a saturated `cell_count` means "every codepoint is in
+    // the atlas", which draws garbage the author can SEE instead of nothing
+    // they cannot.
+    let cell_count = cols.saturating_mul(rows);
 
     let mut out = Vec::new();
     for (line_index, line) in params.text.split('\n').enumerate() {

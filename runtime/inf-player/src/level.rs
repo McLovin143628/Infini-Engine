@@ -1539,7 +1539,23 @@ impl PackLevelSource {
             .as_ref()
             .and_then(|m| m.root_level)
             .map(AssetId)
-            .filter(|id| reader.contains(*id))
+            // **Say so** (round-2, the MED cluster). A manifest that names a
+            // root the pack does not contain used to be discarded here with no
+            // log at all, and the player then booted the pack's lowest-GUID
+            // level — a different game, silently. The broken-`player.toml` case
+            // beside it is a hard refusal; this one falls back, so the fallback
+            // has to be visible.
+            .filter(|id| {
+                let present = reader.contains(*id);
+                if !present {
+                    tracing::warn!(
+                        root = %id.uuid(),
+                        "the manifest names a root level this pack does not contain; \
+                         booting the pack's lowest-GUID level instead"
+                    );
+                }
+                present
+            })
             .or_else(|| {
                 reader
                     .index()

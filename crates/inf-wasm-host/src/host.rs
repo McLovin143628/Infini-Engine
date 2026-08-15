@@ -337,10 +337,16 @@ impl WasmMod {
         if self.initialized {
             return Ok(false);
         }
-        self.initialized = true;
+        // **Latched after the decision, not before it** (round-2 LOW). A mod
+        // with no `mod_init` export took the early return below with
+        // `initialized` already `true`, so the flag said "BeginPlay has run"
+        // for a mod whose BeginPlay does not exist — indistinguishable, at
+        // every reader, from one that ran. Harmless today because nothing else
+        // reads it; the fix is that the flag means what it says.
         let Some(init) = self.init.clone() else {
             return Ok(false);
         };
+        self.initialized = true;
         self.refill_budget();
         self.call_with_world(world, |m| init.call(&mut m.store, ()))?;
         Ok(true)

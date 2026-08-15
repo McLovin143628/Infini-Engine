@@ -908,7 +908,10 @@ pub fn cull_visible_source(
 
     let inst_buf = storage_buffer(gpu, "vgeom-inst", bytemuck::cast_slice(&packed));
 
-    let total = packed.len() as u32 * meshlet_count;
+    // L2.L4's door, at the fourth site (round-2 LOW). `visible_slots` was
+    // applied at three of four; here the bare `as u32 *` still wrapped, and
+    // `MAX_VISIBLE_SLOTS`' own doc names the cull path this feeds.
+    let total = visible_slots(packed.len() as u32, meshlet_count);
     let visible = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("vgeom-visible"),
         size: (total as u64 * 8).max(16),

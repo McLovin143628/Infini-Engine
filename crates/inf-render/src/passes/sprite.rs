@@ -237,7 +237,17 @@ impl SpriteTextures {
             return;
         }
         // Guard against a malformed upload rather than panicking in a frame.
-        if up.width == 0 || up.height == 0 || up.rgba8.len() < (up.width * up.height * 4) as usize {
+        // The C4-5/C4-16 shape, surviving inside a rewritten function
+        // (round-2 LOW): `w * h * 4` in bare `u32`. The release profile has no
+        // overflow-checks, so a 65 536-square upload wraps to a SMALL number
+        // that the length test then passes — and the copy below reads past the
+        // buffer. `checked_mul` makes an unrepresentable size a refusal.
+        let needed = up
+            .width
+            .checked_mul(up.height)
+            .and_then(|px| px.checked_mul(4))
+            .map(|n| n as usize);
+        if up.width == 0 || up.height == 0 || needed.is_none_or(|n| up.rgba8.len() < n) {
             tracing::warn!(
                 handle = up.handle,
                 "sprite: skipping malformed texture upload"

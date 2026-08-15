@@ -397,6 +397,19 @@ impl AssetState {
 
     // `pub(super)` so sibling command modules (e.g. the P11.2 state-machine
     // editor's `sm_list_clips`) can enumerate the asset db through the same guard.
+    /// The shared project handle, for work that must run **off the async
+    /// workers** (round-2, the sm/pcg MED).
+    ///
+    /// `with_project` borrows through `&State`, which is not `Send`, so a
+    /// caller that needs `spawn_blocking` cannot use it. Handing out the `Arc`
+    /// lets the closure own what it locks. Same lock, same order — this is a
+    /// clone of a pointer, not a second door.
+    pub(super) fn project_handle(&self) -> Result<Arc<Mutex<AssetProject>>, String> {
+        let guard = self.inner.lock().map_err(|e| e.to_string())?;
+        let inner = guard.as_ref().ok_or("assets not initialized")?;
+        Ok(inner.project.clone())
+    }
+
     pub(super) fn with_project<R>(
         &self,
         f: impl FnOnce(&mut AssetProject) -> Result<R, String>,

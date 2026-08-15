@@ -163,7 +163,12 @@ pub fn export(project_root: &Path, opts: &ExportOptions) -> Result<ExportReport>
 
     // 3. write the launch config the player reads on boot.
     let config = LaunchConfig {
-        schema_version: 1,
+        // **The constant, not a literal** (round-2, the MED cluster). This was
+        // `1` in two places while `CONFIG_SCHEMA_VERSION` had zero external
+        // consumers — and the player's loader now REFUSES a config newer than
+        // its own, so bumping the constant alone would brick every exported
+        // bundle with nothing in the tree relating the pair.
+        schema_version: LAUNCH_CONFIG_SCHEMA_VERSION,
         pack: DEFAULT_PACK_NAME.to_string(),
         title: Some(opts.window.title.clone().unwrap_or_else(|| name.clone())),
         width: Some(opts.window.width),
@@ -191,6 +196,18 @@ pub fn export(project_root: &Path, opts: &ExportOptions) -> Result<ExportReport>
         cook,
     })
 }
+
+/// The `player.toml` schema version this exporter writes.
+///
+/// Named once (round-2, the MED cluster): it was the literal `1` at two sites
+/// while `inf_player::config::CONFIG_SCHEMA_VERSION` had **zero external
+/// consumers**, and the player's loader refuses a config newer than its own —
+/// so bumping the player's constant alone would brick every exported bundle,
+/// with nothing in the tree relating the pair. `inf-packager` does not depend
+/// on `inf-player`, so the tie is a source pin
+/// (`tests::the_launch_config_schema_matches_the_player_s`) rather than a
+/// shared item — the Wave-C law for two copies of one value across a boundary.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 1;
 
 /// The bundle's `player.toml` (mirrors `inf_player::config::PlayerConfigFile`;
 /// duplicated so the cook pipeline does not depend on the player crate).
@@ -312,7 +329,7 @@ mod tests {
     #[test]
     fn launch_config_serializes_pack_and_window() {
         let c = LaunchConfig {
-            schema_version: 1,
+            schema_version: LAUNCH_CONFIG_SCHEMA_VERSION,
             pack: DEFAULT_PACK_NAME.to_string(),
             title: Some("Game".into()),
             width: Some(800),
@@ -328,5 +345,36 @@ mod tests {
     fn missing_explicit_player_bin_errors() {
         let err = resolve_player_bin(Some(Path::new("/nope/does/not/exist"))).unwrap_err();
         assert!(matches!(err, CookError::Export(_)));
+    }
+
+    /// **Round-2, the MED cluster**: the exporter's `player.toml` schema and
+    /// the player's must be the same number.
+    ///
+    /// `inf-packager` does not depend on `inf-player`, so this reads the
+    /// player's source rather than its constant — the Wave-C law: *two copies
+    /// of one expression across a boundary are a contract nobody is measuring*,
+    /// and a source pin is the enforcement available.
+    #[test]
+    fn the_launch_config_schema_matches_the_player_s() {
+        let src = include_str!("../../inf-player/src/config.rs").replace(
+            "
+", "
+",
+        );
+        let decl = "pub const CONFIG_SCHEMA_VERSION: u32 = ";
+        let at = src
+            .find(decl)
+            .expect("the player's CONFIG_SCHEMA_VERSION occurs nowhere — was it renamed?");
+        let value: u32 = src[at + decl.len()..]
+            .split(';')
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .expect("the player's schema version is a literal");
+        assert_eq!(
+            LAUNCH_CONFIG_SCHEMA_VERSION, value,
+            "the exporter writes player.toml schema {LAUNCH_CONFIG_SCHEMA_VERSION} and              the player speaks {value}; the loader refuses a config newer than its own,              so every exported bundle would refuse to boot"
+        );
     }
 }

@@ -535,12 +535,22 @@ pub async fn pcg_save(
         Ok((payload, format!("{slug}.inf_pcg")))
     })?;
 
-    assets.with_project(|proj| {
+    // **Off the async workers** (round-2, the sm/pcg MED). Wave A's atomic-write
+    // conversion deleted the `spawn_blocking` wrapper AND the comment that said
+    // why ("keep it off the async workers"), so a disk write ran in this
+    // `async fn`'s body under two mutexes — inverting the same campaign's
+    // Wave-E rule two waves later. `project_handle` exists because
+    // `with_project` borrows through `&State`, which is not `Send`.
+    let project = assets.project_handle()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut proj = project.lock().map_err(|e| e.to_string())?;
         let dir = proj.content_dir("PCG").map_err(|e| e.to_string())?;
         proj.write_asset_at(&dir.join(&file_name), &payload, Vec::new())
             .map_err(|e| e.to_string())?;
-        Ok(file_name.clone())
+        Ok(file_name)
     })
+    .await
+    .map_err(|e| format!("asset write task failed to run: {e}"))?
 }
 
 /// Lower the PCG graph and evaluate it over the scene terrain into the target

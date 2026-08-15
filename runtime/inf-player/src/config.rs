@@ -40,7 +40,14 @@ pub struct PlayerConfig {
 }
 
 /// The on-disk `player.toml` layout.
-#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+/// **`Default` writes a config the loader refuses** (round-2, the MED
+/// cluster). `#[derive(Default)]` gives `schema_version = 0`, and `load` now
+/// refuses anything below `CONFIG_SCHEMA_VERSION` — so
+/// `PlayerConfigFile::default()` round-tripped through the writer is a bundle
+/// that will not boot. Latent, because nothing in the tree calls it; `pub`, so
+/// it is a door somebody will. The hand-written impl uses the same
+/// `default_schema()` the serde attribute does, so the two cannot drift.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct PlayerConfigFile {
     #[serde(default = "default_schema")]
     pub schema_version: u32,
@@ -56,6 +63,18 @@ pub struct PlayerConfigFile {
 
 fn default_schema() -> u32 {
     CONFIG_SCHEMA_VERSION
+}
+
+impl Default for PlayerConfigFile {
+    fn default() -> Self {
+        Self {
+            schema_version: default_schema(),
+            pack: String::new(),
+            title: None,
+            width: None,
+            height: None,
+        }
+    }
 }
 
 impl PlayerConfigFile {
