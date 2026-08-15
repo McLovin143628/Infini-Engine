@@ -184,10 +184,30 @@ pub fn build_mod_wasm(crate_dir: &Path) -> Result<ModBuildOutcome> {
     Ok(ModBuildOutcome::Built(wasm))
 }
 
-/// Whether the `wasm32-unknown-unknown` target is installed for the active
-/// toolchain.
+/// Whether the `wasm32-unknown-unknown` target's **standard library** is
+/// installed for the active toolchain.
+///
+/// # Why the exit status is not the answer
+///
+/// `rustc --print target-libdir` *computes* a path; it does not look for one. It
+/// exits **0 for a target that is not installed at all**, printing the directory
+/// where that target's `libstd` would live — verified on this toolchain against
+/// `thumbv7em-none-eabihf`, which prints its libdir and does not have one.
+///
+/// So this probe answered "installed" everywhere, and the only thing that made
+/// [`build_mod_wasm`] classify correctly was a substring sniff over cargo's
+/// stderr (`"may not be installed"`). C4-40 removed that sniff — rightly, since
+/// it also matched ordinary compile errors naming the target — and thereby
+/// exposed the false positive underneath: on a machine without the target, the
+/// build failed with `can't find crate for 'std'` and was reported as a **build
+/// failure** rather than a missing toolchain. That is what turned the P14.5
+/// `mods_e2e` skip into a panic on the CI legs that do not install wasm32.
+///
+/// Checking that the libdir exists **and holds a `libstd` rlib** asks the
+/// toolchain the question directly, and keeps the property C4-40 was for: a
+/// genuine compile error is still an error, because the target is still there.
 pub fn wasm_target_installed() -> bool {
-    Command::new("rustc")
+    let Ok(out) = Command::new("rustc")
         .args([
             "--print",
             "target-libdir",
@@ -195,8 +215,23 @@ pub fn wasm_target_installed() -> bool {
             "wasm32-unknown-unknown",
         ])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return false;
+    };
+    // `flatten`, not `filter_map(Result::ok)`: this crate aliases `Result<T>` to
+    // its own `CookError` result, which makes the path-qualified form ambiguous.
+    entries.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with("libstd-") && n.ends_with(".rlib"))
+    })
 }
 
 const TOOLCHAIN_INSTRUCTIONS: &str = "\

@@ -517,13 +517,19 @@ pub fn clamp_cut(
         }
     }
     // Last resort: drop the farthest tiles until we fit.
-    let mut ordered: Vec<TileKey> = out.iter().copied().collect();
-    ordered.sort_by(|a, b| {
-        grid.distance_to(*b, camera_xz)
-            .total_cmp(&grid.distance_to(*a, camera_xz))
-            .then_with(|| a.cmp(b))
-    });
-    for k in ordered {
+    // DECORATE-SORT-UNDECORATE (lens 3 P29, Hardening Wave G). `sort_by` calls
+    // its comparator O(n log n) times and evaluates `distance_to` TWICE in each
+    // one, and `distance_to` builds a box and takes a `sqrt` — so the key was
+    // computed ~2 n log n times for n distinct values. Computing it once per
+    // key and sorting the pairs is the same order (`total_cmp` on the same
+    // `f64`, tie-broken by the same key comparison, both pure functions of the
+    // input) at n evaluations.
+    let mut ordered: Vec<(f64, TileKey)> = out
+        .iter()
+        .map(|k| (grid.distance_to(*k, camera_xz), *k))
+        .collect();
+    ordered.sort_by(|(da, a), (db, b)| db.total_cmp(da).then_with(|| a.cmp(b)));
+    for (_, k) in ordered {
         if out.len() <= max_tiles {
             break;
         }
@@ -575,14 +581,20 @@ pub fn advance_cut(
     let mut out: BTreeSet<TileKey> = BTreeSet::new();
     let mut handled: BTreeSet<TileKey> = BTreeSet::new();
 
-    let mut order: Vec<TileKey> = current.iter().copied().collect();
-    order.sort_by(|a, b| {
-        grid.distance_to(*a, camera_xz)
-            .total_cmp(&grid.distance_to(*b, camera_xz))
-            .then_with(|| a.cmp(b))
-    });
+    // DECORATE-SORT-UNDECORATE (lens 3 P29, Hardening Wave G). `sort_by` calls
+    // its comparator O(n log n) times and evaluates `distance_to` TWICE in each
+    // one, and `distance_to` builds a box and takes a `sqrt` — so the key was
+    // computed ~2 n log n times for n distinct values. Computing it once per
+    // key and sorting the pairs is the same order (`total_cmp` on the same
+    // `f64`, tie-broken by the same key comparison, both pure functions of the
+    // input) at n evaluations.
+    let mut order: Vec<(f64, TileKey)> = current
+        .iter()
+        .map(|k| (grid.distance_to(*k, camera_xz), *k))
+        .collect();
+    order.sort_by(|(da, a), (db, b)| da.total_cmp(db).then_with(|| a.cmp(b)));
 
-    for node in order {
+    for (_, node) in order {
         if handled.contains(&node) {
             continue;
         }

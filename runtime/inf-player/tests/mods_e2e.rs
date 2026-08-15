@@ -29,11 +29,24 @@ fn spinner_dir() -> PathBuf {
 
 #[test]
 fn scene_plus_spinner_mod_moves_its_entity() {
-    // 1. Cook the sample mod to wasm (skip if the target isn't installed).
+    // 1. Cook the sample mod to wasm.
+    //
+    // **Tool-absent skips; build-failed panics** — the distinction C4-40 built,
+    // used here for the reason it exists. Only the dedicated wasm CI job installs
+    // `wasm32-unknown-unknown`; the three ordinary Rust legs do not, and a test
+    // that cannot build its subject there has proven nothing rather than found
+    // something. A mod that fails to *compile* is a real defect and still fails.
+    //
+    // The skip prints the outcome's own instructions rather than a fixed line, so
+    // a reader sees the named remedy (`rustup target add …`) and not just a
+    // verdict — the house GPU-less / rust-analyzer-absent skip pattern.
     let wasm = match build_mod_wasm(&spinner_dir()) {
         Ok(ModBuildOutcome::Built(p)) => p,
-        Ok(ModBuildOutcome::ToolchainMissing(_)) => {
-            eprintln!("SKIP: wasm32-unknown-unknown target not installed");
+        Ok(ModBuildOutcome::ToolchainMissing(why)) => {
+            eprintln!(
+                "SKIP {}: the wasm32-unknown-unknown target is not installed.\n{why}",
+                module_path!()
+            );
             return;
         }
         Err(e) => panic!("building spinner mod: {e}"),

@@ -8,7 +8,13 @@
 //! locations. The spawn is fire-and-forget (Explorer returns non-zero even on
 //! success), wrapped in `spawn_blocking` so it never blocks the async runtime.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+// Windows-only: the verbatim-prefix strip below is the only thing that names
+// `PathBuf`. The confinement refactor moved the roots walk into
+// `super::paths`, which left this import used on exactly one platform — an
+// `unused_imports` error under `-D warnings` on the Linux and macOS legs.
+#[cfg(target_os = "windows")]
+use std::path::PathBuf;
 
 use tauri::{AppHandle, State};
 

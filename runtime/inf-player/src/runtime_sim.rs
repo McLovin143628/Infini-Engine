@@ -1051,15 +1051,27 @@ impl RuntimeSim {
             self.audio_cmds.push(AudioCommand::SetListener(l));
         }
 
-        // Autoplay once per not-yet-started `AudioSource`, plus the set of live
-        // emitter Guids (for despawn pruning below).
+        // Autoplay once per not-yet-started `AudioSource`, plus the **started**
+        // emitters still alive (for despawn pruning below).
+        //
+        // `still_alive` used to be `live`: every guid in the world, inserted into
+        // a fresh `BTreeSet` every fixed step — thirteen thousand node
+        // allocations on a furnished town — so that a handful of started
+        // emitters could each be asked whether they still existed (lens 3 P34).
+        // The question is the same one, asked the other way round: an entity is
+        // only interesting here if it is already in `audio_started`, which is
+        // small by construction (one entry per emitter that has ever played).
+        // Exactly the same source of truth as before — this walk — so no
+        // reliance on the guid index agreeing with it.
         let mut autoplay: Vec<(Uuid, AudioSource, DVec3)> = Vec::new();
-        let mut live: BTreeSet<Uuid> = BTreeSet::new();
+        let mut still_alive: BTreeSet<Uuid> = BTreeSet::new();
         for e in self.world.world().iter_entities() {
             let Some(guid) = e.get::<Guid>().map(|g| g.0) else {
                 continue;
             };
-            live.insert(guid);
+            if self.audio_started.contains(&guid) {
+                still_alive.insert(guid);
+            }
             let Some(src) = e.get::<AudioSource>() else {
                 continue;
             };
@@ -1080,7 +1092,13 @@ impl RuntimeSim {
         // order — the deterministic contract is the sort, not the scan).
         autoplay.sort_by_key(|(guid, _, _)| *guid);
         for (guid, src, pos) in autoplay {
+            // Started THIS step, and seen alive by the walk above — so it
+            // belongs in `still_alive` too, or the despawn sweep below would
+            // Stop it on the very step it began and autoplay would re-fire it
+            // for ever. (`runtime_autoplay_source_emits_one_deterministic_play_
+            // command` measured exactly that: five Plays over five steps.)
             self.audio_started.insert(guid);
+            still_alive.insert(guid);
             let mut cmd = play_command_for(guid_source_key(guid), &src, src.spatial.then_some(pos));
             if src.occlusion && src.spatial {
                 cmd.occlusion_gain = self.occlusion_gain(listener_pos, pos);
@@ -1094,7 +1112,7 @@ impl RuntimeSim {
         let despawned: Vec<Uuid> = self
             .audio_started
             .iter()
-            .filter(|g| !live.contains(*g))
+            .filter(|g| !still_alive.contains(*g))
             .copied()
             .collect();
         for guid in despawned {

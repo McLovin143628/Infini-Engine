@@ -351,15 +351,21 @@ pub fn clamp_wants(
     if max_chunks == 0 || wants.len() <= max_chunks {
         return wants.clone();
     }
-    let mut ordered: Vec<ChunkKey> = wants.iter().copied().collect();
+    // DECORATE-SORT-UNDECORATE (lens 3 P29, Hardening Wave G). `sort_by` calls
+    // its comparator O(n log n) times and evaluates `distance_to` TWICE in each
+    // one, and `distance_to` builds a box and takes a `sqrt` — so the key was
+    // computed ~2 n log n times for n distinct values. Computing it once per
+    // key and sorting the pairs is the same order (`total_cmp` on the same
+    // `f64`, tie-broken by the same key comparison, both pure functions of the
+    // input) at n evaluations.
     // Nearest first, key-ordered on a tie.
-    ordered.sort_by(|a, b| {
-        grid.distance_to(*a, camera)
-            .total_cmp(&grid.distance_to(*b, camera))
-            .then_with(|| a.cmp(b))
-    });
+    let mut ordered: Vec<(f64, ChunkKey)> = wants
+        .iter()
+        .map(|k| (grid.distance_to(*k, camera), *k))
+        .collect();
+    ordered.sort_by(|(da, a), (db, b)| da.total_cmp(db).then_with(|| a.cmp(b)));
     ordered.truncate(max_chunks);
-    ordered.into_iter().collect()
+    ordered.into_iter().map(|(_, k)| k).collect()
 }
 
 /// One bounded step of `current` toward `target`.
@@ -392,13 +398,19 @@ pub fn advance_wants(
     } else {
         max_new_chunks
     };
-    let mut incoming: Vec<ChunkKey> = target.difference(current).copied().collect();
-    incoming.sort_by(|a, b| {
-        grid.distance_to(*a, camera)
-            .total_cmp(&grid.distance_to(*b, camera))
-            .then_with(|| a.cmp(b))
-    });
-    for key in incoming {
+    // DECORATE-SORT-UNDECORATE (lens 3 P29, Hardening Wave G). `sort_by` calls
+    // its comparator O(n log n) times and evaluates `distance_to` TWICE in each
+    // one, and `distance_to` builds a box and takes a `sqrt` — so the key was
+    // computed ~2 n log n times for n distinct values. Computing it once per
+    // key and sorting the pairs is the same order (`total_cmp` on the same
+    // `f64`, tie-broken by the same key comparison, both pure functions of the
+    // input) at n evaluations.
+    let mut incoming: Vec<(f64, ChunkKey)> = target
+        .difference(current)
+        .map(|k| (grid.distance_to(*k, camera), *k))
+        .collect();
+    incoming.sort_by(|(da, a), (db, b)| da.total_cmp(db).then_with(|| a.cmp(b)));
+    for (_, key) in incoming {
         // A chunk still in memory costs nothing to re-enter, so it never consumes
         // the batch — otherwise a camera oscillating across the dead band would
         // crawl for chunks it never actually let go of.

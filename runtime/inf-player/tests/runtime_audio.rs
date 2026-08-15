@@ -59,6 +59,96 @@ fn runtime_autoplay_source_emits_one_deterministic_play_command() {
     assert_eq!(p.position, Some(DVec3::new(-4.0, 1.0, 0.0)));
 }
 
+/// **A despawned emitter is Stopped exactly once, and a live one never is**
+/// (Hardening Wave G).
+///
+/// The despawn sweep is the only consumer of the "which entities exist" set the
+/// audio step built, and that set used to be *every guid in the world*, minted
+/// into a fresh `BTreeSet` per fixed step — thirteen thousand inserts on a
+/// furnished town so that a handful of emitters could each be asked one
+/// question (lens 3 P34). It is now the started emitters that the same walk saw
+/// alive.
+///
+/// Nothing covered this transition. The narrowing broke autoplay on its first
+/// run — an emitter that started *this* step was not yet in the narrowed set,
+/// so the sweep Stopped it on the step it began and autoplay re-fired it for
+/// ever — and the arm that caught it was counting `Play`s, not `Stop`s. This is
+/// the missing half: both directions, with the negative asserted, because
+/// "the Stop arrives" is satisfied by a sweep that Stops everything.
+#[test]
+fn a_despawned_emitter_is_stopped_and_a_live_one_is_left_alone() {
+    let doomed = Uuid::from_u128(0xD0A0_0011);
+    let survivor = Uuid::from_u128(0xD0A0_0012);
+
+    let mut world = EcsWorld::new();
+    let place = |w: &mut EcsWorld, guid: Uuid, x: f64| {
+        let e = w.spawn_with_guid(guid, "Emitter", None);
+        w.world_mut()
+            .entity_mut(e)
+            .insert(Transform::from_translation(DVec3::new(x, 0.0, 0.0)))
+            .insert(AudioSource {
+                clip: Some(Uuid::from_u128(0xD0A0_C11B)),
+                autoplay: true,
+                spatial: true,
+                ..Default::default()
+            });
+        e
+    };
+    let e_doomed = place(&mut world, doomed, -2.0);
+    place(&mut world, survivor, 2.0);
+    world.mark_dirty();
+
+    let mut sim = RuntimeSim::new(world, vec![], DVec2::ZERO, 60.0);
+    for _ in 0..3 {
+        sim.step_once(RuntimeInput::default());
+    }
+    let stops = |sim: &RuntimeSim| -> Vec<u64> {
+        sim.audio_command_log()
+            .iter()
+            .filter_map(|c| match c {
+                AudioCommand::Stop { source } => Some(*source),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(
+        stops(&sim).is_empty(),
+        "a live emitter was Stopped while it still exists"
+    );
+    let plays_before = sim
+        .audio_command_log()
+        .iter()
+        .filter(|c| matches!(c, AudioCommand::Play(_)))
+        .count();
+    assert_eq!(
+        plays_before, 2,
+        "both emitters must have autoplayed once, or the fixture proves nothing"
+    );
+
+    sim.world_mut().despawn(e_doomed);
+    sim.world_mut().mark_dirty();
+    for _ in 0..3 {
+        sim.step_once(RuntimeInput::default());
+    }
+
+    let after = stops(&sim);
+    assert_eq!(
+        after.len(),
+        1,
+        "expected exactly one Stop for the despawned emitter, got {after:?} — a \
+         second one means the sweep forgot it and found it 'gone' again"
+    );
+    assert_eq!(
+        sim.audio_command_log()
+            .iter()
+            .filter(|c| matches!(c, AudioCommand::Play(_)))
+            .count(),
+        plays_before,
+        "an emitter was re-played after the sweep — it was Stopped and forgotten \
+         while still alive, so autoplay started it again"
+    );
+}
+
 /// **The audio log is bounded, and it says what it dropped** (Hardening D).
 ///
 /// `audio_log` accumulated the whole session's drained command stream **in the

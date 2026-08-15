@@ -1441,13 +1441,20 @@ impl SimSession {
         // 2. Autoplay: enqueue a Play once per not-yet-started autoplay `AudioSource`
         //    (any entity, not just actors), in deterministic Guid order. Keyed by the
         //    Guid's low bits so a scene-placed emitter gets a stable source id.
+        //
+        //    `still_alive` rather than every guid in the world (lens 3 P34,
+        //    Hardening Wave G) — the MIRROR of `RuntimeSim::audio_step`, whose
+        //    doc carries the argument. Same walk, same source of truth, one
+        //    lookup per entity instead of one insert.
         let mut autoplay: Vec<(Uuid, AudioSource, DVec3)> = Vec::new();
-        let mut live: BTreeSet<Uuid> = BTreeSet::new();
+        let mut still_alive: BTreeSet<Uuid> = BTreeSet::new();
         for e in doc.world().world().iter_entities() {
             let Some(guid) = e.get::<Guid>().map(|g| g.0) else {
                 continue;
             };
-            live.insert(guid);
+            if self.audio_started.contains(&guid) {
+                still_alive.insert(guid);
+            }
             let Some(src) = e.get::<AudioSource>() else {
                 continue;
             };
@@ -1468,7 +1475,13 @@ impl SimSession {
         // order — the deterministic contract is the sort, not the scan).
         autoplay.sort_by_key(|(guid, _, _)| *guid);
         for (guid, src, pos) in autoplay {
+            // Started THIS step, and seen alive by the walk above — so it
+            // belongs in `still_alive` too, or the despawn sweep below would
+            // Stop it on the very step it began and autoplay would re-fire it
+            // for ever. (`runtime_autoplay_source_emits_one_deterministic_play_
+            // command` measured exactly that: five Plays over five steps.)
             self.audio_started.insert(guid);
+            still_alive.insert(guid);
             let mut cmd = play_command_for(guid_source_key(guid), &src, src.spatial.then_some(pos));
             if src.occlusion && src.spatial {
                 cmd.occlusion_gain = self.occlusion_gain(listener_pos, pos);
@@ -1482,7 +1495,7 @@ impl SimSession {
         let despawned: Vec<Uuid> = self
             .audio_started
             .iter()
-            .filter(|g| !live.contains(*g))
+            .filter(|g| !still_alive.contains(*g))
             .copied()
             .collect();
         for guid in despawned {
