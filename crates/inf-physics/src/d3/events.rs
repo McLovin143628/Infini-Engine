@@ -103,7 +103,7 @@ impl EventHandler for EventCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapier3_f64::prelude::CollisionEventFlags;
+    use rapier3d_f64::prelude::CollisionEventFlags;
 
     /// **A contact survives a poisoned buffer** (Hardening Wave C, L6.F10).
     ///
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(
             out.len(),
             1,
-            "the contact was dropped because an unrelated panic had happened              earlier in the process — the step's collision set is not a function              of its inputs"
+            "the contact was dropped because an unrelated panic had happened \n             earlier in the process — the step's collision set is not a \n             function of its inputs"
         );
         assert_eq!(out[0].phase, ContactPhase::Started);
     }
