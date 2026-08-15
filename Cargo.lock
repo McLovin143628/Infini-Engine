@@ -3473,6 +3473,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "tracing-tracy",
