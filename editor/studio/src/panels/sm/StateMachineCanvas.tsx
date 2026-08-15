@@ -28,7 +28,7 @@ import "@xyflow/react/dist/style.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useSmStore } from "../../stores/smStore";
-import { SM_OPS, motionSummary, type SmDoc } from "../../lib/smTypes";
+import { SM_OPS, conditionSummary, motionSummary, type SmDoc } from "../../lib/smTypes";
 import { SmNode } from "./SmNode";
 import "../blueprint/blueprint.css";
 import "./sm.css";
@@ -50,13 +50,18 @@ function deriveNodes(doc: SmDoc, clipName: (id: string | null) => string): Node[
 
 function deriveEdges(doc: SmDoc, selected: number | null): Edge[] {
   return doc.machine.transitions.map((t, i) => {
-    const conds = t.conditions.length;
+    // A v2 tree the flat view cannot draw still gets a label -- a summary, so
+    // an edge whose rule the inspector will not edit is at least legible.
+    const conds = t.conditions?.length ?? null;
+    const rule =
+      conds === null ? conditionSummary(t.condition) : conds > 0 ? `${conds} cond` : "";
     const label =
-      (conds > 0 ? `${conds} cond` : "") +
-      (t.exitTime != null ? `${conds > 0 ? " · " : ""}exit ${t.exitTime}` : "");
+      rule + (t.exitTime != null ? `${rule ? " · " : ""}exit ${t.exitTime}` : "");
     return {
       id: String(i),
-      source: String(t.from),
+      // An any-state transition has no source node; it is drawn from its own
+      // target for now (the any-state node is P29.5's canvas work).
+      source: String(t.from ?? t.to),
       target: String(t.to),
       label: label || undefined,
       animated: i === selected,
@@ -258,7 +263,9 @@ function CanvasInner() {
           ) : tr && selectedTransition != null ? (
             <div className="sm-insp__body">
               <div className="sm-insp__title">
-                Transition: {doc?.machine.states[tr.from]?.name} → {doc?.machine.states[tr.to]?.name}
+                Transition:{" "}
+                {tr.from === null ? "Any state" : doc?.machine.states[tr.from]?.name} →{" "}
+                {doc?.machine.states[tr.to]?.name}
               </div>
               <label className="sm-insp__row">
                 <span>Duration (s)</span>
@@ -289,11 +296,25 @@ function CanvasInner() {
               </label>
               <div className="sm-insp__subtitle">
                 Conditions (AND)
-                <button className="bp-btn bp-btn--sm" onClick={() => addCondition(selectedTransition)}>
-                  +
-                </button>
+                {tr.conditions !== null && (
+                  <button
+                    className="bp-btn bp-btn--sm"
+                    onClick={() => addCondition(selectedTransition)}
+                  >
+                    +
+                  </button>
+                )}
               </div>
-              {tr.conditions.map((c, ci) => (
+              {/* A v2 condition tree (an Or, a Not, a trigger, a typed compare)
+                  cannot be represented as this flat list, so it is shown and NOT
+                  edited. Offering the list here would mean a save flattened the
+                  tree away -- the rule builder that edits it is P29.5's. */}
+              {tr.conditions === null && (
+                <div className="sm-cond sm-cond--readonly" title="Edit in the rule builder (P29.5)">
+                  {conditionSummary(tr.condition)}
+                </div>
+              )}
+              {(tr.conditions ?? []).map((c, ci) => (
                 <div key={ci} className="sm-cond">
                   <input
                     className="sm-cond__var"

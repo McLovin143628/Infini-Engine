@@ -2134,28 +2134,26 @@ impl AnimPlayer {
 
 /// The live play state of an animation state machine on one entity (P11.2).
 ///
-/// A plain POD **mirror** of `inf_anim::SmRuntime` — kept here so the foundational
-/// ECS crate needs no `inf-anim` dependency (the same boundary [`AnimPlayer`]
-/// preserves by re-deriving `advance` inline). The editor Simulate loop and the
-/// runtime sim — which *do* depend on `inf-anim` — convert this to/from
-/// `SmRuntime` around each step. Never serialized (see [`AnimStateMachine`]).
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
-pub struct SmRuntimeState {
-    /// Active state index.
-    pub current: usize,
-    /// The state being cross-faded out of, if a fade is in progress.
-    pub prev: Option<usize>,
-    /// The outgoing state's frozen play-head.
-    pub prev_time: f64,
-    /// Elapsed cross-fade time (seconds).
-    pub fade_t: f64,
-    /// Total cross-fade duration (seconds).
-    pub fade_dur: f64,
-    /// Seconds spent in the current state.
-    pub state_time: f64,
-    /// Whether the runtime has been entered onto the machine's `entry` state.
-    pub started: bool,
-}
+/// # It used to be a hand-copied mirror, and P29.1 retired it
+///
+/// This was a field-for-field POD **copy** of `inf_anim::SmRuntime`, kept so the
+/// foundational ECS crate needed no `inf-anim` dependency — with
+/// `to_anim_runtime` / `from_anim_runtime` converting between the two around
+/// every step. That reason expired at P24.1, when [`crate::pose`] took the
+/// `inf-anim` dependency in order to own the one fixed-step pose rule; what
+/// survived was a hand-maintained pair of structs that had to be edited in
+/// lockstep, for no boundary that still existed.
+///
+/// P29.1 would have grown it from seven fields to fifteen. It is a **type alias**
+/// instead, so there is one struct and the conversion functions are gone.
+///
+/// The derives still work out, and that is worth stating rather than discovering:
+/// [`AnimStateMachine`] carries this field as `#[serde(skip)]` +
+/// `#[reflect(ignore)]`, so neither `Serialize` nor `Reflect` is ever asked of
+/// it — only `Clone + Copy + Debug + PartialEq + Default`, which `SmRuntime`
+/// derives. Never serialized (see [`AnimStateMachine`]), which is also why v2
+/// could grow the runtime without touching the scene schema.
+pub type SmRuntimeState = inf_anim::SmRuntime;
 
 fn default_params_from_vars() -> bool {
     true

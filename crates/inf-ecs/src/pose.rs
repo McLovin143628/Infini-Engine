@@ -63,52 +63,33 @@
 //! `inf-anim` depends on glam / serde / thiserror / inf-asset and on nothing
 //! else, so `inf-ecs → inf-anim` is a Ring-0 → Ring-0 edge with no cycle — the
 //! same shape as the existing `inf-terrain` and `inf-water` edges, taken for the
-//! same reason (the rule lives once). [`crate::components::SmRuntimeState`]
-//! survives the dependency because the *component* must derive `Reflect` +
-//! serde and [`inf_anim::SmRuntime`] derives neither; [`to_anim_runtime`] /
-//! [`from_anim_runtime`] are now that mirror's single conversion, instead of one
-//! copy per host.
+//! same reason (the rule lives once). `SmRuntimeState` used to survive that
+//! dependency as a hand-copied POD mirror with a conversion in each direction;
+//! P29.1 retired both — it is a **type alias** for [`inf_anim::SmRuntime`] now,
+//! because the `runtime` field is `#[serde(skip)]` + `#[reflect(ignore)]` and so
+//! never needed the derives the mirror existed to provide.
 
 use std::collections::BTreeMap;
 
 use bevy_ecs::prelude::{Entity, Resource};
 use glam::Mat4;
-use inf_anim::{AnimClip, ClipRef, Pose, SkeletonAsset, SmContext, SmRuntime, StateMachine};
+use inf_anim::{AnimClip, ClipRef, Pose, SkeletonAsset, SmContext, StateMachine};
 use uuid::Uuid;
 
 use crate::components::{AnimStateMachine, Guid, SkeletalMesh, SmRuntimeState};
 use crate::math::Vec3d;
 use crate::world::EcsWorld;
 
-/// Convert the ECS component's transient runtime POD into the anim runtime.
+/// The events one entity's machine emitted this fixed step (P29.1) — the notify
+/// seam P29.4's `anim.*` kit will read.
 ///
-/// One copy, in Ring 0 — it used to be a private helper spelled identically in
-/// `SimSession` and `RuntimeSim`, which is a mirror pair maintained by hand for
-/// a struct-to-struct field copy.
-pub fn to_anim_runtime(s: SmRuntimeState) -> SmRuntime {
-    SmRuntime {
-        current: s.current,
-        prev: s.prev,
-        prev_time: s.prev_time,
-        fade_t: s.fade_t,
-        fade_dur: s.fade_dur,
-        state_time: s.state_time,
-        started: s.started,
-    }
-}
-
-/// Convert the advanced anim runtime back into the ECS component POD.
-pub fn from_anim_runtime(r: SmRuntime) -> SmRuntimeState {
-    SmRuntimeState {
-        current: r.current,
-        prev: r.prev,
-        prev_time: r.prev_time,
-        fade_t: r.fade_t,
-        fade_dur: r.fade_dur,
-        state_time: r.state_time,
-        started: r.started,
-    }
-}
+/// Published as a **resource** for the same three reasons [`PoseStoreRes`] is
+/// (no schema moves, both hosts read the sim world, the fixed step is the only
+/// place it can be a function of the step history), and it is **absent** until a
+/// machine emits something and removed again the moment none does — so a level
+/// whose states name no notifies is byte-identical to its pre-P29.1 self.
+#[derive(Debug, Clone, Default, PartialEq, Resource)]
+pub struct AnimEventsRes(pub BTreeMap<Uuid, Vec<String>>);
 
 /// One IK goal: a chain of joints, where its tip must go, and which way it
 /// bends.
@@ -637,11 +618,22 @@ pub fn pose_state_bytes(world: &EcsWorld) -> Vec<u8> {
 /// written, and every per-entity evaluation is independent, so the result is a
 /// property of the level rather than of archetype iteration order.
 ///
-/// **`exit_time` still has no period resolver** ([`SmContext::new`], not
-/// `with_period`) — the documented P11.2 no-deadlock fallback. The clips needed
-/// to close it are now in reach for the first time, but turning it on would move
-/// every existing machine's transition timing, which is a behaviour change and
-/// not a repair; it is ledgered, not smuggled in.
+/// **`exit_time` is LIVE since P29.1.** The context is built with
+/// [`SmContext::with_clip_lengths`], so a state's motion period is derived from
+/// the very clips this function already resolves in order to sample the pose —
+/// which is why closing it needed no new resolver, no new argument and no change
+/// in either host.
+///
+/// The ledgered consequence was that turning it on "would move every existing
+/// machine's transition timing". Measured before it was turned on: **no committed
+/// machine in this repository sets `exit_time` at all** — not the character-demo
+/// sample, not the wizard's generated locomotion, not any gate fixture. The two
+/// `Some(0.8)`s in the tree are round-trip fixtures in `inf_anim::asset` and
+/// `commands::sm`, neither of which is ever evaluated. So the retiming is real in
+/// principle and empty in fact, and it is stated that way rather than carried as
+/// a reason not to fix the field. What still holds is the v1 no-deadlock
+/// fallback: a machine whose clips do not resolve (an unloaded pack, a lost
+/// asset) has an unknown period, and an unknown period reads as **satisfied**.
 pub fn step_pose_evaluation<'c>(
     world: &mut EcsWorld,
     dt: f64,
@@ -699,17 +691,25 @@ pub fn step_pose_evaluation<'c>(
     }
     let mut posed: BTreeMap<Uuid, EvaluatedPose> = BTreeMap::new();
     let mut verdicts: BTreeMap<Uuid, Vec<IkOutcome>> = BTreeMap::new();
+    let mut fired_events: BTreeMap<Uuid, Vec<String>> = BTreeMap::new();
+    // **The clip-length resolver that makes `exit_time` live** (P29.1). Derived
+    // from the same `clips` the pose is sampled through, so there is exactly one
+    // notion of how long a clip is.
+    let clip_len = |c: ClipRef| clips(c).map(|a| a.duration as f64);
     for (entity, guid, sm_guid, rt_state, skeleton_id) in targets {
         let Some(machine) = machines(sm_guid) else {
             continue;
         };
         let mut outcomes: Vec<IkOutcome> = Vec::new();
         let actor_vars = vars(guid);
-        let mut rt = to_anim_runtime(rt_state);
+        let mut rt = rt_state;
         {
             let lookup = |name: &str| actor_vars.get(name).copied();
-            let ctx = SmContext::new(&lookup);
-            rt.advance(machine, &ctx, dt);
+            let ctx = SmContext::with_clip_lengths(&lookup, &clip_len);
+            let step = rt.advance(machine, &ctx, dt);
+            if !step.events.is_empty() {
+                fired_events.insert(guid, step.events);
+            }
             // Rule 3: no skeleton ⇒ the machine still steps, nothing is posed.
             if let Some(id) = skeleton_id {
                 if let Some(asset) = skeletons(id) {
@@ -806,7 +806,7 @@ pub fn step_pose_evaluation<'c>(
             verdicts.insert(guid, outcomes);
         }
         if let Some(mut asm) = world.world_mut().get_mut::<AnimStateMachine>(entity) {
-            asm.runtime = from_anim_runtime(rt);
+            asm.runtime = rt;
         }
     }
 
@@ -829,6 +829,16 @@ pub fn step_pose_evaluation<'c>(
         }
     }
     let w = world.world_mut();
+    // The notify seam, under rule 4 as well: a step that emitted nothing leaves
+    // no resource behind, so "what fired this step" can never be a stale answer
+    // from an earlier one.
+    if fired_events.is_empty() {
+        if w.contains_resource::<AnimEventsRes>() {
+            w.remove_resource::<AnimEventsRes>();
+        }
+    } else {
+        w.insert_resource(AnimEventsRes(fired_events));
+    }
     if posed.is_empty() {
         if w.contains_resource::<PoseStoreRes>() {
             w.remove_resource::<PoseStoreRes>();
@@ -908,18 +918,16 @@ mod tests {
     fn machine() -> StateMachine {
         StateMachine {
             states: vec![SmState::clip("idle", IDLE), SmState::clip("wave", WAVE)],
-            transitions: vec![SmTransition {
-                from: 0,
-                to: 1,
-                duration: 0.0,
-                conditions: vec![inf_anim::SmCondition {
-                    var: "moving".into(),
-                    op: inf_anim::CmpOp::Gt,
-                    value: 0.5,
-                }],
-                exit_time: None,
-            }],
+            transitions: vec![SmTransition::on(
+                0,
+                1,
+                0.0,
+                "moving",
+                inf_anim::CmpOp::Gt,
+                0.5,
+            )],
             entry: 0,
+            ..Default::default()
         }
     }
 
@@ -1153,9 +1161,16 @@ mod tests {
         clear_poses(&mut world); // idempotent
     }
 
-    /// The runtime POD conversion round-trips (it is the one copy now).
+    /// **There is no conversion left to get wrong** (P29.1).
+    ///
+    /// This used to assert `from_anim_runtime(to_anim_runtime(s)) == s` over a
+    /// hand-copied POD mirror — a round-trip that a field missing from *both*
+    /// halves passes perfectly, which is the failure mode a mirror has. The
+    /// mirror is a type alias now, so the property is checked by assignment: if
+    /// `SmRuntimeState` ever stops being `inf_anim::SmRuntime`, this stops
+    /// compiling, and that is a stronger statement than any round-trip.
     #[test]
-    fn runtime_state_round_trips() {
+    fn the_component_runtime_is_the_anim_runtime() {
         let s = SmRuntimeState {
             current: 3,
             prev: Some(1),
@@ -1164,8 +1179,20 @@ mod tests {
             fade_dur: 0.5,
             state_time: 1.25,
             started: true,
+            ..Default::default()
         };
-        assert_eq!(from_anim_runtime(to_anim_runtime(s)), s);
+        let anim: inf_anim::SmRuntime = s;
+        assert_eq!(anim, s);
+        // …and it reaches an entity unchanged, which is what the write-back does.
+        let asm = AnimStateMachine {
+            runtime: s,
+            ..Default::default()
+        };
+        assert_eq!(asm.runtime.current, 3);
+        // The v2 fields exist and default to "no interruption carried, nothing
+        // armed" — the state a fresh play session starts in.
+        assert_eq!(SmRuntimeState::default().carry, None);
+        assert_eq!(SmRuntimeState::default().triggers, 0);
     }
 
     // ── P24.3: the AUTHORED goals ─────────────────────────────────────────

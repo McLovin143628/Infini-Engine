@@ -78,14 +78,9 @@ fn machine() -> StateMachine {
             SmState::clip("idle", *IDLE.as_bytes()),
             SmState::clip("wave", *WAVE.as_bytes()),
         ],
-        transitions: vec![SmTransition {
-            from: 0,
-            to: 1,
-            duration: 0.0,
-            conditions: vec![],
-            exit_time: None,
-        }],
+        transitions: vec![SmTransition::new(0, 1, 0.0)],
         entry: 0,
+        ..Default::default()
     }
 }
 
@@ -251,6 +246,7 @@ fn the_authored_roots_start_on_the_scalp() {
         states: vec![SmState::clip("idle", *IDLE.as_bytes())],
         transitions: vec![],
         entry: 0,
+        ..Default::default()
     };
     let mut world = EcsWorld::new();
     let e = world.spawn_with_guid(HERO, "Hero", None);

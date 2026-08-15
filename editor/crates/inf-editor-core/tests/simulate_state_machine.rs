@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use glam::DVec2;
 use uuid::Uuid;
 
-use inf_anim::state_machine::{CmpOp, SmCondition, SmState, SmTransition, StateMachine};
+use inf_anim::state_machine::{CmpOp, SmState, SmTransition, StateMachine};
 use inf_ecs::components::AnimStateMachine;
 use inf_editor_core::scene::SceneDoc;
 use inf_editor_core::simulate::{SimInput, SimSession, SIM_HZ};
@@ -52,14 +52,9 @@ fn unconditional_machine_advances_in_the_tick() {
             SmState::clip("idle", [1; 16]),
             SmState::clip("walk", [2; 16]),
         ],
-        transitions: vec![SmTransition {
-            from: 0,
-            to: 1,
-            duration: 0.0,
-            conditions: vec![],
-            exit_time: None,
-        }],
+        transitions: vec![SmTransition::new(0, 1, 0.0)],
         entry: 0,
+        ..Default::default()
     };
     let mut machines = BTreeMap::new();
     machines.insert(sm_guid, machine);
@@ -106,18 +101,9 @@ fn condition_machine_holds_until_its_variable_flips() {
             SmState::clip("idle", [1; 16]),
             SmState::clip("walk", [2; 16]),
         ],
-        transitions: vec![SmTransition {
-            from: 0,
-            to: 1,
-            duration: 0.2,
-            conditions: vec![SmCondition {
-                var: "moving".into(),
-                op: CmpOp::Gt,
-                value: 0.5,
-            }],
-            exit_time: None,
-        }],
+        transitions: vec![SmTransition::on(0, 1, 0.2, "moving", CmpOp::Gt, 0.5)],
         entry: 0,
+        ..Default::default()
     };
     let mut machines = BTreeMap::new();
     machines.insert(sm_guid, machine);

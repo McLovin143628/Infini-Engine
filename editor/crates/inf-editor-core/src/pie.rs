@@ -1155,6 +1155,7 @@ mod tests {
                                 states: vec![inf_anim::SmState::clip("idle", *SM_CLIP.as_bytes())],
                                 transitions: vec![],
                                 entry: 0,
+                                ..Default::default()
                             },
                             None,
                         ))

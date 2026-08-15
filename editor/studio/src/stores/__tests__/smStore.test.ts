@@ -26,9 +26,22 @@ function makeDoc(): SmDoc {
     id: "sm1",
     name: "Main",
     machine: {
-      states: [{ name: "Idle", motion: { kind: "clip", clip: null }, looping: true, speed: 1, x: 0, y: 0 }],
+      states: [
+        {
+          name: "Idle",
+          motion: { kind: "clip", clip: null },
+          looping: true,
+          speed: 1,
+          x: 0,
+          y: 0,
+          onEnter: [],
+          onExit: [],
+        },
+      ],
       transitions: [],
       entry: 0,
+      params: [],
+      profiles: [],
     },
   };
 }
@@ -99,13 +112,48 @@ describe("smStore", () => {
     s.addTransition(0, 1);
     s.addCondition(0);
     s.updateCondition(0, 0, { var: "moving", op: ">", value: 0.5 });
-    expect(useSmStore.getState().doc!.machine.transitions[0].conditions[0]).toEqual({
+    expect(useSmStore.getState().doc!.machine.transitions[0].conditions![0]).toEqual({
       var: "moving",
       op: ">",
       value: 0.5,
     });
     s.removeCondition(0, 0);
     expect(useSmStore.getState().doc!.machine.transitions[0].conditions).toHaveLength(0);
+  });
+
+  // v2: a transition whose condition tree the flat inspector cannot draw comes
+  // back with `conditions: null`, and the three flat editors must then be
+  // NO-OPS -- materialising a list is exactly the flattening that would delete
+  // the tree on the next save.
+  it("refuses to flatten a condition tree the flat editors cannot represent", () => {
+    const s = useSmStore.getState();
+    s.addState(1, 1);
+    s.addTransition(0, 1);
+    // The shape Ring 2 sends for an Or/Not/trigger/typed tree.
+    useSmStore.setState((st) => {
+      const doc = structuredClone(st.doc!);
+      doc.machine.transitions[0].conditions = null;
+      doc.machine.transitions[0].condition = {
+        kind: "or",
+        terms: [
+          { kind: "trigger", param: "jump" },
+          { kind: "compare", param: "stance", op: "==", value: 2, valueKind: "int" },
+        ],
+      };
+      return { doc };
+    });
+    s.addCondition(0);
+    s.updateCondition(0, 0, { var: "hacked" });
+    s.removeCondition(0, 0);
+    const tr = useSmStore.getState().doc!.machine.transitions[0];
+    expect(tr.conditions).toBeNull();
+    expect(tr.condition).toEqual({
+      kind: "or",
+      terms: [
+        { kind: "trigger", param: "jump" },
+        { kind: "compare", param: "stance", op: "==", value: 2, valueKind: "int" },
+      ],
+    });
   });
 
   it("sets exit time and clip motion", () => {

@@ -129,23 +129,9 @@ fn machine() -> StateMachine {
             SmState::clip("wave", *WAVE.as_bytes()),
             SmState::clip("salute", *SALUTE.as_bytes()),
         ],
-        transitions: vec![
-            SmTransition {
-                from: 0,
-                to: 1,
-                duration: 0.0,
-                conditions: vec![],
-                exit_time: None,
-            },
-            SmTransition {
-                from: 1,
-                to: 2,
-                duration: 0.0,
-                conditions: vec![],
-                exit_time: None,
-            },
-        ],
+        transitions: vec![SmTransition::new(0, 1, 0.0), SmTransition::new(1, 2, 0.0)],
         entry: 0,
+        ..Default::default()
     }
 }
 

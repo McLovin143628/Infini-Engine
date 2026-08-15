@@ -1218,60 +1218,67 @@ pub fn character_demo_jump_clip() -> inf_anim::AnimClip {
     AnimClip::new("jump", vec![jt])
 }
 
-/// The state machine: idle(0) / run(1) / jump(2). Jump transitions are declared
-/// **first** so a jump pressed while moving wins over the run transition. Reads
-/// the actor's `speed` + `jump` Blueprint variables via the [`SmContext`] seam.
+/// The state machine: idle(0) / run(1) / jump(2). Reads the actor's `speed` +
+/// `jump` Blueprint variables via the [`SmContext`] seam.
+///
+/// # Re-authored for `.inf_sm` v2 (P29.1), behaviour unchanged
+///
+/// Two of the three v1 workarounds this table carried are gone, and the third
+/// never was one:
+///
+/// * "jump wins over run" used to be expressed by *where the two jump edges sat
+///   in a `Vec`* — a comment saying `declared first`, invisible in the editor and
+///   destroyed by any re-ordering. It is a `priority` now, so the property
+///   survives the list being sorted.
+/// * the two jump edges (`idle→jump`, `run→jump`) were the same edge written
+///   twice because v1 had no **any-state** source. They are one edge, with
+///   `exclude_self` doing what the missing `jump→jump` row's absence did.
+/// * both parameters are **declared**, which costs nothing behaviourally (a
+///   `Float` is what an undeclared name already read as) and is what lets a
+///   reader — and P29.5's rule builder — know what this machine expects from
+///   gameplay without grepping its conditions.
+///
+/// The evaluated behaviour is identical, which is the point: `phase24_gate` and
+/// `character_demo`'s PIE == shipping trace are the check on that claim, not this
+/// paragraph.
 pub fn character_demo_state_machine() -> inf_anim::StateMachine {
-    use inf_anim::state_machine::{CmpOp, Motion, SmCondition, SmState, SmTransition};
+    use inf_anim::state_machine::{CmpOp, SmParam, SmState, SmTransition};
     let clip_ref = |g: Uuid| *g.as_bytes();
-    let cond = |var: &str, op: CmpOp, value: f64| SmCondition {
-        var: var.into(),
-        op,
-        value,
+    let state = |name: &str, g: Uuid, looping: bool, position: (f32, f32)| {
+        let mut s = SmState::clip_at(name, clip_ref(g), position);
+        s.looping = looping;
+        s
     };
-    let tr = |from: usize, to: usize, c: SmCondition| SmTransition {
-        from,
-        to,
-        duration: 0.15,
-        conditions: vec![c],
-        exit_time: None,
+    // The cross-fade every edge in this machine uses.
+    let tr = |from: usize, to: usize, var: &str, op: CmpOp, value: f64| {
+        SmTransition::on(from, to, 0.15, var, op, value)
     };
     inf_anim::StateMachine {
         states: vec![
-            SmState {
-                name: "idle".into(),
-                motion: Motion::Clip(clip_ref(CHARACTER_DEMO_IDLE_CLIP_GUID)),
-                looping: true,
-                speed: 1.0,
-                position: (0.0, 0.0),
-            },
-            SmState {
-                name: "run".into(),
-                motion: Motion::Clip(clip_ref(CHARACTER_DEMO_RUN_CLIP_GUID)),
-                looping: true,
-                speed: 1.0,
-                position: (240.0, 0.0),
-            },
-            SmState {
-                name: "jump".into(),
-                motion: Motion::Clip(clip_ref(CHARACTER_DEMO_JUMP_CLIP_GUID)),
-                looping: false,
-                speed: 1.0,
-                position: (120.0, -160.0),
-            },
+            state("idle", CHARACTER_DEMO_IDLE_CLIP_GUID, true, (0.0, 0.0)),
+            state("run", CHARACTER_DEMO_RUN_CLIP_GUID, true, (240.0, 0.0)),
+            state(
+                "jump",
+                CHARACTER_DEMO_JUMP_CLIP_GUID,
+                false,
+                (120.0, -160.0),
+            ),
         ],
         transitions: vec![
-            // any→jump (declared first so jump wins over run when both hold).
-            tr(0, 2, cond("jump", CmpOp::Gt, 0.5)),
-            tr(1, 2, cond("jump", CmpOp::Gt, 0.5)),
+            // ANY → jump, at a priority that says what the v1 comment said.
+            SmTransition::any(2, 0.15)
+                .when(inf_anim::SmCond::float("jump", CmpOp::Gt, 0.5))
+                .with_priority(10),
             // locomotion.
-            tr(0, 1, cond("speed", CmpOp::Gt, 0.1)),
-            tr(1, 0, cond("speed", CmpOp::Le, 0.1)),
+            tr(0, 1, "speed", CmpOp::Gt, 0.1),
+            tr(1, 0, "speed", CmpOp::Le, 0.1),
             // exit jump back to run (moving) or idle (stopped).
-            tr(2, 1, cond("speed", CmpOp::Gt, 0.1)),
-            tr(2, 0, cond("speed", CmpOp::Le, 0.1)),
+            tr(2, 1, "speed", CmpOp::Gt, 0.1),
+            tr(2, 0, "speed", CmpOp::Le, 0.1),
         ],
         entry: 0,
+        params: vec![SmParam::float("speed"), SmParam::float("jump")],
+        profiles: Vec::new(),
     }
 }
 
@@ -9224,6 +9231,57 @@ mod tests {
         // The actor blueprint round-trips through its committed encoding.
         let class = character_demo_class();
         assert_eq!(decode_actor(&encode_actor(&class).unwrap()).unwrap(), class);
+    }
+
+    /// **The measurement behind P29.1's `exit_time` ruling, kept as an arm.**
+    ///
+    /// P24.1 ledgered that wiring a period resolver "would move every existing
+    /// machine's transition timing", and that sentence was the reason the field
+    /// stayed inert for four phases. Measured before it was wired: **no authored
+    /// machine in this repository gates on `exit_time` at all** — not this
+    /// sample (which is what the committed `Locomotion.inf_sm` is blessed from),
+    /// and not the wizard's generated locomotion, which is every machine an
+    /// Infinity Engine project gets without an author typing one. The retiming
+    /// was real in principle and empty in fact.
+    ///
+    /// This is an assertion rather than a paragraph because the claim has an
+    /// expiry date: the first authored `exit_time` in committed content makes it
+    /// false, and the ledger entry in ROADMAP section 13 has to be rewritten
+    /// rather than quietly outlived. That is what this arm is for.
+    #[test]
+    fn no_authored_machine_gates_on_exit_time_so_the_live_resolver_retimed_nothing() {
+        use inf_anim::locomotion::{build_locomotion, locomotion_machine, GaitParams};
+        use inf_anim::{BodyParams, BodyPlan};
+
+        let gated = |sm: &inf_anim::StateMachine| -> Vec<(usize, f64)> {
+            sm.transitions
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| t.exit_time.map(|x| (i, x)))
+                .collect()
+        };
+
+        let demo = character_demo_state_machine();
+        assert!(
+            gated(&demo).is_empty(),
+            "the character-demo machine now gates on exit_time {:?} — the live \
+             period resolver retimes it, and ROADMAP section 13's ruling is stale",
+            gated(&demo)
+        );
+
+        // The wizard's machine: every project's default locomotion.
+        let rig = inf_anim::build_template(BodyPlan::Biped, &BodyParams::default()).unwrap();
+        let set = build_locomotion(BodyPlan::Biped, &rig, &GaitParams::default()).unwrap();
+        let generated = locomotion_machine(&set, [1; 16], [2; 16], [3; 16]);
+        assert!(
+            gated(&generated).is_empty(),
+            "the generated locomotion machine now gates on exit_time {:?}",
+            gated(&generated)
+        );
+
+        // NOT VACUOUS: these machines have transitions to have found one on.
+        assert_eq!(demo.transitions.len(), 5);
+        assert_eq!(generated.transitions.len(), 4);
     }
 
     // ── Terrain-demo gate test (a): byte-identical save/reload ─────────────

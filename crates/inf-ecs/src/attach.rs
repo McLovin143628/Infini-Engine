@@ -257,14 +257,9 @@ mod tests {
     fn swing_machine() -> StateMachine {
         StateMachine {
             states: vec![SmState::clip("rest", REST), SmState::clip("swing", SWING)],
-            transitions: vec![SmTransition {
-                from: 0,
-                to: 1,
-                duration: 0.0,
-                conditions: vec![],
-                exit_time: None,
-            }],
+            transitions: vec![SmTransition::new(0, 1, 0.0)],
             entry: 0,
+            ..Default::default()
         }
     }
 

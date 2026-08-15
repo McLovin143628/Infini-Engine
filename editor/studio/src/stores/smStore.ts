@@ -12,6 +12,7 @@ import { create } from "zustand";
 import { sm as smIpc } from "../lib/ipc";
 import { registerUndoScope } from "../lib/undoScopes";
 import { useShellStore } from "./shellStore";
+import { newTransition } from "../lib/smTypes";
 import type {
   SmClipDto,
   SmConditionDto,
@@ -179,6 +180,8 @@ export const useSmStore = create<SmStore>((set, get) => ({
         speed: 1,
         x,
         y,
+        onEnter: [],
+        onExit: [],
       };
       m.states.push(st);
     });
@@ -197,11 +200,14 @@ export const useSmStore = create<SmStore>((set, get) => ({
     const next = editMachine(doc, (m) => {
       m.states.splice(index, 1);
       // Drop transitions touching the removed state; reindex the survivors.
+      // An any-state transition has NO source, so it survives a state being
+      // deleted (it left "any state", and there are still states). Only its
+      // target can strand it.
       m.transitions = m.transitions
         .filter((t) => t.from !== index && t.to !== index)
         .map((t) => ({
           ...t,
-          from: t.from > index ? t.from - 1 : t.from,
+          from: t.from !== null && t.from > index ? t.from - 1 : t.from,
           to: t.to > index ? t.to - 1 : t.to,
         }));
       if (m.entry === index) m.entry = 0;
@@ -260,7 +266,7 @@ export const useSmStore = create<SmStore>((set, get) => ({
     // Skip an exact duplicate edge.
     if (doc.machine.transitions.some((t) => t.from === from && t.to === to)) return;
     const next = editMachine(doc, (m) => {
-      m.transitions.push({ from, to, duration: 0.2, conditions: [], exitTime: null });
+      m.transitions.push(newTransition(from, to));
     });
     set({ doc: next, selectedTransition: next.machine.transitions.length - 1 });
   },
@@ -298,12 +304,17 @@ export const useSmStore = create<SmStore>((set, get) => ({
     });
   },
 
+  // The three flat-condition editors are no-ops on a transition whose tree the
+  // flat view cannot represent (`conditions === null`). Refusing is the point:
+  // the alternative is materialising a list, which is the flattening the whole
+  // two-field design exists to prevent. The inspector renders those transitions
+  // read-only, so this guard is a second lock rather than the only one.
   addCondition: (index) => {
     const doc = get().doc;
     if (!doc) return;
     set({
       doc: editMachine(doc, (m) => {
-        m.transitions[index]?.conditions.push({ var: "speed", op: ">" as SmOp, value: 0 });
+        m.transitions[index]?.conditions?.push({ var: "speed", op: ">" as SmOp, value: 0 });
       }),
     });
   },
@@ -313,7 +324,7 @@ export const useSmStore = create<SmStore>((set, get) => ({
     if (!doc) return;
     set({
       doc: editMachine(doc, (m) => {
-        const c = m.transitions[index]?.conditions[ci];
+        const c = m.transitions[index]?.conditions?.[ci];
         if (c) Object.assign(c, patch);
       }),
     });
@@ -323,7 +334,7 @@ export const useSmStore = create<SmStore>((set, get) => ({
     const doc = get().doc;
     if (!doc) return;
     set({
-      doc: editMachine(doc, (m) => void m.transitions[index]?.conditions.splice(ci, 1)),
+      doc: editMachine(doc, (m) => void m.transitions[index]?.conditions?.splice(ci, 1)),
     });
   },
 

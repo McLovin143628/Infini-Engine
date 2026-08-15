@@ -473,8 +473,16 @@ fn the_generated_thresholds_move_the_shipped_player_between_states() {
         .machine
         .transitions
         .iter()
-        .find(|t| t.from == 1 && t.to == 2)
-        .map(|t| t.conditions[0].value)
+        .find(|t| t.from == inf_anim::SmSource::State(1) && t.to == 2)
+        .map(|t| {
+            // v2: the condition is a tree, and the generator's edges are the flat
+            // float compares v1 authored -- `as_flat_and` is the door that says so.
+            t.condition
+                .as_flat_and()
+                .expect("the generated edges stay flat float compares")[0]
+                .value
+                .as_f64()
+        })
         .expect("the generated machine has a walk→run edge");
     assert!(
         run_at > 0.0,

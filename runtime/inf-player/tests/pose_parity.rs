@@ -146,23 +146,9 @@ fn machine() -> StateMachine {
             SmState::clip("walk", *WALK.as_bytes()),
             SmState::clip("run", *RUN.as_bytes()),
         ],
-        transitions: vec![
-            SmTransition {
-                from: 0,
-                to: 1,
-                duration: 0.0,
-                conditions: vec![],
-                exit_time: None,
-            },
-            SmTransition {
-                from: 1,
-                to: 2,
-                duration: 0.0,
-                conditions: vec![],
-                exit_time: None,
-            },
-        ],
+        transitions: vec![SmTransition::new(0, 1, 0.0), SmTransition::new(1, 2, 0.0)],
         entry: 0,
+        ..Default::default()
     }
 }
 
@@ -839,6 +825,7 @@ fn a_goal_on_a_non_finite_pose_refuses_instead_of_panicking() {
                 states: vec![SmState::clip("idle", *IDLE.as_bytes())],
                 transitions: vec![],
                 entry: 0,
+                ..Default::default()
             },
         )]));
         sim.set_skeletons(skeletons());
@@ -930,15 +917,13 @@ fn both_hosts_agree_on_a_fixture_that_really_interpolates() {
                 SmState::clip("idle", *IDLE.as_bytes()),
                 SmState::clip("walk", *WALK.as_bytes()),
             ],
-            transitions: vec![SmTransition {
-                from: 0,
-                to: 1,
-                // NON-ZERO: this is what makes `blend_poses` run at all.
-                duration: 0.25,
-                conditions: vec![],
-                exit_time: None,
-            }],
+            // The duration is NON-ZERO: that is what makes `blend_poses` run
+            // at all, and since P29.1 it is also what makes the OUTGOING
+            // play-head advance -- so this fixture is now the two hosts agreeing
+            // on a three-way blend rather than on a held frame.
+            transitions: vec![SmTransition::new(0, 1, 0.25)],
             entry: 0,
+            ..Default::default()
         }
     }
     fn clips() -> BTreeMap<Uuid, AnimClip> {

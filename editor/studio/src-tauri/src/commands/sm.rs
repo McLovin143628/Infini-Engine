@@ -19,8 +19,10 @@ use tauri::State;
 use uuid::Uuid;
 
 use inf_anim::{
-    BlendEntry1D, BlendEntry2D, BlendSpace1D, BlendSpace2D, CmpOp, Motion, SmCondition, SmState,
-    SmTransition, StateMachine, StateMachineAsset,
+    BlendCurve, BlendEntry1D, BlendEntry2D, BlendProfile, BlendSpace1D, BlendSpace2D, CmpOp,
+    InterruptBlend, InterruptSource, JointBlendWeight, Motion, SmCompare, SmCond, SmInterrupt,
+    SmParam, SmParamKind, SmSource, SmState, SmTransition, SmValue, StateMachine,
+    StateMachineAsset,
 };
 use inf_asset::AssetKind;
 
@@ -45,6 +47,12 @@ pub struct SmMachineDto {
     pub states: Vec<SmStateDto>,
     pub transitions: Vec<SmTransitionDto>,
     pub entry: usize,
+    /// Declared parameters (v2).
+    #[serde(default)]
+    pub params: Vec<SmParamDto>,
+    /// Named per-joint blend masks a transition may point at (v2).
+    #[serde(default)]
+    pub profiles: Vec<SmProfileDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +64,11 @@ pub struct SmStateDto {
     pub speed: f64,
     pub x: f32,
     pub y: f32,
+    /// Notify names emitted when this state is entered / exited (v2).
+    #[serde(default)]
+    pub on_enter: Vec<String>,
+    #[serde(default)]
+    pub on_exit: Vec<String>,
 }
 
 /// A state's motion, tagged by `kind`. v1 UI edits only `clip`; blend spaces
@@ -74,6 +87,10 @@ pub enum SmMotionDto {
         param_y: String,
         entries: Vec<Blend2dEntryDto>,
     },
+    /// A nested machine (v2). Recursive, and lossless: the editor has no
+    /// sub-machine UI yet, and a DTO that could not carry one would mean opening
+    /// a machine with a nested state and saving it deleted the nesting.
+    SubMachine { machine: Box<SmMachineDto> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,23 +108,111 @@ pub struct Blend2dEntryDto {
     pub clip: Option<String>,
 }
 
+/// A transition, camelCase.
+///
+/// # Why there are TWO condition fields, and which one wins
+///
+/// v1's inspector edits a **list** of `var op value` rows, and the overwhelming
+/// majority of authored transitions still are exactly that. v2's model is a
+/// tree, and a UI that can only draw the list would silently flatten — that is,
+/// destroy — an `Or`, a `Not`, a trigger or a typed compare the moment somebody
+/// opened a machine and pressed save.
+///
+/// So: `condition` is **always** the whole tree and is what a save falls back
+/// to; `conditions` is `Some` only when the tree *is* a flat AND of float
+/// compares, and is what the flat inspector binds to. A client that edited the
+/// flat view sends it back and it wins; a client that could not draw the tree
+/// receives `conditions: null`, has nothing to bind, and sends `condition`
+/// through untouched. The rule is one line in [`dto_to_transition`] and the
+/// property it buys is that no UI can lose data it cannot see.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SmTransitionDto {
-    pub from: usize,
+    /// Source state index, or `null` for an **any-state** transition.
+    pub from: Option<usize>,
+    /// Any-state only: whether the transition may re-enter the state it targets.
+    #[serde(default)]
+    pub exclude_self: bool,
     pub to: usize,
     pub duration: f64,
-    pub conditions: Vec<SmConditionDto>,
+    /// The flat view — `null` when the tree is not a flat AND of float compares.
+    pub conditions: Option<Vec<SmConditionDto>>,
+    /// The full tree, always present.
+    pub condition: SmCondDto,
     pub exit_time: Option<f64>,
+    pub priority: i32,
+    /// `"none"` / `"destination"` / `"sourceOrDestination"`.
+    pub interrupt_source: String,
+    /// `"snap"` / `"carry"`.
+    pub interrupt_blend: String,
+    /// `"linear"` / `"easeIn"` / `"easeOut"` / `"easeInOut"` / `"step"`.
+    pub curve: String,
+    /// Index into [`SmMachineDto::profiles`].
+    pub profile: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SmConditionDto {
+    /// The parameter name (v1 called this `var`; the wire keeps that spelling so
+    /// the flat inspector is unchanged).
     pub var: String,
     /// One of `">"`, `"<"`, `">="`, `"<="`, `"=="`, `"!="`.
     pub op: String,
     pub value: f64,
+}
+
+/// A condition tree node, tagged by `kind` — the shape a rule builder edits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SmCondDto {
+    Always,
+    Compare {
+        param: String,
+        op: String,
+        /// The typed operand: exactly one of these is set, chosen by `valueKind`.
+        value: f64,
+        /// `"bool"` / `"int"` / `"float"`.
+        value_kind: String,
+    },
+    Trigger {
+        param: String,
+    },
+    And {
+        terms: Vec<SmCondDto>,
+    },
+    Or {
+        terms: Vec<SmCondDto>,
+    },
+    Not {
+        term: Box<SmCondDto>,
+    },
+}
+
+/// A declared parameter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmParamDto {
+    pub name: String,
+    /// `"bool"` / `"int"` / `"float"` / `"trigger"`.
+    pub kind: String,
+    /// The default, as a number (`bool` reads at `> 0.5`, matching the engine).
+    pub default: f64,
+}
+
+/// A named per-joint blend mask.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmProfileDto {
+    pub name: String,
+    pub weights: Vec<SmJointWeightDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmJointWeightDto {
+    pub joint: u16,
+    pub weight: f32,
 }
 
 /// One imported `.inf_anim` clip, for the motion picker.
@@ -186,6 +291,9 @@ fn motion_to_dto(m: &Motion) -> SmMotionDto {
                 })
                 .collect(),
         },
+        Motion::SubMachine(inner) => SmMotionDto::SubMachine {
+            machine: Box::new(machine_to_dto(inner)),
+        },
     }
 }
 
@@ -217,6 +325,209 @@ fn dto_to_motion(m: &SmMotionDto) -> Motion {
                 })
                 .collect(),
         )),
+        SmMotionDto::SubMachine { machine } => {
+            Motion::SubMachine(Box::new(dto_to_machine(machine)))
+        }
+    }
+}
+
+// -- v2 enum spellings (the wire strings) --------------------------------------
+//
+// Strings rather than indices on purpose: an index is what a re-ordered enum
+// silently re-interprets, and this wire has a hand-written TypeScript mirror on
+// the far side of it. An unrecognized string falls back to the v1-equivalent
+// value and never panics -- a Tauri command that panics takes its handler down.
+
+fn curve_to_str(c: BlendCurve) -> &'static str {
+    match c {
+        BlendCurve::Linear => "linear",
+        BlendCurve::EaseIn => "easeIn",
+        BlendCurve::EaseOut => "easeOut",
+        BlendCurve::EaseInOut => "easeInOut",
+        BlendCurve::Step => "step",
+    }
+}
+
+fn str_to_curve(s: &str) -> BlendCurve {
+    match s {
+        "easeIn" => BlendCurve::EaseIn,
+        "easeOut" => BlendCurve::EaseOut,
+        "easeInOut" => BlendCurve::EaseInOut,
+        "step" => BlendCurve::Step,
+        _ => BlendCurve::Linear,
+    }
+}
+
+fn source_to_str(s: InterruptSource) -> &'static str {
+    match s {
+        InterruptSource::None => "none",
+        InterruptSource::Destination => "destination",
+        InterruptSource::SourceOrDestination => "sourceOrDestination",
+    }
+}
+
+fn str_to_source(s: &str) -> InterruptSource {
+    match s {
+        "none" => InterruptSource::None,
+        "sourceOrDestination" => InterruptSource::SourceOrDestination,
+        _ => InterruptSource::Destination,
+    }
+}
+
+fn blend_to_str(b: InterruptBlend) -> &'static str {
+    match b {
+        InterruptBlend::Snap => "snap",
+        InterruptBlend::Carry => "carry",
+    }
+}
+
+fn str_to_blend(s: &str) -> InterruptBlend {
+    match s {
+        "snap" => InterruptBlend::Snap,
+        _ => InterruptBlend::Carry,
+    }
+}
+
+fn kind_to_str(k: SmParamKind) -> &'static str {
+    match k {
+        SmParamKind::Bool => "bool",
+        SmParamKind::Int => "int",
+        SmParamKind::Float => "float",
+        SmParamKind::Trigger => "trigger",
+    }
+}
+
+fn str_to_kind(s: &str) -> SmParamKind {
+    match s {
+        "bool" => SmParamKind::Bool,
+        "int" => SmParamKind::Int,
+        "trigger" => SmParamKind::Trigger,
+        _ => SmParamKind::Float,
+    }
+}
+
+fn value_to_dto(v: SmValue) -> (f64, &'static str) {
+    match v {
+        SmValue::Bool(b) => (b as i64 as f64, "bool"),
+        SmValue::Int(i) => (i as f64, "int"),
+        SmValue::Float(f) => (f, "float"),
+    }
+}
+
+fn dto_to_value(value: f64, kind: &str) -> SmValue {
+    match kind {
+        "bool" => SmValue::Bool(value > 0.5),
+        "int" => SmValue::Int(value as i64),
+        _ => SmValue::Float(value),
+    }
+}
+
+fn cond_to_dto(c: &SmCond) -> SmCondDto {
+    match c {
+        SmCond::Always => SmCondDto::Always,
+        SmCond::Compare(cmp) => {
+            let (value, value_kind) = value_to_dto(cmp.value);
+            SmCondDto::Compare {
+                param: cmp.param.clone(),
+                op: op_to_str(cmp.op).to_string(),
+                value,
+                value_kind: value_kind.to_string(),
+            }
+        }
+        SmCond::Trigger(name) => SmCondDto::Trigger {
+            param: name.clone(),
+        },
+        SmCond::And(terms) => SmCondDto::And {
+            terms: terms.iter().map(cond_to_dto).collect(),
+        },
+        SmCond::Or(terms) => SmCondDto::Or {
+            terms: terms.iter().map(cond_to_dto).collect(),
+        },
+        SmCond::Not(inner) => SmCondDto::Not {
+            term: Box::new(cond_to_dto(inner)),
+        },
+    }
+}
+
+fn dto_to_cond(c: &SmCondDto) -> SmCond {
+    match c {
+        SmCondDto::Always => SmCond::Always,
+        SmCondDto::Compare {
+            param,
+            op,
+            value,
+            value_kind,
+        } => SmCond::Compare(SmCompare {
+            param: param.clone(),
+            op: str_to_op(op),
+            value: dto_to_value(*value, value_kind),
+        }),
+        SmCondDto::Trigger { param } => SmCond::Trigger(param.clone()),
+        SmCondDto::And { terms } => SmCond::And(terms.iter().map(dto_to_cond).collect()),
+        SmCondDto::Or { terms } => SmCond::Or(terms.iter().map(dto_to_cond).collect()),
+        SmCondDto::Not { term } => SmCond::Not(Box::new(dto_to_cond(term))),
+    }
+}
+
+fn transition_to_dto(t: &SmTransition) -> SmTransitionDto {
+    let (from, exclude_self) = match t.from {
+        SmSource::State(i) => (Some(i), false),
+        SmSource::Any { exclude_self } => (None, exclude_self),
+    };
+    SmTransitionDto {
+        from,
+        exclude_self,
+        to: t.to,
+        duration: t.duration,
+        // `Some` ONLY when the flat inspector can represent the whole tree.
+        conditions: t.condition.as_flat_and().map(|flat| {
+            flat.into_iter()
+                .map(|c| SmConditionDto {
+                    var: c.param,
+                    op: op_to_str(c.op).to_string(),
+                    value: c.value.as_f64(),
+                })
+                .collect()
+        }),
+        condition: cond_to_dto(&t.condition),
+        exit_time: t.exit_time,
+        priority: t.priority,
+        interrupt_source: source_to_str(t.interrupt.source).to_string(),
+        interrupt_blend: blend_to_str(t.interrupt.blend).to_string(),
+        curve: curve_to_str(t.curve).to_string(),
+        profile: t.profile,
+    }
+}
+
+fn dto_to_transition(t: &SmTransitionDto) -> SmTransition {
+    SmTransition {
+        from: match t.from {
+            Some(i) => SmSource::State(i),
+            None => SmSource::Any {
+                exclude_self: t.exclude_self,
+            },
+        },
+        to: t.to,
+        duration: t.duration,
+        // The flat view wins when the client sent one -- it is the surface that
+        // was edited. A client that received `null` (because the tree is not
+        // flat) has nothing to send back, and the tree passes through untouched.
+        condition: match &t.conditions {
+            Some(flat) => SmCond::from_flat_and(
+                flat.iter()
+                    .map(|c| SmCompare::float(c.var.clone(), str_to_op(&c.op), c.value))
+                    .collect(),
+            ),
+            None => dto_to_cond(&t.condition),
+        },
+        exit_time: t.exit_time,
+        priority: t.priority,
+        interrupt: SmInterrupt {
+            source: str_to_source(&t.interrupt_source),
+            blend: str_to_blend(&t.interrupt_blend),
+        },
+        curve: str_to_curve(&t.curve),
+        profile: t.profile,
     }
 }
 
@@ -232,28 +543,36 @@ fn machine_to_dto(m: &StateMachine) -> SmMachineDto {
                 speed: s.speed,
                 x: s.position.0,
                 y: s.position.1,
+                on_enter: s.on_enter.clone(),
+                on_exit: s.on_exit.clone(),
             })
             .collect(),
-        transitions: m
-            .transitions
+        transitions: m.transitions.iter().map(transition_to_dto).collect(),
+        entry: m.entry,
+        params: m
+            .params
             .iter()
-            .map(|t| SmTransitionDto {
-                from: t.from,
-                to: t.to,
-                duration: t.duration,
-                conditions: t
-                    .conditions
+            .map(|p| SmParamDto {
+                name: p.name.clone(),
+                kind: kind_to_str(p.kind).to_string(),
+                default: p.default.as_f64(),
+            })
+            .collect(),
+        profiles: m
+            .profiles
+            .iter()
+            .map(|p| SmProfileDto {
+                name: p.name.clone(),
+                weights: p
+                    .weights
                     .iter()
-                    .map(|c| SmConditionDto {
-                        var: c.var.clone(),
-                        op: op_to_str(c.op).to_string(),
-                        value: c.value,
+                    .map(|w| SmJointWeightDto {
+                        joint: w.joint,
+                        weight: w.weight,
                     })
                     .collect(),
-                exit_time: t.exit_time,
             })
             .collect(),
-        entry: m.entry,
     }
 }
 
@@ -268,28 +587,36 @@ fn dto_to_machine(m: &SmMachineDto) -> StateMachine {
                 looping: s.looping,
                 speed: s.speed,
                 position: (s.x, s.y),
+                on_enter: s.on_enter.clone(),
+                on_exit: s.on_exit.clone(),
             })
             .collect(),
-        transitions: m
-            .transitions
+        transitions: m.transitions.iter().map(dto_to_transition).collect(),
+        entry: m.entry,
+        params: m
+            .params
             .iter()
-            .map(|t| SmTransition {
-                from: t.from,
-                to: t.to,
-                duration: t.duration,
-                conditions: t
-                    .conditions
+            .map(|p| SmParam {
+                name: p.name.clone(),
+                kind: str_to_kind(&p.kind),
+                default: dto_to_value(p.default, &p.kind),
+            })
+            .collect(),
+        profiles: m
+            .profiles
+            .iter()
+            .map(|p| BlendProfile {
+                name: p.name.clone(),
+                weights: p
+                    .weights
                     .iter()
-                    .map(|c| SmCondition {
-                        var: c.var.clone(),
-                        op: str_to_op(&c.op),
-                        value: c.value,
+                    .map(|w| JointBlendWeight {
+                        joint: w.joint,
+                        weight: w.weight,
                     })
                     .collect(),
-                exit_time: t.exit_time,
             })
             .collect(),
-        entry: m.entry,
     }
 }
 
@@ -299,6 +626,7 @@ fn default_doc(id: String, name: String) -> SmDoc {
         states: vec![SmState::clip("Idle", NIL_CLIP)],
         transitions: vec![],
         entry: 0,
+        ..Default::default()
     };
     SmDoc {
         id,
@@ -508,11 +836,24 @@ pub async fn sm_list_clips(assets: State<'_, AssetState>) -> Result<Vec<SmClipDt
 mod tests {
     use super::*;
 
-    #[test]
-    fn machine_dto_round_trips() {
-        let machine = StateMachine {
+    /// A machine using **every** v2 shape, so the round-trip below is a claim
+    /// about v2 and not about v1 wearing a new field list.
+    fn v2_machine() -> StateMachine {
+        let sub = StateMachine {
             states: vec![
-                SmState::clip("idle", NIL_CLIP),
+                SmState::clip("stand", Uuid::from_u128(7).into_bytes()),
+                SmState::clip("crouch", Uuid::from_u128(8).into_bytes()),
+            ],
+            transitions: vec![SmTransition::on(0, 1, 0.1, "crouching", CmpOp::Gt, 0.5)],
+            entry: 0,
+            ..Default::default()
+        };
+        let mut idle = SmState::clip("idle", NIL_CLIP);
+        idle.on_enter = vec!["idle_begin".into()];
+        idle.on_exit = vec!["idle_end".into()];
+        StateMachine {
+            states: vec![
+                idle,
                 SmState {
                     name: "loco".into(),
                     motion: Motion::Blend1D(BlendSpace1D::new(
@@ -525,24 +866,163 @@ mod tests {
                     looping: true,
                     speed: 1.5,
                     position: (10.0, 20.0),
+                    on_enter: Vec::new(),
+                    on_exit: Vec::new(),
                 },
+                SmState::sub_machine("ground", sub),
             ],
-            transitions: vec![SmTransition {
-                from: 0,
-                to: 1,
-                duration: 0.2,
-                conditions: vec![SmCondition {
-                    var: "moving".into(),
-                    op: CmpOp::Ge,
-                    value: 0.5,
-                }],
-                exit_time: Some(0.8),
-            }],
+            transitions: vec![
+                SmTransition::on(0, 1, 0.2, "moving", CmpOp::Ge, 0.5)
+                    .with_exit_time(0.8)
+                    .with_priority(4)
+                    .with_curve(BlendCurve::EaseInOut)
+                    .with_profile(0)
+                    .with_interrupt(SmInterrupt {
+                        source: InterruptSource::SourceOrDestination,
+                        blend: InterruptBlend::Snap,
+                    }),
+                // A tree the flat inspector cannot draw, plus an any-state source.
+                SmTransition::any(2, 0.05).when(SmCond::Or(vec![
+                    SmCond::Trigger("land".into()),
+                    SmCond::Not(Box::new(SmCond::bool("airborne", true))),
+                    SmCond::int("stance", CmpOp::Eq, 2),
+                ])),
+            ],
             entry: 0,
-        };
+            params: vec![
+                SmParam::float("moving"),
+                SmParam::trigger("land"),
+                SmParam::new("airborne", SmParamKind::Bool),
+                SmParam::new("stance", SmParamKind::Int),
+            ],
+            profiles: vec![BlendProfile::new(
+                "upper-body",
+                vec![JointBlendWeight {
+                    joint: 3,
+                    weight: 0.25,
+                }],
+            )],
+        }
+    }
+
+    /// **The DTO carries every v2 shape, losslessly.**
+    ///
+    /// This is the whole reason the Ring-2 mirror was rewritten in this batch
+    /// rather than the next one: `sm_save` pushes the *document* back and writes
+    /// whatever `dto_to_machine` produces. A DTO missing a field is not a
+    /// cosmetic gap — it is the editor deleting a condition tree, a priority or a
+    /// nested machine the moment somebody opens a file and saves it.
+    #[test]
+    fn machine_dto_round_trips_every_v2_shape() {
+        let machine = v2_machine();
         let dto = machine_to_dto(&machine);
         let back = dto_to_machine(&dto);
         assert_eq!(back, machine);
+
+        // …and through JSON, which is what actually crosses the IPC boundary.
+        let json = serde_json::to_string(&dto).unwrap();
+        let parsed: SmMachineDto = serde_json::from_str(&json).unwrap();
+        assert_eq!(dto_to_machine(&parsed), machine);
+        // The wire really is camelCase, so the hand-written TS mirror binds.
+        assert!(json.contains("interruptSource"), "{json}");
+        assert!(json.contains("valueKind"), "{json}");
+        assert!(json.contains("onEnter"), "{json}");
+    }
+
+    /// **The flat view is offered exactly when it is safe, and it wins when it
+    /// is sent.**
+    ///
+    /// Two directions of the same rule:
+    ///
+    ///  * a flat AND of float compares gets `conditions: Some(..)`, so v1's
+    ///    inspector keeps working unchanged;
+    ///  * anything else gets `conditions: null`, so a UI that can only draw the
+    ///    list has nothing to bind — and a save from that UI therefore restores
+    ///    the tree rather than flattening it.
+    ///
+    /// The second arm is the one with teeth: it simulates the v1 inspector by
+    /// round-tripping the DTO untouched and asserts the `Or` survived.
+    #[test]
+    fn the_flat_condition_view_never_destroys_a_tree_it_cannot_draw() {
+        let dto = machine_to_dto(&v2_machine());
+        let flat = &dto.transitions[0];
+        let tree = &dto.transitions[1];
+        assert!(
+            flat.conditions.is_some(),
+            "a flat float AND must still bind to the v1 inspector"
+        );
+        assert_eq!(flat.conditions.as_ref().unwrap()[0].var, "moving");
+        assert!(
+            tree.conditions.is_none(),
+            "an Or/Not/typed tree must NOT be offered as a flat list"
+        );
+
+        // The v1 inspector's behaviour: send back exactly what it received.
+        let back = dto_to_machine(&dto);
+        assert!(
+            matches!(back.transitions[1].condition, SmCond::Or(_)),
+            "the tree was flattened by a save that never edited it: {:?}",
+            back.transitions[1].condition
+        );
+        // …and the any-state source and its exclude_self survived too.
+        assert_eq!(
+            back.transitions[1].from,
+            SmSource::Any { exclude_self: true }
+        );
+
+        // Editing the flat view still wins, which is what makes the inspector
+        // functional rather than read-only.
+        let mut edited = dto;
+        edited.transitions[0].conditions.as_mut().unwrap()[0].value = 9.0;
+        let back = dto_to_machine(&edited);
+        let cmp = back.transitions[0]
+            .condition
+            .as_flat_and()
+            .expect("still flat")[0]
+            .clone();
+        assert_eq!(cmp.value.as_f64(), 9.0);
+    }
+
+    /// Every v2 wire string round-trips, and an unrecognized one falls back to
+    /// the v1-equivalent value rather than panicking — a Tauri command that
+    /// panics takes its handler down.
+    #[test]
+    fn v2_wire_strings_round_trip_and_degrade_safely() {
+        for c in [
+            BlendCurve::Linear,
+            BlendCurve::EaseIn,
+            BlendCurve::EaseOut,
+            BlendCurve::EaseInOut,
+            BlendCurve::Step,
+        ] {
+            assert_eq!(str_to_curve(curve_to_str(c)), c);
+        }
+        for s in [
+            InterruptSource::None,
+            InterruptSource::Destination,
+            InterruptSource::SourceOrDestination,
+        ] {
+            assert_eq!(str_to_source(source_to_str(s)), s);
+        }
+        for b in [InterruptBlend::Snap, InterruptBlend::Carry] {
+            assert_eq!(str_to_blend(blend_to_str(b)), b);
+        }
+        for k in [
+            SmParamKind::Bool,
+            SmParamKind::Int,
+            SmParamKind::Float,
+            SmParamKind::Trigger,
+        ] {
+            assert_eq!(str_to_kind(kind_to_str(k)), k);
+        }
+        assert_eq!(str_to_curve("nonsense"), BlendCurve::Linear);
+        assert_eq!(str_to_source("nonsense"), InterruptSource::Destination);
+        assert_eq!(str_to_kind("nonsense"), SmParamKind::Float);
+        // The typed operand keeps its kind across the numeric wire.
+        assert_eq!(dto_to_value(1.0, "bool"), SmValue::Bool(true));
+        assert_eq!(dto_to_value(0.4, "bool"), SmValue::Bool(false));
+        assert_eq!(dto_to_value(2.9, "int"), SmValue::Int(2));
+        assert_eq!(dto_to_value(2.5, "float"), SmValue::Float(2.5));
     }
 
     #[test]
@@ -628,6 +1108,7 @@ mod tests {
             ],
             transitions: vec![],
             entry: 0,
+            ..Default::default()
         };
         let (skeleton, deps) = machine_binding(&proj, &machine);
         assert_eq!(skeleton, Some(skel), "the rig came back from the clip");
@@ -689,6 +1170,7 @@ mod tests {
             states: vec![SmState::clip("idle", NIL_CLIP)],
             transitions: vec![],
             entry: 0,
+            ..Default::default()
         };
         let (skeleton, deps) = machine_binding(&proj, &machine);
         assert_eq!(skeleton, None);
