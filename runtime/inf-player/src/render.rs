@@ -1098,6 +1098,20 @@ pub fn project_scene_full(
         );
     }
 
+    // **Round-2 finding R2-2**, MIRROR of the editor host: the debris memo is
+    // retained against the live fracture set. `DebrisCache::batch` drops an
+    // entry when the actor sheds nothing, which covers a reclaim; a DESPAWN —
+    // a deleted actor, a streamed cell that unloads — never calls it again and
+    // left the packed payload for the session.
+    {
+        let live: std::collections::BTreeSet<u64> = sim
+            .fractures()
+            .keys()
+            .map(|g| inf_render::terrain_id_from_guid(g.as_u128()))
+            .collect();
+        debris.retain_live(&live);
+    }
+
     scene.mark_dirty();
 }
 

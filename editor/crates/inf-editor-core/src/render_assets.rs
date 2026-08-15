@@ -181,8 +181,10 @@ pub struct EditorRenderAssets {
     /// Opened vmesh sources by **mesh** GUID. `None` is a negative entry: this
     /// mesh has no usable DAG, so stop trying every frame.
     vgeom: HashMap<Uuid, Option<LoadedVgeom>>,
-    /// Bind-space skinned geometry by `(mesh GUID, skeleton GUID)`.
-    skinned: HashMap<(Uuid, Uuid), Option<Arc<SkinnedMeshData>>>,
+    /// Bind-space skinned geometry by **mesh GUID** — see `skinned_geometry`
+    /// (round-2 finding R2-1). The skeleton is not part of the value and was
+    /// never part of it.
+    skinned: HashMap<Uuid, Option<Arc<SkinnedMeshData>>>,
     /// Decoded skeletons by GUID (shared by every entity bound to one).
     skeletons: HashMap<Uuid, Option<Arc<Skeleton>>>,
     /// Decoded clips by GUID.
@@ -305,7 +307,7 @@ impl EditorRenderAssets {
     pub fn retain_only(&mut self, keep: impl IntoIterator<Item = Uuid>) {
         let live: HashSet<Uuid> = keep.into_iter().collect();
         self.vgeom.retain(|mesh, _| live.contains(mesh));
-        self.skinned.retain(|(mesh, _), _| live.contains(mesh));
+        self.skinned.retain(|mesh, _| live.contains(mesh));
         self.skeletons.retain(|id, _| live.contains(id));
         self.clips.retain(|id, _| live.contains(id));
     }
@@ -313,7 +315,7 @@ impl EditorRenderAssets {
     /// Forget one mesh asset's opened payloads (a targeted re-import invalidation).
     pub fn invalidate(&mut self, mesh_id: Uuid) {
         self.vgeom.remove(&mesh_id);
-        self.skinned.retain(|(mesh, _), _| *mesh != mesh_id);
+        self.skinned.remove(&mesh_id);
         self.rescanned_for.clear();
     }
 
@@ -453,20 +455,35 @@ impl EditorRenderAssets {
     }
 
     /// Bind-space skinned geometry for a `(mesh, skeleton)` pair, cached.
+    /// **Keyed by the MESH alone** (round-2 finding R2-1), matching the player
+    /// mirror, whose own doc states the rule.
+    ///
+    /// The cache was keyed `(mesh, skeleton)` and its value never looked at the
+    /// skeleton: `skinned_mesh_data` reads the `.inf_mesh`'s bind-space
+    /// vertices and its per-vertex `VertexSkin` stream, both of which are
+    /// properties of the mesh asset. So N characters sharing one mesh on N
+    /// different rigs — the whole point of the P24 modular-rigging work — held
+    /// N byte-identical copies in RAM, uploaded N times to the GPU (the skinned
+    /// pass keys its upload on `Arc` identity, and these were N different
+    /// pointers), and voxelized N times into GI.
+    ///
+    /// The half-blind `retain_only` was the other half of the same key: it
+    /// dropped an entry only when the MESH left, so an entry whose skeleton had
+    /// gone survived under a key nothing could ever look up again. With one
+    /// term there is nothing left to be blind about.
     fn skinned_geometry(
         &mut self,
         mesh_id: Uuid,
-        skeleton_id: Uuid,
+        _skeleton_id: Uuid,
     ) -> Option<Arc<SkinnedMeshData>> {
-        let key = (mesh_id, skeleton_id);
-        if let Some(hit) = self.skinned.get(&key) {
+        if let Some(hit) = self.skinned.get(&mesh_id) {
             return hit.clone();
         }
         let built = self
             .load_payload::<MeshAsset>(mesh_id)
             .and_then(|m| skinned_mesh_data(&m))
             .map(Arc::new);
-        self.skinned.insert(key, built.clone());
+        self.skinned.insert(mesh_id, built.clone());
         built
     }
 

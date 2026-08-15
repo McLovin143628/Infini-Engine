@@ -478,6 +478,7 @@ impl SkinnedMeshNode {
             } else {
                 inst.palette.iter().map(|m| m.to_cols_array()).collect()
             };
+            let live = palette.len();
             let bytes = std::mem::size_of_val(palette.as_slice()) as u64;
             let fits = self
                 .instances
@@ -515,10 +516,50 @@ impl SkinnedMeshNode {
             }
             let slot = &mut self.instances[i];
             slot.mesh = inst.mesh;
+            let padded = pad_palette(palette, live, slot.capacity);
             gpu.queue
-                .write_buffer(&slot.palette, 0, bytemuck::cast_slice(&palette));
+                .write_buffer(&slot.palette, 0, bytemuck::cast_slice(&padded));
         }
     }
+}
+
+/// **Fill a palette buffer's power-of-two tail with the last live matrix**
+/// (round-2 finding R2-6).
+///
+/// Wave D made these buffers persistent and grew them to a power of two, so a
+/// slot allocated for 40 joints holds room for 64 and only the first 40 are
+/// ever written. Wave D's own note argued the padding is unreadable; it is not.
+/// The shader binds the WHOLE buffer as `array<mat4x4<f32>>`, and wgpu's
+/// bounds check clamps against the *binding's* length, not against
+/// `joint_count` — so a vertex whose skin index runs past its own skeleton
+/// (a mesh bound to the wrong rig, an index the CPU clamp did not see) reads
+/// the tail. Before this it was whatever the previous, larger, character in
+/// that slot left there: a limb snapping to another actor's pose.
+///
+/// The tail carries the last live matrix. That is a *plausible* transform —
+/// the vertex follows some real joint of its own skeleton instead of a
+/// stranger's — and it needs no shader change, no extra uniform and no second
+/// derivation of `joint_count` for the two subsystems to disagree about. Zero
+/// would collapse the vertex to the origin; identity would leave it in bind
+/// space in the middle of the world.
+///
+/// `live` is how many entries of `palette` are real; `capacity_bytes` is the
+/// buffer's size. Returns `palette` unchanged when it already fills the buffer.
+pub(crate) fn pad_palette(
+    mut palette: Vec<[f32; 16]>,
+    live: usize,
+    capacity_bytes: u64,
+) -> Vec<[f32; 16]> {
+    let slots = (capacity_bytes as usize) / std::mem::size_of::<[f32; 16]>();
+    if slots <= palette.len() {
+        return palette;
+    }
+    let fill = palette
+        .get(live.saturating_sub(1))
+        .copied()
+        .unwrap_or_else(|| glam::Mat4::IDENTITY.to_cols_array());
+    palette.resize(slots, fill);
+    palette
 }
 
 fn upload_mesh(gpu: &GpuContext, mesh: &SkinnedMeshData) -> GpuSkinnedMesh {
@@ -612,5 +653,55 @@ impl RenderNode for SkinnedMeshNode {
             let base = i as u32;
             pass.draw_indexed(0..gpu_mesh.index_count, 0, base..base + 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pad_palette;
+
+    fn m(n: f32) -> [f32; 16] {
+        let mut a = [0.0f32; 16];
+        a[0] = n;
+        a
+    }
+
+    /// **Round-2 finding R2-6**: the power-of-two tail is readable, so it must
+    /// hold something of this skeleton's rather than the previous character's.
+    ///
+    /// The shader binds the whole buffer as `array<mat4x4<f32>>` and wgpu
+    /// clamps against the BINDING's length, not against `joint_count`. Wave D's
+    /// note argued the padding was unreachable; it is not.
+    #[test]
+    fn the_padded_tail_repeats_the_last_live_matrix() {
+        let stride = std::mem::size_of::<[f32; 16]>() as u64;
+
+        // 3 live joints in a 4-slot buffer: one slot of tail.
+        let out = pad_palette(vec![m(1.0), m(2.0), m(3.0)], 3, stride * 4);
+        assert_eq!(out.len(), 4, "the buffer must be filled to its capacity");
+        assert_eq!(
+            out[3],
+            m(3.0),
+            "the tail holds neither the last live matrix nor anything of this \
+             skeleton's — a vertex indexing past its own joint count reads it"
+        );
+        assert_eq!(&out[..3], &[m(1.0), m(2.0), m(3.0)], "the live half moved");
+
+        // Exactly full: unchanged, and no allocation of a longer vec.
+        let exact = pad_palette(vec![m(1.0), m(2.0)], 2, stride * 2);
+        assert_eq!(exact, vec![m(1.0), m(2.0)]);
+
+        // A capacity smaller than the palette (cannot happen — the caller grows
+        // first — but the helper must not truncate the live half if it does).
+        let small = pad_palette(vec![m(1.0), m(2.0)], 2, stride);
+        assert_eq!(small.len(), 2);
+
+        // The empty case: the caller substitutes one identity, and the tail
+        // repeats it rather than staying zero (which collapses a vertex to the
+        // origin).
+        let ident = glam::Mat4::IDENTITY.to_cols_array();
+        let out = pad_palette(vec![ident], 1, stride * 8);
+        assert_eq!(out.len(), 8);
+        assert!(out.iter().all(|e| *e == ident));
     }
 }

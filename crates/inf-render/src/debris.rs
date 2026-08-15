@@ -354,6 +354,25 @@ impl DebrisCache {
         self.packs
     }
 
+    /// **Drop every entry whose actor is no longer in the level** (round-2
+    /// finding R2-2).
+    ///
+    /// `batch` drops an entry when the actor sheds nothing, so a *reclaimed*
+    /// actor already stops costing memory. What it cannot see is a **despawned**
+    /// one: a broken car that is deleted, or a streamed cell that unloads, never
+    /// calls `batch` again, so its packed payload — one `ScatterData` per broken
+    /// actor, sized by its chunk count — is held for the rest of the session.
+    /// This is Wave D's class (`grounded`, `swimming`, the voxel and terrain
+    /// stamps, the viewport palettes) in the one map that wave did not have,
+    /// because `DebrisCache` did not exist yet.
+    ///
+    /// `live` is keyed the way the cache is: `terrain_id_from_guid` of each
+    /// actor the fracture store still holds. Called by both hosts from their
+    /// projection, which is the only place that knows.
+    pub fn retain_live(&mut self, live: &std::collections::BTreeSet<u64>) {
+        self.entries.retain(|id, _| live.contains(id));
+    }
+
     /// The batch for `entity` at `generation`, packing only if the generation
     /// moved (or nothing is cached yet).
     ///
@@ -761,5 +780,51 @@ mod tests {
         // The High row is the identity either way, which is why this was invisible
         // on the machine it was written on.
         assert_eq!(debris_budget_for(RenderTier::High), DEBRIS_BUDGET_HIGH);
+    }
+
+    /// **Round-2 finding R2-2**: a despawned actor's packed payload is dropped.
+    ///
+    /// `batch` sheds an entry when the actor has nothing left detached, which
+    /// covers a *reclaim*. It cannot see a **despawn** — a deleted car, a
+    /// streamed cell that unloads — because that actor never calls `batch`
+    /// again. Wave D's class, in the one map that wave did not have.
+    #[test]
+    fn a_despawned_actor_s_debris_payload_is_dropped() {
+        let mut cache = DebrisCache::default();
+        let sites = |entity: u64| {
+            vec![DebrisSite {
+                entity,
+                chunk: 0,
+                order: 1,
+                center: DVec3::ZERO,
+                radius_m: 1.0,
+            }]
+        };
+        assert!(cache.batch(7, 1, &sites(7), 4, [1.0; 4], 0.5).is_some());
+        assert!(cache.batch(9, 1, &sites(9), 4, [1.0; 4], 0.5).is_some());
+        assert_eq!(
+            cache.len(),
+            2,
+            "the fixture cached nothing, so this is vacuous"
+        );
+
+        // Actor 9 despawns; the level still holds 7.
+        let live: std::collections::BTreeSet<u64> = [7u64].into_iter().collect();
+        cache.retain_live(&live);
+        assert_eq!(
+            cache.len(),
+            1,
+            "the despawned actor's packed ScatterData is still held — the memo only ever grew across a session"
+        );
+
+        // The survivor is still a HIT, so the retain did not cost the memo its
+        // whole reason for existing.
+        let packs = cache.packs();
+        assert!(cache.batch(7, 1, &sites(7), 4, [1.0; 4], 0.5).is_some());
+        assert_eq!(cache.packs(), packs, "the survivor was re-packed");
+
+        // An empty live set clears it.
+        cache.retain_live(&std::collections::BTreeSet::new());
+        assert!(cache.is_empty());
     }
 }

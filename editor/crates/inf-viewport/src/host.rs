@@ -2359,6 +2359,25 @@ impl EngineHost {
             self.terrain_guid = self.terrain_slots.first().map(|s| s.guid);
         }
 
+        // **Round-2 finding R2-2**: the debris memo is retained against the
+        // live fracture set. `DebrisCache::batch` drops an entry when the actor
+        // sheds nothing, which covers a reclaim; a DESPAWN never calls it again
+        // and left the packed payload for the session. MIRROR:
+        // `inf_player::render::project_scene` does the same, from the same
+        // authority.
+        {
+            let live: std::collections::BTreeSet<u64> = self
+                .fractures
+                .lock()
+                .map(|f| {
+                    f.keys()
+                        .map(|g| inf_render::terrain_id_from_guid(g.as_u128()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.debris_cache.retain_live(&live);
+        }
+
         // P21.2 SEAM. Fill every projected volume's per-vertex seam terms from
         // the heightfields projected beside them, and arm the blend at
         // [`DEFAULT_SEAM_BAND_M`]. `inf_render::apply_seam` is the ONE

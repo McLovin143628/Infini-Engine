@@ -1799,11 +1799,24 @@ impl VsmRaster {
                     None => self.skinned_palettes.push(slot),
                 }
             }
-            if !inst.palette.is_empty() {
-                let raw: Vec<[f32; 16]> = inst.palette.iter().map(|m| m.to_cols_array()).collect();
-                gpu.queue
-                    .write_buffer(&self.skinned_palettes[i].0, 0, bytemuck::cast_slice(&raw));
-            }
+            // **Always written, and padded** (round-2 finding R2-6 and the P27.3
+            // mirror it restores). The `!is_empty()` gate meant a reused slot
+            // whose new instance has no palette rasterized with the PREVIOUS
+            // instance's matrices — `passes/skinned.rs` substitutes identity for
+            // exactly that case, and the two mirrors had come to disagree. The
+            // power-of-two tail is filled with the last live matrix through the
+            // same door, because the shader binds the whole buffer and wgpu
+            // clamps against the BINDING's length rather than `joint_count`.
+            let raw: Vec<[f32; 16]> = if inst.palette.is_empty() {
+                vec![glam::Mat4::IDENTITY.to_cols_array()]
+            } else {
+                inst.palette.iter().map(|m| m.to_cols_array()).collect()
+            };
+            let live = raw.len();
+            let capacity = self.skinned_palettes[i].3;
+            let raw = crate::passes::skinned::pad_palette(raw, live, capacity);
+            gpu.queue
+                .write_buffer(&self.skinned_palettes[i].0, 0, bytemuck::cast_slice(&raw));
             // The **pointer key**, not the scene index: the group that draws this
             // instance looks its geometry up by identity, so an index that changed
             // meshes cannot be handed the previous mesh's buffers. Re-stamped
