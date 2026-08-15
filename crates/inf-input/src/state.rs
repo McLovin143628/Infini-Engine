@@ -262,11 +262,11 @@ mod tests {
         assert_eq!(st.axis("move_x"), 0.0, "the stick is still pushed");
         assert!(
             !st.anything_held(),
-            "the RAW sets survived — every public query answers from the resolved              snapshot, so a release that cleared only the actions would look              identical through all of them"
+            "the RAW sets survived — every public query answers from the resolved snapshot, so a release that cleared only the actions would look identical through all of them"
         );
         assert!(
             st.just_released("sprint"),
-            "the release edge did not fire, so gameplay that ends an ability on it              never ends the ability"
+            "the release edge did not fire, so gameplay that ends an ability on it never ends the ability"
         );
 
         // …and the state is live again: a fresh press works.

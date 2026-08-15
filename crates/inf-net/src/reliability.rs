@@ -853,7 +853,7 @@ mod tests {
         assert_eq!(
             e.recv_bits,
             1u64 << 63,
-            "a gap of exactly 64 must leave ONLY the old highest, at the far end              of the window; a masked `<< 0` keeps every stale bit and makes the              acks we send a lie"
+            "a gap of exactly 64 must leave ONLY the old highest, at the far end of the window; a masked `<< 0` keeps every stale bit and makes the acks we send a lie"
         );
 
         // 63 and 65 bracket it, so the arm cannot pass by accident.
@@ -915,7 +915,7 @@ mod tests {
         }
         assert!(
             e.reliable_recv_buffer.len() <= cfg.max_in_flight,
-            "the reorder buffer holds {} of an 8-message window — it accepted ids              the peer cannot legally have in flight",
+            "the reorder buffer holds {} of an 8-message window — it accepted ids the peer cannot legally have in flight",
             e.reliable_recv_buffer.len()
         );
         assert!(
