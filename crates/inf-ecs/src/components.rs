@@ -5652,7 +5652,7 @@ mod tests {
         assert_eq!(
             enums,
             FROZEN_ENUMS.len(),
-            "the freeze table and its name list disagree about how many enums it              covers; the census below reads the names"
+            "the freeze table and its name list disagree about how many enums it covers; the census below reads the names"
         );
     }
 
@@ -5725,7 +5725,7 @@ mod tests {
 
         assert!(
             on_the_wire.len() >= 18,
-            "the census found only {} serializable enums in components.rs — it is              not reading what it thinks it is, and a census that finds nothing              covers everything",
+            "the census found only {} serializable enums in components.rs — it is not reading what it thinks it is, and a census that finds nothing covers everything",
             on_the_wire.len()
         );
 
@@ -5736,8 +5736,7 @@ mod tests {
             .collect();
         assert!(
             missing.is_empty(),
-            "these enums reach `.inf_lvl` bytes and no row of the freeze table              pins their discriminants: {missing:?}. bincode encodes an
-             externally-tagged enum as its DECLARATION INDEX, so inserting a              variant mid-list renumbers everything after it in every committed              level. Add a `pin!` row and a name to FROZEN_ENUMS."
+            "these enums reach `.inf_lvl` bytes and no row of the freeze table pins their discriminants: {missing:?}. bincode encodes an externally-tagged enum as its DECLARATION INDEX, so inserting a variant mid-list renumbers everything after it in every committed level. Add a `pin!` row and a name to FROZEN_ENUMS."
         );
 
         let found: std::collections::BTreeSet<&str> =
@@ -5748,7 +5747,7 @@ mod tests {
             .collect();
         assert!(
             stale.is_empty(),
-            "FROZEN_ENUMS names {stale:?}, which no longer exist in this module — a               pin about nothing, which the next enum to take that name inherits"
+            "FROZEN_ENUMS names {stale:?}, which no longer exist in this module — a pin about nothing, which the next enum to take that name inherits"
         );
     }
 
