@@ -18984,8 +18984,9 @@ The battery went **4 568 → 4 811** over 267 binaries; the frontend went
 committed bond energies, shared-face areas, scatter rotations, root-motion
 transforms and eroded terrain, because every consumer was enumerated before the
 first byte changed. **130 `Hardening` commits** carry the campaign by
-`git log --grep`; Wave I's block said 118 at a point where the same grep says
-120, which is the smallest possible example of this section's last paragraph.
+`git log --grep`, of which **this wave's ten are the only ones not on the
+remote**; Wave I's block said 118 at a point where the same grep says 120, which
+is the smallest possible example of this section's last paragraph.
 
 **The laws this campaign minted**, in the order they were paid for:
 
@@ -19024,11 +19025,23 @@ Round 3's closing note, carried here: **a wave's ledger claims local truth; CI
 is the evidence.** Every number in every block of this campaign was measured on
 one Windows machine, in the dev profile, by the wave that wrote it. That is the
 strongest claim a wave can make and it is not the same as a green tree on three
-operating systems: none of these ten waves has been pushed, and the campaign's
-CI verdict does not exist yet. The dev/release split is not academic here —
-R3-1's mutation *aborted* the battery on a live C assert that is compiled out of
-every shipping build, so the configuration that proves the guard is not the
+operating systems. The dev/release split is not academic here — R3-1's mutation
+*aborted* the battery on a live C assert that is **compiled out of every
+shipping build**, so the configuration that proved the guard is not the
 configuration that needed it.
+
+**And the first draft of this very paragraph was wrong, which is the cleanest
+instance of its own point.** It read "none of these ten waves has been pushed,
+and the campaign's CI verdict does not exist yet" — inferred from the fact that
+every wave block, this one included, ends in "NOT PUSHED". Measured instead:
+`git ls-remote origin refs/heads/main` answers **40210b3**, Wave I's ledger
+commit, and the local `origin/main` reflog records three `update by push`
+entries. **Waves A through I are on the remote and have a CI verdict**; each
+block's "NOT PUSHED" was true when it was written and stopped being true minutes
+later, when the wave was pushed. A ledger that records a moment and is never
+revisited will say that moment for ever. What is genuinely unpushed is **Wave J
+alone** — these ten commits, by instruction — so the campaign's *closing* CI
+verdict is the one that does not exist yet.
 
 **Wave H's correction, stated because a ledger that only accumulates is not a
 record.** Wave H's block opens on round 1 having closed C4-30 with "its own
