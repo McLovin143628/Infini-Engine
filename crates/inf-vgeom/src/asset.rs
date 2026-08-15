@@ -949,25 +949,13 @@ fn pair_page_tiles(
 
 /// Reject a mesh whose micro-index ranges do not fit its buffers, so every later
 /// slice in this module is unchecked-safe.
+///
+/// **One rule, two entrances** (round-2 finding B2's sweep): the questions live
+/// on [`VgeomMesh::validate`], because `VgeomMesh` implements `AssetPayload`
+/// and a generic caller can decode one without ever reaching this module. This
+/// wrapper is the container-side entrance and keeps the error type.
 fn validate(mesh: &VgeomMesh) -> Result<()> {
-    for (i, m) in mesh.meshlets.iter().enumerate() {
-        let v_end = m.vertex_offset as usize + m.vertex_count as usize;
-        let t_end = m.triangle_offset as usize + m.triangle_count as usize * 3;
-        if v_end > mesh.meshlet_vertices.len() || t_end > mesh.meshlet_triangles.len() {
-            return Err(VgeomAssetError::Malformed(format!(
-                "meshlet {i} micro-index range is out of bounds"
-            )));
-        }
-        if mesh.meshlet_vertices[m.vertex_offset as usize..v_end]
-            .iter()
-            .any(|&v| v as usize >= mesh.vertices.len())
-        {
-            return Err(VgeomAssetError::Malformed(format!(
-                "meshlet {i} references a vertex past the buffer"
-            )));
-        }
-    }
-    Ok(())
+    mesh.validate().map_err(VgeomAssetError::Malformed)
 }
 
 /// A validated v2 `.inf_vmesh` payload image. Owns its bytes; this — not

@@ -91,6 +91,35 @@ impl AssetPayload for SkeletonAsset {
     fn schema_version(&self) -> u32 {
         self.schema_version
     }
+
+    /// Reject newer-than-current, then re-ask [`Skeleton::new`]'s own questions
+    /// of the decoded rig (round-2 finding **B2**'s default-`migrate` sweep).
+    ///
+    /// `Skeleton::joints` is private and `Skeleton` derives `Deserialize`, and
+    /// serde's derive is expanded in `skeleton.rs` itself — so it builds the
+    /// struct straight from the wire and `Skeleton::new`'s validation never
+    /// runs on the decode path. A `.inf_skel` naming a parent past the end of
+    /// its own joint list decoded cleanly, and
+    /// [`crate::pose::global_transforms`] then indexes `globals[p as usize]`
+    /// with no bound: a panic on **every** posed character, in the editor, in
+    /// PIE and in the shipped player reading a cooked pack. It is also the one
+    /// asset whose in-range-but-wrong case is silent — a non-topological
+    /// parent reads the identity slot ahead of it and produces a pose that is
+    /// wrong rather than missing.
+    fn migrate(self) -> inf_asset::Result<Self> {
+        let found = self.schema_version;
+        if found > Self::SCHEMA_VERSION {
+            return Err(inf_asset::AssetError::SchemaTooNew {
+                kind: Self::KIND.slug(),
+                found,
+                current: Self::SCHEMA_VERSION,
+            });
+        }
+        self.skeleton
+            .validate()
+            .map_err(|e| inf_asset::AssetError::Decode(format!("invalid skeleton: {e}")))?;
+        Ok(self)
+    }
 }
 
 /// The `.inf_anim` payload: one [`AnimClip`] plus the GUID of the skeleton it
@@ -445,5 +474,65 @@ mod tests {
         let back: StateMachineAsset = decode(&e1).unwrap();
         assert_eq!(back, a);
         assert_eq!(back.skeleton, Some([9u8; 16]));
+    }
+
+    /// **Round-2 finding B2's sweep, the one that was a live crash.**
+    ///
+    /// `Skeleton::joints` is private and `Skeleton` derives `Deserialize`, and
+    /// serde's derive is expanded in `skeleton.rs` itself — so it builds the
+    /// struct straight from the wire and `Skeleton::new`'s validation never
+    /// ran on the decode path. `pose::global_transforms` then indexes
+    /// `globals[p as usize]` with no bound: every posed character, every
+    /// socket resolve, every cloth and hair seed, and the IK solve (which
+    /// walks the whole skeleton, not just its chain), in the editor, in PIE
+    /// and in the shipped player reading a cooked pack.
+    ///
+    /// The hostile rigs are built through **serde** rather than
+    /// `Skeleton::new`, which is exactly how a corrupt file arrives.
+    #[test]
+    fn a_skeleton_naming_a_parent_it_does_not_have_is_refused_at_decode() {
+        use crate::skeleton::{Joint, JointTransform};
+
+        let joint = |name: &str, parent: Option<u16>| Joint {
+            name: name.into(),
+            parent,
+            inverse_bind: glam::Mat4::IDENTITY.to_cols_array(),
+            local_bind: JointTransform::IDENTITY,
+        };
+        // The wire shape, straight through serde — the door `Skeleton::new`
+        // does not stand in.
+        let wire = |joints: Vec<Joint>| -> Skeleton {
+            serde_json::from_value(serde_json::json!({ "joints": joints }))
+                .expect("serde builds the struct without asking Skeleton::new")
+        };
+
+        // Control: a healthy two-joint rig round-trips.
+        let ok = SkeletonAsset::new(wire(vec![joint("root", None), joint("child", Some(0))]));
+        let bytes = encode(&ok).unwrap();
+        decode::<SkeletonAsset>(&bytes).expect("a healthy rig must still decode");
+
+        // A parent past the end.
+        let hostile = wire(vec![joint("root", None), joint("child", Some(9999))]);
+        let bytes = encode(&SkeletonAsset::new(hostile)).unwrap();
+        let e = decode::<SkeletonAsset>(&bytes)
+            .expect_err("a parent past the joint list decoded as a valid rig");
+        assert!(
+            e.to_string().contains("9999"),
+            "the refusal must name the offending parent: {e}"
+        );
+
+        // The silent case: an in-range parent that does not precede its child
+        // reads the still-identity slot ahead of it, so the pose is wrong
+        // rather than absent.
+        let backwards = wire(vec![joint("a", Some(1)), joint("b", None)]);
+        let bytes = encode(&SkeletonAsset::new(backwards)).unwrap();
+        assert!(
+            decode::<SkeletonAsset>(&bytes).is_err(),
+            "a non-topological rig decoded as valid"
+        );
+
+        // An empty rig is not a rig.
+        let bytes = encode(&SkeletonAsset::new(wire(Vec::new()))).unwrap();
+        assert!(decode::<SkeletonAsset>(&bytes).is_err());
     }
 }

@@ -139,14 +139,38 @@ impl Skeleton {
     /// Build and validate a skeleton. Errors if empty, oversized, or if any
     /// parent index is out of range or does not precede its child.
     pub fn new(joints: Vec<Joint>) -> Result<Self, SkeletonError> {
-        if joints.is_empty() {
+        let me = Self { joints };
+        me.validate()?;
+        Ok(me)
+    }
+
+    /// The questions [`Skeleton::new`] asks, asked of a skeleton that already
+    /// exists (round-2 finding B2's sweep).
+    ///
+    /// # Why this is separable at all
+    ///
+    /// `joints` is private and `Skeleton` derives `Deserialize`, and serde's
+    /// derive is expanded in this very module — so it reconstructs `Skeleton {
+    /// joints }` **directly from the wire and never calls `new`**. A `.inf_skel`
+    /// whose joint 1 names parent 9999 therefore decoded as a perfectly valid
+    /// skeleton, and [`crate::pose::global_transforms`] indexes
+    /// `globals[p as usize]` with no bound — a panic in the editor, in PIE and
+    /// in the shipped player reading a cooked pack, reachable from every posed
+    /// character, every socket resolve, every cloth and hair seed and the IK
+    /// solve (which walks the whole skeleton, not just its chain).
+    ///
+    /// An in-range but non-topological parent does not panic: it reads the
+    /// still-identity slot ahead of it and produces a pose that is wrong rather
+    /// than absent, which is worse.
+    pub fn validate(&self) -> Result<(), SkeletonError> {
+        if self.joints.is_empty() {
             return Err(SkeletonError::Empty);
         }
-        if joints.len() > u16::MAX as usize + 1 {
-            return Err(SkeletonError::TooManyJoints(joints.len()));
+        if self.joints.len() > u16::MAX as usize + 1 {
+            return Err(SkeletonError::TooManyJoints(self.joints.len()));
         }
-        let len = joints.len();
-        for (i, joint) in joints.iter().enumerate() {
+        let len = self.joints.len();
+        for (i, joint) in self.joints.iter().enumerate() {
             if let Some(parent) = joint.parent {
                 if parent as usize >= len {
                     return Err(SkeletonError::ParentOutOfRange {
@@ -160,7 +184,7 @@ impl Skeleton {
                 }
             }
         }
-        Ok(Self { joints })
+        Ok(())
     }
 
     /// The joints, in topological order.

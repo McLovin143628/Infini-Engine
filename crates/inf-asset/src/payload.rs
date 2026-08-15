@@ -51,6 +51,32 @@ pub trait AssetPayload: Serialize + DeserializeOwned {
     /// Upgrade an older decoded value to [`Self::SCHEMA_VERSION`]. The default
     /// accepts equal-or-older and rejects newer; override to chain real
     /// migrations (v1→v2→…).
+    ///
+    /// # This is also the structural door (round-2 finding B2)
+    ///
+    /// A payload on disk is bytes somebody else wrote — the Content Drawer
+    /// scans every loose file under the project root — so `migrate` is the one
+    /// place a decoded body is inspected before a dozen readers trust it. Wave
+    /// B's unit U6 made that argument for `TextureAsset` and `AnimClipAsset`;
+    /// round 2 swept the remaining implementors and dispositioned each by
+    /// **whether any production consumer uses a field as an index, an
+    /// allocation size, a divisor or a raw FFI argument with no bound of its
+    /// own**:
+    ///
+    /// | payload | disposition |
+    /// |---|---|
+    /// | `MeshAsset` | **structural migrate added** — its index buffer reaches `meshopt`'s raw FFI from two consumers |
+    /// | `SkeletonAsset` | **structural migrate added** — `Skeleton`'s field is private and serde bypasses `Skeleton::new`, so a parent index past the joint list panicked `pose::global_transforms` on every posed character |
+    /// | `VgeomMesh` | **structural migrate added** — safe only by the convention that everything goes through `VgeomSource`; `triangle()` documents its own panic |
+    /// | `StateMachineAsset` | safe — every `entry`/`from`/`to` read is `.min()`-clamped or `<`-guarded in `state_machine.rs` |
+    /// | `ClothAsset`, `HairAsset` | safe — `validate()` runs unconditionally in `seed()`, and a garment that fails is skipped rather than simulated |
+    /// | `StructAsset`, `EnumAsset` | safe — no field of theirs is an index, a size or a divisor |
+    /// | `TableAsset` | safe — rows are walked with `.iter()`; a row/column disagreement is C4-42's import advisory, never an unchecked `row[col]` |
+    /// | `MaterialAsset`, `DerivedMaterial` | safe — GUIDs and PBR floats; the one divided factor is clamped in `mesh.wgsl` |
+    /// | `AudioAsset` | safe — `sample_rate`/`duration_secs` have no production reader at all; playback re-parses the original bytes |
+    /// | `MaterialInstance` | safe — `parent` is a GUID and both resolvers carry the `depth > 16` guard |
+    ///
+    /// A new implementor answers the same question before it takes the default.
     fn migrate(self) -> Result<Self>
     where
         Self: Sized,

@@ -574,11 +574,72 @@ pub fn pick_classic_level(errors: &[f32], threshold: f32) -> usize {
     pick
 }
 
+impl VgeomMesh {
+    /// Reject a mesh whose index ranges do not fit its own buffers, so every
+    /// later slice is unchecked-safe (round-2 finding **B2**'s
+    /// default-`migrate` sweep).
+    ///
+    /// [`VgeomMesh::triangle`] says in its own doc that it *"panics on
+    /// out-of-range indices (a corrupt payload)"*, and
+    /// [`VgeomMesh::classic_lods`] walks `LevelRange` just as bluntly. The
+    /// engine is safe today because `inf_vgeom::asset`'s two validators stand
+    /// in front of every production path — but that safety is a **convention
+    /// about which door you use**, not a property of the type, and this type
+    /// implements `AssetPayload`, whose whole point is that a caller can decode
+    /// it generically. `asset::validate` now delegates here, so there is one
+    /// rule with two entrances rather than two rules.
+    pub fn validate(&self) -> Result<(), String> {
+        for (i, m) in self.meshlets.iter().enumerate() {
+            let v_end = m.vertex_offset as usize + m.vertex_count as usize;
+            let t_end = m.triangle_offset as usize + m.triangle_count as usize * 3;
+            if v_end > self.meshlet_vertices.len() || t_end > self.meshlet_triangles.len() {
+                return Err(format!("meshlet {i} micro-index range is out of bounds"));
+            }
+            if self.meshlet_vertices[m.vertex_offset as usize..v_end]
+                .iter()
+                .any(|&v| v as usize >= self.vertices.len())
+            {
+                return Err(format!("meshlet {i} references a vertex past the buffer"));
+            }
+        }
+        // The level table, which `classic_lods` indexes with equally bare
+        // `[]`. `asset::validate` never looked at it.
+        for (i, l) in self.levels.iter().enumerate() {
+            let end = l.meshlet_start as usize + l.meshlet_count as usize;
+            if end > self.meshlets.len() {
+                return Err(format!("lod level {i} names meshlets past the buffer"));
+            }
+        }
+        for (i, g) in self.groups.iter().enumerate() {
+            let end = g.produced_start as usize + g.produced_count as usize;
+            if end > self.meshlets.len() {
+                return Err(format!("group {i} produced meshlets past the buffer"));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl AssetPayload for VgeomMesh {
     const KIND: AssetKind = AssetKind::MeshletMesh;
     const SCHEMA_VERSION: u32 = Self::CURRENT_VERSION;
     fn schema_version(&self) -> u32 {
         self.schema_version
+    }
+
+    /// Reject newer-than-current, then [`VgeomMesh::validate`].
+    fn migrate(self) -> inf_asset::Result<Self> {
+        let found = self.schema_version;
+        if found > Self::SCHEMA_VERSION {
+            return Err(inf_asset::AssetError::SchemaTooNew {
+                kind: Self::KIND.slug(),
+                found,
+                current: Self::SCHEMA_VERSION,
+            });
+        }
+        self.validate()
+            .map_err(|e| inf_asset::AssetError::Decode(format!("invalid meshlet mesh: {e}")))?;
+        Ok(self)
     }
 }
 
@@ -792,5 +853,62 @@ mod tangent_tests {
         }
         assert!(unpack_tangent(NO_TANGENT).is_none());
         assert_eq!(VgeomVertex::default().tangent, NO_TANGENT);
+    }
+}
+
+#[cfg(test)]
+mod payload_door_tests {
+    use super::*;
+    use crate::test_support::dense_mesh as dense;
+
+    /// **Round-2 finding B2's sweep**: `VgeomMesh` implements `AssetPayload`,
+    /// so a caller can decode one generically without ever reaching
+    /// `inf_vgeom::asset` — and `triangle()`'s own doc says it *"panics on
+    /// out-of-range indices (a corrupt payload)"*. The engine is safe today
+    /// because every production path happens to go through `VgeomSource`, but
+    /// that is a convention about which door you use, not a property of the
+    /// type. The rule now lives on the type and both entrances call it.
+    #[test]
+    fn a_meshlet_mesh_with_ranges_past_its_buffers_is_refused_at_decode() {
+        let good = dense(24);
+        assert!(!good.meshlets.is_empty(), "the fixture is vacuous");
+        let bytes = inf_asset::encode(&good).unwrap();
+        inf_asset::decode::<VgeomMesh>(&bytes).expect("a healthy DAG must still decode");
+
+        // A micro-index range past the end of `meshlet_vertices`.
+        let mut m = good.clone();
+        m.meshlets[0].vertex_offset = m.meshlet_vertices.len() as u32;
+        m.meshlets[0].vertex_count = 4;
+        let bytes = inf_asset::encode(&m).unwrap();
+        assert!(
+            inf_asset::decode::<VgeomMesh>(&bytes).is_err(),
+            "a meshlet naming micro-indices past the buffer decoded as valid"
+        );
+
+        // A vertex index past the end of `vertices`.
+        let mut m = good.clone();
+        let last = m.meshlet_vertices.len() - 1;
+        m.meshlet_vertices[last] = m.vertices.len() as u32;
+        let bytes = inf_asset::encode(&m).unwrap();
+        assert!(inf_asset::decode::<VgeomMesh>(&bytes).is_err());
+
+        // A LOD level naming meshlets past the buffer — `classic_lods` walks
+        // this with equally bare `[]`, and `asset::validate` never looked at it.
+        let mut m = good.clone();
+        m.levels[0].meshlet_count = m.meshlets.len() as u32 + 1;
+        let bytes = inf_asset::encode(&m).unwrap();
+        assert!(
+            inf_asset::decode::<VgeomMesh>(&bytes).is_err(),
+            "a level range past the meshlet buffer decoded as valid"
+        );
+
+        // And a group producing meshlets past the buffer.
+        if !good.groups.is_empty() {
+            let mut m = good.clone();
+            m.groups[0].produced_start = m.meshlets.len() as u32;
+            m.groups[0].produced_count = 1;
+            let bytes = inf_asset::encode(&m).unwrap();
+            assert!(inf_asset::decode::<VgeomMesh>(&bytes).is_err());
+        }
     }
 }
