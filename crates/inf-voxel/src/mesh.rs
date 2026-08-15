@@ -145,26 +145,46 @@ impl VoxelMesh {
         let b = self.key.base_sample();
         self.positions
             .iter()
-            .map(|p| {
-                [
-                    ((p[0] - b[0] as f64) * voxel_size_m) as f32,
-                    ((p[1] - b[1] as f64) * voxel_size_m) as f32,
-                    ((p[2] - b[2] as f64) * voxel_size_m) as f32,
-                ]
-            })
+            .map(|p| Self::rebase(p, b, voxel_size_m))
             .collect()
+    }
+
+    /// One position, rebased — the ONE expression
+    /// [`local_positions_m`](Self::local_positions_m) and
+    /// [`local_bounds_m`](Self::local_bounds_m) share.
+    ///
+    /// Extracted (Hardening Wave E) so the bounds can be folded in a single pass
+    /// without either re-materializing the whole stream *or* growing a second
+    /// copy of the rebase arithmetic beside it — which would be the same
+    /// "two copies of one expression" hazard the seam laws already name.
+    #[inline]
+    fn rebase(p: &[f64; 3], b: [i32; 3], voxel_size_m: f64) -> [f32; 3] {
+        [
+            ((p[0] - b[0] as f64) * voxel_size_m) as f32,
+            ((p[1] - b[1] as f64) * voxel_size_m) as f32,
+            ((p[2] - b[2] as f64) * voxel_size_m) as f32,
+        ]
     }
 
     /// Inclusive `(min, max)` chunk-local AABB in metres — the per-chunk frustum
     /// cull bound. `([0;3], [0;3])` for an empty mesh.
+    ///
+    /// Folded in **one** pass over [`positions`](Self::positions). It used to call
+    /// [`local_positions_m`](Self::local_positions_m) and min/max the result,
+    /// which meant every projected frame rebased and allocated the whole vertex
+    /// stream a **second** time purely to throw it away six floats later — and
+    /// both hosts call this once per resident chunk per frame, right beside the
+    /// call whose output it duplicated.
     pub fn local_bounds_m(&self, voxel_size_m: f64) -> ([f32; 3], [f32; 3]) {
-        let local = self.local_positions_m(voxel_size_m);
-        let Some(first) = local.first() else {
+        let b = self.key.base_sample();
+        let Some(first) = self.positions.first() else {
             return ([0.0; 3], [0.0; 3]);
         };
-        let mut lo = *first;
-        let mut hi = *first;
-        for p in &local {
+        let first = Self::rebase(first, b, voxel_size_m);
+        let mut lo = first;
+        let mut hi = first;
+        for p in &self.positions {
+            let p = Self::rebase(p, b, voxel_size_m);
             for a in 0..3 {
                 lo[a] = lo[a].min(p[a]);
                 hi[a] = hi[a].max(p[a]);

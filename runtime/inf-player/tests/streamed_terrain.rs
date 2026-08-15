@@ -198,7 +198,10 @@ fn rendered_frame(sim: &RuntimeSim) -> FrameTrace {
         .terrain_streaming()
         .render_data(STREAMED_TERRAIN_TERRAIN_GUID)
         .unwrap_or(&terrain.data);
-    let dto = inf_player::render::project_terrain(terrain, data, DVec3::ZERO);
+    // Unkeyed (`0`) and with nothing to carry: this fingerprints a COLD
+    // projection on purpose — the whole point is that two runs build the same
+    // bytes from the same world, which a memo would hide rather than prove.
+    let dto = inf_player::render::project_terrain(terrain, data, DVec3::ZERO, 0, &mut Vec::new());
     dto.tiles
         .iter()
         .map(|t| {

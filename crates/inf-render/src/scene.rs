@@ -978,15 +978,39 @@ pub struct RenderTerrainTile {
 /// ground at all), so using it in place of a mask that *is* present would trade a
 /// correct answer for an approximate one — and would silently move every existing
 /// golden, which has an inline terrain and therefore a mask.
+///
+/// # It writes every vertex it visits, refusals included (Hardening Wave E)
+///
+/// Originally it *skipped* a vertex it refused to seam, which was correct while
+/// the only input it ever saw was a freshly projected volume — one whose terms
+/// are already [`RenderVoxelVertex::NO_SEAM`]. Both hosts now carry an unchanged
+/// volume forward from the previous frame rather than rebuilding it (the P2
+/// memo), and a carried volume arrives holding **last frame's** seam terms: a
+/// vertex that used to be seamed and is now refused would have kept a stale
+/// blend, and a terrain that left the scene entirely would have frozen the seam
+/// it was last sampled at.
+///
+/// So the refusals write the sentinel explicitly, and the "nothing to sample"
+/// case clears rather than returns. The result is a **pure function of
+/// `(positions, normals, terrains, band_m)`** — which is what makes re-running it
+/// over a carried volume produce the same bytes as running it over a fresh one,
+/// and therefore what makes the memo safe. For every caller that existed before
+/// this change the behaviour is byte-identical: a fresh vertex already carries
+/// the sentinel.
 pub fn apply_seam(volumes: &mut [RenderVoxelVolume], terrains: &[RenderTerrain], band_m: f32) {
-    if band_m <= 0.0 || terrains.is_empty() {
-        return;
-    }
+    let armed = band_m > 0.0 && !terrains.is_empty();
     for volume in volumes {
-        volume.seam_band_m = band_m;
+        volume.seam_band_m = if armed { band_m } else { 0.0 };
         for chunk in &mut volume.chunks {
             let base = chunk.origin;
             for v in &mut chunk.vertices {
+                // Cleared FIRST, so every path below — including each `continue`
+                // — leaves the sentinel rather than whatever was there before.
+                v.seam_nh = RenderVoxelVertex::NO_SEAM;
+                v.seam_albedo = [0.0; 4];
+                if !armed {
+                    continue;
+                }
                 let wx = base.x + v.pos[0] as f64;
                 let wy = base.y + v.pos[1] as f64;
                 let wz = base.z + v.pos[2] as f64;
@@ -1023,6 +1047,124 @@ pub fn apply_seam(volumes: &mut [RenderVoxelVolume], terrains: &[RenderTerrain],
             }
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The producer memos (Hardening Wave E, 2026-08-14)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// **The class, stated once for both functions below.**
+//
+// `RenderTerrainTile::version` and `RenderVoxelChunk::version` are monotone
+// change stamps, and every *consumer* in this crate honours them: the terrain
+// pass's `plan_tile_cache` and the voxel pass's `plan_chunk_cache` both discard
+// an incoming payload whose stamp matches the one their cached GPU copy was
+// built at. What no consumer could do is stop the payload from being *built*.
+//
+// So both hosts rebuilt, every frame, per resident tile: a `heights().to_vec()`,
+// a resolved `weights` buffer, a resolved `biomes` buffer, a packed hole mask
+// and a full res² min/max rescan for the bounds — and per resident chunk: two
+// full rebases of the position stream (`local_bounds_m` called
+// `local_positions_m` a second time), a mapped vertex stream and an
+// `indices.clone()`. At the Phase-16 gate scene's 84 tiles that is ~12.6 MB of
+// allocation and memcpy per frame, ~760 MB/s at 60 Hz, thrown away by a
+// consumer that already knew nothing had changed.
+//
+// The two functions below close it the cheapest way there is: the payload the
+// host built LAST frame is still sitting in the scene, so it is carried forward
+// rather than rebuilt. That makes a hit cost a `Vec` move and zero bytes copied,
+// and it needs no cache, no eviction policy and no lifetime — the memo IS the
+// previous frame's scene.
+//
+// **Why the key is sound.** Both stamps are drawn from a *process-global*
+// atomic (`inf_terrain`'s `NEXT_TILE_VERSION`, `inf_voxel`'s
+// `NEXT_MESH_VERSION`), so a stamp is unique across every terrain, every volume
+// and every level in the process — a stale hit is not merely unlikely, it is
+// unreachable. `0` means "not in the ledger" on both sides and is treated as a
+// forced miss, exactly as the GPU caches treat it.
+//
+// **Why a max-fold would NOT have been sound**, recorded because it is the
+// obvious cheaper thing: a removal (`TerrainData::evict_tile`,
+// `VoxelMeshCache::sync`'s drop pass) *deletes* the ledger entry rather than
+// minting a new number, so the maximum stamp over a set is blind to the
+// eviction of a non-maximal member. Both functions therefore walk the whole
+// sequence and compare it element for element against the carried list —
+// lengths, keys, `f64` origins and stamps — which sees an insertion, a removal
+// and a reorder alike. It is O(tiles) scalar comparisons against O(tiles × res²)
+// bytes.
+
+/// Carry an unchanged [`RenderTerrain`] forward from the previous frame's scene
+/// instead of rebuilding it — see the block above for the class.
+///
+/// `prev` is last frame's list, which the caller has taken out of the scene; a
+/// match is **removed** from it, so the leftovers at the end of a projection are
+/// exactly the terrains that left the scene. Returns `None` when anything the
+/// projection would produce differs, in which case the caller projects normally.
+///
+/// Everything a projection derives is compared: the identity and grid
+/// (`id`, `tile_resolution`, `meters_per_sample`), the authored surface
+/// (`layers`, `macro_variation`, `biome_palette`) and the whole tile sequence in
+/// the order it is emitted — level 0 ascending, then the coarse pyramid
+/// ascending, which is the order both hosts build it in and the order this walks.
+pub fn take_unchanged_terrain(
+    prev: &mut Vec<RenderTerrain>,
+    id: u64,
+    tile_resolution: u32,
+    meters_per_sample: f64,
+    layers: &[RenderTerrainLayer; 4],
+    macro_variation: f32,
+    biome_palette: &[[f32; 4]],
+    tiles: impl Iterator<Item = (TerrainTileKey, DVec3, u64)>,
+) -> Option<RenderTerrain> {
+    let at = prev.iter().position(|t| t.id == id)?;
+    if !prev[at].tiles_match(tiles)
+        || prev[at].tile_resolution != tile_resolution
+        || prev[at].meters_per_sample != meters_per_sample
+        || prev[at].layers != *layers
+        || prev[at].macro_variation != macro_variation
+        || prev[at].biome_palette != biome_palette
+    {
+        return None;
+    }
+    Some(prev.remove(at))
+}
+
+/// Carry an unchanged [`RenderVoxelVolume`] forward from the previous frame's
+/// scene instead of rebuilding it — the voxel twin of
+/// [`take_unchanged_terrain`], see the block above for the class.
+///
+/// `chunks` yields `(key, world origin, stamp)` per resident chunk, in the order
+/// the projection emits them (ascending [`VoxelChunkKey`]).
+///
+/// The carried volume keeps the **seam terms** [`apply_seam`] wrote into it last
+/// frame. That is safe precisely because `apply_seam` writes every vertex it
+/// visits (including its refusals) and clears when there is nothing to sample —
+/// so re-running it produces the same bytes on a carried volume as on a fresh
+/// one, and a caller that skips it because nothing changed keeps terms that are
+/// still correct. Neither property was true before this wave, which is why they
+/// are stated on `apply_seam` itself as well.
+pub fn take_unchanged_voxel(
+    prev: &mut Vec<RenderVoxelVolume>,
+    id: u64,
+    layers: &[RenderTerrainLayer; 4],
+    chunks: impl Iterator<Item = (VoxelChunkKey, DVec3, u64)>,
+) -> Option<RenderVoxelVolume> {
+    let at = prev.iter().position(|v| v.id == id)?;
+    if prev[at].layers != *layers {
+        return None;
+    }
+    let mut walked = 0usize;
+    let matched = chunks.into_iter().all(|(key, origin, version)| {
+        let ok = prev[at].chunks.get(walked).is_some_and(|c| {
+            version != 0 && c.version == version && c.key == key && c.origin == origin
+        });
+        walked += 1;
+        ok
+    });
+    if !matched || walked != prev[at].chunks.len() {
+        return None;
+    }
+    Some(prev.remove(at))
 }
 
 /// Does a voxel surface with normal `voxel_n` *continue* a heightfield whose
@@ -1230,6 +1372,27 @@ pub struct RenderTerrain {
 }
 
 impl RenderTerrain {
+    /// Whether this terrain's tile list is exactly the sequence `tiles`
+    /// describes — same length, same keys, same `f64` origins, same stamps, and
+    /// no stamp of `0` (the "not in the ledger" value, which is a forced miss on
+    /// the same rule the GPU tile cache applies).
+    ///
+    /// The whole sequence, element for element, rather than a fold: a removal
+    /// *deletes* a stamp from the source's ledger instead of minting a new one,
+    /// so a maximum over the set is blind to the eviction of a non-maximal
+    /// member. See the memo block above [`take_unchanged_terrain`].
+    fn tiles_match(&self, tiles: impl Iterator<Item = (TerrainTileKey, DVec3, u64)>) -> bool {
+        let mut walked = 0usize;
+        let ok = tiles.into_iter().all(|(key, origin, version)| {
+            let ok = self.tiles.get(walked).is_some_and(|t| {
+                version != 0 && t.version == version && t.key == key && t.origin == origin
+            });
+            walked += 1;
+            ok
+        });
+        ok && walked == self.tiles.len()
+    }
+
     /// World edge length of one **level-0** tile: `(resolution − 1) · mps`. Also
     /// the unit the clipmap ring thresholds are scaled by.
     pub fn tile_span(&self) -> f64 {
@@ -2250,6 +2413,92 @@ mod tests {
             RenderVoxelVertex::NO_SEAM,
             "a vertex off the terrain must not pick up a seam"
         );
+    }
+
+    /// **The idempotency arm** (Hardening Wave E) — the property that makes it
+    /// safe for a host to carry an unchanged volume forward instead of rebuilding
+    /// it.
+    ///
+    /// Before this wave `apply_seam` *skipped* a vertex it refused, which is
+    /// indistinguishable from clearing it as long as the input is always a fresh
+    /// projection. It no longer is: `take_unchanged_voxel` hands back the volume
+    /// this function wrote into last frame. So a vertex that was seamed and is now
+    /// refused — because the terrain under it moved, was holed, or left the scene
+    /// entirely — has to come back to the sentinel, or a cave mouth keeps a blend
+    /// against ground that is no longer there for the rest of the session.
+    ///
+    /// Three refusal routes, one arm: the terrain moves out of reach, the terrain
+    /// list empties, and the band is disarmed. All three re-run over an
+    /// **already-seamed** volume, which is the case that did not exist before.
+    #[test]
+    fn re_seaming_an_already_seamed_volume_clears_what_it_refuses() {
+        let terrain = seam_terrain(false);
+        let mut volumes = vec![RenderVoxelVolume {
+            id: 1,
+            chunks: vec![RenderVoxelChunk {
+                key: VoxelChunkKey::default(),
+                origin: DVec3::ZERO,
+                // Directly under the cell `seam_terrain(true)` holes, so the
+                // SAME vertex is seamed by the unholed terrain and refused by
+                // the holed one — a carve under a cave mouth, exactly.
+                vertices: vec![RenderVoxelVertex {
+                    pos: [2.0, 0.0, 2.0],
+                    normal: [0.0, 1.0, 0.0],
+                    material: 0,
+                    seam_nh: RenderVoxelVertex::NO_SEAM,
+                    seam_albedo: [0.0; 4],
+                }],
+                indices: vec![0, 0, 0],
+                bounds: ([0.0; 3], [1.0; 3]),
+                version: 1,
+            }],
+            layers: [RenderTerrainLayer::default(); 4],
+            seam_band_m: 0.0,
+        }];
+
+        apply_seam(&mut volumes, std::slice::from_ref(&terrain), 2.0);
+        let seamed = volumes[0].chunks[0].vertices[0];
+        assert!(
+            seamed.seam_nh != RenderVoxelVertex::NO_SEAM && volumes[0].seam_band_m == 2.0,
+            "the fixture must actually seam, or every case below is vacuous: {seamed:?}"
+        );
+
+        // (1) The ground under it was carved through — the poison rule refuses.
+        let holed = seam_terrain(true);
+        let mut carried = volumes.clone();
+        apply_seam(&mut carried, std::slice::from_ref(&holed), 2.0);
+        assert_eq!(
+            carried[0].chunks[0].vertices[0].seam_nh,
+            RenderVoxelVertex::NO_SEAM,
+            "a carried volume kept a seam against ground that was carved away"
+        );
+        assert_eq!(carried[0].chunks[0].vertices[0].seam_albedo, [0.0; 4]);
+
+        // (2) The terrain left the scene entirely.
+        let mut carried = volumes.clone();
+        apply_seam(&mut carried, &[], 2.0);
+        assert_eq!(
+            carried[0].chunks[0].vertices[0].seam_nh,
+            RenderVoxelVertex::NO_SEAM,
+            "a carried volume kept a seam after every terrain left"
+        );
+        assert_eq!(carried[0].seam_band_m, 0.0);
+
+        // (3) The band was disarmed.
+        let mut carried = volumes.clone();
+        apply_seam(&mut carried, std::slice::from_ref(&terrain), 0.0);
+        assert_eq!(
+            carried[0].chunks[0].vertices[0].seam_nh,
+            RenderVoxelVertex::NO_SEAM,
+            "a carried volume kept a seam after the band was disarmed"
+        );
+        assert_eq!(carried[0].seam_band_m, 0.0);
+
+        // …and re-running with the SAME inputs is a fixed point, which is the
+        // half that says a memo hit and a memo miss produce the same bytes.
+        let mut again = volumes.clone();
+        apply_seam(&mut again, std::slice::from_ref(&terrain), 2.0);
+        assert_eq!(again, volumes, "re-seaming an unchanged pair moved bytes");
     }
 
     /// **THE F3 GATE: two hosts, two list orders, one seam.**

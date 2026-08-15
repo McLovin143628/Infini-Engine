@@ -560,12 +560,20 @@ pub fn project_scene_full(
     // unchanged character re-uses the GPU upload even though the list is rebuilt.
     scene.skinned_meshes.clear();
     scene.skinned.clear();
-    scene.terrains.clear();
-    // P21.1: volumetric terrain. Rebuilt from scratch every projection like
-    // `terrains`; the meshed surface behind each chunk lives in the host's store
-    // and is re-meshed only where the field moved, so re-projecting an unchanged
-    // cave costs a copy of its vertex streams and no meshing at all.
-    scene.voxels.clear();
+    // P16.3b1 + Hardening Wave E: terrains are NOT cleared — they are
+    // **stamp-gated**, like `deform` below and unlike everything above. Last
+    // frame's list is taken out and each entry is either carried forward whole
+    // (nothing about its grid, layers or per-tile stamps moved) or dropped and
+    // rebuilt. What is left in `prev_terrains` at the end of the walk is exactly
+    // the terrains that left the scene, which is how a disappearance is seen.
+    let mut prev_terrains = std::mem::take(&mut scene.terrains);
+    // P21.1 + Hardening Wave E: volumetric terrain, on the same stamp gate. The
+    // meshed surface behind each chunk lives in the host's store and is re-meshed
+    // only where the field moved, so a settled cave now costs the comparison of
+    // its chunk stamps and no copying at all — it used to cost two rebases of
+    // every vertex stream, a mapped copy and an index clone, every frame.
+    let mut prev_voxels = std::mem::take(&mut scene.voxels);
+    let (terrains_before, voxels_before) = (prev_terrains.len(), prev_voxels.len());
     scene.fracture_chunks.clear();
     // P18.5: GPU-instanced scatter (PCG volumes + painted foliage) is rebuilt from
     // scratch every projection, exactly like `instances`. The payload behind each
@@ -686,9 +694,14 @@ pub fn project_scene_full(
                 .render_data(guid)
                 .unwrap_or(&terrain.data);
             if !data.is_empty() || data.coarse_tile_count() > 0 {
-                let mut rt = project_terrain(terrain, data, translation);
-                rt.id = inf_render::terrain_id_from_guid(guid.as_u128());
-                scene.terrains.push(rt);
+                let id = inf_render::terrain_id_from_guid(guid.as_u128());
+                scene.terrains.push(project_terrain(
+                    terrain,
+                    data,
+                    translation,
+                    id,
+                    &mut prev_terrains,
+                ));
             }
         }
         // Volumetric terrain (P21.1): the SDF chunk volume that locally extends
@@ -708,6 +721,7 @@ pub fn project_scene_full(
                         w.get::<Terrain>(entity),
                         translation,
                         inf_render::terrain_id_from_guid(guid.as_u128()),
+                        &mut prev_voxels,
                     )
                 });
             if let Some(rv) = projected {
@@ -1063,11 +1077,26 @@ pub fn project_scene_full(
     //
     // Runs last, because it needs BOTH halves projected, and once per
     // projection (a change stamp) rather than per frame.
-    inf_render::apply_seam(
-        &mut scene.voxels,
-        &scene.terrains,
-        inf_render::DEFAULT_SEAM_BAND_M,
-    );
+    //
+    // Hardening Wave E: and now not even that. The seam is a pure function of the
+    // volumes' vertices and the terrains, so when EVERY volume and EVERY terrain
+    // in this scene was carried forward unchanged — nothing dropped, nothing
+    // added, nothing rebuilt — last frame's terms are still the right ones, and
+    // the per-vertex walk (which samples every terrain per vertex) is skipped
+    // whole. `carried == pushed && prev.is_empty()` is the exact statement of
+    // "nothing changed on this axis": the first half sees an addition or a
+    // rebuild, the second sees a removal.
+    if !(prev_terrains.is_empty()
+        && prev_voxels.is_empty()
+        && terrains_before - prev_terrains.len() == scene.terrains.len()
+        && voxels_before - prev_voxels.len() == scene.voxels.len())
+    {
+        inf_render::apply_seam(
+            &mut scene.voxels,
+            &scene.terrains,
+            inf_render::DEFAULT_SEAM_BAND_M,
+        );
+    }
 
     scene.mark_dirty();
 }
@@ -1288,6 +1317,33 @@ fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
     }
 }
 
+/// The `(key, world origin, stamp)` signature of `data`'s tile list, in exactly
+/// the order [`project_terrain`] emits it: level 0 ascending, then the coarse
+/// pyramid ascending.
+///
+/// It is the **key** of Hardening Wave E's P1 memo, which is why it is a named
+/// function rather than an expression inside one: a host whose signature
+/// disagreed with what its own projection builds would carry a stale terrain
+/// forward for ever, and nothing but a screenshot would say so.
+///
+/// **MIRROR**: byte-identical in `inf_viewport::host` and `inf_player::render`,
+/// pinned by `inf-editor-core`'s `tests/projector_mirror.rs`.
+fn tile_signature(
+    data: &inf_terrain::TerrainData,
+    translation: DVec3,
+) -> impl Iterator<Item = (TerrainTileKey, DVec3, u64)> + '_ {
+    data.tiles()
+        .map(|(&coord, tile)| (inf_terrain::TileKey::lod0(coord), tile))
+        .chain(data.coarse_tiles().map(|(&key, tile)| (key, tile)))
+        .map(move |(key, tile)| {
+            (
+                TerrainTileKey::new(key.lod, key.coord),
+                tile.origin + translation,
+                data.tile_version(key),
+            )
+        })
+}
+
 /// Project an ECS [`Terrain`] (+ world translation) into a [`RenderTerrain`],
 /// mirroring `inf_viewport::host::project_terrain`: each **resident** tile becomes
 /// a [`RenderTerrainTile`] (heights + resolved RGBA8 splat weights + resolved
@@ -1318,13 +1374,48 @@ fn apply_record(r: &RenderSettingsRecord) -> RenderSettings {
 /// it across two runs is exactly "the same frame was drawn". (Excluding
 /// `version`, which is a process-global cache stamp and deliberately not
 /// reproducible — see `TerrainData::tile_version`.)
+///
+/// `id` is the terrain entity's identity fold (P16.6), and `prev` is the
+/// previous frame's terrain list, which the caller has taken out of the scene:
+/// a terrain whose grid, layers and whole per-tile stamp sequence are unchanged
+/// is **carried forward from it** rather than rebuilt (Hardening Wave E's P1
+/// memo — see [`inf_render::take_unchanged_terrain`] for why the key is sound).
+/// Pass `&mut Vec::new()` for a one-shot projection with nothing to carry.
 pub fn project_terrain(
     terrain: &Terrain,
     data: &inf_terrain::TerrainData,
     translation: DVec3,
+    id: u64,
+    prev: &mut Vec<RenderTerrain>,
 ) -> RenderTerrain {
     let res = data.tile_resolution();
     let n = (res * res) as usize;
+    let layers = std::array::from_fn(|k| RenderTerrainLayer {
+        albedo: terrain.layers[k].albedo.to_array(),
+        roughness: terrain.layers[k].roughness as f32,
+        tex_scale: terrain.layers[k].tex_scale as f32,
+    });
+    let macro_variation = terrain.macro_variation as f32;
+    // EMPTY on purpose (P19.2) — see the `biome_palette` note at the tail of this
+    // function. Named here so the memo compares exactly what the projection
+    // produces.
+    let biome_palette: Vec<[f32; 4]> = Vec::new();
+    // Hardening Wave E's P1 memo: the signature of the tile list this projection
+    // WOULD build — the same walk `project_tile` takes below, reduced to
+    // `(key, world origin, stamp)`. When it matches the carried terrain's, the
+    // carried one IS the answer and not one height buffer is copied.
+    if let Some(kept) = inf_render::take_unchanged_terrain(
+        prev,
+        id,
+        res,
+        data.meters_per_sample(),
+        &layers,
+        macro_variation,
+        &biome_palette,
+        tile_signature(data, translation),
+    ) {
+        return kept;
+    }
     let project_tile = |key: inf_terrain::TileKey, tile: &inf_terrain::TerrainTile| {
         // A coarse pyramid page is always unpainted (the pyramid is heights-only),
         // so it resolves to the uniform default like any unpainted tile.
@@ -1369,21 +1460,18 @@ pub fn project_terrain(
                 .map(|(&key, tile)| project_tile(key, tile)),
         )
         .collect();
-    let layers = std::array::from_fn(|k| RenderTerrainLayer {
-        albedo: terrain.layers[k].albedo.to_array(),
-        roughness: terrain.layers[k].roughness as f32,
-        tex_scale: terrain.layers[k].tex_scale as f32,
-    });
     RenderTerrain {
-        // The caller stamps the terrain entity's identity (P16.6); a bare
-        // projection is "unkeyed", which is exactly right for the single-terrain
-        // callers (the gates' DTO fingerprints) that never reach a GPU cache.
-        id: 0,
+        // The terrain entity's identity (P16.6), now a parameter rather than a
+        // field the caller patched afterwards — the memo above has to key on it
+        // before the tiles are built, so it cannot be stamped after them. `0` is
+        // the "unkeyed" value the single-terrain callers (the gates' DTO
+        // fingerprints) pass, exactly as they got before.
+        id,
         tile_resolution: res,
         meters_per_sample: data.meters_per_sample(),
         tiles,
         layers,
-        macro_variation: terrain.macro_variation as f32,
+        macro_variation,
         // EMPTY on purpose (P19.2). The palette is a property of the level's
         // `BiomeSet` asset, and `Terrain::biome_set` is a GUID: resolving it needs
         // an asset DB, which this projection deliberately does not have (it takes
@@ -1393,7 +1481,7 @@ pub fn project_terrain(
         // Biomes view draws uniform neutral rather than reading a stale palette.
         // The mode is an EDITOR view mode — the viewport host, which does hold the
         // DB, is where a real palette is projected from.
-        biome_palette: Vec::new(),
+        biome_palette,
     }
 }
 
@@ -1603,8 +1691,36 @@ fn project_voxel(
     terrain: Option<&Terrain>,
     translation: DVec3,
     id: u64,
+    prev: &mut Vec<inf_render::RenderVoxelVolume>,
 ) -> Option<inf_render::RenderVoxelVolume> {
     let voxel_size_m = slot.data.voxel_size_m();
+    let layers = std::array::from_fn(|k| match terrain {
+        Some(t) => RenderTerrainLayer {
+            albedo: t.layers[k].albedo.to_array(),
+            roughness: t.layers[k].roughness as f32,
+            tex_scale: t.layers[k].tex_scale as f32,
+        },
+        None => RenderTerrainLayer::default(),
+    });
+    // Hardening Wave E's P2 memo: a volume whose chunk set, stamps, origins and
+    // palette are all unchanged is carried forward from `prev` — the previous
+    // frame's list — rather than having every resident chunk's vertex stream
+    // rebased, mapped and cloned again for a consumer that gates the upload on
+    // the very stamps compared here. See `inf_render::take_unchanged_voxel`.
+    if let Some(kept) = inf_render::take_unchanged_voxel(
+        prev,
+        id,
+        &layers,
+        slot.meshes.meshes().map(|(&key, _)| {
+            (
+                inf_render::VoxelChunkKey::new(key.x, key.y, key.z),
+                slot.data.chunk_origin_world(key) + translation,
+                slot.meshes.version(key),
+            )
+        }),
+    ) {
+        return Some(kept);
+    }
     let chunks: Vec<inf_render::RenderVoxelChunk> = slot
         .meshes
         .meshes()
@@ -1631,14 +1747,6 @@ fn project_voxel(
     if chunks.is_empty() {
         return None;
     }
-    let layers = std::array::from_fn(|k| match terrain {
-        Some(t) => RenderTerrainLayer {
-            albedo: t.layers[k].albedo.to_array(),
-            roughness: t.layers[k].roughness as f32,
-            tex_scale: t.layers[k].tex_scale as f32,
-        },
-        None => RenderTerrainLayer::default(),
-    });
     Some(inf_render::RenderVoxelVolume {
         id,
         chunks,

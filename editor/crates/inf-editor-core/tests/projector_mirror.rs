@@ -1338,9 +1338,21 @@ fn the_shared_voxel_projector_is_not_a_stub() {
 /// and a gizmo drag bumps the document per input event.
 #[test]
 fn both_projectors_project_voxel_volumes_the_same_way() {
-    const SHARED: [&str; 10] = [
-        // Rebuilt every projection, like `terrains`.
-        "scene.voxels.clear()",
+    const SHARED: [&str; 12] = [
+        // **Carried, not rebuilt** (Hardening Wave E). Both hosts take the
+        // previous frame's list out of the scene and hand it to `project_voxel`
+        // as the carry source, so a volume whose chunk stamps did not move costs
+        // a `Vec` move instead of two rebases of every vertex stream. What is
+        // left over at the end of the walk is exactly the volumes that left the
+        // scene — which is how a REMOVAL is seen, and why the seam gate below
+        // reads the leftovers rather than a count.
+        "let mut prev_voxels = std::mem::take(&mut",
+        "prev_voxels.is_empty()",
+        // …through the ONE shared predicate. A host that wrote its own
+        // "has anything changed" test would be free to disagree with the other
+        // about when a cave is stale, which is the same class of drift the
+        // byte-identical `project_voxel` body exists to stop.
+        "inf_render::take_unchanged_voxel(",
         // The branch itself.
         "w.get::<VoxelVolume>(entity)",
         // The palette is the Terrain on THIS SAME entity — composition, not a

@@ -327,3 +327,113 @@ fn a_reprojection_is_byte_identical_to_a_cold_one() {
     // Anti-vacuity for THIS arm: comparing two empty lists proves nothing.
     assert!(!cold.terrains.is_empty() && !cold.voxels.is_empty());
 }
+
+/// **The falsifier.** A carried projection must still see an edit — otherwise
+/// "carried forward unchanged" is just "never updated again".
+///
+/// Sculpts one tile through the stamped door (`get_tile_mut`, which is what every
+/// brush, splat, biome and carve path in the tree goes through), re-projects into
+/// the **same** scene, and asserts the new heights are on screen — and that the
+/// tiles nobody touched came through unchanged, so the fix is a memo rather than
+/// a rebuild wearing one.
+///
+/// Mutation-verified: a `tiles_match` hard-wired to `true` leaves the byte-identity
+/// arm green and fails here.
+#[test]
+fn a_carried_projection_still_sees_an_edit() {
+    let (mut sim, voxels, _registry) = fixture();
+    let mut scene = RenderScene::default();
+    project(&mut scene, &sim, &voxels);
+    let before = scene.terrains[0].clone();
+
+    // The edit: raise every sample of tile (2, 2) by ten metres.
+    let entity = sim
+        .world()
+        .entity_of(Uuid::from_u128(TERRAIN_GUID))
+        .expect("the fixture's terrain");
+    {
+        let world = sim.world_mut();
+        let mut terrain = world
+            .world_mut()
+            .get_mut::<Terrain>(entity)
+            .expect("the fixture's terrain component");
+        let tile = terrain
+            .data
+            .get_tile_mut((2, 2))
+            .expect("the fixture authored (2, 2)");
+        for h in tile.heights_mut() {
+            *h += 10.0;
+        }
+    }
+
+    project(&mut scene, &sim, &voxels);
+    let after = &scene.terrains[0];
+    assert_eq!(
+        before.tiles.len(),
+        after.tiles.len(),
+        "the edit must not change the resident set"
+    );
+
+    let mut moved = 0usize;
+    for (b, a) in before.tiles.iter().zip(after.tiles.iter()) {
+        assert_eq!(b.key, a.key, "the tile order must not change");
+        if b.heights == a.heights {
+            continue;
+        }
+        moved += 1;
+        assert_eq!(a.key.coord, (2, 2), "only the edited tile may move");
+        for (b, a) in b.heights.iter().zip(a.heights.iter()) {
+            assert!(
+                (a - b - 10.0).abs() < 1e-4,
+                "the carried projection served a stale height: {b} -> {a}"
+            );
+        }
+        assert_ne!(
+            b.version, a.version,
+            "the edited tile's stamp must have moved — the memo's whole key"
+        );
+    }
+    assert_eq!(moved, 1, "exactly the edited tile must be re-projected");
+}
+
+/// **The second falsifier, for the case a cheaper key could not see.**
+///
+/// A monotone *maximum* over the tile stamps — the obvious cheap memo key — is
+/// blind to the eviction of a non-maximal tile, because a removal deletes the
+/// ledger entry instead of minting a new number. So this removes a tile that is
+/// *not* the most recently stamped one and asserts the carried projection sheds
+/// it. The comparison is a whole-sequence walk precisely so that this passes.
+#[test]
+fn a_carried_projection_sees_a_tile_leave() {
+    let (mut sim, voxels, _registry) = fixture();
+    let mut scene = RenderScene::default();
+    project(&mut scene, &sim, &voxels);
+    let before = scene.terrains[0].tiles.len();
+
+    let entity = sim
+        .world()
+        .entity_of(Uuid::from_u128(TERRAIN_GUID))
+        .expect("the fixture's terrain");
+    {
+        let world = sim.world_mut();
+        let mut terrain = world
+            .world_mut()
+            .get_mut::<Terrain>(entity)
+            .expect("the fixture's terrain component");
+        // (5, 5) was authored LAST, so (0, 0) is emphatically not the maximum
+        // stamp — which is the entire point of removing that one.
+        terrain.data.remove_tile((0, 0));
+    }
+
+    project(&mut scene, &sim, &voxels);
+    let after = &scene.terrains[0];
+    assert_eq!(
+        after.tiles.len(),
+        before - 1,
+        "a removed tile must leave the projection"
+    );
+    assert!(
+        after.tiles.iter().all(|t| t.key.coord != (0, 0)),
+        "the removed tile is still being drawn"
+    );
+}
