@@ -776,6 +776,142 @@ mod tests {
         });
     }
 
+    /// **A hostile file cannot take the process down on the way in** (P29.1
+    /// audit, finding A1).
+    ///
+    /// v2 gave `.inf_sm` its first two *recursive* shapes — `SmCond`'s
+    /// `Not`/`And`/`Or`, and `Motion::SubMachine` — where v1 had a flat `Vec` of
+    /// compares and three flat motions. `StateMachine::validate` bounds both, and
+    /// that is the P19 parser-depth law correctly applied — but `validate` runs
+    /// inside `migrate`, which runs **after** serde has already built the tree,
+    /// one stack frame per level. Measured before the fix: a **7.9 KB** payload
+    /// of nothing but `Not` tags, and a **54 KB** one of nested sub-machines,
+    /// each ended the process with `STATUS_STACK_OVERFLOW` — in the editor's
+    /// Content-Drawer scan of every loose file under a project root, and in the
+    /// shipped player reading a cooked pack. An abort is not a refusal.
+    ///
+    /// The payloads are built as **bytes**, not by encoding a deep value: a test
+    /// that has to hold the hostile tree in order to write it is a test that can
+    /// overflow on its own construction (and on the `Drop` of it), which would
+    /// make this arm's failure mode indistinguishable from the defect's.
+    #[test]
+    fn a_pathologically_nested_payload_is_refused_by_name_rather_than_aborting() {
+        use crate::state_machine::{SmCond, SmState, SmTransition};
+        let healthy = || StateMachine {
+            states: vec![SmState::clip("idle", [1; 16])],
+            transitions: vec![SmTransition::new(0, 0, 0.2)],
+            entry: 0,
+            ..Default::default()
+        };
+
+        // ── the condition tree ──
+        // One `Not` costs exactly one byte (its variant tag), so a chain of N is
+        // the healthy encoding with N copies of that tag spliced in.
+        let base = encode(&StateMachineAsset::new(healthy(), None)).unwrap();
+        let mut one = healthy();
+        one.transitions[0].condition = SmCond::Not(Box::new(SmCond::Always));
+        let one = encode(&StateMachineAsset::new(one, None)).unwrap();
+        assert_eq!(one.len(), base.len() + 1, "one `Not` is one byte");
+        let at = (0..base.len())
+            .find(|&i| base[i] != one[i])
+            .expect("the extra tag lands somewhere");
+        let cond_payload = |n: usize| -> Vec<u8> {
+            let mut out = base[..at].to_vec();
+            out.extend(std::iter::repeat_n(one[at], n));
+            out.extend_from_slice(&base[at..]);
+            out
+        };
+
+        // The control: a legal tree still decodes through the same door.
+        let mut legal = healthy();
+        legal.transitions[0].condition = SmCond::Not(Box::new(SmCond::Not(Box::new(
+            SmCond::float("speed", crate::state_machine::CmpOp::Gt, 0.1),
+        ))));
+        let legal = encode(&StateMachineAsset::new(legal, None)).unwrap();
+        decode::<StateMachineAsset>(&legal).expect("a two-deep tree is ordinary content");
+
+        // Just past the model's bound: `validate` owns this, and its message
+        // names the transition and the depth, which is what an author can act on.
+        let e =
+            decode::<StateMachineAsset>(&cond_payload(crate::state_machine::MAX_COND_DEPTH + 1))
+                .expect_err("an over-deep tree must be refused");
+        assert!(e.to_string().contains("invalid state machine"), "{e}");
+
+        // And far past it — where the DECODER has to be the one that stops,
+        // because nothing downstream would ever run. Reaching the assertion at
+        // all is half the claim: the pre-fix threshold was under eight thousand
+        // tags, and past it this line was never executed.
+        for n in [8_000usize, 200_000] {
+            let e = decode::<StateMachineAsset>(&cond_payload(n))
+                .expect_err("a 200 KB `Not` chain must be refused, not run off the stack");
+            assert!(
+                e.to_string().contains("nests more than"),
+                "at {n}: the refusal must name the bound it hit: {e}"
+            );
+        }
+
+        // ── the sub-machine chain, the same way ──
+        let leaf = || StateMachine {
+            states: vec![SmState::clip("x", [1; 16])],
+            ..Default::default()
+        };
+        let nest = |inner: StateMachine| StateMachine {
+            states: vec![SmState::sub_machine("n", inner)],
+            ..Default::default()
+        };
+        let a = encode(&StateMachineAsset::new(leaf(), None)).unwrap();
+        let b = encode(&StateMachineAsset::new(nest(leaf()), None)).unwrap();
+        let head = (0..a.len()).find(|&i| a[i] != b[i]).unwrap();
+        let tail = (0..a.len() - head)
+            .find(|&i| a[a.len() - 1 - i] != b[b.len() - 1 - i])
+            .unwrap();
+        let unit = b.len() - a.len();
+        let (mut pre, mut suf) = (Vec::new(), Vec::new());
+        for plen in 0..=unit {
+            let p = &b[head..head + plen];
+            let s = &b[b.len() - tail - (unit - plen)..b.len() - tail];
+            let mut cand = b[..head].to_vec();
+            cand.extend_from_slice(p);
+            cand.extend_from_slice(&a[head..a.len() - tail]);
+            cand.extend_from_slice(s);
+            cand.extend_from_slice(&b[b.len() - tail..]);
+            if cand == b {
+                pre = p.to_vec();
+                suf = s.to_vec();
+                break;
+            }
+        }
+        assert!(
+            !pre.is_empty(),
+            "the per-level byte block was not recovered"
+        );
+        let sub_payload = |n: usize| -> Vec<u8> {
+            let mut out = b[..head].to_vec();
+            for _ in 0..n {
+                out.extend_from_slice(&pre);
+            }
+            out.extend_from_slice(&a[head..a.len() - tail]);
+            for _ in 0..n {
+                out.extend_from_slice(&suf);
+            }
+            out.extend_from_slice(&b[b.len() - tail..]);
+            out
+        };
+        // Control: one level of nesting is the feature, and it decodes.
+        decode::<StateMachineAsset>(&sub_payload(1)).expect("one sub-machine is legal content");
+        // Two: `validate` owns it and says what v2 does not support.
+        let e = decode::<StateMachineAsset>(&sub_payload(2)).expect_err("two levels are refused");
+        assert!(
+            e.to_string().contains("sub-machine inside a sub-machine"),
+            "{e}"
+        );
+        // Deep: the decoder stops it. 100 000 levels is a 2.7 MB file; the
+        // pre-fix threshold was two thousand, or about 54 KB.
+        let e = decode::<StateMachineAsset>(&sub_payload(100_000))
+            .expect_err("a 100 000-deep nest must be refused, not run off the stack");
+        assert!(e.to_string().contains("nests more than"), "{e}");
+    }
+
     /// **The v2 wire SHAPE is pinned, so a tail field cannot be appended without a
     /// bump.**
     ///

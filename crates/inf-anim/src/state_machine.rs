@@ -111,6 +111,113 @@ pub const MAX_COND_DEPTH: usize = 16;
 /// safety one: this is evaluated per candidate transition per fixed step).
 pub const MAX_COND_NODES: usize = 256;
 
+/// The deepest a [`Motion::SubMachine`] chain may nest **at decode**.
+///
+/// [`StateMachine::validate`] refuses a sub-machine inside a sub-machine, so a
+/// legal file never reaches 2. The decoder's own bound is one step looser than
+/// the model's so that a doubly-nested machine still gets `validate`'s named
+/// [`SmError::NestedSubMachine`] rather than a decoder error — and anything
+/// deeper never gets built at all.
+const MAX_SUB_DEPTH_AT_DECODE: usize = 2;
+
+/// The deepest a [`SmCond`] tree may nest **at decode**.
+///
+/// Deliberately far above [`MAX_COND_DEPTH`], and the gap is the design: these
+/// two bounds answer different questions. `MAX_COND_DEPTH` is the **model's**
+/// rule and [`StateMachine::validate`] owns it, reporting
+/// [`SmError::ConditionTooDeep`] with the offending transition and the actual
+/// depth — a message an author can act on. This one exists only to keep the
+/// decoder off the bottom of the stack, so it has to sit above every depth
+/// `validate` is willing to describe; a few dozen frames of `Deserialize` cost
+/// nothing and a few thousand end the process.
+const MAX_COND_DEPTH_AT_DECODE: usize = 64;
+
+// ── the decode-time recursion guards ────────────────────────────────────────
+//
+// **A `.inf_sm` is a file, and v2 gave it two RECURSIVE shapes** — `SmCond`'s
+// `Not`/`And`/`Or` and `Motion::SubMachine` — where v1 had a flat `Vec` of
+// compares and three flat motions. serde's derived decoder descends one stack
+// frame per level with no bound of its own, so `validate`'s depth check (which
+// is the P19 parser-depth law, and is real) runs on a tree the decoder has
+// already built: measured, a **7.9 KB** payload of nothing but `Not` tags, and a
+// **54 KB** one of nested sub-machines, each take the process down with
+// `STATUS_STACK_OVERFLOW` before `migrate` is reached. That is not a refusal —
+// it is an abort, in the editor's Content-Drawer scan of every loose file under
+// a project root, and in the shipped player reading a cooked pack.
+//
+// So the bound is enforced HERE, at the only place that is in front of the
+// stack: a thread-local descent counter, checked as each recursive field is
+// entered, reported as a typed `de::Error` naming the limit. `deserialize_with`
+// delegates to the ordinary `Deserialize` impl, so **the wire is unchanged** —
+// the same bytes decode to the same value, and only the ones that would have
+// aborted now come back as an error.
+
+thread_local! {
+    static COND_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SUB_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Decrements its counter however the decode leaves — including the error path,
+/// which is the whole reason this is a guard and not a pair of statements.
+struct DepthGuard(&'static std::thread::LocalKey<std::cell::Cell<usize>>);
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        self.0.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+fn enter_depth<E: serde::de::Error>(
+    key: &'static std::thread::LocalKey<std::cell::Cell<usize>>,
+    limit: usize,
+    what: &str,
+) -> Result<DepthGuard, E> {
+    let depth = key.with(|c| {
+        let d = c.get() + 1;
+        c.set(d);
+        d
+    });
+    let guard = DepthGuard(key);
+    if depth > limit {
+        return Err(E::custom(format!(
+            "{what} nests more than {limit} deep — refused at the door, because the \
+             decoder would otherwise reach the bottom of the stack before \
+             `validate` ever saw the tree"
+        )));
+    }
+    Ok(guard)
+}
+
+fn de_cond_box<'de, D>(d: D) -> Result<Box<SmCond>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let _guard =
+        enter_depth::<D::Error>(&COND_DEPTH, MAX_COND_DEPTH_AT_DECODE, "a condition tree")?;
+    Ok(Box::new(SmCond::deserialize(d)?))
+}
+
+fn de_cond_vec<'de, D>(d: D) -> Result<Vec<SmCond>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let _guard =
+        enter_depth::<D::Error>(&COND_DEPTH, MAX_COND_DEPTH_AT_DECODE, "a condition tree")?;
+    Vec::<SmCond>::deserialize(d)
+}
+
+fn de_sub_machine<'de, D>(d: D) -> Result<Box<StateMachine>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let _guard = enter_depth::<D::Error>(
+        &SUB_DEPTH,
+        MAX_SUB_DEPTH_AT_DECODE,
+        "a nested state machine",
+    )?;
+    Ok(Box::new(StateMachine::deserialize(d)?))
+}
+
 /// A comparison operator for a transition condition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CmpOp {
@@ -328,10 +435,10 @@ pub enum SmCond {
     /// it `true` inside the transition that fires **consumes** it.
     Trigger(String),
     /// Every term holds (an empty `And` is true — v1's empty condition list).
-    And(Vec<SmCond>),
+    And(#[serde(deserialize_with = "de_cond_vec")] Vec<SmCond>),
     /// Some term holds (an empty `Or` is **false**: nothing holds).
-    Or(Vec<SmCond>),
-    Not(Box<SmCond>),
+    Or(#[serde(deserialize_with = "de_cond_vec")] Vec<SmCond>),
+    Not(#[serde(deserialize_with = "de_cond_box")] Box<SmCond>),
 }
 
 impl SmCond {
@@ -606,7 +713,7 @@ pub enum Motion {
     /// [`SmRuntime`] is `Copy` because it lives inside an ECS component, so the
     /// nested play state is a fixed inline [`SmSub`] rather than a `Box`, and one
     /// slot is what "fixed" means.
-    SubMachine(Box<StateMachine>),
+    SubMachine(#[serde(deserialize_with = "de_sub_machine")] Box<StateMachine>),
 }
 
 /// One state of the machine.
@@ -924,8 +1031,23 @@ impl StateMachine {
 
     /// Look a declared parameter up by name, with its index (the bit position its
     /// trigger state occupies in [`SmRuntime::triggers`]).
+    ///
+    /// **Bounded by [`MAX_PARAMS`]**, and that is not belt-and-braces: the index
+    /// this returns is shifted into a `u64` by [`trigger_armed`] and
+    /// `collect_true_triggers`, and `1u64 << 64` is a debug panic (`attempt to
+    /// shift left with overflow`) and a *silent wrap to bit 0* in release.
+    /// [`StateMachine::validate`] refuses a table past the limit, so no decoded
+    /// machine can get here — but the editor builds machines in memory that never
+    /// pass a decoder, which is the same argument that put the depth bound in
+    /// [`eval_condition`] as well as in `validate`. A parameter past the limit is
+    /// simply not found, so it reads as an undeclared `Float` at `0.0` (v1's
+    /// rule) rather than taking the fixed step down.
     pub fn param(&self, name: &str) -> Option<(usize, &SmParam)> {
-        self.params.iter().enumerate().find(|(_, p)| p.name == name)
+        self.params
+            .iter()
+            .enumerate()
+            .take(MAX_PARAMS)
+            .find(|(_, p)| p.name == name)
     }
 
     /// **The structural questions a decoded machine must answer** — asked by
@@ -1370,7 +1492,14 @@ impl SmRuntime {
         //    parameters and must therefore consume from the same set.
         let mut consumed = sub_consumed;
         if let Some(i) = step.fired {
-            collect_true_triggers(&sm.transitions[i].condition, sm, ctx, armed, &mut consumed);
+            collect_true_triggers(
+                &sm.transitions[i].condition,
+                sm,
+                ctx,
+                armed,
+                true,
+                &mut consumed,
+            );
         }
         self.triggers &= !consumed;
         step.consumed = consumed;
@@ -1462,6 +1591,7 @@ impl SmRuntime {
                 sm,
                 ctx,
                 armed,
+                true,
                 &mut consumed,
             );
         }
@@ -1650,17 +1780,32 @@ fn trigger_armed(sm: &StateMachine, name: &str, triggers: u64) -> bool {
 /// actually fires, which is what keeps the answer independent of how many
 /// candidates were scanned first.
 pub fn eval_condition(cond: &SmCond, sm: &StateMachine, ctx: &SmContext, triggers: u64) -> bool {
-    eval_at(cond, sm, ctx, triggers, 0)
+    // **Unreadable is `false` for the WHOLE tree, not for the subtree.** The
+    // first cut returned `false` from the over-deep frame and let the answer keep
+    // propagating — and `Not` inverts it, so a tree that nested an *even* number
+    // of `Not`s past the bound came back **true**: "a condition that cannot be
+    // read" was treated as satisfied, which is the precise thing the bound
+    // exists to prevent. Measured before the fix: 18, 20 and 32 `Not`s over a
+    // false leaf all evaluated `true`. `None` here means "this tree cannot be
+    // read", it propagates through every combinator, and it lands as `false`
+    // exactly once.
+    eval_at(cond, sm, ctx, triggers, 0).unwrap_or(false)
 }
 
-fn eval_at(cond: &SmCond, sm: &StateMachine, ctx: &SmContext, triggers: u64, depth: usize) -> bool {
+fn eval_at(
+    cond: &SmCond,
+    sm: &StateMachine,
+    ctx: &SmContext,
+    triggers: u64,
+    depth: usize,
+) -> Option<bool> {
     if depth > MAX_COND_DEPTH {
         // A machine built in memory never passed a decoder, so the depth bound is
-        // enforced here too — as `false`, because a condition that cannot be read
-        // must not be treated as satisfied.
-        return false;
+        // enforced here too — as "unreadable", which the caller turns into
+        // `false` after every enclosing `Not` has had its say.
+        return None;
     }
-    match cond {
+    Some(match cond {
         SmCond::Always => true,
         SmCond::Trigger(name) => trigger_armed(sm, name, triggers),
         SmCond::Compare(cmp) => match sm.param(&cmp.param).map(|(_, p)| p.kind) {
@@ -1678,28 +1823,63 @@ fn eval_at(cond: &SmCond, sm: &StateMachine, ctx: &SmContext, triggers: u64, dep
                 .op
                 .eval(param_value(sm, ctx, &cmp.param), cmp.value.as_f64()),
         },
-        SmCond::Not(inner) => !eval_at(inner, sm, ctx, triggers, depth + 1),
-        SmCond::And(terms) => terms
-            .iter()
-            .all(|t| eval_at(t, sm, ctx, triggers, depth + 1)),
-        SmCond::Or(terms) => terms
-            .iter()
-            .any(|t| eval_at(t, sm, ctx, triggers, depth + 1)),
-    }
+        SmCond::Not(inner) => !eval_at(inner, sm, ctx, triggers, depth + 1)?,
+        SmCond::And(terms) => {
+            let mut all = true;
+            for t in terms {
+                // Every term is asked, even after one is false: an unreadable
+                // term must poison the tree rather than be short-circuited past.
+                all &= eval_at(t, sm, ctx, triggers, depth + 1)?;
+            }
+            all
+        }
+        SmCond::Or(terms) => {
+            let mut any = false;
+            for t in terms {
+                any |= eval_at(t, sm, ctx, triggers, depth + 1)?;
+            }
+            any
+        }
+    })
 }
 
 /// Rule 3 of the trigger contract: the triggers a tree read as **true**.
 ///
-/// `Not` is not descended into — a trigger the transition fired *because it was
-/// unset* has nothing to consume — and an `Or`'s untaken terms are not consumed
-/// either, which is what stops one press being eaten by an unrelated branch.
+/// # `Not` flips the sense, it does not end the walk
+///
+/// The rule is "a trigger the fired tree read as TRUE is consumed", and `Not`
+/// decides what "read as true" means for everything under it. The first cut
+/// simply stopped at a `Not` — which is right for `Not(Trigger(x))`, where the
+/// transition fired *because* `x` was unset and has nothing to consume, and
+/// wrong for `Not(Not(Trigger(x)))`, where it fired **because `x` was armed** and
+/// then left it armed for ever. Measured before the fix: that tree fires,
+/// reports `consumed = 0`, and re-fires on the next step off the same press.
+///
+/// So the walk carries `positive` — whether an even number of `Not`s stands
+/// between here and the root — and only collects where it is `true`. A subtree
+/// under an odd number is where the transition fired on something being
+/// **false**, and nothing there is consumed, which is the original rule
+/// preserved exactly. An `Or`'s untaken terms are still not consumed either,
+/// which is what stops one press being eaten by an unrelated branch.
 fn collect_true_triggers(
     cond: &SmCond,
     sm: &StateMachine,
     ctx: &SmContext,
     triggers: u64,
+    positive: bool,
     out: &mut u64,
 ) {
+    // `Not` is handled first, because it is the one node that means something
+    // under an odd count as well as an even one.
+    if let SmCond::Not(inner) = cond {
+        collect_true_triggers(inner, sm, ctx, triggers, !positive, out);
+        return;
+    }
+    if !positive {
+        // An odd number of `Not`s: whatever is here was read as FALSE on the
+        // path that fired, so there is no armed bit to spend.
+        return;
+    }
     match cond {
         SmCond::Always | SmCond::Not(_) => {}
         SmCond::Trigger(name) => {
@@ -1721,13 +1901,13 @@ fn collect_true_triggers(
         }
         SmCond::And(terms) => {
             for t in terms {
-                collect_true_triggers(t, sm, ctx, triggers, out);
+                collect_true_triggers(t, sm, ctx, triggers, positive, out);
             }
         }
         SmCond::Or(terms) => {
             for t in terms {
                 if eval_condition(t, sm, ctx, triggers) {
-                    collect_true_triggers(t, sm, ctx, triggers, out);
+                    collect_true_triggers(t, sm, ctx, triggers, positive, out);
                 }
             }
         }
@@ -3201,6 +3381,159 @@ mod tests {
             c = SmCond::And(vec![c]);
         }
         assert!(!eval_condition(&c, &sm, &ctx, 0));
+    }
+
+    /// **…and `Not` does not turn "unreadable" back into "satisfied"** (P29.1
+    /// audit, finding A3).
+    ///
+    /// The bound's whole justification is that "a condition that cannot be read
+    /// must not be treated as satisfied". It returned `false` from the over-deep
+    /// frame and let that answer keep propagating, so every enclosing `Not`
+    /// inverted it: a tree nesting an **even** number of `Not`s past the bound
+    /// came back `true`. The arm above could not see it — an `And` chain has no
+    /// inversion in it, which is exactly why the defect survived one.
+    ///
+    /// Measured before the fix: 18, 20 and 32 `Not`s over a **false** leaf all
+    /// evaluated `true`.
+    #[test]
+    fn an_over_deep_condition_is_false_through_a_not_chain_of_either_parity() {
+        let sm = StateMachine::default();
+        let vars = |_: &str| Some(0.0);
+        let ctx = SmContext::new(&vars);
+        // A leaf that is plainly FALSE, so an even chain's honest answer is
+        // `false` and an odd chain's is `true` — and the bound must make BOTH
+        // read `false`, because neither was read at all.
+        let leaf = || SmCond::float("speed", CmpOp::Gt, 100.0);
+        assert!(!eval_condition(&leaf(), &sm, &ctx, 0), "the leaf is false");
+
+        for n in [MAX_COND_DEPTH + 1, MAX_COND_DEPTH + 2, 31, 32] {
+            let mut c = leaf();
+            for _ in 0..n {
+                c = SmCond::Not(Box::new(c));
+            }
+            assert!(
+                !eval_condition(&c, &sm, &ctx, 0),
+                "{n} `Not`s past the depth bound evaluated TRUE — an unreadable \
+                 condition was treated as satisfied"
+            );
+        }
+        // NOT VACUOUS: inside the bound, the parity still decides.
+        let mut even = leaf();
+        let mut odd = leaf();
+        for _ in 0..2 {
+            even = SmCond::Not(Box::new(even));
+        }
+        odd = SmCond::Not(Box::new(odd));
+        assert!(
+            !eval_condition(&even, &sm, &ctx, 0),
+            "Not(Not(false)) is false"
+        );
+        assert!(eval_condition(&odd, &sm, &ctx, 0), "Not(false) is true");
+    }
+
+    /// **A parameter past the trigger bitmask is not found, and does not shift**
+    /// (P29.1 audit, finding A2).
+    ///
+    /// `SmRuntime::triggers` is a `u64`, so a parameter's index is a bit
+    /// position. `sample_triggers` already stopped at [`MAX_PARAMS`]; the two
+    /// **readers** did not, and `1u64 << 64` is `attempt to shift left with
+    /// overflow` in debug and a silent wrap to bit 0 in release — the second
+    /// being the worse one, because it consumes an unrelated trigger.
+    /// `validate` refuses an over-long table at decode, but the editor builds
+    /// machines in memory that never pass a decoder, which is the same argument
+    /// that put the depth bound in `eval_condition` as well as in `validate`.
+    #[test]
+    fn a_parameter_past_the_trigger_bitmask_is_not_found_rather_than_shifting() {
+        let mut sm = StateMachine {
+            states: vec![SmState::clip("a", [1; 16]), SmState::clip("b", [2; 16])],
+            transitions: vec![SmTransition::new(0, 1, 0.0).when(SmCond::Trigger("t70".into()))],
+            entry: 0,
+            ..Default::default()
+        };
+        sm.params = (0..80).map(|i| SmParam::trigger(format!("t{i}"))).collect();
+        // In range, so the machine still works for the first 64.
+        assert_eq!(sm.param("t0").map(|(i, _)| i), Some(0));
+        assert_eq!(sm.param("t63").map(|(i, _)| i), Some(63));
+        assert_eq!(
+            sm.param("t70"),
+            None,
+            "a parameter past the bitmask must not be resolvable at all"
+        );
+
+        // The fixed step over it: this used to panic.
+        let vars = |_: &str| Some(1.0);
+        let ctx = SmContext::new(&vars);
+        let mut rt = SmRuntime::default();
+        let step = rt.advance(&sm, &ctx, 1.0 / 60.0);
+        assert_eq!(step.fired, None, "an unresolvable trigger reads as unarmed");
+        assert_eq!(step.consumed, 0);
+        // …and the in-range half is untouched, so this is a bound and not a
+        // blanket refusal.
+        sm.transitions[0].condition = SmCond::Trigger("t5".into());
+        let mut rt = SmRuntime::default();
+        let step = rt.advance(&sm, &ctx, 1.0 / 60.0);
+        assert_eq!(step.fired, Some(0));
+        assert_eq!(step.consumed, 1 << 5);
+    }
+
+    /// **A trigger read through an EVEN number of `Not`s is consumed** (P29.1
+    /// audit, finding A4).
+    ///
+    /// Rule 3 is "every trigger the fired tree read as **true** is disarmed".
+    /// The walk stopped dead at a `Not`, which is right for `Not(Trigger(x))` —
+    /// the transition fired because `x` was unset, and has nothing to spend — and
+    /// wrong for `Not(Not(Trigger(x)))`, which fires *because `x` is armed* and
+    /// then left it armed for ever, so the same press re-fired on the next step.
+    /// Both parities are asserted here, because a fix that consumed under an odd
+    /// count would break the rule it was written to keep.
+    #[test]
+    fn a_trigger_is_consumed_through_an_even_not_chain_and_survives_an_odd_one() {
+        let machine = |cond: SmCond| StateMachine {
+            states: vec![SmState::clip("a", [1; 16]), SmState::clip("b", [2; 16])],
+            transitions: vec![SmTransition::new(0, 1, 0.0).when(cond)],
+            entry: 0,
+            params: vec![SmParam::trigger("t"), SmParam::float("f")],
+            ..Default::default()
+        };
+        let not = |c: SmCond| SmCond::Not(Box::new(c));
+        let run = |cond: SmCond, t: f64| -> (Option<usize>, u64, u64) {
+            let sm = machine(cond);
+            let vars = move |n: &str| Some(if n == "t" { t } else { 0.0 });
+            let ctx = SmContext::new(&vars);
+            let mut rt = SmRuntime::default();
+            let step = rt.advance(&sm, &ctx, 0.1);
+            (step.fired, step.consumed, rt.triggers)
+        };
+
+        // Even: the tree fired BECAUSE the trigger was armed. It must be spent.
+        let (fired, consumed, left) = run(not(not(SmCond::Trigger("t".into()))), 1.0);
+        assert_eq!(fired, Some(0), "Not(Not(armed)) must fire");
+        assert_eq!(
+            consumed, 1,
+            "the press the transition acted on was not spent"
+        );
+        assert_eq!(left, 0, "and it must not stay armed to re-fire next step");
+
+        // Odd: the tree fired because the trigger was UNSET. Nothing to spend,
+        // and — the case the original rule exists for — a later press must still
+        // be there for whoever wanted it.
+        let (fired, consumed, left) = run(not(SmCond::Trigger("t".into())), 0.0);
+        assert_eq!(fired, Some(0), "Not(unarmed) must fire");
+        assert_eq!((consumed, left), (0, 0), "there was nothing armed to spend");
+
+        // Odd, with the trigger armed but the transition firing on something
+        // else being false: the arm stays.
+        let cond = not(SmCond::And(vec![
+            SmCond::Trigger("t".into()),
+            SmCond::float("f", CmpOp::Gt, 100.0),
+        ]));
+        let (fired, consumed, left) = run(cond, 1.0);
+        assert_eq!(fired, Some(0));
+        assert_eq!(
+            consumed, 0,
+            "a trigger under an odd `Not` must not be eaten"
+        );
+        assert_eq!(left, 1, "it stays armed for the transition that wants it");
     }
 
     // ── the flat view the editor DTO round-trips through ────────────────────
