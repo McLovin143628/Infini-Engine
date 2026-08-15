@@ -876,8 +876,14 @@ impl SimSession {
         // D) — MIRROR of `RuntimeSim::capture_positions`'s rule. `audio_started`
         // is dropped by the audio step above; `grounded` had no such rule and
         // grew for the session in a world that spawns and despawns characters.
-        self.grounded
-            .retain(|guid, _| doc.world().entity_of(*guid).is_some());
+        // The same predicate the player uses, character for character: the GUID
+        // index alone is not quite enough, because an entity can also be
+        // despawned through `world_mut()` without going past `EcsWorld::despawn`.
+        self.grounded.retain(|guid, _| {
+            doc.world()
+                .entity_of(*guid)
+                .is_some_and(|e| doc.world().world().get_entity(e).is_ok())
+        });
         // Rising edges are one fixed step wide.
         self.just_pressed.clear();
         self.steps += 1;
