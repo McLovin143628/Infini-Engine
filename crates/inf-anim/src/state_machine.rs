@@ -1336,9 +1336,21 @@ pub struct SmRuntime {
     /// Whether the runtime has been initialized to the machine's entry state.
     pub started: bool,
     /// The partner of an **interrupted** fade, carried so the new fade starts from
-    /// the pose that was being rendered ([`InterruptBlend::Carry`]). One deep: a
-    /// second interruption while a carry is live drops it (and the machine
-    /// snaps) — the bound a `Copy` runtime buys.
+    /// the pose that was being rendered ([`InterruptBlend::Carry`]).
+    ///
+    /// **One deep**, which is the bound a `Copy` runtime buys: a second
+    /// interruption while a carry is live replaces it with the partner of the
+    /// fade just cut, and the oldest pose stops contributing.
+    ///
+    /// This block used to say the machine "snaps" there. The P29.1 audit
+    /// measured it: **40.5°** of discontinuity across the second interruption,
+    /// against **63°** for [`InterruptBlend::Snap`] on the same fixture — so it
+    /// is not a snap, and it is not free either. (The first interruption, which
+    /// the slot *does* serve, costs 0.06°.) A bound worth writing down is worth
+    /// measuring, and both numbers live in
+    /// `interrupting_an_interruption_degrades_toward_the_newer_partner`. A
+    /// machine that changes its mind twice inside one fade is the case a second
+    /// slot would buy, and it is not bought.
     pub carry: Option<usize>,
     /// The carried state's play-head.
     pub carry_time: f64,
@@ -2790,6 +2802,118 @@ mod tests {
             carry < 1.0,
             "carrying the interrupted partner must keep the pose continuous, got {carry} deg \
              against the snap's {snap}"
+        );
+    }
+
+    /// **The carry is one deep, and what happens at the second interruption is a
+    /// measurement rather than a sentence** (P29.1 audit, finding A8).
+    ///
+    /// [`SmRuntime::carry`] used to say a second interruption "drops it (and the
+    /// machine snaps)". It does drop the oldest partner — there is one slot,
+    /// because the runtime is `Copy` and rides an ECS component — but it does
+    /// **not** snap: the newer partner is carried at the alpha the cut fade had
+    /// reached, so the pose falls back one fade rather than to the incoming
+    /// state. Naming the bound wrongly is how a bound stops being checked, so
+    /// the three cases are measured side by side and ordered.
+    #[test]
+    fn interrupting_an_interruption_degrades_toward_the_newer_partner() {
+        let sk = chain();
+        let a = sweep("a", 1, -90.0, 1.0);
+        let b = sweep("b", 1, 90.0, 1.0);
+        let c = sweep("c", 1, 0.0, 1.0);
+        let d = sweep("d", 1, 45.0, 1.0);
+        let clips = |g: ClipRef| -> Option<&AnimClip> {
+            match g[0] {
+                1 => Some(&a),
+                2 => Some(&b),
+                3 => Some(&c),
+                4 => Some(&d),
+                _ => None,
+            }
+        };
+        let machine = |blend: InterruptBlend| StateMachine {
+            states: vec![
+                SmState::clip("a", [1; 16]),
+                SmState::clip("b", [2; 16]),
+                SmState::clip("c", [3; 16]),
+                SmState::clip("d", [4; 16]),
+            ],
+            transitions: vec![
+                SmTransition::new(0, 1, 1.0),
+                SmTransition::on(1, 2, 1.0, "cut1", CmpOp::Gt, 0.5).with_interrupt(SmInterrupt {
+                    source: InterruptSource::Destination,
+                    blend,
+                }),
+                SmTransition::on(2, 3, 1.0, "cut2", CmpOp::Gt, 0.5).with_interrupt(SmInterrupt {
+                    source: InterruptSource::Destination,
+                    blend,
+                }),
+            ],
+            entry: 0,
+            ..Default::default()
+        };
+        let c1 = Cell::new(0.0f64);
+        let c2 = Cell::new(0.0f64);
+        let vars = |n: &str| match n {
+            "cut1" => Some(c1.get()),
+            "cut2" => Some(c2.get()),
+            _ => None,
+        };
+        let ctx = SmContext::new(&vars);
+
+        // The jump across the SECOND interruption, which is the one the carry
+        // slot cannot fully serve.
+        let second_jump = |blend: InterruptBlend| -> (f32, Option<usize>) {
+            let sm = machine(blend);
+            let mut rt = SmRuntime::default();
+            c1.set(0.0);
+            c2.set(0.0);
+            rt.advance(&sm, &ctx, 0.1); // a -> b
+            rt.advance(&sm, &ctx, 0.4); // 40% through
+            c1.set(1.0);
+            rt.advance(&sm, &ctx, 0.3); // b -> c interrupts, carrying a
+            assert_eq!(rt.current, 2, "the first interruption did not happen");
+            let before = eval_pose(&sm, &rt, &sk, &clips, &ctx);
+            c2.set(1.0);
+            rt.advance(&sm, &ctx, 0.001); // c -> d interrupts again
+            assert_eq!(rt.current, 3, "the second interruption did not happen");
+            let after = eval_pose(&sm, &rt, &sk, &clips, &ctx);
+            let deg = before.locals[1]
+                .rotation_quat()
+                .angle_between(after.locals[1].rotation_quat())
+                .to_degrees();
+            (deg, rt.carry)
+        };
+
+        let (carry_jump, carried) = second_jump(InterruptBlend::Carry);
+        let (snap_jump, snapped) = second_jump(InterruptBlend::Snap);
+        // `prev` is now `c`; the one slot holds `b`, the partner of the fade
+        // that was just cut — and `a`, which the first interruption had carried,
+        // is what falls out. That is the bound, exactly.
+        assert_eq!(
+            carried,
+            Some(1),
+            "the slot must hold the partner of the fade just cut, and drop the older one"
+        );
+        assert_eq!(snapped, None, "Snap keeps no partner at all");
+        // The bound, stated as an inequality rather than a story: the second
+        // interruption costs something, and it costs strictly less than the snap
+        // the doc used to claim it becomes.
+        assert!(
+            carry_jump < snap_jump,
+            "carrying the newer partner ({carry_jump} deg) is supposed to beat \
+             snapping ({snap_jump} deg) even at the second interruption"
+        );
+        // Measured on this fixture: **40.5°** against the snap's **63°**. That
+        // is not "small" — the audit's first draft of the doc above said so and
+        // was wrong twice over — but it is a third less, and it is the price of
+        // one slot rather than of two. Banded rather than pinned to a constant,
+        // because the number is a property of these four clips.
+        assert!(
+            carry_jump > 20.0,
+            "the one-deep bound is supposed to COST something ({carry_jump} deg) \
+             — if it is nearly free, the slot is not the limit this claims it is, \
+             and the first interruption's 0.06° is what free looks like"
         );
     }
 
