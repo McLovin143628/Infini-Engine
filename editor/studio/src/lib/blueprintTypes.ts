@@ -109,14 +109,25 @@ export interface BpDoc {
   modifiedMs: number;
 }
 
-/** A structural edit (tagged `{kind, …}`, kebab-case) sent to `graph_apply`. */
+/** A structural edit (tagged `{kind, …}`, kebab-case) sent to `graph_apply`.
+ *
+ *  **Every variant of `inf_graph::GraphEdit`, and the Rust side is the source of
+ *  truth.** Four of them — `restore-node`, `clear-param`, `set-disabled`,
+ *  `resize-node` — were missing here until the L7.M7 drift gate
+ *  (`src-tauri/src/wire_mirror.rs`) first ran: the backend has applied them
+ *  since P6.1 and no canvas could ask for them, with nothing red anywhere to
+ *  say so. Adding a variant in Rust fails that gate until it is added here. */
 export type BpEdit =
   | { kind: "add-node"; id: number; typeId: string; x: number; y: number; params?: Record<string, BpValue> }
   | { kind: "remove-node"; id: number }
+  | { kind: "restore-node"; node: BpNode; links: BpLink[] }
   | { kind: "connect"; link: BpLink }
   | { kind: "disconnect"; link: BpLink }
   | { kind: "set-param"; id: number; name: string; value: BpValue }
+  | { kind: "clear-param"; id: number; name: string }
+  | { kind: "set-disabled"; id: number; disabled: boolean }
   | { kind: "move-node"; id: number; x: number; y: number }
+  | { kind: "resize-node"; id: number; w: number; h: number }
   | { kind: "set-title"; id: number; title: string };
 
 /** A non-fatal structural issue (tagged `{kind, …}`, camelCase). */

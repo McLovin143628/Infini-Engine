@@ -8,6 +8,9 @@
 
 mod commands;
 mod logging;
+// L7.M7: the drift gate for the four hand-written TypeScript wire mirrors that
+// sit outside the ts-rs bindings check. Test-only content.
+mod wire_mirror;
 
 use tauri::Manager as _;
 use tracing_subscriber::layer::SubscriberExt as _;
