@@ -18043,3 +18043,70 @@ implied.
 * **A number you cannot protect is not a result.** Half of this wave's assigned
   items are renderer per-frame costs, and this repo's CI has no GPU. Declining
   them for that reason is a stronger statement than fixing them would have been.
+### VERIFICATION
+
+Battery `cargo test --workspace --no-fail-fast -j 3` = **266 binaries / 4 738
+passed / 0 failed / 9 ignored** against a Wave F baseline of **265 / 4 729 / 0 /
+9**. The delta is accounted for name by name against Wave F's own run: **ten
+names added, one removed.** Four are this wave's arms
+(`the_world_is_exactly_what_the_snapshot_says`,
+`the_steady_state_sync_does_not_scale_like_the_world`,
+`the_archetype_early_outs_still_reach_the_despawn_sweep`,
+`a_despawned_emitter_is_stopped_and_a_live_one_is_left_alone`); one added-plus-
+one-removed is the source gate renamed as it widened from a crate to the
+workspace; and the remaining five (`assets::import` x3,
+`assets::terrain_import` x2) are **Wave F's own**, added by its last test commit
+after it had measured its battery.
+
+Workspace clippy `-D warnings` clean. `cargo fmt --all --check` clean. Rustdoc
+**450 / ceiling 450** over 43 documented crates with `target/doc` cleared first,
+so ci.yml's ceiling does **not** move. Goldens **54, unchanged**; **no committed
+content byte moved** — no `.png` and no `.inf_*` is in this wave's diff at all.
+No TypeScript was touched, so the npm legs are unchanged from Wave F's green.
+**NOT PUSHED.**
+
+Mutations: **4 applied, 4 killed.** Restoring the unconditional
+`set_body_translation` pair fails the scaling arm; never writing a pose at all
+fails the correctness arm; dropping the newly-started guid from the audio
+sweep's live set fails **both** audio arms; and an orphan pick that keeps the
+first candidate fails the sky arm.
+
+### MACHINE OPS
+
+**`git checkout -- <file>` reverted an uncommitted fix during its own mutation
+run.** Wave E's law, third catch in the campaign, one wave after Wave F broke it
+— and this time an hour after reading it. The mutation verdict was still valid
+(the arm failed, which is what the mutation was testing) but the repair had to
+be typed twice. COMMIT BEFORE MUTATING is not advice.
+
+**The source gate caught this wave's own code, one commit after it was
+widened.** The battery went red on `sky.rs`, on an assertion message written by
+this wave, in the arm for the orphan pick — a fourteen-space hole from an eaten
+continuation, produced by the throwaway heredoc that restored the file after the
+`git checkout` above. The mechanism is Wave F's, exactly: a doubled backslash in
+a JSON tool parameter decodes to one backslash before any shell sees it, and one
+backslash at the end of a line inside a heredoc is a *Python* continuation. The
+repair script this wave wrote for the other 86 sites is immune because it never
+spells the character; the throwaway one was not, because it was not repairing a
+backslash and nobody thought it needed the discipline. That is the whole
+argument for the widening: the class was still producing instances **inside the
+wave that was closing it**, and the only thing that noticed was a test.
+
+Two batteries were run — the first ended 266 / 4 737 / **1** / 9 on exactly that
+gate — and the numbers above are the second, after the hand repair.
+
+### Repair phase complete
+
+Waves A through G close the repair phase of the final campaign. **Eighty-one
+commits on `main`, none pushed** (A 10, B 14, C 14, D 12, E 9, F 14 + 1 CI fix,
+G 7), against a seven-lens discovery round: **89 findings closed, 12 declined
+with numbers, 13 deferred with the decision each is waiting on named, and zero
+left pending.** The battery grew from a start-of-campaign **4 568** to **4 738**
+over 266 binaries, and the goldens were **54 at the start and 54 at the end** —
+not one re-blessed in seven waves, across repairs that moved committed bond
+energies, shared-face areas, scatter rotations, root-motion transforms and
+eroded terrain, because every consumer was enumerated before the first byte
+changed. That constraint was the campaign's real difficulty and it is its most
+load-bearing result: the tree is measurably faster, materially safer against
+data loss, and byte-for-byte the same where it counts. The rediscovery round
+follows separately, and these numbers are what it will be measured against.
