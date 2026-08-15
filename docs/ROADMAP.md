@@ -16572,6 +16572,64 @@ shows a one-line authoring change as a one-line diff.
   bit-exact replay across two independent cooks, Blueprint-vs-transpiled parity, and the
   one-line-diff demonstration that is pillar S1's acceptance test.
 
+### Amendment (2026-08-15) — the full movement catalogue
+
+Mandated by the user after this section's spec commit landed and before P29.2 opened, so it
+arrives as an amendment rather than a silent rewrite: Phase 29's movement scope is the **full
+catalogue a AAA studio ships**, not a locomotion set — and where this amendment and the
+sub-phase list above disagree, the amendment wins. The bar that comes with it: transitions
+smoother and cheaper to author than UE5's, and movement aimed at full realism.
+
+**The catalogue, and where each movement lands.**
+
+| Movement | Sub-phase | Mechanism |
+|---|---|---|
+| Walk / run / sprint | P29.3 | gait = analog speed + discrete tier; per-gait acceleration, braking and turn-rate curves |
+| Crouch | P29.3 | capsule half-height resize behind an overhead-clearance probe (standing up under a table refuses) |
+| Prone | P29.3 | minimum-height capsule + crawl gait |
+| Slide | P29.3 | entered from sprint + crouch; a friction-versus-slope curve; exits into crouch or a clearance-checked stand |
+| Dive | P29.3 | a ballistic leap that lands into prone or a roll, chosen by the landing classifier |
+| Roll | P29.3 / P29.4 | root-motion driven; also the soft outcome of the landing classifier |
+| Free-fall / controlled fall | P29.3 | air-control authority and acceleration bounds, terminal velocity, and a landing classifier (soft / hard / roll) keyed to impact speed rather than to whichever animation was playing |
+| Swim, surface and under | P29.3 | absorbs the P20 latch into the mode enum; treading, dive-under, surface snap |
+| Mantle / vault | P29.4 | ledge probes (knee / chest / head) + motion warping |
+| Ragdoll | P29.4 | anim→physics with velocity handoff; physics→anim through a pose-matched get-up that reads the pelvis for supine-versus-prone |
+| Driving | P29.7 | a raycast vehicle controller + enter/exit choreography; the island phase supplies bodies, content and traffic |
+| Flying | P29.7 | 6-DOF integration, no gravity, banking |
+
+**The smoothness stack — pillar S8.** The single biggest transition-quality lever is
+**inertialization** — decay the pose deviation with a quintic polynomial instead of
+evaluating two animations and cross-fading them — which is simultaneously *cheaper* and
+*smoother* than the cross-fade, and lands in P29.2 as a first-class blend mode and the
+**default** for state transitions (the polynomial form also keeps it inside the portable-math
+ban list without a new helper). Around it: **motion warping** (per-clip warp windows scaling
+root motion onto a runtime target — a ledge, a vault edge, a vehicle seat; P29.4),
+**distance matching and orientation warping** so starts, stops and pivots hit their marks
+(P29.4, deriving at import what Epic bakes with hand-run AnimModifiers — pillar S2's
+concrete case), **pose matching** (P29.2 primitive; P29.4's get-up and landing consumers),
+and the sync markers P29.2 already owned. UE ships several of these as opt-in plugins wired
+per-project by hand; here they are core, on by default, and derived from the clips.
+
+**What this changes in the sub-phases.** P29.2 additionally owns inertialization and the
+pose snapshot / pose-matching primitives. P29.3 freezes the **full `MovementMode` wire enum
+on day one** — every variant in the table plus explicit reserved slots — because the enum
+reaches the scene and the freeze-pin law forbids growing it later without another bump; the
+scene still bumps **exactly once**, in P29.3, unchanged. P29.4 additionally owns motion
+warping, the traversal detectors, the landing-classifier consumers, and the ragdoll bridge
+— which crosses the anim/physics crate seam and therefore sits under the P12 command-queue
+doctrine: blend weights are a pure function of sim state, and physics never mutates the
+machine directly. P29.6's course must force **every catalogue mode** in its one
+deterministic replay, so the (pose, mode) trace certifies the catalogue and not a subset.
+And the phase grows a seventh sub-phase:
+
+- **P29.7 Vehicles & flight** — 1. a raycast vehicle controller (suspension by ray, drive
+  and steer at the controller, rapier's dynamic-raycast pattern done natively); 2. enter/exit
+  choreography through motion warping onto the seat; 3. `MovementMode::Driving` routes input
+  to the vehicle through a trait the island phase implements per vehicle class, so one real
+  drivable test rig ships in this phase and the island's fleet reuses the seam; 4. `Flying`
+  as 6-DOF movement with banking; 5. `phase29_gate` extended with a drive-and-fly segment on
+  the same replay discipline.
+
 ## Hardening Wave A — save integrity & data loss (2026-08-14)
 
 The first repair wave of the final hardening campaign. Its subject is the half of
