@@ -16380,7 +16380,7 @@ shows a one-line authoring change as a one-line diff.
 > **The two measurements this batch owed.**
 > (1) **The interruption.** v1 snapped: the new fade's outgoing pose was the incoming state
 > at full weight, discarding the blend that was on screen. Measured across the interrupting
-> step on a three-clip fixture: **47.9°** of pose discontinuity under `Snap`, **0.06°**
+> step on a three-clip fixture: **48.7°** of pose discontinuity under `Snap`, **0.06°**
 > under `Carry`.
 > (2) **The `exit_time` retiming**, which P24.1 ledgered as the reason not to wire a period
 > resolver ("turning it on would move every existing machine's transition timing"). Measured
@@ -16456,6 +16456,94 @@ shows a one-line authoring change as a one-line diff.
 > `current`'s phase. A blend space's period is the weight-blended duration; **sync markers**
 > are P29.2's. And the committed sample was deliberately kept **behaviour-identical**, so no
 > shipped content yet exercises sub-machines, triggers or profiles.
+>
+> **AUDIT (adversarial, 2026-08-15) — eight findings, all fixed; the ruling and the
+> byte claims re-measured and upheld.** Commits `1727985` (model), `cad6dca` (save door,
+> mirror, disposition row), `3dc526e` (the carry bound). Post-audit battery **267
+> binaries / 4 849 passed / 0 failed / 9 ignored** (+6 arms on the implementation's
+> 4 843); clippy `-D warnings` and fmt clean; frontend **577 vitest / 61 files**, tsc
+> and eslint clean; goldens **54**, byte-identical to `5125359`.
+>
+> **A1, the one that was not a refusal.** v2 gave `.inf_sm` its first two *recursive*
+> shapes — `SmCond`'s `Not`/`And`/`Or` and `Motion::SubMachine` — where v1 had a flat
+> `Vec` and three flat motions. `validate` bounds both and that is the P19 law correctly
+> applied, but `validate` runs inside `migrate`, which runs **after** serde has already
+> built the tree one stack frame per level. Measured: a **7.9 KB** payload of nothing but
+> `Not` tags, and a **54 KB** one of nested sub-machines, each ended the process with
+> `STATUS_STACK_OVERFLOW` — in the Content-Drawer scan of every loose file under a
+> project root, and in the shipped player reading a cooked pack. The bound is now in
+> front of the stack (a thread-local descent counter, a typed `de::Error` naming the
+> limit) and **the wire is unchanged**: 2 000 000 tags and a 100 000-deep nest now come
+> back as errors. Falsified by lifting the bound — the arm reproduces the abort exactly.
+>
+> **A2–A4, in the model.** A parameter past the 64-bit trigger mask shifted out of range:
+> `1u64 << 64` is a fixed-step panic in debug and a *silent wrap to bit 0* in release, so
+> an unrelated trigger got spent; `sample_triggers` already stopped at the bound and the
+> two readers did not. The depth guard was **polarity-blind** — it returned `false` from
+> the over-deep frame and every enclosing `Not` inverted it, so 18, 20 and 32 `Not`s over
+> a false leaf all evaluated **true**: an unreadable condition *was* treated as satisfied,
+> the precise thing the guard exists to prevent, and the existing arm could not see it
+> because an `And` chain has no inversion in it. And a trigger read through an **even**
+> number of `Not`s was never consumed: `Not(Not(Trigger(x)))` fires *because* `x` is
+> armed, reported `consumed = 0`, and re-fired off the same press next step. The odd case
+> is unchanged, which is the half that had to survive the fix.
+>
+> **A5–A7, at the edges.** The State Machine editor could **write a file its own reader
+> refuses** — the P23.6 ruling met again: `StateMachine::validate` had exactly one
+> production caller, `migrate`, on the *read* side, so `sm_save` wrote whatever the DTO
+> said. v1 survived that (its `migrate` asked nothing structural and evaluation clamped);
+> v2's refuses, which turns a stale client into a `.inf_sm` the editor can never re-open.
+> `SmMotionDto::Blend2d`'s `param_x`/`param_y` crossed the wire in snake_case while
+> `smTypes.ts` has read `paramX`/`paramY` since P11.2 — the **same** tagged-enum
+> `rename_all` mechanism as the `valueKind` defect this batch already fixed, two fields
+> away, so a 2D blend space's axis names have rendered as `undefined` for the life of the
+> field. That one is pre-existing; what is P29.1's is that the new wire-spelling arm
+> sampled three keys, and that "every v2 shape" never contained a 2D blend space. Both
+> closed: the arm enumerates every renamed key of both tagged enums in **both**
+> directions, and the fixture grew the variant it was skipping. `AssetPayload::migrate`'s
+> disposition table still called `StateMachineAsset` "safe", which was true of v1.
+>
+> **A8, a bound described instead of measured.** `SmRuntime::carry` said a second
+> interruption "drops it (and the machine snaps)". It does not snap — the slot takes the
+> partner of the fade just cut. Measured: **40.5°** across the second interruption
+> against `Snap`'s **63°** — and about **720 times** the 0.06° the first interruption
+> costs, which is the one the slot actually serves. Not a snap, and nowhere near free;
+> two numbers now, where there was an adjective. (The ratio in `3dc526e`'s message says
+> "forty times" and is wrong by an order of magnitude; the figures it quotes are right,
+> and this line is the correction rather than a silent re-write of a landed commit.)
+>
+> **What was re-measured and HELD.** The `exit_time` ruling, independently and against
+> the **committed bytes** rather than the builder: `Locomotion.inf_sm` decodes to 5
+> transitions, `exit_time` `None` on every one, and the sample is byte-pinned to its
+> generator, so the tripwire covers the file and not merely the function — it fires with
+> the right message when an `exit_time` is planted. The v1 no-deadlock fallback is held
+> by two arms. The outgoing pose advances **through the shipped `eval_pose` door** (the
+> arm goes red when the play-head is frozen). Rising-edge arming, priority, any-state,
+> `SourceOrDestination`, and the losing-higher-priority-tree case all behave as claimed
+> under direct probes. The `+32` arm delta is exact (**4 816 → 4 848** `#[test]`
+> tree-wide). The retired POD mirror's replacement is a `pub type` alias, so the drift it
+> guarded is **impossible** rather than untested. `portable_pose` 6/6, no `std`
+> transcendental and no `HashMap` anywhere in the new code. Hostile payloads —
+> out-of-range state index, NaN duration, NaN exit time, profile past the end, 65
+> parameters, doubly-nested sub-machine, a `2^40` length prefix — every one a typed,
+> named refusal.
+>
+> **ROADMAP integrity, checked rather than assumed.** Still pure CRLF — **0** bare LF and
+> 0 lone CR, re-counted after this very paragraph was written into it (the campaign's own
+> rule: state the number for the state *after* the write); the range touches exactly two regions, the TOC line and this
+> section, and every prior phase ledger is byte-unchanged; the `## 13.` anchor is unique.
+> An eaten-`\` sweep over every `.rs`/`.ts`/`.tsx` line the range added found **zero** — and
+> the sweep's predicate was vacuity-checked against a planted one before that zero was
+> believed, because the audit's own first read of a diff mistook a *correct* continuation
+> for the defect.
+>
+> **Carried, and honest.** The remainders above stand, with three corrections: the
+> interruption figure is 48.7° not 47.9°; the carry's second-interruption cost is 40.5°
+> and is now stated; and the trigger bitmask is a *bound* now rather than a documented
+> cap. Two bounds are deliberate and unclosed: an in-memory machine may still hold a
+> condition tree deeper than any decoder would accept (nothing but code builds one, and
+> it evaluates as `false`), and dropping such a tree is still recursive. `sm_save`'s new
+> refusal is a message the editor surfaces, not a UI that prevents the gesture.
 
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
   consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed
