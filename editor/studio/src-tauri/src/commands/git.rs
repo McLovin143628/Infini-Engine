@@ -312,12 +312,22 @@ mod tests {
             "ordinary paths pass through unchanged — git wants them relative"
         );
 
-        for bad in [
+        // A drive-prefixed spelling is an ABSOLUTE path only on Windows; on
+        // Unix `C:/Windows/…` is an ordinary relative path, and confining it
+        // under the root is the CORRECT verdict there — so that fixture is a
+        // Windows-only escape. The first CI run of this test proved it on all
+        // three legs at once.
+        #[cfg(windows)]
+        let bad_paths: &[&str] = &[
             "../secrets.txt",
             "src/../../secrets.txt",
             "/etc/passwd",
             "C:/Windows/System32/drivers/etc/hosts",
-        ] {
+        ];
+        #[cfg(not(windows))]
+        let bad_paths: &[&str] = &["../secrets.txt", "src/../../secrets.txt", "/etc/passwd"];
+
+        for bad in bad_paths.iter().copied() {
             assert!(
                 confined_paths(&root, &[bad.to_string()]).is_err(),
                 "{bad} would have been deleted by git_discard"
