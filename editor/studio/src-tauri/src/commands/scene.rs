@@ -1210,43 +1210,60 @@ pub async fn scene_autosave(app: AppHandle, state: State<'_, SceneState>) -> Res
             // carves existed. An unreadable store must assume the worst.
             Err(_) => Some(POISONED_VOXEL_STORE_SAVE_FAILURE.to_string()),
         });
-    // Encode under the lock (authored values if a scrub is live), write outside it.
-    let (payload, terrain_note) = {
-        let mut doc = lock(&state.doc)?;
-        // A document can be CLEAN and still carry unsaved terrain edits — a save
-        // whose `.inf_terrain` write failed marks the level saved but leaves the
-        // tiles dirty. Gating autosave on `is_dirty()` alone would then starve the
-        // one mechanism that records those edits ever existed (P16.4b audit).
-        // `voxel_note` is exactly that condition for a `.inf_voxel`.
-        //
-        // The *level* half of the same hazard is closed at the source since
-        // C4-3/F2: `scene_save` no longer marks the document saved before its
-        // write, so a save whose `.inf_lvl` write failed leaves the document
-        // dirty and this gate re-arms the recovery file by itself. It used to
-        // do the opposite — mark clean, fail, and stop autosaving work that
-        // existed nowhere on disk.
-        if !doc.is_dirty() && !doc.has_unsaved_terrain_edits() && voxel_note.is_none() {
-            return Ok(());
-        }
-        let payload =
-            doc.with_authored_scene(|d| serialize::encode(&serialize::to_scene_file(d)))?;
-        (payload, terrain_edit::unsaved_terrain_note(&doc))
-    };
-    serialize::write_recovery_bytes(&payload, &dir)?;
-    // Autosave deliberately does NOT rewrite `.inf_terrain` or `.inf_voxel`
-    // assets — asset writes are explicit (P16.4b, P21.2). Record that unsaved
-    // terrain and carve edits existed instead, so a recovery can say honestly
-    // that the ground and the caves it restores are the last SAVED assets rather
-    // than pretending the level is whole.
+    // Encode under the lock (authored values if a scrub is live), write outside
+    // it — and both **off the async workers** (Hardening Wave E). This fires on
+    // a frontend `setInterval` every five seconds for the life of the session,
+    // and on a dirty document it bincodes the WHOLE level and then writes it to
+    // disk. Doing that in the body of an `async fn` parks a Tokio worker that
+    // all 239 commands share, five seconds apart, for ever.
     //
-    // ONE note file carrying both halves, not two: a recovery consumes and warns
-    // exactly once, and a second file is a second thing to forget to read.
-    let note = match (terrain_note, voxel_note) {
-        (Some(t), Some(v)) => Some(format!("{t}\n{v}")),
-        (t, v) => t.or(v),
-    };
-    serialize::write_recovery_terrain_note(&dir, note.as_deref())?;
-    Ok(())
+    // The doc lock still covers the encode and nothing else — it has to: the
+    // payload is a function of the document, and taking a snapshot to encode
+    // outside the lock would be a second whole copy of the level to save one
+    // encode's worth of hold. The `voxel_note` above stays where it is: THE
+    // LOCK RULE (never hold the document and the volumes at once) is about
+    // overlap, and moving the store read into this closure would create it.
+    let doc_handle = Arc::clone(&state.doc);
+    tauri::async_runtime::spawn_blocking(move || {
+        let (payload, terrain_note) = {
+            let mut doc = lock(&doc_handle)?;
+            // A document can be CLEAN and still carry unsaved terrain edits — a save
+            // whose `.inf_terrain` write failed marks the level saved but leaves the
+            // tiles dirty. Gating autosave on `is_dirty()` alone would then starve the
+            // one mechanism that records those edits ever existed (P16.4b audit).
+            // `voxel_note` is exactly that condition for a `.inf_voxel`.
+            //
+            // The *level* half of the same hazard is closed at the source since
+            // C4-3/F2: `scene_save` no longer marks the document saved before its
+            // write, so a save whose `.inf_lvl` write failed leaves the document
+            // dirty and this gate re-arms the recovery file by itself. It used to
+            // do the opposite — mark clean, fail, and stop autosaving work that
+            // existed nowhere on disk.
+            if !doc.is_dirty() && !doc.has_unsaved_terrain_edits() && voxel_note.is_none() {
+                return Ok(());
+            }
+            let payload =
+                doc.with_authored_scene(|d| serialize::encode(&serialize::to_scene_file(d)))?;
+            (payload, terrain_edit::unsaved_terrain_note(&doc))
+        };
+        serialize::write_recovery_bytes(&payload, &dir)?;
+        // Autosave deliberately does NOT rewrite `.inf_terrain` or `.inf_voxel`
+        // assets — asset writes are explicit (P16.4b, P21.2). Record that unsaved
+        // terrain and carve edits existed instead, so a recovery can say honestly
+        // that the ground and the caves it restores are the last SAVED assets
+        // rather than pretending the level is whole.
+        //
+        // ONE note file carrying both halves, not two: a recovery consumes and
+        // warns exactly once, and a second file is a second thing to forget.
+        let note = match (terrain_note, voxel_note) {
+            (Some(t), Some(v)) => Some(format!("{t}\n{v}")),
+            (t, v) => t.or(v),
+        };
+        serialize::write_recovery_terrain_note(&dir, note.as_deref())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("scene_autosave task failed to run: {e}"))?
 }
 
 #[tauri::command]

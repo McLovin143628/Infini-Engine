@@ -41,7 +41,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use glam::DVec2;
 use inf_asset::AssetId;
@@ -60,9 +60,13 @@ use super::assets::{biome_def_dto, AssetState};
 use super::scene::{emit_world_delta, SceneState};
 
 /// Holds the lazily-created erosion GPU host (shared across bakes).
+///
+/// `Arc` rather than a bare `Mutex` so [`terrain_erode`] can move a handle into
+/// `spawn_blocking` (Hardening Wave E) — see that command for why a bake may not
+/// run on an async worker.
 #[derive(Default)]
 pub struct ErosionState {
-    host: Mutex<ErosionHost>,
+    host: Arc<Mutex<ErosionHost>>,
 }
 
 /// Bake `steps` of erosion onto `entity`'s terrain. `region` is an optional
@@ -86,12 +90,34 @@ pub async fn terrain_erode(
         _ => None,
     };
 
-    let outcome = {
-        let mut doc = scene.doc.lock().map_err(|e| e.to_string())?;
-        let mut host = erosion.host.lock().map_err(|e| e.to_string())?;
+    // OFF THE ASYNC WORKERS (Hardening Wave E). A bake is up to 2 000 solver
+    // steps over the whole authored heightfield — and on the first call it also
+    // creates a headless `GpuContext`, adapter request included. Running that in
+    // the body of an `async fn` parks a Tokio worker for its whole duration, and
+    // every one of the editor's 239 commands is `async`: the viewport's own
+    // per-frame IPC, the autosave tick and the asset watcher all queue behind it.
+    // `terrain_probe_heightmap` in this same file states the rule for a *header
+    // read*; this is the heaviest thing the module does.
+    //
+    // The DOC LOCK IS STILL HELD FOR THE WHOLE BAKE, deliberately and
+    // unavoidably: `ErosionHost::bake` takes `&mut SceneDoc` — it reads the
+    // heightfield, erodes it and commits the undo step through the document — so
+    // there is no snapshot to take. What changes is *who* waits: a viewport
+    // frame that wants the document still blocks, but the async runtime that
+    // serves every other command no longer does. Shortening the hold itself
+    // needs `bake` split into "read the region / solve / commit", which is a
+    // Ring-1 redesign and not this wave's repair.
+    let doc = Arc::clone(&scene.doc);
+    let host = Arc::clone(&erosion.host);
+    let params = params.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        let mut doc = doc.lock().map_err(|e| e.to_string())?;
+        let mut host = host.lock().map_err(|e| e.to_string())?;
         host.bake(&mut doc, guid, &params, steps, region)
-            .ok_or_else(|| "selected entity has no terrain to erode".to_string())?
-    };
+            .ok_or_else(|| "selected entity has no terrain to erode".to_string())
+    })
+    .await
+    .map_err(|e| format!("terrain_erode task failed to run: {e}"))??;
 
     // Version was bumped inside the bake; ship the delta so the UI re-syncs.
     emit_world_delta(&app, &scene);

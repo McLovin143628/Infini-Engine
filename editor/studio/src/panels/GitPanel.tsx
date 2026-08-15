@@ -17,6 +17,7 @@ import type { GitFileDto } from "../bindings/GitFileDto";
 import { git } from "../lib/ipc";
 import { requestOpenFile } from "../lib/openFile";
 import { cn } from "../lib/utils";
+import { usePanelVisible } from "./dock/panelChromeContext";
 import { useGitStore } from "../stores/gitStore";
 import { useProjectStore } from "../stores/projectStore";
 
@@ -34,11 +35,19 @@ export default function GitPanel() {
   const [selected, setSelected] = useState<{ path: string; staged: boolean } | null>(null);
   const [diff, setDiff] = useState<string>("");
 
+  // The four-second `git status` poll runs only while this panel is ON SCREEN
+  // (Hardening Wave E). A dock group keeps every tab's body mounted and merely
+  // `hidden`, so before this the poll started the first time Source Control was
+  // opened and then shelled out to `git` every four seconds for the rest of the
+  // session — from behind whatever tab the user actually switched to. It also
+  // refreshes on becoming visible again, so what is shown is never stale.
+  const visible = usePanelVisible();
   useEffect(() => {
+    if (!visible) return;
     void refresh();
     const id = window.setInterval(() => void refresh(), 4000);
     return () => window.clearInterval(id);
-  }, [refresh, project?.root]);
+  }, [refresh, project?.root, visible]);
 
   useEffect(() => {
     if (!selected || !project) return; // DiffView is hidden without a selection

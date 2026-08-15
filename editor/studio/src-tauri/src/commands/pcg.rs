@@ -27,7 +27,7 @@
 //! resolves to the real `.inf_tex` pixels instead of failing closed.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use glam::{DVec2, DVec3};
 use inf_asset::AssetId;
@@ -563,8 +563,25 @@ pub async fn pcg_evaluate(
         });
     }
 
-    let placed_entity = {
-        let mut doc = scene.doc.lock().map_err(|e| e.to_string())?;
+    // OFF THE ASYNC WORKERS (Hardening Wave E). What follows is a full transform
+    // propagation, a whole `TerrainData` clone, `inf_pcg::evaluate` over the
+    // volume's region, and the grammar + building passes — seconds of CPU on a
+    // real volume, in the body of an `async fn`, parking a Tokio worker that
+    // every one of the editor's 239 commands shares. `git.rs`, `files.rs`,
+    // `search.rs`, `shell.rs` and `package.rs` all state the rule for work far
+    // smaller than this.
+    //
+    // THE DOC LOCK IS STILL HELD FOR THE WHOLE EVALUATION, deliberately: the
+    // terrain it scatters over and the `PcgVolume` it writes back to are the
+    // same document, and the file's own note (on `pcg_evaluate_biomes`) records
+    // that a consistent snapshot beats a shorter hold. What changes is *who*
+    // waits — a viewport frame that wants the document still does; the runtime
+    // that serves everything else no longer does.
+    let doc_handle = Arc::clone(&scene.doc);
+    let entity_arg = entity.clone();
+    let placed_entity = tauri::async_runtime::spawn_blocking(move || {
+        let entity = entity_arg;
+        let mut doc = doc_handle.lock().map_err(|e| e.to_string())?;
         doc.world_mut().propagate();
 
         // Resolve the target entity GUID.
@@ -696,8 +713,10 @@ pub async fn pcg_evaluate(
             }
         }
         doc.bump_version_for_runtime();
-        (guid, placed)
-    };
+        Ok::<(Uuid, u32), String>((guid, placed))
+    })
+    .await
+    .map_err(|e| format!("pcg_evaluate task failed to run: {e}"))??;
 
     // Re-emit the scene delta so the viewport re-projects the new instances.
     emit_world_delta(&app, &scene);

@@ -102,6 +102,35 @@ fn send_request(
     }
 }
 
+/// [`send_request`], **off the async workers** (Hardening Wave E).
+///
+/// `send_request` ends in `Receiver::recv_timeout`, a real thread block for up
+/// to `timeout`. Both callers were `async fn`s that invoked it directly, so a
+/// rust-analyzer that was busy — or gone — parked a Tokio worker for five
+/// seconds per keystroke on the completion path, and for **thirty** on
+/// `lsp_start`'s `initialize`. Every one of the editor's 239 commands shares
+/// that runtime.
+///
+/// `lsp_start` already did this for the PATH probe and the `Command::spawn`
+/// beside it, with the rationale written down (*"keep them off the async
+/// workers (mirrors git.rs / package.rs)"*) — and then blocked for thirty
+/// seconds on the next statement. The handles are all `Arc`s, so the move is a
+/// clone of three pointers.
+async fn send_request_async(
+    stdin: Arc<Mutex<ChildStdin>>,
+    next_id: Arc<AtomicI64>,
+    pending: Arc<Mutex<HashMap<i64, Sender<Value>>>>,
+    method: String,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        send_request(&stdin, &next_id, &pending, &method, params, timeout)
+    })
+    .await
+    .map_err(|e| format!("lsp request task failed to run: {e}"))?
+}
+
 /// Read one framed message body from the server stream. Returns None on EOF.
 fn read_message(reader: &mut impl BufRead) -> Option<Value> {
     let mut content_length: Option<usize> = None;
@@ -294,14 +323,15 @@ pub async fn lsp_start(
         },
         "workspaceFolders": [ { "uri": root_uri, "name": "workspace" } ]
     });
-    send_request(
-        &stdin,
-        &next_id,
-        &pending,
-        "initialize",
+    send_request_async(
+        stdin.clone(),
+        next_id.clone(),
+        pending.clone(),
+        "initialize".to_string(),
         init_params,
         Duration::from_secs(30),
-    )?;
+    )
+    .await?;
     send_notify(&stdin, "initialized", json!({}))?;
 
     state.servers.lock().map_err(|e| e.to_string())?.insert(
@@ -422,12 +452,13 @@ pub async fn lsp_request(
             server.pending.clone(),
         )
     };
-    send_request(
-        &stdin,
-        &next_id,
-        &pending,
-        &method,
+    send_request_async(
+        stdin,
+        next_id,
+        pending,
+        method,
         params,
         Duration::from_secs(5),
     )
+    .await
 }

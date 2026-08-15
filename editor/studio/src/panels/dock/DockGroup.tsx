@@ -5,7 +5,7 @@ import { panelDefFor, panelTitle } from "../panelRegistry";
 import { useDockDrag } from "./dockDragStore";
 import { useDockLayout } from "./dockLayoutStore";
 import { beginPanelDrag } from "./dragController";
-import { PanelChromeContext } from "./panelChromeContext";
+import { PanelChromeContext, PanelVisibleContext } from "./panelChromeContext";
 import { dockPanelToSide, PanelContextMenu } from "./PanelContextMenu";
 import type { DockGroupState, DockSide } from "./dockTypes";
 
@@ -203,7 +203,13 @@ export function DockGroup({ side, group }: { side: DockSide; group: DockGroupSta
                 active ? "flex" : "hidden",
               )}
             >
-              <Body panelId={panelId} params={p.params} />
+              {/* The body learns whether it is the active tab (Hardening
+                  Wave E). Bodies stay mounted when they are not, which is what
+                  preserves their state — and what let a polling panel keep
+                  polling from behind another tab for ever. */}
+              <PanelVisibleContext.Provider value={active}>
+                <Body panelId={panelId} params={p.params} />
+              </PanelVisibleContext.Provider>
             </div>
           );
         })}
