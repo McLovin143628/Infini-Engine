@@ -376,10 +376,10 @@ impl PieSession {
     /// Everything the player wrote to stderr so far (its logs; after a
     /// crash, the panic message).
     ///
-    /// **Bounded head-and-tail** (Hardening D): the first
-    /// [`STDERR_HEAD_LINES`] and the last [`STDERR_TAIL_LINES`], with an elision
-    /// line between them naming how many went, so the panic tail is always
-    /// present and a gapped capture always says it is one.
+    /// **Bounded head-and-tail** (Hardening D): the first `STDERR_HEAD_LINES`
+    /// and the last `STDERR_TAIL_LINES`, with an elision line between them
+    /// naming how many went, so the panic tail is always present and a gapped
+    /// capture always says it is one.
     pub fn stderr_lines(&self) -> Vec<String> {
         self.stderr_lines
             .lock()

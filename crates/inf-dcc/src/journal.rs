@@ -367,7 +367,7 @@ impl MeshSession {
         evict_checkpoints(&mut self.checkpoints, self.cursor);
     }
 
-    /// Replay an op sequence onto a base mesh (see [`evict_checkpoints`] for the
+    /// Replay an op sequence onto a base mesh (`evict_checkpoints` carries the
     /// bound the two insertion points share). **The definition of the journal**:
     /// `replay(base, &session.ops()[..session.cursor()])` is byte-identical to
     /// `session.mesh()`, and that is property-tested.
