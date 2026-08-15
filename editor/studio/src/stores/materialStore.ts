@@ -157,6 +157,15 @@ export const useMaterialStore = create<MaterialState>((set, get) => ({
     try {
       const res = await materialIpc.apply(doc.id, edits, label);
       set({ issues: res.issues, canUndo: res.canUndo, canRedo: res.canRedo });
+      // **R2.F1.** A refused edit means the canvas is drawing a graph the
+      // backend does not have, and `issues` cannot say so — a wire that never
+      // entered the graph has nothing to be invalid about. Re-derive before the
+      // recompile, so the shader is compiled from what actually exists.
+      if (res.rejected > 0) {
+        console.warn(`material.apply: the backend refused ${res.rejected} edit(s); re-deriving`);
+        const authoritative = await materialIpc.get(doc.id);
+        if (!tombstoned && get().doc?.id === doc.id) set({ doc: authoritative });
+      }
       // Position-only moves don't change the shader; skip the recompile.
       if (edits.some((e) => e.kind !== "move-node")) void get().compile();
     } catch (e) {

@@ -142,6 +142,21 @@ export interface GraphApplyResult {
   issues: BpIssue[];
   canUndo: boolean;
   canRedo: boolean;
+  /**
+   * **How many of the submitted edits the backend REFUSED** (C4-44 / R2.F1).
+   *
+   * `apply_edit` answers `false` for a `connect` that would cycle, a missing
+   * node or an unknown param. These canvases are fully controlled and apply
+   * optimistically, so a non-zero count means the picture on screen and the
+   * graph in the backend disagree — and `issues` cannot say so, because a wire
+   * that is not in the graph has nothing to be invalid about.
+   *
+   * The field reached the wire in Wave F and stopped at this type: it was
+   * declared nowhere and read by nobody, so the desync it exists to end was
+   * fully intact. Every store now re-derives from the backend when it is
+   * non-zero.
+   */
+  rejected: number;
 }
 
 export interface GraphRunResult {

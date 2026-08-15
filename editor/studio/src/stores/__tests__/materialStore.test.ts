@@ -96,7 +96,12 @@ beforeEach(() => {
   vi.mocked(material.list).mockResolvedValue([]);
   vi.mocked(material.create).mockResolvedValue(makeDoc());
   vi.mocked(material.close).mockResolvedValue(undefined);
-  vi.mocked(material.apply).mockResolvedValue({ issues: [], canUndo: true, canRedo: false });
+  vi.mocked(material.apply).mockResolvedValue({
+    issues: [],
+    canUndo: true,
+    canRedo: false,
+    rejected: 0,
+  });
   vi.mocked(material.compile).mockResolvedValue(compileResult);
 });
 
@@ -166,6 +171,46 @@ describe("apply", () => {
     await useMaterialStore.getState().apply([{ kind: "move-node", id: 1, x: 99, y: 99 }], "Move");
     expect(vi.mocked(material.apply)).toHaveBeenCalled();
     expect(vi.mocked(material.compile)).not.toHaveBeenCalled();
+  });
+
+  // **R2.F1.** The optimistic clone is a bet that the backend agrees. When it
+  // does not — a connect that would cycle, an unknown param — `rejected` is the
+  // ONLY signal: `issues` is computed over the backend's graph, where the
+  // refused wire does not exist to be invalid.
+  it("re-derives from the backend when an edit was refused", async () => {
+    await useMaterialStore.getState().init();
+    vi.mocked(material.apply).mockResolvedValue({
+      issues: [],
+      canUndo: true,
+      canRedo: false,
+      rejected: 1,
+    });
+    // What the backend actually holds: the node was never added.
+    vi.mocked(material.get).mockResolvedValue(makeDoc());
+
+    await useMaterialStore.getState().apply(
+      [{ kind: "add-node", id: 2, typeId: "slab.surface", x: 10, y: 20, params: {} }],
+      "Add node",
+    );
+
+    expect(vi.mocked(material.get)).toHaveBeenCalledWith("mat:1");
+    expect(
+      useMaterialStore.getState().doc?.graph.nodes["2"],
+      "the canvas kept drawing a node the backend refused",
+    ).toBeUndefined();
+  });
+
+  it("does NOT re-derive when every edit landed", async () => {
+    // The other direction: a round trip per edit would undo the whole point of
+    // the optimistic path, so the re-derive has to be conditional.
+    await useMaterialStore.getState().init();
+    vi.mocked(material.get).mockClear();
+    await useMaterialStore.getState().apply(
+      [{ kind: "add-node", id: 2, typeId: "slab.surface", x: 10, y: 20, params: {} }],
+      "Add node",
+    );
+    expect(vi.mocked(material.get)).not.toHaveBeenCalled();
+    expect(useMaterialStore.getState().doc?.graph.nodes["2"]).toBeDefined();
   });
 });
 

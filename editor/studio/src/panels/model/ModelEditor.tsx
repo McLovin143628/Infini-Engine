@@ -50,6 +50,11 @@ import {
   Undo2,
 } from "lucide-react";
 
+import {
+  ASSET_DROP_ATTR,
+  onAssetDrop,
+  type AssetDropDetail,
+} from "../../lib/assetDrop";
 import { DCC_PREVIEW_SIZE } from "../../lib/ipc";
 import { useAssetStore } from "../../stores/assetStore";
 import { useDccEntry, useDccStore } from "../../stores/dccStore";
@@ -197,6 +202,9 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const unwrap = useDccStore((s) => s.unwrap);
   const uvRefresh = useDccStore((s) => s.uvRefresh);
   const assetsById = useAssetStore((s) => s.assets);
+  // What the drawer is dragging right now, so the zone lights up for a drop it
+  // can actually accept rather than for any native drag that crosses it.
+  const dragAsset = useAssetStore((s) => s.dragAsset);
 
   // Tool parameters. Local, because they are the popover's state and nothing
   // outside this panel has an opinion about them.
@@ -435,14 +443,52 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   };
 
   // ── drag-and-drop: a mesh asset dropped on the panel merges in ───────────
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDropTarget(false);
-    const id = e.dataTransfer.getData("application/x-inf-asset") || e.dataTransfer.getData("text/plain");
-    if (!id) return;
-    if (assetsById[id]?.kind !== "mesh") return;
-    if (assetId) void mergeAsset(assetId, id);
-  };
+  //
+  // **Round-2 finding R2.F9.** This read `e.dataTransfer` and nothing in the
+  // tree ever called `setData`: the Content Drawer drags with pointer events
+  // (it has to — its other target is the native viewport hole, which is not a
+  // DOM node), so the zone highlighted for any native drag and silently
+  // discarded it. `dcc_merge_asset` had no reachable caller at all, which is
+  // also why R2.F5 and the two merge defects beside it were latent.
+  const dropRef = useRef<HTMLDivElement | null>(null);
+  const onAsset = useCallback(
+    (detail: AssetDropDetail) => {
+      setDropTarget(false);
+      // The kind comes with the drop; `assetsById` is the cross-check, so a
+      // stale drawer snapshot cannot make a non-mesh reach the merge door.
+      if (detail.kind !== "mesh" || assetsById[detail.id]?.kind !== "mesh") return;
+      if (assetId) void mergeAsset(assetId, detail.id);
+    },
+    [assetId, assetsById, mergeAsset],
+  );
+  useEffect(() => {
+    const el = dropRef.current;
+    if (!el) return;
+    return onAssetDrop(el, onAsset);
+  }, [onAsset]);
+  // Light up while a mesh is in flight over this panel. The listener is on
+  // `window` rather than on the zone because the drawer cell holds pointer
+  // capture for the whole drag, so `pointerenter`/`pointerleave` never fire on
+  // anything else — the same reason the drawer hit-tests coordinates.
+  useEffect(() => {
+    if (dragAsset?.kind !== "mesh") return;
+    const el = dropRef.current;
+    if (!el) return;
+    const over = (e: PointerEvent) => {
+      const r = el.getBoundingClientRect();
+      setDropTarget(
+        e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom,
+      );
+    };
+    window.addEventListener("pointermove", over);
+    // The un-light is in the CLEANUP, which is also what runs when the drag
+    // ends — so a drag that leaves the window, is cancelled, or is dropped
+    // elsewhere cannot leave this zone outlined.
+    return () => {
+      window.removeEventListener("pointermove", over);
+      setDropTarget(false);
+    };
+  }, [dragAsset]);
 
   if (!doc) {
     return (
@@ -525,16 +571,12 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           </div>
         </div>
         <div
+          ref={dropRef}
+          {...{ [ASSET_DROP_ATTR]: "mesh" }}
           className={cn(
             "flex min-h-0 flex-1 items-center justify-center bg-(--ink-bg-0) p-3",
             dropTarget && "outline outline-2 -outline-offset-4 outline-(--ink-accent)",
           )}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDropTarget(true);
-          }}
-          onDragLeave={() => setDropTarget(false)}
-          onDrop={onDrop}
         >
           {image ? (
             <img

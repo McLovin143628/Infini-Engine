@@ -227,6 +227,17 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
     try {
       const res = await graphIpc.apply(doc.id, edits, label);
       set({ issues: res.issues, canUndo: res.canUndo, canRedo: res.canRedo });
+      // **R2.F1.** The backend refused `rejected` of the edits — a `connect`
+      // that would cycle, a node that is not there, an unknown param — and the
+      // optimistic clone above is now a picture of a graph that does not exist.
+      // `issues` cannot report it: a wire that never entered the graph has
+      // nothing to be invalid about. So the canvas re-derives, which is what
+      // "fully controlled" is supposed to mean, and the wire visibly snaps back.
+      if (res.rejected > 0) {
+        console.warn(`graph.apply: the backend refused ${res.rejected} edit(s); re-deriving`);
+        const authoritative = await graphIpc.get(doc.id);
+        if (!tombstoned && get().doc?.id === doc.id) set({ doc: authoritative });
+      }
     } catch (e) {
       console.error("graph.apply failed", e);
     }

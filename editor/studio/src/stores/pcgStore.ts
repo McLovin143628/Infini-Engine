@@ -168,6 +168,15 @@ export const usePcgStore = create<PcgState>((set, get) => ({
     try {
       const res = await pcgIpc.apply(doc.id, edits, label);
       set({ issues: res.issues, canUndo: res.canUndo, canRedo: res.canRedo });
+      // **R2.F1.** A refused edit means the canvas is drawing a graph the
+      // backend does not have, and `issues` cannot say so — a wire that never
+      // entered the graph has nothing to be invalid about. Re-derive before the
+      // recompile, so the lowered document comes from what actually exists.
+      if (res.rejected > 0) {
+        console.warn(`pcg.apply: the backend refused ${res.rejected} edit(s); re-deriving`);
+        const authoritative = await pcgIpc.get(doc.id);
+        if (!tombstoned && get().doc?.id === doc.id) set({ doc: authoritative });
+      }
       // Position-only moves don't change the lowered document; skip the recompile.
       if (edits.some((e) => e.kind !== "move-node")) void get().compile();
     } catch (e) {

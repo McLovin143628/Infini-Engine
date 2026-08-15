@@ -45,6 +45,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { cn } from "../lib/utils";
+import { deliverAssetDrop } from "../lib/assetDrop";
 import { executeCommand } from "../lib/commands";
 import { scene as sceneIpc, shell, viewport } from "../lib/ipc";
 import { useDockLayout } from "../panels/dock/dockLayoutStore";
@@ -748,6 +749,8 @@ function AssetCell({
   // it" and left the old picture on screen for the rest of the session.
   const thumb = useAssetStore((s) => s.thumbnails.get(asset.content_hash));
   const loadThumbnail = useAssetStore((s) => s.loadThumbnail);
+  const beginAssetDrag = useAssetStore((s) => s.beginAssetDrag);
+  const endAssetDrag = useAssetStore((s) => s.endAssetDrag);
   const [ghost, setGhost] = useState<{ x: number; y: number } | null>(null);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const dragging = useRef(false);
@@ -767,15 +770,50 @@ function AssetCell({
     if (!dragStart.current) return;
     const dx = e.clientX - dragStart.current.x;
     const dy = e.clientY - dragStart.current.y;
-    if (!dragging.current && Math.hypot(dx, dy) > 5) dragging.current = true;
+    if (!dragging.current && Math.hypot(dx, dy) > 5) {
+      dragging.current = true;
+      beginAssetDrag(asset.id, asset.kind);
+    }
     if (dragging.current) setGhost({ x: e.clientX, y: e.clientY });
+  };
+  // A drag that never ends leaves every drop zone lit and the store lying about
+  // what is in flight. `pointercancel` (a touch turning into a scroll, the OS
+  // taking the pointer) and `lostpointercapture` (an element removed mid-drag)
+  // are the two ways it happens; `TilemapPanel` already handles the first and
+  // this one had neither.
+  const onPointerCancel = () => {
+    setGhost(null);
+    dragStart.current = null;
+    dragging.current = false;
+    endAssetDrag();
   };
   const onPointerUp = (e: React.PointerEvent) => {
     setGhost(null);
     const wasDragging = dragging.current;
     dragStart.current = null;
     dragging.current = false;
+    endAssetDrag();
     if (!wasDragging) return; // a plain click already selected
+
+    // **DOM drop zones first** (round-2 finding R2.F9). The Model Editor's
+    // merge door was reachable only from an HTML5 `dataTransfer` payload that
+    // nothing in the tree ever set: the drop zone highlighted for any native
+    // drag and silently discarded it, so "drag-and-drop modular model building"
+    // — the DCC vision's headline — had a dead door.
+    //
+    // It cannot be fixed by making these cells `draggable`: an HTML5 drag
+    // cancels the pointer stream, and the pointer stream is the ONLY way to
+    // reach the native viewport hole, which is not a DOM node. So the drawer
+    // keeps its pointer drag and hit-tests DOM zones the same way it already
+    // hit-tests the hole. The ghost is `pointer-events-none`, so
+    // `elementFromPoint` sees what is under the cursor.
+    const taken = deliverAssetDrop(e.clientX, e.clientY, {
+      id: asset.id,
+      kind: asset.kind,
+      name: asset.name,
+    });
+    if (taken) return;
+
     const hole = document.querySelector("[data-viewport-hole]");
     if (!hole) return;
     const r = hole.getBoundingClientRect();
@@ -830,6 +868,8 @@ function AssetCell({
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onPointerCancel={onPointerCancel}
+        onLostPointerCapture={onPointerCancel}
         onDoubleClick={() => onOpen(asset)}
         onContextMenu={(e) => {
           e.preventDefault();

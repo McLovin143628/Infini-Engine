@@ -73,7 +73,12 @@ beforeEach(() => {
   vi.mocked(pcg.list).mockResolvedValue([]);
   vi.mocked(pcg.create).mockResolvedValue(makeDoc());
   vi.mocked(pcg.close).mockResolvedValue(undefined);
-  vi.mocked(pcg.apply).mockResolvedValue({ issues: [], canUndo: true, canRedo: false });
+  vi.mocked(pcg.apply).mockResolvedValue({
+    issues: [],
+    canUndo: true,
+    canRedo: false,
+    rejected: 0,
+  });
   vi.mocked(pcg.compile).mockResolvedValue(compileResult);
   vi.mocked(pcg.evaluate).mockResolvedValue({ entity: "abc", placed: 42, issues: [], ok: true });
   vi.mocked(pcg.save).mockResolvedValue("PCG_Graph.inf_pcg");
@@ -127,6 +132,39 @@ describe("apply", () => {
     await usePcgStore.getState().apply([{ kind: "move-node", id: 1, x: 99, y: 99 }], "Move");
     expect(vi.mocked(pcg.apply)).toHaveBeenCalled();
     expect(vi.mocked(pcg.compile)).not.toHaveBeenCalled();
+  });
+
+  // **R2.F1**, the same property as the material canvas's: a refused edit is
+  // reported ONLY by `rejected`, because the wire that was refused is not in
+  // the backend's graph for `issues` to complain about.
+  it("re-derives from the backend when an edit was refused", async () => {
+    await usePcgStore.getState().init();
+    vi.mocked(pcg.apply).mockResolvedValue({
+      issues: [],
+      canUndo: true,
+      canRedo: false,
+      rejected: 2,
+    });
+    vi.mocked(pcg.get).mockResolvedValue(makeDoc());
+
+    await usePcgStore.getState().apply(
+      [{ kind: "add-node", id: 2, typeId: "const.density", x: 10, y: 20, params: {} }],
+      "Add node",
+    );
+
+    expect(vi.mocked(pcg.get)).toHaveBeenCalledWith("pcg:1");
+    expect(usePcgStore.getState().doc?.graph.nodes["2"]).toBeUndefined();
+  });
+
+  it("does NOT re-derive when every edit landed", async () => {
+    await usePcgStore.getState().init();
+    vi.mocked(pcg.get).mockClear();
+    await usePcgStore.getState().apply(
+      [{ kind: "add-node", id: 2, typeId: "const.density", x: 10, y: 20, params: {} }],
+      "Add node",
+    );
+    expect(vi.mocked(pcg.get)).not.toHaveBeenCalled();
+    expect(usePcgStore.getState().doc?.graph.nodes["2"]).toBeDefined();
   });
 });
 

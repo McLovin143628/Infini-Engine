@@ -83,6 +83,23 @@ interface AssetState {
   imports: Record<number, ImportJob>;
   /** Undismissed advisories from finished imports (P26.5). */
   importAdvisories: ImportAdvisory[];
+  /**
+   * **The asset being pointer-dragged out of the Content Drawer**, or null
+   * (round-2 finding R2.F9).
+   *
+   * The drawer drags with pointer events rather than HTML5 drag-and-drop,
+   * because its original target is the **native viewport child window** — a
+   * hole in the DOM that no `dragover` can reach. That is why the cells are
+   * `draggable={false}`, and it is why every DOM drop zone in the editor had to
+   * be reached some other way. This slot is that way: a panel subscribes to it
+   * to light up while a drag it can accept is in flight.
+   */
+  dragAsset: { id: string; kind: string } | null;
+
+  /** A drawer cell's pointer drag crossed its threshold. */
+  beginAssetDrag: (id: string, kind: string) => void;
+  /** …and ended, however it ended. Always paired, including on cancel. */
+  endAssetDrag: () => void;
 
   applySnapshot: (s: AssetSnapshot) => void;
   refresh: () => Promise<void>;
@@ -253,6 +270,10 @@ export const useAssetStore = create<AssetState>((set, get) => ({
   thumbnails: new Map(),
   imports: {},
   importAdvisories: [],
+  dragAsset: null,
+
+  beginAssetDrag: (id, kind) => set({ dragAsset: { id, kind } }),
+  endAssetDrag: () => set({ dragAsset: null }),
 
   applySnapshot: (s) =>
     set({
