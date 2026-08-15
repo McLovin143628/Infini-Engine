@@ -171,13 +171,23 @@ mod tests {
             root.join("./a.txt")
         );
 
-        for bad in [
+        // Drive-prefixed spellings and backslash separators are escapes only
+        // where the platform's path grammar says so: on Unix `C:/…` is a plain
+        // relative component and `..\..\secrets` is ONE odd filename, and
+        // confining either under the root is the correct verdict there. The
+        // sibling fixture in git.rs learned this on its first CI run.
+        #[cfg(windows)]
+        let bad_paths: &[&str] = &[
             "../secrets",
             "src/../../secrets",
             "/etc/passwd",
             "C:/Windows/system32",
             r"..\..\secrets",
-        ] {
+        ];
+        #[cfg(not(windows))]
+        let bad_paths: &[&str] = &["../secrets", "src/../../secrets", "/etc/passwd"];
+
+        for bad in bad_paths.iter().copied() {
             assert!(
                 confine_under(root, bad).is_err(),
                 "must refuse {bad:?} — this is the argument `git_discard` deletes"
