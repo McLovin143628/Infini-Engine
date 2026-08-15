@@ -914,6 +914,30 @@ pub fn resolve_fracture_states(
     out
 }
 
+/// `v^(2/3)` — **an area from a volume** — built as `pcbrt(v)²` and never as
+/// `v.powf(2.0 / 3.0)`.
+///
+/// # Why the spelling is the point
+///
+/// `f64::powf` is a libm call, and the P14 law says libm is not bit-identical
+/// across targets — the *same* law that put [`inf_math::pcbrt`] on
+/// [`FractureState::chunk_radius_m`] eighty lines up, with the rationale written
+/// out there. The two callers below price every destruction bond in the engine:
+/// the answer decides which chunks detach under a given blast, that decision
+/// rides `DamageReport`/`FractureAudit` into `state_bytes`, and `state_bytes` is
+/// what the `PIE == shipping` arms and the net memo's "every client re-derives
+/// the rubble with nothing sent" claim compare between two *machines*. The
+/// cube-root half of the exponent was already portable and the squaring half was
+/// not, which is how a function can be half-guarded and read as guarded.
+///
+/// Non-positive and non-finite input answer `0.0`, because `pcbrt` does — the
+/// same value both callers' `is_finite` guards were already converging on, one
+/// step earlier.
+fn area_from_volume(volume_m3: f64) -> f64 {
+    let edge = inf_math::pcbrt(volume_m3);
+    edge * edge
+}
+
 /// Every chunk's **ground-bond** energy in joules — what it costs to break it
 /// away from the static geometry it stands on, over its own characteristic
 /// cross-section `volume^(2/3)`. See [`FractureState::ground_bonds`] for why the
@@ -923,7 +947,7 @@ fn ground_bond_energies(asset: &FractureAsset, d: &Destructible, volume_scale: f
         .chunks
         .iter()
         .map(|c| {
-            let area = (c.volume_m3 * volume_scale).max(0.0).powf(2.0 / 3.0);
+            let area = area_from_volume(c.volume_m3 * volume_scale);
             let e = d.bond_force_n(area) * CRACK_OPENING_M;
             if e.is_finite() {
                 e.max(0.0)
@@ -962,7 +986,10 @@ type BondPricing = (BTreeMap<(u32, u32), f64>, BTreeSet<(u32, u32)>);
 /// is deliberately generous rather than zero: a bond with zero energy is a bond
 /// that breaks for free, which would make one malformed chunk shatter a building.
 fn bond_energies(asset: &FractureAsset, d: &Destructible, volume_scale: f64) -> BondPricing {
-    let area_scale = volume_scale.max(0.0).powf(2.0 / 3.0);
+    // The same identity applied to a *ratio* rather than to a volume: an area
+    // scales as the two-thirds power of a volume, so a uniform scale's
+    // determinant enters here exactly as a chunk's own volume does above.
+    let area_scale = area_from_volume(volume_scale);
     let mut out = BTreeMap::new();
     let mut estimated = BTreeSet::new();
     for (a, b) in asset.adjacency_pairs() {
@@ -981,7 +1008,7 @@ fn bond_energies(asset: &FractureAsset, d: &Destructible, volume_scale: f64) -> 
             // carry a faceless edge, and pricing it at zero would let one
             // malformed chunk shatter a building for free. Recorded rather than
             // silent — see `FractureState::estimated_bonds`.
-            area = ca.volume_m3.min(cb.volume_m3).max(0.0).powf(2.0 / 3.0);
+            area = area_from_volume(ca.volume_m3.min(cb.volume_m3));
             estimated.insert((a, b));
         }
         let energy = d.bond_force_n(area * area_scale) * CRACK_OPENING_M;

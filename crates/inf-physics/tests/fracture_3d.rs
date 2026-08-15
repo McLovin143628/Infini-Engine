@@ -1346,38 +1346,153 @@ fn the_portable_cube_root_matches_the_voxel_one() {
     assert!((inf_math::pcbrt(27.0) - 3.0).abs() < 1e-12);
 }
 
-/// **The chunk radius does not call libm.** A grep, because the property is about
-/// what the code is allowed to call and no numeric assertion can see it — the
-/// `inf_render::debris` gate's twin, in the other crate on the placement path.
+/// **The destruction module calls no libm.** A grep, because the property is
+/// about what the code is allowed to call and no numeric assertion can see it —
+/// the `inf_render::debris` gate's twin, in the other crate on the placement
+/// path.
 ///
-/// The auditor's finding this closes: the trig gate lived in `inf-render` and
+/// The P22.4 finding this first closed: the trig gate lived in `inf-render` and
 /// could not see `chunk_radius_m`, so half the arithmetic behind "every client
 /// derives the same rubble" was unguarded.
+///
+/// # Widened from a function span to the module (Hardening Wave C, L6.F2)
+///
+/// The first cut read the twenty lines between `pub fn chunk_radius_m(` and its
+/// closing brace. Everything the module did outside those twenty lines was
+/// invisible to it — and `ground_bond_energies` and `bond_energies`, two hundred
+/// lines below, were pricing **every destruction bond in the engine** through
+/// `.powf(2.0 / 3.0)`, which is the same libm the span above it bans. A gate
+/// that reads a span certifies a span; the claim it is quoted for ("two machines
+/// derive the same fragments from the same detach set") is about the module.
+///
+/// This is the P23 law met again in its other form — *a byte pin cannot see a
+/// semantic change; read a SCOPE, ban the MODULE* — and it is why the scope is
+/// now the whole file, minus comment lines, which name the banned spellings
+/// repeatedly while explaining why they are banned (the P24.1 F1 finding).
 #[test]
-fn the_chunk_radius_uses_the_portable_cube_root() {
+fn the_destruction_module_calls_no_libm() {
     // Normalized: `core.autocrlf = true` checks `.rs` out CRLF on Windows, where
-    // `"\n}\n"` occurs nowhere and `find` returns `None`.
+    // a newline-delimited search finds nothing (the P22 law).
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/d3/fracture.rs"),
     )
     .expect("the module is readable")
     .replace("\r\n", "\n");
-    let start = src
-        .find("    pub fn chunk_radius_m(")
-        .expect("`chunk_radius_m` exists");
-    let end = src[start..]
-        .find("\n    }\n")
-        .expect("`chunk_radius_m` terminates");
-    let body = &src[start..start + end];
+
+    // **The module has no `#[cfg(test)]` region**, so the scope is the whole
+    // file with comments blanked. Asserted rather than assumed: the day someone
+    // adds a test module here, a fixture that builds a rotation from an angle
+    // would fail this gate for the wrong reason, and the fix is to strip the
+    // region the way `inf-anim`'s `portable_pose::production_code` does. Failing
+    // loudly here is what makes that a decision instead of a mystery.
     assert!(
-        body.contains("inf_math::pcbrt("),
-        "`chunk_radius_m` no longer goes through the portable cube root:\n{body}"
+        !src.contains("#[cfg(test)]"),
+        "`d3/fracture.rs` grew a test module; this gate scans the whole file and \
+         must learn to strip `#[cfg(test)]` regions first — see \
+         `inf-anim/tests/portable_pose.rs`'s `production_code`"
     );
-    for banned in [".cbrt()", ".powf(", ".sin()", ".cos()"] {
-        assert!(
-            !body.contains(banned),
-            "`chunk_radius_m` calls `{banned}` — libm is not bit-portable, and this \
-             value decides where two machines lay the same rubble:\n{body}"
-        );
-    }
+    let code: String = src
+        .lines()
+        .map(|l| {
+            if l.trim_start().starts_with("//") {
+                ""
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // The anti-vacuity half, and the original claim kept by name: the radius
+    // really does go through the portable cube root, and the module really does
+    // contain code.
+    assert!(
+        code.contains("pub fn chunk_radius_m("),
+        "`chunk_radius_m` is gone; this gate no longer covers what it was written for"
+    );
+    assert!(
+        code.contains("inf_math::pcbrt("),
+        "the module no longer reaches the portable cube root at all"
+    );
+    assert!(
+        code.lines().filter(|l| !l.trim().is_empty()).count() > 400,
+        "the module reduced to nothing after blanking comments — the ban below \
+         is scanning an empty string"
+    );
+
+    const BANNED: [&str; 29] = [
+        ".cbrt()",
+        ".powf(",
+        ".sin()",
+        ".cos()",
+        ".tan()",
+        ".atan2(",
+        ".acos()",
+        ".asin()",
+        ".sin_cos()",
+        ".exp()",
+        ".ln()",
+        // The UFCS spellings, the P24.2 re-audit's minor 3: `.cbrt()` is a
+        // substring ban and `f64::cbrt(x)` — the same call written the other way
+        // — walks straight past it.
+        "f32::cbrt(",
+        "f64::cbrt(",
+        "f32::powf(",
+        "f64::powf(",
+        "f32::sin(",
+        "f64::sin(",
+        "f32::cos(",
+        "f64::cos(",
+        "f32::tan(",
+        "f64::tan(",
+        // glam constructors that reach `sin_cos` inside another crate, where no
+        // grep of this one would ever see them.
+        "from_rotation_arc",
+        "from_axis_angle",
+        "from_euler",
+        "from_rotation_x(",
+        "from_rotation_y(",
+        "from_rotation_z(",
+        "to_euler(",
+        ".slerp(",
+    ];
+
+    // One predicate, applied to the real source and then to a poisoned copy of
+    // it, so the arm below is the same question asked twice rather than an
+    // assertion and a separate hand-written decoy.
+    let offenders = |text: &str| -> Vec<(&'static str, Vec<usize>)> {
+        BANNED
+            .iter()
+            .filter_map(|banned| {
+                let hits: Vec<usize> = text
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, l)| l.contains(banned))
+                    .map(|(i, _)| i + 1)
+                    .collect();
+                (!hits.is_empty()).then_some((*banned, hits))
+            })
+            .collect()
+    };
+
+    let found = offenders(&code);
+    assert!(
+        found.is_empty(),
+        "`d3/fracture.rs` calls libm: {found:?} — it is not bit-portable (the P14 \
+         law), and this module prices every destruction bond and places every \
+         fragment two machines are claimed to agree about. Use `inf_math`'s \
+         portable family: `pcbrt`, `psin64`, `pcos64`, `pacos64`. `sqrt` is fine \
+         and is deliberately not banned."
+    );
+
+    // **Built to falsify** (the P22 law): the same predicate over a poisoned copy
+    // must reject it, or the assertion above is a statement about a string that
+    // happens to be green. The poison is the exact defect this widening found —
+    // a two-thirds power written as a `powf`, two hundred lines below the span
+    // the gate used to read.
+    let poisoned = format!("{code}\n    let area = v.max(0.0).powf(2.0 / 3.0);");
+    assert!(
+        !offenders(&poisoned).is_empty(),
+        "the ban cannot see a `powf` even when one is put in front of it"
+    );
 }
