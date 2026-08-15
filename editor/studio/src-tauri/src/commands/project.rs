@@ -85,6 +85,21 @@ fn apply_open(
     if let Some(viewport) = app.try_state::<super::ViewportState>() {
         viewport.set_content_root(super::Target::All, Some(content_root));
     }
+    // …and drop every open Model Editor session (round-2 finding R2.F15). A
+    // `MeshSession` is keyed on an `AssetId` **in the database re-rooted two
+    // statements above**, so a document left open across a switch holds a whole
+    // base mesh + op journal + checkpoints against a project that is gone. The
+    // asset store and the viewports are re-pointed here; this one was not, and
+    // the panel's own unmount effect never runs for a dock tab that stays open.
+    if let Some(dcc) = app.try_state::<super::dcc::DccState>() {
+        let dropped = dcc.clear_all();
+        if dropped > 0 {
+            tracing::info!(
+                dropped,
+                "closed Model Editor sessions belonging to the previous project"
+            );
+        }
+    }
     let _ = app.emit("project://changed", dto.clone());
     tracing::info!("project opened: {}", dto.name);
     Ok(dto)

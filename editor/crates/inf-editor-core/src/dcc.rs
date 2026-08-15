@@ -1837,11 +1837,58 @@ pub struct PreviewCache {
     scratch_geometry: Option<std::sync::Arc<EditGeometry>>,
     scratch_mesh: Option<std::sync::Arc<Mesh>>,
     scratch_tessellations: u64,
+    /// **The identity of the geometry the last get returned** — the key a
+    /// vertex-buffer upload may be skipped on. See [`PreviewCache::upload_stamp`].
+    upload_stamp: u64,
 }
+
+/// Fold a preview key into one integer, so the renderer's upload can be skipped
+/// on equality without the caller carrying a pair.
+///
+/// FNV-1a over the two halves rather than a shift-and-or, because `step` is a
+/// hash itself for a gizmo drag (see [`drag_step`]) and a packing would collide
+/// on its high bits.
+fn fold_key(generation: u64, step: u64) -> u64 {
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+    for x in [generation, step] {
+        acc ^= x;
+        acc = acc.wrapping_mul(0x1000_0000_01b3);
+    }
+    acc
+}
+
+/// The step half of a committed (no drag in flight) key. `u64::MAX` because a
+/// real step is a path length or a `usize` hash and neither is asked to be
+/// distinct from this — the fold is what makes them so.
+const COMMITTED_STEP: u64 = u64::MAX;
 
 impl PreviewCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// **The stamp a caller must give the renderer** for the geometry the last
+    /// [`get`](PreviewCache::get) / [`get_with_pending`](PreviewCache::get_with_pending)
+    /// returned (round-2 finding R2.F4).
+    ///
+    /// `PreviewSession::set_geometry` early-returns when the stamp it is handed
+    /// equals the one it holds — that is the P23.2a warm path and it is what
+    /// makes an orbit free. The Model Editor's command layer passed
+    /// `session.generation()`, which is exactly the number an **uncommitted
+    /// drag deliberately does not move**: this cache keys its scratch on
+    /// `(generation, step)` *because* the generation cannot see a live stroke.
+    /// So every sculpt / weight-paint / gizmo drag frame re-tessellated a fresh
+    /// scratch mesh and then skipped the upload of it. The wireframe and brush
+    /// ring (composited CPU-side, from the same geometry) tracked the pointer
+    /// while the shaded surface stayed frozen at the pre-drag mesh until
+    /// `dcc_drag_end` moved the generation.
+    ///
+    /// Reading it from the cache rather than recomputing it at the call site is
+    /// the point: the cache is the only thing that knows which of its two slots
+    /// it just served, and a second derivation of that is the class of bug this
+    /// tree's laws forbid.
+    pub fn upload_stamp(&self) -> u64 {
+        self.upload_stamp
     }
 
     /// How many times the tessellator has actually run — the cache's observable
@@ -1865,6 +1912,7 @@ impl PreviewCache {
             self.mesh = Some(std::sync::Arc::new(session.mesh().clone()));
             self.tessellations += 1;
         }
+        self.upload_stamp = fold_key(stamp, COMMITTED_STEP);
         (
             self.geometry.clone().expect("just filled"),
             self.mesh.clone().expect("just filled"),
@@ -1951,6 +1999,7 @@ impl PreviewCache {
             self.scratch_mesh = Some(std::sync::Arc::new(mesh));
             self.scratch_tessellations += 1;
         }
+        self.upload_stamp = fold_key(key.0, key.1 as u64);
         (
             self.scratch_geometry.clone().expect("just filled"),
             self.scratch_mesh.clone().expect("just filled"),
@@ -3461,6 +3510,66 @@ mod tests {
             "no extra scratch on release"
         );
         assert!(!std::sync::Arc::ptr_eq(&committed, &geo1));
+    }
+
+    /// **Round-2 finding R2.F4**: the stamp the upload is skipped on has to move
+    /// whenever the geometry does, and a live drag moves the geometry without
+    /// moving the journal generation — that is the whole reason the scratch
+    /// channel exists.
+    ///
+    /// The command layer sent `session.generation()`, so the renderer's
+    /// `set_geometry` early-return fired on every drag frame and the shaded
+    /// surface stayed frozen at the pre-drag mesh while the CPU-composited
+    /// wireframe tracked the pointer. The arm asserts the property that was
+    /// false: **distinct geometry, distinct stamp** — and that a frame which
+    /// really did not move keeps its stamp, because a stamp that always changed
+    /// would retire the warm path this cache exists for.
+    #[test]
+    fn the_upload_stamp_moves_whenever_the_geometry_does() {
+        let s = MeshSession::new(cube(1.0));
+        let sel = SelectionSet::new(s.generation());
+        let mut cache = PreviewCache::new();
+
+        let (_, _) = cache.get(&s);
+        let committed = cache.upload_stamp();
+
+        let mut stroke = StrokeInFlight {
+            mode: inf_dcc::SculptMode::Draw,
+            radius: 0.8,
+            strength: 0.1,
+            falloff: inf_dcc::SculptFalloff::Smooth,
+            path: vec![DVec3::new(0.5, 0.5, 0.5)],
+            last_normal: DVec3::Y,
+        };
+        let pending = PendingDrag::Stroke(stroke.clone());
+        cache.get_with_pending(&s, &sel, SelectMode::Face, Some(&pending));
+        let first = cache.upload_stamp();
+        assert_ne!(
+            first, committed,
+            "the first drag frame draws a different mesh from the committed one, at the SAME \
+             journal generation — this is the inequality `session.generation()` could not express"
+        );
+
+        // A frame where nothing moved keeps the stamp: the warm path survives.
+        cache.get_with_pending(&s, &sel, SelectMode::Face, Some(&pending));
+        assert_eq!(first, cache.upload_stamp(), "an orbit mid-stroke is free");
+
+        // The stroke grows → new geometry → new stamp.
+        stroke.path.push(DVec3::new(0.6, 0.5, 0.5));
+        let moved = PendingDrag::Stroke(stroke);
+        cache.get_with_pending(&s, &sel, SelectMode::Face, Some(&moved));
+        let second = cache.upload_stamp();
+        assert_ne!(second, first, "the stroke grew and the surface must follow");
+
+        // Letting go returns to the committed geometry, which is a THIRD picture
+        // and must not be skipped either.
+        cache.get_with_pending(&s, &sel, SelectMode::Face, None);
+        assert_eq!(
+            cache.upload_stamp(),
+            committed,
+            "an abandoned drag returns to exactly the geometry it started from"
+        );
+        assert_ne!(cache.upload_stamp(), second);
     }
 
     #[test]

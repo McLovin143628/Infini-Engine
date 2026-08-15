@@ -1,9 +1,8 @@
 //! Ring-2 command surface for the **Model Editor** (ROADMAP P23.4).
 //!
 //! The fourth instance of the template `GraphState`, `MaterialState` and
-//! `PcgState` already are — a document map, a journal map keyed the same way and
-//! a counter — with two deliberate differences, both consequences of what a mesh
-//! is:
+//! `PcgState` already are — a document map and a journal map keyed the same way
+//! — with two deliberate differences, both consequences of what a mesh is:
 //!
 //! * **The journal IS the document.** `inf_dcc::MeshSession` owns the base mesh,
 //!   the op list and the cursor, so there is no second copy of the mesh to keep
@@ -115,7 +114,6 @@ struct DccDoc {
 struct DccStore {
     docs: BTreeMap<String, DccDoc>,
     journals: BTreeMap<String, MeshSession>,
-    counter: u32,
 }
 
 pub struct DccState {
@@ -133,7 +131,6 @@ impl Default for DccState {
             inner: Mutex::new(DccStore {
                 docs: BTreeMap::new(),
                 journals: BTreeMap::new(),
-                counter: 0,
             }),
             preview: Mutex::new(Thumbnailer::new(PREVIEW_SIZE)),
         }
@@ -167,6 +164,34 @@ impl DccState {
             s.journals.remove(id);
             Ok(abandoned)
         })
+    }
+
+    /// Drop **every** open document — the project the sessions belong to is
+    /// going away (round-2 finding R2.F15).
+    ///
+    /// A `MeshSession` is a base mesh plus its op journal plus its checkpoints,
+    /// and every document here is keyed on an `AssetId` **in the open project's
+    /// database**. `project::apply_open` re-roots that database and every
+    /// viewport and never touched this store, so a Model Editor tab open across
+    /// a switch kept a full session alive against an asset id that no longer
+    /// resolves: every command still worked on it, only `dcc_save` failed, and
+    /// each switch stranded another. The panel's unmount effect was the only
+    /// remover, and a dock tab is not unmounted by opening a project.
+    ///
+    /// Returns how many documents were dropped, so the switch can say so — and
+    /// so a test can tell a clear that ran from one that did not.
+    pub fn clear_all(&self) -> usize {
+        match self.inner.lock() {
+            Ok(mut s) => {
+                let n = s.docs.len();
+                s.docs.clear();
+                s.journals.clear();
+                n
+            }
+            // A poisoned store is already unusable; reporting zero here is the
+            // honest answer and the project switch is not the place to panic.
+            Err(_) => 0,
+        }
     }
 }
 
@@ -397,7 +422,10 @@ pub async fn dcc_open(
     let view = dcc::frame(dcc::tessellate(&import.mesh).bounds);
     let session = MeshSession::new(import.mesh);
     let dto = state.with(|s| {
-        s.counter += 1;
+        // No counter: unlike the three graph stores this template came from,
+        // a document id here is `dcc:{asset}` — the asset IS the identity, which
+        // is what makes `dcc_open` idempotent. The inherited `counter` was
+        // incremented on every open and read by nothing.
         let doc = DccDoc {
             id: doc_id.clone(),
             asset: id,
@@ -1111,6 +1139,15 @@ pub async fn dcc_orbit(
     dolly: f32,
     state: State<'_, DccState>,
 ) -> Result<(), String> {
+    // **The one door in this module that wrote unvalidated floats into state.**
+    // `f32::clamp` PROPAGATES NaN (it returns `self` when neither comparison
+    // fires — the C4-35 mechanism), so a single non-finite delta from the wire
+    // poisoned the camera permanently: every later preview rendered a blank
+    // image and nothing said why. Recoverable via `dcc_frame`, which is not a
+    // thing an author would know to try.
+    if !yaw_deg.is_finite() || !pitch_deg.is_finite() || !dolly.is_finite() {
+        return Err("a camera move must be finite".into());
+    }
     state.with(|s| {
         let (doc, _) = s.pair(&id)?;
         doc.view.yaw_deg += yaw_deg;
@@ -1178,10 +1215,17 @@ pub async fn dcc_redo(
 /// Render one preview frame: the edit mesh, with the wireframe and selection
 /// composited on top.
 ///
-/// The geometry upload is keyed by the journal generation, so an orbit re-renders
-/// without touching a vertex buffer (the P23.2a warm path). `encode_png_fast` is
-/// the encoder, per the same measurement: at edit rate the default deflate is 98%
-/// of the frame.
+/// The geometry upload is keyed by **`PreviewCache::upload_stamp`**, so an orbit
+/// re-renders without touching a vertex buffer (the P23.2a warm path) *and* a
+/// live drag does. `encode_png_fast` is the encoder, per the same measurement:
+/// at edit rate the default deflate is 98% of the frame.
+///
+/// Round-2 finding R2.F4: this used to send `session.generation()`, which is
+/// precisely the number an uncommitted drag does not move — so `set_geometry`
+/// early-returned on every sculpt / weight / gizmo frame and the shaded surface
+/// stayed frozen at the pre-drag mesh while the composited wireframe tracked the
+/// pointer. The cache is the only thing that knows which of its two slots it
+/// just served, so the stamp is read from it rather than re-derived here.
 #[tauri::command]
 pub async fn dcc_preview(
     id: String,
@@ -1236,7 +1280,7 @@ pub async fn dcc_preview(
         Ok((
             geo,
             mesh,
-            session.generation(),
+            doc.preview.upload_stamp(),
             doc.view,
             doc.selection.clone(),
             doc.mode,
@@ -1426,17 +1470,60 @@ fn advisories(r: &ExportReport) -> Vec<String> {
 /// re-solve (see `inf_dcc::uv` for why that is a decision and not an
 /// optimization). A refusal — a chart with no area, or no pair to pin — comes
 /// back as a value with the chart index in it.
+///
+/// # Three phases, because the solve is seconds long (round-2 finding R2.F14)
+///
+/// `DccState::with` guards `docs` **and** `journals` for every open Model
+/// Editor, and this was the one door that held it across a long kernel call:
+/// `inf_dcc::unwrap`'s conjugate-gradient parameterization is seconds on a dense
+/// mesh, so an unwrap froze every other Model Editor command *and* the Tauri
+/// worker it ran on. The rule is stated 240 lines above (`dcc_preview`: CPU-side
+/// under the lock, the long call outside it) and `dcc_save` follows it; this one
+/// did not.
+///
+/// So: clone under the lock, solve on a blocking task, re-acquire and apply. The
+/// re-acquire **re-checks the generation** and refuses if the mesh moved while
+/// the solver ran — an `Op::Unwrap` carries the corner list it solved for, and
+/// applying it to a mesh that has since been extruded would write UVs onto
+/// corners that are not the ones measured. A refusal is a value, per P21's law.
 #[tauri::command]
 pub async fn dcc_unwrap(
     app: AppHandle,
     id: String,
     state: State<'_, DccState>,
 ) -> Result<DccUnwrapDto, String> {
-    let out = state.with(|s| {
+    // Phase 1 — settle and take a copy, under the lock.
+    let (mesh, solved_at, settled) = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
         let settled = settle_reported(doc, session, "dcc_unwrap");
         sync(doc, session);
-        match inf_dcc::unwrap(session.mesh()) {
+        Ok((session.mesh().clone(), session.generation(), settled))
+    })?;
+
+    // Phase 2 — the solve, off both the store lock and the async workers.
+    let solved = tauri::async_runtime::spawn_blocking(move || {
+        let seams = inf_dcc::seam_count(&mesh) as u32;
+        (inf_dcc::unwrap(&mesh), seams)
+    })
+    .await
+    .map_err(|e| format!("unwrap task failed: {e}"))?;
+    let (solved, seams_before) = solved;
+
+    // Phase 3 — apply, back under the lock.
+    let out = state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        if session.generation() != solved_at {
+            let seams = inf_dcc::seam_count(session.mesh()) as u32;
+            return Ok(unwrap_refused(
+                doc,
+                session,
+                "the model changed while the unwrap was solving — nothing was written; \
+                 run Unwrap again"
+                    .to_string(),
+                seams,
+            ));
+        }
+        match solved {
             Ok(unwrapped) => {
                 let report = unwrapped.report;
                 match session.apply(unwrapped.op) {
@@ -1460,36 +1547,35 @@ pub async fn dcc_unwrap(
                             doc: doc_dto(doc, session),
                         })
                     }
-                    Err(e) => Ok(DccUnwrapDto {
-                        ok: false,
-                        refusal: Some(refusal_text(&e)),
-                        charts: 0,
-                        corners: 0,
-                        seams: report.seams as u32,
-                        worst_residual: 0.0,
-                        worst_convergence: 0.0,
-                        flipped: 0,
-                        triangles: 0,
-                        doc: doc_dto(doc, session),
-                    }),
+                    Err(e) => Ok(unwrap_refused(
+                        doc,
+                        session,
+                        refusal_text(&e),
+                        report.seams as u32,
+                    )),
                 }
             }
-            Err(e) => Ok(DccUnwrapDto {
-                ok: false,
-                refusal: Some(refusal_text(&e)),
-                charts: 0,
-                corners: 0,
-                seams: inf_dcc::seam_count(session.mesh()) as u32,
-                worst_residual: 0.0,
-                worst_convergence: 0.0,
-                flipped: 0,
-                triangles: 0,
-                doc: doc_dto(doc, session),
-            }),
+            Err(e) => Ok(unwrap_refused(doc, session, refusal_text(&e), seams_before)),
         }
     })?;
     let _ = app.emit("dcc://sync", id);
     Ok(out)
+}
+
+/// An unwrap that wrote nothing, as a value the panel prints (the P21 law).
+fn unwrap_refused(doc: &DccDoc, session: &MeshSession, why: String, seams: u32) -> DccUnwrapDto {
+    DccUnwrapDto {
+        ok: false,
+        refusal: Some(why),
+        charts: 0,
+        corners: 0,
+        seams,
+        worst_residual: 0.0,
+        worst_convergence: 0.0,
+        flipped: 0,
+        triangles: 0,
+        doc: doc_dto(doc, session),
+    }
 }
 
 /// One frame of the **2D UV view**: the charts, the wireframe, the seams and the
@@ -1565,9 +1651,16 @@ pub async fn dcc_merge_asset(
 
     let out = state.with(|s| {
         let (doc, session) = s.pair(&id)?;
-        // This door answers with a bare `DccDocDto`, which has nowhere to
-        // carry a refusal; `settle_reported` has already said it out loud.
-        let _ = settle_reported(doc, session, "dcc_merge_asset");
+        // **The eleventh C4-34 door** (round-2 finding R2.F5). The comment that
+        // stood here said this door "answers with a bare `DccDocDto`, which has
+        // nowhere to carry a refusal" — and it does not: it answers with a
+        // `DccApplyDto`, whose `refusal` field it populates twenty lines below
+        // from a different cause. So the settle refusal was dropped by
+        // `let _ =` (which satisfies `#[must_use]`) into a DTO that had a slot
+        // for it, and the structural gate saw only that `settle_reported` had
+        // been called. A merge that silently discarded the stroke in flight
+        // reported plain success.
+        let settled = settle_reported(doc, session, "dcc_merge_asset");
         sync(doc, session);
         let here = dcc::tessellate(session.mesh()).bounds;
         let there = dcc::tessellate(&incoming.mesh).bounds;
@@ -1583,10 +1676,22 @@ pub async fn dcc_merge_asset(
         // with the part.
         match dcc::merge_into(session, &incoming.mesh, offset, None) {
             Ok(r) => {
-                doc.selection.sync(session.generation());
+                // `sync`, not a bare `selection.sync` — the module's own door
+                // also clears the knife path and `last_edge`, which name ids the
+                // merge has just renumbered. Re-implementing half of it here is
+                // how a stale knife survived a merge.
+                sync(doc, session);
+                let merged = r.faces > 0;
                 Ok(DccApplyDto {
-                    ok: r.faces > 0,
-                    refusal: (r.faces == 0).then(|| "the dropped mesh had no faces".to_string()),
+                    // A refused stroke means the model on disk will not contain
+                    // what the author was looking at, so it is not an `ok` merge
+                    // even when the geometry landed.
+                    ok: merged && settled.is_none(),
+                    refusal: match (merged, settled) {
+                        (false, _) => Some("the dropped mesh had no faces".to_string()),
+                        (true, Some(why)) => Some(why),
+                        (true, None) => None,
+                    },
                     doc: doc_dto(doc, session),
                 })
             }
@@ -2585,5 +2690,153 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    /// **Round-2 finding R2.F5, as the class rather than the instance.**
+    ///
+    /// `settle_reported` is `#[must_use]`-shaped and ten doors legitimately drop
+    /// its answer with `let _ =`, because the DTO they return has nowhere to put
+    /// it. `dcc_merge_asset` did the same over a comment saying exactly that —
+    /// and it returns a `DccApplyDto`, which has a `refusal` field it populates
+    /// twenty lines further down. The structural gate could not see it: it
+    /// checked only that `settle_reported` had been *called*.
+    ///
+    /// So the pin is the correspondence itself. Every door that drops the
+    /// refusal must return a DTO that genuinely cannot carry one, and that is
+    /// asserted against `inf-editor-core`'s own source rather than against a
+    /// belief about it. Adding a `refusal` slot to `DccDocDto` later — or
+    /// writing a new `let _ = settle_reported` in a door whose DTO has one —
+    /// fails here.
+    #[test]
+    fn no_door_drops_a_refusal_into_a_dto_that_could_carry_it() {
+        let ipc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../crates/inf-editor-core/src/ipc.rs"),
+        )
+        .expect("the DTO source is readable")
+        .replace(
+            "
+", "
+",
+        );
+
+        /// Whether `struct <name>` in `ipc.rs` declares a `refusal` field.
+        fn carries_a_refusal(ipc: &str, dto: &str) -> bool {
+            let header = format!("pub struct {dto} {{");
+            let start = ipc
+                .find(&header)
+                .unwrap_or_else(|| panic!("ipc.rs declares no `{dto}`"))
+                + header.len();
+            let end = start
+                + ipc[start..]
+                    .find(
+                        "
+}",
+                    )
+                    .expect("the struct closes");
+            ipc[start..end].contains("pub refusal:")
+        }
+
+        // The doors that drop it, paired with what they answer with. A list of
+        // PAIRS, so the two halves cannot drift apart silently.
+        let dropping: &[(&str, &str)] = &[
+            ("pub async fn dcc_select(", "DccDocDto"),
+            ("pub async fn dcc_pick(", "DccDocDto"),
+            ("pub async fn dcc_set_gizmo(", "DccDocDto"),
+            ("pub async fn dcc_undo(", "DccDocDto"),
+            ("pub async fn dcc_redo(", "DccDocDto"),
+        ];
+        for (signature, dto) in dropping {
+            let body = code_only(&body_of(SOURCE, signature));
+            assert!(
+                body.contains("let _ = settle_reported("),
+                "{signature} no longer drops the refusal — move it out of this list                  and carry it, which is strictly better"
+            );
+            assert!(
+                !carries_a_refusal(&ipc, dto),
+                "{signature} drops the settle refusal into a {dto}, which HAS a                  `refusal` field — this is R2.F5 exactly, at another door"
+            );
+        }
+
+        // …and the census that stops the list above from being a subset: every
+        // `let _ = settle_reported` in this module must be one of them. The
+        // PRODUCTION half only — this test module quotes the spelling it bans,
+        // and a census that counts its own arms is measuring itself.
+        let production = SOURCE
+            .split_once("#[cfg(test)]")
+            .map(|(head, _)| head)
+            .expect("this module has a test half");
+        let dropped_calls = code_only(production)
+            .matches("let _ = settle_reported(")
+            .count();
+        assert_eq!(
+            dropped_calls,
+            dropping.len(),
+            "a door drops the settle refusal and is not in this list; each one is a              decision that its DTO cannot carry the refusal, and it has to be made"
+        );
+
+        // The eleventh door, from the other side: it must NOT drop it.
+        let merge = code_only(&body_of(SOURCE, "pub async fn dcc_merge_asset("));
+        assert!(
+            !merge.contains("let _ = settle_reported("),
+            "dcc_merge_asset returns a DccApplyDto and must carry the refusal"
+        );
+        assert!(
+            merge.contains("let settled = settle_reported("),
+            "…by binding it"
+        );
+        assert!(
+            carries_a_refusal(&ipc, "DccApplyDto"),
+            "the slot it goes in"
+        );
+    }
+
+    /// **Round-2 finding R2.F15**: a project switch strands every open session.
+    ///
+    /// Asserted as WORLD state (the store is empty) rather than as "the call was
+    /// made", and the count is returned so the switch can log it — a clear that
+    /// dropped nothing and one that dropped three are otherwise the same event.
+    #[test]
+    fn closing_a_project_drops_every_model_session() {
+        let state = DccState::default();
+        seed(&state, "dcc:1", inf_dcc::cube(1.0));
+        seed(&state, "dcc:2", inf_dcc::cube(2.0));
+        state
+            .with(|s| {
+                assert_eq!(s.docs.len(), 2);
+                assert_eq!(s.journals.len(), 2, "and a journal each");
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(state.clear_all(), 2, "both were dropped, and it says so");
+        state
+            .with(|s| {
+                assert!(s.docs.is_empty());
+                assert!(
+                    s.journals.is_empty(),
+                    "the journal is the session — leaving it is the whole leak"
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(state.clear_all(), 0, "and it is idempotent");
+    }
+
+    /// The **source pin** for the half above that has no observable behaviour:
+    /// `apply_open` has to call it. Nothing in a running editor distinguishes a
+    /// switch that cleared from one that did not until a save fails, which is
+    /// why the campaign's rule puts a gate on the text.
+    #[test]
+    fn the_project_switch_reaches_the_session_clear() {
+        let project = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/project.rs"),
+        )
+        .expect("project.rs is readable");
+        let body = code_only(&body_of(&project, "fn apply_open("));
+        assert!(
+            body.contains("dcc.clear_all()"),
+            "apply_open re-roots the asset database and every viewport; the Model              Editor sessions are keyed on ids in that database and must go with them"
+        );
     }
 }
