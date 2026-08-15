@@ -289,8 +289,43 @@ pub fn build_vgeom(
         })
         .collect();
 
+    // **The second entrance to the import door** (round-2 finding B2).
+    //
+    // `generate_vertex_remap` below is a raw `unsafe` call into a C library
+    // that sizes its remap table from `vertices.len()` and writes
+    // `remap[index]` with the `assert` compiled out under `-DNDEBUG`, so one
+    // index past the end is an out-of-bounds heap **write**. `inf_mesh`'s
+    // `optimize()` grew this backstop in Hardening Wave B; this door did not,
+    // and it is reached from exactly the same place — a `.inf_mesh` decoded
+    // off disk, by `inf_editor_core::assets::vmesh` and by the cook — where
+    // the importer's validator (`inf_mesh::validate`) never ran.
+    //
+    // `MeshAsset::migrate` now refuses such a payload at the decode, which is
+    // where it can name the asset. This is the check that stands between that
+    // door and the `unsafe` call for every OTHER producer of raw streams (the
+    // DCC exporter, photogrammetry finish, the grammar bake), which build
+    // their own index buffers and cross no door at all. Returning the
+    // degenerate mesh is the only honest answer at a signature with no error
+    // channel — `optimize()`'s own words — and it is loud, because unlike an
+    // unoptimized mesh an unclusterized one is visible.
+    //
+    // No `debug_assert!(false, ..)` here, unlike `optimize()`: this branch has
+    // an arm over it (`tests::an_index_outside_the_vertex_buffer_never_reaches_the_ffi`),
+    // and an assertion that aborts the test process is not a thing a test can
+    // drive. The `tracing::error!` is the louder channel anyway — it survives
+    // into the cook log, where the author of the mesh will see it.
+    let addressable = indices.iter().all(|&i| (i as usize) < raw.len());
+    if !addressable {
+        tracing::error!(
+            vertices = raw.len(),
+            indices = indices.len(),
+            "meshlet build refused: an index addresses outside the vertex buffer; \
+             this mesh will not virtualize"
+        );
+    }
+
     // Degenerate: nothing to cluster.
-    if raw.is_empty() || indices.len() < 3 {
+    if raw.is_empty() || indices.len() < 3 || !addressable {
         let (center, radius) = bounding_sphere(&raw);
         return VgeomMesh {
             schema_version: VgeomMesh::CURRENT_VERSION,
@@ -1387,5 +1422,62 @@ mod tests {
         // A degenerate triangle is never acceptable either.
         let degenerate = [0u32, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 0];
         assert_eq!(seam_safe(&input, &degenerate, &lock, &seen), None);
+    }
+
+    /// **Round-2 finding B2**: an index outside the vertex buffer must never
+    /// reach `meshopt::generate_vertex_remap`.
+    ///
+    /// The FFI sizes its remap table from `vertices.len()` and writes
+    /// `remap[index]` with the `assert` compiled out under `-DNDEBUG`, so one
+    /// index past the end is an out-of-bounds heap **write**. `inf_mesh`'s
+    /// `optimize()` grew a backstop in Wave B; this door reaches the same call
+    /// from a `.inf_mesh` decoded off disk (the editor's `.inf_vmesh` derive
+    /// and the cook) and had none.
+    ///
+    /// The control is the same geometry with the index repaired, so "no
+    /// meshlets" cannot pass for a fixture that was never clusterizable.
+    ///
+    /// **Mutation note:** the guard was NOT removed and re-run. Removing it
+    /// makes this test perform the out-of-bounds heap write it exists to
+    /// prevent, which is the finding, not a verification of it. What is
+    /// verified instead is that the control clusterizes and the hostile input
+    /// does not — so the arm can only pass while the branch is taken.
+    #[test]
+    fn an_index_outside_the_vertex_buffer_never_reaches_the_ffi() {
+        // Two triangles over four vertices.
+        let p = vec![
+            [0.0f32, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let n = vec![[0.0f32, 0.0, 1.0]; 4];
+        let uv = vec![[0.0f32, 0.0]; 4];
+        let good = [0u32, 1, 2, 0, 2, 3];
+
+        let control = build_vgeom(&p, &n, &uv, &[], &good, BuildParams::default());
+        assert!(
+            !control.meshlets.is_empty(),
+            "the control never clusterized, so the hostile case below is vacuous"
+        );
+
+        // One index past the end — the exact C4-1 shape, at the other door.
+        let hostile = [0u32, 1, 2, 0, 2, 4];
+        let out = build_vgeom(&p, &n, &uv, &[], &hostile, BuildParams::default());
+        assert!(
+            out.meshlets.is_empty() && out.meshlet_vertices.is_empty(),
+            "an out-of-range index was clusterized — it went through the raw FFI"
+        );
+        assert_eq!(
+            out.vertices.len(),
+            p.len(),
+            "the degenerate answer must still be the mesh's own vertices"
+        );
+
+        // `u32::MAX` is the same refusal, not a different one.
+        let far = [0u32, 1, 2, 0, 2, u32::MAX];
+        assert!(build_vgeom(&p, &n, &uv, &[], &far, BuildParams::default())
+            .meshlets
+            .is_empty());
     }
 }

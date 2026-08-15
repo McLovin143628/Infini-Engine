@@ -475,3 +475,112 @@ fn a_healthy_obj_still_imports() {
     let g = obj("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
     assert_eq!(g.meshes[0].mesh.triangle_count(), 1);
 }
+
+// ── Round-2 finding B2: the door has a second entrance ──────────────────────
+//
+// Everything above is about `.gltf` / `.glb` / `.obj`. But a `.inf_mesh` **on
+// disk** is also bytes somebody else wrote — the Content Drawer scans every
+// loose payload under the project root, an asset arrives in a zip, a pack gets
+// hand-edited — and `MeshAsset` used the DEFAULT `AssetPayload::migrate`, which
+// reads one integer and asks nothing about the buffers behind it.
+//
+// Both production consumers of a decoded `.inf_mesh` hand its index buffer to
+// `meshopt::generate_vertex_remap` through raw FFI (`inf_editor_core::assets::
+// vmesh` and the cook's `build_vgeom`). These arms drive `encode` → `decode`,
+// which is the exact path those consumers take.
+
+/// A `.inf_mesh` whose index buffer addresses outside its own vertices is
+/// refused at decode — C4-1's out-of-bounds heap write, at the other door.
+#[test]
+fn a_decoded_inf_mesh_with_a_dangling_index_is_refused() {
+    use inf_mesh::{MeshAsset, MeshVertex, SubMesh};
+
+    let sub = |indices: Vec<u32>| SubMesh {
+        name: "s".into(),
+        vertices: vec![MeshVertex::default(); 3],
+        indices,
+        material_slot: None,
+        skin: Vec::new(),
+    };
+
+    // Control: the same payload with a valid index buffer round-trips.
+    let good = MeshAsset::new(vec![sub(vec![0, 1, 2])], Vec::new());
+    let bytes = inf_asset::encode(&good).unwrap();
+    inf_asset::decode::<MeshAsset>(&bytes).expect("a healthy mesh must still decode");
+
+    let bad = MeshAsset::new(vec![sub(vec![0, 1, 3])], Vec::new());
+    let bytes = inf_asset::encode(&bad).unwrap();
+    let e = inf_asset::decode::<MeshAsset>(&bytes)
+        .expect_err("an index past the vertex buffer decoded as a valid mesh");
+    let msg = e.to_string();
+    assert!(
+        msg.contains("index 3") && msg.contains("submesh 0"),
+        "the refusal must name the offending index and submesh: {msg}"
+    );
+}
+
+/// A NaN in a decoded `.inf_mesh` is refused. `MeshVertex` is `Pod` and is
+/// uploaded verbatim, and `f32::min`/`max` ignore NaN — so the bounding box
+/// computed from a poisoned buffer looks perfectly healthy and nothing
+/// downstream is looking.
+#[test]
+fn a_decoded_inf_mesh_carrying_a_nan_is_refused() {
+    use inf_mesh::{MeshAsset, MeshVertex, SubMesh};
+
+    for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut v = vec![MeshVertex::default(); 3];
+        v[1].position[2] = poison;
+        let m = MeshAsset::new(
+            vec![SubMesh {
+                name: "s".into(),
+                vertices: v,
+                indices: vec![0, 1, 2],
+                material_slot: None,
+                skin: Vec::new(),
+            }],
+            Vec::new(),
+        );
+        let bytes = inf_asset::encode(&m).unwrap();
+        assert!(
+            inf_asset::decode::<MeshAsset>(&bytes).is_err(),
+            "a {poison} vertex position decoded as a valid mesh"
+        );
+    }
+}
+
+/// The parallel skin stream must agree with the vertex buffer it is
+/// index-aligned to. `SubMesh`'s own doc states the invariant; until now
+/// nothing enforced it on the decode path, and both streams are uploaded as one
+/// interleaved draw.
+#[test]
+fn a_decoded_inf_mesh_with_a_short_skin_stream_is_refused() {
+    use inf_mesh::{MeshAsset, MeshVertex, SubMesh, VertexSkin};
+
+    let mesh = |skin: Vec<VertexSkin>| {
+        MeshAsset::new(
+            vec![SubMesh {
+                name: "s".into(),
+                vertices: vec![MeshVertex::default(); 3],
+                indices: vec![0, 1, 2],
+                material_slot: None,
+                skin,
+            }],
+            Vec::new(),
+        )
+    };
+
+    // Empty is legal — that is a rigid submesh, and every pre-P11 payload.
+    let bytes = inf_asset::encode(&mesh(Vec::new())).unwrap();
+    inf_asset::decode::<MeshAsset>(&bytes).expect("an unskinned submesh must decode");
+    // Aligned is legal.
+    let bytes = inf_asset::encode(&mesh(vec![VertexSkin::default(); 3])).unwrap();
+    inf_asset::decode::<MeshAsset>(&bytes).expect("an aligned skin stream must decode");
+    // Short is not.
+    let bytes = inf_asset::encode(&mesh(vec![VertexSkin::default(); 2])).unwrap();
+    let e = inf_asset::decode::<MeshAsset>(&bytes)
+        .expect_err("a skin stream shorter than its vertices decoded as valid");
+    assert!(
+        e.to_string().contains("2 elements against 3"),
+        "the refusal must name both lengths: {e}"
+    );
+}

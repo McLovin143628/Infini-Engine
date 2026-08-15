@@ -293,11 +293,113 @@ impl MeshAsset {
     }
 }
 
+impl MeshAsset {
+    /// The three [`crate::validate`] questions, asked of a **decoded payload**
+    /// rather than of an imported file (round-2 finding B2).
+    ///
+    /// Separate from [`AssetPayload::migrate`] so a caller holding a
+    /// hand-assembled `MeshAsset` — the DCC writer, the grammar bake, a test —
+    /// can ask the same question without a round trip through bincode.
+    pub fn validate(&self) -> Result<(), crate::MeshError> {
+        use crate::validate::AllFinite;
+        let mut total: usize = 0;
+        for (s, sm) in self.submeshes.iter().enumerate() {
+            let what = format!("submesh {s} ({})", sm.name);
+            // The vertex streams. `MeshVertex` is `#[repr(C)] Pod` and is
+            // uploaded verbatim; a NaN position also poisons every cull bound
+            // derived from it, and `f32::min`/`max` ignore NaN so the bounds
+            // still look healthy.
+            for v in &sm.vertices {
+                if !(v.position.all_finite()
+                    && v.normal.all_finite()
+                    && v.uv.all_finite()
+                    && v.tangent.all_finite())
+                {
+                    return Err(crate::MeshError::Malformed(format!(
+                        "{what}: a vertex attribute is not a finite number (NaN or infinity)"
+                    )));
+                }
+            }
+            // The index buffer, against ITS OWN vertex buffer — this is the one
+            // that reaches `meshopt` through raw FFI.
+            crate::validate::reject_out_of_range(&sm.indices, sm.vertices.len(), &what)?;
+            // The parallel skin stream. `SubMesh`'s own doc states the
+            // invariant ("when non-empty, `skin.len() == vertices.len()`") and
+            // until now nothing enforced it on the decode path; the GPU
+            // uploads both as one interleaved draw.
+            if !sm.skin.is_empty() {
+                crate::validate::reject_length_mismatch(
+                    sm.skin.len(),
+                    sm.vertices.len(),
+                    &format!("{what}: skin"),
+                    "vertices",
+                )?;
+            }
+            for sk in &sm.skin {
+                if !sk.weights.all_finite() {
+                    return Err(crate::MeshError::Malformed(format!(
+                        "{what}: a skin weight is not a finite number"
+                    )));
+                }
+            }
+            // `vgeom_streams` rebases every submesh onto one concatenated
+            // buffer with `i + base` in bare `u32`, and the release profile has
+            // no overflow checks. Refuse a payload whose concatenation cannot
+            // be addressed rather than wrap into a valid-looking index.
+            total = total
+                .checked_add(sm.vertices.len())
+                .filter(|t| u32::try_from(*t).is_ok())
+                .ok_or_else(|| {
+                    crate::MeshError::Malformed(format!(
+                        "{what}: the mesh's combined vertex count exceeds a 32-bit index buffer"
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+}
+
 impl AssetPayload for MeshAsset {
     const KIND: AssetKind = AssetKind::Mesh;
     const SCHEMA_VERSION: u32 = Self::CURRENT_VERSION;
     fn schema_version(&self) -> u32 {
         self.schema_version
+    }
+
+    /// Reject newer-than-current (the default rule), then run
+    /// [`MeshAsset::validate`] — round-2 finding **B2**, and the same
+    /// `AnimClipAsset`/`TextureAsset`/`BiomeSet` shape.
+    ///
+    /// # The import door has a second entrance
+    ///
+    /// [`crate::validate`]'s module doc says a mesh from outside is checked
+    /// "before any of it becomes engine data", and for `.gltf`/`.glb`/`.obj`
+    /// that is true. But a `.inf_mesh` **on disk** is also bytes somebody else
+    /// wrote — the Content Drawer scans every loose payload under the project
+    /// root, an asset arrives in a zip, a pack is hand-edited — and this type
+    /// used the default `migrate`, which reads one integer and asks nothing
+    /// about the buffers behind it.
+    ///
+    /// Both production consumers of a decoded `.inf_mesh` hand its index buffer
+    /// straight to `meshopt::generate_vertex_remap` through raw FFI:
+    /// `inf_editor_core::assets::vmesh` and the cook's `build_vgeom`. That is
+    /// C4-1's out-of-bounds heap **write**, verbatim, at a door the importer's
+    /// validator never sees. `crate::optimize()` got its own backstop in Wave
+    /// B; `inf_vgeom::build_vgeom` did not, and now has one too — but the
+    /// place to stop this is the decode, because by the time a builder sees the
+    /// streams the payload has already been trusted by a dozen other readers.
+    fn migrate(self) -> inf_asset::Result<Self> {
+        let found = self.schema_version;
+        if found > Self::SCHEMA_VERSION {
+            return Err(inf_asset::AssetError::SchemaTooNew {
+                kind: Self::KIND.slug(),
+                found,
+                current: Self::SCHEMA_VERSION,
+            });
+        }
+        self.validate()
+            .map_err(|e| inf_asset::AssetError::Decode(format!("invalid mesh: {e}")))?;
+        Ok(self)
     }
 }
 
