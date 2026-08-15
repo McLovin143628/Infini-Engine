@@ -111,6 +111,26 @@ fn skeleton_hash(project: &AssetProject, id: AssetId) -> Option<ContentHash> {
     (entry.kind() == AssetKind::Skeleton).then_some(entry.sidecar.content_hash)
 }
 
+/// The skeleton an animation asset depends on, if the project can see one.
+///
+/// One walk, two readers (round 3): [`advisories`] asks it of the asset it is
+/// checking, and the State Machine editor asks it of the **clips** a machine
+/// plays — a `.inf_sm` names no skeleton of its own, so the only thing that can
+/// say which rig it was authored against is the clips inside it.
+///
+/// An animation asset has at most one skeleton by construction (every writer in
+/// the tree passes exactly one), so "the first Skeleton among the dependencies"
+/// is the answer rather than a choice among several.
+pub fn skeleton_of(project: &AssetProject, id: AssetId) -> Option<AssetId> {
+    let db = project.db();
+    db.get(id)?
+        .sidecar
+        .dependencies
+        .iter()
+        .copied()
+        .find(|d| db.get(*d).is_some_and(|e| e.kind() == AssetKind::Skeleton))
+}
+
 /// **The check.** One advisory line per animation asset whose recorded skeleton
 /// hash disagrees with the skeleton it points at, in GUID order.
 ///
@@ -130,13 +150,7 @@ pub fn advisories(project: &AssetProject) -> Vec<String> {
             continue; // imported before the key existed — nothing to compare
         };
         // The skeleton it depends on. An animation asset has at most one.
-        let Some(skel) = entry
-            .sidecar
-            .dependencies
-            .iter()
-            .copied()
-            .find(|d| db.get(*d).is_some_and(|e| e.kind() == AssetKind::Skeleton))
-        else {
+        let Some(skel) = skeleton_of(project, entry.id()) else {
             continue;
         };
         let Some(current) = skeleton_hash(project, skel) else {

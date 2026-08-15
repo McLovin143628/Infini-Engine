@@ -308,11 +308,17 @@ impl AssetProject {
     ///
     /// [`write_asset`](Self::write_asset) cannot serve them: it calls
     /// `unique_path`, so the second save of "Forest" would land in `Forest_1`.
+    ///
+    /// `import` is the sidecar `import` table. `Some` **replaces** it; `None`
+    /// leaves whatever is there, which is what an editor re-save of a document
+    /// it did not import must do — see
+    /// [`rewrite_payload_with_import`](Self::rewrite_payload_with_import).
     pub fn write_asset_at<T: AssetPayload>(
         &mut self,
         path: &Path,
         payload: &T,
         dependencies: Vec<AssetId>,
+        import: Option<toml::Table>,
     ) -> Result<AssetId> {
         // A different *kind* already registered at this exact path cannot be
         // rewritten in place — the payload codec differs — so it is evicted
@@ -321,7 +327,7 @@ impl AssetProject {
         // stale `by_id` entry is what would linger.)
         match self.db.get_by_path(path).map(|e| (e.id(), e.kind())) {
             Some((id, kind)) if kind == T::KIND => {
-                self.rewrite_payload(id, payload, dependencies)?;
+                self.rewrite_payload_with_import(id, payload, dependencies, import)?;
                 return Ok(id);
             }
             Some((id, _)) => {
@@ -335,6 +341,7 @@ impl AssetProject {
         inf_asset::write_atomically(path, &bytes)?;
         let mut sidecar = AssetSidecar::new(id, T::KIND, hash);
         sidecar.dependencies = dependencies;
+        sidecar.import = import;
         if let Err(e) = sidecar.save(path) {
             let _ = std::fs::remove_file(path);
             return Err(e);
@@ -608,6 +615,26 @@ impl AssetProject {
         payload: &T,
         dependencies: Vec<AssetId>,
     ) -> Result<()> {
+        self.rewrite_payload_with_import(id, payload, dependencies, None)
+    }
+
+    /// [`rewrite_payload`](Self::rewrite_payload), replacing the sidecar's
+    /// `import` table when one is given.
+    ///
+    /// **`None` keeps what is there, and that is the important half.** The
+    /// import table is where provenance lives — `assets::vmesh`'s source hash,
+    /// `skeleton_binding`'s rig hash — and a re-save that dropped it would
+    /// silence the advisory that exists to notice exactly this kind of edit.
+    /// Only a caller that *knows* the binding writes one (round 3: the State
+    /// Machine editor, which resolves the rig from the clips its machine
+    /// plays, because a `.inf_sm` names no skeleton of its own).
+    pub fn rewrite_payload_with_import<T: AssetPayload>(
+        &mut self,
+        id: AssetId,
+        payload: &T,
+        dependencies: Vec<AssetId>,
+        import: Option<toml::Table>,
+    ) -> Result<()> {
         let path = self
             .db
             .get(id)
@@ -622,6 +649,9 @@ impl AssetProject {
         let mut sidecar = self.db.get(id).unwrap().sidecar.clone();
         sidecar.content_hash = hash;
         sidecar.dependencies = dependencies;
+        if import.is_some() {
+            sidecar.import = import;
+        }
         sidecar.save(&path)?;
         self.db.insert(AssetEntry {
             sidecar,
@@ -1079,7 +1109,7 @@ mod tests {
         let path = d.join("Forest.inf_struct");
 
         let first = proj
-            .write_asset_at(&path, &inf_asset::StructAsset::new("Forest"), vec![])
+            .write_asset_at(&path, &inf_asset::StructAsset::new("Forest"), vec![], None)
             .unwrap();
         assert!(
             inf_asset::sidecar_path(&path).exists(),
@@ -1088,7 +1118,7 @@ mod tests {
 
         let mut edited = inf_asset::StructAsset::new("Forest");
         edited.name = "Forest v2".into();
-        let second = proj.write_asset_at(&path, &edited, vec![]).unwrap();
+        let second = proj.write_asset_at(&path, &edited, vec![], None).unwrap();
         assert_eq!(first, second, "the graph's GUID churned on re-save");
         assert_eq!(
             std::fs::read_dir(&d)

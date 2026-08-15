@@ -386,6 +386,16 @@ fn roll_back(project: &mut AssetProject, written: &[AssetId]) {
 }
 
 /// One write, remembered — so [`roll_back`] can undo it if a later one fails.
+///
+/// `import` is the sidecar `import` table, and it is a parameter rather than
+/// `None` because of round 3: `skeleton_binding` exists to catch a clip whose
+/// rig has been re-imported under it, and it compares a hash **only assets that
+/// recorded one** carry. Its single producer was the glTF importer, so the
+/// engine's own generator of skeleton-bound animation — this wizard, which
+/// writes three clips and a machine against a rig it has just written — was
+/// invisible to it. The rig is re-writable in place (`write_asset` on the same
+/// path routes to `rewrite_payload`, which keeps the GUID), so the staleness is
+/// a live path and not a hypothetical one.
 fn write_one<T: AssetPayload>(
     project: &mut AssetProject,
     written: &mut Vec<AssetId>,
@@ -393,8 +403,9 @@ fn write_one<T: AssetPayload>(
     name: &str,
     payload: &T,
     dependencies: Vec<AssetId>,
+    import: Option<toml::Table>,
 ) -> Result<AssetId, CharacterError> {
-    match project.write_asset(dir, name, payload, None, dependencies, None) {
+    match project.write_asset(dir, name, payload, None, dependencies, import) {
         Ok(id) => {
             written.push(id);
             Ok(id)
@@ -454,7 +465,15 @@ pub fn build_character(
     let mut written: Vec<AssetId> = Vec::new();
 
     // ── the rig ────────────────────────────────────────────────────────────
-    let skeleton = write_one(project, &mut written, &dir, name, &rig, vec![])?;
+    let skeleton = write_one(project, &mut written, &dir, name, &rig, vec![], None)?;
+    // The rig is on disk now, so its content hash exists to be recorded. Every
+    // asset below whose track indices are POSITIONS in that rig's joint list
+    // records it (round 3).
+    let bound = crate::assets::skeleton_binding::import_table(project, Some(skeleton));
+    debug_assert!(
+        bound.is_some(),
+        "the rig was just written, so its hash must be recordable"
+    );
 
     // ── the body ───────────────────────────────────────────────────────────
     let (body, weights, mannequin) = match source.as_ref() {
@@ -486,6 +505,12 @@ pub fn build_character(
         &format!("{name} Body"),
         &body,
         vec![skeleton],
+        // **Not the body.** Its skin stream is index-aligned to the rig's joints
+        // and it is the same staleness class — but `skeleton_binding` scans
+        // `AnimClip | StateMachine` only, so recording a hash here would write a
+        // key nothing reads. It is the garment/scalp shape, and it belongs with
+        // the two `DEFERRED_INSTANCES` that already name it.
+        None,
     )?;
 
     // ── the clips ──────────────────────────────────────────────────────────
@@ -503,6 +528,7 @@ pub fn build_character(
             &format!("{name} {suffix}"),
             &payload,
             vec![skeleton],
+            bound.clone(),
         )
     };
     let idle = clip(project, &mut written, "Idle", &set.idle)?;
@@ -526,6 +552,7 @@ pub fn build_character(
         &format!("{name} Locomotion"),
         &machine_asset,
         vec![skeleton, idle, walk, run],
+        bound,
     )?;
 
     Ok(CharacterBuild {
@@ -1152,6 +1179,63 @@ mod tests {
             }],
             vec![],
         )
+    }
+
+    /// **Round 3: the wizard's own output was invisible to R2.C's advisory.**
+    ///
+    /// `skeleton_binding` compares a recorded rig hash against the rig an
+    /// animation asset points at, and it can only compare a hash somebody
+    /// wrote. Its one producer was the glTF importer — so the engine's own
+    /// generator of skeleton-bound animation wrote three clips and a machine
+    /// with an empty `import` table, and re-generating the rig into the same
+    /// GUID renumbered every track index with nothing anywhere saying so.
+    ///
+    /// Asserted as the WORLD (the advisory fires) and not as "a table was
+    /// passed": the healthy control has to be silent first, or the second half
+    /// proves nothing.
+    #[test]
+    fn a_wizard_character_notices_its_rig_being_regenerated_under_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project(tmp.path());
+        let out = build_character(&mut p, &CharacterSpec::default()).expect("a mannequin builds");
+
+        assert!(
+            crate::assets::skeleton_binding::advisories(&p).is_empty(),
+            "a freshly generated character raised an advisory about itself"
+        );
+
+        // The rig is regenerated with DIFFERENT proportions into the same GUID
+        // — the wizard's own re-run, and what `rewrite_payload` is for. The
+        // joint list changes shape, so every clip baked against the old one is
+        // now indexed against a different rig.
+        let taller = inf_anim::build_template(
+            BodyPlan::Biped,
+            &BodyParams {
+                height_m: 2.4,
+                ..BodyParams::default()
+            },
+        )
+        .unwrap();
+        p.rewrite_payload(out.skeleton, &taller, vec![])
+            .expect("the rig re-generates in place");
+
+        let found = crate::assets::skeleton_binding::advisories(&p);
+        assert_eq!(
+            found.len(),
+            4,
+            "the three clips and the machine must each say so, got {found:?}"
+        );
+        assert!(
+            found.iter().all(|a| a.contains("POSITIONS")),
+            "every advisory must name the mechanism: {found:?}"
+        );
+        // The BODY is not in the set: its skin stream is index-aligned to the
+        // same joints, and that instance is the deferred one — recorded in
+        // `DEFERRED_INSTANCES`, not silently half-closed here.
+        assert!(
+            !found.iter().any(|a| a.contains("Body")),
+            "the body mesh is the deferred instance, not a fifth advisory: {found:?}"
+        );
     }
 
     /// **The imported-mesh path, end to end**: the rig is fitted to the model,

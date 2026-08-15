@@ -380,6 +380,27 @@ pub async fn sm_get(id: String, state: State<'_, SmEditorState>) -> Result<SmDoc
 /// defect: a bare `fs::write` into `<Content>/StateMachines/<slug>.inf_sm`,
 /// non-atomic and with no sidecar, so the payload was promoted by the watcher
 /// under a content-derived id that changed on every save.
+///
+/// # The rig this machine was authored against (round 3)
+///
+/// `skeleton_binding` records a rig's content hash in an animation asset's
+/// sidecar so a re-imported rig can say *"every track index past the edit point
+/// now names a different bone"*. It had **one** producer, the glTF importer, so
+/// the two doors in this engine that author skeleton-bound animation — the
+/// character wizard, and this — recorded nothing and were invisible to it.
+///
+/// A `.inf_sm` is the harder half, because it names **no skeleton of its own**:
+/// `dto_to_machine` builds a machine whose states hold clip GUIDs and the
+/// editor's DTO has no rig field. So the rig is resolved the only way it can be
+/// — from the clips the machine plays (`StateMachine::clip_refs`, the one walk
+/// that closes the machine→clip edge) — and the same resolution supplies the
+/// **dependency edges**, which this door wrote as `Vec::new()`. That omission
+/// was its own small defect: the delete-with-references guard and the drawer's
+/// reference view could not see that a machine used a clip at all.
+///
+/// A machine with no assigned clips, or clips that name no rig, records
+/// nothing. That is the honest answer and it is the silent one — the same rule
+/// `advisories` states for an asset imported before the key existed.
 #[tauri::command]
 pub async fn sm_save(
     id: String,
@@ -389,17 +410,16 @@ pub async fn sm_save(
     assets: State<'_, AssetState>,
 ) -> Result<String, String> {
     // Update in-memory + build the payload.
-    let (payload, file_name) = {
+    let (machine, file_name) = {
         let mut s = state.inner.lock().map_err(|e| e.to_string())?;
         let machine = dto_to_machine(&doc.machine);
-        let payload = StateMachineAsset::new(machine, None);
         s.docs.insert(id.clone(), doc.clone());
         let base = if name.is_empty() { &doc.name } else { &name };
         let slug: String = base
             .chars()
             .map(|c| if c.is_alphanumeric() { c } else { '_' })
             .collect();
-        (payload, format!("{slug}.inf_sm"))
+        (machine, format!("{slug}.inf_sm"))
     };
 
     // **Off the async workers** (round-2, the sm/pcg MED). Wave A's atomic-write
@@ -411,15 +431,54 @@ pub async fn sm_save(
     let project = assets.project_handle()?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut proj = project.lock().map_err(|e| e.to_string())?;
+        let (skeleton, deps) = machine_binding(&proj, &machine);
+        let import = inf_editor_core::assets::skeleton_binding::import_table(&proj, skeleton);
+        let payload = StateMachineAsset::new(machine, skeleton.map(|s| *s.uuid().as_bytes()));
         let dir = proj
             .content_dir("StateMachines")
             .map_err(|e| e.to_string())?;
-        proj.write_asset_at(&dir.join(&file_name), &payload, Vec::new())
+        proj.write_asset_at(&dir.join(&file_name), &payload, deps, import)
             .map_err(|e| e.to_string())?;
         Ok(file_name)
     })
     .await
     .map_err(|e| format!("asset write task failed to run: {e}"))?
+}
+
+/// The rig a machine is bound to, and the dependency edges that say so: every
+/// clip it plays that the project has, plus the rig itself.
+///
+/// Deterministic — `clip_refs` is a `BTreeSet`, so the edge list is in ascending
+/// GUID order and two saves of the same document write the same sidecar.
+///
+/// The rig is the first one any of the clips names. Clips that disagree are not
+/// resolved here: a machine blending two rigs is a broken machine, and
+/// `skeleton_binding::advisories` is the thing that says so — from the clips'
+/// own recorded hashes, which is where that question belongs.
+fn machine_binding(
+    proj: &inf_editor_core::assets::AssetProject,
+    machine: &StateMachine,
+) -> (Option<inf_asset::AssetId>, Vec<inf_asset::AssetId>) {
+    let mut deps: Vec<inf_asset::AssetId> = Vec::new();
+    let mut skeleton = None;
+    for c in machine.clip_refs() {
+        let clip = inf_asset::AssetId(Uuid::from_bytes(c));
+        if proj
+            .db()
+            .get(clip)
+            .is_none_or(|e| e.kind() != AssetKind::AnimClip)
+        {
+            continue; // unassigned (the nil GUID), or a clip this project lost
+        }
+        deps.push(clip);
+        if skeleton.is_none() {
+            skeleton = inf_editor_core::assets::skeleton_binding::skeleton_of(proj, clip);
+        }
+    }
+    if let Some(s) = skeleton {
+        deps.push(s);
+    }
+    (skeleton, deps)
 }
 
 /// Close a document: free it from the workspace so open state machines don't
@@ -509,6 +568,131 @@ mod tests {
             d.machine.states[0].motion,
             SmMotionDto::Clip { .. }
         ));
+    }
+
+    /// **Round 3: the rig a saved `.inf_sm` was authored against.**
+    ///
+    /// A state machine names no skeleton of its own, so the binding can only
+    /// come from the clips it plays. `sm_save` itself takes `State<'_, …>` and
+    /// an async runtime and is not constructible in a unit test — the same
+    /// reason every settle check in `commands::dcc` is a source gate — so what
+    /// is driven here is the resolution it delegates to, against a **real
+    /// project on disk**, and the world it produces: the advisory fires.
+    #[test]
+    fn a_saved_machine_binds_to_the_rig_its_clips_name() {
+        use inf_anim::{AnimClip, AnimClipAsset, Joint, JointTransform, SkeletonAsset};
+        use inf_editor_core::assets::AssetProject;
+
+        let joint = |name: &str, parent: Option<u16>| Joint {
+            name: name.into(),
+            parent,
+            inverse_bind: glam::Mat4::IDENTITY.to_cols_array(),
+            local_bind: JointTransform::IDENTITY,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut proj = AssetProject::open(dir.path()).unwrap();
+        let content = proj.content_dir("Anim").unwrap();
+
+        let rig =
+            inf_anim::Skeleton::new(vec![joint("root", None), joint("spine", Some(0))]).unwrap();
+        let skel = proj
+            .write_asset(
+                &content,
+                "Rig",
+                &SkeletonAsset::new(rig),
+                None,
+                vec![],
+                None,
+            )
+            .unwrap();
+        let table = inf_editor_core::assets::skeleton_binding::import_table(&proj, Some(skel));
+        let clip = proj
+            .write_asset(
+                &content,
+                "Walk",
+                &AnimClipAsset::new(
+                    AnimClip::new("walk", Vec::new()),
+                    Some(*skel.uuid().as_bytes()),
+                ),
+                None,
+                vec![skel],
+                table,
+            )
+            .unwrap();
+
+        // The machine the editor would save: one assigned clip, one unassigned.
+        let machine = StateMachine {
+            states: vec![
+                SmState::clip("walk", *clip.uuid().as_bytes()),
+                SmState::clip("idle", NIL_CLIP),
+            ],
+            transitions: vec![],
+            entry: 0,
+        };
+        let (skeleton, deps) = machine_binding(&proj, &machine);
+        assert_eq!(skeleton, Some(skel), "the rig came back from the clip");
+        assert_eq!(
+            deps,
+            vec![clip, skel],
+            "the edges name the clip and the rig; the nil clip is not an edge"
+        );
+
+        // The write door, with what `sm_save` resolves.
+        let import = inf_editor_core::assets::skeleton_binding::import_table(&proj, skeleton);
+        assert!(
+            import.is_some(),
+            "nothing was recorded — the rest is vacuous"
+        );
+        let payload = StateMachineAsset::new(machine, skeleton.map(|s| *s.uuid().as_bytes()));
+        let path = proj
+            .content_dir("StateMachines")
+            .unwrap()
+            .join("Loco.inf_sm");
+        proj.write_asset_at(&path, &payload, deps, import).unwrap();
+
+        assert!(
+            inf_editor_core::assets::skeleton_binding::advisories(&proj).is_empty(),
+            "a machine saved against the current rig raised an advisory"
+        );
+
+        // Re-import the rig with a joint INSERTED — the edit that renumbers
+        // every track after it, in range, with nothing to refuse it.
+        let three = inf_anim::Skeleton::new(vec![
+            joint("root", None),
+            joint("pelvis", Some(0)),
+            joint("spine", Some(1)),
+        ])
+        .unwrap();
+        proj.rewrite_payload(skel, &SkeletonAsset::new(three), vec![])
+            .unwrap();
+
+        let found = inf_editor_core::assets::skeleton_binding::advisories(&proj);
+        assert_eq!(
+            found.len(),
+            2,
+            "the clip AND the machine must each say so, got {found:?}"
+        );
+        assert!(
+            found.iter().any(|a| a.contains("Loco")),
+            "the machine's own advisory is the one this test exists for: {found:?}"
+        );
+    }
+
+    /// A machine whose clips are all unassigned records nothing, and says so by
+    /// being silent rather than by writing a key that means "no rig".
+    #[test]
+    fn a_machine_with_no_assigned_clips_records_no_binding() {
+        use inf_editor_core::assets::AssetProject;
+        let dir = tempfile::tempdir().unwrap();
+        let proj = AssetProject::open(dir.path()).unwrap();
+        let machine = StateMachine {
+            states: vec![SmState::clip("idle", NIL_CLIP)],
+            transitions: vec![],
+            entry: 0,
+        };
+        let (skeleton, deps) = machine_binding(&proj, &machine);
+        assert_eq!(skeleton, None);
+        assert!(deps.is_empty(), "the nil clip is not a dependency");
     }
 
     #[test]

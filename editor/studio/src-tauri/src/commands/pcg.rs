@@ -545,7 +545,7 @@ pub async fn pcg_save(
     tauri::async_runtime::spawn_blocking(move || {
         let mut proj = project.lock().map_err(|e| e.to_string())?;
         let dir = proj.content_dir("PCG").map_err(|e| e.to_string())?;
-        proj.write_asset_at(&dir.join(&file_name), &payload, Vec::new())
+        proj.write_asset_at(&dir.join(&file_name), &payload, Vec::new(), None)
             .map_err(|e| e.to_string())?;
         Ok(file_name)
     })
