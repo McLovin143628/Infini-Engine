@@ -242,7 +242,7 @@ mod tests {
         let (base, tail) = split_existing_ancestor(&target).expect("an ancestor exists");
         assert_eq!(base, real.join("Content/Levels"));
         assert_eq!(tail, vec![std::ffi::OsString::from("New.inf_lvl")]);
-        assert!(check_against(&[real.clone()], &base).is_ok());
+        assert!(check_against(std::slice::from_ref(&real), &base).is_ok());
 
         // Several missing levels at once: the whole tail is carried, in order.
         let deep = real.join("Content/Levels/a/b/c.inf_lvl");
@@ -281,7 +281,7 @@ mod tests {
         let resolved = std::fs::canonicalize(&base).unwrap();
         assert_eq!(tail, vec![std::ffi::OsString::from("escaped.txt")]);
         assert!(
-            check_against(&[project.clone()], &resolved).is_err(),
+            check_against(std::slice::from_ref(&project), &resolved).is_err(),
             "the resolved ancestor is {} — outside {}",
             resolved.display(),
             project.display()
@@ -327,7 +327,7 @@ mod tests {
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::create_dir_all(&sibling).unwrap();
 
-        assert!(check_against(&[proj.clone()], &proj.join("Content")).is_ok());
+        assert!(check_against(std::slice::from_ref(&proj), &proj.join("Content")).is_ok());
         assert!(
             check_against(&[proj], &sibling.join("Content")).is_err(),
             "`starts_with` on a Path compares COMPONENTS, and this arm is what \

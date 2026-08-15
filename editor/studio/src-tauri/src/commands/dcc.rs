@@ -2709,16 +2709,13 @@ mod tests {
     /// fails here.
     #[test]
     fn no_door_drops_a_refusal_into_a_dto_that_could_carry_it() {
+        // The P22 CRLF law: a `.rs` read by a test is normalized first.
         let ipc = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../crates/inf-editor-core/src/ipc.rs"),
         )
         .expect("the DTO source is readable")
-        .replace(
-            "
-", "
-",
-        );
+        .replace("\r\n", "\n");
 
         /// Whether `struct <name>` in `ipc.rs` declares a `refusal` field.
         fn carries_a_refusal(ipc: &str, dto: &str) -> bool {
