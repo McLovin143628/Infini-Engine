@@ -1234,16 +1234,20 @@ impl VsmRaster {
             // raises it — the `inf_vgeom` reset, at one args block per (page, group).
             let mut draw_raw = Vec::with_capacity(pages.len() * groups.len());
             let mut arg_raw: Vec<u32> = Vec::with_capacity(pages.len() * groups.len() * 5);
+            // Hardening Wave E: hoisted. `group_first` is a prefix sum over
+            // `groups[..g]` and is independent of the PAGE index, but it used to be
+            // evaluated inside both loops — `pages x G^2 / 2` scalar adds where
+            // `pages x G` suffice. G is one per primitive kind, per vgeom asset, per
+            // skinned pair AND per resident terrain tile (`sync_terrain`), so a
+            // streamed world routinely puts it in the hundreds; at 256 pages x 300
+            // groups that was 11.5 M redundant adds on every frame with a dirty
+            // shadow page, i.e. most frames under a moving sun.
+            let firsts = group_prefix(&groups);
             for (i, p) in pages.iter().enumerate() {
                 for (g, geo) in groups.iter().enumerate() {
                     draw_raw.push(VsmPageDrawRaw {
                         view_proj: p.view_proj.to_cols_array(),
-                        info: [
-                            i as u32 * caster_count + group_first(&groups, g),
-                            p.slot,
-                            g as u32,
-                            0,
-                        ],
+                        info: [i as u32 * caster_count + firsts[g], p.slot, g as u32, 0],
                         _pad: [0; 44],
                     });
                     arg_raw.extend_from_slice(&[
@@ -2249,8 +2253,26 @@ fn admit_group(groups: usize, carries: u32, dropped: &mut u32, dropped_groups: &
 
 /// The first caster of group `g` — the base of that group's slice inside every
 /// page's visible list.
+///
+/// Kept as the *definition* of the base, and used by the tests as such;
+/// [`group_prefix`] is what the record path evaluates, once per group instead of
+/// once per (page, group). The two are pinned against each other by
+/// `the_group_prefix_is_the_prefix_sum`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn group_first(groups: &[GroupGeom], g: usize) -> u32 {
     groups[..g].iter().map(|x| x.casters).sum()
+}
+
+/// Every group's base, folded in one pass — `[group_first(groups, 0), …,
+/// group_first(groups, groups.len() - 1)]`.
+fn group_prefix(groups: &[GroupGeom]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(groups.len());
+    let mut acc = 0u32;
+    for g in groups {
+        out.push(acc);
+        acc += g.casters;
+    }
+    out
 }
 
 /// The shared page-uniform bind-group layout: one dynamic-offset uniform, read in
@@ -2927,6 +2949,19 @@ mod tests {
         let total: u32 = groups.iter().map(|g| g.casters).sum();
         assert_eq!(group_first(&groups, groups.len()), total);
         assert_eq!(total, 8);
+
+        // Hardening Wave E: the hoisted fold `record` actually evaluates must
+        // agree with the definition above, group for group — including the empty
+        // one, which is where an off-by-one would hide.
+        let prefix = group_prefix(&groups);
+        assert_eq!(prefix.len(), groups.len());
+        for g in 0..groups.len() {
+            assert_eq!(
+                prefix[g],
+                group_first(&groups, g),
+                "the hoisted prefix disagrees with the definition at group {g}"
+            );
+        }
     }
 
     /// **The one line a host reads is one line** (P27.2 audit).

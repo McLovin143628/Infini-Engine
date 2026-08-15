@@ -230,6 +230,25 @@ pub struct PhysicsBridge3D {
     /// it — the inverse of [`collider_of`](Self::collider_of). Deterministic
     /// (`BTreeMap`, sorted keys).
     collider_to_guid: BTreeMap<ColliderId3D, Uuid>,
+    /// Whether [`collider_to_guid`](Self::collider_to_guid) needs rebuilding —
+    /// set by the **three** sites that can move a collider handle (a rebuilt
+    /// collider on an existing entity, a new entity, a despawn) and cleared by
+    /// the rebuild at the end of a sync (Hardening Wave E).
+    ///
+    /// The map used to be rebuilt from scratch on **every** sync, and the
+    /// comment above it called that "cheap (one pass over the tracked
+    /// entities)". One pass is O(colliders) `BTreeMap` inserts — the whole
+    /// collider population of the level, sixty times a second, to reproduce a
+    /// map that changes only when something spawns, despawns or has its shape
+    /// edited. On a furnished town (the tree's own 13 000-collider figure) the
+    /// steady state paid the whole rebuild for a guaranteed-identical result.
+    ///
+    /// A flag rather than incremental mutation on purpose: three call sites can
+    /// invalidate and one place rebuilds, so a site added later that forgets to
+    /// mutate the map would be a silently stale map, while a site that forgets
+    /// to set this flag is the same bug with one line to find. `true` at
+    /// construction, so the first sync always builds.
+    collider_map_dirty: bool,
     /// **How many collider builds this bridge has refused, ever** (C4-30), and
     /// which entities it has already complained about.
     ///
@@ -282,6 +301,7 @@ impl PhysicsBridge3D {
             terrain_audit: TerrainColliderAudit::default(),
             fracture_stamps: BTreeMap::new(),
             collider_to_guid: BTreeMap::new(),
+            collider_map_dirty: true,
             collider_refusals: 0,
             warned_colliders: BTreeSet::new(),
             water: WaterIndex::default(),
@@ -1144,6 +1164,7 @@ impl PhysicsBridge3D {
                         self.attach_collider(snap.guid, body, snap.collider.as_ref());
                     if let Some(r) = self.entities.get_mut(&snap.guid) {
                         r.collider = new_col;
+                        self.collider_map_dirty = true;
                         r.col = achieved;
                         r.col_refused = refused;
                     }
@@ -1156,6 +1177,7 @@ impl PhysicsBridge3D {
                 }
                 let (collider, achieved, refused) =
                     self.attach_collider(snap.guid, body, snap.collider.as_ref());
+                self.collider_map_dirty = true;
                 self.entities.insert(
                     snap.guid,
                     BodyRecord {
@@ -1182,6 +1204,7 @@ impl PhysicsBridge3D {
             .copied()
             .collect();
         for guid in gone {
+            self.collider_map_dirty = true;
             if let Some(rec) = self.entities.remove(&guid) {
                 self.world.remove_body(rec.body);
             }
@@ -1195,11 +1218,14 @@ impl PhysicsBridge3D {
         // 5. Rebuild the reverse collider→Guid map for this step's event drain
         //    (Wave 3). Cheap (one pass over the tracked entities) and always
         //    consistent with the handles just reconciled above.
-        self.collider_to_guid = self
-            .entities
-            .iter()
-            .filter_map(|(g, r)| r.collider.map(|c| (c, *g)))
-            .collect();
+        if self.collider_map_dirty {
+            self.collider_to_guid = self
+                .entities
+                .iter()
+                .filter_map(|(g, r)| r.collider.map(|c| (c, *g)))
+                .collect();
+            self.collider_map_dirty = false;
+        }
 
         // 6. P20.2: a despawned character forgets it was swimming, so a later
         //    entity reusing the guid cannot inherit a stale latch — the same

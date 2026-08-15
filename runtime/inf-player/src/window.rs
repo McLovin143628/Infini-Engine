@@ -272,6 +272,25 @@ impl PlayerApp {
     /// already tees to the log file and (in the editor) the Output Log — rather
     /// than a new panel or IPC channel.
     fn log_stream_stats(&mut self, dt: f64) {
+        // THE GATE COMES FIRST (Hardening Wave E). Every probe below is a
+        // *diagnostic* and three of them are expensive: `vsm_summary` formats
+        // four `String`s, `vt_summary` two, `predict_summary` runs the
+        // dead-reckoner and formats, and `stream_summary` computes a whole
+        // `stream_report()` — a mutex acquisition, a report clone and an
+        // `inf_stream::arbitrate` — *unconditionally, even on a level with
+        // nothing streaming at all*. All four used to run before the
+        // one-second accumulator, sixty times a second, purely to decide
+        // whether to run them again a second later. They are now behind it.
+        //
+        // The accumulator resets whenever the second elapses, whether or not
+        // there was anything to say — which is the one behavioural difference,
+        // and it is unobservable: a level with no subjects logged nothing then
+        // and logs nothing now.
+        self.stats_accum += dt;
+        if self.stats_accum < 1.0 {
+            return;
+        }
+        self.stats_accum = 0.0;
         let terrain = !self.sim.terrain_streaming().is_empty();
         let cells = !self.sim.cell_streaming().is_empty();
         // P27.5: the shadow-page streamer joins the two that were already here,
@@ -298,11 +317,6 @@ impl PlayerApp {
         if !terrain && !cells && !shadows && !paging {
             return;
         }
-        self.stats_accum += dt;
-        if self.stats_accum < 1.0 {
-            return;
-        }
-        self.stats_accum = 0.0;
         if terrain {
             tracing::info!(
                 "inf-player: {}",
