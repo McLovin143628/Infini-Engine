@@ -1011,6 +1011,40 @@ impl EngineHost {
         Ok((gpu, chain, renderer))
     }
 
+    /// **Forget every cached answer that was about the DEAD device** (Hardening D).
+    ///
+    /// A fresh `EngineRenderer` starts with `vt: None`, `vt_textures: None`,
+    /// `RenderSettings::default()` and `ViewMode::Lit`. The host, meanwhile, keeps
+    /// *memos* of what it already pushed into the old one, and every one of those
+    /// memos gates an early return:
+    ///
+    /// * `vt_level_key` — `sync_vt_bindings` returns early on `key == self.…`, so
+    ///   the fresh renderer never receives `set_vt_level` and **every
+    ///   virtual-textured surface renders untextured for the rest of the
+    ///   session**;
+    /// * `applied_render` — `apply_render_settings` returns early when the mapped
+    ///   block is unchanged, so the level's authored post/exposure/vgeom/VSM/SSAO
+    ///   block is never pushed and the viewport silently runs crate defaults;
+    /// * `synced_version` — the projection itself is version-gated, and the new
+    ///   renderer holds no scene at all;
+    /// * `render_tier` / `render_caps` — probes of the OLD adapter, and the new
+    ///   device may not be the same one (a TDR can move the app to a different
+    ///   GPU).
+    ///
+    /// The view mode lives only in the renderer, so it is re-pushed rather than
+    /// cleared. The old comment on the loss branch — "every remaining field on
+    /// `self` is plain CPU/scene data" — was true when it was written and stopped
+    /// being true at P26.3/R-P4; the player has done this correctly since P14
+    /// (`PlayerRenderHost::rebuild_vt` exists for exactly this case).
+    fn reset_device_scoped_state(&mut self, view_mode: inf_render::ViewMode) {
+        self.vt_level_key = Default::default();
+        self.applied_render = None;
+        self.synced_version = None;
+        self.render_tier = None;
+        self.render_caps = None;
+        self.renderer.set_view_mode(view_mode);
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         self.chain.request_resize(width, height);
     }
@@ -6754,6 +6788,16 @@ impl EngineHost {
         if self.gpu.is_lost() {
             tracing::warn!("inf-viewport: device lost — rebuilding GPU stack");
             let (w, h) = self.chain.requested_size();
+            // Read the shading mode off the DYING renderer, which is the only
+            // place it is stored, before it is replaced by a fresh one that
+            // starts at `Lit`. See `reset_device_scoped_state`.
+            let view_mode = self.renderer.view_mode();
+            // Drop the dead device's swapchain BEFORE a second one is created on
+            // the same window: `build_gpu_stack` makes a fresh `Instance` +
+            // `Surface`, and two live swapchains on one HWND/CAMetalLayer is
+            // driver-dependent state nobody gains anything from. See
+            // `SurfaceChain::release`.
+            self.chain.release();
             let (gpu, chain, renderer) = Self::build_gpu_stack(self.target, w, h)?;
             self.gpu = gpu;
             self.chain = chain;
@@ -6763,10 +6807,9 @@ impl EngineHost {
             // Rebuild it on the fresh device too — otherwise the next pick (which
             // runs in the interaction block, OUTSIDE the render catch_unwind)
             // hits a device-mismatch validation error and kills the thread with
-            // the scene mutex poisoned (H1). The `renderer` was already the only
-            // other GPU-resource field; every remaining field on `self` is plain
-            // CPU/scene data and survives a device loss untouched.
+            // the scene mutex poisoned (H1).
             self.picker = Picker::new(&self.gpu);
+            self.reset_device_scoped_state(view_mode);
         }
 
         // Per-frame debug primitives: world-origin axes tripod, plus the

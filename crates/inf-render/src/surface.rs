@@ -16,7 +16,9 @@ use crate::gpu::GpuContext;
 pub const RECONFIGURE_DEBOUNCE: Duration = Duration::from_millis(80);
 
 pub struct SurfaceChain {
-    surface: wgpu::Surface<'static>,
+    /// `None` only between [`release`](SurfaceChain::release) and the chain's
+    /// replacement — see that method for the one caller and the reason.
+    surface: Option<wgpu::Surface<'static>>,
     config: wgpu::SurfaceConfiguration,
     /// Latest size asked for by the host (physical px). May differ from
     /// `config` while the debounce window is open.
@@ -48,7 +50,7 @@ impl SurfaceChain {
 
         surface.configure(&gpu.device, &config);
         Ok(Self {
-            surface,
+            surface: Some(surface),
             requested: (config.width, config.height),
             target_format,
             config,
@@ -77,10 +79,30 @@ impl SurfaceChain {
         self.requested = (width.max(1), height.max(1));
     }
 
+    /// **Drop the swapchain now, without dropping the chain** (Hardening D).
+    ///
+    /// Both device-loss rebuilds in this tree used to construct a *second*
+    /// `wgpu::Instance` + `Surface` **for the same window while the old one was
+    /// still alive** — the old chain is only dropped at the assignment that
+    /// replaces it, which happens after the new one exists. That is usually
+    /// benign (the old device is already lost) but two live swapchains on one
+    /// HWND/CAMetalLayer is driver-dependent state, and there is nothing to be
+    /// gained by holding the dead one across the rebuild.
+    ///
+    /// The chain is unusable afterwards: [`acquire`](Self::acquire) answers
+    /// `None`, which the callers already treat as "no image this frame". The one
+    /// legitimate caller replaces `self` on the next line.
+    pub fn release(&mut self) {
+        self.surface = None;
+    }
+
     fn configure(&mut self, gpu: &GpuContext) {
+        let Some(surface) = self.surface.as_ref() else {
+            return;
+        };
         self.config.width = self.requested.0;
         self.config.height = self.requested.1;
-        self.surface.configure(&gpu.device, &self.config);
+        surface.configure(&gpu.device, &self.config);
         self.last_configure = Instant::now();
     }
 
@@ -95,13 +117,23 @@ impl SurfaceChain {
         }
 
         use wgpu::CurrentSurfaceTexture as Cst;
-        match self.surface.get_current_texture() {
+        // A released chain has no image, which is the same answer an occluded
+        // window gives and is handled by every caller. See `release`.
+        let Some(surface) = self.surface.as_ref() else {
+            return None;
+        };
+        match surface.get_current_texture() {
             Cst::Success(f) | Cst::Suboptimal(f) => Some(f),
             Cst::Outdated | Cst::Lost => {
                 // The window system invalidated the swapchain — reconfigure at
                 // the requested size immediately (no debounce) and retry once.
                 self.configure(gpu);
-                match self.surface.get_current_texture() {
+                match self
+                    .surface
+                    .as_ref()
+                    .map(|s| s.get_current_texture())
+                    .unwrap_or(Cst::Outdated)
+                {
                     Cst::Success(f) | Cst::Suboptimal(f) => Some(f),
                     _ => None,
                 }

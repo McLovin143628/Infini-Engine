@@ -290,6 +290,17 @@ impl PlayerRenderHost {
         self.chain.requested_size()
     }
 
+    /// Drop this host's swapchain, without dropping the host (Hardening D).
+    ///
+    /// Called on the device-loss path **before** `build_host` creates a second
+    /// `Instance` + `Surface` for the same window; see
+    /// [`inf_render::SurfaceChain::release`]. The host renders nothing
+    /// afterwards (`acquire` answers `None`, which is the occluded-window path)
+    /// and its caller replaces it immediately.
+    pub fn release_surface(&mut self) {
+        self.chain.release();
+    }
+
     /// The floating origin (the camera rebases against it before rendering).
     pub fn origin(&self) -> FloatingOrigin {
         self.origin

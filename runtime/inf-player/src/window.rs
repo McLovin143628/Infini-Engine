@@ -375,6 +375,11 @@ impl PlayerApp {
         }
         if live.host.is_lost() {
             tracing::warn!("inf-player: device lost — rebuilding GPU stack");
+            // The dead device's swapchain goes first: `build_host` creates a
+            // second `Instance` + `Surface` for this same window, and the old
+            // chain would otherwise live until the assignment below. See
+            // `PlayerRenderHost::release_surface`.
+            live.host.release_surface();
             match Self::build_host(&live.window, self.width, self.height, self.render) {
                 Ok(mut host) => {
                     host.set_vmeshes(self.vmeshes.clone());
