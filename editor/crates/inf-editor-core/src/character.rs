@@ -607,9 +607,10 @@ fn export_advisories(r: &inf_dcc::ExportReport) -> Vec<String> {
     let mut out = Vec::new();
     if r.non_finite_written > 0 {
         out.push(format!(
-            "{} vertices of the body carry a non-finite position, normal or UV — \
-             they came in that way from the source mesh, and they will render as \
-             holes",
+            "{} vertices of the body arrived from the source mesh with a \
+             non-finite position, normal or UV, and were written as zeroes — the \
+             body is readable and those vertices are collapsed at the origin. \
+             Fix them in the source model and re-run the wizard",
             r.non_finite_written
         ));
     }

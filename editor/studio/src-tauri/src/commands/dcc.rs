@@ -1449,7 +1449,9 @@ fn advisories(r: &ExportReport) -> Vec<String> {
     }
     if r.non_finite_written > 0 {
         out.push(format!(
-            "{} vertices carry a non-finite value from the source file.",
+            "{} vertices arrived from the source file with a non-finite value \
+             and were written as zeroes — the saved mesh is readable and those \
+             vertices sit at the origin.",
             r.non_finite_written
         ));
     }

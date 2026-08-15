@@ -152,7 +152,9 @@ pub struct ExportReport {
     /// polygon has no such ear it is counted here rather than left to be
     /// discovered on the next open.
     pub reused_diagonals: usize,
-    /// Written vertices carrying a non-finite position, normal or UV.
+    /// Written vertices whose non-finite position, normal or UV was
+    /// **replaced** on the way out (zero for position and uv, `+Y` for a
+    /// normal), counted so the save can say so.
     ///
     /// # Why this is a counter here and a REFUSAL in [`crate::ops`]
     ///
@@ -168,11 +170,37 @@ pub struct ExportReport {
     /// *values* (it preserves them bit-for-bit so the round trip is exact), so
     /// such a value can reach the writer. Refusing there would mean an author
     /// who opened a bad file cannot save their work at all, over a value they
-    /// did not create and may not be able to find. So it is counted, loudly, for
-    /// P23.6's save path to surface — the P16 advisory doctrine, and the same
-    /// call as `coincident_vertices` above.
+    /// did not create and may not be able to find.
     ///
-    /// A non-zero count on a mesh this crate built is a bug in this crate.
+    /// # The contract inversion, and the ruling (round 3)
+    ///
+    /// This field used to be a pure counter: the value was **written through**
+    /// and the count reported. Hardening Wave H then gave `MeshAsset` a
+    /// `migrate` that refuses a non-finite vertex attribute at the decode — so
+    /// from that commit on, this writer produced a file its own reader rejects.
+    /// The author's save reported success, the advisory said "they will render
+    /// as holes", and the asset could never be opened again. That is the P23.6
+    /// law (*a modelling op must not manufacture a file its own reader rejects*)
+    /// broken by the two halves of one campaign, neither of which was wrong on
+    /// its own.
+    ///
+    /// Three ways out were available and the author-can-save-their-work concern
+    /// decides between them:
+    ///
+    /// * **Refuse at export, naming the ops.** Symmetric, and it takes the
+    ///   author's work hostage over a value they did not create — the thing the
+    ///   paragraph above already rejected, now with the whole session at stake
+    ///   rather than one advisory.
+    /// * **Relax the reader.** It would re-open C4-1's whole class: a NaN
+    ///   position poisons every cull bound derived from it and `f32::min`/`max`
+    ///   ignore NaN, so the bounds look healthy and nothing downstream is
+    ///   looking.
+    /// * **Sanitize at export and count it** — this. The save always succeeds,
+    ///   the asset always re-opens, and the author is told exactly how many
+    ///   vertices were repaired and where they came from. It is a change to
+    ///   geometry that was already not geometry: a NaN position is not a place.
+    ///
+    /// A non-zero count on a mesh this crate built is still a bug in this crate.
     pub non_finite_written: usize,
     /// Written vertices whose normal is not unit length (tolerance 1e-3).
     ///
@@ -397,6 +425,15 @@ fn corner_uv32(mesh: &Mesh, h: HalfId) -> [f32; 2] {
     [uv[0] as f32, uv[1] as f32]
 }
 
+/// Replace every non-finite component with `fill`, leaving the rest alone.
+///
+/// Component-wise, so a vertex whose `z` is NaN keeps the `x` and `y` its author
+/// placed: the substitute is a repair of the value that is not a number, not a
+/// re-authoring of the ones that are.
+fn finite_or<const N: usize>(v: [f32; N], fill: f32) -> [f32; N] {
+    v.map(|c| if c.is_finite() { c } else { fill })
+}
+
 fn build_submesh(
     mesh: &Mesh,
     faces: &[FaceId],
@@ -493,17 +530,35 @@ fn build_submesh(
                 if idx == next {
                     let p = mesh.position(v).expect("live vertex id");
                     let p32 = [p.x as f32, p.y as f32, p.z as f32];
-                    // M6: the write path counts what it cannot refuse. See the
-                    // `ExportReport` field docs for why this is a counter here
-                    // and a REFUSAL in `ops`.
-                    if !p32.iter().all(|c| c.is_finite())
-                        || !n32.iter().all(|c| c.is_finite())
-                        || !uv32.iter().all(|c| c.is_finite())
+                    // M6 / **the round-3 contract ruling**: the write path
+                    // SANITIZES what it cannot refuse, and counts it. See the
+                    // `ExportReport` field docs for the ruling and its
+                    // alternatives.
+                    let (p32, n32, uv32) = if p32.iter().all(|c| c.is_finite())
+                        && n32.iter().all(|c| c.is_finite())
+                        && uv32.iter().all(|c| c.is_finite())
                     {
+                        (p32, n32, uv32)
+                    } else {
                         report.non_finite_written += 1;
-                    }
+                        (
+                            finite_or(p32, 0.0),
+                            // A normal is a direction, so the substitute is a
+                            // direction (`vgeom_streams`' own default for a
+                            // missing one) rather than a component-wise patch
+                            // that could leave a zero-length vector.
+                            if n32.iter().all(|c| c.is_finite()) {
+                                n32
+                            } else {
+                                [0.0, 1.0, 0.0]
+                            },
+                            finite_or(uv32, 0.0),
+                        )
+                    };
                     let len2: f32 = n32.iter().map(|c| c * c).sum();
                     // NaN-safe on purpose: a non-finite normal is also non-unit.
+                    // (Sanitized above, so this now only sees a real non-unit
+                    // authored normal — which is the thing it was counting.)
                     if len2.is_nan() || (len2 - 1.0).abs() > 1e-3 {
                         report.non_unit_normals_written += 1;
                     }
@@ -537,10 +592,18 @@ fn build_submesh(
             .iter()
             .map(|&v| {
                 let w = mesh.vert_weights(v).expect("live vertex id");
+                // **The fourth stream `MeshAsset::validate` reads** (round 3).
+                // A weight table can carry an imported NaN exactly as a position
+                // can, and the reader refuses one — so this goes through
+                // `normalized`, whose own doc is about this case: it is the
+                // second line for a `VertexSkin` built by hand, and it answers a
+                // degenerate table with "all of joint 0" rather than with a
+                // value nothing can decode.
                 inf_mesh::VertexSkin {
                     joints: w.joints,
                     weights: w.weights,
                 }
+                .normalized()
             })
             .collect()
     } else {
@@ -1209,7 +1272,7 @@ mod tests {
         asset.submeshes[0].vertices[0].position[0] = f32::NAN;
         asset.submeshes[0].vertices[1].normal = [0.0, 5.0, 0.0];
         let m = from_mesh_asset(&asset).unwrap().mesh;
-        let (_, report) = to_mesh_asset(&m, &ExportOptions::default());
+        let (written, report) = to_mesh_asset(&m, &ExportOptions::default());
         assert!(
             report.non_finite_written >= 1,
             "a NaN reached the payload uncounted"
@@ -1218,6 +1281,19 @@ mod tests {
             report.non_unit_normals_written >= 1,
             "a [0,5,0] normal reached the payload uncounted"
         );
+        // **The round-3 contract ruling.** Counting it is not enough: Wave H
+        // gave `MeshAsset` a `migrate` that refuses a non-finite attribute at
+        // the decode, so a writer that wrote the NaN through produced a file
+        // its own reader rejects — a save that reported success over an asset
+        // that could never be opened again. The count now means "replaced".
+        written
+            .validate()
+            .expect("the writer produced a payload its own reader refuses");
+        inf_mesh::MeshAsset::validate(
+            &inf_asset::decode::<inf_mesh::MeshAsset>(&inf_asset::encode(&written).unwrap())
+                .expect("…and the decode door agrees"),
+        )
+        .unwrap();
 
         // And the clean fixture reports zero, so the counters are not just
         // always-on noise.
