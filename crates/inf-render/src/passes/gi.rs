@@ -93,6 +93,13 @@ const KIND_SPHERE: f32 = 1.0;
 /// its neighbours until a character voxelized as one slab.
 const JOINT_DOMINANT_WEIGHT: f32 = 0.35;
 
+/// One cached mesh's joint boxes, **and the `Arc` whose address is its key**.
+///
+/// The pair is the point, not an implementation detail: see
+/// [`GiNode::joint_boxes`] for why an entry that does not hold its allocation is
+/// a stale-lighting bug rather than a leak.
+type JointBoxEntry = (Arc<crate::scene::SkinnedMeshData>, Arc<Vec<(Vec3, Vec3)>>);
+
 /// A shared handle to the last frame's [`GiAudit`], published by the node and read
 /// through [`crate::EngineRenderer::gi_audit`]. The same shape as the P18.2
 /// streaming report: CPU counters the pass already computes, so it is free and
@@ -355,7 +362,7 @@ pub struct GiNode {
     /// no black frame, just wrong light. Verbatim `passes::skinned`'s
     /// `mesh_cache` and `vsm_raster`'s `SkinnedCasterGeom::mesh`, which is the
     /// half the P27.3 audit put back there for the same reason.
-    joint_boxes: HashMap<usize, (Arc<crate::scene::SkinnedMeshData>, Arc<Vec<(Vec3, Vec3)>>)>,
+    joint_boxes: HashMap<usize, JointBoxEntry>,
     /// Per-vgeom-asset root-page meshlet spheres (local space), keyed by asset id.
     ///
     /// Retained to the frame's asset list: in the editor an asset id is

@@ -119,9 +119,7 @@ impl SurfaceChain {
         use wgpu::CurrentSurfaceTexture as Cst;
         // A released chain has no image, which is the same answer an occluded
         // window gives and is handled by every caller. See `release`.
-        let Some(surface) = self.surface.as_ref() else {
-            return None;
-        };
+        let surface = self.surface.as_ref()?;
         match surface.get_current_texture() {
             Cst::Success(f) | Cst::Suboptimal(f) => Some(f),
             Cst::Outdated | Cst::Lost => {

@@ -156,8 +156,8 @@ mod tests {
             "the newest entry is always retained"
         );
         assert!(
-            kept.iter().all(|v| *v > kept[0] || *v == kept[0]),
-            "retained entries stay in push order"
+            kept.windows(2).all(|w| w[1] == w[0] + 1),
+            "retained entries stay in push order, contiguously"
         );
         assert!(
             !kept.contains(&0),

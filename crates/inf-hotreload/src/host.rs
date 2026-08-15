@@ -224,7 +224,7 @@ impl PluginHost {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             match loaded.get(&hash) {
-                Some(lib) => *lib,
+                Some(lib) => lib,
                 None => {
                     let lib: &'static libloading::Library =
                         Box::leak(Box::new(unsafe { libloading::Library::new(&shadow) }?));
