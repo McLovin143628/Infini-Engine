@@ -545,9 +545,39 @@ pub fn decode_rows<R: BufRead + Seek>(
     on_row: RowSink<'_>,
 ) -> Result<HeightmapProbe, TerrainError> {
     let format = sniff(&mut src)?;
+    // **The finiteness door** (round-2 finding B3). Every row crosses it, so
+    // both tilers — the whole-image one at `:891` and the chunked one — are
+    // covered by one check, and neither can disagree with the other about it.
+    //
+    // NaN is the *conventional* no-data value in a float height EXR, and this
+    // decoder passes f16/f32 channel samples through verbatim. Downstream,
+    // `HeightmapImport::map_sample` looks like a guard and is not: `Normalized`
+    // does `v.clamp(0.0, 1.0)`, and Rust's `clamp` returns `self` when neither
+    // comparison fires, which is exactly what a NaN does to both of them; and
+    // `FloatMeters` — which the wizard offers whenever the source is float —
+    // returns `v` untouched. From there it is `TerrainTile::set_sample` and a
+    // committed `.inf_terrain`, then rapier heightfields, `terrain.height_at`,
+    // the clipmap upload and erosion. `height_bounds` uses `f32::min`/`max`,
+    // which ignore NaN, so the tile's own bounds look perfectly healthy —
+    // the mechanism `crate::validate`'s module doc names.
+    //
+    // Refused rather than substituted: a no-data pixel means the author's
+    // source does not cover that ground, and this engine has no representation
+    // for a hole in a heightfield (holes are the voxel layer's, P21.2). Naming
+    // the pixel is the only answer that lets them fix it in the exporter.
+    let mut finite_rows = |y: u32, row: &[f64]| -> Result<(), TerrainError> {
+        if let Some(x) = row.iter().position(|v| !v.is_finite()) {
+            return Err(TerrainError::Image(format!(
+                "sample at ({x}, {y}) is not a finite number (NaN or infinity) — \
+                 in a float heightmap that usually means 'no data', and a terrain \
+                 has no way to be absent at one sample"
+            )));
+        }
+        on_row(y, row)
+    };
     let probe = match format {
-        HeightmapFormat::Png => decode_rows_png(src, on_row)?,
-        HeightmapFormat::Exr => decode_rows_exr(src, on_row)?,
+        HeightmapFormat::Png => decode_rows_png(src, &mut finite_rows)?,
+        HeightmapFormat::Exr => decode_rows_exr(src, &mut finite_rows)?,
     };
     if probe.width == 0 || probe.height == 0 {
         return Err(TerrainError::Empty);

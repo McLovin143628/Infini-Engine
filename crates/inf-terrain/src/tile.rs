@@ -1019,8 +1019,25 @@ impl TerrainTile {
     }
 
     /// Write the `f32` offset at sample `(i, j)`. Out-of-range indices are ignored.
+    ///
+    /// **A non-finite height is dropped, not stored** — the same rule as its
+    /// sibling [`HeightRegion::set_height`](crate::region::HeightRegion::set_height)
+    /// (C4-35), which this door did not have (round-2 finding B3).
+    ///
+    /// The refusal that matters for an *imported* heightmap is at
+    /// [`decode_rows`](crate::import::decode_rows), where it can name the
+    /// offending pixel. This is the check that stands in front of the seven
+    /// other writers — the brush, the delta replay, the pyramid fold, the
+    /// analytic `from_fn` generators — none of which cross that door, and any
+    /// of which can produce `inf - inf` on a tile a saturated edit left
+    /// infinite. `encode_tile` bincodes whatever is in this buffer with no
+    /// finiteness check of its own, so this is the last place before a
+    /// committed `.inf_terrain`.
     #[inline]
     pub fn set_sample(&mut self, resolution: u32, i: u32, j: u32, height: f32) {
+        if !height.is_finite() {
+            return;
+        }
         let r = resolution.max(1);
         if i < r && j < r {
             self.heights[(j * r + i) as usize] = height;

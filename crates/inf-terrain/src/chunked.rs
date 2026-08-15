@@ -944,6 +944,105 @@ mod tests {
         assert!(report.peak_live_tiles <= report.live_tile_bound);
     }
 
+    /// **Round-2 finding B3: a NaN from a third-party EXR must not reach
+    /// committed terrain.**
+    ///
+    /// NaN is the *conventional* no-data value in a float height EXR, and this
+    /// decoder passed f16/f32 channel samples through verbatim.
+    /// `HeightmapImport::map_sample` looks like the guard and is not:
+    /// `Normalized` does `v.clamp(0.0, 1.0)`, and Rust's `clamp` returns
+    /// `self` when neither comparison fires — which is what a NaN does to both
+    /// — while `FloatMeters`, which the wizard offers whenever the source is
+    /// float, returns `v` untouched. Downstream is `.inf_terrain`, rapier
+    /// heightfields, `terrain.height_at`, the clipmap and erosion; and
+    /// `height_bounds` uses `f32::min`/`max`, which ignore NaN, so the tile's
+    /// own bounds look perfectly healthy the whole way.
+    ///
+    /// Both tilers are driven, because the finding is precisely that they
+    /// share one decoder and neither had the check.
+    #[test]
+    fn a_non_finite_exr_sample_is_refused_by_both_tilers() {
+        let import = HeightmapImport {
+            tile_resolution: 5,
+            meters_per_sample: 1.0,
+            min_height: 0.0,
+            max_height: 100.0,
+            mode: HeightMode::FloatMeters,
+            ..Default::default()
+        };
+        let opts = ChunkedImportOptions::default();
+
+        // The control: the same generator with every sample finite imports
+        // through both paths, so a refusal below cannot be "EXR is broken".
+        let clean = write_test_exr(9, 7, &|x, z| (x + z) as f32);
+        assert!(TerrainData::from_height_image(&clean, import).is_ok());
+        assert!(import_heightmap_reader(
+            std::io::Cursor::new(clean.clone()),
+            import,
+            opts,
+            &mut noop_progress(),
+            &never_cancel(),
+        )
+        .is_ok());
+
+        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let bytes = write_test_exr(9, 7, &move |x, z| {
+                if (x, z) == (4, 3) {
+                    poison
+                } else {
+                    (x + z) as f32
+                }
+            });
+
+            // The whole-image tiler.
+            let e = TerrainData::from_height_image(&bytes, import)
+                .expect_err("a {poison} sample tiled into a terrain");
+            let msg = e.to_string();
+            assert!(
+                msg.contains("(4, 3)") && msg.contains("finite"),
+                "the refusal must name the pixel: {msg}"
+            );
+
+            // The chunked tiler — the one a 16 k import actually uses.
+            let e = import_heightmap_reader(
+                std::io::Cursor::new(bytes.clone()),
+                import,
+                opts,
+                &mut noop_progress(),
+                &never_cancel(),
+            )
+            .err()
+            .expect("the chunked tiler accepted a non-finite sample");
+            assert!(
+                e.to_string().contains("finite"),
+                "the two tilers disagree about a non-finite sample: {e}"
+            );
+        }
+    }
+
+    /// The second line, one layer down: `TerrainTile::set_sample` drops a
+    /// non-finite height rather than storing it, exactly as its sibling
+    /// `HeightRegion::set_height` has since C4-35.
+    ///
+    /// Seven writers reach this door without crossing `decode_rows` — the
+    /// brush, the delta replay, the pyramid fold, the analytic generators —
+    /// and `encode_tile` bincodes whatever is in the buffer with no check of
+    /// its own.
+    #[test]
+    fn a_tile_refuses_to_store_a_non_finite_height() {
+        let mut tile = crate::TerrainTile::flat(4, glam::DVec3::ZERO);
+        tile.set_sample(4, 1, 1, 12.5);
+        assert_eq!(tile.sample(4, 1, 1), 12.5);
+        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            tile.set_sample(4, 1, 1, poison);
+            assert_eq!(
+                tile.sample(4, 1, 1),
+                12.5,
+                "a {poison} height was stored into a tile that is about to be                  bincoded into a committed .inf_terrain"
+            );
+        }
+    }
+
     /// A single-channel (`Y`) `f32` scanline EXR — the shape a heightmap export
     /// takes.
     fn write_test_exr(width: u32, height: u32, f: &dyn Fn(u32, u32) -> f32) -> Vec<u8> {
