@@ -186,9 +186,15 @@ struct SimSample {
     unresolved_refs: usize,
 }
 
-fn sim_sample(sim: &RuntimeSim, step: usize) -> SimSample {
+// `&mut` since Hardening Wave E: `terrain_height_at` resolves its terrain
+// through an archetype-scoped query rather than a whole-world walk, and building
+// one needs the world mutably. The seam's ANSWER is unchanged and nothing is
+// cached, so this trace still traces the live simulation — which is the whole
+// point of sampling the real seam here rather than re-implementing it.
+fn sim_sample(sim: &mut RuntimeSim, step: usize) -> SimSample {
     use inf_ecs::components::Terrain;
     let p = phase16_walk_point(step);
+    let height = sim.terrain_height_at(p.x, p.z);
     let world = sim.world();
     let terrain_resident = world
         .entity_of(PHASE16_TERRAIN_GUID)
@@ -205,7 +211,7 @@ fn sim_sample(sim: &RuntimeSim, step: usize) -> SimSample {
     }
     SimSample {
         walker: [p.x, p.y, p.z],
-        height: sim.terrain_height_at(p.x, p.z),
+        height,
         terrain_resident,
         cells_resident: sim.cell_streaming().resident().collect(),
         props,
@@ -316,7 +322,7 @@ fn run_scripted(mut sim: RuntimeSim, camera: impl Fn(usize) -> DVec3) -> RunTrac
         sim.step_once(RuntimeInput::default());
         step_time += t0.elapsed();
 
-        trace.sim.push(sim_sample(&sim, step));
+        trace.sim.push(sim_sample(&mut sim, step));
         hasher.update(&sim.state_bytes());
 
         // ── the render-sync point (camera wants, the OTHER working set) ──

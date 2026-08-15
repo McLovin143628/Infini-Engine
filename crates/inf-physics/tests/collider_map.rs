@@ -131,7 +131,7 @@ fn the_two_d_mirror_sheds_a_despawned_collider() {
     use inf_physics::PhysicsBridge2D;
 
     let mut w = EcsWorld::new();
-    let mut spawn = |w: &mut EcsWorld, guid: u128, x: f64| {
+    let spawn = |w: &mut EcsWorld, guid: u128, x: f64| {
         let e = w.spawn_with_guid(Uuid::from_u128(guid), "Body", None);
         let mut t = Transform::IDENTITY;
         t.translation = Vec3d::new(x, 0.0, 0.0);
