@@ -104,6 +104,13 @@ pub struct ExportReport {
 }
 
 impl ExportReport {
+    /// Whether this export must not ship (C4-40) — the cook's verdict, carried
+    /// through the bundle so `inf export` can refuse the same builds `inf cook`
+    /// does.
+    pub fn has_blocking(&self) -> bool {
+        self.cook.has_blocking()
+    }
+
     /// A human-readable summary for CLI output.
     pub fn render(&self) -> String {
         let mut s = self.cook.render();

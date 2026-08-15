@@ -43,10 +43,38 @@ pub struct WebExportReport {
     /// Whether the `.wasm` + JS bindings were actually produced (the real
     /// toolchain ran). `false` ⇒ the bundle is skeleton-only + instructions.
     pub wasm_built: bool,
+    /// **Why** the wasm step ended as it did (C4-40).
+    ///
+    /// `wasm_built` alone cannot separate "the toolchain is not installed" —
+    /// which is the honest skeleton-only path — from "the player failed to
+    /// compile", which ships an `index.html` importing an `inf_player.js` that
+    /// was never produced. Both used to render as "wasm built: no" and exit 0.
+    pub wasm: WasmOutcome,
     pub cook: CookReport,
 }
 
+/// How the optional two-step wasm build ended (C4-40).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WasmOutcome {
+    /// Not attempted (`run_toolchain: false`).
+    NotRequested,
+    /// A required tool is absent. The bundle is skeleton + instructions, which
+    /// is exactly what `WEB_BUILD.txt` is for — **not** a failure.
+    ToolAbsent(String),
+    /// The tools ran and the build **failed**. The bundle is broken: its page
+    /// imports JS that does not exist.
+    Failed(String),
+    /// The `.wasm` and its JS glue were produced.
+    Built,
+}
+
 impl WebExportReport {
+    /// Whether this export must not ship (C4-40): a blocking cook, or a wasm
+    /// build that was attempted and failed.
+    pub fn has_blocking(&self) -> bool {
+        self.cook.has_blocking() || matches!(self.wasm, WasmOutcome::Failed(_))
+    }
+
     /// A human-readable CLI summary.
     pub fn render(&self) -> String {
         let mut s = self.cook.render();
@@ -57,10 +85,17 @@ impl WebExportReport {
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            if self.wasm_built {
-                "yes"
-            } else {
-                "no — see WEB_BUILD.txt for the cargo/wasm-bindgen steps"
+            match &self.wasm {
+                WasmOutcome::Built => "yes".to_string(),
+                WasmOutcome::NotRequested =>
+                    "no — not requested; see WEB_BUILD.txt for the cargo/wasm-bindgen steps"
+                        .to_string(),
+                WasmOutcome::ToolAbsent(why) =>
+                    format!("no — {why}; see WEB_BUILD.txt for the cargo/wasm-bindgen steps"),
+                WasmOutcome::Failed(why) => format!(
+                    "NO — the build FAILED ({why}). \
+                     This bundle's page imports inf_player.js, which was never produced"
+                ),
             },
         ));
         s
@@ -90,10 +125,17 @@ pub fn export_web(project_root: &Path, opts: &WebExportOptions) -> Result<WebExp
     std::fs::write(&instructions, web_build_note(&name))?;
 
     // 4. run the real toolchain if asked + available (never faked).
-    let wasm_built = if opts.run_toolchain {
-        try_build_wasm(&out).unwrap_or(false)
+    //
+    // C4-40: the outcome used to be `try_build_wasm(..).unwrap_or(false)`, which
+    // discarded `CookError::Export` *and* collapsed a compile failure into the
+    // same `false` a missing toolchain produces.
+    let wasm = if opts.run_toolchain {
+        match try_build_wasm(&out) {
+            Ok(o) => o,
+            Err(e) => WasmOutcome::Failed(e.to_string()),
+        }
     } else {
-        false
+        WasmOutcome::NotRequested
     };
 
     Ok(WebExportReport {
@@ -101,7 +143,8 @@ pub fn export_web(project_root: &Path, opts: &WebExportOptions) -> Result<WebExp
         pack_path: cook.pack_path.clone(),
         index_html,
         instructions,
-        wasm_built,
+        wasm_built: wasm == WasmOutcome::Built,
+        wasm,
         cook,
     })
 }
@@ -123,6 +166,12 @@ pub struct AndroidExportReport {
 }
 
 impl AndroidExportReport {
+    /// Whether this export must not ship (C4-40) — here, entirely the cook's
+    /// verdict: no toolchain step runs.
+    pub fn has_blocking(&self) -> bool {
+        self.cook.has_blocking()
+    }
+
     /// A human-readable CLI summary.
     pub fn render(&self) -> String {
         let mut s = self.cook.render();
@@ -167,21 +216,28 @@ pub fn export_android(
     })
 }
 
-/// Run the two-step wasm build if the tools are present. Returns `Ok(true)` only
-/// when both `cargo build --target wasm32-unknown-unknown` and `wasm-bindgen`
-/// succeed and produce the JS glue; `Ok(false)` when a tool is missing (the
-/// caller then leaves the instructions in place). Never panics on a missing tool.
-fn try_build_wasm(out_dir: &Path) -> Result<bool> {
+/// Run the two-step wasm build if the tools are present.
+///
+/// Returns [`WasmOutcome::ToolAbsent`] when a tool is missing (the caller leaves
+/// the instructions in place — a legitimate skeleton export) and
+/// [`WasmOutcome::Failed`] when the tools ran and the build did not succeed. The
+/// two used to be the same `Ok(false)`, which is why `inf export --target web`
+/// shipped a page importing JS that was never produced, exit 0 (C4-40).
+fn try_build_wasm(out_dir: &Path) -> Result<WasmOutcome> {
     // wasm-bindgen-cli must be installed for the second step.
     if Command::new("wasm-bindgen")
         .arg("--version")
         .output()
         .is_err()
     {
-        return Ok(false);
+        return Ok(WasmOutcome::ToolAbsent(
+            "wasm-bindgen is not installed".into(),
+        ));
     }
     let Some(ws) = workspace_root() else {
-        return Ok(false);
+        return Ok(WasmOutcome::ToolAbsent(
+            "no cargo workspace root above the current directory".into(),
+        ));
     };
 
     // Step 1: build the player for wasm (getrandom needs the browser backend).
@@ -199,7 +255,9 @@ fn try_build_wasm(out_dir: &Path) -> Result<bool> {
         .status()
         .map_err(|e| CookError::Export(format!("cargo build wasm: {e}")))?;
     if !status.success() {
-        return Ok(false);
+        return Ok(WasmOutcome::Failed(format!(
+            "cargo build --target wasm32-unknown-unknown -p inf-player exited {status}"
+        )));
     }
 
     // Step 2: wasm-bindgen → JS glue + trimmed wasm into the bundle.
@@ -209,7 +267,10 @@ fn try_build_wasm(out_dir: &Path) -> Result<bool> {
         .join("release")
         .join("inf_player.wasm");
     if !wasm.is_file() {
-        return Ok(false);
+        return Ok(WasmOutcome::Failed(format!(
+            "cargo reported success but {} does not exist",
+            wasm.display()
+        )));
     }
     let status = Command::new("wasm-bindgen")
         .args([
@@ -224,7 +285,11 @@ fn try_build_wasm(out_dir: &Path) -> Result<bool> {
         .arg(&wasm)
         .status()
         .map_err(|e| CookError::Export(format!("wasm-bindgen: {e}")))?;
-    Ok(status.success())
+    if status.success() {
+        Ok(WasmOutcome::Built)
+    } else {
+        Ok(WasmOutcome::Failed(format!("wasm-bindgen exited {status}")))
+    }
 }
 
 /// Walk up for the workspace root (`Cargo.toml` with a `[workspace]` table).

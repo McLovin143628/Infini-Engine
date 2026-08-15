@@ -157,7 +157,14 @@ pub fn build_mod_wasm(crate_dir: &Path) -> Result<ModBuildOutcome> {
         .map_err(|e| CookError::Mod(format!("spawning cargo: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if target_missing(&stderr) {
+        // C4-40: classify by **asking the toolchain**, not by reading the error
+        // text. The old `target_missing(&stderr)` substring sniff matched
+        // "target `wasm32-unknown-unknown`" — a phrase an ordinary compile error
+        // for that target routinely contains — and reported a broken mod as
+        // "toolchain missing", which `inf cook-mods` then exits 0 on. The probe
+        // ran before the build too, so if it still says installed, the failure is
+        // the code's.
+        if !wasm_target_installed() {
             return Ok(ModBuildOutcome::ToolchainMissing(
                 TOOLCHAIN_INSTRUCTIONS.to_string(),
             ));
@@ -197,12 +204,6 @@ the wasm32-unknown-unknown target is not installed; mod wasm was NOT built.
 Install it and re-run:
     rustup target add wasm32-unknown-unknown
     cargo build --release --target wasm32-unknown-unknown --manifest-path <mod>/Cargo.toml";
-
-fn target_missing(stderr: &str) -> bool {
-    stderr.contains("may not be installed")
-        || stderr.contains("target `wasm32-unknown-unknown`")
-        || stderr.contains("std` is required")
-}
 
 /// Strip the `#[infinity::blueprint(id = "…")]` marker attribute line(s) from
 /// transpiled Rust — that proc-macro ships with the engine runtime, not a mod.

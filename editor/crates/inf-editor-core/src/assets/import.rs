@@ -111,7 +111,7 @@ fn import_audio(
         dest_dir,
         &name,
         &audio,
-        Some(rel_source(project, source)),
+        super::sidecar_source(project, source),
         vec![],
         import_tbl,
     )?;
@@ -119,7 +119,7 @@ fn import_audio(
         produced: vec![id],
         primary: Some(id),
         cached: false,
-        advisories: Vec::new(),
+        advisories: outside_root_advisories(project, source),
     })
 }
 
@@ -145,7 +145,8 @@ fn import_image(
     let settings = TextureImportSettings::default();
     let (rgba, w, h) =
         inf_material::decode_image_rgba8(bytes).map_err(|e| AssetError::Import(e.to_string()))?;
-    let advisories = raise(source, inf_material::texture_import_advisories(w, h));
+    let mut advisories = raise(source, inf_material::texture_import_advisories(w, h));
+    advisories.extend(outside_root_advisories(project, source));
     let image = inf_material::build_tiled_texture(rgba, w, h, settings)
         .map_err(|e| AssetError::Import(e.to_string()))?;
     let name = file_stem(source);
@@ -154,7 +155,7 @@ fn import_image(
         dest_dir,
         &name,
         &image,
-        Some(rel_source(project, source)),
+        super::sidecar_source(project, source),
         import_tbl,
     )?;
     Ok(ImportOutcome {
@@ -201,7 +202,7 @@ fn import_mesh_container(
     dest_dir: &Path,
     g: GltfImport,
 ) -> Result<ImportOutcome> {
-    let source_rel = rel_source(project, source);
+    let source_rel = super::sidecar_source(project, source);
     let mut produced = Vec::new();
 
     // 1. Decide each image's usage (sRGB base color vs linear data) from the
@@ -234,7 +235,7 @@ fn import_mesh_container(
                 .map_err(|e| e.to_string())
         })
     };
-    let mut advisories = Vec::new();
+    let mut advisories = outside_root_advisories(project, source);
     for (i, tex) in decoded.into_iter().enumerate() {
         let tex = tex.map_err(AssetError::Import)?;
         advisories.extend(raise(
@@ -246,7 +247,7 @@ fn import_mesh_container(
             dest_dir,
             &name,
             &tex,
-            Some(source_rel.clone()),
+            source_rel.clone(),
             settings_table(&settings[i]),
         )?;
         image_ids[i] = Some(id);
@@ -271,8 +272,7 @@ fn import_mesh_container(
         };
         let deps = mat.texture_dependencies();
         let name = format!("{}_{}", file_stem(source), m.name);
-        let id =
-            project.write_asset(dest_dir, &name, &mat, Some(source_rel.clone()), deps, None)?;
+        let id = project.write_asset(dest_dir, &name, &mat, source_rel.clone(), deps, None)?;
         material_ids.push(id);
         produced.push(id);
     }
@@ -283,14 +283,7 @@ fn import_mesh_container(
     for sk in &g.skeletons {
         let asset = inf_anim::SkeletonAsset::new(sk.skeleton.clone());
         let name = format!("{}_{}", file_stem(source), sk.name);
-        let id = project.write_asset(
-            dest_dir,
-            &name,
-            &asset,
-            Some(source_rel.clone()),
-            vec![],
-            None,
-        )?;
+        let id = project.write_asset(dest_dir, &name, &asset, source_rel.clone(), vec![], None)?;
         skeleton_ids.push(id);
         produced.push(id);
     }
@@ -303,14 +296,7 @@ fn import_mesh_container(
         let asset = inf_anim::AnimClipAsset::new(clip.clip.clone(), skel_bytes);
         let deps: Vec<AssetId> = skel_id.into_iter().collect();
         let name = format!("{}_{}", file_stem(source), clip.name);
-        let id = project.write_asset(
-            dest_dir,
-            &name,
-            &asset,
-            Some(source_rel.clone()),
-            deps,
-            None,
-        )?;
+        let id = project.write_asset(dest_dir, &name, &asset, source_rel.clone(), deps, None)?;
         produced.push(id);
     }
 
@@ -331,14 +317,8 @@ fn import_mesh_container(
         if let Some(sid) = im.skin.and_then(|i| skeleton_ids.get(i).copied()) {
             deps.push(sid);
         }
-        let id = project.write_asset(
-            dest_dir,
-            &im.name,
-            &im.mesh,
-            Some(source_rel.clone()),
-            deps,
-            None,
-        )?;
+        let id =
+            project.write_asset(dest_dir, &im.name, &im.mesh, source_rel.clone(), deps, None)?;
         produced.push(id);
         primary.get_or_insert(id);
     }
@@ -386,14 +366,13 @@ fn file_stem(path: &Path) -> String {
         .to_string()
 }
 
-/// The source path relative to the project root, if it lives under it; else the
-/// absolute path (imports can pull from anywhere on disk).
-fn rel_source(project: &AssetProject, source: &Path) -> String {
-    source
-        .strip_prefix(project.root())
-        .unwrap_or(source)
-        .to_string_lossy()
-        .replace('\\', "/")
+/// Zero or one advisory: the L7.H7 note, raised exactly where the sidecar
+/// declines to record an outside-the-project path.
+fn outside_root_advisories(project: &AssetProject, source: &Path) -> Vec<String> {
+    if super::sidecar_source(project, source).is_some() {
+        return Vec::new();
+    }
+    raise(source, vec![super::outside_root_advisory(source)])
 }
 
 /// Serialize texture import settings into the sidecar `import` table.

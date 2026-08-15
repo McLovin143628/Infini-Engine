@@ -430,3 +430,14 @@ opt-level = 2
 
 [profile.release]
 lto = "thin"
+# L7.L2 — build-machine paths must not reach a shipped crash report.
+#
+# The compile-time half of this is `trim-paths = "all"` (Cargo's supported
+# spelling of `--remap-path-prefix`), which is **not stabilized in cargo 1.97**,
+# the toolchain this workspace builds with — adding it here makes the manifest
+# unparseable, so it is written down rather than set. The runtime half IS in
+# place and does not depend on how the binary was built:
+# `inf_player::log::sanitize_location` strips absolute paths out of
+# `CrashReport.location` before the report is written. Turn this line on the day
+# the pin moves past cargo's stabilization:
+#   trim-paths = "all"

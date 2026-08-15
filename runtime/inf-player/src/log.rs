@@ -228,7 +228,14 @@ fn build_report(info: &std::panic::PanicHookInfo<'_>, log_lines: &[String]) -> S
     let msg = payload_str(info.payload());
     let loc = info
         .location()
-        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+        .map(|l| {
+            format!(
+                "{}:{}:{}",
+                sanitize_location(l.file()),
+                l.line(),
+                l.column()
+            )
+        })
         .unwrap_or_else(|| "<unknown>".to_string());
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -260,6 +267,63 @@ fn build_report(info: &std::panic::PanicHookInfo<'_>, log_lines: &[String]) -> S
     out
 }
 
+/// Strip a build machine's identity out of a panic location (L7.L2).
+///
+/// `std::panic::Location::file` is `file!()`. For this workspace's own crates
+/// cargo already passes relative paths, but a panic inside a dependency reports
+/// its registry path — on Windows `C:\Users\<name>\.cargo\registry\src\…\
+/// wgpu-30\src\lib.rs` — so a crash report a customer mails back carries the
+/// **builder's OS username**. The compile-time remedy is
+/// `[profile.release] trim-paths` (see the root `Cargo.toml`: not stabilized in
+/// this toolchain), which is why the runtime one exists and does not depend on
+/// how the binary was built.
+///
+/// Everything the reader needs is kept: the crate directory and the path inside
+/// it. Only the machine prefix goes.
+pub(crate) fn sanitize_location(file: &str) -> String {
+    // A registry / git-checkout path: keep from `<crate>-<version>` onwards.
+    for marker in [
+        "registry/src/",
+        "registry\\src\\",
+        "git/checkouts/",
+        "git\\checkouts\\",
+    ] {
+        if let Some(idx) = file.find(marker) {
+            let rest = &file[idx + marker.len()..];
+            // Drop the index/repo hash directory that follows the marker.
+            let rest = rest
+                .split_once(['/', '\\'])
+                .map(|(_, tail)| tail)
+                .unwrap_or(rest);
+            return format!("<dep>/{}", rest.replace('\\', "/"));
+        }
+    }
+    // The standard library, remapped by rustc itself but not on every path.
+    if let Some(idx) = file.find("/rustc/") {
+        return file[idx..].replace('\\', "/");
+    }
+    // Anything still absolute is a build directory: keep only the tail below the
+    // workspace-looking segment, else the file name.
+    let looks_absolute = file.starts_with('/')
+        || file
+            .as_bytes()
+            .get(1)
+            .is_some_and(|&c| c == b':' && file.len() > 2);
+    if looks_absolute {
+        let normalized = file.replace('\\', "/");
+        for anchor in ["/crates/", "/editor/", "/runtime/", "/tools/"] {
+            if let Some(idx) = normalized.find(anchor) {
+                return normalized[idx + 1..].to_string();
+            }
+        }
+        return normalized
+            .rsplit_once('/')
+            .map(|(_, name)| format!("<build>/{name}"))
+            .unwrap_or_else(|| "<build>".to_string());
+    }
+    file.replace('\\', "/")
+}
+
 fn payload_str(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
@@ -273,6 +337,43 @@ fn payload_str(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L7.L2: a crash report is a file a customer mails back. It must not carry
+    /// the machine that built the binary — on Windows that string is literally
+    /// the builder's OS username.
+    #[test]
+    fn a_panic_location_never_carries_the_build_machine() {
+        let cases = [
+            (
+                "C:\\Users\\someone\\.cargo\\registry\\src\\index.crates.io-1949cf8/wgpu-30.0.1/src/lib.rs",
+                "<dep>/wgpu-30.0.1/src/lib.rs",
+            ),
+            (
+                "/home/someone/.cargo/registry/src/index.crates.io-1949cf8/rapier3d-f64-0.34.0/src/pipeline.rs",
+                "<dep>/rapier3d-f64-0.34.0/src/pipeline.rs",
+            ),
+            (
+                "C:\\Users\\someone\\Desktop\\Infinity_Engine\\infinity_engine\\runtime\\inf-player\\src\\lib.rs",
+                "runtime/inf-player/src/lib.rs",
+            ),
+            (
+                "C:\\Users\\someone\\build\\weird\\thing.rs",
+                "<build>/thing.rs",
+            ),
+            // Already relative: cargo's ordinary shape for a workspace member.
+            ("runtime/inf-player/src/log.rs", "runtime/inf-player/src/log.rs"),
+        ];
+        for (raw, want) in cases {
+            let got = sanitize_location(raw);
+            assert_eq!(got, want, "sanitizing {raw}");
+            assert!(
+                !got.to_ascii_lowercase().contains("users")
+                    && !got.contains("someone")
+                    && !got.contains("home/"),
+                "the sanitized location still names a machine: {got}"
+            );
+        }
+    }
 
     #[test]
     fn ring_is_bounded_and_ordered() {

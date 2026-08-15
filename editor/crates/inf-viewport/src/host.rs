@@ -5192,10 +5192,12 @@ impl EngineHost {
 
     /// Why the water tool refused a click that missed the ground.
     const WATER_NO_GROUND_REJECTION: &'static str =
-        "Water: no terrain under the cursor. Aim at ground that has paged in — a water          placement here would commit geometry at sea level.";
+        "Water: no terrain under the cursor. Aim at ground that has paged in — a water \
+         placement here would commit geometry at sea level.";
     /// …and why it refused a lake drag too small to be a lake.
     const WATER_LAKE_TOO_SMALL_REJECTION: &'static str =
-        "Water: that lake is under a metre across. Drag a larger rectangle — a zero-extent          lake draws nothing and would be an invisible entity in the outliner.";
+        "Water: that lake is under a metre across. Drag a larger rectangle — a zero-extent \
+         lake draws nothing and would be an invisible entity in the outliner.";
 
     /// **The water tool's world pick** — like [`pick_world_point`](Self::pick_world_point)
     /// but it **refuses** rather than falling through to the `y = 0` plane
@@ -7716,6 +7718,43 @@ mod analytic_pick {
 /// which matters, because the bug this pins was invisible: the classic fallback
 /// draws the *same geometry*, so nothing looked wrong while the editor silently
 /// skipped every part of P18.2.
+/// **The on-screen rejection strings (C4-14).**
+///
+/// Every constant here is printed verbatim to a user through `reject_tool`, and
+/// two of them shipped with a swallowed `\`-continuation: the source's own
+/// indentation appeared mid-sentence in the viewport. B33 claimed the class had
+/// a producer-side guard "where it reaches a user"; nothing guarded these.
+///
+/// The gate is over the *values*, not the source text, because that is what the
+/// user reads — and it is a list the compiler forces an author to extend, since
+/// a new rejection constant that is not in it is simply not covered and the
+/// omission is visible right here.
+#[cfg(test)]
+mod rejection_text {
+    use super::EngineHost;
+
+    #[test]
+    fn no_rejection_a_user_reads_carries_an_eaten_continuation() {
+        let all = [
+            ("WATER_NO_GROUND", EngineHost::WATER_NO_GROUND_REJECTION),
+            (
+                "WATER_LAKE_TOO_SMALL",
+                EngineHost::WATER_LAKE_TOO_SMALL_REJECTION,
+            ),
+        ];
+        for (name, msg) in all {
+            assert!(
+                !msg.contains("  "),
+                "{name} carries a run of spaces — a continuation was eaten: {msg:?}"
+            );
+            assert!(
+                !msg.is_empty() && msg.ends_with('.'),
+                "{name} must be a finished sentence: {msg:?}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod requested_settings {
     use super::{apply_record, requested_render_settings, RenderSettings, RenderSettingsRecord};

@@ -211,7 +211,14 @@ fn cmd_cook(args: &[String]) -> ExitCode {
     match cook(&project, &out, &opts) {
         Ok(report) => {
             print!("{}", report.render());
-            ExitCode::SUCCESS
+            // C4-40: a cook that produced an unbootable pack — or one missing
+            // content its levels name — is not a success. It used to print the
+            // advisory and exit 0, so CI shipped it green.
+            if report.has_blocking() {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(e) => {
             eprintln!("cook failed: {e}");
@@ -353,7 +360,7 @@ fn cmd_export(args: &[String]) -> ExitCode {
                 player_bin,
                 ..Default::default()
             };
-            report_export(export(&project, &opts).map(|r| r.render()))
+            report_export(export(&project, &opts).map(|r| (r.render(), r.has_blocking())))
         }
         // Web (P14.2): cook + wasm bundle skeleton; runs the two-step wasm build
         // when the toolchain is present, else leaves WEB_BUILD.txt instructions.
@@ -362,12 +369,12 @@ fn cmd_export(args: &[String]) -> ExitCode {
                 out_dir: out,
                 run_toolchain: true,
             };
-            report_export(export_web(&project, &opts).map(|r| r.render()))
+            report_export(export_web(&project, &opts).map(|r| (r.render(), r.has_blocking())))
         }
         // Android (P14.1): cook + cargo-ndk/APK build steps (NDK required).
         "android" => {
             let opts = AndroidExportOptions { out_dir: out };
-            report_export(export_android(&project, &opts).map(|r| r.render()))
+            report_export(export_android(&project, &opts).map(|r| (r.render(), r.has_blocking())))
         }
         other => {
             eprintln!("unsupported --target '{other}' (current | web | android)");
@@ -377,11 +384,20 @@ fn cmd_export(args: &[String]) -> ExitCode {
 }
 
 /// Print an export report or its error.
-fn report_export(result: Result<String, inf_packager::CookError>) -> ExitCode {
+///
+/// C4-40: an export whose cook cannot boot — or whose wasm build was attempted
+/// and failed — exits non-zero. It used to print the advisory and return
+/// `SUCCESS`, which is how CI shipped an unbootable bundle green.
+fn report_export(result: Result<(String, bool), inf_packager::CookError>) -> ExitCode {
     match result {
-        Ok(rendered) => {
+        Ok((rendered, blocking)) => {
             print!("{rendered}");
-            ExitCode::SUCCESS
+            if blocking {
+                eprintln!("export produced a build that must not ship (see the errors above)");
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(e) => {
             eprintln!("export failed: {e}");

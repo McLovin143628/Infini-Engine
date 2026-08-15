@@ -616,6 +616,47 @@ fn report_sidecar_advisories(db: &AssetDb) {
     }
 }
 
+/// The value an import records in its sidecar's `source` field — **`None` when
+/// the file lives outside the project root** (L7.H7).
+///
+/// The sidecar is deterministic TOML committed beside the payload. Recording an
+/// absolute path writes a developer's machine layout, and on Windows their OS
+/// **username**, into every other checkout of the project: a data leak in
+/// version-controlled content. It has never fired in this repo only because
+/// every committed sample is built programmatically rather than imported.
+///
+/// The capability given up is small and was already unreliable: every re-import
+/// door joins the recorded value onto the project root
+/// (`terrain_import::reimport_terrain`), so an outside path only resolved by
+/// accident of `Path::join`'s absolute-replaces rule, and moved the moment the
+/// project did. `None` makes the re-import door say "this asset has no import
+/// source" instead — a refusal rather than a leak. Copy the file under the
+/// project to keep re-import.
+///
+/// One door for every importer: the generic one, the mesh container, and the
+/// terrain wizard each had their own copy of the old `rel_source`.
+pub(crate) fn sidecar_source(project: &AssetProject, source: &Path) -> Option<String> {
+    source
+        .strip_prefix(project.root())
+        .ok()
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+}
+
+/// The advisory an import raises when [`sidecar_source`] declines to record the
+/// path — so the lost re-import is *said*, not merely absent.
+pub(crate) fn outside_root_advisory(source: &Path) -> String {
+    let name = source
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "the source file".to_string());
+    format!(
+        "\"{name}\" was imported from outside the project, so no source path is recorded \
+         (a sidecar is committed content and an absolute path would carry this machine's \
+         layout into every checkout) — re-import is unavailable until a copy lives under \
+         the project"
+    )
+}
+
 /// A collision-free payload path: `<dir>/<name>.<ext>`, `_1`, `_2`, …
 fn unique_path(dir: &Path, name: &str, ext: &str) -> Result<PathBuf> {
     let safe = sanitize(name);

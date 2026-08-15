@@ -66,6 +66,20 @@ mod tests {
             (call $log (i32.const 8) (i32.const 2))))
     "#;
 
+    /// A mod with a **BeginPlay**: `mod_init` puts entity 1 at (1,2,3) and each
+    /// `mod_update` moves it to (5,6,7). Reading (1,2,3) proves init ran; reading
+    /// (5,6,7) after a tick proves init ran *before* it and only once.
+    const INIT_WAT: &str = r#"
+        (module
+          (import "env" "set_entity_translation"
+            (func $set (param i64 f64 f64 f64)))
+          (memory (export "memory") 1)
+          (func (export "mod_init")
+            (call $set (i64.const 1) (f64.const 1) (f64.const 2) (f64.const 3)))
+          (func (export "mod_update") (param $dt f64)
+            (call $set (i64.const 1) (f64.const 5) (f64.const 6) (f64.const 7))))
+    "#;
+
     /// A mod that hangs forever (a back-edge loop) — exhausts its budget.
     const HANG_WAT: &str = r#"
         (module
@@ -92,6 +106,87 @@ mod tests {
             ExecLimits::default(),
         )
         .unwrap();
+        m.update(&mut world, 0.016).unwrap();
+        assert_eq!(world.entities[&1], [5.0, 6.0, 7.0]);
+    }
+
+    fn init_mod(engine: &WasmEngine) -> WasmMod {
+        WasmMod::instantiate(
+            engine,
+            "beginner",
+            INIT_WAT.as_bytes(),
+            ModCaps {
+                entities: true,
+                ..ModCaps::NONE
+            },
+            ExecLimits::default(),
+        )
+        .unwrap()
+    }
+
+    /// A mod's `mod_init` is its BeginPlay. It was emitted by the cook target and
+    /// documented by `inf_mod::infinity_mod!`, and the host only ever looked up
+    /// `mod_update` — so the handler was compiled, shipped and **never called**.
+    #[test]
+    fn a_mods_begin_play_runs_once_before_its_first_tick() {
+        let e = engine();
+        let mut world = MockModWorld::with_entities([(1, [0.0, 0.0, 0.0])]);
+        let mut m = init_mod(&e);
+        assert!(m.has_init(), "the module exports mod_init");
+        assert!(!m.initialized());
+
+        // Explicitly, without any tick: BeginPlay's own writes land.
+        assert!(m.init(&mut world).unwrap(), "init ran");
+        assert_eq!(world.entities[&1], [1.0, 2.0, 3.0]);
+        assert!(m.initialized());
+
+        // Exactly once — a second call is a no-op even after the world moved.
+        world.entities.insert(1, [9.0, 9.0, 9.0]);
+        assert!(!m.init(&mut world).unwrap(), "init does not run twice");
+        assert_eq!(world.entities[&1], [9.0, 9.0, 9.0]);
+    }
+
+    /// The one door: a host that only ticks still gets BeginPlay, before the
+    /// first Tick. Ticking is how every production caller drives a mod
+    /// (`WasmMods::tick`), so an `init` the tick path did not run would be a
+    /// second path to forget.
+    #[test]
+    fn ticking_a_fresh_mod_runs_begin_play_first() {
+        let e = engine();
+        let mut world = MockModWorld::with_entities([(1, [0.0, 0.0, 0.0])]);
+        let mut m = init_mod(&e);
+
+        m.update(&mut world, 0.016).unwrap();
+        // Tick ran after init, so the tick's value is what survives …
+        assert_eq!(world.entities[&1], [5.0, 6.0, 7.0]);
+        assert!(m.initialized(), "the tick ran init");
+
+        // … and init does not fire again on the second tick: park the entity at
+        // init's value and confirm the tick alone moves it.
+        world.entities.insert(1, [1.0, 2.0, 3.0]);
+        m.update(&mut world, 0.016).unwrap();
+        assert_eq!(world.entities[&1], [5.0, 6.0, 7.0]);
+    }
+
+    /// A mod with only a Tick handler exports no `mod_init`, and that is not an
+    /// error — the export is genuinely optional.
+    #[test]
+    fn a_mod_without_begin_play_still_loads_and_ticks() {
+        let e = engine();
+        let mut world = MockModWorld::with_entities([(1, [0.0, 0.0, 0.0])]);
+        let mut m = WasmMod::instantiate(
+            &e,
+            "mover",
+            MOVE_WAT.as_bytes(),
+            ModCaps {
+                entities: true,
+                ..ModCaps::NONE
+            },
+            ExecLimits::default(),
+        )
+        .unwrap();
+        assert!(!m.has_init());
+        assert!(!m.init(&mut world).unwrap(), "nothing to run");
         m.update(&mut world, 0.016).unwrap();
         assert_eq!(world.entities[&1], [5.0, 6.0, 7.0]);
     }

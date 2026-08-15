@@ -241,11 +241,29 @@ pub struct CookReport {
     /// Total streamed grid cells across those partitions (the persistent cell is
     /// not counted — it is always resident, so it is not a streaming unit).
     pub partition_cells: usize,
-    /// Non-fatal advisories (e.g. "no levels").
+    /// Non-fatal advisories (e.g. a dangling material binding).
+    ///
+    /// Every entry in [`blocking`](Self::blocking) also appears here, so a
+    /// caller that only wants "everything the cook had to say" reads this one.
     pub warnings: Vec<String>,
+    /// The **cannot-ship** subset of [`warnings`](Self::warnings) (C4-40).
+    ///
+    /// A cook that produces a pack the runtime cannot boot — or one that is
+    /// missing content its levels name because an edge could not be read — is
+    /// not a success, and `inf cook` exits non-zero on it. The class is carried
+    /// as its own list rather than recovered from the message text, because
+    /// which advisories block shipping is a **decision**, not a spelling.
+    pub blocking: Vec<String>,
 }
 
 impl CookReport {
+    /// Whether this cook produced something that must not ship (C4-40).
+    ///
+    /// The one question `inf cook`'s exit code asks.
+    pub fn has_blocking(&self) -> bool {
+        !self.blocking.is_empty()
+    }
+
     /// A human-readable multi-line summary for CLI output.
     pub fn render(&self) -> String {
         let mut s = String::new();
@@ -302,7 +320,20 @@ impl CookReport {
             None => s.push_str("  root level: (none)\n"),
         }
         for w in &self.warnings {
-            s.push_str(&format!("  warning: {w}\n"));
+            // A blocking advisory is printed as an error so the line the reader
+            // stops on is the line the exit code is about.
+            let label = if self.blocking.contains(w) {
+                "error"
+            } else {
+                "warning"
+            };
+            s.push_str(&format!("  {label}: {w}\n"));
+        }
+        if self.has_blocking() {
+            s.push_str(&format!(
+                "  {} blocking issue(s) — this build must not ship\n",
+                self.blocking.len()
+            ));
         }
         s
     }
@@ -1121,7 +1152,13 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     };
 
     // ── 3. dependency closure (BFS over forward edges) ──────────────────────
-    let closure = dependency_closure(&db, &roots);
+    // C4-41: an asset whose payload cannot be decoded contributes NO forward
+    // edges, so everything it references silently leaves the pack. That used to
+    // be an unlogged `Vec::new()`; it is now a blocking advisory, because the
+    // symptom is a shipped level missing content nothing said was missing.
+    let mut blocking: Vec<String> = Vec::new();
+    let (closure, unreadable) = dependency_closure(&db, &roots);
+    blocking.extend(unreadable);
     // A level may name a terrain asset the project no longer has. The closure
     // simply cannot follow that edge, which would ship a level whose ground never
     // streams — silently. Say so.
@@ -1372,8 +1409,14 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
     levels.sort();
     let root_level = levels.first().copied();
     if levels.is_empty() {
-        warnings.push("no levels in cook — the build has no boot scene".into());
+        // C4-40: this is the definition of a pack that cannot boot. It printed
+        // as an ordinary warning and the CLI returned success, so CI cooked an
+        // unbootable build and reported green.
+        blocking.push("no levels in cook — the build has no boot scene".into());
     }
+    // Every blocking advisory is also a warning, so a caller that reads only
+    // `warnings` still sees everything (and the existing arms keep working).
+    warnings.extend(blocking.iter().cloned());
 
     let manifest = CookManifest {
         schema_version: MANIFEST_SCHEMA_VERSION,
@@ -1409,6 +1452,7 @@ pub fn cook(project_root: &Path, out_dir: &Path, opts: &CookOptions) -> Result<C
         partitions_built,
         partition_cells,
         warnings,
+        blocking,
     })
 }
 
@@ -1547,7 +1591,11 @@ pub enum VmeshSkip {
 /// `partition::streamed_actors` / `streamed_terrains` precedent.
 pub fn sub_threshold_advisory(guid: AssetId, name: &str, triangles: usize, min: usize) -> String {
     format!(
-        "mesh {guid} ({name}) has {triangles} triangles, below the virtualized-geometry          threshold of {min}, so no .inf_vmesh was derived — the shipped build renders it as a          PLACEHOLDER CUBE (the editor derives from one triangle, so it looks correct while you          author it). Lower [vgeom] min_triangles for this build, or merge the mesh into a          denser one."
+        "mesh {guid} ({name}) has {triangles} triangles, below the virtualized-geometry \
+         threshold of {min}, so no .inf_vmesh was derived — the shipped build renders it as a \
+         PLACEHOLDER CUBE (the editor derives from one triangle, so it looks correct while you \
+         author it). Lower [vgeom] min_triangles for this build, or merge the mesh into a \
+         denser one."
     )
 }
 
@@ -1625,9 +1673,16 @@ fn is_root_kind(kind: AssetKind) -> bool {
 /// ([`AssetDb::references_of`]) and — for `.inf_lvl` levels — the **persisted
 /// per-entity `actor` bindings** (P9.5), which form a real level→blueprint edge
 /// so an explicit-roots cook (`--roots <level>`) still ships the bound classes.
-fn dependency_closure(db: &AssetDb, roots: &[AssetId]) -> Vec<AssetId> {
+/// Returns `(closure, unreadable)` — the second half being one advisory per
+/// asset whose payload could not be read or decoded (C4-41). Those assets are
+/// still *packed*; what is lost is everything they **reference**, so the
+/// advisory has to exist for the hole to be visible at all.
+fn dependency_closure(db: &AssetDb, roots: &[AssetId]) -> (Vec<AssetId>, Vec<String>) {
     let mut seen: BTreeSet<AssetId> = BTreeSet::new();
     let mut queue: VecDeque<AssetId> = VecDeque::new();
+    // A set, not a Vec: the same asset is reachable from many referrers and the
+    // report must be deterministic.
+    let mut unreadable: BTreeSet<String> = BTreeSet::new();
     for &r in roots {
         if db.contains(r) && seen.insert(r) {
             queue.push_back(r);
@@ -1641,13 +1696,25 @@ fn dependency_closure(db: &AssetDb, roots: &[AssetId]) -> Vec<AssetId> {
                 }
             }
         }
-        for dep in asset_deps(db, id) {
+        for dep in asset_deps(db, id, &mut unreadable) {
             if db.contains(dep) && seen.insert(dep) {
                 queue.push_back(dep);
             }
         }
     }
-    seen.into_iter().collect()
+    (seen.into_iter().collect(), unreadable.into_iter().collect())
+}
+
+/// The C4-41 advisory for an asset whose payload the edge walk could not read.
+fn unreadable_edge_advisory(db: &AssetDb, id: AssetId, kind: &str, why: &str) -> String {
+    let name = db
+        .get(id)
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| id.to_string());
+    format!(
+        "{kind} \"{name}\" ({id}) could not be read for its dependency edges ({why}) — \
+         everything it references is MISSING from the pack"
+    )
 }
 
 /// The asset GUIDs an asset references through its persisted refs — the real
@@ -1672,16 +1739,26 @@ fn dependency_closure(db: &AssetDb, roots: &[AssetId]) -> Vec<AssetId> {
 /// * **Pcg** (`.inf_pcg`) — the `.inf_mesh` assets its **grammar modules** place
 ///   (P19.4), closing `level → PcgVolume.graph → module mesh`. Grammar only; see
 ///   the arm for why a scatter kind's mesh is deliberately still not an edge.
-fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
+fn asset_deps(db: &AssetDb, id: AssetId, unreadable: &mut BTreeSet<String>) -> Vec<AssetId> {
     let Some(entry) = db.get(id) else {
         return Vec::new();
     };
-    let Ok(raw) = std::fs::read(&entry.path) else {
-        return Vec::new();
+    let raw = match std::fs::read(&entry.path) {
+        Ok(r) => r,
+        Err(e) => {
+            unreadable.insert(unreadable_edge_advisory(
+                db,
+                id,
+                entry.kind().slug(),
+                &e.to_string(),
+            ));
+            return Vec::new();
+        }
     };
     match entry.kind() {
         AssetKind::Level => {
             let Ok(level) = inf_scene::decode(&raw) else {
+                unreadable.insert(unreadable_edge_advisory(db, id, "level", "undecodable"));
                 return Vec::new();
             };
             let mut deps: Vec<AssetId> = Vec::new();
@@ -1758,10 +1835,19 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
         // set the cook PACKS and the set the runtime ASKS FOR cannot differ.
         AssetKind::Material => match inf_material::derive_material_bytes(&raw) {
             Ok(d) => d.texture_dependencies(),
-            Err(_) => Vec::new(),
+            Err(e) => {
+                unreadable.insert(unreadable_edge_advisory(db, id, "material", &e.to_string()));
+                Vec::new()
+            }
         },
         AssetKind::StateMachine => {
             let Ok(sm) = inf_asset::decode::<inf_anim::StateMachineAsset>(&raw) else {
+                unreadable.insert(unreadable_edge_advisory(
+                    db,
+                    id,
+                    "state machine",
+                    "undecodable",
+                ));
                 return Vec::new();
             };
             let mut deps: Vec<AssetId> = Vec::new();
@@ -1780,6 +1866,7 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
         }
         AssetKind::AnimClip => {
             let Ok(clip) = inf_asset::decode::<inf_anim::AnimClipAsset>(&raw) else {
+                unreadable.insert(unreadable_edge_advisory(db, id, "anim clip", "undecodable"));
                 return Vec::new();
             };
             clip.skeleton
@@ -1798,6 +1885,7 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
         // itself has an advisory for.
         AssetKind::BiomeSet => {
             let Ok(set) = inf_asset::decode::<inf_terrain::BiomeSet>(&raw) else {
+                unreadable.insert(unreadable_edge_advisory(db, id, "biome set", "undecodable"));
                 return Vec::new();
             };
             set.dependencies()
@@ -1815,7 +1903,13 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
         // existing project packs, for bytes nothing currently reads. A grammar
         // module is named in authored text and is the only thing that makes a
         // wall a wall. The scatter half is a stated remainder, not an oversight.
-        AssetKind::Pcg => grammar_module_refs(&raw).into_iter().map(AssetId).collect(),
+        AssetKind::Pcg => match grammar_module_refs(&raw) {
+            Ok(refs) => refs.into_iter().map(AssetId).collect(),
+            Err(why) => {
+                unreadable.insert(unreadable_edge_advisory(db, id, "pcg graph", why));
+                Vec::new()
+            }
+        },
         _ => Vec::new(),
     }
 }
@@ -1835,14 +1929,21 @@ fn asset_deps(db: &AssetDb, id: AssetId) -> Vec<AssetId> {
 /// meshes ship without them, and without the advisory that would have said so.
 /// [`inf_pcg::grammar_mesh_refs`] carries the full argument and the
 /// over-inclusiveness it trades for.
-fn grammar_module_refs(raw: &[u8]) -> Vec<uuid::Uuid> {
+/// `Err` names the reason the payload could not be walked (C4-41). A v1
+/// document-only payload is `Ok(vec![])` — **absent is not broken**, and the
+/// distinction is exactly what [`inf_pcg::PcgAssetPayload::try_graph`] exists
+/// for.
+fn grammar_module_refs(raw: &[u8]) -> std::result::Result<Vec<uuid::Uuid>, &'static str> {
     let Ok(payload) = inf_pcg::PcgAssetPayload::decode(raw) else {
-        return Vec::new();
+        return Err("undecodable");
     };
-    let Some(graph) = payload.graph() else {
-        return Vec::new();
+    let Ok(stored) = payload.try_graph() else {
+        return Err("its authored graph will not parse");
     };
-    inf_pcg::grammar_mesh_refs(&graph, &inf_pcg::pcg_registry())
+    let Some(graph) = stored else {
+        return Ok(Vec::new());
+    };
+    Ok(inf_pcg::grammar_mesh_refs(&graph, &inf_pcg::pcg_registry()))
 }
 /// Every `Material.asset` binding in the closure's levels that names an asset the
 /// project does not have (P26.3b) — the [`dangling_terrain_refs`] shape, for
@@ -2731,7 +2832,10 @@ fn dangling_grammar_modules(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
         let Ok(raw) = std::fs::read(&entry.path) else {
             continue;
         };
-        for mesh in grammar_module_refs(&raw) {
+        // An unwalkable payload is C4-41's blocking advisory, raised once by the
+        // closure walk; this advisory is about *resolvable* modules that are
+        // missing, so it stays silent rather than reporting the same file twice.
+        for mesh in grammar_module_refs(&raw).unwrap_or_default() {
             if !db.contains(AssetId(mesh)) {
                 missing.insert((id, AssetId(mesh)));
             }
@@ -2746,6 +2850,168 @@ fn dangling_grammar_modules(db: &AssetDb, closure: &[AssetId]) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// **The crate-wide eaten-`\` guard (C4-14).**
+///
+/// Recorded bound B33 says the eaten-backslash class "now has a producer-side
+/// guard where it reaches a user (`inf-material`'s advisories,
+/// `inf_packager::cook`'s, …)". That claim was false for this crate: the guard
+/// was one `!msg.contains("  ")` inside a five-element array of *material*
+/// advisories, and `sub_threshold_advisory` — the function the guard's own doc
+/// comment cites as its precedent — carried the defect, tested by an arm with no
+/// space assertion at all.
+///
+/// A hand-listed array cannot be widened by a future author who does not read
+/// it, so the guard is a **source gate** over every `.rs` in the crate: no
+/// string literal may carry an interior run of eight or more spaces, which is
+/// what a swallowed `\`-continuation leaves behind (the intentional
+/// column-alignment sites in this tree run 3–7). Threshold and boundary are the
+/// lens's, measured over 101 sites tree-wide.
+///
+/// The exception list is an **allowlist of functions**, not of spellings, per
+/// the P23 law: a ban enumerates what you thought of.
+#[cfg(test)]
+mod advisory_source_gate {
+    /// Functions that legitimately align columns inside a literal. Every one
+    /// writes a **file for a human to read** (build instructions, an HTML page)
+    /// rather than an advisory, so its alignment is the point.
+    const ALIGNED_ON_PURPOSE: &[&str] = &["web_build_note", "android_build_note"];
+
+    /// The run length that means a continuation was eaten.
+    const EATEN: usize = 8;
+
+    fn interior_space_run(line: &str) -> Option<usize> {
+        let b: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        // Skip leading indentation: a run at the start of a line is formatting.
+        while i < b.len() && b[i] == ' ' {
+            i += 1;
+        }
+        let mut best = None;
+        while i < b.len() {
+            if b[i] == ' ' {
+                let start = i;
+                while i < b.len() && b[i] == ' ' {
+                    i += 1;
+                }
+                // Trailing whitespace is not an interior run either.
+                if i < b.len() {
+                    let run = i - start;
+                    if run >= EATEN && best.map_or(true, |b| run > b) {
+                        best = Some(run);
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+        best
+    }
+
+    /// The enclosing function name for a line, tracked by the last `fn <name>`
+    /// seen at or above it. Crude on purpose: it only has to answer "is this
+    /// inside one of the allowlisted note writers".
+    fn enclosing_fn(lines: &[&str], idx: usize) -> String {
+        for line in lines[..=idx].iter().rev() {
+            let t = line.trim_start();
+            for prefix in ["fn ", "pub fn ", "pub(crate) fn ", "const fn "] {
+                if let Some(rest) = t.strip_prefix(prefix) {
+                    return rest
+                        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+                }
+            }
+        }
+        String::new()
+    }
+
+    #[test]
+    fn no_string_literal_in_this_crate_carries_an_eaten_continuation() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        let mut stack = vec![src.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("crate src is readable") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    files.push(path);
+                }
+            }
+        }
+        assert!(
+            files.len() >= 5,
+            "the gate found almost no source — it is not looking where it thinks it is"
+        );
+        files.sort();
+
+        let mut offences = Vec::new();
+        for path in &files {
+            let text = std::fs::read_to_string(path).expect("source is utf-8");
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if !line.contains('"') {
+                    continue;
+                }
+                let Some(run) = interior_space_run(line) else {
+                    continue;
+                };
+                if ALIGNED_ON_PURPOSE.contains(&enclosing_fn(&lines, i).as_str()) {
+                    continue;
+                }
+                offences.push(format!(
+                    "{}:{} — a run of {run} spaces inside a literal: {}",
+                    path.display(),
+                    i + 1,
+                    line.trim()
+                ));
+            }
+        }
+        assert!(
+            offences.is_empty(),
+            "eaten `\\`-continuations reach a user from this crate:\n{}",
+            offences.join("\n")
+        );
+    }
+
+    /// The gate must be able to see the defect it is named for — otherwise it is
+    /// a test that passes because it looks at nothing (this campaign's third
+    /// vacuous-gate catch is one wave old).
+    /// The fixtures are **assembled**, never written as literals: a source gate
+    /// whose own falsifiers are literal space runs fails on itself, and the
+    /// obvious repair — allowlisting the test — is the hand-listed exception
+    /// this gate exists to replace.
+    #[test]
+    fn the_gate_detects_the_shape_it_bans() {
+        let gap = |n: usize| " ".repeat(n);
+        let eaten = format!("{}\"below the threshold{}of {{min}}\"", gap(8), gap(10));
+        assert_eq!(interior_space_run(&eaten), Some(10));
+
+        let indented = format!("{}threshold of {{min}}, so nothing was derived\";", gap(9));
+        assert_eq!(
+            interior_space_run(&indented),
+            None,
+            "leading indentation is formatting, not an eaten continuation"
+        );
+
+        let aligned = format!("{}\"* index.html{}— a note\"", gap(4), gap(3));
+        assert_eq!(
+            interior_space_run(&aligned),
+            None,
+            "a 3-space run is deliberate column alignment"
+        );
+
+        let trailing = format!("let x = 1;{}", gap(12));
+        assert_eq!(
+            interior_space_run(&trailing),
+            None,
+            "trailing whitespace is not an interior run"
+        );
+    }
 }
 
 /// **The four material advisories (P26.3b + this audit).** Pure functions, so the
@@ -2791,10 +3057,15 @@ mod material_advisories {
                     || lower.contains("clear"),
                 "states a remedy: {msg}"
             );
-            // The eaten-`\` law (five prior catches): a scripted edit to a Rust
+            // The eaten-`\` law (six prior catches): a scripted edit to a Rust
             // string literal swallows the continuation and leaves the source
             // indentation in the user-visible message. `contains()` is perfectly
             // happy with that, so it needs its own assertion.
+            //
+            // This checks these five. The crate-wide guarantee is
+            // [`advisory_source_gate`] below — B33 claimed a producer-side guard
+            // "where it reaches a user" and this array WAS that guard, so it was
+            // a claim about five functions dressed as a claim about the crate.
             assert!(
                 !msg.contains("  "),
                 "the advisory carries a run of spaces — a continuation was eaten: {msg:?}"

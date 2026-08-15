@@ -74,7 +74,14 @@ use runtime_sim::{RuntimeInput, RuntimeSim};
 /// that would corrupt the PIE stdout protocol.
 pub fn run(mut args: Args) -> ExitCode {
     log::init(args.log_file.clone(), args.crash_file.clone());
-    apply_boot_config(&mut args);
+    if let Err(e) = apply_boot_config(&mut args) {
+        // C4-33: the file is there, so the customer asked for *their* game.
+        // Booting the built-in demo instead — which is what falling through
+        // did — is the worst possible answer, and it exited 0.
+        tracing::error!("inf-player: {e}");
+        eprintln!("inf-player: {e}");
+        return ExitCode::FAILURE;
+    }
     match args.mode {
         Mode::Headless => run_headless(&args),
         Mode::Windowed => run_windowed(&args),
@@ -88,12 +95,15 @@ pub fn run(mut args: Args) -> ExitCode {
 /// When no world was chosen on the command line, boot the pack named by a
 /// `player.toml` beside the executable (the exported-game path). A no-op when a
 /// world was given explicitly or no config is present.
-fn apply_boot_config(args: &mut Args) {
+///
+/// Returns `Err` when the config **exists** and cannot be honoured; the caller
+/// refuses to boot rather than falling back to the built-in demo (C4-33).
+fn apply_boot_config(args: &mut Args) -> Result<(), config::ConfigError> {
     if args.world_explicit {
-        return;
+        return Ok(());
     }
-    let Some(cfg) = config::load_beside_exe() else {
-        return;
+    let Some(cfg) = config::load_beside_exe()? else {
+        return Ok(());
     };
     tracing::info!(
         "inf-player: booting from player.toml → {}",
@@ -109,6 +119,7 @@ fn apply_boot_config(args: &mut Args) {
     if let Some(h) = cfg.height {
         args.height = h;
     }
+    Ok(())
 }
 
 /// Where a world's `.inf_terrain` streaming assets come from (P16.3b2).

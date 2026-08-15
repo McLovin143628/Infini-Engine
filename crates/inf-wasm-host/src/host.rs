@@ -9,6 +9,11 @@
 //!
 //! * `memory` — its linear memory (required).
 //! * `mod_update(dt: f64)` — ticked once per fixed step (required).
+//! * `mod_init()` — the mod's **BeginPlay**, called once immediately before its
+//!   first tick (optional). `inf-packager` has emitted this for every blueprint
+//!   with a BeginPlay handler since P14.5 and nothing here looked it up, so the
+//!   handler was compiled, shipped and never called; [`WasmMod::update`] now
+//!   runs it through [`WasmMod::init`].
 //!
 //! The host functions:
 //!
@@ -203,6 +208,17 @@ pub struct WasmMod {
     caps: ModCaps,
     store: Store<ModState>,
     update: TypedFunc<f64, ()>,
+    /// The optional one-time `mod_init` entry — a mod's **BeginPlay**.
+    ///
+    /// `inf-packager` has emitted this export for every blueprint with a
+    /// BeginPlay handler since P14.5, and `inf_mod::infinity_mod!` documents it,
+    /// but nothing ever looked it up: the handler was compiled, shipped, and
+    /// never called. It is `Option` because it is genuinely optional — a mod
+    /// with only a Tick handler exports no `mod_init`.
+    init: Option<TypedFunc<(), ()>>,
+    /// Whether [`init`](Self::init) has already run. A mod's BeginPlay fires
+    /// exactly once, immediately before its first tick.
+    initialized: bool,
     limits: ExecLimits,
     /// Whether epoch deadlines are live for this mod (engine has a ticker AND a
     /// deadline is configured).
@@ -262,6 +278,10 @@ impl WasmMod {
         let update = instance
             .get_typed_func::<f64, ()>(&mut store, "mod_update")
             .map_err(|_| ModError::MissingExport("mod_update"))?;
+        // Optional: a mod with no BeginPlay handler exports no `mod_init`.
+        let init = instance
+            .get_typed_func::<(), ()>(&mut store, "mod_init")
+            .ok();
 
         let epoch_active = engine.epoch && limits.epoch_deadline.is_some();
 
@@ -270,6 +290,8 @@ impl WasmMod {
             caps,
             store,
             update,
+            init,
+            initialized: false,
             limits,
             epoch_active,
             enabled: true,
@@ -291,15 +313,62 @@ impl WasmMod {
         self.enabled
     }
 
+    /// Whether this mod exports a `mod_init` (BeginPlay) entry.
+    pub fn has_init(&self) -> bool {
+        self.init.is_some()
+    }
+
+    /// Whether its one-time `mod_init` has already run.
+    pub fn initialized(&self) -> bool {
+        self.initialized
+    }
+
+    /// Run the mod's one-time `mod_init` (BeginPlay) against `world`, if it has
+    /// one and it has not already run.
+    ///
+    /// Returns `Ok(true)` when the entry actually ran. Called automatically by
+    /// [`update`](Self::update) before the first tick, so a host that only ticks
+    /// gets BeginPlay for free — one door, per the P22 law, rather than a second
+    /// path a caller can forget.
+    pub fn init(&mut self, world: &mut dyn ModWorld) -> Result<bool, ModTrap> {
+        if !self.enabled {
+            return Err(ModTrap::Disabled);
+        }
+        if self.initialized {
+            return Ok(false);
+        }
+        self.initialized = true;
+        let Some(init) = self.init.clone() else {
+            return Ok(false);
+        };
+        self.refill_budget();
+        self.call_with_world(world, |m| init.call(&mut m.store, ()))?;
+        Ok(true)
+    }
+
     /// Tick the mod once against `world`, refilling its execution budget first. A
     /// trap (fuel/epoch/`unreachable`/OOB) disables the mod and is returned as
     /// [`ModTrap::Trap`]; the host is unaffected. Ticking a disabled mod is a
     /// no-op returning [`ModTrap::Disabled`].
+    ///
+    /// Runs [`init`](Self::init) first, once, so a mod's BeginPlay always
+    /// precedes its first Tick.
     pub fn update(&mut self, world: &mut dyn ModWorld, dt: f64) -> Result<(), ModTrap> {
         if !self.enabled {
             return Err(ModTrap::Disabled);
         }
-        // Refill the deterministic op budget for this frame.
+        self.init(world)?;
+        // Refill the deterministic op budget for this frame. Deliberately AFTER
+        // init: BeginPlay gets its own full budget, so a heavy one-time setup
+        // cannot starve the first tick.
+        self.refill_budget();
+        let update = self.update.clone();
+        self.call_with_world(world, |m| update.call(&mut m.store, dt))
+    }
+
+    /// Refill the per-call deterministic op budget and (re)arm the epoch
+    /// deadline.
+    fn refill_budget(&mut self) {
         if let Some(fuel) = self.limits.fuel_per_update {
             let _ = self.store.set_fuel(fuel);
         }
@@ -308,18 +377,25 @@ impl WasmMod {
                 self.store.set_epoch_deadline(deadline);
             }
         }
+    }
 
-        // Publish the world for the duration of this synchronous call.
-        //
-        // SAFETY: `world` is a live `&mut dyn ModWorld` for the whole of
-        // `self.update.call(..)` below (host imports run only during that call),
-        // and we clear the pointer immediately after the call returns — so no
-        // host function ever dereferences a dangling or aliased world. The
-        // transmute only erases the borrow's lifetime; layout is unchanged.
+    /// Publish `world` for the duration of one synchronous guest call, run `f`,
+    /// clear the pointer, and turn a trap into a disable.
+    ///
+    /// SAFETY: `world` is a live `&mut dyn ModWorld` for the whole of `f` (host
+    /// imports run only during that call) and the pointer is cleared immediately
+    /// after `f` returns — including on the trap path — so no host function ever
+    /// dereferences a dangling or aliased world. The transmute only erases the
+    /// borrow's lifetime; layout is unchanged.
+    fn call_with_world(
+        &mut self,
+        world: &mut dyn ModWorld,
+        f: impl FnOnce(&mut Self) -> wasmtime::Result<()>,
+    ) -> Result<(), ModTrap> {
         let raw: *mut dyn ModWorld = world;
         let raw: WorldPtr = unsafe { std::mem::transmute::<*mut dyn ModWorld, WorldPtr>(raw) };
         self.store.data_mut().world = Some(raw);
-        let result = self.update.call(&mut self.store, dt);
+        let result = f(self);
         self.store.data_mut().world = None;
 
         match result {

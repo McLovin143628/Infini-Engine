@@ -319,12 +319,14 @@ pub fn commit(
     let bytes = inf_terrain::write_terrain_asset(&path, &built.asset)?;
     let hash = ContentHash::of(bytes);
     let size = bytes.len() as u64;
-    let rel_source = rel_source(project, &built.source);
+    // L7.H7: `None` when the heightmap lives outside the project — the sidecar
+    // is committed content and must not carry this machine's paths.
+    let rel_source = super::sidecar_source(project, &built.source);
     let id = project.register_written_asset(
         path,
         AssetKind::Terrain,
         hash,
-        Some(rel_source),
+        rel_source,
         built.settings.to_table(),
         reuse,
     )?;
@@ -413,16 +415,6 @@ fn file_stem(source: &Path) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("Terrain")
         .to_string()
-}
-
-/// The source path as recorded in the sidecar: relative to the project root when
-/// it lives inside it, absolute otherwise (matching the generic importer).
-fn rel_source(project: &AssetProject, source: &Path) -> String {
-    source
-        .strip_prefix(project.root())
-        .unwrap_or(source)
-        .to_string_lossy()
-        .replace('\\', "/")
 }
 
 #[cfg(test)]
