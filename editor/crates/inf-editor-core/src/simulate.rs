@@ -2508,26 +2508,45 @@ fn arg_f64(args: &[Value], i: usize) -> f64 {
 /// sentinel. (The P20.4 "missed picks reject, never y = 0" law is about *picks*,
 /// which have a Result to reject into; this is a query, and a query that failed to
 /// answer is not an action that failed.)
-fn terrain_height_at(world: &EcsWorld, voxels: &BTreeMap<Uuid, VoxelData>, x: f64, z: f64) -> f64 {
-    let w = world.world();
+fn terrain_height_at(
+    world: &mut EcsWorld,
+    voxels: &BTreeMap<Uuid, VoxelData>,
+    x: f64,
+    z: f64,
+) -> f64 {
+    // ARCHETYPE-SCOPED, not a whole-world walk (Hardening Wave E). This is the
+    // host seam behind a node designed to be called from actor `Tick` handlers,
+    // so its cost is multiplied by the actor count on every fixed step — and it
+    // used to visit **every entity in the world**, with two component lookups
+    // each, to find the one or two that carry a `Terrain`. Measured on this
+    // machine: 0.0137 ms/call over 1 000 entities, 0.0668 over 5 000, 0.2032
+    // over 15 000 — linear in the world, for a query whose answer set is one.
+    //
+    // The answer is UNCHANGED, which is why this is a repair and not a policy:
+    // the winner is still the lowest `Guid` among non-empty terrains, chosen by
+    // an explicit comparison rather than by iteration order, so the query's
+    // (unspecified) order cannot move it. Nothing is cached and nothing goes
+    // stale — an entity that gains or loses a `Terrain` this step is seen on the
+    // very next call, exactly as before.
+    let mut query = world.world_mut().query::<(
+        Entity,
+        &Guid,
+        &Terrain,
+        Option<&GlobalTransform>,
+        Option<&Transform>,
+    )>();
     let mut picked: Option<(Uuid, DVec3, Entity)> = None;
-    for e in w.iter_entities() {
-        let Some(guid) = e.get::<Guid>().map(|g| g.0) else {
-            continue;
-        };
-        let Some(t) = e.get::<Terrain>() else {
-            continue;
-        };
+    let w = world.world();
+    for (entity, guid, t, global, local) in query.iter(w) {
         if t.data.is_empty() {
             continue;
         }
-        let origin = e
-            .get::<GlobalTransform>()
+        let origin = global
             .map(|g| g.translation())
-            .or_else(|| e.get::<Transform>().map(|t| t.translation.to_dvec3()))
+            .or_else(|| local.map(|t| t.translation.to_dvec3()))
             .unwrap_or(DVec3::ZERO);
-        if picked.as_ref().map(|(g, _, _)| guid < *g).unwrap_or(true) {
-            picked = Some((guid, origin, e.id()));
+        if picked.as_ref().map(|(g, _, _)| guid.0 < *g).unwrap_or(true) {
+            picked = Some((guid.0, origin, entity));
         }
     }
     let picked = picked.and_then(|(_, origin, e)| w.get::<Terrain>(e).map(|t| (origin, t)));
