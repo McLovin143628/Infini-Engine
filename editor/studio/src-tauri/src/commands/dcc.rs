@@ -2750,11 +2750,13 @@ mod tests {
             let body = code_only(&body_of(SOURCE, signature));
             assert!(
                 body.contains("let _ = settle_reported("),
-                "{signature} no longer drops the refusal — move it out of this list                  and carry it, which is strictly better"
+                "{signature} no longer drops the refusal — move it out of this list \
+                 and carry it, which is strictly better"
             );
             assert!(
                 !carries_a_refusal(&ipc, dto),
-                "{signature} drops the settle refusal into a {dto}, which HAS a                  `refusal` field — this is R2.F5 exactly, at another door"
+                "{signature} drops the settle refusal into a {dto}, which HAS a \
+                 `refusal` field — this is R2.F5 exactly, at another door"
             );
         }
 
@@ -2772,7 +2774,8 @@ mod tests {
         assert_eq!(
             dropped_calls,
             dropping.len(),
-            "a door drops the settle refusal and is not in this list; each one is a              decision that its DTO cannot carry the refusal, and it has to be made"
+            "a door drops the settle refusal and is not in this list; each one is a \
+             decision that its DTO cannot carry the refusal, and it has to be made"
         );
 
         // The eleventh door, from the other side: it must NOT drop it.
@@ -2801,7 +2804,9 @@ mod tests {
         let body = code_only(&body_of(SOURCE, "pub async fn dcc_preview("));
         assert!(
             body.contains("doc.preview.upload_stamp()"),
-            "dcc_preview must key the vertex-buffer upload on the stamp the CACHE              served, not on the journal generation — a live drag does not move the              generation, which is the whole reason the scratch channel exists"
+            "dcc_preview must key the vertex-buffer upload on the stamp the CACHE \
+             served, not on the journal generation — a live drag does not move the \
+             generation, which is the whole reason the scratch channel exists"
         );
         assert!(
             !body.contains("session.generation(),"),
@@ -2820,7 +2825,8 @@ mod tests {
         let body = code_only(&body_of(SOURCE, "pub async fn dcc_unwrap("));
         assert!(
             body.contains("spawn_blocking"),
-            "`inf_dcc::unwrap` is a conjugate-gradient solve, seconds on a dense              mesh; `dcc.rs` states the rule 240 lines above and `dcc_save` follows it"
+            "`inf_dcc::unwrap` is a conjugate-gradient solve, seconds on a dense \
+             mesh; `dcc.rs` states the rule 240 lines above and `dcc_save` follows it"
         );
         // The solve must not appear inside a `state.with(` block. Both `with`
         // blocks close before it, so the call sits at the function's own
@@ -2828,11 +2834,13 @@ mod tests {
         let stmts = statements(&body_of(SOURCE, "pub async fn dcc_unwrap("), 4);
         assert!(
             stmts.iter().any(|l| l.contains("spawn_blocking")),
-            "the solve must be a statement of the command, not of a closure holding              the store lock: {stmts:?}"
+            "the solve must be a statement of the command, not of a closure holding \
+             the store lock: {stmts:?}"
         );
         assert!(
             body.contains("session.generation() != solved_at"),
-            "an Op::Unwrap carries the corner list it solved for; applying it to a              mesh that moved meanwhile writes UVs onto corners nobody measured"
+            "an Op::Unwrap carries the corner list it solved for; applying it to a \
+             mesh that moved meanwhile writes UVs onto corners nobody measured"
         );
     }
 
@@ -2881,7 +2889,8 @@ mod tests {
         let body = code_only(&body_of(&project, "fn apply_open("));
         assert!(
             body.contains("dcc.clear_all()"),
-            "apply_open re-roots the asset database and every viewport; the Model              Editor sessions are keyed on ids in that database and must go with them"
+            "apply_open re-roots the asset database and every viewport; the Model \
+             Editor sessions are keyed on ids in that database and must go with them"
         );
     }
 }
