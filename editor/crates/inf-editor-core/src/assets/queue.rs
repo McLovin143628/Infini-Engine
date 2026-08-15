@@ -375,9 +375,12 @@ fn worker_loop(rx: Receiver<Job>, etx: Sender<ImportProgress>, project: Arc<Mute
                         primary: Some(out.asset),
                         cached: false,
                         // A heightmap is not a `.inf_tex` and takes no tile
-                        // geometry, so the three texture advisories cannot
-                        // apply to it.
-                        advisories: Vec::new(),
+                        // geometry, so the three TEXTURE advisories cannot
+                        // apply to it — but the L7.H7 outside-the-project note
+                        // does, and this line hard-coded it away (round-2
+                        // finding R2.F7). It is the one importer where an
+                        // outside-the-project source is the normal case.
+                        advisories: out.advisories,
                     },
                     Err(e) => ImportProgress::Failed {
                         id,

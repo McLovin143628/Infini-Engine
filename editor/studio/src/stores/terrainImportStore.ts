@@ -40,6 +40,17 @@ export interface TerrainImportMachine {
   /** The stage label of the last tick ("tiles", "lod2", …). */
   stage: string;
   result: TerrainImportResultDto | null;
+  /**
+   * **Non-fatal advisories from the finished import** (round-2 finding R2.F7).
+   *
+   * The wizard is the one importer where the source normally lives OUTSIDE the
+   * project, so L7.H7's "no source path is recorded, re-import is unavailable"
+   * note is the common case here — and it had no surface at all. The author
+   * learned about it later, from `reimport` refusing. The Content Drawer's
+   * advisory badge shows it too; this is the wizard saying it while the author
+   * is still looking at the import they just made.
+   */
+  advisories: string[];
   error: string | null;
   /** A command is in flight (probe / spawn) — disables the buttons. */
   busy: boolean;
@@ -52,6 +63,7 @@ export function initialMachine(): TerrainImportMachine {
     probe: null,
     settings: null,
     plan: null,
+    advisories: [],
     job: null,
     done: 0,
     total: 0,
@@ -79,7 +91,7 @@ export function terrainImportReducer(
   if (state.job === null || Number(event.job) !== state.job) return state;
   switch (event.phase) {
     case "started":
-      return { ...state, step: "importing", error: null, done: 0 };
+      return { ...state, step: "importing", error: null, advisories: [], done: 0 };
     case "progress":
       return {
         ...state,
@@ -94,6 +106,7 @@ export function terrainImportReducer(
         step: "done",
         job: null,
         done: state.total || state.done,
+        advisories: event.advisories,
         error: null,
       };
     case "failed": {
@@ -210,6 +223,7 @@ export const useTerrainImportStore = create<TerrainImportState>((set, get) => ({
         settings: probe.suggested,
         step: "configure",
         result: null,
+        advisories: [],
         job: null,
         done: 0,
         total: 0,
@@ -295,7 +309,7 @@ export const useTerrainImportStore = create<TerrainImportState>((set, get) => ({
     }
   },
 
-  back: () => set({ step: "configure", error: null, result: null }),
+  back: () => set({ step: "configure", error: null, result: null, advisories: [] }),
 
   reset: () => set(initialMachine()),
 }));

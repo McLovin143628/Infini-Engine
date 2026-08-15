@@ -56,6 +56,11 @@ fn report_to_dto(report: &CookReport) -> PackageResultDto {
         blueprints_validated: report.blueprints_validated as u32,
         levels_rewritten: report.levels_rewritten as u32,
         warnings: report.warnings.clone(),
+        // B10 == R2.F8: the ship/no-ship verdict, which `inf cook` has honoured
+        // since C4-40 and this door did not. Every entry is also in `warnings`
+        // (that is `CookReport`'s own contract), so the dialog separates them
+        // rather than counting them twice.
+        blocking: report.blocking.clone(),
     }
 }
 
@@ -228,5 +233,79 @@ pub async fn project_package(
             handler: None,
             guid: None,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cook report with the two advisory lists set and everything else
+    /// trivial.
+    ///
+    /// **Constructed field by field on purpose.** `CookReport` has no `Default`,
+    /// so adding a field to it breaks this test — and that is the class of
+    /// finding B10 is: a fact the cook computed, that the editor's projection
+    /// silently did not carry. The next such field gets looked at.
+    fn report(warnings: &[&str], blocking: &[&str]) -> CookReport {
+        CookReport {
+            project_name: "Demo".into(),
+            engine_version: "0.1.0".into(),
+            out_dir: PathBuf::from("C:/proj/Build"),
+            pack_path: PathBuf::from("C:/proj/Build/demo.inf_pack"),
+            manifest_path: PathBuf::from("C:/proj/Build/manifest.toml"),
+            asset_count: 12,
+            kinds: Default::default(),
+            pack_bytes: 4096,
+            levels: Vec::new(),
+            root_level: None,
+            blueprints_validated: 0,
+            levels_rewritten: 0,
+            meshlet_meshes_derived: 0,
+            materials_derived: 0,
+            fractures_derived: 0,
+            fracture_chunks: 0,
+            fracture_chunks_dropped: 0,
+            partitions_built: 0,
+            partition_cells: 0,
+            warnings: warnings.iter().map(|s| s.to_string()).collect(),
+            blocking: blocking.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// **Round-2 finding B10 == R2.F8.** `inf cook` exits non-zero on
+    /// `has_blocking` and prints "this build must not ship"; this projection
+    /// dropped the list, and `PackageResultDto` had no slot for it — so the
+    /// Package dialog, the door an author actually uses, showed those same
+    /// strings inside a yellow "N warnings" list under a success panel.
+    #[test]
+    fn the_dto_carries_the_ship_verdict() {
+        let no_boot = "no boot level: the runtime has nothing to load";
+        let dangling = "a material binding is dangling";
+        let dto = report_to_dto(&report(&[no_boot, dangling], &[no_boot]));
+
+        assert_eq!(
+            dto.blocking,
+            vec![no_boot.to_string()],
+            "the cook's ship/no-ship decision must reach the editor — it is the one \
+             question `inf cook`'s exit code asks"
+        );
+        // `CookReport`'s own contract: a blocking entry is also a warning. Both
+        // lists cross the wire whole; the dialog is what splits them, so it can
+        // show each sentence once.
+        assert_eq!(dto.warnings.len(), 2);
+        assert!(dto.warnings.contains(&no_boot.to_string()));
+    }
+
+    /// The other direction, so the field cannot be hard-wired to "something".
+    #[test]
+    fn a_shippable_cook_reports_nothing_blocking() {
+        let dto = report_to_dto(&report(&["a material binding is dangling"], &[]));
+        assert!(
+            dto.blocking.is_empty(),
+            "an ordinary advisory must not read as a refusal — a dialog that cries \
+             wolf is how an author learns to ignore the one that matters"
+        );
+        assert_eq!(dto.warnings.len(), 1);
     }
 }

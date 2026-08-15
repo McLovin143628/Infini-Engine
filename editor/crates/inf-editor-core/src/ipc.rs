@@ -1550,6 +1550,20 @@ pub struct PackageResultDto {
     pub levels_rewritten: u32,
     /// Non-fatal advisories (e.g. "no levels").
     pub warnings: Vec<String>,
+    /// The **cannot-ship** subset of [`warnings`](Self::warnings) (C4-40,
+    /// re-opened as round-2 finding B10 == R2.F8).
+    ///
+    /// `CookReport::has_blocking` is the one question `inf cook`'s exit code
+    /// asks, and it never reached the editor: `report_to_dto` dropped the field
+    /// and this DTO had no slot for it, so the Package dialog — **the door an
+    /// author actually uses** — rendered the identical strings inside a yellow
+    /// "N warnings" list under a full success panel, with `Boot Level: none` as
+    /// a plain stat beside it. The CLI refused to ship the same build.
+    ///
+    /// Carried as its own list rather than recovered from the message text,
+    /// exactly as `CookReport` carries it: which advisories block shipping is a
+    /// decision, not a spelling.
+    pub blocking: Vec<String>,
 }
 
 /// A structured cook failure (the `Err` payload of `project_package`). `class`

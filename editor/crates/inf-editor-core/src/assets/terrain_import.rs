@@ -229,6 +229,16 @@ pub struct TerrainImportOutcome {
     pub extent_m: (f64, f64),
     /// Payload size on disk.
     pub bytes: u64,
+    /// **Non-fatal advisories** (round-2 finding R2.F7).
+    ///
+    /// L7.H7 stopped the sidecar recording an absolute source path — a sidecar
+    /// is committed content and must not carry this machine's layout — and the
+    /// *advisory* half of that fix reached the mesh and texture importers and
+    /// not this one. Here it matters most: a heightmap normally lives outside
+    /// the project, so `source: None` is the common case, and the author's only
+    /// notice was `reimport` refusing with "no import source" at some later
+    /// session.
+    pub advisories: Vec<String>,
 }
 
 /// A cancellation token shared with the caller (the Ring-2 command layer holds a
@@ -349,6 +359,13 @@ pub fn commit(
     let size = bytes.len() as u64;
     // L7.H7: `None` when the heightmap lives outside the project — the sidecar
     // is committed content and must not carry this machine's paths.
+    //
+    // R2.F7: and SAY SO. This is the one importer where an outside-the-project
+    // source is the norm, and it recorded `None` in silence; the author found
+    // out at some later session, from `reimport` refusing with "no import
+    // source". `outside_root_advisories` is the same door the mesh and texture
+    // importers raise it through, so the wording cannot drift.
+    let advisories = super::import::outside_root_advisories(project, &built.source);
     let rel_source = super::sidecar_source(project, &built.source);
     let id = project.register_written_asset(
         path,
@@ -378,6 +395,7 @@ pub fn commit(
         lod_levels: built.report.lod_levels,
         extent_m: (built.report.extent.x, built.report.extent.y),
         bytes: size,
+        advisories,
     })
 }
 
@@ -611,12 +629,52 @@ mod tests {
             None,
             "the sidecar records a path from outside the project"
         );
+        // **R2.F7: and it has to SAY SO.** The refusal above is the only notice
+        // the author used to get, and it arrives at whatever later session they
+        // try to re-import in. The advisory arrives now, on the import that
+        // caused it, through the same door the mesh and texture importers use.
+        assert_eq!(built.advisories.len(), 1, "{:?}", built.advisories);
+        assert!(
+            built.advisories[0].contains("outside the project")
+                && built.advisories[0].contains("re-import"),
+            "the advisory must name the consequence, not just the fact: {:?}",
+            built.advisories
+        );
+
         let err = reimport(&mut proj, built.asset, &mut |_| {}, &CancelToken::new())
             .expect_err("reimport must refuse rather than guess");
         assert!(
             err.to_string().contains("no import source"),
             "the refusal must say why: {err}"
         );
+    }
+
+    /// The other direction: an import from INSIDE the project records its source
+    /// and must raise nothing. An advisory that always fires is noise, and an
+    /// author who learns to ignore the badge is back where R2.F7 started.
+    #[test]
+    fn a_heightmap_inside_the_project_raises_no_advisory() {
+        let proj_dir = tempfile::tempdir().unwrap();
+        let mut proj = AssetProject::open(proj_dir.path()).unwrap();
+        let inside = proj_dir.path().join("Source");
+        std::fs::create_dir_all(&inside).unwrap();
+        let png = write_png(&inside, "Home.png", 65, 65);
+
+        let built = import_terrain(
+            &mut proj,
+            &png,
+            &TerrainImportSettings::default(),
+            None,
+            &mut |_| {},
+            &CancelToken::new(),
+        )
+        .unwrap();
+
+        assert!(
+            proj.db().get(built.asset).unwrap().sidecar.source.is_some(),
+            "the source is recordable, so it is recorded"
+        );
+        assert!(built.advisories.is_empty(), "{:?}", built.advisories);
     }
 
     #[test]

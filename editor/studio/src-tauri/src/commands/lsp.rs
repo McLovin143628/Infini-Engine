@@ -398,7 +398,7 @@ fn resolve_rust_analyzer(app: &AppHandle) -> Result<PathBuf, String> {
 /// diagnostics were never painted at all. Wave C's own law: *two copies of one
 /// expression across a language boundary are a contract nobody is measuring.*
 ///
-/// [`URI_FIXTURE_PATHS`] and the committed `lspUriFixtures.json` are the
+/// `URI_FIXTURE_PATHS` and the committed `lspUriFixtures.json` are the
 /// measurement. This side generates the file; the vitest arm beside it asserts
 /// the TypeScript encoder reproduces every pair. Neither language can move
 /// alone.
@@ -430,6 +430,9 @@ fn path_to_uri(path: &str) -> String {
 /// one is a character the old spaces-only encoder let through untouched. The
 /// list lives on this side because Rust is the authority: the server is told
 /// this spelling, and `publishDiagnostics` comes back under it.
+///
+/// `#[cfg(test)]`: it is the fixture generator's input and nothing ships it.
+#[cfg(test)]
 const URI_FIXTURE_PATHS: &[&str] = &[
     // The two shapes of an absolute path.
     "C:/proj/src/main.rs",

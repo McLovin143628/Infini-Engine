@@ -399,7 +399,12 @@ fn file_stem(path: &Path) -> String {
 
 /// Zero or one advisory: the L7.H7 note, raised exactly where the sidecar
 /// declines to record an outside-the-project path.
-fn outside_root_advisories(project: &AssetProject, source: &Path) -> Vec<String> {
+///
+/// `pub(crate)` because the **terrain** wizard needs it too (round-2 finding
+/// R2.F7) — and that is the door where an outside-the-project source is the
+/// *norm*, since a heightmap comes off the author's disk rather than out of the
+/// project.
+pub(crate) fn outside_root_advisories(project: &AssetProject, source: &Path) -> Vec<String> {
     if super::sidecar_source(project, source).is_some() {
         return Vec::new();
     }

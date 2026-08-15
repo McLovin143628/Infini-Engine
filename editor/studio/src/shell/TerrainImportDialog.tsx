@@ -18,7 +18,7 @@
  * other shell overlay uses).
  */
 import { useEffect } from "react";
-import { Mountain, X } from "lucide-react";
+import { AlertTriangle, Mountain, X } from "lucide-react";
 
 import { useViewportOverlay } from "../lib/viewportOverlay";
 import { useShellStore } from "../stores/shellStore";
@@ -46,6 +46,7 @@ export default function TerrainImportDialog() {
   const total = useTerrainImportStore((s) => s.total);
   const stage = useTerrainImportStore((s) => s.stage);
   const result = useTerrainImportStore((s) => s.result);
+  const advisories = useTerrainImportStore((s) => s.advisories);
   const error = useTerrainImportStore((s) => s.error);
   const busy = useTerrainImportStore((s) => s.busy);
 
@@ -282,6 +283,25 @@ export default function TerrainImportDialog() {
                 </Section>
               ) : (
                 <div className="text-(--ink-text-dim)">Reading the imported asset…</div>
+              )}
+              {/* **R2.F7.** The one importer whose source normally lives
+                  outside the project, so L7.H7's "no source path is recorded"
+                  note is the COMMON case here — and it had no surface at all:
+                  the author found out later, from `reimport` refusing with "no
+                  import source". The Content Drawer's badge carries it too;
+                  this says it while the author is still looking at the import. */}
+              {advisories.length > 0 && (
+                <div className="mt-2 rounded border border-(--ink-warning)/50 bg-(--ink-warning)/10 p-2">
+                  <div className="mb-1 flex items-center gap-1 font-semibold text-(--ink-warning)">
+                    <AlertTriangle size={12} /> {advisories.length} advisory
+                    {advisories.length === 1 ? "" : "s"}
+                  </div>
+                  <ul className="list-disc pl-4 text-(--ink-text-dim)">
+                    {advisories.map((a, i) => (
+                      <li key={i}>{a}</li>
+                    ))}
+                  </ul>
+                </div>
               )}
               <div className="mt-2 text-(--ink-text-faint)">
                 The terrain streams from its `.inf_terrain` — the level stays small and the

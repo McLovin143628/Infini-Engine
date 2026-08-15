@@ -110,6 +110,34 @@ describe("terrainImportReducer", () => {
     expect(s.error).toBeNull();
   });
 
+  // **R2.F7.** L7.H7 stopped the sidecar recording an absolute source path;
+  // the ADVISORY half reached the mesh and texture importers and not this one
+  // — the door where an outside-the-project source is the norm. `queue.rs`
+  // hard-coded `advisories: Vec::new()` under a comment reasoning only about
+  // texture advisories, so the channel to the drawer's badge posted empty and
+  // the wizard had no surface of its own. The author found out later, from
+  // `reimport` refusing with "no import source".
+  it("carries a finished import's advisories to the done step", () => {
+    const note =
+      '"heights.exr" was imported from outside the project, so no source path is recorded';
+    const s = terrainImportReducer(
+      machine({ step: "importing", done: 4000, total: 4225 }),
+      event({ phase: "finished", primary: "asset-guid", advisories: [note] }),
+    );
+    expect(s.step).toBe("done");
+    expect(s.advisories).toEqual([note]);
+  });
+
+  it("clears advisories when a new import starts", () => {
+    // Otherwise the second import inherits the first one's notice and the
+    // author reads a stale warning about a file they did not choose.
+    const s = terrainImportReducer(
+      machine({ step: "importing", advisories: ["stale"] }),
+      event({ phase: "started" }),
+    );
+    expect(s.advisories).toEqual([]);
+  });
+
   it("a failure surfaces the error, a cancellation steps back to settings", () => {
     const failed = terrainImportReducer(
       machine({ step: "importing" }),

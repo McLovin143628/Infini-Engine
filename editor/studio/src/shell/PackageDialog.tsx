@@ -12,12 +12,13 @@
  * Honest scope: per-stage progress is not surfaced — the cook API has no progress
  * callback, so the state area shows a start→finish spinner only.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Copy, FolderOpen, FolderSearch, Loader2, Package, X } from "lucide-react";
 
 import type { PackageErrorDto } from "../bindings/PackageErrorDto";
 import type { PackageResultDto } from "../bindings/PackageResultDto";
 import { packaging, shell } from "../lib/ipc";
+import { cn } from "../lib/utils";
 import { useViewportOverlay } from "../lib/viewportOverlay";
 import { useProjectStore } from "../stores/projectStore";
 import { useShellStore } from "../stores/shellStore";
@@ -41,6 +42,32 @@ function prettyKind(slug: string): string {
     .split(/[_\s]+/)
     .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
     .join(" ");
+}
+
+/**
+ * **The ship / no-ship verdict a cook report carries** (B10 == R2.F8).
+ *
+ * `inf cook` exits non-zero on `CookReport::has_blocking` and prints "this
+ * build must not ship"; the field never reached this dialog, which rendered the
+ * identical strings inside a yellow "N warnings" list under a full success
+ * panel. The decision is the cook's — this only reads it, and splits the two
+ * lists so nothing is counted twice: `CookReport`'s own contract is that every
+ * blocking entry ALSO appears in `warnings`.
+ *
+ * Exported so the split is testable rather than buried in JSX (the
+ * `appendedLines` precedent next door).
+ */
+export function shipVerdict(result: PackageResultDto): {
+  blocked: boolean;
+  blocking: string[];
+  advisories: string[];
+} {
+  const blocking = result.blocking;
+  return {
+    blocked: blocking.length > 0,
+    blocking,
+    advisories: result.warnings.filter((w) => !blocking.includes(w)),
+  };
 }
 
 /** Coerce a rejected `project_package` value into a structured error. */
@@ -69,6 +96,12 @@ export default function PackageDialog() {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<PackageResultDto | null>(null);
   const [error, setError] = useState<PackageErrorDto | null>(null);
+
+  const verdict = useMemo(
+    () => (result ? shipVerdict(result) : { blocked: false, blocking: [], advisories: [] }),
+    [result],
+  );
+  const advisories = verdict.advisories;
 
   const defaultOutDir = project ? `${project.root}/Build` : "Build";
   const outDir = outDirOverride ?? defaultOutDir;
@@ -220,7 +253,37 @@ export default function PackageDialog() {
 
               {/* Report */}
               {result && !busy && (
-                <div className="mb-1 rounded border border-(--ink-border) bg-(--ink-bg-2) p-3 text-xs">
+                <div
+                  className={cn(
+                    "mb-1 rounded border bg-(--ink-bg-2) p-3 text-xs",
+                    verdict.blocked ? "border-(--ink-error)/60" : "border-(--ink-border)",
+                  )}
+                >
+                  {/* **The ship / no-ship verdict** (B10 == R2.F8).
+                      `inf cook` exits non-zero on exactly this list and prints
+                      "this build must not ship"; the dialog used to render the
+                      same strings inside a yellow "N warnings" bullet list
+                      under a full success panel. The decision is the cook's —
+                      the dialog only has to stop calling it a success. */}
+                  {verdict.blocked && (
+                    <div className="mb-2 rounded border border-(--ink-error)/50 bg-(--ink-error)/10 p-2">
+                      <div className="mb-1 flex items-center gap-1.5 font-semibold text-(--ink-error)">
+                        <AlertTriangle size={13} />
+                        This build must not ship
+                      </div>
+                      <div className="mb-1 text-(--ink-text-dim)">
+                        The pack was written, and {verdict.blocking.length} cook{" "}
+                        {verdict.blocking.length === 1 ? "advisory blocks" : "advisories block"}{" "}
+                        shipping it. <code>inf cook</code> exits non-zero on the same build.
+                      </div>
+                      <ul className="list-disc pl-4 text-(--ink-text)">
+                        {verdict.blocking.map((b, i) => (
+                          <li key={i}>{b}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
                   <div className="mb-2 flex items-baseline justify-between">
                     <span className="font-semibold text-(--ink-text)">
                       {result.project_name}
@@ -237,6 +300,7 @@ export default function PackageDialog() {
                     <Stat
                       label="Boot Level"
                       value={result.root_level ? "set" : "none"}
+                      alarm={!result.root_level}
                     />
                   </div>
 
@@ -267,14 +331,14 @@ export default function PackageDialog() {
                     onReveal={reveal}
                   />
 
-                  {result.warnings.length > 0 && (
+                  {advisories.length > 0 && (
                     <div className="mt-2">
                       <div className="mb-1 flex items-center gap-1 text-(--ink-warning)">
-                        <AlertTriangle size={12} /> {result.warnings.length} warning
-                        {result.warnings.length > 1 ? "s" : ""}
+                        <AlertTriangle size={12} /> {advisories.length} warning
+                        {advisories.length > 1 ? "s" : ""}
                       </div>
                       <ul className="list-disc pl-4 text-(--ink-text-dim)">
-                        {result.warnings.map((w, i) => (
+                        {advisories.map((w, i) => (
                           <li key={i}>{w}</li>
                         ))}
                       </ul>
@@ -308,11 +372,26 @@ export default function PackageDialog() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({
+  label,
+  value,
+  alarm = false,
+}: {
+  label: string;
+  value: string;
+  alarm?: boolean;
+}) {
   return (
-    <div className="rounded border border-(--ink-border) bg-(--ink-bg-1) px-2 py-1">
+    <div
+      className={cn(
+        "rounded border bg-(--ink-bg-1) px-2 py-1",
+        alarm ? "border-(--ink-error)/50" : "border-(--ink-border)",
+      )}
+    >
       <div className="text-[10px] uppercase tracking-wide text-(--ink-text-faint)">{label}</div>
-      <div className="font-mono text-(--ink-text)">{value}</div>
+      <div className={cn("font-mono", alarm ? "text-(--ink-error)" : "text-(--ink-text)")}>
+        {value}
+      </div>
     </div>
   );
 }
