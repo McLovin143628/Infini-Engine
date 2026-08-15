@@ -155,29 +155,37 @@ pub const LOAD_BUDGET_MS: f64 = 5000.0;
 /// factor from [`LOAD_BUDGET_MS`]'s docs *is* a CPU factor, and it is carried in
 /// the number below rather than in a skip.
 ///
-/// # The number, and what it is seeded from
+/// # The number, and the ratchet it has already taken
 ///
 /// Measured on a developer machine (Windows, dev profile with optimizations)
 /// over the gate fixture — 36 level-0 tiles at 129², a 55-chunk / 19 623-vertex
-/// voxel slab and 200 props — at **6.37 ms/projection**. That is six and a third
-/// milliseconds of a shipped player's frame, every frame, producing payloads the
-/// renderer discards on a version match.
+/// voxel slab and 200 props, sixty projections into one scene:
 ///
-/// **48 ms** is that measurement × ~7.5, which is ~1.9× after the ~4×
-/// shared-runner factor — the [`STREAMED_STEP_BUDGET_MS`] margin, for the same
-/// reason: loose enough that a loaded runner of three operating systems cannot
-/// flake it, tight enough that a projector that started rebuilding something
-/// *else* per frame trips it.
+/// * **6.370 ms** with the three producers rebuilding their payloads every
+///   frame against stamps their own consumers honour. That is six and a third
+///   milliseconds of a shipped player's frame, every frame, producing bytes the
+///   renderer discards on a version match.
+/// * **0.041 ms** once terrain tiles and voxel chunks are carried forward from
+///   the previous frame's scene instead — **155×**, with byte-identical
+///   payloads (the gate's arm (d) asserts exactly that).
 ///
-/// It is deliberately seeded from the **unrepaired** measurement, because a
-/// budget minted after a fix cannot certify that the fix is what moved the
-/// number. This constant exists first, at the cost it found; the same wave then
-/// ratchets it down against the repaired one, and the two commits are the
-/// before/after pair. **That ratchet is the point** — read the git log of this
-/// line, not just its value.
+/// This constant was minted at **48.0** — the *unrepaired* measurement × ~7.5 —
+/// before the repair, on purpose: a budget minted after a fix cannot certify
+/// that the fix is what moved the number. It ratchets here, in the same wave,
+/// against the repaired one. Read the git log of this line, not just its value.
+///
+/// **1.5 ms** is ~37× the repaired measurement and ~9× after the ~4×
+/// shared-runner factor from [`LOAD_BUDGET_MS`]'s docs — a wider margin than
+/// [`STREAMED_STEP_BUDGET_MS`] carries, because a projection's cost is
+/// dominated by allocation and a loaded runner's allocator is the noisiest
+/// thing in this file. What matters more than the margin is that it sits **more
+/// than four times below the 6.370 ms this fixture cost before the repair**: a
+/// producer that goes back to rebuilding per frame trips it, which is the
+/// regression it exists for and the property a number chosen to clear the old
+/// cost could not have had.
 ///
 /// **RATCHET RULE (§8): this constant may only ever DECREASE.**
-pub const PROJECTION_BUDGET_MS: f64 = 48.0;
+pub const PROJECTION_BUDGET_MS: f64 = 1.5;
 
 /// Hard **mean** fixed-step budget, in milliseconds, for a step that also runs
 /// cell streaming and terrain sim-residency at its top (the composed gate scene).

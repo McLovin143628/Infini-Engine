@@ -17353,3 +17353,173 @@ which is the worst thing a harness can do.
 
 *This roadmap is a living document. Each phase completion updates it; decision memos land in
 `docs/memos/`; deviations require a memo, not silence.*
+
+## Hardening Wave E (2026-08-14) — performance tier 1, MEASURED
+
+The wave's rule was **measure first, fix second, protect third**, and the first
+commit is the whole argument: `crates/inf-render/tests/frame_budget.rs` rendered
+**one** `RenderScene` sixty times without ever bumping `version`, so every
+version-gated cache in the renderer hit on all fifty-nine frames after the first
+— the opposite of the regime a host produces, where `project_scene_full` ends in
+`mark_dirty()`. And between the simulation and the renderer sat a function no
+budget of any class could see at all. That blindness is why the audit's whole
+P1–P4 class stood with a green gate beside it since P18.
+
+### THE NUMBERS
+
+Every one measured on this machine (Windows, RTX 4070 Ti, dev profile with
+optimizations), by the arm named beside it.
+
+| # | what | before | after | the arm that holds it |
+|---|---|---|---|---|
+| P1+P2 | one sim→render **projection** (36 tiles at 129², a 55-chunk/19 623-vertex voxel slab, 200 props) | **6.370 ms** | **0.041 ms** (155×) | `projection_budget.rs` + `PROJECTION_BUDGET_MS` |
+| P4 | a **version-churning** frame vs a still one (484 instances, 640×360) | 0.176 ms still | 0.201 ms churning (+0.026, **+14.7 %**) | `frame_stays_under_budget_under_version_churn` |
+| P8 | `terrain.height_at` over 15 000 entities | **0.2032 ms/call** | **0.0009 ms/call** (226×, and flat) | `ground_seam_scaling.rs` |
+| P8 | the same over 1 000 / 5 000 | 0.0137 / 0.0668 ms | 0.0010 / 0.0009 ms | as above |
+| P11 | `PhysicsBridge3D::sync` at 13 000 colliders | **6.3519 ms** | **6.0083 ms** (−5.4 %) | `collider_map.rs` |
+| P11 | the same at 1 000 / 5 000 | 0.3836 / 2.3870 ms | 0.3488 / 2.1667 ms (−9 %) | as above |
+| P15a | `ContentHash::of_parts` over a 200 MiB source | **96.2 ms** (2× peak RSS) | **19.9 ms** (1×) | `streaming_of_parts_matches_the_concatenation` |
+| P15a | the same at 16 / 64 MiB | 6.8 / 26.5 ms | 1.7 / 5.9 ms | as above |
+| P15b | `fs::canonicalize` per scanned asset | **2** (53.8 µs each) | **1** | `insert_normalized`'s single door |
+| P10 | the four per-frame `*_summary` probes | **0.883 µs/frame** | 0 (behind the 1 s gate) | — |
+| L7.H1 | the erosion bake that parked a Tokio worker | **3 665 ms** at the 2 000-step clamp | off the async workers | — |
+| L7.M5 | the autosave encode, every 5 s | **29.18 ms** at 15 000 entities | off the async workers | — |
+| L7.H3 | `lsp_request` / `lsp_start` blocking `recv_timeout` | **5 s** / **30 s** on a worker | off the async workers | — |
+
+`PROJECTION_BUDGET_MS` was minted at **48.0** from the *unrepaired* 6.370 ms and
+**ratcheted to 1.5** against the repaired 0.041 ms in the same wave. Seeded
+before the repair on purpose: a budget minted after a fix cannot certify that the
+fix is what moved the number, and the two commits are the before/after pair. 1.5
+sits more than four times below the pre-fix cost, which is the property that lets
+it catch the regression it exists for — a number chosen to clear the old cost
+could not have.
+
+### THE MECHANISM, in one sentence
+
+`RenderTerrainTile::version` and `RenderVoxelChunk::version` are monotone change
+stamps and every *consumer* honours them; what no consumer could do is stop the
+payload being **built**. Both hosts now carry last frame's payload forward
+instead of rebuilding it — the memo IS the previous frame's scene, so a hit costs
+a `Vec` move and zero bytes copied, with no cache, no eviction and no lifetime.
+The key is sound because both stamps come from a **process-global** atomic: a
+stale hit is unreachable, not merely unlikely.
+
+### NEW LAWS
+
+**A budget minted after the fix cannot certify the fix.** `PROJECTION_BUDGET_MS`
+exists in the git log twice on purpose. The first value is the cost the wave
+found; the second is the cost it left. A single commit carrying only the second
+would be a number with nothing to compare against, and no way for a reader to
+tell a repair from a plausible constant.
+
+**A max-fold over change stamps cannot see a removal.** Both the terrain ledger
+(`evict_tile`, `remove_tile`) and the voxel mesh cache (`sync`'s drop pass,
+`clear()`) *delete* the entry rather than minting a new number, so the maximum
+stamp over a set is blind to the eviction of a non-maximal member. Both memos
+walk the whole sequence and compare it element for element.
+`a_carried_projection_sees_a_tile_leave` is that exact case, and it is why the
+obvious cheaper key was not taken.
+
+**A function that skipped its refusals becomes a bug the moment its input can be
+reused.** `apply_seam` used to `continue` past a vertex it refused, which is
+indistinguishable from clearing it while every input is a fresh projection — and
+becomes a stale blend against ground that was carved away the moment a volume is
+carried forward. It now writes every vertex it visits, refusals included, and
+clears rather than returning when there is nothing to sample. Byte-identical for
+every pre-existing caller; load-bearing for the new one. The mutation that
+restores the old shape leaves all 448 `inf-render` unit tests and all four
+projection arms green.
+
+**"One pass over the tracked entities" is a cost, not a reassurance.**
+`collider_to_guid`'s rebuild carried that comment while doing one `BTreeMap`
+insert per collider in the level, sixty times a second, to reproduce a map that
+changes only on a spawn, a despawn or a shape edit.
+
+**A lens's premise is a measurement too.** `entity_id_of`'s linear scan was filed
+at "1.3 M comparisons/tick on a 13 k-entity level"; `entities` is keyed one entry
+per *blueprint actor*, so the scan is over tens. Declined rather than fixed,
+because the reverse index it wanted has a staleness path (`mods.tick` takes
+`&mut self.entities`) that a linear scan does not — a hazard for a microsecond is
+a bad trade.
+
+### CLOSED
+
+Lens 3: **P1, P2, P4** (measured and now protected — the churn itself remains,
+the blindness to it does not), **P5, P8, P10, P11a, P15a, P15b**.
+Lens 7: **H1, H3, M5, M6**, and **H2** for `pcg_evaluate`.
+
+### DECLINED, with the numbers
+
+* **L2.M6 — the thumbnailer's per-thumbnail pipeline compile.** A whole
+  `render_sphere` at 256² is **0.882 ms**, against the **22.9 ms PNG encode**
+  documented beside it in the P23.2a ledger, and the result is content-hash
+  cached to disk so it happens once per asset ever. Caching the pipeline needs
+  either a device-keyed global (the Arc-pointer-key class this tree has fixed
+  three times) or a cache plumbed through two free functions and the
+  `Thumbnailer`, for a fraction of 3 % of a once-per-asset operation.
+* **P15c — `ImportCache::put`'s m²/2 manifest rewrites.** Measured at **1.167
+  ms/put** averaged over the first 1 000 and a **2.785 ms marginal put at 10 000
+  entries** — roughly 14 s of manifest rewriting to import 10 000 assets. Real,
+  and not repaired here: the per-put atomic write **is** the durability C4-38
+  exists to protect. Batching trades a documented data-loss guard for import
+  throughput, which is a decision; the clean fix is an append-only manifest with
+  compaction on open, and that is a container format change with a migration.
+* **P11b — `RuntimeSim::entity_id_of`.** See the law above.
+* **L7.H2's second half — `pcg_evaluate_biomes`.** Its doc-locked block holds
+  `State<'_, AssetState>` and does synchronous asset IO through it, so moving it
+  off the worker needs the asset door hoisted first: Ring-2 surface, not a repair.
+
+### DEFERRED, with the reason
+
+* **P3 — `project_fracture`'s per-frame retransform.** The retain-in-place trick
+  the terrain and voxel memos use cannot be applied: a chunk's
+  `translation`/`rotation` move on **every** step under a fixed `generation`, so
+  only the *geometry* is carryable, and `generation` is **per-instance and
+  restarts at 1** for every `FractureState` — so a memo keyed on
+  `(entity, generation)` that outlives a sim serves the previous level's chunks.
+  The correct shape is a host-owned cache keyed additionally on
+  `Arc::as_ptr(state.asset())` **holding that Arc**, beside `DebrisCache`. It
+  also only fires while something is broken. Wave G.
+* **P6 — the query BVH rebuilt per moving character.** `rapier3d-f64 0.34`'s
+  `BroadPhaseBvh` exposes `set_aabb` (which is both insert and update) but **no
+  public remove**: removal only exists inside
+  `update(…, removed_colliders, events)`, which needs a `BroadPhasePairEvent`
+  sink and pulls in change-detection semantics. An incremental scheme that can
+  add and move but not retire a handle is not a scheme. Needs a design pass
+  against that API, not a repair.
+* **P9, P12, P13, P14, L2.M4, L2.L6.** P8 is the proof that the P12/P13 pattern
+  pays (226× on the one scan taken), and the pattern it establishes — an
+  archetype-scoped query in place of `iter_entities()`, answer unchanged —
+  transfers verbatim. The per-frame bind-group class (P14, L2.M4, L2.L6) now has
+  one honest number over it: the whole version-churn regime costs **+0.026
+  ms/frame (+14.7 %)** on a 484-instance scene, which bounds every member of that
+  class from above and says none of them is where the milliseconds are on that
+  fixture. Wave G owns them with those numbers.
+
+### FOUND EN ROUTE, handed on with a number
+
+`PhysicsBridge3D::sync` costs **6.0 ms at 13 000 static colliders** *after* this
+wave's fix, which makes it the dominant term of that fixed step by a wide margin.
+P30 (the `seen` + `joint_desires` vectors built for every entity, and
+`reconcile_joint` called on jointless ones) lives inside it and is a Wave G item;
+this is the number it should be judged against.
+
+### MUTATIONS: 7 applied, 7 killed
+
+`tiles_match` hard-wired to `true` leaves the byte-identity arm **green** and
+fails both carried-projection falsifiers. `apply_seam` restored to skipping its
+refusals leaves 448 unit tests and four projection arms green and fails only the
+new idempotency arm — which is why that arm's fixture had to be a vertex the
+holed terrain refuses and the unholed one seams. Each of the three
+`collider_map_dirty` sites, deleted line-exactly, fails **the arm that names it
+and only that arm**. The `group_prefix` fold is pinned against `group_first`
+group-for-group including the empty group, where an off-by-one would hide.
+
+### VERIFICATION
+
+Goldens **54, unchanged**; the 100-scene golden suite green. The projector
+mirror's voxel pin moved **deliberately** from `scene.voxels.clear()` to the new
+rule (`prev_voxels`, the shared predicate, and the leftovers-see-a-removal gate),
+so both hosts are still pinned to carrying volumes the same way — a stronger pin
+than the one it replaced. Battery, clippy, fmt and rustdoc figures are in the
+machine-ops note appended after the run.
