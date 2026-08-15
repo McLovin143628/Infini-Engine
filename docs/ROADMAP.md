@@ -17767,6 +17767,40 @@ committed platformer cooks with **zero advisories**, `inf cook` exits 0, and
 the headless player runs its 300 frames to the same final-state hash. No sample
 content had to change.
 
+### CI FIX (2026-08-15, post-push)
+
+Two platform-conditional defects reached CI, both this wave's:
+
+* **`unused import: PathBuf`** on the Ubuntu and macOS clippy legs.
+  `shell_reveal`'s confinement refactor moved the roots walk into
+  `super::paths`, leaving `display_path` — Windows-only — as the import's sole
+  user. Gated with the same cfg. Falsified by flipping the gate to `linux` on
+  this Windows machine: the build then fails with exactly two errors, both
+  inside `display_path`, and nowhere else in the module.
+
+* **`mods_e2e` panicked instead of skipping** on the Rust legs, which do not
+  install `wasm32-unknown-unknown`. The test is P14.5's and has always skipped
+  on `ToolchainMissing`; it had stopped *receiving* one.
+  `rustc --print target-libdir` **computes** a path rather than looking for one,
+  so it exits 0 for an absent target — verified against `thumbv7em-none-eabihf`,
+  which prints a libdir it does not have. `wasm_target_installed()` therefore
+  answered "installed" everywhere, and the only thing making `build_mod_wasm`
+  classify correctly was the stderr sniff C4-40 deleted. Deleting it was right;
+  it exposed the false positive underneath. The probe now requires the libdir to
+  exist and hold a `libstd` rlib, which keeps C4-40's property — a real compile
+  error is still an error, because the target is still there.
+
+**A law, paid for here:** *removing a bad heuristic can expose the broken thing
+it was compensating for.* The stderr sniff was wrong AND load-bearing; deleting
+it without checking what it had been propping up is what turned a green skip
+into a red panic.
+
+**Bookkeeping, honestly:** these three files were staged as their own
+`(Hardening F fix)` commit and were swept into Wave G's `d7771ed` by a
+concurrent tree-wide `git add`. The content landed intact and verified, but it
+is findable under a Wave G perf commit rather than under its own message. Two
+waves committing to one worktree need file-scoped staging on both sides.
+
 ### MACHINE OPS
 
 **Mutations: 14 distinct, 14 killed after repair.** Three survived their first
