@@ -141,6 +141,26 @@ fn an_index_past_the_vertex_buffer_is_refused() {
     refused(import(json, bin), "addresses outside a 3-vertex buffer");
 }
 
+/// **Round 3 — an index count that is not a multiple of three.**
+///
+/// The same compiled-out C assert, one entry point over. Every `meshopt` call
+/// opens with `assert(index_count % 3 == 0)`;
+/// `meshopt_optimizeVertexCacheTable` then floors `index_count / 3` and enters
+/// its emit loop over a second compiled-out `assert(output_triangle <
+/// face_count)`, reading `indices[current_triangle * 3 + 2]`. With a count-2
+/// accessor — which is what this file has, and which is a perfectly parseable
+/// glTF — that read is one `u32` past the end of the input, and the write
+/// beside it is one past the end of the destination the Rust wrapper allocated
+/// at `indices.len()`. Without the door, an out-of-bounds heap **write**.
+#[test]
+fn an_index_count_that_is_not_whole_triangles_is_refused() {
+    let (json, bin) = triangle(&TRI, &[0, 1]);
+    refused(import(json, bin), "not a whole number of triangles");
+    // Four indices: in range, past the `< 3` shape, still a partial triangle.
+    let (json, bin) = triangle(&TRI, &[0, 1, 2, 0]);
+    refused(import(json, bin), "not a whole number of triangles");
+}
+
 // ── glTF: finiteness ────────────────────────────────────────────────────────
 
 /// **C4-8 — a NaN in POSITION.**
@@ -517,6 +537,52 @@ fn a_decoded_inf_mesh_with_a_dangling_index_is_refused() {
         msg.contains("index 3") && msg.contains("submesh 0"),
         "the refusal must name the offending index and submesh: {msg}"
     );
+}
+
+/// A `.inf_mesh` whose index buffer is not a whole number of triangles is
+/// refused at decode — **round 3**, the other half of the same compiled-out C
+/// assert.
+///
+/// `meshopt_optimizeVertexCacheTable` floors `index_count / 3`, then enters its
+/// emit loop over a second compiled-out `assert(output_triangle < face_count)`
+/// and reads `indices[current_triangle * 3 + 2]`: with two indices that is one
+/// `u32` past the end of the input **and** past the end of the destination
+/// `optimize_vertex_cache`'s wrapper allocated at `indices.len()`. Two indices
+/// is what a glTF primitive with a count-2 index accessor produces.
+#[test]
+fn a_decoded_inf_mesh_with_a_partial_triangle_is_refused() {
+    use inf_mesh::{MeshAsset, MeshVertex, SubMesh};
+
+    let sub = |indices: Vec<u32>| SubMesh {
+        name: "s".into(),
+        vertices: vec![MeshVertex::default(); 4],
+        indices,
+        material_slot: None,
+        skin: Vec::new(),
+    };
+    let bytes = |indices: Vec<u32>| {
+        inf_asset::encode(&MeshAsset::new(vec![sub(indices)], Vec::new())).unwrap()
+    };
+
+    // Controls: whole triangles, and an unindexed submesh (a real state).
+    inf_asset::decode::<MeshAsset>(&bytes(vec![0, 1, 2, 0, 2, 3]))
+        .expect("a healthy mesh must still decode");
+    inf_asset::decode::<MeshAsset>(&bytes(Vec::new()))
+        .expect("an unindexed submesh is not a partial triangle");
+
+    // Every index in range, so this is not the dangling-index refusal wearing
+    // a different message.
+    for partial in [vec![0u32], vec![0u32, 1], vec![0u32, 1, 2, 3]] {
+        let n = partial.len();
+        let msg = match inf_asset::decode::<MeshAsset>(&bytes(partial)) {
+            Ok(_) => panic!("{n} indices decoded as {} triangles", n / 3),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            msg.contains("whole number of triangles") && msg.contains("submesh 0"),
+            "the refusal must name the arity and the submesh: {msg}"
+        );
+    }
 }
 
 /// A NaN in a decoded `.inf_mesh` is refused. `MeshVertex` is `Pod` and is

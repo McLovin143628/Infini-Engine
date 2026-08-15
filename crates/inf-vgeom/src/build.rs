@@ -323,9 +323,28 @@ pub fn build_vgeom(
              this mesh will not virtualize"
         );
     }
+    // **The same door, the other half of the same C assert.** `meshopt`'s every
+    // entry point opens with `assert(index_count % 3 == 0)` and the vendored
+    // build compiles its asserts out, so a partial triangle is not diagnosed —
+    // it is read past the end of the buffer (`meshopt_buildMeshletsScan` and
+    // `meshopt_computeClusterBounds` both index `i + 1` / `i + 2` at `i += 3`)
+    // or floored away, silently, with `optimize_vertex_cache`'s wrapper still
+    // returning a buffer of the original length whose tail is a fabricated
+    // `[0, 0, 0]`. `MeshAsset::migrate` refuses such a payload at the decode;
+    // this is the backstop for every OTHER producer of raw streams, exactly as
+    // `addressable` above is.
+    let whole_triangles = indices.len().is_multiple_of(3);
+    if !whole_triangles {
+        tracing::error!(
+            vertices = raw.len(),
+            indices = indices.len(),
+            "meshlet build refused: the index buffer is not a whole number of \
+             triangles; this mesh will not virtualize"
+        );
+    }
 
     // Degenerate: nothing to cluster.
-    if raw.is_empty() || indices.len() < 3 || !addressable {
+    if raw.is_empty() || indices.len() < 3 || !addressable || !whole_triangles {
         let (center, radius) = bounding_sphere(&raw);
         return VgeomMesh {
             schema_version: VgeomMesh::CURRENT_VERSION,
@@ -1479,5 +1498,62 @@ mod tests {
         assert!(build_vgeom(&p, &n, &uv, &[], &far, BuildParams::default())
             .meshlets
             .is_empty());
+    }
+
+    /// **The other half of the same compiled-out assert** (round-3): an index
+    /// buffer that is not a whole number of triangles.
+    ///
+    /// Every `meshopt` entry point opens with `assert(index_count % 3 == 0)`,
+    /// compiled out under `-DNDEBUG`. The consequence here is not a heap write
+    /// but silent geometry loss — `meshopt_buildMeshlets` floors
+    /// `index_count / 3`, so the trailing indices are dropped from the DAG
+    /// while every count derived from `indices.len()` still includes them.
+    /// Refusing says so; flooring does not.
+    ///
+    /// Every index is in range, so this cannot pass by way of the
+    /// `addressable` branch beside it — asserted, not assumed.
+    #[test]
+    fn a_partial_triangle_never_reaches_the_ffi() {
+        let p = vec![
+            [0.0f32, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let n = vec![[0.0f32, 0.0, 1.0]; 4];
+        let uv = vec![[0.0f32, 0.0]; 4];
+
+        let control = build_vgeom(
+            &p,
+            &n,
+            &uv,
+            &[],
+            &[0u32, 1, 2, 0, 2, 3],
+            BuildParams::default(),
+        );
+        assert!(
+            !control.meshlets.is_empty(),
+            "the control never clusterized, so the hostile cases below are vacuous"
+        );
+
+        for hostile in [
+            vec![0u32, 1, 2, 0],
+            vec![0u32, 1, 2, 0, 2],
+            // Four indices, all in range: `< 3` does not catch it and
+            // `addressable` answers true.
+            vec![0u32, 1, 2, 3],
+        ] {
+            assert!(
+                hostile.iter().all(|&i| (i as usize) < p.len()),
+                "the fixture must be in range or it is testing the other guard"
+            );
+            let out = build_vgeom(&p, &n, &uv, &[], &hostile, BuildParams::default());
+            assert!(
+                out.meshlets.is_empty() && out.meshlet_triangles.is_empty(),
+                "{} indices were clusterized as {} triangles",
+                hostile.len(),
+                hostile.len() / 3
+            );
+        }
     }
 }

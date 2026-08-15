@@ -36,7 +36,10 @@
 //! 1. **Finiteness** — [`reject_non_finite`]. Written as `is_finite()`, never as
 //!    a comparison, because the house's standing NaN-blind-guard class is
 //!    exactly a comparison that a NaN answers `false` and therefore passes.
-//! 2. **Index bounds** — [`reject_out_of_range`] / [`reject_joint_indices`].
+//! 2. **Index bounds** — [`reject_out_of_range`] / [`reject_joint_indices`] —
+//!    and index **arity**, [`reject_partial_triangle`]: every `meshopt` entry
+//!    asserts `index_count % 3 == 0`, and that assert is compiled out, so a
+//!    partial triangle is an out-of-bounds heap write rather than a diagnostic.
 //! 3. **Stream-length agreement** — [`reject_length_mismatch`]. A glTF sampler
 //!    whose output count disagrees with its input count, or a `TEXCOORD_0`
 //!    shorter than `POSITION`, is a file whose streams do not describe the same
@@ -110,6 +113,45 @@ pub fn reject_out_of_range(
             indices[at]
         ))),
         None => Ok(()),
+    }
+}
+
+/// Refuse an index buffer that is not a whole number of triangles.
+///
+/// # The compiled-out assert, and the underflow behind it
+///
+/// Every `meshopt` entry point this workspace calls opens with
+/// `assert(index_count % 3 == 0)`, and the vendored build compiles its asserts
+/// out — so the library does not check this, it *assumes* it. Three separate
+/// consequences follow, all verified in `meshopt-0.4.1/vendor/src`:
+///
+/// * **An out-of-bounds heap write.** `meshopt_optimizeVertexCacheTable`
+///   computes `face_count = index_count / 3`, then enters its emit loop over a
+///   second compiled-out `assert(output_triangle < face_count)` and reads
+///   `indices[current_triangle * 3 + 2]`. With two indices that is one `u32`
+///   past the end of the input **and** one past the end of the destination the
+///   Rust wrapper allocated at `indices.len()`. Two indices is what a glTF
+///   primitive with a count-2 index accessor produces.
+/// * **An underflow.** `meshopt::build_meshlets` finishes with
+///   `meshlets[count - 1]`; a floored `index_count / 3` of zero returns
+///   `count == 0`, and `0 - 1` is `usize::MAX`.
+/// * **Silent geometry loss.** The entry points that floor drop the trailing
+///   one or two indices, while `optimize_vertex_cache`'s wrapper still returns
+///   a buffer of the original length — so the tail comes back as a fabricated
+///   `[0, 0, …]` triangle that was in nobody's file.
+///
+/// A partial triangle is meaningless in every format this engine reads (glTF's
+/// `TRIANGLES` mode and `.obj`'s `f` both describe whole faces), so there is no
+/// legitimate producer to accommodate. `indices.is_empty()` is not a partial
+/// triangle — an unindexed submesh is a real state.
+pub fn reject_partial_triangle(index_count: usize, what: &str) -> Result<(), MeshError> {
+    if index_count.is_multiple_of(3) {
+        Ok(())
+    } else {
+        Err(MeshError::Malformed(format!(
+            "{what}: {index_count} indices is not a whole number of triangles ({} left over)",
+            index_count % 3
+        )))
     }
 }
 
@@ -213,6 +255,21 @@ mod tests {
         assert!(reject_out_of_range(&[0, 1, 2], 0, "indices").is_err());
         // An empty index buffer over an empty vertex buffer is not a defect.
         assert!(reject_out_of_range(&[], 0, "indices").is_ok());
+    }
+
+    #[test]
+    fn an_index_count_that_is_not_whole_triangles_is_refused() {
+        for whole in [0usize, 3, 6, 300] {
+            assert!(reject_partial_triangle(whole, "indices").is_ok(), "{whole}");
+        }
+        for partial in [1usize, 2, 4, 5, 301] {
+            let e = reject_partial_triangle(partial, "indices").unwrap_err();
+            let msg = e.to_string();
+            assert!(
+                msg.contains("whole number of triangles") && msg.contains(&partial.to_string()),
+                "the refusal must name the count: {msg}"
+            );
+        }
     }
 
     #[test]

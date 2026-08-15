@@ -323,6 +323,8 @@ impl MeshAsset {
             // The index buffer, against ITS OWN vertex buffer — this is the one
             // that reaches `meshopt` through raw FFI.
             crate::validate::reject_out_of_range(&sm.indices, sm.vertices.len(), &what)?;
+            // …and it must be a whole number of TRIANGLES.
+            crate::validate::reject_partial_triangle(sm.indices.len(), &what)?;
             // The parallel skin stream. `SubMesh`'s own doc states the
             // invariant ("when non-empty, `skin.len() == vertices.len()`") and
             // until now nothing enforced it on the decode path; the GPU

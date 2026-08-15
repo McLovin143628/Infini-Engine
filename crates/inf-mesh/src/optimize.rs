@@ -74,6 +74,22 @@ pub fn optimize(vertices: Vec<MeshVertex>, indices: Vec<u32>) -> (Vec<MeshVertex
         );
         return (vertices, indices);
     }
+    // **The partial triangle**, which is the same class one step further in.
+    // `meshopt_optimizeVertexCacheTable` floors `index_count / 3` and then
+    // enters its emit loop over a compiled-out `assert(output_triangle <
+    // face_count)`, reading `indices[current_triangle * 3 + 2]` — with two
+    // indices that is one `u32` past the end of the input AND past the end of
+    // the destination `optimize_vertex_cache` allocated at `indices.len()`. A
+    // glTF primitive with a count-2 index accessor produces exactly that.
+    // See `crate::validate::reject_partial_triangle` for the enumeration.
+    if !indices.len().is_multiple_of(3) {
+        debug_assert!(
+            false,
+            "optimize() was handed a partial triangle; the import door \
+             (inf_mesh::validate) is supposed to have refused this file already"
+        );
+        return (vertices, indices);
+    }
 
     // 1. Weld: find unique vertices and a remap table over the index stream.
     let (unique_count, remap) = meshopt::generate_vertex_remap(&vertices, Some(&indices));

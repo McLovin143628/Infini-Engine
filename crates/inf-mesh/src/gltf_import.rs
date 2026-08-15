@@ -23,7 +23,7 @@ use crate::error::MeshError;
 use crate::optimize::optimize;
 use crate::validate::{
     reject_joint_indices, reject_length_mismatch, reject_non_finite, reject_non_increasing,
-    reject_out_of_range,
+    reject_out_of_range, reject_partial_triangle,
 };
 
 /// A decoded texture source, RGBA8, straight from the glTF image list.
@@ -321,6 +321,12 @@ pub fn import_gltf(path: &Path) -> Result<GltfImport, MeshError> {
             let at = format!("{name} primitive {pi}");
             reject_non_finite(&positions, &format!("{at} POSITION"))?;
             reject_out_of_range(&indices, positions.len(), &format!("{at} indices"))?;
+            // A count that is not a multiple of three: `meshopt` asserts against
+            // it and the assert is compiled out, so the partial triangle becomes
+            // an out-of-bounds heap write inside the vertex-cache optimizer four
+            // lines of ours later. Named here, where the file and the primitive
+            // can be named with it.
+            reject_partial_triangle(indices.len(), &format!("{at} indices"))?;
             for (stream, label) in [
                 (normals.as_ref().map(Vec::len), "NORMAL"),
                 (uvs.as_ref().map(Vec::len), "TEXCOORD_0"),
