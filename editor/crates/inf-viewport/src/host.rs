@@ -1425,6 +1425,20 @@ impl EngineHost {
         self.spline_polylines.clear();
 
         let world = doc.world();
+        // Hardening D — the two per-entity side tables that are NOT rebuilt by the
+        // projection. `biome_palettes` and `water_hints` are pushed in from Ring 2
+        // (`set_biome_palette` / `set_water_hints`), so they cannot be cleared at
+        // the top of a sync like the tables above — clearing would drop a palette
+        // set between two document versions. What they *can* be is retained to the
+        // document: a `Guid` the document no longer carries is an entity that was
+        // deleted, and its palette (a `Vec` per terrain, and a
+        // `Vec<Option<f64>>` per water body sized by its spline) outlived it for
+        // the life of the host.
+        {
+            let live: std::collections::BTreeSet<Uuid> = doc.order().iter().copied().collect();
+            self.biome_palettes.retain(|guid, _| live.contains(guid));
+            self.water_hints.retain(|guid, _| live.contains(guid));
+        }
         // The sky authority first (P17.1): it writes `scene.sun` / `scene.sky` and,
         // when a clock is present, pushes the sun/moon directional light as
         // `lights[0]` — a stable index on both projector sides.

@@ -463,3 +463,129 @@ fn gi_releases_its_caches_when_the_setting_goes_off() {
         "GI off means nothing reads either cache"
     );
 }
+
+/// A 4×4 solid-colour RGBA8 upload under `handle`.
+fn solid_upload(handle: u64, rgba: [u8; 4]) -> inf_render::SpriteTextureUpload {
+    inf_render::SpriteTextureUpload {
+        handle,
+        width: 4,
+        height: 4,
+        rgba8: rgba.iter().copied().cycle().take(4 * 4 * 4).collect(),
+    }
+}
+
+/// A scene with one full-screen-ish sprite sampling `handle`, plus the upload.
+fn sprite_scene(handle: u64, rgba: [u8; 4], with_sprite: bool) -> RenderScene {
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        pending_texture_uploads: vec![solid_upload(handle, rgba)],
+        ..Default::default()
+    };
+    if with_sprite {
+        scene.sprites.push(inf_render::SpriteInstance {
+            position: DVec3::ZERO,
+            size: glam::Vec2::new(6.0, 6.0),
+            color: [1.0, 1.0, 1.0, 1.0],
+            texture: handle,
+            ..Default::default()
+        });
+    }
+    scene.mark_dirty();
+    scene
+}
+
+/// **The sprite finding (lens 2 M2), both halves.** The cache was keyed on a
+/// GUID-derived handle with no content in the identity, and `ingest` skipped on
+/// `contains_key` — so re-importing a sprite texture in place never reached the
+/// screen again for the rest of the session. And it was eviction-free, so every
+/// texture a session ever drew stayed in VRAM across every level switch.
+///
+/// The first half is asserted **in pixels**, because that is where the defect
+/// lives: same handle, different bytes, must render differently.
+#[test]
+fn a_re_imported_sprite_texture_reaches_the_screen() {
+    let Some(gpu) = gpu_or_skip("a_re_imported_sprite_texture_reaches_the_screen") else {
+        return;
+    };
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    let view = RenderView {
+        origin: FloatingOrigin::new(DVec3::ZERO),
+        eye_world: DVec3::new(0.0, 0.0, 6.0),
+        forward: Vec3::new(0.0, 0.0, -1.0),
+        up: Vec3::Y,
+        fov_y: 60f32.to_radians(),
+        near: 0.05,
+        width: W,
+        height: H,
+        ortho: None,
+    };
+    const HANDLE: u64 = 0x5F31_7E00_0001;
+
+    let red = sprite_scene(HANDLE, [220, 20, 20, 255], true);
+    renderer.render(&gpu, &red, &view, &target.view, (W, H));
+    let red_px = target.read_rgba(&gpu).expect("readback");
+
+    // The SAME handle, different bytes — the in-place re-import.
+    let mut blue = sprite_scene(HANDLE, [20, 20, 220, 255], true);
+    blue.mark_dirty();
+    renderer.render(&gpu, &blue, &view, &target.view, (W, H));
+    let blue_px = target.read_rgba(&gpu).expect("readback");
+
+    assert_ne!(
+        red_px, blue_px,
+        "a texture re-imported under its existing GUID must update on screen"
+    );
+}
+
+/// The eviction half: a texture the level stopped referencing is released, and
+/// the always-resident built-in font is what remains.
+#[test]
+fn sprite_textures_do_not_outlive_the_level_that_referenced_them() {
+    let Some(gpu) = gpu_or_skip("sprite_textures_do_not_outlive_the_level_that_referenced_them")
+    else {
+        return;
+    };
+    let target = HeadlessTarget::new(&gpu, W, H);
+    let mut renderer = EngineRenderer::new(&gpu, HEADLESS_FORMAT);
+    let view = view();
+
+    // The built-in font is uploaded at construction and is always live.
+    let floor = renderer.sprite_cache_len();
+
+    let mut scene = RenderScene {
+        grid_enabled: false,
+        pending_texture_uploads: (0..4)
+            .map(|i| solid_upload(0x7000 + i, [10 * i as u8, 40, 90, 255]))
+            .collect(),
+        ..Default::default()
+    };
+    for i in 0..4u64 {
+        scene.sprites.push(inf_render::SpriteInstance {
+            position: DVec3::new(i as f64, 0.0, 0.0),
+            size: glam::Vec2::splat(1.0),
+            color: [1.0, 1.0, 1.0, 1.0],
+            texture: 0x7000 + i,
+            ..Default::default()
+        });
+    }
+    scene.mark_dirty();
+    renderer.render(&gpu, &scene, &view, &target.view, (W, H));
+    assert_eq!(
+        renderer.sprite_cache_len(),
+        floor + 4,
+        "four referenced textures should be cached"
+    );
+
+    // The level switches: nothing references them any more.
+    let empty = RenderScene {
+        grid_enabled: false,
+        ..Default::default()
+    };
+    renderer.render(&gpu, &empty, &view, &target.view, (W, H));
+    assert_eq!(
+        renderer.sprite_cache_len(),
+        floor,
+        "a level switch releases the textures the old level referenced"
+    );
+}

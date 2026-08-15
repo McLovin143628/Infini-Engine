@@ -156,12 +156,31 @@ struct TextureEntry {
     // Held to keep the texture (and its views) alive; the bind group borrows it.
     _texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
+    /// xxh3-128 of `(width, height, rgba8)` — **the entry's identity**, not its
+    /// address. See [`SpriteTextures::ingest`].
+    content: u128,
 }
 
-/// GPU texture cache keyed by [`TextureHandle`] (a `u64`). Eviction-free for now
-/// (a documented follow-up): textures live for the renderer's lifetime. Uploads
-/// RGBA8 with a full CPU-generated box mip chain; a 1×1 white fallback backs
-/// missing handles.
+/// GPU texture cache keyed by [`TextureHandle`] (a `u64`) **and content hash**,
+/// retained to the handles the scene still references. Uploads RGBA8 with a full
+/// CPU-generated box mip chain; a 1×1 white fallback backs missing handles.
+///
+/// # What the two halves fix (Hardening D)
+///
+/// The cache used to be eviction-free ("textures live for the renderer's
+/// lifetime" — a documented follow-up) *and* keyed on a GUID-derived handle
+/// alone, and each of those is a separate defect:
+///
+/// * without eviction, every texture a session ever drew stayed in VRAM across
+///   every level switch, with no budget;
+/// * without content in the identity, `ingest`'s `contains_key` skip meant
+///   **editing or re-importing a sprite texture in place never updated on
+///   screen** for the rest of the session — the handle is `handle_from_guid`, and
+///   a GUID does not move when its bytes do.
+///
+/// The second is the reason the fix is a *content* hash rather than a version
+/// counter: it is the `CachedTile` / `ClassicGpu` rule, which this tree applies
+/// everywhere a cache stands between an author's edit and their eyes.
 pub struct SpriteTextures {
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -200,9 +219,21 @@ impl SpriteTextures {
         }
     }
 
-    /// Upload one texture if its handle isn't cached yet (dedup by handle).
+    /// Upload one texture unless the cached entry is already **these bytes**.
+    ///
+    /// The hash is over the dimensions and the pixels, so a re-import that keeps
+    /// the GUID replaces the entry and a redundant re-send of identical bytes
+    /// still costs nothing but the hash.
     fn ingest(&mut self, gpu: &GpuContext, up: &SpriteTextureUpload) {
-        if up.handle == inf_render_2d::WHITE_TEXTURE || self.map.contains_key(&up.handle) {
+        if up.handle == inf_render_2d::WHITE_TEXTURE {
+            return;
+        }
+        let content = content_hash(up.width, up.height, &up.rgba8);
+        if self
+            .map
+            .get(&up.handle)
+            .is_some_and(|e| e.content == content)
+        {
             return;
         }
         // Guard against a malformed upload rather than panicking in a frame.
@@ -213,7 +244,7 @@ impl SpriteTextures {
             );
             return;
         }
-        let entry = upload_rgba8(
+        let mut entry = upload_rgba8(
             gpu,
             &self.layout,
             &self.sampler,
@@ -221,7 +252,26 @@ impl SpriteTextures {
             up.height,
             &up.rgba8,
         );
+        entry.content = content;
         self.map.insert(up.handle, entry);
+    }
+
+    /// Drop every cached texture the **level** no longer references.
+    ///
+    /// The live set is the scene's own reference list — loose sprites, tilemap
+    /// atlases, the host's pre-batched (9-slice / text) runs — and deliberately
+    /// **not** this frame's draw batches: a tilemap chunk that culled out is off
+    /// *camera*, not out of the level, and evicting on that would make a texture's
+    /// residency a function of where somebody is looking. The built-in font is
+    /// always live; it has no upload and no source to be re-sent from.
+    fn retain_live(&mut self, scene: &RenderScene, uploads: &[SpriteTextureUpload]) {
+        let mut live: std::collections::BTreeSet<TextureHandle> =
+            std::iter::once(BUILTIN_FONT_TEXTURE).collect();
+        live.extend(scene.sprites.iter().map(|s| s.texture));
+        live.extend(scene.tilemaps.iter().map(|t| t.params.texture));
+        live.extend(scene.prebatched.iter().map(|r| r.texture));
+        live.extend(uploads.iter().map(|u| u.handle));
+        self.map.retain(|handle, _| live.contains(handle));
     }
 
     /// The bind group for `handle`, falling back to the white texture when the
@@ -233,6 +283,26 @@ impl SpriteTextures {
             .map(|e| &e.bind_group)
             .unwrap_or(&self.fallback.bind_group)
     }
+
+    /// How many textures are cached (Hardening D) — the release instrument.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+/// The identity of a sprite texture's pixels: xxh3-128 over its dimensions and
+/// its RGBA8 bytes. The same content-addressing rule the rest of the tree's
+/// caches use — a GUID does not move when the bytes behind it do.
+fn content_hash(width: u32, height: u32, rgba: &[u8]) -> u128 {
+    let mut bytes = Vec::with_capacity(8 + rgba.len());
+    bytes.extend_from_slice(&width.to_le_bytes());
+    bytes.extend_from_slice(&height.to_le_bytes());
+    bytes.extend_from_slice(rgba);
+    xxhash_rust::xxh3::xxh3_128(&bytes)
 }
 
 /// Create + upload an RGBA8 (sRGB) texture with a full box mip chain and its
@@ -311,6 +381,10 @@ fn upload_rgba8(
     TextureEntry {
         _texture: texture,
         bind_group,
+        // The caller stamps the real identity; the fallback and the built-in font
+        // are never re-ingested, so `0` is only ever read for entries `ingest`
+        // does not own.
+        content: 0,
     }
 }
 
@@ -367,6 +441,12 @@ pub struct SpriteNode {
 }
 
 impl SpriteNode {
+    /// How many textures the cache holds — the release instrument (Hardening D).
+    /// Counts the always-resident built-in font.
+    pub fn cached_textures(&self) -> usize {
+        self.textures.len()
+    }
+
     pub fn new(gpu: &GpuContext, view_bgl: &wgpu::BindGroupLayout) -> Self {
         let shader = gpu
             .device
@@ -548,6 +628,13 @@ impl SpriteNode {
         let mut runs = build_tilemap_runs(frame.scene, frame.view);
         runs.extend(frame.scene.prebatched.iter().cloned());
         merge_batches(&self.loose_sorted, &runs, &mut self.scratch);
+
+        // The texture cache holds exactly what the level still references
+        // (Hardening D). Placed on the re-batch path rather than every frame
+        // because the scene's reference list only moves when the scene does —
+        // and a level switch always moves it.
+        self.textures
+            .retain_live(frame.scene, &frame.scene.pending_texture_uploads);
 
         // Pack (origin-dependent) into the reused staging buffer.
         self.raw_scratch.clear();

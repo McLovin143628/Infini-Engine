@@ -1273,6 +1273,15 @@ impl EngineRenderer {
             .unwrap_or((0, 0))
     }
 
+    /// How many sprite textures the 2D pass is caching (Hardening D). Includes
+    /// the built-in bitmap font, which is always resident.
+    pub fn sprite_cache_len(&self) -> usize {
+        self.graph
+            .node::<passes::sprite::SpriteNode>()
+            .map(|n| n.cached_textures())
+            .unwrap_or(0)
+    }
+
     /// The active HDR/post settings.
     pub fn settings(&self) -> &RenderSettings {
         &self.settings

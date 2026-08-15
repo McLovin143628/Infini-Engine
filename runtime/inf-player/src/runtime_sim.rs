@@ -1339,6 +1339,20 @@ impl RuntimeSim {
                 }
             }
         }
+        // `grounded` is the same shape and had no such rule (Hardening D): it is
+        // written per `move_and_slide` and was never pruned, so in a world that
+        // spawns and despawns characters — streamed cells, respawns, projectiles
+        // that walk — it grew for the session. Its siblings are all pruned:
+        // `audio_started` drops a despawned emitter in the audio step (and Stops
+        // it), and `prev_positions`/`cur_positions` are rebuilt here every step.
+        //
+        // The live set is the world's, not the actor map's: a character need not
+        // carry a blueprint to be moved by one.
+        self.grounded.retain(|guid, _| {
+            self.world
+                .entity_of(*guid)
+                .is_some_and(|e| self.world.world().get_entity(e).is_ok())
+        });
     }
 
     fn run_all(&mut self, event: &EventKind) {

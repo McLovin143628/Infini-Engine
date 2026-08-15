@@ -872,6 +872,12 @@ impl SimSession {
         // ── P12.3 audio step ── last, so it observes this step's final transforms:
         //    pick the listener, enqueue autoplay, resolve occlusion, drain the queue.
         self.audio_step(doc);
+        // Per-actor caches keyed by `Guid` are pruned to the live world (Hardening
+        // D) — MIRROR of `RuntimeSim::capture_positions`'s rule. `audio_started`
+        // is dropped by the audio step above; `grounded` had no such rule and
+        // grew for the session in a world that spawns and despawns characters.
+        self.grounded
+            .retain(|guid, _| doc.world().entity_of(*guid).is_some());
         // Rising edges are one fixed step wide.
         self.just_pressed.clear();
         self.steps += 1;
