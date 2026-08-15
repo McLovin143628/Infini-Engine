@@ -83,7 +83,19 @@ pub enum SmMotionDto {
         entries: Vec<Blend1dEntryDto>,
     },
     Blend2d {
+        /// **Renamed explicitly, for the same reason `SmCondDto::Compare`'s
+        /// `valueKind` is.** `rename_all = "camelCase"` on a tagged enum renames
+        /// the *variants*, not their fields, so these two crossed the IPC
+        /// boundary as `param_x` / `param_y` while the hand-written TypeScript
+        /// mirror has read `paramX` / `paramY` since P11.2 — a 2D blend space's
+        /// axis names have therefore been `undefined` in the editor for the
+        /// whole life of the field. The P29.1 audit found it two fields away
+        /// from the one the implementation battery caught, which is why the
+        /// round-trip's wire-spelling arm now enumerates **every** renamed key
+        /// in both tagged enums instead of sampling three.
+        #[serde(rename = "paramX")]
         param_x: String,
+        #[serde(rename = "paramY")]
         param_y: String,
         entries: Vec<Blend2dEntryDto>,
     },
@@ -760,6 +772,20 @@ pub async fn sm_save(
     let (machine, file_name) = {
         let mut s = state.inner.lock().map_err(|e| e.to_string())?;
         let machine = dto_to_machine(&doc.machine);
+        // **A door must not manufacture a file its own reader rejects** (the
+        // P23.6 ruling, met again at P29.1's audit). `StateMachine::validate`
+        // had exactly ONE production caller — `StateMachineAsset::migrate`, on
+        // the READ side — so this door wrote whatever the DTO said. v1 survived
+        // that: its `migrate` asked no structural question, so a transition
+        // index left dangling by a client bug was `.min()`-clamped at
+        // evaluation and the file still opened. v2's `migrate` refuses it, which
+        // turns the same client bug into a `.inf_sm` the editor can write and
+        // then never load again. Asking here costs one walk of a document
+        // somebody just edited, and the answer is a message rather than a dead
+        // file.
+        machine
+            .validate()
+            .map_err(|e| format!("this state machine cannot be saved: {e}"))?;
         s.docs.insert(id.clone(), doc.clone());
         let base = if name.is_empty() { &doc.name } else { &name };
         let slug: String = base
@@ -889,6 +915,29 @@ mod tests {
                     on_exit: Vec::new(),
                 },
                 SmState::sub_machine("ground", sub),
+                // **A 2D blend space, which "every v2 shape" did not have.**
+                // The fixture carried a 1D one and a sub-machine, so the two
+                // fields only `SmMotionDto::Blend2d` has were never on the wire
+                // this arm inspects — and that is precisely why their missing
+                // `#[serde(rename)]` survived P11.2, P24 and P29.1's own
+                // battery. A round-trip fixture that skips a variant is a
+                // round-trip claim about the variants it kept.
+                SmState {
+                    name: "aim".into(),
+                    motion: Motion::Blend2D(BlendSpace2D::new(
+                        "aim_x",
+                        "aim_y",
+                        vec![BlendEntry2D {
+                            pos: [1.0, -1.0],
+                            clip: Uuid::from_u128(6).into_bytes(),
+                        }],
+                    )),
+                    looping: true,
+                    speed: 1.0,
+                    position: (30.0, 40.0),
+                    on_enter: Vec::new(),
+                    on_exit: Vec::new(),
+                },
             ],
             transitions: vec![
                 SmTransition::on(0, 1, 0.2, "moving", CmpOp::Ge, 0.5)
@@ -942,10 +991,87 @@ mod tests {
         let json = serde_json::to_string(&dto).unwrap();
         let parsed: SmMachineDto = serde_json::from_str(&json).unwrap();
         assert_eq!(dto_to_machine(&parsed), machine);
-        // The wire really is camelCase, so the hand-written TS mirror binds.
-        assert!(json.contains("interruptSource"), "{json}");
-        assert!(json.contains("valueKind"), "{json}");
-        assert!(json.contains("onEnter"), "{json}");
+        // **Every renamed key, by name.** Three samples is what this arm used to
+        // check, and the P29.1 audit found a fourth defect it could not see:
+        // `SmMotionDto::Blend2d`'s `param_x`/`param_y` crossed as snake_case
+        // while `smTypes.ts` read `paramX`/`paramY`, for the same reason
+        // `valueKind` did — `rename_all` on a **tagged enum** renames variants,
+        // not their fields. The two tagged enums are therefore enumerated in
+        // full here, and the plain structs' multi-word fields with them, because
+        // a spelling this wire gets wrong is not a decode failure on the far
+        // side: it is an `undefined` that renders.
+        for key in [
+            // plain structs (`rename_all` DOES reach their fields)
+            "excludeSelf",
+            "exitTime",
+            "interruptSource",
+            "interruptBlend",
+            "onEnter",
+            "onExit",
+            // the tagged enums (`rename_all` does NOT reach their fields)
+            "valueKind",
+            "paramX",
+            "paramY",
+        ] {
+            assert!(json.contains(key), "the wire is missing `{key}`: {json}");
+        }
+        // …and the snake_case spellings must not be there at all, which is the
+        // half that actually falsifies: a `#[serde(rename)]` that was dropped
+        // leaves the field present under the wrong name.
+        for wrong in [
+            "value_kind",
+            "param_x",
+            "param_y",
+            "exclude_self",
+            "exit_time",
+        ] {
+            assert!(
+                !json.contains(wrong),
+                "the wire carries `{wrong}` — a rename was dropped and the TS \
+                 mirror reads `undefined`: {json}"
+            );
+        }
+    }
+
+    /// **The save door refuses a machine its own reader would refuse** (P29.1
+    /// audit, finding A5 — the P23.6 ruling).
+    ///
+    /// `dto_to_machine` builds a `StateMachine` out of whatever JSON arrives:
+    /// `to`, `entry` and `profile` are plain `usize`s off the wire with no bound
+    /// on this side of the boundary. v1 survived that, because its `migrate`
+    /// asked no structural question and evaluation clamped. v2's `migrate`
+    /// refuses — so without this check a client bug writes a `.inf_sm` the
+    /// editor can never open again.
+    ///
+    /// `sm_save` itself takes `State<'_, …>` and an async runtime and is not
+    /// constructible in a unit test (the same reason every settle check in
+    /// `commands::dcc` is a source gate), so what is driven here is the pair it
+    /// delegates to — and the pair is the whole rule.
+    #[test]
+    fn the_save_door_refuses_what_the_load_door_would() {
+        let mut dto = machine_to_dto(&v2_machine());
+        // The shape a stale client sends after deleting a state without
+        // reindexing: an edge pointing past the end.
+        dto.transitions[0].to = 99;
+        let machine = dto_to_machine(&dto);
+        let err = machine
+            .validate()
+            .expect_err("a dangling transition must not be saveable");
+        assert!(err.to_string().contains("does not exist"), "{err}");
+
+        // …and the file it WOULD have written is one this engine cannot read,
+        // which is the claim that makes the check worth its cost.
+        let bytes = inf_asset::encode(&StateMachineAsset::new(machine, None)).unwrap();
+        assert!(
+            inf_asset::decode::<StateMachineAsset>(&bytes).is_err(),
+            "the payload decoded, so the refusal above is guarding nothing"
+        );
+
+        // Control: the healthy document still saves.
+        let healthy = dto_to_machine(&machine_to_dto(&v2_machine()));
+        healthy
+            .validate()
+            .expect("a healthy machine must still save");
     }
 
     /// **The flat view is offered exactly when it is safe, and it wins when it

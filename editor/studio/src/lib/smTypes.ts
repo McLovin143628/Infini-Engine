@@ -57,7 +57,15 @@ export const SM_INTERRUPT_BLENDS: SmInterruptBlend[] = ["snap", "carry"];
 
 /** A state's motion, tagged by `kind`. The UI edits `clip`; blend spaces and
  *  sub-machines round-trip faithfully so a data-authored machine is never lossy
- *  on save. */
+ *  on save.
+ *
+ *  `paramX` / `paramY` are camelCase on the wire only because `commands/sm.rs`
+ *  spells them with an explicit `#[serde(rename)]`. `rename_all = "camelCase"`
+ *  on a **tagged enum** renames the variants and not their fields, so every
+ *  multi-word field inside `SmMotionDto` and `SmCondDto` needs its own rename —
+ *  and until the P29.1 audit these two did not have one, so a 2D blend space's
+ *  axis names read `undefined` here. The Rust round-trip arm now asserts every
+ *  key of both enums by name, in both directions. */
 export type SmMotion =
   | { kind: "clip"; clip: string | null }
   | { kind: "blend1d"; param: string; entries: { pos: number; clip: string | null }[] }

@@ -68,7 +68,7 @@ pub trait AssetPayload: Serialize + DeserializeOwned {
     /// | `MeshAsset` | **structural migrate added** — its index buffer reaches `meshopt`'s raw FFI from two consumers |
     /// | `SkeletonAsset` | **structural migrate added** — `Skeleton`'s field is private and serde bypasses `Skeleton::new`, so a parent index past the joint list panicked `pose::global_transforms` on every posed character |
     /// | `VgeomMesh` | **structural migrate added** — safe only by the convention that everything goes through `VgeomSource`; `triangle()` documents its own panic |
-    /// | `StateMachineAsset` | safe — every `entry`/`from`/`to` read is `.min()`-clamped or `<`-guarded in `state_machine.rs` |
+    /// | `StateMachineAsset` | **structural migrate added at P29.1** — v2 gave `.inf_sm` a recursive condition tree and nested sub-machines, which the fixed step walks; the row used to read "safe — every `entry`/`from`/`to` read is `.min()`-clamped", which was true of v1 and is not the question v2 asks |
     /// | `ClothAsset`, `HairAsset` | safe — `validate()` runs unconditionally in `seed()`, and a garment that fails is skipped rather than simulated |
     /// | `StructAsset`, `EnumAsset` | safe — no field of theirs is an index, a size or a divisor |
     /// | `TableAsset` | safe — rows are walked with `.iter()`; a row/column disagreement is C4-42's import advisory, never an unchecked `row[col]` |
