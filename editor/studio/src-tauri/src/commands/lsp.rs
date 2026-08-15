@@ -657,7 +657,7 @@ mod tests {
         ] {
             let mut r: &[u8] = &bytes;
             assert!(
-                matches!(read_message(&mut r), Err(_)),
+                read_message(&mut r).is_err(),
                 "{why} must be an error, not end-of-stream"
             );
         }

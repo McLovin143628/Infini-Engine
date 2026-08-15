@@ -475,7 +475,7 @@ mod tests {
             (0.9375, f64::INFINITY, 0.0),
             (0.9375, 0.0, f64::NAN),
         ] {
-            let mut dto = good.clone();
+            let mut dto = good;
             dto.camera.focal_ratio = bad.0;
             dto.camera.k1 = bad.1;
             dto.camera.k2 = bad.2;

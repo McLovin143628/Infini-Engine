@@ -5,7 +5,7 @@
 //! list (no shell), a `--` separator before paths, and an exit-code whitelist.
 //! (stash / blame / log / push / pull are deferred — see TODOs.)
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use inf_editor_core::ipc::{GitFileDto, GitStatusDto};
@@ -27,7 +27,7 @@ fn confined_repo(app: &AppHandle, project: &ProjectState, repo: &str) -> Result<
 /// Validate every path argument as living **inside** the confined repo, and hand
 /// back the relative spellings git wants. A `..` or an absolute path is refused
 /// rather than normalized: neither is something the panel produced.
-fn confined_paths(root: &PathBuf, paths: &[String]) -> Result<Vec<String>, String> {
+fn confined_paths(root: &Path, paths: &[String]) -> Result<Vec<String>, String> {
     for p in paths {
         confine_under(root, p)?;
     }
