@@ -11,6 +11,13 @@ publish = false
 [dependencies]
 glam = { workspace = true }
 serde = { workspace = true }
+# The BIT-PORTABLE trigonometry (`psin64`/`pcos64`) the thermal-erosion talus
+# threshold goes through. `f64::tan` is a libm call and libm is not bit-identical
+# across targets (the P14 law); eroded terrain is DATA — it is written back into
+# an `.inf_terrain`, cooked into a pack and shipped — so a bake on one machine and
+# a bake on another must not produce two different worlds. Ring-0 → Ring-0, and
+# `inf-math` names nothing but glam, so no cycle and no new external crate.
+inf-math = { workspace = true }
 # The `.inf_terrain` streaming asset (P16.3): `AssetKind`/`AssetPayload` + the
 # dual-format rule. Ring-0 → Ring-0 (inf-asset never names terrain, so no cycle).
 inf-asset = { workspace = true }

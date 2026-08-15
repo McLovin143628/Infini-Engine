@@ -241,8 +241,15 @@ impl<'a> ErosionGpu<'a> {
             deposition: params.deposition,
             min_tilt: params.min_tilt,
             max_erode_depth: params.max_erode_depth,
-            // f64 tan to stay as close to the CPU reference as WGSL f32 allows.
-            talus_tan: (params.thermal_talus_deg as f64).to_radians().tan() as f32,
+            // **The CPU reference's own function**, narrowed once at the wire
+            // (Hardening Wave C, L6.F7). It used to be a second copy of the same
+            // `f64` expression, which made these two lines the CPU/GPU parity
+            // envelope: the shader never calls `tan`, it only compares against
+            // this uniform, so a change to one that missed the other would open a
+            // divergence far below what the parity gates' 1e-3 tolerances can
+            // see. `inf_terrain::erosion::talus_tan` is also portable, which
+            // `f64::tan` was not.
+            talus_tan: inf_terrain::erosion::talus_tan(params.thermal_talus_deg) as f32,
             thermal_rate: params.thermal_rate,
             max_thermal_depth: params.max_thermal_depth,
             l,

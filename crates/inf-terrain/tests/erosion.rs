@@ -950,3 +950,101 @@ fn flow_is_a_time_integral_not_a_step_count() {
         totals[0]
     );
 }
+
+// ── the talus threshold (Hardening Wave C, L6.F7) ────────────────────────────
+
+/// The portable talus threshold agrees with `f64::tan` across the whole range a
+/// repose angle can meaningfully take.
+///
+/// A tolerance and not a bit compare, necessarily: `psin64`/`pcos64` are ~1e-7
+/// polynomials and `tan` is libm, and the point is precisely that the
+/// polynomials do not depend on which libm is linked. The bound is *relative*
+/// because `tan` runs away near vertical — at 85° it is 11.4, and an absolute
+/// tolerance there would say nothing about the 30–40° band the parameter
+/// actually lives in.
+#[test]
+fn the_talus_threshold_matches_tan_without_libm() {
+    let mut worst = 0.0_f64;
+    // 0.5° steps up to 89°, which covers the documented 30–40° repose band and
+    // then some. 90° and past is the degenerate branch, checked below.
+    for i in 0..=178 {
+        let deg = i as f32 * 0.5;
+        let got = inf_terrain::erosion::talus_tan(deg);
+        let want = (deg as f64).to_radians().tan();
+        let rel = if want.abs() > 1.0 {
+            (got - want).abs() / want.abs()
+        } else {
+            (got - want).abs()
+        };
+        if rel > worst {
+            worst = rel;
+        }
+        assert!(rel < 1.0e-6, "at {deg}°: {got} vs {want} (rel {rel})");
+    }
+    // Not vacuous: the sweep really did exercise a spread of values, and the
+    // agreement is real rather than both sides being zero.
+    assert!(
+        worst > 0.0,
+        "the two answers were bit-identical everywhere, which \
+         would mean the portable pair is not being used"
+    );
+    assert!(
+        (inf_terrain::erosion::talus_tan(45.0) - 1.0).abs() < 1.0e-7,
+        "tan(45°) is 1"
+    );
+    assert_eq!(inf_terrain::erosion::talus_tan(0.0), 0.0);
+}
+
+/// **At or past vertical there is no finite slope, and the answer says so.**
+///
+/// This is the one input where the portable form and `f64::tan` differ, and the
+/// difference is a fix rather than a drift. At exactly 90° the range reduction
+/// inside `pcos64` lands on `sin(π)` and returns exactly `-0.0`; an unguarded
+/// division would answer `-INFINITY`, which reads as "every slope is
+/// over-steep" and would liquefy the terrain in one step. `f64::tan` answered
+/// `1.6e16` — the same "nothing moves", by luck rather than by rule.
+#[test]
+fn a_vertical_talus_angle_moves_nothing() {
+    for deg in [90.0_f32, 90.5, 120.0, 180.0, f32::NAN] {
+        let t = inf_terrain::erosion::talus_tan(deg);
+        assert!(
+            t == f64::INFINITY,
+            "a repose angle of {deg}° answered {t}; anything finite and negative \
+             makes every slope over-steep"
+        );
+    }
+    // The behaviour that threshold buys, on the real pass: the over-steep cliff
+    // `thermal_relaxes_oversteep_cliff_toward_talus` relaxes by 25% under a 33°
+    // repose angle does not move ONE BIT under a vertical one.
+    let t = terrain_from(33, |x, _z| if x < 16.0 { 60.0 } else { 0.0 });
+    let mut region = t.extract_region(DVec2::new(0.0, 0.0), DVec2::new(32.0, 32.0), 0);
+    let before = region.heights().to_vec();
+    let params = ErosionParams {
+        rain_rate: 0.0,
+        thermal_talus_deg: 90.0,
+        thermal_rate: 1.0,
+        ..Default::default()
+    };
+    erode(&mut region, &params, 150);
+    assert_eq!(
+        region.heights(),
+        before.as_slice(),
+        "a vertical talus angle moved material"
+    );
+
+    // NOT VACUOUS: the same cliff under the default repose angle really does
+    // move, so the equality above is a property of the threshold and not of an
+    // inert fixture.
+    let mut moving = t.extract_region(DVec2::new(0.0, 0.0), DVec2::new(32.0, 32.0), 0);
+    erode(
+        &mut moving,
+        &ErosionParams {
+            rain_rate: 0.0,
+            thermal_talus_deg: 33.0,
+            thermal_rate: 1.0,
+            ..Default::default()
+        },
+        150,
+    );
+    assert_ne!(moving.heights(), before.as_slice());
+}

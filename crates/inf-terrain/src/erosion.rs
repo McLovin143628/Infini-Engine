@@ -240,6 +240,45 @@ impl Default for ErosionParams {
     }
 }
 
+/// The **talus threshold as a slope** — rise over run, `tan` of the repose
+/// angle — computed without libm.
+///
+/// # Why this is a function, and a public one
+///
+/// It is computed in **two crates**: here, for the CPU reference pass, and in
+/// `inf_editor_core::erosion_gpu`, which uploads it as an `f32` uniform because
+/// the WGSL shader never calls `tan` itself. Those two numbers *are* the CPU/GPU
+/// parity envelope — the shader's whole thermal step is `diff / dist >
+/// talus_tan` against a value the host handed it — so a change to one that
+/// missed the other would open a divergence that the parity gates' `1e-3`
+/// tolerances are far too loose to see. One door, and the second crate calls it.
+///
+/// `f64::tan` is a libm call and libm is not bit-identical across targets (the
+/// P14 law). Eroded terrain is **data**: it is written back into an
+/// `.inf_terrain`, cooked into a pack, and shipped, so a bake run on one machine
+/// and a bake run on another must not produce two different worlds.
+///
+/// # The degenerate end
+///
+/// A repose angle at or past vertical has no finite slope, and this answers
+/// `INFINITY`: nothing is ever over-steep, so no material moves. That is the
+/// physically meaningful reading, and it is also the *only* branch where this
+/// differs from `tan`: at exactly 90° `pcos64` returns exactly `-0.0` (the
+/// range reduction lands on `sin(π)`), and an unguarded division would answer
+/// `-INFINITY` — which reads as "every slope is over-steep" and would liquefy
+/// the terrain. `f64::tan(90°.to_radians())` answered `1.6e16` instead, which is
+/// the same "nothing moves" by luck rather than by rule. A NaN angle takes the
+/// same branch, for the same reason and to the same effect as before.
+pub fn talus_tan(deg: f32) -> f64 {
+    let rad = (deg as f64).to_radians();
+    let (s, c) = (inf_math::psin64(rad), inf_math::pcos64(rad));
+    if c > 0.0 {
+        s / c
+    } else {
+        f64::INFINITY
+    }
+}
+
 /// Mass-accounting diagnostics returned by [`erode`]. Volumes are in world³
 /// (metres³): a per-cell depth times the cell area `l²`. Determinism note: these
 /// accumulate in `f64`, so they are stable across runs but not the *definition*
@@ -688,7 +727,7 @@ impl Sim {
     // 8. thermal erosion (mass-conserving; computed into a delta, then applied)
     fn thermal(&mut self, p: &ErosionParams) {
         let (nx, nz) = (self.nx, self.nz);
-        let talus_tan = (p.thermal_talus_deg as f64).to_radians().tan();
+        let talus_tan = talus_tan(p.thermal_talus_deg);
         let l = self.l as f64;
         let sqrt2 = std::f32::consts::SQRT_2 as f64;
         let mut delta = vec![0.0f64; self.b.len()];
