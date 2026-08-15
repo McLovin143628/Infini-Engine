@@ -5,6 +5,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   Check,
   GitBranch,
   GitCommitHorizontal,
@@ -24,6 +25,8 @@ import { useProjectStore } from "../stores/projectStore";
 export default function GitPanel() {
   const project = useProjectStore((s) => s.current);
   const status = useGitStore((s) => s.status);
+  const gitError = useGitStore((s) => s.error);
+  const clearError = useGitStore((s) => s.clearError);
   const refresh = useGitStore((s) => s.refresh);
   const stage = useGitStore((s) => s.stage);
   const unstage = useGitStore((s) => s.unstage);
@@ -110,13 +113,35 @@ export default function GitPanel() {
           className="flex items-center justify-center gap-1 rounded bg-(--ink-accent) py-1 text-xs text-(--ink-text-onaccent) enabled:hover:bg-(--ink-accent-hover) disabled:opacity-50"
           disabled={!message.trim() || staged.length === 0}
           onClick={() => {
-            void commit(message);
-            setMessage("");
+            // **The message survives a failed commit** (round-2 finding
+            // R2.F10). This was `void commit(message); setMessage("")` —
+            // unconditional — so a commit that failed (no `user.email` on a
+            // fresh machine, a pre-commit hook, an `index.lock`) threw into
+            // nothing, showed nothing, and took the typed message with it.
+            void commit(message).then((ok) => {
+              if (ok) setMessage("");
+            });
           }}
         >
           <GitCommitHorizontal size={13} /> Commit {staged.length > 0 && `(${staged.length})`}
         </button>
       </div>
+
+      {/* What git said when it refused. Nothing rendered this slot before
+          (round-2 finding R2.F10) — five mutations could fail in silence. */}
+      {gitError && (
+        <div className="flex shrink-0 items-start gap-1.5 border-b border-(--ink-error)/40 bg-(--ink-error)/10 px-2 py-1.5 text-(--ink-error)">
+          <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+          <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{gitError}</span>
+          <button
+            className="shrink-0 rounded px-1 hover:bg-(--ink-error)/20"
+            aria-label="Dismiss git error"
+            onClick={clearError}
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {/* Changes */}
       <div className="min-h-0 flex-1 overflow-auto">

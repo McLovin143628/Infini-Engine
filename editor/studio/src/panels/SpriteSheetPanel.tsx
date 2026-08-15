@@ -15,21 +15,37 @@ import { Plus, Save, Trash2 } from "lucide-react";
 
 import { useShellStore } from "../stores/shellStore";
 import {
+  MAX_GRID_CELLS,
   resolveSlices,
   useSpriteSheetStore,
   type ResolvedSlice,
 } from "../stores/spriteSheetStore";
 
-/** A labelled integer field bound to a value + setter (min-clamped). */
+/**
+ * A labelled integer field bound to a value + setter, clamped at **both** ends
+ * (round-2 finding R2.F6).
+ *
+ * This clamped only the minimum. `<input type=number>` accepts `1e999`, so
+ * `Number(...)` was `Infinity`, `Math.max(1, Infinity)` was `Infinity`, and
+ * `resolveSlices` looped `for (c = 0; c < Infinity; c++)` pushing objects until
+ * the tab died. `100000` was barely better: 10^10 cells, each a heap object and
+ * a `strokeRect`, on the UI thread, per keystroke.
+ *
+ * `MAX_GRID_CELLS` is the real bound and it lives in the store beside the
+ * resolver (mirroring Rust's `MAX_GRID_CELLS`); this is the input's own guard,
+ * so a value that would be truncated later is never stored in the first place.
+ */
 function NumField({
   label,
   value,
   min = 0,
+  max = MAX_GRID_CELLS,
   onChange,
 }: {
   label: string;
   value: number;
   min?: number;
+  max?: number;
   onChange: (v: number) => void;
 }) {
   return (
@@ -38,8 +54,16 @@ function NumField({
       <input
         type="number"
         min={min}
+        max={max}
         value={value}
-        onChange={(e) => onChange(Math.max(min, Math.floor(Number(e.target.value) || 0)))}
+        onChange={(e) => {
+          const raw = Number(e.target.value);
+          // A non-finite entry is not a number the author meant; it falls back
+          // to the floor rather than through the clamps (`Math.max`/`Math.min`
+          // propagate NaN, which is the C4-35 mechanism in JavaScript).
+          const n = Number.isFinite(raw) ? Math.floor(raw) : min;
+          onChange(Math.min(max, Math.max(min, n)));
+        }}
         className="w-16 rounded border border-(--ink-border) bg-(--ink-bg-2) px-1.5 py-0.5 text-right outline-none focus:border-(--ink-accent)"
       />
     </label>

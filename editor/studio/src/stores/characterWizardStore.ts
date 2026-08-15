@@ -185,6 +185,31 @@ export function projectRig(joints: CharacterJointDto[]): ProjectedJoint[] {
   }));
 }
 
+/**
+ * How long the wizard waits after the last keystroke before previewing.
+ *
+ * Long enough that typing "1.85" is one preview rather than four, short enough
+ * that the diagram still feels live. The expensive path (fit to a mesh) is
+ * hundreds of milliseconds, so the coalescing is the whole saving.
+ */
+export const PREVIEW_DEBOUNCE_MS = 250;
+
+/**
+ * The preview generation, and the pending keystroke timer.
+ *
+ * Module-level: nothing renders because of either, and they exist only so a
+ * reply can ask "am I still the newest?" (`blueprintStore`'s `openGen` shape).
+ */
+let previewGen = 0;
+let previewTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Test-only: forget any pending preview. */
+export function __resetCharacterPreviewForTest(): void {
+  previewGen += 1;
+  if (previewTimer !== null) clearTimeout(previewTimer);
+  previewTimer = null;
+}
+
 /** Fold a preview answer into the machine. */
 export function characterWizardReducer(
   state: CharacterWizardMachine,
@@ -209,6 +234,8 @@ interface CharacterWizardState extends CharacterWizardMachine {
   setMesh: (assetId: string | null) => void;
   setAddToScene: (on: boolean) => void;
   refresh: () => Promise<void>;
+  /** Debounced `refresh`, for the per-keystroke call sites (R2.F-med-extra). */
+  refreshSoon: () => void;
   createCharacter: () => Promise<CharacterCreateDto | null>;
 }
 
@@ -238,29 +265,55 @@ export const useCharacterWizardStore = create<CharacterWizardState>((set, get) =
   setAddToScene: (addToScene) => set({ addToScene }),
 
   /**
-   * Re-preview the current spec.
+   * Re-preview the current spec, **now** — the awaitable path, used by the
+   * step transitions and by the tests.
    *
-   * **Not debounced, and that is a cost on one of the two paths.** With no mesh
-   * the backend generates a template rig and three clips, which is arithmetic.
-   * With a mesh it also decodes the whole `.inf_mesh` off disk (uncached), builds
-   * the kernel, tessellates, builds a BVH and runs the fit — per keystroke. The
-   * bound is written up on `inf_editor_core::character::preview_character`, with
-   * the three shapes a fix could take; it is not decided here because it is the
-   * wizard's interaction model rather than a repair.
+   * # The generation guard (round-2 finding R2.F-med-extra)
+   *
+   * With no mesh the backend generates a template rig and three clips, which is
+   * arithmetic; with a mesh it decodes the whole `.inf_mesh` off disk
+   * (uncached), builds the kernel, tessellates, builds a BVH and runs the fit.
+   * The dialog fired one of these per keystroke with nothing ordering the
+   * replies, so a SLOW refusal could land after a fast success and leave
+   * "Create Character" disabled over a spec that was fine — with the refusal
+   * text describing a value the author had already changed.
+   *
+   * Only the newest request may write. `refreshSoon` below is the keystroke
+   * path and coalesces as well, so the expensive call runs once per pause
+   * rather than once per character.
    */
   refresh: async () => {
     const spec = get().spec;
     const local = specIssue(spec);
     if (local) {
+      previewGen += 1; // a local refusal supersedes anything in flight
       set({ refusal: local });
       return;
     }
+    const gen = ++previewGen;
     try {
       const preview = await characterIpc.preview(spec);
+      if (gen !== previewGen) return;
       set((s) => characterWizardReducer(s, preview));
     } catch (e) {
+      if (gen !== previewGen) return;
       set({ error: String(e) });
     }
+  },
+
+  /**
+   * The keystroke path: re-preview once the author stops typing.
+   *
+   * Separate from `refresh` rather than replacing it, because a debounced
+   * `refresh` would answer its callers before it did anything — and both the
+   * step transitions and the tests await it meaning "the preview is current".
+   */
+  refreshSoon: () => {
+    if (previewTimer !== null) clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => {
+      previewTimer = null;
+      void get().refresh();
+    }, PREVIEW_DEBOUNCE_MS);
   },
 
   createCharacter: async () => {

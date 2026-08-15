@@ -80,6 +80,21 @@ export function PropertyRow({
 const numberInput =
   "h-6 w-full min-w-0 rounded border border-(--ink-border) bg-(--ink-bg-2) px-1.5 text-xs outline-none focus:border-(--ink-accent)";
 
+/**
+ * A number row, guarded on the **write** as well as the display (round-2
+ * finding R2.F11).
+ *
+ * The display guard was here; the write was not. Typing `1e999` into any of the
+ * ~60 World Settings rows stored `Infinity` optimistically, rendered it as `0`
+ * (so the field looked reset rather than wrong), and serialized to JSON `null`
+ * — which `scene_set_settings` refuses. And because every `patch*` action
+ * spreads the whole settings object, EVERY later edit re-sent the same
+ * `Infinity` and failed too: one keystroke and World Settings stopped saving
+ * for the session, silently.
+ *
+ * The sibling `ViewportToolbar.NumberField` already guarded with
+ * `Number.isFinite`; this is that guard, at the door that writes.
+ */
 export function NumberField({
   value,
   onChange,
@@ -96,7 +111,13 @@ export function NumberField({
       type="number"
       value={Number.isFinite(value) ? +value.toFixed(4) : 0}
       step={step}
-      onChange={(e) => onChange(Number(e.target.value))}
+      onChange={(e) => {
+        const n = Number(e.target.value);
+        // A non-finite entry is not a number the author meant. Dropping it
+        // leaves the previous value, which is what an unparseable keystroke has
+        // always done in this field ("" is `NaN` and was equally unguarded).
+        if (Number.isFinite(n)) onChange(n);
+      }}
       className={cn(numberInput, className)}
     />
   );

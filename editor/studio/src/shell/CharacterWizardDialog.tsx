@@ -83,11 +83,11 @@ export default function CharacterWizardDialog() {
 
   const bump = (key: keyof typeof spec.params, value: number) => {
     useCharacterWizardStore.getState().setParam(key, value);
-    void useCharacterWizardStore.getState().refresh();
+    useCharacterWizardStore.getState().refreshSoon();
   };
   const bumpGait = (key: keyof typeof spec.gait, value: number) => {
     useCharacterWizardStore.getState().setGait(key, value);
-    void useCharacterWizardStore.getState().refresh();
+    useCharacterWizardStore.getState().refreshSoon();
   };
 
   const multiGirdle = spec.plan !== "biped";
@@ -225,7 +225,7 @@ export default function CharacterWizardDialog() {
                         useCharacterWizardStore.setState((s) => ({
                           spec: { ...s.spec, legs: Math.max(2, Math.round(v)) },
                         }));
-                        void useCharacterWizardStore.getState().refresh();
+                        useCharacterWizardStore.getState().refreshSoon();
                       }}
                     />
                   )}
@@ -235,7 +235,7 @@ export default function CharacterWizardDialog() {
                     placeholder="empty → blocky mannequin"
                     onChange={(v) => {
                       useCharacterWizardStore.getState().setMesh(v.trim() || null);
-                      void useCharacterWizardStore.getState().refresh();
+                      useCharacterWizardStore.getState().refreshSoon();
                     }}
                   />
                 </Section>

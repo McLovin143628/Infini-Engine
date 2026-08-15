@@ -78,6 +78,67 @@ export function appendedLines(prev: LogLine[], next: LogLine[]): LogLine[] | nul
   return next.slice(j + 1);
 }
 
+/** What the panel remembers between flushes: the inputs, and what they gave. */
+export interface FilterMemo {
+  lines: LogLine[];
+  enabled: Record<LogLevel, boolean>;
+  needle: string;
+  visible: LogLine[];
+}
+
+/**
+ * **One flush of the panel's filter** — the whole incremental step, as a pure
+ * function of the previous memo and the new inputs.
+ *
+ * Extracted from the `useMemo` for the test-integrity finding: the equivalence
+ * arm in `outputLogFilter.test.ts` used to RE-IMPLEMENT this composition, so
+ * deleting the head-drop below (which is what bounds the panel's visible list
+ * against the ring's trimming) left every arm green. A test that reproduces the
+ * code it checks measures the reproduction.
+ *
+ * The composition is what has to equal a full re-filter: `appendedLines`
+ * recognises the shared run, and the head-drop removes whatever the ring
+ * trimmed off the front. If the two ever disagree the panel shows a log that is
+ * not the log.
+ */
+export function filterStep(
+  prev: FilterMemo | null,
+  lines: LogLine[],
+  enabled: Record<LogLevel, boolean>,
+  search: string,
+): FilterMemo {
+  const needle = search.trim().toLowerCase();
+  // `lineText` is memoized per line, so a test is a level check plus at most
+  // one `includes` over a string that was lower-cased once in its life — no
+  // regex and no allocation.
+  const keep = (l: LogLine) =>
+    enabled[l.level] && (!needle || lineText(l).needle.includes(needle));
+
+  // Only the LINES may have moved: a filter change invalidates every verdict,
+  // so those fall through to the full pass.
+  const appended =
+    prev && prev.enabled === enabled && prev.needle === needle
+      ? appendedLines(prev.lines, lines)
+      : null;
+
+  let out: LogLine[];
+  if (prev && appended) {
+    // Drop whatever the ring trimmed off the front. `seq` is a per-session
+    // monotonic counter, so "older than the oldest line still held" is exactly
+    // the set that left.
+    const oldest = lines.length > 0 ? lines[0]!.seq : Number.POSITIVE_INFINITY;
+    let head = 0;
+    while (head < prev.visible.length && prev.visible[head]!.seq < oldest) head += 1;
+    const tail = appended.filter(keep);
+    out =
+      head === 0 && tail.length === 0 ? prev.visible : [...prev.visible.slice(head), ...tail];
+  } else {
+    out = lines.filter(keep);
+  }
+
+  return { lines, enabled, needle, visible: out };
+}
+
 export default function OutputLogPanel() {
   const lines = useLogStore((s) => s.lines);
   const enabled = useLogStore((s) => s.enabled);
@@ -111,48 +172,12 @@ export default function OutputLogPanel() {
   // The previous filter result, so a flush extends it instead of redoing it.
   // A cache, not state: nothing renders because of it, it is read and written
   // only inside the `useMemo` below, and a miss is always safe (full re-filter).
-  const filtered = useRef<{
-    lines: LogLine[];
-    enabled: Record<LogLevel, boolean>;
-    needle: string;
-    visible: LogLine[];
-  } | null>(null);
+  const filtered = useRef<FilterMemo | null>(null);
 
   const visible = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    // `lineText` is memoized per line, so a test is a level check plus at most
-    // one `includes` over a string that was lower-cased once in its life — no
-    // regex and no allocation.
-    const keep = (l: LogLine) =>
-      enabled[l.level] && (!needle || lineText(l).needle.includes(needle));
-
-    const prev = filtered.current;
-    // Only the LINES may have moved: a filter change invalidates every verdict,
-    // so those fall through to the full pass.
-    const appended =
-      prev && prev.enabled === enabled && prev.needle === needle
-        ? appendedLines(prev.lines, lines)
-        : null;
-
-    let out: LogLine[];
-    if (prev && appended) {
-      // Drop whatever the ring trimmed off the front. `seq` is a per-session
-      // monotonic counter, so "older than the oldest line still held" is exactly
-      // the set that left.
-      const oldest = lines.length > 0 ? lines[0]!.seq : Number.POSITIVE_INFINITY;
-      let head = 0;
-      while (head < prev.visible.length && prev.visible[head]!.seq < oldest) head += 1;
-      const tail = appended.filter(keep);
-      out =
-        head === 0 && tail.length === 0
-          ? prev.visible
-          : [...prev.visible.slice(head), ...tail];
-    } else {
-      out = lines.filter(keep);
-    }
-
-    filtered.current = { lines, enabled, needle, visible: out };
-    return out;
+    const step = filterStep(filtered.current, lines, enabled, search);
+    filtered.current = step;
+    return step.visible;
   }, [lines, enabled, search]);
 
   // Row virtualization: only the visible window of rows is in the DOM, so the

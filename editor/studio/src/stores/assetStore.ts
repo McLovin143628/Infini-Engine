@@ -50,6 +50,20 @@ export interface ImportAdvisory {
   messages: string[];
 }
 
+/**
+ * What a delete attempt did: the backend's own answer, plus the failure the
+ * store caught (round-2 finding R2.F13).
+ *
+ * `DeleteResult` distinguishes "deleted" from "blocked by referrers"; it has no
+ * shape for "the command threw", which is what a locked or read-only payload
+ * produces — and that case used to be an unhandled rejection with the asset
+ * still on screen.
+ */
+export interface DeleteOutcome extends DeleteResult {
+  /** The error, when the command itself failed. */
+  error?: string;
+}
+
 interface AssetState {
   assets: Record<string, AssetDto>;
   folders: Record<string, AssetFolderDto>;
@@ -74,11 +88,20 @@ interface AssetState {
   /** Name of the collection whose members filter the grid, or null (E-P8). */
   activeCollection: string | null;
   /**
-   * Thumbnail data-URLs keyed by **`content_hash`** ("" = requested, no answer
-   * yet). See `THUMBNAIL_CAP` / `loadThumbnail` for why it is a hash, a `Map`,
-   * and bounded.
+   * Thumbnail data-URLs keyed by **`content_hash`**.
+   *
+   * Three states, and the distinction is load-bearing (round-2 finding):
+   * `""` = requested and still in flight, `null` = the backend answered that
+   * this asset has no thumbnail, absent = not asked (or evicted, and therefore
+   * askable again). A refusal used to leave the `""` sentinel, which
+   * `touchThumbnail` then renewed as most-recently-used on every re-read — so
+   * the failed entry became MORE durable than a real picture, was never
+   * retried, and could not be evicted while the grid kept asking.
+   *
+   * See `THUMBNAIL_CAP` / `loadThumbnail` for why it is a hash, a `Map`, and
+   * bounded.
    */
-  thumbnails: Map<string, string>;
+  thumbnails: Map<string, string | null>;
   /** Active/recent import jobs by job id. */
   imports: Record<number, ImportJob>;
   /** Undismissed advisories from finished imports (P26.5). */
@@ -125,8 +148,9 @@ interface AssetState {
   createCollection: (name: string) => Promise<void>;
   renameCollection: (oldName: string, newName: string) => Promise<void>;
   deleteCollection: (name: string) => Promise<void>;
-  addToCollection: (name: string, id: string) => Promise<void>;
-  removeFromCollection: (name: string, id: string) => Promise<void>;
+  /** `true` only if the collection really changed (R2.F13). */
+  addToCollection: (name: string, id: string) => Promise<boolean>;
+  removeFromCollection: (name: string, id: string) => Promise<boolean>;
 
   /**
    * Request the thumbnail for `id`'s current content, keyed by `contentHash`.
@@ -151,9 +175,10 @@ interface AssetState {
       | "skel:quadruped"
       | "skel:hexapod",
   ) => Promise<void>;
-  deleteAsset: (id: string, force?: boolean) => Promise<DeleteResult>;
-  rename: (id: string, name: string) => Promise<void>;
-  duplicate: (id: string) => Promise<void>;
+  deleteAsset: (id: string, force?: boolean) => Promise<DeleteOutcome>;
+  /** The failure message, or `null` when it worked (R2.F13). */
+  rename: (id: string, name: string) => Promise<string | null>;
+  duplicate: (id: string) => Promise<string | null>;
 }
 
 /**
@@ -177,21 +202,30 @@ const IMPORT_CAP = 50;
  * previewable assets accumulated every one of them for the life of the session,
  * as strings, in a zustand store.
  *
- * 256 covers several screens of the virtualized grid in both scroll directions,
- * which is what a cache in front of a scroll view is for. Beyond that the answer
- * is cheap to re-fetch (the backend keeps its own content-hash PNG cache on
- * disk — `inf_editor_core::thumbnail::ThumbnailCache`), so evicting here costs
- * an IPC round trip, not a re-render.
+ * It must be larger than the number of cells that can be MOUNTED AT ONCE
+ * (round-2 finding: the cap was 256 and a wide drawer mounts ~300 virtualized
+ * cells). Under that, the later cells evict the earlier ones while both are on
+ * screen, and the earlier ones stay blank for as long as the drawer is open —
+ * a cache smaller than its own working set is not a cache, it is a treadmill.
+ *
+ * Beyond the working set the answer is cheap to re-fetch (the backend keeps its
+ * own content-hash PNG cache on disk —
+ * `inf_editor_core::thumbnail::ThumbnailCache`), so evicting costs an IPC round
+ * trip, not a re-render.
  */
-const THUMBNAIL_CAP = 256;
+export const THUMBNAIL_CAP = 1024;
 
 /**
  * Look a thumbnail up and mark it most-recently-used; `true` if present.
  *
  * `Map` iterates in insertion order, so "delete then re-set" IS the LRU touch —
  * it moves the key to the end, and `putThumbnail` evicts from the front.
+ *
+ * `undefined` (absent) is the only miss. `""` means a request is in flight and
+ * `null` means the backend answered "this asset has no thumbnail" — both are
+ * held, because both are things we already know.
  */
-function touchThumbnail(cache: Map<string, string>, key: string): boolean {
+function touchThumbnail(cache: Map<string, string | null>, key: string): boolean {
   const hit = cache.get(key);
   if (hit === undefined) return false;
   cache.delete(key);
@@ -209,7 +243,7 @@ function touchThumbnail(cache: Map<string, string>, key: string): boolean {
  * what zustand compares), so subscribers re-run their selectors and see the new
  * value; what is skipped is duplicating the container itself.
  */
-function putThumbnail(cache: Map<string, string>, key: string, url: string): void {
+function putThumbnail(cache: Map<string, string | null>, key: string, url: string | null): void {
   cache.delete(key);
   cache.set(key, url);
   while (cache.size > THUMBNAIL_CAP) {
@@ -401,18 +435,27 @@ export const useAssetStore = create<AssetState>((set, get) => ({
       console.error("collections.delete failed", e);
     }
   },
+  // **These answer whether it happened** (round-2 finding R2.F13). The drawer
+  // called them as `void addTo(...)` and then said "Added …" unconditionally,
+  // because the store caught the failure internally — so the status bar stated
+  // an asset was in a collection it was not in. A caught error that the caller
+  // cannot see is worse than an uncaught one: it looks handled.
   addToCollection: async (name, id) => {
     try {
       set({ collections: await collectionsIpc.add(name, id) });
+      return true;
     } catch (e) {
       console.error("collections.add failed", e);
+      return false;
     }
   },
   removeFromCollection: async (name, id) => {
     try {
       set({ collections: await collectionsIpc.remove(name, id) });
+      return true;
     } catch (e) {
       console.error("collections.remove failed", e);
+      return false;
     }
   },
 
@@ -424,12 +467,24 @@ export const useAssetStore = create<AssetState>((set, get) => ({
     assetsIpc
       .thumbnail(id)
       .then((url) => {
-        if (!url) return;
         const live = get().thumbnails;
-        putThumbnail(live, contentHash, url);
+        // `null` is an ANSWER — no adapter, or a kind with no preview — and it
+        // is recorded as one, so it is not re-requested and is not immortal
+        // either. Leaving the `""` sentinel made a refusal the most durable
+        // entry in the cache.
+        putThumbnail(live, contentHash, url ?? null);
         set({ thumbnails: live });
       })
-      .catch((e) => console.error("asset.thumbnail failed", e));
+      .catch((e) => {
+        // An error is NOT an answer: the sentinel is dropped so a transient
+        // failure can be retried rather than blanking the cell for the session.
+        console.error("asset.thumbnail failed", e);
+        const live = get().thumbnails;
+        if (live.get(contentHash) === "") {
+          live.delete(contentHash);
+          set({ thumbnails: live });
+        }
+      });
   },
 
   importFiles: async (sources, dest = null) => {
@@ -471,18 +526,45 @@ export const useAssetStore = create<AssetState>((set, get) => ({
     }
   },
 
+  // **The three context-menu mutations, caught** (round-2 finding R2.F13).
+  // Eleven siblings in this file already had a `try`; these did not, and every
+  // call site is `void store.x(...)`. A DELETE that failed — the payload locked
+  // by another process, a read-only file — was an unhandled rejection with the
+  // asset still on screen and nothing said.
+  //
+  // Each answers what happened rather than throwing, because the drawer's
+  // caller is a menu item that has to decide what to tell the author.
   deleteAsset: async (id, force = false) => {
-    const result = await assetsIpc.delete(id, force);
-    if (result.deleted && get().selected === id) set({ selected: null });
-    return result;
+    try {
+      const result = await assetsIpc.delete(id, force);
+      if (result.deleted && get().selected === id) set({ selected: null });
+      return result;
+    } catch (e) {
+      console.error("asset.delete failed", e);
+      // Shaped like a refusal with no blockers, so the caller's existing
+      // "not deleted" path runs and `error` carries the reason.
+      return { deleted: false, blockers: [], error: String(e) };
+    }
   },
 
   rename: async (id, name) => {
-    await assetsIpc.rename(id, name);
+    try {
+      await assetsIpc.rename(id, name);
+      return null;
+    } catch (e) {
+      console.error("asset.rename failed", e);
+      return String(e);
+    }
   },
   duplicate: async (id) => {
-    const newId = await assetsIpc.duplicate(id);
-    set({ selected: newId });
+    try {
+      const newId = await assetsIpc.duplicate(id);
+      set({ selected: newId });
+      return null;
+    } catch (e) {
+      console.error("asset.duplicate failed", e);
+      return String(e);
+    }
   },
 }));
 

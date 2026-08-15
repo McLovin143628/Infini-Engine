@@ -14,6 +14,7 @@ import { cn } from "../lib/utils";
 import type { DataAssetDto, DataFieldDto } from "../lib/ipc";
 import { assets as assetsIpc } from "../lib/ipc";
 import { useAssetStore } from "../stores/assetStore";
+import { useShellStore } from "../stores/shellStore";
 
 const FIELD_TYPES: { value: string; label: string }[] = [
   { value: "bool", label: "Bool" },
@@ -37,6 +38,12 @@ const selectCls =
 const btnCls = "flex h-6 items-center gap-1 rounded px-2 text-xs hover:bg-(--ink-bg-3)";
 
 export default function DataAssetEditor({ id, onClose }: { id: string; onClose: () => void }) {
+  // **Every failure here went to `console.error` and nowhere else** (round-2
+  // finding R2.F-med-extra): a Save that the backend refused closed nothing,
+  // said nothing and left the author looking at a draft they believed was
+  // written. `BiomeSetEditor` next door pushes a status for exactly these
+  // cases, and this editor renders inside the same drawer.
+  const pushStatus = useShellStore((s) => s.pushStatus);
   const [draft, setDraft] = useState<DataAssetDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -49,9 +56,10 @@ export default function DataAssetEditor({ id, onClose }: { id: string; onClose: 
       setDraft(await assetsIpc.data(id));
     } catch (e) {
       console.error("asset.data failed", e);
+      pushStatus(`Could not read this data asset: ${String(e)}`, 8000);
       setDraft(null);
     }
-  }, [id]);
+  }, [id, pushStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -69,9 +77,13 @@ export default function DataAssetEditor({ id, onClose }: { id: string; onClose: 
     setSaving(true);
     try {
       await assetsIpc.dataSave(draft);
+      pushStatus(`Saved "${draft.name}".`);
       onClose();
     } catch (e) {
       console.error("asset.dataSave failed", e);
+      // Deliberately does NOT close: the draft is the only copy of the edit
+      // that was refused, and closing would throw it away.
+      pushStatus(`Save failed: ${String(e)}`, 8000);
     } finally {
       setSaving(false);
     }
@@ -86,6 +98,7 @@ export default function DataAssetEditor({ id, onClose }: { id: string; onClose: 
       setRust(await assetsIpc.rustSource(id));
     } catch (e) {
       console.error("asset.rustSource failed", e);
+      pushStatus(`Could not generate Rust: ${String(e)}`, 8000);
     }
   };
 
@@ -286,6 +299,7 @@ function TableEditor({
   id: string;
   reload: () => Promise<void>;
 }) {
+  const pushStatus = useShellStore((s) => s.pushStatus);
   const setCols = (fields: DataFieldDto[]) => setDraft({ ...draft, fields });
   const setRows = (rows: string[][]) => setDraft({ ...draft, rows });
 
@@ -321,8 +335,10 @@ function TableEditor({
     try {
       await assetsIpc.tableImport(id, picked);
       await reload();
+      pushStatus("Table imported.");
     } catch (e) {
       console.error("asset.tableImport failed", e);
+      pushStatus(`Import failed: ${String(e)}`, 8000);
     }
   };
 

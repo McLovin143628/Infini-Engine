@@ -15,8 +15,9 @@
 // return the tail" is a wrong one.
 import { describe, expect, it } from "vitest";
 
+import type { LogLevel } from "../../bindings/LogLevel";
 import type { LogLine } from "../../bindings/LogLine";
-import { appendedLines } from "../OutputLogPanel";
+import { appendedLines, filterStep, type FilterMemo } from "../OutputLogPanel";
 
 const line = (seq: number): LogLine => ({
   seq,
@@ -71,53 +72,97 @@ describe("appendedLines", () => {
 });
 
 /**
- * The panel's incremental step, reproduced outside React: it is the composition
- * of `appendedLines` with a head-drop on `seq`, and the composition is what has
- * to equal a full re-filter. If these two ever disagree the panel shows a log
- * that is not the log.
+ * **The panel's incremental step, called rather than reproduced.**
+ *
+ * The previous version of this block RE-IMPLEMENTED the composition — the
+ * `appendedLines` call, the head-drop on `seq`, the concatenation — and then
+ * asserted its own reimplementation against a full re-filter. So it verified
+ * that two pieces of test code agreed: deleting the head-drop from
+ * `OutputLogPanel` (the line that bounds the visible list against the ring's
+ * trimming, i.e. the unbounded-accumulation defect) left every arm here green.
+ * That is the test-integrity finding, and the repair is to call the real thing:
+ * `filterStep` is now the panel's own `useMemo` body, lifted out whole, and the
+ * panel calls exactly this.
  */
 describe("incremental filtering equals a full re-filter", () => {
   const CAP = 64;
+  const ALL: Record<LogLevel, boolean> = {
+    trace: true,
+    debug: true,
+    info: true,
+    warn: true,
+    error: true,
+  };
 
   function fullFilter(lines: LogLine[], keep: (l: LogLine) => boolean) {
     return lines.filter(keep);
   }
 
-  function incremental(
-    prevLines: LogLine[],
-    prevVisible: LogLine[],
-    lines: LogLine[],
-    keep: (l: LogLine) => boolean,
-  ): LogLine[] | null {
-    const appended = appendedLines(prevLines, lines);
-    if (!appended) return null;
-    const oldest = lines.length > 0 ? lines[0]!.seq : Number.POSITIVE_INFINITY;
-    let head = 0;
-    while (head < prevVisible.length && prevVisible[head]!.seq < oldest) head += 1;
-    return [...prevVisible.slice(head), ...appended.filter(keep)];
-  }
-
   it("agrees with a full pass over a hundred capped flushes", () => {
-    // Only even-numbered lines pass, so the head-drop has to remove entries
-    // that are NOT simply the first few of `visible`.
-    const keep = (l: LogLine) => l.seq % 2 === 0;
+    // Only INFO lines pass, so the head-drop has to remove entries that are not
+    // simply the first few of `visible`. (The level is what the panel filters
+    // on, so the arm drives the panel's own predicate rather than a stand-in.)
+    const keep = (l: LogLine) => l.level === "info";
+    const enabled: Record<LogLevel, boolean> = { ...ALL, warn: false };
     let lines: LogLine[] = [];
-    let visible: LogLine[] = [];
+    let memo: FilterMemo | null = null;
     let seq = 0;
 
     for (let flush = 0; flush < 100; flush++) {
-      const batch = Array.from({ length: (flush % 7) + 1 }, () => line(seq++));
+      const batch = Array.from({ length: (flush % 7) + 1 }, () => {
+        const l = line(seq++);
+        // Alternate the level so half the lines are filtered out.
+        return { ...l, level: (l.seq % 2 === 0 ? "info" : "warn") as LogLevel };
+      });
       const merged = [...lines, ...batch];
       const next = merged.length > CAP ? merged.slice(merged.length - CAP) : merged;
 
-      const step = incremental(lines, visible, next, keep);
-      expect(step).not.toBeNull();
-      expect(step).toEqual(fullFilter(next, keep));
+      memo = filterStep(memo, next, enabled, "");
+      expect(memo.visible).toEqual(fullFilter(next, keep));
 
       lines = next;
-      visible = step!;
     }
     // …and the run really did exercise the trimming half.
     expect(lines).toHaveLength(CAP);
+    expect(memo!.visible.length).toBeLessThan(CAP);
+  });
+
+  it("stays bounded by the ring, which is the defect it exists for", () => {
+    // The head-drop, on its own. Without it `visible` only ever GROWS: the
+    // panel accumulates every line the ring has already thrown away, which is
+    // unbounded memory behind a bounded store.
+    const enabled = ALL;
+    let lines: LogLine[] = [];
+    let memo: FilterMemo | null = null;
+    for (let seq = 0; seq < 500; seq++) {
+      const merged = [...lines, line(seq)];
+      lines = merged.length > CAP ? merged.slice(merged.length - CAP) : merged;
+      memo = filterStep(memo, lines, enabled, "");
+    }
+    expect(memo!.visible).toHaveLength(CAP);
+    expect(memo!.visible[0]!.seq).toBe(500 - CAP);
+  });
+
+  it("re-filters from scratch when the filter itself changes", () => {
+    // A changed predicate invalidates every previous verdict, so the memo must
+    // NOT be extended — extending it would keep lines the new filter rejects.
+    const lines = [0, 1, 2, 3].map((n) => ({
+      ...line(n),
+      level: (n % 2 === 0 ? "info" : "warn") as LogLevel,
+    }));
+    const all = filterStep(null, lines, ALL, "");
+    expect(all.visible).toHaveLength(4);
+
+    const infoOnly = filterStep(all, lines, { ...ALL, warn: false }, "");
+    expect(infoOnly.visible.map((l) => l.seq)).toEqual([0, 2]);
+  });
+
+  it("honours the search needle", () => {
+    const lines = [line(1), line(2), line(3)];
+    const step = filterStep(null, lines, ALL, "  M2  ");
+    expect(step.visible.map((l) => l.seq)).toEqual([2]);
+    // The needle is normalised, and the memo records the normalised form —
+    // otherwise a whitespace-only change re-filters the whole ring.
+    expect(step.needle).toBe("m2");
   });
 });

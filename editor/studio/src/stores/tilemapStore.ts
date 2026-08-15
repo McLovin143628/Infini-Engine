@@ -107,6 +107,20 @@ interface TilemapState {
   floodFill: (x: number, y: number) => Promise<TilemapCellDto[]>;
 }
 
+/**
+ * The bind generation (round-2 finding R2.F12).
+ *
+ * Module-level rather than store state because nothing renders because of it —
+ * it exists only so a reply can ask "am I still the one being waited for?".
+ * The same shape as `blueprintStore`'s `openGen`.
+ */
+let bindGen = 0;
+
+/** Test-only: forget any in-flight bind. */
+export function __resetTilemapBindForTest(): void {
+  bindGen += 1;
+}
+
 export const useTilemapStore = create<TilemapState>((set, get) => ({
   entity: null,
   dto: null,
@@ -117,6 +131,7 @@ export const useTilemapStore = create<TilemapState>((set, get) => ({
   error: null,
 
   bind: async (entity) => {
+    const gen = ++bindGen;
     if (entity === null) {
       set({ entity: null, dto: null, cellMap: new Map(), error: null });
       return;
@@ -124,6 +139,13 @@ export const useTilemapStore = create<TilemapState>((set, get) => ({
     set({ busy: true, error: null, entity });
     try {
       const dto = await tilemapIpc.get(entity);
+      // **The generation check** (round-2 finding R2.F12). `entity` was set
+      // synchronously and the reply applied without re-reading it, so selecting
+      // tilemap A then B quickly — or an undo/redo, or StrictMode's double
+      // mount — could leave the store holding `entity: B` with A's `cellMap`,
+      // and `PaintCanvas.commit` then sent A's cells to B. A stale reply is
+      // dropped whole rather than merged.
+      if (gen !== bindGen) return;
       set((s) => ({
         dto,
         cellMap: cellMapOf(dto),
@@ -132,6 +154,7 @@ export const useTilemapStore = create<TilemapState>((set, get) => ({
         activeTile: dto ? Math.min(s.activeTile, dto.palette_cols * dto.palette_rows || 1) : 1,
       }));
     } catch (e) {
+      if (gen !== bindGen) return;
       set({ error: String(e), busy: false });
     }
   },
@@ -139,10 +162,15 @@ export const useTilemapStore = create<TilemapState>((set, get) => ({
   refresh: async () => {
     const entity = get().entity;
     if (!entity) return;
+    const gen = bindGen;
     try {
       const dto = await tilemapIpc.get(entity);
+      // Same race, one door along: a refresh in flight when the selection moves
+      // would write the OLD entity's cells over the new one's.
+      if (gen !== bindGen || get().entity !== entity) return;
       set({ dto, cellMap: cellMapOf(dto) });
     } catch (e) {
+      if (gen !== bindGen) return;
       set({ error: String(e) });
     }
   },

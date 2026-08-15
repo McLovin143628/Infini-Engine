@@ -30,25 +30,51 @@ export function defaultGrid(): SpriteGridDto {
 }
 
 /**
+ * The largest grid a sheet may be sliced into — the mirror of Rust's
+ * `MAX_GRID_CELLS` (round-2 finding R2.F6).
+ *
+ * C4-15 bounded the Rust resolver because `columns`/`rows` come out of an
+ * editable TOML sidecar. **This port had no bound at all**, and it is the one
+ * that runs on every keystroke: `<input type=number>` accepts `1e999`, so
+ * `Number(...)` is `Infinity`, `Math.max(1, Infinity)` is `Infinity`, and the
+ * loop below pushed slice objects until the tab died. Even `100000` freezes the
+ * UI thread per keystroke on 10^10 cells.
+ *
+ * 64 Ki cells is far past any real atlas (a 4096² sheet of 16-pixel tiles is
+ * 65 536 exactly) and is bounded work.
+ */
+export const MAX_GRID_CELLS = 1 << 16;
+
+/** A finite, non-negative integer, or `fallback`. Wire values are not trusted. */
+function counted(value: number, fallback: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : fallback;
+}
+
+/**
  * Resolve a slice model against its texture pixel size — a faithful port of the
  * Rust `SpriteSheetSlices::resolve` (top-left origin, grid cells first and
- * index-named, then manual rects in author order).
+ * index-named, then manual rects in author order), **bounded by
+ * [`MAX_GRID_CELLS`] exactly as the Rust is**.
  */
 export function resolveSlices(dto: SpriteSheetDto): ResolvedSlice[] {
-  const tw = Math.max(1, dto.tex_width);
-  const th = Math.max(1, dto.tex_height);
+  const tw = Math.max(1, counted(dto.tex_width, 1));
+  const th = Math.max(1, counted(dto.tex_height, 1));
   const out: ResolvedSlice[] = [];
 
   const g = dto.grid;
   if (g) {
-    const cols = Math.max(1, g.columns);
-    const rows = Math.max(1, g.rows);
+    const cols = Math.max(1, counted(g.columns, 1));
+    const rows = Math.max(1, counted(g.rows, 1));
+    // The bound, as a cell BUDGET rather than a per-axis clamp — the same shape
+    // as `GridSlicing::count`, so a truncated grid is truncated identically on
+    // both sides of the wire.
+    const budget = Math.min(cols * rows, MAX_GRID_CELLS);
     const usableW = Math.max(0, tw - g.margin_x - (cols - 1) * g.padding_x);
     const usableH = Math.max(0, th - g.margin_y - (rows - 1) * g.padding_y);
     const cellW = usableW / cols;
     const cellH = usableH / rows;
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
+    for (let r = 0; r < rows && out.length < budget; r++) {
+      for (let c = 0; c < cols && out.length < budget; c++) {
         const x0 = g.margin_x + c * (cellW + g.padding_x);
         const y0 = g.margin_y + r * (cellH + g.padding_y);
         const x1 = x0 + cellW;

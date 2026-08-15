@@ -51,13 +51,47 @@ import type { SkelJointDto } from "../../bindings/SkelJointDto";
 const VIEW = 320;
 
 /** A joint's rest-pose position in model space, and where it lands on screen. */
-interface Placed {
+export interface Placed {
   joint: SkelJointDto;
   /** Model-space rest position (metres). */
   world: [number, number, number];
   /** SVG coordinates. */
   x: number;
   y: number;
+}
+
+/** One drawable bone: the segment from a joint to its parent. */
+export interface BoneSegment {
+  key: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/**
+ * The bones a rig can actually draw (round-2 finding R2.F-med-extra).
+ *
+ * The renderer did `placed[p.joint.parent].x` with no guard, while `projectRig`
+ * defends the identical lookup 100 lines above ("a forward reference cannot
+ * happen -- the joint list is topological -- but a malformed one must not crash
+ * the panel"). So a `.inf_skel` naming a parent past its own joint list took
+ * the whole Skeleton Editor down on a read of `undefined.x`. That file reaches
+ * here unvalidated: Wave H found the Rust half of exactly this, where serde's
+ * derive reconstructs a `Skeleton` without ever running `Skeleton::new`.
+ *
+ * A separate function, rather than a guard inside the JSX, so the property has
+ * somewhere to be asserted.
+ */
+export function boneSegments(placed: Placed[]): BoneSegment[] {
+  const out: BoneSegment[] = [];
+  for (const p of placed) {
+    if (p.joint.parent === null) continue;
+    const parent = placed[p.joint.parent];
+    if (!parent) continue; // a parent index outside the rig: draw nothing
+    out.push({ key: `b${p.joint.index}`, x1: parent.x, y1: parent.y, x2: p.x, y2: p.y });
+  }
+  return out;
 }
 
 /**
@@ -303,19 +337,17 @@ export default function SkeletonEditor({
             aria-label="skeleton rest pose"
           >
             {/* Bones: a segment from each joint to its parent. */}
-            {placed.map((p) =>
-              p.joint.parent === null ? null : (
-                <line
-                  key={`b${p.joint.index}`}
-                  x1={placed[p.joint.parent].x}
-                  y1={placed[p.joint.parent].y}
-                  x2={p.x}
-                  y2={p.y}
-                  stroke="var(--ink-border-strong)"
-                  strokeWidth={1.5}
-                />
-              ),
-            )}
+            {boneSegments(placed).map((b) => (
+              <line
+                key={b.key}
+                x1={b.x1}
+                y1={b.y1}
+                x2={b.x2}
+                y2={b.y2}
+                stroke="var(--ink-border-strong)"
+                strokeWidth={1.5}
+              />
+            ))}
             {/* The selected joint's mirror twin, so a pairing is visible. */}
             {sel?.mirror !== null &&
               sel?.mirror !== undefined &&

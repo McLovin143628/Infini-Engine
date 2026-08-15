@@ -755,9 +755,16 @@ function AssetCell({
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const dragging = useRef(false);
 
+  // `thumb` is in the deps on purpose (round-2 finding): the request used to
+  // fire once per mount, so a cell whose entry was EVICTED while it was still
+  // on screen stayed blank until the drawer was closed and reopened.
+  // `loadThumbnail` is idempotent per content hash — a pending or answered
+  // entry short-circuits — so this asks exactly once per genuine miss.
   useEffect(() => {
-    if (asset.previewable) loadThumbnail(asset.id, asset.content_hash);
-  }, [asset.id, asset.previewable, asset.content_hash, loadThumbnail]);
+    if (asset.previewable && thumb === undefined) {
+      loadThumbnail(asset.id, asset.content_hash);
+    }
+  }, [asset.id, asset.previewable, asset.content_hash, thumb, loadThumbnail]);
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
@@ -970,12 +977,28 @@ function AssetContextMenu({
     </button>
   );
 
+  // **Seven context actions said nothing when they failed** (round-2 finding
+  // R2.F13), and a silently failing DELETE was the worst of them: the asset
+  // stayed on screen, the rejection went unhandled, and the author's only clue
+  // was that nothing happened. Every one of them now ends in a status line.
   const doRename = () => {
     const name = window.prompt("Rename asset", asset.name);
-    if (name && name !== asset.name) void store.rename(asset.id, name);
+    if (!name || name === asset.name) return;
+    void store.rename(asset.id, name).then((err) => {
+      if (err) pushStatus(`Rename failed: ${err}`, 8000);
+    });
+  };
+  const doDuplicate = () => {
+    void store.duplicate(asset.id).then((err) => {
+      if (err) pushStatus(`Duplicate failed: ${err}`, 8000);
+    });
   };
   const doDelete = async () => {
     const result = await store.deleteAsset(asset.id, false);
+    if (result.error) {
+      pushStatus(`Delete failed: ${result.error}`, 8000);
+      return;
+    }
     if (!result.deleted) {
       const names = result.blockers
         .map((b) => `• ${b.name} (${b.kind})`)
@@ -983,16 +1006,23 @@ function AssetContextMenu({
       const ok = window.confirm(
         `"${asset.name}" is still referenced by ${result.blockers.length} asset(s):\n\n${names}\n\nDelete anyway? References will break.`,
       );
-      if (ok) await store.deleteAsset(asset.id, true);
+      if (!ok) return;
+      const forced = await store.deleteAsset(asset.id, true);
+      if (forced.error) pushStatus(`Delete failed: ${forced.error}`, 8000);
+      else if (!forced.deleted) pushStatus(`"${asset.name}" was not deleted.`, 8000);
     }
   };
   const showRefs = async () => {
-    const refs = await import("../lib/ipc").then((m) =>
-      m.assets.references(asset.id),
-    );
-    if (refs.length === 0)
-      pushStatus(`"${asset.name}" is not referenced by anything.`);
-    else pushStatus(`${asset.name} ← ${refs.map((r) => r.name).join(", ")}`);
+    try {
+      const refs = await import("../lib/ipc").then((m) =>
+        m.assets.references(asset.id),
+      );
+      if (refs.length === 0)
+        pushStatus(`"${asset.name}" is not referenced by anything.`);
+      else pushStatus(`${asset.name} ← ${refs.map((r) => r.name).join(", ")}`);
+    } catch (e) {
+      pushStatus(`Could not read references: ${String(e)}`, 8000);
+    }
   };
   // The asset's absolute payload path = content root + its content-relative path.
   const doReveal = async () => {
@@ -1003,32 +1033,51 @@ function AssetContextMenu({
     }
   };
   const applyToSelection = async () => {
-    const n = await sceneIpc.applyMaterial(asset.id);
-    pushStatus(
-      n > 0
-        ? `Applied "${asset.name}" to ${n} actor(s).`
-        : "Select an actor with a material first, then apply.",
-    );
+    try {
+      const n = await sceneIpc.applyMaterial(asset.id);
+      pushStatus(
+        n > 0
+          ? `Applied "${asset.name}" to ${n} actor(s).`
+          : "Select an actor with a material first, then apply.",
+      );
+    } catch (e) {
+      pushStatus(`Apply failed: ${String(e)}`, 8000);
+    }
   };
   const createInstance = async () => {
-    const { assets } = await import("../lib/ipc");
-    await assets.createMaterialInstance(asset.id);
-    pushStatus(`Created an instance of "${asset.name}".`);
+    try {
+      const { assets } = await import("../lib/ipc");
+      await assets.createMaterialInstance(asset.id);
+      pushStatus(`Created an instance of "${asset.name}".`);
+    } catch (e) {
+      pushStatus(`Could not create an instance: ${String(e)}`, 8000);
+    }
   };
   const isMaterialLike =
     asset.kind === "material" || asset.kind === "material_instance";
   const bindToSelection = async () => {
-    const n = await sceneIpc.applyActor(asset.id);
-    pushStatus(
-      n > 0
-        ? `Bound "${asset.name}" to ${n} entity(ies).`
-        : "Select an entity first, then bind the blueprint.",
-    );
+    try {
+      const n = await sceneIpc.applyActor(asset.id);
+      pushStatus(
+        n > 0
+          ? `Bound "${asset.name}" to ${n} entity(ies).`
+          : "Select an entity first, then bind the blueprint.",
+      );
+    } catch (e) {
+      pushStatus(`Bind failed: ${String(e)}`, 8000);
+    }
   };
   // ── collections (E-P8) ────────────────────────────────────────────────────
+  // The status has to follow the ANSWER: the store catches internally, so an
+  // unconditional "Added ..." stated a membership that did not exist.
   const addTo = async (name: string) => {
-    await addToCollection(name, asset.id);
-    pushStatus(`Added "${asset.name}" to "${name}".`);
+    const ok = await addToCollection(name, asset.id);
+    pushStatus(
+      ok
+        ? `Added "${asset.name}" to "${name}".`
+        : `Could not add "${asset.name}" to "${name}".`,
+      ok ? undefined : 8000,
+    );
     onClose();
   };
   const newCollectionAndAdd = async () => {
@@ -1043,8 +1092,13 @@ function AssetContextMenu({
   };
   const removeFrom = async () => {
     if (!activeCollection) return;
-    await removeFromCollection(activeCollection, asset.id);
-    pushStatus(`Removed "${asset.name}" from "${activeCollection}".`);
+    const ok = await removeFromCollection(activeCollection, asset.id);
+    pushStatus(
+      ok
+        ? `Removed "${asset.name}" from "${activeCollection}".`
+        : `Could not remove "${asset.name}" from "${activeCollection}".`,
+      ok ? undefined : 8000,
+    );
   };
 
   return (
@@ -1084,11 +1138,7 @@ function AssetContextMenu({
           useDockLayout.getState().openPanel("skeleton", asset.id),
         )}
       {item("Rename", <Pencil size={13} />, doRename)}
-      {item(
-        "Duplicate",
-        <Copy size={13} />,
-        () => void store.duplicate(asset.id),
-      )}
+      {item("Duplicate", <Copy size={13} />, doDuplicate)}
       {item("Show References", <Link2 size={13} />, () => void showRefs())}
       {item(
         "Reveal in Explorer",

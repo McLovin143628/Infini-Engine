@@ -24,7 +24,7 @@ import type { AssetDto } from "../../bindings/AssetDto";
 import type { CollectionDto } from "../../bindings/CollectionDto";
 import type { ImportEventDto } from "../../bindings/ImportEventDto";
 import { assets as assetsIpc, collections as collectionsIpc } from "../../lib/ipc";
-import { useAssetStore, visibleAssets } from "../assetStore";
+import { THUMBNAIL_CAP, useAssetStore, visibleAssets } from "../assetStore";
 
 function asset(id: string, name: string, kind = "mesh", folder = ""): AssetDto {
   return {
@@ -131,7 +131,12 @@ describe("collection state + actions", () => {
  *     scrolled past, held for the life of the session.
  */
 describe("thumbnail cache (L7.H5)", () => {
-  const CAP = 256;
+  // The cap is read from the store, not restated: it MOVED in round 2 (a wide
+  // drawer mounts ~300 virtualized cells against a cap of 256, so the later
+  // cells evicted the earlier ones while both were on screen and the earlier
+  // ones stayed blank for as long as the drawer was open). A test carrying its
+  // own copy of a bound is a test that stops describing the bound.
+  const CAP = THUMBNAIL_CAP;
 
   beforeEach(() => {
     useAssetStore.setState({ thumbnails: new Map() });
@@ -195,6 +200,79 @@ describe("thumbnail cache (L7.H5)", () => {
     expect(cache().has("hash-9")).toBe(false);
     expect(cache().has("hash-10")).toBe(true);
     expect(cache().has(`hash-${CAP + 9}`)).toBe(true);
+  });
+
+  /**
+   * **The test-integrity finding**: the load-bearing `set({ thumbnails })` had
+   * no arm.
+   *
+   * `putThumbnail` mutates the `Map` IN PLACE — that is the O(N^2) fix — so
+   * every assertion above reads the mutation through `getState()` and passes
+   * whether or not zustand was ever told. Delete both `set` calls and all six
+   * arms stay green while the Content Drawer's cells never re-render: the
+   * thumbnails land in the cache and no subscriber hears about it.
+   *
+   * The subscriber is the missing half, and it is the whole reason the cache
+   * builds a fresh STATE object around the same container.
+   */
+  it("notifies subscribers, so a mounted cell re-renders when its picture lands", async () => {
+    let notifications = 0;
+    const unsub = useAssetStore.subscribe(() => {
+      notifications += 1;
+    });
+    try {
+      useAssetStore.getState().loadThumbnail("asset-1", "h");
+      expect(
+        notifications,
+        "the pending sentinel went into the map without telling zustand",
+      ).toBeGreaterThanOrEqual(1);
+
+      const afterRequest = notifications;
+      await vi.waitFor(() => expect(cache().get("h")).toContain("asset-1"));
+      expect(
+        notifications,
+        "the picture arrived and no subscriber was told, so the cell stays blank",
+      ).toBeGreaterThan(afterRequest);
+    } finally {
+      unsub();
+    }
+  });
+
+  /**
+   * **R2.F13's other half**: a refusal must not become the most durable entry
+   * in the cache.
+   *
+   * A `null` answer left the `""` "requested" sentinel in place, and
+   * `touchThumbnail` renewed it as most-recently-used on every re-read — so the
+   * failed entry outlived real pictures, was never retried, and could never be
+   * evicted while the grid kept asking for it.
+   */
+  it("records a refusal as an answer, not as a permanent pending", async () => {
+    vi.mocked(assetsIpc.thumbnail).mockResolvedValue(null);
+    useAssetStore.getState().loadThumbnail("asset-1", "h");
+    await vi.waitFor(() => expect(cache().get("h")).toBeNull());
+
+    // It is an ANSWER: asking again costs no round trip...
+    useAssetStore.getState().loadThumbnail("asset-1", "h");
+    expect(vi.mocked(assetsIpc.thumbnail)).toHaveBeenCalledTimes(1);
+    // ...and it is a normal LRU entry, so it ages out like any other.
+    for (let i = 0; i < CAP; i++) {
+      useAssetStore.getState().loadThumbnail(`asset-${i}`, `hash-${i}`);
+    }
+    expect(cache().has("h")).toBe(false);
+  });
+
+  it("lets a thrown request be retried", async () => {
+    // An error is not an answer. Leaving the sentinel behind made a transient
+    // failure permanent for the session.
+    vi.mocked(assetsIpc.thumbnail).mockRejectedValueOnce(new Error("busy"));
+    useAssetStore.getState().loadThumbnail("asset-1", "h");
+    await vi.waitFor(() => expect(cache().has("h")).toBe(false));
+
+    vi.mocked(assetsIpc.thumbnail).mockResolvedValue("data:image/png;base64,ok");
+    useAssetStore.getState().loadThumbnail("asset-1", "h");
+    await vi.waitFor(() => expect(cache().get("h")).toContain("ok"));
+    expect(vi.mocked(assetsIpc.thumbnail)).toHaveBeenCalledTimes(2);
   });
 
   it("a re-read renews an entry, so it survives the next eviction", async () => {

@@ -17,9 +17,11 @@ vi.mock("../../lib/ipc", () => ({
 import type { CharacterRigDto } from "../../bindings/CharacterRigDto";
 import { character as characterIpc } from "../../lib/ipc";
 import {
+  __resetCharacterPreviewForTest,
   characterWizardReducer,
   defaultSpec,
   initialMachine,
+  PREVIEW_DEBOUNCE_MS,
   projectRig,
   specIssue,
   useCharacterWizardStore,
@@ -213,5 +215,96 @@ describe("the store", () => {
     expect(s.busy).toBe(false);
     expect(s.error).toMatch(/disk/);
     expect(s.step).not.toBe("done");
+  });
+});
+
+/**
+ * **The preview race** (round-2 finding R2.F-med-extra).
+ *
+ * The dialog fired a full `character_preview` per keystroke with nothing
+ * ordering the replies. With a mesh that call decodes the whole `.inf_mesh` off
+ * disk (uncached), builds the kernel, tessellates, builds a BVH and runs the
+ * fit — so a SLOW refusal could land after a fast success and leave "Create
+ * Character" permanently disabled over a spec that was fine, with refusal text
+ * describing a value the author had already changed.
+ */
+describe("preview ordering and debounce", () => {
+  /** A promise plus the trigger that settles it, so replies can be reordered. */
+  function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  beforeEach(() => {
+    __resetCharacterPreviewForTest();
+    useCharacterWizardStore.setState(initialMachine());
+    vi.clearAllMocks();
+  });
+
+  it("a late reply cannot overwrite a newer one", async () => {
+    const slow = deferred<{ refusal: string | null; rig: CharacterRigDto | null }>();
+    vi.mocked(characterIpc.preview)
+      .mockReturnValueOnce(slow.promise)
+      .mockResolvedValueOnce({ refusal: null, rig: RIG });
+
+    const first = useCharacterWizardStore.getState().refresh();
+    await useCharacterWizardStore.getState().refresh();
+    expect(useCharacterWizardStore.getState().refusal).toBeNull();
+
+    // …and now the first request answers, with a refusal about a spec the
+    // author has already moved past.
+    slow.resolve({ refusal: "legs must be even", rig: null });
+    await first;
+
+    expect(
+      useCharacterWizardStore.getState().refusal,
+      "a stale refusal disabled Create over a spec that is fine",
+    ).toBeNull();
+  });
+
+  it("a late FAILURE cannot overwrite a newer answer either", async () => {
+    const slow = deferred<{ refusal: string | null; rig: CharacterRigDto | null }>();
+    vi.mocked(characterIpc.preview)
+      .mockReturnValueOnce(
+        slow.promise.then(() => {
+          throw new Error("the mesh went away");
+        }),
+      )
+      .mockResolvedValueOnce({ refusal: null, rig: RIG });
+
+    const first = useCharacterWizardStore.getState().refresh();
+    await useCharacterWizardStore.getState().refresh();
+    slow.resolve({ refusal: null, rig: null });
+    await first;
+
+    expect(useCharacterWizardStore.getState().error).toBeNull();
+  });
+
+  it("still applies the reply it is waiting for", async () => {
+    // The other direction: a guard that dropped everything is a wizard whose
+    // diagram never updates.
+    vi.mocked(characterIpc.preview).mockResolvedValue({ refusal: null, rig: RIG });
+    await useCharacterWizardStore.getState().refresh();
+    expect(useCharacterWizardStore.getState().rig).toBe(RIG);
+  });
+
+  it("coalesces keystrokes into one backend call", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(characterIpc.preview).mockResolvedValue({ refusal: null, rig: RIG });
+      const store = useCharacterWizardStore.getState();
+      store.refreshSoon();
+      store.refreshSoon();
+      store.refreshSoon();
+      expect(vi.mocked(characterIpc.preview)).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(PREVIEW_DEBOUNCE_MS + 1);
+      expect(vi.mocked(characterIpc.preview)).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
