@@ -2007,4 +2007,41 @@ mod tests {
         assert_eq!(dh.vars.get("n"), nh.vars.get("n"));
         assert_eq!(dh.logs, nh.logs, "debug must not trip the loop guard");
     }
+
+    /// C4-44: a node type this build does not know — a graph authored against a
+    /// larger node kit, or with a plugin uninstalled — used to lower into an
+    /// `Expr::Call` with **zero arguments**, because `data_input_ports` answered
+    /// `unwrap_or_default()` and `role` classified it as a pure call via
+    /// `unwrap_or(false)`. The interpreter then substituted defaults, so the
+    /// blueprint ran silently against entity 0 with no motion instead of saying
+    /// it could not run at all.
+    #[test]
+    fn an_unregistered_node_type_refuses_instead_of_lowering_to_nothing() {
+        let reg = blueprint_registry();
+        let mut g = Graph::empty();
+        let tick = g.insert("event.tick", NodeUi::default());
+        let unknown = g.insert("plugin.does_not_exist", NodeUi::default());
+        wire(&mut g, tick, EXEC_THEN, unknown, "exec");
+
+        let err = lower_graph(&g, &reg).expect_err("an unknown node type must not lower");
+        match err {
+            LowerError::UnknownType(node, ref ty) => {
+                assert_eq!(node, unknown);
+                assert_eq!(ty, "plugin.does_not_exist", "the message must name it");
+            }
+            other => panic!("expected UnknownType, got {other}"),
+        }
+        assert!(
+            err.to_string().contains("plugin.does_not_exist"),
+            "a user has to be told WHICH node: {err}"
+        );
+
+        // The control: the same graph with a REGISTERED action lowers fine, so
+        // the refusal is about the registry and not about the shape.
+        let mut ok = Graph::empty();
+        let tick = ok.insert("event.tick", NodeUi::default());
+        let rot = ok.insert("engine.set_rotation", NodeUi::default());
+        wire(&mut ok, tick, EXEC_THEN, rot, "exec");
+        assert!(lower_graph(&ok, &reg).is_ok());
+    }
 }
