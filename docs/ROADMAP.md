@@ -17747,4 +17747,56 @@ the sixth and seventh. Both were found by mutation, neither by reading.
 
 ### VERIFICATION
 
-Battery, clippy, fmt, rustdoc, npm: see the machine-ops block below.
+`cargo test --workspace --no-fail-fast -j 3` = **265 binaries / 4 729 passed /
+0 failed / 9 ignored** against a start-of-wave baseline of **263 / 4 701 / 0 /
+8**. +2 binaries (`cook_blocking.rs`, `delta_cost_bench.rs`), +28 tests, +1
+ignored (the delta measurement, which is a bench and says so). The run's only
+three failures were this wave's own H7 fixtures — three tests that import from
+outside the project root, which is precisely the case H7 changed — repaired by
+importing from inside it and pinned by two new arms that state the trade.
+
+Workspace clippy `-D warnings` clean; `cargo fmt --all --check` clean; rustdoc
+**450 / ceiling 450** over 43 crates with `target/doc` cleared first, so
+ci.yml's ceiling does **not** move. Frontend: typecheck clean, `eslint .
+--max-warnings 0` clean over 196 files, vitest **54 files / 500 tests** (from
+49 / 423). Goldens **54, unchanged**; no committed `.png`, `.inf_*` or sample
+byte moved in the whole wave.
+
+The CI cook-and-run smoke was re-verified against the stricter exit codes: the
+committed platformer cooks with **zero advisories**, `inf cook` exits 0, and
+the headless player runs its 300 frames to the same final-state hash. No sample
+content had to change.
+
+### MACHINE OPS
+
+**Mutations: 14 distinct, 14 killed after repair.** Three survived their first
+run and each one paid for itself:
+
+* gutting `confined_paths` left the confinement source gate GREEN — it checked
+  that a `git_*` command confined its *repo* and never the file names it then
+  deletes. Fixed by checking the signature for a path argument, and by adding
+  the value arm a source pin cannot substitute for.
+* `data_input_ports` accepting an unknown node type survived because `role()`
+  refuses first. Recorded rather than repaired: `build_call` has one caller and
+  it is role-classified, so the second guard is defence in depth, and mutating
+  `role()` kills the arm.
+* the P23 source pin looked for `self.order` and could never have fired —
+  rustfmt writes it as `self` and `.order` on two lines.
+
+**`git checkout -- <file>` reverted an uncommitted fix, again.** Wave E's law,
+broken one wave later: the P23 hoist was not committed when its mutation ran, so
+the checkout took the whole repair and the run reported SURVIVED against
+unmutated original code. That accident is what exposed the vacuous pin, which is
+the only good thing to say about it.
+
+**The eaten backslash, seventh catch — with the mechanism, at last.** Eleven of
+this wave's own advisory strings shipped with the source indentation inside the
+sentence. It is not "Python ate it": a **doubled** backslash typed into a JSON
+tool parameter is decoded to ONE backslash before any shell sees it, and that
+single backslash at the end of a line inside a heredoc is read by Python as a
+line continuation and removed. Both the file-write and the shell parameter are
+JSON, so neither is a safe place to type the character at all. Build it with
+`chr(92)`, or do not script the edit.
+
+The sentence above was itself corrupted twice while being written, which is why
+it now names the character instead of spelling it.
