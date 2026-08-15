@@ -1423,48 +1423,25 @@ fn the_destruction_module_calls_no_libm() {
          is scanning an empty string"
     );
 
-    const BANNED: [&str; 29] = [
-        ".cbrt()",
-        ".powf(",
-        ".sin()",
-        ".cos()",
-        ".tan()",
-        ".atan2(",
-        ".acos()",
-        ".asin()",
-        ".sin_cos()",
-        ".exp()",
-        ".ln()",
-        // The UFCS spellings, the P24.2 re-audit's minor 3: `.cbrt()` is a
-        // substring ban and `f64::cbrt(x)` — the same call written the other way
-        // — walks straight past it.
-        "f32::cbrt(",
-        "f64::cbrt(",
-        "f32::powf(",
-        "f64::powf(",
-        "f32::sin(",
-        "f64::sin(",
-        "f32::cos(",
-        "f64::cos(",
-        "f32::tan(",
-        "f64::tan(",
-        // glam constructors that reach `sin_cos` inside another crate, where no
-        // grep of this one would ever see them.
-        "from_rotation_arc",
-        "from_axis_angle",
-        "from_euler",
-        "from_rotation_x(",
-        "from_rotation_y(",
-        "from_rotation_z(",
-        "to_euler(",
-        ".slerp(",
-    ];
+    // **One list, not six** (round-2 finding R2.B). This copy was missing
+    // `.atan()` entirely and sixteen UFCS twins, and it is the gate over the
+    // module that prices every destruction bond two machines are claimed to
+    // agree about.
+    const GATE: &str = "inf-physics/tests/fracture_3d.rs";
+    /// Beyond the canonical list: both reach `sin_cos` inside glam.
+    const EXTRA: [&str; 2] = ["to_euler(", ".slerp("];
+    let banned: Vec<&str> = inf_math::libm_ban::ALL
+        .iter()
+        .copied()
+        .chain(EXTRA)
+        .collect();
+    inf_math::libm_ban::covers_both_spellings(GATE, &banned);
 
     // One predicate, applied to the real source and then to a poisoned copy of
     // it, so the arm below is the same question asked twice rather than an
     // assertion and a separate hand-written decoy.
     let offenders = |text: &str| -> Vec<(&'static str, Vec<usize>)> {
-        BANNED
+        banned
             .iter()
             .filter_map(|banned| {
                 let hits: Vec<usize> = text

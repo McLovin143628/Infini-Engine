@@ -57,6 +57,37 @@ pub fn temp_sibling(path: &Path) -> PathBuf {
 /// exactly as it found it, with neither litter nor a damaged destination — and
 /// the original error is returned unchanged, so a caller's message ("could not
 /// write X … nothing on disk changed") is true rather than aspirational.
+///
+/// # A rename replaces the INODE, so the destination's mode is carried over
+///
+/// Round-2 finding **R2.A**, and it is this door's own doing: before Hardening
+/// Wave A these writes were `std::fs::write`, which *keeps* the destination
+/// inode and therefore keeps its permission bits, its ACLs, its extended
+/// attributes and any hard links to it. A temp-plus-rename creates a **new**
+/// file with the process umask's mode and swaps it in, so an executable script
+/// saved through the IDE's Ctrl+S (`files.rs::file_write`) came back
+/// non-executable, and a file the author had made group-writable came back
+/// private. Invisible to CI, because the only leg that drives that door is
+/// Windows, where the mode is not meaningful.
+///
+/// So on Unix the destination's mode is read *before* the rename and applied to
+/// the temp file. Where there is no destination the umask decides, exactly as
+/// `std::fs::write` would; where the mode cannot be read the write proceeds
+/// rather than failing, because a missing permission bit is a smaller harm than
+/// a refused save.
+///
+/// # Symlinks are followed, deliberately, and that is a change of shape
+///
+/// `std::fs::write` follows a symlink and writes through it to the target;
+/// `rename` replaces the *link itself* with a regular file. Neither is
+/// obviously right — writing through means a Ctrl+S can modify a file outside
+/// the project through a link inside it, replacing means the author's link
+/// silently becomes a copy. This door **replaces**, because the atomicity
+/// guarantee is the reason it exists and writing through a link cannot be
+/// atomic without staging in the target's directory (which may be on another
+/// filesystem, where `rename` is not atomic and may not even succeed). Recorded
+/// here rather than left implicit; nothing in the tree writes through a
+/// symlink today, and a door that needs to must say so at its own signature.
 pub fn write_atomically(path: &Path, bytes: impl AsRef<[u8]>) -> io::Result<()> {
     // `Path::new("a.txt").parent()` is `Some("")`, and `create_dir_all("")`
     // fails on Windows — a relative single-segment destination is legal and must
@@ -67,13 +98,40 @@ pub fn write_atomically(path: &Path, bytes: impl AsRef<[u8]>) -> io::Result<()> 
         }
     }
     let tmp = temp_sibling(path);
-    let staged = std::fs::write(&tmp, bytes.as_ref()).and_then(|()| std::fs::rename(&tmp, path));
+    let staged = std::fs::write(&tmp, bytes.as_ref()).and_then(|()| {
+        carry_dest_permissions(path, &tmp);
+        std::fs::rename(&tmp, path)
+    });
     if let Err(err) = staged {
         let _ = std::fs::remove_file(&tmp);
         return Err(err);
     }
     Ok(())
 }
+
+/// Copy the destination's permission bits onto the staged temp file, where
+/// there is a destination and the platform has bits worth carrying (R2.A).
+///
+/// Best-effort by design: every failure here leaves the file at the umask's
+/// mode, which is what a first write produces anyway. Refusing the save because
+/// a mode could not be read would trade the user's document for a permission
+/// bit.
+#[cfg(unix)]
+fn carry_dest_permissions(dest: &Path, tmp: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(dest) else {
+        return; // no destination — the umask decides, as `fs::write` would
+    };
+    let mode = meta.permissions().mode();
+    let _ = std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(mode));
+}
+
+/// Windows has no mode bits worth carrying here: the meaningful attribute is
+/// read-only, and a destination that is read-only cannot be renamed over in the
+/// first place, so there is nothing this could preserve that the rename would
+/// not have refused.
+#[cfg(not(unix))]
+fn carry_dest_permissions(_dest: &Path, _tmp: &Path) {}
 
 #[cfg(test)]
 mod tests {
@@ -212,5 +270,63 @@ mod tests {
             .unwrap()
             .filter_map(|e| e.ok())
             .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+    }
+
+    /// **Round-2 finding R2.A**: a rename replaces the inode, so the mode has
+    /// to be carried across it.
+    ///
+    /// Before Wave A these writes were `std::fs::write`, which keeps the
+    /// destination inode and therefore its permission bits. Temp-plus-rename
+    /// creates a new file at the umask's mode and swaps it in — so an
+    /// executable script saved through the IDE's Ctrl+S came back
+    /// non-executable. Invisible to CI: the only leg that drives that door is
+    /// Windows, where the bit is not meaningful.
+    #[cfg(unix)]
+    #[test]
+    fn a_rewrite_keeps_the_destination_s_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("build.sh");
+
+        write_atomically(
+            &path,
+            b"#!/bin/sh
+echo one
+",
+        )
+        .unwrap();
+        // The author makes it executable, as they would from a shell.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "the fixture never became executable, so this arm is vacuous"
+        );
+
+        // …and saves it again from the editor.
+        write_atomically(
+            &path,
+            b"#!/bin/sh
+echo two
+",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "the save stripped the executable bit — the rename swapped in a fresh inode at the umask's mode"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"#!/bin/sh
+echo two
+"
+        );
+
+        // A destination that does not exist yet takes the umask, exactly as
+        // `std::fs::write` would — there is nothing to carry.
+        let fresh = dir.path().join("new.txt");
+        write_atomically(&fresh, b"x").unwrap();
+        assert!(fresh.is_file());
     }
 }

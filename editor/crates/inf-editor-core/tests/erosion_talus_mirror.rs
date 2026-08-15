@@ -78,23 +78,18 @@ fn production_code(rel: &str) -> String {
         .join("\n")
 }
 
-const BANNED: [&str; 8] = [
-    ".tan()",
-    "f32::tan(",
-    "f64::tan(",
-    ".sin()",
-    ".cos()",
-    "f32::sin(",
-    "f64::sin(",
-    "f64::cos(",
-];
+/// **One list, not six** (round-2 finding R2.B).
+///
+/// This copy banned `f64::cos(` over a module whose parameters are `f32`, so
+/// `f32::cos(` walked straight past it — the named hole that made the divergence
+/// worth closing. `inf_math::libm_ban::ALL` is the one list and
+/// `covers_both_spellings` is the completeness meta-arm.
+const GATE: &str = "inf-editor-core/tests/erosion_talus_mirror.rs";
 
 fn offenders(code: &str) -> Vec<&'static str> {
-    BANNED
-        .iter()
-        .copied()
-        .filter(|b| code.contains(b))
-        .collect()
+    let banned: Vec<&'static str> = inf_math::libm_ban::ALL.to_vec();
+    inf_math::libm_ban::covers_both_spellings(GATE, &banned);
+    banned.into_iter().filter(|b| code.contains(b)).collect()
 }
 
 /// Neither erosion pass derives its threshold with libm.

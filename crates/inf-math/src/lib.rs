@@ -9,6 +9,8 @@
 
 pub use glam;
 
+pub mod libm_ban;
+
 pub mod portable;
 pub use portable::{
     pacos64, patan2_64, pcbrt, pcos, pcos64, psin, psin64, pslerp, pyaw, ACOS_SERIES_CROSSOVER,

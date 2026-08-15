@@ -88,30 +88,20 @@ fn no_std_transcendentals_anywhere() {
     // `DMat3::from_axis_angle` reach `sin_cos` **inside another crate**, where no
     // grep of this one would ever see them. `crate::xform` builds its rotation by
     // hand from `inf_math`'s portable pair for exactly that reason.
-    let banned = [
-        ".sin()",
-        ".cos()",
-        ".tan()",
-        ".cbrt()",
-        ".powf(",
-        ".atan2(",
-        ".exp()",
-        ".ln()",
-        "f64::sin",
-        "f64::cos",
-        "f32::sin",
-        "f32::cos",
-        ".sin_cos()",
-        "from_axis_angle",
-        "from_rotation_x",
-        "from_rotation_y",
-        "from_rotation_z",
-    ];
+    // **One list, not six** (round-2 finding R2.B). This copy was missing
+    // `.asin()`/`.acos()`/`.atan()`, sixteen UFCS twins (including
+    // `f64::cbrt(`, the exact function the P22.4 widening was for) and
+    // `from_rotation_arc`/`from_euler`. None was a live escape, which is the
+    // problem: a ban that enumerates what somebody thought of passes for years
+    // and then misses the one that matters.
+    const GATE: &str = "inf-dcc/tests/determinism_law.rs";
+    let banned: Vec<&str> = inf_math::libm_ban::ALL.to_vec();
+    inf_math::libm_ban::covers_both_spellings(GATE, &banned);
     for (name, src) in SOURCES
         .iter()
         .chain(std::iter::once(&("journal.rs", JOURNAL)))
     {
-        for needle in banned {
+        for needle in &banned {
             let hits = code_hits(src, needle);
             assert!(
                 hits.is_empty(),

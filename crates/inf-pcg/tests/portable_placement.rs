@@ -251,3 +251,29 @@ fn the_ban_covers_both_spellings_of_the_functions_it_names() {
     // Twelve methods × two widths, plus the six glam constructors.
     assert_eq!(BANNED.len(), 12 + 24 + 6);
 }
+
+/// **Round-2 finding R2.B**: this gate's list is a superset of the canonical
+/// one, and passes the shared completeness meta-arm.
+///
+/// Six hand-copies of the libm ban existed and they had diverged — the erosion
+/// mirror banned `f64::cos(` over an `f32` module, the fracture gate was
+/// missing sixteen UFCS twins including `f64::cbrt(` and every glam entry, the
+/// physics gate had no `.atan()`. None was a live escape, which is exactly the
+/// problem with a list that enumerates what somebody thought of.
+/// `inf_math::libm_ban::ALL` is the one list now; this arm is what keeps this
+/// gate tied to it.
+#[test]
+fn this_gate_bans_everything_the_canonical_list_does() {
+    let mine: Vec<&str> = BANNED.to_vec();
+    inf_math::libm_ban::covers_both_spellings("inf-pcg/tests/portable_placement.rs", &mine);
+    let missing: Vec<&str> = inf_math::libm_ban::ALL
+        .iter()
+        .copied()
+        .filter(|b| !mine.contains(b))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{} is missing {missing:?} from `inf_math::libm_ban::ALL` — six copies of this list diverged once already",
+        "inf-pcg/tests/portable_placement.rs"
+    );
+}

@@ -436,3 +436,33 @@ pub fn also_on_it(x: f64) -> f64 {
         "the surviving violation is invisible to the ban: {code:?}"
     );
 }
+
+/// **Round-2 finding R2.B**: this gate's list is a superset of the canonical
+/// one, and passes the shared completeness meta-arm.
+///
+/// Six hand-copies of the libm ban existed and they had diverged — the erosion
+/// mirror banned `f64::cos(` over an `f32` module, the fracture gate was
+/// missing sixteen UFCS twins including `f64::cbrt(` and every glam entry, the
+/// physics gate had no `.atan()`. None was a live escape, which is exactly the
+/// problem with a list that enumerates what somebody thought of.
+/// `inf_math::libm_ban::ALL` is the one list now; this arm is what keeps this
+/// gate tied to it.
+#[test]
+fn this_gate_bans_everything_the_canonical_list_does() {
+    let mine: Vec<&str> = BANNED_CALLS
+        .iter()
+        .chain(BANNED_GLAM.iter())
+        .copied()
+        .collect();
+    inf_math::libm_ban::covers_both_spellings("inf-anim/tests/portable_pose.rs", &mine);
+    let missing: Vec<&str> = inf_math::libm_ban::ALL
+        .iter()
+        .copied()
+        .filter(|b| !mine.contains(b))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{} is missing {missing:?} from `inf_math::libm_ban::ALL` — six copies of this list diverged once already",
+        "inf-anim/tests/portable_pose.rs"
+    );
+}
