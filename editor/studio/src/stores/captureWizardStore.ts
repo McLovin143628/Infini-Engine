@@ -358,9 +358,10 @@ export const useCaptureStore = create<CaptureState>((set, get) => ({
  * after the first `await`, so StrictMode's double mount subscribed twice and
  * orphaned the first handle.
  */
-export const initCaptureSync = refCountedInit(async () => {
+export const initCaptureSync = refCountedInit(async (sink) => {
   const unlisten = await listenTo("photogrammetry://progress", (e) =>
     useCaptureStore.getState().applyProgress(e),
   );
+  sink(unlisten);
   return () => unlisten();
 });

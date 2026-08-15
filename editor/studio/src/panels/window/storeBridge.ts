@@ -106,7 +106,13 @@ function arrayPatch(prev: unknown[], next: unknown[]): KeyPatch | null {
   }
   const append = next.slice(j + 1);
   // A patch that carries nearly the whole array is just a slower full send.
-  if (append.length >= next.length) return null;
+  //
+  // The bound is `j`, not a length comparison: `append` is `next.slice(j + 1)`
+  // and `j >= 0` here, so `append.length >= next.length` is unreachable — the
+  // guard it replaces could never fire (a round-2 LOW). What it MEANT is this,
+  // and now that it can fire, the fast path is bounded rather than merely
+  // believed to be.
+  if (append.length * 2 >= next.length && next.length > 8) return null;
   return { t: "arr", trim, append };
 }
 
@@ -235,6 +241,17 @@ export function setPanelWindowCount(n: number): void {
   // First window just opened → push a full snapshot so it can't miss
   // changes that landed before its own sync request resolves.
   if (wasZero && n > 0) emitAllSnapshots();
+  // …and the last one just closed (round-2 finding R2-4). `lastSent` holds one
+  // whole DATA SLICE per bridged store — the 5 000-line log ring, the full
+  // scene node map — as the baseline patches are computed against. With no
+  // window open nothing is emitted and the baseline is stale on purpose, so it
+  // is not merely useless: it is a copy of the largest objects in the editor,
+  // pinned for the rest of the session by a feature nobody is using.
+  //
+  // Dropping it is free. `emitAllSnapshots` above re-bases from live state the
+  // moment a window opens again, and `flush` treats a missing baseline as a
+  // full send, which is the correct answer for a mirror that holds nothing.
+  if (n === 0) lastSent.clear();
 }
 
 function emitAllSnapshots(): void {
@@ -246,6 +263,17 @@ function emitAllSnapshots(): void {
     lastSent.set(name, state);
     void emit("panel://sync", { store: name, seq: seqOf.get(name) ?? 0, state } satisfies SyncMessage);
   }
+}
+
+/**
+ * **How many baseline slices the host is holding** — Wave B's law, applied: a
+ * fix whose whole effect is that something is no longer retained needs an
+ * accessor, or a mutation that restores the retention passes every test.
+ *
+ * Test-only; nothing in the app reads it.
+ */
+export function __bridgeBaselineCount(): number {
+  return lastSent.size;
 }
 
 /** Install the host side (main window only). Returns the uninstaller. */

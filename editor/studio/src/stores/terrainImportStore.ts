@@ -321,9 +321,10 @@ export const useTerrainImportStore = create<TerrainImportState>((set, get) => ({
  * after the first `await`, so StrictMode's double mount subscribed twice and
  * orphaned the first handle.
  */
-export const initTerrainImportSync = refCountedInit(async () => {
+export const initTerrainImportSync = refCountedInit(async (sink) => {
   const unlisten = await listenTo("assets://import", (e) =>
     useTerrainImportStore.getState().applyImportEvent(e),
   );
+  sink(unlisten);
   return () => unlisten();
 });

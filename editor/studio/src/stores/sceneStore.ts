@@ -518,10 +518,11 @@ export function registerSceneCommands(): void {
  * `world://delta` is the hottest channel in the editor, so every scene change
  * was reduced into the store twice over.
  */
-export const initSceneSync = refCountedInit(async () => {
+export const initSceneSync = refCountedInit(async (sink) => {
   const unlisten = await listenTo("world://delta", (delta) =>
     useSceneStore.getState().applyDelta(delta),
   );
+  sink(unlisten);
   try {
     useSceneStore.getState().applySnapshot(await sceneIpc.snapshot());
   } catch (e) {

@@ -74,19 +74,19 @@ pub fn confine_existing(
     Ok(target)
 }
 
-/// Confine a path that **may not exist yet** (the write/create case), returning
-/// the path to write.
+/// Split a path into its nearest **existing ancestor** and the tail below it.
 ///
-/// The nearest existing ancestor is canonicalized and checked; the remaining
-/// components are re-joined onto it. A `..` in the tail is refused outright
-/// rather than normalized, because a tail that walks upward is never something a
-/// save dialog produced.
-pub fn confine_for_write(
-    app: &AppHandle,
-    project: &ProjectState,
-    path: impl AsRef<Path>,
-) -> Result<PathBuf, String> {
-    let path = path.as_ref();
+/// The pure half of [`confine_for_write`], separated so it has somewhere to be
+/// asserted: the whole function needs an `AppHandle`, which a unit test cannot
+/// build, and that is why the write door had no arm of its own (a round-2 LOW).
+///
+/// The tail can never contain `..`: `Path::file_name` answers `None` for a path
+/// ending in one, which is the "no existing ancestor" refusal below. The
+/// previous `if name == ".."` arm was therefore **dead code** — it read as the
+/// guard against an upward walk and could not fire. The real guard is that the
+/// ancestor is canonicalized (which resolves every `..` in it) and *then*
+/// checked, so `C:/proj/../../secrets/new.txt` is decided on `C:/secrets`.
+fn split_existing_ancestor(path: &Path) -> Result<(PathBuf, Vec<std::ffi::OsString>), String> {
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     let mut cursor = path.to_path_buf();
     loop {
@@ -94,21 +94,38 @@ pub fn confine_for_write(
             break;
         }
         let Some(name) = cursor.file_name().map(|n| n.to_os_string()) else {
+            // No file name means the tail ends in `.`, `..`, a root or a
+            // prefix — none of which a save dialog produces, and all of which
+            // would make the re-join below meaningless.
             return Err("refusing a path with no existing ancestor".into());
         };
-        if name == ".." {
-            return Err("refusing a path that walks above its own directory".into());
-        }
         tail.push(name);
         if !cursor.pop() {
             return Err("refusing a path with no existing ancestor".into());
         }
     }
+    tail.reverse();
+    Ok((cursor, tail))
+}
+
+/// Confine a path that **may not exist yet** (the write/create case), returning
+/// the path to write.
+///
+/// The nearest existing ancestor is canonicalized and checked; the remaining
+/// components are re-joined onto it, so a new file inherits its parent's
+/// verdict and `../../..` cannot escape — canonicalizing the ancestor resolves
+/// the upward walk *before* the check sees it.
+pub fn confine_for_write(
+    app: &AppHandle,
+    project: &ProjectState,
+    path: impl AsRef<Path>,
+) -> Result<PathBuf, String> {
+    let (cursor, tail) = split_existing_ancestor(path.as_ref())?;
     let base = std::fs::canonicalize(&cursor)
         .map_err(|e| format!("cannot resolve the containing directory: {e}"))?;
     check(app, project, &base)?;
     let mut out = base;
-    for name in tail.into_iter().rev() {
+    for name in tail {
         out.push(name);
     }
     Ok(out)
@@ -139,8 +156,19 @@ pub fn confine_under(root: &Path, rel: &str) -> Result<PathBuf, String> {
 }
 
 fn check(app: &AppHandle, project: &ProjectState, target: &Path) -> Result<(), String> {
-    let allowed = allowed_roots(app, project);
+    check_against(&allowed_roots(app, project), target)
+}
+
+/// The containment rule itself, against a given root set.
+///
+/// Split out for the same reason as [`split_existing_ancestor`]: `allowed_roots`
+/// needs an `AppHandle`, the rule does not, and until this split the only
+/// confinement arm in the file was `confine_under`'s.
+fn check_against(allowed: &[PathBuf], target: &Path) -> Result<(), String> {
     if allowed.is_empty() {
+        // **Fails closed.** With no project open and no app-data dir there is
+        // nothing legitimate to touch, and the alternative — falling back to
+        // "anywhere" — is the defect L7.H6 closed.
         return Err(
             "no project is open, so there is nothing this command is allowed to touch".into(),
         );
@@ -193,6 +221,135 @@ mod tests {
                 "must refuse {bad:?} — this is the argument `git_discard` deletes"
             );
         }
+    }
+
+    /// **The write door's own arms** (a round-2 LOW: `confine_for_write` and
+    /// `confine_existing` had none — only `confine_under` did, and it is the
+    /// one that needs no Tauri handle).
+    ///
+    /// The two halves that decide a write are pure once they are separated from
+    /// `allowed_roots`, which is what `split_existing_ancestor` and
+    /// `check_against` are for. Driven against a real temp directory, because
+    /// "the nearest ancestor that EXISTS" is a filesystem question.
+    #[test]
+    fn a_new_file_inherits_its_existing_ancestors_verdict() {
+        let root = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(root.path()).unwrap();
+        std::fs::create_dir_all(real.join("Content/Levels")).unwrap();
+
+        // A file that does not exist yet, under a directory that does.
+        let target = real.join("Content/Levels/New.inf_lvl");
+        let (base, tail) = split_existing_ancestor(&target).expect("an ancestor exists");
+        assert_eq!(base, real.join("Content/Levels"));
+        assert_eq!(tail, vec![std::ffi::OsString::from("New.inf_lvl")]);
+        assert!(check_against(&[real.clone()], &base).is_ok());
+
+        // Several missing levels at once: the whole tail is carried, in order.
+        let deep = real.join("Content/Levels/a/b/c.inf_lvl");
+        let (base, tail) = split_existing_ancestor(&deep).expect("an ancestor exists");
+        assert_eq!(base, real.join("Content/Levels"));
+        assert_eq!(
+            tail,
+            vec![
+                std::ffi::OsString::from("a"),
+                std::ffi::OsString::from("b"),
+                std::ffi::OsString::from("c.inf_lvl"),
+            ],
+            "the tail must re-join in the order it was walked, or the path is scrambled"
+        );
+    }
+
+    /// The upward walk, decided where it is actually decided: on the
+    /// **canonicalized ancestor**, not on the tail.
+    ///
+    /// The `if name == ".."` arm this replaces was dead code —
+    /// `Path::file_name` answers `None` for a path ending in `..`, so that
+    /// branch could never be reached and the guard it appeared to be was not
+    /// one. What does the work is that the ancestor is canonicalized (which
+    /// resolves the `..`) before `check_against` sees it.
+    #[test]
+    fn an_upward_walk_is_decided_on_the_resolved_ancestor() {
+        let outer = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(outer.path()).unwrap();
+        let project = real.join("proj");
+        std::fs::create_dir_all(project.join("Content")).unwrap();
+
+        // `<proj>/Content/../../escaped.txt` — the ancestor exists and
+        // canonicalizes OUT of the project.
+        let escaping = project.join("Content/../../escaped.txt");
+        let (base, tail) = split_existing_ancestor(&escaping).expect("an ancestor exists");
+        let resolved = std::fs::canonicalize(&base).unwrap();
+        assert_eq!(tail, vec![std::ffi::OsString::from("escaped.txt")]);
+        assert!(
+            check_against(&[project.clone()], &resolved).is_err(),
+            "the resolved ancestor is {} — outside {}",
+            resolved.display(),
+            project.display()
+        );
+
+        // …and the same shape INSIDE the project is allowed, or the guard is
+        // just a refusal of everything.
+        let inside = project.join("Content/../Content/ok.txt");
+        let (base, _) = split_existing_ancestor(&inside).expect("an ancestor exists");
+        let resolved = std::fs::canonicalize(&base).unwrap();
+        assert!(check_against(&[project], &resolved).is_ok());
+    }
+
+    /// A path with nothing existing above it is refused rather than re-joined
+    /// onto whatever `canonicalize` makes of it.
+    #[test]
+    fn a_path_with_no_existing_ancestor_is_refused() {
+        // A path ending in `..` has no `file_name`, which is exactly the case
+        // the dead arm claimed to cover.
+        let nowhere = std::path::Path::new("Q:/no-such-volume/a/..");
+        assert!(split_existing_ancestor(nowhere).is_err());
+        assert!(split_existing_ancestor(std::path::Path::new("Q:/no-such-volume/a")).is_err());
+    }
+
+    /// **Fails closed.** With no project open and no app-data dir there is
+    /// nothing legitimate to touch; the alternative — falling back to
+    /// "anywhere" — is the defect L7.H6 closed.
+    #[test]
+    fn an_empty_root_set_refuses_everything() {
+        let anywhere = std::path::Path::new("C:/Users/somebody/.ssh/id_rsa");
+        let err = check_against(&[], anywhere).expect_err("must refuse");
+        assert!(err.contains("no project is open"), "{err}");
+    }
+
+    /// Containment is a PREFIX test on canonical paths, and a sibling directory
+    /// whose name merely starts with the root's is not inside it.
+    #[test]
+    fn a_sibling_with_a_shared_prefix_is_outside() {
+        let root = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(root.path()).unwrap();
+        let proj = real.join("proj");
+        let sibling = real.join("proj-backup");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        assert!(check_against(&[proj.clone()], &proj.join("Content")).is_ok());
+        assert!(
+            check_against(&[proj], &sibling.join("Content")).is_err(),
+            "`starts_with` on a Path compares COMPONENTS, and this arm is what \
+             says so — the string test it is often mistaken for accepts this"
+        );
+    }
+
+    /// Both roots are honoured: the app-data dir is where loose Content and
+    /// quicksaves live before a project is opened.
+    #[test]
+    fn either_allowed_root_is_enough() {
+        let root = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(root.path()).unwrap();
+        let proj = real.join("proj");
+        let appdata = real.join("appdata");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::create_dir_all(&appdata).unwrap();
+
+        let roots = vec![proj.clone(), appdata.clone()];
+        assert!(check_against(&roots, &proj.join("a.txt")).is_ok());
+        assert!(check_against(&roots, &appdata.join("b.txt")).is_ok());
+        assert!(check_against(&roots, &real.join("c.txt")).is_err());
     }
 
     /// The reason every check canonicalizes: a prefix test on the raw string is

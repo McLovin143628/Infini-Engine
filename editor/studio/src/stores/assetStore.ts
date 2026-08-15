@@ -648,19 +648,26 @@ export async function importViaDialog(): Promise<void> {
  * first set of handles. See `refCountedInit` for why a plain synchronous flag
  * is not enough either.
  */
-export const initAssetSync = refCountedInit(async () => {
+export const initAssetSync = refCountedInit(async (sink) => {
+  // Each handle goes into the sink AS IT IS TAKEN (round-2 finding R2-7). The
+  // `Promise.all` below can reject, and before the sink that left all four
+  // subscriptions live with nothing holding a reference to release them.
   const unlistenChanged = await listenTo("assets://changed", () =>
     void useAssetStore.getState().refresh(),
   );
+  sink(unlistenChanged);
   const unlistenImport = await listenTo("assets://import", (e) =>
     useAssetStore.getState().applyImportEvent(e),
   );
+  sink(unlistenImport);
   const unlistenCollections = await listenTo("collections://changed", () =>
     void useAssetStore.getState().fetchCollections(),
   );
+  sink(unlistenCollections);
   const unlistenProject = await listenTo("project://changed", () =>
     void useAssetStore.getState().fetchCollections(),
   );
+  sink(unlistenProject);
   await Promise.all([
     useAssetStore.getState().refresh(),
     useAssetStore.getState().fetchCollections(),

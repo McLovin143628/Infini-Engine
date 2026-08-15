@@ -14,9 +14,21 @@
 // a whole-value send. Every case below asserts that, and then asserts the SIZE
 // claim separately, because a diff that is correct but ships everything anyway
 // fixes nothing.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { applySlicePatch, diffSlice } from "../window/storeBridge";
+// The bridge emits a Tauri event when a window opens; there is no Tauri here.
+vi.mock("@tauri-apps/api/event", () => ({
+  emit: vi.fn(async () => {}),
+  listen: vi.fn(async () => () => {}),
+}));
+
+import {
+  applySlicePatch,
+  diffSlice,
+  registerBridgedStore,
+  setPanelWindowCount,
+  __bridgeBaselineCount,
+} from "../window/storeBridge";
 
 /** Apply a patch the way the mirror does — `setState`'s shallow merge. */
 function roundTrip(
@@ -175,5 +187,55 @@ describe("the slice as a whole", () => {
       typeof diffSlice
     >;
     expect({ ...prev, ...applySlicePatch(prev, wire!) }).toEqual(next);
+  });
+});
+
+/**
+ * **The baseline the host keeps holding after the last window closes**
+ * (round-2 finding R2-4).
+ *
+ * `lastSent` is one whole DATA SLICE per bridged store — the 5 000-line log
+ * ring, the full scene node map — kept as the baseline patches are computed
+ * against. With no panel window open nothing is emitted and the baseline is
+ * stale on purpose, so it is not merely useless: it is a pinned copy of the
+ * largest objects in the editor, held for the rest of the session by a feature
+ * nobody is using.
+ *
+ * The clear is safe because `setPanelWindowCount(n > 0)` re-bases from live
+ * state, and `flush` treats a missing baseline as a full send — which is the
+ * correct answer for a mirror that holds nothing.
+ */
+describe("the host's patch baseline", () => {
+  /** A zustand-shaped store holding one big-ish slice. */
+  function fakeStore(lines: string[]) {
+    const state = { lines, act: () => {} };
+    return {
+      getState: () => state,
+      subscribe: () => () => {},
+    };
+  }
+
+  it("is dropped when the last panel window closes", () => {
+    registerBridgedStore("r2-4-log", fakeStore(["a", "b", "c"]));
+    setPanelWindowCount(1); // a window opens -> every store is re-based
+    expect(__bridgeBaselineCount()).toBeGreaterThan(0);
+
+    setPanelWindowCount(0);
+    expect(
+      __bridgeBaselineCount(),
+      "the host is still pinning a full slice per store with nothing to send it to",
+    ).toBe(0);
+  });
+
+  it("is re-based the moment a window opens again", () => {
+    // The other direction: dropping it must not leave the next window syncing
+    // against nothing. `emitAllSnapshots` re-bases from LIVE state, which is
+    // also why the stale copy was worth nothing.
+    registerBridgedStore("r2-4-log", fakeStore(["a"]));
+    setPanelWindowCount(0);
+    expect(__bridgeBaselineCount()).toBe(0);
+    setPanelWindowCount(1);
+    expect(__bridgeBaselineCount()).toBeGreaterThan(0);
+    setPanelWindowCount(0);
   });
 });

@@ -180,8 +180,14 @@ export function listenToDynamic<T>(
  * @param start Subscribe and return the teardown. Called at most once per
  *   0 → 1 holder transition.
  */
+/**
+ * Where a `start` function reports each disposer as it takes it, so a partial
+ * start can be undone (round-2 finding R2-7).
+ */
+export type DisposerSink = (dispose: UnlistenFn) => void;
+
 export function refCountedInit(
-  start: () => Promise<() => void>,
+  start: (sink: DisposerSink) => Promise<() => void>,
 ): () => Promise<() => void> {
   let holders = 0;
   let pending: Promise<() => void> | null = null;
@@ -189,13 +195,32 @@ export function refCountedInit(
   return async function acquire(): Promise<() => void> {
     // Synchronous, BEFORE the await below — this is the whole fix.
     holders += 1;
-    const p = (pending ??= start());
+    // **The partial-start sink** (round-2 finding R2-7). `start` obtains its
+    // disposers one `await` at a time; if a later one REJECTS it never returns
+    // a teardown, so every handle it had already taken is orphaned — subscribed
+    // for the life of the process with nothing holding a reference to release
+    // it. The failure is exactly the kind that happens in a batch (the IPC
+    // bridge going away), so it strands all of them at once.
+    //
+    // `start` pushes each disposer here as it takes it, and a rejection drains
+    // the sink. A `start` that ignores the argument keeps the old behaviour,
+    // which is why it is a parameter rather than a required return.
+    const collected: UnlistenFn[] = [];
+    const sink: DisposerSink = (d) => collected.push(d);
+    const p = (pending ??= start(sink));
     let teardown: () => void;
     try {
       teardown = await p;
     } catch (e) {
       holders -= 1;
       if (pending === p) pending = null;
+      for (const d of collected.splice(0)) {
+        try {
+          d();
+        } catch {
+          /* one bad disposer must not strand the rest */
+        }
+      }
       throw e;
     }
     let released = false;

@@ -179,6 +179,25 @@ function createSession(key: string, cwd: string | null): PtySession {
   // bytes into a disposed xterm on every `pty://output` for the life of the
   // process. Each handle is released the moment it is seen to be late, and the
   // failure path stops writing into a terminal that no longer exists.
+  // **Declared OUTSIDE the `try`** (round-2 finding R2-8). These lived inside
+  // it, so the `catch` could not name them: if `listenExit` REJECTED, the
+  // output handle taken a line earlier existed nowhere — not in
+  // `session.unlisten` (it is published only once both resolve) and not in any
+  // reachable local — and every later `pty://output` wrote into a disposed
+  // xterm for the life of the process. The pre-wave code pushed each handle
+  // individually and could not lose one; the fix that stopped the drained-array
+  // race introduced this.
+  const handles: UnlistenFn[] = [];
+  const releaseLate = () => {
+    for (const u of handles.splice(0)) {
+      try {
+        u();
+      } catch {
+        /* one bad disposer must not strand the rest */
+      }
+    }
+  };
+
   session.ready = (async () => {
     try {
       const id = await deps.backend.create(cwd, term.cols || 80, term.rows || 24);
@@ -194,23 +213,15 @@ function createSession(key: string, cwd: string | null): PtySession {
       // array cannot release what lands in it afterwards. From here on
       // `session.id` is set, so the teardown closes the backend PTY itself;
       // only the listeners need releasing here.
-      const handles: UnlistenFn[] = [];
-      const releaseLate = () => {
-        for (const u of handles) {
-          try {
-            u();
-          } catch {
-            /* ignore */
-          }
-        }
-      };
-
       handles.push(await deps.listenOutput(id, term));
       if (session.disposed) return releaseLate();
       handles.push(await deps.listenExit(id, term));
       if (session.disposed) return releaseLate();
-      session.unlisten.push(...handles);
+      session.unlisten.push(...handles.splice(0));
     } catch (e) {
+      // Whatever was taken before the failure is released here — that is the
+      // whole reason `handles` is declared above.
+      releaseLate();
       if (session.disposed) return;
       term.writeln(`\r\n\x1b[31mfailed to start terminal: ${String(e)}\x1b[0m`);
     }

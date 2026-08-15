@@ -272,10 +272,13 @@ export function registerSimCommands(): void {
  * channels twice — and a doubled `sim://debug` handler pauses Simulate twice
  * per breakpoint hit.
  */
-export const initSimSync = refCountedInit(async () => {
+export const initSimSync = refCountedInit(async (sink) => {
   const unlisten = await listenTo("sim://state", (running) =>
     useSimStore.getState().syncRunning(running),
   );
+  // The second subscribe can reject; without the sink the first is orphaned
+  // (round-2 finding R2-7).
+  sink(unlisten);
   const unlistenDebug = await listenTo("sim://debug", (events) => {
     if (events.some((e) => e.hits.length > 0)) {
       useSimStore.getState().pause();
@@ -286,6 +289,7 @@ export const initSimSync = refCountedInit(async () => {
   } catch (e) {
     console.error("sim.isRunning failed", e);
   }
+  sink(unlistenDebug);
   return () => {
     unlisten();
     unlistenDebug();

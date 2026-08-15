@@ -156,23 +156,40 @@ async function activateForActive(): Promise<void> {
  * the teardown: they describe the *backend server's* state, which outlives this
  * bridge's listeners.
  */
-export const initLsp = refCountedInit(async () => {
-  const disposers: UnlistenFn[] = [];
-
-  disposers.push(
-    await onLspStarted((p) => useLspStore.getState().setStatus(p.language, "running")),
-  );
-  disposers.push(
-    await onLspStopped((p) => useLspStore.getState().setStatus(p.language, "stopped")),
-  );
-  disposers.push(
-    await onLspDiagnostics(({ uri, diagnostics }) => {
+export const initLsp = refCountedInit(async (sink) => {
+  // **Three subscribes at once, and every survivor accounted for** (round-2
+  // LOW + R2-7). This awaited them one at a time, which is the ptyRegistry
+  // lesson Wave F wrote down and did not apply to its sibling in the same wave:
+  // a rejection on the second left the first subscribed with nothing holding a
+  // reference to release it.
+  //
+  // `allSettled` rather than `all`, deliberately: `all` rejects on the first
+  // failure while the others are still resolving, and those handles then arrive
+  // with no owner at all. Settling every one first means each is either in the
+  // sink or never existed.
+  const settled = await Promise.allSettled([
+    onLspStarted((p) => useLspStore.getState().setStatus(p.language, "running")),
+    onLspStopped((p) => useLspStore.getState().setStatus(p.language, "stopped")),
+    onLspDiagnostics(({ uri, diagnostics }) => {
       useLspStore.getState().setDiagnostics(uri, diagnostics);
       const path = activeTabPath();
       const view = getActiveView();
       if (view && path && pathToUri(path) === uri) pushDiagnostics(view, diagnostics);
     }),
-  );
+  ]);
+  const disposers: UnlistenFn[] = [];
+  for (const r of settled) {
+    if (r.status === "fulfilled") {
+      disposers.push(r.value);
+      sink(r.value);
+    }
+  }
+  const failed = settled.find((r) => r.status === "rejected");
+  if (failed && failed.status === "rejected") {
+    // `refCountedInit` drains the sink on the way out, so the handles that DID
+    // resolve are released rather than left subscribed for the process.
+    throw failed.reason instanceof Error ? failed.reason : new Error(String(failed.reason));
+  }
 
   // React to the active tab changing.
   let lastActive: string | null = null;

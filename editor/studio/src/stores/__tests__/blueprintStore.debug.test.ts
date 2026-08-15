@@ -56,15 +56,23 @@ describe("breakpoint slice", () => {
   });
 
   it("persists breakpoints per graph in localStorage", () => {
+    // Keyed on the document's NAME (a round-2 LOW). The id is `bp:{counter}`
+    // and the counter is per PROCESS, restarting at 1 every session — so
+    // `bp:debug:bp:1` meant "whichever graph was created first this run", and
+    // last session's breakpoints reloaded onto a different graph.
+    const key = `bp:debug:name:${fakeDoc.name}`;
     useBlueprintStore.getState().toggleBreakpoint(7);
     useBlueprintStore.getState().toggleBreakpoint(9);
-    const raw = localStorage.getItem("bp:debug:bp:test");
+    const raw = localStorage.getItem(key);
     expect(raw).not.toBeNull();
     expect(JSON.parse(raw as string).sort()).toEqual([7, 9]);
 
     // Removing one updates the persisted set.
     useBlueprintStore.getState().toggleBreakpoint(7);
-    expect(JSON.parse(localStorage.getItem("bp:debug:bp:test") as string)).toEqual([9]);
+    expect(JSON.parse(localStorage.getItem(key) as string)).toEqual([9]);
+
+    // …and the key does NOT carry the session-local id.
+    expect(localStorage.getItem(`bp:debug:${fakeDoc.id}`)).toBeNull();
   });
 });
 

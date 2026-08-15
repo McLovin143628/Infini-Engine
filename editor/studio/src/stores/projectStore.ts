@@ -164,10 +164,13 @@ export function registerProjectCommands(): void {
  * after the first `await`, so StrictMode's double mount subscribed twice and
  * orphaned the first handle.
  */
-export const initProjectSync = refCountedInit(async () => {
+export const initProjectSync = refCountedInit(async (sink) => {
   const unlisten = await listenTo("project://changed", (info) =>
     useProjectStore.getState().applyChanged(info),
   );
+  // The `refresh` below can reject, and without the sink that stranded the
+  // subscription above for the life of the process (round-2 finding R2-7).
+  sink(unlisten);
   await useProjectStore.getState().refresh();
   return () => unlisten();
 });

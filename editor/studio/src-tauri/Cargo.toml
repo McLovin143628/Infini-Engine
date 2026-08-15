@@ -61,6 +61,12 @@ portable-pty = { workspace = true }
 ignore = { workspace = true }
 regex = { workspace = true }
 
+[dev-dependencies]
+# The confinement arms in `commands/paths.rs` decide "the nearest ancestor that
+# EXISTS", which is a filesystem question and has to be asked of a real
+# directory. Version pinned once in the workspace manifest, per the rules.
+tempfile = { workspace = true }
+
 [features]
 # Tracy live profiler capture for the editor (P15.1). OFF by default. Build with
 # `cargo tauri dev --features tracy` (or `cargo build -p inf-studio --features

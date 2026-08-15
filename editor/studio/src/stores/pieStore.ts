@@ -206,8 +206,9 @@ export function registerPieCommands(): void {
  * after the first `await`, so StrictMode's double mount subscribed twice and
  * orphaned the first handle.
  */
-export const initPieSync = refCountedInit(async () => {
+export const initPieSync = refCountedInit(async (sink) => {
   const unlisten = await listenTo("pie://state", (ev) => usePieStore.getState().syncState(ev));
+  sink(unlisten);
   try {
     usePieStore.getState().syncRunning(await pieIpc.isRunning());
   } catch (e) {

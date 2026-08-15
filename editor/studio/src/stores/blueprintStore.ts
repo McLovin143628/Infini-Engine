@@ -19,15 +19,26 @@ import { applyEditsLocal } from "../panels/blueprint/reducer";
 
 // ── B-P4 debugger: breakpoints persist per graph in localStorage. ────────────
 
-/** The localStorage key holding a graph's breakpoint node ids. */
-function bpKey(graphId: string): string {
-  return `bp:debug:${graphId}`;
+/**
+ * The localStorage key holding a graph's breakpoint node ids.
+ *
+ * Keyed on the document's **name**, not its id (a round-2 LOW). A `GraphDoc`
+ * id is `bp:{counter}` where the counter is per PROCESS and restarts at 1 every
+ * session, so `bp:debug:bp:1` named "whichever graph happened to be created
+ * first this run" — last session's breakpoints reloaded onto a different graph,
+ * silently, and pausing somewhere the author never asked for is worse than not
+ * pausing at all. The name is what the author sees and what identifies the
+ * document to them; it is the best identity a session-scoped document has,
+ * since `graph_create` takes no asset key.
+ */
+function bpKey(graphName: string): string {
+  return `bp:debug:name:${graphName}`;
 }
 
 /** Load a graph's persisted breakpoints (best-effort; empty on any failure). */
-function loadBreakpoints(graphId: string): Set<number> {
+function loadBreakpoints(graphName: string): Set<number> {
   try {
-    const raw = localStorage.getItem(bpKey(graphId));
+    const raw = localStorage.getItem(bpKey(graphName));
     if (!raw) return new Set();
     const arr = JSON.parse(raw) as unknown;
     return new Set(Array.isArray(arr) ? arr.filter((n): n is number => typeof n === "number") : []);
@@ -37,9 +48,9 @@ function loadBreakpoints(graphId: string): Set<number> {
 }
 
 /** Persist a graph's breakpoints (best-effort). */
-function saveBreakpoints(graphId: string, bps: Set<number>): void {
+function saveBreakpoints(graphName: string, bps: Set<number>): void {
   try {
-    localStorage.setItem(bpKey(graphId), JSON.stringify([...bps]));
+    localStorage.setItem(bpKey(graphName), JSON.stringify([...bps]));
   } catch {
     /* storage unavailable — breakpoints stay in-memory only */
   }
@@ -163,7 +174,7 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
           doc,
           ready: true,
           // Restore this graph's persisted breakpoints.
-          debugBreakpoints: loadBreakpoints(doc.id),
+          debugBreakpoints: loadBreakpoints(doc.name),
         });
       } catch (e) {
         console.error("blueprint.init failed", e);
@@ -305,7 +316,7 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
     if (next.has(id)) next.delete(id);
     else next.add(id);
     set({ debugBreakpoints: next });
-    if (doc) saveBreakpoints(doc.id, next);
+    if (doc) saveBreakpoints(doc.name, next);
   },
 
   debugRun: async () => {

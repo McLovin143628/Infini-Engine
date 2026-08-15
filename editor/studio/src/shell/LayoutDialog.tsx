@@ -150,7 +150,17 @@ function LoadBody({ onDone }: { onDone: (name: string) => void }) {
             aria-label={`Delete layout ${p.name}`}
             className="mr-1 hidden rounded p-1 text-(--ink-text-faint) group-hover:block hover:bg-(--ink-error)/15 hover:text-(--ink-error)"
             onClick={() => {
-              void layouts.delete(p.name).then(refresh);
+              // The rejection AND the answer were both dropped (a round-2 LOW):
+              // this component has a `setError` two lines up, used by the load
+              // path, and a delete that failed refreshed a list that still had
+              // the preset in it and said nothing.
+              void layouts
+                .delete(p.name)
+                .then((ok) => {
+                  if (!ok) setError(`Could not delete \u201c${p.name}\u201d.`);
+                  return refresh();
+                })
+                .catch((e) => setError(`Could not delete \u201c${p.name}\u201d: ${String(e)}`));
             }}
           >
             <Trash2 size={13} />

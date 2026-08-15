@@ -265,6 +265,52 @@ describe("the close race while a session is still wiring up (L7.M9)", () => {
     expect(s.unlisten).toHaveLength(2);
   });
 
+  /**
+   * **The handle the `catch` could not name** (round-2 finding R2-8).
+   *
+   * `handles` and `releaseLate` were declared INSIDE the `try`, so if
+   * `listenExit` rejected the output handle taken a line earlier existed
+   * nowhere reachable: not in `session.unlisten` (it is published only once
+   * both resolve) and not in any live local. Every later `pty://output` then
+   * wrote into a disposed xterm for the life of the process.
+   *
+   * The pre-wave code pushed each handle individually and could not lose one;
+   * the fix that closed the drained-array race introduced this.
+   */
+  it("releases the output listener when the exit listener rejects", async () => {
+    const outUnlisten = vi.fn();
+    __setPtyDepsForTest({
+      listenOutput: vi.fn(async () => outUnlisten),
+      listenExit: vi.fn(() => Promise.reject(new Error("the bridge went away"))),
+    });
+
+    const s = acquirePtySession("terminal", "/proj");
+    await s.ready;
+
+    expect(
+      outUnlisten,
+      "the output listener survived a failed start with nothing holding it",
+    ).toHaveBeenCalledTimes(1);
+    expect(s.unlisten, "…and it must not be published as a live handle").toHaveLength(0);
+  });
+
+  it("does not release the listeners of a start that worked", async () => {
+    // The other direction: "always release" would pass the arm above.
+    const outUnlisten = vi.fn();
+    const exitUnlisten = vi.fn();
+    __setPtyDepsForTest({
+      listenOutput: vi.fn(async () => outUnlisten),
+      listenExit: vi.fn(async () => exitUnlisten),
+    });
+
+    const s = acquirePtySession("terminal", "/proj");
+    await s.ready;
+
+    expect(outUnlisten).not.toHaveBeenCalled();
+    expect(exitUnlisten).not.toHaveBeenCalled();
+    expect(s.unlisten).toHaveLength(2);
+  });
+
   it("does not write a failure banner into a terminal that was disposed", async () => {
     __setPtyDepsForTest({
       backend: {

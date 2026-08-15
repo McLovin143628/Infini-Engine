@@ -149,6 +149,62 @@ describe("refCountedInit", () => {
     expect(teardown).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * **The partial start** (round-2 finding R2-7).
+   *
+   * A `start` takes its disposers one `await` at a time. When a later one
+   * rejects it never returns a teardown, so everything it had already
+   * subscribed was orphaned: live for the life of the process, with no
+   * reference anywhere that could release it. The failure that causes this is
+   * exactly the kind that hits a whole batch (the IPC bridge going away), so it
+   * stranded all of them at once.
+   */
+  it("releases what a failed start had already taken", async () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const acquire = refCountedInit(async (sink) => {
+      sink(first);
+      sink(second);
+      throw new Error("the third listen failed");
+    });
+
+    await expect(acquire()).rejects.toThrow("the third listen failed");
+    expect(first, "a subscription outlived the start that took it").toHaveBeenCalledTimes(1);
+    expect(second).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not release a sink a start SUCCEEDED with", async () => {
+    // The other direction. Draining on success would tear down the listeners
+    // the caller is about to be handed — a correct-looking init that hears
+    // nothing.
+    const held = vi.fn();
+    const teardown = vi.fn();
+    const acquire = refCountedInit(async (sink) => {
+      sink(held);
+      return teardown;
+    });
+
+    const dispose = await acquire();
+    expect(held).not.toHaveBeenCalled();
+    dispose();
+    expect(teardown).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps draining when one disposer throws", async () => {
+    const bad = vi.fn(() => {
+      throw new Error("already gone");
+    });
+    const good = vi.fn();
+    const acquire = refCountedInit(async (sink) => {
+      sink(bad);
+      sink(good);
+      throw new Error("start failed");
+    });
+
+    await expect(acquire()).rejects.toThrow("start failed");
+    expect(good, "one bad disposer stranded the rest").toHaveBeenCalledTimes(1);
+  });
+
   it("propagates a failed start and lets the next caller retry", async () => {
     let attempt = 0;
     const teardown = vi.fn();
