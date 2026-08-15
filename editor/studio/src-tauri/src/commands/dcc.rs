@@ -2791,6 +2791,24 @@ mod tests {
         );
     }
 
+    /// **The source pin for R2.F4.** The defect is a *skipped upload*, and no
+    /// instrument in this repo can see one: the preview command returns a PNG
+    /// either way, the cache's counters say a scratch was tessellated (it was),
+    /// and only a human looking at a stale surface knows. `PreviewCache`'s own
+    /// arm holds the stamp's semantics; this holds the call site to using it.
+    #[test]
+    fn the_preview_uploads_on_the_cache_s_own_stamp() {
+        let body = code_only(&body_of(SOURCE, "pub async fn dcc_preview("));
+        assert!(
+            body.contains("doc.preview.upload_stamp()"),
+            "dcc_preview must key the vertex-buffer upload on the stamp the CACHE              served, not on the journal generation — a live drag does not move the              generation, which is the whole reason the scratch channel exists"
+        );
+        assert!(
+            !body.contains("session.generation(),"),
+            "…and must not pass the generation as the wire stamp, which is R2.F4"
+        );
+    }
+
     /// **Round-2 finding R2.F15**: a project switch strands every open session.
     ///
     /// Asserted as WORLD state (the store is empty) rather than as "the call was
