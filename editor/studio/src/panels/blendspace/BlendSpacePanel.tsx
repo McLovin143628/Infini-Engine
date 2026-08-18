@@ -114,6 +114,12 @@ export default function BlendSpacePanel() {
 
   const onPaneDoubleClick = useCallback(
     (e: React.MouseEvent) => {
+      // Only the empty pane places a sample. A double-click that lands on an
+      // existing sample (or on the query cross) is two clicks on that thing, and
+      // dropping a second sample underneath the first is the one gesture that
+      // produces a duplicate position — which the triangulator collapses, so the
+      // author would see nothing happen and try again.
+      if (e.target !== svgRef.current) return;
       const rect = svgRef.current?.getBoundingClientRect();
       if (!rect) return;
       const px = ((e.clientX - rect.left) / rect.width) * VIEW;
