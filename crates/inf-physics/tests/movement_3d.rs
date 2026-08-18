@@ -16,7 +16,8 @@
 use glam::DVec3;
 use inf_ecs::components::{
     BodyKind3D, CharacterController3D, CharacterMovement, Collider3D, ColliderShape3DKind, Gait,
-    LandingKind, MovementMode, MovementRefusal, RigidBody3D, RotationMode, Transform, WaterBody,
+    LandingKind, MovementDirection, MovementMode, MovementRefusal, RigidBody3D, RotationMode,
+    Transform, WaterBody,
 };
 use inf_ecs::math::{Vec2d, Vec3d};
 use inf_ecs::movement::MovementIntent;
@@ -1243,4 +1244,223 @@ fn an_npc_keeps_the_gait_and_rotation_mode_it_was_authored_with() {
         hero_pos(&w).z
     );
     assert_eq!(hero(&w).gait, Gait::Sprint, "and its gait follows the keys");
+}
+
+// ── the audit's arms (P29.3 audit) ──────────────────────────────────────────
+
+/// **An authored facing survives the first step** (audit A1).
+///
+/// Step 12 writes `body_yaw_deg` onto the entity's `Transform` every step, and
+/// nothing recomputes that value from the world — a character standing still has
+/// no velocity to face. So a runtime starting at zero wrote a zero over the level
+/// author's placement on step one: measured at 90 degrees in, **0 degrees out**
+/// after a single idle step, for a player character and an NPC alike.
+///
+/// The same defect family as the gait and rotation-mode finding this wave
+/// recorded: an authored value is not the controller's to take.
+#[test]
+fn an_authored_facing_is_not_stomped_on_the_first_step() {
+    fn run(player_controlled: bool, authored_yaw: f64) -> (f64, f64) {
+        let mut w = EcsWorld::new();
+        let mut b = PhysicsBridge3D::new(GRAVITY);
+        spawn_block(
+            &mut w,
+            GROUND,
+            DVec3::new(0.0, -0.5, 0.0),
+            DVec3::new(20.0, 0.5, 20.0),
+        );
+        spawn_hero(&mut w, 0.0, 0.0, 0.0);
+        {
+            let e = w.entity_of(HERO).unwrap();
+            w.world_mut()
+                .get_mut::<CharacterMovement>(e)
+                .unwrap()
+                .player_controlled = player_controlled;
+            w.world_mut().get_mut::<Transform>(e).unwrap().rotation.y = authored_yaw;
+        }
+        let yaw = |w: &EcsWorld| {
+            w.world()
+                .get::<Transform>(w.entity_of(HERO).unwrap())
+                .unwrap()
+                .rotation
+                .y
+        };
+        step(&mut w, &mut b, &idle());
+        let after_one = yaw(&w);
+        for _ in 0..120 {
+            step(&mut w, &mut b, &idle());
+        }
+        (after_one, yaw(&w))
+    }
+
+    for controlled in [false, true] {
+        let (one, many) = run(controlled, 90.0);
+        assert!(
+            (one - 90.0).abs() < 1e-9,
+            "player_controlled = {controlled}: one idle step moved the authored \
+             facing from 90 to {one}"
+        );
+        assert!(
+            (many - 90.0).abs() < 1e-6,
+            "…and two seconds of standing still moved it to {many}"
+        );
+    }
+    // A negative authored yaw is kept as authored rather than folded into
+    // [0, 360): the transform the author wrote is the transform they get back.
+    let (one, _) = run(false, -135.0);
+    assert!((one + 135.0).abs() < 1e-9, "-135 became {one}");
+
+    // Two controls, and between them they are the load-bearing half.
+    //
+    // (1) The seed reaches the AIM FRAME, not just the drawn rotation: the
+    //     movement intent is expressed in that frame, so "forward" for a
+    //     character authored facing +X is +X. A seed that wrote only the
+    //     transform would send it north.
+    // (2) The body can still TURN, so the seeding is a seed and not a body
+    //     frozen where it was placed.
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(80.0, 0.5, 80.0),
+    );
+    spawn_hero(&mut w, 0.0, 0.0, 0.0);
+    {
+        let e = w.entity_of(HERO).unwrap();
+        w.world_mut().get_mut::<Transform>(e).unwrap().rotation.y = 90.0;
+    }
+    for _ in 0..180 {
+        step(&mut w, &mut b, &walk_forward());
+    }
+    let p = hero_pos(&w);
+    assert!(
+        p.x > 3.0 && p.z.abs() < 0.5,
+        "forward for a character authored facing +X is +X: {p:?}"
+    );
+
+    // Now strafe: in the aim frame that is world -Z, so the body must come round
+    // to 180.
+    for _ in 0..300 {
+        step(
+            &mut w,
+            &mut b,
+            &MovementIntent {
+                move_input: EcsVec2d::new(1.0, 0.0),
+                ..Default::default()
+            },
+        );
+    }
+    let yaw = w
+        .world()
+        .get::<Transform>(w.entity_of(HERO).unwrap())
+        .unwrap()
+        .rotation
+        .y;
+    assert!(
+        inf_ecs::movement::angle_delta_deg(yaw, 180.0).abs() < 5.0,
+        "the body must still turn to face where it is going: {yaw}"
+    );
+}
+
+/// **The movement-direction quadrant is derived, and derived from the world**
+/// (audit A4).
+///
+/// `MovementRuntime::direction` is the one derived output with memory — the
+/// hysteresis makes it path-dependent — and it is the input a four-way locomotion
+/// blend space reads (P29.4). No arm read it: freezing it at `Forward` for ever
+/// killed nothing, because the determinism trace records the same frozen byte in
+/// both of its runs.
+///
+/// Asserted in `LookingDirection`, where the body holds its aim and the input
+/// really does move around it; in `VelocityDirection` the body turns to face the
+/// input and every direction is eventually forward, which is the correct
+/// behaviour and a useless measurement.
+#[test]
+fn the_movement_quadrant_follows_the_input_around_the_aim_frame() {
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(80.0, 0.5, 80.0),
+    );
+    spawn_hero(&mut w, 0.0, 0.0, 0.0);
+    {
+        let e = w.entity_of(HERO).unwrap();
+        w.world_mut()
+            .get_mut::<CharacterMovement>(e)
+            .unwrap()
+            .rotation_mode = RotationMode::LookingDirection;
+    }
+    let mut drive = |w: &mut EcsWorld, b: &mut PhysicsBridge3D, x: f64, y: f64| {
+        for _ in 0..90 {
+            step(
+                w,
+                b,
+                &MovementIntent {
+                    move_input: EcsVec2d::new(x, y),
+                    ..Default::default()
+                },
+            );
+        }
+        hero(w).runtime.direction
+    };
+
+    assert_eq!(drive(&mut w, &mut b, 0.0, 1.0), MovementDirection::Forward);
+    assert_eq!(
+        drive(&mut w, &mut b, 1.0, 0.0),
+        MovementDirection::Right,
+        "strafing right is a RIGHT quadrant, not a forward one"
+    );
+    assert_eq!(
+        drive(&mut w, &mut b, 0.0, -1.0),
+        MovementDirection::Backward
+    );
+    assert_eq!(drive(&mut w, &mut b, -1.0, 0.0), MovementDirection::Left);
+    assert_eq!(drive(&mut w, &mut b, 0.0, 1.0), MovementDirection::Forward);
+}
+
+/// **Surface and submerged are two modes, and the fraction chooses** (audit A4).
+///
+/// The swim arm above asserts `is_swimming()`, which both halves satisfy, so a
+/// `SWIM_UNDER_FRACTION` of zero — every swimmer permanently submerged, at the
+/// slower submerged speed — killed nothing. The distinction is the whole reason
+/// P29.3 split P20's one swim state into two modes.
+#[test]
+fn a_swimmer_at_the_surface_is_not_the_same_mode_as_one_underneath() {
+    fn mode_at(feet_y: f64) -> MovementMode {
+        let mut w = EcsWorld::new();
+        let mut b = PhysicsBridge3D::new(GRAVITY);
+        let lake = w.spawn_with_guid(LAKE, "Lake", None);
+        w.world_mut().entity_mut(lake).insert((
+            WaterBody {
+                wave_amplitude_m: 0.0,
+                ..WaterBody::lake(6.0, Vec2d::splat(100.0))
+            },
+            Transform::IDENTITY,
+        ));
+        spawn_block(
+            &mut w,
+            GROUND,
+            DVec3::new(0.0, -0.5, 0.0),
+            DVec3::new(40.0, 0.5, 40.0),
+        );
+        spawn_hero(&mut w, feet_y, 0.0, 0.0);
+        w.mark_dirty();
+        w.propagate();
+        step(&mut w, &mut b, &idle());
+        assert!(b.is_swimming(HERO), "the fixture must be swimming at all");
+        hero(&w).mode
+    }
+    // Feet at 1 m under a surface at 6 m: a 1.8 m capsule is wholly submerged.
+    assert_eq!(mode_at(1.0), MovementMode::SwimUnder);
+    // Feet at 4.6 m: the head is out, and that is a different mode.
+    assert_eq!(
+        mode_at(4.6),
+        MovementMode::SwimSurface,
+        "a swimmer with its head out is at the SURFACE"
+    );
 }

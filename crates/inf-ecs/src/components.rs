@@ -1495,7 +1495,8 @@ impl MovementMode {
         )
     }
 
-    /// Whether this is one of the two airborne modes.
+    /// Whether the character is airborne: the two fall modes **and** `Dive`,
+    /// which is a ballistic leap and integrates under the same air branch.
     pub fn is_falling(self) -> bool {
         matches!(
             self,
@@ -1713,6 +1714,19 @@ impl Default for SpeedCurve {
 /// than private to the integrator.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct MovementRuntime {
+    /// Whether the fixed step has taken this character's **authored facing**
+    /// off its `Transform` yet (P29.3 audit, A1).
+    ///
+    /// The step writes `body_yaw_deg` back onto the entity's rotation every
+    /// step. Every other field here starts at zero and is recomputed before it
+    /// is read; the body yaw is not, because there is nothing to recompute it
+    /// *from* — a character standing still has no velocity to face. So without
+    /// this latch the first step wrote a zero over whatever the level author
+    /// had placed, and a squad of NPCs faced north on their first frame. The
+    /// same shape as the gait and rotation-mode defect this wave found: an
+    /// authored value is not the controller's to take.
+    pub seeded: bool,
+
     // ── intent, written by `crate::movement::apply_intent` ──
     /// Desired planar motion in the **aim frame**: `x` right, `y` forward, each
     /// in `[-1, 1]`.
@@ -1771,7 +1785,10 @@ pub struct MovementRuntime {
     pub ground_normal: Vec3d,
     /// Seconds spent in the current [`MovementMode`].
     pub time_in_mode_s: f64,
-    /// Seconds since the last landing, or a large number if none.
+    /// Seconds since the last landing. Meaningless until
+    /// [`landing`](Self::landing) leaves [`LandingKind::None`], which is the
+    /// latch [`landing_friction_scale`](crate::movement::landing_friction_scale)
+    /// reads rather than trusting this to start large (P29.3 audit, A5).
     pub time_since_land_s: f64,
     /// Downward speed at the last landing, m/s — the classifier's input.
     pub land_impact_mps: f64,

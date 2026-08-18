@@ -447,6 +447,15 @@ pub fn classify_landing(cm: &CharacterMovement, impact_mps: f64, has_input: bool
 /// to 0" half of ALS's rule expressed as a multiplier rather than as an absolute
 /// so it composes with the curve.
 pub fn landing_friction_scale(cm: &CharacterMovement, since_land_s: f64, has_input: bool) -> f64 {
+    // **Nothing has landed yet** (P29.3 audit, A5). `time_since_land_s` starts
+    // at zero like every other runtime field, so a character that had never
+    // left the ground read as one that had landed *this instant* and spent its
+    // first half-second under the post-landing override — a plant it never
+    // earned. The latch is `landing`, which the step writes in the same breath
+    // as the timer, so it is the honest question to ask.
+    if cm.runtime.landing == LandingKind::None {
+        return 1.0;
+    }
     if !since_land_s.is_finite() || since_land_s >= cm.land_friction_time_s {
         return 1.0;
     }
@@ -1205,7 +1214,12 @@ mod tests {
 
     #[test]
     fn landing_friction_is_an_override_with_an_expiry() {
-        let c = cm();
+        // The fixture must have LANDED. The first version did not, and read the
+        // override anyway because `time_since_land_s` starts at zero — the defect
+        // `the_landing_override_waits_for_a_landing_to_have_happened` now pins
+        // from the other side (P29.3 audit, A5).
+        let mut c = cm();
+        c.runtime.landing = LandingKind::Hard;
         assert_eq!(
             landing_friction_scale(&c, 0.0, true),
             c.brake_friction_input
@@ -1452,6 +1466,104 @@ mod tests {
         // The point of an OPEN id: a name the engine has never heard of works.
         let invented = reg.intern("carrying_a_very_specific_crate");
         assert_eq!(reg.name(invented), Some("carrying_a_very_specific_crate"));
+    }
+
+    /// **Turning costs something** (P29.3 audit, A4). The integrator's second
+    /// documented rule — "bleed the component that is NOT along the wish
+    /// direction, so a turn feels like a turn instead of a drift" — had no arm,
+    /// and a mutation that set the bleed factor to 1 (keep everything) killed
+    /// nothing in the tree.
+    ///
+    /// Measured as the thing the rule is for: a character at full speed on +Y
+    /// asked to run +X arrives on its new heading sooner with friction than
+    /// without, and the frictionless control is what makes that a measurement.
+    #[test]
+    fn the_integrator_bleeds_the_velocity_that_is_not_going_where_you_asked() {
+        let dt = 1.0 / 60.0;
+        let run = |friction: f64| {
+            let mut v = Vec2d::new(0.0, 3.75);
+            let mut steps = 0;
+            // "On heading" = the old +Y component is under a tenth of the speed.
+            while steps < 600 && v.y.abs() > 0.1 * (v.x * v.x + v.y * v.y).sqrt() {
+                v = integrate_planar_velocity(
+                    v,
+                    Vec2d::new(1.0, 0.0),
+                    3.75,
+                    8.0,
+                    20.0,
+                    friction,
+                    1.0,
+                    dt,
+                );
+                steps += 1;
+            }
+            (steps, v)
+        };
+        let (with_friction, _) = run(6.0);
+        let (frictionless, tail) = run(0.0);
+        assert!(
+            with_friction < frictionless,
+            "the sideways bleed is not doing anything: {with_friction} steps with \
+             friction vs {frictionless} without"
+        );
+        // …and the control really is the slow one rather than one that never
+        // arrives for some other reason.
+        assert!(
+            frictionless < 600,
+            "the frictionless control never came round at all: {tail:?}"
+        );
+    }
+
+    /// **A character that has never landed is not recovering from a landing**
+    /// (P29.3 audit, A5).
+    ///
+    /// `time_since_land_s` starts at zero like every other runtime field, so the
+    /// window test alone said "landed this instant" for a character that had
+    /// never left the ground — half a second of ALS's 3x plant friction, earned
+    /// by nothing. The latch is `landing`.
+    #[test]
+    fn the_landing_override_waits_for_a_landing_to_have_happened() {
+        let mut c = cm();
+        assert_eq!(c.runtime.landing, LandingKind::None);
+        assert_eq!(
+            landing_friction_scale(&c, 0.0, false),
+            1.0,
+            "nothing has landed, so there is no override to apply"
+        );
+        assert_eq!(landing_friction_scale(&c, 0.0, true), 1.0);
+        // The control: once something HAS landed the override is exactly the one
+        // ALS specifies, so the guard above did not simply disable it.
+        c.runtime.landing = LandingKind::Hard;
+        assert_eq!(
+            landing_friction_scale(&c, 0.0, false),
+            c.brake_friction_idle
+        );
+        assert_eq!(
+            landing_friction_scale(&c, 0.0, true),
+            c.brake_friction_input
+        );
+    }
+
+    /// **Aiming moves slower** (P29.3 audit, A4) — the second half of ALS's
+    /// two-level settings dispatch, which had no arm at all: a
+    /// `rotation_speed_scale` that answered 1.0 for every mode killed nothing.
+    #[test]
+    fn the_rotation_mode_scales_the_target_speed() {
+        let mut c = cm();
+        let at = |c: &CharacterMovement| {
+            settings_for(c, MovementMode::Grounded, Gait::Run, 2.0, 0.0).target_speed_mps
+        };
+        let free = at(&c);
+        assert!((free - c.run_speed_mps).abs() < 1e-12);
+        c.rotation_mode = RotationMode::Aiming;
+        let aiming = at(&c);
+        assert!(
+            (aiming - c.run_speed_mps * c.aiming_speed_scale).abs() < 1e-12,
+            "aiming must scale the target speed: {aiming} vs {free}"
+        );
+        assert!(aiming < free, "and it must be SLOWER: {aiming} vs {free}");
+        c.rotation_mode = RotationMode::LookingDirection;
+        assert!((at(&c) - c.run_speed_mps * c.looking_speed_scale).abs() < 1e-12);
     }
 
     #[test]

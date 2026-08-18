@@ -51,6 +51,11 @@ pub struct InputState {
     // ── resolved snapshot (recomputed each frame) ──
     actions_prev: BTreeSet<String>,
     actions_cur: BTreeSet<String>,
+    // The two halves each axis resolved into this frame, kept because
+    // `axis_snapshot` must divide only the delta one by `dt` and the raw mouse
+    // deltas are cleared by `commit_frame` before anyone can ask again.
+    axis_positions: BTreeMap<String, f32>,
+    axis_deltas: BTreeMap<String, f32>,
     axis_values: BTreeMap<String, f32>,
 }
 
@@ -66,6 +71,8 @@ impl InputState {
             mouse_axes: BTreeMap::new(),
             actions_prev: BTreeSet::new(),
             actions_cur: BTreeSet::new(),
+            axis_positions: BTreeMap::new(),
+            axis_deltas: BTreeMap::new(),
             axis_values: BTreeMap::new(),
         }
     }
@@ -181,53 +188,72 @@ impl InputState {
         })
     }
 
-    fn axis_value(&self, sources: &[AxisSource]) -> f32 {
-        let dz = self.map.deadzone();
-        let mut sum = 0.0;
-        // An axis that names a mouse delta is **not clamped**. Every other
-        // source is bounded by construction — a key is 0 or 1, a stick is
-        // [-1, 1] — so the clamp is free for them and a guard against a map that
-        // binds five keys to one axis. A mouse delta has no such range: a fast
-        // flick is fifty pixels and a slow drag is two, and clamping both to 1
-        // makes them the same gesture, which is exactly the look control every
-        // engine gets wrong once.
-        let unbounded = sources
+    /// Whether any source bound to this axis reports a **delta** rather than a
+    /// position — the one question both the clamp rule and the rate conversion
+    /// turn on.
+    fn has_delta_source(sources: &[AxisSource]) -> bool {
+        sources
             .iter()
-            .any(|s| matches!(s, AxisSource::MouseAxis { .. }));
+            .any(|s| matches!(s, AxisSource::MouseAxis { .. }))
+    }
+
+    /// One axis resolved into its **two physically different halves**: the
+    /// sources that report a POSITION (a key, a button, a stick — read the same
+    /// at any frame rate) and the sources that report an AMOUNT THAT HAPPENED
+    /// this frame (a mouse delta).
+    ///
+    /// They are split rather than summed because only the second half is a
+    /// per-frame quantity, so only the second half may be divided by `dt` to
+    /// become a rate ([`axis_snapshot`](Self::axis_snapshot)). Summing first and
+    /// dividing the total is the shape that made a right stick bound to the same
+    /// axis as the mouse read sixty times its own scale (P29.3 audit, A2) — the
+    /// rate conversion is a property of the SOURCE, exactly as the clamp is.
+    fn axis_parts(&self, sources: &[AxisSource]) -> (f32, f32) {
+        let dz = self.map.deadzone();
+        let mut position = 0.0;
+        let mut delta = 0.0;
         for s in sources {
-            sum += match s {
+            match s {
                 AxisSource::Key { code, scale } => {
                     if self.keys_down.contains(code) {
-                        *scale
-                    } else {
-                        0.0
+                        position += *scale;
                     }
                 }
                 AxisSource::GamepadButton { button, scale } => {
                     if self.buttons_down.contains(button) {
-                        *scale
-                    } else {
-                        0.0
+                        position += *scale;
                     }
                 }
                 AxisSource::GamepadAxis { axis, scale } => {
                     let raw = self.axes_raw.get(axis).copied().unwrap_or(0.0);
-                    apply_deadzone(raw, dz) * *scale
+                    position += apply_deadzone(raw, dz) * *scale;
                 }
                 AxisSource::MouseAxis { axis, scale } => {
                     // No deadzone: a deadzone rescales a *position*, and there
                     // is no position here. A 1-pixel move is a 1-pixel move.
-                    self.mouse_axes.get(axis).copied().unwrap_or(0.0) * *scale
+                    delta += self.mouse_axes.get(axis).copied().unwrap_or(0.0) * *scale;
                 }
                 AxisSource::MouseButton { button, scale } => {
                     if self.mouse_down.contains(button) {
-                        *scale
-                    } else {
-                        0.0
+                        position += *scale;
                     }
                 }
-            };
+            }
         }
+        (position, delta)
+    }
+
+    /// The two halves recombined under the axis's clamp rule.
+    ///
+    /// An axis that names a mouse delta is **not clamped**. Every other source is
+    /// bounded by construction — a key is 0 or 1, a stick is `[-1, 1]` — so the
+    /// clamp is free for them and a guard against a map that binds five keys to
+    /// one axis. A mouse delta has no such range: a fast flick is fifty pixels
+    /// and a slow drag is two, and clamping both to 1 makes them the same
+    /// gesture, which is exactly the look control every engine gets wrong once.
+    /// The same reasoning makes such an axis a *rate* axis, so a stick bound to
+    /// it may legitimately carry a scale far outside `[-1, 1]`.
+    fn combine(sum: f32, unbounded: bool) -> f32 {
         if unbounded {
             sum
         } else {
@@ -244,9 +270,16 @@ impl InputState {
             }
         }
         self.axis_values.clear();
+        self.axis_positions.clear();
+        self.axis_deltas.clear();
         for (name, sources) in self.map.axes_iter() {
-            self.axis_values
-                .insert(name.to_string(), self.axis_value(sources));
+            let (position, delta) = self.axis_parts(sources);
+            self.axis_values.insert(
+                name.to_string(),
+                Self::combine(position + delta, Self::has_delta_source(sources)),
+            );
+            self.axis_positions.insert(name.to_string(), position);
+            self.axis_deltas.insert(name.to_string(), delta);
         }
         // The mouse deltas are consumed BY the resolution above and cleared
         // after it: they describe motion that belongs to the frame just
@@ -300,23 +333,32 @@ impl InputState {
     /// Bounded axes pass through untouched: dividing a stick position by `dt`
     /// would be meaningless. `dt <= 0` (or non-finite) leaves everything alone,
     /// because the alternative is publishing an infinity into the sim.
+    ///
+    /// # The conversion is per SOURCE, not per axis name (P29.3 audit, A2)
+    ///
+    /// The first version asked "does this axis name any mouse source" and, if so,
+    /// divided the axis's whole resolved value. The shipped `default_map` binds
+    /// `look_x` to the mouse **and** to the right stick — a look axis is a rate
+    /// axis, so the stick's scale is 180 deg/s rather than 1 — and the stick's
+    /// contribution was divided by `dt` along with the mouse's: a full deflection
+    /// read **10 800 deg/s at 60 fps**, and read differently at every other frame
+    /// rate. Only the delta half is a per-frame quantity, so only the delta half
+    /// becomes a rate; see [`axis_parts`](Self::axis_parts).
     pub fn axis_snapshot(&self, dt: f64) -> BTreeMap<String, f32> {
-        let scale = if dt.is_finite() && dt > 0.0 {
-            Some((1.0 / dt) as f32)
+        let k = if dt.is_finite() && dt > 0.0 {
+            (1.0 / dt) as f32
         } else {
-            None
+            1.0
         };
-        self.axis_values
-            .iter()
-            .map(|(name, v)| {
-                let delta = self
-                    .map
-                    .axis_sources(name)
-                    .is_some_and(|s| s.iter().any(|s| matches!(s, AxisSource::MouseAxis { .. })));
-                match (delta, scale) {
-                    (true, Some(k)) => (name.clone(), v * k),
-                    _ => (name.clone(), *v),
-                }
+        self.map
+            .axes_iter()
+            .map(|(name, sources)| {
+                let position = self.axis_positions.get(name).copied().unwrap_or(0.0);
+                let delta = self.axis_deltas.get(name).copied().unwrap_or(0.0);
+                (
+                    name.to_string(),
+                    Self::combine(position + delta * k, Self::has_delta_source(sources)),
+                )
             })
             .collect()
     }

@@ -411,6 +411,61 @@ fn the_mouse_source_tokens_are_frozen_and_append_only() {
     );
 }
 
+/// **A look axis bound to BOTH a mouse and a stick converts only the mouse
+/// half** (P29.3 audit, A2).
+///
+/// This is the shape the shipped `default_map` actually has: `look_x` names the
+/// mouse (degrees per raw count) *and* the right stick (degrees per second,
+/// hence a scale of 180 rather than 1, which is legal precisely because a delta
+/// source makes the axis unclamped). The first `axis_snapshot` asked its
+/// question of the axis NAME and divided the resolved total, so the stick's
+/// 180 deg/s came out as 10 800 at 60 fps — and as 5 400 at 30, which is a look
+/// control whose speed depends on the frame rate.
+///
+/// The control is the load-bearing half: the mouse-only axis beside it must
+/// still convert, or this arm is satisfied by an `axis_snapshot` that converts
+/// nothing at all.
+#[test]
+fn a_stick_bound_to_a_look_axis_is_not_divided_by_the_frame_time() {
+    let mut m = look_map();
+    m.bind_axis_stick("look_x", GamepadAxis::RightStickX, 180.0);
+    let mut st = InputState::new(m);
+
+    // A stick at full deflection and NO mouse motion is 180 deg/s, whatever the
+    // frame rate.
+    st.apply(&[InputEvent::GamepadAxis {
+        axis: GamepadAxis::RightStickX,
+        value: 1.0,
+    }]);
+    for dt in [1.0 / 30.0, 1.0 / 60.0, 1.0 / 240.0] {
+        let snap = st.axis_snapshot(dt);
+        assert!(
+            (snap["look_x"] - 180.0).abs() < 1e-3,
+            "dt = {dt}: a stick is a POSITION and must not be divided by it, got {}",
+            snap["look_x"]
+        );
+    }
+
+    // Both together add as rates: 30 counts x 0.1 deg = 3 deg in 1/60 s is
+    // 180 deg/s of mouse, on top of the stick's 180.
+    st.apply(&[InputEvent::MouseMotion { delta: [30.0, 0.0] }]);
+    let snap = st.axis_snapshot(1.0 / 60.0);
+    assert!(
+        (snap["look_x"] - 360.0).abs() < 1e-2,
+        "the mouse half converts and the stick half does not: {}",
+        snap["look_x"]
+    );
+    // The control: the mouse-only axis still becomes a rate, so the assertion
+    // above is about the SOURCE split and not about a conversion that stopped.
+    st.apply(&[InputEvent::MouseMotion { delta: [0.0, 30.0] }]);
+    let snap = st.axis_snapshot(1.0 / 60.0);
+    assert!(
+        (snap["look_y"] + 180.0).abs() < 1e-2,
+        "look_y is mouse-only and must still convert: {}",
+        snap["look_y"]
+    );
+}
+
 #[test]
 fn a_delta_axis_snapshots_as_a_rate_and_a_bounded_one_as_a_position() {
     // The frame-rate independence the fixed step rests on: the same gesture

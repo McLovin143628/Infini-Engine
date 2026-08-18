@@ -309,16 +309,46 @@ fn step_one(
     dt: f64,
 ) -> Option<MoveOutcome> {
     let entity = world.entity_of(guid)?;
-    let (mut cm, mut position, collider) = {
+    let (mut cm, mut position, authored_yaw_deg, collider) = {
         let w = world.world();
         let cm = w.get::<CharacterMovement>(entity)?.clone();
         let t = w.get::<Transform>(entity)?;
         (
             cm,
             t.translation.to_dvec3(),
+            t.rotation.y,
             w.get::<Collider3D>(entity).copied(),
         )
     };
+
+    // ── 0. The authored facing, taken exactly once (audit A1).
+    //
+    //    Step 12 writes `body_yaw_deg` onto the entity's rotation every step, and
+    //    nothing recomputes that value from the world — a character standing
+    //    still has no velocity to face. So a runtime that starts at zero writes a
+    //    zero over the level author's placement on the very first step: an NPC
+    //    posted facing east faced north instead, and a whole squad snapped to one
+    //    heading. Measured before the fix at 90 degrees in, 0 degrees out after a
+    //    single idle step.
+    //
+    //    The aim goes with it, because the movement intent is expressed in the
+    //    AIM frame: seeding only the drawn rotation would send a character
+    //    authored facing east northward the moment it was told to walk forward.
+    //
+    //    Seeded rather than resynced: the smoother owns the yaw from here on (see
+    //    `MovementRuntime::body_yaw_deg`), and re-reading the transform every step
+    //    would make two authorities fight over one number.
+    if !cm.runtime.seeded {
+        cm.runtime.seeded = true;
+        let yaw = if authored_yaw_deg.is_finite() {
+            authored_yaw_deg
+        } else {
+            0.0
+        };
+        cm.runtime.body_yaw_deg = yaw;
+        cm.runtime.target_yaw_deg = yaw;
+        cm.runtime.aim_yaw_deg = yaw;
+    }
     let mut exclude: BTreeSet<ColliderId3D> = BTreeSet::new();
     if let Some(c) = bridge.collider_of(guid) {
         exclude.insert(c);
