@@ -1518,6 +1518,43 @@ impl SmRuntime {
         self.play().curved_alpha()
     }
 
+    /// **Arm the declared [`SmParamKind::Trigger`] parameter named `name`**, as
+    /// though its level had just risen — the door `anim.set_trigger` goes through
+    /// (P29.4).
+    ///
+    /// Returns `false` when the machine declares no trigger by that name, which
+    /// is a **value** and not a failure: a Blueprint that names a trigger the
+    /// machine does not have has made an authoring mistake, and taking its whole
+    /// `Tick` body down over one is the `voxel.*` kit's ruling met again.
+    ///
+    /// # Why this and not "write 1.0 into the parameter"
+    ///
+    /// A trigger is edge-detected from a *level*
+    /// ([`sample_triggers`](Self::advance)), so "set the variable to 1" arms it on
+    /// the first step and is silent on the second — two presses one step apart
+    /// would fire once. Arming the bit directly has the semantics the name
+    /// promises: every call arms, and an armed trigger nothing consumes stays
+    /// armed until a transition reads it as true.
+    ///
+    /// It composes with the level path rather than fighting it: `sample_triggers`
+    /// only ever `|=`s a rising edge in, so a bit armed here survives the sampling
+    /// at the top of the very next [`advance`](Self::advance).
+    pub fn arm_trigger(&mut self, sm: &StateMachine, name: &str) -> bool {
+        match sm
+            .params
+            .iter()
+            .enumerate()
+            .take(MAX_PARAMS)
+            .find(|(_, p)| p.kind == SmParamKind::Trigger && p.name == name)
+        {
+            Some((i, _)) => {
+                self.triggers |= 1u64 << i;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Advance the machine by one fixed step of `dt` seconds. Pure given
     /// `(sm, ctx, dt)`; returns what it did ([`SmStep`]).
     ///

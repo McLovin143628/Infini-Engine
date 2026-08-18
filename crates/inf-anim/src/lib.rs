@@ -48,6 +48,9 @@ pub mod delaunay;
 pub mod cloth;
 // P24.4 secondary animation: strand hair, on the same solver primitives.
 pub mod hair;
+// P29.4 foot IK + foot locking: the pure half of the ground contact, and the
+// lock whose slide the wave's gate measures in metres.
+pub mod foot;
 // P24.2 inverse kinematics: the post-pass over an evaluated pose.
 pub mod ik;
 // P29.2 inertialization: the quintic decay of a pose deviation, and the blender
@@ -62,6 +65,9 @@ pub mod merge;
 pub mod pose;
 // P29.2 pose snapshot + pose matching (P29.4's get-up and landing consumers).
 pub mod pose_match;
+// P29.4 the ragdoll bridge's animation half: the motor drive, the face-up read
+// and the blend weight that is a pure function of sim state.
+pub mod ragdoll;
 pub mod skeleton;
 pub mod state_machine;
 // P29.2 sync groups: marker-phase warping so a walk↔run blend keeps its feet.
@@ -73,6 +79,9 @@ pub mod root_motion;
 pub mod sockets;
 // P24.1 template body plans: the parametric N-pedal skeleton generator.
 pub mod template;
+// P29.4 motion warping: warp windows scaling root motion onto a runtime target,
+// plus distance matching and orientation warping.
+pub mod warp;
 
 pub use asset::{AnimClipAsset, SkeletonAsset, StateMachineAsset};
 pub use blend_space::{
@@ -89,6 +98,10 @@ pub use delaunay::{barycentric, triangulate, Triangulation};
 pub use hair::{
     render_mesh, ribbon_mesh, roots_for, step_hair, HairAsset, HairDetail, HairGroom, HairMaterial,
     HairRoot, HairState, HairStrand,
+};
+pub use foot::{
+    ground_offset, interp_to, pelvis_offset, FootLock, GroundOffset, FOOT_HEIGHT_M, TRACE_ABOVE_M,
+    TRACE_BELOW_M,
 };
 pub use ik::{
     fabrik, rotation_between, solve_chain, two_bone_positions, IkError, IkReport,
@@ -114,8 +127,15 @@ pub use pose::{
 pub use pose_match::{
     match_clip, match_clips, pose_cost, PoseMatch, PoseMatchWeights, PoseSnapshot,
 };
+pub use ragdoll::{
+    blend_weight as ragdoll_blend_weight, face_up_from_pelvis_roll, motor_stiffness, GetUp,
+    RagdollPhase,
+};
 pub use retarget::{humanoid_joint_names, retarget_pose, RetargetMap};
-pub use root_motion::{root_delta, root_delta_world, root_joint_index, RootMotionDelta};
+pub use root_motion::{
+    bake_root_motion, root_delta, root_delta_3d, root_delta_world, root_delta_world_3d,
+    root_joint_index, RootMotion3D, RootMotionDelta,
+};
 pub use skeleton::{Joint, JointTransform, Skeleton, SkeletonError};
 pub use sockets::{find_socket, socket_transform, socket_transforms, Socket};
 pub use state_machine::{
@@ -128,6 +148,10 @@ pub use sync::{common_group, leader_index, warped_times, SyncPhase, SyncTrack};
 pub use template::{
     build_template, girdle_name, leg_suffix, BodyParams, BodyPlan, JointLimit, TemplateError,
     MAX_LEGS,
+};
+pub use warp::{
+    distance_match, height_remap, play_rate_for, warp_ease, warp_offset, warp_yaw_deg, HeightRemap,
+    WarpWindow, MANTLE_HIGH_SPLIT_M,
 };
 
 /// `v > 0.0`, written once so the **NaN-rejecting** form reads as intent rather

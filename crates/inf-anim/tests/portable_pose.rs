@@ -46,7 +46,23 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 17] = [
+const SIM_PATH: [(&str, &str, &str); 20] = [
+    // ── P29.4's three new modules ──
+    (
+        "warp.rs",
+        include_str!("../src/warp.rs"),
+        "a warped offset is written straight onto an entity's Transform by the movement step, on both hosts, and is folded into state_bytes",
+    ),
+    (
+        "foot.rs",
+        include_str!("../src/foot.rs"),
+        "a foot lock decides where a foot IS, which is a pose, and the wave's own gate measures its slide in metres",
+    ),
+    (
+        "ragdoll.rs",
+        include_str!("../src/ragdoll.rs"),
+        "the ragdoll's blend weights and its get-up choice are a pure function of sim state by doctrine, and the pose they choose rides the trace",
+    ),
     (
         "pose.rs",
         include_str!("../src/pose.rs"),
