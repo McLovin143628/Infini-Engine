@@ -3279,6 +3279,7 @@ name = "inf-physics"
 version = "0.1.0"
 dependencies = [
  "glam 0.33.2",
+ "inf-anim",
  "inf-asset",
  "inf-ecs",
  "inf-math",

@@ -32,6 +32,13 @@ glam = { workspace = true }
 # Dependency direction is inf-physics → inf-ecs (both Ring 0); inf-ecs never
 # names physics, so there is no cycle.
 inf-ecs = { workspace = true }
+# P29.4: the animation half of the character bridge -- the warp primitive a
+# mantle is placed by, the foot-lock rule, the ragdoll's motor drive and the
+# root-motion track a machine-driven character consumes. Ring 0 -> Ring 0, the
+# same direction inf-ecs already takes, and inf-anim names no physics so there is
+# no cycle. Here rather than in inf-ecs because the CONSUMER is the fixed step in
+# `d3::movement`, and a rule lives once beside the thing that calls it.
+inf-anim = { workspace = true }
 # P20.2: the water height query the buoyancy pass samples in the fixed step.
 # Ring 0 → Ring 0, and deliberately the SAME crate `inf-render` consumes, so the
 # surface a boat floats on and the surface the shader draws are one evaluator —

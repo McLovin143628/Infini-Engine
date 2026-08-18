@@ -17,7 +17,7 @@ use rapier3d_f64::prelude::{
 use super::character::{CharacterMove3D, CharacterMover3D};
 use super::events::{ContactEvent3D, EventCollector};
 use super::joint::{JointDesc3D, JointId3D};
-use super::query::{RayHit3D, ShapeHit3D};
+use super::query::{CastTargets, RayHit3D, ShapeHit3D};
 use super::{BodyId3D, ColliderId3D};
 use crate::filtering::{CollisionLayers, CombineRule};
 
@@ -1201,18 +1201,17 @@ impl PhysicsWorld3D {
     /// "is anything in the way" gets "no" for a query that describes no sweep,
     /// which is the only answer that composes.
     ///
-    /// # No `targets` parameter, and why
+    /// # The `targets` filter is on the other door
     ///
-    /// [`cast_ray_excluding`](Self::cast_ray_excluding) hard-codes
-    /// `exclude_dynamic` because its one caller — the structural solve — is
-    /// asking about *support*, and the P22.3 audit showed that filtering
-    /// dynamics after the cast hides the floor behind the rubble. That reasoning
-    /// is specific to that question. A clearance probe must see a crate on the
-    /// table, and a camera must not tunnel through a truck, so this one sees
-    /// everything and the exclusion is the caller's. A `targets` filter belongs
-    /// here the day a caller genuinely wants one (P29.4's mantle uses ALS's
-    /// `IgnoreOnlyPawn` profile) — not before, because a knob nobody turns
-    /// documents a choice nobody made.
+    /// This one sees **everything** and the exclusion is the caller's, which is
+    /// what a clearance probe needs (it must see a crate on the table) and what a
+    /// camera needs (it must not tunnel through a truck). The day a caller
+    /// genuinely wants a *class* filter it uses
+    /// [`cast_shape_where`](Self::cast_shape_where) — the same split
+    /// [`cast_ray`](Self::cast_ray) and
+    /// [`cast_ray_excluding`](Self::cast_ray_excluding) already have, and for the
+    /// same reason: the filtered question is a different question, not a knob on
+    /// this one.
     pub fn cast_shape(
         &mut self,
         shape: &ColliderShape3D,
@@ -1221,6 +1220,48 @@ impl PhysicsWorld3D {
         dir: DVec3,
         max_toi: f64,
         exclude: &std::collections::BTreeSet<ColliderId3D>,
+    ) -> Option<ShapeHit3D> {
+        self.cast_shape_where(
+            shape,
+            origin,
+            rotation,
+            dir,
+            max_toi,
+            exclude,
+            CastTargets::All,
+        )
+    }
+
+    /// [`cast_shape`](Self::cast_shape) against one **class** of collider
+    /// (P29.4), which the exclusion set cannot express.
+    ///
+    /// # The caller this exists for
+    ///
+    /// P29.4's mantle probe. ALS refuses to mantle a ledge whose component is
+    /// moving faster than 10 cm/s (port map §3.2, `.cpp:202–210`) — do not climb
+    /// onto a moving platform — and expresses it as a post-hoc velocity check on
+    /// the hit. The P22.3 audit's M4 is the reason we do not: filtering **after**
+    /// the cast hides whatever is behind the rejected hit, so a crate resting
+    /// against a wall would make the wall unmantleable rather than the crate. Ask
+    /// the broad phase instead, and the wall is simply the nearest hit.
+    ///
+    /// # And the pawn filter, which is NOT this
+    ///
+    /// ALS's `IgnoreOnlyPawn` profile is "do not mantle another character". A
+    /// character in this engine has a collider and often no rigid body at all, so
+    /// its class is not a body kind — it is a *set of colliders the caller knows*,
+    /// which is exactly what `exclude` already is. `traversal::probe_ledge` fills
+    /// it from the bridge's own character map; that is the port of the profile,
+    /// and it is on the caller's side because that is where the knowledge is.
+    pub fn cast_shape_where(
+        &mut self,
+        shape: &ColliderShape3D,
+        origin: DVec3,
+        rotation: DQuat,
+        dir: DVec3,
+        max_toi: f64,
+        exclude: &std::collections::BTreeSet<ColliderId3D>,
+        targets: CastTargets,
     ) -> Option<ShapeHit3D> {
         let dir = dir.normalize_or_zero();
         if dir == DVec3::ZERO || !max_toi.is_finite() || max_toi <= 0.0 {
@@ -1232,7 +1273,13 @@ impl PhysicsWorld3D {
                          _: &rapier3d_f64::geometry::Collider| {
             !exclude.contains(&ColliderId3D(h))
         };
-        let filter = QueryFilter::default().predicate(&predicate);
+        let base = match targets {
+            CastTargets::All => QueryFilter::default(),
+            // The broad phase leaves dynamic bodies out entirely — see this
+            // method's docs on why the check cannot be downstream of the cast.
+            CastTargets::Fixed => QueryFilter::exclude_dynamic(),
+        };
+        let filter = base.predicate(&predicate);
         let pipe = self.query_pipeline(filter);
         // `shape_vel` is a velocity and `max_time_of_impact` a time, so a UNIT
         // direction makes the returned `time_of_impact` a distance in metres.

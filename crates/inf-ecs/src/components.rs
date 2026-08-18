@@ -1821,6 +1821,132 @@ pub struct MovementRuntime {
     pub relative_accel: Vec2d,
     /// Lean inputs `[-1, 1]`: `x` left/right, `y` forward/back.
     pub lean: Vec2d,
+
+    // ── traversal (P29.4) ──
+    /// The mantle in progress, if one is.
+    pub mantle: MantleState,
+    /// How close a predicted landing is, `[0, 1]`; `0` when none is predicted.
+    /// The value an in-air animation blends a landing pose on.
+    pub land_alpha: f64,
+    /// The speed the land-prediction sweep says the character will arrive at,
+    /// m/s — which is what lets the classifier run **before** the touch.
+    pub land_predicted_mps: f64,
+    /// What the classifier would say about that predicted landing.
+    pub predicted_landing: LandingKind,
+
+    // ── turn / rotate in place (P29.4) ──
+    /// How long the turn-in-place conditions have held, seconds. Reset the
+    /// moment either of them stops.
+    pub turn_delay_s: f64,
+    /// The yaw a turn-in-place is turning toward, degrees.
+    pub turn_target_yaw_deg: f64,
+    /// Whether a turn-in-place is running.
+    pub turning_in_place: bool,
+    /// Rotate-in-place gates (ALS's `bRotateL`/`bRotateR`): the aim has left the
+    /// ±50° band while the character is standing still and aiming.
+    pub rotate_left: bool,
+    /// See [`rotate_left`](Self::rotate_left).
+    pub rotate_right: bool,
+    /// The play-rate scale a rotate-in-place animation runs at, from the aim yaw
+    /// rate (ALS 1.15…3.0).
+    pub rotate_rate: f64,
+
+    // ── aim offsets (P29.4) ──
+    /// The vertical aim-offset sweep parameter, `[0, 1]`, `0` looking up.
+    pub aim_sweep: f64,
+    /// Per-spine-joint yaw for the aim offset, degrees — the aim/body yaw delta
+    /// divided across the spine chain.
+    pub spine_yaw_deg: f64,
+    /// How much aim offset to apply, `[0, 1]` — `1 - Mask_AimOffset`.
+    pub aim_offset_weight: f64,
+
+    // ── foot IK / foot lock (P29.4) ──
+    /// The left foot's world-space lock.
+    pub foot_lock_l: inf_anim::FootLock,
+    /// The right foot's.
+    pub foot_lock_r: inf_anim::FootLock,
+    /// **The gate's number**: how far the locked left foot slid last step,
+    /// metres, on the ground plane. `0` when nothing is locked.
+    pub foot_slide_l_m: f64,
+    /// The right foot's, same units.
+    pub foot_slide_r_m: f64,
+
+    // ── ragdoll (P29.4) ──
+    /// The ragdoll bridge's state for this character.
+    pub ragdoll: RagdollRuntime,
+}
+
+/// A **mantle in progress** (P29.4) — where it started, where it must end, and
+/// how far through it is.
+///
+/// Plain `Copy` scalars, because [`MovementRuntime`] is inlined into an ECS
+/// component and must not allocate. The *placement* is
+/// [`inf_anim::warp::warp_offset`]; this is only the endpoints and the clock.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MantleState {
+    /// Whether a mantle is running.
+    pub active: bool,
+    /// The character's feet when it started, world metres.
+    pub start: Vec3d,
+    /// Its facing then, degrees.
+    pub start_yaw_deg: f64,
+    /// Where the feet must end up, world metres.
+    pub target: Vec3d,
+    /// The facing to arrive at, degrees.
+    pub target_yaw_deg: f64,
+    /// Seconds elapsed.
+    pub elapsed_s: f64,
+    /// How long the whole mantle takes, seconds.
+    pub duration_s: f64,
+    /// How far up the ledge was, metres.
+    pub height_m: f64,
+    /// Whether it is a high mantle (past
+    /// [`inf_anim::MANTLE_HIGH_SPLIT_M`]).
+    pub high: bool,
+    /// The clip time the traversal animation should be entered at, seconds —
+    /// ALS's `StartingPosition` from the height remap.
+    pub clip_start_s: f64,
+    /// The rate that animation should play at — ALS's `PlayRate`.
+    pub play_rate: f64,
+}
+
+impl MantleState {
+    /// How far through the mantle it is, `[0, 1]`.
+    pub fn alpha(&self) -> f64 {
+        if !(self.duration_s > 0.0) {
+            return 1.0;
+        }
+        (self.elapsed_s / self.duration_s).clamp(0.0, 1.0)
+    }
+}
+
+/// The **ragdoll bridge's** per-character state (P29.4).
+///
+/// The phase and its clock are what [`inf_anim::ragdoll::blend_weight`] reads, so
+/// the blend really is a pure function of sim state; the rest is the handoff in
+/// each direction.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RagdollRuntime {
+    /// What the bridge is doing with this character.
+    pub phase: inf_anim::RagdollPhase,
+    /// Seconds in that phase — the other half of the blend weight's input.
+    pub time_in_phase_s: f64,
+    /// The velocity the articulated bodies were last seen at, m/s. Handed back
+    /// to the movement integrator when a ragdoll ends in the air.
+    pub last_velocity: Vec3d,
+    /// Whether the pelvis says the character is on its back.
+    pub face_up: bool,
+    /// Whether the ragdoll's own ground probe found a floor under the pelvis.
+    pub on_ground: bool,
+    /// Whether the articulated bodies exist in the physics world right now.
+    pub spawned: bool,
+    /// The pelvis's world position last step, m — what the capsule follows.
+    pub pelvis: Vec3d,
+    /// The pelvis's yaw, degrees.
+    pub pelvis_yaw_deg: f64,
+    /// The angular-drive stiffness the motor is being driven at, from the
+    /// ragdoll's own speed.
+    pub motor_stiffness: f64,
 }
 
 /// **The movement component** (P29.3) — the full tunable set §13's catalogue

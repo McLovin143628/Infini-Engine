@@ -19,6 +19,8 @@ pub mod fracture;
 mod joint;
 pub mod movement;
 mod query;
+// P29.4 traversal detectors: the ledge probe and the land-prediction sweep.
+pub mod traversal;
 pub mod water;
 mod world;
 
@@ -36,7 +38,8 @@ pub use fracture::{
 };
 pub use joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
 pub use movement::{mover_for, step_character_movement, MoveOutcome};
-pub use query::{RayHit3D, ShapeHit3D};
+pub use query::{CastTargets, RayHit3D, ShapeHit3D};
+pub use traversal::{is_walkable, predict_landing, probe_ledge, LandPrediction, Ledge, LedgeSettings};
 pub use water::{
     BuoyancyDesc3D, SampleGeometry, WaterEvent3D, WaterEventKind3D, WaterIndex, WaterProbe,
 };

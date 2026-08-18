@@ -51,3 +51,27 @@ pub struct ShapeHit3D {
     /// not to be trusted; `toi` is `0.0`.
     pub started_penetrating: bool,
 }
+
+/// Which **class** of collider a filtered shape cast may hit (P29.4).
+///
+/// Not a wire enum — it never reaches a file, so the freeze-pin law has nothing
+/// to say about it — and deliberately two variants rather than a matrix of every
+/// combination rapier's `QueryFilter` can express. Each one exists because a
+/// caller in this repository asks that question; the day a third does, it gets a
+/// third variant, because a knob nobody turns documents a choice nobody made.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CastTargets {
+    /// Everything. What [`super::PhysicsWorld3D::cast_shape`] does, and what a
+    /// clearance probe and a camera both need.
+    #[default]
+    All,
+    /// Static and kinematic geometry only — the broad phase leaves dynamic
+    /// bodies out entirely.
+    ///
+    /// The mantle probe's filter. A ledge that is a crate somebody can shove is
+    /// not a ledge, and the exclusion has to happen in the broad phase rather
+    /// than after the cast: the P22.3 audit's M4 is a whole building that
+    /// collapsed because a downstream check turned "the rubble is not support"
+    /// into "the rubble HIDES support".
+    Fixed,
+}
