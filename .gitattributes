@@ -17,6 +17,13 @@
 *.inf_anim -text
 *.inf_skel -text
 *.inf_sm -text
+# P29.6: the `.inf_sm` TEXT face (pillar S1). It is a sidecar rather than a
+# payload, so nothing locks its bytes yet -- but `phase29_gate` reads it, edits
+# one line of it and compares the result, and the whole point of the file is
+# that a diff of it is reviewable. A checkout that CRLF'd it would make the
+# committed line endings a property of the developer's platform, which is the
+# exact defect the block above records paying for once already.
+*.inf_sm.txt -text
 # .inf_biomes (P19.2): a BiomeSet is deterministic bincode whose bytes a cook
 # validates and a fixture will lock; never let git rewrite them.
 *.inf_biomes -text
