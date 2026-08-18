@@ -2050,10 +2050,13 @@ impl EngineHost {
             }
             if w.get::<MeshRef>(entity).is_none() {
                 if let (true, Some(sm)) = (visible, w.get::<SkeletalMesh>(entity).copied()) {
-                    let affine = w
-                        .get::<GlobalTransform>(entity)
-                        .map(|g| g.0)
-                        .unwrap_or(glam::DAffine3::IDENTITY);
+                    // ── P29.6 character space ── a rig's origin is its FEET and a
+                    //    character's entity transform is its capsule CENTRE, so
+                    //    the pose is drawn through the one door that knows the
+                    //    difference (`inf_ecs::pose::model_to_world`,
+                    //    identity-composed for everything that is not a
+                    //    character). (MIRROR of the other host's call.)
+                    let affine = inf_ecs::pose::model_to_world(world, entity);
                     let (scale, rot, translation) = affine.to_scale_rotation_translation();
                     let id = next_id;
                     next_id += 1;

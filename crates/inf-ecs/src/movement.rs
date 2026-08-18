@@ -37,8 +37,8 @@ use bevy_ecs::prelude::With;
 use uuid::Uuid;
 
 use crate::components::{
-    CharacterMovement, Gait, Guid, LandingKind, MovementDirection, MovementMode, MovementRefusal,
-    RotationMode, Transform,
+    CharacterMovement, Collider3D, ColliderShape3DKind, Gait, Guid, LandingKind, MovementDirection,
+    MovementMode, MovementRefusal, RotationMode, Transform,
 };
 use crate::math::Vec2d;
 use crate::world::EcsWorld;
@@ -1006,6 +1006,53 @@ pub fn movement_targets(world: &EcsWorld) -> Vec<Uuid> {
     let mut targets: Vec<Uuid> = q.iter(w).map(|g| g.0).collect();
     targets.sort_unstable();
     targets
+}
+
+// ── character space (P29.6: the foot-publish seam) ──────────────────────────
+
+/// **How far below a character's entity transform its own origin sits**, metres.
+///
+/// # The seam this closes
+///
+/// The P29.4 audit's A12 pinned a disagreement nothing in the tree had decided:
+/// `crate::pose` lifts a model-space pose into the world with the entity's own
+/// `GlobalTransform`, and the movement step keeps a character's transform at its
+/// capsule **centre** — while `inf_anim::template` (and every glTF character
+/// anybody imports) authors a rig with its **feet at model y = 0**. So a rig
+/// published its feet one half-capsule above the floor it was standing on:
+/// **0.9 m** for the default 1.8 m capsule, which is outside ALS's ±50/45 cm
+/// probe envelope, so the foot IK could never reach the ground and the foot lock
+/// pinned a point in the air.
+///
+/// # The ruling (P29.6)
+///
+/// **Pose space is feet-at-origin character space.** A character mesh's origin
+/// is where it stands, which is what every DCC and every exporter already means,
+/// and what the wizard's own generator already produces. The *publisher* — the
+/// one place that lifts a pose into the world — subtracts this, so the engine
+/// keeps the capsule-centred transform the mover needs and the content keeps the
+/// origin an artist expects. Nothing is authored, nothing is stored, and no
+/// schema moves: the number is derived from the capsule the character is
+/// **wearing**.
+///
+/// # Worn, not requested
+///
+/// `collider` is the capsule the entity actually carries, which is the P29.3
+/// audit's A7 lesson stated once more: the collider's half-height is authored
+/// independently of [`CharacterMovement::stand_half_height_m`], the component
+/// wins on the first step, and reading the mode's *requested* height would move
+/// the published feet by the difference for exactly one step. On every step but
+/// the first the two are the same number.
+///
+/// A non-capsule (or absent) collider falls back to the mode's requested half
+/// height with no radius, because that is what the step's own ground probe uses
+/// for such an entity.
+pub fn feet_offset_m(cm: &CharacterMovement, collider: Option<&Collider3D>) -> f64 {
+    match collider {
+        Some(c) if c.shape_kind == ColliderShape3DKind::Capsule => c.half_extents.y + c.radius,
+        Some(c) => c.half_extents.y,
+        None => cm.half_height_for(cm.mode),
+    }
 }
 
 // ── overlay registry ────────────────────────────────────────────────────────

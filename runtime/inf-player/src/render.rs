@@ -860,10 +860,21 @@ pub fn project_scene_full(
         }
         if w.get::<MeshRef>(entity).is_none() {
             if let Some(sm) = w.get::<SkeletalMesh>(entity).copied() {
-                let affine = w
-                    .get::<GlobalTransform>(entity)
-                    .map(|g| g.0)
-                    .unwrap_or(glam::DAffine3::IDENTITY);
+                // ── P29.6 character space ── a rig's origin is its FEET and a
+                //    character's entity transform is its capsule CENTRE, so the
+                //    pose is drawn through the one door that knows the difference
+                //    (`inf_ecs::pose::model_to_world`, identity-composed for
+                //    everything that is not a character). Applied to the
+                //    *interpolated* translation as a world delta rather than
+                //    taken from the affine, because this host interpolates actor
+                //    positions and the editor does not — the drop is the same
+                //    number either way. (MIRROR of the other host's call.)
+                let affine = inf_ecs::pose::model_to_world(world, entity);
+                let drop = affine.translation
+                    - w.get::<GlobalTransform>(entity)
+                        .map(|g| g.translation())
+                        .unwrap_or(affine.translation);
+                let translation = translation + drop;
                 let (scale, rot, _t) = affine.to_scale_rotation_translation();
                 let id = next_id;
                 next_id += 1;

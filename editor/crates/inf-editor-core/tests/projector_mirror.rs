@@ -1087,11 +1087,19 @@ fn the_skinned_instance_projection_matches_field_for_field() {
 #[test]
 fn both_projectors_draw_skeletal_meshes_the_same_way() {
     // Fragments that must appear in BOTH projectors, verbatim.
-    const SHARED: [&str; 11] = [
+    const SHARED: [&str; 12] = [
         // The branch is the `MeshRef`-absent arm: an entity is a rigid draw or a
         // skinned one, never both.
         "w.get::<MeshRef>(entity).is_none()",
         "w.get::<SkeletalMesh>(entity).copied()",
+        // **Character space** (P29.6). A rig's origin is its feet and a
+        // character's entity transform is its capsule centre, so both hosts draw
+        // the pose through the ONE door that knows the difference. A host that
+        // went back to the raw `GlobalTransform` would draw a character half a
+        // capsule above the floor its own feet are locked to — in one host only,
+        // which is exactly the PIE-versus-shipping divergence this file exists
+        // for.
+        "inf_ecs::pose::model_to_world(world, entity)",
         // The pose inputs, and the shared store call that applies the pose rule.
         // `evaluated_pose` is the load-bearing one (P24.1): a host that stopped
         // reading the sim's pose would draw every machine-driven character at

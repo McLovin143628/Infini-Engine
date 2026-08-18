@@ -81,7 +81,7 @@ pub fn update_attachments(world: &mut EcsWorld) {
         let Some(target) = world.entity_of(target_guid) else {
             continue;
         };
-        let Some(target_global) = world.world().get::<GlobalTransform>(target).map(|g| g.0) else {
+        let Some(entity_global) = world.world().get::<GlobalTransform>(target).map(|g| g.0) else {
             continue;
         };
         // The socket's MODEL-space transform under this step's evaluated pose, or
@@ -95,6 +95,18 @@ pub fn update_attachments(world: &mut EcsWorld) {
                 .and_then(|p| p.socket(&socket))
                 .map(|m| glam::DAffine3::from_mat4(m.as_dmat4()))
                 .unwrap_or(glam::DAffine3::IDENTITY)
+        };
+        // **Character space** (P29.6), and only where it means something. A named
+        // socket is a point on the RIG, so it is lifted by the same door the feet
+        // and the ragdoll rig go through (`crate::pose::model_to_world`) — a sword
+        // in a character's hand would otherwise ride half a capsule above the
+        // hand. An attachment that names **no** socket rides the *entity*, not the
+        // rig, so it keeps the entity's own transform: the two questions are
+        // different and the fallback identity above must not be read as a pose.
+        let target_global = if socket.is_empty() {
+            entity_global
+        } else {
+            crate::pose::model_to_world(world, target)
         };
         let world_affine = target_global * socket_local * offset;
         let (scale, rot, trans) = world_affine.to_scale_rotation_translation();

@@ -78,18 +78,43 @@ fn legs() -> SkeletonAsset {
 /// half — with `plant` deciding whether the lock channel ever reaches the engage
 /// threshold, which is the whole of the control.
 fn walk_clip(plant: bool) -> AnimClip {
-    walk_clip_at(plant, 1.0)
+    walk_clip_at(plant, HIPS_FEET_AT_ORIGIN)
 }
+
+/// The hip height that puts this rig's **feet at model y = 0** — the leg chain's
+/// own length (0.05 + 0.45 + 0.45).
+///
+/// P29.6 ruled that pose space **is** feet-at-origin character space, so this is
+/// the convention every fixture in this file authors against and the publisher
+/// (`inf_ecs::pose::model_to_world`) is what subtracts the worn capsule. Before
+/// the ruling these fixtures had to put the hips at the capsule's *centre* to
+/// reach the floor at all, which is the seam the P29.4 audit pinned.
+const HIPS_FEET_AT_ORIGIN: f32 = 0.95;
 
 /// [`walk_clip`] with the hips placed at `hips_y` in **model** space.
 ///
 /// The height is the clip's, not the skeleton's: joint 0 is animated, so its
 /// bind pose is irrelevant and the clip is the only thing that decides where the
-/// rig's feet end up. `1.0` is a feet-at-origin rig (the `inf_anim::template`
-/// convention); `0.05` puts the same legs under a hip that sits at the capsule's
-/// centre, which is the only way the feet reach the floor at all — see
-/// `a_feet_at_origin_rig_publishes_its_feet_half_a_capsule_up`.
+/// rig's feet end up. [`HIPS_FEET_AT_ORIGIN`] is the convention; a larger value
+/// stands the ankle that much above the ground the character is on.
 fn walk_clip_at(plant: bool, hips_y: f32) -> AnimClip {
+    walk_clip_ik(plant, hips_y, 1.0)
+}
+
+/// [`walk_clip_at`] with `Enable_FootIK` authored at `ik` on both feet.
+///
+/// **Why the slide gate turns it off** (P29.6). Foot IK and the foot lock are two
+/// different mechanisms, and until this wave they could not be confused because
+/// the fixture's feet stood 0.95 m in the air — outside ALS's probe envelope — so
+/// no goal was ever published (that was the A12 seam). Character space puts the
+/// feet on the floor, which turns foot IK **on** for these fixtures, and the goal
+/// it solves to is one fixed step **stale** (the movement step reads the feet the
+/// pose step published last time), so it is itself a partial anti-slide: measured
+/// at **0.229 m** of skate against the lock-free control's 0.892 m. The gate below
+/// measures the *lock*, so it authors the IK off and its numbers are the P29.4
+/// ledger's unchanged; `foot_ik_alone_is_a_partial_brake_and_not_the_lock` records
+/// the other number rather than leaving it as a mystery.
+fn walk_clip_ik(plant: bool, hips_y: f32, ik: f32) -> AnimClip {
     let lock_value = if plant { 1.0 } else { 0.6 };
     // **The clip needs a DURATION**, and `AnimClip::new` derives it from the
     // joint keys — so a clip with curve channels and no tracks is a clip whose
@@ -108,8 +133,8 @@ fn walk_clip_at(plant: bool, hips_y: f32) -> AnimClip {
         scale: None,
     };
     AnimClip::new("walk", vec![track]).with_curves(vec![
-        CurveChannel::constant(als::ENABLE_FOOT_IK_L, 1.0),
-        CurveChannel::constant(als::ENABLE_FOOT_IK_R, 1.0),
+        CurveChannel::constant(als::ENABLE_FOOT_IK_L, ik),
+        CurveChannel::constant(als::ENABLE_FOOT_IK_R, ik),
         // Planted for the first half of the cycle, swinging for the second.
         CurveChannel::new(
             als::FOOT_LOCK_L,
@@ -219,7 +244,17 @@ impl Sim {
 /// the drawn left foot across a single planted window**, in metres, along with
 /// how far the body itself travelled.
 fn worst_slide(plant: bool, steps: usize) -> (f64, f64) {
+    worst_slide_ik(plant, steps, 0.0)
+}
+
+/// [`worst_slide`] with `Enable_FootIK` authored at `ik`.
+///
+/// The gate calls it with **0**: it measures the *lock*, and character space
+/// (P29.6) put these feet inside the IK envelope for the first time, so the two
+/// mechanisms would otherwise be measured together. See [`walk_clip_ik`].
+fn worst_slide_ik(plant: bool, steps: usize, ik: f32) -> (f64, f64) {
     let mut sim = Sim::new(plant);
+    sim.clip = walk_clip_ik(plant, HIPS_FEET_AT_ORIGIN, ik);
     let forward = MovementIntent {
         move_input: inf_ecs::Vec2d::new(0.0, 1.0),
         ..Default::default()
@@ -297,11 +332,13 @@ fn a_planted_foot_does_not_slide_and_the_unlocked_control_does() {
     );
 
     // **THE NUMBER**, in metres. Measured on this machine over a 1.017 m walk:
-    // **7e-9 m** locked against **0.892 m** unlocked — eight orders of
-    // magnitude, which is the separation a mechanism that works produces and a
-    // tolerance never does. The bound is 1e-5 m: a thousand times the
-    // measurement, so a real regression fails it and floating-point weather does
-    // not, and ninety thousand times under the control.
+    // **0.0 m exactly** locked against **0.892 m** unlocked. P29.4 measured
+    // 7e-9 m here and this is the same mechanism unperturbed: character space
+    // (P29.6) brought the feet inside the foot-IK envelope, so the gate now
+    // authors the IK off to isolate the lock, and with nothing else touching the
+    // pose the drawn foot IS the lock's own world position — the residue that
+    // produced 7e-9 was the inert-but-present solve. The bound stays 1e-5 m,
+    // which is what a real regression fails and floating-point weather does not.
     const BOUND_M: f64 = 1.0e-5;
     assert!(
         locked_slide <= BOUND_M,
@@ -323,6 +360,35 @@ fn a_planted_foot_does_not_slide_and_the_unlocked_control_does() {
     assert!(
         (loose_slide - loose_travel).abs() < 0.25,
         "the unlocked foot travelled {loose_slide:.3} m while the body went {loose_travel:.3} m"
+    );
+}
+
+/// **Foot IK is a partial brake, and it is not the lock** (P29.6).
+///
+/// A finding the character-space ruling exposed, written down rather than left
+/// as a discrepancy between two runs of the same fixture. The goal the movement
+/// step publishes is read off the feet the *pose* step published last step — one
+/// fixed step stale, by the ordering P29.4's ledger records — so solving to it
+/// drags a swinging foot back toward where it was, and the skate falls by roughly
+/// a factor of four. That is a long way from a lock (eight orders of magnitude
+/// below) and it is not nothing, which is exactly why the gate above authors the
+/// IK off: a control that quietly carried a second anti-slide mechanism would be
+/// measuring the pair and reporting the lock.
+#[test]
+fn foot_ik_alone_is_a_partial_brake_and_not_the_lock() {
+    let (bare, travel) = worst_slide_ik(false, 28, 0.0);
+    let (with_ik, _) = worst_slide_ik(false, 28, 1.0);
+    assert!(travel > 0.5, "the body must move: {travel}");
+    assert!(
+        bare > with_ik * 2.0,
+        "foot IK did not brake at all: {bare:.3} m bare against {with_ik:.3} m \
+         with it — if these are equal the goal is no longer being published, \
+         which means character space stopped reaching the probe"
+    );
+    assert!(
+        with_ik > 0.05,
+        "foot IK held the foot still ({with_ik:.6} m) — it is not a lock and must \
+         not read like one"
     );
 }
 
@@ -477,15 +543,13 @@ fn a_foot_over_ground_inside_the_envelope_is_given_a_goal_on_the_surface() {
     /// `(goal target y, published foot y, floor top)` after twelve steps.
     fn probe(floor_top: f64) -> (f64, f64) {
         let mut sim = Sim::new(true);
-        // The hips at the capsule's centre rather than a metre above it, so the
-        // feet land on the floor instead of a metre over it (the seam the arm
-        // below records).
-        // 0.13 puts the ANKLE 8 cm above the floor, which is what a real foot
-        // joint does — and it is the only way the two readings of
-        // `ground_offset`'s third argument can be told apart (A13): with the
-        // ankle passed in, the solve drives it down onto the floor; with the
-        // floor point, a foot on the body's own plane is left where it is.
-        sim.clip = walk_clip_at(true, 0.13);
+        // 8 cm above the feet-at-origin height puts the ANKLE 8 cm above the
+        // floor, which is what a real foot joint does — and it is the only way
+        // the two readings of `ground_offset`'s third argument can be told apart
+        // (A13): with the ankle passed in, the solve drives it down onto the
+        // floor; with the floor point, a foot on the body's own plane is left
+        // where it is.
+        sim.clip = walk_clip_at(true, HIPS_FEET_AT_ORIGIN + 0.08);
         // Move the floor: the ground block's top is at `translation.y + 0.5`.
         let e = sim.world.entity_of(GROUND).unwrap();
         sim.world
@@ -557,30 +621,33 @@ fn a_foot_over_ground_inside_the_envelope_is_given_a_goal_on_the_surface() {
     );
 }
 
-/// **The rig rides the entity transform, and a character's entity transform is
-/// its capsule CENTRE** — measured, because nothing in the tree decides it
-/// (P29.4 audit, A12).
+/// **THE FOOT-PUBLISH SEAM, DECIDED** (P29.6; the P29.4 audit's A12 pinned it and
+/// this arm replaces the pin).
 ///
-/// `inf_ecs::pose` lifts model space into world space with the entity's own
-/// `GlobalTransform`, and the movement step keeps that transform at the capsule's
-/// centre (`feet = translation - (half_height + radius)`). A rig authored the way
-/// `inf_anim::template` authors one — hips at `h × hip_height_ratio`, **feet at
-/// model y = 0** — therefore publishes its feet one half-height plus one radius
-/// above the floor it is standing on. For the default 1.8 m capsule that is
-/// **0.9 m**, and ALS's probe envelope is ±50/45 cm, so the foot IK can never
-/// reach the ground for such a character and the foot lock pins a point in the
-/// air.
+/// The seam was a disagreement nothing in the tree had ruled on: `inf_ecs::pose`
+/// lifted a model-space pose with the entity's own `GlobalTransform`, and the
+/// movement step keeps a character's transform at its capsule **centre**
+/// (`feet = translation - (half_height + radius)`) — while `inf_anim::template`
+/// (and every glTF character anybody imports) authors a rig with its **feet at
+/// model y = 0**. So a rig published its feet one half-height plus one radius
+/// above the floor it stood on: **0.9 m** for the default 1.8 m capsule, outside
+/// ALS's ±50/45 cm envelope, so the foot IK could never reach the ground and the
+/// lock pinned a point in the air. The old arm asserted that number, on purpose,
+/// so that deciding would break it.
 ///
-/// No committed content carries a `CharacterMovement` and a `SkeletalMesh` at
-/// once (the P29.4 ledger says so), which is why nothing has noticed. The
-/// decision — a mesh offset on the character, a feet-anchored transform, or the
-/// capsule-centred rig convention `walk_clip_at(_, 0.05)` assumes — belongs with
-/// P29.6's sample character. **This arm asserts the current answer**, so the day
-/// that decision lands it fails and the ledger has to be rewritten rather than
-/// quietly disagreeing with the engine.
+/// **The ruling: pose space is feet-at-origin character space.** The publisher —
+/// `inf_ecs::pose::model_to_world`, the one door — subtracts the capsule the
+/// character is **wearing**. Nothing is authored, nothing is stored, no schema
+/// moves, and every entity that is not a character is composed with the identity,
+/// so no committed level moves a byte.
+///
+/// Three claims: the feet-at-origin rig now publishes its feet **on the floor**;
+/// the number is the *worn* capsule and not the mode's requested one; and the
+/// consequence the seam blocked is unblocked — the probe reaches the ground and a
+/// goal is published.
 #[test]
-fn a_feet_at_origin_rig_publishes_its_feet_half_a_capsule_up() {
-    let mut sim = Sim::new(true); // `legs()` — hips at model y = 1.0, feet at 0
+fn a_feet_at_origin_rig_publishes_its_feet_on_the_floor() {
+    let mut sim = Sim::new(true); // `walk_clip` — hips at 0.95, feet at model 0
     let forward = MovementIntent {
         move_input: inf_ecs::Vec2d::new(0.0, 1.0),
         ..Default::default()
@@ -603,35 +670,51 @@ fn a_feet_at_origin_rig_publishes_its_feet_half_a_capsule_up() {
         "the capsule stands on the floor: {feet_y}"
     );
 
+    // The lift really is the entity transform minus the worn capsule, asserted
+    // against the door rather than against a restated constant.
+    let lift = inf_ecs::pose::model_to_world(&sim.world, e).translation;
+    assert!(
+        (lift.y - feet_y).abs() < 1e-9,
+        "character space starts at the feet: {lift:?} against {feet_y}"
+    );
+    let worn = sim
+        .world
+        .world()
+        .get::<Collider3D>(e)
+        .expect("the fixture wears a capsule");
+    assert!(
+        (centre.y - lift.y - (worn.half_extents.y + worn.radius)).abs() < 1e-9,
+        "the drop is the WORN capsule (half {} + radius {}), not the mode's \
+         requested one",
+        worn.half_extents.y,
+        worn.radius
+    );
+
     let left = inf_ecs::anim_bridge::feet_of(&sim.world, HERO).unwrap()[0].expect("a left foot");
-    // The rig's own foot is at model y = 0.05 (1.0 − 0.05 − 0.45 − 0.45).
     let published = left.world.y;
+    // A centimetre, not an epsilon: the published foot is the drawn one, so it
+    // carries the mover's skin width and — now that the seam is closed — the
+    // foot-IK solve's own correction. The *exact* claim is the lift above.
     assert!(
-        (published - (centre.y + 0.05)).abs() < 1e-6,
-        "the published foot is the model position lifted by the ENTITY transform: \
-         {published} vs {}",
-        centre.y + 0.05
+        (published - feet_y).abs() < 0.01,
+        "a feet-at-origin rig publishes its feet on the floor: {published} vs \
+         {feet_y}"
     );
-    // …which is most of a capsule above the floor, and outside the envelope.
-    let above_floor = published - feet_y;
+    // …and it is inside the probe envelope now, which is the whole consequence.
     assert!(
-        above_floor > half + RADIUS - 0.06,
-        "a feet-at-origin rig should publish its feet ~{} m up: {above_floor}",
-        half + RADIUS
-    );
-    assert!(
-        above_floor > inf_anim::TRACE_BELOW_M,
-        "…which is what puts the floor out of the {} m probe reach",
+        (published - feet_y).abs() < inf_anim::TRACE_BELOW_M,
+        "…within the {} m probe reach",
         inf_anim::TRACE_BELOW_M
     );
-    // And the consequence, asserted rather than described: no goal is published,
-    // because the probe finds nothing under a foot that is standing in the air.
+    // The positive half: the probe finds the floor and a goal is published, which
+    // is what the seam made impossible.
     assert!(
         inf_ecs::anim_bridge::bridge(&sim.world)
-            .map(|b| b.foot_ik.is_empty())
-            .unwrap_or(true),
-        "the probe reached the floor after all — the seam this arm records is \
-         closed, and the ledger must be rewritten"
+            .and_then(|b| b.foot_ik.get(&HERO).copied())
+            .map(|g| g[0].is_some())
+            .unwrap_or(false),
+        "the probe found no ground under a foot standing on it — character space \
+         is not reaching the publisher"
     );
 }
 

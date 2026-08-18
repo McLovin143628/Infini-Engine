@@ -597,6 +597,44 @@ pub fn anim_events(world: &EcsWorld, guid: Uuid) -> &[String] {
         .unwrap_or(&[])
 }
 
+/// **The one door from model space into the world** (P29.6).
+///
+/// Every consumer of an [`EvaluatedPose`] — the foot bridge, the ragdoll rig,
+/// the socket attachments and both render projectors — has to answer the same
+/// question, *where is this rig's origin in the world*, and before this wave each
+/// of them answered it with the entity's raw `GlobalTransform`. That is right for
+/// a prop and wrong for a character, because the movement step keeps a
+/// character's transform at its capsule **centre** while a rig is authored with
+/// its **feet at the origin** (the P29.4 audit's A12 seam; the ruling and the
+/// arithmetic are on [`crate::movement::feet_offset_m`]).
+///
+/// So the rule lives here, once. An entity with no [`CharacterMovement`] gets its
+/// `GlobalTransform` unchanged — which is every prop, every non-character
+/// skeletal mesh and every committed sample in the tree today, so nothing that
+/// existed before this wave moves by a micrometre.
+///
+/// The offset is composed on the **right**, i.e. in the entity's own frame: a rig
+/// belongs to its character, so a character standing on a rotated platform drops
+/// along its own down axis rather than the world's.
+pub fn model_to_world(world: &EcsWorld, entity: Entity) -> glam::DAffine3 {
+    let w = world.world();
+    let global = w
+        .get::<crate::components::GlobalTransform>(entity)
+        .map(|g| g.0)
+        .unwrap_or(glam::DAffine3::IDENTITY);
+    let Some(cm) = w.get::<crate::components::CharacterMovement>(entity) else {
+        return global;
+    };
+    let drop = crate::movement::feet_offset_m(cm, w.get::<crate::components::Collider3D>(entity));
+    global * glam::DAffine3::from_translation(glam::DVec3::new(0.0, -drop, 0.0))
+}
+
+/// [`model_to_world`] by GUID — the door a caller outside the fixed step reaches
+/// through (an attachment, a projector, a gate).
+pub fn model_to_world_of(world: &EcsWorld, guid: Uuid) -> Option<glam::DAffine3> {
+    world.entity_of(guid).map(|e| model_to_world(world, e))
+}
+
 /// How many entities the sim posed this step (`0` on a world that has never
 /// posed one).
 pub fn posed_count(world: &EcsWorld) -> usize {
@@ -1140,11 +1178,12 @@ pub fn step_pose_evaluation<'c>(
                         //    reason the whole seam exists: a foot's position is
                         //    a pose, the chain is a skeleton, and neither is
                         //    reachable from a physics world.
-                        let to_world = world
-                            .world()
-                            .get::<crate::components::GlobalTransform>(entity)
-                            .map(|g| g.0)
-                            .unwrap_or(glam::DAffine3::IDENTITY);
+                        //    **Character space** (P29.6): a rig's origin is its
+                        //    FEET, and a character's entity transform is its
+                        //    capsule centre, so the lift goes through the one
+                        //    door that knows the difference. Identity-composed
+                        //    for anything that is not a character.
+                        let to_world = model_to_world(world, entity);
                         if let Some(goals) = bridge.foot_ik.get(&guid).copied() {
                             apply_foot_ik(&asset.skeleton, &mut pose, &goals, to_world);
                         }
@@ -1158,11 +1197,9 @@ pub fn step_pose_evaluation<'c>(
                         // that has the skeleton, the pose AND the placement, so
                         // it is the only place the answer can be computed.
                         if bridge.ragdoll_requested.remove(&guid) {
-                            let to_world = world
-                                .world()
-                                .get::<crate::components::GlobalTransform>(entity)
-                                .map(|g| g.0)
-                                .unwrap_or(glam::DAffine3::IDENTITY);
+                            // The same character-space lift the feet take — a
+                            // ragdoll that spawned half a capsule above its own
+                            // body would be the A12 seam wearing a different hat.
                             if let Some(bones) = rig_bones(&asset.skeleton, &pose, to_world) {
                                 bridge.ragdoll_rig.insert(guid, bones);
                             }
