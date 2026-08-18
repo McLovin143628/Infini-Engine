@@ -16545,6 +16545,139 @@ shows a one-line authoring change as a one-line diff.
 > it evaluates as `false`), and dropping such a tree is still recursive. `sm_save`'s new
 > refusal is a message the editor surfaces, not a UI that prevents the gesture.
 
+> **STATUS: P29.2 COMPLETE** (2026-08-17) — **local gates green; NOT PUSHED.** Battery
+> **268 binaries / 4 910 passed / 0 failed / 9 ignored** against the
+> 267 / 4 849 / 0 / 9 baseline (+61 arms and +1 binary — the wall-clock inertialization
+> gate); `clippy -D warnings`, `cargo fmt --check`
+> clean, and `cargo doc --no-deps` reports nothing from any of the seven new files; `tsc
+> --noEmit`, eslint and the editor's vitest suite
+> green at **583 tests / 62 files** (from 577 / 61). Goldens stay **54** and are
+> byte-unchanged — nothing here draws a pixel. The scene schema **does not move**;
+> `.inf_anim` bumps to **v2, once**, per this section's 2026-08-17 amendment.
+>
+> **What landed, one line each.** Additive poses, per-bone masks and an ordered layer
+> stack; Delaunay 2D blend spaces, closing the P11.2 IDW-`k`-3 deferral its own module
+> docs named; sync groups with marker-phase warping, closing the other one; pose
+> snapshots and pose matching; inertialization as a first-class blend mode **and** the
+> default for state transitions, wired into `inf_ecs::pose::step_pose_evaluation` so both
+> hosts inherit it from one function; `.inf_anim` v2 carrying the whole channel model; and
+> a 2D blend-space authoring panel that draws the engine's own triangulation rather than
+> one of its own.
+>
+> **The four measurements this batch owed.**
+> (1) **Delaunay against IDW.** Barycentric weights are *affine* — weighting the sample
+> positions reproduces the query position — and inverse-distance weights are not. On a
+> 3×3 grid at `(0.25, 0.4)`, IDW's `k = 3` returns `0.545 / 0.287 / 0.168` and
+> reconstructs `(0.168, 0.287)`: **0.14 away on a grid two units wide**, so the character
+> blended as if it stood somewhere else in its own parameter space. The barycentric
+> answer is exact to 1e-9, and that arm is what a restored IDW body fails by six orders
+> of magnitude.
+> (2) **Inertialization is cheaper.** Functionally: 600 fixed steps cost **600** state
+> evaluations inertialized against the cross-fade's **≥ 45 % more** — asserted on every
+> platform, because it is a counter and not a clock. On the clock, 900 steps over a
+> 64-joint rig, minimum of seven interleaved rounds: **4.90 ms against 6.52 ms, 1.33×**.
+> The timing leg reports-and-does-not-assert on macOS **by name** (paravirtual runner);
+> its functional twin still asserts there.
+> (3) **Inertialization is smoother, by different amounts in different places.** At the
+> *end* of a transition — where a linear cross-fade's ramp stops and takes a velocity step
+> with it — the worst second difference of the rendered angle is **0.59°/step² against
+> 3.63°/step², 6.2×**. Across the *whole* transition it is **3.2 against 4.9, 1.5×**, and
+> the smaller number is written down rather than the larger quoted twice: `y″(0) =
+> −20/T²` is deliberately non-zero, because that is what buys the flat landing.
+> (4) **Marker sync against uniform phase.** A 1 s walk planting at 0.2/0.7 and a 0.6 s
+> run planting at 0.05/0.35: uniform phase samples the run at **0.42 s** when the walk is
+> on its `plant_r`; marker warping samples it at **0.35 s**, its own. The 0.07 s is the
+> foot slide, measured as a pose difference through the blend-space sampling door.
+>
+> **Schema `.inf_anim` v1 → v2, the full ladder.** Five fields at `AnimClip`'s **tail**
+> (bincode is positional, and this format does not bump twice): named scalar curve
+> channels, timed `{time_s, name, group}` markers, an additive reference, and a
+> present-but-optional root-motion track — **translation including Y**, the port map's
+> finding about our own extraction — plus a distance track. The v1 wire shape is pinned
+> from **ladder-local literals** (a shadow struct: a trimmed v2 encoding is derived from
+> the live encoder and pins nothing); the v2 shape is pinned field-for-field **with a
+> byte-consumption check**; and `migrate` asks the structural questions — parallel-vector
+> length agreement on all three new keyframe lists, finite key and marker times, a
+> **non-decreasing** distance track (its inverse `partition_point`s it), and a
+> reserved-slot refusal. `AdditiveRef` carries **two reserved variants** with
+> `BaseClip`'s payload shape, precisely because a format that never bumps again cannot
+> refuse a future kind by failing to decode it: a newer build's file decodes here and is
+> refused *by name*, with a remedy. The three committed `character-demo` clips are
+> downgrade-blessed through their generator.
+>
+> **Inertialization, and what it cost to be `Copy`-free.** The deviation is one
+> `Vec<JointTransform>`, so it cannot live in `SmRuntime` — that struct is inlined into an
+> ECS component. It lives in `PoseBlender`, inside a `PoseBlendRes` that follows
+> `PoseStoreRes`'s rules exactly (never serialized, pruned to the entities that stepped,
+> dropped by `clear_poses`, and never created on a world that poses nothing). One
+> structural gain falls out: because every capture is taken from the **rendered** pose, an
+> interruption during a live decay inherits the whole stack automatically. P29.1 measured
+> the `Copy` runtime's one-deep carry at **40.5°** across a second interruption; this has
+> no depth limit at all, and the two are compared on the same double transition.
+>
+> **`f32` was not good enough for the quintic.** `a` is `O(1/T⁵)` and the five terms
+> cancel to zero at `t = T`: measured at 249/250 of the way through a 0.25 s decay, the
+> `f32` residual is **−9.5e-7** — a *negative* decay weight, which inverts the deviation
+> rather than dropping it. The coefficients and the polynomial are `f64` now. That is not
+> a portability change: these are adds and multiplies, not libm.
+>
+> **Four things the batch found in code it did not write.**
+> (a) `pose_parity.rs`'s anti-vacuity guard asserted "the pose changed when the machine
+> transitioned walk → run" and had been comparing `run` against `run`: `SmRuntime::advance`
+> enters the entry state and evaluates its outgoing transitions in the **same** step, so
+> the fixture was one state further along than every comment beside it said. It passed
+> because a zero-duration cross-fade still ran `blend_poses(prev, cur, 1.0)`, which is not
+> bit-identical to `cur` — the guard was resting on a **one-ULP rounding artefact of a
+> blend that blends nothing**. P29.2 collapses that degenerate fade (a snap is a snap, and
+> the incoming pose exactly), which exposed it; the fixture gains a `spawn` state so one
+> transition fires per observable step and every label is true.
+> (b) `portable_pose.rs`'s "is this looking at real code" arm read `SIM_PATH[0]` and
+> `SIM_PATH[1]` — a **positional** reference into a list whose entire purpose is to grow.
+> It began asserting about the wrong file the moment this wave inserted one. It looks its
+> files up by name now and fails loudly when a name is not on the list.
+> (c) `blend_space.rs` has driven every 1D and 2D blend since P11.2 and was **never** on
+> the portable-math ban list — survivable only while it delegated all of its arithmetic,
+> and P29.2 gave it a triangulation and a marker warp of its own. It is on the list with
+> the six new files.
+> (d) The character-demo sample lock covered the `.inf_lvl`, the `.inf_sm` and the
+> `.inf_skel` and had **never** covered the three `.inf_anim` clips — the same gap the
+> note beside it records for the skeleton, met a second time and from the other side: the
+> clips were stale v1 bytes no assertion in this repository could see.
+>
+> **The blend space's cost, measured rather than assumed.** `blend_weights_2d`
+> triangulates on **every call**, because this crate is pure by doctrine (no interior
+> mutability, no globals) and `&BlendSpace2D` gives it nowhere to cache. Release, minimum
+> of seven rounds of two thousand calls: **0.94 µs** at 5 samples, **1.74 µs** at 9,
+> **6.84 µs** at 25. `motion_period` and `sample_motion` each make one, so a 9-sample
+> space is about 3.5 µs per entity per fixed step — roughly 2 % of a core for a hundred
+> characters at 60 Hz. The follow-up is a caller-held triangulation cache keyed on the
+> point set, which is an API change reaching both fixed steps and is therefore not in this
+> wave. No committed content uses a 2D blend space today.
+>
+> **Honest remainders, carried into P29.3–P29.6.** The blend mode is selectable
+> **world-level** (`inf_ecs::pose::set_blend_mode`) and not per transition: a
+> per-transition choice would be a field on `SmTransition`, and `.inf_sm` bumped in P29.1
+> and does not bump again this phase. Layers and masks are a **runtime composition** with
+> no persistence — the overlay routing that would author one is P29.4/P29.6, and a third
+> schema was not in this phase's budget. `AdditiveRef` is carried, validated and resolved
+> by `layers::sample_additive_clip`, but **nothing at import sets it**; the root-motion and
+> distance tracks are **present and empty**; and the 25 ALS curve names are a vocabulary in
+> `channels::als` with no derivation behind them — all three for the same reason, which is
+> that P29.5 is the producer and the format could not wait for it.
+> `TransitionEntry::PoseMatched` is **off by default**, because it changes which frame
+> plays and that is a content decision; P29.4's get-up and landing consumers turn it on.
+> Sync markers warp inside a **blend space** and not across a state transition — an
+> inertialized transition has no second clip to align to, which is the reason rather than
+> an omission. The inertializer's initial rate is **one scalar for the whole pose**, not
+> per joint: a per-joint rate would decay different limbs on different schedules, which is
+> a different algorithm rather than a more accurate version of this one. The generated
+> gait clips' foot-plant markers change **nothing** for the wizard's own walk/run pair
+> (one generator authored both and phase-aligned them by construction) — what they buy is
+> interoperability with an imported clip, and the arm asserts both halves. And the
+> blend-space panel's preview is a **stick figure** drawn from the engine's joint
+> positions, not a shaded render: a lit one needs the offscreen character-preview path,
+> which is P29.5's `preview_character` work.
+
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
   consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed
   compares) replacing the flat AND list; 3. transition **priority** + an interruption model (which
