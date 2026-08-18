@@ -362,6 +362,70 @@ mod tests {
             Some("foot"),
             "two clips that both name `foot` should align on it"
         );
+        // **The choice among SEVERAL shared groups is lexicographic**, which is
+        // what makes it a property of the content rather than of the order the
+        // clips or their markers were authored in. Two groups, authored in
+        // opposite orders on the two clips, and the answer is `arm` either way.
+        let two = |name: &str, order: [&str; 2]| {
+            let mut c = gait(name, 1.0, &[(0.1, "a"), (0.6, "b")]);
+            c.markers.extend([
+                crate::AnimMarker::sync(0.2, "a", order[0]),
+                crate::AnimMarker::sync(0.7, "b", order[0]),
+                crate::AnimMarker::sync(0.3, "a", order[1]),
+                crate::AnimMarker::sync(0.8, "b", order[1]),
+            ]);
+            c
+        };
+        let x = two("x", ["arm", "hand"]);
+        let y = two("y", ["hand", "arm"]);
+        assert_eq!(common_group([&x, &y]).as_deref(), Some("arm"), "{:?}", {
+            let mut g: Vec<&str> = x.sync_groups().into_iter().collect();
+            g.sort();
+            g
+        });
+        assert_eq!(common_group([&y, &x]).as_deref(), Some("arm"));
+    }
+
+    /// **Followers match the leader's segment BY NAME, not by index** — the
+    /// mechanism the module's own docs lead with, and the one that makes an
+    /// imported clip interoperable with a generated one.
+    ///
+    /// Every other arm in this file uses clips whose markers appear in the same
+    /// order, where "the segment called `plant_l`" and "segment 0" are the same
+    /// segment and a name lookup is indistinguishable from an index. This fixture
+    /// separates them: the follower plants its **right** foot first, so its
+    /// segment 0 is `plant_r` and its segment 1 is `plant_l`. A leader on
+    /// `plant_l` therefore lands on the follower's segment **1**, and an
+    /// index-matched implementation would put it on segment 0 — the opposite foot,
+    /// which is the whole failure marker sync exists to prevent.
+    #[test]
+    fn a_follower_whose_markers_are_ordered_differently_still_matches_the_event() {
+        let leader = gait("l", 1.0, &[(0.0, "plant_l"), (0.5, "plant_r")]);
+        // Right foot first: sorted by time this is [plant_r @ 0.1, plant_l @ 0.4].
+        let mirrored = gait("m", 0.8, &[(0.4, "plant_l"), (0.1, "plant_r")]);
+        let tr = SyncTrack::of(&mirrored, "foot");
+        assert_eq!(tr.segment_name(0), "plant_r", "the fixture is not mirrored");
+        assert_eq!(tr.segment_name(1), "plant_l");
+
+        // Leader exactly on `plant_l` (its segment 0). By NAME the follower is on
+        // its own `plant_l`, at 0.4. By INDEX it would be on `plant_r`, at 0.1.
+        let times = warped_times(&[&leader, &mirrored], &[1.0, 0.0], 0.0).unwrap();
+        assert!(
+            (times[1] - 0.4).abs() < 1e-6,
+            "the follower was matched by index rather than by name: {times:?}"
+        );
+        // …and half way through the leader's `plant_l` segment is half way
+        // through the follower's, which wraps through its clip end:
+        // [0.4, 0.1 + 0.8) is 0.5 long, so half way is 0.65.
+        let times = warped_times(&[&leader, &mirrored], &[1.0, 0.0], 0.25).unwrap();
+        assert!((times[1] - 0.65).abs() < 1e-6, "{times:?}");
+        // The other named event, for symmetry: the leader on `plant_r` puts the
+        // follower on ITS `plant_r`, at 0.1.
+        let times = warped_times(&[&leader, &mirrored], &[1.0, 0.0], 0.5).unwrap();
+        assert!(
+            (times[1] - 0.1).abs() < 1e-6,
+            "the follower missed its own plant_r: {times:?}"
+        );
     }
 
     /// A follower that does not carry the leader's marker **name** falls back to
