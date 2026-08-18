@@ -633,6 +633,10 @@ pub fn clear_poses(world: &mut EcsWorld) {
     // an event is a statement about a fixed step, and a stopped session's last
     // step is not this one.
     world.world_mut().remove_resource::<AnimEventsRes>();
+    // …and the animation bridge (P29.4): a parameter a stopped session set is
+    // not a parameter the next one meant, and a pose-matched entry is a decision
+    // that belongs to the get-up that made it.
+    crate::anim_bridge::clear_anim_bridge(world);
     clear_ik_goals(world);
 }
 
@@ -755,6 +759,17 @@ pub fn step_pose_evaluation<'c>(
         if w.contains_resource::<PoseBlendRes>() {
             w.remove_resource::<PoseBlendRes>();
         }
+        // …and the bridge's PUBLISHED half (P29.4), for the third time and the
+        // same reason: a level that stopped carrying machines must stop
+        // answering "what state is it in" with the answer from before it did.
+        if let Some(mut b) = w.get_resource_mut::<crate::anim_bridge::AnimBridgeRes>() {
+            b.states.clear();
+            b.root_motion.clear();
+            let empty = b.is_empty();
+            if empty {
+                w.remove_resource::<crate::anim_bridge::AnimBridgeRes>();
+            }
+        }
         return;
     }
     targets.sort_by_key(|(_, guid, _, _, _)| *guid);
@@ -794,6 +809,19 @@ pub fn step_pose_evaluation<'c>(
         .map(|r| r.0)
         .unwrap_or_default();
     let mut blended_this_step: Vec<Uuid> = Vec::new();
+    // **The animation bridge** (P29.4), lifted out for the same reason the IK
+    // goals and the blenders are: the write-back below needs `&mut EcsWorld`.
+    //
+    // Its two INPUT maps (`params`, `pose_matched`) survive the step; its two
+    // PUBLISHED ones (`states`, `root_motion`) are cleared first and rebuilt, so
+    // an entity whose machine stopped resolving stops having a state rather than
+    // keeping a stale one — [`PoseStoreRes`]'s rule 4, applied to the bridge.
+    let mut bridge = world
+        .world_mut()
+        .remove_resource::<crate::anim_bridge::AnimBridgeRes>()
+        .unwrap_or_default();
+    bridge.states.clear();
+    bridge.root_motion.clear();
     // Read once, so a world-level setting cannot mean two things inside one step.
     let mode = blend_mode(world);
     // **The clip-length resolver that makes `exit_time` live** (P29.1). Derived
@@ -805,9 +833,30 @@ pub fn step_pose_evaluation<'c>(
             continue;
         };
         let mut outcomes: Vec<IkOutcome> = Vec::new();
-        let actor_vars = vars(guid);
+        // **The bridge's parameter overlay** (P29.4). A name set through
+        // `anim.set_param` shadows an actor variable of the same name, because a
+        // gameplay system that has just said "landed hard" must not be silently
+        // outvoted by a variable nobody updated.
+        let mut actor_vars = vars(guid);
+        if let Some(over) = bridge.params.get(&guid) {
+            for (k, v) in over {
+                actor_vars.insert(k.clone(), *v);
+            }
+        }
         let mut pending_pose: Option<Pose> = None;
         let mut rt = rt_state;
+        // **The bridge's armed triggers** (P29.4), handed to the machine BEFORE
+        // it evaluates anything, and taken rather than read — an arm is consumed
+        // by the step that delivers it, and the bit it sets survives on the
+        // runtime until a transition reads it as true.
+        if let Some(names) = bridge.triggers.remove(&guid) {
+            for n in &names {
+                rt.arm_trigger(machine, n);
+            }
+        }
+        let state_before = rt.current;
+        let time_before = rt.state_time;
+        let started_before = rt.started;
         {
             let lookup = |name: &str| actor_vars.get(name).copied();
             let ctx = SmContext::with_clip_lengths(&lookup, &clip_len);
@@ -830,6 +879,17 @@ pub fn step_pose_evaluation<'c>(
                         b.mode = mode;
                         b
                     });
+                    // **The pose-matched entry** (P29.4), read from the bridge
+                    // every step rather than latched: P29.2 shipped it off by
+                    // default and named this wave's get-up as the consumer that
+                    // turns it on, and a get-up turns it off again when it is
+                    // done — a machine that entered every state at its
+                    // best-matching frame would never play a state's beginning.
+                    blender.entry = if bridge.pose_matched.contains(&guid) {
+                        inf_anim::TransitionEntry::PoseMatched
+                    } else {
+                        inf_anim::TransitionEntry::Restart
+                    };
                     // A rig swap invalidates the captured deviation — a delta
                     // between two different joint counts is not a delta.
                     blender.fit_rig(asset.skeleton.len());
@@ -839,8 +899,55 @@ pub fn step_pose_evaluation<'c>(
                     step
                 }
             };
-            if !step.events.is_empty() {
-                fired_events.insert(guid, step.events);
+            // ── P29.4: what the machine IS, what its clip MOVED, and which of
+            //    its clip's event markers the play-head crossed ──
+            //
+            // All three are properties of this step and of nothing else, so they
+            // are computed here — inside the one door both hosts call — rather
+            // than by two host-side loops that would have to agree.
+            let mut events = step.events;
+            if let Some(state) = machine.states.get(rt.current) {
+                bridge.states.insert(
+                    guid,
+                    crate::anim_bridge::AnimStateInfo {
+                        index: rt.current,
+                        name: state.name.clone(),
+                        time_s: rt.state_time,
+                        blending: rt.prev.is_some(),
+                    },
+                );
+                // The clip window this step covered. A step that CHANGED state
+                // has no single window — the outgoing state's tail and the
+                // incoming state's head are two different clips — so it
+                // contributes no root motion and fires no markers, which is the
+                // honest answer and costs one step of a transition.
+                let same_state = started_before && rt.current == state_before;
+                if same_state {
+                    if let inf_anim::Motion::Clip(cref) = &state.motion {
+                        if let Some(clip) = clips(*cref) {
+                            let t0 = wrap_clip_time(time_before * state.speed, clip.duration, state.looping);
+                            let t1 = wrap_clip_time(rt.state_time * state.speed, clip.duration, state.looping);
+                            if let Some(asset) = rig {
+                                let d = inf_anim::root_delta_3d(
+                                    clip,
+                                    &asset.skeleton,
+                                    t0,
+                                    t1,
+                                    state.looping,
+                                );
+                                if !d.is_zero() {
+                                    bridge.root_motion.insert(guid, d);
+                                }
+                            }
+                            for m in crossed_markers(&clip.markers, t0, t1, state.looping) {
+                                events.push(m.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            if !events.is_empty() {
+                fired_events.insert(guid, events);
             }
             // Rule 3: no skeleton ⇒ the machine still steps, nothing is posed.
             if let Some(id) = skeleton_id {
@@ -996,6 +1103,69 @@ pub fn step_pose_evaluation<'c>(
     } else {
         w.insert_resource(PoseStoreRes(posed));
     }
+    // The bridge, under the same rule: an empty one is no resource at all, so a
+    // level with no bridge traffic is byte-identical to its pre-P29.4 self.
+    if bridge.is_empty() {
+        if w.contains_resource::<crate::anim_bridge::AnimBridgeRes>() {
+            w.remove_resource::<crate::anim_bridge::AnimBridgeRes>();
+        }
+    } else {
+        w.insert_resource(bridge);
+    }
+}
+
+/// A play-head time resolved into `[0, duration]` — the convention
+/// [`inf_anim::root_delta_3d`] and the marker scan below both take.
+///
+/// A looping clip wraps; a one-shot clamps. A non-positive duration is `0`, so a
+/// static clip has one window and it is empty.
+fn wrap_clip_time(t: f64, duration: f32, looping: bool) -> f32 {
+    let d = duration as f64;
+    if !(d > 0.0) || !t.is_finite() {
+        return 0.0;
+    }
+    if looping {
+        let r = t % d;
+        (if r < 0.0 { r + d } else { r }) as f32
+    } else {
+        t.clamp(0.0, d) as f32
+    }
+}
+
+/// The **event** markers (`group` empty — see [`inf_anim::AnimMarker`]) whose
+/// times the play-head crossed going from `t0` to `t1`.
+///
+/// Half-open at the start and closed at the end (`t0 < m <= t1`), so a marker is
+/// crossed exactly once no matter how the steps land on it. When `looping` and
+/// the interval wrapped past the clip's end, the window is the union of the two
+/// pieces — a footstep at 0.05 s must not be lost because the step straddled the
+/// loop point.
+///
+/// Sync-group markers are deliberately skipped: they exist to align two clips
+/// ([`inf_anim::sync`]) and firing them as notifies would ring a footstep for
+/// every phase alignment.
+fn crossed_markers<'m>(
+    markers: &'m [inf_anim::AnimMarker],
+    t0: f32,
+    t1: f32,
+    looping: bool,
+) -> Vec<&'m str> {
+    if markers.is_empty() || t0 == t1 {
+        return Vec::new();
+    }
+    let wrapped = looping && t1 < t0;
+    markers
+        .iter()
+        .filter(|m| !m.is_sync() && m.time_s.is_finite())
+        .filter(|m| {
+            if wrapped {
+                m.time_s > t0 || m.time_s <= t1
+            } else {
+                m.time_s > t0 && m.time_s <= t1
+            }
+        })
+        .map(|m| m.name.as_str())
+        .collect()
 }
 
 #[cfg(test)]
@@ -2017,4 +2187,261 @@ mod tests {
             .values()
             .all(|b| b.mode == inf_anim::SmBlendMode::Inertialize));
     }
+
+    // -- P29.4: the animation bridge, through the one door both hosts call ----
+
+    /// A **walking** fixture: a root joint that really travels, a baked v2
+    /// root-motion track, one event marker and one sync marker.
+    fn walk_fixture() -> (StateMachine, SkeletonAsset, AnimClip) {
+        let skeleton = skeleton_asset();
+        // The root moves +2 m along +Z over one second.
+        let clip = inf_anim::root_motion::straight_line_clip("walk", glam::Vec3::Z, 2.0, 1.0);
+        let (rm, dist) = inf_anim::bake_root_motion(&clip, &skeleton.skeleton, 60.0).unwrap();
+        let clip = clip
+            .with_root_motion(rm)
+            .with_distance(dist)
+            .with_markers(vec![
+                inf_anim::AnimMarker::event(0.25, "footstep_l"),
+                inf_anim::AnimMarker::event(0.75, "footstep_r"),
+                // A SYNC marker at the same instant, which must NOT ring.
+                inf_anim::AnimMarker::sync(0.25, "plant_l", "foot"),
+            ]);
+        let machine = StateMachine {
+            states: vec![SmState::clip("idle", IDLE), SmState::clip("walk", WAVE)],
+            transitions: vec![SmTransition::on(0, 1, 0.0, "go", inf_anim::CmpOp::Gt, 0.5)],
+            entry: 0,
+            params: vec![inf_anim::SmParam::new("go", inf_anim::SmParamKind::Trigger)],
+            ..Default::default()
+        };
+        (machine, skeleton, clip)
+    }
+
+    struct WalkFixture {
+        machine: StateMachine,
+        skeleton: SkeletonAsset,
+        clip: AnimClip,
+    }
+
+    impl WalkFixture {
+        fn new() -> Self {
+            let (machine, skeleton, clip) = walk_fixture();
+            Self {
+                machine,
+                skeleton,
+                clip,
+            }
+        }
+        fn step(&self, world: &mut EcsWorld, dt: f64) {
+            let machines = |g: Uuid| (g == SM).then_some(&self.machine);
+            let skeletons = |g: Uuid| (g == SKEL).then_some(&self.skeleton);
+            let clips = |c: ClipRef| (c == WAVE).then_some(&self.clip);
+            let vars = |_: Uuid| BTreeMap::new();
+            step_pose_evaluation(world, dt, &machines, &skeletons, &clips, &vars);
+        }
+    }
+
+    /// **The overlay wins over the actor's variable**, which is the whole reason
+    /// `anim.set_param` exists -- and the control is the same fixture with the
+    /// overlay absent, which does not transition at all.
+    #[test]
+    fn a_bridge_parameter_shadows_the_actors_variable() {
+        let guid = Uuid::from_u128(41);
+        let f = Fixture::new();
+
+        // Control: the actor's variable says "not moving", and nothing happens.
+        let mut plain = world_with_character(guid);
+        f.step(&mut plain, 1.0 / 60.0, 0.0);
+        f.step(&mut plain, 1.0 / 60.0, 0.0);
+        let e = plain.entity_of(guid).unwrap();
+        assert_eq!(
+            plain
+                .world()
+                .get::<AnimStateMachine>(e)
+                .unwrap()
+                .runtime
+                .current,
+            0,
+            "the control must NOT transition, or the arm below proves nothing"
+        );
+
+        // The same variable, overlaid by the bridge.
+        let mut w = world_with_character(guid);
+        assert!(crate::anim_bridge::set_anim_param(
+            &mut w, guid, "moving", 1.0
+        ));
+        f.step(&mut w, 1.0 / 60.0, 0.0);
+        f.step(&mut w, 1.0 / 60.0, 0.0);
+        let e = w.entity_of(guid).unwrap();
+        assert_eq!(
+            w.world().get::<AnimStateMachine>(e).unwrap().runtime.current,
+            1,
+            "the overlay did not reach the machine"
+        );
+        // ...and it PERSISTS: a parameter is a setting, not an event.
+        assert_eq!(crate::anim_bridge::anim_param(&w, guid, "moving"), Some(1.0));
+    }
+
+    /// An armed trigger fires **once**, is taken by the step that delivers it,
+    /// and a second step off the same arm does nothing.
+    #[test]
+    fn an_armed_trigger_fires_once_and_is_taken_by_the_step() {
+        let guid = Uuid::from_u128(42);
+        let f = WalkFixture::new();
+        let mut w = world_with_character(guid);
+        f.step(&mut w, 1.0 / 60.0);
+        let e = w.entity_of(guid).unwrap();
+        assert_eq!(
+            w.world().get::<AnimStateMachine>(e).unwrap().runtime.current,
+            0
+        );
+
+        assert!(crate::anim_bridge::set_anim_trigger(&mut w, guid, "go"));
+        f.step(&mut w, 1.0 / 60.0);
+        assert_eq!(
+            w.world().get::<AnimStateMachine>(e).unwrap().runtime.current,
+            1,
+            "the armed trigger did not reach the machine"
+        );
+        // The pending arm was TAKEN, not left to re-fire.
+        assert!(crate::anim_bridge::bridge(&w)
+            .map(|b| b.triggers.is_empty())
+            .unwrap_or(true));
+    }
+
+    /// The step publishes **what the machine is in** and **what its clip moved**,
+    /// and both are replaced rather than merged.
+    #[test]
+    fn the_step_publishes_the_state_and_the_clips_root_motion() {
+        let guid = Uuid::from_u128(43);
+        let f = WalkFixture::new();
+        let mut w = world_with_character(guid);
+        f.step(&mut w, 1.0 / 60.0);
+        assert!(crate::anim_bridge::anim_state_is(&w, guid, "idle"));
+        // Idle plays a clip nothing resolves, so it moves nothing.
+        assert_eq!(crate::anim_bridge::anim_root_motion(&w, guid), None);
+
+        crate::anim_bridge::set_anim_trigger(&mut w, guid, "go");
+        f.step(&mut w, 1.0 / 60.0);
+        assert!(crate::anim_bridge::anim_state_is(&w, guid, "walk"));
+        // The step the transition fires contributes no root motion (two clips,
+        // one window) -- the honest answer, and it costs one step.
+        assert_eq!(crate::anim_bridge::anim_root_motion(&w, guid), None);
+
+        f.step(&mut w, 1.0 / 60.0);
+        let rm = crate::anim_bridge::anim_root_motion(&w, guid).expect("root motion");
+        // 2 m/s for one 60 Hz step.
+        assert!((rm.translation.z - 2.0 / 60.0).abs() < 1e-4, "{rm:?}");
+        assert!((rm.distance_m - 2.0 / 60.0).abs() < 1e-4, "{rm:?}");
+        assert!(crate::anim_bridge::anim_state_time(&w, guid) > 0.0);
+
+        // Unbind the machine: the published half must not go stale.
+        let e = w.entity_of(guid).unwrap();
+        w.world_mut().get_mut::<AnimStateMachine>(e).unwrap().sm = None;
+        f.step(&mut w, 1.0 / 60.0);
+        assert!(crate::anim_bridge::anim_state(&w, guid).is_none());
+        assert_eq!(crate::anim_bridge::anim_root_motion(&w, guid), None);
+    }
+
+    /// **An event marker becomes a notify, exactly once, and a sync marker does
+    /// not.** The consumer takes it, and the second taker gets nothing.
+    #[test]
+    fn an_event_marker_rings_once_and_a_sync_marker_never_does() {
+        let guid = Uuid::from_u128(44);
+        let f = WalkFixture::new();
+        let mut w = world_with_character(guid);
+        crate::anim_bridge::set_anim_trigger(&mut w, guid, "go");
+        f.step(&mut w, 1.0 / 60.0);
+        f.step(&mut w, 1.0 / 60.0);
+        assert!(crate::anim_bridge::anim_state_is(&w, guid, "walk"));
+
+        // Walk the play-head past 0.25 s in 60 Hz steps and count the rings.
+        let mut left = 0;
+        let mut right = 0;
+        let mut sync = 0;
+        for _ in 0..30 {
+            f.step(&mut w, 1.0 / 60.0);
+            for n in anim_events(&w, guid) {
+                match n.as_str() {
+                    "footstep_l" => left += 1,
+                    "footstep_r" => right += 1,
+                    "plant_l" => sync += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(left, 1, "the left footstep rang {left} times");
+        assert_eq!(right, 0, "0.75 s is past the end of a 30-step walk");
+        assert_eq!(sync, 0, "a sync marker is an alignment, not a notify");
+
+        // ...and a consumer takes it: two handlers racing for one footstep get one.
+        let mut w2 = world_with_character(guid);
+        crate::anim_bridge::set_anim_trigger(&mut w2, guid, "go");
+        f.step(&mut w2, 1.0 / 60.0);
+        f.step(&mut w2, 1.0 / 60.0);
+        let mut taken = 0;
+        for _ in 0..30 {
+            f.step(&mut w2, 1.0 / 60.0);
+            if crate::anim_bridge::consume_anim_notify(&mut w2, guid, "footstep_l") {
+                taken += 1;
+            }
+            assert!(
+                !crate::anim_bridge::consume_anim_notify(&mut w2, guid, "footstep_l"),
+                "a notify was consumed twice in one step"
+            );
+        }
+        assert_eq!(taken, 1);
+    }
+
+    /// The bridge's own resource obeys the absent-costs-nothing rule: a level
+    /// with no machines never grows one, and `clear_poses` forgets it.
+    #[test]
+    fn a_level_with_no_bridge_traffic_never_grows_the_resource() {
+        let guid = Uuid::from_u128(45);
+        let mut empty = EcsWorld::new();
+        let f = Fixture::new();
+        f.step(&mut empty, 1.0 / 60.0, 0.0);
+        assert!(crate::anim_bridge::bridge(&empty).is_none());
+
+        // With a machine the states map is published, so the resource exists...
+        let mut w = world_with_character(guid);
+        f.step(&mut w, 1.0 / 60.0, 0.0);
+        assert!(crate::anim_bridge::bridge(&w).is_some());
+        // ...and stopping the session forgets it entirely.
+        clear_poses(&mut w);
+        assert!(crate::anim_bridge::bridge(&w).is_none());
+    }
+
+    /// The two helpers the marker scan rests on, probed directly: a marker is
+    /// crossed exactly once however the steps land on it, including across the
+    /// loop seam.
+    #[test]
+    fn the_marker_window_is_half_open_and_wraps() {
+        let markers = vec![
+            inf_anim::AnimMarker::event(0.25, "a"),
+            inf_anim::AnimMarker::sync(0.25, "s", "foot"),
+        ];
+        assert_eq!(crossed_markers(&markers, 0.2, 0.3, false), ["a"]);
+        assert_eq!(
+            crossed_markers(&markers, 0.25, 0.3, false),
+            Vec::<&str>::new()
+        );
+        assert_eq!(crossed_markers(&markers, 0.2, 0.25, false), ["a"]);
+        // Across the seam of a looping clip, both pieces count.
+        assert_eq!(crossed_markers(&markers, 0.9, 0.3, true), ["a"]);
+        assert_eq!(
+            crossed_markers(&markers, 0.9, 0.1, true),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            crossed_markers(&markers, 0.3, 0.3, false),
+            Vec::<&str>::new()
+        );
+
+        assert_eq!(wrap_clip_time(1.25, 1.0, true), 0.25);
+        assert_eq!(wrap_clip_time(1.25, 1.0, false), 1.0);
+        assert_eq!(wrap_clip_time(-0.25, 1.0, true), 0.75);
+        assert_eq!(wrap_clip_time(0.5, 0.0, true), 0.0);
+        assert_eq!(wrap_clip_time(f64::NAN, 1.0, true), 0.0);
+    }
+
 }

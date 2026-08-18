@@ -12,6 +12,9 @@
 //! convert to glam for computation — see [`math`].
 
 pub mod anim;
+// P29.4 the animation bridge: the Ring-0 doors the `anim.*` node kit and the
+// movement step share.
+pub mod anim_bridge;
 pub mod attach;
 // P24.4: the fixed-step slot that turns a `ClothSim` into moving cloth.
 pub mod cloth;
@@ -53,6 +56,11 @@ pub use components::{
 // gameplay layer calls is a facade item like `update_attachments`.
 pub use hierarchy::{ChildOf, Children};
 pub use math::{Color, Vec2d, Vec3d};
+pub use anim_bridge::{
+    anim_param, anim_root_motion, anim_state, anim_state_is, anim_state_time, clear_anim_bridge,
+    consume_anim_notify, set_anim_param, set_anim_trigger, set_pose_match_entry, AnimBridgeRes,
+    AnimStateInfo,
+};
 pub use pose::{clear_ik_goals, ik_goals, ik_outcomes, set_ik_goals, IkGoal, IkOutcome};
 // Terrain heightfield types re-exported so downstream editor crates (e.g. the
 // viewport host) reach them through the ECS facade without a direct dep.
