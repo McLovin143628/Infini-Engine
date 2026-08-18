@@ -2204,6 +2204,44 @@ pub fn sample_motion<'c>(
     }
 }
 
+/// **The clip a state's motion has its play-head in at `t`, and where** (P29.5).
+///
+/// A single-clip state answers itself. A **blend space** answers its *leader* —
+/// see [`crate::blend_space::blend_leader`] for why that is the honest answer and
+/// not a convenient one. A sub-machine answers `None`: its play-head belongs to
+/// its own current state, which is a different machine's question.
+///
+/// This is what lets a blend space fire event markers and publish curve channels
+/// at all, which P29.4 recorded as a remainder it could not close because it had
+/// no producer for the markers. It does not change what a blend space *poses*;
+/// [`sample_motion`] is untouched.
+pub fn motion_leader<'c>(
+    motion: &Motion,
+    clips: &dyn Fn(ClipRef) -> Option<&'c AnimClip>,
+    ctx: &SmContext,
+    looping: bool,
+    t: f64,
+) -> Option<(&'c AnimClip, f32)> {
+    match motion {
+        Motion::Clip(id) => {
+            let c = clips(*id)?;
+            Some((c, crate::clip::resolve_time(t as f32, c.duration, looping)))
+        }
+        Motion::Blend1D(space) => {
+            let p = ctx.var(&space.param).unwrap_or(0.0);
+            let weights = crate::blend_space::blend_weights_1d(space, p);
+            crate::blend_space::blend_leader(&weights, |i| clips(space.entries[i].clip), t)
+        }
+        Motion::Blend2D(space) => {
+            let x = ctx.var(&space.params.0).unwrap_or(0.0);
+            let y = ctx.var(&space.params.1).unwrap_or(0.0);
+            let weights = crate::blend_space::blend_weights_2d(space, DVec2::new(x, y));
+            crate::blend_space::blend_leader(&weights, |i| clips(space.entries[i].clip), t)
+        }
+        Motion::SubMachine(_) => None,
+    }
+}
+
 /// Evaluate the machine into a [`Pose`] for the current runtime state, blending
 /// the outgoing state in during a cross-fade. Does **not** advance the runtime
 /// (call [`SmRuntime::advance`] first, or use [`step`]).

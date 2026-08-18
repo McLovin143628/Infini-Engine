@@ -562,3 +562,61 @@ fn emit_debug(app: &AppHandle, session: &mut SimSession) {
     let dto: Vec<SimDebugEventDto> = events.into_iter().map(Into::into).collect();
     let _ = app.emit("sim://debug", dto);
 }
+
+#[cfg(test)]
+mod tests {
+    /// **The live-tuning panel names movement fields that exist** (P29.5,
+    /// pillar S4).
+    ///
+    /// `LiveTuning.tsx` carries a list of `CharacterMovement` field names as
+    /// TypeScript string literals, and every one of them crosses to Rust as a
+    /// `bevy_reflect` access path. A misspelling is a **silent no-op**: the tune
+    /// is queued, the write returns `false`, the panel says "next step" and the
+    /// value never moves — which is exactly the two-copies-of-one-expression
+    /// defect the campaign's Wave I found across this same language boundary.
+    ///
+    /// So the list is read out of the `.tsx` and checked against the component's
+    /// own reflected fields. The panel is the copy; the component is the truth.
+    #[test]
+    fn every_movement_tunable_the_panel_offers_is_a_real_field() {
+        const PANEL: &str = include_str!("../../../src/panels/sm/LiveTuning.tsx");
+
+        // The list, extracted from the source rather than restated here — a
+        // restatement is a third copy.
+        let named: Vec<&str> = PANEL
+            .split("field: \"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert!(
+            named.len() >= 5,
+            "found {} tunables in LiveTuning.tsx — this gate is reading the wrong file or the wrong shape",
+            named.len()
+        );
+
+        // The component's own reflected field names, through the same registry
+        // `props::write_field` resolves a tune against.
+        let mut world = inf_ecs::EcsWorld::new();
+        let e = world
+            .world_mut()
+            .spawn(inf_ecs::components::CharacterMovement::default())
+            .id();
+        let props = inf_ecs::props::read_entity(world.world(), world.registry(), e);
+        let movement = props
+            .iter()
+            .find(|p| p.type_path == inf_editor_core::tuning::MOVEMENT_TYPE_PATH)
+            .expect("CharacterMovement is a reflected, editable component");
+        let fields: std::collections::BTreeSet<&str> =
+            movement.fields.iter().map(|f| f.name.as_str()).collect();
+
+        for n in &named {
+            assert!(
+                fields.contains(n),
+                "LiveTuning.tsx offers `{n}`, which is not a field of CharacterMovement: {fields:?}"
+            );
+        }
+        // Anti-vacuity: the field set is a real one, so `contains` is answering.
+        assert!(fields.contains("walk_speed_mps"), "{fields:?}");
+        assert!(!fields.contains("sprint_speed_mph"));
+    }
+}

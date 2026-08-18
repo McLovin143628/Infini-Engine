@@ -300,3 +300,17 @@
   padding-left: 16px;
   line-height: 1.45;
 }
+
+/* ── live tuning (P29.5, pillar S4) ── */
+.sm-live {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.sm-live .sm-param__name {
+  flex: 1 1 auto;
+  border: 0;
+  background: transparent;
+  color: var(--ink-text-dim);
+  padding: 0;
+}

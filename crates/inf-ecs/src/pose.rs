@@ -953,19 +953,34 @@ pub fn step_pose_evaluation<'c>(
                 // honest answer and costs one step of a transition.
                 let same_state = started_before && rt.current == state_before;
                 if same_state {
-                    if let inf_anim::Motion::Clip(cref) = &state.motion {
-                        if let Some(clip) = clips(*cref) {
-                            let t0 = wrap_clip_time(
-                                time_before * state.speed,
-                                clip.duration,
-                                state.looping,
-                            );
-                            let t1 = wrap_clip_time(
-                                rt.state_time * state.speed,
-                                clip.duration,
-                                state.looping,
-                            );
-                            if let Some(asset) = rig {
+                    // **Where the play-head is** — the single clip a `Clip` state
+                    // plays, or the LEADER of a blend space (P29.5, closing
+                    // P29.4's "notifies fire from single-clip states only"
+                    // remainder). `inf_anim::motion_leader` is the one place that
+                    // decides, so a blend space's markers ride the same timeline
+                    // its followers are already warped onto.
+                    //
+                    // Two calls, because an interval needs both ends: a step on
+                    // which the leader CHANGED (the weights moved past each
+                    // other) spans two different clips' timelines and is not an
+                    // interval at all — the same reason a state change is not.
+                    let head = |t: f64| {
+                        inf_anim::motion_leader(&state.motion, &clips, &ctx, state.looping, t)
+                    };
+                    let same_leader = |a: &inf_anim::AnimClip, b: &inf_anim::AnimClip| {
+                        std::ptr::eq(a as *const _, b as *const _)
+                    };
+                    if let (Some((c0, t0)), Some((clip, t1))) = (
+                        head(time_before * state.speed),
+                        head(rt.state_time * state.speed),
+                    ) {
+                        if same_leader(c0, clip) {
+                            // **Root motion stays single-clip.** A blend's true
+                            // root delta is the weighted blend of its clips'
+                            // deltas, and the leader's alone would be wrong;
+                            // blend-space root motion is `root_motion.rs`'s own
+                            // documented follow-up and is not smuggled in here.
+                            if let (inf_anim::Motion::Clip(_), Some(asset)) = (&state.motion, rig) {
                                 let d = inf_anim::root_delta_3d(
                                     clip,
                                     &asset.skeleton,
@@ -986,6 +1001,11 @@ pub fn step_pose_evaluation<'c>(
                             // both it and the play-head, so the movement step can
                             // read `Enable_FootIK_L` without reaching into the
                             // machine (the command-queue shape).
+                            //
+                            // The leader's, for a blend space — which is what
+                            // `Mask_FootstepSound` has to be read off for the
+                            // footstep that marker just fired to be the right
+                            // loudness.
                             if !clip.curves.is_empty() {
                                 let mut vals: BTreeMap<String, f32> = BTreeMap::new();
                                 for c in &clip.curves {
@@ -1011,6 +1031,34 @@ pub fn step_pose_evaluation<'c>(
                         let mut pose = pending_pose
                             .take()
                             .unwrap_or_else(|| Pose::rest(&asset.skeleton));
+                        // ── P29.5: the pelvis IK offset, APPLIED ──
+                        //
+                        // P29.4 computed it and wrote it down (`SetPelvisIKOffset`
+                        // — when one foot is on a step below the other the whole
+                        // body drops, rather than the low leg straightening past
+                        // its limit) and its audit's A9 recorded that nothing
+                        // consumed it: "routing it into the rig is a pose edit
+                        // P29.5's authoring pass owns".
+                        //
+                        // Here, and BEFORE the goals below, because that is the
+                        // whole point — the legs have to solve from a hip that
+                        // has already come down, or the drop and the reach fight
+                        // each other for a frame.
+                        //
+                        // **Inert by construction.** The offset is zero unless
+                        // the movement step's foot IK produced one, which needs
+                        // a `CharacterMovement`, a rig, feet inside ALS's
+                        // ±50/45 cm envelope and ground under them at different
+                        // heights. Every level that has none of that poses
+                        // exactly the bytes P29.4 did.
+                        let drop = pelvis_drop(world, entity);
+                        if drop != 0.0 {
+                            if let Some(j) = pelvis_joint(&asset.skeleton) {
+                                if let Some(local) = pose.locals.get_mut(j) {
+                                    local.translation[1] += drop;
+                                }
+                            }
+                        }
                         // ── P24.2 IK: a POST-PASS, before anything reads the
                         //    pose ──
                         //
@@ -1417,22 +1465,39 @@ fn traversal_arc_of(clip: &inf_anim::AnimClip) -> Option<crate::anim_bridge::Tra
     Some(crate::anim_bridge::TraversalArc { samples, yaw_rad })
 }
 
-/// A play-head time resolved into `[0, duration]` — the convention
-/// [`inf_anim::root_delta_3d`] and the marker scan below both take.
+/// **How far the hips must come down this step**, metres (P29.5).
 ///
-/// A looping clip wraps; a one-shot clamps. A non-positive duration is `0`, so a
-/// static clip has one window and it is empty.
-fn wrap_clip_time(t: f64, duration: f32, looping: bool) -> f32 {
-    let d = duration as f64;
-    if d.is_nan() || d <= 0.0 || !t.is_finite() {
-        return 0.0;
-    }
-    if looping {
-        let r = t % d;
-        (if r < 0.0 { r + d } else { r }) as f32
-    } else {
-        t.clamp(0.0, d) as f32
-    }
+/// Read off the character's own [`crate::components::MovementRuntime`], which is
+/// where the movement step wrote it earlier in this same fixed step — so there
+/// is no latency and no second computation. `0` for an entity with no character
+/// movement at all, which is every entity in a level that has none.
+fn pelvis_drop(world: &EcsWorld, entity: bevy_ecs::entity::Entity) -> f32 {
+    world
+        .world()
+        .get::<crate::components::CharacterMovement>(entity)
+        .map(|cm| cm.runtime.pelvis_offset.y as f32)
+        .filter(|d| d.is_finite())
+        .unwrap_or(0.0)
+}
+
+/// The joint a pelvis offset moves.
+///
+/// A joint named `pelvis` when the rig has one (the UEFN / ALS convention), else
+/// the **root** joint — which is what [`inf_anim::build_template`] names `hips`
+/// and is the same bone under a different vocabulary.
+///
+/// The offset is applied to that joint's **local** Y, which is model-space Y for
+/// any rig whose ancestors above the pelvis are unrotated — true of every rig
+/// this engine generates and of the imported convention. A rig that rotates the
+/// bone above its own pelvis would tilt the drop; that bound is written down
+/// rather than guarded, because guarding it needs a global-transform pass this
+/// post-pass deliberately does not run.
+fn pelvis_joint(skeleton: &inf_anim::Skeleton) -> Option<usize> {
+    skeleton
+        .joints()
+        .iter()
+        .position(|j| j.name.eq_ignore_ascii_case("pelvis"))
+        .or_else(|| inf_anim::root_joint_index(skeleton))
 }
 
 /// The **event** markers (`group` empty — see [`inf_anim::AnimMarker`]) whose
@@ -2705,6 +2770,138 @@ mod tests {
         assert_eq!(taken, 1);
     }
 
+    /// **A blend space fires its footsteps** (P29.5 — P29.4's "event-marker
+    /// notifies fire from single-clip states only" remainder, closed).
+    ///
+    /// The mechanism is the **leader**: a blend space has no single play-head,
+    /// but `inf_anim::sync` already picks a heaviest clip whose timeline every
+    /// follower is warped onto, and a marker crossed on that timeline is a marker
+    /// the blend crossed. Three halves:
+    ///
+    /// 1. a two-clip blend space fires the leader's markers over one cycle;
+    /// 2. the leader's `Mask_FootstepSound` reaches the audio drain, so the
+    ///    footstep is the loudness the leading clip authored and not 1.0 by
+    ///    default;
+    /// 3. the **control** — the same state with the weights swapped leads with
+    ///    the other clip and fires ITS marker, which is what proves the answer
+    ///    follows the weights rather than the entry order.
+    #[test]
+    fn a_blend_space_fires_the_leaders_markers_and_publishes_its_curves() {
+        let guid = Uuid::from_u128(64);
+        // Two one-second clips, each with one distinctly-named footstep and a
+        // different authored gain.
+        let clip = |name: &str, gain: f32| {
+            let mut c = wave_clip();
+            c.markers = vec![inf_anim::AnimMarker::event(0.5, format!("footstep_{name}"))];
+            c.curves = vec![inf_anim::CurveChannel::constant(
+                inf_anim::channels::als::MASK_FOOTSTEP_SOUND,
+                gain,
+            )];
+            c
+        };
+        let left = clip("left", 0.25);
+        let right = clip("right", 0.75);
+        const L: ClipRef = [11u8; 16];
+        const R: ClipRef = [22u8; 16];
+        let space = inf_anim::BlendSpace1D {
+            param: "moving".into(),
+            entries: vec![
+                inf_anim::BlendEntry1D { pos: 0.0, clip: L },
+                inf_anim::BlendEntry1D { pos: 1.0, clip: R },
+            ],
+        };
+        let machine = StateMachine {
+            states: vec![SmState {
+                motion: inf_anim::Motion::Blend1D(space),
+                ..SmState::clip("locomotion", L)
+            }],
+            transitions: Vec::new(),
+            entry: 0,
+            ..Default::default()
+        };
+        let skeleton = skeleton_asset();
+
+        let run = |moving: f64| -> (Vec<String>, f64) {
+            let mut world = world_with_character(guid);
+            let mut fired: Vec<String> = Vec::new();
+            let mut gain = -1.0;
+            for _ in 0..70 {
+                let machines = |g: Uuid| (g == SM).then_some(&machine);
+                let skeletons = |g: Uuid| (g == SKEL).then_some(&skeleton);
+                let clips = |c: ClipRef| match c {
+                    L => Some(&left),
+                    R => Some(&right),
+                    _ => None,
+                };
+                let vars = |_: Uuid| BTreeMap::from([("moving".to_string(), moving)]);
+                step_pose_evaluation(&mut world, 1.0 / 60.0, &machines, &skeletons, &clips, &vars);
+                for cue in crate::anim_bridge::footstep_cues(&world) {
+                    fired.push(cue.name.clone());
+                    gain = cue.gain;
+                }
+            }
+            (fired, gain)
+        };
+
+        // Leaning left: the left clip leads, so its footstep rings at its gain.
+        let (left_fired, left_gain) = run(0.0);
+        assert_eq!(
+            left_fired,
+            vec!["footstep_left".to_string()],
+            "{left_fired:?}"
+        );
+        assert!(
+            (left_gain - 0.25).abs() < 1e-6,
+            "the leader's Mask_FootstepSound did not reach the drain: {left_gain}"
+        );
+
+        // **The control**: lean the other way and the OTHER clip leads. Without
+        // it, "fires the leader's markers" and "fires entry 0's markers" are the
+        // same assertion.
+        let (right_fired, right_gain) = run(1.0);
+        assert_eq!(
+            right_fired,
+            vec!["footstep_right".to_string()],
+            "{right_fired:?}"
+        );
+        assert!((right_gain - 0.75).abs() < 1e-6, "{right_gain}");
+    }
+
+    /// **The pelvis IK offset reaches the rig** (P29.5 — P29.4 audit A9's
+    /// "recorded rather than applied", closed).
+    ///
+    /// The audit's own bound was that the value had "no consumer to falsify
+    /// against", so its arm could only assert the inert path. This is the
+    /// consumer: the number the movement step records moves the posed hips, on
+    /// the same fixed step, and a zero one moves nothing at all.
+    ///
+    /// The control is the same world with the offset left at zero — without it,
+    /// "the pelvis is at −0.1" and "the pelvis was always at −0.1" are the same
+    /// assertion.
+    #[test]
+    fn a_recorded_pelvis_offset_drops_the_posed_hips_and_a_zero_one_does_not() {
+        let guid = Uuid::from_u128(66);
+        let f = Fixture::new();
+        let posed_root_y = |drop: f64| -> f32 {
+            let mut world = world_with_character(guid);
+            let e = world.entity_of(guid).unwrap();
+            let mut cm = crate::components::CharacterMovement::default();
+            cm.runtime.pelvis_offset = crate::math::Vec3d::new(0.0, drop, 0.0);
+            world.world_mut().entity_mut(e).insert(cm);
+            world.reindex_guids();
+            f.step(&mut world, 1.0 / 60.0, 0.0);
+            evaluated_pose(&world, guid).expect("a pose").pose.locals[0].translation[1]
+        };
+        let level = posed_root_y(0.0);
+        let dropped = posed_root_y(-0.1);
+        assert!(
+            (dropped - (level - 0.1)).abs() < 1e-6,
+            "the hips did not come down by the offset: {level} -> {dropped}"
+        );
+        // …and a NON-finite offset is a value, not a poisoned pose.
+        assert_eq!(posed_root_y(f64::NAN), level);
+    }
+
     /// The bridge's own resource obeys the absent-costs-nothing rule: a level
     /// with no machines never grows one, and `clear_poses` forgets it.
     #[test]
@@ -2750,11 +2947,27 @@ mod tests {
             Vec::<&str>::new()
         );
 
-        assert_eq!(wrap_clip_time(1.25, 1.0, true), 0.25);
-        assert_eq!(wrap_clip_time(1.25, 1.0, false), 1.0);
-        assert_eq!(wrap_clip_time(-0.25, 1.0, true), 0.75);
-        assert_eq!(wrap_clip_time(0.5, 0.0, true), 0.0);
-        assert_eq!(wrap_clip_time(f64::NAN, 1.0, true), 0.0);
+        // The play-head resolver this step used to keep its own copy of is now
+        // `inf_anim::clip::resolve_time`, reached through `motion_leader` — one
+        // rule for "where is this clip's play-head", asserted here so a second
+        // one cannot come back.
+        assert_eq!(inf_anim::clip::resolve_time(1.25, 1.0, true), 0.25);
+        assert_eq!(inf_anim::clip::resolve_time(1.25, 1.0, false), 1.0);
+        assert_eq!(inf_anim::clip::resolve_time(-0.25, 1.0, true), 0.75);
+        assert_eq!(inf_anim::clip::resolve_time(0.5, 0.0, true), 0.0);
+        // A NaN play-head is NOT collapsed to zero here, and the copy this step
+        // used to keep did collapse it — which is worth stating, because it is
+        // the one behavioural difference between the two. It is survivable in
+        // both directions and the shared rule is the honest one: `locate` is
+        // total over a NaN probe (the C4-7 rule) and answers the first key, and
+        // every comparison a NaN takes part in is false, so a NaN head crosses no
+        // marker and reads the clip's first curve values. The collapse would have
+        // made it read the first frame and cross every marker before it.
+        assert!(inf_anim::clip::resolve_time(f32::NAN, 1.0, true).is_nan());
+        assert_eq!(
+            crossed_markers(&markers, f32::NAN, f32::NAN, true),
+            Vec::<&str>::new()
+        );
     }
 
     /// **The footstep stream is a pure function of sim state** (P29.4, clause 7

@@ -434,13 +434,36 @@ fn sample_weighted<'c>(
     clip_of: impl Fn(usize) -> Option<&'c AnimClip>,
     t: f64,
 ) -> Pose {
+    let Some((resolved, times, _)) = resolve_times(weights, clip_of, t) else {
+        return Pose::rest(skeleton);
+    };
+    let items: Vec<(Pose, f64)> = resolved
+        .iter()
+        .zip(&times)
+        .map(|((c, w), ct)| (sample_clip(skeleton, c, *ct, true), *w))
+        .collect();
+    weighted_blend(items).unwrap_or_else(|| Pose::rest(skeleton))
+}
+
+/// The resolved `(clip, weight)` list, each clip's own sample time, and which
+/// index leads.
+///
+/// Split out of [`sample_weighted`] so the **leader** is computed in exactly one
+/// place: P29.5 needs it outside the pose (to know which clip a blend space's
+/// play-head is in, for markers and curve channels), and a second copy of this
+/// arithmetic would be a second answer to "where is this blend space".
+fn resolve_times<'c>(
+    weights: &[(usize, f64)],
+    clip_of: impl Fn(usize) -> Option<&'c AnimClip>,
+    t: f64,
+) -> Option<(Vec<(&'c AnimClip, f64)>, Vec<f32>, usize)> {
     // Resolve clips + weights, dropping any that don't resolve.
     let resolved: Vec<(&AnimClip, f64)> = weights
         .iter()
         .filter_map(|&(i, w)| clip_of(i).map(|c| (c, w)))
         .collect();
     if resolved.is_empty() {
-        return Pose::rest(skeleton);
+        return None;
     }
     // Weight-blended duration → a single normalized phase → per-clip sample time.
     let blended_dur: f64 = resolved.iter().map(|(c, w)| c.duration as f64 * w).sum();
@@ -463,12 +486,29 @@ fn sample_weighted<'c>(
     let leader = crate::sync::leader_index(&weights_only);
     let times =
         crate::sync::warped_times(&clips_only, &weights_only, uniform[leader]).unwrap_or(uniform);
-    let items: Vec<(Pose, f64)> = resolved
-        .iter()
-        .zip(&times)
-        .map(|((c, w), ct)| (sample_clip(skeleton, c, *ct, true), *w))
-        .collect();
-    weighted_blend(items).unwrap_or_else(|| Pose::rest(skeleton))
+    Some((resolved, times, leader))
+}
+
+/// **Where a blend space's play-head actually is** (P29.5): the leading clip and
+/// its own sample time, in seconds.
+///
+/// A blend space has no single play-head — that is P29.4's ledgered reason for
+/// firing event markers from single-clip states only. But it does have a
+/// **leader**: [`crate::sync::leader_index`] picks the heaviest-weighted clip,
+/// and it is the leader's uniform time that sets the cycle rate while every
+/// follower is warped onto its marker phase. So the leader's timeline *is* the
+/// blend's timeline, and a marker crossed on it is a marker the blend crossed.
+///
+/// `None` when nothing resolves. The caller (the pose step) also has to notice
+/// the leader **changing** between two steps, which is a different clip's
+/// timeline and therefore not an interval at all.
+pub fn blend_leader<'c>(
+    weights: &[(usize, f64)],
+    clip_of: impl Fn(usize) -> Option<&'c AnimClip>,
+    t: f64,
+) -> Option<(&'c AnimClip, f32)> {
+    let (resolved, times, leader) = resolve_times(weights, clip_of, t)?;
+    Some((resolved[leader].0, times[leader]))
 }
 
 /// Sample a 1D blend space at parameter `param` and play-head `t` (seconds) into

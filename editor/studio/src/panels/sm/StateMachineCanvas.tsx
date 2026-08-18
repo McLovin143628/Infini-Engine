@@ -63,6 +63,7 @@ import {
 } from "../../lib/smTypes";
 import { RuleBuilder } from "./RuleBuilder";
 import { SmNode } from "./SmNode";
+import { LiveTuning } from "./LiveTuning";
 import "../blueprint/blueprint.css";
 import "./sm.css";
 
@@ -424,6 +425,8 @@ function CanvasInner() {
                   </button>
                 ))}
               </div>
+              <div className="sm-insp__subtitle">Live tuning (S4)</div>
+              <LiveTuning params={root.params} />
             </div>
           )}
 

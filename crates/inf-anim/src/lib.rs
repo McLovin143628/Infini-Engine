@@ -91,8 +91,8 @@ pub mod warp;
 
 pub use asset::{AnimClipAsset, SkeletonAsset, StateMachineAsset};
 pub use blend_space::{
-    blend_weights_1d, blend_weights_2d, sample_blend_space_1d, sample_blend_space_2d, weights_2d,
-    BlendEntry1D, BlendEntry2D, BlendSpace1D, BlendSpace2D, ClipRef,
+    blend_leader, blend_weights_1d, blend_weights_2d, sample_blend_space_1d, sample_blend_space_2d,
+    weights_2d, BlendEntry1D, BlendEntry2D, BlendSpace1D, BlendSpace2D, ClipRef,
 };
 pub use channels::{AdditiveRef, AnimMarker, CurveChannel, DistanceTrack, RootMotionTrack};
 pub use clip::{AnimClip, Interpolation, JointTrack, QuatTrack, Vec3Track};
@@ -152,10 +152,10 @@ pub use root_motion::{
 pub use skeleton::{Joint, JointTransform, Skeleton, SkeletonError};
 pub use sockets::{find_socket, socket_transform, socket_transforms, Socket};
 pub use state_machine::{
-    eval_condition, eval_pose, motion_period, sample_motion, step, BlendCurve, BlendProfile, CmpOp,
-    InterruptBlend, InterruptSource, JointBlendWeight, Motion, SmCompare, SmCond, SmContext,
-    SmError, SmInterrupt, SmParam, SmParamKind, SmRuntime, SmSource, SmState, SmStep, SmSub,
-    SmTransition, SmValue, StateMachine, MAX_COND_DEPTH, MAX_COND_NODES, MAX_PARAMS,
+    eval_condition, eval_pose, motion_leader, motion_period, sample_motion, step, BlendCurve,
+    BlendProfile, CmpOp, InterruptBlend, InterruptSource, JointBlendWeight, Motion, SmCompare,
+    SmCond, SmContext, SmError, SmInterrupt, SmParam, SmParamKind, SmRuntime, SmSource, SmState,
+    SmStep, SmSub, SmTransition, SmValue, StateMachine, MAX_COND_DEPTH, MAX_COND_NODES, MAX_PARAMS,
 };
 pub use sync::{common_group, leader_index, warped_times, SyncPhase, SyncTrack};
 pub use template::{
