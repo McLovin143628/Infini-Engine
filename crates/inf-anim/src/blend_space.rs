@@ -298,9 +298,41 @@ pub fn weights_2d(points: &[DVec2], q: DVec2) -> Vec<(usize, f64)> {
         // resolved" and answers with the rest pose — a character snapping to
         // bind. `.inf_sm` does not refuse a non-finite sample position at its
         // own door either; it does now, and this is the second lock.
+        //
+        // It is NOT only about a value that arrives non-finite: two **finite**
+        // samples 2e300 apart overflow `ab` on the subtraction, and the same
+        // `inf/inf` empties the same list.
         if !(d2.is_finite() && t.is_finite()) {
             continue;
         }
+        // **A non-finite candidate takes no weight**, the same rule
+        // [`crate::delaunay::triangulate`] and the exact-hit scan above already
+        // apply — and the reason this guard is here rather than assumed. A NaN
+        // `d2` fails every ordering comparison it takes part in, so an edge
+        // touching a poisoned sample became `best` the moment it was scanned
+        // FIRST and no finite edge could displace it afterwards: the query then
+        // came back as that sample at full weight (the wrong clip, at 1.0), and
+        // for an infinite coordinate `t` itself went NaN and the whole weight
+        // list came back **empty**, which `sample_weighted` reads as "nothing
+        // resolved" and answers with the rest pose — a character snapping to
+        // bind. `.inf_sm` does not refuse a non-finite sample position at its
+        // own door either; it does now, and this is the second lock.
+        //
+        // It is NOT only about a value that arrives non-finite: two **finite**
+        // samples 2e300 apart overflow `ab` on the subtraction, and the same
+        // `inf/inf` empties the same list.
+        // **A non-finite candidate takes no weight**, the same rule
+        // [`crate::delaunay::triangulate`] and the exact-hit scan above already
+        // apply — and the reason this guard is here rather than assumed. A NaN
+        // `d2` fails every ordering comparison it takes part in, so an edge
+        // touching a poisoned sample became `best` the moment it was scanned
+        // FIRST and no finite edge could displace it afterwards: the query then
+        // came back as that sample at full weight (the wrong clip, at 1.0), and
+        // for an infinite coordinate `t` itself went NaN and the whole weight
+        // list came back **empty**, which `sample_weighted` reads as "nothing
+        // resolved" and answers with the rest pose — a character snapping to
+        // bind. `.inf_sm` does not refuse a non-finite sample position at its
+        // own door either; it does now, and this is the second lock.
         // **A non-finite candidate takes no weight**, the same rule
         // [`crate::delaunay::triangulate`] and the exact-hit scan above already
         // apply — and the reason this guard is here rather than assumed. A NaN
@@ -1141,6 +1173,44 @@ mod tests {
         let w = blend_weights_2d(&clean, DVec2::new(0.5, 0.1));
         assert_eq!(w.len(), 2);
         assert!((w[0].1 - 0.5).abs() < 1e-12, "{w:?}");
+
+        // **And it is not only about a value that arrives non-finite.** Two
+        // samples 2e300 apart are each perfectly finite, and their *difference*
+        // is not: `ab` overflows on the subtraction, `len2` is infinite, and the
+        // same `inf/inf` takes `t` to NaN. Measured with only the `chain_edges`
+        // half of the fix in place, this fixture still answered `[]` — the rest
+        // pose — which is what makes the edge scan's own guard load-bearing
+        // rather than belt-and-braces.
+        for big in [1e300f64, 1e308, f64::MAX] {
+            let sp = BlendSpace2D::new(
+                "x",
+                "y",
+                vec![
+                    BlendEntry2D {
+                        pos: [big, big],
+                        clip: id(0),
+                    },
+                    BlendEntry2D {
+                        pos: [-big, -big],
+                        clip: id(1),
+                    },
+                    BlendEntry2D {
+                        pos: [1.0, 0.0],
+                        clip: id(2),
+                    },
+                ],
+            );
+            let w = blend_weights_2d(&sp, DVec2::new(0.5, 0.1));
+            assert!(
+                !w.is_empty(),
+                "a {big:e}-wide space emptied the blend, which reads as the rest pose"
+            );
+            let total: f64 = w.iter().map(|(_, x)| x).sum();
+            assert!((total - 1.0).abs() < 1e-12, "{big:e} → {w:?}");
+            // The query is a hair from sample 2 and astronomically far from the
+            // other two, so it is sample 2 that carries it.
+            assert_eq!(w, vec![(2, 1.0)], "{big:e} → {w:?}");
+        }
     }
 
     #[test]
