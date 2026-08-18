@@ -52,6 +52,21 @@ const STEPS: u32 = 240;
 /// How many `f64`s [`movement_bytes`] writes before its first discriminant.
 /// Named so [`assert_not_vacuous`] and the writer cannot drift apart.
 const FLOATS: usize = 38;
+/// How many single-byte discriminants and flags follow them: eight from P29.3
+/// and seven this wave appended.
+const FLAGS: usize = 15;
+
+/// The exact width of one [`movement_bytes`] record.
+///
+/// **Pinned, not assumed** (P29.4 audit, A10). `FLOATS` is what `mode_at` is
+/// derived from, and nothing checked it against the writer: a field appended to
+/// the `f64` list without moving the constant would leave every reader below
+/// indexing a *float's* low byte as a mode, and each of them would go on
+/// passing. Comparing the number against the length of a real record is the one
+/// check the two cannot both be wrong about.
+fn record_len() -> usize {
+    FLOATS * 8 + FLAGS + std::mem::size_of::<u32>()
+}
 
 const HERO: Uuid = Uuid::from_u128(0x2903_0100);
 const GROUND: Uuid = Uuid::from_u128(0x2903_0101);
@@ -436,6 +451,11 @@ fn both_hosts_mantle_and_ragdoll_the_same_character_byte_for_byte() {
     // **ANTI-VACUITY, and it is the whole arm**: the trace has to have contained
     // a real mantle and a real ragdoll, or "identical" is a claim about a
     // character that walked in a straight line.
+    assert_eq!(
+        player[0].len(),
+        record_len(),
+        "the traversal trace's shape moved without `FLOATS` moving with it"
+    );
     let mode_at = FLOATS * 8;
     let modes: std::collections::BTreeSet<u8> = player.iter().map(|t| t[mode_at]).collect();
     let mantle = inf_ecs::components::MovementMode::Mantle as u8;
@@ -478,11 +498,18 @@ fn assert_not_vacuous(trace: &[Vec<u8>]) {
     );
     let n = trace[0].len();
     assert!(trace.iter().all(|t| t.len() == n));
+    assert_eq!(
+        n,
+        record_len(),
+        "the trace's shape moved without `FLOATS` moving with it — `mode_at` \
+         below is derived from that number, so every check would go on passing \
+         while reading a float's low byte as a mode"
+    );
 
     // The mode byte sits immediately after the f64 block, whose length is
-    // asserted rather than assumed: a field appended to the list above without
-    // this number moving would silently start reading a *float's* low byte as a
-    // mode, and every one of the checks below would go on passing.
+    // asserted rather than assumed (above): a field appended to the list in
+    // `movement_bytes` without this number moving would silently start reading a
+    // *float's* low byte as a mode.
     let mode_at = FLOATS * 8;
     let modes: std::collections::BTreeSet<u8> = trace.iter().map(|t| t[mode_at]).collect();
     assert!(

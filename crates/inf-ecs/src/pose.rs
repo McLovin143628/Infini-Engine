@@ -766,6 +766,15 @@ pub fn step_pose_evaluation<'c>(
             b.states.clear();
             b.root_motion.clear();
             b.curves.clear();
+            // **And the feet** (P29.4 audit, A3). This list was the one published
+            // map the early return did not drop, and it is the one with a reader
+            // in the *other* fixed step: `d3::movement::step_feet` asks
+            // `feet_of` where the pose put a foot, so a character that stopped
+            // carrying a machine went on being locked to the last position a
+            // pose it no longer has had put it in. The four maps are cleared
+            // together here for the same reason the main path clears them
+            // together — `PoseStoreRes`'s rule 4 is about all of them or none.
+            b.feet.clear();
             let empty = b.is_empty();
             if empty {
                 w.remove_resource::<crate::anim_bridge::AnimBridgeRes>();

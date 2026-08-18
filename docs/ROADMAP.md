@@ -17333,6 +17333,166 @@ shows a one-line authoring change as a one-line diff.
 > `samples/phase29-locomotion`, and it is why the gate arms here assert worlds
 > they construct rather than levels they load.
 
+> **P29.4 AUDIT** (2026-08-18) — adversarial pass over `ac144a2..c912d1f`, eleven
+> commits. **Thirteen findings, one HIGH, all closed in the tree.** Battery
+> **275 binaries / 5 060 passed / 0 failed / 9 ignored** against the wave's
+> 274 / 5 049 / 0 / 9 (+1 binary, `portable_character`, and +11 arms);
+> `clippy -D warnings` over the whole workspace and `cargo fmt --check` clean;
+> `cargo doc --no-deps` over the five touched crates still **52** warnings, none
+> of them in anything this pass wrote. Goldens still **54** byte-unchanged, **no
+> schema moved** and no committed content byte moved. **Eighteen mutations run independently** — six of the wave's own nine,
+> re-applied from scratch (all six reproduced), and twelve it did not think of.
+> **Five of the twelve SURVIVED**, and every one is a rule the port map names,
+> shipped correct and unwatched. Eleven further mutations then checked the
+> audit's own arms; ten kill, and the one that does not is named below.
+>
+> **A1 (HIGH) — a ragdoll whose rig never arrives never ends.** The bridge asks
+> the pose step for a rig and spawns the articulated bodies when it comes back.
+> For a character with no skeleton it never comes back — and **both** exits from
+> `Ragdoll`, the settle check and the player's jump, live *inside* the "the bodies
+> exist" branch. Measured on the shipped code: six hundred steps, ten seconds, the
+> mode never changed, no gravity, no input authority, and a held jump did nothing.
+> Not a corner: the landing classifier turns a hard enough fall into a ragdoll for
+> **any** character, and `movement_parity`'s own traversal fixture — the one whose
+> bound the ledger above records as "neither host registers a skeleton" — is
+> exactly such a character, so the wave's flagship parity arm was comparing two
+> hosts that agreed about a frozen character. `RIG_WAIT_S` (0.25 s, never fewer
+> than three fixed steps) bounds the wait and hands the character back on the same
+> two-destination branch §13's row names; a jump ends it at once. Three halves in
+> `a_character_with_no_rig_is_handed_back_rather_than_left_in_a_ragdoll`.
+>
+> **A13 (MEDIUM) — the ported foot thickness did nothing at all.**
+> `inf_anim::ground_offset`'s third argument is documented as "the ankle socket
+> with its Y replaced by the root joint's Y — the character's own ground plane",
+> and it is ALS's `IKFootFloorLocation`. The one call site passed the **ankle**.
+> The arithmetic then collapses exactly: the offset becomes `impact − ankle`, the
+> solve drives the *ankle* onto the floor rather than the sole, a foot sinks by
+> however high its joint stands, and `FOOT_HEIGHT_M` — 13.5 cm, converted once and
+> ledgered as a ported constant — **cancels out of the expression and has no
+> effect**. `foot.rs`'s own unit arm said "lifts the foot by its own thickness"
+> while asserting a number that does not contain the thickness. The call site
+> passes the ground plane now; the offset is what it is meant to be (how far the
+> ground under a foot differs from the ground under the body, zero on a flat
+> floor); and the thickness is pinned where it is actually load-bearing — on a
+> slope, where `h·(n − Y)` is the whole of its contribution. Setting
+> `FOOT_HEIGHT_M` to zero now fails two arms; before, it failed none.
+>
+> **A12 (MEDIUM) — the foot-IK half had no world arm, and the reason is a seam.**
+> Every arm the wave wrote for clause 5 measures the **lock**; the only assertion
+> about `foot_ik` in the tree was that it is *empty*. The probe, the goal, the
+> P24.2 chain solve and `foot_states`'s world lift were never executed. The reason
+> they could not be is worth the paragraph: `inf_ecs::pose` lifts a pose into the
+> world with the entity's **own** `GlobalTransform`, and the movement step keeps a
+> character's transform at its capsule **centre** — so a rig authored the way
+> `inf_anim::template` authors one (hips at `h × hip_height_ratio`, **feet at
+> model y = 0**) publishes its feet **0.9 m** above the floor it is standing on
+> for the default 1.8 m capsule, and ALS's ±50/45 cm envelope cannot span that.
+> Nothing in the tree decides whether a character mesh's origin is its feet or its
+> capsule centre, and no committed content carries a `CharacterMovement` and a
+> `SkeletalMesh` at once, which is why nothing had noticed. Two arms now:
+> `a_foot_over_ground_inside_the_envelope_is_given_a_goal_on_the_surface` runs the
+> solve end to end, and `a_feet_at_origin_rig_publishes_its_feet_half_a_capsule_up`
+> **asserts the current answer** — so the day P29.6's sample character decides the
+> convention it fails and this ledger has to be rewritten rather than quietly
+> disagreeing with the engine.
+>
+> **A2, A4, A5, A7, A11 — five rules that were right and unwatched.** Each is a
+> mutation this audit designed that killed nothing in the tree.
+> * **A2** — a body turning under a planted foot breaks the lock (ALS's
+>   `|RotationAmount| <= 0.001`). Replacing the whole test with `false` killed
+>   nothing: every foot fixture walked in a straight line.
+>   `a_turning_body_never_locks_a_foot` walks the same clip with the camera
+>   swinging, against a straight-line control that does lock.
+> * **A4** — "a walkable face is a FLOOR, not a wall" (`.cpp:196`). Deleting it
+>   killed nothing: the five refusals the wave wrote all reject for other reasons.
+>   The arm reads the knob the branch uses — at a 45-degree slope limit a vertical
+>   wall is a wall and the probe finds it; at 91 degrees the same wall is *ground*,
+>   and climbing onto ground you can walk up is not a mantle.
+> * **A5** — the room check. Deleting it killed nothing, and the reason is the
+>   finding: under the shipped settings the downward sphere has the **same radius**
+>   as the character and starts above the ledge ceiling, so anything that would
+>   block the capsule is something the sweep lands on instead. The one shape that
+>   separates them is a character taller than the sweep's own reach — which is what
+>   the arm is, and that bound is now written down rather than latent.
+> * **A7** — `SmRuntime::arm_trigger` **arms** a bit, it does not assign one. The
+>   bridge hands a whole `BTreeSet` of names to it in one loop, so `=` instead of
+>   `|=` would deliver the last name of each step and drop every edge the level
+>   sampler had already found. Replacing it killed nothing: every arm in the tree
+>   armed exactly one trigger.
+> * **A11** — the footsteps. `footstep_cues` had a unit test; the six lines in
+>   **each host** that map it onto the P12 queue had none, and they are a
+>   hand-maintained mirror pair.
+>   `a_footstep_marker_reaches_both_hosts_audio_queues_identically` is the twin the
+>   wave's brief asked for: the marker rings once (the sync marker at the same
+>   instant does not), the clip's `Mask_FootstepSound` really scales the voice
+>   (0.8 x 0.5 = 0.4, so a mapping that ignored it reads 0.8), and the two hosts'
+>   command streams are equal. Killed by dropping the gain in **one** host.
+>
+> **A3 (MEDIUM) — the early return kept the feet.** `step_pose_evaluation`'s
+> no-targets path cleared `states`, `root_motion` and `curves` and left `feet` —
+> the one published map whose reader is in the *other* fixed step. A character
+> that stopped carrying a machine went on being locked to the last place a pose it
+> no longer has had put its foot. `PoseStoreRes`'s rule 4 is about all four maps or
+> none; it clears all four now.
+>
+> **A6 (MEDIUM) — the character step had no portable-math gate.** `portable_pose`
+> grew three entries this wave and covers `inf-anim`. Nothing covered
+> `d3/movement.rs` (which writes every character's `Transform`, including the
+> mantle's warped placement), `d3/traversal.rs` (whose answer *is* where a mantle
+> ends and which landing the classifier reaches) or `d3/ragdoll_bridge.rs` (which
+> reads the pelvis to choose supine from prone) — all three folded into
+> `state_bytes` and compared by `movement_parity`. All three are clean today; that
+> is the point. `portable_character.rs` is the gate, over
+> `inf_math::libm_ban::ALL` plus the four glam constructors that reach `sin_cos`,
+> with per-file anchors so it cannot pass by scanning something else and two
+> poisoned copies so it cannot pass by scanning nothing.
+>
+> **A8 (MEDIUM) — the falling catch was quadratic.** `try_mantle` asked
+> `movement_targets` for its own copy of the character list to build
+> `IgnoreOnlyPawn`, and the falling catch runs on **every airborne step with
+> input** — so a crowd paid `O(characters)` per character per fixed step against a
+> list `step_character_movement` had already walked, sorted and allocated one line
+> earlier. Threaded down instead; the exclusion set is composed identically.
+>
+> **A9, A10 — two smaller ones, and one found a real number.** `A9`: the pelvis IK
+> offset was computed into a `let _ =` under a comment reading "Recorded rather
+> than applied" — it is recorded now, on `MovementRuntime`, which is what P29.5's
+> authoring pass will read. Its arm asserts only the inert path (a bare clip
+> records nothing), because the value still has no consumer to falsify against;
+> that bound is stated rather than dressed up. `A10`: `movement_parity`'s `FLOATS`
+> is what `mode_at` is derived from and nothing checked it against the writer.
+> Pinning the record width against a real record failed on the first run — the
+> trace is **323** bytes and the derivation said 321, because the flag block is
+> fifteen bytes and not thirteen. The pin is the fix and its own evidence.
+>
+> **The chr(92) law's EIGHTH catch, on the auditor.** The `assert_eq!` message A10
+> added went in through a scripted heredoc and came out with the continuation
+> eaten and fourteen spaces in the middle of a sentence — the same shape, in the
+> same wave, one commit after the guard caught the implementer's. Re-written
+> through the editor.
+>
+> **Five carried remainders the wave's own ledger does not name.**
+> `inf_anim::warp::WarpWindow`, `distance_match`, `play_rate_for`,
+> `ragdoll::flail_rate` and `foot::interp_to_vec` have **zero callers** outside
+> their own unit tests — the `OverlayRegistry` shape, in a file whose neighbouring
+> `CastTargets` doc says "a knob nobody turns documents a choice nobody made".
+> They are P29.5's substrate and are kept; they are named here so the next wave
+> inherits a list rather than a search.
+>
+> **What the audit did NOT change.** The spec clause list for P29.4 gained a status
+> note in this range — an annotation, not a contradiction, and it makes the clause
+> list agree with the catalogue amendment, so it stands. `set_pose_match_entry` is
+> the one bridge write door that does not gate on `has_machine`, so it can create
+> the resource for an entity with no machine; it is self-cleaning through
+> `tick_get_up` and both hosts do it identically. `press_crouch`/`prone`/`roll`/
+> `dive` are not consumed during a mantle or a ragdoll, so a held button fires on
+> the step after — the edges are `|=`d from a level, so that is the same answer the
+> button gives. `aim_sweep`'s pitch sign rests on a convention `aim_pitch_deg` does
+> not define yet ("Stored for P29.6"), so it is unfalsifiable until the camera
+> arrives. And `foot_ik` is not pruned by the pose step; it is rewritten every step
+> for every live character, so it can only go stale for one the movement step stops
+> visiting.
+
 
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
   consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed

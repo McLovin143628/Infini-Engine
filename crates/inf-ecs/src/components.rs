@@ -1879,6 +1879,18 @@ pub struct MovementRuntime {
     pub foot_world_l: Vec3d,
     /// The right foot's.
     pub foot_world_r: Vec3d,
+    /// **The pelvis drop the two foot offsets imply**, metres — computed and
+    /// deliberately **not applied** (P29.4 audit, A9).
+    ///
+    /// [`inf_anim::pelvis_offset`] answers how far the hips must come down for
+    /// the lower foot to reach its ground without the leg straightening past its
+    /// limit. Routing it into the rig is a *pose* edit that P29.5's authoring
+    /// pass owns; applying it to the capsule would move the character, which is
+    /// not what it means. It is recorded here rather than dropped on the floor
+    /// because a number a step computes and nobody can read is a number no test
+    /// can see — and the whole point of this block is that the animation bridge
+    /// reads what the movement step derives.
+    pub pelvis_offset: Vec3d,
 
     // ── ragdoll (P29.4) ──
     /// The ragdoll bridge's state for this character.

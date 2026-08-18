@@ -345,6 +345,212 @@ fn the_ledge_probe_finds_a_wall_and_refuses_five_things_that_are_not_one() {
     let _ = &mut ok;
 }
 
+/// **A face the character could walk up is not a ledge** (ALS `.cpp:196`), and
+/// the knob is the character's own slope limit (P29.4 audit, A4).
+///
+/// The branch this covers — "a walkable face is a FLOOR, not a wall" — is the
+/// first thing `probe_ledge` checks after the forward sweep, and the audit's
+/// mutation that deleted it killed nothing: every fixture above rejects for a
+/// different reason (no wall, too low, too high, dynamic, degenerate facing), so
+/// the branch was load-bearing and unwatched.
+///
+/// Read the two halves as one sentence: at a 45-degree limit a vertical wall is
+/// a wall and the probe finds it; at a 90-degree limit — a project whose
+/// characters walk up vertical faces — the same wall is **ground**, and climbing
+/// onto ground you can walk on is not a mantle.
+#[test]
+fn a_walkable_face_is_ground_and_not_a_ledge() {
+    let settings = traversal::LedgeSettings::default();
+    let feet = DVec3::new(0.0, 0.0, 1.2);
+    let (mut w, mut b) = world_with_ledge(1.0, BodyKind3D::Static);
+    b.sync_from_world(&w);
+    let none = only_self(&b);
+
+    // The control: at the ordinary limit the wall is a wall.
+    assert!(
+        traversal::probe_ledge(
+            b.world_mut(),
+            feet,
+            DVec3::Z,
+            RADIUS,
+            0.9,
+            45.0,
+            &settings,
+            &none
+        )
+        .is_some(),
+        "the fixture must be mantleable, or the refusal below proves nothing"
+    );
+    // The claim: a character that can walk up a vertical face does not mantle it.
+    assert!(
+        traversal::probe_ledge(
+            b.world_mut(),
+            feet,
+            DVec3::Z,
+            RADIUS,
+            0.9,
+            91.0,
+            &settings,
+            &none
+        )
+        .is_none(),
+        "a face inside the character's own slope limit is ground, not a ledge"
+    );
+    // …and `is_walkable` is the predicate that says so. Deliberately **not**
+    // probed at exactly 90 degrees: `pacos64` is a polynomial, so a horizontal
+    // normal answers 90.000000000000014 and the boundary is a coin toss rather
+    // than a claim.
+    assert!(traversal::is_walkable(DVec3::Z, 91.0));
+    assert!(!traversal::is_walkable(DVec3::Z, 89.0));
+    assert!(traversal::is_walkable(DVec3::Y, 45.0));
+    assert!(
+        !traversal::is_walkable(DVec3::ZERO, 91.0),
+        "no normal, no floor"
+    );
+    let _ = &mut w;
+}
+
+/// **The room check**: the character's own capsule must fit where it is going
+/// (P29.4 audit, A5).
+///
+/// Step 3 of the probe is the only one that reads the character's *height*, and
+/// under the shipped settings it is nearly unreachable — the downward sphere
+/// sweep has the same radius as the capsule and starts above the ledge ceiling,
+/// so anything that would block the capsule is something the sweep lands on
+/// instead. The one shape that separates them is a character **taller than the
+/// sweep's own reach**, which is exactly what this arm is: one ledge, one
+/// ceiling far above it, and the same probe asked for a 1.8 m character and for
+/// a 6.6 m one.
+///
+/// The audit's mutation that deleted the check killed nothing before this.
+#[test]
+fn a_character_that_does_not_fit_above_the_ledge_does_not_mantle_onto_it() {
+    const CEILING: Uuid = Uuid::from_u128(0x2904_0004);
+    let settings = traversal::LedgeSettings::default();
+    let feet = DVec3::new(0.0, 0.0, 1.2);
+    let (mut w, mut b) = world_with_ledge(1.0, BodyKind3D::Static);
+    // A slab five metres up: far above the probe's own sweeps (the downward one
+    // starts at 2.81 m and the forward one reaches 2.81 m), so it can only be
+    // seen by the capsule that has to stand there.
+    spawn_block(
+        &mut w,
+        CEILING,
+        DVec3::new(0.0, 5.0, 2.0),
+        DVec3::new(10.0, 0.25, 10.0),
+        BodyKind3D::Static,
+    );
+    b.sync_from_world(&w);
+    let none = only_self(&b);
+
+    // The control: an ordinary 1.8 m character fits under the slab and climbs.
+    let ok = traversal::probe_ledge(
+        b.world_mut(),
+        feet,
+        DVec3::Z,
+        RADIUS,
+        0.9,
+        45.0,
+        &settings,
+        &none,
+    );
+    assert!(
+        ok.is_some(),
+        "the slab is five metres up; a normal character must still mantle"
+    );
+    // The claim: one that would stand through the slab does not.
+    assert!(
+        traversal::probe_ledge(
+            b.world_mut(),
+            feet,
+            DVec3::Z,
+            RADIUS,
+            3.0,
+            45.0,
+            &settings,
+            &none
+        )
+        .is_none(),
+        "a character with no room above the ledge must not be sent there"
+    );
+}
+
+/// **A wall is not a landing** (P29.4 audit, A6).
+///
+/// `predict_landing` sweeps along the character's own velocity, so a character
+/// thrown sideways off a roof sweeps into whatever is in front of it — and what
+/// is in front of it is often a wall. The verdict feeds the landing classifier,
+/// which decides between a soft landing, a hard one, a roll and a **ragdoll**,
+/// so predicting an impact against a vertical face is not a cosmetic error.
+///
+/// The check is one `!is_walkable` in the sweep's tail, and the audit's mutation
+/// that removed it killed nothing: every land-prediction fixture fell straight
+/// down onto a floor.
+#[test]
+fn the_land_prediction_refuses_a_wall_and_accepts_the_floor_behind_it() {
+    fn fixture(with_wall: bool) -> (EcsWorld, PhysicsBridge3D) {
+        let mut w = EcsWorld::new();
+        let b = PhysicsBridge3D::new(GRAVITY);
+        spawn_block(
+            &mut w,
+            GROUND,
+            DVec3::new(0.0, -0.5, 0.0),
+            DVec3::new(40.0, 0.5, 40.0),
+            BodyKind3D::Static,
+        );
+        if with_wall {
+            // A ten-metre wall whose face is at z = 6, square across the sweep.
+            spawn_block(
+                &mut w,
+                LEDGE,
+                DVec3::new(0.0, 5.0, 6.5),
+                DVec3::new(10.0, 5.0, 0.5),
+                BodyKind3D::Static,
+            );
+        }
+        (w, b)
+    }
+    // Thrown forward and falling: the sweep is velocity-aligned, so it points at
+    // the wall rather than at the ground under the character.
+    let centre = DVec3::new(0.0, 5.0, 0.0);
+    let velocity = DVec3::new(0.0, -20.0, 40.0);
+    let none = std::collections::BTreeSet::new();
+
+    let (w, mut b) = fixture(true);
+    b.sync_from_world(&w);
+    assert!(
+        traversal::predict_landing(
+            b.world_mut(),
+            centre,
+            velocity,
+            RADIUS,
+            0.9,
+            45.0,
+            9.81,
+            &none
+        )
+        .is_none(),
+        "a vertical face is not a floor to land on"
+    );
+
+    // The control: the same sweep with nothing in the way reaches the ground and
+    // answers — so the refusal above is the wall and not the sweep's length.
+    let (w2, mut b2) = fixture(false);
+    b2.sync_from_world(&w2);
+    let p = traversal::predict_landing(
+        b2.world_mut(),
+        centre,
+        velocity,
+        RADIUS,
+        0.9,
+        45.0,
+        9.81,
+        &none,
+    )
+    .expect("the floor is inside the sweep");
+    assert!(p.normal.y > 0.9, "the floor's normal is up: {:?}", p.normal);
+    assert!(p.impact_mps > 20.0, "and it arrives faster than it left");
+}
+
 /// The `targets` filter is **not** the exclusion set: a dynamic crate in front of
 /// a static wall is *skipped* by `Fixed` and the wall behind it is returned, which
 /// is the whole reason the filter is in the broad phase.

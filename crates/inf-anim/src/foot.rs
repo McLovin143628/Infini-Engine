@@ -273,15 +273,45 @@ mod tests {
         assert_eq!(FOOT_HEIGHT_M, 0.135);
     }
 
+    /// The offset is the **difference** between the ground under the foot and
+    /// the character's own ground plane — and the foot's own thickness shows up
+    /// only on a slope, which is where it means something (P29.4 audit, A13).
     #[test]
-    fn a_flat_surface_lifts_the_foot_by_its_own_thickness_and_does_not_tilt_it() {
+    fn the_offset_is_a_difference_and_the_thickness_shows_on_a_slope() {
+        // Flat ground 20 cm above the character's plane: lift the foot 20 cm.
+        // The thickness cancels here — `impact + n·h` against `floor + Y·h` with
+        // `n == Y` — and that is correct, not an accident: on a level surface a
+        // sole's depth is the same under the foot and under the body.
         let g = ground_offset(Vec3::new(0.0, 0.2, 0.0), Vec3::Y, Vec3::new(0.0, 0.0, 0.0));
         assert!((g.offset.y - 0.2).abs() < 1e-6, "{g:?}");
         assert!(g.pitch_deg.abs() < 1e-9 && g.roll_deg.abs() < 1e-9, "{g:?}");
-        // A 30-degree slope about the character's right axis reads as pitch.
-        let n = Vec3::new(0.0, 30f32.to_radians().cos(), 30f32.to_radians().sin());
+        // A foot on the same plane the body stands on is not moved at all.
+        assert_eq!(
+            ground_offset(Vec3::ZERO, Vec3::Y, Vec3::ZERO).offset,
+            Vec3::ZERO
+        );
+
+        // A 30-degree slope about the character's right axis reads as pitch…
+        let (c, s) = (30f32.to_radians().cos(), 30f32.to_radians().sin());
+        let n = Vec3::new(0.0, c, s);
         let g = ground_offset(Vec3::ZERO, n, Vec3::ZERO);
         assert!((g.pitch_deg + 30.0).abs() < 0.5, "{g:?}");
+        // …and **this** is where `FOOT_HEIGHT_M` is load-bearing: the sole is
+        // lifted along the SURFACE normal and dropped along the vertical, so the
+        // residue is `h · (n − Y)` and nothing else. A thickness of zero would
+        // make both of these exactly zero, which is what makes them a pin on the
+        // ported 13.5 cm rather than on the trigonometry.
+        let h = FOOT_HEIGHT_M as f32;
+        assert!(
+            (g.offset.z - h * s).abs() < 1e-6,
+            "the slope's share of the foot's thickness: {g:?}"
+        );
+        assert!(
+            (g.offset.y - h * (c - 1.0)).abs() < 1e-6,
+            "…and its vertical half: {g:?}"
+        );
+        assert!(g.offset.z > 0.06, "not vacuous: {g:?}");
+
         // A degenerate normal is an answer, not a NaN in the pose.
         assert_eq!(
             ground_offset(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO),

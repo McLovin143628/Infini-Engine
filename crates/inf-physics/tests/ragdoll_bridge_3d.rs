@@ -212,6 +212,21 @@ impl Sim {
             .map(|s| s.name.clone())
             .unwrap_or_default()
     }
+
+    /// The same character with its **skeleton taken away**, so the pose step can
+    /// never publish a rig and the bodies can never be built (P29.4 audit, A1).
+    fn rigless(feet_y: f64) -> Self {
+        let mut sim = Self::new(feet_y);
+        let e = sim.world.entity_of(HERO).unwrap();
+        sim.world.world_mut().entity_mut(e).remove::<SkeletalMesh>();
+        sim.world.mark_dirty();
+        sim.world.propagate();
+        sim
+    }
+
+    fn mode(&self) -> MovementMode {
+        self.hero().mode
+    }
 }
 
 /// **The whole round trip**: velocity in, bodies, settle, pose-matched get-up out.
@@ -476,4 +491,109 @@ fn a_ragdoll_can_be_entered_from_any_mode_the_character_is_in() {
         // `OnOwnerRagdollStateChanged` doing the same thing.
         assert!(!sim.hero().runtime.mantle.active, "{label}");
     }
+}
+
+/// **A ragdoll nobody can build bodies for still ends** (P29.4 audit, A1).
+///
+/// The bridge asks the pose step for a rig and spawns the bodies when it
+/// arrives. For a character with no skeleton it never arrives — and the two ways
+/// out of a ragdoll, settling and the player's jump, both live *inside* the "the
+/// bodies exist" branch. Measured on the shipped code before this arm: six
+/// hundred steps in `Ragdoll`, no gravity, no input authority, and a held jump
+/// that changed nothing.
+///
+/// That is not a corner. `movement.rs`'s landing classifier turns a hard enough
+/// fall into a ragdoll for **any** character, rig or no rig, and
+/// `movement_parity`'s own traversal fixture is a character with no skeleton.
+///
+/// Three halves, because the exit is a branch: on the ground it gets up, in the
+/// air it resumes falling, and a jump ends it at once rather than after the
+/// wait. The control is the arm at the top of this file — the same bridge with a
+/// real humanoid spawns bodies and settles, so this is not "ragdolls never work".
+#[test]
+fn a_character_with_no_rig_is_handed_back_rather_than_left_in_a_ragdoll() {
+    // 1. On the ground: it gets up. Stepped first, because "am I on the ground"
+    //    is an answer the movement step produces and a character nothing has
+    //    simulated has not been told yet.
+    let mut sim = Sim::rigless(0.0);
+    for _ in 0..10 {
+        sim.step(&MovementIntent::default());
+    }
+    assert!(
+        sim.hero().runtime.grounded,
+        "the fixture must start standing"
+    );
+    assert!(ragdoll_bridge::start_ragdoll(&mut sim.world, HERO));
+    assert_eq!(sim.mode(), MovementMode::Ragdoll);
+    let mut steps = 0;
+    while sim.mode() == MovementMode::Ragdoll && steps < 600 {
+        sim.step(&MovementIntent::default());
+        steps += 1;
+    }
+    assert!(
+        steps < 600,
+        "a rig-less character never left Ragdoll in ten seconds — it is stuck"
+    );
+    assert_eq!(
+        sim.mode(),
+        MovementMode::Grounded,
+        "on the ground, the exit is a get-up"
+    );
+    assert!(
+        !sim.hero().runtime.ragdoll.spawned,
+        "nothing should have spawned"
+    );
+    assert_eq!(sim.bridge.ragdoll_count(), 0);
+    // The wait is a bound, not a formality: it really did last more than one
+    // step, so a bail-out that fired instantly would fail here too.
+    assert!(steps > 1, "the bridge gave up before the rig could arrive");
+
+    // 2. In the air: it resumes falling, and does not get up.
+    let mut air = Sim::rigless(40.0);
+    for _ in 0..30 {
+        air.step(&MovementIntent::default());
+    }
+    assert!(ragdoll_bridge::start_ragdoll(&mut air.world, HERO));
+    let mut steps = 0;
+    while air.mode() == MovementMode::Ragdoll && steps < 600 {
+        air.step(&MovementIntent::default());
+        steps += 1;
+    }
+    assert!(steps < 600, "the airborne half is stuck too");
+    assert_eq!(
+        air.mode(),
+        MovementMode::FallFree,
+        "airborne resumes falling"
+    );
+    assert_eq!(
+        air.hero().runtime.ragdoll.phase,
+        inf_anim::RagdollPhase::Inactive,
+        "there is nothing to get up from in mid-air"
+    );
+    // …and it is still falling afterwards rather than frozen where it stopped.
+    let y0 = air.hero().runtime.velocity.y;
+    for _ in 0..30 {
+        air.step(&MovementIntent::default());
+    }
+    assert!(
+        air.hero().runtime.velocity.y < y0 - 1.0,
+        "the character must be falling again, not parked: {y0} -> {}",
+        air.hero().runtime.velocity.y
+    );
+
+    // 3. A jump ends it at once — the player's own escape, which was unreachable.
+    let mut asked = Sim::rigless(0.0);
+    for _ in 0..10 {
+        asked.step(&MovementIntent::default());
+    }
+    assert!(ragdoll_bridge::start_ragdoll(&mut asked.world, HERO));
+    asked.step(&MovementIntent {
+        jump: true,
+        ..Default::default()
+    });
+    assert_ne!(
+        asked.mode(),
+        MovementMode::Ragdoll,
+        "a jump must end a ragdoll the bridge cannot build"
+    );
 }

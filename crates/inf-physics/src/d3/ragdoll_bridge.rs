@@ -62,6 +62,38 @@ pub const SETTLE_SPEED_MPS: f64 = 0.35;
 /// See [`SETTLE_SPEED_MPS`].
 pub const SETTLE_TIME_S: f64 = 0.6;
 
+/// How long the bridge waits for the pose step to answer a rig request before
+/// concluding that **no rig is coming**, seconds (P29.4 audit, A1).
+///
+/// The answer normally arrives on the very next fixed step: the request is a
+/// value in [`inf_ecs::anim_bridge`] and the pose step runs after the movement
+/// step in both hosts. It never arrives at all for a character that has a
+/// [`CharacterMovement`] and no skeleton — and that is not a hypothetical. The
+/// landing classifier turns a hard enough fall into a ragdoll for *any*
+/// character (`movement.rs` step 10), and `movement_parity`'s own traversal
+/// fixture is exactly such a character.
+///
+/// Without a bound, that character stays in [`MovementMode::Ragdoll`] for ever.
+/// Nothing spawns, so both exits — the settle check and the player's jump — are
+/// unreachable, because both live inside the "the bodies exist" branch; the
+/// capsule is written back to the same place every step with no gravity and no
+/// input authority. Measured before this constant existed: six hundred steps,
+/// ten seconds, never left the mode, and a held jump did not end it either.
+///
+/// A refusal is a value in this repository. A wait with no end is neither.
+pub const RIG_WAIT_S: f64 = 0.25;
+
+/// [`RIG_WAIT_S`], never shorter than three fixed steps — so a host running at
+/// ten hertz still gives the pose step its one step of latency and a margin,
+/// rather than giving up before the answer could have been written.
+fn rig_wait_s(dt: f64) -> f64 {
+    if dt.is_finite() && dt > 0.0 {
+        RIG_WAIT_S.max(dt * 3.0)
+    } else {
+        RIG_WAIT_S
+    }
+}
+
 /// The bodies and joints one ragdolled character owns while it is simulating.
 ///
 /// Held by the [`PhysicsBridge3D`] rather than by the ECS, for the reason
@@ -245,6 +277,17 @@ pub fn step_ragdoll(
                 // refusal is visible as a `Ragdoll` mode that lasted one step.
                 return finish(world, bridge, guid, cm, false);
             }
+        } else if cm.runtime.press_jump || cm.runtime.ragdoll.time_in_phase_s > rig_wait_s(dt) {
+            // **No rig is coming** (P29.4 audit, A1). See [`RIG_WAIT_S`]: the
+            // branch above is "the rig arrived and was not a humanoid", and this
+            // one is "the rig never arrived", which is what a character with no
+            // skeleton gets. Both hand the character straight back, and this one
+            // reads its own last ground answer to pick which of the two exits
+            // §13's row names — a character that cannot be a ragdoll is not a
+            // character that stops moving.
+            cm.runtime.press_jump = false;
+            let grounded = cm.runtime.grounded;
+            return finish(world, bridge, guid, cm, grounded);
         }
     }
 

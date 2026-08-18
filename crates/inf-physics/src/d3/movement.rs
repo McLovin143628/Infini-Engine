@@ -217,8 +217,14 @@ pub fn step_character_movement(
     // the measured cost of getting this wrong).
     let targets: Vec<uuid::Uuid> = model::movement_targets(world);
     let mut out = Vec::with_capacity(targets.len());
-    for guid in targets {
-        if let Some(o) = step_one(world, bridge, guid, dt) {
+    for guid in &targets {
+        // **The list is walked once and then passed down** (P29.4 audit, A8).
+        // `try_mantle` needs it too — `IgnoreOnlyPawn` is "every other
+        // character's collider" — and it used to ask for its own copy, which
+        // made the falling catch (tried on *every* airborne step with input)
+        // O(characters) per character per step. One walk, one sort, one
+        // allocation, whoever reads it.
+        if let Some(o) = step_one(world, bridge, *guid, dt, &targets) {
             out.push(o);
         }
     }
@@ -319,6 +325,7 @@ fn step_one(
     bridge: &mut PhysicsBridge3D,
     guid: uuid::Uuid,
     dt: f64,
+    characters: &[uuid::Uuid],
 ) -> Option<MoveOutcome> {
     let entity = world.entity_of(guid)?;
     let (mut cm, mut position, authored_yaw_deg, collider) = {
@@ -531,7 +538,7 @@ fn step_one(
                 && (cm.mode == MovementMode::Grounded || cm.mode == MovementMode::Crouch)
                 && try_mantle(
                     &mut cm,
-                    world,
+                    characters,
                     bridge,
                     &probe,
                     position,
@@ -584,7 +591,7 @@ fn step_one(
         {
             try_mantle(
                 &mut cm,
-                world,
+                characters,
                 bridge,
                 &probe,
                 position,
@@ -1131,8 +1138,21 @@ fn step_one(
         model::angle_delta_deg(cm.runtime.aim_yaw_deg, cm.runtime.body_yaw_deg),
         aim_mask,
     );
-    // ── 11b. **Foot IK and foot lock** (P29.4, clause 5).
-    step_feet(world, bridge, &mut cm, guid, radius, &exclude, dt);
+    // ── 11b. **Foot IK and foot lock** (P29.4, clause 5). The character's own
+    //    ground plane goes with it: the offset arithmetic is a comparison
+    //    between the ground under a foot and the ground under the BODY, and the
+    //    body's is not derivable from a foot.
+    let ground_plane_y = position.y - (half_height + radius);
+    step_feet(
+        world,
+        bridge,
+        &mut cm,
+        guid,
+        radius,
+        ground_plane_y,
+        &exclude,
+        dt,
+    );
     cm.runtime.refusal = refusal;
 
     // ── 12. Write the world back: the component, the transform, the capsule,
@@ -1190,7 +1210,7 @@ fn step_one(
 #[allow(clippy::too_many_arguments)]
 fn try_mantle(
     cm: &mut CharacterMovement,
-    world: &EcsWorld,
+    characters: &[uuid::Uuid],
     bridge: &mut PhysicsBridge3D,
     probe: &ClearanceProbe<'_>,
     position: DVec3,
@@ -1204,11 +1224,14 @@ fn try_mantle(
     let feet = position - DVec3::Y * (cm.half_height_for(cm.mode) + radius);
     let forward = model::rotate_from_frame(Vec2d::new(0.0, 1.0), cm.runtime.body_yaw_deg);
     // `IgnoreOnlyPawn`, made out of what this engine has: every character's
-    // collider, through the same `O(characters)` door the step's own target walk
-    // goes through, so a crowd cannot be climbed.
+    // collider, off the list `step_character_movement` already walked once this
+    // step, so a crowd cannot be climbed and the walk is not repeated per
+    // character (P29.4 audit, A8 — the falling catch runs this on every airborne
+    // step, so asking for a fresh `movement_targets` here was O(characters) per
+    // character per fixed step).
     let mut exclude = probe.exclude.clone();
-    for other in model::movement_targets(world) {
-        if let Some(c) = bridge.collider_of(other) {
+    for other in characters {
+        if let Some(c) = bridge.collider_of(*other) {
             exclude.insert(c);
         }
     }
@@ -1415,6 +1438,7 @@ fn step_feet(
     cm: &mut CharacterMovement,
     guid: uuid::Uuid,
     radius: f64,
+    ground_plane_y: f64,
     exclude: &BTreeSet<ColliderId3D>,
     dt: f64,
 ) {
@@ -1427,6 +1451,7 @@ fn step_feet(
         cm.runtime.foot_lock_r.release();
         cm.runtime.foot_slide_l_m = 0.0;
         cm.runtime.foot_slide_r_m = 0.0;
+        cm.runtime.pelvis_offset = Vec3d::ZERO;
         return;
     };
     // A turn breaks a lock. `RotationAmount` is the donor's channel; ours is the
@@ -1507,6 +1532,19 @@ fn step_feet(
         {
             continue;
         }
+        // **The FLOOR point, not the ankle** (P29.4 audit, A13).
+        //
+        // `ground_offset`'s third argument is documented as "the ankle socket
+        // with its Y replaced by the root joint's Y — the character's own ground
+        // plane", and it is ALS's `IKFootFloorLocation`. Passing the ankle
+        // itself instead makes the whole expression collapse: the offset becomes
+        // `impact − ankle`, so the solve drives the ANKLE onto the ground rather
+        // than the sole, the foot sinks by however high the ankle is, and
+        // `FOOT_HEIGHT_M` — a ported constant with a number in it — cancels out
+        // of the arithmetic exactly and does nothing at all. With the floor point
+        // the offset is what it is meant to be: how far the ground under THIS
+        // foot differs from the ground under the body, zero on a flat floor.
+        let floor = glam::Vec3::new(held.x, ground_plane_y as f32, held.z);
         let g = inf_anim::ground_offset(
             glam::Vec3::new(hit.point.x as f32, hit.point.y as f32, hit.point.z as f32),
             glam::Vec3::new(
@@ -1514,7 +1552,7 @@ fn step_feet(
                 hit.normal.y as f32,
                 hit.normal.z as f32,
             ),
-            held,
+            floor,
         );
         offsets[side] = g.offset;
         let target = held + g.offset;
@@ -1524,11 +1562,13 @@ fn step_feet(
         });
     }
     // The pelvis drops to the lower foot, so the low leg does not straighten past
-    // its limit reaching for a step below the other one. Recorded rather than
+    // its limit reaching for a step below the other one. **Recorded** rather than
     // applied: moving the capsule would move the character, and the pelvis is a
-    // POSE offset — P29.5's authoring pass is what routes it into the rig.
+    // POSE offset — P29.5's authoring pass is what routes it into the rig. It was
+    // computed into a `let _ =` before (P29.4 audit, A9), which is a value the
+    // sentence above claims and no reader could check.
     let pelvis = inf_anim::pelvis_offset(enables[0], enables[1], offsets[0], offsets[1]);
-    let _ = pelvis;
+    cm.runtime.pelvis_offset = Vec3d::new(pelvis.x as f64, pelvis.y as f64, pelvis.z as f64);
     inf_ecs::anim_bridge::set_foot_ik(world, guid, goals);
 }
 

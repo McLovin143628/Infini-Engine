@@ -3095,6 +3095,49 @@ mod tests {
         assert_eq!(rt.current, 2);
     }
 
+    /// **[`SmRuntime::arm_trigger`] arms, it does not assign** (P29.4 audit, A7).
+    ///
+    /// The bridge hands a whole `BTreeSet` of names to this method in one loop
+    /// (`inf_ecs::pose::step_pose_evaluation`), and the level path `|=`s a rising
+    /// edge into the same word — so a body that wrote the bit instead of setting
+    /// it would silently keep only the last name of each step and drop every
+    /// edge the sampler had already found. The audit's mutation that replaced
+    /// `|=` with `=` killed nothing in the tree: every arm until this one armed
+    /// exactly one trigger.
+    ///
+    /// Also the refusal: a name the machine does not declare as a trigger is a
+    /// `false` that changes nothing, not a panic and not a silent arm of index
+    /// zero.
+    #[test]
+    fn arming_a_second_trigger_does_not_disarm_the_first() {
+        let sm = StateMachine {
+            states: vec![SmState::clip("idle", [1; 16])],
+            entry: 0,
+            params: vec![
+                SmParam::trigger("jump"),
+                SmParam::new("speed", SmParamKind::Float),
+                SmParam::trigger("ragdoll"),
+            ],
+            ..Default::default()
+        };
+        let mut rt = SmRuntime::default();
+        assert!(rt.arm_trigger(&sm, "jump"));
+        assert_eq!(rt.triggers, 0b001);
+        assert!(rt.arm_trigger(&sm, "ragdoll"));
+        assert_eq!(
+            rt.triggers, 0b101,
+            "arming the second cleared the first — a step that arms two names \
+             would deliver one"
+        );
+        // Idempotent: arming the same name twice is one armed bit.
+        assert!(rt.arm_trigger(&sm, "jump"));
+        assert_eq!(rt.triggers, 0b101);
+        // A name that is not a declared trigger is a value, and changes nothing.
+        assert!(!rt.arm_trigger(&sm, "speed"), "a Float is not a trigger");
+        assert!(!rt.arm_trigger(&sm, "nope"));
+        assert_eq!(rt.triggers, 0b101);
+    }
+
     /// Rule 4: an armed trigger nothing consumed **stays armed**, so an input one
     /// step early is not lost.
     #[test]
