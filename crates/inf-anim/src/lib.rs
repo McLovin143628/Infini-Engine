@@ -44,6 +44,9 @@ pub mod clip;
 // P29.2 blend spaces: the deterministic triangulator that closes the P11.2
 // IDW-k3 deferral.
 pub mod delaunay;
+// P29.5 pillar S2: what Epic's seven hand-run AnimModifiers bake, derived from
+// the clip at import instead — root motion, distance, foot plants, gait curves.
+pub mod derive;
 // P24.4 secondary animation: XPBD cloth over the posed skeleton.
 pub mod cloth;
 // P24.4 secondary animation: strand hair, on the same solver primitives.
@@ -63,6 +66,9 @@ pub mod locomotion;
 // P24.3 modular rigging: assembling one skeleton out of parts.
 pub mod merge;
 pub mod pose;
+// P29.5 pillar S3: a state graph proposed from a derived clip set, written as a
+// normal text-diffable `.inf_sm` the author edits.
+pub mod propose;
 // P29.2 pose snapshot + pose matching (P29.4's get-up and landing consumers).
 pub mod pose_match;
 // P29.4 the ragdoll bridge's animation half: the motor drive, the face-up read
@@ -95,6 +101,10 @@ pub use cloth::{
     ClothError, ClothMaterial, ClothState, GRAVITY_M_S2,
 };
 pub use delaunay::{barycentric, triangulate, Triangulation};
+pub use derive::{
+    derive_clip, foot_joints, gait_of, unbake_root_motion, DeriveError, DeriveOptions,
+    DeriveReport, FootPlant, VerticalPolicy, FOOTSTEP_PREFIX,
+};
 pub use foot::{
     ground_offset, interp_to, pelvis_offset, FootLock, GroundOffset, FOOT_HEIGHT_M, TRACE_ABOVE_M,
     TRACE_BELOW_M,
@@ -126,6 +136,9 @@ pub use pose::{
 };
 pub use pose_match::{
     match_clip, match_clips, pose_cost, PoseMatch, PoseMatchWeights, PoseSnapshot,
+};
+pub use propose::{
+    facts_of, propose_machine, ClipFacts, Proposal, ProposalOptions, ProposeError, SPEED_PARAM,
 };
 pub use ragdoll::{
     blend_weight as ragdoll_blend_weight, face_up_from_pelvis_roll, motor_stiffness, GetUp,

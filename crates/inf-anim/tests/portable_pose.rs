@@ -46,7 +46,26 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 20] = [
+const SIM_PATH: [(&str, &str, &str); 22] = [
+    // ── P29.5's proposal, for the same reason its derivation is here ──
+    (
+        "propose.rs",
+        include_str!("../src/propose.rs"),
+        "a proposal writes a committed .inf_sm — its thresholds are bytes in a file two developers diff",
+    ),
+    // ── P29.5's derivation, which writes committed bytes ──
+    //
+    // The strongest case on this list rather than the weakest: everything else
+    // here decides a pose at runtime, and this one decides what is *in the file*.
+    // A `sin` here would not merely disagree between two machines at play time —
+    // it would put two different `.inf_anim` byte streams in two developers'
+    // checkouts, and every determinism gate downstream would compare them and
+    // pass, because each machine would agree with itself.
+    (
+        "derive.rs",
+        include_str!("../src/derive.rs"),
+        "an import derivation writes the root-motion track, the markers and the curves INTO a committed .inf_anim, so a non-portable call here forks the content itself",
+    ),
     // ── P29.4's three new modules ──
     (
         "warp.rs",
