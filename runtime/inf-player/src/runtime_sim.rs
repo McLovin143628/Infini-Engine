@@ -53,16 +53,15 @@ use inf_blueprint::{ActorInstance, BlueprintClass, EventKind, Host, InterpDebug,
 use inf_core::BoundedLog;
 use inf_ecs::components::{
     AnimPlayer, AudioListener, AudioSource, CharacterController2D, CharacterController3D,
-    Collider2D, Collider3D, ColliderShape2DKind, ColliderShape3DKind, Destructible, DistanceModel,
-    GlobalTransform, RootMotion, RootMotionMode, Terrain, Transform, VoxelVolume,
+    Collider2D, ColliderShape2DKind, Destructible, DistanceModel, GlobalTransform, RootMotion,
+    RootMotionMode, Terrain, Transform, VoxelVolume,
 };
 use inf_ecs::{sim_snapshot, update_attachments, EcsWorld, Entity, Guid};
 use inf_physics::d3::{
     DebrisBudget, DestroyedEvent, DestructOutcome, FractureAudit, FractureState, WaterEventKind3D,
 };
 use inf_physics::{
-    CharacterMover2D, CharacterMover3D, ColliderShape2D, ColliderShape3D, ContactPhase,
-    PhysicsBridge2D, PhysicsBridge3D,
+    CharacterMover2D, ColliderShape2D, ContactPhase, PhysicsBridge2D, PhysicsBridge3D,
 };
 use inf_runtime::FixedStep;
 use inf_voxel::VoxelData;
@@ -986,7 +985,26 @@ impl RuntimeSim {
         let args: HashMap<String, Value> = [("dt".to_string(), Value::Float(dt))].into();
         self.run_all_with_args(&EventKind::Tick, &args);
         self.drain_dispatch(); // Wave 3: Tick may dispatch custom events.
-                               // 3. Solver.
+                               // ── P29.3 character movement ── the ONE Ring-0 fixed step, called by
+                               //    both hosts, so the editor preview and the shipped player cannot
+                               //    integrate a character differently (the `step_pose_evaluation`
+                               //    shape). HERE, and not earlier: it runs AFTER the Blueprint Tick, so
+                               //    gameplay that set a character's intent this step is honoured this
+                               //    step; and BEFORE the solver, which is the slot
+                               //    `physics3d.move_and_slide` has always occupied. Inert (one empty
+                               //    query) on every level with no `CharacterMovement`.
+                               //
+                               //    Two calls rather than one because an intent is not input: a
+                               //    Blueprint, an AI or a replay can write one, and `apply_intent` is
+                               //    only the local player's path into the same field.
+        let intent = inf_ecs::movement::MovementIntent::from_actions(
+            |a| self.input.axis(a),
+            |a| self.input.is_down(a),
+            |a| self.just_pressed.contains(a),
+        );
+        inf_ecs::movement::apply_intent(&mut self.world, &intent);
+        inf_physics::d3::step_character_movement(&mut self.world, &mut self.bridge3d, dt);
+        // 3. Solver.
         self.bridge.step(dt);
         self.bridge3d.step(dt); // ── P11.3 3D bridge: step ──
                                 // ── Wave 3 collision + overlap drain ── (MIRROR of SimSession) between the
@@ -1356,7 +1374,7 @@ impl RuntimeSim {
             let pos = t.translation.to_dvec3();
 
             let new_pos = if has_cc {
-                let mover = build_mover3d(&self.world, guid);
+                let mover = inf_physics::d3::mover_for(&self.world, guid);
                 let exclude = self.bridge3d.collider_of(guid);
                 let res =
                     self.bridge3d
@@ -2308,7 +2326,7 @@ impl Physics3dHost for RuntimeHost<'_> {
             .body_translation(body)
             .ok_or("body vanished")?;
         let exclude = self.bridge3d.collider_of(guid);
-        let mover = build_mover3d(self.world, guid);
+        let mover = inf_physics::d3::mover_for(self.world, guid);
         // ── P20.2 swim mode ── the mover HONOURS the water: a character deep
         //    enough to swim has its free-fall discarded, its vertical motion
         //    replaced by a buoyancy balance and its horizontal speed capped. The
@@ -2355,7 +2373,7 @@ impl Physics3dHost for RuntimeHost<'_> {
             .body_translation(body)
             .ok_or("body vanished")?;
         let exclude = self.bridge3d.collider_of(guid);
-        let mover = build_mover3d(self.world, guid);
+        let mover = inf_physics::d3::mover_for(self.world, guid);
         let probe = self
             .bridge3d
             .world_mut()
@@ -2419,52 +2437,12 @@ impl Physics3dHost for RuntimeHost<'_> {
     }
 }
 
-/// Build a [`CharacterMover3D`] from an entity's `CharacterController3D` +
-/// `Collider3D` (the runtime mirror of the editor's `build_mover3d`). Shared by
-/// the `physics3d.move_and_slide` host path and the root-motion applier.
-fn build_mover3d(world: &EcsWorld, guid: Uuid) -> CharacterMover3D {
-    let default_shape = ColliderShape3D::Capsule {
-        half_height: 0.5,
-        radius: 0.25,
-    };
-    let Some(entity) = world.entity_of(guid) else {
-        return CharacterMover3D::new(default_shape);
-    };
-    let w = world.world();
-    let shape = w
-        .get::<Collider3D>(entity)
-        .map(collider_shape3d)
-        .unwrap_or(default_shape);
-    let cc = w.get::<CharacterController3D>(entity).copied();
-    let mut mover = CharacterMover3D::new(shape).up(DVec3::Y).slide(true);
-    if let Some(cc) = cc {
-        mover = mover
-            .offset(cc.offset.max(1e-4))
-            .max_slope_climb_angle(cc.max_slope_deg.to_radians())
-            .snap_to_ground(if cc.snap_to_ground > 0.0 {
-                Some(cc.snap_to_ground)
-            } else {
-                None
-            });
-    } else {
-        mover = mover.offset(0.02);
-    }
-    mover
-}
-
-/// A `Collider3D` component's shape as the 3D physics-facade shape.
-fn collider_shape3d(c: &Collider3D) -> ColliderShape3D {
-    match c.shape_kind {
-        ColliderShape3DKind::Box => ColliderShape3D::Box {
-            half_extents: c.half_extents.to_dvec3(),
-        },
-        ColliderShape3DKind::Sphere => ColliderShape3D::Sphere { radius: c.radius },
-        ColliderShape3DKind::Capsule => ColliderShape3D::Capsule {
-            half_height: c.half_extents.y,
-            radius: c.radius,
-        },
-    }
-}
+// **`build_mover3d` and `collider_shape3d` moved to Ring 0 in P29.3** as
+// `inf_physics::d3::mover_for`. They were a hand-maintained byte-identical pair,
+// one copy in each host, and §13's risk register says why that is not good
+// enough: a host-versus-host text compare cannot see a value that is wrong in
+// BOTH. The mover is now built once, and the movement component's autostep and
+// slope limit ride along for free rather than needing a third edit.
 
 /// A `Collider2D` component's shape as the physics-facade shape.
 fn collider_shape(c: &Collider2D) -> ColliderShape2D {

@@ -88,6 +88,18 @@ pub const SWIM_ENTER_FRACTION: f64 = 0.6;
 /// between two locomotion modes every fixed step.
 pub const SWIM_EXIT_FRACTION: f64 = 0.45;
 
+/// Submerged fraction past which a swimmer counts as **fully under** rather
+/// than at the surface (P29.3).
+///
+/// A distinction P20 did not need to draw — it had one swim state — and P29.3's
+/// [`MovementMode`](../../../inf_ecs/components/enum.MovementMode.html) does:
+/// `SwimSurface` and `SwimUnder` are separate modes with separate speeds. It
+/// lives here, beside the enter/exit band and the float target, because a second
+/// home for a water threshold is exactly the drift this module's own comments
+/// argue against. Above [`SWIM_FLOAT_SUBMERSION`], because a swimmer that is
+/// being pulled toward 0.8 must not flicker into "under" at rest.
+pub const SWIM_UNDER_FRACTION: f64 = 0.95;
+
 /// The submerged fraction a swimming character is pulled toward: 0.8, i.e. head
 /// out of the water. This is the "mild buoyancy balance" that replaces gravity —
 /// a swimmer neither sinks nor pops out.

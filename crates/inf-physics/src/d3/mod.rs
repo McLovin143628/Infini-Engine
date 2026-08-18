@@ -17,11 +17,12 @@ mod ecs;
 mod events;
 pub mod fracture;
 mod joint;
+pub mod movement;
 mod query;
 pub mod water;
 mod world;
 
-pub use character::{CharacterMove3D, CharacterMover3D};
+pub use character::{AutoStep3D, CharacterMove3D, CharacterMover3D};
 pub use ecs::{
     pcg_structure_guid, terrain_tile_collider, terrain_tile_guid, voxel_chunk_guid, BodyDesc3D,
     EntitySync3D, JointSync3D, PhysicsBridge3D, PoseWriteback3D, TerrainColliderAudit,
@@ -34,6 +35,7 @@ pub use fracture::{
     CRACK_OPENING_M, DEFAULT_DEBRIS_LIFETIME_S, DEFAULT_DEBRIS_MAX_LIVE,
 };
 pub use joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
+pub use movement::{mover_for, step_character_movement, MoveOutcome};
 pub use query::{RayHit3D, ShapeHit3D};
 pub use water::{
     BuoyancyDesc3D, SampleGeometry, WaterEvent3D, WaterEventKind3D, WaterIndex, WaterProbe,

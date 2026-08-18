@@ -23,6 +23,25 @@ pub struct CharacterMove3D {
     pub collisions: Vec<ColliderId3D>,
 }
 
+/// **Autostep configuration** (P29.3) — the parameters that make stairs work,
+/// in absolute metres.
+///
+/// rapier's own defaults are *relative* to the swept shape, which is wrong for a
+/// character that changes height: a crouched capsule would step over less than a
+/// standing one, so a doorway sill that is climbable upright would stop a crouch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AutoStep3D {
+    /// The tallest obstacle the character steps onto, world metres.
+    pub max_height: f64,
+    /// Free space that must exist beyond the step for it to be taken, metres.
+    /// Without it a character steps onto a ledge it cannot stand on.
+    pub min_width: f64,
+    /// Whether the character steps onto dynamic bodies as well as static
+    /// geometry. rapier defaults this on and so does the movement component:
+    /// a plank on the floor is a step.
+    pub include_dynamic_bodies: bool,
+}
+
 /// A `move_and_slide`-style kinematic character mover.
 ///
 /// It wraps rapier's `KinematicCharacterController` plus the character's collision
@@ -38,8 +57,9 @@ pub struct CharacterMover3D {
 
 impl CharacterMover3D {
     /// A mover for the given character shape, with sensible defaults: up is `+Y`,
-    /// sliding on, a 45° max climbable slope, ground-snap on, and autostep off (it
-    /// is expensive; opt in with [`autostep`](Self::autostep)).
+    /// sliding on, a 45° max climbable slope, ground-snap on, and autostep off
+    /// (opt in with [`autostep`](Self::autostep) — see that method for why the
+    /// default being off was, until P29.3, the reason stairs did not work).
     ///
     /// # Panics
     /// Panics if `shape` is a degenerate trimesh (a mover shape should always be a
@@ -93,10 +113,45 @@ impl CharacterMover3D {
         self
     }
 
-    /// Enable/disable automatic stepping over small obstacles (stairs). Off by
-    /// default because it is comparatively expensive.
-    pub fn autostep(mut self, enabled: bool) -> Self {
-        self.controller.autostep = enabled.then(CharacterAutostep::default);
+    /// **Automatic stepping over small obstacles — stairs** (P29.3). `None`
+    /// disables it.
+    ///
+    /// # Why this signature changed
+    ///
+    /// It used to be `autostep(bool)`, using rapier's default
+    /// (`Relative(0.25)` of the shape's height, `Relative(0.5)` width). It had
+    /// **no production caller at all**: `.autostep(` appeared exactly twice in
+    /// the tree, at its own definition here and in the `d2` sibling. So rapier's
+    /// real default — `None` — applied to every character this engine has ever
+    /// simulated, and stairs did not work. That is not a subtle failure: a
+    /// character walks into a 20 cm step and stops.
+    ///
+    /// A bool cannot express what a character needs, because a step height is a
+    /// *tuning* value that belongs beside the slope limit and the capsule
+    /// heights, and because `Relative` measures against the shape — so a
+    /// crouched capsule would silently step over less. Absolute metres, from
+    /// [`CharacterMovement::step_height_m`](../../inf_ecs/components/struct.CharacterMovement.html),
+    /// keep the stairs a character can climb independent of what it is doing.
+    pub fn autostep(mut self, step: Option<AutoStep3D>) -> Self {
+        self.controller.autostep = step.map(|s| CharacterAutostep {
+            max_height: CharacterLength::Absolute(s.max_height.max(0.0)),
+            min_width: CharacterLength::Absolute(s.min_width.max(0.0)),
+            include_dynamic_bodies: s.include_dynamic_bodies,
+        });
+        self
+    }
+
+    /// Replace the swept shape, keeping every tuning value (P29.3).
+    ///
+    /// The movement step decides a stance change and must sweep with the capsule
+    /// it just decided, one step before the component that holds it is written.
+    /// Rebuilding the whole mover to change one field would duplicate
+    /// `mover_for`'s reasoning at the call site, which is the thing that pair
+    /// was retired for.
+    pub fn with_shape(mut self, shape: ColliderShape3D) -> Self {
+        if let Some(s) = shape.to_shared() {
+            self.shape = s;
+        }
         self
     }
 
