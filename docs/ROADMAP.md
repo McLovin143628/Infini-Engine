@@ -18158,6 +18158,15 @@ shows a one-line authoring change as a one-line diff.
 > all — (2) and (3) were doing the work — and it is fixed because the number was
 > wrong, not because it was the cause.
 >
+> **One committed level moved, and it is these two fixes arriving in content.**
+> `samples/physics-playground` **persists** the ragdoll builder's output — P12.2
+> mapped `build_ragdoll`'s parts and `JointDesc3D`s onto real `Collider3D` and
+> `Joint3D` components — so its `.inf_lvl` carried twelve limbs at one kilogram
+> per cubic metre and eleven joints anchored the wrong way round. 164 bytes of it
+> changed, re-blessed through its own generator; nothing else under `samples/`
+> moved, and the P12-era arms are green on the new bytes. A committed level
+> moving is a thing this ledger has to say out loud, and this is it said.
+>
 > **(5) A level's `gravity_3d` is authored, serialized, round-tripped and read by
 > NOTHING.** The 3D solver's gravity comes from `gravity_2d.y`
 > (`RuntimeSim::new`). Every 3D sample in the tree sets the 2D field and this one
