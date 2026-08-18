@@ -7801,9 +7801,11 @@ run under existing state machines in PIE.
 > from templates through the wizard and **run under generated state machines in the real
 > `--pie` subprocess** (`phase24_wizard.rs`, 5 tests / 6 arms); auto-fit + heat weights solve
 > through the one `fit_rig_to_mesh` door; cloth and hair attach and fold in Simulate **and in
-> a cooked pack** — but **PIE previews neither** (the `ScenePayload` v8 gap, measured by an
-> arm that fails the day it closes — see the P24.4 ledger below). That is the one clause of
-> the done-when carried rather than met, and it is carried loudly.
+> a cooked pack**, and — since P26.3b's `ScenePayload` v8, which fired and retired the arm
+> that measured the gap — **in PIE too**. That clause of the done-when was carried rather than
+> met when this block was written; it was met on 2026-08-12, and this line is the correction,
+> made by P29.3 when it was asked to close the gap or re-ledger it and found it already shut.
+> See the P24.4 ledger below for what genuinely remains (a garment has no material slot).
 >
 > **P24.5 (character pipeline UX), what landed.** `inf_anim::locomotion` — the default
 > locomotion set is **derived from the rig it drives**: nothing in this repo ships stock
@@ -8371,17 +8373,23 @@ field: the grown guides are the fact, per the P23 `Op::Unwrap` doctrine. The con
 is the bound: **re-grooming means re-entering the numbers** — a `.inf_hair` cannot be re-opened
 in the panel with its knobs where the author left them.
 
-*The gap PIE leaves.* **A character previewed in PIE wears nothing.** `ScenePayload` v7 has no
-`cloths`/`hairs` slot and `build_world_from_payload` calls `with_anim_assets` and neither cloth
-door, so the same character folds a coat and a head of hair in the editor's Simulate and in a
-cooked pack, and neither in PIE. P24.1's note on `SCENE_PAYLOAD_VERSION` predicted this would
-not happen ("a GUID added to the collector and nothing added to the wire"); P24.4 then chose
-distinct `.inf_cloth` / `.inf_hair` kinds, which by that note's own words is "the honest reason
-for" a **v8**. The phase's schema budget is spent, so the gap is **measured** rather than
-described: `phase24_gate`'s `the_pie_payload_carries_no_garment_and_that_is_measured` reads the
-struct's own scope (with a self-check that it found `meshes`, so the absence cannot pass
-vacuously) and **fails the day the payload learns to carry them**, with the remedy in the
-message. Retire this paragraph then, not before.
+*The gap PIE left, and when it closed.* **This paragraph used to say a character previewed in
+PIE wears nothing, and that has been false since 2026-08-12.** It said so with an expiry
+attached — "retire this paragraph then, not before" — and the day came without anyone
+retiring it: P26.3b's `ScenePayload` **v8** (commit `077d963`) added `cloths` and `hairs`,
+`build_world_from_payload` was wired through `with_cloth_assets`/`with_hair_assets`, and
+`phase24_gate`'s trip-wire `the_pie_payload_carries_no_garment_and_that_is_measured` **fired
+verbatim and was deleted**, leaving its own grave marker in that file. P29.3 was told to close
+this gap or re-ledger it; measured against the code rather than against this text there was
+nothing left to close, so this is the re-ledger. `ScenePayload` v9 (P29.3) is a version-only
+bump carrying the scene-v23 contract and has nothing to do with garments.
+
+Three residuals are real and none of them is the payload's. A `ClothAsset` has **no material
+slot**, so both hosts draw cloth at a hard-coded `CLOTH_TINT` and a garment's texture set is
+`VtTextureSet::NONE` — that is an `.inf_cloth` **v2**, not a wire move, because v8 already
+carries `materials` and `textures`. PIE previews the last **saved** garment, because the
+payload's binding bytes are read from the content root (the rule the voxel path already
+documents). And pinned particles are still model-space, which the next block states in full.
 
 *What the solvers do not model.* Stated on `step_cloth` and repeated here because a bound
 nobody can find is a bound nobody knows about:

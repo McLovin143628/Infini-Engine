@@ -955,3 +955,144 @@ fn a_jump_leaves_the_ground_and_the_derived_outputs_track_the_gait() {
         h.runtime.gait_scalar
     );
 }
+
+// ── body rotation ───────────────────────────────────────────────────────────
+
+/// The body turns to face where it is going, and the turn is **rate-bounded**:
+/// a goal that flips by 180 degrees does not snap the character round, because
+/// ALS's first smoothing stage chases the goal at a constant rate.
+///
+/// The measurement is a `Transform`, not a runtime field: a step that turned its
+/// own bookkeeping and never wrote the entity would leave the character facing
+/// the way it started on screen.
+///
+/// The `AimYawRate` multiplier is NOT measured here, deliberately. It is a
+/// property of one number (`grounded_rotation_rate`, unit-tested three ways in
+/// `inf_ecs::movement`), and a world-level version of it cannot isolate the
+/// variable: the movement input is expressed in the AIM frame, so spinning the
+/// camera to raise the yaw rate also spins the direction the character is asked
+/// to run in, and the body ends up chasing a different goal rather than the same
+/// goal faster. Measuring it here would have produced a number that looked like
+/// a regression and was a control error.
+#[test]
+fn the_body_faces_where_it_is_going_and_the_turn_is_rate_bounded() {
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(80.0, 0.5, 80.0),
+    );
+    spawn_hero(&mut w, 0.0, 0.0, 0.0);
+    let body_yaw = |w: &EcsWorld| {
+        w.world()
+            .get::<Transform>(w.entity_of(HERO).unwrap())
+            .unwrap()
+            .rotation
+            .y
+    };
+
+    for _ in 0..180 {
+        step(&mut w, &mut b, &walk_forward());
+    }
+    assert!(
+        body_yaw(&w).abs() < 5.0,
+        "running +Z, the body faces +Z: {}",
+        body_yaw(&w)
+    );
+
+    // Flip the input to dead astern. The goal moves 180 degrees in one step; the
+    // BODY must not.
+    let back = MovementIntent {
+        move_input: EcsVec2d::new(0.0, -1.0),
+        ..Default::default()
+    };
+    let mut worst_step = 0.0_f64;
+    let mut prev = body_yaw(&w);
+    for _ in 0..300 {
+        step(&mut w, &mut b, &back);
+        let now = body_yaw(&w);
+        worst_step = worst_step.max(inf_ecs::movement::angle_delta_deg(now, prev).abs());
+        prev = now;
+    }
+    // 500 deg/s at 1/60 s is 8.3 degrees; the exponential second stage only ever
+    // lags that, so a per-step jump much past it is a snap.
+    assert!(
+        worst_step < 12.0,
+        "the body snapped {worst_step} degrees in one step — the constant-rate \
+         stage is not bounding it"
+    );
+    assert!(
+        inf_ecs::movement::angle_delta_deg(body_yaw(&w), 180.0).abs() < 10.0,
+        "…and it did eventually get there: {}",
+        body_yaw(&w)
+    );
+}
+
+/// Standing still and aiming, the body is **clamped** to within 100 degrees of
+/// the aim rather than turned to face it — ALS's `LimitRotation`, and what stops
+/// an idle character spinning under its own camera.
+#[test]
+fn an_idle_aiming_character_is_clamped_rather_than_turned() {
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(20.0, 0.5, 20.0),
+    );
+    spawn_hero(&mut w, 0.0, 0.0, 0.0);
+
+    // Aim held, no movement input, camera swinging round at 120 deg/s.
+    let aim_and_look = MovementIntent {
+        aim: true,
+        look_yaw_dps: 120.0,
+        ..Default::default()
+    };
+    for _ in 0..30 {
+        step(&mut w, &mut b, &aim_and_look);
+    }
+    let h = hero(&w);
+    let e = w.entity_of(HERO).unwrap();
+    let body = w.world().get::<Transform>(e).unwrap().rotation.y;
+    // Half a second at 120 deg/s is 60 degrees of aim, which is inside the
+    // hundred-degree band: the body has not been dragged round at all.
+    assert!(
+        (h.runtime.aim_yaw_deg - 60.0).abs() < 2.0,
+        "the aim moved: {}",
+        h.runtime.aim_yaw_deg
+    );
+    assert!(
+        body.abs() < 1.0,
+        "and the body did NOT follow it inside the band: {body}"
+    );
+
+    // Keep going past the band and the clamp starts pulling the body along.
+    for _ in 0..90 {
+        step(&mut w, &mut b, &aim_and_look);
+    }
+    let h = hero(&w);
+    let body = w
+        .world()
+        .get::<Transform>(w.entity_of(HERO).unwrap())
+        .unwrap()
+        .rotation
+        .y;
+    let delta = inf_ecs::movement::angle_delta_deg(h.runtime.aim_yaw_deg, body);
+    // The clamp is a FIRST-ORDER pull toward the bound, not a hard stop at it,
+    // so a camera that keeps moving is always a little ahead: at 120 deg/s and
+    // an interp of 20 the steady-state lag is 2 / (20/60) = 6 degrees, and the
+    // measured 104 is that. Asserting 101 here would have been asserting a
+    // behaviour ALS does not have.
+    assert!(
+        delta <= 108.0,
+        "past the band the body is pulled to the bound, not left behind: aim {} body {body} delta {delta}",
+        h.runtime.aim_yaw_deg
+    );
+    assert!(
+        body > 1.0,
+        "and it really was pulled — a body that never moved would pass the bound above"
+    );
+}

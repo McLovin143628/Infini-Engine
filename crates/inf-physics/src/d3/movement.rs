@@ -63,6 +63,12 @@ use super::{AutoStep3D, CharacterMover3D, ColliderId3D, ColliderShape3D};
 /// because the mode and the speeds are still meaningful.
 const FALLBACK_RADIUS_M: f64 = 0.3;
 
+/// How far the body may be turned away from the aim direction while standing
+/// still and aiming, degrees (ALS `LimitRotation(-100, 100, 20)`).
+const AIM_BODY_LIMIT_DEG: f64 = 100.0;
+/// The exponential rate the clamp above pulls at (ALS's third argument).
+const AIM_BODY_LIMIT_INTERP: f64 = 20.0;
+
 /// Build the kinematic mover for `guid` from its components — **the one
 /// construction site**, replacing the byte-identical `build_mover3d` pair the
 /// two hosts each carried (IM-2b).
@@ -713,6 +719,50 @@ fn step_one(
         cm.runtime.time_in_mode_s = 0.0;
     }
 
+    // ── 10b. Body rotation — ALS's two-stage smoother, and the one consumer of
+    //    the rotation-rate curve and of `AimYawRate`.
+    //
+    //    `VelocityDirection` faces where the body is going, the other two face
+    //    where it is looking; standing still while aiming clamps the body to
+    //    within 100 degrees of the aim rather than turning it, which is what
+    //    keeps an idle character from spinning under the camera.
+    let planar_now = Vec2d::new(cm.runtime.velocity.x, cm.runtime.velocity.z);
+    let moving = (planar_now.x * planar_now.x + planar_now.y * planar_now.y).sqrt() > 0.1;
+    let (goal, actor_interp) = match cm.rotation_mode {
+        RotationMode::VelocityDirection if moving => (model::planar_yaw_deg(planar_now), 15.0),
+        RotationMode::Aiming => (cm.runtime.aim_yaw_deg, 20.0),
+        RotationMode::LookingDirection => (cm.runtime.aim_yaw_deg, 15.0),
+        _ => (cm.runtime.body_yaw_deg, 15.0),
+    };
+    // Moving turns the body; standing still does NOT — it clamps, and only
+    // while aiming. The first draft of this branch read
+    // `moving || rotation_mode != VelocityDirection`, which made the clamp below
+    // unreachable and dragged an idle aiming character round under its own
+    // camera: exactly the failure `LimitRotation` exists to prevent, introduced
+    // by the line that was meant to call it. Found by the arm that measures the
+    // TRANSFORM.
+    if moving {
+        let (t, b) = model::smooth_rotation(
+            cm.runtime.target_yaw_deg,
+            cm.runtime.body_yaw_deg,
+            goal,
+            settings.rotation_rate_dps,
+            actor_interp,
+            dt,
+        );
+        cm.runtime.target_yaw_deg = t;
+        cm.runtime.body_yaw_deg = b;
+    } else if cm.rotation_mode == RotationMode::Aiming {
+        cm.runtime.body_yaw_deg = model::limit_rotation(
+            cm.runtime.body_yaw_deg,
+            cm.runtime.aim_yaw_deg,
+            -AIM_BODY_LIMIT_DEG,
+            AIM_BODY_LIMIT_DEG,
+            AIM_BODY_LIMIT_INTERP,
+            dt,
+        );
+    }
+
     // ── 11. Derived outputs for the P29.4 bridge.
     let planar_after = Vec2d::new(cm.runtime.velocity.x, cm.runtime.velocity.z);
     let speed_after = (planar_after.x * planar_after.x + planar_after.y * planar_after.y).sqrt();
@@ -737,7 +787,7 @@ fn step_one(
     let decelerating = speed_after < speed_planar;
     cm.runtime.relative_accel = model::relative_acceleration(
         accel_world,
-        cm.runtime.aim_yaw_deg,
+        cm.runtime.body_yaw_deg,
         settings.acceleration_mps2,
         settings.braking_mps2,
         decelerating,
@@ -749,12 +799,16 @@ fn step_one(
     //    and the physics body if there is one.
     let mode = cm.mode;
     let grounded = cm.runtime.grounded;
+    let body_yaw = cm.runtime.body_yaw_deg;
     {
         let w = world.world_mut();
         if let Some(mut t) = w.get_mut::<Transform>(entity) {
             t.translation.x = position.x;
             t.translation.y = position.y;
             t.translation.z = position.z;
+            // Yaw only: a character's pitch and roll belong to its pose, not to
+            // its body. (`Transform::rotation` is euler DEGREES, YXZ.)
+            t.rotation.y = body_yaw;
         }
         if is_capsule {
             if let Some(mut c) = w.get_mut::<Collider3D>(entity) {

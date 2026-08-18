@@ -1754,6 +1754,15 @@ pub struct MovementRuntime {
     /// `|Δ aim yaw| / dt`, degrees per second — ALS's `AimYawRate`, read by the
     /// grounded rotation-rate multiplier here and by three P29.4 systems.
     pub aim_yaw_rate_dps: f64,
+    /// The body's own facing, degrees. Written back onto the entity's
+    /// `Transform` every step; kept here as well because the smoother below
+    /// needs last step's value and a `Transform` may be moved by anything.
+    pub body_yaw_deg: f64,
+    /// The **intermediate** goal of ALS's two-stage rotation smoother: a
+    /// constant-rate chase of the real goal, which the body then chases
+    /// exponentially. Bounding peak angular velocity in the first stage is what
+    /// stops a 179-degree input flip from snapping the character round.
+    pub target_yaw_deg: f64,
     /// Whether the last sweep ended on the ground.
     pub grounded: bool,
     /// The surface normal under the character, from the ground probe; `+Y` when
