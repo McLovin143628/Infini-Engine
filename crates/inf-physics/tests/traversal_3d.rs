@@ -680,7 +680,7 @@ fn the_land_prediction_agrees_with_the_classifier_before_the_touch() {
         // ground they are the same number.
         assert_eq!(
             first_prediction, landed,
-            "{drop_m} m: the first prediction (alpha {first_alpha:.3}) already has              to be the verdict — reporting the CURRENT speed instead of the              arrival speed passes at the last instant and fails here"
+            "{drop_m} m: the first prediction (alpha {first_alpha:.3}) already has to be the verdict — reporting the CURRENT speed rather than the arrival speed passes at the last instant and fails here"
         );
         // …and a grounded character predicts nothing at all: a prediction is a
         // statement about THIS step.
