@@ -129,6 +129,18 @@ fn hold(deg: f32) -> AnimClip {
 /// chain settles after one transition and every hash from step 2 on is identical
 /// — which would make the "the trace moved" arm below fail for the right reason
 /// and the equality arm pass for the wrong one.
+/// **The second transition has a DURATION** (P29.4, closing P29.2's recorded
+/// boundary). P29.2 shipped inertialization as the default blend mode and wrote
+/// down what it could not check: *"No **subprocess** arm runs an inertialized
+/// transition: `pie_skinned`'s real `--pie` binary walks its machine on
+/// zero-duration transitions, so the decay is exercised across the two hosts only
+/// in-process."* One number closes it. A quarter-second fade between two constant
+/// poses makes every step of the decay a *different* pose, so the trace the real
+/// subprocess folds and the trace the shipping build folds are now compared
+/// through several frames of a live inertialized blend rather than through a
+/// snap.
+///
+/// The first transition stays at zero, so a snap is still covered too.
 fn machine() -> StateMachine {
     StateMachine {
         states: vec![
@@ -136,11 +148,18 @@ fn machine() -> StateMachine {
             SmState::clip("wave", *WAVE.as_bytes()),
             SmState::clip("salute", *SALUTE.as_bytes()),
         ],
-        transitions: vec![SmTransition::new(0, 1, 0.0), SmTransition::new(1, 2, 0.0)],
+        transitions: vec![
+            SmTransition::new(0, 1, 0.0),
+            SmTransition::new(1, 2, INERTIAL_FADE_S),
+        ],
         entry: 0,
         ..Default::default()
     }
 }
+
+/// The second transition's duration, seconds — long enough that a 60 Hz trace of
+/// eight steps lands several frames inside it.
+const INERTIAL_FADE_S: f64 = 0.25;
 
 /// The asset bytes the editor would resolve out of a project's content root.
 fn anim_bytes() -> BTreeMap<Uuid, Vec<u8>> {
@@ -342,6 +361,21 @@ fn pie_subprocess_trace_matches_shipping_with_a_skinned_character() {
         got.windows(2).any(|w| w[0] != w[1]),
         "the trace never changed — the machine never left its entry state, so this \
          comparison says nothing about the pose"
+    );
+    // **P29.2's recorded boundary, closed** (P29.4). Every state holds a CONSTANT
+    // pose, so a machine walking them on zero-duration transitions can only ever
+    // produce three distinct hashes. A quarter-second inertialized decay produces
+    // a different pose on every step it is running, so a count above three is
+    // proof that the real `--pie` subprocess and the shipping build agreed
+    // through a live decay rather than through a snap — which is exactly what
+    // P29.2 wrote down that it could not check.
+    let distinct: std::collections::BTreeSet<_> = got.iter().collect();
+    assert!(
+        distinct.len() > 3,
+        "the subprocess trace holds only {} distinct poses over {N} steps - the \
+inertialized decay is not crossing the process boundary, and P29.2's boundary \
+is open again",
+        distinct.len()
     );
     session.stop(Duration::from_secs(5)).expect("graceful stop");
 }

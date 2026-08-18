@@ -49,6 +49,10 @@ const HZ: f64 = 60.0;
 const GRAVITY: DVec2 = DVec2::new(0.0, -9.81);
 const STEPS: u32 = 240;
 
+/// How many `f64`s [`movement_bytes`] writes before its first discriminant.
+/// Named so [`assert_not_vacuous`] and the writer cannot drift apart.
+const FLOATS: usize = 38;
+
 const HERO: Uuid = Uuid::from_u128(0x2903_0100);
 const GROUND: Uuid = Uuid::from_u128(0x2903_0101);
 const STEP_BLOCK: Uuid = Uuid::from_u128(0x2903_0102);
@@ -193,6 +197,27 @@ fn movement_bytes(world: &EcsWorld) -> Vec<u8> {
         cm.runtime.relative_accel.y,
         cm.runtime.land_impact_mps,
         cm.runtime.time_in_mode_s,
+        // ── P29.4: the traversal, the ragdoll and the aim, so a host that
+        //    agreed on where the character is while disagreeing about the ledge
+        //    it is climbing or the tumble it is in still fails.
+        cm.runtime.mantle.elapsed_s,
+        cm.runtime.mantle.duration_s,
+        cm.runtime.mantle.height_m,
+        cm.runtime.mantle.target.x,
+        cm.runtime.mantle.target.y,
+        cm.runtime.mantle.target.z,
+        cm.runtime.mantle.target_yaw_deg,
+        cm.runtime.ragdoll.time_in_phase_s,
+        cm.runtime.ragdoll.last_velocity.x,
+        cm.runtime.ragdoll.last_velocity.y,
+        cm.runtime.ragdoll.last_velocity.z,
+        cm.runtime.land_alpha,
+        cm.runtime.land_predicted_mps,
+        cm.runtime.turn_delay_s,
+        cm.runtime.aim_sweep,
+        cm.runtime.spine_yaw_deg,
+        cm.runtime.foot_slide_l_m,
+        cm.runtime.foot_slide_r_m,
     ] {
         out.extend_from_slice(&v.to_le_bytes());
     }
@@ -204,6 +229,13 @@ fn movement_bytes(world: &EcsWorld) -> Vec<u8> {
     out.push(cm.runtime.landing as u8);
     out.push(cm.runtime.refusal as u8);
     out.push(u8::from(cm.runtime.grounded));
+    out.push(cm.runtime.predicted_landing as u8);
+    out.push(u8::from(cm.runtime.mantle.active));
+    out.push(u8::from(cm.runtime.mantle.high));
+    out.push(cm.runtime.ragdoll.phase as u8);
+    out.push(u8::from(cm.runtime.ragdoll.spawned));
+    out.push(u8::from(cm.runtime.ragdoll.face_up));
+    out.push(u8::from(cm.runtime.turning_in_place));
     out.extend_from_slice(&cm.runtime.refusals.to_le_bytes());
     out
 }
@@ -291,6 +323,146 @@ fn editor_trace() -> Vec<Vec<u8>> {
     out
 }
 
+// ── P29.4: a LIVE mantle and a ragdoll, in both hosts ───────────────────────
+
+/// The ledge the traversal fixture climbs, and the pit it falls into.
+const LEDGE: Uuid = Uuid::from_u128(0x2904_0300);
+const PIT_FLOOR: Uuid = Uuid::from_u128(0x2904_0301);
+const TRAVERSAL_STEPS: u32 = 420;
+
+/// A world with a floor, a 1 m ledge to mantle at `z = 3`, and a long drop past
+/// it onto a floor 30 m down — so one script produces a live mantle AND a landing
+/// hard enough for the classifier to call a ragdoll.
+fn traversal_blocks() -> Vec<(Uuid, (RigidBody3D, Collider3D, Transform))> {
+    vec![
+        (
+            GROUND,
+            block(DVec3::new(0.0, -0.5, 0.0), DVec3::new(20.0, 0.5, 3.0)),
+        ),
+        // The ledge: top at y = 1, face at z = 3, 4 m deep.
+        (
+            LEDGE,
+            block(DVec3::new(0.0, 0.5, 5.0), DVec3::new(20.0, 0.5, 2.0)),
+        ),
+        // The floor of the drop beyond it, 30 m down.
+        (
+            PIT_FLOOR,
+            block(DVec3::new(0.0, -30.5, 40.0), DVec3::new(40.0, 0.5, 33.0)),
+        ),
+    ]
+}
+
+/// Walk forward the whole way; jump once at the ledge. Everything after that is
+/// the world's doing: the mantle, the walk across the ledge, the fall off its far
+/// side and the landing the classifier calls.
+fn traversal_script(i: u32) -> (Vec<&'static str>, BTreeMap<String, f32>) {
+    let mut held: Vec<&'static str> = Vec::new();
+    if i == 40 {
+        held.push("jump");
+    }
+    let mut axes = BTreeMap::new();
+    axes.insert("move_y".to_string(), 1.0);
+    (held, axes)
+}
+
+fn traversal_player_trace() -> Vec<Vec<u8>> {
+    let mut world = EcsWorld::new();
+    for (guid, parts) in traversal_blocks() {
+        let e = world.spawn_with_guid(guid, "Block", None);
+        world.world_mut().entity_mut(e).insert(parts);
+    }
+    let e = world.spawn_with_guid(HERO, "Hero", None);
+    let mut parts = hero_parts();
+    parts.4.rotation.y = 0.0; // facing +Z, at the ledge
+    world.world_mut().entity_mut(e).insert(parts);
+    world.mark_dirty();
+    world.propagate();
+    let mut sim = RuntimeSim::new(world, Vec::new(), GRAVITY, HZ);
+    (0..TRAVERSAL_STEPS)
+        .map(|i| {
+            let (held, axes) = traversal_script(i);
+            sim.step_once(RuntimeInput::with_down(held).with_axes(axes));
+            movement_bytes(sim.world())
+        })
+        .collect()
+}
+
+fn traversal_editor_trace() -> Vec<Vec<u8>> {
+    let mut doc = SceneDoc::new();
+    for (guid, parts) in traversal_blocks() {
+        let e = doc.create_with_guid(guid, inf_editor_core::ipc::SpawnKind::Empty, "Block", None);
+        doc.world_mut().world_mut().entity_mut(e).insert(parts);
+    }
+    let e = doc.create_with_guid(HERO, inf_editor_core::ipc::SpawnKind::Empty, "Hero", None);
+    let mut parts = hero_parts();
+    parts.4.rotation.y = 0.0;
+    doc.world_mut().world_mut().entity_mut(e).insert(parts);
+    doc.world_mut().mark_dirty();
+    doc.world_mut().propagate();
+    let mut session = SimSession::enter(&mut doc, Vec::new(), GRAVITY, HZ);
+    let out = (0..TRAVERSAL_STEPS)
+        .map(|i| {
+            let (held, axes) = traversal_script(i);
+            session.step_once(&mut doc, SimInput::with_down(held).with_axes(axes));
+            movement_bytes(doc.world())
+        })
+        .collect();
+    session.exit(&mut doc);
+    out
+}
+
+/// **PIE == shipping on a LIVE mantle and a ragdoll** (P29.4, clause 8).
+///
+/// One script: walk at a ledge, jump, climb it through the warp, walk off its far
+/// side, fall thirty metres and land hard enough for the classifier to call a
+/// ragdoll. Every step of it is compared byte for byte between the shipped player
+/// and the editor's Simulate, over a trace that now carries the mantle's target
+/// and clock, the ragdoll's phase and handoff velocity, the land prediction, the
+/// turn-in-place delay and both feet's slide.
+///
+/// **The bound, stated.** Neither host registers a skeleton for this character, so
+/// the ragdoll never receives a rig and never spawns bodies — the two hosts agree
+/// on the *entry* half (the mode, the phase, the clock, the velocity handed over)
+/// and the spawn is covered where it can be, in `inf-physics`'s
+/// `ragdoll_bridge_3d`, which drives both fixed steps over a real humanoid.
+/// Registering a rig here needs an asset registry API neither host exposes to a
+/// test, which is P29.6's gate work.
+#[test]
+fn both_hosts_mantle_and_ragdoll_the_same_character_byte_for_byte() {
+    let player = traversal_player_trace();
+    let editor = traversal_editor_trace();
+    assert_eq!(player.len() as u32, TRAVERSAL_STEPS);
+
+    // **ANTI-VACUITY, and it is the whole arm**: the trace has to have contained
+    // a real mantle and a real ragdoll, or "identical" is a claim about a
+    // character that walked in a straight line.
+    let mode_at = FLOATS * 8;
+    let modes: std::collections::BTreeSet<u8> = player.iter().map(|t| t[mode_at]).collect();
+    let mantle = inf_ecs::components::MovementMode::Mantle as u8;
+    let ragdoll = inf_ecs::components::MovementMode::Ragdoll as u8;
+    assert!(
+        modes.contains(&mantle),
+        "the script never mantled — modes seen: {modes:?}"
+    );
+    assert!(
+        modes.contains(&ragdoll),
+        "the script never ragdolled — modes seen: {modes:?}"
+    );
+    let mantling = player.iter().filter(|t| t[mode_at] == mantle).count();
+    assert!(
+        mantling > 5,
+        "a mantle that lasted {mantling} steps is a snap, not a climb"
+    );
+
+    for (i, (p, e)) in player.iter().zip(editor.iter()).enumerate() {
+        assert_eq!(
+            p, e,
+            "the shipped player and the editor's Simulate diverged at step {i} — \
+             a mantle or a ragdoll that looks different in PIE than in the build"
+        );
+    }
+}
+
 // ── the claims ──────────────────────────────────────────────────────────────
 
 /// **ANTI-VACUITY.** Two empty traces are equal; so are two traces of a
@@ -307,8 +479,11 @@ fn assert_not_vacuous(trace: &[Vec<u8>]) {
     let n = trace[0].len();
     assert!(trace.iter().all(|t| t.len() == n));
 
-    // The mode byte sits immediately after the twenty f64s.
-    let mode_at = 20 * 8;
+    // The mode byte sits immediately after the f64 block, whose length is
+    // asserted rather than assumed: a field appended to the list above without
+    // this number moving would silently start reading a *float's* low byte as a
+    // mode, and every one of the checks below would go on passing.
+    let mode_at = FLOATS * 8;
     let modes: std::collections::BTreeSet<u8> = trace.iter().map(|t| t[mode_at]).collect();
     assert!(
         modes.len() >= 3,

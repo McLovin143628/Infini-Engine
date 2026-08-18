@@ -148,6 +148,35 @@ impl CharacterMover3D {
     /// Rebuilding the whole mover to change one field would duplicate
     /// `mover_for`'s reasoning at the call site, which is the thing that pair
     /// was retired for.
+    /// **The slope this mover will climb**, radians — the read side of
+    /// [`max_slope_climb_angle`](Self::max_slope_climb_angle) (P29.4).
+    ///
+    /// It exists because a *setting* nothing can read is a setting no test can
+    /// see. The P29.3 audit's declined item was exactly that: `mover_for` rules
+    /// that a character's `CharacterMovement::slope_limit_deg` overrides its
+    /// `CharacterController3D::max_slope_deg` — two numbers that mean one thing —
+    /// and the ruling had no arm, because both defaults are 45 degrees and a
+    /// mutation that ignores it is a no-op on every fixture in the tree. Reading
+    /// the number back is what makes the override checkable.
+    pub fn slope_limit_rad(&self) -> f64 {
+        self.controller.max_slope_climb_angle
+    }
+
+    /// The slope at which the character starts sliding back down, radians — the
+    /// read side of [`min_slope_slide_angle`](Self::min_slope_slide_angle).
+    pub fn slide_slope_rad(&self) -> f64 {
+        self.controller.min_slope_slide_angle
+    }
+
+    /// The autostep this mover is configured with, if any — the read side of
+    /// [`autostep`](Self::autostep), in the absolute metres it was given.
+    pub fn autostep_height_m(&self) -> Option<f64> {
+        self.controller.autostep.map(|a| match a.max_height {
+            CharacterLength::Absolute(m) => m,
+            CharacterLength::Relative(r) => r,
+        })
+    }
+
     pub fn with_shape(mut self, shape: ColliderShape3D) -> Self {
         if let Some(s) = shape.to_shared() {
             self.shape = s;

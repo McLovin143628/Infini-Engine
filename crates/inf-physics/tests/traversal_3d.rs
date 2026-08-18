@@ -638,15 +638,19 @@ fn the_land_prediction_agrees_with_the_classifier_before_the_touch() {
         spawn_hero(&mut w, drop_m, 0.0);
 
         let mut last_prediction = LandingKind::None;
-        let mut saw_prediction = false;
+        let mut first_prediction = LandingKind::None;
+        let mut first_alpha = 1.0f64;
         let mut landed = LandingKind::None;
         for _ in 0..300 {
             let before = hero(&w).runtime.grounded;
             step(&mut w, &mut b, &MovementIntent::default());
             let h = hero(&w);
             if !h.runtime.grounded && h.runtime.predicted_landing != LandingKind::None {
+                if first_prediction == LandingKind::None {
+                    first_prediction = h.runtime.predicted_landing;
+                    first_alpha = h.runtime.land_alpha;
+                }
                 last_prediction = h.runtime.predicted_landing;
-                saw_prediction = true;
                 assert!(
                     h.runtime.land_alpha > 0.0 && h.runtime.land_alpha <= 1.0,
                     "alpha out of range: {}",
@@ -658,11 +662,25 @@ fn the_land_prediction_agrees_with_the_classifier_before_the_touch() {
                 break;
             }
         }
-        assert!(saw_prediction, "{drop_m} m: nothing was ever predicted");
+        assert_ne!(
+            first_prediction,
+            LandingKind::None,
+            "{drop_m} m: nothing was ever predicted"
+        );
         assert_ne!(landed, LandingKind::None, "{drop_m} m: never landed");
         assert_eq!(
             last_prediction, landed,
             "{drop_m} m: the prediction and the classifier must agree"
+        );
+        // **The FIRST prediction is already right**, which is the whole reason
+        // the sweep exists: an animation can only prepare for a hard landing if
+        // "hard" is knowable while the character is still a long way up. The
+        // sweep reports the speed the character WILL arrive at, not the one it
+        // has — and this is the half that tells the two apart, because near the
+        // ground they are the same number.
+        assert_eq!(
+            first_prediction, landed,
+            "{drop_m} m: the first prediction (alpha {first_alpha:.3}) already has              to be the verdict — reporting the CURRENT speed instead of the              arrival speed passes at the last instant and fails here"
         );
         // …and a grounded character predicts nothing at all: a prediction is a
         // statement about THIS step.
@@ -802,4 +820,138 @@ fn an_aiming_character_rotates_in_place_instead_of_turning() {
         "the play rate must track the camera: {fastest}"
     );
     assert_eq!(hero(&w).rotation_mode, RotationMode::Aiming);
+}
+
+// ── A8: the slope authority, closed (P29.3 audit, declined and carried) ─────
+
+/// **The two numbers that meant one thing.**
+///
+/// `mover_for` rules that a character's `CharacterMovement::slope_limit_deg`
+/// overrides its `CharacterController3D::max_slope_deg`. The P29.3 audit declined
+/// to close it and said why: the ruling had **no arm**, and a mutation that
+/// ignores it kills nothing because both defaults are 45 degrees, so the mutation
+/// is a no-op on every fixture in the tree. Closing it needed a ramp fixture and a
+/// public reader for the mover's slope, and neither existed.
+///
+/// Both exist now. This arm has three halves:
+///
+/// 1. the **reader** says the component's number reached the mover;
+/// 2. the **world** agrees — a 40-degree ramp is climbed by a character whose
+///    component allows 50 and refused by one whose component allows 30, with the
+///    *controller's* number held at 45 in both, so only the override can explain
+///    the difference;
+/// 3. the **control**: with no movement component at all the controller's number
+///    is what applies, which is the clause `mover_for` documents and the half a
+///    test of the override alone would not see.
+#[test]
+fn the_movement_components_slope_limit_is_the_one_that_reaches_the_mover() {
+    /// A ramp of `deg` degrees rising along +Z from the origin, as a rotated box.
+    fn ramp(w: &mut EcsWorld, guid: Uuid, deg: f64) {
+        let e = w.spawn_with_guid(guid, "Ramp", None);
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::new(0.0, 0.0, 6.0);
+        // `Transform::rotation` is euler DEGREES (YXZ) — a positive X rotation
+        // tips the far end of the box up.
+        t.rotation.x = -deg;
+        w.world_mut().entity_mut(e).insert((
+            RigidBody3D {
+                kind: BodyKind3D::Static,
+                ..Default::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Box,
+                half_extents: Vec3d::new(6.0, 0.25, 8.0),
+                ..Default::default()
+            },
+            t,
+        ));
+        w.mark_dirty();
+        w.propagate();
+    }
+
+    fn run(component_slope_deg: Option<f64>) -> (f64, f64) {
+        let mut w = EcsWorld::new();
+        let mut b = PhysicsBridge3D::new(GRAVITY);
+        spawn_block(
+            &mut w,
+            GROUND,
+            DVec3::new(0.0, -0.5, -2.0),
+            DVec3::new(6.0, 0.5, 4.0),
+            BodyKind3D::Static,
+        );
+        ramp(&mut w, LEDGE, 40.0);
+        spawn_hero(&mut w, 0.0, 0.0);
+        {
+            let e = w.entity_of(HERO).unwrap();
+            // The CONTROLLER's number stays at its 45-degree default in every
+            // case, so nothing below can be explained by changing it.
+            assert_eq!(
+                w.world()
+                    .get::<inf_ecs::components::CharacterController3D>(e)
+                    .unwrap()
+                    .max_slope_deg,
+                45.0
+            );
+            match component_slope_deg {
+                Some(deg) => {
+                    w.world_mut()
+                        .get_mut::<CharacterMovement>(e)
+                        .unwrap()
+                        .slope_limit_deg = deg;
+                }
+                None => {
+                    // No movement component at all: the controller's number is
+                    // what applies, which is `mover_for`'s other clause.
+                    w.world_mut().entity_mut(e).remove::<CharacterMovement>();
+                }
+            }
+        }
+        b.sync_from_world(&w);
+        let mover_deg = inf_physics::d3::mover_for(&w, HERO)
+            .slope_limit_rad()
+            .to_degrees();
+        if component_slope_deg.is_none() {
+            return (mover_deg, 0.0);
+        }
+        for _ in 0..240 {
+            step(&mut w, &mut b, &forward());
+        }
+        (mover_deg, hero_feet(&w))
+    }
+
+    // 1. THE READER. The component's number is the one on the mover.
+    let (steep, climbed) = run(Some(50.0));
+    assert!(
+        (steep - 50.0).abs() < 1e-9,
+        "the component's 50 degrees did not reach the mover: {steep}"
+    );
+    let (shallow, refused) = run(Some(30.0));
+    assert!(
+        (shallow - 30.0).abs() < 1e-9,
+        "the component's 30 degrees did not reach the mover: {shallow}"
+    );
+
+    // 2. THE WORLD. A 40-degree ramp is climbed at a 50-degree limit and not at
+    //    a 30-degree one — the same ramp, the same character, the same
+    //    controller, one number apart.
+    assert!(
+        climbed > 0.5,
+        "a 40-degree ramp must be climbable at a 50-degree limit: feet {climbed}"
+    );
+    assert!(
+        refused < 0.25,
+        "a 40-degree ramp must NOT be climbable at a 30-degree limit: feet {refused}"
+    );
+    assert!(
+        climbed > refused + 0.4,
+        "climbed {climbed} vs refused {refused} — the limit changed nothing"
+    );
+
+    // 3. THE CONTROL. With no movement component the CONTROLLER's number applies,
+    //    which is the clause an override-only arm would not see.
+    let (fallback, _) = run(None);
+    assert!(
+        (fallback - 45.0).abs() < 1e-9,
+        "without a movement component the controller's 45 degrees must apply: {fallback}"
+    );
 }
