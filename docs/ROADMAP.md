@@ -16630,6 +16630,113 @@ And the phase grows a seventh sub-phase:
   as 6-DOF movement with banking; 5. `phase29_gate` extended with a drive-and-fly segment on
   the same replay discipline.
 
+### Amendment (2026-08-17) — the ALS port ruling
+
+Mandated by the user after the movement-catalogue amendment landed and before P29.2 opened,
+and recorded here for the same reason that one was: it changes the phase's **reference**, not
+merely its content. Where this amendment and anything above it disagree, this amendment wins.
+
+**Ruling 1 — the directive.** Humanoid movement is modelled on **ALS** (Advanced Locomotion
+System, the community UE5 port — **8 099** lines of C++ across 43 files, read in full)
+**ported to Rust**, superseding the untouched stock sample as the *movement* reference. The
+stock sample stays the animation-**content** baseline (891 clips); ALS is the **architecture
+donor**, and the port map the reading produced is the input to P29.2–P29.6.
+
+A donor is not a ceiling, and this one says so itself: ALS-Community's own README declares the
+design obsolete — "built upon pretty outdated animation programming techniques of pre Unreal
+Engine 5 era". So every mechanism it hands over arrives with a verdict attached, and where §13
+already plans something better §13 **wins**: inertialization over cross-fade, Delaunay
+barycentric weights over the hand-rolled four-way `BlendMulti` (which exists in ALS *because*
+UE's bilinear blend space blends worse), pose matching over the dynamic-transition foot
+corrective, a real root-motion warp window over `RotationAmount ÷ 30 fps`, derive-at-import
+over the seven AnimModifiers a human has to remember to run. One whole pattern is refused
+outright: the **seven enum-mirror structs** — 398 hand-maintained lines that store an enum
+*plus one bool per variant*, refreshed in `operator=`, so that an AnimBP property-binding can
+read a bool without a compare node. That is UE tax. A `match` is free in Rust and a
+denormalisation can desync. Not ported.
+
+**Ruling 2 — `.inf_anim` v2 carries the full channel model.** The format bumps **exactly
+once**, in P29.2, which means it must be wide enough for every sub-phase that later reads it.
+Four things, and the last two are reserved capacity rather than a feature:
+
+1. **Scalar curve channels** — named `f32` curves on the clip timeline. Free-form `String`
+   names, **not** an enum: the port map's 25 verbatim ALS names (`Enable_FootIK_L/R`,
+   `FootLock_L/R`, `RotationAmount`, `W_Gait`, `YawOffset`, `Mask_AimOffset`, the ten
+   `Layering_*`, …) are the *reference vocabulary* that import derivation (P29.5) and the
+   bridge (P29.4) target, and a studio adding its own curve must not need an engine bump.
+2. **Timed markers** — `{time_s, name, group}`, the sync markers §13 already owned,
+   generalised so one shape serves both foot-phase sync groups and event notifies (P29.4's
+   footstep consumer).
+3. **Additive reference** — what a clip is additive *over*: nothing, its own first frame, or a
+   named base clip by asset ref.
+4. **Present-but-optional day one**: a **root-motion track carrying translation including Y**
+   plus yaw — the port map caught that today's root extraction drops Y, which is simply wrong
+   for a mantle — and a derived **distance track** (metres travelled) for distance matching.
+   P29.2 defines the fields and the codec; P29.4/P29.5 are the producers and consumers.
+
+The bincode-positional law applies unchanged: the new fields land at the **end**, both codec
+mirrors move together, the frozen previous-version record is built from **ladder-local
+literals**, the committed clips are downgrade-blessed through their generator, and `migrate`
+asks the structural questions rather than a version question.
+
+**Ruling 3 — the three unscheduled blockers get owners.** The port map found three
+capabilities ALS depends on that this engine does not have and no sub-phase had claimed:
+
+- **Shape casts.** The engine has **zero** `cast_shape` call sites. Lands **P29.3, day one**,
+  through the physics bridge (parry supports it). Consumers: crouch/uncrouch overhead clearance
+  (P29.3), mantle ledge probes and land prediction (P29.4), camera collision (P29.6).
+- **Mouse input.** `InputEvent` has no mouse variant, and three ALS systems key on `AimYawRate`
+  — degrees per second of *camera* yaw. Lands **P29.3** with that plumbing.
+- **The locomotion camera.** §13 assigned a camera to no sub-phase at all. Lands **P29.6** with
+  the showcase, as the portable six-item subset of ALS's camera manager headlined by
+  `CalculateAxisIndependentLag` (three interp speeds resolved in camera-yaw space). ALS drives
+  those speeds from a dummy AnimBP's curves, which is tax; ours are plain tunables.
+
+**Ruling 4 — the axis question.** The port map's single most structural finding is that ALS's
+"what the character is doing" is a **product**, not an enum: `MovementState × MovementAction ×
+Stance × Gait × RotationMode × ViewMode × OverlayState` = **11 700** nominal combinations,
+pruned by rules. Flattening that into one enum and then freeze-pinning it would be unfixable.
+The ruling, which binds P29.3:
+
+- `MovementMode` stays **exactly** the catalogue amendment's frozen wire enum. Stance **folds
+  in** — Crouch and Prone are modes here, because they change the capsule, the speed set and
+  the integration regime together — and Gait rides *inside* `Grounded{gait}` as an analog
+  speed plus a discrete tier.
+- `RotationMode` is its **own** frozen wire enum (VelocityDirection / LookingDirection / Aiming
+  + reserved slots), P29.3.
+- `OverlayState` is an **open interned id** over a string-keyed registry, **not** a wire enum,
+  so a studio can add Rifle, Torch, Box or Injured without an engine schema bump. The layering
+  *mechanism* it drives — per-bone masks plus the `Layering_*` channels — is P29.2; the routing
+  and the content are P29.4/P29.6.
+- `ViewMode` (first/third person) is camera-side only and never crosses the sim wire.
+
+**Ruling 5 — the adopted mechanisms, and where each lands.**
+
+- **P29.3.** The `GetMappedSpeed` normalised-speed model: horizontal speed mapped piecewise onto
+  a **0–3 scalar** (0 stopped, 1 walk, 2 run, 3 sprint) which is then the X axis of *every*
+  movement curve, so retuning the speeds does not invalidate the acceleration, braking,
+  friction or turn-rate curves. Settings select on rotation-mode × stance (six blocks); gait
+  picks the speed inside. Quadrant hysteresis for movement direction (±70° / ±110° with a 5°
+  buffer that widens the band on entry and narrows it on exit, so the boundary cannot chatter).
+  The `W_Gait` bias-and-clamp trick, which extracts two independent 0..1 factors from one
+  curve. Stride blend and the walk/run blend derivations. The landing classifier's thresholds,
+  in SI: 7.0 m/s to break-fall, 10.0 m/s to ragdoll, braking friction 0.5 with input and 3.0
+  without, both released after 0.5 s.
+- **P29.4.** Turn-in-place (45° / 130° thresholds, a 50°/s settled-camera gate, an
+  angle-dependent 0–0.75 s delay). Foot IK and foot lock (±50/45 cm traces, a 13.5 cm foot
+  height, and the rule that the lock may only blend *out* or re-lock, never in). Land
+  prediction as a velocity-aligned sweep whose length scales 0.5→20 m with fall speed. The
+  ragdoll bridge: velocity-scaled motor drive, face-up read from the **pelvis roll sign**, and
+  the exit branch — grounded gets up, airborne resumes falling with `LastRagdollVelocity`.
+  Footstep notifies as event markers feeding the P12 audio command queue. The mantle
+  height→(start position, play rate) remap and its three-alpha correction curve — mechanism
+  superseded by our motion warping, constants kept as the reference behaviour.
+- **P29.5.** Import derivation targets the 25-curve vocabulary and the markers by name.
+
+**What this changes in P29.2, concretely.** Its clause list gains `.inf_anim` v2 per Ruling 2
+and keeps everything the catalogue amendment already gave it. Rulings 3 and 4 are recorded here
+and implemented later; nothing in them is P29.2 scope.
+
 ## Hardening Wave A — save integrity & data loss (2026-08-14)
 
 The first repair wave of the final hardening campaign. Its subject is the half of
