@@ -1030,6 +1030,34 @@ impl PhysicsWorld3D {
         removed
     }
 
+    /// **Turn a collider off (or back on)** without destroying it (P29.4).
+    ///
+    /// A disabled collider takes part in no contact and answers no query, but
+    /// keeps its handle, its parent and its shape — so the thing that turned it
+    /// off is the thing that turns it back on, and nothing downstream has to
+    /// re-resolve a new id.
+    ///
+    /// # The caller
+    ///
+    /// The ragdoll bridge, and it is ALS's own move: `RagdollStart` sets "capsule
+    /// collision off" (port map §4.1) because the character's kinematic capsule
+    /// and its own articulated bodies spawn **inside each other**, and a
+    /// kinematic body resolving that overlap pushes the ragdoll across the level
+    /// rather than letting it fall. Measured before this existed: the limbs never
+    /// came to rest at all, so the get-up never fired.
+    ///
+    /// Returns `false` for a handle that no longer exists.
+    pub fn set_collider_enabled(&mut self, collider: ColliderId3D, enabled: bool) -> bool {
+        match self.colliders.get_mut(collider.0) {
+            Some(c) => {
+                c.set_enabled(enabled);
+                self.query_dirty = true;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Does this collider still exist?
     pub fn contains_collider(&self, collider: ColliderId3D) -> bool {
         self.colliders.contains(collider.0)

@@ -1948,6 +1948,10 @@ pub struct RagdollRuntime {
     /// The angular-drive stiffness the motor is being driven at, from the
     /// ragdoll's own speed.
     pub motor_stiffness: f64,
+    /// Whether the bodies have come to rest — the condition the get-up waits
+    /// for. On the runtime rather than only inside the physics bridge so a gate
+    /// can assert on it without reaching across the seam.
+    pub settled_hint: bool,
 }
 
 /// **The movement component** (P29.3) — the full tunable set §13's catalogue

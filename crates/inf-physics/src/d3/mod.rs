@@ -19,6 +19,8 @@ pub mod fracture;
 mod joint;
 pub mod movement;
 mod query;
+// P29.4 the ragdoll bridge: the physics half of the anim<->physics handoff.
+pub mod ragdoll_bridge;
 // P29.4 traversal detectors: the ledge probe and the land-prediction sweep.
 pub mod traversal;
 pub mod water;
@@ -39,6 +41,9 @@ pub use fracture::{
 pub use joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
 pub use movement::{mover_for, step_character_movement, MoveOutcome};
 pub use query::{CastTargets, RayHit3D, ShapeHit3D};
+pub use ragdoll_bridge::{
+    blend_weight as ragdoll_blend_weight, start_ragdoll, step_ragdoll, SpawnedRagdoll,
+};
 pub use traversal::{
     is_walkable, predict_landing, probe_ledge, LandPrediction, Ledge, LedgeSettings,
 };

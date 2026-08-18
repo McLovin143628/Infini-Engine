@@ -65,6 +65,37 @@ pub fn motor_stiffness(speed_mps: f64) -> f64 {
     map_range(speed_mps.abs(), MOTOR_SPEED_BAND_MPS, MOTOR_STIFFNESS_BAND)
 }
 
+/// The most angular damping a ragdoll's limbs are given, at
+/// [`MOTOR_SPEED_BAND_MPS`]'s top end.
+///
+/// See [`angular_damping`] for why this is the unit the drive is expressed in.
+pub const MAX_ANGULAR_DAMPING: f64 = 8.0;
+
+/// **The velocity-scaled stiffness, applied**: how much angular damping a
+/// ragdoll's bodies get, from the same band [`motor_stiffness`] maps.
+///
+/// # This is a behaviour port, not a mechanism port, and it says so
+///
+/// ALS drives the physical-animation **angular motors** of its skeletal mesh
+/// (`SetAllMotorsAngularDriveParams`), which pull each bone toward the pose the
+/// animation would have had. This engine's `JointKind3D::Spherical` has no motor
+/// — a shoulder is a plain ball joint — so there is nothing to give a stiffness
+/// to. What is portable is the *behaviour* the donor's comment describes: a fast
+/// ragdoll holds its shape and a slow one goes limp. Angular damping is the
+/// mechanism this facade has for exactly that, and it is driven from the same
+/// 0…10 m/s band so the ported constant stays load-bearing rather than becoming
+/// a number in a comment.
+///
+/// The day `JointKind3D::Spherical` grows a motor, this becomes the drive's
+/// stiffness and the constant is already in the right units.
+pub fn angular_damping(speed_mps: f64) -> f64 {
+    let top = MOTOR_STIFFNESS_BAND.1;
+    if !(top > 0.0) {
+        return 0.0;
+    }
+    motor_stiffness(speed_mps) / top * MAX_ANGULAR_DAMPING
+}
+
 /// Whether the ragdoll should still feel gravity, given its vertical speed.
 pub fn gravity_enabled(vertical_mps: f64) -> bool {
     // A NaN answers `true`: a ragdoll that keeps its gravity behaves like every
@@ -205,6 +236,27 @@ mod tests {
         assert_eq!(motor_stiffness(f64::NAN), 0.0);
         // 1000 cm/s is 10 m/s: the conversion happened once, here.
         assert_eq!(MOTOR_SPEED_BAND_MPS.1, 10.0);
+    }
+
+    /// The applied half of the drive: same band, same shape, a unit this facade
+    /// actually has.
+    #[test]
+    fn the_drive_is_applied_as_angular_damping_over_the_same_band() {
+        assert_eq!(angular_damping(0.0), 0.0, "a stopped ragdoll is limp");
+        assert!((angular_damping(10.0) - MAX_ANGULAR_DAMPING).abs() < 1e-12);
+        assert!((angular_damping(5.0) - MAX_ANGULAR_DAMPING / 2.0).abs() < 1e-12);
+        assert_eq!(angular_damping(1e9), MAX_ANGULAR_DAMPING, "clamped");
+        // It is DERIVED from the ported constant, not a second table: halving the
+        // stiffness halves the damping, at every speed.
+        for i in 0..=20 {
+            let v = i as f64 * 0.7;
+            let ratio = angular_damping(v) / MAX_ANGULAR_DAMPING;
+            let stiff = motor_stiffness(v) / MOTOR_STIFFNESS_BAND.1;
+            assert!(
+                (ratio - stiff).abs() < 1e-12,
+                "at {v} m/s: {ratio} vs {stiff}"
+            );
+        }
     }
 
     #[test]

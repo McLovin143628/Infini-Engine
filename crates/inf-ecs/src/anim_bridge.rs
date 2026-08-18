@@ -45,7 +45,26 @@ use inf_anim::RootMotion3D;
 use uuid::Uuid;
 
 use crate::components::AnimStateMachine;
+use crate::math::Vec3d;
 use crate::world::EcsWorld;
+
+/// One bone of a character's rig, in **world space** — a name and the segment it
+/// spans (P29.4, clause 6).
+///
+/// Deliberately a plain value type in this crate rather than
+/// `inf_physics::ragdoll::RagdollBone`: `inf-ecs` does not depend on `inf-physics`
+/// (the direction is the other way round), and the whole point of the seam is
+/// that neither side names the other's types. The physics side maps this onto its
+/// own descriptor in one line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RigBone {
+    /// The joint's name — what `inf_physics::ragdoll::classify` reads.
+    pub name: String,
+    /// The parent-facing end of the segment, world metres.
+    pub head: Vec3d,
+    /// The far end.
+    pub tail: Vec3d,
+}
 
 /// What one entity's machine is doing, published every fixed step.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -86,6 +105,23 @@ pub struct AnimBridgeRes {
     /// both it and the play-head. Published rather than queried, which is the
     /// command-queue shape — the physics side never reaches into the machine.
     pub curves: BTreeMap<Uuid, BTreeMap<String, f32>>,
+    /// Entities that have asked the pose step for their **ragdoll rig** and
+    /// not yet been given one (clause 6).
+    ///
+    /// The request half of the command queue: the movement step knows a
+    /// character has started ragdolling and has no skeleton; the pose step has
+    /// the skeleton and no idea that it happened. Asking rather than computing
+    /// every step is what keeps a level full of characters from paying for a
+    /// mechanism none of them are using.
+    pub ragdoll_requested: BTreeSet<Uuid>,
+    /// The **world-space bone segments** the pose step derived for a requested
+    /// ragdoll — the answer half.
+    ///
+    /// Published once per request and consumed by the physics side, which turns
+    /// it into bodies and joints through `inf_physics::ragdoll::build_ragdoll`.
+    /// Physics never reaches into the machine and the machine never reaches into
+    /// physics; the P12 command-queue doctrine, applied to a rig.
+    pub ragdoll_rig: BTreeMap<Uuid, Vec<RigBone>>,
     /// Entities whose transitions enter at the **pose-matched** frame
     /// ([`inf_anim::TransitionEntry::PoseMatched`]) rather than at zero.
     ///
@@ -104,6 +140,8 @@ impl AnimBridgeRes {
             && self.states.is_empty()
             && self.root_motion.is_empty()
             && self.curves.is_empty()
+            && self.ragdoll_requested.is_empty()
+            && self.ragdoll_rig.is_empty()
             && self.pose_matched.is_empty()
     }
 }
@@ -273,6 +311,29 @@ pub fn anim_curve(world: &EcsWorld, guid: Uuid, name: &str, fallback: f32) -> f3
         .and_then(|c| c.get(name))
         .copied()
         .unwrap_or(fallback)
+}
+
+/// **Ask the pose step for `guid`'s ragdoll rig.**
+///
+/// The physics side calls this the step a ragdoll starts; the answer arrives on
+/// the next fixed step, which is the same one beat of latency
+/// [`anim_root_motion`] documents and for the same structural reason.
+pub fn request_ragdoll_rig(world: &mut EcsWorld, guid: Uuid) {
+    with_bridge(world, |b| {
+        b.ragdoll_requested.insert(guid);
+    });
+}
+
+/// The world-space rig the pose step published for `guid`, if it has.
+pub fn ragdoll_rig(world: &EcsWorld, guid: Uuid) -> Option<&[RigBone]> {
+    bridge(world)?.ragdoll_rig.get(&guid).map(Vec::as_slice)
+}
+
+/// **Take** the rig, so the bodies are built from it exactly once.
+pub fn take_ragdoll_rig(world: &mut EcsWorld, guid: Uuid) -> Option<Vec<RigBone>> {
+    let w = world.world_mut();
+    let mut res = w.get_resource_mut::<AnimBridgeRes>()?;
+    res.ragdoll_rig.remove(&guid)
 }
 
 /// **Forget every bridge entry.** Called by [`crate::pose::clear_poses`], which is

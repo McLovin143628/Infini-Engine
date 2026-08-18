@@ -1050,6 +1050,21 @@ pub fn step_pose_evaluation<'c>(
                             }
                             outcomes.push(outcome);
                         }
+                        // **The ragdoll rig, on request** (P29.4, clause 6).
+                        // Model-space joint positions, lifted into the world by
+                        // the entity's own transform -- this is the one place
+                        // that has the skeleton, the pose AND the placement, so
+                        // it is the only place the answer can be computed.
+                        if bridge.ragdoll_requested.remove(&guid) {
+                            let to_world = world
+                                .world()
+                                .get::<crate::components::GlobalTransform>(entity)
+                                .map(|g| g.0)
+                                .unwrap_or(glam::DAffine3::IDENTITY);
+                            if let Some(bones) = rig_bones(&asset.skeleton, &pose, to_world) {
+                                bridge.ragdoll_rig.insert(guid, bones);
+                            }
+                        }
                         let sockets =
                             inf_anim::socket_transforms(&asset.skeleton, &pose, &asset.sockets);
                         posed.insert(
@@ -1139,6 +1154,72 @@ pub fn step_pose_evaluation<'c>(
     } else {
         w.insert_resource(bridge);
     }
+}
+
+/// The world-space bone segments of a posed skeleton (P29.4, clause 6).
+///
+/// Each joint contributes one bone: from its own model-space position to its
+/// **first child**'s, or — for a leaf — a short stub along the direction it came
+/// from, so a hand or a foot still has a body rather than a point. The result is
+/// in world space, because that is where the articulated bodies are spawned.
+///
+/// `None` for a skeleton with no joints. A rig with no *classifiable* joint is
+/// still a `Some`: which names are bones is `inf_physics::ragdoll::classify`'s
+/// question, and this side does not get to answer it.
+fn rig_bones(
+    skeleton: &inf_anim::Skeleton,
+    pose: &Pose,
+    model_to_world: glam::DAffine3,
+) -> Option<Vec<crate::anim_bridge::RigBone>> {
+    let joints = skeleton.joints();
+    if joints.is_empty() {
+        return None;
+    }
+    let globals = inf_anim::global_transforms(skeleton, pose);
+    // Model space is `f32` (the pose pipeline's own precision) and the world is
+    // `f64` (architecture rule 3), so the widening happens exactly once, here,
+    // at the boundary between them.
+    let pos = |i: usize| -> Vec3d {
+        let m = globals[i].w_axis.truncate();
+        let w =
+            model_to_world.transform_point3(glam::DVec3::new(m.x as f64, m.y as f64, m.z as f64));
+        Vec3d::new(w.x, w.y, w.z)
+    };
+    let mut first_child: Vec<Option<usize>> = vec![None; joints.len()];
+    for (i, j) in joints.iter().enumerate() {
+        if let Some(p) = j.parent {
+            let p = p as usize;
+            if p < first_child.len() && first_child[p].is_none() {
+                first_child[p] = Some(i);
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(joints.len());
+    for (i, j) in joints.iter().enumerate() {
+        let head = pos(i);
+        let tail = match first_child[i] {
+            Some(c) => pos(c),
+            // A leaf: a stub along the direction it came from, so the body has a
+            // length. A zero-length capsule is not a capsule.
+            None => match j.parent {
+                Some(p) => {
+                    let up = pos(p as usize);
+                    Vec3d::new(
+                        head.x + (head.x - up.x) * 0.5,
+                        head.y + (head.y - up.y) * 0.5,
+                        head.z + (head.z - up.z) * 0.5,
+                    )
+                }
+                None => Vec3d::new(head.x, head.y + 0.1, head.z),
+            },
+        };
+        out.push(crate::anim_bridge::RigBone {
+            name: j.name.clone(),
+            head,
+            tail,
+        });
+    }
+    Some(out)
 }
 
 /// A play-head time resolved into `[0, duration]` — the convention

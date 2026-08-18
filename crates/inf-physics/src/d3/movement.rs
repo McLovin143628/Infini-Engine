@@ -388,6 +388,14 @@ fn step_one(
         return step_mantle(world, bridge, guid, cm, dt);
     }
 
+    // ── 0c. A RAGDOLL owns it just as completely (P29.4, clause 6), and for the
+    //    same reason: the articulated bodies are the simulation now, and this
+    //    step's velocity model has nothing to say about them. The bridge follows
+    //    the pelvis with the capsule and hands the character back when it settles.
+    if cm.mode == MovementMode::Ragdoll {
+        return super::ragdoll_bridge::step_ragdoll(world, bridge, guid, cm, dt);
+    }
+
     // ── 1. Aim. The look intent is a RATE (degrees per second), so integrating
     //    it here is frame-rate independent by construction — see
     //    `inf_input::InputState::axis_snapshot` for where that conversion is
@@ -417,9 +425,12 @@ fn step_one(
     let swimming = bridge.update_swim(guid);
     let fraction = bridge.water_probe(guid).map(|p| p.fraction).unwrap_or(0.0);
 
-    // ── 3. Timers.
+    // ── 3. Timers. The get-up blend ages here rather than in the ragdoll
+    //    branch, because a character getting up walks, turns and falls like any
+    //    other — the blend is a WEIGHT, not a mode.
     cm.runtime.time_in_mode_s += dt;
     cm.runtime.time_since_land_s += dt;
+    super::ragdoll_bridge::tick_get_up(world, guid, &mut cm, dt);
 
     // ── 4. Mode resolution: the single table, asked once per candidate.
     let previous_mode = cm.mode;
@@ -896,6 +907,37 @@ fn step_one(
             // — not the animation (§13's catalogue row, verbatim). A ragdoll
             // verdict is recorded on the runtime and lands like a hard landing:
             // P29.4 owns the ragdoll, and `request_mode` refuses it by name.
+            // **A ragdoll verdict is now a ragdoll** (P29.3 recorded that it
+            // "lands like a hard landing: P29.4 owns the ragdoll"). The bodies
+            // are seeded with the velocity the character hit at, so a fall that
+            // breaks a character carries its momentum into the tumble.
+            if kind == LandingKind::Ragdoll {
+                cm.runtime.velocity.y = -impact;
+                if super::ragdoll_bridge::begin(&mut cm) {
+                    cm.runtime.press_jump = false;
+                    cm.runtime.press_crouch = false;
+                    cm.runtime.press_prone = false;
+                    cm.runtime.press_roll = false;
+                    cm.runtime.press_dive = false;
+                    let mode = cm.mode;
+                    if let Some(mut slot) = world.world_mut().get_mut::<CharacterMovement>(entity) {
+                        *slot = cm;
+                    }
+                    inf_ecs::anim_bridge::request_ragdoll_rig(world, guid);
+                    inf_ecs::anim_bridge::set_anim_trigger(
+                        world,
+                        guid,
+                        super::ragdoll_bridge::TRIGGER_RAGDOLL,
+                    );
+                    return Some(MoveOutcome {
+                        guid,
+                        mode,
+                        refusal,
+                        grounded: true,
+                        landed: kind,
+                    });
+                }
+            }
             let to = match kind {
                 LandingKind::Roll => MovementMode::Roll,
                 _ if previous_mode == MovementMode::Dive => MovementMode::Prone,

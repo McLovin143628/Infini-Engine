@@ -297,6 +297,31 @@ pub fn pyaw(q: Quat) -> f32 {
     patan2_64(2.0 * (x * z + w * y), 1.0 - 2.0 * (x * x + y * y)) as f32
 }
 
+/// **The portable YXZ roll** (rotation about `+Z`) of a quaternion — [`pyaw`]'s
+/// sibling, and taken from the same decomposition for the same reason.
+///
+/// P29.4's ragdoll reads the **sign** of the pelvis's roll to decide whether a
+/// character is on its back or its front (ALS `bRagdollFaceUp = PelvisRotation
+/// .Roll < 0`), and that decision picks which get-up animation plays — which is a
+/// pose, which is `state_bytes`. `Quat::to_euler` is `atan2` plus `asin` inside
+/// glam, i.e. `std` libm, which the P14 law says is not bit-identical across
+/// targets.
+///
+/// ```text
+///   R = Ry(a) . Rx(b) . Rz(c)   =>   c = atan2(m10, m11)
+///   m10 = 2(xy + wz),   m11 = 1 - 2(x^2 + z^2)
+/// ```
+///
+/// **The denominator is the `YXZ` one.** `1 - 2(x^2 + y^2)` is the `ZYX` roll and
+/// is what a quick reference gives; the two agree whenever pitch and yaw are
+/// zero, which is every fixture a lying-down body would casually be tested with.
+/// `portable_roll_matches_glam` measures the agreement against
+/// `Quat::to_euler(EulerRot::YXZ).2` rather than asserting it.
+pub fn proll(q: Quat) -> f32 {
+    let (x, y, z, w) = (q.x as f64, q.y as f64, q.z as f64, q.w as f64);
+    patan2_64(2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z)) as f32
+}
+
 /// **Byte-portable spherical linear interpolation** between two rotations,
 /// taking the shortest arc.
 ///
@@ -655,5 +680,52 @@ mod tests {
         assert!(pyaw(Quat::from_rotation_y(1.0)) > 0.9);
         assert!(pyaw(Quat::from_rotation_y(-1.0)) < -0.9);
         assert!(pyaw(Quat::IDENTITY).abs() < 1e-6);
+    }
+
+    /// **[`proll`] is the `Z` component `Quat::to_euler(EulerRot::YXZ)` returns**
+    /// — [`pyaw`]'s arm, on the angle whose SIGN P29.4's ragdoll reads to choose
+    /// a get-up.
+    ///
+    /// The sign is the load-bearing half, so it is asserted separately: a roll
+    /// whose magnitude is right and whose sign is inverted would put every
+    /// character on the wrong side and pass a tolerance check on |angle|.
+    #[test]
+    fn portable_roll_matches_glam() {
+        let mut worst = 0.0f32;
+        let mut worst_at = (0.0f32, 0.0f32, 0.0f32);
+        for yi in -18..=18 {
+            for xi in -4..=4 {
+                for zi in -8..=8 {
+                    let (yaw, pitch, roll) = (
+                        yi as f32 * 10.0f32.to_radians(),
+                        xi as f32 * 15.0f32.to_radians(),
+                        zi as f32 * 10.0f32.to_radians(),
+                    );
+                    let q = Quat::from_euler(glam::EulerRot::YXZ, yaw, pitch, roll);
+                    let mine = proll(q);
+                    let theirs = q.to_euler(glam::EulerRot::YXZ).2;
+                    let mut d = (mine - theirs).abs();
+                    if d > std::f32::consts::PI {
+                        d = std::f32::consts::TAU - d;
+                    }
+                    if d > worst {
+                        worst = d;
+                        worst_at = (yaw, pitch, roll);
+                    }
+                }
+            }
+        }
+        assert!(
+            worst < 1.0e-5,
+            "proll differs from glam's YXZ roll by {worst} rad at {worst_at:?}"
+        );
+        // **The sign**, which is the whole of the face-up read.
+        assert!(proll(Quat::from_rotation_z(1.0)) > 0.9);
+        assert!(proll(Quat::from_rotation_z(-1.0)) < -0.9);
+        assert!(proll(Quat::IDENTITY).abs() < 1e-6);
+        // A character on its back is 180 degrees of roll: the magnitude is near
+        // PI and the sign is whichever way it fell, which is exactly what
+        // `face_up_from_pelvis_roll` keys on.
+        assert!(proll(Quat::from_rotation_z(3.0)).abs() > 2.9);
     }
 }

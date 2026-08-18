@@ -286,6 +286,15 @@ pub struct PhysicsBridge3D {
     /// **Empty for every level without a `Buoyancy` component**, which is what
     /// makes the whole water pass one branch on the off path.
     buoyant: BuoyantMap,
+    /// **Ragdolls in flight** (P29.4), keyed by character `Guid`: the bodies,
+    /// colliders and joints one ragdolled character owns while it simulates.
+    ///
+    /// Here rather than in the ECS for the reason `PoseStoreRes` is a resource:
+    /// they are a property of a play session, they are never serialized, and a
+    /// stopped session must not leave a skeleton of loose bodies behind. Empty
+    /// for every level nobody has ragdolled in, which is what keeps the whole
+    /// mechanism free on the off path.
+    ragdolls: BTreeMap<Uuid, super::ragdoll_bridge::SpawnedRagdoll>,
     /// Swim latches, keyed by character `Guid` (P20.2). Separate from
     /// [`buoyant`](Self::buoyant) because a character controller is kinematic and
     /// never floats — it swims.
@@ -332,6 +341,7 @@ impl PhysicsBridge3D {
             water_sources: Vec::new(),
             water_env: (0.0, (0.0, 0.0)),
             buoyant: BuoyantMap::new(),
+            ragdolls: BTreeMap::new(),
             swimming: BTreeMap::new(),
             water_events: Vec::new(),
             snaps_scratch: Vec::new(),
@@ -451,6 +461,27 @@ impl PhysicsBridge3D {
     /// The collider handle mirroring `guid`, if it has one.
     pub fn collider_of(&self, guid: Uuid) -> Option<ColliderId3D> {
         self.entities.get(&guid).and_then(|r| r.collider)
+    }
+
+    /// The ragdoll `guid` is simulating, if it is (P29.4).
+    pub fn ragdoll_of(&self, guid: Uuid) -> Option<&super::ragdoll_bridge::SpawnedRagdoll> {
+        self.ragdolls.get(&guid)
+    }
+
+    /// Record (or replace) `guid`'s ragdoll.
+    pub fn set_ragdoll(&mut self, guid: Uuid, spawned: super::ragdoll_bridge::SpawnedRagdoll) {
+        self.ragdolls.insert(guid, spawned);
+    }
+
+    /// **Take** `guid`'s ragdoll, so the despawn happens exactly once.
+    pub fn take_ragdoll(&mut self, guid: Uuid) -> Option<super::ragdoll_bridge::SpawnedRagdoll> {
+        self.ragdolls.remove(&guid)
+    }
+
+    /// How many characters are ragdolling right now — the counter a gate asserts
+    /// on, and the one that makes "the bodies were cleaned up" checkable.
+    pub fn ragdoll_count(&self) -> usize {
+        self.ragdolls.len()
     }
 
     /// Every tracked `(guid, body, kind)`, in `Guid` order (P22.3).

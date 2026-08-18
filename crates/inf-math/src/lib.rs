@@ -13,8 +13,8 @@ pub mod libm_ban;
 
 pub mod portable;
 pub use portable::{
-    pacos64, patan2_64, pcbrt, pcos, pcos64, psin, psin64, pslerp, pyaw, ACOS_SERIES_CROSSOVER,
-    SLERP_LERP_THRESHOLD,
+    pacos64, patan2_64, pcbrt, pcos, pcos64, proll, psin, psin64, pslerp, pyaw,
+    ACOS_SERIES_CROSSOVER, SLERP_LERP_THRESHOLD,
 };
 
 pub mod predict;
