@@ -996,6 +996,14 @@ pub enum SmError {
         name: String,
         speed: f64,
     },
+    #[error(
+        "state {index} ({name})'s blend space places sample {sample} at a non-finite position"
+    )]
+    BadBlendSample {
+        index: usize,
+        name: String,
+        sample: usize,
+    },
     #[error("{count} parameters declared (the limit is {MAX_PARAMS})")]
     TooManyParams { count: usize },
     #[error("parameter {index} has an empty name")]
@@ -1126,6 +1134,55 @@ impl StateMachine {
                     name: s.name.clone(),
                     speed: s.speed,
                 });
+            }
+            // **A blend-space sample's position must be a number** (P29.2 audit).
+            //
+            // The one numeric field on this format that had neither a guard nor a
+            // door. Since P29.2 a 2D space's weights are barycentric over a
+            // triangulation, and `blend_weights_2d`'s boundary projection could be
+            // won by a poisoned sample — a NaN fails every ordering comparison it
+            // takes part in, so the first edge touching one became "nearest" and no
+            // finite edge could displace it. The 1D half has the older hazard: its
+            // sort comparator answers `Equal` for every NaN pair, which is not a
+            // total order and is what `sort_by` is entitled to panic on. Both are
+            // now defended in code as well; this is the door, and the door is where
+            // the crate's own `.inf_anim` ladder says such a value has to stop.
+            // **A blend-space sample's position must be a number** (P29.2 audit).
+            //
+            // The one numeric field on this format that had neither a guard nor a
+            // door. Since P29.2 a 2D space's weights are barycentric over a
+            // triangulation, and `blend_weights_2d`'s boundary projection could be
+            // won by a poisoned sample — a NaN fails every ordering comparison it
+            // takes part in, so the first edge touching one became "nearest" and no
+            // finite edge could displace it. The 1D half has the older hazard: its
+            // sort comparator answers `Equal` for every NaN pair, which is not a
+            // total order and is what `sort_by` is entitled to panic on. Both are
+            // now defended in code as well; this is the door, and the door is where
+            // the crate's own `.inf_anim` ladder says such a value has to stop.
+            match &s.motion {
+                Motion::Blend1D(sp) => {
+                    if let Some(bad) = sp.entries.iter().position(|e| !e.pos.is_finite()) {
+                        return Err(SmError::BadBlendSample {
+                            index: i,
+                            name: s.name.clone(),
+                            sample: bad,
+                        });
+                    }
+                }
+                Motion::Blend2D(sp) => {
+                    if let Some(bad) = sp
+                        .entries
+                        .iter()
+                        .position(|e| !(e.pos[0].is_finite() && e.pos[1].is_finite()))
+                    {
+                        return Err(SmError::BadBlendSample {
+                            index: i,
+                            name: s.name.clone(),
+                            sample: bad,
+                        });
+                    }
+                }
+                _ => {}
             }
             if let Motion::SubMachine(inner) = &s.motion {
                 if depth >= 1 {
@@ -3413,6 +3470,62 @@ mod tests {
             bad(&|sm| sm.states[0].speed = f64::INFINITY),
             SmError::BadSpeed { .. }
         ));
+        // **A blend-space sample at a non-finite position** (P29.2 audit). Both
+        // halves, because both readers have a hazard: the 2D weighting's boundary
+        // projection could be won by the poisoned sample at full weight, and the
+        // 1D sort's comparator is not a total order once a NaN is in it.
+        assert!(matches!(
+            bad(
+                &|sm| sm.states[0].motion = Motion::Blend2D(crate::BlendSpace2D::new(
+                    "x",
+                    "y",
+                    vec![
+                        crate::BlendEntry2D {
+                            pos: [0.0, 0.0],
+                            clip: [1; 16]
+                        },
+                        crate::BlendEntry2D {
+                            pos: [f64::NAN, 1.0],
+                            clip: [2; 16]
+                        },
+                    ]
+                ))
+            ),
+            SmError::BadBlendSample { sample: 1, .. }
+        ));
+        assert!(matches!(
+            bad(
+                &|sm| sm.states[0].motion = Motion::Blend1D(crate::BlendSpace1D::new(
+                    "s",
+                    vec![crate::BlendEntry1D {
+                        pos: f64::INFINITY,
+                        clip: [1; 16]
+                    }]
+                ))
+            ),
+            SmError::BadBlendSample { sample: 0, .. }
+        ));
+        // …and an ordinary blend space is not refused: the check has to be about
+        // the value and not about the motion kind.
+        {
+            let mut ok = two_state_machine();
+            ok.states[0].motion = Motion::Blend2D(crate::BlendSpace2D::new(
+                "x",
+                "y",
+                vec![
+                    crate::BlendEntry2D {
+                        pos: [0.0, 0.0],
+                        clip: [1; 16],
+                    },
+                    crate::BlendEntry2D {
+                        pos: [1.0, 1.0],
+                        clip: [2; 16],
+                    },
+                ],
+            ));
+            ok.validate()
+                .expect("a finite blend space is ordinary content");
+        }
         assert!(matches!(
             bad(&|sm| sm.transitions[0].condition = SmCond::float("x", CmpOp::Gt, f64::NAN)),
             SmError::NonFiniteCompare { .. }

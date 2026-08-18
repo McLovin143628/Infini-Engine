@@ -220,6 +220,12 @@ const INSIDE_EPS: f64 = 1e-9;
 ///    the same rule applied to the row itself: project onto the dominant
 ///    direction and bracket, which is exactly [`blend_weights_1d`] and the only
 ///    meaningful reading of a blend space with no area.
+///
+/// A sample whose position is **not finite** takes no weight in any of the three
+/// — [`crate::delaunay::triangulate`] already skipped it, and since the P29.2
+/// audit so do the exact-hit scan and the boundary projection. `.inf_sm` refuses
+/// one at its own door too ([`crate::StateMachine::validate`]); this is the
+/// second lock, for a space built in memory that never passed one.
 pub fn weights_2d(points: &[DVec2], q: DVec2) -> Vec<(usize, f64)> {
     let n = points.len();
     if n == 0 {
@@ -280,6 +286,33 @@ pub fn weights_2d(points: &[DVec2], q: DVec2) -> Vec<(usize, f64)> {
             0.0
         };
         let d2 = (a + ab * t - q).length_squared();
+        // **A non-finite candidate takes no weight**, the same rule
+        // [`crate::delaunay::triangulate`] and the exact-hit scan above already
+        // apply — and the reason this guard is here rather than assumed. A NaN
+        // `d2` fails every ordering comparison it takes part in, so an edge
+        // touching a poisoned sample became `best` the moment it was scanned
+        // FIRST and no finite edge could displace it afterwards: the query then
+        // came back as that sample at full weight (the wrong clip, at 1.0), and
+        // for an infinite coordinate `t` itself went NaN and the whole weight
+        // list came back **empty**, which `sample_weighted` reads as "nothing
+        // resolved" and answers with the rest pose — a character snapping to
+        // bind. `.inf_sm` does not refuse a non-finite sample position at its
+        // own door either; it does now, and this is the second lock.
+        if !(d2.is_finite() && t.is_finite()) {
+            continue;
+        }
+        // **A non-finite candidate takes no weight**, the same rule
+        // [`crate::delaunay::triangulate`] and the exact-hit scan above already
+        // apply — and the reason this guard is here rather than assumed. A NaN
+        // `d2` fails every ordering comparison it takes part in, so an edge
+        // touching a poisoned sample became `best` the moment it was scanned
+        // FIRST and no finite edge could displace it afterwards: the query then
+        // came back as that sample at full weight (the wrong clip, at 1.0), and
+        // for an infinite coordinate `t` itself went NaN and the whole weight
+        // list came back **empty**, which `sample_weighted` reads as "nothing
+        // resolved" and answers with the rest pose — a character snapping to
+        // bind. `.inf_sm` does not refuse a non-finite sample position at its
+        // own door either; it does now, and this is the second lock.
         if best.as_ref().is_none_or(|(_, _, bd)| d2 < *bd) {
             best = Some((e, t, d2));
         }
@@ -307,22 +340,31 @@ pub fn weights_2d(points: &[DVec2], q: DVec2) -> Vec<(usize, f64)> {
 /// Sorting by the wider of the two axes (ties to X, then to the original index)
 /// makes this a property of the point set rather than of the order it arrived in,
 /// and reduces to [`blend_weights_1d`]'s rule when the row is an axis.
+///
+/// **Non-finite points are dropped**, which is [`crate::delaunay::triangulate`]'s
+/// rule applied to the path that runs when there is nothing to triangulate. They
+/// used to ride the chain: `lo`/`hi` were seeded from `points[0]` before anything
+/// checked it, the comparator answered `Equal` for every NaN pair (which is not a
+/// total order and is what `sort_by` is entitled to panic on), and the edge they
+/// produced then poisoned the projection in [`weights_2d`].
 fn chain_edges(points: &[DVec2]) -> Vec<[usize; 2]> {
     let n = points.len();
     if n < 2 {
         return Vec::new();
     }
-    let (mut lo, mut hi) = (points[0], points[0]);
-    for p in points {
-        if p.is_finite() {
-            lo = lo.min(*p);
-            hi = hi.max(*p);
-        }
+    let usable: Vec<usize> = (0..n).filter(|&i| points[i].is_finite()).collect();
+    if usable.len() < 2 {
+        return Vec::new();
+    }
+    let (mut lo, mut hi) = (points[usable[0]], points[usable[0]]);
+    for &i in &usable {
+        lo = lo.min(points[i]);
+        hi = hi.max(points[i]);
     }
     let extent = hi - lo;
     let by_x = extent.x >= extent.y;
     let key = |p: DVec2| if by_x { (p.x, p.y) } else { (p.y, p.x) };
-    let mut order: Vec<usize> = (0..n).collect();
+    let mut order: Vec<usize> = usable;
     order.sort_by(|&a, &b| {
         let (ka, kb) = (key(points[a]), key(points[b]));
         ka.0.partial_cmp(&kb.0)
@@ -412,7 +454,11 @@ pub fn sample_blend_space_1d<'c>(
 }
 
 /// Sample a 2D blend space at `params` and play-head `t` (seconds) into a full
-/// [`Pose`], via the `k = 3` inverse-distance blend.
+/// [`Pose`], via [`weights_2d`]'s **Delaunay barycentric** weighting.
+///
+/// (This line used to say "via the `k = 3` inverse-distance blend" — the exact
+/// mechanism P29.2 removed, left behind on the one public function most callers
+/// read first.)
 pub fn sample_blend_space_2d<'c>(
     space: &BlendSpace2D,
     skeleton: &Skeleton,
@@ -1014,6 +1060,87 @@ mod tests {
             (plain - warped).abs() > 0.05,
             "marker warping changed nothing ({plain} vs {warped})"
         );
+    }
+
+    /// **A sample at a non-finite position takes no weight** (P29.2 audit).
+    ///
+    /// `delaunay::triangulate` has always skipped one, and so has the exact-hit
+    /// scan — but the *boundary projection* did not, and it is the path a
+    /// poisoned sample forces the query down (a set with a non-finite point in it
+    /// has at most `n − 1` usable points, so a three-sample space triangulates to
+    /// nothing at all).
+    ///
+    /// The two failures this arm kills, both measured before the fix on these
+    /// exact fixtures:
+    ///
+    ///  * **NaN**, scanned first: `d2` is NaN, every ordering comparison it takes
+    ///    part in is false, so the edge touching it became `best` and no finite
+    ///    edge could displace it — the query came back as `[(0, 1.0)]`, the
+    ///    poisoned sample at **full weight**, i.e. the wrong clip playing alone;
+    ///  * **infinite**: `t` itself went NaN through `inf/inf`, both weight pushes
+    ///    were guarded by comparisons a NaN fails, and the result was an **empty**
+    ///    weight list — which `sample_weighted` reads as "nothing resolved" and
+    ///    answers with the rest pose, i.e. the character snapping to bind.
+    #[test]
+    fn a_non_finite_sample_takes_no_weight_and_does_not_empty_the_blend() {
+        let space = |bad: [f64; 2]| {
+            BlendSpace2D::new(
+                "x",
+                "y",
+                vec![
+                    BlendEntry2D {
+                        pos: bad,
+                        clip: id(0),
+                    },
+                    BlendEntry2D {
+                        pos: [0.0, 0.0],
+                        clip: id(1),
+                    },
+                    BlendEntry2D {
+                        pos: [1.0, 0.0],
+                        clip: id(2),
+                    },
+                ],
+            )
+        };
+        for bad in [
+            [f64::NAN, -5.0],
+            [f64::NEG_INFINITY, -5.0],
+            [0.5, f64::NAN],
+            [f64::INFINITY, f64::INFINITY],
+        ] {
+            let w = blend_weights_2d(&space(bad), DVec2::new(0.5, 0.1));
+            assert!(
+                !w.is_empty(),
+                "{bad:?} emptied the blend, which reads as the rest pose"
+            );
+            assert!(w.iter().all(|(i, _)| *i != 0), "{bad:?} took weight: {w:?}");
+            let total: f64 = w.iter().map(|(_, x)| x).sum();
+            assert!((total - 1.0).abs() < 1e-12, "{bad:?} → {w:?}");
+            // The surviving row is the healthy 0 → 1 span, projected: the query
+            // at (0.5, 0.1) is half way along it.
+            assert_eq!(w.len(), 2, "{bad:?} → {w:?}");
+            assert!((w[0].1 - 0.5).abs() < 1e-12, "{bad:?} → {w:?}");
+        }
+        // …and with the poisoned sample gone the answer is the same one, so the
+        // guard drops a sample rather than changing the weighting.
+        let clean = BlendSpace2D::new(
+            "x",
+            "y",
+            vec![
+                BlendEntry2D {
+                    pos: [0.0, 0.0],
+                    clip: id(1),
+                },
+                BlendEntry2D {
+                    pos: [1.0, 0.0],
+                    clip: id(2),
+                },
+            ],
+        );
+        let w = blend_weights_2d(&clean, DVec2::new(0.5, 0.1));
+        assert_eq!(w.len(), 2);
+        assert!((w[0].1 - 0.5).abs() < 1e-12, "{w:?}");
     }
 
     #[test]
