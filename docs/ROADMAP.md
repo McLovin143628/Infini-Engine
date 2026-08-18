@@ -16545,10 +16545,11 @@ shows a one-line authoring change as a one-line diff.
 > it evaluates as `false`), and dropping such a tree is still recursive. `sm_save`'s new
 > refusal is a message the editor surfaces, not a UI that prevents the gesture.
 
-> **STATUS: P29.2 COMPLETE** (2026-08-17) — **local gates green; NOT PUSHED.** Battery
-> **268 binaries / 4 910 passed / 0 failed / 9 ignored** against the
-> 267 / 4 849 / 0 / 9 baseline (+61 arms and +1 binary — the wall-clock inertialization
-> gate); `clippy -D warnings`, `cargo fmt --check`
+> **STATUS: P29.2 COMPLETE** (2026-08-17, **audited 2026-08-18**) — **local gates green;
+> NOT PUSHED.** Battery **268 binaries / 4 913 passed / 0 failed / 9 ignored** against the
+> 267 / 4 849 / 0 / 9 baseline (+64 arms and +1 binary — the wall-clock inertialization
+> gate; the implementation landed +61 and the audit added three more, none of them a new
+> binary); `clippy -D warnings`, `cargo fmt --check`
 > clean, and `cargo doc --no-deps` reports nothing from any of the seven new files; `tsc
 > --noEmit`, eslint and the editor's vitest suite
 > green at **583 tests / 62 files** (from 577 / 61). Goldens stay **54** and are
@@ -16683,10 +16684,13 @@ shows a one-line authoring change as a one-line diff.
 > positions, not a shaded render: a lit one needs the offscreen character-preview path,
 > which is P29.5's `preview_character` work.
 
-> **AUDITED** (2026-08-18) — three findings, all fixed; no golden moved, no schema moved,
+> **AUDITED** (2026-08-18) — five findings, all fixed; no golden moved, no schema moved,
 > and the `.inf_anim` v2 ladder held every claim made for it (the v1 refusal, the
 > reserved-slot refusal, the structural questions, and the byte-consumption pin, which
-> fails as designed when a sixth field is appended to `AnimClip`).
+> fails as designed when a sixth field is appended to `AnimClip`). The three committed
+> `character-demo` clips are **+5 bytes** each and nothing else in the tree moved: five
+> empty containers at the clip's tail, which is exactly what a downgrade-bless of a v1
+> clip through a v2 generator should produce.
 >
 > **A1, the one with a wrong pose behind it.** This wave's new 2D weighting skips a
 > non-finite sample in two of the three places it can arrive and not the third: the
@@ -16725,17 +16729,54 @@ shows a one-line authoring change as a one-line diff.
 > cross-fade, when it is now the only place in the battery where the shipped runtime and
 > the editor's Simulate are compared byte for byte across a live **inertialization**.
 >
+> **A4, the determinism arm that passed with determinism deleted.**
+> `the_triangulation_does_not_depend_on_input_order` names the law the whole
+> triangulator is built around, and its point set is in **general position** — where the
+> Delaunay triangulation is unique and any insertion order finds it. Deleting the sorted
+> insertion leaves it green. The case the sort exists for is the one `delaunay.rs`'s own
+> docs name: a **co-circular square**, which is what a hand-authored locomotion grid is,
+> where a strict predicate flips nothing and the diagonal is simply whichever the
+> insertion laid down. `a_square_triangulates_into_a_cover` built that square and
+> asserted its area and hull size. It now asserts the **same two triangles for every
+> rotation of the corner list** — measured with the sort removed, the four rotations give
+> two different diagonals, which is two different blends of one authored grid on a weight
+> that reaches `state_bytes`.
+>
+> **A5, two mechanisms `sync.rs` leads with and could not tell from their fallbacks.**
+> Every fixture in that module gave both clips their markers in the same order, so
+> "the segment named `plant_l`" and "segment 0" were the same segment and the by-name
+> match was indistinguishable from an index. A follower that plants its **right** foot
+> first now separates them (the index answer is the opposite foot). And `common_group`'s
+> lexicographic choice — the argument for why the group is a property of the content and
+> not of the resolve order — had only been exercised on clips with one group each, where
+> every rule agrees; two clips now share two groups authored in opposite orders. Neither
+> was wholly uncovered (`locomotion`'s retimed-import case discriminates the first from
+> the other side of the crate); what was missing was a statement of each where somebody
+> changing `follow` or `common_group` would look.
+>
 > **Verified rather than taken.** Measured claim (1)'s IDW numbers reproduce from the
 > pre-wave body (`1.0 / d²`, so `0.545 / 0.287 / 0.168`, reconstructing `(0.168, 0.287)`,
 > 0.1396 away); (3)'s reproduce exactly (0.588 / 3.633, 6.17×; 3.192 / 4.934, 1.55×);
 > (4)'s is asserted by its own arm; the blend-space cost reproduces at 0.93 / 1.85 /
-> 7.11 µs. (2)'s timing half is corrected above. Mutation-verified besides: the
+> 7.11 µs. (2)'s timing half is corrected above. The `f32` residual holds too — a
+> float32 reconstruction of the deleted body reaches **−9.5367431640625e-7**, exactly
+> −2⁻²⁰, in 62 of 10 001 samples over the last 2 % of a 0.25 s decay (at the quoted
+> 249/250 the reconstruction lands on **+**2⁻²⁰, so the sample point in the note is not
+> the one that goes negative; the magnitude, the sign and the argument for `f64` all
+> stand). Worth adding that `Inertializer::apply` guards `!positive(w)` and returns the
+> target untouched, so a negative weight could not have inverted a deviation *through
+> this type* — the case the `f64` change actually closes is a caller reading the public
+> `quintic_decay` / `decay()` directly, plus six orders of conditioning.
+> Mutation-verified besides: the
 > portable-math ban really does catch a `.sin()` planted in `blend_space.rs`; the
 > by-name sim-path lookup survives a reordered `SIM_PATH` and panics by name on an
 > unknown file; the `character-demo` clip lock fails on a single flipped byte, so it
 > covers content and not existence; the pre-fix `pose_parity` fixture really is vacuous
-> against the collapsed degenerate fade; and putting the cross-fade back as the default
-> in `step_pose_evaluation` fails the default-flip arm.
+> against the collapsed degenerate fade; putting the cross-fade back as the default in
+> `step_pose_evaluation` fails the default-flip arm; reordering `AdditiveRef`'s variants
+> fails `freeze_pins`; and a uniform weighting in place of the barycentric one fails
+> `the_weights_reproduce_the_query_point` by six orders of magnitude, exactly as the
+> ledger says a restored IDW body would.
 >
 > **One coverage boundary, stated rather than closed.** No **subprocess** arm runs an
 > inertialized transition: `pie_skinned`'s real `--pie` binary walks its machine on
