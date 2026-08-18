@@ -41,7 +41,9 @@
 
 use glam::{Quat, Vec3};
 
-use crate::pose::Pose;
+use crate::channels::AdditiveRef;
+use crate::clip::AnimClip;
+use crate::pose::{sample_clip, Pose};
 use crate::skeleton::{JointTransform, Skeleton};
 use crate::state_machine::BlendProfile;
 
@@ -358,6 +360,57 @@ pub fn apply_additive(base: &Pose, delta: &Pose, weights: &[f32]) -> Pose {
     Pose { locals }
 }
 
+/// The pose an **additive clip** is additive *over* — the door that reads
+/// [`AdditiveRef`] (`.inf_anim` v2).
+///
+/// * [`AdditiveRef::None`] — the clip is not additive, so there is no base and
+///   this is `None`. A caller that fell back to the rest pose here would turn
+///   every ordinary clip into a delta against bind, which is a plausible-looking
+///   pose and a wrong one.
+/// * [`AdditiveRef::FirstFrame`] — the clip's own frame 0, sampled **non-looping**
+///   so a negative or wrapped time cannot pick a different frame.
+/// * [`AdditiveRef::BaseClip`] — the named clip at `time_s`. `None` when it does
+///   not resolve: a delta measured against a base that is not there is the clip's
+///   *absolute* pose wearing a delta's name, and [`apply_additive`] would then add
+///   a whole character on top of a whole character.
+/// * a **reserved** kind — `None`. It was written by a newer build; the decode
+///   door already refuses it by name, and this is the second lock for a clip built
+///   in memory that never passed one.
+pub fn additive_base_pose<'c>(
+    skeleton: &Skeleton,
+    clip: &AnimClip,
+    clips: &dyn Fn([u8; 16]) -> Option<&'c AnimClip>,
+) -> Option<Pose> {
+    match clip.additive {
+        AdditiveRef::None => None,
+        AdditiveRef::FirstFrame => Some(sample_clip(skeleton, clip, 0.0, false)),
+        AdditiveRef::BaseClip { clip: id, time_s } => {
+            clips(id).map(|c| sample_clip(skeleton, c, time_s, false))
+        }
+        AdditiveRef::Reserved3 { .. } | AdditiveRef::Reserved4 { .. } => None,
+    }
+}
+
+/// Sample an additive clip into the **delta** [`apply_additive`] takes, resolving
+/// its base through [`additive_base_pose`].
+///
+/// `None` for a clip that is not additive — which is the answer a caller needs,
+/// because the alternative is silently treating a full pose as a delta and adding
+/// it to whatever is underneath.
+pub fn sample_additive_clip<'c>(
+    skeleton: &Skeleton,
+    clip: &AnimClip,
+    t: f32,
+    looping: bool,
+    clips: &dyn Fn([u8; 16]) -> Option<&'c AnimClip>,
+) -> Option<Pose> {
+    let base = additive_base_pose(skeleton, clip, clips)?;
+    Some(additive_delta(
+        &base,
+        &sample_clip(skeleton, clip, t, looping),
+    ))
+}
+
 /// Apply one layer's pose over `base`.
 pub fn apply_layer(base: &Pose, layer_pose: &Pose, layer: &AnimLayer) -> Pose {
     if !layer.is_active() {
@@ -633,5 +686,86 @@ mod tests {
         let out = apply_additive(&base, &short, &[1.0; 4]);
         assert_eq!(out.locals.len(), 4);
         assert_eq!(out.locals[3], base.locals[3]);
+    }
+    /// **The `AdditiveRef` door**, which is what stops the `.inf_anim` v2 field
+    /// being data nothing reads.
+    ///
+    /// Three claims: a `FirstFrame` clip's delta at its own frame 0 is the
+    /// identity (nothing has happened yet) and grows from there; a `BaseClip`
+    /// reference is measured against the *named* clip and not against itself; and
+    /// a clip that is **not** additive is refused rather than silently treated as
+    /// a delta — which is the failure that looks most like success, because
+    /// `apply_additive` would then add a whole character on top of a whole
+    /// character.
+    #[test]
+    fn an_additive_clip_resolves_the_base_its_reference_names() {
+        use crate::channels::AdditiveRef;
+        use crate::clip::{Interpolation, JointTrack, QuatTrack};
+
+        let sk = rig();
+        // A clip taking joint 1 from 20° to 60° over a second.
+        let swing = |from: f32, to: f32| {
+            let mut jt = JointTrack::new(1);
+            jt.rotation = Some(QuatTrack::new(
+                vec![0.0, 1.0],
+                vec![
+                    inf_math::pslerp(
+                        Quat::IDENTITY,
+                        Quat::from_xyzw(0.0, 0.0, 1.0, 0.0),
+                        from / 180.0,
+                    )
+                    .to_array(),
+                    inf_math::pslerp(
+                        Quat::IDENTITY,
+                        Quat::from_xyzw(0.0, 0.0, 1.0, 0.0),
+                        to / 180.0,
+                    )
+                    .to_array(),
+                ],
+                Interpolation::Linear,
+            ));
+            AnimClip::new("swing", vec![jt])
+        };
+        let none = |_: [u8; 16]| -> Option<&AnimClip> { None };
+
+        // Not additive: refused.
+        let plain = swing(20.0, 60.0);
+        assert!(additive_base_pose(&sk, &plain, &none).is_none());
+        assert!(sample_additive_clip(&sk, &plain, 0.5, false, &none).is_none());
+
+        // FirstFrame: the delta is identity at t = 0 and 40° at t = 1.
+        let ff = swing(20.0, 60.0).with_additive(AdditiveRef::FirstFrame);
+        let d0 = sample_additive_clip(&sk, &ff, 0.0, false, &none).unwrap();
+        assert!(deg_of(&d0, 1) < 1e-3, "{}", deg_of(&d0, 1));
+        let d1 = sample_additive_clip(&sk, &ff, 1.0, false, &none).unwrap();
+        assert!((deg_of(&d1, 1) - 40.0).abs() < 0.5, "{}", deg_of(&d1, 1));
+        // …and applying it to an arbitrary base really adds those 40°.
+        let base = pose_with(&[(1, 15.0)]);
+        let out = apply_additive(&base, &d1, &[1.0; 4]);
+        assert!((deg_of(&out, 1) - 55.0).abs() < 0.5, "{}", deg_of(&out, 1));
+
+        // BaseClip: measured against the NAMED clip, at the named time.
+        let reference = swing(0.0, 0.0);
+        let over = swing(20.0, 60.0).with_additive(AdditiveRef::BaseClip {
+            clip: [9; 16],
+            time_s: 0.0,
+        });
+        let resolver =
+            |id: [u8; 16]| -> Option<&AnimClip> { (id == [9; 16]).then_some(&reference) };
+        let d = sample_additive_clip(&sk, &over, 0.0, false, &resolver).unwrap();
+        assert!(
+            (deg_of(&d, 1) - 20.0).abs() < 0.5,
+            "the delta was measured against the wrong base: {}",
+            deg_of(&d, 1)
+        );
+        // An unresolved base is a refusal, not a full pose wearing a delta's name.
+        assert!(sample_additive_clip(&sk, &over, 0.0, false, &none).is_none());
+
+        // A reserved kind — written by a newer build — is refused here too.
+        let future = swing(20.0, 60.0).with_additive(AdditiveRef::Reserved3 {
+            clip: [9; 16],
+            time_s: 0.0,
+        });
+        assert!(sample_additive_clip(&sk, &future, 0.0, false, &resolver).is_none());
     }
 }

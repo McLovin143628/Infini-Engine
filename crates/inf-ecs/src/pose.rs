@@ -73,7 +73,9 @@ use std::collections::BTreeMap;
 
 use bevy_ecs::prelude::{Entity, Resource};
 use glam::Mat4;
-use inf_anim::{AnimClip, ClipRef, Pose, PoseBlender, SkeletonAsset, SmContext, StateMachine};
+use inf_anim::{
+    AnimClip, ClipRef, Pose, PoseBlender, SkeletonAsset, SmBlendMode, SmContext, StateMachine,
+};
 use uuid::Uuid;
 
 use crate::components::{AnimStateMachine, Guid, SkeletalMesh, SmRuntimeState};
@@ -523,6 +525,44 @@ pub struct PoseStoreRes(pub BTreeMap<Uuid, EvaluatedPose>);
 #[derive(Resource, Default, Debug, Clone)]
 pub struct PoseBlendRes(pub BTreeMap<Uuid, PoseBlender>);
 
+/// How this world's state transitions blend (P29.2). **Absent means
+/// [`SmBlendMode::Inertialize`]**, which is §13's amendment's default.
+///
+/// A *setting*, not per-step state, so — unlike [`PoseBlendRes`] — it survives
+/// [`clear_poses`]: an author who switched a session to the P29.1 cross-fade did
+/// not mean "until the next time Simulate stops".
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoseBlendModeRes(pub SmBlendMode);
+
+/// Choose how state transitions blend, for every posed entity in this world.
+///
+/// The **selector** `.inf_sm` cannot carry: a per-transition choice would be a
+/// field on `SmTransition`, and that format bumped in P29.1 and does not bump
+/// again in this phase. So the choice is world-level and lives in a resource,
+/// which is enough for a project that wants the P29.1 cross-fade back and is the
+/// seam P29.4's `anim.*` kit exposes.
+///
+/// Existing blenders switch **immediately** rather than after their current decay
+/// expires — a setting that takes effect at an unpredictable later moment is
+/// worse than one that does not exist.
+pub fn set_blend_mode(world: &mut EcsWorld, mode: SmBlendMode) {
+    world.world_mut().insert_resource(PoseBlendModeRes(mode));
+    if let Some(mut res) = world.world_mut().get_resource_mut::<PoseBlendRes>() {
+        for b in res.0.values_mut() {
+            b.mode = mode;
+        }
+    }
+}
+
+/// How this world blends state transitions — the default when nothing set one.
+pub fn blend_mode(world: &EcsWorld) -> SmBlendMode {
+    world
+        .world()
+        .get_resource::<PoseBlendModeRes>()
+        .map(|r| r.0)
+        .unwrap_or_default()
+}
+
 /// The pose the sim evaluated for `guid` this step, if any.
 ///
 /// This is the **read door** both render projectors go through, and the reason
@@ -754,6 +794,8 @@ pub fn step_pose_evaluation<'c>(
         .map(|r| r.0)
         .unwrap_or_default();
     let mut blended_this_step: Vec<Uuid> = Vec::new();
+    // Read once, so a world-level setting cannot mean two things inside one step.
+    let mode = blend_mode(world);
     // **The clip-length resolver that makes `exit_time` live** (P29.1). Derived
     // from the same `clips` the pose is sampled through, so there is exactly one
     // notion of how long a clip is.
@@ -783,7 +825,11 @@ pub fn step_pose_evaluation<'c>(
                 None => rt.advance(machine, &ctx, dt),
                 Some(asset) => {
                     blended_this_step.push(guid);
-                    let blender = blenders.entry(guid).or_insert_with(PoseBlender::new);
+                    let blender = blenders.entry(guid).or_insert_with(|| {
+                        let mut b = PoseBlender::new();
+                        b.mode = mode;
+                        b
+                    });
                     // A rig swap invalidates the captured deviation — a delta
                     // between two different joint counts is not a delta.
                     blender.fit_rig(asset.skeleton.len());
@@ -1910,5 +1956,65 @@ mod tests {
         assert!(w.world().get_resource::<PoseBlendRes>().is_some());
         clear_poses(&mut w);
         assert!(w.world().get_resource::<PoseBlendRes>().is_none());
+    }
+    /// **The mode is selectable, and the selection is real** (P29.2).
+    ///
+    /// `.inf_sm` cannot carry a per-transition choice — that format bumped in
+    /// P29.1 and does not bump again this phase — so the selector is world-level.
+    /// What this arm asserts is that it is not decorative: under `CrossFade` the
+    /// runtime's own fade survives a fired transition, which is exactly what the
+    /// default collapses.
+    #[test]
+    fn the_cross_fade_mode_is_selectable_and_puts_the_p29_1_path_back() {
+        let guid = Uuid::from_u128(0x29_2004);
+        let faded = StateMachine {
+            transitions: vec![SmTransition::on(
+                0,
+                1,
+                0.25,
+                "moving",
+                inf_anim::CmpOp::Gt,
+                0.5,
+            )],
+            ..machine()
+        };
+        let f = Fixture {
+            machine: faded,
+            ..Fixture::new()
+        };
+        let mut w = world_with_character(guid);
+        // The default, stated rather than assumed.
+        assert_eq!(blend_mode(&w), inf_anim::SmBlendMode::Inertialize);
+        set_blend_mode(&mut w, inf_anim::SmBlendMode::CrossFade);
+        assert_eq!(blend_mode(&w), inf_anim::SmBlendMode::CrossFade);
+
+        f.step(&mut w, 1.0 / 60.0, 0.0);
+        f.step(&mut w, 1.0 / 60.0, 1.0);
+        let e = w.entity_of(guid).unwrap();
+        let rt = w.world().get::<AnimStateMachine>(e).unwrap().runtime;
+        assert_eq!(rt.current, 1, "the transition did not fire");
+        assert_eq!(
+            rt.prev,
+            Some(0),
+            "the cross-fade was collapsed anyway — the mode did nothing"
+        );
+        assert!((rt.fade_dur - 0.25).abs() < 1e-12);
+        // …and no deviation was captured, because there is nothing to inertialize.
+        let b = &w.world().get_resource::<PoseBlendRes>().unwrap().0[&guid];
+        assert!(!b.is_blending());
+
+        // The setting SURVIVES `clear_poses`, which drops the per-step state.
+        clear_poses(&mut w);
+        assert_eq!(blend_mode(&w), inf_anim::SmBlendMode::CrossFade);
+        // …and switching back reaches the live blenders immediately.
+        f.step(&mut w, 1.0 / 60.0, 0.0);
+        set_blend_mode(&mut w, inf_anim::SmBlendMode::Inertialize);
+        assert!(w
+            .world()
+            .get_resource::<PoseBlendRes>()
+            .unwrap()
+            .0
+            .values()
+            .all(|b| b.mode == inf_anim::SmBlendMode::Inertialize));
     }
 }

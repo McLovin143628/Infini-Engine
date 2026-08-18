@@ -96,7 +96,8 @@ pub use ik::{
 };
 pub use inertialize::{quintic_decay, Inertializer, PoseBlender, SmBlendMode, TransitionEntry};
 pub use layers::{
-    additive_delta, apply_additive, apply_layer, apply_layers, AnimLayer, JointMask, LayerMode,
+    additive_base_pose, additive_delta, apply_additive, apply_layer, apply_layers,
+    sample_additive_clip, AnimLayer, JointMask, LayerMode,
 };
 pub use locomotion::{
     build_locomotion, locomotion_machine, GaitParams, LegSummary, LocomotionError, LocomotionSet,

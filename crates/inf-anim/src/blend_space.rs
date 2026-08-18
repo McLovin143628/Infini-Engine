@@ -37,6 +37,19 @@
 //! samples); a set with no area at all (one point, two points, or a collinear row)
 //! interpolates along its own line, which is the 1D rule and the only meaningful
 //! one there.
+//!
+//! ## What it costs, measured
+//!
+//! [`blend_weights_2d`] **triangulates on every call**, because this crate is pure
+//! by doctrine — no interior mutability, no globals — and `&BlendSpace2D` gives it
+//! nowhere to cache. Measured in release on the development machine, minimum of
+//! seven rounds of two thousand calls: **0.94 µs** for 5 samples, **1.74 µs** for
+//! 9, **6.84 µs** for 25. `motion_period` and `sample_motion` each make one call,
+//! so a 9-sample space costs about 3.5 µs per entity per fixed step — roughly 2 %
+//! of a core for a hundred characters at 60 Hz. Affordable, and not free: the
+//! follow-up is a caller-held triangulation cache keyed on the point set, which is
+//! an API change reaching both fixed steps and is therefore not in this wave. No
+//! committed content uses a 2D blend space today.
 
 use glam::DVec2;
 use serde::{Deserialize, Serialize};
