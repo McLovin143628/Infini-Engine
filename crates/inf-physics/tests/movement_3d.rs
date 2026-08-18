@@ -1096,3 +1096,72 @@ fn an_idle_aiming_character_is_clamped_rather_than_turned() {
         "and it really was pulled — a body that never moved would pass the bound above"
     );
 }
+
+/// **The step processes characters in `Guid` order, not in archetype order** —
+/// and that is not bookkeeping.
+///
+/// Each character's move calls `move_character`, which writes a body translation
+/// and dirties the query BVH, so the world entity B sweeps against is the world
+/// entity A left behind. The order is therefore observable, it reaches
+/// `state_bytes`, and a replay cannot be allowed to depend on the order bevy
+/// happens to store components in.
+///
+/// The arm spawns two characters whose guids are the REVERSE of their spawn
+/// order, so "sorted" and "as bevy stored them" cannot be the same answer.
+#[test]
+fn characters_step_in_guid_order_and_not_in_the_order_they_were_spawned() {
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(40.0, 0.5, 40.0),
+    );
+    // Spawned high-guid first, so archetype order is descending.
+    let hi = Uuid::from_u128(0x2903_9002);
+    let lo = Uuid::from_u128(0x2903_9001);
+    for (guid, z) in [(hi, 4.0), (lo, 0.0)] {
+        let cm = CharacterMovement {
+            player_controlled: true,
+            ..Default::default()
+        };
+        let e = w.spawn_with_guid(guid, "Hero", None);
+        let mut t = Transform::IDENTITY;
+        t.translation = Vec3d::new(0.0, cm.stand_half_height_m + RADIUS, z);
+        w.world_mut().entity_mut(e).insert((
+            RigidBody3D {
+                kind: BodyKind3D::Kinematic,
+                ..Default::default()
+            },
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Capsule,
+                half_extents: Vec3d::new(RADIUS, cm.stand_half_height_m, RADIUS),
+                radius: RADIUS,
+                ..Default::default()
+            },
+            CharacterController3D::default(),
+            cm,
+            t,
+        ));
+    }
+    w.mark_dirty();
+    w.propagate();
+
+    b.sync_from_world(&w);
+    inf_ecs::movement::apply_intent(&mut w, &walk_forward());
+    let outcomes = step_character_movement(&mut w, &mut b, DT);
+    assert_eq!(outcomes.len(), 2, "both characters stepped");
+    assert!(
+        outcomes[0].guid < outcomes[1].guid,
+        "the step visited {} before {} — that is archetype order, not Guid order",
+        outcomes[0].guid,
+        outcomes[1].guid
+    );
+    // Anti-vacuity: the two guids really are out of spawn order, so the
+    // assertion above could have failed.
+    assert!(
+        lo < hi,
+        "the fixture's guids are the reverse of its spawn order"
+    );
+}
