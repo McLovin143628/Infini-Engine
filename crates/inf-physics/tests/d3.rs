@@ -544,3 +544,293 @@ fn fixed_stepper_drives_step_count() {
         "expected 3 fixed steps across two 1.5-tick frames"
     );
 }
+
+// ── shape casts (P29.3) ─────────────────────────────────────────────────────
+//
+// The engine had no swept-volume query at all before this wave — the only one
+// anywhere ran inside rapier's `move_shape` and was unreachable from outside the
+// mover. These arms pin the properties every consumer of `cast_shape` depends
+// on: the distance is metres along a UNIT direction, the hit is the nearest one,
+// "already inside" is a distinguishable answer rather than a distance of zero
+// that looks like a touch, and the exclusion set really keeps a collider out of
+// the answer (a sweep almost always starts on top of its own character).
+
+/// A world with a ceiling slab whose underside sits at `y = under`.
+fn world_with_ceiling(under: f64) -> PhysicsWorld3D {
+    let mut world = PhysicsWorld3D::new(DVec3::ZERO);
+    let slab = world.add_body(
+        BodyKind3D::Static,
+        DVec3::new(0.0, under + 0.5, 0.0),
+        DQuat::IDENTITY,
+    );
+    world.add_collider(
+        slab,
+        ColliderDesc3D::new(ColliderShape3D::Box {
+            half_extents: DVec3::new(5.0, 0.5, 5.0),
+        }),
+    );
+    world
+}
+
+#[test]
+fn a_swept_capsule_reports_the_distance_it_travelled_in_metres() {
+    // Ceiling underside at y = 2. A 0.5 m-radius sphere centred at y = 0 has its
+    // top at 0.5, so it may rise 1.5 m before touching.
+    let mut world = world_with_ceiling(2.0);
+    let none = std::collections::BTreeSet::new();
+
+    let hit = world
+        .cast_shape(
+            &ColliderShape3D::Sphere { radius: 0.5 },
+            DVec3::ZERO,
+            DQuat::IDENTITY,
+            DVec3::Y,
+            10.0,
+            &none,
+        )
+        .expect("the sphere must find the ceiling");
+    assert!(
+        (hit.toi - 1.5).abs() < 1e-9,
+        "a unit direction makes the time of impact a distance in metres: {}",
+        hit.toi
+    );
+    assert!(!hit.started_penetrating, "the sweep started in free space");
+    assert!(
+        hit.normal.y < -0.9,
+        "the ceiling's outward normal points DOWN at the thing below it: {:?}",
+        hit.normal
+    );
+    assert!(
+        (hit.point.y - 2.0).abs() < 1e-6,
+        "the witness point is on the ceiling's underside: {:?}",
+        hit.point
+    );
+
+    // A budget shorter than the gap is a miss, not a near-miss: the clearance
+    // caller asks "is anything within 1 m", and 1.5 m away is not.
+    assert!(
+        world
+            .cast_shape(
+                &ColliderShape3D::Sphere { radius: 0.5 },
+                DVec3::ZERO,
+                DQuat::IDENTITY,
+                DVec3::Y,
+                1.0,
+                &none,
+            )
+            .is_none(),
+        "a hit past `max_toi` is not a hit"
+    );
+}
+
+#[test]
+fn a_sweep_that_starts_inside_says_so_instead_of_reporting_a_touch() {
+    // The clearance probe's most important answer. A capsule tall enough to
+    // already intersect the ceiling must not come back as "hit at 0 m" — which
+    // is what a grazing contact also looks like — but as "you are inside it".
+    let mut world = world_with_ceiling(1.0);
+    let none = std::collections::BTreeSet::new();
+
+    let hit = world
+        .cast_shape(
+            &ColliderShape3D::Capsule {
+                half_height: 0.9,
+                radius: 0.3,
+            },
+            DVec3::new(0.0, 0.5, 0.0),
+            DQuat::IDENTITY,
+            DVec3::Y,
+            2.0,
+            &none,
+        )
+        .expect("an overlapping sweep is a hit, not a miss");
+    assert!(
+        hit.started_penetrating,
+        "the capsule reaches 1.7 and the ceiling starts at 1.0 — that is an overlap"
+    );
+    assert_eq!(hit.toi, 0.0, "an overlap is time zero");
+
+    // The control: a capsule that clears the ceiling sweeps cleanly. Without it
+    // the arm above would pass on a probe that reported `started_penetrating`
+    // unconditionally.
+    let clear = world
+        .cast_shape(
+            &ColliderShape3D::Capsule {
+                half_height: 0.2,
+                radius: 0.1,
+            },
+            DVec3::ZERO,
+            DQuat::IDENTITY,
+            DVec3::Y,
+            2.0,
+            &none,
+        )
+        .expect("it still reaches the ceiling within 2 m");
+    assert!(
+        !clear.started_penetrating,
+        "a capsule reaching 0.3 under a ceiling at 1.0 starts clear"
+    );
+    assert!((clear.toi - 0.7).abs() < 1e-9, "toi = {}", clear.toi);
+}
+
+#[test]
+fn the_nearest_collider_wins_and_an_excluded_one_is_invisible() {
+    let mut world = PhysicsWorld3D::new(DVec3::ZERO);
+    // Two walls on the +X axis, at x = 2 and x = 6 (each 0.5 m half-thick).
+    let mut ids = Vec::new();
+    for x in [2.0_f64, 6.0] {
+        let b = world.add_body(BodyKind3D::Static, DVec3::new(x, 0.0, 0.0), DQuat::IDENTITY);
+        ids.push(
+            world
+                .add_collider(
+                    b,
+                    ColliderDesc3D::new(ColliderShape3D::Box {
+                        half_extents: DVec3::new(0.5, 5.0, 5.0),
+                    }),
+                )
+                .expect("a box collider builds"),
+        );
+    }
+    let none = std::collections::BTreeSet::new();
+    let probe = ColliderShape3D::Sphere { radius: 0.25 };
+
+    let near = world
+        .cast_shape(&probe, DVec3::ZERO, DQuat::IDENTITY, DVec3::X, 20.0, &none)
+        .expect("something is in the way");
+    assert_eq!(near.collider, ids[0], "the NEAR wall is the answer");
+    assert!((near.toi - 1.25).abs() < 1e-9, "toi = {}", near.toi);
+
+    // Exclude the near wall and the far one becomes the answer — the property
+    // every character sweep rests on, since a character's own collider is always
+    // the nearest thing to its own capsule.
+    let mut skip = std::collections::BTreeSet::new();
+    skip.insert(ids[0]);
+    let far = world
+        .cast_shape(&probe, DVec3::ZERO, DQuat::IDENTITY, DVec3::X, 20.0, &skip)
+        .expect("the far wall is still there");
+    assert_eq!(
+        far.collider, ids[1],
+        "the excluded collider must not answer"
+    );
+    assert!((far.toi - 5.25).abs() < 1e-9, "toi = {}", far.toi);
+
+    // Exclude both and the sweep is clear.
+    skip.insert(ids[1]);
+    assert!(
+        world
+            .cast_shape(&probe, DVec3::ZERO, DQuat::IDENTITY, DVec3::X, 20.0, &skip)
+            .is_none(),
+        "with every collider excluded the sweep hits nothing"
+    );
+}
+
+#[test]
+fn a_sweep_that_describes_no_sweep_answers_no_rather_than_panicking() {
+    let mut world = world_with_ceiling(2.0);
+    let none = std::collections::BTreeSet::new();
+    let probe = ColliderShape3D::Sphere { radius: 0.5 };
+
+    for (label, dir, max) in [
+        ("a zero direction", DVec3::ZERO, 10.0),
+        ("a zero budget", DVec3::Y, 0.0),
+        ("a negative budget", DVec3::Y, -1.0),
+        ("a NaN budget", DVec3::Y, f64::NAN),
+    ] {
+        assert!(
+            world
+                .cast_shape(&probe, DVec3::ZERO, DQuat::IDENTITY, dir, max, &none)
+                .is_none(),
+            "{label} describes no sweep and must answer None"
+        );
+    }
+
+    // A shape rapier refuses to build is refused here too, rather than panicking
+    // inside parry (the `to_shared` door the collider builder already uses).
+    assert!(
+        world
+            .cast_shape(
+                &ColliderShape3D::ConvexHull {
+                    points: vec![DVec3::ZERO, DVec3::X],
+                },
+                DVec3::ZERO,
+                DQuat::IDENTITY,
+                DVec3::Y,
+                10.0,
+                &none,
+            )
+            .is_none(),
+        "a degenerate hull bounds no volume, so it sweeps nothing"
+    );
+
+    // Anti-vacuity: the same call with a real shape and a real budget DOES hit,
+    // so the four Nones above are the refusals and not a broken probe.
+    assert!(
+        world
+            .cast_shape(&probe, DVec3::ZERO, DQuat::IDENTITY, DVec3::Y, 10.0, &none)
+            .is_some(),
+        "the control sweep must hit, or this arm proves nothing"
+    );
+}
+
+#[test]
+fn an_unnormalized_direction_still_measures_in_metres() {
+    // The doc promises `toi` is a distance. `cast_shape` normalizes, so a caller
+    // passing a velocity-shaped vector (as land prediction will) gets metres and
+    // not seconds-of-that-velocity.
+    let mut world = world_with_ceiling(2.0);
+    let none = std::collections::BTreeSet::new();
+    let probe = ColliderShape3D::Sphere { radius: 0.5 };
+
+    let unit = world
+        .cast_shape(&probe, DVec3::ZERO, DQuat::IDENTITY, DVec3::Y, 10.0, &none)
+        .expect("hit");
+    let fast = world
+        .cast_shape(
+            &probe,
+            DVec3::ZERO,
+            DQuat::IDENTITY,
+            DVec3::new(0.0, 37.0, 0.0),
+            10.0,
+            &none,
+        )
+        .expect("hit");
+    assert!(
+        (unit.toi - fast.toi).abs() < 1e-9,
+        "a 37 m/s direction must not rescale the answer: {} vs {}",
+        unit.toi,
+        fast.toi
+    );
+}
+
+#[test]
+fn the_swept_shapes_rotation_is_honoured() {
+    // A long bar swept upward: axis-aligned it is 0.2 m tall and clears; rolled
+    // 90 degrees about Z its 2 m length becomes its height and it does not. The
+    // mantle and camera probes both sweep rotated shapes, so this is not
+    // decoration.
+    let mut world = world_with_ceiling(1.0);
+    let none = std::collections::BTreeSet::new();
+    let bar = ColliderShape3D::Box {
+        half_extents: DVec3::new(1.0, 0.1, 0.1),
+    };
+
+    let flat = world
+        .cast_shape(&bar, DVec3::ZERO, DQuat::IDENTITY, DVec3::Y, 5.0, &none)
+        .expect("hit");
+    let rolled = world
+        .cast_shape(
+            &bar,
+            DVec3::ZERO,
+            DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
+            DVec3::Y,
+            5.0,
+            &none,
+        )
+        .expect("hit");
+    assert!((flat.toi - 0.9).abs() < 1e-9, "flat toi = {}", flat.toi);
+    assert!(
+        rolled.started_penetrating,
+        "rolled on its end the bar already touches the ceiling: toi = {}, penetrating = {}",
+        rolled.toi, rolled.started_penetrating
+    );
+}

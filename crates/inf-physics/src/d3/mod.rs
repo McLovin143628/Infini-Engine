@@ -34,7 +34,7 @@ pub use fracture::{
     CRACK_OPENING_M, DEFAULT_DEBRIS_LIFETIME_S, DEFAULT_DEBRIS_MAX_LIVE,
 };
 pub use joint::{JointDesc3D, JointId3D, JointKind3D, JointMotor3D};
-pub use query::RayHit3D;
+pub use query::{RayHit3D, ShapeHit3D};
 pub use water::{
     BuoyancyDesc3D, SampleGeometry, WaterEvent3D, WaterEventKind3D, WaterIndex, WaterProbe,
 };

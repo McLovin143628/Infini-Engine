@@ -2,6 +2,7 @@
 //! [`crate::d2::PhysicsWorld2D`].
 
 use glam::{DQuat, DVec2, DVec3};
+use parry3d_f64::query::{ShapeCastOptions, ShapeCastStatus};
 use parry3d_f64::shape::{HeightField, HeightFieldCellStatus, HeightFieldFlags, TriMeshFlags};
 use parry3d_f64::utils::Array2;
 use rapier3d_f64::dynamics::CoefficientCombineRule;
@@ -9,14 +10,14 @@ use rapier3d_f64::geometry::{Group, InteractionGroups, InteractionTestMode};
 use rapier3d_f64::prelude::{
     Aabb, ActiveCollisionTypes, ActiveEvents, BroadPhaseBvh, CCDSolver, ColliderBuilder,
     ColliderSet, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet,
-    NarrowPhase, PhysicsPipeline, QueryFilter, QueryPipeline, Ray, RigidBodyBuilder, RigidBodySet,
-    RigidBodyType, SharedShape,
+    NarrowPhase, PhysicsPipeline, Pose, QueryFilter, QueryPipeline, Ray, RigidBodyBuilder,
+    RigidBodySet, RigidBodyType, SharedShape,
 };
 
 use super::character::{CharacterMove3D, CharacterMover3D};
 use super::events::{ContactEvent3D, EventCollector};
 use super::joint::{JointDesc3D, JointId3D};
-use super::query::RayHit3D;
+use super::query::{RayHit3D, ShapeHit3D};
 use super::{BodyId3D, ColliderId3D};
 use crate::filtering::{CollisionLayers, CombineRule};
 
@@ -1159,6 +1160,107 @@ impl PhysicsWorld3D {
             .collect();
         out.sort_unstable();
         out
+    }
+
+    /// **Sweep a shape** from `origin` along `dir` up to `max_toi` world units,
+    /// and return the first thing it would touch (P29.3).
+    ///
+    /// The volumetric sibling of [`cast_ray`](Self::cast_ray): same arguments,
+    /// same answer shape ([`ShapeHit3D`]), plus a `rotation` for the swept shape
+    /// and an `exclude` set — a sweep almost always starts on top of the thing
+    /// doing the sweeping, so an exclusion that is optional in a ray cast is
+    /// *structural* here.
+    ///
+    /// # Why the facade needed this at all
+    ///
+    /// Until this function the engine had **zero** shape-cast call sites: the
+    /// only swept-volume query anywhere was the one rapier runs *inside*
+    /// `move_shape`, unreachable from outside the mover. That is why a character
+    /// could stand up inside a table — there was no way to ask "does my taller
+    /// capsule fit here?" that did not involve actually moving.
+    ///
+    /// # The callers this signature is shaped for
+    ///
+    /// It is deliberately not a movement-component method — it is a physics
+    /// query, and the callers are not all movement:
+    ///
+    /// * **Clearance** (P29.3) — sweep the *stood-up* capsule from the crouched
+    ///   position upward by the height difference; a hit refuses the stand.
+    /// * **Landing classification** (P29.3) — sweep the capsule along the fall
+    ///   velocity to see the ground before touching it.
+    /// * **Ledge probes** (P29.4) — a forward capsule and a downward sphere, the
+    ///   two-probe shape ALS's mantle check is built from.
+    /// * **Camera collision** (P29.6) — a sphere swept from the pivot to the
+    ///   desired boom position.
+    ///
+    /// # Degenerate inputs are answers, not panics
+    ///
+    /// A zero direction, a non-positive `max_toi`, or a shape rapier refuses to
+    /// build (a degenerate trimesh or hull — see
+    /// [`ColliderShape3D::ConvexHull`]) all return `None`. A caller asking
+    /// "is anything in the way" gets "no" for a query that describes no sweep,
+    /// which is the only answer that composes.
+    ///
+    /// # No `targets` parameter, and why
+    ///
+    /// [`cast_ray_excluding`](Self::cast_ray_excluding) hard-codes
+    /// `exclude_dynamic` because its one caller — the structural solve — is
+    /// asking about *support*, and the P22.3 audit showed that filtering
+    /// dynamics after the cast hides the floor behind the rubble. That reasoning
+    /// is specific to that question. A clearance probe must see a crate on the
+    /// table, and a camera must not tunnel through a truck, so this one sees
+    /// everything and the exclusion is the caller's. A `targets` filter belongs
+    /// here the day a caller genuinely wants one (P29.4's mantle uses ALS's
+    /// `IgnoreOnlyPawn` profile) — not before, because a knob nobody turns
+    /// documents a choice nobody made.
+    pub fn cast_shape(
+        &mut self,
+        shape: &ColliderShape3D,
+        origin: DVec3,
+        rotation: DQuat,
+        dir: DVec3,
+        max_toi: f64,
+        exclude: &std::collections::BTreeSet<ColliderId3D>,
+    ) -> Option<ShapeHit3D> {
+        let dir = dir.normalize_or_zero();
+        if dir == DVec3::ZERO || !(max_toi > 0.0) {
+            return None;
+        }
+        let swept = shape.to_shared()?;
+        self.ensure_query_pipeline();
+        let predicate = |h: rapier3d_f64::geometry::ColliderHandle,
+                         _: &rapier3d_f64::geometry::Collider| {
+            !exclude.contains(&ColliderId3D(h))
+        };
+        let filter = QueryFilter::default().predicate(&predicate);
+        let pipe = self.query_pipeline(filter);
+        // `shape_vel` is a velocity and `max_time_of_impact` a time, so a UNIT
+        // direction makes the returned `time_of_impact` a distance in metres.
+        // Feeding an unnormalized direction here would silently rescale every
+        // caller's clearance budget.
+        let pose = Pose::from_parts(origin, rotation);
+        let opts = ShapeCastOptions {
+            max_time_of_impact: max_toi,
+            target_distance: 0.0,
+            // The sweep must report a start-in-contact overlap rather than
+            // discard it: "you are already inside the ceiling" is the clearance
+            // probe's most important answer, and with this false parry drops any
+            // t = 0 hit whose relative velocity is separating.
+            stop_at_penetration: true,
+            compute_impact_geometry_on_penetration: true,
+        };
+        let (handle, hit) = pipe.cast_shape(&pose, dir, &*swept, opts)?;
+        Some(ShapeHit3D {
+            collider: ColliderId3D(handle),
+            // witness1 / normal1 belong to the composite's sub-shape — i.e. the
+            // world collider — and the pipeline's root frame IS world space, so
+            // no transform is owed here (parry's `transform1_by` has already run
+            // for a compound part).
+            point: hit.witness1,
+            normal: hit.normal1,
+            toi: hit.time_of_impact,
+            started_penetrating: hit.status == ShapeCastStatus::PenetratingOrWithinTargetDist,
+        })
     }
 
     // ── Character mover ───────────────────────────────────────────────────────
