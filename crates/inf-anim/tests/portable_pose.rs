@@ -46,11 +46,17 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 10] = [
+const SIM_PATH: [(&str, &str, &str); 11] = [
     (
         "pose.rs",
         include_str!("../src/pose.rs"),
         "blend_poses and skinning_matrices produce the pose that is folded into state_bytes",
+    ),
+    // P29.2's `.inf_anim` v2 channel model.
+    (
+        "channels.rs",
+        include_str!("../src/channels.rs"),
+        "a `.inf_anim` v2 curve value reaches a blend weight, and a blend weight reaches the pose",
     ),
     (
         "clip.rs",
@@ -338,14 +344,25 @@ fn the_trig_ban_is_looking_at_real_code() {
         );
     }
     // The portable replacement really is used where the banned one was.
-    let pose = production_code(SIM_PATH[0].1);
-    let clip = production_code(SIM_PATH[1].1);
+    //
+    // **By NAME, not by index.** This used to read `SIM_PATH[0]` and `SIM_PATH[1]`
+    // and it broke the moment P29.2 inserted a file between them — a positional
+    // reference into a list whose whole purpose is to grow. A lookup that cannot
+    // find its file fails loudly, which is the behaviour an index silently traded
+    // away for asserting the wrong file's contents.
+    let by_name = |want: &str| -> String {
+        let (_, src, _) = SIM_PATH
+            .iter()
+            .find(|(n, _, _)| *n == want)
+            .unwrap_or_else(|| panic!("{want} is not on the sim-path list"));
+        production_code(src)
+    };
     assert!(
-        pose.contains("inf_math::pslerp"),
+        by_name("pose.rs").contains("inf_math::pslerp"),
         "pose.rs no longer blends through the portable arc"
     );
     assert!(
-        clip.contains("inf_math::pslerp"),
+        by_name("clip.rs").contains("inf_math::pslerp"),
         "clip.rs no longer blends through the portable arc"
     );
     // And the ban is a real filter: it fires on a string that contains one.

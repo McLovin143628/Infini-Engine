@@ -37,6 +37,9 @@
 
 pub mod asset;
 pub mod blend_space;
+// P29.2 `.inf_anim` v2: the clip channel model — named curves, timed markers,
+// the additive reference, root motion (Y included) and the distance track.
+pub mod channels;
 pub mod clip;
 // P24.4 secondary animation: XPBD cloth over the posed skeleton.
 pub mod cloth;
@@ -63,6 +66,9 @@ pub use asset::{AnimClipAsset, SkeletonAsset, StateMachineAsset};
 pub use blend_space::{
     blend_weights_1d, blend_weights_2d, sample_blend_space_1d, sample_blend_space_2d, BlendEntry1D,
     BlendEntry2D, BlendSpace1D, BlendSpace2D, ClipRef,
+};
+pub use channels::{
+    AdditiveRef, AnimMarker, CurveChannel, DistanceTrack, RootMotionTrack,
 };
 pub use clip::{AnimClip, Interpolation, JointTrack, QuatTrack, Vec3Track};
 pub use cloth::{

@@ -125,6 +125,29 @@ impl AssetPayload for SkeletonAsset {
 /// The `.inf_anim` payload: one [`AnimClip`] plus the GUID of the skeleton it
 /// was authored against (stored as raw bytes so this crate needs no `uuid` dep;
 /// the editor sets the dependency edge). `None` = skeleton-agnostic.
+///
+/// # The v2 ladder — the bump that only happens once
+///
+/// v2 (P29.2) grows the *clip*, not this wrapper: [`AnimClip`] gained the channel
+/// model — named scalar curves, timed markers, an additive reference, and a
+/// present-but-optional root-motion and distance track. §13's 2026-08-17
+/// amendment (Ruling 2) is explicit that `.inf_anim` bumps **exactly once**, which
+/// is why all five land together rather than as each sub-phase needs one: P29.4's
+/// notify consumer, P29.5's import derivation and P29.6's showcase all read this
+/// format, and a second bump would break every project imported in between.
+///
+/// bincode is positional and the five fields are a **tail append inside `clip`**,
+/// so v1 bytes stop short and no `#[serde(default)]` rescues the read. That is
+/// what `schema_version` is for, and because it is this type's **first** field
+/// [`inf_asset::peek_schema_version`] reads it without decoding: the failure
+/// arrives as [`AssetError::SchemaTooOld`](inf_asset::AssetError::SchemaTooOld)
+/// carrying [`UPGRADE_REMEDY`](AssetPayload::UPGRADE_REMEDY) rather than as
+/// `Decode("UnexpectedEnd")`.
+///
+/// The three committed v1 clips (`samples/character-demo/{Idle,Run,Jump}.inf_anim`)
+/// are regenerated from their generator under `INF_BLESS_SAMPLES=1` — the
+/// downgrade-bless — and the v1 wire shape they *used* to have is pinned below
+/// from ladder-local literals.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnimClipAsset {
     pub schema_version: u32,
@@ -135,7 +158,9 @@ pub struct AnimClipAsset {
 }
 
 impl AnimClipAsset {
-    pub const CURRENT_VERSION: u32 = 1;
+    /// v2 (P29.2) — the clip's channel model: curves, markers, additive
+    /// reference, root motion, distance. See the type's docs for the ladder.
+    pub const CURRENT_VERSION: u32 = 2;
 
     /// Wrap a clip (optionally bound to a skeleton GUID) as a current-schema asset.
     pub fn new(clip: AnimClip, skeleton: Option<[u8; 16]>) -> Self {
@@ -150,6 +175,11 @@ impl AnimClipAsset {
 impl AssetPayload for AnimClipAsset {
     const KIND: AssetKind = AssetKind::AnimClip;
     const SCHEMA_VERSION: u32 = Self::CURRENT_VERSION;
+    // A clip has TWO doors, like its sibling rig: it arrives by import, or it is
+    // generated for a character. A user reading this message is looking at a
+    // project imported before P29.2.
+    const UPGRADE_REMEDY: &'static str =
+        "re-import the source animation (Content Drawer ▸ Import), or regenerate the character through the New Character wizard (which derives its clips from the rig)";
     fn schema_version(&self) -> u32 {
         self.schema_version
     }
@@ -486,6 +516,22 @@ mod tests {
 
     #[test]
     fn clip_asset_round_trips_deterministically() {
+        let a = AnimClipAsset::new(v2_clip(), Some([7u8; 16]));
+        assert_eq!(a.schema_version, 2);
+        let e1 = encode(&a).unwrap();
+        let e2 = encode(&a).unwrap();
+        assert_eq!(e1, e2);
+        let back: AnimClipAsset = decode(&e1).unwrap();
+        assert_eq!(back, a, "every v2 shape survived the wire");
+        assert_eq!(back.skeleton, Some([7u8; 16]));
+    }
+
+    /// A **v2** clip that exercises every shape the schema grew, so the round-trip
+    /// above is a statement about v2 and not about v1 re-encoded.
+    fn v2_clip() -> AnimClip {
+        use crate::channels::{
+            als, AdditiveRef, AnimMarker, CurveChannel, DistanceTrack, RootMotionTrack,
+        };
         let mut jt = JointTrack::new(1);
         jt.rotation = Some(QuatTrack::new(
             vec![0.0, 1.0],
@@ -495,14 +541,274 @@ mod tests {
             ],
             Interpolation::Linear,
         ));
-        let clip = AnimClip::new("spin", vec![jt]);
-        let a = AnimClipAsset::new(clip, Some([7u8; 16]));
-        let e1 = encode(&a).unwrap();
-        let e2 = encode(&a).unwrap();
-        assert_eq!(e1, e2);
-        let back: AnimClipAsset = decode(&e1).unwrap();
-        assert_eq!(back, a);
-        assert_eq!(back.skeleton, Some([7u8; 16]));
+        AnimClip::new("spin", vec![jt])
+            .with_curves(vec![
+                CurveChannel::new(
+                    als::W_GAIT,
+                    vec![0.0, 1.0],
+                    vec![1.0, 2.0],
+                    Interpolation::Linear,
+                ),
+                CurveChannel::constant(als::ENABLE_FOOT_IK_L, 1.0),
+            ])
+            .with_markers(vec![
+                AnimMarker::sync(0.0, "plant_l", "foot"),
+                AnimMarker::sync(0.5, "plant_r", "foot"),
+                AnimMarker::event(0.5, "footstep_r"),
+            ])
+            .with_additive(AdditiveRef::BaseClip {
+                clip: [3; 16],
+                time_s: 0.25,
+            })
+            .with_root_motion(RootMotionTrack {
+                times: vec![0.0, 1.0],
+                translation: vec![[0.0, 0.0, 0.0], [0.0, 0.4, 1.5]],
+                yaw_rad: vec![0.0, 0.25],
+            })
+            .with_distance(DistanceTrack {
+                times: vec![0.0, 1.0],
+                distance_m: vec![0.0, 1.5],
+            })
+    }
+
+    /// The **v1 wire shape** of an `.inf_anim`, spelled out from ladder-local
+    /// literals.
+    ///
+    /// Real shadow structs, not a v2 encoding with its tail trimmed off: trimming
+    /// is *derived from the live encoder*, so it reproduces whatever the encoder
+    /// currently does and pins nothing (the `.inf_skel` ladder's own finding). This
+    /// says what v1 **was** — a clip of `{name, duration, tracks}` and nothing else.
+    mod anim_v1 {
+        use super::{JointTrack, Serialize};
+
+        #[derive(Serialize)]
+        pub struct AnimClip {
+            pub name: String,
+            pub duration: f32,
+            pub tracks: Vec<JointTrack>,
+        }
+        #[derive(Serialize)]
+        pub struct AnimClipAsset {
+            pub schema_version: u32,
+            pub clip: AnimClip,
+            pub skeleton: Option<[u8; 16]>,
+        }
+    }
+
+    fn v1_anim_bytes() -> Vec<u8> {
+        let mut jt = JointTrack::new(1);
+        jt.rotation = Some(QuatTrack::new(
+            vec![0.0, 1.0],
+            vec![
+                Quat::IDENTITY.to_array(),
+                Quat::from_rotation_z(1.0).to_array(),
+            ],
+            Interpolation::Linear,
+        ));
+        bincode::serde::encode_to_vec(
+            &anim_v1::AnimClipAsset {
+                schema_version: 1,
+                clip: anim_v1::AnimClip {
+                    name: "spin".into(),
+                    duration: 1.0,
+                    tracks: vec![jt],
+                },
+                skeleton: Some([7u8; 16]),
+            },
+            inf_asset::bincode_config(),
+        )
+        .unwrap()
+    }
+
+    /// **The v1 → v2 break is a NAMED refusal that says what to do.**
+    ///
+    /// The five v2 fields are a tail append *inside* `clip`, so a v1 payload stops
+    /// short and `#[serde(default)]` cannot rescue it. What matters is that a user
+    /// with a project imported before P29.2 sees `SchemaTooOld` carrying this
+    /// type's remedy — the `.inf_skel` / `.inf_sm` ladder ruling, applied to the
+    /// third format that has two authoring doors.
+    #[test]
+    fn a_v1_anim_clip_is_refused_by_name_and_names_the_remedy() {
+        let err = decode::<AnimClipAsset>(&v1_anim_bytes()).expect_err("v1 must not decode as v2");
+        match err {
+            inf_asset::AssetError::SchemaTooOld {
+                kind,
+                found,
+                current,
+                remedy,
+            } => {
+                assert_eq!(kind, "anim_clip");
+                assert_eq!((found, current), (1, AnimClipAsset::CURRENT_VERSION));
+                // An INSTRUCTION, not a restatement — and it names both doors.
+                assert!(remedy.contains("Import"), "{remedy}");
+                assert!(remedy.contains("wizard"), "{remedy}");
+                // …and it is READABLE: a run of spaces inside a user-facing literal
+                // is the scripted-edit law's signature (a `\` line continuation
+                // eaten by a non-raw Python string).
+                assert!(
+                    !remedy.contains("  "),
+                    "the remedy carries a run of spaces — a line continuation was \
+                     eaten: {remedy:?}"
+                );
+            }
+            other => panic!("expected SchemaTooOld, got {other:?}"),
+        }
+        let msg = decode::<AnimClipAsset>(&v1_anim_bytes())
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("re-import the source animation"), "{msg}");
+    }
+
+    /// The other direction: a payload from a newer build decodes structurally and
+    /// is rejected by `migrate`.
+    #[test]
+    fn a_future_anim_clip_is_refused_as_too_new() {
+        let mut a = AnimClipAsset::new(v2_clip(), None);
+        a.schema_version = AnimClipAsset::CURRENT_VERSION + 1;
+        let bytes = encode(&a).unwrap();
+        assert!(matches!(
+            decode::<AnimClipAsset>(&bytes),
+            Err(inf_asset::AssetError::SchemaTooNew { .. })
+        ));
+    }
+
+    /// **The v2 wire SHAPE is pinned, so a tail field cannot be appended without a
+    /// bump.**
+    ///
+    /// Two claims, and the second is the load-bearing one: the fields decode
+    /// positionally, in this order, with these types — **and** the decode consumes
+    /// every byte of the encoding. A sixth v2 field appended to `AnimClip` (or a
+    /// fourth to the asset) leaves bytes unaccounted for here and fails, which is
+    /// exactly the check an encoder-derived fixture cannot make.
+    ///
+    /// The clip is spelled out field-for-field rather than reusing `AnimClip`,
+    /// because a shape that *is* the type under test agrees with it by
+    /// construction and pins nothing at all.
+    #[test]
+    fn the_anim_clip_wire_shape_is_pinned_field_for_field() {
+        use crate::channels::{AdditiveRef, AnimMarker, CurveChannel, DistanceTrack, RootMotionTrack};
+
+        #[derive(Deserialize)]
+        struct ClipWire {
+            name: String,
+            duration: f32,
+            tracks: Vec<JointTrack>,
+            curves: Vec<CurveChannel>,
+            markers: Vec<AnimMarker>,
+            additive: AdditiveRef,
+            root_motion: Option<RootMotionTrack>,
+            distance: Option<DistanceTrack>,
+        }
+        #[derive(Deserialize)]
+        struct Wire {
+            schema_version: u32,
+            clip: ClipWire,
+            skeleton: Option<[u8; 16]>,
+        }
+
+        let want = AnimClipAsset::new(v2_clip(), Some([7u8; 16]));
+        let bytes = encode(&want).unwrap();
+        let (wire, consumed): (Wire, usize) =
+            bincode::serde::decode_from_slice(&bytes, inf_asset::bincode_config())
+                .expect("the v2 shape decodes the v2 wire");
+        assert_eq!(
+            consumed,
+            bytes.len(),
+            "the encoding carries bytes the pinned shape does not account for — a \
+             field was appended to `AnimClip` or `AnimClipAsset` without bumping \
+             `CURRENT_VERSION`"
+        );
+        assert_eq!(wire.schema_version, AnimClipAsset::CURRENT_VERSION);
+        assert_eq!(wire.skeleton, want.skeleton);
+        assert_eq!(wire.clip.name, want.clip.name);
+        assert_eq!(wire.clip.duration, want.clip.duration);
+        assert_eq!(wire.clip.tracks, want.clip.tracks);
+        assert_eq!(wire.clip.curves, want.clip.curves);
+        assert_eq!(wire.clip.markers, want.clip.markers);
+        assert_eq!(wire.clip.additive, want.clip.additive);
+        assert_eq!(wire.clip.root_motion, want.clip.root_motion);
+        assert_eq!(wire.clip.distance, want.clip.distance);
+    }
+
+    /// **`migrate` asks the STRUCTURAL questions** (the campaign's U6 standard),
+    /// and for this payload every one of them is a value the frame loop would
+    /// otherwise index with or divide by.
+    ///
+    /// The hostile clips are built through the public fields and encoded — which
+    /// is how a corrupt or hand-edited `.inf_anim` arrives.
+    #[test]
+    fn a_structurally_broken_v2_clip_is_refused_at_decode() {
+        use crate::channels::{AdditiveRef, AnimMarker, CurveChannel, DistanceTrack};
+
+        // Control: the full v2 clip decodes.
+        let bytes = encode(&AnimClipAsset::new(v2_clip(), None)).unwrap();
+        decode::<AnimClipAsset>(&bytes).expect("a healthy v2 clip must decode");
+
+        let refused = |name: &str, f: &dyn Fn(&mut AnimClip)| -> String {
+            let mut c = v2_clip();
+            f(&mut c);
+            let bytes = encode(&AnimClipAsset::new(c, None)).unwrap();
+            let e = decode::<AnimClipAsset>(&bytes)
+                .err()
+                .unwrap_or_else(|| panic!("{name} decoded as a valid clip"));
+            let s = e.to_string();
+            assert!(s.contains("invalid anim clip"), "{name}: {s}");
+            s
+        };
+
+        // A curve whose parallel vectors disagree — `sample` indexes `values` with
+        // an index derived from `times`.
+        let e = refused("a short curve", &|c| {
+            c.curves[0].values.pop();
+        });
+        assert!(e.contains("2 key times against 1"), "{e}");
+        // A NaN key time, in each of the three new keyframe lists.
+        refused("a NaN curve key", &|c| c.curves[0].times[1] = f32::NAN);
+        refused("a NaN root-motion key", &|c| {
+            c.root_motion.as_mut().unwrap().times[1] = f32::NAN
+        });
+        refused("a NaN distance key", &|c| {
+            c.distance.as_mut().unwrap().times[1] = f32::NAN
+        });
+        // A NaN marker time — `markers_in` sorts on it and `sync` then trusts the
+        // order.
+        refused("a NaN marker time", &|c| {
+            c.markers.push(AnimMarker::sync(f32::NAN, "x", "foot"))
+        });
+        // Root motion whose three parallel vectors disagree.
+        refused("a short root-motion yaw list", &|c| {
+            c.root_motion.as_mut().unwrap().yaw_rad.pop();
+        });
+        // Distance that goes backwards — `time_at_distance` `partition_point`s it.
+        let e = refused("a non-monotone distance track", &|c| {
+            c.distance = Some(DistanceTrack {
+                times: vec![0.0, 1.0, 2.0],
+                distance_m: vec![0.0, 2.0, 1.0],
+            })
+        });
+        assert!(e.contains("goes backwards"), "{e}");
+        // …and its NaN twin, which the positive spelling of that comparison would
+        // have let straight through.
+        refused("a NaN distance", &|c| {
+            c.distance = Some(DistanceTrack {
+                times: vec![0.0, 1.0],
+                distance_m: vec![0.0, f32::NAN],
+            })
+        });
+        // A RESERVED additive slot: a newer build wrote it, this one decodes it
+        // (that is what the slot is for) and refuses it by name.
+        let e = refused("a reserved additive reference", &|c| {
+            c.additive = AdditiveRef::Reserved3 {
+                clip: [1; 16],
+                time_s: 0.0,
+            }
+        });
+        assert!(e.contains("newer engine"), "{e}");
+        // The control's mirror: an empty curve list is not a defect.
+        let mut plain = v2_clip();
+        plain.curves = vec![CurveChannel::constant("k", 1.0)];
+        decode::<AnimClipAsset>(&encode(&AnimClipAsset::new(plain, None)).unwrap())
+            .expect("a one-key constant curve is ordinary content");
     }
 
     /// A v2 machine that exercises **every** shape the schema grew, so the

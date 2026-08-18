@@ -15,6 +15,8 @@
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
+use crate::channels::{AdditiveRef, AnimMarker, CurveChannel, DistanceTrack, RootMotionTrack};
+
 /// How a track interpolates between adjacent keyframes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Interpolation {
@@ -152,18 +154,51 @@ impl JointTrack {
 }
 
 /// A named animation clip: a set of per-joint keyframe tracks over `duration`
-/// seconds.
+/// seconds, plus — since **`.inf_anim` v2** (P29.2) — the channel model
+/// [`crate::channels`] describes.
+///
+/// # The v2 tail, and why it is a tail
+///
+/// bincode is **positional**, so the five v2 fields are appended after `tracks`
+/// and nowhere else: a field inserted in the middle re-interprets every byte
+/// after it, and `#[serde(default)]` cannot rescue a short read (the crate law on
+/// [`crate::asset::SkeletonAsset`], met for the third time). v1 bytes therefore do
+/// not decode as v2, which is what `schema_version` is for — see
+/// [`crate::asset::AnimClipAsset`] for the ladder, the named refusal and the
+/// downgrade-bless.
+///
+/// All five are **empty/`None`/`AdditiveRef::None` by default**, so a v2 clip that
+/// carries none of them is the v1 clip plus five empty containers — which is
+/// exactly what re-blessing the three committed `character-demo` clips produced.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnimClip {
     pub name: String,
     /// Total clip length in seconds (the max keyframe time across all tracks).
     pub duration: f32,
     pub tracks: Vec<JointTrack>,
+    // ── the v2 tail (P29.2) ──
+    /// Named scalar curves on the clip timeline (v2). See [`crate::channels::als`]
+    /// for the reference vocabulary.
+    pub curves: Vec<CurveChannel>,
+    /// Timed sync/event markers (v2).
+    pub markers: Vec<AnimMarker>,
+    /// What this clip is additive **over** (v2).
+    pub additive: AdditiveRef,
+    /// Baked root motion, translation **including Y** plus yaw (v2,
+    /// present-but-optional — P29.4/P29.5 produce it).
+    pub root_motion: Option<RootMotionTrack>,
+    /// Cumulative distance travelled, for distance matching (v2,
+    /// present-but-optional).
+    pub distance: Option<DistanceTrack>,
 }
 
 impl AnimClip {
     /// Build a clip, computing `duration` as the maximum keyframe time across
     /// every channel of every track (0 for an empty/static clip).
+    ///
+    /// The v2 channels start empty; the `with_*` builders below add them, so an
+    /// existing call site is a v1-shaped clip written through the v2 struct and
+    /// nothing about its keyframes moves.
     pub fn new(name: impl Into<String>, tracks: Vec<JointTrack>) -> Self {
         let mut duration = 0.0f32;
         for tr in &tracks {
@@ -184,7 +219,86 @@ impl AnimClip {
             name: name.into(),
             duration,
             tracks,
+            curves: Vec::new(),
+            markers: Vec::new(),
+            additive: AdditiveRef::None,
+            root_motion: None,
+            distance: None,
         }
+    }
+
+    /// Attach named scalar curves (v2).
+    pub fn with_curves(mut self, curves: Vec<CurveChannel>) -> Self {
+        self.curves = curves;
+        self
+    }
+
+    /// Attach sync/event markers (v2).
+    pub fn with_markers(mut self, markers: Vec<AnimMarker>) -> Self {
+        self.markers = markers;
+        self
+    }
+
+    /// Declare what this clip is additive over (v2).
+    pub fn with_additive(mut self, additive: AdditiveRef) -> Self {
+        self.additive = additive;
+        self
+    }
+
+    /// Attach a baked root-motion track (v2).
+    pub fn with_root_motion(mut self, track: RootMotionTrack) -> Self {
+        self.root_motion = Some(track);
+        self
+    }
+
+    /// Attach a derived distance track (v2).
+    pub fn with_distance(mut self, track: DistanceTrack) -> Self {
+        self.distance = Some(track);
+        self
+    }
+
+    /// The named curve, if the clip carries one (v2). Names are compared
+    /// **byte-exactly** — the vocabulary in [`crate::channels::als`] is what
+    /// imported content spells them as.
+    pub fn curve(&self, name: &str) -> Option<&CurveChannel> {
+        self.curves.iter().find(|c| c.name == name)
+    }
+
+    /// The named curve's value at `t` seconds, or `fallback` when the clip does
+    /// not carry it — the read shape every consumer of the ALS vocabulary wants
+    /// (an absent `Enable_FootIK_L` means "IK on", not "IK at zero").
+    pub fn curve_value(&self, name: &str, t: f32, fallback: f32) -> f32 {
+        self.curve(name)
+            .and_then(|c| c.sample(t))
+            .filter(|v| v.is_finite())
+            .unwrap_or(fallback)
+    }
+
+    /// Every marker in `group`, in ascending time order (v2). Sorting here rather
+    /// than trusting the file: a marker list is authored, and
+    /// [`crate::sync`] binary-searches the result.
+    pub fn markers_in(&self, group: &str) -> Vec<&AnimMarker> {
+        let mut out: Vec<&AnimMarker> = self
+            .markers
+            .iter()
+            .filter(|m| m.group == group && m.time_s.is_finite())
+            .collect();
+        out.sort_by(|a, b| {
+            a.time_s
+                .partial_cmp(&b.time_s)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        out
+    }
+
+    /// Every non-empty sync group this clip names, deduplicated and ordered.
+    pub fn sync_groups(&self) -> std::collections::BTreeSet<&str> {
+        self.markers
+            .iter()
+            .filter(|m| m.is_sync())
+            .map(|m| m.group.as_str())
+            .collect()
     }
 
     /// Whether this clip's timing is something the samplers can be handed.
@@ -240,6 +354,105 @@ impl AnimClip {
                 check(&c.times, c.values.len(), "scale")?;
             }
         }
+        self.validate_channels()
+    }
+
+    /// The v2 tail's half of [`validate_timing`](Self::validate_timing), split
+    /// out because it asks a different *kind* of question.
+    ///
+    /// The joint-track checks above defend `locate`'s index arithmetic. These
+    /// defend five things a consumer written in P29.4 will assume without asking:
+    ///
+    /// * a curve/root/distance channel's parallel vectors agree in length —
+    ///   [`CurveChannel::sample`] and its siblings index one with an index derived
+    ///   from another, and their constructors only `debug_assert` it;
+    /// * every key time is finite, for the same reason the joint tracks' are;
+    /// * a marker's `time_s` is finite — [`AnimClip::markers_in`] sorts on it and
+    ///   [`crate::sync`] then treats the order as meaningful;
+    /// * `DistanceTrack::distance_m` is **non-decreasing**, because
+    ///   [`DistanceTrack::time_at_distance`] `partition_point`s it and a search
+    ///   over an unsorted list returns a meaningless index rather than a wrong
+    ///   one;
+    /// * an [`AdditiveRef`] **reserved** slot is refused **by name**. That slot
+    ///   exists precisely so a newer build's file decodes here (see
+    ///   [`AdditiveRef`]'s docs), and decoding it into silence would be worse than
+    ///   the decode error it replaced.
+    fn validate_channels(&self) -> Result<(), String> {
+        let finite = |times: &[f32], what: &str| -> Result<(), String> {
+            match times.iter().position(|t| !t.is_finite()) {
+                Some(i) => Err(format!(
+                    "clip {:?} {what}: key time {i} is {}",
+                    self.name, times[i]
+                )),
+                None => Ok(()),
+            }
+        };
+        for c in &self.curves {
+            if c.times.len() != c.values.len() {
+                return Err(format!(
+                    "clip {:?} curve {:?}: {} key times against {} values",
+                    self.name,
+                    c.name,
+                    c.times.len(),
+                    c.values.len()
+                ));
+            }
+            finite(&c.times, &format!("curve {:?}", c.name))?;
+        }
+        for (i, m) in self.markers.iter().enumerate() {
+            if !m.time_s.is_finite() {
+                return Err(format!(
+                    "clip {:?} marker {i} ({:?}): time is {}",
+                    self.name, m.name, m.time_s
+                ));
+            }
+        }
+        if let Some(slot) = self.additive.reserved_slot() {
+            return Err(format!(
+                "clip {:?} is additive over reference kind {slot}, which this build does not \
+                 understand — it was written by a newer engine",
+                self.name
+            ));
+        }
+        if let Some(r) = &self.root_motion {
+            if r.times.len() != r.translation.len() || r.times.len() != r.yaw_rad.len() {
+                return Err(format!(
+                    "clip {:?} root motion: {} key times against {} translations and {} yaws",
+                    self.name,
+                    r.times.len(),
+                    r.translation.len(),
+                    r.yaw_rad.len()
+                ));
+            }
+            finite(&r.times, "root motion")?;
+        }
+        if let Some(d) = &self.distance {
+            if d.times.len() != d.distance_m.len() {
+                return Err(format!(
+                    "clip {:?} distance track: {} key times against {} distances",
+                    self.name,
+                    d.times.len(),
+                    d.distance_m.len()
+                ));
+            }
+            finite(&d.times, "distance track")?;
+            // `!(a <= b)` rather than `a > b`: a NaN distance fails every ordering
+            // comparison it takes part in, so the positive spelling would let it
+            // through into the `partition_point` this check exists to protect.
+            if let Some(i) = d
+                .distance_m
+                .windows(2)
+                .position(|w| !(w[0] <= w[1]))
+            {
+                return Err(format!(
+                    "clip {:?} distance track: distance goes backwards at key {} ({} then {})",
+                    self.name,
+                    i + 1,
+                    d.distance_m[i],
+                    d.distance_m[i + 1]
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -292,7 +505,11 @@ pub fn resolve_time(t: f32, duration: f32, looping: bool) -> f32 {
 /// sorted (nothing before the import door refused one) makes `partition_point`'s
 /// result meaningless rather than merely wrong, and index arithmetic on a
 /// meaningless number is how this class panics.
-fn locate(times: &[f32], t: f32) -> Option<(usize, usize, f32)> {
+/// `pub(crate)` since P29.2: [`crate::channels`]' scalar curve, root-motion and
+/// distance tracks are keyframe lists with exactly this shape and exactly these
+/// two hazards, and a second copy of a search that has already been repaired
+/// twice (C4-7) is how the two copies come to disagree.
+pub(crate) fn locate(times: &[f32], t: f32) -> Option<(usize, usize, f32)> {
     match times.len() {
         0 => None,
         1 => Some((0, 0, 0.0)),
