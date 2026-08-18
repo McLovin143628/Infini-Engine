@@ -834,6 +834,7 @@ pub fn step_pose_evaluation<'c>(
     bridge.root_motion.clear();
     bridge.curves.clear();
     bridge.feet.clear();
+    bridge.traversal.clear();
     // Read once, so a world-level setting cannot mean two things inside one step.
     let mode = blend_mode(world);
     // **The clip-length resolver that makes `exit_time` live** (P29.1). Derived
@@ -928,6 +929,23 @@ pub fn step_pose_evaluation<'c>(
                         blending: rt.prev.is_some(),
                     },
                 );
+                // **The traversal arc** (P29.5), published outside the
+                // same-state guard below because it is a property of the STATE's
+                // clip and not of the interval this step covered: a mantle needs
+                // the arc on the very step it enters the state, which is a step
+                // that changed state by definition.
+                //
+                // Only for a **one-shot** — see `TraversalArc`'s docs. After
+                // P29.5 every imported clip carries a root-motion track, so the
+                // `looping` gate is what keeps a level of walking NPCs from
+                // paying 33 samples each per fixed step for an arc nothing warps.
+                if !state.looping {
+                    if let inf_anim::Motion::Clip(cref) = &state.motion {
+                        if let Some(arc) = clips(*cref).and_then(traversal_arc_of) {
+                            bridge.traversal.insert(guid, arc);
+                        }
+                    }
+                }
                 // The clip window this step covered. A step that CHANGED state
                 // has no single window — the outgoing state's tail and the
                 // incoming state's head are two different clips — so it
@@ -1368,6 +1386,35 @@ fn rig_bones(
         });
     }
     Some(out)
+}
+
+/// **Resample a clip's baked root motion onto the traversal-arc grid** (P29.5).
+///
+/// `None` for a clip that carries no track — which is a value the mantle already
+/// handles, and the reason a project with no derived traversal content behaves
+/// exactly as it did before this existed.
+///
+/// The grid is normalized over the clip's whole timeline rather than over a warp
+/// window, and that bound is stated rather than implied: a clip whose traversal
+/// occupies only its middle third publishes an arc whose first and last thirds
+/// are flat, and a warp over it spends those thirds correcting additively. A
+/// per-clip warp window ([`inf_anim::WarpWindow`], which has no producer yet) is
+/// where that stops being true.
+fn traversal_arc_of(clip: &inf_anim::AnimClip) -> Option<crate::anim_bridge::TraversalArc> {
+    let track = clip.root_motion.as_ref()?;
+    if track.times.len() < 2 || !clip.duration.is_finite() || clip.duration <= 0.0 {
+        return None;
+    }
+    let n = crate::anim_bridge::TRAVERSAL_ARC_SAMPLES;
+    let mut samples = Vec::with_capacity(n);
+    let mut yaw_rad = Vec::with_capacity(n);
+    for k in 0..n {
+        let t = clip.duration * (k as f32) / (n as f32 - 1.0);
+        let (p, yaw) = track.sample(t)?;
+        samples.push(glam::Vec3::from_array(p));
+        yaw_rad.push(yaw);
+    }
+    Some(crate::anim_bridge::TraversalArc { samples, yaw_rad })
 }
 
 /// A play-head time resolved into `[0, duration]` — the convention

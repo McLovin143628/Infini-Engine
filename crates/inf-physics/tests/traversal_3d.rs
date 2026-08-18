@@ -740,6 +740,227 @@ fn the_warp_is_monotone_and_its_endpoint_is_exact() {
     assert!(v.x.abs() < 1e-9 && v.z.abs() < 1e-9, "{v:?}");
 }
 
+// ── the traversal arc (P29.5): the clock remainder, closed ──────────────────
+
+const SM: Uuid = Uuid::from_u128(0x2905_0001);
+const SKEL: Uuid = Uuid::from_u128(0x2905_0002);
+const CLIP: inf_anim::ClipRef = [0x29; 16];
+
+/// A one-joint rig — the root is all the arc reads.
+fn arc_rig() -> inf_anim::SkeletonAsset {
+    inf_anim::SkeletonAsset::new(
+        inf_anim::Skeleton::new(vec![inf_anim::Joint {
+            name: "hips".into(),
+            parent: None,
+            inverse_bind: glam::Mat4::IDENTITY.to_cols_array(),
+            local_bind: inf_anim::JointTransform::IDENTITY,
+        }])
+        .unwrap(),
+    )
+}
+
+/// **A real traversal clip, derived** — the fixture P29.4's ledger said this
+/// wave owes it.
+///
+/// The arc is deliberately **front-loaded**: three quarters of the rise happen in
+/// the first quarter of the clip, and the forward travel lags behind it. That is
+/// what a mantle looks like (the hands go up first and the body follows) and it
+/// is what separates a warp that scales the clip's shape from one that lerps: a
+/// smoothstep is symmetric, so at a quarter of the way through it is at 15.6% of
+/// the target, and this clip is at 75%.
+fn traversal_clip(rise: f32) -> inf_anim::AnimClip {
+    let mut clip = inf_anim::AnimClip::new("mantle", Vec::new());
+    inf_anim::derive::set_root_translation(
+        &mut clip,
+        0,
+        vec![0.0, 0.25, 1.0],
+        vec![[0.0, 0.0, 0.0], [0.0, rise * 0.75, 0.05], [0.0, rise, 0.8]],
+    );
+    clip.duration = 1.0;
+    inf_anim::derive_clip(
+        &clip,
+        &arc_rig().skeleton,
+        &inf_anim::DeriveOptions::traversal(),
+    )
+    .expect("a traversal clip derives")
+    .0
+}
+
+/// A machine with one **non-looping** state playing the traversal clip — which
+/// is the gate on the arc being published at all.
+fn traversal_machine() -> inf_anim::StateMachine {
+    inf_anim::StateMachine {
+        states: vec![inf_anim::SmState {
+            looping: false,
+            ..inf_anim::SmState::clip("mantle", CLIP)
+        }],
+        transitions: Vec::new(),
+        entry: 0,
+        params: Vec::new(),
+        profiles: Vec::new(),
+    }
+}
+
+/// Give the hero a machine and a rig, so the pose step has something to publish.
+fn give_hero_a_machine(w: &mut EcsWorld) {
+    let e = w.entity_of(HERO).unwrap();
+    w.world_mut().entity_mut(e).insert((
+        inf_ecs::components::AnimStateMachine {
+            sm: Some(SM),
+            ..Default::default()
+        },
+        inf_ecs::components::SkeletalMesh {
+            mesh: Some(Uuid::from_u128(7)),
+            skeleton: Some(SKEL),
+        },
+    ));
+    w.mark_dirty();
+    w.propagate();
+}
+
+/// One fixed step in the order both hosts run it: movement, then pose.
+fn step_with_pose(
+    w: &mut EcsWorld,
+    b: &mut PhysicsBridge3D,
+    intent: &MovementIntent,
+    rig: &inf_anim::SkeletonAsset,
+    machine: &inf_anim::StateMachine,
+    clip: &inf_anim::AnimClip,
+) {
+    step(w, b, intent);
+    w.propagate();
+    let machines = |g: Uuid| (g == SM).then_some(machine);
+    let skels = |g: Uuid| (g == SKEL).then_some(rig);
+    let clips = |c: inf_anim::ClipRef| (c == CLIP).then_some(clip);
+    let vars = |_: Uuid| std::collections::BTreeMap::new();
+    inf_ecs::pose::step_pose_evaluation(w, DT, &machines, &skels, &clips, &vars);
+}
+
+/// Climb the ledge and report the feet height at each step, plus how many steps
+/// the mantle took.
+fn mantle_profile(clip: Option<&inf_anim::AnimClip>) -> Vec<f64> {
+    let (mut w, mut b) = world_with_ledge(1.0, BodyKind3D::Static);
+    let rig = arc_rig();
+    let machine = traversal_machine();
+    let empty = inf_anim::AnimClip::new("none", Vec::new());
+    let bound = clip.unwrap_or(&empty);
+    if clip.is_some() {
+        give_hero_a_machine(&mut w);
+    }
+    for _ in 0..5 {
+        step_with_pose(&mut w, &mut b, &forward(), &rig, &machine, bound);
+    }
+    step_with_pose(&mut w, &mut b, &forward_jump(), &rig, &machine, bound);
+    assert_eq!(hero(&w).mode, MovementMode::Mantle);
+    let mut out = vec![hero_feet(&w)];
+    let mut steps = 0;
+    while hero(&w).mode == MovementMode::Mantle && steps < 240 {
+        step_with_pose(&mut w, &mut b, &forward(), &rig, &machine, bound);
+        out.push(hero_feet(&w));
+        steps += 1;
+    }
+    assert!(steps < 240, "the mantle never ended");
+    out
+}
+
+/// **The mantle warp now scales a real clip's arc** (P29.5 — P29.4's "the
+/// progress is a clock" remainder).
+///
+/// The assertion is not "a track exists": it is that the character's *path up the
+/// wall* is the CLIP's and not the ease's. A front-loaded clip puts the feet
+/// three quarters of the way up at a quarter of the climb; the smoothstep the
+/// same mantle uses with no clip bound puts them at 15.6%. Both land on the same
+/// ledge to the same millimetre, which is why the endpoint alone could never have
+/// told them apart — and is exactly the shape of the mutation P29.4's ledger said
+/// only a unit test could kill.
+#[test]
+fn a_bound_traversal_clip_makes_the_mantle_follow_the_clips_arc() {
+    let clip = traversal_clip(1.0);
+    // The arc really is front-loaded, read off the derived track itself, so a
+    // failure below is about the warp and not about the fixture.
+    let track = clip.root_motion.as_ref().expect("the derivation baked one");
+    assert!(
+        (track.sample(0.25).unwrap().0[1] - 0.75).abs() < 1e-4,
+        "{:?}",
+        track.sample(0.25)
+    );
+
+    let with = mantle_profile(Some(&clip));
+    let without = mantle_profile(None);
+    assert_eq!(
+        with.len(),
+        without.len(),
+        "the clip must not change how long the mantle takes — only its shape"
+    );
+    assert!(with.len() > 6, "a mantle that short is a snap");
+
+    let quarter = with.len() / 4;
+    let (a, b) = (with[quarter], without[quarter]);
+    assert!(
+        a > 0.6,
+        "a quarter into a front-loaded clip the feet should be most of the way up, not at {a}"
+    );
+    assert!(
+        b < 0.35,
+        "the unbound control must still be the symmetric ease: {b}"
+    );
+    assert!(
+        a - b > 0.3,
+        "the arc and the ease are indistinguishable ({a} vs {b}) — the warp is not reading the clip"
+    );
+    // Monotone and exact, exactly as P29.4 measured it, with the clip bound.
+    for pair in with.windows(2) {
+        assert!(pair[1] >= pair[0] - 1e-9, "{with:?}");
+        assert!(pair[1] <= 1.0 + 1e-6, "{with:?}");
+    }
+    assert!(
+        (with.last().copied().unwrap() - 1.0).abs() < 1e-3,
+        "the warp must still land ON the ledge: {:?}",
+        with.last()
+    );
+}
+
+/// The arc is published for a **one-shot** and not for a gait — the gate that
+/// keeps a level of walking NPCs from paying for a mechanism they never warp.
+#[test]
+fn only_a_one_shot_state_publishes_a_traversal_arc() {
+    let clip = traversal_clip(1.0);
+    let rig = arc_rig();
+    let (mut w, mut b) = world_with_ledge(1.0, BodyKind3D::Static);
+    give_hero_a_machine(&mut w);
+
+    let one_shot = traversal_machine();
+    step_with_pose(&mut w, &mut b, &forward(), &rig, &one_shot, &clip);
+    let arc = inf_ecs::traversal_arc(&w, HERO).expect("a one-shot publishes its arc");
+    assert!(arc.is_usable());
+    assert_eq!(arc.samples.len(), inf_ecs::TRAVERSAL_ARC_SAMPLES);
+    // The arc is the clip's, read relative to its first frame.
+    let (total, _) = arc.total();
+    assert!((total.y - 1.0).abs() < 1e-4, "{total:?}");
+    assert!((arc.at(0.25).0.y - 0.75).abs() < 1e-3, "{:?}", arc.at(0.25));
+    assert_eq!(arc.at(0.0).0, glam::Vec3::ZERO);
+
+    // The same clip in a LOOPING state publishes nothing.
+    let looping = inf_anim::StateMachine {
+        states: vec![inf_anim::SmState::clip("walk", CLIP)],
+        ..traversal_machine()
+    };
+    let (mut w2, mut b2) = world_with_ledge(1.0, BodyKind3D::Static);
+    give_hero_a_machine(&mut w2);
+    step_with_pose(&mut w2, &mut b2, &forward(), &rig, &looping, &clip);
+    assert!(
+        inf_ecs::traversal_arc(&w2, HERO).is_none(),
+        "a gait state must not publish a traversal arc"
+    );
+
+    // …and neither does a one-shot whose clip was never derived.
+    let bare = inf_anim::AnimClip::new("bare", Vec::new());
+    let (mut w3, mut b3) = world_with_ledge(1.0, BodyKind3D::Static);
+    give_hero_a_machine(&mut w3);
+    step_with_pose(&mut w3, &mut b3, &forward(), &rig, &one_shot, &bare);
+    assert!(inf_ecs::traversal_arc(&w3, HERO).is_none());
+}
+
 /// **The falling catch** (ALS's automatic path): a character falling past a ledge
 /// while holding forward catches it, with **no jump pressed**.
 ///

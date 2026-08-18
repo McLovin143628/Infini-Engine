@@ -1299,15 +1299,29 @@ fn try_mantle(
 /// the runtime target, so consuming the whole window lands **exactly** on the
 /// ledge — no residual, no ease that merely converges.
 ///
-/// # What drives the progress today, stated
+/// # What drives the progress — and the two answers, named
 ///
-/// The clock, shaped by [`inf_anim::warp_ease`], which is what ALS's Timeline
-/// does. The warp is called with the clip's `(delivered, total)` pair, and with
-/// no traversal clip bound those are `total × progress` and `total`, so the scale
-/// is exactly one and the warp degenerates to the ease. The moment P29.5's import
-/// derivation gives the traversal state a baked root-motion track, the same call
-/// scales its arc onto the same target with no change here — which is the whole
-/// reason the placement is a warp and not a lerp.
+/// The **clock** is always the parameter: a mantle's duration comes from the
+/// ledge height and the play rate, so `m.alpha()` is what says how far through
+/// the climb the character is and `done` is its own.
+///
+/// The **shape** is the clip's, when there is one. P29.4 shipped this call with
+/// a synthesised pair — `total × progress` and `total`, a scale of exactly one,
+/// so the warp degenerated to [`inf_anim::warp_ease`] and its ledger said so.
+/// P29.5's import derivation bakes a root-motion track onto a traversal clip and
+/// the pose step resamples it into an
+/// [`inf_ecs::TraversalArc`](inf_ecs::anim_bridge::TraversalArc), so the pair is
+/// now the clip's own arc read at the mantle's progress and the warp scales that
+/// arc onto the ledge. At `alpha == 1` the arc's delivered *is* its total, so the
+/// endpoint stays exact by construction and P29.4's landing measurement is
+/// unchanged.
+///
+/// The arc is sampled at the **raw** clock rather than at the eased one: the
+/// clip already carries its own ease, and easing an eased arc would smooth the
+/// animator's timing away. The ease survives as the alpha of `warp_offset`'s
+/// additive half, which is the axis the clip has no shape along — where a
+/// smoothstep is exactly what is wanted. With no arc, both are the eased clock,
+/// which is P29.4's behaviour byte for byte.
 fn step_mantle(
     world: &mut EcsWorld,
     bridge: &mut PhysicsBridge3D,
@@ -1333,15 +1347,34 @@ fn step_mantle(
         Vec2d::new(target_offset.x, target_offset.z),
         m.start_yaw_deg,
     );
-    let total = glam::Vec3::new(local.x as f32, target_offset.y as f32, local.y as f32);
-    let delivered = total * progress as f32;
+    let clock_total = glam::Vec3::new(local.x as f32, target_offset.y as f32, local.y as f32);
+    let yaw_delta = model::angle_delta_deg(m.target_yaw_deg, m.start_yaw_deg);
+    // The clip's arc if the machine is playing a derived traversal one-shot,
+    // the clock's own ramp if it is not. See the fn docs for why the arc is read
+    // at `m.alpha()` and not at `progress`.
+    //
+    // Both branches answer the yaw in DEGREES: the arc's is radians (the unit
+    // `RootMotionTrack` documents) and is converted here, once, rather than at
+    // the call site below.
+    let arc = inf_ecs::traversal_arc(world, guid).filter(|a| a.is_usable());
+    let (delivered, total, yaw_now_deg, yaw_total_deg) = match arc {
+        Some(a) => {
+            let (d, y) = a.at(m.alpha());
+            let (t, ty) = a.total();
+            (d, t, (y as f64).to_degrees(), (ty as f64).to_degrees())
+        }
+        None => (
+            clock_total * progress as f32,
+            clock_total,
+            yaw_delta * progress,
+            yaw_delta,
+        ),
+    };
     let feet =
         start + inf_anim::warp_offset(m.start_yaw_deg, delivered, total, target_offset, progress);
 
-    let yaw_delta = model::angle_delta_deg(m.target_yaw_deg, m.start_yaw_deg);
     cm.runtime.body_yaw_deg = wrap_deg(
-        m.start_yaw_deg
-            + inf_anim::warp_yaw_deg(yaw_delta * progress, yaw_delta, yaw_delta, progress),
+        m.start_yaw_deg + inf_anim::warp_yaw_deg(yaw_now_deg, yaw_total_deg, yaw_delta, progress),
     );
     cm.runtime.target_yaw_deg = cm.runtime.body_yaw_deg;
 

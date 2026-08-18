@@ -58,7 +58,8 @@ pub use anim_bridge::{
     anim_curve, anim_param, anim_root_motion, anim_state, anim_state_is, anim_state_time,
     clear_anim_bridge, consume_anim_notify, feet_of, footstep_cues, ragdoll_rig,
     request_ragdoll_rig, set_anim_param, set_anim_trigger, set_foot_ik, set_pose_match_entry,
-    take_ragdoll_rig, AnimBridgeRes, AnimStateInfo, FootGoal, FootState, FootstepCue, RigBone,
+    take_ragdoll_rig, traversal_arc, AnimBridgeRes, AnimStateInfo, FootGoal, FootState,
+    FootstepCue, RigBone, TraversalArc, FOOTSTEP_PREFIX, TRAVERSAL_ARC_SAMPLES,
 };
 pub use hierarchy::{ChildOf, Children};
 pub use math::{Color, Vec2d, Vec3d};

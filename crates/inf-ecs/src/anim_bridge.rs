@@ -86,6 +86,84 @@ pub struct FootGoal {
     pub weight: f32,
 }
 
+/// How many points a [`TraversalArc`] is resampled onto.
+///
+/// Odd on purpose, so the midpoint of the clip is a sample and not an
+/// interpolation between two — a traversal clip's most characteristic frame (the
+/// hands on the ledge) sits there far more often than anywhere else.
+pub const TRAVERSAL_ARC_SAMPLES: usize = 33;
+
+/// **The arc a one-shot clip's root motion draws**, resampled onto a fixed grid
+/// of normalized clip positions (P29.5).
+///
+/// This is what closes P29.4's ledgered "the mantle's progress is a clock"
+/// remainder. That wave's warp was *called* with the clip's `(delivered, total)`
+/// pair and, with no traversal clip bound, had to synthesise them as
+/// `total × progress` and `total` — a scale of exactly one, so the warp
+/// degenerated to its own ease. With a clip's root motion baked at import
+/// ([`inf_anim::derive`]) the pair is real, and the same call at the same site
+/// scales the clip's own arc onto the runtime target.
+///
+/// # Why an arc and not a delta
+///
+/// The movement step needs "where would this clip be at *my* progress", and its
+/// progress is its own clock — a mantle's duration is derived from the ledge
+/// height and the play rate, not from the machine's play-head. A per-step delta
+/// cannot answer that; a resampled arc can, at [`TRAVERSAL_ARC_SAMPLES`] points
+/// and one lerp.
+///
+/// # Why only one-shots
+///
+/// After P29.5 *every* imported clip carries a root-motion track, so publishing
+/// an arc for all of them would put 33 samples per character per fixed step on a
+/// level full of walking NPCs for nothing. A gait's arc is not a traversal arc:
+/// a walk cycle's root motion is consumed continuously by the movement step and
+/// never warped onto a target. The pose step therefore publishes this only for a
+/// state whose `looping` is **false**, which is what a traversal state is.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TraversalArc {
+    /// Root translation at each grid point, clip space, metres, **Y included**.
+    /// Index 0 is the clip's first frame; the last index is its last.
+    pub samples: Vec<glam::Vec3>,
+    /// Root yaw at each grid point, radians, index-aligned with `samples`.
+    pub yaw_rad: Vec<f32>,
+}
+
+impl TraversalArc {
+    /// Whether the arc has enough points to be read.
+    pub fn is_usable(&self) -> bool {
+        self.samples.len() >= 2 && self.samples.len() == self.yaw_rad.len()
+    }
+
+    /// The motion delivered from the clip's first frame to normalized position
+    /// `alpha`, and the yaw with it. `(ZERO, 0)` for an unusable arc — a value,
+    /// so a caller reads a shape it can scale rather than a `None` it has to
+    /// branch on twice.
+    pub fn at(&self, alpha: f64) -> (glam::Vec3, f32) {
+        if !self.is_usable() {
+            return (glam::Vec3::ZERO, 0.0);
+        }
+        let a = if alpha.is_finite() {
+            alpha.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let last = self.samples.len() - 1;
+        let x = a * last as f64;
+        let i0 = (x.floor() as usize).min(last);
+        let i1 = (i0 + 1).min(last);
+        let f = (x - i0 as f64) as f32;
+        let p = self.samples[i0] + (self.samples[i1] - self.samples[i0]) * f;
+        let y = self.yaw_rad[i0] + (self.yaw_rad[i1] - self.yaw_rad[i0]) * f;
+        (p - self.samples[0], y - self.yaw_rad[0])
+    }
+
+    /// What the whole clip produces — [`at`](Self::at) at the end.
+    pub fn total(&self) -> (glam::Vec3, f32) {
+        self.at(1.0)
+    }
+}
+
 /// What one entity's machine is doing, published every fixed step.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AnimStateInfo {
@@ -160,6 +238,10 @@ pub struct AnimBridgeRes {
     /// frame plays, and named this wave's get-up and landing consumers as the
     /// ones that turn it on. This set is how they do.
     pub pose_matched: BTreeSet<Uuid>,
+    /// **The traversal arc** of the one-shot clip each machine is playing, when
+    /// it is playing one that carries baked root motion (P29.5). See
+    /// [`TraversalArc`] for what it is and why only one-shots have one.
+    pub traversal: BTreeMap<Uuid, TraversalArc>,
 }
 
 impl AnimBridgeRes {
@@ -176,6 +258,7 @@ impl AnimBridgeRes {
             && self.ragdoll_requested.is_empty()
             && self.ragdoll_rig.is_empty()
             && self.pose_matched.is_empty()
+            && self.traversal.is_empty()
     }
 }
 
@@ -332,6 +415,16 @@ pub fn anim_root_motion(world: &EcsWorld, guid: Uuid) -> Option<RootMotion3D> {
     bridge(world)?.root_motion.get(&guid).copied()
 }
 
+/// **The traversal arc** of the one-shot clip `guid`'s machine is playing, if it
+/// is playing one that carries baked root motion (P29.5).
+///
+/// `None` is a value the mantle already knows what to do with: it falls back to
+/// its own clock, which is exactly the pre-P29.5 behaviour, so a project with no
+/// traversal content behaves as it did.
+pub fn traversal_arc(world: &EcsWorld, guid: Uuid) -> Option<&TraversalArc> {
+    bridge(world)?.traversal.get(&guid)
+}
+
 /// The value of `guid`'s current clip curve `name` at this step's play-head, or
 /// `fallback` when the clip has no such channel.
 ///
@@ -365,7 +458,13 @@ pub struct FootstepCue {
 /// A prefix rather than an exact match, because `footstep_l` and `footstep_r`
 /// are two notifies and one sound, and a project that adds `footstep_land` gets
 /// it for free.
-pub const FOOTSTEP_PREFIX: &str = "footstep";
+///
+/// **One spelling, not two.** P29.5 gave this prefix a *producer*
+/// ([`inf_anim::derive`] writes the event markers a clip's own feet imply), and
+/// a producer and a consumer that each spell a wire string in their own crate is
+/// how a mechanism goes quiet without anything failing. It is defined where the
+/// markers are written and re-exported here, where they are heard.
+pub const FOOTSTEP_PREFIX: &str = inf_anim::derive::FOOTSTEP_PREFIX;
 
 /// **The footstep cues this fixed step produced** — a pure function of sim state.
 ///
