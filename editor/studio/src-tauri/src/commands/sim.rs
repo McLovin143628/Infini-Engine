@@ -424,6 +424,64 @@ pub async fn sim_set_debug(
     Ok(true)
 }
 
+/// **Queue a live tuning edit** (P29.5, pillar S4) — a movement tunable, a
+/// machine parameter or a machine trigger.
+///
+/// The rule is `inf_editor_core::tuning`; this is the string↔enum hop and one
+/// `State` lookup, per the typed-IPC law. It applies at the top of the **next**
+/// fixed step, never inside one.
+///
+/// `kind` is `"field"`, `"param"` or `"trigger"`. For `"field"`, `name` is the
+/// reflect access path and `type_path` names the component (defaulting to
+/// `CharacterMovement`, which is what a movement tuner edits). `keep` chooses
+/// whether the value survives Stop.
+///
+/// Returns `false` when no session is running, which is a **value**: a tuning
+/// panel is live over a session the author can stop at any moment, and a toast
+/// for every slider tick after Stop would be the panel's whole behaviour.
+#[tauri::command]
+pub async fn sim_tune(
+    sim: State<'_, SimState>,
+    kind: String,
+    guid: String,
+    name: String,
+    value: f64,
+    type_path: Option<String>,
+    keep: bool,
+) -> Result<bool, String> {
+    let guid: uuid::Uuid = guid.parse().map_err(|e| format!("bad guid: {e}"))?;
+    if name.trim().is_empty() {
+        return Err("a tune needs a field or parameter name".to_string());
+    }
+    let tune = match kind.as_str() {
+        "field" => inf_editor_core::tuning::Tune::Field {
+            guid,
+            type_path: type_path
+                .unwrap_or_else(|| inf_editor_core::tuning::MOVEMENT_TYPE_PATH.to_string()),
+            path: name,
+            value: inf_ecs::PropValue::Number(value),
+        },
+        "param" => inf_editor_core::tuning::Tune::Param { guid, name, value },
+        "trigger" => inf_editor_core::tuning::Tune::Trigger { guid, name },
+        other => {
+            return Err(format!(
+                "unknown tune kind `{other}` (expected field, param or trigger)"
+            ))
+        }
+    };
+    let scope = if keep {
+        inf_editor_core::tuning::TuneScope::Keep
+    } else {
+        inf_editor_core::tuning::TuneScope::Session
+    };
+    let mut inner = sim.inner.lock().map_err(|_| "sim lock poisoned")?;
+    let Some(session) = inner.session.as_mut() else {
+        return Ok(false);
+    };
+    session.tune(tune, scope);
+    Ok(true)
+}
+
 /// Exit Simulate: restore the pre-play world exactly.
 #[tauri::command]
 pub async fn sim_stop(

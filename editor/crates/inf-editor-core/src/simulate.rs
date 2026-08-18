@@ -247,6 +247,16 @@ pub struct SimSession {
     /// `the_detail_draws_differently_and_traces_identically` is what keeps those
     /// two sentences true of the code.
     hair_detail: inf_anim::HairDetail,
+    /// **Tuning edits queued and not yet applied** (P29.5, pillar S4).
+    ///
+    /// Drained at the very top of [`fixed_step`](Self::fixed_step), before
+    /// anything reads anything, so a tuned run is still a deterministic sequence
+    /// of fixed steps rather than a run with an edit somewhere inside one.
+    pending_tunes: Vec<(crate::tuning::Tune, crate::tuning::TuneScope)>,
+    /// The [`TuneScope::Keep`](crate::tuning::TuneScope::Keep) tunes this session
+    /// has applied, replayed onto the document by [`exit`](Self::exit) after the
+    /// snapshot restore.
+    kept_tunes: Vec<crate::tuning::Tune>,
     /// Currently-held keys/actions.
     input: SimInput,
     /// Keys/actions held the previous tick (for rising-edge detection).
@@ -441,6 +451,8 @@ impl SimSession {
             cloths: BTreeMap::new(),
             hairs: BTreeMap::new(),
             hair_detail: inf_anim::HairDetail::GUIDES,
+            pending_tunes: Vec::new(),
+            kept_tunes: Vec::new(),
             input: SimInput::default(),
             prev_down: BTreeSet::new(),
             just_pressed: BTreeSet::new(),
@@ -532,10 +544,58 @@ impl SimSession {
         self.fixed_step(doc);
     }
 
+    /// **Queue a tuning edit** (P29.5, pillar S4).
+    ///
+    /// It applies at the top of the **next** fixed step and not before — see
+    /// [`crate::tuning`] for why that is a contract and not a convenience, and
+    /// for what [`TuneScope::Keep`](crate::tuning::TuneScope::Keep) does at
+    /// `Stop`.
+    ///
+    /// Queueing always succeeds; *applying* answers whether it did anything, and
+    /// that answer is a value nobody waits for. A tuning UI is a live surface
+    /// over a world that is changing underneath it.
+    pub fn tune(&mut self, tune: crate::tuning::Tune, scope: crate::tuning::TuneScope) {
+        self.pending_tunes.push((tune, scope));
+    }
+
+    /// How many tunes are queued and not yet applied — the read a test uses to
+    /// assert the "next step, not this one" half.
+    pub fn pending_tunes(&self) -> usize {
+        self.pending_tunes.len()
+    }
+
+    /// The `Keep`-scoped tunes applied so far, in order.
+    pub fn kept_tunes(&self) -> &[crate::tuning::Tune] {
+        &self.kept_tunes
+    }
+
+    /// Drain the queue onto the world. The **first** thing a fixed step does.
+    fn apply_pending_tunes(&mut self, doc: &mut SceneDoc) {
+        if self.pending_tunes.is_empty() {
+            return;
+        }
+        for (tune, scope) in std::mem::take(&mut self.pending_tunes) {
+            if !crate::tuning::apply_tune(doc, &tune) {
+                continue;
+            }
+            if scope == crate::tuning::TuneScope::Keep {
+                self.kept_tunes.push(tune);
+            }
+        }
+    }
+
     /// Exit Simulate: restore the world captured at [`enter`](Self::enter). The
-    /// document is byte-for-byte what it was before play.
+    /// document is byte-for-byte what it was before play — **except** for the
+    /// tunes the author asked to keep (P29.5), which are replayed onto it
+    /// afterwards as ordinary undoable edits.
     pub fn exit(self, doc: &mut SceneDoc) {
         apply_to_doc(doc, &self.snapshot);
+        // ── P29.5 pillar S4 ── AFTER the restore, deliberately: the snapshot is
+        //    what the run started from, and a kept tune is a decision about the
+        //    document taken during it. Applied through `edit_set_prop`, so it is
+        //    one `Edit <field>` step on the history and `Ctrl+Z` takes it back —
+        //    a tuning session must not be a change nobody can undo.
+        crate::tuning::commit_kept(doc, &self.kept_tunes);
         // ── P22.1 ── **Simulate never leaves an edit behind** (this module's
         //    opening promise). The snapshot restores entities and components;
         //    the deformation field is a *resource*, so it is outside the snapshot
@@ -782,6 +842,12 @@ impl SimSession {
     /// The four-phase fixed step (see the module docs).
     fn fixed_step(&mut self, doc: &mut SceneDoc) {
         let dt = self.stepper.fixed_dt();
+        // ── P29.5 pillar S4 ── **tuning lands here and nowhere else.** Before
+        //    the clock, before the physics sync, before a Blueprint reads a
+        //    variable: a tuned run has to stay a deterministic sequence of fixed
+        //    steps, and an edit that lands part-way through one is a step no
+        //    replay can reproduce. See `crate::tuning`.
+        self.apply_pending_tunes(doc);
         // ── P17.1 time of day ── advance the level clock ONCE per fixed step,
         //    before anything reads it, so blueprints, the projected sun, shadows,
         //    GI and audio all observe one consistent clock for the step. Pure IEEE

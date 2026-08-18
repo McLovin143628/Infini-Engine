@@ -234,6 +234,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         sim::sim_tick,
         sim::sim_step_fixed,
         sim::sim_set_debug,
+        sim::sim_tune,
         sim::sim_stop,
         sim::sim_is_running,
         sequencer::seq_list,

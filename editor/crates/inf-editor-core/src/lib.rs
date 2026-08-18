@@ -48,6 +48,9 @@ pub mod terrain_edit;
 /// Editor-side camera-driven terrain streaming (P16.3b2).
 pub mod terrain_stream;
 pub mod thumbnail;
+// P29.5 pillar S4: the queue a live tuning edit lands on, drained at the top of
+// the next fixed step. Ring 1 ONLY -- the shipped player has no such door.
+pub mod tuning;
 /// Carving a voxel volume + the save write-back (P21.2), `terrain_edit`'s twin.
 pub mod voxel_edit;
 pub mod voxel_store;
