@@ -8471,6 +8471,27 @@ mod tests {
                     .unwrap(),
                 "committed character-demo .inf_skel drifted from the generator"
             );
+            // **P29.2: the three `.inf_anim` clips, which this lock had never
+            // covered.** Exactly the gap the note above records for the
+            // `.inf_skel` — its siblings were locked and it was not — met a
+            // second time, in the other direction: `.inf_anim` moved to v2 in
+            // P29.2 (the clip channel model) and the three committed clips were
+            // stale v1 bytes that no assertion in this repository could see.
+            // Locked now, so the next schema move is a red test rather than a
+            // silent `SchemaTooOld` in whatever loads them first.
+            let skel_bytes = *CHARACTER_DEMO_SKELETON_GUID.as_bytes();
+            for (file, clip) in [
+                ("Idle.inf_anim", character_demo_idle_clip()),
+                ("Run.inf_anim", character_demo_run_clip()),
+                ("Jump.inf_anim", character_demo_jump_clip()),
+            ] {
+                assert_eq!(
+                    std::fs::read(cdir.join(file)).unwrap(),
+                    inf_asset::encode(&inf_anim::AnimClipAsset::new(clip, Some(skel_bytes)))
+                        .unwrap(),
+                    "committed character-demo {file} drifted from the generator"
+                );
+            }
         }
 
         // Physics-playground lock: the committed v6 `.inf_lvl` + the two

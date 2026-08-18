@@ -73,7 +73,7 @@ use std::collections::BTreeMap;
 
 use bevy_ecs::prelude::{Entity, Resource};
 use glam::Mat4;
-use inf_anim::{AnimClip, ClipRef, Pose, SkeletonAsset, SmContext, StateMachine};
+use inf_anim::{AnimClip, ClipRef, Pose, PoseBlender, SkeletonAsset, SmContext, StateMachine};
 use uuid::Uuid;
 
 use crate::components::{AnimStateMachine, Guid, SkeletalMesh, SmRuntimeState};
@@ -508,6 +508,21 @@ impl EvaluatedPose {
 #[derive(Resource, Default, Debug, Clone, PartialEq)]
 pub struct PoseStoreRes(pub BTreeMap<Uuid, EvaluatedPose>);
 
+/// Every posed entity's [`PoseBlender`] — the inertialization state the `Copy`
+/// [`SmRuntimeState`] cannot hold (P29.2).
+///
+/// A blender carries the previous two rendered poses and the live decay, which is
+/// one `Vec<JointTransform>` each — far too much for a struct that is inlined into
+/// an ECS component. It lives here for the same reason [`PoseStoreRes`] does: it
+/// is a property of a **play session**, rebuilt from nothing, never serialized, so
+/// no schema moves and [`clear_poses`] is the one door that forgets it.
+///
+/// The map is pruned to the entities that stepped this fixed step, so an entity
+/// whose machine was unbound stops carrying a decay rather than resuming one when
+/// it comes back.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct PoseBlendRes(pub BTreeMap<Uuid, PoseBlender>);
+
 /// The pose the sim evaluated for `guid` this step, if any.
 ///
 /// This is the **read door** both render projectors go through, and the reason
@@ -570,6 +585,10 @@ pub fn posed_count(world: &EcsWorld) -> usize {
 /// leak `clear_deformation` exists to stop, one level up.
 pub fn clear_poses(world: &mut EcsWorld) {
     world.world_mut().remove_resource::<PoseStoreRes>();
+    // …and the inertialization state (P29.2), through this same door: a decay is
+    // a statement about the transition that started it, and a stopped session's
+    // last transition must not still be decaying into the next one's first frame.
+    world.world_mut().remove_resource::<PoseBlendRes>();
     // …and the notifies (P29.1), for the same reason and through the same door:
     // an event is a statement about a fixed step, and a stopped session's last
     // step is not this one.
@@ -690,6 +709,12 @@ pub fn step_pose_evaluation<'c>(
         if w.contains_resource::<PoseStoreRes>() {
             w.remove_resource::<PoseStoreRes>();
         }
+        // The blenders go with them (P29.2): an unbound machine must come back
+        // with nothing in flight, and this early return is the *other* way a
+        // level reaches "nothing poses" — the pruning below never runs here.
+        if w.contains_resource::<PoseBlendRes>() {
+            w.remove_resource::<PoseBlendRes>();
+        }
         return;
     }
     targets.sort_by_key(|(_, guid, _, _, _)| *guid);
@@ -719,6 +744,16 @@ pub fn step_pose_evaluation<'c>(
     let mut posed: BTreeMap<Uuid, EvaluatedPose> = BTreeMap::new();
     let mut verdicts: BTreeMap<Uuid, Vec<IkOutcome>> = BTreeMap::new();
     let mut fired_events: BTreeMap<Uuid, Vec<String>> = BTreeMap::new();
+    // **The inertialization state** (P29.2), lifted out for the same reason the
+    // IK goals are: the write-back below needs `&mut EcsWorld`. `remove_resource`
+    // rather than a clone — a blender holds two poses per entity and this runs
+    // every fixed step.
+    let mut blenders: BTreeMap<Uuid, PoseBlender> = world
+        .world_mut()
+        .remove_resource::<PoseBlendRes>()
+        .map(|r| r.0)
+        .unwrap_or_default();
+    let mut blended_this_step: Vec<Uuid> = Vec::new();
     // **The clip-length resolver that makes `exit_time` live** (P29.1). Derived
     // from the same `clips` the pose is sampled through, so there is exactly one
     // notion of how long a clip is.
@@ -729,11 +764,35 @@ pub fn step_pose_evaluation<'c>(
         };
         let mut outcomes: Vec<IkOutcome> = Vec::new();
         let actor_vars = vars(guid);
+        let mut pending_pose: Option<Pose> = None;
         let mut rt = rt_state;
         {
             let lookup = |name: &str| actor_vars.get(name).copied();
             let ctx = SmContext::with_clip_lengths(&lookup, &clip_len);
-            let step = rt.advance(machine, &ctx, dt);
+            // **The blender advances the machine AND evaluates the pose** (P29.2),
+            // because inertialization is not a post-pass: it has to collapse the
+            // fade the transition just set up *before* `eval_pose` runs, which is
+            // the whole "one evaluation instead of two". An entity with no
+            // skeleton still needs the machine stepped (rule 3), so the two calls
+            // are split rather than nested — `advance_only` for that case, the
+            // blender for the posed one.
+            let rig = skeleton_id
+                .and_then(skeletons)
+                .filter(|a| !a.skeleton.is_empty());
+            let step = match rig {
+                None => rt.advance(machine, &ctx, dt),
+                Some(asset) => {
+                    blended_this_step.push(guid);
+                    let blender = blenders.entry(guid).or_insert_with(PoseBlender::new);
+                    // A rig swap invalidates the captured deviation — a delta
+                    // between two different joint counts is not a delta.
+                    blender.fit_rig(asset.skeleton.len());
+                    let (pose, step) =
+                        blender.step(machine, &mut rt, &asset.skeleton, clips, &ctx, dt);
+                    pending_pose = Some(pose);
+                    step
+                }
+            };
             if !step.events.is_empty() {
                 fired_events.insert(guid, step.events);
             }
@@ -741,8 +800,9 @@ pub fn step_pose_evaluation<'c>(
             if let Some(id) = skeleton_id {
                 if let Some(asset) = skeletons(id) {
                     if !asset.skeleton.is_empty() {
-                        let mut pose =
-                            inf_anim::eval_pose(machine, &rt, &asset.skeleton, clips, &ctx);
+                        let mut pose = pending_pose
+                            .take()
+                            .unwrap_or_else(|| Pose::rest(&asset.skeleton));
                         // ── P24.2 IK: a POST-PASS, before anything reads the
                         //    pose ──
                         //
@@ -839,6 +899,23 @@ pub fn step_pose_evaluation<'c>(
 
     // 3. Publish (rule 4).
     {
+        // The blenders first, and **pruned to the entities that posed this
+        // step**: rule 4 says the store is replaced rather than merged, and a
+        // blender is store-shaped. An entity whose machine was unbound must come
+        // back with no decay in flight, not resume one from before it left.
+        blenders.retain(|g, _| blended_this_step.contains(g));
+        let w = world.world_mut();
+        if blenders.is_empty() {
+            // Never *touch* a world that never posed one: `contains_resource`
+            // keeps a machine-free level byte-identical to its pre-P29.2 self.
+            if w.contains_resource::<PoseBlendRes>() {
+                w.remove_resource::<PoseBlendRes>();
+            }
+        } else {
+            w.insert_resource(PoseBlendRes(blenders));
+        }
+    }
+    {
         let w = world.world_mut();
         match w.get_resource_mut::<IkTargetsRes>() {
             Some(mut res) => res.last = verdicts,
@@ -921,10 +998,11 @@ mod tests {
     /// fires — the assertion would then be measuring "one step later", not "the
     /// machine drives the pose".
     fn wave_clip() -> AnimClip {
-        AnimClip {
-            name: "wave".into(),
-            duration: 1.0,
-            tracks: vec![JointTrack {
+        // `AnimClip::new` since `.inf_anim` v2 (P29.2): `duration` is derived
+        // from the keys (1.0 here, unchanged).
+        AnimClip::new(
+            "wave",
+            vec![JointTrack {
                 joint: 1,
                 translation: None,
                 rotation: Some(QuatTrack::new(
@@ -937,7 +1015,7 @@ mod tests {
                 )),
                 scale: None,
             }],
-        }
+        )
     }
 
     /// idle → wave when `moving > 0.5`. Idle plays a clip nothing resolves, so
@@ -1736,5 +1814,101 @@ mod tests {
         assert_eq!(posed_count(&world), 0);
         assert!(pose_state_bytes(&world).is_empty());
         assert!(world.world().get_resource::<IkTargetsRes>().is_none());
+    }
+
+    /// **Inertialization is the DEFAULT for state transitions, in the one fixed
+    /// step both hosts call** (P29.2, §13's catalogue amendment).
+    ///
+    /// The observable claim, and the reason it is observable *here* rather than
+    /// only in `inf-anim`: after a transition with a real duration fires, the
+    /// machine's own cross-fade is **collapsed** — `prev` is `None` and `fade_dur`
+    /// is zero — so `eval_pose` samples one state and the outgoing half is the
+    /// decaying deviation the blender holds. Under the P29.1 cross-fade the same
+    /// step leaves `prev = Some(0)` and `fade_dur = 0.25`.
+    ///
+    /// Mutation check: calling `rt.advance` + `inf_anim::eval_pose` directly
+    /// (the pre-P29.2 body) leaves the fade running and fails the first two
+    /// assertions; dropping the resource write fails the third.
+    #[test]
+    fn a_transition_inertializes_rather_than_cross_fading() {
+        let guid = Uuid::from_u128(0x29_2001);
+        let faded = StateMachine {
+            transitions: vec![SmTransition::on(
+                0,
+                1,
+                0.25,
+                "moving",
+                inf_anim::CmpOp::Gt,
+                0.5,
+            )],
+            ..machine()
+        };
+        let f = Fixture {
+            machine: faded,
+            ..Fixture::new()
+        };
+        let mut w = world_with_character(guid);
+        // Step 1 settles into the entry state; step 2 fires the transition.
+        f.step(&mut w, 1.0 / 60.0, 0.0);
+        f.step(&mut w, 1.0 / 60.0, 1.0);
+        let e = w.entity_of(guid).unwrap();
+        let rt = w.world().get::<AnimStateMachine>(e).unwrap().runtime;
+        assert_eq!(rt.current, 1, "the transition did not fire");
+        assert!(
+            rt.prev.is_none(),
+            "the runtime is still cross-fading out of {:?}",
+            rt.prev
+        );
+        assert_eq!(rt.fade_dur, 0.0, "the fade duration survived the collapse");
+        // The decay lives in the resource, and it is live.
+        let blend = w
+            .world()
+            .get_resource::<PoseBlendRes>()
+            .expect("the blender resource was not published");
+        let b = blend.0.get(&guid).expect("this entity has no blender");
+        assert!(b.is_blending(), "no deviation was captured");
+        assert!(
+            b.decay() > 0.0 && b.decay() <= 1.0,
+            "decay {} is outside [0,1]",
+            b.decay()
+        );
+        // …and it finishes: 0.25 s at 60 Hz is 15 steps, so 20 is comfortably past.
+        for _ in 0..20 {
+            f.step(&mut w, 1.0 / 60.0, 1.0);
+        }
+        let b = &w.world().get_resource::<PoseBlendRes>().unwrap().0[&guid];
+        assert!(!b.is_blending(), "the decay never finished");
+    }
+
+    /// The blender store follows [`PoseStoreRes`]'s rules: **absent costs
+    /// nothing**, and it is pruned rather than merged.
+    #[test]
+    fn the_blender_store_is_pruned_and_never_grows_on_a_machine_free_world() {
+        // A world with no machine never grows one.
+        let mut bare = EcsWorld::new();
+        bare.world_mut().spawn((Guid(Uuid::from_u128(0x29_2002)),));
+        bare.reindex_guids();
+        Fixture::new().step(&mut bare, 0.1, 1.0);
+        assert!(bare.world().get_resource::<PoseBlendRes>().is_none());
+
+        // A posed entity grows one…
+        let guid = Uuid::from_u128(0x29_2003);
+        let f = Fixture::new();
+        let mut w = world_with_character(guid);
+        f.step(&mut w, 1.0 / 60.0, 0.0);
+        assert_eq!(w.world().get_resource::<PoseBlendRes>().unwrap().0.len(), 1);
+        // …and unbinding its machine takes it away again, rather than leaving a
+        // decay to resume from when it comes back.
+        let e = w.entity_of(guid).unwrap();
+        w.world_mut().get_mut::<AnimStateMachine>(e).unwrap().sm = None;
+        f.step(&mut w, 1.0 / 60.0, 0.0);
+        assert!(w.world().get_resource::<PoseBlendRes>().is_none());
+
+        // `clear_poses` forgets it through the one door.
+        w.world_mut().get_mut::<AnimStateMachine>(e).unwrap().sm = Some(SM);
+        f.step(&mut w, 1.0 / 60.0, 0.0);
+        assert!(w.world().get_resource::<PoseBlendRes>().is_some());
+        clear_poses(&mut w);
+        assert!(w.world().get_resource::<PoseBlendRes>().is_none());
     }
 }

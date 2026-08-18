@@ -240,16 +240,20 @@ mod tests {
     /// constant pose, so "the socket moved" is a statement about the STATE).
     fn hold(deg: f32) -> AnimClip {
         let q = glam::Quat::from_rotation_z(deg.to_radians()).to_array();
-        AnimClip {
-            name: "hold".into(),
-            duration: 1.0,
-            tracks: vec![JointTrack {
+        // Through the constructor since `.inf_anim` v2 (P29.2); `duration` is
+        // set afterwards because one key at t=0 derives a zero-length clip and
+        // this fixture wants a 1 s state period.
+        let mut clip = AnimClip::new(
+            "hold",
+            vec![JointTrack {
                 joint: 1,
                 translation: None,
                 rotation: Some(QuatTrack::new(vec![0.0], vec![q], Interpolation::Step)),
                 scale: None,
             }],
-        }
+        );
+        clip.duration = 1.0;
+        clip
     }
 
     /// rest → swing, unconditional, so the machine leaves its entry state on the

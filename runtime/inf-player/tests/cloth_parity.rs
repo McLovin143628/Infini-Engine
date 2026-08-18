@@ -79,16 +79,20 @@ fn rig() -> SkeletonAsset {
 /// drift by a ULP as the play-head moves, which is fatal to a byte comparison.
 fn hold(deg: f32) -> AnimClip {
     let q = Quat::from_rotation_z(deg.to_radians()).to_array();
-    AnimClip {
-        name: format!("hold{deg}"),
-        duration: 1.0,
-        tracks: vec![JointTrack {
+    // Through the constructor since `.inf_anim` v2 (P29.2) — see the twin note in
+    // `pose_parity.rs`. `duration` is set afterwards because one key at t=0
+    // derives a zero-length clip and this fixture wants a 1 s state period.
+    let mut clip = AnimClip::new(
+        format!("hold{deg}"),
+        vec![JointTrack {
             joint: 1,
             translation: None,
             rotation: Some(QuatTrack::new(vec![0.0], vec![q], Interpolation::Step)),
             scale: None,
         }],
-    }
+    );
+    clip.duration = 1.0;
+    clip
 }
 
 /// idle → wave, unconditional, so the machine leaves its entry state on the first

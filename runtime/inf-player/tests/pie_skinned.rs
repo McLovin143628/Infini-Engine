@@ -102,16 +102,23 @@ fn body() -> MeshAsset {
 /// a state produces is an exact constant).
 fn hold(deg: f32) -> AnimClip {
     let q = Quat::from_rotation_z(deg.to_radians()).to_array();
-    AnimClip {
-        name: format!("hold{deg}"),
-        duration: 1.0,
-        tracks: vec![JointTrack {
+    // Built through `AnimClip::new` rather than as a struct literal since
+    // `.inf_anim` v2 (P29.2): the constructor fills the five new tail channels
+    // with their empty defaults, and a literal here would have to be edited every
+    // time the format grows a field it does not care about. `duration` is derived
+    // from the keys, which for a single stepped key at t=0 is 0 — so it is set
+    // afterwards, because this fixture wants a 1 s state period.
+    let mut clip = AnimClip::new(
+        format!("hold{deg}"),
+        vec![JointTrack {
             joint: 1,
             translation: None,
             rotation: Some(QuatTrack::new(vec![0.0], vec![q], Interpolation::Step)),
             scale: None,
         }],
-    }
+    );
+    clip.duration = 1.0;
+    clip
 }
 
 /// idle → wave → salute, both transitions unconditional, so the machine walks

@@ -347,6 +347,20 @@ impl PoseBlender {
         self.prev = None;
     }
 
+    /// [`reset`](Self::reset) if the history is for a **different rig**.
+    ///
+    /// A deviation between poses of different joint counts is not a deviation, and
+    /// nothing downstream would notice: [`apply_additive`] takes the shorter
+    /// length and quietly leaves the rest of the character on the base. The caller
+    /// that has both the entity and the skeleton — `inf_ecs::pose` — asks this
+    /// once per step, which is cheaper than a rig identity and catches the case
+    /// that actually happens (a `SkeletalMesh` re-bound during a session).
+    pub fn fit_rig(&mut self, joints: usize) {
+        if self.last.as_ref().is_some_and(|p| p.locals.len() != joints) {
+            self.reset();
+        }
+    }
+
     /// Advance the machine by `dt` and produce the pose to render.
     ///
     /// Equivalent to [`SmRuntime::advance`] + [`eval_pose`] in `CrossFade` mode.

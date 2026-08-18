@@ -47,6 +47,18 @@ const HERO: Uuid = Uuid::from_u128(0x2401_0000_0000_0000_0000_0000_0000_0001);
 const SM: Uuid = Uuid::from_u128(0x2401_0000_0000_0000_0000_0000_0000_0002);
 const SKEL: Uuid = Uuid::from_u128(0x2401_0000_0000_0000_0000_0000_0000_0003);
 const MESH: Uuid = Uuid::from_u128(0x2401_0000_0000_0000_0000_0000_0000_0004);
+// **The spawn state** (P29.2). The fixture used to enter `idle` and fire
+// `idle -> walk` on the SAME step, because `SmRuntime::advance` enters the
+// entry state and then evaluates its outgoing transitions before returning —
+// so the machine was in `walk` at step 0 and in `run` from step 1, and the
+// vacuity guard's "the pose changed when the machine transitioned walk -> run"
+// was comparing `run` against `run`. It passed only because a zero-duration
+// cross-fade still ran `blend_poses(prev, cur, 1.0)`, which is not bit-identical
+// to `cur`: the guard was resting on a one-ULP rounding artefact of a blend that
+// blends nothing. P29.2 collapses that degenerate fade (a snap is a snap), which
+// exposed it. One extra state in front makes each label true of the step it
+// names, and every assertion below now compares two genuinely different poses.
+const SPAWN: Uuid = Uuid::from_u128(0x2401_0000_0000_0000_0000_0000_0000_000F);
 const IDLE: Uuid = Uuid::from_u128(0x2401_0000_0000_0000_0000_0000_0000_0010);
 const WALK: Uuid = Uuid::from_u128(0x2401_0000_0000_0000_0000_0000_0000_0011);
 const RUN: Uuid = Uuid::from_u128(0x2401_0000_0000_0000_0000_0000_0000_0012);
@@ -87,16 +99,22 @@ fn rig() -> SkeletonAsset {
 /// say something DID change.
 fn hold(deg: f32) -> AnimClip {
     let q = Quat::from_rotation_z(deg.to_radians()).to_array();
-    AnimClip {
-        name: format!("hold{deg}"),
-        duration: 1.0,
-        tracks: vec![JointTrack {
+    // Through the constructor since `.inf_anim` v2 (P29.2): it fills the five new
+    // tail channels with their empty defaults, where a struct literal would need
+    // editing every time the format grows a field this fixture does not use.
+    // `duration` is set afterwards because one key at t=0 derives a zero-length
+    // clip and this fixture wants a 1 s state period.
+    let mut clip = AnimClip::new(
+        format!("hold{deg}"),
+        vec![JointTrack {
             joint: 1,
             translation: None,
             rotation: Some(QuatTrack::new(vec![0.0], vec![q], Interpolation::Step)),
             scale: None,
         }],
-    }
+    );
+    clip.duration = 1.0;
+    clip
 }
 
 /// A clip that **actually interpolates**: two distinct keys under
@@ -116,10 +134,9 @@ fn hold(deg: f32) -> AnimClip {
 /// both, and the joint it drives is the same one `hold` drives, so the two
 /// fixtures are directly comparable.
 fn sweep(from_deg: f32, to_deg: f32) -> AnimClip {
-    AnimClip {
-        name: format!("sweep{from_deg}_{to_deg}"),
-        duration: 1.0,
-        tracks: vec![JointTrack {
+    AnimClip::new(
+        format!("sweep{from_deg}_{to_deg}"),
+        vec![JointTrack {
             joint: 1,
             translation: None,
             rotation: Some(QuatTrack::new(
@@ -132,28 +149,42 @@ fn sweep(from_deg: f32, to_deg: f32) -> AnimClip {
             )),
             scale: None,
         }],
-    }
+    )
 }
 
-/// idle → walk → run, both transitions **unconditional**, so the machine walks
-/// its states on consecutive fixed steps with no actor and no Blueprint variable
-/// in the picture. Each state holds a different angle, so "which state is the
-/// machine in" is directly readable off the pose.
+/// spawn → idle → walk → run, every transition **unconditional**, so the machine
+/// walks its states on consecutive fixed steps with no actor and no Blueprint
+/// variable in the picture. Each state holds a different angle, so "which state
+/// is the machine in" is directly readable off the pose.
+///
+/// `spawn` exists because the *entry* state is entered and left on the same step
+/// — see the `SPAWN` constant for the whole finding. With it in front, step 0 is
+/// `idle`, step 1 `walk`, step 2 `run`, and the trace's labels are true.
 fn machine() -> StateMachine {
     StateMachine {
         states: vec![
+            SmState::clip("spawn", *SPAWN.as_bytes()),
             SmState::clip("idle", *IDLE.as_bytes()),
             SmState::clip("walk", *WALK.as_bytes()),
             SmState::clip("run", *RUN.as_bytes()),
         ],
-        transitions: vec![SmTransition::new(0, 1, 0.0), SmTransition::new(1, 2, 0.0)],
+        transitions: vec![
+            SmTransition::new(0, 1, 0.0),
+            SmTransition::new(1, 2, 0.0),
+            SmTransition::new(2, 3, 0.0),
+        ],
         entry: 0,
         ..Default::default()
     }
 }
 
 fn pose_clips() -> BTreeMap<Uuid, AnimClip> {
-    BTreeMap::from([(IDLE, hold(0.0)), (WALK, hold(35.0)), (RUN, hold(80.0))])
+    BTreeMap::from([
+        (SPAWN, hold(-25.0)),
+        (IDLE, hold(0.0)),
+        (WALK, hold(35.0)),
+        (RUN, hold(80.0)),
+    ])
 }
 
 fn skeletons() -> BTreeMap<Uuid, SkeletonAsset> {
@@ -351,6 +382,11 @@ fn the_drawn_palette_follows_the_machine() {
         .expect("a bound character draws")
         .palette;
 
+    // One step per state, now that `spawn` sits in front of `idle` (see the
+    // `SPAWN` constant): step 0 lands on `idle`, which holds 0° and is therefore
+    // indistinguishable from the rest pose — so the first *measurable* state is
+    // `walk`, one step later than this arm used to read it.
+    sim.step_once(RuntimeInput::default()); // → idle
     sim.step_once(RuntimeInput::default()); // → walk
     let walk = palette(&store, &sm, &sim);
     sim.step_once(RuntimeInput::default()); // → run
@@ -792,23 +828,27 @@ fn a_goal_on_a_non_finite_pose_refuses_instead_of_panicking() {
     fn broken_clips() -> BTreeMap<Uuid, AnimClip> {
         BTreeMap::from([(
             IDLE,
-            AnimClip {
-                name: "broken".into(),
-                duration: 1.0,
-                tracks: vec![JointTrack {
-                    joint: 1,
-                    // Not a number, in the one place a corrupt clip, a divide by
-                    // zero in a blend, or a bad import would put one — and the
-                    // channel `two_bone_positions` measures. See the doc above
-                    // for why this is the translation and no longer the rotation.
-                    translation: Some(Vec3Track::new(
-                        vec![0.0],
-                        vec![[f32::NAN; 3]],
-                        Interpolation::Step,
-                    )),
-                    rotation: None,
-                    scale: None,
-                }],
+            {
+                let mut c = AnimClip::new(
+                    "broken",
+                    vec![JointTrack {
+                        joint: 1,
+                        // Not a number, in the one place a corrupt clip, a divide
+                        // by zero in a blend, or a bad import would put one — and
+                        // the channel `two_bone_positions` measures. See the doc
+                        // above for why this is the translation and no longer the
+                        // rotation.
+                        translation: Some(Vec3Track::new(
+                            vec![0.0],
+                            vec![[f32::NAN; 3]],
+                            Interpolation::Step,
+                        )),
+                        rotation: None,
+                        scale: None,
+                    }],
+                );
+                c.duration = 1.0;
+                c
             },
         )])
     }

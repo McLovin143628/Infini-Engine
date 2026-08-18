@@ -58,16 +58,20 @@ fn rig() -> SkeletonAsset {
 /// is a constant and two runs cannot drift by a ULP.
 fn hold(deg: f32) -> AnimClip {
     let q = Quat::from_rotation_z(deg.to_radians()).to_array();
-    AnimClip {
-        name: format!("hold{deg}"),
-        duration: 1.0,
-        tracks: vec![JointTrack {
+    // Through the constructor since `.inf_anim` v2 (P29.2) — see the twin note in
+    // `pie_skinned.rs`. `duration` is set afterwards because a single key at t=0
+    // derives a zero-length clip and this fixture wants a 1 s state period.
+    let mut clip = AnimClip::new(
+        format!("hold{deg}"),
+        vec![JointTrack {
             joint: 1,
             translation: None,
             rotation: Some(QuatTrack::new(vec![0.0], vec![q], Interpolation::Step)),
             scale: None,
         }],
-    }
+    );
+    clip.duration = 1.0;
+    clip
 }
 
 /// idle then wave, unconditional, so the head the strands are rooted on moves on

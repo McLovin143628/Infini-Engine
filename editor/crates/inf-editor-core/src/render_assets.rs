@@ -868,10 +868,11 @@ mod tests {
 
     /// A one-second clip rotating the tip joint 90° about X.
     fn wave_clip() -> AnimClip {
-        AnimClip {
-            name: "wave".into(),
-            duration: 1.0,
-            tracks: vec![JointTrack {
+        // `AnimClip::new` since `.inf_anim` v2 (P29.2): `duration` is derived
+        // from the keys (1.0 here, unchanged).
+        AnimClip::new(
+            "wave",
+            vec![JointTrack {
                 joint: 1,
                 translation: None,
                 rotation: Some(QuatTrack::new(
@@ -884,7 +885,7 @@ mod tests {
                 )),
                 scale: None,
             }],
-        }
+        )
     }
 
     /// A project with one derived mesh; returns `(dir, root, mesh guid)`.

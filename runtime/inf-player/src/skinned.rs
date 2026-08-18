@@ -529,10 +529,12 @@ mod tests {
     }
 
     fn wave_clip() -> AnimClip {
-        AnimClip {
-            name: "wave".into(),
-            duration: 2.0,
-            tracks: vec![JointTrack {
+        // `AnimClip::new` since `.inf_anim` v2 (P29.2): it derives `duration`
+        // from the keys (2.0 here, unchanged) and fills the five new tail
+        // channels with their empty defaults.
+        AnimClip::new(
+            "wave",
+            vec![JointTrack {
                 joint: 1,
                 translation: None,
                 rotation: Some(QuatTrack::new(
@@ -545,7 +547,7 @@ mod tests {
                 )),
                 scale: None,
             }],
-        }
+        )
     }
 
     fn triangle() -> SkinnedMeshData {

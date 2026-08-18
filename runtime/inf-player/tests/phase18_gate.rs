@@ -1807,10 +1807,11 @@ fn two_joint_skeleton() -> inf_anim::Skeleton {
 /// — so *every* play-head inside the cycle is a distinct pose, and two different
 /// step counts cannot coincidentally agree.
 fn wave_clip() -> inf_anim::AnimClip {
-    inf_anim::AnimClip {
-        name: "wave".into(),
-        duration: SKINNED_CLIP_SECONDS as f32,
-        tracks: vec![inf_anim::JointTrack {
+    // `AnimClip::new` since `.inf_anim` v2 (P29.2): `duration` is derived from
+    // the keys, which are exactly `SKINNED_CLIP_SECONDS` apart.
+    inf_anim::AnimClip::new(
+        "wave",
+        vec![inf_anim::JointTrack {
             joint: 1,
             translation: None,
             rotation: Some(inf_anim::QuatTrack::new(
@@ -1823,7 +1824,7 @@ fn wave_clip() -> inf_anim::AnimClip {
             )),
             scale: None,
         }],
-    }
+    )
 }
 
 /// The gate's document: one entity bound to the fixture mesh + skeleton, playing
