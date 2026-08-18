@@ -1371,6 +1371,899 @@ impl Default for CharacterController3D {
     }
 }
 
+// ── P29.3 movement component v2 ─────────────────────────────────────────────
+//
+// The catalogue amendment's twelve movements, ALS's curve-driven settings model,
+// and the mode enum that absorbs the P20 swim latch. The whole design note is on
+// [`CharacterMovement`]; the enums below carry the parts of it that are wire
+// contracts and therefore frozen on the day they are born.
+
+/// **What a character is doing.** The frozen wire enum of §13's movement
+/// catalogue (2026-08-15 amendment) plus its reserved growth room.
+///
+/// # Frozen on day one, and why that is not premature
+///
+/// This reaches `.inf_lvl` bytes, so bincode writes it as its **declaration
+/// index** and the append-only law applies from the first commit. The catalogue
+/// amendment is explicit that the whole discriminant set is frozen now rather
+/// than grown per sub-phase: P29.3 is the scene's one allowed bump this phase,
+/// and a mode that arrives in P29.4 or P29.7 without a slot would need a second
+/// one. Four modes here — `Mantle`, `Ragdoll`, `Driving`, `Flying` — therefore
+/// **exist without their mechanics**, and asking to enter one is a typed refusal
+/// ([`MovementRefusal::ModeNotYetImplemented`]) rather than a stub that pretends.
+/// A refusal is a value.
+///
+/// # The axis question (Ruling 4), and where this deviates
+///
+/// ALS's "what the character is doing" is a *product* of seven fields — 11 700
+/// nominal combinations — and Ruling 4's answer is: stance **folds into** the
+/// mode (crouch and prone change the capsule, the speed set and the integration
+/// regime together, so they are modes), [`RotationMode`] stays its own frozen
+/// enum, overlay stays an open interned id, and gait rides *inside* `Grounded`.
+///
+/// The deviation is that last clause: gait is the sibling field
+/// [`CharacterMovement::gait`] rather than a payload on `Grounded`. The reason is
+/// mechanical and lives two crates away — the Details grid's write-back door
+/// (`crate::props`) applies an edited enum as `DynamicVariant::Unit`, so a
+/// struct variant is a value the editor that must *tune* this component cannot
+/// round-trip; and the ECS census pins wire enums by asserting a unit variant
+/// encodes to one byte. `Fall` and `Swim` take the same medicine and split into
+/// two discriminants each, which costs nothing: the sub-state is a closed
+/// two-valued thing in both cases, and [`is_falling`](Self::is_falling) /
+/// [`is_swimming`](Self::is_swimming) express the grouping in code.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
+pub enum MovementMode {
+    /// Standing locomotion. The gait tier is [`CharacterMovement::gait`].
+    #[default]
+    Grounded,
+    /// Crouched: the crouch capsule, the crouch speed, standing again gated by
+    /// an overhead-clearance sweep.
+    Crouch,
+    /// Prone: the minimum capsule and the crawl speed.
+    Prone,
+    /// Sliding, entered from sprint + crouch; friction is a function of slope.
+    Slide,
+    /// A roll — the double-tap-crouch action and the soft outcome of the landing
+    /// classifier. The root-motion half is P29.4's.
+    Roll,
+    /// A ballistic dive that lands into prone or a roll, chosen by the landing
+    /// classifier.
+    Dive,
+    /// Airborne with **full** air-control authority (a deliberate jump).
+    FallFree,
+    /// Airborne with **reduced** authority — walked off a ledge, knocked back,
+    /// or dived. The distinction §13's catalogue calls "free vs controlled".
+    FallControlled,
+    /// Swimming at the surface. Absorbs the P20 latch.
+    SwimSurface,
+    /// Fully submerged.
+    SwimUnder,
+    /// Mantling/vaulting. **P29.4 owns the mechanics**; entering refuses here.
+    Mantle,
+    /// Physics-driven ragdoll. **P29.4 owns the mechanics**; entering refuses.
+    Ragdoll,
+    /// Driving a vehicle. **P29.7 owns the mechanics**; entering refuses.
+    Driving,
+    /// 6-DOF flight. **P29.7 owns the mechanics**; entering refuses.
+    Flying,
+    /// Reserved. A build that meets one refuses by name — see the type's docs.
+    Reserved14,
+    /// Reserved. A build that meets one refuses by name — see the type's docs.
+    Reserved15,
+    /// Reserved. A build that meets one refuses by name — see the type's docs.
+    Reserved16,
+    /// Reserved. A build that meets one refuses by name — see the type's docs.
+    Reserved17,
+}
+
+impl MovementMode {
+    /// `Some(index)` if this is a reserved slot a newer build wrote, else `None`.
+    ///
+    /// A reserved slot no reader ever asks about is a comment rather than a slot.
+    pub fn reserved_slot(self) -> Option<u8> {
+        match self {
+            MovementMode::Reserved14 => Some(14),
+            MovementMode::Reserved15 => Some(15),
+            MovementMode::Reserved16 => Some(16),
+            MovementMode::Reserved17 => Some(17),
+            _ => None,
+        }
+    }
+
+    /// Whether this mode's mechanics belong to a later sub-phase, so that asking
+    /// to enter it is a typed refusal rather than a stub.
+    pub fn is_deferred(self) -> bool {
+        matches!(
+            self,
+            MovementMode::Mantle
+                | MovementMode::Ragdoll
+                | MovementMode::Driving
+                | MovementMode::Flying
+        ) || self.reserved_slot().is_some()
+    }
+
+    /// Whether the character's feet are on something — the modes the ground
+    /// integrator runs for.
+    pub fn is_grounded_family(self) -> bool {
+        matches!(
+            self,
+            MovementMode::Grounded
+                | MovementMode::Crouch
+                | MovementMode::Prone
+                | MovementMode::Slide
+                | MovementMode::Roll
+        )
+    }
+
+    /// Whether this is one of the two airborne modes.
+    pub fn is_falling(self) -> bool {
+        matches!(
+            self,
+            MovementMode::FallFree | MovementMode::FallControlled | MovementMode::Dive
+        )
+    }
+
+    /// Whether this is one of the two swim modes.
+    pub fn is_swimming(self) -> bool {
+        matches!(self, MovementMode::SwimSurface | MovementMode::SwimUnder)
+    }
+}
+
+/// The discrete gait tier inside [`MovementMode::Grounded`] (Ruling 4: "an
+/// analog speed plus a discrete tier" — the analog half is
+/// [`MovementRuntime::mapped_speed`]).
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
+pub enum Gait {
+    /// The slowest tier — ALS's `WalkAction` toggle.
+    Walk,
+    /// The default.
+    #[default]
+    Run,
+    /// Gated: see [`CharacterMovement::sprint_input_min`].
+    Sprint,
+    /// Reserved. A build that meets one refuses by name.
+    Reserved3,
+    /// Reserved. A build that meets one refuses by name.
+    Reserved4,
+}
+
+impl Gait {
+    /// `Some(index)` if this is a reserved slot a newer build wrote.
+    pub fn reserved_slot(self) -> Option<u8> {
+        match self {
+            Gait::Reserved3 => Some(3),
+            Gait::Reserved4 => Some(4),
+            _ => None,
+        }
+    }
+}
+
+/// **How the body's yaw relates to where it is looking** (Ruling 4: its own
+/// frozen wire enum). Selects the movement-settings block *and* the rotation
+/// target, exactly as ALS's two-level dispatch does.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
+pub enum RotationMode {
+    /// The body faces where it is going. The third-person default.
+    #[default]
+    VelocityDirection,
+    /// The body faces where the camera looks, and strafes.
+    LookingDirection,
+    /// As `LookingDirection`, but slower and with sprint refused.
+    Aiming,
+    /// Reserved. A build that meets one refuses by name.
+    Reserved3,
+    /// Reserved. A build that meets one refuses by name.
+    Reserved4,
+}
+
+impl RotationMode {
+    /// `Some(index)` if this is a reserved slot a newer build wrote.
+    pub fn reserved_slot(self) -> Option<u8> {
+        match self {
+            RotationMode::Reserved3 => Some(3),
+            RotationMode::Reserved4 => Some(4),
+            _ => None,
+        }
+    }
+}
+
+/// Which quadrant of the aim frame the character is actually moving in — the
+/// input a four-way locomotion blend space reads (P29.4).
+///
+/// Derived with hysteresis so the boundary cannot chatter; see
+/// [`crate::movement::quadrant`].
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
+pub enum MovementDirection {
+    /// Within the forward band.
+    #[default]
+    Forward,
+    /// To the character's right.
+    Right,
+    /// To the character's left.
+    Left,
+    /// Behind.
+    Backward,
+}
+
+/// What the landing classifier decided, keyed to **impact speed** rather than to
+/// whichever animation happened to be playing (§13's catalogue, verbatim).
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
+pub enum LandingKind {
+    /// Nothing has landed yet this session.
+    #[default]
+    None,
+    /// Under [`CharacterMovement::land_hard_mps`]: keep running.
+    Soft,
+    /// Between the two thresholds with no movement input: plant, with the
+    /// heavier braking friction for [`CharacterMovement::land_friction_time`].
+    Hard,
+    /// Between the two thresholds *with* movement input: break-fall into a roll.
+    Roll,
+    /// Past [`CharacterMovement::land_ragdoll_mps`]. ALS ragdolls here; P29.4
+    /// owns the ragdoll, so this lands as `Hard` and records the verdict.
+    Ragdoll,
+}
+
+/// Why a requested mode change did not happen. **A refusal is a value** (the P21
+/// law): the movement step never fails, it answers.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
+pub enum MovementRefusal {
+    /// Nothing was refused.
+    #[default]
+    None,
+    /// The taller capsule does not fit here — the overhead sweep hit something.
+    NoOverheadClearance,
+    /// The mode exists on the frozen wire enum and its mechanics belong to a
+    /// later sub-phase (P29.4's mantle and ragdoll, P29.7's driving and flight),
+    /// or it is a reserved slot a newer build wrote.
+    ModeNotYetImplemented,
+    /// The transition is not in the mode table (e.g. sliding while swimming).
+    IllegalTransition,
+    /// The entry condition was not met — too slow to slide, not grounded to
+    /// jump, not in water to swim.
+    ConditionNotMet,
+}
+
+/// A piecewise-linear curve sampled on ALS's **normalized speed**: `0` stopped,
+/// `1` walk, `2` run, `3` sprint.
+///
+/// # Why four numbers and not a keyframe list
+///
+/// This is the single idea most worth taking from ALS (`GetMappedSpeed`,
+/// `ALSCharacterMovementComponent.cpp:156`). Every movement curve is keyed on
+/// the *normalized* speed rather than on metres per second, so retuning a
+/// character's walk from 1.5 to 1.8 m/s does not invalidate its acceleration,
+/// braking, friction or turn-rate curves. The anchors of that axis are exactly
+/// the three gait speeds plus zero, so a curve with a value at each anchor and a
+/// straight line between them is not an approximation of ALS's curve asset — it
+/// is the shape those assets are authored in.
+///
+/// Four `f64`s also make this `Copy`, reflectable as four scalars in the Details
+/// grid, and free of any interpolation that could reach a transcendental (the
+/// portable-math law). Sampling clamps outside `[0, 3]`.
+#[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct SpeedCurve {
+    /// Value at normalized speed 0 (stopped).
+    pub at_stop: f64,
+    /// Value at normalized speed 1 (walk speed).
+    pub at_walk: f64,
+    /// Value at normalized speed 2 (run speed).
+    pub at_run: f64,
+    /// Value at normalized speed 3 (sprint speed).
+    pub at_sprint: f64,
+}
+
+impl SpeedCurve {
+    /// A flat curve — the same value at every speed.
+    pub const fn flat(v: f64) -> Self {
+        Self {
+            at_stop: v,
+            at_walk: v,
+            at_run: v,
+            at_sprint: v,
+        }
+    }
+
+    /// A curve from its four anchors.
+    pub const fn new(at_stop: f64, at_walk: f64, at_run: f64, at_sprint: f64) -> Self {
+        Self {
+            at_stop,
+            at_walk,
+            at_run,
+            at_sprint,
+        }
+    }
+
+    /// Sample at normalized speed `s`, clamped to `[0, 3]`. Pure adds and
+    /// multiplies — no transcendental, so it is portable by construction.
+    ///
+    /// A non-finite `s` reads as `0`: every ordering comparison a NaN takes part
+    /// in is false, so an unguarded clamp would let it through and put a NaN
+    /// into the velocity integrator, where it becomes a character at no position
+    /// at all (the P29.2 blend-space finding, one crate over).
+    pub fn sample(&self, s: f64) -> f64 {
+        if !s.is_finite() {
+            return self.at_stop;
+        }
+        let s = s.clamp(0.0, 3.0);
+        let (a, b, t) = if s <= 1.0 {
+            (self.at_stop, self.at_walk, s)
+        } else if s <= 2.0 {
+            (self.at_walk, self.at_run, s - 1.0)
+        } else {
+            (self.at_run, self.at_sprint, s - 2.0)
+        };
+        a + (b - a) * t
+    }
+}
+
+impl Default for SpeedCurve {
+    fn default() -> Self {
+        Self::flat(0.0)
+    }
+}
+
+/// The live movement state — never serialized, never reflected.
+///
+/// The same shape as [`SmRuntimeState`]'s role on `AnimStateMachine`: the
+/// authored tunables persist, the per-step derivations do not. Every field here
+/// is either recomputed each fixed step or is a latch the step owns, and all of
+/// them are read by P29.4's animation bridge, which is why they are `pub` rather
+/// than private to the integrator.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct MovementRuntime {
+    // ── intent, written by `crate::movement::apply_intent` ──
+    /// Desired planar motion in the **aim frame**: `x` right, `y` forward, each
+    /// in `[-1, 1]`.
+    pub intent_move: Vec2d,
+    /// Requested yaw rate, **degrees per second** (a mouse delta already divided
+    /// by the frame's own dt — see `inf_input::InputState::axis_snapshot`).
+    pub intent_look_yaw_dps: f64,
+    /// Requested pitch rate, degrees per second. Consumed by P29.6's camera; the
+    /// movement step only stores it.
+    pub intent_look_pitch_dps: f64,
+    /// Requested vertical motion while swimming or flying, `[-1, 1]`.
+    pub intent_vertical: f64,
+    /// Held intent flags: sprint, walk, aim.
+    pub want_sprint: bool,
+    /// See [`want_sprint`](Self::want_sprint).
+    pub want_walk: bool,
+    /// See [`want_sprint`](Self::want_sprint).
+    pub want_aim: bool,
+    /// Edge intents, consumed by the mode table on the step they arrive.
+    pub press_jump: bool,
+    /// See [`press_jump`](Self::press_jump).
+    pub press_crouch: bool,
+    /// See [`press_jump`](Self::press_jump).
+    pub press_prone: bool,
+    /// See [`press_jump`](Self::press_jump).
+    pub press_roll: bool,
+    /// See [`press_jump`](Self::press_jump).
+    pub press_dive: bool,
+
+    // ── integrated state ──
+    /// World velocity, m/s. **Owned by the movement step** — this is the whole
+    /// of impedance mismatch IM-2: rapier's kinematic controller has no velocity
+    /// model at all, so the engine keeps one and uses the controller purely as
+    /// sweep-and-slide.
+    pub velocity: Vec3d,
+    /// Smoothed aim yaw, degrees. ALS's `AimingRotation.Yaw`.
+    pub aim_yaw_deg: f64,
+    /// Aim pitch, degrees, clamped to `[-89, 89]`. Stored for P29.6.
+    pub aim_pitch_deg: f64,
+    /// `|Δ aim yaw| / dt`, degrees per second — ALS's `AimYawRate`, read by the
+    /// grounded rotation-rate multiplier here and by three P29.4 systems.
+    pub aim_yaw_rate_dps: f64,
+    /// Whether the last sweep ended on the ground.
+    pub grounded: bool,
+    /// The surface normal under the character, from the ground probe; `+Y` when
+    /// there is nothing under it.
+    pub ground_normal: Vec3d,
+    /// Seconds spent in the current [`MovementMode`].
+    pub time_in_mode_s: f64,
+    /// Seconds since the last landing, or a large number if none.
+    pub time_since_land_s: f64,
+    /// Downward speed at the last landing, m/s — the classifier's input.
+    pub land_impact_mps: f64,
+    /// What the classifier decided about the last landing.
+    pub landing: LandingKind,
+    /// The most recent refusal, cleared when a transition succeeds.
+    pub refusal: MovementRefusal,
+    /// How many transitions have been refused since the entity was created.
+    /// A counter rather than a log: it is the thing a gate can assert on.
+    pub refusals: u32,
+
+    // ── derived outputs, for P29.4's animation bridge ──
+    /// Horizontal speed mapped onto `[0, 3]` — the X axis of every
+    /// [`SpeedCurve`].
+    pub mapped_speed: f64,
+    /// The gait the *body* is actually in, which lags the requested one during
+    /// deceleration (ALS's `GetActualGait` and its hysteresis band).
+    pub actual_gait: Gait,
+    /// Which quadrant of the aim frame the motion is in, with hysteresis.
+    pub direction: MovementDirection,
+    /// The `W_Gait`-style scalar: `0` at a walk, `1` at a run, `2` at a sprint,
+    /// continuous between.
+    pub gait_scalar: f64,
+    /// Stride blend `[0, 1]` — how far the locomotion clip's stride is scaled.
+    pub stride_blend: f64,
+    /// Walk↔run blend `[0, 1]`.
+    pub walk_run_blend: f64,
+    /// Acceleration relative to the character's own facing, normalized against
+    /// the *current* curve-derived accel/braking maxima, `[-1, 1]` per axis.
+    pub relative_accel: Vec2d,
+    /// Lean inputs `[-1, 1]`: `x` left/right, `y` forward/back.
+    pub lean: Vec2d,
+}
+
+/// **The movement component** (P29.3) — the full tunable set §13's catalogue
+/// amendment asks for, the ALS curve-driven settings model, and the mode the
+/// fixed step integrates.
+///
+/// # What this replaces
+///
+/// [`CharacterController3D`] is three fields (`max_slope_deg`, `snap_to_ground`,
+/// `offset`) and stays exactly that: it describes the *mover*, and it is what
+/// `physics3d.move_and_slide` has always read. This describes the *character* —
+/// how fast it walks, how hard it accelerates, how much authority it has in the
+/// air, how tall it is when it crouches — and it is what the P29.3 fixed step
+/// integrates. Before it, an entity's movement tunables were those three
+/// numbers and every scrap of motion had to be computed by a Blueprint.
+///
+/// It is a **new component** rather than fields appended to
+/// `CharacterController3D`, and the reason is the bincode-positional law rather
+/// than taste: `CharacterController3D` appears inside eighteen frozen historical
+/// entity records, in two codec mirrors. Growing it means freezing a
+/// `CharacterController3DV22` copy into every one of those thirty-six places,
+/// because bincode reads a struct's fields positionally and `#[serde(default)]`
+/// buys nothing. Appending a whole component to the live record's tail is the
+/// cheap rung of the same ladder and leaves every historical record byte-for-byte
+/// untouched.
+///
+/// # Units, converted exactly once
+///
+/// SI throughout: metres, seconds, m/s, m/s², degrees only for angles. ALS's
+/// constants arrive in centimetres and are converted **here, at the port
+/// boundary**, in the defaults below — never at runtime. Each converted default
+/// names its ALS source so the conversion can be checked rather than trusted.
+///
+/// # The settings model
+///
+/// ALS selects one of six `FALSMovementSettings` blocks on
+/// `RotationMode × Stance` and then picks a *speed* inside it by gait. The shape
+/// is kept ([`crate::movement::settings_for`]) and the storage is flattened: the
+/// stance axis is the per-mode speeds (`crouch_speed_mps`, `prone_speed_mps`),
+/// the rotation-mode axis is a pair of scales, and the four curves are shared.
+/// That is a real reduction from ALS's 6 × (3 speeds + 2 curve assets) and it is
+/// stated rather than hidden: the shipped ALS data table points all six blocks
+/// at the same curve pair, so what is lost is the ability to give aiming a
+/// *different acceleration profile* — recoverable later as two more curve
+/// fields at this struct's tail, which is the cheap direction.
+#[derive(Component, Reflect, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[reflect(Component, Default)]
+pub struct CharacterMovement {
+    // ── state (authored initial value; the fixed step writes it back) ────────
+    /// What the character is doing. Authored as the spawn mode; the fixed step
+    /// owns it afterwards.
+    #[serde(default)]
+    pub mode: MovementMode,
+    /// The **requested** gait tier. The gait the body is in is
+    /// [`MovementRuntime::actual_gait`], which lags this during deceleration.
+    #[serde(default)]
+    pub gait: Gait,
+    /// How the body's yaw relates to the aim direction.
+    #[serde(default)]
+    pub rotation_mode: RotationMode,
+    /// The **overlay id** — an open, string-keyed name (`""` = default,
+    /// `"rifle"`, `"torch"`, `"injured"`, …), interned at runtime by
+    /// [`crate::movement::OverlayRegistry`].
+    ///
+    /// Ruling 4 is explicit that this is **not** a wire enum: ALS ships thirteen
+    /// overlay states and a studio must be able to add a fourteenth without an
+    /// engine schema bump. A `String` on the wire and a `u32` in the hot loop is
+    /// what "open interned id" means.
+    #[serde(default)]
+    pub overlay: String,
+    /// Whether this character reads the local player's intent
+    /// ([`crate::movement::apply_intent`]). An AI or a Blueprint writes the
+    /// runtime intent directly instead.
+    #[serde(default)]
+    pub player_controlled: bool,
+
+    // ── speeds, m/s ─────────────────────────────────────────────────────────
+    /// ALS `WalkSpeed` 165 cm/s.
+    #[serde(default = "default_walk_speed")]
+    pub walk_speed_mps: f64,
+    /// ALS `RunSpeed` 375 cm/s.
+    #[serde(default = "default_run_speed")]
+    pub run_speed_mps: f64,
+    /// ALS `SprintSpeed` 650 cm/s.
+    #[serde(default = "default_sprint_speed")]
+    pub sprint_speed_mps: f64,
+    /// Crouched locomotion speed.
+    #[serde(default = "default_crouch_speed")]
+    pub crouch_speed_mps: f64,
+    /// Prone crawl speed.
+    #[serde(default = "default_prone_speed")]
+    pub prone_speed_mps: f64,
+    /// Surface swim speed. Capped again by the P20 swim transform, which owns
+    /// the water's opinion.
+    #[serde(default = "default_swim_surface_speed")]
+    pub swim_surface_speed_mps: f64,
+    /// Submerged swim speed.
+    #[serde(default = "default_swim_under_speed")]
+    pub swim_under_speed_mps: f64,
+    /// Speed scale applied in [`RotationMode::LookingDirection`].
+    #[serde(default = "default_move_speed_scale")]
+    pub looking_speed_scale: f64,
+    /// Speed scale applied in [`RotationMode::Aiming`] — ALS aims slower.
+    #[serde(default = "default_aiming_speed_scale")]
+    pub aiming_speed_scale: f64,
+
+    // ── the four curves, keyed on normalized speed ───────────────────────────
+    /// Max acceleration, m/s² (ALS `MovementCurve.X`).
+    #[serde(default = "default_accel_curve")]
+    pub acceleration: SpeedCurve,
+    /// Max braking deceleration, m/s² (ALS `MovementCurve.Y`).
+    #[serde(default = "default_braking_curve")]
+    pub braking: SpeedCurve,
+    /// Ground friction, 1/s (ALS `MovementCurve.Z`).
+    #[serde(default = "default_friction_curve")]
+    pub ground_friction: SpeedCurve,
+    /// Body turn rate, degrees per second (ALS `RotationRateCurve`).
+    #[serde(default = "default_rotation_rate_curve")]
+    pub rotation_rate: SpeedCurve,
+
+    // ── air ─────────────────────────────────────────────────────────────────
+    /// Fraction of ground acceleration available in [`MovementMode::FallFree`].
+    #[serde(default = "default_air_control")]
+    pub air_control: f64,
+    /// Fraction available in [`MovementMode::FallControlled`] — the "controlled
+    /// fall" half of the catalogue row.
+    #[serde(default = "default_air_control_reduced")]
+    pub air_control_reduced: f64,
+    /// Hard ceiling on air acceleration, m/s², whatever the curve says.
+    #[serde(default = "default_air_accel_max")]
+    pub air_accel_max_mps2: f64,
+    /// Terminal velocity, m/s (positive magnitude).
+    #[serde(default = "default_terminal_velocity")]
+    pub terminal_velocity_mps: f64,
+    /// Gravity acting on this character, m/s² (positive magnitude, down). Kept
+    /// per-character rather than read from the physics world because the mover
+    /// is kinematic: the solver never applies gravity to it, so nothing else
+    /// would.
+    #[serde(default = "default_char_gravity")]
+    pub gravity_mps2: f64,
+    /// Take-off speed of a jump, m/s.
+    #[serde(default = "default_jump_speed")]
+    pub jump_speed_mps: f64,
+
+    // ── capsule ─────────────────────────────────────────────────────────────
+    /// Capsule half-height (the segment half-length, **excluding** the radius)
+    /// while standing.
+    #[serde(default = "default_stand_half_height")]
+    pub stand_half_height_m: f64,
+    /// Capsule half-height while crouched, sliding or rolling.
+    #[serde(default = "default_crouch_half_height")]
+    pub crouch_half_height_m: f64,
+    /// Capsule half-height while prone.
+    #[serde(default = "default_prone_half_height")]
+    pub prone_half_height_m: f64,
+
+    // ── mover ───────────────────────────────────────────────────────────────
+    /// **Autostep**: the tallest obstacle the character steps over, in metres.
+    /// Zero disables it.
+    ///
+    /// This field is the reason stairs work. rapier's autostep setter existed
+    /// from P9.1 and was **never called from production code**, so the default
+    /// (`None`) applied and a character walked into a step instead of up it.
+    #[serde(default = "default_step_height")]
+    pub step_height_m: f64,
+    /// Free space that must exist beyond a step for it to be taken, in metres.
+    #[serde(default = "default_step_min_width")]
+    pub step_min_width_m: f64,
+    /// The steepest slope the character can walk up, degrees.
+    #[serde(default = "default_slope_limit")]
+    pub slope_limit_deg: f64,
+    /// The slope at which the character starts sliding back down, degrees.
+    /// rapier's `min_slope_slide_angle`, likewise never called before P29.3.
+    #[serde(default = "default_slide_slope")]
+    pub slide_slope_deg: f64,
+
+    // ── sprint gate (ALS `CanSprint`) ───────────────────────────────────────
+    /// Minimum input magnitude for a sprint, `[0, 1]` (ALS 0.9).
+    #[serde(default = "default_sprint_input_min")]
+    pub sprint_input_min: f64,
+    /// In [`RotationMode::LookingDirection`], how far off the aim direction the
+    /// input may point and still sprint, degrees (ALS 50).
+    #[serde(default = "default_sprint_angle")]
+    pub sprint_angle_deg: f64,
+
+    // ── slide ───────────────────────────────────────────────────────────────
+    /// Minimum speed to enter a slide, m/s.
+    #[serde(default = "default_slide_entry_speed")]
+    pub slide_entry_speed_mps: f64,
+    /// Speed at which a slide ends, m/s.
+    #[serde(default = "default_slide_exit_speed")]
+    pub slide_exit_speed_mps: f64,
+    /// Slide friction on level ground, 1/s.
+    #[serde(default = "default_slide_friction_flat")]
+    pub slide_friction_flat: f64,
+    /// Slide friction at [`slope_limit_deg`](Self::slope_limit_deg), 1/s.
+    /// Interpolated against the measured slope, which is the "friction-versus-
+    /// slope curve" the catalogue's slide row names: downhill keeps you sliding,
+    /// flat ground stops you.
+    #[serde(default = "default_slide_friction_slope")]
+    pub slide_friction_slope: f64,
+
+    // ── roll / dive ─────────────────────────────────────────────────────────
+    /// Forward speed a roll carries, m/s.
+    #[serde(default = "default_roll_speed")]
+    pub roll_speed_mps: f64,
+    /// Seconds a roll lasts before returning to crouch.
+    #[serde(default = "default_roll_time")]
+    pub roll_time_s: f64,
+    /// Forward speed a dive launches with, m/s.
+    #[serde(default = "default_dive_speed")]
+    pub dive_speed_mps: f64,
+    /// Upward speed a dive launches with, m/s.
+    #[serde(default = "default_dive_up_speed")]
+    pub dive_up_speed_mps: f64,
+
+    // ── landing (ALS `EventOnLanded`) ───────────────────────────────────────
+    /// Impact speed past which a landing is hard, m/s (ALS 700 cm/s).
+    #[serde(default = "default_land_hard")]
+    pub land_hard_mps: f64,
+    /// Impact speed past which a landing would ragdoll, m/s (ALS 1000 cm/s).
+    #[serde(default = "default_land_ragdoll")]
+    pub land_ragdoll_mps: f64,
+    /// Braking-friction multiplier for [`land_friction_time_s`](Self::land_friction_time_s)
+    /// after a hard landing **with** movement input — ALS 0.5, i.e. a slide.
+    #[serde(default = "default_brake_friction_input")]
+    pub brake_friction_input: f64,
+    /// The same **without** input — ALS 3.0, i.e. a plant.
+    #[serde(default = "default_brake_friction_idle")]
+    pub brake_friction_idle: f64,
+    /// How long the landing friction override lasts, seconds (ALS 0.5).
+    #[serde(default = "default_land_friction_time")]
+    pub land_friction_time_s: f64,
+
+    /// Live state — transient, never serialized or reflected. See
+    /// [`MovementRuntime`].
+    #[serde(skip)]
+    #[reflect(ignore)]
+    pub runtime: MovementRuntime,
+}
+
+// ── defaults, with the ALS constant each was converted from ─────────────────
+//
+// IM-1, discharged in one place: every ALS distance is centimetres and every
+// speed centimetres per second. The conversion happens HERE and nowhere else, so
+// there is no cm value anywhere in the runtime to be divided twice.
+
+fn default_walk_speed() -> f64 {
+    1.65 // ALS WalkSpeed 165 cm/s
+}
+fn default_run_speed() -> f64 {
+    3.75 // ALS RunSpeed 375 cm/s
+}
+fn default_sprint_speed() -> f64 {
+    6.5 // ALS SprintSpeed 650 cm/s
+}
+fn default_crouch_speed() -> f64 {
+    1.5 // ALS AnimatedCrouchSpeed 150 cm/s
+}
+fn default_prone_speed() -> f64 {
+    0.7 // no ALS precedent: prone is one of the seven catalogue rows ALS lacks
+}
+fn default_swim_surface_speed() -> f64 {
+    2.0
+}
+fn default_swim_under_speed() -> f64 {
+    1.6
+}
+fn default_move_speed_scale() -> f64 {
+    1.0
+}
+fn default_aiming_speed_scale() -> f64 {
+    0.65
+}
+fn default_accel_curve() -> SpeedCurve {
+    // ALS NormalMovement.X: brisk from a stop, softer at speed.
+    SpeedCurve::new(8.0, 8.0, 6.0, 4.0)
+}
+fn default_braking_curve() -> SpeedCurve {
+    SpeedCurve::new(20.0, 20.0, 8.0, 5.0)
+}
+fn default_friction_curve() -> SpeedCurve {
+    SpeedCurve::new(6.0, 6.0, 3.0, 1.0)
+}
+fn default_rotation_rate_curve() -> SpeedCurve {
+    SpeedCurve::new(360.0, 360.0, 500.0, 700.0)
+}
+fn default_air_control() -> f64 {
+    0.35
+}
+fn default_air_control_reduced() -> f64 {
+    0.12
+}
+fn default_air_accel_max() -> f64 {
+    12.0
+}
+fn default_terminal_velocity() -> f64 {
+    53.0 // the human terminal velocity, belly-to-earth
+}
+fn default_char_gravity() -> f64 {
+    9.81
+}
+fn default_jump_speed() -> f64 {
+    4.5 // ALS JumpZVelocity 450 cm/s
+}
+fn default_stand_half_height() -> f64 {
+    0.6 // a 1.8 m capsule with a 0.3 m radius
+}
+fn default_crouch_half_height() -> f64 {
+    0.3
+}
+fn default_prone_half_height() -> f64 {
+    0.05
+}
+fn default_step_height() -> f64 {
+    0.45 // UE's MaxStepHeight 45 cm, which is what ALS gets stairs from
+}
+fn default_step_min_width() -> f64 {
+    0.15
+}
+fn default_slope_limit() -> f64 {
+    45.0
+}
+fn default_slide_slope() -> f64 {
+    50.0
+}
+fn default_sprint_input_min() -> f64 {
+    0.9 // ALS CanSprint
+}
+fn default_sprint_angle() -> f64 {
+    50.0 // ALS CanSprint, LookingDirection branch
+}
+fn default_slide_entry_speed() -> f64 {
+    4.0
+}
+fn default_slide_exit_speed() -> f64 {
+    1.5
+}
+fn default_slide_friction_flat() -> f64 {
+    3.5
+}
+fn default_slide_friction_slope() -> f64 {
+    0.3
+}
+fn default_roll_speed() -> f64 {
+    4.0
+}
+fn default_roll_time() -> f64 {
+    0.75
+}
+fn default_dive_speed() -> f64 {
+    5.5
+}
+fn default_dive_up_speed() -> f64 {
+    2.5
+}
+fn default_land_hard() -> f64 {
+    7.0 // ALS BreakfallOnLandVelocity 700 cm/s
+}
+fn default_land_ragdoll() -> f64 {
+    10.0 // ALS RagdollOnLandVelocity 1000 cm/s
+}
+fn default_brake_friction_input() -> f64 {
+    0.5 // ALS EventOnLanded, with input
+}
+fn default_brake_friction_idle() -> f64 {
+    3.0 // ALS EventOnLanded, without input
+}
+fn default_land_friction_time() -> f64 {
+    0.5 // ALS OnLandFrictionReset timer
+}
+
+impl Default for CharacterMovement {
+    fn default() -> Self {
+        Self {
+            mode: MovementMode::default(),
+            gait: Gait::default(),
+            rotation_mode: RotationMode::default(),
+            overlay: String::new(),
+            player_controlled: false,
+            walk_speed_mps: default_walk_speed(),
+            run_speed_mps: default_run_speed(),
+            sprint_speed_mps: default_sprint_speed(),
+            crouch_speed_mps: default_crouch_speed(),
+            prone_speed_mps: default_prone_speed(),
+            swim_surface_speed_mps: default_swim_surface_speed(),
+            swim_under_speed_mps: default_swim_under_speed(),
+            looking_speed_scale: default_move_speed_scale(),
+            aiming_speed_scale: default_aiming_speed_scale(),
+            acceleration: default_accel_curve(),
+            braking: default_braking_curve(),
+            ground_friction: default_friction_curve(),
+            rotation_rate: default_rotation_rate_curve(),
+            air_control: default_air_control(),
+            air_control_reduced: default_air_control_reduced(),
+            air_accel_max_mps2: default_air_accel_max(),
+            terminal_velocity_mps: default_terminal_velocity(),
+            gravity_mps2: default_char_gravity(),
+            jump_speed_mps: default_jump_speed(),
+            stand_half_height_m: default_stand_half_height(),
+            crouch_half_height_m: default_crouch_half_height(),
+            prone_half_height_m: default_prone_half_height(),
+            step_height_m: default_step_height(),
+            step_min_width_m: default_step_min_width(),
+            slope_limit_deg: default_slope_limit(),
+            slide_slope_deg: default_slide_slope(),
+            sprint_input_min: default_sprint_input_min(),
+            sprint_angle_deg: default_sprint_angle(),
+            slide_entry_speed_mps: default_slide_entry_speed(),
+            slide_exit_speed_mps: default_slide_exit_speed(),
+            slide_friction_flat: default_slide_friction_flat(),
+            slide_friction_slope: default_slide_friction_slope(),
+            roll_speed_mps: default_roll_speed(),
+            roll_time_s: default_roll_time(),
+            dive_speed_mps: default_dive_speed(),
+            dive_up_speed_mps: default_dive_up_speed(),
+            land_hard_mps: default_land_hard(),
+            land_ragdoll_mps: default_land_ragdoll(),
+            brake_friction_input: default_brake_friction_input(),
+            brake_friction_idle: default_brake_friction_idle(),
+            land_friction_time_s: default_land_friction_time(),
+            runtime: MovementRuntime::default(),
+        }
+    }
+}
+
+impl CharacterMovement {
+    /// The capsule half-height this mode wants, metres.
+    pub fn half_height_for(&self, mode: MovementMode) -> f64 {
+        match mode {
+            MovementMode::Crouch | MovementMode::Slide | MovementMode::Roll => {
+                self.crouch_half_height_m
+            }
+            MovementMode::Prone | MovementMode::Dive => self.prone_half_height_m,
+            _ => self.stand_half_height_m,
+        }
+    }
+
+    /// The target speed for a mode and gait, m/s, **before** the rotation-mode
+    /// scale. ALS's `GetSpeedForGait` with the stance axis folded into the mode.
+    pub fn speed_for(&self, mode: MovementMode, gait: Gait) -> f64 {
+        match mode {
+            MovementMode::Crouch | MovementMode::Slide | MovementMode::Roll => {
+                self.crouch_speed_mps
+            }
+            MovementMode::Prone => self.prone_speed_mps,
+            MovementMode::SwimSurface => self.swim_surface_speed_mps,
+            MovementMode::SwimUnder => self.swim_under_speed_mps,
+            _ => match gait {
+                Gait::Walk => self.walk_speed_mps,
+                Gait::Sprint => self.sprint_speed_mps,
+                // A reserved gait a newer build wrote reads as the safe middle
+                // tier rather than as zero, which would freeze the character.
+                _ => self.run_speed_mps,
+            },
+        }
+    }
+
+    /// The rotation-mode speed scale (the second half of ALS's two-level
+    /// settings dispatch).
+    pub fn rotation_speed_scale(&self) -> f64 {
+        match self.rotation_mode {
+            RotationMode::VelocityDirection => 1.0,
+            RotationMode::LookingDirection => self.looking_speed_scale,
+            RotationMode::Aiming => self.aiming_speed_scale,
+            _ => 1.0,
+        }
+    }
+}
+
 // ── Joints (P12.1) ──────────────────────────────────────────────────────────
 //
 // A `Joint2D`/`Joint3D` links its entity's body to ANOTHER entity's body,
@@ -5001,6 +5894,102 @@ mod tests {
     }
 
     #[test]
+    fn character_movement_serde_round_trips_and_leaves_the_runtime_behind() {
+        let mut cm = CharacterMovement {
+            mode: MovementMode::Crouch,
+            gait: Gait::Sprint,
+            rotation_mode: RotationMode::Aiming,
+            overlay: "rifle".into(),
+            player_controlled: true,
+            walk_speed_mps: 1.1,
+            acceleration: SpeedCurve::new(1.0, 2.0, 3.0, 4.0),
+            ..Default::default()
+        };
+        // A dirtied runtime must not reach the wire: it is derived state, and a
+        // saved level that carried one step's velocity would replay differently
+        // on load. (`AnimStateMachine::runtime` is the precedent.)
+        cm.runtime.velocity = Vec3d::new(1.0, 2.0, 3.0);
+        cm.runtime.refusals = 9;
+
+        let json = serde_json::to_string(&cm).unwrap();
+        assert!(
+            !json.contains("\"runtime\"") && !json.contains("aim_yaw_rate_dps"),
+            "the live runtime is `#[serde(skip)]`: {json}"
+        );
+        let back: CharacterMovement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mode, MovementMode::Crouch);
+        assert_eq!(back.gait, Gait::Sprint);
+        assert_eq!(back.rotation_mode, RotationMode::Aiming);
+        assert_eq!(back.overlay, "rifle");
+        assert!(back.player_controlled);
+        assert_eq!(back.walk_speed_mps, 1.1);
+        assert_eq!(back.acceleration, SpeedCurve::new(1.0, 2.0, 3.0, 4.0));
+        assert_eq!(back.runtime, MovementRuntime::default());
+
+        let d: CharacterMovement = serde_json::from_str("{}").unwrap();
+        assert_eq!(d, CharacterMovement::default());
+        // The ALS constants, converted ONCE at the port boundary (IM-1). These
+        // four are the ones a later reader is most likely to want to check
+        // against the source: 165/375/650 cm/s and the two landing thresholds.
+        assert_eq!(d.walk_speed_mps, 1.65);
+        assert_eq!(d.run_speed_mps, 3.75);
+        assert_eq!(d.sprint_speed_mps, 6.5);
+        assert_eq!(d.land_hard_mps, 7.0);
+        assert_eq!(d.land_ragdoll_mps, 10.0);
+        // And the field that makes stairs work is non-zero by default, because a
+        // step height of zero is exactly the state this wave found the engine in.
+        assert!(d.step_height_m > 0.0, "autostep is on by default");
+    }
+
+    /// A reserved slot no reader ever asks about is a comment rather than a
+    /// slot. Both directions on all three enums that carry them, so the
+    /// accessors cannot answer `Some` for everything.
+    #[test]
+    fn the_movement_reserved_slots_are_reachable_and_named() {
+        assert_eq!(MovementMode::Reserved14.reserved_slot(), Some(14));
+        assert_eq!(MovementMode::Reserved17.reserved_slot(), Some(17));
+        assert_eq!(MovementMode::Grounded.reserved_slot(), None);
+        assert_eq!(MovementMode::Flying.reserved_slot(), None);
+        assert_eq!(Gait::Reserved3.reserved_slot(), Some(3));
+        assert_eq!(Gait::Run.reserved_slot(), None);
+        assert_eq!(RotationMode::Reserved4.reserved_slot(), Some(4));
+        assert_eq!(RotationMode::Aiming.reserved_slot(), None);
+
+        // The four modes whose mechanics belong to later sub-phases are deferred
+        // together with the reserved slots, because entering either is the same
+        // typed refusal.
+        for m in [
+            MovementMode::Mantle,
+            MovementMode::Ragdoll,
+            MovementMode::Driving,
+            MovementMode::Flying,
+            MovementMode::Reserved16,
+        ] {
+            assert!(m.is_deferred(), "{m:?}");
+        }
+        for m in [
+            MovementMode::Grounded,
+            MovementMode::Crouch,
+            MovementMode::Prone,
+            MovementMode::Slide,
+            MovementMode::Roll,
+            MovementMode::Dive,
+            MovementMode::FallFree,
+            MovementMode::FallControlled,
+            MovementMode::SwimSurface,
+            MovementMode::SwimUnder,
+        ] {
+            assert!(!m.is_deferred(), "{m:?} is this wave's own");
+        }
+        // The three families, asserted rather than described.
+        assert!(MovementMode::Slide.is_grounded_family());
+        assert!(!MovementMode::FallFree.is_grounded_family());
+        assert!(MovementMode::Dive.is_falling());
+        assert!(MovementMode::SwimUnder.is_swimming());
+        assert!(!MovementMode::SwimUnder.is_falling());
+    }
+
+    #[test]
     fn joint_3d_serde_round_trips_including_entity_ref() {
         // GUARD (v6 persistence gap): `Joint3D` round-trips through serde — the
         // `other` entity ref (now an `EntityRef`, serde-transparent) IS
@@ -5637,6 +6626,42 @@ mod tests {
             WeatherPreset::Fog, WeatherPreset::Snow,
         ]);
         pin!(WaterKind => [WaterKind::Ocean, WaterKind::Lake, WaterKind::River]);
+        // ── P29.3, the movement catalogue ──
+        //
+        // `MovementMode` is frozen on the day it is born (the 2026-08-15
+        // catalogue amendment says so in as many words) with four reserved
+        // slots, because the scene bumps once this phase and a mode arriving in
+        // P29.4 or P29.7 without a slot would need a second bump.
+        pin!(MovementMode => [
+            MovementMode::Grounded, MovementMode::Crouch, MovementMode::Prone,
+            MovementMode::Slide, MovementMode::Roll, MovementMode::Dive,
+            MovementMode::FallFree, MovementMode::FallControlled,
+            MovementMode::SwimSurface, MovementMode::SwimUnder,
+            MovementMode::Mantle, MovementMode::Ragdoll,
+            MovementMode::Driving, MovementMode::Flying,
+            MovementMode::Reserved14, MovementMode::Reserved15,
+            MovementMode::Reserved16, MovementMode::Reserved17,
+        ]);
+        pin!(Gait => [
+            Gait::Walk, Gait::Run, Gait::Sprint, Gait::Reserved3, Gait::Reserved4,
+        ]);
+        pin!(RotationMode => [
+            RotationMode::VelocityDirection, RotationMode::LookingDirection,
+            RotationMode::Aiming, RotationMode::Reserved3, RotationMode::Reserved4,
+        ]);
+        pin!(MovementDirection => [
+            MovementDirection::Forward, MovementDirection::Right,
+            MovementDirection::Left, MovementDirection::Backward,
+        ]);
+        pin!(LandingKind => [
+            LandingKind::None, LandingKind::Soft, LandingKind::Hard,
+            LandingKind::Roll, LandingKind::Ragdoll,
+        ]);
+        pin!(MovementRefusal => [
+            MovementRefusal::None, MovementRefusal::NoOverheadClearance,
+            MovementRefusal::ModeNotYetImplemented, MovementRefusal::IllegalTransition,
+            MovementRefusal::ConditionNotMet,
+        ]);
 
         // The counts are part of the pin. **They count TABLE ROWS, not enums in
         // the module** (round-2 finding R2.D) — so a nineteenth enum added to
@@ -5645,8 +6670,8 @@ mod tests {
         // `the_freeze_table_covers_every_wire_enum_in_this_module` below is the
         // census that closes it; these two stay because they are what makes an
         // edit to an EXISTING row deliberate.
-        assert_eq!(enums, 18, "a scene wire enum joined or left the table");
-        assert_eq!(pinned, 59, "a variant joined or left without a decision");
+        assert_eq!(enums, 24, "a scene wire enum joined or left the table");
+        assert_eq!(pinned, 101, "a variant joined or left without a decision");
         assert_eq!(
             enums,
             FROZEN_ENUMS.len(),
@@ -5680,6 +6705,13 @@ mod tests {
         "SplineInterp",
         "WeatherPreset",
         "WaterKind",
+        // ── P29.3 ──
+        "MovementMode",
+        "Gait",
+        "RotationMode",
+        "MovementDirection",
+        "LandingKind",
+        "MovementRefusal",
     ];
 
     /// **Round-2 finding R2.D: the count guard counted the wrong thing.**
@@ -5724,7 +6756,7 @@ mod tests {
         }
 
         assert!(
-            on_the_wire.len() >= 18,
+            on_the_wire.len() >= 24,
             "the census found only {} serializable enums in components.rs — it is not reading what it thinks it is, and a census that finds nothing covers everything",
             on_the_wire.len()
         );

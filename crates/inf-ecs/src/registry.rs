@@ -14,13 +14,14 @@ use bevy_reflect::{TypePath, TypeRegistry};
 use crate::components::{
     AlwaysLoaded, AnimPlayer, AnimStateMachine, AtlasRect, AudioListener, AudioSource,
     BillboardMode, BlendMode, BodyKind2D, BodyKind3D, Buoyancy, Camera, CharacterController2D,
-    CharacterController3D, ClothSim, Collider2D, Collider3D, ColliderShape2DKind,
-    ColliderShape3DKind, CombineRule, Decal, Destructible, DistanceModel, Foliage,
-    FoliagePaletteEntry, HairGuides, IkGoalRecord, IkTarget, Joint2D, Joint3D, JointKind2D,
-    JointKind3D, Light, Light2D, LightKind, Material, MeshRef, Name, NineSlice, PcgVolume,
-    Primitive, RigidBody2D, RigidBody3D, SkeletalMesh, SkyAtmosphere, Spline, SplineInterp, Sprite,
-    StreamingSource, Terrain, Text2D, TextAlign, Tilemap, TimeOfDay, Transform, Visibility, Volume,
-    VolumeKind, VoxelVolume, WaterBody, WaterKind, WeatherPreset,
+    CharacterController3D, CharacterMovement, ClothSim, Collider2D, Collider3D,
+    ColliderShape2DKind, ColliderShape3DKind, CombineRule, Decal, Destructible, DistanceModel,
+    Foliage, FoliagePaletteEntry, Gait, HairGuides, IkGoalRecord, IkTarget, Joint2D, Joint3D,
+    JointKind2D, JointKind3D, LandingKind, Light, Light2D, LightKind, Material, MeshRef,
+    MovementDirection, MovementMode, MovementRefusal, Name, NineSlice, PcgVolume, Primitive,
+    RigidBody2D, RigidBody3D, RotationMode, SkeletalMesh, SkyAtmosphere, SpeedCurve, Spline,
+    SplineInterp, Sprite, StreamingSource, Terrain, Text2D, TextAlign, Tilemap, TimeOfDay,
+    Transform, Visibility, Volume, VolumeKind, VoxelVolume, WaterBody, WaterKind, WeatherPreset,
 };
 use crate::math::{Color, Vec2d, Vec3d};
 
@@ -93,6 +94,18 @@ impl ComponentRegistry {
         // P17.4 — `SkyAtmosphere::weather_target`. Registered as a value type so
         // the Details grid surfaces it as the preset dropdown it is.
         types.register::<WeatherPreset>();
+        // P29.3 — the movement component's nested value types. `SpeedCurve` is a
+        // four-scalar struct the Details walker's Struct arm descends into; the
+        // five enums are dropdowns. Registered here for the same reason
+        // `WeatherPreset` is: a nested type the walker meets and cannot resolve
+        // renders as nothing at all.
+        types.register::<MovementMode>();
+        types.register::<Gait>();
+        types.register::<RotationMode>();
+        types.register::<MovementDirection>();
+        types.register::<LandingKind>();
+        types.register::<MovementRefusal>();
+        types.register::<SpeedCurve>();
         // Opaque entity reference (E-P1) — joint `other` fields; surfaced by the
         // Details walker as an entity-picker widget.
         types.register::<crate::refs::EntityRef>();
@@ -171,6 +184,13 @@ impl ComponentRegistry {
             RigidBody3D => "Rigid Body 3D",
             Collider3D => "Collider 3D",
             CharacterController3D => "Character Controller 3D",
+            // P29.3 — the movement component v2. Directly after the mover it
+            // drives, because they are two halves of one character: the
+            // controller describes the SWEEP (skin width, ground snap, the slope
+            // rapier will climb) and this describes the CHARACTER (how fast it
+            // walks, how hard it stops, how tall it is when it crouches, what it
+            // is doing). The fixed step reads both.
+            CharacterMovement => "Character Movement",
             Joint2D => "Joint 2D",
             Joint3D => "Joint 3D",
             AudioSource => "Audio Source",
@@ -271,7 +291,7 @@ mod tests {
         let reg = ComponentRegistry::new();
         // 36 through P20.2, + `VoxelVolume` at P21.1, + `Destructible` at P22.2,
         // + the three character components at P24.3.
-        assert_eq!(reg.editable().len(), 41);
+        assert_eq!(reg.editable().len(), 42);
         // Every editable component resolves a ReflectComponent handle.
         for info in reg.editable() {
             assert!(
