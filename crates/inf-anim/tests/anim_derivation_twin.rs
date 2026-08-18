@@ -1,8 +1,9 @@
 //! **Two processes derive the same clip into the same bytes** (P29.5, pillar S2).
 //!
 //! Derivation writes into a committed `.inf_anim`: the root-motion track, the
-//! distance track, the foot-plant markers, the footstep notifies and five curve
-//! channels. Those bytes go into a project, into a cook, into a pack, and into
+//! distance track, the foot-plant markers, the footstep notifies and a curve
+//! channel per foot plus two for the clip (six on a biped). Those bytes go into
+//! a project, into a cook, into a pack, and into
 //! every determinism gate downstream — and each of those gates compares one
 //! machine's answer with *its own*. So a derivation that depended on anything
 //! per-process would put two different clip files in two developers' checkouts
@@ -108,7 +109,7 @@ fn a_second_process_derives_the_same_clip_into_the_same_bytes() {
     assert!(
         mine.len() > 4096,
         "the derived clip encodes to {} hex chars — too small to be a walk cycle \
-         with a root-motion track, a distance track, markers and five channels",
+         with a root-motion track, a distance track, markers and six channels",
         mine.len()
     );
 

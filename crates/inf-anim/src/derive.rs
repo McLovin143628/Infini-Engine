@@ -1134,7 +1134,7 @@ mod tests {
             &mut clip,
             0,
             vec![0.0, 1.0],
-            vec![q(0.0), q(std::f64::consts::FRAC_PI_4 as f64)],
+            vec![q(0.0), q(std::f64::consts::FRAC_PI_4)],
         );
         clip.duration = 1.0;
 

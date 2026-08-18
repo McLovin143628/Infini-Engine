@@ -22,8 +22,8 @@
 //!    mid-step — but nothing said so, and nothing would have failed if that
 //!    changed. A tuned run has to remain a deterministic sequence of fixed
 //!    steps or the whole S5 replay claim leaks. Tunes are therefore **queued**
-//!    and drained at the top of [`SimSession::fixed_step`], before anything
-//!    reads anything.
+//!    ([`crate::simulate::SimSession::tune`]) and drained at the top of the
+//!    session's own fixed step, before anything reads anything.
 //! 2. **Nothing survived Stop.** `SimSession::exit` restores the snapshot, which
 //!    is right for a *run* and wrong for a *tune*: an author who spent a minute
 //!    finding the right sprint speed lost it by pressing the button that ends

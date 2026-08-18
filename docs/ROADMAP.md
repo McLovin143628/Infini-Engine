@@ -17493,6 +17493,259 @@ shows a one-line authoring change as a one-line diff.
 > for every live character, so it can only go stale for one the movement step stops
 > visiting.
 
+> **STATUS: P29.5 COMPLETE** (2026-08-18) — **local gates green; NOT PUSHED.**
+> Battery **278 binaries / 5 108 passed / 0 failed / 10 ignored** against the
+> P29.4 audit's 275 / 5 060 / 0 / 9 — three binaries added
+> (`anim_derivation_twin`, `live_tuning`, `player_has_no_tuning_door`), 48 arms,
+> and one more ignored (the twin's subprocess probe, which its parent runs by
+> name). `clippy -D warnings` over the whole workspace and `cargo fmt --check`
+> clean; `cargo doc --no-deps` reports **11 / 30 / 4 / 73 / 1** warnings over
+> `inf-anim` / `inf-ecs` / `inf-physics` / `inf-editor-core` / `inf-studio`, and
+> **not one of them is at a site this wave wrote** — checked line by line rather
+> than counted, and the one that *was* (a `tuning.rs` link to a private method) is
+> fixed rather than tallied. The frontend is
+> **609 tests across 65 files** against 583 / 62 (+26 arms, +3 files);
+> `tsc --noEmit` and eslint clean. Goldens stay **54** — nothing here draws a
+> pixel. **No schema moves**: `.inf_anim` v2, `.inf_sm` v2, scene v23 and
+> `ScenePayload` v9 all stand, which is what P29.2 reserved those fields for and
+> this is the wave that writes them.
+>
+> **What landed, one line each.** Import-time derivation (`inf_anim::derive`) —
+> a root-motion track whose residual is removed so the clip plays in place, a
+> distance track, foot-plant sync markers and footstep notifies found from the
+> feet's own height, and six curve channels; applied at the glTF import door and
+> re-runnable from the panel. Proposed state graphs (`inf_anim::propose`) — a
+> clip set clustered by what the derivation measured, written as a normal
+> text-diffable machine with its reasoning beside it. The `.inf_sm` **v2
+> authoring UI**, including the condition rule builder §13 names by name. Live
+> tuning during Simulate through one queued door, with the shipped player proved
+> not to have it. The **traversal arc**, which closes P29.4's mantle-clock
+> remainder. The `preview_character` warm path (§13's F5). And three more of
+> P29.4's named remainders: blend-space notifies, the pelvis IK offset applied,
+> and the derivation twin.
+>
+> **The seven AnimModifiers, one row each** — §13's S2 promise, discharged
+> against the thing itself. The stock sample's modifier folder was counted on
+> disk (`Content/Characters/UEFN_Mannequin/Blueprints/AnimModifiers/`): **seven**
+> files, which is §13's seven, and each one's curve name was read out of its
+> `.uasset` name table rather than assumed.
+>
+> | Epic's, run by hand over 891 clips | What it bakes | Ours |
+> |---|---|---|
+> | `AM_MoveData_Speed` | `MoveData_Speed` — a `MotionExtractor` in `TranslationSpeed` mode | **derived**, byte-exact name, off the baked distance track's own slope |
+> | `AM_FootSpeed_L` | `FootSpeed_L` — `TranslationSpeed` on `ball_l` | **derived** per foot, from the rig's own foot joints |
+> | `AM_FootSpeed_R` | `FootSpeed_R` — the same on `ball_r` | **derived**, same pass |
+> | `AM_BakePhaseCurveFromFootstepNotifies` | phase curves from the **hand-placed** `Footstep Left` / `Footstep Right` notify tracks | **superseded** — we derive the *notifies themselves* from foot height, and the phase is the sync group's own segment phase at runtime, so no curve is baked. Epic's cannot run until a human has placed the notifies; ours needs nothing |
+> | `AM_OrientationWarpingAlpha` | `Enable_OrientationWarping`, from the root-motion translation angle | **superseded** (Ruling 1) — orientation warping reads the baked `RootMotionTrack.yaw_rad` and rescales it against the runtime target, so there is no authored alpha left to bake |
+> | `AM_RateWarpingAlpha` | `Enable_PlayRateWarping` | **superseded in principle, carried in fact** — `play_rate_for` over a derived `DistanceTrack` is the mechanism, and this wave gave it its *input* on every imported clip without giving it a runtime caller |
+> | `AM_DistanceFromLedge` | `Distance_From_Ledge` | **derived under another name** — the distance track answers "how far has the root travelled", which is "how far is left" read from the other end. An honest **CANNOT** on the name: the modifier's extraction settings live inside a binary `.uasset` this reading did not decode, so a clip imported from that project keeps Epic's channel and ours sits beside it |
+>
+> **The measurements this batch owed.**
+>
+> (1) **An in-place cycle says how fast it is** — and the check is a *second
+> opinion*, not a tolerance. Derivation first measured travel, and every clip this
+> engine can generate travels nothing, so a whole wizard set clustered as one
+> idle. The answer is the definition of gait speed, which does not care whether
+> anything moved: `stride × cadence`, where the stride is a foot's own planar
+> excursion in the residual-removed clip and the cadence is how often that foot is
+> planted. `LocomotionSet::walk_speed_m_s` is the generator's own number, computed
+> from the leg geometry it authored the clip with (`2 L sin θ × cadence`); the
+> derivation never sees any of it. Measured on the default biped: the walk reads
+> **0.651 m/s** against a depicted **0.625** (4.1% apart, stride 0.723 m over a
+> 1.111 s cycle, stance 0.490 s), the run **1.644** against **1.711** (3.9%,
+> stride 1.027 m over 0.625 s, stance 0.099 s), and the idle reads zero because
+> its feet never leave the floor. The residue is the knee: `mean_leg_m` is the
+> straight hip-to-foot distance and the animated leg flexes, so the excursion is
+> not exactly `2 L sin θ`. The bound is 8%, twice the measurement.
+>
+> **The first attempt read the mean ground speed during each contact window and
+> over-read by 2.1×**, and the reason is a fact about the content rather than
+> about the measure: the generated legs are a *pendulum*, so a window at the
+> bottom of the arc selects exactly the fastest part of it. A planted foot is
+> stationary and these are not. That is why the shipped estimator is an excursion
+> and not a speed — and why both numbers are reported, since their disagreement on
+> a root-motion clip is foot slide the animator authored and no runtime lock can
+> put it back.
+>
+> (2) **The mantle now warps a clip's arc**, measured against the ease it used to
+> be. A quarter of the way up a 1 m ledge, a front-loaded traversal clip puts the
+> feet above **0.6 m** where the unbound smoothstep control has them under
+> **0.35 m** — and both land on the ledge to the millimetre, which is exactly why
+> the endpoint alone could never have separated them. That is P29.4's "the
+> progress is a clock" remainder closed at the **world** level: its ledger said
+> only a unit arm could kill the plain-lerp mutation, and now
+> `a_bound_traversal_clip_makes_the_mantle_follow_the_clips_arc` does.
+>
+> (3) **The wizard preview, warm** — §13's F5 item, per preview, MIN of three
+> rounds on this machine: an **18 432-triangle** model **56.95 ms → 17.59 ms**, a
+> 4 608-triangle one **25.96 → 16.06**, and the default mannequin path
+> **13.9 µs → 3.2 µs**. The warm number is nearly flat as the model grows because
+> what is left is the fit itself, which is the one thing a proportion drag has to
+> redo. The committed arm is **counters, not a clock**: twenty proportion drags
+> build one BVH, forty build one, an identical re-preview builds nothing — and the
+> control, a fresh session per preview (which is what the panel did), builds
+> twenty.
+>
+> **Derivation is a pure function, and it is twinned.** Its bytes go into a
+> project, a cook, a pack and every determinism gate downstream, and each of those
+> gates compares one machine's answer with *its own* — so a derivation that
+> depended on per-process state would put two different `.inf_anim` files in two
+> developers' checkouts and every gate would go on passing.
+> `anim_derivation_twin` spawns a second process in two halves: the whole
+> generate-and-derive chain over there, and the derivation alone over bytes this
+> process produced, so a failure names which half. `derive.rs` and `propose.rs`
+> join `portable_pose.rs`'s ban list and are the strongest entries on it —
+> everything else there decides a pose at runtime, and these two decide what is in
+> the file.
+>
+> **A re-derive is idempotent, and it needs a rule to be.** Derivation *removes*
+> the root residual, so a naive re-run would extract a track of zero and overwrite
+> the real one. `derive_clip` therefore un-bakes before it bakes:
+> `unbake_root_motion` is the exact inverse of the removal, so
+> `derive(derive(c)) == derive(c)` byte for byte — which is what makes it safe to
+> put on a button at all.
+>
+> **The vertical is the one thing a clip cannot answer for itself**, and it is an
+> **advisory** rather than a guess (the P16 rule). A rig's root joint is whichever
+> joint has no parent, and on a rig `inf_anim::template` authors that joint is
+> `hips`, which *bobs* — so a walk cycle's vertical is oscillation and a mantle's
+> is travel, and no amount of looking at the curve tells them apart.
+> `VerticalPolicy::NetDrift` is the default (the track carries the straight ramp
+> from first frame to last; every oscillation stays in the pose), a clip that rises
+> more than **25 cm** earns an import advisory naming the traversal preset, and the
+> panel offers both buttons.
+>
+> **The proposal explains itself.** `Proposal::notes` is one line per decision with
+> the numbers it came from — "`walk` ↔ `run` at 2.60 m/s, the midpoint of 1.60 and
+> 3.60, so each state is used where its own stride is the closer match" — rendered
+> beside the canvas and deliberately **not** stored in the asset, because a note is
+> a fact about the proposal and not about the machine. The arm is the one the brief
+> asks for: a proposal **validates** (`StateMachine::validate`, after a full round
+> trip through the wire DTO, with the blend space, the any-state edge, the declared
+> trigger and the exit time all still on it) and **runs** a fixed-step smoke that
+> visits every gait state it proposed. Not that it is good; nobody can assert that.
+>
+> **`W_Gait` is a tier and not a speed**, and that coupling was silent. Reading a
+> clip's depicted speed back off the wire means inverting the gait scale, which
+> needs the same three ladder numbers the derivation wrote it against — so
+> `facts_of` takes them rather than reaching for a default. It also explains a
+> reading that looks wrong and is not: the wizard's default biped walks at 0.65 m/s,
+> which on ALS's own ladder (walk at 1.65) tiers as an **idle**. That is the correct
+> reading of a slow shuffle against a soldier's gait, and the ladder is a knob for
+> exactly this.
+>
+> **The v2 authoring UI, and the two rules that are easy to get silently wrong.**
+> Everything the reader decodes is authorable now: typed parameters including
+> `Trigger`, condition trees, priority, interruption, blend curves, per-joint
+> profiles, `exit_time`, any-state transitions drawn as themselves rather than as a
+> mystery self-edge, one level of nested sub-machines drilled into through a path
+> the same editing verbs read, and state enter/exit events. The two rules:
+> * **setting a tree clears the flat view**, because `dto_to_transition` prefers the
+>   flat list when it is present — leaving a stale one beside a new tree would save
+>   the list and discard the tree the author just drew;
+> * **deleting a blend profile repairs every reference to one**, at every depth,
+>   because `profile` is an *index*: a delete silently re-points later references at
+>   their neighbour and `validate` accepts the result, so the machine goes on saving
+>   while masking the wrong joints.
+>
+> `sm_save`'s validator remains the door (P29.2's A1) and its refusal is rendered
+> **inline** rather than toasted — a toast that has faded is a save the author
+> believes happened.
+>
+> **Live tuning: what was already true, said first.** A reflected component field
+> written through `SceneDoc::write_prop` reaches the live world, and during Simulate
+> the live world *is* the document's world — so a Details edit to `walk_speed_mps`
+> has changed a running character since P29.3. That is P23.6 paying out and nothing
+> here replaces it. Three things were missing, and each is a clause of S4: the
+> **step boundary** was an accident of Ring 2 holding a lock rather than a contract
+> (tunes are queued and drained at the very top of the fixed step now, so a tuned
+> run is still a deterministic sequence of steps); **nothing survived Stop**
+> (`TuneScope::Keep` replays onto the document after the snapshot restore, as ONE
+> undoable edit however many times the slider moved); and a machine's **parameters
+> and triggers had no editor door at all** — the `anim.*` kit is a Blueprint's door,
+> so an author watching a graph could not ask it what it does at speed 4 without
+> writing a program to ask.
+>
+> The other half is `player_has_no_tuning_door`: the shipped player names no tune,
+> and `inf-editor-core` is a **dev**-dependency of it, so it could not call one even
+> in principle. PIE == shipping means a tuned Simulate is a tuned *document* played
+> identically by both hosts, never a host that can be nudged while the other cannot.
+> The panel's movement field names are held against the component's own reflected
+> fields by a Rust gate that reads them out of the `.tsx` — a misspelling there is a
+> **silent no-op** (the tune queues, the write returns false, the panel says "next
+> step" and nothing moves), which is the two-copies-across-a-language-boundary
+> defect the campaign's Wave I found at this same seam.
+>
+> **Three more of P29.4's remainders, closed.**
+> *Blend-space notifies.* P29.4's reason for the bound was that a blend space has no
+> single play-head — true, and it has a **leader**, which is `inf_anim::sync`'s own
+> notion: the heaviest clip, whose timeline every follower is already warped onto.
+> `motion_leader` is the one place that decides where a motion's head is, so the
+> marker scan and the curve publish both ride it; the step on which the leader
+> *changes* contributes nothing, for the same reason a state change does not. Root
+> motion stays single-clip — a blend's true delta is the weighted blend of its
+> clips' and the leader's alone would be wrong, and blend-space root motion is
+> `root_motion.rs`'s own documented follow-up rather than something smuggled in
+> here. The arm has a control: swing the weights the other way and the *other*
+> clip's footstep rings, at *its* authored `Mask_FootstepSound` gain.
+> *The pelvis IK offset.* A9 recorded it as computed and unconsumed, with its arm
+> bounded to the inert path because there was nothing to falsify against. It moves
+> the posed hips now, on the same fixed step, before the leg goals solve — and it is
+> inert by construction on any level whose feet the ±50/45 cm envelope refuses.
+> *The derivation twin*, above.
+>
+> **One private copy retired.** The pose step's own `wrap_clip_time` is gone;
+> `inf_anim::clip::resolve_time` is the one rule for where a play-head is, reached
+> through `motion_leader`. The single behavioural difference is stated rather than
+> absorbed — a NaN head is no longer collapsed to zero — and the total answer
+> downstream (no marker crossed, the clip's first curve values) is asserted beside
+> it.
+>
+> **Mutation matrix (6 of 6 killed).** The mantle ignoring the traversal arc; a
+> planted `pending_tunes` in the shipped player's `runtime_sim.rs`; a misspelled
+> token in the player gate's own search list, which must fail the **vacuity** half
+> rather than report a clean player for ever; `motion_leader` answering `None` for a
+> blend space; a movement field name misspelled in `LiveTuning.tsx`; and the
+> derivation's residual removal turned off.
+>
+> **Honest remainders, carried into P29.6–P29.7.**
+> **The blend mode and the overlay state are still not authored**, deliberately and
+> for the third wave running. P29.2 recorded that exposing `set_blend_mode` obliges
+> PIE to carry it or the hosts stop agreeing, and `OverlayRegistry` interns by
+> first-seen order so an id crossing a process boundary needs an
+> interning-determinism arm. Neither parity arm was budgeted here either, and
+> shipping the authoring surface without them would be shipping the obligation.
+> `OverlayRegistry` still has **zero callers**.
+> **Four of P29.4's five zero-caller items are still zero-caller.**
+> `inf_anim::warp::WarpWindow` — named in `traversal_arc_of`'s docs as the thing
+> that would bound an arc to a *window* instead of to the whole clip, which is the
+> arc's stated bound; `distance_match` and `play_rate_for`, which now have their
+> **input** on every imported clip and still no runtime caller, because wiring
+> distance matching into the movement step is a behaviour change with its own arms;
+> and `ragdoll::flail_rate` and `foot::interp_to_vec`. The list is inherited rather
+> than re-searched, which is what P29.4's audit asked of this wave.
+> **The proposal reads a clip set and not a rig.** It clusters on speed and gait and
+> knows nothing about which skeleton a clip is bound to, so a set spanning two rigs
+> proposes one machine over both. `sm_save`'s `machine_binding` resolves the rig from
+> the clips afterwards and takes the first; the mixed-rig refusal the blend-space
+> preview already makes, the proposal does not.
+> **The UI round-trip's reopen half is the frontend's.** The byte-stability arm
+> asserts that what goes over the wire is what the store holds and that pushing
+> twice pushes the same bytes; the *reader's* half is
+> `machine_dto_round_trips_every_v2_shape` in Rust. A single arm spanning a real
+> `sm_save` and a real `sm_get` needs a project on disk, which is P29.6's gate work.
+> **No committed content is derived.** Nothing under `samples/` carries a
+> root-motion track, a derived marker or a `W_Gait`, so every fixture here is built
+> in its test — the same bound P29.4 recorded and for the same reason:
+> `samples/phase29-locomotion` is P29.6's.
+> **The foot-publish seam is untouched.** P29.4's audit pinned it — a feet-at-origin
+> rig publishes its feet half a capsule up, and nothing in the tree decides whether
+> a character mesh's origin is its feet or its capsule centre. Nothing in this wave
+> resolves it and
+> `a_feet_at_origin_rig_publishes_its_feet_half_a_capsule_up` still asserts the
+> current answer, so the day P29.6's sample character decides the convention it
+> fails and the ledger is rewritten rather than quietly disagreeing.
+
 
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
   consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed
@@ -17517,7 +17770,11 @@ shows a one-line authoring change as a one-line diff.
   the STATUS block above for what each one is and for the bounds each carries.
 - **P29.5 Authoring** — 1. the condition rule builder over the v2 trees; 2. live tuning during
   Simulate (S4); 3. import-time derivation of the curves UE bakes by hand and **proposed** state
-  graphs from a clip set (S2/S3); 4. the `preview_character` warm-path fix.
+  graphs from a clip set (S2/S3); 4. the `preview_character` warm-path fix. **All four landed**,
+  and with them the whole `.inf_sm` v2 authoring surface P29.1 shipped a model for and could not
+  edit, plus four of P29.4's named remainders (the mantle's clip clock, blend-space notifies, the
+  pelvis IK offset, the derivation twin) — see the STATUS block above for what each one is and
+  for the bounds each carries.
 - **P29.6 The gate** — 1. the character wizard emits a real `.inf_act` controller; 2.
   `samples/phase29-locomotion`; 3. `phase29_gate` — PIE == shipping on the (pose, mode) trace,
   bit-exact replay across two independent cooks, Blueprint-vs-transpiled parity, and the

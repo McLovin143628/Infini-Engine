@@ -588,10 +588,9 @@ function CanvasInner() {
                 <input
                   type="checkbox"
                   checked={tr.from === null}
+                  title="Fire from any state (v2). Turning it off gives the edge state 0 as its source — an any-state transition never had one to restore."
                   onChange={(e) =>
-                    setTransition(selectedTransition, {
-                      from: e.target.checked ? null : tr.to === 0 ? 0 : 0,
-                    })
+                    setTransition(selectedTransition, { from: e.target.checked ? null : 0 })
                   }
                 />
               </label>

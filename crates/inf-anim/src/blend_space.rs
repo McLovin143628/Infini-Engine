@@ -445,6 +445,10 @@ fn sample_weighted<'c>(
     weighted_blend(items).unwrap_or_else(|| Pose::rest(skeleton))
 }
 
+/// What a blend space resolves to at one play-head: the surviving
+/// `(clip, weight)` pairs, each clip's own sample time, and which index leads.
+type Resolved<'c> = (Vec<(&'c AnimClip, f64)>, Vec<f32>, usize);
+
 /// The resolved `(clip, weight)` list, each clip's own sample time, and which
 /// index leads.
 ///
@@ -456,7 +460,7 @@ fn resolve_times<'c>(
     weights: &[(usize, f64)],
     clip_of: impl Fn(usize) -> Option<&'c AnimClip>,
     t: f64,
-) -> Option<(Vec<(&'c AnimClip, f64)>, Vec<f32>, usize)> {
+) -> Option<Resolved<'c>> {
     // Resolve clips + weights, dropping any that don't resolve.
     let resolved: Vec<(&AnimClip, f64)> = weights
         .iter()
