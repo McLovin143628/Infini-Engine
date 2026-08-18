@@ -16,7 +16,7 @@
 use glam::DVec3;
 use inf_ecs::components::{
     BodyKind3D, CharacterController3D, CharacterMovement, Collider3D, ColliderShape3DKind, Gait,
-    LandingKind, MovementMode, MovementRefusal, RigidBody3D, Transform, WaterBody,
+    LandingKind, MovementMode, MovementRefusal, RigidBody3D, RotationMode, Transform, WaterBody,
 };
 use inf_ecs::math::{Vec2d, Vec3d};
 use inf_ecs::movement::MovementIntent;
@@ -1164,4 +1164,83 @@ fn characters_step_in_guid_order_and_not_in_the_order_they_were_spawned() {
         lo < hi,
         "the fixture's guids are the reverse of its spawn order"
     );
+}
+
+/// An entity that is **not** player-controlled keeps what it was authored with.
+///
+/// `apply_intent` writes only onto `player_controlled` characters, so an NPC's
+/// intent flags are all false — and "no sprint and no walk held" is
+/// indistinguishable from "no controller". Read unconditionally, that would
+/// overwrite an authored `Walk` with `Run` on the first step, and drag an
+/// authored `Aiming` to `LookingDirection` by the absence of a key nobody was
+/// pressing.
+#[test]
+fn an_npc_keeps_the_gait_and_rotation_mode_it_was_authored_with() {
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(20.0, 0.5, 20.0),
+    );
+    spawn_hero(&mut w, 0.0, 0.0, 0.0);
+    {
+        let e = w.entity_of(HERO).unwrap();
+        let mut cm = w.world_mut().get_mut::<CharacterMovement>(e).unwrap();
+        cm.player_controlled = false;
+        cm.gait = Gait::Walk;
+        cm.rotation_mode = RotationMode::Aiming;
+    }
+
+    // A player-shaped intent is applied to the world; this character must not
+    // see any of it.
+    for _ in 0..60 {
+        step(
+            &mut w,
+            &mut b,
+            &MovementIntent {
+                move_input: EcsVec2d::new(0.0, 1.0),
+                sprint: true,
+                ..Default::default()
+            },
+        );
+    }
+    let h = hero(&w);
+    assert_eq!(h.gait, Gait::Walk, "the authored gait survived");
+    assert_eq!(
+        h.rotation_mode,
+        RotationMode::Aiming,
+        "and so did the authored rotation mode"
+    );
+    assert!(
+        hero_pos(&w).z.abs() < 0.05,
+        "and it did not run off with the player's stick: z = {}",
+        hero_pos(&w).z
+    );
+
+    // The control: flip the flag and the very same intent moves it, so the
+    // assertions above are about the FLAG and not about a step that does nothing.
+    {
+        let e = w.entity_of(HERO).unwrap();
+        let mut cm = w.world_mut().get_mut::<CharacterMovement>(e).unwrap();
+        cm.player_controlled = true;
+    }
+    for _ in 0..60 {
+        step(
+            &mut w,
+            &mut b,
+            &MovementIntent {
+                move_input: EcsVec2d::new(0.0, 1.0),
+                sprint: true,
+                ..Default::default()
+            },
+        );
+    }
+    assert!(
+        hero_pos(&w).z > 0.5,
+        "a player-controlled character does move: z = {}",
+        hero_pos(&w).z
+    );
+    assert_eq!(hero(&w).gait, Gait::Sprint, "and its gait follows the keys");
 }

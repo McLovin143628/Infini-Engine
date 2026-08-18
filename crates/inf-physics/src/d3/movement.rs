@@ -339,10 +339,17 @@ fn step_one(
         (cm.runtime.aim_pitch_deg + cm.runtime.intent_look_pitch_dps * dt).clamp(-89.0, 89.0);
     cm.runtime.aim_yaw_rate_dps =
         (model::angle_delta_deg(cm.runtime.aim_yaw_deg, prev_aim) / dt).abs();
-    if cm.runtime.want_aim {
-        cm.rotation_mode = RotationMode::Aiming;
-    } else if cm.rotation_mode == RotationMode::Aiming {
-        cm.rotation_mode = RotationMode::LookingDirection;
+    // The aim toggle is a CONTROLLER action, so it only moves the rotation mode
+    // on a character a controller is driving. Applied unconditionally it stomps
+    // an authored one: an NPC placed in `Aiming` would be dragged to
+    // `LookingDirection` on its first step by the absence of a key nobody was
+    // pressing. Same argument as the gait below.
+    if cm.player_controlled {
+        if cm.runtime.want_aim {
+            cm.rotation_mode = RotationMode::Aiming;
+        } else if cm.rotation_mode == RotationMode::Aiming {
+            cm.rotation_mode = RotationMode::LookingDirection;
+        }
     }
 
     // ── 2. Water, through P20's door. `update_swim` advances the latch from the
@@ -518,12 +525,20 @@ fn step_one(
         cm.run_speed_mps,
         cm.sprint_speed_mps,
     );
-    let desired_gait = if cm.runtime.want_sprint {
-        Gait::Sprint
-    } else if cm.runtime.want_walk {
-        Gait::Walk
+    // A controller's held keys pick the gait; anything else keeps the one it was
+    // authored (or given by gameplay) with. Reading the keys unconditionally
+    // would overwrite an authored `Walk` with `Run` every step, because "no
+    // sprint and no walk held" is indistinguishable from "no controller".
+    let desired_gait = if cm.player_controlled {
+        if cm.runtime.want_sprint {
+            Gait::Sprint
+        } else if cm.runtime.want_walk {
+            Gait::Walk
+        } else {
+            Gait::Run
+        }
     } else {
-        Gait::Run
+        cm.gait
     };
     let move_input = cm.runtime.intent_move;
     let input_mag = (move_input.x * move_input.x + move_input.y * move_input.y)
