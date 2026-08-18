@@ -103,7 +103,7 @@ pub use cloth::{
 pub use delaunay::{barycentric, triangulate, Triangulation};
 pub use derive::{
     derive_clip, foot_joints, gait_of, speed_of_gait, unbake_root_motion, DeriveError,
-    DeriveOptions, DeriveReport, FootPlant, VerticalPolicy, FOOTSTEP_PREFIX,
+    DeriveOptions, DeriveReport, DerivedNames, FootPlant, VerticalPolicy, FOOTSTEP_PREFIX,
 };
 pub use foot::{
     ground_offset, interp_to, pelvis_offset, FootLock, GroundOffset, FOOT_HEIGHT_M, TRACE_ABOVE_M,

@@ -960,62 +960,67 @@ pub fn step_pose_evaluation<'c>(
                     // decides, so a blend space's markers ride the same timeline
                     // its followers are already warped onto.
                     //
-                    // Two calls, because an interval needs both ends: a step on
-                    // which the leader CHANGED (the weights moved past each
-                    // other) spans two different clips' timelines and is not an
-                    // interval at all — the same reason a state change is not.
+                    // Two calls, because an interval needs both ends — and both
+                    // land on the SAME clip by construction, which is worth
+                    // saying rather than guarding (P29.5 audit, A10). A blend
+                    // space's weights come from `ctx`, which is this step's
+                    // parameter snapshot, so `motion_leader` answers the same
+                    // leader at either end of the step and a comparison between
+                    // them is a branch that cannot be taken. What is genuinely
+                    // not detected is a leader change *between* two steps: the
+                    // weights crossing means last step ended on the other clip's
+                    // warped phase, so the crossover step can repeat or skip one
+                    // marker. Seeing that needs the previous step's leader
+                    // remembered somewhere, and the only per-character homes are
+                    // reflected components — a schema move this wave does not
+                    // have. Carried, named, and bounded at one marker.
                     let head = |t: f64| {
                         inf_anim::motion_leader(&state.motion, &clips, &ctx, state.looping, t)
                     };
-                    let same_leader = |a: &inf_anim::AnimClip, b: &inf_anim::AnimClip| {
-                        std::ptr::eq(a as *const _, b as *const _)
-                    };
-                    if let (Some((c0, t0)), Some((clip, t1))) = (
+                    if let (Some((_, t0)), Some((clip, t1))) = (
                         head(time_before * state.speed),
                         head(rt.state_time * state.speed),
                     ) {
-                        if same_leader(c0, clip) {
-                            // **Root motion stays single-clip.** A blend's true
-                            // root delta is the weighted blend of its clips'
-                            // deltas, and the leader's alone would be wrong;
-                            // blend-space root motion is `root_motion.rs`'s own
-                            // documented follow-up and is not smuggled in here.
-                            if let (inf_anim::Motion::Clip(_), Some(asset)) = (&state.motion, rig) {
-                                let d = inf_anim::root_delta_3d(
-                                    clip,
-                                    &asset.skeleton,
-                                    t0,
-                                    t1,
-                                    state.looping,
-                                );
-                                if !d.is_zero() {
-                                    bridge.root_motion.insert(guid, d);
+                        // **Root motion stays single-clip.** A blend's true
+                        // root delta is the weighted blend of its clips'
+                        // deltas, and the leader's alone would be wrong;
+                        // blend-space root motion is `root_motion.rs`'s own
+                        // documented follow-up and is not smuggled in here.
+                        if let (inf_anim::Motion::Clip(_), Some(asset)) = (&state.motion, rig) {
+                            let d = inf_anim::root_delta_3d(
+                                clip,
+                                &asset.skeleton,
+                                t0,
+                                t1,
+                                state.looping,
+                            );
+                            if !d.is_zero() {
+                                bridge.root_motion.insert(guid, d);
+                            }
+                        }
+                        for m in crossed_markers(&clip.markers, t0, t1, state.looping) {
+                            events.push(m.to_string());
+                        }
+                        // The v2 curve channels at THIS step's play-head.
+                        // Published rather than queried: the clip resolver is
+                        // a host registry and this is the one place that has
+                        // both it and the play-head, so the movement step can
+                        // read `Enable_FootIK_L` without reaching into the
+                        // machine (the command-queue shape).
+                        //
+                        // The leader's, for a blend space — which is what
+                        // `Mask_FootstepSound` has to be read off for the
+                        // footstep that marker just fired to be the right
+                        // loudness.
+                        if !clip.curves.is_empty() {
+                            let mut vals: BTreeMap<String, f32> = BTreeMap::new();
+                            for c in &clip.curves {
+                                if let Some(v) = c.sample(t1) {
+                                    vals.insert(c.name.clone(), v);
                                 }
                             }
-                            for m in crossed_markers(&clip.markers, t0, t1, state.looping) {
-                                events.push(m.to_string());
-                            }
-                            // The v2 curve channels at THIS step's play-head.
-                            // Published rather than queried: the clip resolver is
-                            // a host registry and this is the one place that has
-                            // both it and the play-head, so the movement step can
-                            // read `Enable_FootIK_L` without reaching into the
-                            // machine (the command-queue shape).
-                            //
-                            // The leader's, for a blend space — which is what
-                            // `Mask_FootstepSound` has to be read off for the
-                            // footstep that marker just fired to be the right
-                            // loudness.
-                            if !clip.curves.is_empty() {
-                                let mut vals: BTreeMap<String, f32> = BTreeMap::new();
-                                for c in &clip.curves {
-                                    if let Some(v) = c.sample(t1) {
-                                        vals.insert(c.name.clone(), v);
-                                    }
-                                }
-                                if !vals.is_empty() {
-                                    bridge.curves.insert(guid, vals);
-                                }
+                            if !vals.is_empty() {
+                                bridge.curves.insert(guid, vals);
                             }
                         }
                     }
@@ -2865,6 +2870,30 @@ mod tests {
             "{right_fired:?}"
         );
         assert!((right_gain - 0.75).abs() < 1e-6, "{right_gain}");
+
+        // **The control that actually separates them** (P29.5 audit, A4). Both
+        // probes above are at a *pure* weight, where `blend_weights_1d` returns
+        // one surviving entry and "the heaviest" and "the first" are the same
+        // index — so a `blend_leader` that answered `resolved[0]` passed them
+        // both. In between, the list is `[(lo, 1-frac), (hi, frac)]` in POSITION
+        // order, so past the midpoint the leader is the second entry and the
+        // first is not. That is where the claim lives.
+        let (mostly_right, gain_r) = run(0.7);
+        assert_eq!(
+            mostly_right,
+            vec!["footstep_right".to_string()],
+            "at weight 0.7 the RIGHT clip is the heaviest, so its marker is the \
+             one crossed — reading entry 0 instead answers `footstep_left`: \
+             {mostly_right:?}"
+        );
+        assert!((gain_r - 0.75).abs() < 1e-6, "{gain_r}");
+        let (mostly_left, gain_l) = run(0.3);
+        assert_eq!(
+            mostly_left,
+            vec!["footstep_left".to_string()],
+            "{mostly_left:?}"
+        );
+        assert!((gain_l - 0.25).abs() < 1e-6, "{gain_l}");
     }
 
     /// **The pelvis IK offset reaches the rig** (P29.5 — P29.4 audit A9's

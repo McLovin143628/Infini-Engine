@@ -370,7 +370,14 @@ pub fn propose_machine(
     let mut triggers = Vec::new();
     for f in &oneshots {
         let index = states.len();
-        let trigger = trigger_name(&f.name);
+        // **Unique, because `validate` refuses a duplicate parameter** (P29.5
+        // audit, A3). `trigger_name` collapses case and punctuation, so two
+        // clips called `Jump` and `jump!` — or two assets that simply share a
+        // name in different folders, which nothing forbids — both ask for
+        // `play_jump`, and the machine the panel adopts is then one `sm_save`
+        // rejects. An author's first save after a proposal must never be a
+        // refusal they did not cause (P29.2's A1, read from the writing side).
+        let trigger = unique_trigger(trigger_name(&f.name), &params);
         notes.push(format!(
             "`{}` does not cycle ({} foot plant{}), so it is a one-shot entered from ANY state on the trigger `{trigger}` and leaving after {:.0}% of it has played",
             f.name,
@@ -414,6 +421,25 @@ pub fn propose_machine(
         notes,
         triggers,
     })
+}
+
+/// `want`, or the first `want_2`, `want_3`… that no declared parameter already
+/// uses.
+///
+/// Linear in the table, which is bounded by
+/// [`MAX_PARAMS`](crate::state_machine::MAX_PARAMS) — 64 — so the quadratic is
+/// four thousand comparisons at the ceiling and needs no index.
+fn unique_trigger(want: String, params: &[SmParam]) -> String {
+    if !params.iter().any(|p| p.name == want) {
+        return want;
+    }
+    for n in 2usize.. {
+        let candidate = format!("{want}_{n}");
+        if !params.iter().any(|p| p.name == candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("an unbounded counter always finds a free name")
 }
 
 /// The trigger a one-shot clip is armed with: the clip's name, lowercased, with
@@ -622,6 +648,72 @@ mod tests {
         assert_eq!(trigger_name("Hero Jump (start)"), "play_hero_jump_start");
         assert_eq!(trigger_name("Roll"), "play_roll");
         assert_eq!(trigger_name("!!!"), "play_clip");
+    }
+
+    /// **A proposal never emits a machine the reader refuses** (P29.5 audit,
+    /// A3).
+    ///
+    /// `trigger_name` collapses case and punctuation, so `Jump`, `jump!` and a
+    /// second asset simply *called* `Jump` in another folder all want
+    /// `play_jump` — and `StateMachine::validate` refuses a duplicate parameter.
+    /// The panel adopts a proposal as its document, so that machine's first save
+    /// is a refusal the author did not cause.
+    #[test]
+    fn colliding_one_shot_names_get_distinct_triggers_and_the_machine_validates() {
+        let t = ProposalOptions::default().gait_speeds_mps;
+        let f = |name: &str, seed: u8| ClipFacts {
+            name: name.into(),
+            clip: [seed; 16],
+            duration_s: 1.0,
+            speed_mps: 2.0,
+            gait: gait_of(2.0, t),
+            plants: 1,
+        };
+        let p = propose_machine(
+            &[
+                facts("Idle", 0.0, 0, t),
+                facts("Walk", 1.6, 2, t),
+                f("Jump", 3),
+                f("jump!", 4),
+                f("JUMP", 5),
+            ],
+            &ProposalOptions::default(),
+        )
+        .unwrap();
+        p.machine
+            .validate()
+            .expect("a proposal must validate whatever the clips are called");
+        assert_eq!(
+            p.triggers,
+            vec![
+                "play_jump".to_string(),
+                "play_jump_2".to_string(),
+                "play_jump_3".to_string()
+            ],
+            "{:?}",
+            p.triggers
+        );
+        // Every declared trigger is the one its own edge reads, so the third
+        // clip is reachable rather than merely named.
+        for (state, trigger) in p
+            .machine
+            .states
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.looping)
+            .map(|(i, _)| i)
+            .zip(&p.triggers)
+        {
+            let edge = p
+                .machine
+                .transitions
+                .iter()
+                .find(|tr| {
+                    tr.to == state && matches!(tr.from, crate::state_machine::SmSource::Any { .. })
+                })
+                .expect("an any-state entry");
+            assert_eq!(edge.condition, SmCond::Trigger(trigger.clone()));
+        }
     }
 
     /// Facts are read back off a **derived** clip, which is the seam between S2

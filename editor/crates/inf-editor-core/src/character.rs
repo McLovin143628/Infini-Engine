@@ -411,7 +411,21 @@ pub struct PreviewBuilds {
 }
 
 /// What the locomotion cache is keyed on: everything `build_locomotion` reads.
-type LocoKey = (BodyPlan, BodyParams, inf_anim::locomotion::GaitParams, u64);
+///
+/// The last element is the **fit source's identity**, and it is an `Option`
+/// rather than a bare stamp (P29.5 audit, A8): `None` is the mannequin path,
+/// whose rig comes from `build_template`, and `Some(s)` is a fitted one, whose
+/// rig comes from a BVH. A bare `0` for both would let an unstamped fitted
+/// preview seed the key a *mannequin* preview then hits, and answer a mannequin
+/// with the fitted model's leg lengths — which is exactly the "two unidentified
+/// models are indistinguishable" hazard the stamp exists for, met from the
+/// other side.
+type LocoKey = (
+    BodyPlan,
+    BodyParams,
+    inf_anim::locomotion::GaitParams,
+    Option<u64>,
+);
 
 /// The part of a [`inf_anim::LocomotionSet`] a preview reports — kept instead of
 /// the set, because the set holds three whole clips and the preview reads six
@@ -466,7 +480,9 @@ impl CharacterPreviewSession {
                 fit_rig_to_bvh(bvh, spec.plan, &spec.params)?.0
             }
         };
-        let loco = self.loco_for(spec, &rig, stamp)?.clone();
+        let loco = self
+            .loco_for(spec, &rig, fit_source.map(|(_, s)| s))?
+            .clone();
         let body = match fit_source {
             Some(_) => None,
             None => Some(self.body_for(spec, &rig)),
@@ -517,9 +533,9 @@ impl CharacterPreviewSession {
         &mut self,
         spec: &CharacterSpec,
         rig: &SkeletonAsset,
-        stamp: u64,
+        fit: Option<u64>,
     ) -> Result<&LocoSummary, CharacterError> {
-        let key: LocoKey = (spec.plan, spec.params, spec.gait, stamp);
+        let key: LocoKey = (spec.plan, spec.params, spec.gait, fit);
         let hit = matches!(&self.loco, Some((k, _)) if *k == key);
         if !hit {
             self.builds.locomotion += 1;
@@ -1236,6 +1252,28 @@ mod tests {
         t.preview(&spec, Some((&a, 1))).unwrap();
         t.preview(&spec, Some((&a, 2))).unwrap();
         assert_eq!(t.builds().bvh, 2, "{:?}", t.builds());
+
+        // **And an unstamped FITTED preview must not seed the key a MANNEQUIN
+        // preview then hits** (P29.5 audit, A8). The two rigs come from
+        // different producers -- `fit_template` against a BVH, `build_template`
+        // against nothing -- so a cache that could not tell them apart would
+        // answer a mannequin with the author's model's leg lengths.
+        let spec = CharacterSpec {
+            mesh: Some(AssetId::new()),
+            ..CharacterSpec::default()
+        };
+        let bare = CharacterSpec {
+            mesh: None,
+            ..CharacterSpec::default()
+        };
+        let mut u = CharacterPreviewSession::new();
+        u.preview(&spec, Some((&a, 0))).unwrap();
+        let mixed = u.preview(&bare, None).unwrap();
+        assert_eq!(
+            mixed,
+            preview_character(&bare, None).unwrap(),
+            "a mannequin preview answered with the fitted model's locomotion"
+        );
     }
 
     #[test]

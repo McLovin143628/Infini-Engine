@@ -139,6 +139,21 @@ fn pos(doc: &SceneDoc) -> DVec3 {
         .to_dvec3()
 }
 
+/// The character's own horizontal speed this step, m/s — what the movement step
+/// arrived at, rather than what the document says it may reach.
+fn speed_now(doc: &SceneDoc) -> f64 {
+    let e = doc.entity_of(HERO).expect("hero");
+    let v = doc
+        .world()
+        .world()
+        .get::<CharacterMovement>(e)
+        .expect("movement")
+        .runtime
+        .velocity
+        .to_dvec3();
+    DVec3::new(v.x, 0.0, v.z).length()
+}
+
 /// **(a) The next fixed step, and not this one.**
 ///
 /// The contract `crate::tuning` exists to make explicit: a queued tune has not
@@ -174,6 +189,68 @@ fn a_queued_tune_lands_on_the_next_fixed_step_and_not_before() {
     // is not fighting a ghost.
     sim.step_once(&mut doc, SimInput::default());
     assert!((speed_field(&doc) - 9.0).abs() < 1e-9);
+}
+
+/// **(a2) The tune lands at the TOP of the step, so the step that drains it is
+/// the step that reads it** (P29.5 audit, A5).
+///
+/// Arm (a) proves the value moved by the time the step returned, which is true
+/// wherever in the step the queue is drained — an `apply_pending_tunes` moved to
+/// the very *last* line of `fixed_step` passes it, and passes the whole of the
+/// rest of this file. That is the S4 contract unfalsified: "queued and drained
+/// at the very top of the fixed step, before anything reads anything" is exactly
+/// the sentence no arm was asking about.
+///
+/// So this one asks the movement step. Let the character settle at its
+/// cruising speed, queue a tune that raises the cap, and run **one** step: with
+/// the drain at the top, that step accelerates toward the new cap; with it
+/// anywhere after the movement solve, the character is still capped at the old
+/// one and does not move until the step after.
+///
+/// The control is the same settled character stepped once with no tune at all,
+/// which must not speed up — otherwise this measures the settling and not the
+/// tune.
+#[test]
+fn a_tune_is_read_by_the_step_that_drained_it_and_not_the_one_after() {
+    let settle = |sim: &mut SimSession, doc: &mut SceneDoc| {
+        for _ in 0..180 {
+            sim.step_once(doc, forward());
+        }
+    };
+
+    // THE CONTROL first, so a failure below cannot be the fixture drifting.
+    let mut doc = world();
+    let mut sim = session(&mut doc);
+    settle(&mut sim, &mut doc);
+    let cruise = speed_now(&doc);
+    assert!(
+        (cruise - 3.75).abs() < 0.05,
+        "the character must be at its run cap before the tune, not still \
+         accelerating into it: {cruise}"
+    );
+    sim.step_once(&mut doc, forward());
+    let control = speed_now(&doc);
+    assert!(
+        (control - cruise).abs() < 1e-9,
+        "an untuned step changed the speed on its own ({cruise} -> {control})"
+    );
+
+    // THE CLAIM: the very next step after the queue is drained is already faster.
+    let mut doc = world();
+    let mut sim = session(&mut doc);
+    settle(&mut sim, &mut doc);
+    let before = speed_now(&doc);
+    sim.tune(
+        Tune::movement(HERO, "run_speed_mps", 9.0),
+        TuneScope::Session,
+    );
+    sim.step_once(&mut doc, forward());
+    let after = speed_now(&doc);
+    assert!(
+        after > before + 1e-6,
+        "the step that drained the tune ran at the OLD cap ({before} -> {after}) \
+         — the queue is not being drained before the movement solve"
+    );
 }
 
 /// **(b) A movement tunable changes the movement**, in metres, against a control

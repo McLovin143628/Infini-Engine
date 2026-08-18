@@ -261,6 +261,14 @@ pub enum DeriveError {
     NoDuration { name: String },
     #[error("derivation was asked for {fps} fps, which is not a positive rate")]
     BadRate { fps: f32 },
+    /// The clip poses to something that is not a number, so what would be baked
+    /// is not either. See [`derive_clip`]'s step 6a for why this is a refusal
+    /// and not a sanitised value.
+    #[error(
+        "clip {name:?} derives a non-finite {what}, so nothing was baked — the pose it was \
+         sampled from is not a number"
+    )]
+    NonFinite { name: String, what: String },
 }
 
 // ── the entry point ─────────────────────────────────────────────────────────
@@ -315,7 +323,8 @@ pub fn derive_clip(
     let plants = foot_plants(skeleton, &feet, &foot_times, &traces, clip.duration, opts);
 
     // 6. Assemble. Everything this module owns is replaced; anything an author
-    //    wrote under a name this module does not use survives.
+    //    wrote that this rig's derivation would not itself write survives —
+    //    see [`DerivedNames`] for where that boundary is drawn and why.
     let total = *root_track.translation.last().unwrap_or(&[0.0; 3]);
     let first = *root_track.translation.first().unwrap_or(&[0.0; 3]);
     let translation = [
@@ -350,9 +359,34 @@ pub fn derive_clip(
 
     let owned_curves: Vec<String> = curves.iter().map(|c| c.name.clone()).collect();
 
-    out.curves.retain(|c| !is_derived_curve(&c.name));
+    // 6a. **Nothing non-finite reaches the file.** A clip whose joints hold a
+    //     NaN is a legal `.inf_anim` today — `validate_timing` asks about key
+    //     *times*, not values — and sampling one poses a NaN, which every step
+    //     below propagates: the root-motion track, the distance track and the
+    //     foot-speed channels all become NaN. Two of those are worse than
+    //     useless. The distance track is `partition_point`ed by
+    //     `DistanceTrack::time_at_distance` and its monotonicity **is** checked
+    //     at the door, so a derivation that baked one would turn a clip that
+    //     loads into a clip that does not: the writer manufacturing a file its
+    //     own reader rejects (P23.6's closing ruling). And the foot-speed
+    //     channels are read by P29.4's lock with no guard at all.
+    //
+    //     A refusal and not a sanitised zero, because a zero here is a
+    //     measurement nobody took: the honest answer is that this clip cannot be
+    //     measured, which the import records as an advisory and the panel shows.
+    if let Some(what) = first_non_finite(&root_track, &distance, &curves) {
+        return Err(DeriveError::NonFinite {
+            name: clip.name.clone(),
+            what,
+        });
+    }
+
+    // 6b. Replace exactly the names this rig implies — see [`DerivedNames`] for
+    //     why the boundary is the rig's own and not a prefix.
+    let owned = DerivedNames::of(skeleton, &feet);
+    out.curves.retain(|c| !owned.curves.contains(&c.name));
     out.curves.append(&mut curves);
-    out.markers.retain(|m| !is_derived_marker(&m.name));
+    out.markers.retain(|m| !owned.owns_marker(m));
     out.markers.append(&mut markers);
 
     let report = DeriveReport {
@@ -366,19 +400,98 @@ pub fn derive_clip(
         gait,
         plants,
         curves: owned_curves,
-        markers: out
-            .markers
-            .iter()
-            .filter(|m| is_derived_marker(&m.name))
-            .count(),
+        markers: out.markers.iter().filter(|m| owned.owns_marker(m)).count(),
     };
     out.root_motion = Some(root_track);
     out.distance = Some(distance);
     Ok((out, report))
 }
 
-/// Whether a curve name is one this module writes — the set it is entitled to
-/// replace on a re-derive, and the set it must leave alone otherwise.
+/// **Every name a derivation over `skeleton` writes** — and therefore the exact
+/// set it is entitled to replace.
+///
+/// The boundary is the **rig's own** and not a prefix, and that is the whole
+/// point of the type. The audio drain hears any marker starting with
+/// [`FOOTSTEP_PREFIX`], and its own documentation invites a project to add a
+/// `footstep_land` for free — so a prefix rule reads that authored notify as
+/// something this module wrote and deletes it on the next press of the
+/// re-derive button. So does it read a `plant_hand_l` sync marker somebody put
+/// in a hands group. Silently destroying authored content is not a boundary, it
+/// is the absence of one.
+///
+/// It is a set of **could-write** names rather than the did-write ones, which
+/// matters in the other direction: a re-derive with a stricter
+/// [`DeriveOptions::contact_lift_m`] may find no plants at all, and a rule that
+/// only replaced what it wrote this time would leave the *previous* run's
+/// markers behind. The set is a function of the rig alone, so it is the same
+/// whatever the options say.
+///
+/// The cost of that choice is stated rather than hidden: a rig whose feet were
+/// renamed strands the old run's channels under the old names. That is stale
+/// derived data an author can see and delete, which is the cheaper of the two
+/// mistakes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DerivedNames {
+    /// Curve channels: [`MOVE_DATA_SPEED`], [`als::W_GAIT`], and a
+    /// [`FOOT_SPEED_PREFIX`]/[`FOOT_LOCK_PREFIX`] pair per foot.
+    pub curves: std::collections::BTreeSet<String>,
+    /// Sync markers — `plant_<leg>`, one per foot, in
+    /// [`crate::locomotion::FOOT_SYNC_GROUP`].
+    pub sync_markers: std::collections::BTreeSet<String>,
+    /// Event markers — `footstep_<leg>`, one per foot.
+    pub event_markers: std::collections::BTreeSet<String>,
+}
+
+impl DerivedNames {
+    /// The names a derivation over `skeleton` with `feet` ([`foot_joints`])
+    /// writes.
+    pub fn of(skeleton: &Skeleton, feet: &[u16]) -> Self {
+        let mut out = Self {
+            curves: [MOVE_DATA_SPEED.to_string(), als::W_GAIT.to_string()]
+                .into_iter()
+                .collect(),
+            ..Self::default()
+        };
+        for &foot in feet {
+            let suffix = foot_suffix(skeleton, foot);
+            out.curves.insert(format!("{FOOT_SPEED_PREFIX}{suffix}"));
+            out.curves.insert(format!("{FOOT_LOCK_PREFIX}{suffix}"));
+            let leg = leg_name_of(skeleton, foot);
+            out.sync_markers.insert(format!("{PLANT_PREFIX}{leg}"));
+            out.event_markers.insert(format!("{FOOTSTEP_PREFIX}_{leg}"));
+        }
+        out
+    }
+
+    /// The names a derivation over `skeleton` writes, asking [`foot_joints`] for
+    /// the feet — the door the asset panel's `anim_clip_info` reads to badge a
+    /// channel as derived, so the badge and the re-derive button agree about
+    /// which channels the button will replace.
+    pub fn of_skeleton(skeleton: &Skeleton) -> Self {
+        Self::of(skeleton, &foot_joints(skeleton))
+    }
+
+    /// Whether `marker` is one this module writes. **The group is part of the
+    /// question** for a sync marker: a `plant_hand_l` an author put in a hands
+    /// group is not a foot plant however it is spelled.
+    pub fn owns_marker(&self, marker: &AnimMarker) -> bool {
+        if marker.is_sync() {
+            marker.group == crate::locomotion::FOOT_SYNC_GROUP
+                && self.sync_markers.contains(&marker.name)
+        } else {
+            self.event_markers.contains(&marker.name)
+        }
+    }
+}
+
+/// Whether a curve name belongs to the **derived vocabulary** — the display
+/// question, not the ownership one.
+///
+/// A panel badging a channel "derived" has a clip and may have no rig, so it
+/// asks about the family. [`DerivedNames`] is the authority on what a derivation
+/// actually replaces, and the two differ only on a name that borrows the family
+/// prefix without naming a foot of the rig (`FootLock_Weapon`): badged here,
+/// left alone there — which is the safe direction for both.
 pub fn is_derived_curve(name: &str) -> bool {
     name == MOVE_DATA_SPEED
         || name == als::W_GAIT
@@ -386,9 +499,39 @@ pub fn is_derived_curve(name: &str) -> bool {
         || name.starts_with(FOOT_LOCK_PREFIX)
 }
 
-/// Whether a marker name is one this module writes.
+/// Whether a marker name belongs to the derived vocabulary — the display
+/// question. [`DerivedNames::owns_marker`] is the ownership one.
 pub fn is_derived_marker(name: &str) -> bool {
     name.starts_with(PLANT_PREFIX) || name.starts_with(FOOTSTEP_PREFIX)
+}
+
+/// The first non-finite number in what a derivation is about to bake, named.
+///
+/// Every field checked here is one a consumer reads without asking: the mantle
+/// reads the root track, `time_at_distance` binary-searches the distance track,
+/// and P29.4's foot lock reads the channels. `AnimClip::validate_timing` asks
+/// about key *times* only, so none of these values has a door anywhere else.
+fn first_non_finite(
+    root: &RootMotionTrack,
+    distance: &DistanceTrack,
+    curves: &[CurveChannel],
+) -> Option<String> {
+    if root
+        .translation
+        .iter()
+        .flatten()
+        .chain(root.yaw_rad.iter())
+        .any(|v| !v.is_finite())
+    {
+        return Some("root-motion track".to_string());
+    }
+    if distance.distance_m.iter().any(|v| !v.is_finite()) {
+        return Some("distance track".to_string());
+    }
+    curves
+        .iter()
+        .find(|c| c.values.iter().any(|v| !v.is_finite()))
+        .map(|c| format!("curve channel `{}`", c.name))
 }
 
 /// **Put a baked root-motion track back onto the root joint** — the exact inverse
@@ -1153,6 +1296,99 @@ mod tests {
         assert!((d.yaw - std::f32::consts::FRAC_PI_4).abs() < 1e-4, "{d:?}");
     }
 
+    /// **Conservation, on a clip that does both** (P29.5 audit).
+    ///
+    /// The in-tree arms measure the residual on a *straight line* and the yaw on
+    /// a clip that only turns. A traversal clip does both at once, and the two
+    /// removals compose — the translation is subtracted from the root's own
+    /// local keys while the yaw is left-multiplied out of its rotation — so
+    /// "each half works alone" is not the same claim as "the pair is invertible".
+    /// Both halves here: the clip plays in place **and** un-baking recovers the
+    /// pose it arrived with, sample for sample, at times that are not keys.
+    #[test]
+    fn a_clip_that_travels_and_turns_plays_in_place_and_un_bakes_back() {
+        let sk = one_joint();
+        let q = |a: f64| {
+            let h = a * 0.5;
+            [
+                0.0f32,
+                inf_math::psin64(h) as f32,
+                0.0,
+                inf_math::pcos64(h) as f32,
+            ]
+        };
+        let mut clip = AnimClip::new("vault", Vec::new());
+        set_root_translation(
+            &mut clip,
+            0,
+            vec![0.0, 0.5, 1.0],
+            vec![[0.0, 0.0, 0.0], [0.3, 0.6, 0.55], [0.4, 0.9, 1.2]],
+        );
+        set_root_rotation(
+            &mut clip,
+            0,
+            vec![0.0, 0.5, 1.0],
+            vec![
+                q(0.0),
+                q(std::f64::consts::FRAC_PI_6),
+                q(std::f64::consts::FRAC_PI_3),
+            ],
+        );
+        clip.duration = 1.0;
+
+        let before: Vec<_> = (0..=20)
+            .map(|k| {
+                let t = k as f32 / 20.0;
+                let p = sample_clip(&sk, &clip, t, false).locals[0];
+                (t, p.translation, p.rotation)
+            })
+            .collect();
+
+        let (out, report) = derive_clip(&clip, &sk, &DeriveOptions::traversal()).unwrap();
+
+        // 1. THE RESIDUAL. Not "a track exists" — the root itself no longer
+        //    moves or turns, at every sample and not only at the keys.
+        for (t, _, _) in &before {
+            let p = sample_clip(&sk, &out, *t, false).locals[0];
+            assert!(
+                p.translation_vec().length() < 1e-5,
+                "the root still travels at t={t}: {:?}",
+                p.translation
+            );
+            assert!(
+                inf_math::pyaw(p.rotation_quat()).abs() < 1e-4,
+                "the root still turns at t={t}: {}",
+                inf_math::pyaw(p.rotation_quat())
+            );
+        }
+        // …and what it stopped doing is on the track.
+        assert!((report.translation[1] - 0.9).abs() < 1e-5, "{report:?}");
+        assert!(
+            (report.yaw_rad - std::f32::consts::FRAC_PI_3).abs() < 1e-4,
+            "{report:?}"
+        );
+
+        // 2. CONSERVATION. Un-baking gives back the clip that arrived.
+        let mut restored = out.clone();
+        unbake_root_motion(&mut restored, 0);
+        for (t, translation, rotation) in &before {
+            let p = sample_clip(&sk, &restored, *t, false).locals[0];
+            let d = p.translation_vec() - Vec3::from_array(*translation);
+            assert!(
+                d.length() < 1e-5,
+                "t={t}: {:?} vs {translation:?}",
+                p.translation
+            );
+            let a = p.rotation_quat();
+            let b = Quat::from_array(*rotation);
+            assert!(
+                a.dot(b).abs() > 1.0 - 1e-6,
+                "t={t}: {:?} vs {rotation:?}",
+                p.rotation
+            );
+        }
+    }
+
     /// **Idempotence, byte for byte.** The property the whole un-bake-first rule
     /// exists for: a re-derive from the panel must not eat the track it already
     /// wrote.
@@ -1485,6 +1721,165 @@ mod tests {
                 .length()
                 < 1e-6,
             "a traversal clip plays in place too"
+        );
+    }
+
+    /// **A poisoned pose is refused, not baked** (P29.5 audit, A1).
+    ///
+    /// `validate_timing` asks about key *times*, so a clip holding a NaN
+    /// translation **value** is a perfectly legal `.inf_anim` — and sampling one
+    /// poses a NaN, which every derived field inherits. Two of them are worse
+    /// than useless: `DistanceTrack::distance_m` has a monotonicity check at the
+    /// asset door, so baking a NaN one turns a clip that loads into a clip that
+    /// does not (the writer manufacturing a file its own reader rejects); and
+    /// the foot-speed channels are read by P29.4's lock with no guard at all.
+    ///
+    /// The control is the same clip with the NaN removed, which must derive —
+    /// otherwise this asserts nothing about NaN and everything about the fixture.
+    #[test]
+    fn a_clip_that_poses_a_nan_is_refused_rather_than_baked() {
+        let sk = one_joint();
+        let mut clip = AnimClip::new("poisoned", Vec::new());
+        set_root_translation(
+            &mut clip,
+            0,
+            vec![0.0, 1.0],
+            vec![[0.0, 0.0, 0.0], [f32::NAN, 0.0, 1.0]],
+        );
+        clip.duration = 1.0;
+        // The fixture really is a legal clip today — that is what makes this a
+        // door and not a decode error somewhere upstream.
+        assert!(clip.validate_timing().is_ok(), "the fixture must be legal");
+
+        let err = derive_clip(&clip, &sk, &DeriveOptions::default()).unwrap_err();
+        assert_eq!(
+            err,
+            DeriveError::NonFinite {
+                name: "poisoned".into(),
+                what: "root-motion track".into(),
+            },
+            "a NaN pose must be a refusal by name"
+        );
+
+        // THE CONTROL: the same clip, finite, derives — and the refused one is
+        // still exactly the clip that arrived (a refusal is a value: the caller
+        // keeps what it had).
+        let mut ok = clip.clone();
+        set_root_translation(
+            &mut ok,
+            0,
+            vec![0.0, 1.0],
+            vec![[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        );
+        let (baked, _) = derive_clip(&ok, &sk, &DeriveOptions::default()).unwrap();
+        assert!(baked.validate_timing().is_ok());
+        assert!(baked.root_motion.is_some());
+
+        // …and the arm that says why it matters: had the NaN been baked, the
+        // asset's own door would have refused the result.
+        let mut poisoned = clip.clone();
+        poisoned.distance = Some(DistanceTrack {
+            times: vec![0.0, 1.0],
+            distance_m: vec![0.0, f32::NAN],
+        });
+        assert!(
+            poisoned.validate_timing().is_err(),
+            "a NaN distance track must be refused by the asset door, or this \
+             refusal is defending nothing"
+        );
+    }
+
+    /// **The ownership boundary** (P29.5 audit, A2): a re-derive replaces what
+    /// this rig's derivation writes and leaves everything else alone.
+    ///
+    /// `footstep_land` is the name `anim_bridge::FOOTSTEP_PREFIX`'s own docs
+    /// invite an author to add ("a project that adds `footstep_land` gets it for
+    /// free"), and a prefix rule deletes it on the next press of the re-derive
+    /// button. So does it delete a `plant_hand_l` sync marker somebody put in a
+    /// hands group. Both are authored content and neither is this module's.
+    #[test]
+    fn a_re_derive_keeps_authored_markers_it_did_not_write() {
+        let sk = biped();
+        let set = build_locomotion(BodyPlan::Biped, &sk, &GaitParams::default()).unwrap();
+        let authored = set
+            .walk
+            .clone()
+            .with_markers(vec![
+                AnimMarker::event(0.4, "footstep_land"),
+                AnimMarker::sync(0.25, "plant_hand_l", "hands"),
+            ])
+            .with_curves(vec![CurveChannel::constant("FootLock_Weapon", 0.5)]);
+        // The generator already put its own `plant_*` markers on: keep them
+        // beside the authored ones, or the assertion below is about an empty set.
+        let (out, report) =
+            derive_clip(&authored, &sk.skeleton, &DeriveOptions::default()).unwrap();
+
+        assert!(
+            out.markers.iter().any(|m| m.name == "footstep_land"),
+            "an authored footstep notify was deleted: {:?}",
+            out.markers.iter().map(|m| &m.name).collect::<Vec<_>>()
+        );
+        assert!(
+            out.markers
+                .iter()
+                .any(|m| m.name == "plant_hand_l" && m.group == "hands"),
+            "an authored sync marker in another group was deleted"
+        );
+        assert_eq!(
+            out.curve_value("FootLock_Weapon", 0.0, -1.0),
+            0.5,
+            "a channel that borrows a derived prefix without naming a foot is not this module's"
+        );
+
+        // …and what it DOES own is still replaced rather than duplicated: the
+        // derived plants appear once each, and the report counts only its own.
+        let names = DerivedNames::of_skeleton(&sk.skeleton);
+        for n in &names.sync_markers {
+            assert_eq!(
+                out.markers
+                    .iter()
+                    .filter(|m| m.is_sync() && &m.name == n)
+                    .count(),
+                1,
+                "{n} was duplicated by a re-derive"
+            );
+        }
+        assert_eq!(
+            report.markers, 4,
+            "two feet, one plant and one footstep each"
+        );
+
+        // Re-deriving is still byte-identical with the authored data present.
+        let (again, _) = derive_clip(&out, &sk.skeleton, &DeriveOptions::default()).unwrap();
+        assert_eq!(bytes(&out), bytes(&again));
+    }
+
+    /// A derivation that finds **no** plants still clears the previous run's
+    /// markers — the reason [`DerivedNames`] is a could-write set rather than a
+    /// did-write one.
+    #[test]
+    fn a_re_derive_that_finds_no_plants_clears_the_last_ones() {
+        let sk = biped();
+        let set = build_locomotion(BodyPlan::Biped, &sk, &GaitParams::default()).unwrap();
+        let (with, r1) = derive_clip(&set.walk, &sk.skeleton, &DeriveOptions::default()).unwrap();
+        assert_eq!(r1.plants.len(), 2);
+
+        // A contact window nothing can meet: every plant disappears.
+        let strict = DeriveOptions {
+            min_contact_s: 1e6,
+            ..DeriveOptions::default()
+        };
+        let (without, r2) = derive_clip(&with, &sk.skeleton, &strict).unwrap();
+        assert!(r2.plants.is_empty(), "{:?}", r2.plants);
+        assert_eq!(
+            without
+                .markers
+                .iter()
+                .filter(|m| m.name.starts_with(PLANT_PREFIX) || m.name.starts_with(FOOTSTEP_PREFIX))
+                .count(),
+            0,
+            "the previous run's derived markers survived a run that found none: {:?}",
+            without.markers.iter().map(|m| &m.name).collect::<Vec<_>>()
         );
     }
 

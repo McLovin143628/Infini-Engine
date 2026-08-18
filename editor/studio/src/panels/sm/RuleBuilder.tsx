@@ -28,8 +28,6 @@
  * a tree that happens to be flat is still saved as a tree, which is the same
  * machine.
  */
-import { useCallback } from "react";
-
 import {
   SM_COND_KINDS,
   SM_OPS,
@@ -56,6 +54,10 @@ interface Props {
   onChange: (next: SmCondDto) => void;
 }
 
+/** The id of the shared parameter-name `<datalist>`. One per builder, not one
+ *  per node: ids are document-unique and a condition tree is recursive. */
+const PARAM_LIST_ID = "sm-param-names";
+
 /** A node and its subtree. Recursive, bounded by the engine's own
  *  `MAX_COND_DEPTH` — a tree past it is refused by `validate` at the save door,
  *  which is where the bound belongs. */
@@ -71,10 +73,11 @@ function CondNode({
   onChange: (next: SmCondDto) => void;
 }) {
   const node = condAt(root, path);
-  const replace = useCallback(
-    (next: SmCondDto) => onChange(setCondAt(root, path, next)),
-    [onChange, root, path],
-  );
+  // A plain closure, not a `useCallback`: `path` is `[...path, i]` — a fresh
+  // array the parent builds on every render — so the dependency list never
+  // matches and the memo has never once been reused (P29.5 audit, nit). The
+  // React-compiler lint says the same thing from the other end.
+  const replace = (next: SmCondDto) => onChange(setCondAt(root, path, next));
   if (!node) return null;
 
   const removable = path.length > 0;
@@ -116,23 +119,18 @@ function CondNode({
     </div>
   );
 
+  // The `<datalist>` itself is rendered ONCE, by `RuleBuilder` below. A tree is
+  // recursive, so emitting it here gave every node in a nested condition the
+  // same element id — and `list=` resolves to whichever one the document happens
+  // to hold first (P29.5 audit, nit).
   const paramPicker = (value: string, set: (v: string) => void) => (
-    <>
-      <input
-        className="sm-rule__param"
-        value={value}
-        list="sm-param-names"
-        placeholder="parameter"
-        onChange={(e) => set(e.target.value)}
-      />
-      <datalist id="sm-param-names">
-        {params.map((p) => (
-          <option key={p.name} value={p.name}>
-            {p.kind}
-          </option>
-        ))}
-      </datalist>
-    </>
+    <input
+      className="sm-rule__param"
+      value={value}
+      list={PARAM_LIST_ID}
+      placeholder="parameter"
+      onChange={(e) => set(e.target.value)}
+    />
   );
 
   return (
@@ -195,5 +193,16 @@ function CondNode({
 
 /** The rule builder over a whole transition condition. */
 export function RuleBuilder({ cond, params, onChange }: Props) {
-  return <CondNode root={cond} path={[]} params={params} onChange={onChange} />;
+  return (
+    <>
+      <datalist id={PARAM_LIST_ID}>
+        {params.map((p) => (
+          <option key={p.name} value={p.name}>
+            {p.kind}
+          </option>
+        ))}
+      </datalist>
+      <CondNode root={cond} path={[]} params={params} onChange={onChange} />
+    </>
+  );
 }

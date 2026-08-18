@@ -17603,7 +17603,12 @@ shows a one-line authoring change as a one-line diff.
 > the real one. `derive_clip` therefore un-bakes before it bakes:
 > `unbake_root_motion` is the exact inverse of the removal, so
 > `derive(derive(c)) == derive(c)` byte for byte — which is what makes it safe to
-> put on a button at all.
+> put on a button at all. **Two clauses the P29.5 audit added to it** (A1, A2):
+> a clip that poses a NaN is **refused** rather than baked, because the distance
+> track it would produce is one the asset's own reader rejects; and what a
+> re-derive replaces is the set of names **this rig** implies
+> (`inf_anim::DerivedNames`) rather than a prefix, because a prefix reads an
+> authored `footstep_land` as this module's and deletes it.
 >
 > **The vertical is the one thing a clip cannot answer for itself**, and it is an
 > **advisory** rather than a guess (the P16 rule). A rig's root joint is whichever
@@ -17681,13 +17686,21 @@ shows a one-line authoring change as a one-line diff.
 > single play-head — true, and it has a **leader**, which is `inf_anim::sync`'s own
 > notion: the heaviest clip, whose timeline every follower is already warped onto.
 > `motion_leader` is the one place that decides where a motion's head is, so the
-> marker scan and the curve publish both ride it; the step on which the leader
-> *changes* contributes nothing, for the same reason a state change does not. Root
+> marker scan and the curve publish both ride it. ~~the step on which the leader
+> *changes* contributes nothing, for the same reason a state change does not.~~
+> **CORRECTED by the P29.5 audit (A10):** it does not, and could not — both ends
+> of the interval are read against the same `ctx`, so the leader is identical by
+> construction and the guard that said otherwise was unreachable. A leader change
+> *between* two steps is genuinely not detected and is now carried as a bound
+> (one marker, at a weight crossover) rather than claimed as handled. Root
 > motion stays single-clip — a blend's true delta is the weighted blend of its
 > clips' and the leader's alone would be wrong, and blend-space root motion is
 > `root_motion.rs`'s own documented follow-up rather than something smuggled in
 > here. The arm has a control: swing the weights the other way and the *other*
-> clip's footstep rings, at *its* authored `Mask_FootstepSound` gain.
+> clip's footstep rings, at *its* authored `Mask_FootstepSound` gain — **and, per
+> the audit's A4, two more probes at intermediate weights, because both of the
+> original ones are at a *pure* weight where "the heaviest" and "the first" are
+> the same entry.**
 > *The pelvis IK offset.* A9 recorded it as computed and unconsumed, with its arm
 > bounded to the inert path because there was nothing to falsify against. It moves
 > the posed hips now, on the same fixed step, before the leg goals solve — and it is
@@ -17745,6 +17758,167 @@ shows a one-line authoring change as a one-line diff.
 > `a_feet_at_origin_rig_publishes_its_feet_half_a_capsule_up` still asserts the
 > current answer, so the day P29.6's sample character decides the convention it
 > fails and the ledger is rewritten rather than quietly disagreeing.
+
+> **P29.5 AUDIT** (2026-08-18) — adversarial pass over `77582f1..bf39dce`, eight
+> commits, 46 files. **Ten findings, three HIGH, all closed in the tree.**
+> Battery **278 binaries / 5 115 passed / 0 failed / 10 ignored** against the
+> wave's 278 / 5 108 / 0 / 10 (+7 arms, no new binary — every arm this pass added
+> lives in a binary that already existed); `clippy -D warnings` over the whole workspace and
+> `cargo fmt --check` clean; the frontend is **609 tests across 65 files**, unchanged, with
+> `tsc --noEmit` and eslint clean — and eslint *matters* here: the audit's own
+> first pass at the rule-builder nit tripped
+> `react-hooks/preserve-manual-memoization`, which is how the useless
+> `useCallback` beneath it was found. Goldens stay **54**, byte-unchanged; **no schema moved**, no
+> committed content moved, and `samples/` is untouched. **Twenty-two mutations
+> run independently** — all six of the wave's own, re-applied from scratch (all
+> six reproduced), and sixteen it did not think of. **Four of the sixteen
+> SURVIVED**, and three of those four are the wave's own headline claims:
+> the S2 import wiring, the S4 step boundary, and the leader half of the
+> blend-space notify. Each is now watched, and each new arm was
+> mutation-checked against the defect it was written for.
+>
+> **A1 (HIGH) — the import door writes a file its own reader refuses.**
+> `AnimClip::validate_timing` asks about key *times*, not values, so a clip
+> holding a NaN **translation** is a legal `.inf_anim` today — and every
+> derivation samples it. Measured on the shipped code: the root-motion track
+> comes out NaN, the distance track comes out NaN, and `validate_channels`'
+> monotonicity guard then refuses the result with *"distance track: distance goes
+> backwards at key 1 (0 then NaN)"*. So the pillar-S2 door took a clip that loads
+> and wrote one that does not — P23.6's closing ruling met from the writing side,
+> at the one place in this engine that now touches **every** imported clip. The
+> foot-speed channels are the quieter half: nothing validates a curve *value*, and
+> P29.4's foot lock reads them with no guard. `derive_clip` refuses now, as a
+> value (`DeriveError::NonFinite`, naming which field), so the import keeps the
+> clip it had and says what it could not measure — the same shape as every other
+> refusal in the module. `a_clip_that_poses_a_nan_is_refused_rather_than_baked`
+> carries the fixture, the control that must still derive, and the arm that
+> proves the refusal is defending something (the poisoned track really is refused
+> at the asset door).
+>
+> **A2 (HIGH) — a re-derive deleted authored notifies.** Ownership was a
+> **prefix**: any marker starting `footstep` or `plant_`, any curve starting
+> `FootSpeed_`/`FootLock_`. `anim_bridge::FOOTSTEP_PREFIX`'s own documentation —
+> written in this wave — invites a project to add `footstep_land` and get it for
+> free, and the panel's re-derive button then ate it. So did it eat a
+> `plant_hand_l` sync marker in somebody else's group, and a `FootLock_Weapon`
+> channel. Measured: all four authored names gone after one derivation.
+> `DerivedNames` replaces the prefix with the set this **rig** implies —
+> `plant_<leg>` in `FOOT_SYNC_GROUP`, `footstep_<leg>`, and the two channels per
+> foot — so a name this derivation would not itself write survives. It is a
+> *could-write* set and not a did-write one on purpose, which is the other half:
+> a re-derive that finds no plants at all must still clear the previous run's
+> markers, and a rule keyed on what it wrote this time would leave them behind.
+> Both arms are new, and the second one retired a surviving mutation as well
+> (`min_contact_s` had no coverage: deleting the check killed nothing).
+>
+> **A3 (HIGH) — a proposal could be a machine the save door rejects.**
+> `trigger_name` collapses case and punctuation, so `Jump`, `jump!` and a second
+> asset simply *called* `Jump` in another folder all ask for `play_jump` — and
+> `StateMachine::validate` refuses `DuplicateParam`. The panel adopts a proposal
+> as its document, so an author's first `Save` after pressing Propose would be a
+> refusal they did not cause, which is P29.2's A1 read from the writing side and
+> the exact failure the wave's own `sm_propose` arm says must not happen. Measured
+> on the shipped code: `[speed, play_jump, play_jump]`,
+> `Err(DuplicateParam { name: "play_jump" })`. Triggers are now uniquified
+> (`play_jump`, `play_jump_2`, …) and the arm asserts each declared trigger is the
+> one its own any-state edge reads, so the third clip is reachable rather than
+> merely named.
+>
+> **A4, A5, A6 — three headline claims, unwatched.** Each is a mutation this
+> audit designed that killed nothing in the tree, and all three are now watched by
+> an arm that was mutation-checked against the defect.
+> * **A6 (the S2 wiring).** `derive_in_place` at the glTF door was covered by a
+>   unit test of the *rule* and by nothing at all of the *wiring*: deriving onto a
+>   throwaway clone passed the whole 648-arm `inf-editor-core` library.
+>   "There is no window in which a `.inf_anim` in this project has not been
+>   measured" was the wave's own sentence and nothing asked it.
+>   `an_imported_clip_is_derived_before_it_is_written` reads the written asset
+>   back off disk — a glTF-decoded clip carries neither a root-motion track nor a
+>   `W_Gait` channel, so both are proof — and re-derives it to prove the button
+>   and the door are the same rule.
+> * **A5 (the S4 step boundary).** Moving `apply_pending_tunes` from the first
+>   line of `fixed_step` to the last passed **every** arm in `live_tuning`. The
+>   wave's claim is precisely "drained at the very top of the fixed step, before
+>   anything reads anything", and the four arms all read the field *after* the
+>   step, which is true wherever the drain sits.
+>   `a_tune_is_read_by_the_step_that_drained_it_and_not_the_one_after` asks the
+>   movement step instead: settle at the run cap, queue a tune that raises it, run
+>   **one** step, and the character is already accelerating — with the drain
+>   anywhere after the movement solve it is not, and the arm dies.
+> * **A4 (the blend-space leader).** The notify arm's control swings the weights
+>   between `0.0` and `1.0` — both *pure*, where `blend_weights_1d` returns a
+>   single surviving entry and "the heaviest" and "the first" are the same index.
+>   A `blend_leader` that answered `resolved[0]` passed both halves, so
+>   "the answer follows the weights rather than the entry order" was the one thing
+>   the control did not check. Two probes at `0.3` and `0.7` do, because in
+>   between the list is `[(lo, 1−frac), (hi, frac)]` in **position** order and the
+>   leader is the second entry past the midpoint.
+>
+> **A10 (MEDIUM) — a guard that could not fire, and a bound that was stated
+> backwards.** The pose step compared the leader at both ends of the step through
+> `std::ptr::eq` and the ledger recorded that "the step on which the leader
+> *changes* contributes nothing". Both calls take the **same** `ctx` — this
+> step's parameter snapshot — and a blend space's weights are a function of the
+> parameters alone, so `motion_leader` answers the same clip at either end by
+> construction and the branch is unreachable. The dead comparison is gone and the
+> real bound is written where it lives: a leader change **between** two steps is
+> not detected, because last step ended on the other clip's warped phase and
+> seeing that needs the previous leader remembered — and the only per-character
+> homes are reflected components, which is a schema move this wave does not have.
+> Carried, named, and bounded at one marker at a weight crossover.
+>
+> **A8 (LOW) — the preview session could answer a mannequin with a fitted rig.**
+> `LocoKey` carried the fit stamp as a bare `u64`, and `0` means "unstamped" — so
+> an unstamped *fitted* preview seeded the key a **mannequin** preview then hits,
+> and the mannequin came back with the author's model's leg lengths and gait
+> speeds. The stamp is an `Option<u64>` now: `None` is the mannequin path, whose
+> rig comes from `build_template`, and `Some(s)` a fitted one, whose rig comes
+> from a BVH. Reachable only on a hash collision with zero, and fixed because the
+> type was lying rather than because the odds were long.
+>
+> **The conservation arm the residual claim was missing.** The wave measures the
+> residual on a clip that only travels and the yaw on a clip that only turns, and
+> the two removals **compose** — a translation subtracted from the root's local
+> keys while a yaw is left-multiplied out of its rotation. "Each half works alone"
+> is not "the pair is invertible".
+> `a_clip_that_travels_and_turns_plays_in_place_and_un_bakes_back` asserts both,
+> at twenty samples that are not keys: the root neither travels nor turns
+> afterwards, and un-baking gives back the pose that arrived.
+>
+> **Mutation matrix.** The wave's own six, re-applied from scratch: the mantle
+> ignoring the arc (1 arm), the planted `pending_tunes` in the player (1), the
+> misspelled gate token — which fails the **vacuity** half, as designed (1), a
+> blend space with no leader (1), the misspelled `LiveTuning.tsx` field (1), and
+> the residual removal switched off (**5**). All six reproduced. Sixteen new:
+> a no-op `unbake_root_motion` (2 arms), `is_derived_curve` always false (2), the
+> looping contact seam un-merged (3), the stride second opinion dropped (2),
+> `kept_edits` un-deduplicated (2), `commit_kept` moved before the snapshot
+> restore (1), a proposal exit time of 2.0 (1), the pelvis drop suppressed (1),
+> the traversal-arc `looping` gate removed (1), the BVH cache key never matching
+> (2), the traversal advisory threshold set to infinity (1), and
+> `inf-editor-core` promoted to a real dependency of the player (1) — all killed.
+> **The four survivors** are A6, A5, A4 and the `min_contact_s` check, and each is
+> killed by an arm added here (re-verified by re-applying the mutation against it).
+>
+> **What this pass did NOT change.** The foot-publish seam is untouched, as the
+> wave's ledger promised —
+> `a_feet_at_origin_rig_publishes_its_feet_half_a_capsule_up` still asserts the
+> current answer and P29.6 still owns the convention. No P29.1–P29.4 arm changed
+> semantics. No golden moved, no `.inf_*` schema moved, no committed asset moved.
+>
+> **Carried, with the measurement (A7 and A9).** A play-head reduction that used to happen in
+> `f64` now happens in `f32`: `motion_leader` casts the state clock before
+> `resolve_time` wraps it, where the pose step's retired private copy took the
+> modulo first. It is exact below the clip's own duration and degrades with the
+> clock — markers stop separating when one f32 ulp exceeds the fixed step, which
+> is **t > 131 072 s**, about 36 hours in one unbroken animation state. Left
+> alone deliberately: the honest fixes are a second reduction rule (the very thing
+> the wave retired) or an `f64` `resolve_time` every caller pays for, and neither
+> is worth perturbing the one play-head rule inside an audit.
+> The inline save refusal is rendered (`role="alert"` beside the canvas) and
+> asserted at the **store** — `surfaces the validator's refusal inline` — but not
+> at the DOM: this tree has no component-render harness for an `@xyflow` canvas
+> and building one here was out of scope.
 
 
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger

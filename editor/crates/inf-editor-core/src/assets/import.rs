@@ -906,6 +906,75 @@ mod tests {
         assert_eq!(referrers, expected);
     }
 
+    /// **The import door really derives** (P29.5 audit, A6).
+    ///
+    /// §13's S2 promise is that there is no window in which a `.inf_anim` in a
+    /// project has not been measured — and until this arm, nothing asserted that
+    /// the derivation was wired into the importer at all. Deriving onto a
+    /// throwaway clone passed the whole `inf-editor-core` battery: the rule was
+    /// unit-tested (`anim_derive`), the wiring was not.
+    ///
+    /// So this reads the written asset back off disk. A `.inf_anim` decoded from
+    /// a glTF carries neither a root-motion track nor a `W_Gait` channel — the
+    /// format has the fields but the importer has nothing to put in them — so
+    /// both are proof the derivation ran on the way in.
+    #[test]
+    fn an_imported_clip_is_derived_before_it_is_written() {
+        let src = tempfile::tempdir().unwrap();
+        let proj_dir = tempfile::tempdir().unwrap();
+        let gltf = write_skinned_gltf(src.path());
+
+        let mut proj = AssetProject::open(proj_dir.path()).unwrap();
+        let dest = proj.content_dir("imported").unwrap();
+        let out = proj.import_file(&gltf, &dest).unwrap();
+
+        let clip_id = out
+            .produced
+            .iter()
+            .copied()
+            .find(|id| proj.db().get(*id).unwrap().kind() == AssetKind::AnimClip)
+            .expect("the fixture imports a clip");
+        let asset = proj
+            .load_payload::<inf_anim::AnimClipAsset>(clip_id)
+            .expect(
+            "the written clip decodes — a derivation must not bake bytes its own reader refuses",
+        );
+
+        assert!(
+            asset.clip.root_motion.is_some(),
+            "the imported clip carries no root-motion track, so nothing derived it"
+        );
+        assert!(
+            asset.clip.distance.is_some(),
+            "…and no distance track either"
+        );
+        assert!(
+            asset.clip.curve(inf_anim::channels::als::W_GAIT).is_some(),
+            "the derived gait channel is missing: {:?}",
+            asset
+                .clip
+                .curves
+                .iter()
+                .map(|c| &c.name)
+                .collect::<Vec<_>>()
+        );
+
+        // …and the derivation is the one the panel's button would run: a second
+        // pass over what was written moves nothing.
+        let rig = crate::assets::anim_derive::skeleton_for(&proj, clip_id, &asset)
+            .expect("the bound rig");
+        let (again, _) = inf_anim::derive_clip(
+            &asset.clip,
+            &rig.skeleton,
+            &inf_anim::DeriveOptions::default(),
+        )
+        .expect("a re-derive");
+        assert_eq!(
+            again, asset.clip,
+            "re-deriving what the importer wrote changed it"
+        );
+    }
+
     /// A small OBJ + MTL written to a temp dir, imported end-to-end through the
     /// shared orchestrator. Proves an `.inf_mesh` lands as the primary asset,
     /// carries a `usemtl`-derived material dependency edge, and — since the

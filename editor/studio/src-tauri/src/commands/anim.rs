@@ -161,11 +161,23 @@ pub async fn anim_clip_info(
             Err(e) => return Ok(Err(e.to_string())),
         };
         let rig = inf_editor_core::assets::anim_derive::skeleton_for(p, asset_id, &payload);
-        Ok(Ok((name, payload, rig.is_some())))
+        Ok(Ok((name, payload, rig)))
     })?;
-    let (name, payload, has_rig) = match loaded {
+    let (name, payload, rig) = match loaded {
         Ok(v) => v,
         Err(why) => return Ok(refused(&id, why)),
+    };
+    let has_rig = rig.is_some();
+    // **The ownership answer when the rig is there, the family answer when it is
+    // not** (P29.5 audit, A2). `DerivedNames` is what a re-derive would actually
+    // replace, so the badge and the button agree; `is_derived_curve` is the
+    // vocabulary question, which is all a clip bound to no skeleton can be asked.
+    let owned = rig
+        .as_ref()
+        .map(|r| inf_anim::DerivedNames::of_skeleton(&r.skeleton));
+    let derived_name = |n: &str| match &owned {
+        Some(o) => o.curves.contains(n),
+        None => inf_anim::derive::is_derived_curve(n),
     };
     let clip = &payload.clip;
 
@@ -193,7 +205,7 @@ pub async fn anim_clip_info(
                 min: if min.is_finite() { min } else { 0.0 },
                 max: if max.is_finite() { max } else { 0.0 },
                 samples,
-                derived: inf_anim::derive::is_derived_curve(&c.name),
+                derived: derived_name(&c.name),
             }
         })
         .collect();
