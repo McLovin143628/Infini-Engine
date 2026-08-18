@@ -53,6 +53,7 @@ pub fn blueprint_registry() -> NodeRegistry {
     reg.register_all(voxel_nodes());
     reg.register_all(destruct_nodes());
     reg.register_all(ik_nodes());
+    reg.register_all(anim_nodes());
     reg
 }
 
@@ -960,6 +961,113 @@ fn ik_nodes() -> Vec<NodeDef> {
     ]
 }
 
+/// The **animation kit** (P29.4) — the bridge between gameplay and the state
+/// machine: two exec actions that drive it, one pure query that reads it, and one
+/// exec action that *takes* one of this step's notifies.
+///
+/// # Why a kit at all, when a machine already reads Blueprint variables
+///
+/// It does, and that is an authoring path: an actor's variable named `speed`
+/// resolves through `SmContext` on every step, and a machine's conditions compare
+/// against it. What it is not is a *gameplay* path. A system that wants to say
+/// "this character just landed hard" has to know which actor owns the character
+/// and what the variable is called; a system that wants to ask "is it still
+/// getting up?" has no route at all, because a machine's current state was never
+/// published anywhere a script could read it.
+///
+/// So each node is one of the four questions the bridge answers, and each is a
+/// thin call onto a Ring-0 door in `inf_ecs::anim_bridge` — the `ik.*` shape,
+/// where the *rule* is in Ring 0 and both hosts hold only the dispatch.
+///
+/// # A parameter and a trigger are different things
+///
+/// `anim.set_param` is a **setting**: it persists until it is set again, and it
+/// shadows an actor variable of the same name. `anim.set_trigger` is an
+/// **event**: it arms a declared trigger parameter once, through
+/// `SmRuntime::arm_trigger`, so two presses one step apart fire twice — which
+/// writing a level into a variable does not do, because the second press has no
+/// rising edge to be detected from.
+///
+/// # Why `query_state` is pure and `consume_notify` is not
+///
+/// Asking what state a machine is in changes nothing, so it can be read from a
+/// condition without being sequenced. **Taking** a notify does change something —
+/// that is what "consume" means — so it is an exec action, and two handlers
+/// racing for one footstep get one footstep. `inf_ecs::pose::anim_events` remains
+/// the non-taking read for a caller that wants to look without spending.
+///
+/// # What is deliberately NOT here
+///
+/// * **The blend mode.** `inf_ecs::pose::set_blend_mode` is a world-level
+///   resource that nothing outside its own tests calls, and P29.2 recorded the
+///   consequence of exposing it: PIE has to carry it or the two hosts stop
+///   agreeing. Exposing it is a decision with a parity arm attached, and this
+///   wave did not spend either — the boundary stays named rather than half-closed.
+/// * **The overlay state.** `inf_ecs::movement::OverlayRegistry` interns names by
+///   first-seen order, so an id means something different per process; a node that
+///   handed one out would need an interning-determinism arm across a process
+///   boundary before it could be trusted. Also carried.
+///
+/// Every action reports `ok` rather than failing its handler (the `voxel.*`
+/// ruling): an entity with no `AnimStateMachine` answers `false` and the rest of
+/// the Tick body runs.
+fn anim_nodes() -> Vec<NodeDef> {
+    vec![
+        NodeDef::new("anim.set_param", "Set Anim Parameter", "anim")
+            .described(
+                "Set a named parameter on this entity's animation state machine. It SHADOWS an \
+                 actor variable of the same name and persists until set again. Reports false for \
+                 an entity with no state machine, or for a value that is not a number.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("name", PortType::Str).required(),
+                PortDef::new("value", PortType::Float),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN), PortDef::new("ok", PortType::Bool)]),
+        NodeDef::new("anim.set_trigger", "Set Anim Trigger", "anim")
+            .described(
+                "Arm a declared trigger parameter once. Unlike Set Anim Parameter this is an \
+                 EVENT: arming twice on consecutive steps fires twice, and an armed trigger no \
+                 transition consumes stays armed. Reports false for an entity with no state \
+                 machine.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("name", PortType::Str).required(),
+            ])
+            .with_outputs(vec![exec_out(EXEC_THEN), PortDef::new("ok", PortType::Bool)]),
+        NodeDef::new("anim.query_state", "Is Anim State", "anim")
+            .described(
+                "True while this entity's state machine is in the named state. False for an \
+                 entity that has never stepped one — a state nothing has entered is not a state \
+                 anything is in.",
+            )
+            .with_inputs(vec![
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("name", PortType::Str).required(),
+            ])
+            .with_outputs(vec![PortDef::new("active", PortType::Bool)]),
+        NodeDef::new("anim.consume_notify", "Consume Anim Notify", "anim")
+            .described(
+                "TAKE one of this step's animation notifies by name — a state's enter/exit event \
+                 or a clip's event marker (a footstep). True exactly once per fired name per \
+                 step: two handlers racing for one footstep get one.",
+            )
+            .with_inputs(vec![
+                exec_in(),
+                PortDef::new("entity", PortType::Int).required(),
+                PortDef::new("name", PortType::Str).required(),
+            ])
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("fired", PortType::Bool),
+            ]),
+    ]
+}
+
 /// The destruction kit (P22.3) — **runtime destruction**: two exec actions that
 /// break things and two pure queries that ask what is left. The `voxel_nodes`
 /// shape, one phase later, because the two kits are the same idea about two
@@ -1594,6 +1702,125 @@ mod tests {
                 "{host} dispatches a different set of `ik.*` nodes than the registry declares. An id in the registry and in neither host falls through to the unknown-call logger and the node silently does nothing; an id in a host and not the registry is an arm no author can reach."
             );
         }
+    }
+
+    /// **The `anim.*` kit's registry-versus-hosts gate** (P29.4), the same shape
+    /// as the `ik.*` one above and for the same reason §13's risk register gives:
+    /// the two Blueprint dispatches are a hand-maintained MIRROR pair, so a
+    /// host-versus-host text compare cannot see an id spelled wrong in *both*. An
+    /// id the registry declares and neither host matches falls through to the
+    /// unknown-call logger and the node silently does nothing; an id a host
+    /// matches and the registry does not is an arm no author can reach.
+    ///
+    /// **The bound, stated.** This is a source check: it proves the arms are
+    /// written and named correctly, not that dispatching one has the effect it
+    /// should. The effects are covered where they are implemented — the doors in
+    /// `inf_ecs::anim_bridge` have execution tests, and `pie_skinned.rs` drives
+    /// them against a real world through both hosts.
+    #[test]
+    fn both_hosts_dispatch_exactly_the_registered_anim_nodes() {
+        let reg = blueprint_registry();
+        let declared: std::collections::BTreeSet<String> = reg
+            .ordered()
+            .map(|d| d.type_id.clone())
+            .filter(|id| id.starts_with("anim."))
+            .map(|id| id["anim.".len()..].to_string())
+            .collect();
+        assert_eq!(declared.len(), 4, "the anim kit changed size: {declared:?}");
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        for host in [
+            "editor/crates/inf-editor-core/src/simulate.rs",
+            "runtime/inf-player/src/runtime_sim.rs",
+        ] {
+            let src = std::fs::read_to_string(root.join(host))
+                .unwrap_or_else(|e| panic!("read {host}: {e}"));
+            let mut arms: std::collections::BTreeSet<String> = Default::default();
+            for (i, _) in src.match_indices("(Some(\"anim\"), Some(\"") {
+                let rest = &src[i + "(Some(\"anim\"), Some(\"".len()..];
+                if let Some(end) = rest.find('"') {
+                    arms.insert(rest[..end].to_string());
+                }
+            }
+            assert_eq!(
+                arms, declared,
+                "{host} dispatches a different set of `anim.*` nodes than the registry declares."
+            );
+        }
+    }
+
+    /// The `anim.*` kit's shape (P29.4): three exec actions with the ONE data
+    /// output the lowerer can bind to a `Stmt::Let`, one pure query, every node
+    /// naming its character, and **declaration order as argument order**, which
+    /// both hosts' arms index positionally and no reader can see from the list.
+    #[test]
+    fn anim_kit_is_registered() {
+        let reg = blueprint_registry();
+        for id in [
+            "anim.set_param",
+            "anim.set_trigger",
+            "anim.query_state",
+            "anim.consume_notify",
+        ] {
+            assert!(reg.get(id).is_some(), "missing anim node {id}");
+            assert!(
+                reg.get(id).unwrap().input("entity").unwrap().required,
+                "{id} must name its character"
+            );
+            assert!(
+                reg.get(id).unwrap().input("name").unwrap().required,
+                "{id} must name the thing it acts on"
+            );
+            assert_eq!(reg.get(id).unwrap().input("name").unwrap().ty, PortType::Str);
+        }
+        for (id, out) in [
+            ("anim.set_param", "ok"),
+            ("anim.set_trigger", "ok"),
+            ("anim.consume_notify", "fired"),
+        ] {
+            let d = reg.get(id).unwrap();
+            assert!(d.input(EXEC_IN).is_some(), "{id} must be an exec action");
+            assert!(d.output(EXEC_THEN).is_some(), "{id} must chain");
+            let data_outs: Vec<&str> = d
+                .outputs
+                .iter()
+                .filter(|p| !p.ty.is_exec())
+                .map(|p| p.name.as_str())
+                .collect();
+            assert_eq!(data_outs, [out], "{id} must have exactly one data output");
+            assert_eq!(d.output(out).unwrap().ty, PortType::Bool);
+        }
+        // The query is PURE — readable from a condition without being sequenced.
+        let q = reg.get("anim.query_state").unwrap();
+        assert!(q.input(EXEC_IN).is_none(), "query_state must be pure");
+        assert!(q.output(EXEC_THEN).is_none(), "query_state must be pure");
+        assert_eq!(q.outputs.len(), 1);
+        assert_eq!(q.output("active").unwrap().ty, PortType::Bool);
+
+        let args = |id: &str| -> Vec<String> {
+            reg.get(id)
+                .unwrap()
+                .inputs
+                .iter()
+                .filter(|p| !p.ty.is_exec())
+                .map(|p| p.name.clone())
+                .collect()
+        };
+        assert_eq!(args("anim.set_param"), ["entity", "name", "value"]);
+        assert_eq!(args("anim.set_trigger"), ["entity", "name"]);
+        assert_eq!(args("anim.query_state"), ["entity", "name"]);
+        assert_eq!(args("anim.consume_notify"), ["entity", "name"]);
+
+        // **The distinction the kit exists to draw**, said in the palette where
+        // an author reads it: a parameter persists, a trigger is an event.
+        let p = reg.get("anim.set_param").unwrap().description.clone();
+        assert!(p.contains("SHADOWS") && p.contains("persists"), "{p}");
+        let t = reg.get("anim.set_trigger").unwrap().description.clone();
+        assert!(t.contains("EVENT"), "{t}");
+        let c = reg.get("anim.consume_notify").unwrap().description.clone();
+        assert!(c.contains("TAKE"), "{c}");
     }
 
     /// The `ik.*` kit (P24.3) is registered, and its actions have the ONE data

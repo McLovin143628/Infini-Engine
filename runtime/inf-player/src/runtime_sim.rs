@@ -2095,6 +2095,58 @@ impl Host for RuntimeHost<'_> {
                     Err(_) => 0.0,
                 }))
             }
+            // -- the `anim.*` kit (P29.4) --
+            //
+            // Four arms, identical in both hosts, over the Ring-0 doors in
+            // `inf_ecs::anim_bridge`. The rule is there and only the dispatch is
+            // here, which is the `ik.*` shape and the reason the kit needed no
+            // change to either fixed step: `step_pose_evaluation` reads the
+            // bridge itself.
+            //
+            // Every one reports rather than failing its handler -- an entity
+            // with no `AnimStateMachine` answers `false` and the rest of the
+            // Tick body runs (the `voxel.*` ruling).
+            (Some("anim"), Some("set_param")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => inf_ecs::anim_bridge::set_anim_param(
+                        self.world,
+                        guid,
+                        &arg_str(args, 1),
+                        arg_f64(args, 2),
+                    ),
+                    Err(_) => false,
+                }))
+            }
+            (Some("anim"), Some("set_trigger")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => {
+                        inf_ecs::anim_bridge::set_anim_trigger(self.world, guid, &arg_str(args, 1))
+                    }
+                    Err(_) => false,
+                }))
+            }
+            (Some("anim"), Some("query_state")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => {
+                        inf_ecs::anim_bridge::anim_state_is(self.world, guid, &arg_str(args, 1))
+                    }
+                    Err(_) => false,
+                }))
+            }
+            (Some("anim"), Some("consume_notify")) => {
+                let entity = self.guid_of(arg_i64(args, 0));
+                Ok(Value::Bool(match entity {
+                    Ok(guid) => inf_ecs::anim_bridge::consume_anim_notify(
+                        self.world,
+                        guid,
+                        &arg_str(args, 1),
+                    ),
+                    Err(_) => false,
+                }))
+            }
             // Unknown engine call: log it (matching the editor host) so a
             // partially-authored blueprint still runs rather than aborting.
             _ => {
