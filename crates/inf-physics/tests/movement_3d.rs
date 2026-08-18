@@ -1633,3 +1633,71 @@ fn the_spawn_settle_never_lowers_a_character_and_never_reaches_far() {
         hero_feet(&w)
     );
 }
+
+/// **A character with a movement component owns its own `speed`** (P29.6), and
+/// that shadows an actor variable of the same name.
+///
+/// The precedence matters and it is not obvious. Before this wave nothing in the
+/// engine set `speed` at all, so the only writers were a Blueprint variable and
+/// `anim.set_param`; a wizard character therefore stood in its idle state unless
+/// somebody wrote a program to tell it how fast it was going — while the number
+/// was already on its own movement runtime. Now the movement step publishes it,
+/// and the bridge overlay shadows the actor's variables, so the character's
+/// measured speed wins over a stale authored one. `phase24_wizard` takes the
+/// component off its fixture precisely because of this, and says so.
+///
+/// Both halves: with the component, the published number is the character's; the
+/// control is the same world with no machine, where nothing is published at all.
+#[test]
+fn a_character_with_a_movement_component_publishes_its_own_speed() {
+    use inf_ecs::components::AnimStateMachine;
+    let mut w = EcsWorld::new();
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(40.0, 0.5, 40.0),
+    );
+    spawn_hero(&mut w, 0.0, 0.0, 0.0);
+    let e = w.entity_of(HERO).unwrap();
+    w.world_mut().entity_mut(e).insert(AnimStateMachine {
+        sm: Some(Uuid::from_u128(0x5)),
+        ..Default::default()
+    });
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    for _ in 0..90 {
+        step(&mut w, &mut b, &walk_forward());
+    }
+    let published = inf_ecs::anim_bridge::anim_param(&w, HERO, inf_ecs::anim_bridge::params::SPEED)
+        .expect("a character with a machine publishes its speed");
+    let rt = hero(&w).runtime;
+    let planar = (rt.velocity.x * rt.velocity.x + rt.velocity.z * rt.velocity.z).sqrt();
+    assert!(
+        (published - planar).abs() < 1e-9,
+        "the published speed is the character's own: {published} against {planar}"
+    );
+    assert!(
+        published > 1.0,
+        "the fixture never got moving, so this arm is about nothing: {published}"
+    );
+
+    // The control: no machine, nothing published — the cheap path every
+    // character in every committed level before this wave takes.
+    let mut w2 = EcsWorld::new();
+    spawn_block(
+        &mut w2,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(40.0, 0.5, 40.0),
+    );
+    spawn_hero(&mut w2, 0.0, 0.0, 0.0);
+    let mut b2 = PhysicsBridge3D::new(GRAVITY);
+    for _ in 0..90 {
+        step(&mut w2, &mut b2, &walk_forward());
+    }
+    assert_eq!(
+        inf_ecs::anim_bridge::anim_param(&w2, HERO, inf_ecs::anim_bridge::params::SPEED),
+        None,
+        "a character with no machine published a parameter into nothing"
+    );
+}

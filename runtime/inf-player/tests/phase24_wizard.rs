@@ -160,8 +160,32 @@ fn doc_with(made: &Made) -> (SceneDoc, Uuid) {
         made.build.mesh.0,
         made.build.machine.0,
         DVec3::ZERO,
+        // The wizard's own controller is REPLACED below by this file's `driver`,
+        // whose only job is to default `speed` — see its doc comment. Passing
+        // `None` here keeps that substitution honest rather than layering two
+        // classes on one entity.
+        None,
+        1.8,
     );
     let e = doc.world().entity_of(guid).expect("the wizard spawned it");
+    // **P29.6: the movement component is taken back off.**
+    //
+    // The wizard now makes a real character — a capsule, a kinematic body and a
+    // `CharacterMovement` — and the movement step publishes that character's own
+    // `speed` into its machine every step
+    // (`inf_ecs::anim_bridge::publish_character_params`), which SHADOWS an actor
+    // variable of the same name. That is the right precedence: a character that
+    // has a movement component has one authority for how fast it is going.
+    //
+    // This file's claim is the P24.5 one — *the machine the wizard wrote fires
+    // on the thresholds the wizard derived* — and it drives it with a variable
+    // on purpose (see `driver`). So the fixture takes the component away and
+    // keeps testing exactly what it always tested; the new precedence has its
+    // own arm in `movement_3d`.
+    doc.world_mut()
+        .world_mut()
+        .entity_mut(e)
+        .remove::<inf_ecs::components::CharacterMovement>();
     doc.world_mut()
         .world_mut()
         .entity_mut(e)

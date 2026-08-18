@@ -50,6 +50,11 @@ uuid = { workspace = true }
 # this target to see per-phase timing. Spans never affect step results, so the
 # §8 replay-determinism gate is untouched.
 tracing = { workspace = true }
+# P29.6: the locomotion camera's tunables live beside the level as `camera.toml`
+# — a camera is not sim state and this wave has no schema budget, so its table is
+# text an author owns rather than a scene field. Already a workspace dependency
+# (`inf-asset` and the shipped player both carry it); it adds nothing to the tree.
+toml = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

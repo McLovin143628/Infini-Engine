@@ -14,10 +14,11 @@ use std::collections::HashMap;
 
 use glam::{DVec2, DVec3};
 use inf_ecs::components::{
-    AnimStateMachine, AtlasRect, Camera, Collider3D, ColliderShape3DKind, Foliage, FoliageInstance,
+    ActorClass, AnimStateMachine, AtlasRect, BodyKind3D, Camera, CharacterController3D,
+    CharacterMovement, Collider3D, ColliderShape3DKind, Foliage, FoliageInstance,
     FoliagePaletteEntry, GlobalTransform, Light, Light2D, LightKind, Material, MeshRef, NineSlice,
-    Primitive, SkeletalMesh, Spline, SplineInterp, Sprite, Terrain, Text2D, Tilemap, TimeOfDay,
-    Transform, Visibility, Volume, VolumeKind, WaterBody, WaterKind,
+    Primitive, RigidBody3D, SkeletalMesh, Spline, SplineInterp, Sprite, Terrain, Text2D, Tilemap,
+    TimeOfDay, Transform, Visibility, Volume, VolumeKind, WaterBody, WaterKind,
 };
 use inf_ecs::{Color, ComputedVisibility, EcsWorld, Entity, PropValue, Vec2d, Vec3d};
 use inf_terrain::{
@@ -1621,11 +1622,41 @@ impl SceneDoc {
         mesh: Uuid,
         machine: Uuid,
         at: DVec3,
+        controller: Option<Uuid>,
+        height_m: f64,
     ) -> Uuid {
         let guid = self.create(SpawnKind::Empty, name, None);
         if let Some(entity) = self.world.entity_of(guid) {
+            // ── P29.6 ── the character is a CHARACTER now: a capsule sized from
+            //    the rig it was generated with, a kinematic body, the movement
+            //    component with the catalogue defaults, and the controller the
+            //    wizard wrote. §13's gap list said the wizard emitted none of
+            //    this; a `SkeletalMesh` and a machine alone is a puppet.
+            //
+            //    The capsule is derived rather than authored: half the creature's
+            //    own height, less a radius that is a quarter of it, so a 1.2 m
+            //    character and a 2 m one both get a capsule that fits. `at` is
+            //    the FEET (which is what an author places), and the transform is
+            //    the capsule CENTRE, so the two differ by exactly what
+            //    `inf_ecs::movement::feet_offset_m` subtracts — the P29.6
+            //    character-space ruling, applied at the one place a character is
+            //    created.
+            let height = if height_m.is_finite() && height_m > 0.2 {
+                height_m
+            } else {
+                1.8
+            };
+            let radius = (height * 0.15).clamp(0.1, 0.5);
+            let half = (height * 0.5 - radius).max(0.05);
+            let mut movement = CharacterMovement {
+                player_controlled: true,
+                ..Default::default()
+            };
+            movement.stand_half_height_m = half;
+            movement.crouch_half_height_m = (half * 0.5).max(0.05);
+            movement.prone_half_height_m = (radius * 0.6).max(0.03);
             let mut t = Transform::IDENTITY;
-            t.translation = Vec3d::new(at.x, at.y, at.z);
+            t.translation = Vec3d::new(at.x, at.y + half + radius, at.z);
             self.world.world_mut().entity_mut(entity).insert((
                 SkeletalMesh {
                     mesh: Some(mesh),
@@ -1635,8 +1666,26 @@ impl SceneDoc {
                     sm: Some(machine),
                     ..Default::default()
                 },
+                RigidBody3D {
+                    kind: BodyKind3D::Kinematic,
+                    ..Default::default()
+                },
+                Collider3D {
+                    shape_kind: ColliderShape3DKind::Capsule,
+                    half_extents: Vec3d::new(radius, half, radius),
+                    radius,
+                    ..Default::default()
+                },
+                CharacterController3D::default(),
+                movement,
                 t,
             ));
+            if let Some(actor) = controller {
+                self.world
+                    .world_mut()
+                    .entity_mut(entity)
+                    .insert(ActorClass(actor));
+            }
         }
         self.record_create(guid, "Create Character");
         guid

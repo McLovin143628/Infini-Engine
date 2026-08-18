@@ -208,6 +208,8 @@ pub async fn character_create(
                 built.mesh.0,
                 built.machine.0,
                 glam::DVec3::new(at[0], at[1], at[2]),
+                Some(built.actor.0),
+                spec.params.height_m,
             );
             doc.select(&[guid], false);
             guid

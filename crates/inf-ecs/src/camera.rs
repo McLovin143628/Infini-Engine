@@ -61,7 +61,8 @@ pub enum ViewMode {
 /// One settings block — ALS's `FALSCameraSettings`, with the two fields its C++
 /// path reads out of curves instead (the pivot offset and the three lag speeds)
 /// promoted to real fields, because that is what removes the dummy AnimBP.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct CameraSettings {
     /// Distance from the pivot to the camera, metres (ALS `TargetArmLength`,
     /// 340 cm at a run).
@@ -115,7 +116,12 @@ impl CameraSettings {
 }
 
 /// The four blocks a rotation mode carries — ALS's `FALSCameraGaitSettings`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Every field is `#[serde(default)]` so a `camera.toml` may name only the
+/// numbers an author is actually tuning; the rest come from
+/// [`CameraTuning::default`], which is the ported ALS table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct GaitCameraSettings {
     pub walk: CameraSettings,
     pub run: CameraSettings,
@@ -147,7 +153,8 @@ impl GaitCameraSettings {
 /// The table is ALS's `FALSCameraStateSettings` — `RotationMode` × (gait +
 /// crouch) = 3 × 4 = twelve blocks — plus the first-person seat and the handful
 /// of numbers that are not per-state.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct CameraTuning {
     pub velocity_direction: GaitCameraSettings,
     pub looking_direction: GaitCameraSettings,
@@ -377,6 +384,38 @@ impl CameraTuning {
             };
         }
         known
+    }
+}
+
+impl CameraTuning {
+    /// **Read a `camera.toml` beside a level**, or the ported ALS defaults.
+    ///
+    /// The same shape (and the same rationale) as the input map's own
+    /// `load_map_beside`: the camera table has no home in the scene schema —
+    /// this wave has no schema budget and a camera is not sim state anyway — so
+    /// it lives beside the level as text an author owns and a reviewer can read.
+    /// Every field defaults, so a file naming one number is a legal file.
+    ///
+    /// A malformed file falls back to the defaults **and says which** — a
+    /// refusal is a value, and a camera that would not load is not a reason to
+    /// refuse to open a level.
+    pub fn load_beside(level_path: &std::path::Path) -> Self {
+        let path = level_path.with_file_name("camera.toml");
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match toml::from_str::<Self>(&text) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!("bad camera table {}: {e}; using defaults", path.display());
+                    Self::default()
+                }
+            },
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// The table as deterministic TOML — what the character wizard writes.
+    pub fn to_toml(&self) -> Result<String, String> {
+        toml::to_string_pretty(self).map_err(|e| e.to_string())
     }
 }
 

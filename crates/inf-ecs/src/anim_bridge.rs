@@ -553,6 +553,90 @@ pub fn clear_anim_bridge(world: &mut EcsWorld) {
     world.world_mut().remove_resource::<AnimBridgeRes>();
 }
 
+/// **The parameter names a character publishes into its own machine** (P29.6).
+///
+/// ALS's AnimInstance copies seventeen fields off the character every tick and
+/// the AnimBP reads them by name; this is the same idea with the name set
+/// written down once, so a proposed machine, a wizard-generated one and a
+/// hand-authored one all read the same words for the same numbers.
+///
+/// [`SPEED`] is `inf_anim::locomotion::SPEED_VAR` by construction — the
+/// generator has used that name since P24.5 and a second spelling would leave
+/// every wizard character standing still. The arm in this module holds the two
+/// together, because `inf-ecs` cannot reach for the constant without the
+/// dependency edge it deliberately does not want on the *name* side.
+pub mod params {
+    /// Planar ground speed, m/s.
+    pub const SPEED: &str = "speed";
+    /// The normalized 0–3 gait scale — 0 stopped, 1 walk, 2 run, 3 sprint.
+    /// ALS's `GetMappedSpeed`, and the X axis of every movement curve.
+    pub const GAIT: &str = "gait";
+    /// `1` when the last sweep ended on the ground, `0` otherwise.
+    pub const GROUNDED: &str = "grounded";
+    /// The [`crate::components::MovementMode`] discriminant, as a number — so a
+    /// machine can say `mode == 4` for a slide without the engine growing a
+    /// typed parameter kind for enums.
+    pub const MODE: &str = "mode";
+    /// The [`crate::components::MovementDirection`] discriminant.
+    pub const DIRECTION: &str = "direction";
+    /// Downward speed, m/s, positive falling — `0` while grounded.
+    pub const FALL_SPEED: &str = "fall_speed";
+    /// How close a predicted landing is, `[0, 1]`.
+    pub const LAND_ALPHA: &str = "land_alpha";
+}
+
+/// **Publish a character's movement state into its machine's parameters**
+/// (P29.6) — the door that makes a wizard-generated character animate with no
+/// script at all.
+///
+/// Before this, `speed` was a parameter every generated and proposed machine
+/// gated on and **nothing in the engine ever set**: the only writer was
+/// `anim.set_param`, which is a Blueprint's door. So the wizard's own character
+/// stood in its idle state for ever unless somebody wrote a program to tell it
+/// how fast it was going — and the number it needed was already on the movement
+/// runtime, one crate away.
+///
+/// It writes into the same overlay `anim.set_param` writes into, which means a
+/// Blueprint still **wins**: the kit's writes land after this in the fixed step
+/// (the movement step runs before the Blueprint tick in neither host — see the
+/// call site) and a game that wants to drive `speed` itself simply does.
+///
+/// Returns whether anything was published. `false` for an entity with no
+/// machine, which is most characters, and the check is the first thing that
+/// happens so the cost on those is one map lookup.
+pub fn publish_character_params(
+    world: &mut EcsWorld,
+    guid: Uuid,
+    cm: &crate::components::CharacterMovement,
+) -> bool {
+    if !has_machine(world, guid) {
+        return false;
+    }
+    let rt = &cm.runtime;
+    let planar = (rt.velocity.x * rt.velocity.x + rt.velocity.z * rt.velocity.z).sqrt();
+    let values: [(&str, f64); 7] = [
+        (params::SPEED, planar),
+        (params::GAIT, rt.mapped_speed),
+        (params::GROUNDED, f64::from(u8::from(rt.grounded))),
+        (params::MODE, cm.mode as u8 as f64),
+        (params::DIRECTION, rt.direction as u8 as f64),
+        (params::FALL_SPEED, (-rt.velocity.y).max(0.0)),
+        (params::LAND_ALPHA, rt.land_alpha),
+    ];
+    with_bridge(world, |b| {
+        let slot = b.params.entry(guid).or_default();
+        for (name, value) in values {
+            // A non-finite number is DROPPED rather than published: the machine
+            // would compare against it and every comparison a NaN takes part in
+            // is false, which reads as "no transition is ready" for ever.
+            if value.is_finite() {
+                slot.insert(name.to_string(), value);
+            }
+        }
+    });
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,5 +722,99 @@ mod tests {
         set_anim_param(&mut w, guid, "x", 1.0);
         clear_anim_bridge(&mut w);
         assert!(bridge(&w).is_none());
+    }
+
+    /// **`speed` is the name the generator has used since P24.5**, and a second
+    /// spelling would leave every wizard character standing in its idle state.
+    ///
+    /// `inf-anim` owns the constant and `inf-ecs` owns the publisher, and the
+    /// two are held together here because this crate can name both. It is an
+    /// assertion rather than a `pub use` on purpose: the publisher's vocabulary
+    /// is the ENGINE's, and a machine that a project authors by hand reads these
+    /// words whether or not `inf_anim::locomotion` exists.
+    #[test]
+    fn the_published_speed_is_the_name_every_generated_machine_reads() {
+        assert_eq!(params::SPEED, inf_anim::locomotion::SPEED_VAR);
+    }
+
+    /// The publisher writes every name it declares, and refuses an entity with
+    /// no machine — the cheap path every character in every committed level
+    /// before P29.6 takes.
+    #[test]
+    fn a_character_publishes_its_state_into_its_own_machine() {
+        use crate::components::{AnimStateMachine, CharacterMovement, MovementMode};
+        let mut w = EcsWorld::new();
+        let guid = Uuid::from_u128(0x2906_1001);
+        let bare = Uuid::from_u128(0x2906_1002);
+        let e = w.spawn_with_guid(guid, "Hero", None);
+        w.world_mut().entity_mut(e).insert(AnimStateMachine {
+            sm: Some(Uuid::from_u128(9)),
+            ..Default::default()
+        });
+        w.spawn_with_guid(bare, "Prop", None);
+
+        let mut cm = CharacterMovement {
+            mode: MovementMode::Crouch,
+            ..Default::default()
+        };
+        cm.runtime.velocity = Vec3d::new(3.0, -4.0, 4.0);
+        cm.runtime.mapped_speed = 1.75;
+        cm.runtime.grounded = true;
+
+        assert!(!publish_character_params(&mut w, bare, &cm), "no machine");
+        assert!(publish_character_params(&mut w, guid, &cm));
+        // 3-4-5: the planar speed is 5, and the vertical is NOT in it.
+        assert_eq!(anim_param(&w, guid, params::SPEED), Some(5.0));
+        assert_eq!(anim_param(&w, guid, params::GAIT), Some(1.75));
+        assert_eq!(anim_param(&w, guid, params::GROUNDED), Some(1.0));
+        assert_eq!(
+            anim_param(&w, guid, params::MODE),
+            Some(MovementMode::Crouch as u8 as f64)
+        );
+        assert_eq!(anim_param(&w, guid, params::FALL_SPEED), Some(4.0));
+        // Every declared name is written — a name that is declared and never
+        // published is a machine gating on a parameter that stays at its default.
+        for name in [
+            params::SPEED,
+            params::GAIT,
+            params::GROUNDED,
+            params::MODE,
+            params::DIRECTION,
+            params::FALL_SPEED,
+            params::LAND_ALPHA,
+        ] {
+            assert!(
+                anim_param(&w, guid, name).is_some(),
+                "`{name}` is declared and never published"
+            );
+        }
+        // A Blueprint still wins: the kit writes into the same overlay.
+        assert!(set_anim_param(&mut w, guid, params::SPEED, 99.0));
+        assert_eq!(anim_param(&w, guid, params::SPEED), Some(99.0));
+    }
+
+    /// A non-finite value is **dropped**, not published: a machine comparing
+    /// against a NaN reads every transition as not-ready, for ever.
+    #[test]
+    fn a_non_finite_movement_value_is_not_published() {
+        use crate::components::{AnimStateMachine, CharacterMovement};
+        let mut w = EcsWorld::new();
+        let guid = Uuid::from_u128(0x2906_1003);
+        let e = w.spawn_with_guid(guid, "Hero", None);
+        w.world_mut().entity_mut(e).insert(AnimStateMachine {
+            sm: Some(Uuid::from_u128(9)),
+            ..Default::default()
+        });
+        let mut cm = CharacterMovement::default();
+        cm.runtime.velocity = Vec3d::new(2.0, 0.0, 0.0);
+        assert!(publish_character_params(&mut w, guid, &cm));
+        assert_eq!(anim_param(&w, guid, params::SPEED), Some(2.0));
+        cm.runtime.velocity = Vec3d::new(f64::NAN, 0.0, 0.0);
+        assert!(publish_character_params(&mut w, guid, &cm));
+        assert_eq!(
+            anim_param(&w, guid, params::SPEED),
+            Some(2.0),
+            "a NaN overwrote the last good speed"
+        );
     }
 }

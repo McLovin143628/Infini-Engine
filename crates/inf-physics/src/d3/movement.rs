@@ -1278,9 +1278,23 @@ fn step_one(
             }
         }
         if let Some(mut slot) = w.get_mut::<CharacterMovement>(entity) {
-            *slot = cm;
+            *slot = cm.clone();
         }
     }
+    // ── 12b. **Publish this character's state into its own machine** (P29.6).
+    //
+    //    ALS's AnimInstance copies seventeen fields off the character every
+    //    tick; this is the same idea through the one Ring-0 overlay the `anim.*`
+    //    kit writes into, so a wizard-generated character animates with **no
+    //    script at all**. Before it, `speed` was a parameter every generated and
+    //    proposed machine gated on and nothing in the engine ever set.
+    //
+    //    A Blueprint still wins: its `anim.set_param` runs in the Tick pass,
+    //    which is after this in both hosts' fixed steps.
+    //
+    //    Costs one map lookup on a character with no machine, which is every
+    //    character in every committed level before this wave.
+    inf_ecs::anim_bridge::publish_character_params(world, guid, &cm);
     if let Some(body) = bridge.body_of(guid) {
         bridge.world_mut().set_body_translation(body, position);
     }
@@ -1528,9 +1542,23 @@ fn step_mantle(
             }
         }
         if let Some(mut slot) = w.get_mut::<CharacterMovement>(entity) {
-            *slot = cm;
+            *slot = cm.clone();
         }
     }
+    // ── 12b. **Publish this character's state into its own machine** (P29.6).
+    //
+    //    ALS's AnimInstance copies seventeen fields off the character every
+    //    tick; this is the same idea through the one Ring-0 overlay the `anim.*`
+    //    kit writes into, so a wizard-generated character animates with **no
+    //    script at all**. Before it, `speed` was a parameter every generated and
+    //    proposed machine gated on and nothing in the engine ever set.
+    //
+    //    A Blueprint still wins: its `anim.set_param` runs in the Tick pass,
+    //    which is after this in both hosts' fixed steps.
+    //
+    //    Costs one map lookup on a character with no machine, which is every
+    //    character in every committed level before this wave.
+    inf_ecs::anim_bridge::publish_character_params(world, guid, &cm);
     if let Some(body) = bridge.body_of(guid) {
         bridge.world_mut().set_body_translation(body, position);
     }

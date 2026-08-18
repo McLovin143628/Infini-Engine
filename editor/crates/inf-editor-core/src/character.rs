@@ -206,6 +206,18 @@ pub struct CharacterBuild {
     pub walk: AssetId,
     pub run: AssetId,
     pub machine: AssetId,
+    /// **The controller** (P29.6) — a real `.inf_act` the character is bound to,
+    /// not a hole where one should be. §13's gap list said "the character wizard
+    /// emits no controller at all"; this is that closed.
+    pub actor: AssetId,
+    /// The **text** files written beside the assets, relative to the content
+    /// root: the machine's reviewable face, the camera table and the bindings.
+    /// Paths rather than ids because none of them is an asset — they are the
+    /// author's own text, which is the whole point (pillar S1).
+    pub text: Vec<std::path::PathBuf>,
+    /// One line per decision the proposal took, with the numbers behind it — the
+    /// panel shows them, and they are deliberately not stored in the machine.
+    pub proposal_notes: Vec<String>,
     /// Whether `mesh` is the generated mannequin (`true`) or a skinned copy of
     /// the author's own mesh (`false`).
     pub mannequin: bool,
@@ -648,10 +660,53 @@ pub fn build_character(
         None => None,
     };
     let (rig, fit) = rig_for(spec, source.as_ref())?;
-    let set = build_locomotion(spec.plan, &rig, &spec.gait)
+    let mut set = build_locomotion(spec.plan, &rig, &spec.gait)
         .map_err(|e| CharacterError::Locomotion(e.to_string()))?;
 
-    let mut warnings: Vec<String> = Vec::new();
+    // ── DERIVE, before anything is written (P29.6) ────────────────────────
+    //
+    // The same door the glTF import goes through (`inf_anim::derive_clip`), for
+    // the same reason: a clip in this project has been measured, and there is no
+    // window in which one has not. It is also what makes the proposal below
+    // possible at all — `facts_of` clusters on `W_Gait`, the distance track and
+    // the foot-plant markers, and a generated clip carries none of those until
+    // this runs.
+    //
+    // A refusal is carried as a warning rather than as a failure: the clip that
+    // could not be measured is still a perfectly good clip (P29.5's `DeriveError`
+    // rule), and a wizard that refused to make a character because one cycle's
+    // feet were odd would be the wrong trade.
+    // **This creature's OWN ladder**, not ALS's soldier. `W_Gait` is a tier and
+    // not a speed (P29.5), so inverting it needs the same three numbers it was
+    // written against — and the wizard's default biped walks at 0.65 m/s, which
+    // on ALS's 1.65/3.75/6.5 ladder tiers as an *idle*. That reading is correct
+    // for a soldier and wrong for this animal, and the ladder is the knob for
+    // exactly that: derive and propose both take the generator's own speeds, so
+    // the walk clips as a walk.
+    let ladder: [f32; 3] = [
+        set.walk_speed_m_s as f32,
+        set.run_speed_m_s as f32,
+        (set.run_speed_m_s * SPRINT_OF_RUN) as f32,
+    ];
+    let derive_opts = inf_anim::DeriveOptions {
+        gait_speeds_mps: ladder,
+        ..inf_anim::DeriveOptions::default()
+    };
+    let mut derive_warnings: Vec<String> = Vec::new();
+    for (label, clip) in [
+        ("idle", &mut set.idle),
+        ("walk", &mut set.walk),
+        ("run", &mut set.run),
+    ] {
+        match inf_anim::derive_clip(clip, &rig.skeleton, &derive_opts) {
+            Ok((derived, _report)) => *clip = derived,
+            Err(e) => derive_warnings.push(format!(
+                "the {label} cycle could not be measured ({e}), so its curves and                  markers are absent — the machine still plays it"
+            )),
+        }
+    }
+
+    let mut warnings: Vec<String> = derive_warnings;
     if let Some(f) = fit {
         if f.joints_inside < f.joints {
             warnings.push(format!(
@@ -741,16 +796,45 @@ pub fn build_character(
     let walk = clip(project, &mut written, "Walk", &set.walk)?;
     let run = clip(project, &mut written, "Run", &set.run)?;
 
-    // ── the machine ────────────────────────────────────────────────────────
-    let machine_asset = StateMachineAsset::new(
-        locomotion_machine(
-            &set,
-            *idle.0.as_bytes(),
-            *walk.0.as_bytes(),
-            *run.0.as_bytes(),
-        ),
-        Some(skel_bytes),
-    );
+    // ── the machine, PROPOSED from what the derivation measured (P29.6) ────
+    //
+    // `inf_anim::propose` gets its first committed consumer here. Until this
+    // wave it had none: S3's promise is that an author does not start from an
+    // empty canvas, and the one door in this engine that produces a character
+    // from nothing was still calling P24.5's hand-rolled three-state generator.
+    //
+    // The proposal is a NORMAL machine — the author opens it in the same canvas,
+    // edits it with the same tools and reviews it as the same diff — and it
+    // reads the numbers the derivation just measured off these very clips rather
+    // than the generator's model of them. `locomotion_machine` remains the
+    // fallback, by name, for a clip set the proposal refuses (an empty one
+    // cannot happen here, but a refusal is a value and this is what a value is
+    // for).
+    let facts = vec![
+        inf_anim::propose::facts_of("idle", *idle.0.as_bytes(), &set.idle, ladder),
+        inf_anim::propose::facts_of("walk", *walk.0.as_bytes(), &set.walk, ladder),
+        inf_anim::propose::facts_of("run", *run.0.as_bytes(), &set.run, ladder),
+    ];
+    let propose_opts = inf_anim::propose::ProposalOptions {
+        gait_speeds_mps: ladder,
+        ..Default::default()
+    };
+    let (machine_model, proposal_notes) =
+        match inf_anim::propose::propose_machine(&facts, &propose_opts) {
+            Ok(p) => (p.machine, p.notes),
+            Err(e) => (
+                locomotion_machine(
+                    &set,
+                    *idle.0.as_bytes(),
+                    *walk.0.as_bytes(),
+                    *run.0.as_bytes(),
+                ),
+                vec![format!(
+                    "the clip set could not be proposed over ({e}), so the                      generated three-state locomotion machine was written instead"
+                )],
+            ),
+        };
+    let machine_asset = StateMachineAsset::new(machine_model.clone(), Some(skel_bytes));
     let machine = write_one(
         project,
         &mut written,
@@ -761,7 +845,57 @@ pub fn build_character(
         bound,
     )?;
 
+    // ── the controller (P29.6) ─────────────────────────────────────────────
+    //
+    // §13's gap list: *"the character wizard emits no controller at all"*. This
+    // is a real `.inf_act`, bound to the entity, driving nothing the engine
+    // already drives — the movement step publishes `speed` and the rest of the
+    // machine's parameters itself (`inf_ecs::anim_bridge::publish_character_
+    // params`), so a controller that set them would be a second authority for
+    // one fact. What it does is the half only a game can do: consume the
+    // footstep notifies the derivation authored and keep the character's own
+    // counters.
+    let actor = match write_controller(project, &dir, name, machine) {
+        Ok(id) => {
+            written.push(id);
+            id
+        }
+        Err(e) => {
+            roll_back(project, &written);
+            return Err(e);
+        }
+    };
+
+    // ── the text the author owns from minute one (S1) ──────────────────────
+    let mut text: Vec<std::path::PathBuf> = Vec::new();
+    // The machine, as text: the reviewable face of the `.inf_sm` beside it, and
+    // the thing pillar S1's whole argument is about.
+    let sm_text = inf_anim::to_toml(&machine_model);
+    let sm_path = dir.join(format!("{name} Locomotion.inf_sm.txt"));
+    inf_asset::write_atomically(&sm_path, sm_text.as_bytes())
+        .map_err(|e| CharacterError::Write(e.to_string()))?;
+    text.push(sm_path);
+    // The camera table and the input bindings — neither has a home in the scene
+    // schema (a camera is not sim state; a binding is a project's), so both are
+    // text beside the character, in the formats the shipped player already reads.
+    let cam_path = dir.join("camera.toml");
+    let cam_text = inf_ecs::camera::CameraTuning::default()
+        .to_toml()
+        .map_err(CharacterError::Write)?;
+    inf_asset::write_atomically(&cam_path, cam_text.as_bytes())
+        .map_err(|e| CharacterError::Write(e.to_string()))?;
+    text.push(cam_path);
+    let input_path = dir.join("input.toml");
+    let input_text = toml::to_string_pretty(&inf_input::default_map())
+        .map_err(|e| CharacterError::Write(e.to_string()))?;
+    inf_asset::write_atomically(&input_path, input_text.as_bytes())
+        .map_err(|e| CharacterError::Write(e.to_string()))?;
+    text.push(input_path);
+
     Ok(CharacterBuild {
+        actor,
+        text,
+        proposal_notes,
         skeleton,
         mesh,
         idle,
@@ -895,6 +1029,213 @@ fn skinned_copy(
         },
         export,
     ))
+}
+
+// ── the controller (P29.6) ──────────────────────────────────────────────────
+
+/// A sprint speed for the derived gait ladder, as a multiple of the run.
+///
+/// The generator authors a walk and a run and nothing faster, so the third rung
+/// has to come from somewhere. ALS's own ladder is 165 / 375 / 650 cm/s — a
+/// sprint 1.73× its run — and this is that ratio, rounded, applied to whatever
+/// this creature's run turns out to be. It matters only as the top of the scale
+/// `W_Gait` is written against; nothing in the generated set reaches it.
+const SPRINT_OF_RUN: f64 = 1.75;
+
+/// Write the character's `.inf_act` controller beside its assets.
+///
+/// A `.inf_act` is **JSON** (a `BlueprintClass` carries enums bincode cannot
+/// round-trip — `samples::encode_actor` says so), so it does not go through
+/// `write_asset`'s payload path; the bytes and the sidecar are written here and
+/// registered through the same `register_written_asset` door every other
+/// hand-encoded asset in this crate uses.
+fn write_controller(
+    project: &mut AssetProject,
+    dir: &Path,
+    name: &str,
+    machine: AssetId,
+) -> Result<AssetId, CharacterError> {
+    let class = controller_class(name);
+    let bytes = crate::samples::encode_actor(&class).map_err(CharacterError::Write)?;
+    let path = dir.join(format!("{name} Controller.inf_act"));
+    inf_asset::write_atomically(&path, &bytes).map_err(|e| CharacterError::Write(e.to_string()))?;
+    let id = project
+        .register_written_asset(
+            path,
+            AssetKind::Blueprint,
+            inf_asset::ContentHash::of(&bytes),
+            None,
+            None,
+            None,
+        )
+        .map_err(|e| CharacterError::Write(e.to_string()))?;
+    // The dependency edge is written straight onto the sidecar: a `.inf_act` is
+    // not an `AssetPayload`, so `register_written_asset` (which is the raw-bytes
+    // door) takes no dependency list, and the delete-with-references guard reads
+    // the sidecar. Recorded rather than skipped — a controller that names a
+    // machine nothing knows it names is a machine that deletes silently.
+    if let Some(entry) = project.db().get(id) {
+        let mut sidecar = entry.sidecar.clone();
+        let path = entry.path.clone();
+        sidecar.dependencies = vec![machine];
+        sidecar
+            .save(&path)
+            .map_err(|e| CharacterError::Write(e.to_string()))?;
+        project
+            .rescan()
+            .map_err(|e| CharacterError::Write(e.to_string()))?;
+    }
+    Ok(id)
+}
+
+/// **The character's own script**, as `BlueprintClass` IR.
+///
+/// # What it deliberately does NOT do
+///
+/// It does not tell the machine how fast the character is going. That number is
+/// the movement step's, and P29.6 made the engine publish it
+/// (`inf_ecs::anim_bridge::publish_character_params`) — a controller that set
+/// `speed` as well would be a second authority for one fact, which is the shape
+/// of defect this repository keeps paying for.
+///
+/// # What it does
+///
+/// The half only a game can do: consume the **footstep notifies** the import
+/// derivation authored onto every cycle, and keep the character's own counters
+/// from them. Three of the four `anim.*` nodes, and the fourth
+/// (`anim.set_trigger`) is absent because a trigger is an *event* — a jump, a
+/// hit, a door — and the wizard has no event to arm on a character it knows
+/// nothing else about. Saying so is better than arming something arbitrary.
+fn controller_class(name: &str) -> inf_blueprint::BlueprintClass {
+    use inf_blueprint::{
+        BinOp, Binding, BlueprintClass, BlueprintFn, EventBinding, EventKind, Expr, Lit, LocalId,
+        Param, Stmt, Ty, Variable,
+    };
+
+    let call = |path: &[&str], args: Vec<Expr>| Expr::Call {
+        path: path.iter().map(|s| (*s).to_string()).collect(),
+        args,
+    };
+    let str_lit = |v: &str| Expr::Lit(Lit::Str(v.to_string()));
+    let float_lit = |v: f64| Expr::Lit(Lit::Float(v));
+    let get_var = |n: &str| Expr::Call {
+        path: vec!["vars".to_string(), "get".to_string()],
+        args: vec![Expr::Lit(Lit::Str(n.to_string()))],
+    };
+    let set_var = |n: &str, value: Expr| {
+        Stmt::ExprStmt(Expr::Call {
+            path: vec!["vars".to_string(), "set".to_string()],
+            args: vec![Expr::Lit(Lit::Str(n.to_string())), value],
+        })
+    };
+    let bin = |op: BinOp, a: Expr, b: Expr| Expr::Binary(op, Box::new(a), Box::new(b));
+    let entity = || Expr::Local(LocalId(1));
+    let dt = || Expr::Param("dt".to_string());
+
+    // if <cond> { <var> = <var> + <by> }
+    let bump = |cond: Expr, var: &'static str, by: Expr| Stmt::If {
+        cond,
+        then_body: vec![set_var(var, bin(BinOp::Add, get_var(var), by))],
+        else_body: vec![],
+    };
+
+    let tick = BlueprintFn {
+        id: EventKind::Tick.key(),
+        name: EventKind::Tick.key(),
+        params: vec![Param {
+            name: "dt".to_string(),
+            ty: Ty::Float,
+        }],
+        ret: Ty::Unit,
+        body: vec![
+            Stmt::Let {
+                id: LocalId(1),
+                binding: Binding::Named("entity".to_string()),
+                ty: None,
+                mutable: false,
+                value: get_var("entity"),
+            },
+            // The two footfalls the derivation found in this creature's own gait.
+            bump(
+                call(
+                    &["anim", "consume_notify"],
+                    vec![entity(), str_lit("footstep_l")],
+                ),
+                "steps",
+                float_lit(1.0),
+            ),
+            bump(
+                call(
+                    &["anim", "consume_notify"],
+                    vec![entity(), str_lit("footstep_r")],
+                ),
+                "steps",
+                float_lit(1.0),
+            ),
+            // How long it has spent running — the readout `anim.query_state` is
+            // for, and the cheapest possible proof that the query is answered
+            // against the machine's real current state.
+            bump(
+                call(&["anim", "query_state"], vec![entity(), str_lit("run")]),
+                "run_time",
+                dt(),
+            ),
+            // …published back so a machine may gate on it (a limp after N steps
+            // is one condition away). The engine publishes the MOVEMENT
+            // parameters; this is the character's own.
+            Stmt::ExprStmt(call(
+                &["anim", "set_param"],
+                vec![entity(), str_lit("steps"), get_var("steps")],
+            )),
+        ],
+    };
+    let begin = BlueprintFn {
+        id: EventKind::BeginPlay.key(),
+        name: EventKind::BeginPlay.key(),
+        params: vec![],
+        ret: Ty::Unit,
+        body: vec![
+            set_var("steps", float_lit(0.0)),
+            set_var("run_time", float_lit(0.0)),
+        ],
+    };
+
+    let mut class = BlueprintClass::new(
+        format!("{}.controller", name.to_lowercase().replace(' ', "_")),
+        format!("{name} Controller"),
+    );
+    class.variables = vec![
+        // Seeded by the host, exactly as the platformer's is.
+        Variable {
+            name: "entity".to_string(),
+            ty: Ty::Int,
+            default: Lit::Int(0),
+            exposed: false,
+        },
+        Variable {
+            name: "steps".to_string(),
+            ty: Ty::Float,
+            default: Lit::Float(0.0),
+            exposed: true,
+        },
+        Variable {
+            name: "run_time".to_string(),
+            ty: Ty::Float,
+            default: Lit::Float(0.0),
+            exposed: true,
+        },
+    ];
+    class.events = vec![
+        EventBinding {
+            event: EventKind::BeginPlay,
+            body: begin,
+        },
+        EventBinding {
+            event: EventKind::Tick,
+            body: tick,
+        },
+    ];
+    class
 }
 
 // ── the mannequin ───────────────────────────────────────────────────────────
@@ -1498,6 +1839,8 @@ mod tests {
             out.mesh.0,
             out.machine.0,
             glam::DVec3::new(1.0, 0.0, -2.0),
+            Some(out.actor.0),
+            1.8,
         );
         let e = doc.world().entity_of(guid).expect("spawned");
         let sk = doc.world().world().get::<SkeletalMesh>(e).expect("rigged");
@@ -1890,9 +2233,154 @@ mod tests {
             },
         )
         .expect("the second build succeeds");
-        assert_eq!(p.db().len(), 6);
+        // **Seven**, not six: P29.6 added the `.inf_act` controller §13's gap
+        // list said the wizard emitted none of.
+        assert_eq!(p.db().len(), 7);
         let sm: StateMachineAsset = p.load_payload(out.machine).unwrap();
         assert_eq!(sm.machine.states.len(), 3);
+        // …and the three text files are beside them, which is the whole of the
+        // S1 claim: the author owns something reviewable from minute one.
+        assert_eq!(out.text.len(), 3, "{:?}", out.text);
+        for path in &out.text {
+            assert!(path.exists(), "{} was not written", path.display());
+        }
+    }
+
+    /// **The wizard emits a real controller, and everything it takes to play**
+    /// (P29.6). §13's gap list: *"the character wizard emits no controller at
+    /// all"*.
+    ///
+    /// Seven assets and three text files, and each one is checked for what it
+    /// IS rather than for existing: the `.inf_act` decodes to a class whose Tick
+    /// names the `anim.*` doors; the machine's text form reads back as the
+    /// machine beside it; the camera table and the bindings parse through the
+    /// engine's own readers.
+    #[test]
+    fn the_wizard_emits_a_controller_and_the_text_an_author_owns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project(tmp.path());
+        let out = build_character(
+            &mut p,
+            &CharacterSpec {
+                name: "Hero".into(),
+                ..CharacterSpec::default()
+            },
+        )
+        .expect("the wizard builds");
+
+        // ── the controller ──
+        let entry = p.db().get(out.actor).expect("the controller is registered");
+        assert_eq!(entry.kind(), AssetKind::Blueprint);
+        assert_eq!(
+            entry.sidecar.dependencies,
+            vec![out.machine],
+            "the controller does not name the machine it drives, so a delete of \
+             the machine would not warn"
+        );
+        let bytes = std::fs::read(&entry.path).expect("the controller is on disk");
+        let class = crate::samples::decode_actor(&bytes).expect("it decodes");
+        let tick = class
+            .events
+            .iter()
+            .find(|e| e.event == inf_blueprint::EventKind::Tick)
+            .expect("a Tick handler");
+        let ir = format!("{:?}", tick.body);
+        for door in ["consume_notify", "query_state", "set_param"] {
+            assert!(ir.contains(door), "the Tick never calls `anim.{door}`");
+        }
+        assert!(
+            !ir.contains("set_trigger"),
+            "the wizard armed a trigger it has no event for — see `controller_class`"
+        );
+        // It does NOT set `speed`: that is the movement step's number now, and a
+        // second authority for one fact is the defect this repository keeps
+        // paying for.
+        assert!(
+            !ir.contains("\"speed\""),
+            "the controller writes `speed`, which the engine already publishes"
+        );
+
+        // ── the text ──
+        let by_name = |suffix: &str| {
+            out.text
+                .iter()
+                .find(|p| p.to_string_lossy().ends_with(suffix))
+                .unwrap_or_else(|| panic!("no {suffix} was written: {:?}", out.text))
+        };
+        let sm_text = std::fs::read_to_string(by_name(".inf_sm.txt")).unwrap();
+        let from_text = inf_anim::from_toml(&sm_text).expect("the machine text reads back");
+        let payload: StateMachineAsset = p.load_payload(out.machine).unwrap();
+        assert_eq!(
+            from_text, payload.machine,
+            "the text face and the binary face are different machines"
+        );
+        assert!(
+            from_text.validate().is_ok(),
+            "the wizard wrote a machine its own reader refuses"
+        );
+        let cam: inf_ecs::camera::CameraTuning =
+            toml::from_str(&std::fs::read_to_string(by_name("camera.toml")).unwrap())
+                .expect("the camera table parses");
+        assert_eq!(cam, inf_ecs::camera::CameraTuning::default());
+        let map: inf_input::InputMap =
+            toml::from_str(&std::fs::read_to_string(by_name("input.toml")).unwrap())
+                .expect("the bindings parse");
+        assert!(
+            map.axis_names().any(|n| n == "move_y"),
+            "the wizard wrote bindings a character cannot walk forward with"
+        );
+    }
+
+    /// **The machine is PROPOSED, from what the derivation measured** (P29.6) —
+    /// `inf_anim::propose`'s first committed consumer, and its first one with a
+    /// creature's own gait ladder behind it.
+    ///
+    /// Three claims. The clips are derived (they carry `W_Gait` and a distance
+    /// track, neither of which a generated clip has); the proposal clustered
+    /// them into three tiers rather than one (the ladder is this animal's, not
+    /// ALS's soldier's, which is the whole reason the wizard passes one); and it
+    /// explains itself.
+    #[test]
+    fn the_wizard_proposes_the_machine_from_its_own_derived_clips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = project(tmp.path());
+        let out = build_character(
+            &mut p,
+            &CharacterSpec {
+                name: "Hero".into(),
+                ..CharacterSpec::default()
+            },
+        )
+        .expect("the wizard builds");
+
+        // The clips were measured before they were written.
+        for id in [out.idle, out.walk, out.run] {
+            let clip: AnimClipAsset = p.load_payload(id).unwrap();
+            assert!(
+                clip.clip.curve(inf_anim::channels::als::W_GAIT).is_some(),
+                "a clip reached disk without being derived"
+            );
+            assert!(clip.clip.distance.is_some());
+        }
+        // The walk really did clip as a WALK. On ALS's own ladder the default
+        // biped's 0.65 m/s walk tiers as an idle — the P29.5 reading — and the
+        // proposal would then have produced two states, not three.
+        let sm: StateMachineAsset = p.load_payload(out.machine).unwrap();
+        let names: Vec<&str> = sm.machine.states.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["idle", "walk", "run"], "the tiers collapsed");
+        assert!(
+            sm.machine.validate().is_ok(),
+            "the proposal is a machine the save door refuses"
+        );
+        assert!(
+            !out.proposal_notes.is_empty(),
+            "the proposal explained nothing"
+        );
+        assert!(
+            out.proposal_notes.iter().any(|n| n.contains("m/s")),
+            "the notes carry no numbers: {:?}",
+            out.proposal_notes
+        );
     }
 
     /// A refusal from a door *inside* the build leaves the content root clean —
