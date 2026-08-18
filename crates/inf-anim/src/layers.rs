@@ -10,7 +10,7 @@
 //! 1. **Additive poses** — the difference between two poses, applicable as a
 //!    delta. A lean, an aim offset, a breath, a limp: authored once against a
 //!    reference pose and added to *any* base, so it does not have to be
-//!    re-authored per locomotion state. [`AdditiveRef`](crate::AdditiveRef) is how
+//!    re-authored per locomotion state. [`AdditiveRef`] is how
 //!    a clip says what it is additive over; [`additive_delta`] and
 //!    [`apply_additive`] are the arithmetic.
 //! 2. **Per-bone masks** — [`JointMask`], a per-joint weight with an explicit
@@ -108,7 +108,7 @@ impl JointMask {
     /// `Layering_Spine`, `Layering_Arm_L`, `Layering_Head` are all "this joint and
     /// its descendants". Written against the skeleton's topological order (a
     /// parent always precedes its children, which [`Skeleton::new`] guarantees and
-    /// [`crate::asset::SkeletonAsset::migrate`] re-checks at the decode door), so
+    /// `SkeletonAsset::migrate` re-checks at the decode door), so
     /// one forward pass marks the whole subtree.
     pub fn from_subtree(
         name: impl Into<String>,
@@ -263,8 +263,7 @@ impl AnimLayer {
 
     /// Whether this layer can change anything (a zero weight everywhere cannot).
     pub fn is_active(&self) -> bool {
-        let w = self.weight;
-        if !(w > 0.0) {
+        if !crate::positive(self.weight) {
             return false;
         }
         match &self.mask {
@@ -313,7 +312,7 @@ fn safe_ratio(a: f32, b: f32) -> f32 {
     // `!(b.abs() > MIN)` rather than `<=`: a NaN scale fails every ordering
     // comparison it takes part in, and the positive spelling would divide by it.
     const MIN: f32 = 1e-9;
-    if !(b.abs() > MIN) {
+    if !crate::greater(b.abs(), MIN) {
         return 1.0;
     }
     let r = a / b;

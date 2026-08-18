@@ -271,7 +271,7 @@ impl DistanceTrack {
         if n == 0 {
             return None;
         }
-        if n == 1 || !(d > self.distance_m[0]) {
+        if n == 1 || !crate::greater(d, self.distance_m[0]) {
             return Some(self.times[0]);
         }
         if d >= self.distance_m[n - 1] {
@@ -508,9 +508,9 @@ mod tests {
         // without desyncing the positional decode: same encoded length.
         let cfg = inf_asset::bincode_config();
         assert_eq!(
-            bincode::serde::encode_to_vec(&base, cfg).unwrap().len(),
+            bincode::serde::encode_to_vec(base, cfg).unwrap().len(),
             bincode::serde::encode_to_vec(
-                &AdditiveRef::Reserved3 {
+                AdditiveRef::Reserved3 {
                     clip: [7; 16],
                     time_s: 0.0
                 },

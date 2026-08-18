@@ -82,7 +82,7 @@ pub fn quintic_decay(elapsed: f32, duration: f32, v0: f32) -> f32 {
     if !crate::positive(duration) {
         return 0.0;
     }
-    if !(elapsed > 0.0) {
+    if !crate::positive(elapsed) {
         return 1.0;
     }
     if elapsed >= duration {
@@ -205,7 +205,7 @@ impl Inertializer {
 
     /// Whether the decay has finished and the inertializer can be dropped.
     pub fn is_done(&self) -> bool {
-        !(self.elapsed_s < self.duration_s) || !crate::positive(self.duration_s)
+        !crate::greater(self.duration_s, self.elapsed_s) || !crate::positive(self.duration_s)
     }
 
     /// The captured deviation, for callers that want to inspect it (the tests do).
@@ -216,7 +216,7 @@ impl Inertializer {
     /// `target` plus the decaying deviation — the pose to render.
     pub fn apply(&self, target: &Pose) -> Pose {
         let w = self.decay();
-        if !(w > 0.0) {
+        if !crate::positive(w) {
             return target.clone();
         }
         apply_additive(target, &self.deviation, &vec![w; target.locals.len()])

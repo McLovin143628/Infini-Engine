@@ -13,7 +13,7 @@
 //! the *backward* clip into a forward walk as soon as the backward sample is one
 //! of the three closest. ALS works around exactly this — its `FALSVelocityBlend`
 //! is a hand-rolled four-way blend whose comment says outright that it exists
-//! because it "produce[s] better directional blending than a standard
+//! because it "produces better directional blending than a standard
 //! blendspace". Barycentric weights over a Delaunay triangle have the property
 //! IDW lacks: only the three corners of the simplex the query is *inside*
 //! contribute, and the weights are the unique affine ones. So the port map's

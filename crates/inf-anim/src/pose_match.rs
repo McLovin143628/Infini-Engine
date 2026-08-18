@@ -182,7 +182,7 @@ pub fn pose_cost(
     let mut cost = 0.0f32;
     for i in 0..n {
         let jw = weights.get(i).copied().unwrap_or(0.0);
-        if !(jw > 0.0) {
+        if !crate::positive(jw) {
             continue;
         }
         if let (Some(a), Some(b)) = (qg.get(i), cg.get(i)) {

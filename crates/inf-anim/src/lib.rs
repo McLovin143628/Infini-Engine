@@ -154,3 +154,24 @@ pub(crate) fn positive(v: f32) -> bool {
 pub(crate) fn positive64(v: f64) -> bool {
     v > 0.0
 }
+
+/// `a > b`, named for the same reason [`positive`] is: the crate needs the
+/// **NaN-rejecting** negation `!greater(a, b)` in several places, and clippy's
+/// `neg_cmp_op_on_partial_ord` is right that `!(a > b)` reads badly — but wrong
+/// that the fix is `partial_cmp`, because `partial_cmp` returns `None` for a NaN
+/// and every one of these sites wants the NaN on the refusing side.
+///
+/// Naming it keeps the meaning visible and keeps the lint from being suppressed
+/// one `allow` at a time, which is the discipline `positive` already follows.
+#[inline]
+pub(crate) fn greater(a: f32, b: f32) -> bool {
+    a > b
+}
+
+/// `a <= b`, for the same reason as [`greater`]. `!at_most(a, b)` is "not
+/// non-decreasing, NaN included" — the question a monotonicity check has to ask,
+/// and the one `a > b` answers wrongly for a NaN.
+#[inline]
+pub(crate) fn at_most(a: f32, b: f32) -> bool {
+    a <= b
+}

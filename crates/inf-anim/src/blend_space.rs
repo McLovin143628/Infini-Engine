@@ -206,7 +206,8 @@ const INSIDE_EPS: f64 = 1e-9;
 ///
 /// Three cases, in order:
 ///
-/// 1. **Exactly at a sample** (within [`EXACT_EPS`]) — that sample alone. Ties go
+/// 1. **Exactly at a sample** (within `EXACT_EPS`, this module's private
+///    parameter-unit tolerance) — that sample alone. Ties go
 ///    to the lowest index, so a duplicated position is deterministic.
 /// 2. **Inside the hull** — the containing triangle's barycentric weights.
 ///    Triangles are scanned in the triangulation's canonical order and the first
