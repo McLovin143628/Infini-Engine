@@ -483,7 +483,13 @@ impl PoseBlender {
             self.match_samples,
             &self.match_weights,
         )?;
-        Some(m.time_s as f64 / state.speed.max(1e-6))
+        // `state_time` is the play-head BEFORE `speed` scales it (`eval_pose`
+        // samples at `t * state.speed`), so the matched clip time divides by it.
+        // A non-positive or non-finite speed is REFUSED rather than clamped: a
+        // state playing backwards has no "the frame we are at" in this
+        // parameterisation, and a `1e-6` floor would turn its match into a
+        // play-head of a million seconds.
+        crate::positive64(state.speed).then(|| m.time_s as f64 / state.speed)
     }
 }
 

@@ -1222,7 +1222,7 @@ mod tests {
         let run_period = 1.0 / gait.run_cadence_hz;
         assert!(
             (walk_period - run_period).abs() > 1e-3,
-            "the two cadences are equal, so this fixture cannot tell marker sync              from uniform phase"
+            "the two cadences are equal, so this fixture cannot tell marker sync from uniform phase"
         );
 
         // The markers are in the group, one per leg, named after the leg.
@@ -1292,7 +1292,7 @@ mod tests {
         );
         assert!(
             (uniform - times[1] as f64).abs() > 1e-3,
-            "marker sync and uniform phase agree even on a retimed clip, so this              arm cannot see the difference"
+            "marker sync and uniform phase agree on a retimed clip, so this arm cannot see the difference"
         );
 
         // The idle clip is not a gait and carries no plants.
