@@ -1131,6 +1131,8 @@ fn step_one(
         model::angle_delta_deg(cm.runtime.aim_yaw_deg, cm.runtime.body_yaw_deg),
         aim_mask,
     );
+    // ── 11b. **Foot IK and foot lock** (P29.4, clause 5).
+    step_feet(world, bridge, &mut cm, guid, radius, &exclude, dt);
     cm.runtime.refusal = refusal;
 
     // ── 12. Write the world back: the component, the transform, the capsule,
@@ -1382,6 +1384,152 @@ fn step_mantle(
         grounded,
         landed: LandingKind::None,
     })
+}
+
+/// **Foot IK and foot locking, the half that needs a world** (P29.4, clause 5).
+///
+/// The pure half is [`inf_anim::foot`]: the ±50/45 cm trace envelope in metres,
+/// the ground-offset arithmetic, and the lock rule that may only engage or
+/// release and never blend in. This is where those meet a physics world.
+///
+/// Four steps per foot:
+///
+/// 1. **Where is it?** From the bridge, which is where the pose step put it —
+///    one fixed step ago, because the pose runs after this one in both hosts.
+/// 2. **Where is the ground under it?** A short downward sweep across ALS's own
+///    envelope, converted once at [`inf_anim::TRACE_ABOVE_M`].
+/// 3. **Is it planted?** The clip's `FootLock_L/R` channel says so, gated by
+///    `Enable_FootIK_L/R`, and a body that is turning breaks the lock (a pinned
+///    foot under a rotating hip points the wrong way).
+/// 4. **What is the slide?** The number this wave's gate holds, in **metres**,
+///    recorded on the runtime whether or not anything is watching.
+///
+/// Everything is inert on a character whose clips carry no curve channels: the
+/// gate curve reads its fallback of zero, no lock engages, no goal is published
+/// and the pose is exactly what the machine produced. That is what keeps every
+/// committed sample byte-identical.
+#[allow(clippy::too_many_arguments)]
+fn step_feet(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    cm: &mut CharacterMovement,
+    guid: uuid::Uuid,
+    radius: f64,
+    exclude: &BTreeSet<ColliderId3D>,
+    dt: f64,
+) {
+    use inf_anim::channels::als;
+    let Some(feet) = inf_ecs::anim_bridge::feet_of(world, guid) else {
+        // No rig, or a rig with no feet: release whatever was held, so a
+        // character that loses its skeleton does not leave a foot pinned to a
+        // spot on the floor.
+        cm.runtime.foot_lock_l.release();
+        cm.runtime.foot_lock_r.release();
+        cm.runtime.foot_slide_l_m = 0.0;
+        cm.runtime.foot_slide_r_m = 0.0;
+        return;
+    };
+    // A turn breaks a lock. `RotationAmount` is the donor's channel; ours is the
+    // body's own measured turn this step, which is the same quantity without the
+    // 30 fps authoring convention in it.
+    let turning = (cm.runtime.aim_yaw_rate_dps * dt).abs() > 0.05
+        || model::angle_delta_deg(cm.runtime.body_yaw_deg, cm.runtime.target_yaw_deg).abs() > 0.05;
+
+    let gates = [
+        (als::ENABLE_FOOT_IK_L, als::FOOT_LOCK_L),
+        (als::ENABLE_FOOT_IK_R, als::FOOT_LOCK_R),
+    ];
+    let mut goals: [Option<inf_ecs::anim_bridge::FootGoal>; 2] = [None, None];
+    let mut offsets = [glam::Vec3::ZERO, glam::Vec3::ZERO];
+    let mut enables = [0.0f32, 0.0f32];
+    for (side, (enable_name, lock_name)) in gates.iter().enumerate() {
+        let Some(state) = feet[side] else { continue };
+        let enable = inf_ecs::anim_bridge::anim_curve(world, guid, enable_name, 0.0);
+        let lock_curve = inf_ecs::anim_bridge::anim_curve(world, guid, lock_name, 0.0);
+        enables[side] = enable;
+        let posed = state.world.to_dvec3();
+
+        // The lock first, so a foot that is planted is measured against where it
+        // was planted rather than against where it has been dragged to.
+        let lock = if side == 0 {
+            &mut cm.runtime.foot_lock_l
+        } else {
+            &mut cm.runtime.foot_lock_r
+        };
+        lock.update(
+            enable,
+            lock_curve,
+            turning,
+            glam::Vec3::new(posed.x as f32, posed.y as f32, posed.z as f32),
+            cm.runtime.body_yaw_deg,
+        );
+        let slide = lock.slide_m(glam::Vec3::new(
+            posed.x as f32,
+            posed.y as f32,
+            posed.z as f32,
+        ));
+        let held = lock.resolve(glam::Vec3::new(
+            posed.x as f32,
+            posed.y as f32,
+            posed.z as f32,
+        ));
+        let drawn = Vec3d::new(held.x as f64, held.y as f64, held.z as f64);
+        if side == 0 {
+            cm.runtime.foot_slide_l_m = slide;
+            cm.runtime.foot_world_l = drawn;
+        } else {
+            cm.runtime.foot_slide_r_m = slide;
+            cm.runtime.foot_world_r = drawn;
+        }
+        if !(enable > 0.0) {
+            continue;
+        }
+
+        // The ground under it, across ALS's envelope.
+        let from = DVec3::new(
+            held.x as f64,
+            held.y as f64 + inf_anim::TRACE_ABOVE_M,
+            held.z as f64,
+        );
+        let span = inf_anim::TRACE_ABOVE_M + inf_anim::TRACE_BELOW_M;
+        let hit = bridge.world_mut().cast_shape(
+            &ColliderShape3D::Sphere {
+                radius: (radius * 0.25).max(0.02),
+            },
+            from,
+            DQuat::IDENTITY,
+            -DVec3::Y,
+            span,
+            exclude,
+        );
+        let Some(hit) = hit else { continue };
+        if hit.started_penetrating || !super::traversal::is_walkable(hit.normal, cm.slope_limit_deg)
+        {
+            continue;
+        }
+        let g = inf_anim::ground_offset(
+            glam::Vec3::new(hit.point.x as f32, hit.point.y as f32, hit.point.z as f32),
+            glam::Vec3::new(
+                hit.normal.x as f32,
+                hit.normal.y as f32,
+                hit.normal.z as f32,
+            ),
+            held,
+        );
+        offsets[side] = g.offset;
+        let target = held + g.offset;
+        goals[side] = Some(inf_ecs::anim_bridge::FootGoal {
+            target: Vec3d::new(target.x as f64, target.y as f64, target.z as f64),
+            weight: enable.clamp(0.0, 1.0),
+        });
+    }
+    // The pelvis drops to the lower foot, so the low leg does not straighten past
+    // its limit reaching for a step below the other one. Recorded rather than
+    // applied: moving the capsule would move the character, and the pelvis is a
+    // POSE offset — P29.5's authoring pass is what routes it into the rig.
+    let pelvis = inf_anim::pelvis_offset(enables[0], enables[1], offsets[0], offsets[1]);
+    let _ = pelvis;
+    inf_ecs::anim_bridge::set_foot_ik(world, guid, goals);
 }
 
 /// [`mover_for`], with the capsule the movement step decided this step rather

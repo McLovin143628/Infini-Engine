@@ -1095,6 +1095,22 @@ impl RuntimeSim {
 
     /// The P12.3 audio step — the shipped mirror of `SimSession::audio_step`.
     fn audio_step(&mut self) {
+        // -- P29.4 footsteps -- the animation's own event markers, turned into
+        //    voices. The DECISION is Ring 0 (`inf_ecs::anim_bridge::footstep_cues`
+        //    is a pure function of this step's notifies and the clip's
+        //    `Mask_FootstepSound` channel); this is only the mapping onto the
+        //    queue, and it is the same six lines in the other host. Inert on
+        //    every level whose clips carry no footstep markers.
+        for cue in inf_ecs::anim_bridge::footstep_cues(&self.world) {
+            let Some(src) = audio_source_of(&self.world, cue.source) else {
+                continue;
+            };
+            let key = cue.source.as_u128() as u64;
+            let pos = emitter_position(&self.world, cue.source);
+            let mut cmd = play_command_for(key, &src, src.spatial.then_some(pos));
+            cmd.volume *= cue.gain;
+            self.audio_cmds.push(AudioCommand::Play(cmd));
+        }
         let listener = active_listener(&self.world);
         let listener_pos = listener
             .map(|l| l.position)

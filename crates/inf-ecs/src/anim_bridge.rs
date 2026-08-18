@@ -66,6 +66,26 @@ pub struct RigBone {
     pub tail: Vec3d,
 }
 
+/// One foot, as the pose left it (P29.4, clause 5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FootState {
+    /// The joint index the foot is, so the IK pass can walk up to a chain
+    /// without matching names a second time.
+    pub joint: u16,
+    /// Where the pose put it, world metres.
+    pub world: Vec3d,
+}
+
+/// Where a foot must be put, and how much of the way (P29.4, clause 5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FootGoal {
+    /// The world-space target.
+    pub target: Vec3d,
+    /// How much of the solve to apply, `[0, 1]` — the `Enable_FootIK` curve, so
+    /// a state that wants no foot IK authors a zero and gets the pose untouched.
+    pub weight: f32,
+}
+
 /// What one entity's machine is doing, published every fixed step.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AnimStateInfo {
@@ -105,6 +125,17 @@ pub struct AnimBridgeRes {
     /// both it and the play-head. Published rather than queried, which is the
     /// command-queue shape — the physics side never reaches into the machine.
     pub curves: BTreeMap<Uuid, BTreeMap<String, f32>>,
+    /// **Where the pose put each foot**, world space, published every step for
+    /// every rig that has feet (clause 5).
+    ///
+    /// `[left, right]`. The movement step reads it to know where to probe for
+    /// the ground; it cannot derive it itself, because a foot's position is a
+    /// pose and the pose lives on the other side of the seam.
+    pub feet: BTreeMap<Uuid, [Option<FootState>; 2]>,
+    /// **Where each foot must go**, world space — the movement step's answer,
+    /// consumed by the pose step's IK pass in the SAME fixed step (the movement
+    /// step runs first in both hosts).
+    pub foot_ik: BTreeMap<Uuid, [Option<FootGoal>; 2]>,
     /// Entities that have asked the pose step for their **ragdoll rig** and
     /// not yet been given one (clause 6).
     ///
@@ -140,6 +171,8 @@ impl AnimBridgeRes {
             && self.states.is_empty()
             && self.root_motion.is_empty()
             && self.curves.is_empty()
+            && self.feet.is_empty()
+            && self.foot_ik.is_empty()
             && self.ragdoll_requested.is_empty()
             && self.ragdoll_rig.is_empty()
             && self.pose_matched.is_empty()
@@ -311,6 +344,85 @@ pub fn anim_curve(world: &EcsWorld, guid: Uuid, name: &str, fallback: f32) -> f3
         .and_then(|c| c.get(name))
         .copied()
         .unwrap_or(fallback)
+}
+
+/// A footstep the animation asked for this fixed step (P29.4, clause 7).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FootstepCue {
+    /// The character whose foot landed — and, because a footstep is played on
+    /// the character's own emitter, the audio source.
+    pub source: Uuid,
+    /// The notify's name, so a project can tell left from right (or a surface
+    /// from a surface) without a second channel.
+    pub name: String,
+    /// How loud, `[0, 1]` — ALS's `Mask_FootstepSound`, which is a *scale* an
+    /// animator authors on the clip so a crouched walk is quieter than a sprint.
+    pub gain: f64,
+}
+
+/// The name a notify must start with to be a footstep.
+///
+/// A prefix rather than an exact match, because `footstep_l` and `footstep_r`
+/// are two notifies and one sound, and a project that adds `footstep_land` gets
+/// it for free.
+pub const FOOTSTEP_PREFIX: &str = "footstep";
+
+/// **The footstep cues this fixed step produced** — a pure function of sim state.
+///
+/// The P12 doctrine's sentence for audio is that the stream is a pure function of
+/// the simulation, and this is where that is true for footsteps: the notifies are
+/// what the pose step published (a property of the step history), the gain is a
+/// curve channel on the clip that is playing, and the order is `Guid` order
+/// followed by the order the machine fired them in. Two identical worlds produce
+/// identical lists, which `the_footstep_cues_are_a_pure_function_of_sim_state`
+/// asserts rather than describes.
+///
+/// The cues are **read, not taken**: a caller that wants exactly-once semantics
+/// uses [`consume_anim_notify`], which is what the `anim.*` kit's node does. This
+/// is the host's audio drain, and a host drains once per step by construction.
+pub fn footstep_cues(world: &EcsWorld) -> Vec<FootstepCue> {
+    let Some(events) = world.world().get_resource::<crate::pose::AnimEventsRes>() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (guid, names) in &events.0 {
+        for name in names {
+            if !name.starts_with(FOOTSTEP_PREFIX) {
+                continue;
+            }
+            let gain = anim_curve(
+                world,
+                *guid,
+                inf_anim::channels::als::MASK_FOOTSTEP_SOUND,
+                1.0,
+            ) as f64;
+            out.push(FootstepCue {
+                source: *guid,
+                name: name.clone(),
+                gain: gain.clamp(0.0, 1.0),
+            });
+        }
+    }
+    out
+}
+
+/// Where the pose put `guid`'s feet last step, world space.
+pub fn feet_of(world: &EcsWorld, guid: Uuid) -> Option<[Option<FootState>; 2]> {
+    bridge(world)?.feet.get(&guid).copied()
+}
+
+/// **Set this step's foot-IK goals** for `guid`, world space.
+///
+/// Consumed by the pose step's IK pass in the same fixed step, and replaced
+/// every step: a goal is a statement about where the ground is *now*.
+pub fn set_foot_ik(world: &mut EcsWorld, guid: Uuid, goals: [Option<FootGoal>; 2]) {
+    with_bridge(world, |b| {
+        if goals.iter().all(Option::is_none) {
+            b.foot_ik.remove(&guid);
+        } else {
+            b.foot_ik.insert(guid, goals);
+        }
+    });
 }
 
 /// **Ask the pose step for `guid`'s ragdoll rig.**

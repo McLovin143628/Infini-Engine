@@ -824,6 +824,7 @@ pub fn step_pose_evaluation<'c>(
     bridge.states.clear();
     bridge.root_motion.clear();
     bridge.curves.clear();
+    bridge.feet.clear();
     // Read once, so a world-level setting cannot mean two things inside one step.
     let mode = blend_mode(world);
     // **The clip-length resolver that makes `exit_time` live** (P29.1). Derived
@@ -1050,6 +1051,27 @@ pub fn step_pose_evaluation<'c>(
                             }
                             outcomes.push(outcome);
                         }
+                        // ── P29.4 clause 5: **foot IK**, applied over the
+                        //    P24.2 solver from the goals the movement step put
+                        //    on the bridge THIS step (it runs first in both
+                        //    hosts), and the feet published for the NEXT one.
+                        //
+                        //    Here rather than in the movement step for the
+                        //    reason the whole seam exists: a foot's position is
+                        //    a pose, the chain is a skeleton, and neither is
+                        //    reachable from a physics world.
+                        let to_world = world
+                            .world()
+                            .get::<crate::components::GlobalTransform>(entity)
+                            .map(|g| g.0)
+                            .unwrap_or(glam::DAffine3::IDENTITY);
+                        if let Some(goals) = bridge.foot_ik.get(&guid).copied() {
+                            apply_foot_ik(&asset.skeleton, &mut pose, &goals, to_world);
+                        }
+                        let feet = foot_states(&asset.skeleton, &pose, to_world);
+                        if feet.iter().any(Option::is_some) {
+                            bridge.feet.insert(guid, feet);
+                        }
                         // **The ragdoll rig, on request** (P29.4, clause 6).
                         // Model-space joint positions, lifted into the world by
                         // the entity's own transform -- this is the one place
@@ -1153,6 +1175,123 @@ pub fn step_pose_evaluation<'c>(
         }
     } else {
         w.insert_resource(bridge);
+    }
+}
+
+/// The **foot joints** of a skeleton, `[left, right]`, by name.
+///
+/// The vocabulary is deliberately generous, because a rig arrives from wherever
+/// it arrives: ALS's `ik_foot_l`/`ik_foot_r`, this engine's own template
+/// (`Foot.L` — see [`inf_anim::template`]), and the Mixamo/UE spellings
+/// (`LeftFoot`, `foot_r`). The match is case-insensitive, requires the word
+/// "foot", and takes the side from a trailing `l`/`r` or a leading `left`/`right`
+/// — and the FIRST match wins, so a rig with a toe joint named `foot_l_end` does
+/// not displace `foot_l`.
+fn foot_joints(skeleton: &inf_anim::Skeleton) -> [Option<u16>; 2] {
+    let mut out: [Option<u16>; 2] = [None, None];
+    for (i, j) in skeleton.joints().iter().enumerate() {
+        if i > u16::MAX as usize {
+            break;
+        }
+        let n = j.name.to_ascii_lowercase();
+        if !n.contains("foot") {
+            continue;
+        }
+        let side = if n.starts_with("left") || n.ends_with("_l") || n.ends_with(".l") {
+            0
+        } else if n.starts_with("right") || n.ends_with("_r") || n.ends_with(".r") {
+            1
+        } else {
+            continue;
+        };
+        if out[side].is_none() {
+            out[side] = Some(i as u16);
+        }
+    }
+    out
+}
+
+/// Where the pose put each foot, in world space.
+fn foot_states(
+    skeleton: &inf_anim::Skeleton,
+    pose: &Pose,
+    model_to_world: glam::DAffine3,
+) -> [Option<crate::anim_bridge::FootState>; 2] {
+    let joints = foot_joints(skeleton);
+    if joints.iter().all(Option::is_none) {
+        return [None, None];
+    }
+    let globals = inf_anim::global_transforms(skeleton, pose);
+    let mut out = [None, None];
+    for (side, j) in joints.iter().enumerate() {
+        let Some(j) = *j else { continue };
+        let Some(m) = globals.get(j as usize) else {
+            continue;
+        };
+        let p = m.w_axis.truncate();
+        let w =
+            model_to_world.transform_point3(glam::DVec3::new(p.x as f64, p.y as f64, p.z as f64));
+        out[side] = Some(crate::anim_bridge::FootState {
+            joint: j,
+            world: Vec3d::new(w.x, w.y, w.z),
+        });
+    }
+    out
+}
+
+/// Solve each foot toward its goal, over the P24.2 chain solver.
+///
+/// The chain is **derived**, not authored: a foot, its parent (the shin) and its
+/// grandparent (the thigh) are the two bones every biped IK solver uses, and the
+/// skeleton already says which joints those are. An author who wants a different
+/// chain uses the authored [`crate::components::IkTarget`], which this pass does
+/// not disturb — both run, in that order, exactly like the runtime goals.
+///
+/// A refusal is a **value**: a chain that is not a chain, a degenerate bone or a
+/// non-finite target leaves the pose untouched and costs its own foot.
+fn apply_foot_ik(
+    skeleton: &inf_anim::Skeleton,
+    pose: &mut Pose,
+    goals: &[Option<crate::anim_bridge::FootGoal>; 2],
+    model_to_world: glam::DAffine3,
+) {
+    let joints = foot_joints(skeleton);
+    let to_model = model_to_world.inverse();
+    for (side, goal) in goals.iter().enumerate() {
+        let (Some(goal), Some(foot)) = (goal, joints[side]) else {
+            continue;
+        };
+        if !(goal.weight > 0.0) {
+            continue;
+        }
+        let all = skeleton.joints();
+        let Some(shin) = all.get(foot as usize).and_then(|j| j.parent) else {
+            continue;
+        };
+        let Some(thigh) = all.get(shin as usize).and_then(|j| j.parent) else {
+            continue;
+        };
+        let t = to_model.transform_point3(goal.target.to_dvec3());
+        let target = glam::Vec3::new(t.x as f32, t.y as f32, t.z as f32);
+        if !target.is_finite() {
+            continue;
+        }
+        let before: Vec<(usize, [f32; 4])> = [thigh, shin, foot]
+            .iter()
+            .map(|&j| j as usize)
+            .filter(|&j| j < pose.locals.len())
+            .map(|j| (j, pose.locals[j].rotation))
+            .collect();
+        let chain = [thigh, shin, foot];
+        if inf_anim::solve_chain(skeleton, pose, &chain, target, None, &[]).is_ok()
+            && goal.weight < 1.0
+        {
+            for (j, rot) in before {
+                let a = glam::Quat::from_array(rot);
+                let b = glam::Quat::from_array(pose.locals[j].rotation);
+                pose.locals[j].rotation = inf_math::pslerp(a, b, goal.weight).to_array();
+            }
+        }
     }
 }
 
@@ -2565,5 +2704,87 @@ mod tests {
         assert_eq!(wrap_clip_time(-0.25, 1.0, true), 0.75);
         assert_eq!(wrap_clip_time(0.5, 0.0, true), 0.0);
         assert_eq!(wrap_clip_time(f64::NAN, 1.0, true), 0.0);
+    }
+
+    /// **The footstep stream is a pure function of sim state** (P29.4, clause 7
+    /// under the P12 doctrine): two identical worlds, stepped identically,
+    /// produce identical cue lists — the same names, the same order, the same
+    /// gains — and a clip's `Mask_FootstepSound` channel is what scales them.
+    #[test]
+    fn the_footstep_cues_are_a_pure_function_of_sim_state() {
+        let guid = Uuid::from_u128(46);
+        let mut f = WalkFixture::new();
+        // The animator's volume mask: this walk's footsteps are half volume.
+        f.clip = f
+            .clip
+            .clone()
+            .with_curves(vec![inf_anim::CurveChannel::constant(
+                inf_anim::channels::als::MASK_FOOTSTEP_SOUND,
+                0.5,
+            )]);
+
+        let run = || {
+            let mut w = world_with_character(guid);
+            crate::anim_bridge::set_anim_trigger(&mut w, guid, "go");
+            let mut all: Vec<Vec<crate::anim_bridge::FootstepCue>> = Vec::new();
+            for _ in 0..40 {
+                f.step(&mut w, 1.0 / 60.0);
+                all.push(crate::anim_bridge::footstep_cues(&w));
+            }
+            all
+        };
+        let a = run();
+        let b = run();
+        assert_eq!(a, b, "two identical worlds produced different footsteps");
+
+        // NOT VACUOUS: something really did ring, exactly once, at the gain the
+        // clip's own channel asked for.
+        let fired: Vec<&crate::anim_bridge::FootstepCue> = a.iter().flatten().collect();
+        assert_eq!(fired.len(), 1, "{fired:?}");
+        assert_eq!(fired[0].name, "footstep_l");
+        assert_eq!(fired[0].source, guid);
+        assert!((fired[0].gain - 0.5).abs() < 1e-6, "{:?}", fired[0].gain);
+
+        // A machine that never rings produces an empty stream rather than an
+        // absent one — the difference a host's drain would notice.
+        let clean = world_with_character(Uuid::from_u128(47));
+        assert!(crate::anim_bridge::footstep_cues(&clean).is_empty());
+    }
+
+    /// The **foot matcher** takes the spellings a rig actually arrives with, and
+    /// refuses the ones that are not a side.
+    #[test]
+    fn the_foot_matcher_reads_every_spelling_a_rig_arrives_with() {
+        fn skel(names: &[&str]) -> inf_anim::Skeleton {
+            let joints = names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| Joint {
+                    name: (*n).into(),
+                    parent: (i > 0).then(|| (i - 1) as u16),
+                    inverse_bind: Mat4::IDENTITY.to_cols_array(),
+                    local_bind: JointTransform::IDENTITY,
+                })
+                .collect();
+            inf_anim::Skeleton::new(joints).unwrap()
+        }
+        // This engine's own template, ALS's, and the Mixamo/UE spellings.
+        for (names, want) in [
+            (vec!["Hips", "Foot.L", "Foot.R"], [Some(1u16), Some(2u16)]),
+            (vec!["root", "ik_foot_l", "ik_foot_r"], [Some(1), Some(2)]),
+            (vec!["x", "LeftFoot", "RightFoot"], [Some(1), Some(2)]),
+            (vec!["x", "foot_r", "foot_l"], [Some(2), Some(1)]),
+        ] {
+            assert_eq!(foot_joints(&skel(&names)), want, "{names:?}");
+        }
+        // A foot with no side is not a foot this pass can use, and a rig with no
+        // feet at all answers nothing rather than guessing.
+        assert_eq!(foot_joints(&skel(&["a", "foot"])), [None, None]);
+        assert_eq!(foot_joints(&skel(&["a", "hand_l"])), [None, None]);
+        // The FIRST match wins, so a toe does not displace the ankle.
+        assert_eq!(
+            foot_joints(&skel(&["a", "foot_l", "foot_l_toe"])),
+            [Some(1), None]
+        );
     }
 }

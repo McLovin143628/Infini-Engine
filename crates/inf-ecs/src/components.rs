@@ -1871,6 +1871,14 @@ pub struct MovementRuntime {
     pub foot_slide_l_m: f64,
     /// The right foot's, same units.
     pub foot_slide_r_m: f64,
+    /// Where the left foot is **drawn** this step — the pose's position with the
+    /// lock applied. Published so a gate can measure a planted foot against the
+    /// world rather than against the lock's own opinion of itself: an unlocked
+    /// foot reports a slide of zero (it makes no claim), so the number that
+    /// distinguishes a plant from a skate has to be the position.
+    pub foot_world_l: Vec3d,
+    /// The right foot's.
+    pub foot_world_r: Vec3d,
 
     // ── ragdoll (P29.4) ──
     /// The ragdoll bridge's state for this character.

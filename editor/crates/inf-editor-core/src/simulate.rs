@@ -1469,6 +1469,22 @@ impl SimSession {
     /// autoplay sources once, resolve occlusion via one physics raycast per
     /// occlusion-enabled spatial source, then drain the queue into the host engine.
     fn audio_step(&mut self, doc: &mut SceneDoc) {
+        // -- P29.4 footsteps -- the animation's own event markers, turned into
+        //    voices. The DECISION is Ring 0 (`inf_ecs::anim_bridge::footstep_cues`
+        //    is a pure function of this step's notifies and the clip's
+        //    `Mask_FootstepSound` channel); this is only the mapping onto the
+        //    queue, and it is the same six lines in the other host. Inert on
+        //    every level whose clips carry no footstep markers.
+        for cue in inf_ecs::anim_bridge::footstep_cues(doc.world()) {
+            let Some(src) = audio_source_of(doc.world(), cue.source) else {
+                continue;
+            };
+            let key = cue.source.as_u128() as u64;
+            let pos = emitter_position(doc.world(), cue.source);
+            let mut cmd = play_command_for(key, &src, src.spatial.then_some(pos));
+            cmd.volume *= cue.gain;
+            self.audio_cmds.push(AudioCommand::Play(cmd));
+        }
         // 1. Listener: the first active `AudioListener` (Guid order); else keep the
         //    engine's current pose (default/origin). Orientation-from-transform is a
         //    documented follow-up — v1 uses the entity position with the default basis.
