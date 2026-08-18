@@ -166,7 +166,7 @@ pub fn keycode_to_code(code: KeyCode) -> Option<&'static str> {
     })
 }
 
-/// Map a winit mouse button onto the engine's [`MouseButton`] (P29.3). Anything
+/// Map a winit mouse button onto the engine's [`inf_input::MouseButton`] (P29.3). Anything
 /// past the two side buttons is ignored — a reserved slot is a wire promise, not
 /// a device-mapping one, and a 12-button gaming mouse's extra buttons have no
 /// stable meaning to bind to.

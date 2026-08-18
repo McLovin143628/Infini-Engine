@@ -33,9 +33,12 @@
 //! for the two places an angle is genuinely needed (the movement quadrant and
 //! the sprint-direction gate).
 
+use bevy_ecs::prelude::With;
+use uuid::Uuid;
+
 use crate::components::{
-    CharacterMovement, Gait, LandingKind, MovementDirection, MovementMode, MovementRefusal,
-    RotationMode,
+    CharacterMovement, Gait, Guid, LandingKind, MovementDirection, MovementMode, MovementRefusal,
+    RotationMode, Transform,
 };
 use crate::math::Vec2d;
 use crate::world::EcsWorld;
@@ -829,6 +832,37 @@ pub fn apply_intent(world: &mut EcsWorld, intent: &MovementIntent) {
         rt.press_roll |= intent.roll;
         rt.press_dive |= intent.dive;
     }
+}
+
+/// The [`Guid`]s of every character the movement step will visit, sorted.
+///
+/// One door, beside [`apply_intent`], for the same one-door reason — and the
+/// walk is the point:
+///
+/// ## Cost
+///
+/// `O(characters)`, not `O(entities)`: `try_query_filtered` restricts the walk
+/// to archetypes that actually contain a [`CharacterMovement`], so a streamed
+/// scene with thousands of entities and no characters pays nothing per fixed
+/// step. The distinction is measured, not stylistic — the movement step's
+/// original full-world `iter_entities` walk pushed the phase16 streamed-scene
+/// budget from under 4 ms to 4.22 ms on a scene with **zero** characters (the
+/// CI red on the P29.3 push). `None` from `try_query_filtered` — the component
+/// never inserted in this world — is the `O(1)` answer for every characterless
+/// level. Same law as [`crate::sky::sky_authority`].
+///
+/// The sort is the determinism half: a bevy archetype walk's order is an
+/// implementation detail and must never reach a result, so the step consumes
+/// these in `Guid` order, as it always has.
+pub fn movement_targets(world: &EcsWorld) -> Vec<Uuid> {
+    let w = world.world();
+    let Some(mut q) = w.try_query_filtered::<&Guid, (With<CharacterMovement>, With<Transform>)>()
+    else {
+        return Vec::new();
+    };
+    let mut targets: Vec<Uuid> = q.iter(w).map(|g| g.0).collect();
+    targets.sort_unstable();
+    targets
 }
 
 // ── overlay registry ────────────────────────────────────────────────────────

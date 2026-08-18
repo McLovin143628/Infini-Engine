@@ -44,8 +44,8 @@ use std::collections::BTreeSet;
 use glam::{DQuat, DVec3};
 
 use inf_ecs::components::{
-    CharacterController3D, CharacterMovement, Collider3D, ColliderShape3DKind, Gait, Guid,
-    LandingKind, MovementMode, MovementRefusal, RotationMode, Transform,
+    CharacterController3D, CharacterMovement, Collider3D, ColliderShape3DKind, Gait, LandingKind,
+    MovementMode, MovementRefusal, RotationMode, Transform,
 };
 use inf_ecs::math::{Vec2d, Vec3d};
 use inf_ecs::movement as model;
@@ -191,19 +191,10 @@ pub fn step_character_movement(
     if !dt.is_finite() || dt <= 0.0 {
         return Vec::new();
     }
-    let mut targets: Vec<uuid::Uuid> = Vec::new();
-    {
-        let w = world.world();
-        for e in w.iter_entities() {
-            if e.get::<CharacterMovement>().is_none() || e.get::<Transform>().is_none() {
-                continue;
-            }
-            if let Some(g) = e.get::<Guid>().map(|g| g.0) {
-                targets.push(g);
-            }
-        }
-    }
-    targets.sort_unstable();
+    // O(characters), not O(entities), and sorted — the walk and the ordering
+    // rule both live in the model's one door (`movement_targets`'s doc states
+    // the measured cost of getting this wrong).
+    let targets: Vec<uuid::Uuid> = model::movement_targets(world);
     let mut out = Vec::with_capacity(targets.len());
     for guid in targets {
         if let Some(o) = step_one(world, bridge, guid, dt) {
