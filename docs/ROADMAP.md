@@ -16796,6 +16796,208 @@ shows a one-line authoring change as a one-line diff.
 > own tests calls: the day the editor exposes it, PIE has to carry it or the two hosts
 > stop agreeing.
 
+> **STATUS: P29.3 COMPLETE** (2026-08-18) — **local gates green; NOT PUSHED.**
+> Battery **269 binaries / 4 976 passed / 0 failed / 9 ignored** against the
+> 268 / 4 913 / 0 / 9 baseline (+63 arms and +1 binary, the new `movement_3d`);
+> `clippy -D warnings` and `cargo fmt --check` clean; `cargo doc --no-deps`
+> reports **exactly the 84 warnings it reported before this wave** — measured by
+> running it on both commits and diffing the sites, which found three this wave
+> had added and closed them. The frontend is
+> **untouched** (the movement component reaches the Details grid through the
+> reflection registry, which is served over IPC and needs no binding), so its
+> suite is unchanged at 583 / 62. Goldens stay **54** and are byte-unchanged —
+> nothing here draws a pixel. The scene schema moves **once**, v22 → v23, and
+> `ScenePayload` 8 → 9.
+>
+> **The two unscheduled blockers landed first** (Ruling 3). `cast_shape` /
+> `shape_cast` returned **zero** hits across `crates/`, `runtime/` and `editor/`
+> before this wave: the only swept-volume query in the tree ran *inside* rapier's
+> `move_shape` and was unreachable from outside the mover, which is the
+> mechanical reason a character could stand up inside a table. And `InputEvent`
+> was `Key | GamepadButton | GamepadAxis | Touch` — no mouse source, no
+> mouse-delta event anywhere — so `AimYawRate`, an input to three ported systems,
+> had nothing to be derived from.
+>
+> **What landed, one line each.** `PhysicsWorld3D::cast_shape`, answering a
+> `ShapeHit3D` in `cast_ray`'s own vocabulary plus the one thing a ray has no
+> need of, `started_penetrating`; mouse buttons, motion and wheel with frozen
+> `MouseButton`/`MouseAxis` enums and `InputState::axis_snapshot`, which converts
+> delta axes to **rates** so a fixed step can integrate them; analog axes on
+> `RuntimeInput`/`SimInput`, which until now carried a set of action NAMES and
+> nothing else; the frozen `MovementMode` (twelve catalogue rows, four reserved),
+> `RotationMode`, and an **open interned** overlay registry; the
+> `CharacterMovement` component with the full tunable set; `inf_ecs::movement`,
+> the model, as pure functions of numbers; `inf_physics::d3::movement`, the ONE
+> fixed step both hosts call; and `mover_for`, which retires the
+> `build_mover3d` pair rather than keeping it in step.
+>
+> **The measurements this batch owed.**
+> (1) **Stairs.** `.autostep(` appeared exactly twice in this repository — at its
+> own definition in `d2` and in `d3` — and was called from no production code, so
+> rapier's default (`None`) applied. Measured on a four-riser flight with a
+> landing at 0.8 m, walked at for five seconds: with autostep the character ends
+> **standing on the landing, past the flight**; with `step_height_m = 0`, which
+> is what this engine did until today, it stops **dead at the first 20 cm riser**
+> (feet 0.02, z 1.3). The control is the falsification — if it climbed, the arm
+> would be measuring the ability to walk.
+> (2) **Clearance is exact, not approximate.** With the feet at `f`, the crouched
+> capsule occupies `[f, f + 2(h0 + r)]` and the standing one `[f, f + 2(h1 + r)]`,
+> so sweeping the **crouched** shape upward by `2(h1 − h0)` covers exactly the
+> union. Clear means it fits, with no margin and no guess.
+> (3) **The landing classifier reads the speed it landed at.** Dropped from 1 m,
+> 4 m and 9 m: 4.4 m/s → `Soft`, 8.9 → `Hard` with no input and `Roll` with it,
+> 12.5 → `Ragdoll`. The thresholds are ALS's 700 and 1000 cm/s, converted once.
+> (4) **The turn is rate-bounded.** A goal that flips 180° in one step moves the
+> body by at most **12°** in any single step against the constant-rate stage's
+> 8.3° budget (the exponential stage lagging, as it should) — and it does arrive.
+>
+> **The velocity model is ours, and that is the port's central impedance
+> mismatch (IM-2).** rapier's `KinematicCharacterController` has no velocity model
+> at all: it moves a shape and reports what it touched. UE's CMC integrates
+> velocity from acceleration under a friction-and-braking model, and that model is
+> exactly what ALS's three curve channels drive. So the engine keeps its own
+> integrator and uses rapier purely as sweep-and-slide plus autostep. Expressing
+> ALS's friction through rapier's options would be translating a model into a
+> thing that has no model.
+>
+> **Where the port deviates from Ruling 4, and why.** Gait does not ride inside
+> `Grounded{gait}`; it is a sibling field, and `Fall`/`Swim` split into two
+> discriminants each. The reason is mechanical rather than aesthetic: the Details
+> grid's write-back door (`inf_ecs::props`) applies an edited enum as
+> `DynamicVariant::Unit`, so a struct variant is a value the editor that must
+> **tune** this component cannot round-trip, and the ECS census pins a wire enum
+> by asserting a unit variant encodes to one byte. The grouping lives in
+> `is_grounded_family` / `is_falling` / `is_swimming`, which the arms assert
+> rather than describe. Four modes — Mantle, Ragdoll, Driving, Flying — exist
+> **without their mechanics**: entering one is
+> `MovementRefusal::ModeNotYetImplemented`, a typed value naming the wave that
+> owns it, rather than a stub that pretends.
+>
+> **The swim latch is absorbed, not re-implemented.** The mode reads P20's latch
+> through the same `update_swim` / `apply_swim_motion` pair
+> `physics3d.move_and_slide` has called since P20.2, so a swimming character is in
+> `MovementMode::SwimSurface` rather than in `Grounded` with a special case bolted
+> on. **Not one P20 assertion changed** — `water_buoyancy_3d`'s fourteen arms,
+> `water_visibility_3d`'s three and `phase20_gate`'s six are byte-identical to
+> what they were, and all green. Stated precisely, because two P20-adjacent files
+> did move and neither is an assertion: `d3/water.rs` gained
+> `SWIM_UNDER_FRACTION` (a distinction P20 had no need to draw — surface versus
+> submerged is a *mode* — placed beside its siblings rather than given a second
+> home), and `samples/phase20-coastal` moved by the same +1 byte per entity every
+> committed level did, with `phase20_gate` green on the re-blessed bytes. The new
+> arm asserts the latch and the mode agree on **every step** of a swim-out, and
+> that the swimmer really does leave the water, or the agreement would be
+> vacuous.
+>
+> **Schema v22 → v23, the full ladder, and it is the cheap rung.**
+> `CharacterMovement` is a new slot at the entity record's **tail** — the
+> `EntityRecordV10` shape of bump rather than the `EntityRecordV14` one — so every
+> frozen historical record is byte-unchanged and only the live record grew. That
+> is also why the tunables are a **new component** instead of fields on
+> `CharacterController3D`: that struct appears inside eighteen frozen records
+> across two mirrors, and growing it would mean freezing a
+> `CharacterController3DV22` into all thirty-six places, because bincode reads a
+> struct positionally and `#[serde(default)]` buys nothing. `EntityRecordV22` is
+> frozen from **ladder-local literals**; the v23 wire pin **re-declares
+> `CharacterMovement` field-for-field** as an independent `CharacterMovementWire`
+> (the `MaterialV22Wire` idiom) so a field appended to the component leaves bytes
+> the pin cannot account for, and its absent `runtime` field pins the
+> `#[serde(skip)]` from the other side; the committed `scene_v22.inf_lvl` fixtures
+> are blessed through their generators and asserted **byte-identical across the
+> two mirrors**. Measured price: **+1 byte per entity**, and each of the sixteen
+> committed levels moved by exactly its entity count (character-demo +4,
+> platformer +5, cavern +7, playground +13, coastal +16, partitioned-world +20,
+> phase16-world +22, phase19-town +25, physics-playground +28, phase18-scatter
+> +31, vgeom-demo +325).
+>
+> **`ScenePayload` 8 → 9 carries no new slot, deliberately.** The envelope's
+> version is the build contract between the two processes, and this records that
+> `level_bytes` is now a scene v23. Without it a v23 editor handing a stale player
+> a level would pass `check_version` — the envelope is unchanged — and fail
+> several layers deeper with a message about a *scene* schema, when the refusal
+> that names the actual fix ("rebuild both from the same commit") is the player's
+> own. The skew fixture's rule changes with it, honestly: "exactly one version
+> behind" worked while every bump added fields, and v9 adds none, so it stays at
+> the **v7 shape** — still the newest that produces a short read — and the two
+> refusal paths are now covered by two named arms.
+>
+> **The P24 ScenePayload-v8 garment gap, re-ledgered.** Measured against the code
+> rather than against the text: it was closed on **2026-08-12** by P26.3b's
+> `ScenePayload` v8 (`077d963`), whose own trip-wire
+> (`the_pie_payload_carries_no_garment_and_that_is_measured`) fired verbatim and
+> was deleted. The P24.4 paragraph carried an expiry — "retire this paragraph
+> then, not before" — and the day came without anyone retiring it. There was
+> nothing left for v9 to close, so §12's two stale passages are corrected instead,
+> and what genuinely remains is named: a `ClothAsset` has **no material slot**
+> (an `.inf_cloth` v2, not a wire move, since v8 already carries `materials` and
+> `textures`), PIE previews the last **saved** garment, and pinned particles are
+> model-space.
+>
+> **Three defects this batch's arms found in its own work**, every one by
+> measuring rather than by trusting a report.
+> (a) A character that had never been grounded — spawned in the air, or with its
+> floor deleted — stayed in `Grounded` for ever, integrating the small downward
+> ground bias instead of gravity: it fell at **16 cm/s** and reported an impact of
+> 0.16 m/s from any height, which is a landing classifier that always says
+> "soft". The transition read `was_grounded` and should not have.
+> (b) The rotation branch first read `moving || rotation_mode != VelocityDirection`,
+> which makes the clamp below it unreachable and drags an idle aiming character
+> round under its own camera — exactly the failure `LimitRotation` exists to
+> prevent, introduced by the line meant to call it.
+> (c) The gait and the aim toggle were read from the intent unconditionally, but
+> `apply_intent` writes only onto `player_controlled` characters — so "no sprint
+> held and no walk held" is indistinguishable from "no controller at all", and an
+> NPC authored `Walk` was overwritten to `Run` on its first step while one
+> authored `Aiming` was dragged to `LookingDirection` by the absence of a key
+> nobody was pressing.
+>
+> And one the *arms themselves* were caught by: the gait arm ran its character
+> off the end of its own 40 m floor after fifteen seconds and reported `Run` for
+> a character that was falling. The ladder was right; the floor is 400 m now.
+>
+> **Mutation matrix (9 of 9 killed).** A clearance probe that always says yes
+> fails the refusal arm; `step_height_m` never reaching the mover fails the stairs
+> arm; a mode that stops reading P20's latch fails the swim arm; a body yaw that
+> is computed and never written to the `Transform` fails both rotation arms; a
+> landing that is always soft fails the classifier arm at both levels; a zeroed
+> quadrant buffer fails the chatter arm; two `MovementMode` variants swapped fails
+> the freeze table; `record_of` forgetting the slot fails the editor's
+> round-trip-through-the-world arm; and visiting entities in descending guid order
+> fails the ordering arm — which **did not exist** until the matrix found that
+> every fixture had one character. Worth recording that the ordering mutation went
+> wrong first: `targets.reverse()` left the arm green because the gather already
+> happened to hand back descending guids, so a mutation that fails to kill an arm
+> can mean the mutation was wrong rather than the arm.
+>
+> **A tooling law, earned for the sixth time.** A scripted edit through a shell
+> heredoc ate `\`-continuations inside Rust string literals again, and then ate
+> them inside the *Python* that was written to repair them. Every edit in this
+> wave that touched a continued literal went through a python **file**, never a
+> heredoc.
+>
+> **Honest remainders, carried into P29.4–P29.7.** `Roll` and `Dive` have their
+> modes, their impulses, their capsules and their landing routing, and **no root
+> motion** — P29.4 item 2 owns that, and until then a roll is a curve-decayed
+> slide with a timer. `Mantle`, `Ragdoll`, `Driving` and `Flying` are typed
+> refusals. The **derived anim outputs are computed and nothing reads them**: the
+> quadrant, gait scalar, stride, walk/run blend, relative acceleration and lean
+> are on the runtime for P29.4's bridge, which is the wave that consumes them —
+> the same shape as P29.2's `AdditiveRef`, carried and unproduced. `cast_shape`
+> has **no `targets` filter**: the day P29.4's mantle wants ALS's `IgnoreOnlyPawn`
+> it gets one, and not before, because a knob nobody turns documents a choice
+> nobody made. Autostep is **opt-in by component presence**, so every committed
+> sample moves exactly as it did — turning it on for entities that never asked
+> would have changed the platformer, the coastal swimmer and the physics
+> playground, and those are gates. The editor's Simulate can carry analog axes and
+> **nothing fills them yet**: the runtime player wires winit's device motion, and
+> the editor's mouse capture is P29.6's camera work. `MovementIntent` is applied
+> to every `player_controlled` character, so two of them would receive the same
+> intent; a per-controller binding is a gameplay concern nothing in this wave has.
+> No `character.*` Blueprint kit — the node kit this phase owns is P29.4's
+> `anim.*`. And there are **no timing legs in this wave**, so the paravirtual-macOS
+> law has nothing to name here: every measurement above is a counter, a distance
+> or a byte.
+
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
   consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed
   compares) replacing the flat AND list; 3. transition **priority** + an interruption model (which
