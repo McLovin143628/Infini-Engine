@@ -954,10 +954,17 @@ fn both_hosts_agree_on_a_fixture_that_really_interpolates() {
                 SmState::clip("idle", *IDLE.as_bytes()),
                 SmState::clip("walk", *WALK.as_bytes()),
             ],
-            // The duration is NON-ZERO: that is what makes `blend_poses` run
-            // at all, and since P29.1 it is also what makes the OUTGOING
-            // play-head advance -- so this fixture is now the two hosts agreeing
-            // on a three-way blend rather than on a held frame.
+            // The duration is NON-ZERO, and what that buys has changed twice.
+            // P24.2: it is what makes `blend_poses` run at all. P29.1: it is
+            // also what makes the OUTGOING play-head advance, so the fixture
+            // became a three-way blend rather than a held frame. **P29.2**: it
+            // is what makes the transition INERTIALIZE — the default now
+            // collapses the machine's own cross-fade the step it fires and
+            // renders one state plus a quintic-decayed deviation instead. So
+            // this arm is no longer the two hosts agreeing on a cross-fade; it
+            // is the two hosts agreeing on the decay, which is the only place in
+            // the battery where the shipped runtime and the editor's Simulate
+            // are compared byte for byte across a live inertialization.
             transitions: vec![SmTransition::new(0, 1, 0.25)],
             entry: 0,
             ..Default::default()

@@ -196,9 +196,19 @@ impl Inertializer {
         }
     }
 
-    /// The current decay weight in `[0,1]` (well, in `[0,1]` for `v0 ≤ 0`; a
-    /// positive `v0` may exceed 1 briefly, which is the overshoot a real
-    /// inertialization has and a cross-fade cannot express).
+    /// The current decay weight — in `[0,1]` for `v0 ≤ 0`, and a little above 1
+    /// early on for a positive `v0` (measured: **1.019** at the `v0 = 4`
+    /// [`capture_moving`](Self::capture_moving) allows for a 0.25 s decay), which
+    /// is the overshoot a real inertialization has and a cross-fade cannot
+    /// express.
+    ///
+    /// **What is rendered does not overshoot** (P29.2 audit): [`apply`](Self::apply)
+    /// hands this to [`apply_additive`], which clamps every per-joint weight into
+    /// `[0,1]` — so the excess is a property of the curve and not of the pose, and
+    /// the render lands *on* the outgoing pose rather than past it. That clamp is
+    /// the shared conservative rule masks rely on and is not worth relaxing for
+    /// 2 % of one frame; this line says so instead of claiming a behaviour the
+    /// type's own `apply` removes.
     pub fn decay(&self) -> f32 {
         quintic_decay(self.elapsed_s, self.duration_s, self.v0)
     }

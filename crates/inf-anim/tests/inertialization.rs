@@ -99,9 +99,25 @@ fn machine() -> StateMachine {
 /// machine spends most of its time mid-blend — which is the only regime in which
 /// the two mechanisms cost different amounts.
 fn run(blender: &mut PoseBlender, steps: usize, period: usize) -> f32 {
+    run_counted(blender, steps, period).0
+}
+
+/// [`run`], and how many times the machine actually asked the clip resolver for
+/// a clip.
+///
+/// The resolver call is the **observable** form of "a state was evaluated":
+/// `eval_pose` reaches every posed state through `sample_motion`, and a
+/// single-clip state resolves exactly one `ClipRef`. Counting the calls
+/// therefore measures the world, where [`PoseBlender::evaluations`] is the
+/// blender's own model of what the coming `eval_pose` will do — and a model that
+/// no arm ever compares against the thing it models is a report, not a
+/// measurement (P29.2 audit).
+fn run_counted(blender: &mut PoseBlender, steps: usize, period: usize) -> (f32, u64) {
     let sk = rig();
     let (a, b) = (dense_clip("a", 0.0), dense_clip("b", 90.0));
+    let resolved = Cell::new(0u64);
     let clips = |c: ClipRef| -> Option<&AnimClip> {
+        resolved.set(resolved.get() + 1);
         match c[0] {
             1 => Some(&a),
             2 => Some(&b),
@@ -122,7 +138,7 @@ fn run(blender: &mut PoseBlender, steps: usize, period: usize) -> f32 {
         let (pose, _) = blender.step(&sm, &mut rt, &sk, &clips, &ctx, 1.0 / 60.0);
         checksum += pose.locals[JOINTS / 2].rotation[3];
     }
-    checksum
+    (checksum, resolved.get())
 }
 
 /// **The functional leg: inertialization evaluates strictly fewer states.**
@@ -154,6 +170,42 @@ fn inertialization_samples_fewer_states_than_the_cross_fade() {
          supposed to be paying for",
         f - i
     );
+}
+
+/// **The counter is a MEASUREMENT, not a report** (P29.2 audit).
+///
+/// [`PoseBlender::evaluations`] is incremented from `evaluation_cost`, which is
+/// the blender's own *model* of the branching `eval_pose` is about to do — one
+/// for the current state, one more for a cross-fade partner, one more for a
+/// carried interruption. The arm above then reads that model back and calls it
+/// the perf claim. If `eval_pose` ever stopped agreeing with the model (a fourth
+/// pose, a sub-machine evaluated twice, a state whose motion resolves nothing),
+/// the model would keep answering and the claim would keep passing.
+///
+/// So this arm counts the thing itself: the machine's `clips` resolver, which
+/// `sample_motion` calls exactly once per single-clip state it poses. The two
+/// numbers have to be the **same** number, on both mechanisms, or one of them is
+/// describing a program that is not running.
+#[test]
+fn the_evaluation_counter_agrees_with_what_the_machine_actually_sampled() {
+    const STEPS: usize = 240;
+    const PERIOD: usize = 40;
+    for (name, mut blender) in [
+        ("inertialized", PoseBlender::new()),
+        ("cross-faded", PoseBlender::cross_fade()),
+    ] {
+        let (_, resolved) = run_counted(&mut blender, STEPS, PERIOD);
+        assert_eq!(
+            blender.evaluations(),
+            resolved,
+            "the {name} run's counter says {} state evaluations and the machine \
+             asked the clip resolver {resolved} times — the counter is modelling \
+             an `eval_pose` that is no longer the one being called",
+            blender.evaluations()
+        );
+        // …and the count is not trivially zero on either side.
+        assert!(resolved >= STEPS as u64, "{name}: {resolved}");
+    }
 }
 
 /// **The timing leg.** Reports on every platform; asserts everywhere except
