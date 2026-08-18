@@ -17117,6 +17117,222 @@ shows a one-line authoring change as a one-line diff.
 > the new parity arm and by `two_identical_worlds_move_byte_for_byte`, and the
 > section belongs with P29.4's bridge, which is the first consumer.
 
+> **STATUS: P29.4 COMPLETE** (2026-08-18) — **local gates green; NOT PUSHED.**
+> Battery **274 binaries / 5 049 passed / 0 failed / 9 ignored** against the
+> 270 / 4 986 / 0 / 9 baseline (+63 arms and +4 binaries: `traversal_3d`,
+> `ragdoll_bridge_3d`, `foot_slide_gate`, `anim_roundtrip`);
+> `clippy -D warnings` over the whole workspace and `cargo fmt --check` clean.
+> `cargo doc --no-deps` over the five touched crates reports **52** warnings
+> against 56 before this wave's own doc fixes, and **every remaining site's text
+> is present at the base commit `ac144a2`** — checked line by line rather than
+> counted, because a count that happens to match can hide one added and one
+> fixed. The frontend is **untouched** (no `.ts`/`.tsx` in the range), so its
+> suite is unchanged at 583 / 62. Goldens stay **54** — nothing here draws a
+> pixel. **No schema moves**: `.inf_sm` v2, `.inf_anim` v2, scene v23 and
+> `ScenePayload` v9 all stand, and every new field is on `MovementRuntime` or in
+> a bevy resource, neither of which reaches a file.
+>
+> **What landed, one line each.** The `anim.*` node kit (set a parameter, arm a
+> trigger, query the state, take a notify) dispatched by both hosts under the
+> registry gate; `inf_ecs::anim_bridge`, the one Ring-0 resource the kit, the
+> movement step and the pose step share; root motion **including Y** off
+> `.inf_anim` v2's baked track, with a producer; motion warping, distance
+> matching and orientation warping; the five-step ledge probe and the
+> velocity-aligned land-prediction sweep; the mantle, through the one movement
+> door; foot IK and foot locking over P24.2's solver; the ragdoll bridge, with
+> the velocity handoff in and a pose-matched get-up out; turn- and
+> rotate-in-place, aim offsets, and footsteps into the P12 audio queue.
+>
+> **The measurements this batch owed.**
+> (1) **The foot-slide gate**, in metres. A planted foot's world displacement
+> across its authored window: **7e-9 m** locked against **0.892 m** unlocked, on
+> a 1.017 m walk. Eight orders of magnitude — what a mechanism that works
+> produces and what a tolerance never does. The bound is **1e-5 m**: a thousand
+> times the measurement, ninety thousand times under the control. The control is
+> the same character, the same walk and the same clip with `FootLock_L` authored
+> below the engage threshold, and the arm asserts that it *does* skate **and**
+> that the skate is the body's own travel.
+> (2) **The mantle lands exactly.** Measured through the shipped door: the feet
+> end within **1e-3 m** of the probed ledge, having risen monotonically and never
+> overshot, over a climb that takes more than five steps (a snap would pass "ends
+> on the ledge" too). It is exact by construction rather than by an ease that
+> converges — `warp_offset` scales the traversal motion delivered so far onto the
+> runtime target, so consuming the whole window lands *on* it.
+> (3) **The 1.25 m split, and both classes.** A 1 m ledge classifies low and a
+> 2 m one high, each is climbed, and each ends standing on the surface the probe
+> found. ALS hard-codes 125 cm as a literal in its check; ours is
+> `inf_anim::MANTLE_HIGH_SPLIT_M`, converted once.
+> (4) **Land prediction is early enough to be worth having.** Dropped from 1 m,
+> 4 m and 9 m, the **first** prediction the sweep produces already equals the
+> verdict the classifier reaches at the touch. That is the half that distinguishes
+> "the speed it will arrive at" from "the speed it has": near the ground the two
+> are the same number, and an arm that only checked the last prediction passed a
+> mutation that reported the current speed.
+>
+> **The `anim.*` kit is the S6 claim, checked.** Four nodes, each a thin dispatch
+> onto a Ring-0 door — the `ik.*` shape, where the rule lives once and the hosts
+> hold only the arms. Because the bridge is read *inside*
+> `step_pose_evaluation`, **neither fixed step changed a line for it**, which is
+> the mirror rule paying out for the third phase running.
+> `both_hosts_dispatch_exactly_the_registered_anim_nodes` is the
+> registry-versus-hosts gate §13's risk register asks for (a host-versus-host
+> text compare cannot see an id spelled wrong in *both*), and
+> `interpreted_and_compiled_drive_the_bridge_identically` runs the same driver
+> program twice — interpreted against a stand-in bridge, and as compiled Rust
+> mirroring `generate_fn`'s output — comparing the traces step for step with a
+> string pin keeping the mirror honest.
+>
+> **A parameter and a trigger are different things**, and the kit says so. A
+> parameter is a *setting* that shadows an actor variable of the same name; a
+> trigger is an *event*, armed through the new `SmRuntime::arm_trigger` rather
+> than by writing a level — because a trigger is edge-detected, and "set the
+> variable to 1" fires once for two presses one step apart.
+>
+> **The ragdoll bridge is the P12 doctrine written as functions.** anim →
+> physics: the movement step *asks* for a rig and the pose step answers with
+> world-space bone segments — it is the one place that has the skeleton, the pose
+> and the placement at once. physics → anim: the bridge writes numbers onto the
+> character's runtime and sets a parameter and a trigger through the same doors a
+> Blueprint would use; it never touches `SmRuntime`, and the machine picks its
+> own get-up out of its own condition tree. The blend weight is
+> `inf_anim::ragdoll::blend_weight(phase, clock)` and nothing else, asserted bit
+> for bit between two worlds that reached the same state by different routes.
+> `inf_physics::ragdoll` (P12.1) gets its first runtime consumer after seven
+> phases as a pure builder nothing called.
+>
+> **Three things the ragdoll fixtures taught**, each now a comment beside the
+> line it explains. The character's kinematic capsule and its own limbs spawn
+> **inside each other**, and a kinematic body resolving that overlap shoves the
+> ragdoll across the level — measured: the limbs never came to rest at all, so
+> the get-up never fired. `PhysicsWorld3D::set_collider_enabled` is ALS's
+> "capsule collision off", a new facade call with one caller and a measurement
+> behind it. A settled ragdoll's hips rest **centimetres off the floor**, so a
+> ground probe starting *at* the pelvis begins penetrating and answers "not
+> grounded" — measured at 0.01 m/s for nine hundred steps with no get-up; the
+> probe starts above it now. And the velocity handed back is the one the bodies
+> were **last** seen at, not the one a step earlier — the arm compares against
+> both, so neither a zeroed nor a stale handoff passes.
+>
+> **`cast_shape` got its `targets` filter, with its first caller** (the P29.3
+> remainder). As `cast_shape_where`, the split `cast_ray`/`cast_ray_excluding`
+> already has, so the fifteen existing call sites are untouched. Two variants,
+> each with a caller: `All` and `Fixed`. A ledge that is a crate somebody can
+> shove is not a ledge, and the exclusion has to be in the **broad phase** —
+> which is the P22.3 audit's M4 said the other way round. ALS's
+> `IgnoreOnlyPawn` is *not* this: a character here is a set of colliders the
+> caller knows, which is what `exclude` already is, and the mantle fills it from
+> `movement_targets` — the same `O(characters)` door the hotfix installed, so the
+> cost property survives.
+>
+> **A8 closed** (P29.3 audit, declined and carried). `mover_for`'s ruling — a
+> movement component's `slope_limit_deg` overrides the controller's
+> `max_slope_deg` — had no arm, because both defaults are 45 degrees and the
+> mutation was a no-op on every fixture in the tree. It has the ramp fixture and
+> the public reader the audit said it needed: `CharacterMover3D::slope_limit_rad`
+> says the component's number reached the mover, a **40-degree ramp is climbed at
+> a 50-degree limit and refused at a 30-degree one** with the controller held at
+> 45 in both, and the control (no movement component at all) proves the
+> controller's number still applies when there is nothing to override it.
+>
+> **P29.2's recorded subprocess boundary closed.** That wave shipped
+> inertialization as the default and wrote down that no subprocess arm ran one:
+> `pie_skinned`'s real `--pie` binary walked its machine on zero-duration
+> transitions. One number — a 0.25 s second transition — puts a live decay across
+> the process boundary, and the arm asserts it by counting **distinct** poses:
+> three constant states on zero-duration transitions can produce at most three, so
+> a count above three *is* the decay. Mutation-verified by putting the fade back
+> to zero.
+>
+> **PIE == shipping on a live mantle and a ragdoll.** `movement_parity` gains a
+> second fixture: one script walks a character at a 1 m ledge, jumps, climbs it
+> through the warp, walks off its far side, falls thirty metres and lands hard
+> enough for the classifier to call a ragdoll — compared byte for byte over 420
+> steps. The trace grew eighteen `f64`s and six discriminants, and the
+> anti-vacuity half asserts a mantle and a ragdoll really appear in it. **The
+> bound is on the arm**: neither host registers a skeleton for that character, so
+> the ragdoll's *spawn* is covered in `ragdoll_bridge_3d` instead, where both
+> fixed steps run over a real humanoid; registering a rig through a host needs an
+> asset-registry API neither exposes to a test, which is P29.6's gate work.
+>
+> **Mutation matrix (9 of 9 killed), and two of them were wrong first.** The
+> ledge probe's dynamic-body refusal *survived* until the mutation removed it from
+> **both** sweeps — the second one was still refusing, for a different reason —
+> and land prediction survived reporting the current speed until the arm was made
+> to check the **first** prediction rather than the last. Both are this
+> repository's own law met again: a mutation that fails to kill can mean the
+> mutation was wrong, or that the arm was measuring the easy half. The nine:
+> `mover_for` reading the controller's slope; a foot lock that resolves to the
+> posed position; a warp that is a plain lerp; a ragdoll exit that forgets to say
+> which way up; a pose step that drops the parameter overlay; a marker window that
+> fires on every nearby step; one `anim.*` id spelled wrong in **one** host; the
+> ledge probe seeing dynamics; and land prediction reporting the current speed.
+>
+> **The chr(92) law's SEVENTH catch, and this time it caught the arm being
+> written.** A scripted edit through a shell heredoc ate the continuation inside
+> the land-prediction arm's own failure message, leaving fourteen spaces in the
+> middle of a sentence.
+> `no_string_literal_in_the_workspace_carries_an_eaten_continuation` found it in
+> the full battery — the guard doing exactly what it exists for. Every edit in
+> this wave that touched a continued literal went through a python **file**; the
+> one that did not is the one that broke.
+>
+> **The doc-link law, applied to this wave's own writing.** Four links did not
+> resolve in the **scope of the item**: `root_motion.rs` linked `DistanceTrack`
+> and `RootMotionTrack` (both `crate::channels::`), and `warp.rs` linked
+> `[SUPERSEDE]`, which is a ROADMAP marker and not an item at all.
+>
+> **ROADMAP integrity, checked rather than assumed.** The file is **pure LF** —
+> 0 CRLF and 0 lone CR, re-counted after this very paragraph was written into it.
+> That corrects the P29.1 audit's "still pure CRLF": the blob in the object store
+> has always been LF and `.gitattributes` leaves `.md` alone, so that reading was
+> of a checkout `core.autocrlf` had converted rather than of the file. The
+> substance of the law is unchanged and holds — nothing mixes. The range touches
+> exactly one region of this section and every prior phase ledger is
+> byte-unchanged; the `## 13.` anchor is unique. An eaten-`\`-continuation sweep
+> over all **7 804** `.rs` lines this wave added finds **zero**, and the
+> predicate was vacuity-checked against a planted one before that zero was
+> believed — which is the same discipline that found the real one described above,
+> two commits earlier.
+>
+> **Honest remainders, carried into P29.5–P29.7.**
+> **The mantle's progress is a clock**, shaped by `warp_ease`, which is what ALS's
+> Timeline does. The warp is *called* with the clip's `(delivered, total)` pair,
+> and with no traversal clip bound those are `total × progress` and `total`, so
+> the scale is exactly one and the warp degenerates to the ease — which is why the
+> "plain lerp" mutation is killed by `warp.rs`'s own unit arm and not by the world
+> one. The day P29.5's import derivation gives the traversal state a baked
+> root-motion track, the same call scales its arc onto the same target with no
+> change at the call site.
+> **Root motion reaches the movement step one fixed step late**, because the pose
+> runs after it in both hosts. Over any interval the total displacement is the
+> same, shifted by 1/60 s — the same one-beat latency P22.3's collapse documents,
+> and named where it happens rather than discovered later.
+> **Event-marker notifies fire from single-clip states only.** A blend space has
+> no single play-head to cross a marker on, and the sync-group path is what aligns
+> feet inside one; a blend-space footstep is P29.5's, with the derivation that
+> authors it.
+> **The pelvis IK offset is computed and not applied.** `pelvis_offset` answers
+> the drop a low foot needs, and routing it into the rig is a pose edit P29.5's
+> authoring pass owns — applying it to the capsule would move the character,
+> which is not what it means.
+> **The ragdoll's drive is angular damping, not a motor.** ALS drives physical-
+> animation angular motors; `JointKind3D::Spherical` in this facade has no motor
+> to give a stiffness to. The band is ALS's and it is load-bearing (the damping is
+> derived from `motor_stiffness`, asserted at twenty speeds), but it is a
+> behaviour port and is said as one.
+> **The `anim.*` kit deliberately does not expose the blend mode or the overlay
+> state.** P29.2 recorded that exposing `set_blend_mode` obliges PIE to carry it
+> or the hosts stop agreeing, and that parity arm was not budgeted here;
+> `OverlayRegistry` interns by first-seen order, so an id crossing a process
+> boundary needs an interning-determinism arm before a node can hand one out. Both
+> stay **named** remainders rather than half-closed ones — `OverlayRegistry` still
+> has **zero callers**, exactly as the P29.3 audit found it.
+> **No committed content uses any of this.** No sample carries a
+> `CharacterMovement`, a traversal clip, a foot-lock channel or a get-up state, so
+> every fixture in this wave is built in its test. That is P29.6's
+> `samples/phase29-locomotion`, and it is why the gate arms here assert worlds
+> they construct rather than levels they load.
+
 
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
   consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed
@@ -17136,7 +17352,9 @@ shows a one-line authoring change as a one-line diff.
 - **P29.4 The bridge** — 1. the `anim.*` node kit (set parameter, set trigger, query state,
   consume notify) dispatched by **both** hosts in lockstep under the registry gate; 2. root motion
   for machine-driven characters; 3. foot IK against terrain over P24.2's solver; 4. a foot-slide
-  gate measured in metres.
+  gate measured in metres. Plus the catalogue amendment's four: motion warping, the traversal
+  detectors, the landing-classifier consumers and the ragdoll bridge. **All eight landed** — see
+  the STATUS block above for what each one is and for the bounds each carries.
 - **P29.5 Authoring** — 1. the condition rule builder over the v2 trees; 2. live tuning during
   Simulate (S4); 3. import-time derivation of the curves UE bakes by hand and **proposed** state
   graphs from a clip set (S2/S3); 4. the `preview_character` warm-path fix.
