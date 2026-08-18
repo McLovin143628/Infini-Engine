@@ -16573,11 +16573,16 @@ shows a one-line authoring change as a one-line diff.
 > answer is exact to 1e-9, and that arm is what a restored IDW body fails by six orders
 > of magnitude.
 > (2) **Inertialization is cheaper.** Functionally: 600 fixed steps cost **600** state
-> evaluations inertialized against the cross-fade's **≥ 45 % more** — asserted on every
-> platform, because it is a counter and not a clock. On the clock, 900 steps over a
-> 64-joint rig, minimum of seven interleaved rounds: **4.90 ms against 6.52 ms, 1.33×**.
-> The timing leg reports-and-does-not-assert on macOS **by name** (paravirtual runner);
-> its functional twin still asserts there.
+> evaluations inertialized against the cross-fade's **870**, exactly 45 % more — asserted
+> on every platform, because it is a counter and not a clock, and since the audit the
+> counter is checked against the **clip resolver's own call count**, so it is a
+> measurement of `eval_pose` rather than the blender's model of it. On the clock, 900
+> steps over a 64-joint rig, minimum of seven interleaved rounds: **4.38 ms against
+> 5.65 ms, 1.29×** (**corrected** by the audit from 4.90 / 6.52 / 1.33×, which does not
+> reproduce; four consecutive release runs on this machine give 4.37–4.40 against
+> 5.58–5.69, ratio 1.27–1.29, and both figures include the fixture's own construction,
+> so the ratio understates the loop). The timing leg reports-and-does-not-assert on
+> macOS **by name** (paravirtual runner); its functional twin still asserts there.
 > (3) **Inertialization is smoother, by different amounts in different places.** At the
 > *end* of a transition — where a linear cross-fade's ramp stops and takes a velocity step
 > with it — the worst second difference of the rendered angle is **0.59°/step² against
@@ -16677,6 +16682,70 @@ shows a one-line authoring change as a one-line diff.
 > blend-space panel's preview is a **stick figure** drawn from the engine's joint
 > positions, not a shaded render: a lit one needs the offscreen character-preview path,
 > which is P29.5's `preview_character` work.
+
+> **AUDITED** (2026-08-18) — three findings, all fixed; no golden moved, no schema moved,
+> and the `.inf_anim` v2 ladder held every claim made for it (the v1 refusal, the
+> reserved-slot refusal, the structural questions, and the byte-consumption pin, which
+> fails as designed when a sixth field is appended to `AnimClip`).
+>
+> **A1, the one with a wrong pose behind it.** This wave's new 2D weighting skips a
+> non-finite sample in two of the three places it can arrive and not the third: the
+> **boundary projection**, which is the path a poisoned coordinate *forces* the query
+> down, because a set containing one has at most `n − 1` usable points and a
+> three-sample space then triangulates to nothing at all. A NaN scanned first won the
+> nearest-edge comparison and could not be displaced (every ordering comparison a NaN
+> takes part in is false), so `blend_weights_2d` answered with **that sample alone at
+> full weight** — the wrong clip playing, which is the failure that looks like content.
+> An infinite coordinate took `t` to NaN through `inf/inf` and returned an **empty**
+> weight list, which `sample_weighted` reads as "nothing resolved": the character snaps
+> to bind. Fixed with two locks, the pattern this crate's own `.inf_anim` ladder argues
+> for — `chain_edges` drops non-finite points before it sorts (its comparator answered
+> `Equal` for every NaN pair, which is not a total order and is what `sort_by` is
+> entitled to panic on) and the edge scan skips a non-finite candidate; and
+> `StateMachine::validate` now **refuses** a blend-space sample at a non-finite position
+> (`SmError::BadBlendSample`), which was the one numeric field on `.inf_sm` with neither
+> a guard nor a door while `duration`, `exit_time`, `speed`, a parameter default, a
+> profile weight and a compare value all had one. A healthy space is bit-identical
+> either way.
+>
+> **A2, a counter that was a report.** `PoseBlender::evaluations` is incremented from
+> `evaluation_cost`, the blender's own *model* of the branching `eval_pose` is about to
+> do — and the perf claim then read that model back. The counter now has a twin that
+> counts the machine's **clip resolver** calls, which `sample_motion` makes once per
+> single-clip state it poses, and asserts the two are the same number on both
+> mechanisms. Mutation-verified: making the model overcount by one per cross-fade
+> partner leaves the original arm green and turns the new one red.
+>
+> **A3, three prose claims that had drifted from the code.** `sample_blend_space_2d`
+> still documented itself as "the `k = 3` inverse-distance blend" — the exact mechanism
+> this wave removed, on the public function most callers read first. `Inertializer::decay`
+> documented an overshoot past 1 that `apply` then clamps away in `apply_additive`
+> (measured: 1.019 at the `v0` a 0.25 s decay allows, rendered as 1.000). And
+> `pose_parity`'s interpolating fixture still described itself as a P29.1 three-way
+> cross-fade, when it is now the only place in the battery where the shipped runtime and
+> the editor's Simulate are compared byte for byte across a live **inertialization**.
+>
+> **Verified rather than taken.** Measured claim (1)'s IDW numbers reproduce from the
+> pre-wave body (`1.0 / d²`, so `0.545 / 0.287 / 0.168`, reconstructing `(0.168, 0.287)`,
+> 0.1396 away); (3)'s reproduce exactly (0.588 / 3.633, 6.17×; 3.192 / 4.934, 1.55×);
+> (4)'s is asserted by its own arm; the blend-space cost reproduces at 0.93 / 1.85 /
+> 7.11 µs. (2)'s timing half is corrected above. Mutation-verified besides: the
+> portable-math ban really does catch a `.sin()` planted in `blend_space.rs`; the
+> by-name sim-path lookup survives a reordered `SIM_PATH` and panics by name on an
+> unknown file; the `character-demo` clip lock fails on a single flipped byte, so it
+> covers content and not existence; the pre-fix `pose_parity` fixture really is vacuous
+> against the collapsed degenerate fade; and putting the cross-fade back as the default
+> in `step_pose_evaluation` fails the default-flip arm.
+>
+> **One coverage boundary, stated rather than closed.** No **subprocess** arm runs an
+> inertialized transition: `pie_skinned`'s real `--pie` binary walks its machine on
+> zero-duration transitions, so the decay is exercised across the two hosts only
+> in-process (`both_hosts_agree_on_a_fixture_that_really_interpolates`). The blender is
+> constructed inside `step_pose_evaluation`, the one door both hosts call, which is why
+> this is a boundary and not a hole — but it is the boundary, and P29.6's gate is where
+> it closes. Second, `set_blend_mode` is a world-level resource that nothing outside its
+> own tests calls: the day the editor exposes it, PIE has to carry it or the two hosts
+> stop agreeing.
 
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
   consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed
