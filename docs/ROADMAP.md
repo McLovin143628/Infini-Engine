@@ -17396,6 +17396,16 @@ shows a one-line authoring change as a one-line diff.
 > convention it fails and this ledger has to be rewritten rather than quietly
 > disagreeing with the engine.
 >
+> > **DISCHARGED by P29.6 (2026-08-18), which is what the expiry above was for.**
+> > The convention is **feet-at-origin character space**: a character mesh's origin
+> > is where it stands, and the publisher — `inf_ecs::pose::model_to_world`, one
+> > door — subtracts the capsule the character is *wearing*. The pinned arm is
+> > replaced by its opposite,
+> > `a_feet_at_origin_rig_publishes_its_feet_on_the_floor`, and the two arms this
+> > paragraph added are the control: their fixtures moved to the feet-at-origin hip
+> > height and every world number they assert is unchanged. See the P29.6 STATUS
+> > block.
+>
 > **A2, A4, A5, A7, A11 — five rules that were right and unwatched.** Each is a
 > mutation this audit designed that killed nothing in the tree.
 > * **A2** — a body turning under a planted foot breaks the lock (ALS's
@@ -17757,7 +17767,9 @@ shows a one-line authoring change as a one-line diff.
 > resolves it and
 > `a_feet_at_origin_rig_publishes_its_feet_half_a_capsule_up` still asserts the
 > current answer, so the day P29.6's sample character decides the convention it
-> fails and the ledger is rewritten rather than quietly disagreeing.
+> fails and the ledger is rewritten rather than quietly disagreeing. **CLOSED by
+> P29.6**: pose space is feet-at-origin character space and the publisher
+> subtracts the worn capsule.
 
 > **P29.5 AUDIT** (2026-08-18) — adversarial pass over `77582f1..bf39dce`, eight
 > commits, 46 files. **Ten findings, three HIGH, all closed in the tree.**
@@ -17903,7 +17915,9 @@ shows a one-line authoring change as a one-line diff.
 > **What this pass did NOT change.** The foot-publish seam is untouched, as the
 > wave's ledger promised —
 > `a_feet_at_origin_rig_publishes_its_feet_half_a_capsule_up` still asserts the
-> current answer and P29.6 still owns the convention. No P29.1–P29.4 arm changed
+> current answer and P29.6 still owns the convention. **(P29.6 took it: the
+> convention is feet-at-origin character space, and that arm is now
+> `a_feet_at_origin_rig_publishes_its_feet_on_the_floor`.)** No P29.1–P29.4 arm changed
 > semantics. No golden moved, no `.inf_*` schema moved, no committed asset moved.
 >
 > **Carried, with the measurement (A7 and A9).** A play-head reduction that used to happen in
@@ -17920,6 +17934,376 @@ shows a one-line authoring change as a one-line diff.
 > at the DOM: this tree has no component-render harness for an `@xyflow` canvas
 > and building one here was out of scope.
 
+
+> **STATUS: P29.6 COMPLETE** (2026-08-18) — **local gates green; NOT PUSHED.**
+> Battery **BATTERY_LINE**; `clippy -D warnings` over the whole workspace and
+> `cargo fmt --check` clean. The frontend is **FRONTEND_LINE**, with `tsc
+> --noEmit` and eslint clean. Goldens stay **54** — the showcase asserts STATE,
+> not pixels (the P22 playground precedent). **No schema moves**: `.inf_anim` v2,
+> `.inf_sm` v2, scene v23 and `ScenePayload` v9 all stand, and everything this
+> wave added that has to persist is **text beside the level** rather than a wire
+> field.
+>
+> **What landed, one line each.** The locomotion camera — Ruling 3's third
+> unscheduled blocker, and the engine's first gameplay camera. The foot-publish
+> seam, decided. `.inf_sm` as **text**, which is what pillar S1 has promised
+> since P29.1 and nothing could produce. The wizard emitting a real `.inf_act`,
+> a movement component, a proposed machine over its own derived clips, and the
+> two text files a character needs to be played. `samples/phase29-locomotion` —
+> an obstacle course that forces **every** catalogue mode. `phase29_gate`, ten
+> arms. And the engine publishing a character's own state into its machine, which
+> is what makes a wizard character animate with no script at all.
+>
+> ---
+>
+> **THE FOOT-PUBLISH SEAM, DECIDED** (the P29.4 audit's A12, pinned for this
+> wave). **Pose space is feet-at-origin character space**, and the publisher
+> subtracts the capsule the character is **wearing**.
+>
+> A character mesh's origin is where it stands — what every DCC, every exporter
+> and `inf_anim::template` already mean — and the movement step keeps the entity
+> transform at the capsule's **centre**, so the two differ by exactly one half
+> height plus one radius. `inf_ecs::pose::model_to_world` is the one door that
+> subtracts it, and the foot bridge, the ragdoll rig, the socket attachments and
+> **both render projectors** now go through it; `projector_mirror` pins the call
+> in both hosts. Nothing is authored, nothing is stored, no schema moves, and an
+> entity with no `CharacterMovement` composes with the identity — so no committed
+> level moves a byte.
+>
+> **The proof, in three parts.** The pinned arm is replaced by its opposite:
+> `a_feet_at_origin_rig_publishes_its_feet_on_the_floor` asserts the lift equals
+> the worn capsule *against the door rather than a restated constant*, that the
+> published foot is on the floor, and — the consequence the seam blocked — that
+> the probe now finds ground and a goal is published. The foot IK and foot-lock
+> gates are the control: their fixtures moved from a capsule-centre hip height of
+> **0.05** to the feet-at-origin **0.95**, which is the same rig authored the way
+> the ruling says, and **every world number they assert is unchanged**.
+>
+> And a finding fell out of it. The slide gate now authors `Enable_FootIK` **off**,
+> because character space brought those feet inside the IK envelope for the first
+> time and foot IK is itself a partial anti-slide: its goal is one fixed step
+> stale, so solving to it drags a swinging foot back. Measured — **0.229 m** of
+> skate with the IK on against **0.892 m** with it off, and **0.0 m** with the
+> lock. The gate measures the *lock*, so it isolates it; the other number is a
+> new arm rather than a footnote.
+>
+> ---
+>
+> **THE LOCOMOTION CAMERA** (Ruling 3). The portable six-item subset, split the
+> way the movement port is: `inf_ecs::camera` is the model as functions of
+> numbers, `inf_physics::d3::camera` the one fixed-step door both hosts call.
+> `CalculateAxisIndependentLag` is ported verbatim — three interp speeds resolved
+> in **camera-yaw** space — and the arm that says so is the control: with one
+> speed on all three axes the frame cannot matter, and with three it must. The
+> state table, the rotation lag (on the **short** way round; a raw interp across
+> ±180° spins the whole screen for a two-degree turn), first person as a **blend
+> weight**, and the sphere sweep — `cast_shape`'s third consumer, after the crouch
+> clearance probe and the mantle — come with it.
+>
+> ALS's `UALSPlayerCameraBehavior` does not: an `UAnimInstance` on a **dummy
+> skeletal mesh** whose only job is to blend eleven scalar curves over a state
+> machine. Here the settings are a table and the blend is the same first-order
+> interp the lag uses.
+>
+> **It is not sim state and it never writes back.** The camera *reads* the aim yaw
+> the movement step integrated from the look axes — which is the one movement door
+> — so there is no camera → sim path to trace at all. Asserted twice: once at the
+> unit level (`stepping_a_camera_changes_nothing_about_the_simulation`) and once
+> over the whole course, where the camera trace is deterministic across two runs
+> and the **sim** trace is byte-identical with the camera stepped and not stepped.
+>
+> **The mouse reaches all three hosts.** `default_map` moved to Ring 0
+> (`inf_input::default_map`) and gained the four bindings the catalogue names and
+> P29.3 left unbound — `move_y` had no **keyboard** binding at all, so a character
+> could strafe and not walk forward, and `move_up`/`roll`/`dive` had none on any
+> device. The editor's Simulate resolves through that same table now: `sim_tick`
+> takes raw `KeyboardEvent.code` values and `InputState::resolved` answers the
+> actions *and* the axes. The three-action map that used to live in TypeScript is
+> gone — it knew three of the table's fourteen entries, which is the campaign's
+> Wave-I two-copies-across-a-language-boundary defect at this exact seam. The
+> mouse crosses the airspace boundary the only way it can: while a session is live
+> the native viewport captures a plain LMB for the **game** camera
+> (`Capture::SimLook`, Escape releases) and forwards raw counts, which Ring 2
+> accumulates and `axis_snapshot` turns into degrees per second — the same rule
+> the shipped player's winit device motion goes through. macOS carries the command
+> and does nothing with it, which is that platform's honest state (its viewport
+> has no input at all).
+>
+> ---
+>
+> **PILLAR S1, PRODUCED.** `inf_anim::text` projects a v2 machine into
+> deterministic TOML and reads it back **losslessly** over every shape the model
+> has — typed parameters, condition trees, priority, interruption, curves,
+> per-joint profiles, `exit_time`, any-state edges, 1D/2D blend spaces and one
+> level of nested sub-machine.
+>
+> A **condition is one line of a tiny expression language** rather than a nest of
+> arrays-of-tables, and that is the whole design decision: TOML's spelling for a
+> recursive sum type puts a threshold three levels deep in a structure whose
+> *shape* changes when the author adds a term, which is the thing S1 exists to
+> abolish. `speed > 2.6 && !aiming` is the reviewable form. `&&` binds tighter
+> than `||` and the writer's parentheses are asserted to keep the two apart —
+> without them `a || b && c` reads back as `(a || b) && c`, a different machine
+> that validates perfectly.
+>
+> `inf_editor_core::sm_text` is the other half. A text sidecar you can only
+> **read** is most of the way back to a binary `.uasset`; `save_from_text` parses,
+> validates through the same door `sm_save` uses (P29.2's A1), re-encodes the
+> payload and rewrites the text from what was stored, so the two faces cannot
+> drift. A machine the reader would refuse writes nothing at all.
+>
+> ---
+>
+> **THE COURSE, AND EVERY MODE IT FORCES.** The catalogue amendment's sentence is
+> the specification: *"P29.6's course must force every catalogue mode in its one
+> deterministic replay, so the (pose, mode) trace certifies the catalogue and not
+> a subset."* So `phase29_gate`'s anti-vacuity is a **list**, and a mode that
+> stops appearing fails by name. All twelve, with the steps each occupies in the
+> shipped run:
+>
+> | mode | steps | what forces it |
+> |---|---|---|
+> | `Grounded` | 1 155 | open floor, three gaits |
+> | `Crouch` | 922 | a roof at 1.4 m |
+> | `Prone` | 221 | the crawl out of it |
+> | `Slide` | 13 | sprint + crouch, after **eight metres** of runway |
+> | `Roll` | 45 | the roll edge |
+> | `Dive` | 29 | the dive edge |
+> | `FallFree` | 146 | a jump, which is the only thing that makes one |
+> | `FallControlled` | 63 | walking off the stair landing |
+> | `Mantle` | 146 | ledges at 1 m and 3 m — **both** height classes |
+> | `Ragdoll` | 46 | a jump off the 5 m ledge: 10.9 m/s, past the 10.0 threshold |
+> | `SwimSurface` | 2 141 | a 3 m pool |
+> | `SwimUnder` | 473 | a deliberate dive in it |
+>
+> `Driving` and `Flying` are absent on purpose and have their own arm: both are
+> **typed refusals** naming the wave that owns them, asserted rather than
+> described.
+>
+> **The runway is a finding.** The first draft of the course gave the slide two
+> metres and reported a catalogue with no slide in it — a slide is entered from a
+> sprint at 4 m/s and a sprint accelerates from a standstill. The second draft
+> jumped at the 1 m ledge two metres early and reported no **mantle**: a jump with
+> the stick forward *within reach of a face* is a mantle, and the same jump early
+> is a jump that lands on top. Both are why the driver is a stage machine over the
+> world rather than a script over the clock — and a roll moves the character
+> **sixteen centimetres**, so a station expressed as a z-window rolls for ever.
+>
+> ---
+>
+> **THE ONE-LINE-DIFF DEMONSTRATION** (S1's acceptance test). The committed text
+> is edited in one place:
+>
+> ```diff
+> -duration = 0.15
+> +duration = 0.42
+> ```
+>
+> and the arm asserts, in four parts: the committed `.inf_sm.txt` **is** the
+> committed `.inf_sm` (it decodes to the same machine); the edit changes **exactly
+> one line** and leaves the file's shape alone; the edited machine **validates**
+> through `sm_save`'s own door and exactly one transition moved; and the (pose,
+> mode) trace is identical up to the step the affected transition first fires and
+> different after it — with a **control** that is what makes it a claim: a
+> character that never leaves `idle` traces **byte-identically** under both
+> machines for the whole run, because the one line that changed belongs to an edge
+> that never fires. What changes at the divergence is the **pose** half and not
+> the movement half, which is the other half of the claim: a blend duration is an
+> animation decision and must not move the character.
+>
+> ---
+>
+> **SIX DEFECTS THE COURSE FOUND**, every one of them invisible to a fixture.
+>
+> **(1) A character authored ON the floor sank through it.** The mover keeps a
+> 2 cm skin and rapier's character controller does not depenetrate, so a capsule
+> authored at exactly `half + radius` — the only placement that looks right in a
+> viewport — starts inside the band and the small downward ground bias is never
+> given back. Measured: **2 mm per fixed step**, about 12 cm/s, `grounded`
+> reporting true throughout, and a **crouched** character through a one-metre floor
+> in **1.6 seconds**. `settle_on_spawn` takes the authored placement once, inside
+> the same `seeded` latch the authored facing uses; it only ever raises, and its
+> reach is bounded so a character authored in the air still falls.
+>
+> **(2) The ragdoll's joints were anchored backwards.** `local_anchor1` is body
+> 1's and `spawn` calls `add_joint(parent, child, …)`, and the builder passed the
+> **child's** anchor first. Since P12.1 — `inf_physics::ragdoll` was a pure builder
+> with no runtime consumer for seven phases, and P29.4's fixtures all spawn a
+> ragdoll at rest on flat ground, where a mis-anchored joint still settles into a
+> heap, just the wrong one. The first ragdoll in this repository's life to be
+> given a real 10.7 m/s impact took **7 m/s of sideways velocity in one step**.
+>
+> **(3) Its limbs collided with each other.** Limb capsules are built from bones
+> that share an endpoint, so a thigh and a shin overlap **by construction**, and
+> two overlapping dynamic bodies constrained to stay together are a depenetration
+> force with nowhere to go. Turning contacts off between *jointed* pairs
+> (`JointDesc3D::without_contacts`) handles the adjacent ones; the rest needed a
+> layer. Measured before it: a settled pelvis climbed **14 cm per fixed step with
+> a velocity of four centimetres per second** — a position correction, not a
+> motion — and rose ten metres. `RAGDOLL_LAYER_BIT` is the standard first answer,
+> and its bound is written down: two *different* ragdolls pass through each other.
+>
+> **(4) Its density was rapier's 1.0 placeholder** — the **fourth** catch of that
+> law, after `Buoyancy` (P20.2), `Destructible` (P22.3) and a 268-gram wheel
+> (P22.4). A limb capsule is a few litres, so a thigh weighed **six grams**. Now
+> 985 kg/m³, human tissue. Honest note: fixing it alone changed the symptom not at
+> all — (2) and (3) were doing the work — and it is fixed because the number was
+> wrong, not because it was the cause.
+>
+> **(5) A level's `gravity_3d` is authored, serialized, round-tripped and read by
+> NOTHING.** The 3D solver's gravity comes from `gravity_2d.y`
+> (`RuntimeSim::new`). Every 3D sample in the tree sets the 2D field and this one
+> does too; the dead wire field is recorded rather than removed, because removing
+> it is a schema move.
+>
+> **(6) The wizard's controller consumed a notify nobody fires.** The derivation
+> names an event marker after the **leg joint** — `footstep_upper_leg_l` on the
+> template biped — and the controller hard-coded `footstep_l`. So it counted
+> nothing, silently, on every character the wizard has ever made: a notify that is
+> not there is not an error. The controller is a function of the rig now
+> (`DerivedNames::event_markers`), and it was the Blueprint-versus-transpiled arm
+> that found it, by feeding it a real course segment and then asking what it
+> counted.
+>
+> **And one about a mode nobody could reach.** `SwimUnder`'s threshold is 95 %
+> submerged, and P20's swim transform honours a dive at `SWIM_SINK_AUTHORITY` (a
+> quarter) against a buoyancy balance of `4 × (f − 0.8)` — so the equilibrium is
+> `0.8 + v × 0.0625`, which at the catalogue's 1.6 m/s swim speed is **0.88**.
+> The mode was unreachable by input. The cause is that `swim_motion` sees one
+> negative `motion.y` whether it came from a player holding "down" or from a
+> Blueprint integrating gravity, and treated both as accidents; it takes a
+> `deliberate` flag now, which the character step passes and the `move_and_slide`
+> path does not. The load-bearing P20 case — a body integrating gravity at 20 m/s
+> while fully submerged still surfaces — is untouched and pinned.
+>
+> ---
+>
+> **THE ENGINE DRIVES ITS OWN MACHINE.** `speed` was a parameter every generated
+> and proposed machine gated on and **nothing in the engine ever set**: the only
+> writer was `anim.set_param`, which is a Blueprint's door. So a wizard character
+> stood in its idle state for ever while the number sat on its own movement
+> runtime one crate away. `publish_character_params` writes speed, gait, grounded,
+> mode, direction, fall speed, land alpha, overlay and flail into the same overlay
+> the kit writes into, once per step, from the one movement door.
+>
+> The precedence that follows is not obvious and has its own arm: a character with
+> a movement component **owns** its speed, and that shadows an actor variable of
+> the same name. `phase24_wizard` takes the component off its fixture and says so
+> — its claim is the P24.5 one (the machine fires on the thresholds the wizard
+> derived) and it drives that with a variable on purpose.
+>
+> **The wizard derives, then proposes.** Its generated clips go through
+> `inf_anim::derive_clip` before they are written — the same door the glTF import
+> takes — and `inf_anim::propose` gets its **first committed consumer**, with this
+> creature's own gait ladder rather than ALS's soldier's. That detail is
+> load-bearing: the default biped walks at 0.65 m/s, which on the ported
+> 1.65/3.75/6.5 ladder tiers as an **idle** (P29.5's own reading), and a proposal
+> over that clusters the whole set into one state. Passing the generator's own
+> speeds is what makes the three tiers three states.
+>
+> ---
+>
+> **THE ZERO-CALLER LIST, disposed of.** P29.4's audit handed on five; P29.5
+> handed on four of them plus `OverlayRegistry`.
+>
+> * **`OverlayRegistry` — CLOSED.** Interned over `movement_targets`' sorted walk,
+>   so the ids are a function of the world's contents and not of a bevy archetype
+>   order, and published as the `overlay` machine parameter. That is the
+>   interning-determinism arm both audits recorded as owed before an id could be
+>   handed out: `the_overlay_ids_are_a_function_of_the_world_and_not_of_the_spawn_
+>   order` builds the same three overlays in opposite orders, gets the same three
+>   numbers, and checks they are three *distinct* ones.
+> * **`ragdoll::flail_rate` — CLOSED.** Published as the `flail` parameter from
+>   the same door.
+> * **`warp::WarpWindow` — still zero-caller.** It bounds an arc to a *window*
+>   instead of to a whole clip, and binding one needs a traversal clip with an
+>   authored window; this sample's traversal is the mantle's own warp over the
+>   whole clip. Named again, routed to P29.7.
+> * **`distance_match` and `play_rate_for` — still zero-caller.** Their *input* is
+>   on every derived clip in the sample now (the distance track is committed
+>   content for the first time), and wiring distance matching into the movement
+>   step is a behaviour change with its own arms — P29.5 said so and it is still
+>   true. Named again, routed to P29.7.
+> * **`foot::interp_to_vec` — still zero-caller, and now with a reason rather than
+>   a hope.** The brief expected the camera lag to consume it; it cannot. That
+>   helper is `Vec3` (f32, pose space) and the camera is f64 world space, and
+>   casting a world position through f32 to reuse a two-line lerp would be the
+>   wrong trade. Named again.
+>
+> **The blend mode and the overlay authoring surface, deferred a FOURTH time —
+> and they are no longer the same item.** The overlay half is closed above. What
+> remains is `inf_ecs::pose::set_blend_mode`, and the reason is now precise rather
+> than budgetary: it is a **world-level** resource, so exposing it in the editor
+> obliges the PIE payload to carry it, and `ScenePayload` is a wire. This wave has
+> no schema budget by its own brief. Routed to P29.7 as *"one schema move buys the
+> per-transition blend mode as well"* — a field on `SmTransition` and a
+> `ScenePayload` slot are the same bump, and doing either alone is the worse half.
+>
+> ---
+>
+> **What `phase29_gate` asserts, by letter.** (a) PIE == shipping, byte for byte,
+> on the (pose, mode) trace over the whole course — a **cooked pack** against the
+> **payload** `sim_from_payload` builds, compared per step so a failure names the
+> divergence *step*; (b) bit-exact replay across two **independent cooks**, which
+> is a determinism check on the pipeline rather than on the sim; (c)
+> Blueprint-versus-transpiled parity, driving the **sample's own committed
+> `.inf_act`** through a real course segment — the states its machine entered and
+> the footsteps its derived clips fired — with the `generate_fn` string pin
+> keeping the compiled mirror honest; (d) the one-line diff; (e) the camera; (f)
+> the committed clips really are derived and the machine really is the proposal;
+> (g) the two refusals.
+>
+> **And a bound the gate found rather than assumed.** The editor's `SimSession`
+> and the shipped player are byte-identical for the whole course **up to the
+> ragdoll** — two and a half thousand steps, every gait, the crouch, the crawl,
+> the slide, the roll, the dive, both falls and all three mantles — and then
+> diverge in the last bits of the character's position, growing to nine
+> millimetres four steps later and to a one-step difference in when the ragdoll
+> ends. The cause is rapier's contract rather than this engine's: it guarantees
+> the same answer for the same **sequence of operations**, and a `SimSession`
+> entered over an edited document does not have the same one. Nothing here had
+> ever compared the two hosts across a dynamic solve. The arm asserts what is
+> true — exact before the first dynamic body exists, same catalogue and same
+> finish after — and the choice (one construction sequence for both hosts, or a
+> dynamic solve is host-local and the editor previews an approximation) is routed
+> to P29.7 as a design decision rather than a fix. **PIE == shipping is
+> unaffected**: that arm compares two `RuntimeSim`s built the same way and is
+> byte-exact over the whole course, ragdoll included.
+>
+> ---
+>
+> **Honest remainders, carried into P29.7.**
+> **Cloth and hair are still lifted by the raw entity transform.** `model_to_world`
+> covers the pose, the ragdoll rig, the sockets and both skinned draws; the
+> garment and hair projectors decompose the `GlobalTransform` directly and would
+> put a coat half a capsule above a character that wears one. No committed content
+> pairs cloth with a `CharacterMovement`, which is why it is a remainder and not a
+> defect — and it is exactly the shape of the seam this wave closed, so it is
+> named rather than left to be rediscovered.
+> **The `.inf_sm` text has no UI.** `sm_text::save_from_text` is a Ring-1 door with
+> arms; no panel and no Ring-2 command calls it yet, so an author edits the file
+> and the editor does not know. The gate's demonstration goes through the door.
+> **The camera's table is read but not tuned live.** The wizard writes
+> `camera.toml` and the windowed player reads it beside a `--level` boot, exactly
+> as it reads `input.toml`; a `--pack` boot does not, because the cook does not
+> carry it and making it would be a pipeline change with its own arms. And
+> `Tune::Camera` does not exist — so "live-tunable through P29.5's door" is true
+> of the tuning *type* (`CameraTuning::set` is by name, with refusals as values,
+> and has its arm) and not yet of the queue.
+> **The editor's play capture is human-verified.** `Capture::SimLook` is Windows
+> `wnd_proc` code, like every other viewport gesture in this repository; CI covers
+> the *rule* (delta → rate → axis → intent, all Ring 0 and arm-covered) and not
+> the grab.
+> **The course does not visit two of its own stations twice.** `Slide` lasts
+> thirteen steps and `Ragdoll` forty-six: both are real and both are brief, and a
+> longer slide wants a slope the catalogue does not require.
+> **The ragdoll's self-collision is off wholesale.** Two ragdolls pass through each
+> other; per-ragdoll groups need a group id rather than a wider mask.
+>
+> **Deliberately not done.** Vehicles and flight (P29.7, and their refusals are
+> asserted). The island. PIE Possess polish (P30). A `character.*` node kit — the
+> parity arm is driven through `anim.*`, which is what the brief asked, and a
+> second kit with no caller is the thing this wave spent a section closing.
 
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
   consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed
@@ -17952,7 +18336,11 @@ shows a one-line authoring change as a one-line diff.
 - **P29.6 The gate** — 1. the character wizard emits a real `.inf_act` controller; 2.
   `samples/phase29-locomotion`; 3. `phase29_gate` — PIE == shipping on the (pose, mode) trace,
   bit-exact replay across two independent cooks, Blueprint-vs-transpiled parity, and the
-  one-line-diff demonstration that is pillar S1's acceptance test.
+  one-line-diff demonstration that is pillar S1's acceptance test. Plus the ALS
+  amendment's Ruling 3 item the phase had left unowned (**the locomotion camera**)
+  and the seam the P29.4 audit pinned for this wave (**the foot-publish
+  convention**). **All five landed** — see the STATUS block above for what each
+  one is, for the six defects the course found, and for the bounds each carries.
 
 ### Amendment (2026-08-15) — the full movement catalogue
 

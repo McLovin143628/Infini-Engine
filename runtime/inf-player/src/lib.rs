@@ -395,6 +395,14 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     // captured before `built` is consumed, applied by the render host.
     let render = built.render;
     let mut sim = sim_from_built(built);
+    // ── P29.6 the locomotion camera's table ── read from `camera.toml` beside
+    //    the level, exactly as the input map above is. A camera is not sim state
+    //    and has no home in the scene schema, so its tunables live as text an
+    //    author owns and a reviewer can read; the character wizard writes one,
+    //    and a level with none gets the ported ALS defaults.
+    if let WorldChoice::Level(path) = &args.world {
+        sim.camera_mut().tuning = inf_ecs::camera::CameraTuning::load_beside(path);
+    }
     attach_cell_streaming(&mut sim, &partition);
     attach_terrain_streaming(&mut sim, &terrain_content);
     // The SAME registry the render host will page from — one source of bytes, two
