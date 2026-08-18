@@ -20,6 +20,13 @@ inf-asset = { workspace = true }
 # bit-identical across targets, so it cannot be on that path. Ring 0 -> Ring 0,
 # no cycle, and it adds no external crate (glam and nothing else).
 inf-math = { workspace = true }
+# P29.6 pillar S1: the `.inf_sm` TEXT form. TOML is the engine's existing
+# human-readable face (every asset sidecar is one), and `toml` is already a
+# workspace dependency of `inf-asset` — which this crate already names — so the
+# text door adds no crate to the tree. The reading half is the reason it is a
+# real parser rather than a hand-rolled one: a malformed sidecar is an author's
+# typo, and a typo must produce a named refusal rather than a wrong machine.
+toml = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

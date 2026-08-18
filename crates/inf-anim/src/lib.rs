@@ -85,6 +85,9 @@ pub mod root_motion;
 pub mod sockets;
 // P24.1 template body plans: the parametric N-pedal skeleton generator.
 pub mod template;
+// P29.6 pillar S1: the `.inf_sm` TEXT form — the reviewable face of a machine,
+// and the substrate `phase29_gate`'s one-line-diff arm measures.
+pub mod text;
 // P29.4 motion warping: warp windows scaling root motion onto a runtime target,
 // plus distance matching and orientation warping.
 pub mod warp;
@@ -162,6 +165,7 @@ pub use template::{
     build_template, girdle_name, leg_suffix, BodyParams, BodyPlan, JointLimit, TemplateError,
     MAX_LEGS,
 };
+pub use text::{cond_text, from_toml, parse_cond, to_toml, TextError};
 pub use warp::{
     distance_match, height_remap, play_rate_for, warp_ease, warp_offset, warp_yaw_deg, HeightRemap,
     WarpWindow, MANTLE_HIGH_SPLIT_M,

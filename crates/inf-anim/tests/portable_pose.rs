@@ -46,7 +46,19 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 22] = [
+const SIM_PATH: [(&str, &str, &str); 23] = [
+    // ── P29.6's text form, for the same reason the two below it are here ──
+    //
+    // It is not on the *runtime* path at all — it is an authoring door — and it
+    // is on this list because of what it writes: the committed `.inf_sm` text
+    // sidecar is content, so a value that printed or parsed differently on two
+    // targets would fork the file rather than the frame, and every determinism
+    // gate downstream would compare each machine with itself and pass.
+    (
+        "text.rs",
+        include_str!("../src/text.rs"),
+        "the .inf_sm text form is committed content — a threshold that printed differently on two targets would fork the file, not the frame",
+    ),
     // ── P29.5's proposal, for the same reason its derivation is here ──
     (
         "propose.rs",
