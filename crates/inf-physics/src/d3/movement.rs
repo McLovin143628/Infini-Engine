@@ -188,7 +188,7 @@ pub fn step_character_movement(
     bridge: &mut PhysicsBridge3D,
     dt: f64,
 ) -> Vec<MoveOutcome> {
-    if !(dt > 0.0) || !dt.is_finite() {
+    if !dt.is_finite() || dt <= 0.0 {
         return Vec::new();
     }
     let mut targets: Vec<uuid::Uuid> = Vec::new();
@@ -232,7 +232,9 @@ fn has_clearance(
     to_half: f64,
     exclude: &BTreeSet<ColliderId3D>,
 ) -> bool {
-    if !(to_half > from_half) {
+    // Finiteness first, comparison second: a NaN half-height must answer
+    // "nothing to grow into" rather than slip through a negated comparison.
+    if !to_half.is_finite() || !from_half.is_finite() || to_half <= from_half {
         return true;
     }
     let rise = 2.0 * (to_half - from_half);

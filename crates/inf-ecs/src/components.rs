@@ -1595,7 +1595,8 @@ pub enum LandingKind {
     /// Under [`CharacterMovement::land_hard_mps`]: keep running.
     Soft,
     /// Between the two thresholds with no movement input: plant, with the
-    /// heavier braking friction for [`CharacterMovement::land_friction_time`].
+    /// heavier braking friction for
+    /// [`land_friction_time_s`](CharacterMovement::land_friction_time_s).
     Hard,
     /// Between the two thresholds *with* movement input: break-fall into a roll.
     Roll,

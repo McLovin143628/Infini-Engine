@@ -1223,7 +1223,7 @@ impl PhysicsWorld3D {
         exclude: &std::collections::BTreeSet<ColliderId3D>,
     ) -> Option<ShapeHit3D> {
         let dir = dir.normalize_or_zero();
-        if dir == DVec3::ZERO || !(max_toi > 0.0) {
+        if dir == DVec3::ZERO || !max_toi.is_finite() || max_toi <= 0.0 {
             return None;
         }
         let swept = shape.to_shared()?;

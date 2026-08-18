@@ -334,8 +334,8 @@ use uuid::Uuid;
 ///   has paid.
 /// * **v23** — P29.3: the movement component. [`CharacterMovement`] is a new
 ///   entity slot at the record's **tail**, which is the cheap rung of this
-///   ladder — the [`EntityRecordV10`] shape of bump rather than the
-///   [`EntityRecordV14`] one — so every frozen historical record above is
+///   ladder — the `EntityRecordV10` shape of bump rather than the
+///   `EntityRecordV14` one — so every frozen historical record above is
 ///   byte-unchanged and only the live record grew. It carries a character's
 ///   whole tunable set (per-gait speeds, the four curves keyed on normalized
 ///   speed, air control, capsule heights, step height, the sprint gate, the

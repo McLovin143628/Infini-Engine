@@ -270,7 +270,7 @@ pub fn smooth_rotation(
     actor_interp: f64,
     dt: f64,
 ) -> (f64, f64) {
-    if !(dt > 0.0) || !dt.is_finite() {
+    if !dt.is_finite() || dt <= 0.0 {
         return (target_deg, actor_deg);
     }
     // Stage 1: constant rate toward the goal.
@@ -347,6 +347,13 @@ pub fn grounded_rotation_rate(cm: &CharacterMovement, mapped: f64, aim_yaw_rate_
 /// with input, 3.0 without, both released after half a second).
 ///
 /// Returns the new planar velocity, m/s.
+///
+/// Eight arguments, deliberately: each is a distinct physical quantity with its
+/// own unit, and three of them (`accel`, `braking`, `friction`) are the three
+/// channels of ALS's movement curve. Bundling them into a struct would hide
+/// which one a caller meant to change — the air branch varies exactly one — and
+/// this function is the piece most likely to be read against the donor.
+#[allow(clippy::too_many_arguments)]
 pub fn integrate_planar_velocity(
     velocity: Vec2d,
     wish_dir: Vec2d,
@@ -357,7 +364,7 @@ pub fn integrate_planar_velocity(
     friction_scale: f64,
     dt: f64,
 ) -> Vec2d {
-    if !(dt > 0.0) || !dt.is_finite() {
+    if !dt.is_finite() || dt <= 0.0 {
         return velocity;
     }
     let v = (velocity.x, velocity.y);
@@ -508,7 +515,7 @@ pub fn relative_acceleration(
     decelerating: bool,
 ) -> Vec2d {
     let max = if decelerating { max_braking } else { max_accel };
-    if !(max > 0.0) {
+    if !max.is_finite() || max <= 0.0 {
         return Vec2d::ZERO;
     }
     let local = rotate_into_frame(accel_world, body_yaw_deg);
