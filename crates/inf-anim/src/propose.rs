@@ -112,19 +112,32 @@ impl ClipFacts {
 
 /// Read a derived clip's facts back off it.
 ///
-/// Prefers the derived channels ([`crate::derive::MOVE_DATA_SPEED`],
-/// [`als::W_GAIT`]) and falls
-/// back to the distance track and then to nothing — so a clip that was never
-/// derived proposes as an idle rather than as a refusal. The fallback is a
-/// **value**: a set with one underived clip in it still proposes.
-pub fn facts_of(name: impl Into<String>, clip_ref: ClipRef, clip: &AnimClip) -> ClipFacts {
+/// Prefers [`als::W_GAIT`] and falls back to the distance track and then to
+/// nothing — so a clip that was never derived proposes as an idle rather than as
+/// a refusal. The fallback is a **value**: a set with one underived clip in it
+/// still proposes.
+///
+/// # `tiers` must be the ladder the clip was DERIVED against
+///
+/// `W_Gait` is a **tier** value and not a speed — `1` means "walk speed",
+/// whatever this project's walk speed is — so inverting it needs the same three
+/// numbers [`crate::derive::DeriveOptions::gait_speeds_mps`] used. Passing a
+/// different ladder does not fail; it answers a different creature's speed,
+/// which is why the ladder is a parameter here rather than a default reached for
+/// silently.
+pub fn facts_of(
+    name: impl Into<String>,
+    clip_ref: ClipRef,
+    clip: &AnimClip,
+    tiers: [f32; 3],
+) -> ClipFacts {
     let duration_s = clip.duration;
     let distance = clip
         .distance
         .as_ref()
         .and_then(|d| d.distance_m.last().copied())
         .unwrap_or(0.0);
-    let speed_mps = if crate::positive(duration_s) {
+    let travelled = if crate::positive(duration_s) {
         distance / duration_s
     } else {
         0.0
@@ -133,7 +146,14 @@ pub fn facts_of(name: impl Into<String>, clip_ref: ClipRef, clip: &AnimClip) -> 
         .curve(als::W_GAIT)
         .and_then(|c| c.sample(0.0))
         .filter(|v| v.is_finite())
-        .unwrap_or_else(|| gait_of(speed_mps, ProposalOptions::default().gait_speeds_mps));
+        .unwrap_or_else(|| gait_of(travelled, tiers));
+    // **The depicted speed, from whichever end the clip has one.** A root-motion
+    // clip says it in its distance track; an **in-place** cycle — which is most
+    // authored locomotion, and every clip `crate::locomotion` generates — says it
+    // only through `W_Gait`, because the derivation read it off the feet sliding
+    // backwards under a stationary body. Taking the greater of the two is what
+    // stops a whole wizard-generated set from clustering as one idle.
+    let speed_mps = travelled.max(crate::derive::speed_of_gait(gait, tiers));
     let plants = clip
         .markers
         .iter()
@@ -608,6 +628,7 @@ mod tests {
     /// and S3: derivation measures, the proposal decides.
     #[test]
     fn the_facts_come_off_the_derived_clip() {
+        let tiers = ProposalOptions::default().gait_speeds_mps;
         let sk = crate::template::build_template(
             crate::template::BodyPlan::Biped,
             &crate::template::BodyParams::default(),
@@ -625,12 +646,42 @@ mod tests {
             &crate::derive::DeriveOptions::default(),
         )
         .unwrap();
-        let f = facts_of("Walk", [1u8; 16], &walk);
+        let f = facts_of("Walk", [1u8; 16], &walk, tiers);
         assert_eq!(f.plants, report.plants.len());
         assert!(f.is_cycle(), "a generated walk cycles: {f:?}");
         assert!((f.gait - report.gait).abs() < 1e-6);
+        // **The in-place recovery.** The clip translates nothing, so its distance
+        // track is flat — and the speed the derivation read off its sliding feet
+        // still comes back, through `W_Gait`, which is the one derived number
+        // that survives onto the wire. Without this the whole wizard set clusters
+        // as one idle and a proposal over it is a single state.
+        assert_eq!(f.duration_s, walk.duration);
+        assert!(
+            (f.speed_mps - report.avg_speed_mps).abs() < 0.05,
+            "the depicted speed did not survive the round trip through W_Gait: \
+             {} vs {}",
+            f.speed_mps,
+            report.avg_speed_mps
+        );
+
+        // **And the tier is a question about the LADDER, not about the clip.**
+        // The wizard's default biped walks at about 0.65 m/s, which on ALS's own
+        // ladder (walk at 1.65) is under a walk — so it tiers as an idle, and
+        // that is the correct reading of a slow shuffle against a soldier's
+        // gait. `gait_speeds_mps` is a knob for exactly this: derived against a
+        // ladder scaled to the creature, the same clip is a walk.
+        assert_eq!(f.tier(), 0, "against ALS's ladder this is a shuffle: {f:?}");
+        let slow = crate::derive::DeriveOptions {
+            gait_speeds_mps: [0.6, 1.4, 2.4],
+            ..crate::derive::DeriveOptions::default()
+        };
+        let (scaled, _) = crate::derive::derive_clip(&set.walk, &sk.skeleton, &slow).unwrap();
+        assert!(
+            facts_of("Walk", [1u8; 16], &scaled, slow.gait_speeds_mps).tier() >= 1,
+            "against a ladder this creature's size it is a walk"
+        );
         // An UNDERIVED clip is still a fact, just a dull one — no refusal.
-        let bare = facts_of("Bare", [2u8; 16], &set.walk);
+        let bare = facts_of("Bare", [2u8; 16], &set.walk, tiers);
         assert_eq!(bare.plants, 2, "the generator's own markers still count");
         assert_eq!(bare.speed_mps, 0.0, "an unbaked clip depicts no travel");
     }

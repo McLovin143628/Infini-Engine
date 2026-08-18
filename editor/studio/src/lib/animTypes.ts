@@ -61,7 +61,16 @@ export interface AnimClipInfoDto {
 /** What a re-derivation found. */
 export interface AnimDeriveDto {
   distanceM: number;
+  /** The speed the clip depicts, m/s -- the greater of the two below. */
   avgSpeedMps: number;
+  /** What the ROOT travels. Zero for an in-place cycle, which is most authored
+   *  locomotion and every clip the character wizard generates. */
+  travelSpeedMps: number;
+  /** `stride x cadence` -- what the FEET say. The number an in-place cycle
+   *  answers with; a large gap between this and `travelSpeedMps` on a
+   *  root-motion clip is foot slide the animator authored. */
+  strideSpeedMps: number;
+  /** How far a foot travels along the ground over one cycle, metres. */
   strideM: number;
   /** The 0-3 `W_Gait` scale: 0 stopped, 1 walk, 2 run, 3 sprint. */
   gait: number;

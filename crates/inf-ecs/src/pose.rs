@@ -2885,8 +2885,13 @@ mod tests {
         let posed_root_y = |drop: f64| -> f32 {
             let mut world = world_with_character(guid);
             let e = world.entity_of(guid).unwrap();
-            let mut cm = crate::components::CharacterMovement::default();
-            cm.runtime.pelvis_offset = crate::math::Vec3d::new(0.0, drop, 0.0);
+            let cm = crate::components::CharacterMovement {
+                runtime: crate::components::MovementRuntime {
+                    pelvis_offset: crate::math::Vec3d::new(0.0, drop, 0.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
             world.world_mut().entity_mut(e).insert(cm);
             world.reindex_guids();
             f.step(&mut world, 1.0 / 60.0, 0.0);

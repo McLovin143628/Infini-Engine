@@ -264,6 +264,8 @@ describe("derived data", () => {
     mockAnim.rederive.mockResolvedValue({
       distanceM: 1.6,
       avgSpeedMps: 1.6,
+      travelSpeedMps: 1.6,
+      strideSpeedMps: 0.0,
       strideM: 0.8,
       gait: 0.97,
       riseM: 0,

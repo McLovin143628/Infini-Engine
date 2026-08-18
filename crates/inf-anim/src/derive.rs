@@ -202,10 +202,42 @@ pub struct DeriveReport {
     pub yaw_rad: f32,
     /// Total ground distance travelled, metres.
     pub distance_m: f32,
-    /// `distance_m / duration`, m/s — the number a state graph clusters on.
+    /// **The speed this clip depicts**, m/s — the number a state graph clusters
+    /// on. The greater of [`travel_speed_mps`](Self::travel_speed_mps) and
+    /// [`stride_speed_mps`](Self::stride_speed_mps); see the latter for why
+    /// exactly one of them is meaningful on any given clip.
     pub avg_speed_mps: f32,
-    /// Ground distance between successive plants of the **same** foot, averaged;
-    /// `0` when no foot planted twice.
+    /// `distance_m / duration` — what the **root** travels.
+    ///
+    /// Zero for an in-place cycle, which is most authored locomotion and every
+    /// clip [`crate::locomotion`] generates.
+    pub travel_speed_mps: f32,
+    /// **What the FEET say**, m/s: `stride × cadence`, where the stride is
+    /// [`stride_m`](Self::stride_m) and the cadence is how often the clip plants
+    /// that foot.
+    ///
+    /// The other half of the same question, and the reason a proposal works on
+    /// in-place content at all — which is most authored locomotion, and every
+    /// clip this engine generates. A cycle that translates nothing still says
+    /// how fast it is: it says it in the length of its own stride and the rate it
+    /// takes them at, which is the definition of gait speed and does not care
+    /// whether anything moved.
+    ///
+    /// It is measured on the clip **after** the root residual is removed, so a
+    /// root-motion clip and an in-place one are the same measurement — which is
+    /// what makes the two comparable rather than merely both present. Their
+    /// disagreement is itself a reading: a root-motion clip whose stride speed
+    /// is a long way from its travel speed is a clip whose feet slide, and no
+    /// runtime lock can put back what an animator did not author.
+    pub stride_speed_mps: f32,
+    /// **The stride**, metres: how far a foot travels along the ground over one
+    /// cycle, averaged over the feet that plant at all.
+    ///
+    /// Measured as the foot's own planar excursion in the residual-removed clip,
+    /// which is the one definition that reads the same on a root-motion clip and
+    /// an in-place one: in both, a foot goes back by one stride under the body
+    /// and forward by one stride over it. `0` for a clip with no feet or no
+    /// plants.
     pub stride_m: f32,
     /// The gait tier this clip depicts on ALS's 0–3 scale (0 stopped, 1 walk,
     /// 2 run, 3 sprint) — the value written into [`als::W_GAIT`].
@@ -272,9 +304,14 @@ pub fn derive_clip(
     // 5. The feet: contact windows, and the markers and lock curves they imply.
     //    One grid and one set of traces, shared by the plants and the channels,
     //    so a lock window cannot land between two samples of its own curve.
+    //    Measured on `out` -- the residual-removed clip -- and not on the source,
+    //    for two reasons that are the same reason: it is the clip every consumer
+    //    will actually play, so the channels describe what will be sampled; and a
+    //    stride is a foot's excursion *under the body*, which is only a stable
+    //    quantity once the body's own travel has been taken out.
     let feet = foot_joints(skeleton);
     let foot_times = uniform_times(clip.duration, opts.fps);
-    let traces = foot_traces(&source, skeleton, &feet, &foot_times);
+    let traces = foot_traces(&out, skeleton, &feet, &foot_times);
     let plants = foot_plants(skeleton, &feet, &foot_times, &traces, clip.duration, opts);
 
     // 6. Assemble. Everything this module owns is replaced; anything an author
@@ -289,7 +326,13 @@ pub fn derive_clip(
     let yaw_rad = root_track.yaw_rad.last().copied().unwrap_or(0.0)
         - root_track.yaw_rad.first().copied().unwrap_or(0.0);
     let distance_m = distance.distance_m.last().copied().unwrap_or(0.0);
-    let avg_speed_mps = distance_m / clip.duration;
+    let travel_speed_mps = distance_m / clip.duration;
+    let (stride_m, stride_speed_mps) = stride_and_speed(&feet, &traces, &plants, clip.duration);
+    // The greater, because a clip answers this question from one end or the
+    // other: a root-motion clip travels and an in-place one strides. See
+    // `DeriveReport::stride_speed_mps` for what their disagreement means when a
+    // clip answers from both.
+    let avg_speed_mps = travel_speed_mps.max(stride_speed_mps);
     let gait = gait_of(avg_speed_mps, opts.gait_speeds_mps);
 
     let mut curves = derived_curves(
@@ -317,7 +360,9 @@ pub fn derive_clip(
         yaw_rad,
         distance_m,
         avg_speed_mps,
-        stride_m: stride_of(&plants, &distance),
+        travel_speed_mps,
+        stride_speed_mps,
+        stride_m,
         gait,
         plants,
         curves: owned_curves,
@@ -618,14 +663,25 @@ fn foot_suffix(skeleton: &Skeleton, foot: u16) -> String {
     tail.to_ascii_uppercase()
 }
 
-/// Every foot's world-space height and speed, sampled on `times`.
+/// One foot at one sample.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct FootSample {
+    /// Model-space position.
+    pos: Vec3,
+    /// Full speed, m/s — what the stock sample's `AM_FootSpeed_*` bakes
+    /// (`MotionExtractor` in `TranslationSpeed` mode) and what the channel
+    /// carries.
+    speed: f32,
+}
+
+/// Every foot's position and speed, sampled on `times`.
 fn foot_traces(
     clip: &AnimClip,
     skeleton: &Skeleton,
     feet: &[u16],
     times: &[f32],
-) -> Vec<Vec<(f32, f32)>> {
-    let mut out: Vec<Vec<(f32, f32)>> = vec![Vec::with_capacity(times.len()); feet.len()];
+) -> Vec<Vec<FootSample>> {
+    let mut out: Vec<Vec<FootSample>> = vec![Vec::with_capacity(times.len()); feet.len()];
     let mut prev: Vec<Option<Vec3>> = vec![None; feet.len()];
     let mut prev_t = times.first().copied().unwrap_or(0.0);
     for &t in times {
@@ -633,16 +689,16 @@ fn foot_traces(
         let globals = global_transforms(skeleton, &pose);
         let dt = t - prev_t;
         for (k, &joint) in feet.iter().enumerate() {
-            let p = globals
+            let pos = globals
                 .get(joint as usize)
                 .map(|m| m.w_axis.truncate())
                 .unwrap_or(Vec3::ZERO);
             let speed = match (prev[k], crate::positive(dt)) {
-                (Some(q), true) => ((p - q).length()) / dt,
+                (Some(q), true) => (pos - q).length() / dt,
                 _ => 0.0,
             };
-            out[k].push((p.y, speed));
-            prev[k] = Some(p);
+            out[k].push(FootSample { pos, speed });
+            prev[k] = Some(pos);
         }
         prev_t = t;
     }
@@ -650,10 +706,70 @@ fn foot_traces(
     // rather than reporting a zero that would read as a plant.
     for tr in out.iter_mut() {
         if tr.len() >= 2 {
-            tr[0].1 = tr[1].1;
+            tr[0].speed = tr[1].speed;
         }
     }
     out
+}
+
+/// **The stride, and the speed it implies** — `(stride_m, stride × cadence)`.
+///
+/// The stride is a foot's **planar excursion** over the clip: how far it travels
+/// along the ground between the extremes of its own swing. That is the one
+/// definition that reads the same on a root-motion clip and an in-place one,
+/// because it is measured after the root residual is removed — in both, a foot
+/// goes back by one stride under the body and forward by one stride over it.
+///
+/// The cadence is how often the clip **plants** that foot: `plants / duration`.
+/// `stride × cadence` is then the definition of gait speed, and it does not care
+/// whether anything translated. That is what makes a proposal work over content
+/// that plays in place, which is most authored locomotion and every clip
+/// [`crate::locomotion`] generates.
+///
+/// Averaged **per foot** rather than pooled: a creature whose left leg swings
+/// further than its right depicts one speed, not a weighted vote, and pooling
+/// would let the busier leg decide.
+fn stride_and_speed(
+    feet: &[u16],
+    traces: &[Vec<FootSample>],
+    plants: &[FootPlant],
+    duration: f32,
+) -> (f32, f32) {
+    if !crate::positive(duration) {
+        return (0.0, 0.0);
+    }
+    let mut stride_total = 0.0f32;
+    let mut speed_total = 0.0f32;
+    let mut counted = 0usize;
+    for (k, &joint) in feet.iter().enumerate() {
+        let steps = plants.iter().filter(|p| p.joint == joint).count();
+        if steps == 0 {
+            continue;
+        }
+        let Some(trace) = traces.get(k) else {
+            continue;
+        };
+        let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+        for s in trace {
+            if s.pos.is_finite() {
+                lo = lo.min(s.pos);
+                hi = hi.max(s.pos);
+            }
+        }
+        if !lo.is_finite() || !hi.is_finite() {
+            continue;
+        }
+        let (dx, dz) = (hi.x - lo.x, hi.z - lo.z);
+        let stride = (dx * dx + dz * dz).sqrt();
+        stride_total += stride;
+        speed_total += stride * (steps as f32 / duration);
+        counted += 1;
+    }
+    if counted == 0 {
+        (0.0, 0.0)
+    } else {
+        (stride_total / counted as f32, speed_total / counted as f32)
+    }
 }
 
 /// Contact windows, foot by foot, off a grid and traces the caller already has.
@@ -661,7 +777,7 @@ fn foot_plants(
     skeleton: &Skeleton,
     feet: &[u16],
     times: &[f32],
-    traces: &[Vec<(f32, f32)>],
+    traces: &[Vec<FootSample>],
     duration: f32,
     opts: &DeriveOptions,
 ) -> Vec<FootPlant> {
@@ -673,7 +789,7 @@ fn foot_plants(
         let tr = &traces[k];
         let lowest = tr
             .iter()
-            .map(|(h, _)| *h)
+            .map(|s| s.pos.y)
             .fold(f32::INFINITY, |a, b| if b < a { b } else { a });
         if !lowest.is_finite() {
             continue;
@@ -681,7 +797,7 @@ fn foot_plants(
         let ceiling = lowest + opts.contact_lift_m;
         let down: Vec<bool> = tr
             .iter()
-            .map(|(h, _)| crate::at_most(*h, ceiling))
+            .map(|s| crate::at_most(s.pos.y, ceiling))
             .collect();
         // Every frame down is a foot that never leaves the floor — a clip with no
         // step in it (an idle, an aim offset). No plant, which is the answer: a
@@ -785,7 +901,7 @@ fn derived_curves(
     feet: &[u16],
     times: &[f32],
     foot_times: &[f32],
-    traces: &[Vec<(f32, f32)>],
+    traces: &[Vec<FootSample>],
     distance: &DistanceTrack,
     plants: &[FootPlant],
     duration: f32,
@@ -816,7 +932,7 @@ fn derived_curves(
         out.push(CurveChannel::new(
             format!("{FOOT_SPEED_PREFIX}{suffix}"),
             foot_times.to_vec(),
-            trace.iter().map(|(_, s)| *s).collect(),
+            trace.iter().map(|s| s.speed).collect(),
             Interpolation::Linear,
         ));
         out.push(CurveChannel::new(
@@ -843,34 +959,6 @@ fn derived_curves(
     out
 }
 
-/// Ground distance between successive plants of the same foot, averaged over
-/// every such pair — the textbook definition of stride length, computed off the
-/// distance track rather than guessed from the speed.
-fn stride_of(plants: &[FootPlant], distance: &DistanceTrack) -> f32 {
-    let mut total = 0.0f32;
-    let mut pairs = 0usize;
-    let mut by_joint: std::collections::BTreeMap<u16, Vec<f32>> = std::collections::BTreeMap::new();
-    for p in plants {
-        by_joint.entry(p.joint).or_default().push(p.start_s);
-    }
-    for starts in by_joint.values() {
-        let mut s = starts.clone();
-        s.sort_by(|a, b| a.total_cmp(b));
-        for w in s.windows(2) {
-            let (Some(a), Some(b)) = (distance.sample(w[0]), distance.sample(w[1])) else {
-                continue;
-            };
-            total += b - a;
-            pairs += 1;
-        }
-    }
-    if pairs == 0 {
-        0.0
-    } else {
-        total / pairs as f32
-    }
-}
-
 /// **ALS's `W_Gait` scale**, derived: 0 stopped, 1 at walk speed, 2 at run,
 /// 3 at sprint, piecewise-linear between and clamped outside.
 ///
@@ -895,6 +983,31 @@ pub fn gait_of(speed_mps: f32, tiers: [f32; 3]) -> f32 {
         1.0 + seg(speed_mps, walk, run)
     } else {
         2.0 + seg(speed_mps, run, sprint)
+    }
+}
+
+/// **[`gait_of`] read backwards**: the speed a gait value depicts.
+///
+/// The inverse exists because `W_Gait` is the one derived number a clip carries
+/// on the **wire** — the derivation's own `avg_speed_mps` lives in a report that
+/// is thrown away after the import — and [`crate::propose`] has to recover a
+/// depicted speed from a clip it is reading off disk. An in-place cycle's
+/// distance track is flat, so the channel is the only place its speed survives.
+///
+/// Exact on the round trip at every tier boundary and linear between them, which
+/// is what makes `speed_of_gait(gait_of(v)) == v` for any `v` inside the ladder.
+pub fn speed_of_gait(gait: f32, tiers: [f32; 3]) -> f32 {
+    let [walk, run, sprint] = tiers;
+    if !gait.is_finite() || gait <= 0.0 {
+        return 0.0;
+    }
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t.clamp(0.0, 1.0);
+    if gait <= 1.0 {
+        lerp(0.0, walk, gait)
+    } else if gait <= 2.0 {
+        lerp(walk, run, gait - 1.0)
+    } else {
+        lerp(run, sprint, gait - 2.0)
     }
 }
 
@@ -1218,6 +1331,91 @@ mod tests {
             })
             .expect("a frame with this foot in the air");
         assert!(out.curve_value(&name, free, 1.0) < crate::foot::LOCK_ENGAGE);
+    }
+
+    /// **An in-place cycle says how fast it is.**
+    ///
+    /// The check that matters is not a tolerance, it is a *second opinion*:
+    /// `LocomotionSet::walk_speed_m_s` is the generator's own number, computed
+    /// from the leg geometry it authored the clip with (`stride × cadence`, where
+    /// `stride = 2 L sin θ`). The derivation never sees any of that — it watches
+    /// the feet slide backwards under a body that does not move. Two independent
+    /// routes to the same metres per second, and if they agree the mechanism is
+    /// measuring the thing it claims to.
+    #[test]
+    fn an_in_place_cycle_reports_the_speed_its_planted_feet_slide_at() {
+        let sk = biped();
+        let set = build_locomotion(BodyPlan::Biped, &sk, &GaitParams::default()).unwrap();
+        for (clip, depicted, what) in [
+            (&set.walk, set.walk_speed_m_s as f32, "walk"),
+            (&set.run, set.run_speed_m_s as f32, "run"),
+        ] {
+            let (_, r) = derive_clip(clip, &sk.skeleton, &DeriveOptions::default()).unwrap();
+            assert_eq!(
+                r.travel_speed_mps, 0.0,
+                "a generated cycle is in place, so nothing travels ({what})"
+            );
+            assert!(
+                r.stride_speed_mps > 0.0,
+                "{what}: the feet must slide backwards under a body that does not move"
+            );
+            assert_eq!(r.avg_speed_mps, r.stride_speed_mps);
+            let err = (r.stride_speed_mps - depicted).abs() / depicted;
+            // Measured: 4.1% on the walk, 3.9% on the run. The residue is the
+            // knee — the generator's `mean_leg_m` is the straight hip-to-foot
+            // distance and the animated leg flexes, so the foot's real excursion
+            // is not exactly `2 L sin θ`. Bounded at 8%, twice the measurement.
+            assert!(
+                err < 0.08,
+                "{what}: the derivation reads {:.3} m/s where the generator's own \
+                 stride x cadence says {depicted:.3} m/s ({:.0}% apart)",
+                r.stride_speed_mps,
+                err * 100.0
+            );
+            // …and the run really is faster than the walk, which is the property
+            // a proposal clusters on.
+            assert!(r.stride_m > 0.0, "{what}: an in-place stride is not zero");
+        }
+        let walk = derive_clip(&set.walk, &sk.skeleton, &DeriveOptions::default())
+            .unwrap()
+            .1;
+        let run = derive_clip(&set.run, &sk.skeleton, &DeriveOptions::default())
+            .unwrap()
+            .1;
+        assert!(
+            run.stride_speed_mps > walk.stride_speed_mps * 1.2,
+            "a run must read faster than a walk: {} vs {}",
+            run.stride_speed_mps,
+            walk.stride_speed_mps
+        );
+    }
+
+    /// The other side of the same coin: a clip whose ROOT travels reports travel
+    /// and not stance, because a planted foot in such a clip really is stationary.
+    #[test]
+    fn a_root_motion_clip_reports_its_travel() {
+        let sk = one_joint();
+        let clip = crate::root_motion::straight_line_clip("walk", Vec3::Z, 2.0, 1.0);
+        let (_, r) = derive_clip(&clip, &sk, &DeriveOptions::default()).unwrap();
+        assert!((r.travel_speed_mps - 2.0).abs() < 1e-4, "{r:?}");
+        assert_eq!(r.stride_speed_mps, 0.0, "a one-joint rig has no feet");
+        assert_eq!(r.avg_speed_mps, r.travel_speed_mps);
+    }
+
+    /// The gait scale inverts exactly at every tier boundary — which is what lets
+    /// a proposal recover an in-place clip's speed from the one channel that
+    /// survives onto the wire.
+    #[test]
+    fn the_gait_scale_reads_backwards() {
+        let t = [1.65f32, 3.75, 6.5];
+        for v in [0.0f32, 0.4, 1.65, 2.7, 3.75, 5.0, 6.5] {
+            let back = speed_of_gait(gait_of(v, t), t);
+            assert!((back - v).abs() < 1e-4, "{v} -> {back}");
+        }
+        // Past the top the ladder clamps, so the inverse clamps with it.
+        assert_eq!(speed_of_gait(gait_of(99.0, t), t), 6.5);
+        assert_eq!(speed_of_gait(f32::NAN, t), 0.0);
+        assert_eq!(speed_of_gait(-1.0, t), 0.0);
     }
 
     /// The gait scale is ALS's, and the stride is measured off the distance track

@@ -915,6 +915,7 @@ pub async fn sm_propose(
             .map_err(|e| format!("bad clip id `{c}`: {e}"))?;
         ids.push((id, c.clone()));
     }
+    let opts = inf_anim::ProposalOptions::default();
     let (facts, mut notes) = assets.with_project(|p| {
         let mut facts = Vec::new();
         let mut notes = Vec::new();
@@ -929,14 +930,22 @@ pub async fn sm_propose(
             }
             let name = entry.name.clone();
             match p.load_payload::<inf_anim::AnimClipAsset>(*id) {
-                Ok(a) => facts.push(inf_anim::facts_of(name, id.uuid().into_bytes(), &a.clip)),
+                // The SAME ladder the proposal clusters against — `W_Gait` is a
+                // tier and not a speed, so reading one back needs the three
+                // numbers it was written against.
+                Ok(a) => facts.push(inf_anim::facts_of(
+                    name,
+                    id.uuid().into_bytes(),
+                    &a.clip,
+                    opts.gait_speeds_mps,
+                )),
                 Err(e) => notes.push(format!("skipped `{name}`: {e}")),
             }
         }
         Ok((facts, notes))
     })?;
 
-    match inf_anim::propose_machine(&facts, &inf_anim::ProposalOptions::default()) {
+    match inf_anim::propose_machine(&facts, &opts) {
         Ok(p) => {
             notes.extend(p.notes);
             Ok(SmProposalDto {

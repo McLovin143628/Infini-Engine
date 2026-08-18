@@ -99,7 +99,16 @@ pub struct AnimClipInfoDto {
 pub struct AnimDeriveDto {
     /// Ground distance the clip travels, metres.
     pub distance_m: f32,
+    /// The speed the clip depicts, m/s — the greater of what its root travels
+    /// and what its stride says.
     pub avg_speed_mps: f32,
+    /// `distance / duration` — what the **root** travels. Zero for an in-place
+    /// cycle, which is most authored locomotion.
+    pub travel_speed_mps: f32,
+    /// `stride x cadence` — what the **feet** say. The number an in-place cycle
+    /// answers with, and the one a proposal clusters on when nothing translates.
+    pub stride_speed_mps: f32,
+    /// How far a foot travels along the ground over one cycle, metres.
     pub stride_m: f32,
     /// The 0–3 `W_Gait` scale.
     pub gait: f32,
@@ -270,6 +279,8 @@ pub async fn anim_rederive(
             return Ok(AnimDeriveDto {
                 distance_m: 0.0,
                 avg_speed_mps: 0.0,
+                travel_speed_mps: 0.0,
+                stride_speed_mps: 0.0,
                 stride_m: 0.0,
                 gait: 0.0,
                 rise_m: 0.0,
@@ -286,6 +297,8 @@ pub async fn anim_rederive(
         Some(r) => AnimDeriveDto {
             distance_m: r.distance_m,
             avg_speed_mps: r.avg_speed_mps,
+            travel_speed_mps: r.travel_speed_mps,
+            stride_speed_mps: r.stride_speed_mps,
             stride_m: r.stride_m,
             gait: r.gait,
             rise_m: r.translation[1],
@@ -298,6 +311,8 @@ pub async fn anim_rederive(
         None => AnimDeriveDto {
             distance_m: 0.0,
             avg_speed_mps: 0.0,
+            travel_speed_mps: 0.0,
+            stride_speed_mps: 0.0,
             stride_m: 0.0,
             gait: 0.0,
             rise_m: 0.0,

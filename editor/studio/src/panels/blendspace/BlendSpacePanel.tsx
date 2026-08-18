@@ -510,7 +510,9 @@ export default function BlendSpacePanel() {
                     <div className="bs-stat">
                       {lastDerive.avgSpeedMps.toFixed(2)} m/s ({gaitLabel(lastDerive.gait)}), stride{" "}
                       {lastDerive.strideM.toFixed(2)} m, {lastDerive.plants} plant(s),{" "}
-                      {lastDerive.markers} marker(s)
+                      {lastDerive.markers} marker(s) &middot; root{" "}
+                      {lastDerive.travelSpeedMps.toFixed(2)} / feet{" "}
+                      {lastDerive.strideSpeedMps.toFixed(2)} m/s
                     </div>
                   )}
                   {lastDerive?.refusal && <div className="bs-note">{lastDerive.refusal}</div>}
