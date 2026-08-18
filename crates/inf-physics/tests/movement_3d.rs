@@ -1395,7 +1395,7 @@ fn the_movement_quadrant_follows_the_input_around_the_aim_frame() {
             .unwrap()
             .rotation_mode = RotationMode::LookingDirection;
     }
-    let mut drive = |w: &mut EcsWorld, b: &mut PhysicsBridge3D, x: f64, y: f64| {
+    let drive = |w: &mut EcsWorld, b: &mut PhysicsBridge3D, x: f64, y: f64| {
         for _ in 0..90 {
             step(
                 w,

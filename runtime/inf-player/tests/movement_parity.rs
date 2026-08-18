@@ -134,7 +134,7 @@ fn hero_parts() -> (
 /// several modes rather than proving that two idle characters agree.
 fn script(i: u32) -> (Vec<&'static str>, BTreeMap<String, f32>) {
     let mut held: Vec<&'static str> = Vec::new();
-    if i >= 40 && i < 140 {
+    if (40..140).contains(&i) {
         held.push("sprint");
     }
     if (60..70).contains(&i) {
