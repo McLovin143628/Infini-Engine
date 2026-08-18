@@ -20,6 +20,11 @@ gilrs = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# The format an `InputMap` actually lives in: the runtime loads `input.toml`
+# beside a level (`inf_player::input::load_map_beside`). The mouse-source freeze
+# pin round-trips through it rather than through JSON alone, because a
+# name-tagged enum's contract IS its spelling in the file a project ships.
+toml = { workspace = true }
 
 [features]
 default = []

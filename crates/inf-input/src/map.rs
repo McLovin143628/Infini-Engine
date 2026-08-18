@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{ActionSource, AxisSource, GamepadAxis, GamepadButton};
+use crate::types::{ActionSource, AxisSource, GamepadAxis, GamepadButton, MouseAxis, MouseButton};
 
 /// A named binding of digital **actions** and analog **axes** to input sources,
 /// shared by the editor and the runtime. It serializes deterministically
@@ -103,6 +103,23 @@ impl InputMap {
         scale: f32,
     ) -> &mut Self {
         self.bind_axis(axis, AxisSource::GamepadAxis { axis: stick, scale })
+    }
+
+    /// Bind `axis` to a mouse motion/wheel channel at `scale` — a *sensitivity*
+    /// (P29.3). Convenience for [`bind_axis`](Self::bind_axis) with an
+    /// [`AxisSource::MouseAxis`].
+    pub fn bind_axis_mouse(
+        &mut self,
+        axis: impl Into<String>,
+        mouse: MouseAxis,
+        scale: f32,
+    ) -> &mut Self {
+        self.bind_axis(axis, AxisSource::MouseAxis { axis: mouse, scale })
+    }
+
+    /// Bind `action` to a mouse button (P29.3).
+    pub fn bind_mouse(&mut self, action: impl Into<String>, button: MouseButton) -> &mut Self {
+        self.bind_action(action, ActionSource::MouseButton(button))
     }
 
     /// The sources bound to `action`, if any.

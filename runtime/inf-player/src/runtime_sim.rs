@@ -101,16 +101,32 @@ pub struct OverlapEvent {
     pub phase: OverlapPhase,
 }
 
-/// The set of currently-held actions/keys for one tick (analogue of
-/// `SimSession::SimInput`). Rising edges (`just_pressed`) are derived by the
-/// [`RuntimeSim`] from the previous tick's set.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The set of currently-held actions/keys for one tick, plus this tick's
+/// resolved **analog axes** (analogue of `SimSession::SimInput`). Rising edges
+/// (`just_pressed`) are derived by the [`RuntimeSim`] from the previous tick's
+/// set.
+///
+/// # The axes are P29.3, and they are why the movement component can exist
+///
+/// Until this wave the only thing that reached a fixed step was a set of action
+/// NAMES: analog movement and mouse look had nowhere to arrive, so a character's
+/// motion had to be a Blueprint handing `physics3d.move_and_slide` a finished
+/// translation. A movement component that owns velocity needs an *intent*, and
+/// an intent is analog.
+///
+/// Delta axes (mouse) arrive here already converted to **rates** by
+/// [`InputState::axis_snapshot`](inf_input::InputState::axis_snapshot), so a
+/// fixed step integrates `rate × dt` and the same gesture produces the same
+/// rotation at any frame rate. `Eq` is gone with the `f32`s, deliberately: an
+/// axis is a measurement and measurements compare approximately.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RuntimeInput {
     down: BTreeSet<String>,
+    axes: BTreeMap<String, f32>,
 }
 
 impl RuntimeInput {
-    /// An input state with the given actions/keys held.
+    /// An input state with the given actions/keys held and no axes.
     pub fn with_down<I, S>(keys: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -118,7 +134,14 @@ impl RuntimeInput {
     {
         Self {
             down: keys.into_iter().map(Into::into).collect(),
+            axes: BTreeMap::new(),
         }
+    }
+
+    /// Attach this tick's resolved axes (builder-style).
+    pub fn with_axes(mut self, axes: BTreeMap<String, f32>) -> Self {
+        self.axes = axes;
+        self
     }
 
     /// Whether `key` is currently held.
@@ -126,9 +149,20 @@ impl RuntimeInput {
         self.down.contains(key)
     }
 
+    /// This tick's value for `axis`, or `0.0` if nothing bound it.
+    pub fn axis(&self, axis: &str) -> f32 {
+        self.axes.get(axis).copied().unwrap_or(0.0)
+    }
+
     /// Mark `key` held (builder-style).
     pub fn press(mut self, key: impl Into<String>) -> Self {
         self.down.insert(key.into());
+        self
+    }
+
+    /// Set one axis (builder-style) — the shape a test uses.
+    pub fn axis_at(mut self, axis: impl Into<String>, value: f32) -> Self {
+        self.axes.insert(axis.into(), value);
         self
     }
 }

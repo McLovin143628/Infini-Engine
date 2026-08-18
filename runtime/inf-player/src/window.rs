@@ -25,7 +25,7 @@ use web_time::Instant;
 use glam::{DVec3, Vec3};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -432,7 +432,7 @@ impl PlayerApp {
             (dt, std::mem::take(&mut live.pending))
         };
         self.input_state.apply(&events);
-        let held = input::held_actions(&self.input_state);
+        let held = input::held_actions(&self.input_state, dt);
         // PIE pause freezes the sim but keeps rendering the last frame.
         if !self.paused {
             self.sim.run_frame(dt, held);
@@ -614,6 +614,27 @@ impl ApplicationHandler for PlayerApp {
         }
     }
 
+    /// Raw **device** motion (P29.3) — the unaccelerated delta, which is what a
+    /// look control needs. The window-cursor delta reported by
+    /// `WindowEvent::CursorMoved` is clipped by the screen edge, so a player
+    /// turning right stops turning when the pointer reaches the monitor's edge.
+    /// That is the oldest bug in first-person games and it is avoided by reading
+    /// the device instead.
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if let winit::event::DeviceEvent::MouseMotion { delta } = event {
+            if let Some(live) = self.live.as_mut() {
+                live.pending.push(InputEvent::MouseMotion {
+                    delta: [delta.0 as f32, delta.1 as f32],
+                });
+            }
+        }
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -638,6 +659,32 @@ impl ApplicationHandler for PlayerApp {
                             });
                         }
                     }
+                }
+            }
+            // ── P29.3 mouse ── buttons are level state; the wheel is a delta.
+            //    Cursor MOTION is deliberately not read here: a window-cursor
+            //    delta stops at the edge of the screen, so it is taken from
+            //    `device_event` below instead.
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let (Some(button), Some(live)) =
+                    (input::mouse_button(button), self.live.as_mut())
+                {
+                    live.pending.push(InputEvent::MouseButton {
+                        button,
+                        pressed: state == ElementState::Pressed,
+                    });
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let d = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => [x, y],
+                    // A pixel delta (trackpad) is divided by a nominal line
+                    // height so both devices speak the same unit; the binding's
+                    // scale then converts once.
+                    MouseScrollDelta::PixelDelta(p) => [p.x as f32 / 16.0, p.y as f32 / 16.0],
+                };
+                if let Some(live) = self.live.as_mut() {
+                    live.pending.push(InputEvent::MouseWheel { delta: d });
                 }
             }
             // Touch platforms (web / Android): route winit touches through the

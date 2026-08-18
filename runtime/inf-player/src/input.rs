@@ -24,7 +24,7 @@ use crate::runtime_sim::RuntimeInput;
 /// on-screen [`default_touch_controls`] emits exactly these gamepad events, so
 /// touch reuses the same bindings with no separate mapping.
 pub fn default_map() -> InputMap {
-    use inf_input::{GamepadAxis, GamepadButton};
+    use inf_input::{GamepadAxis, GamepadButton, MouseAxis, MouseButton};
     let mut m = InputMap::new();
     m.bind_key("left", "KeyA")
         .bind_key("left", "ArrowLeft")
@@ -44,7 +44,27 @@ pub fn default_map() -> InputMap {
         .bind_axis_key("move_x", "ArrowLeft", -1.0)
         .bind_axis_stick("move_x", GamepadAxis::LeftStickX, 1.0)
         // Screen/stick y is +down; invert so "up = forward/positive".
-        .bind_axis_stick("move_y", GamepadAxis::LeftStickY, -1.0);
+        .bind_axis_stick("move_y", GamepadAxis::LeftStickY, -1.0)
+        // ── P29.3: look, sprint, walk, crouch ──
+        //
+        // `look_x`/`look_y` are DEGREES per raw device unit; the delta reaches
+        // the sim as degrees per SECOND (`InputState::axis_snapshot`), which is
+        // exactly ALS's `AimYawRate`. 0.15 deg/count is a middle-of-the-road
+        // desktop sensitivity; a project overrides the whole map in `input.toml`.
+        // `look_y` inverts because the platform reports +y down and a look
+        // control wants +pitch up — the binding says so rather than the engine
+        // guessing (see `MouseAxis::Y`).
+        .bind_axis_mouse("look_x", MouseAxis::X, 0.15)
+        .bind_axis_mouse("look_y", MouseAxis::Y, -0.15)
+        .bind_axis_stick("look_x", GamepadAxis::RightStickX, 180.0)
+        .bind_axis_stick("look_y", GamepadAxis::RightStickY, -180.0)
+        .bind_key("sprint", "Shift")
+        .bind_button("sprint", GamepadButton::LeftThumb)
+        .bind_key("walk", "AltLeft")
+        .bind_key("crouch", "KeyC")
+        .bind_button("crouch", GamepadButton::East)
+        .bind_key("prone", "KeyX")
+        .bind_mouse("aim", MouseButton::Right);
     m
 }
 
@@ -95,16 +115,25 @@ pub fn load_map_beside(level_path: &Path) -> InputMap {
     }
 }
 
-/// The set of actions currently held, as [`RuntimeInput`] — what the blueprint
-/// host queries via `input.is_down` / `input.just_pressed`.
-pub fn held_actions(state: &InputState) -> RuntimeInput {
+/// The actions currently held **and this frame's resolved axes**, as
+/// [`RuntimeInput`] — what the blueprint host queries via `input.is_down` /
+/// `input.just_pressed`, and what P29.3's movement component reads its intent
+/// from.
+///
+/// `frame_dt` is the wall-clock seconds this frame covered; it is used for one
+/// thing only, and it is used inside `inf-input` rather than here:
+/// [`InputState::axis_snapshot`] converts the **delta** axes (mouse) into rates
+/// so a fixed step can integrate them, and leaves the bounded ones alone. Doing
+/// it there rather than at this call site is what keeps the rule from being
+/// spelled once per host.
+pub fn held_actions(state: &InputState, frame_dt: f64) -> RuntimeInput {
     let held: Vec<String> = state
         .map()
         .action_names()
         .filter(|name| state.pressed(name))
         .map(str::to_string)
         .collect();
-    RuntimeInput::with_down(held)
+    RuntimeInput::with_down(held).with_axes(state.axis_snapshot(frame_dt))
 }
 
 /// Map a winit [`KeyCode`] to the `KeyboardEvent.code` string `inf-input` uses.
@@ -129,7 +158,27 @@ pub fn keycode_to_code(code: KeyCode) -> Option<&'static str> {
         KeyCode::ShiftLeft | KeyCode::ShiftRight => "Shift",
         KeyCode::Enter => "Enter",
         KeyCode::Escape => "Escape",
+        // ── P29.3: the keys the default movement bindings name ──
+        KeyCode::KeyX => "KeyX",
+        KeyCode::AltLeft => "AltLeft",
+        KeyCode::ControlLeft | KeyCode::ControlRight => "Control",
         _ => return None,
+    })
+}
+
+/// Map a winit mouse button onto the engine's [`MouseButton`] (P29.3). Anything
+/// past the two side buttons is ignored — a reserved slot is a wire promise, not
+/// a device-mapping one, and a 12-button gaming mouse's extra buttons have no
+/// stable meaning to bind to.
+pub fn mouse_button(button: winit::event::MouseButton) -> Option<inf_input::MouseButton> {
+    use winit::event::MouseButton as W;
+    Some(match button {
+        W::Left => inf_input::MouseButton::Left,
+        W::Middle => inf_input::MouseButton::Middle,
+        W::Right => inf_input::MouseButton::Right,
+        W::Back => inf_input::MouseButton::Back,
+        W::Forward => inf_input::MouseButton::Forward,
+        W::Other(_) => return None,
     })
 }
 
@@ -153,7 +202,7 @@ mod tests {
             code: "KeyD".to_string(),
             pressed: true,
         }]);
-        let held = held_actions(&state);
+        let held = held_actions(&state, 1.0 / 60.0);
         assert!(held.is_down("right"));
         assert!(!held.is_down("left"));
     }
@@ -162,5 +211,63 @@ mod tests {
     fn keycode_maps_movement_keys() {
         assert_eq!(keycode_to_code(KeyCode::Space), Some("Space"));
         assert_eq!(keycode_to_code(KeyCode::KeyW), Some("KeyW"));
+        // P29.3 added three, and a binding whose key never maps is a binding
+        // that silently does nothing.
+        for key in ["Shift", "KeyC", "KeyX", "AltLeft"] {
+            assert!(
+                default_map()
+                    .actions_iter()
+                    .any(|(_, srcs)| srcs.iter().any(|s| matches!(
+                        s,
+                        inf_input::ActionSource::Key(c) if c == key
+                    ))),
+                "{key} is bound in the default map"
+            );
+        }
+        assert_eq!(keycode_to_code(KeyCode::KeyX), Some("KeyX"));
+        assert_eq!(keycode_to_code(KeyCode::AltLeft), Some("AltLeft"));
+        assert_eq!(keycode_to_code(KeyCode::ShiftLeft), Some("Shift"));
+        assert_eq!(keycode_to_code(KeyCode::KeyC), Some("KeyC"));
+    }
+
+    /// **The wiring, not the model** (P29.3). `inf-input`'s own arms prove that a
+    /// mouse delta resolves and that a delta axis snapshots as a rate; this one
+    /// proves the runtime *carries* it into the thing the fixed step reads.
+    /// Before this wave `RuntimeInput` was a set of action names and a mouse
+    /// delta had nowhere to arrive at all.
+    #[test]
+    fn a_mouse_delta_reaches_the_fixed_step_as_degrees_per_second() {
+        let mut state = InputState::new(default_map());
+        state.apply(&[
+            InputEvent::MouseMotion {
+                delta: [100.0, 0.0],
+            },
+            InputEvent::MouseButton {
+                button: inf_input::MouseButton::Right,
+                pressed: true,
+            },
+        ]);
+        let held = held_actions(&state, 0.5);
+        // 100 counts x 0.15 deg = 15 deg, over half a second = 30 deg/s.
+        assert!(
+            (held.axis("look_x") - 30.0).abs() < 1e-3,
+            "look_x = {}",
+            held.axis("look_x")
+        );
+        assert!(held.is_down("aim"), "the right button is bound to aim");
+
+        // The control: a held key is a position and is NOT divided by dt, so the
+        // rate conversion is a property of the source and not of the sampler.
+        state.apply(&[InputEvent::Key {
+            code: "KeyD".to_string(),
+            pressed: true,
+        }]);
+        let held = held_actions(&state, 0.5);
+        assert_eq!(held.axis("move_x"), 1.0, "a key axis is full deflection");
+        assert_eq!(
+            held.axis("look_x"),
+            0.0,
+            "and last frame's motion is not re-delivered"
+        );
     }
 }

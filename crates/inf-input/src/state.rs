@@ -7,7 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::map::InputMap;
-use crate::types::{ActionSource, AxisSource, GamepadAxis, GamepadButton, InputEvent};
+use crate::types::{
+    ActionSource, AxisSource, GamepadAxis, GamepadButton, InputEvent, MouseAxis, MouseButton,
+};
 
 /// Radial (1-D) deadzone with rescale: values inside `dz` read as 0; values
 /// outside are remapped so the response starts at 0 exactly at the deadzone edge
@@ -36,6 +38,16 @@ pub struct InputState {
     keys_down: BTreeSet<String>,
     buttons_down: BTreeSet<GamepadButton>,
     axes_raw: BTreeMap<GamepadAxis, f32>,
+    // ── mouse (P29.3) ──
+    //
+    // The buttons are level state like the keys above. The axes are NOT: a
+    // mouse delta is a *quantity of motion that happened*, so it accumulates
+    // across the events of one frame and is cleared by `commit_frame` once the
+    // axes have read it. A stick that is not touched keeps reporting its
+    // position; a mouse that is not moved reports nothing, and the difference is
+    // the whole reason `AimYawRate` is derivable at all.
+    mouse_down: BTreeSet<MouseButton>,
+    mouse_axes: BTreeMap<MouseAxis, f32>,
     // ── resolved snapshot (recomputed each frame) ──
     actions_prev: BTreeSet<String>,
     actions_cur: BTreeSet<String>,
@@ -50,6 +62,8 @@ impl InputState {
             keys_down: BTreeSet::new(),
             buttons_down: BTreeSet::new(),
             axes_raw: BTreeMap::new(),
+            mouse_down: BTreeSet::new(),
+            mouse_axes: BTreeMap::new(),
             actions_prev: BTreeSet::new(),
             actions_cur: BTreeSet::new(),
             axis_values: BTreeMap::new(),
@@ -77,6 +91,8 @@ impl InputState {
         self.keys_down.clear();
         self.buttons_down.clear();
         self.axes_raw.clear();
+        self.mouse_down.clear();
+        self.mouse_axes.clear();
         self.commit_frame();
     }
 
@@ -135,6 +151,25 @@ impl InputState {
             // (`crate::touch::TouchControls`) translate it into the gamepad
             // events above before it reaches the resolver, so here it is ignored.
             InputEvent::Touch { .. } => {}
+            InputEvent::MouseButton { button, pressed } => {
+                if *pressed {
+                    self.mouse_down.insert(*button);
+                } else {
+                    self.mouse_down.remove(button);
+                }
+            }
+            // Motion ACCUMULATES. Two 4-pixel events in one frame are an 8-pixel
+            // frame, not a 4-pixel one: a backend is free to deliver a frame's
+            // motion in as many events as the OS gave it, and the resolved axis
+            // must not depend on that packetization.
+            InputEvent::MouseMotion { delta } => {
+                *self.mouse_axes.entry(MouseAxis::X).or_insert(0.0) += delta[0];
+                *self.mouse_axes.entry(MouseAxis::Y).or_insert(0.0) += delta[1];
+            }
+            InputEvent::MouseWheel { delta } => {
+                *self.mouse_axes.entry(MouseAxis::WheelX).or_insert(0.0) += delta[0];
+                *self.mouse_axes.entry(MouseAxis::WheelY).or_insert(0.0) += delta[1];
+            }
         }
     }
 
@@ -142,12 +177,23 @@ impl InputState {
         sources.iter().any(|s| match s {
             ActionSource::Key(code) => self.keys_down.contains(code),
             ActionSource::GamepadButton(b) => self.buttons_down.contains(b),
+            ActionSource::MouseButton(b) => self.mouse_down.contains(b),
         })
     }
 
     fn axis_value(&self, sources: &[AxisSource]) -> f32 {
         let dz = self.map.deadzone();
         let mut sum = 0.0;
+        // An axis that names a mouse delta is **not clamped**. Every other
+        // source is bounded by construction — a key is 0 or 1, a stick is
+        // [-1, 1] — so the clamp is free for them and a guard against a map that
+        // binds five keys to one axis. A mouse delta has no such range: a fast
+        // flick is fifty pixels and a slow drag is two, and clamping both to 1
+        // makes them the same gesture, which is exactly the look control every
+        // engine gets wrong once.
+        let unbounded = sources
+            .iter()
+            .any(|s| matches!(s, AxisSource::MouseAxis { .. }));
         for s in sources {
             sum += match s {
                 AxisSource::Key { code, scale } => {
@@ -168,9 +214,25 @@ impl InputState {
                     let raw = self.axes_raw.get(axis).copied().unwrap_or(0.0);
                     apply_deadzone(raw, dz) * *scale
                 }
+                AxisSource::MouseAxis { axis, scale } => {
+                    // No deadzone: a deadzone rescales a *position*, and there
+                    // is no position here. A 1-pixel move is a 1-pixel move.
+                    self.mouse_axes.get(axis).copied().unwrap_or(0.0) * *scale
+                }
+                AxisSource::MouseButton { button, scale } => {
+                    if self.mouse_down.contains(button) {
+                        *scale
+                    } else {
+                        0.0
+                    }
+                }
             };
         }
-        sum.clamp(-1.0, 1.0)
+        if unbounded {
+            sum
+        } else {
+            sum.clamp(-1.0, 1.0)
+        }
     }
 
     fn commit_frame(&mut self) {
@@ -186,6 +248,12 @@ impl InputState {
             self.axis_values
                 .insert(name.to_string(), self.axis_value(sources));
         }
+        // The mouse deltas are consumed BY the resolution above and cleared
+        // after it: they describe motion that belongs to the frame just
+        // committed. Leaving them would make a single flick drive the look for
+        // every frame after it — the mouse-look equivalent of the stuck-key
+        // failure `release_all` exists for.
+        self.mouse_axes.clear();
     }
 
     // ── queries ────────────────────────────────────────────────────────────────
@@ -208,6 +276,49 @@ impl InputState {
     /// The resolved value of `axis` in `[-1, 1]` (0 if unbound).
     pub fn axis(&self, axis: &str) -> f32 {
         self.axis_values.get(axis).copied().unwrap_or(0.0)
+    }
+
+    /// Every resolved axis for this frame, with the **delta axes converted to
+    /// rates** (P29.3). `dt` is the wall-clock seconds the frame covered.
+    ///
+    /// # Why the conversion has to happen here and exactly once
+    ///
+    /// The two kinds of axis this state resolves are not the same physical
+    /// quantity. A stick or a key is a **position**: it reads the same at 30 fps
+    /// and at 240 fps, and a fixed step that samples it N times gets the right
+    /// answer N times. A mouse delta is an **amount that happened**: the same
+    /// gesture is one big number at 30 fps and eight small ones at 240, and a
+    /// fixed step that consumed it once per step would turn the same flick into
+    /// eight times the rotation on a fast machine.
+    ///
+    /// Dividing a delta axis by the frame's own `dt` makes it a rate, and a
+    /// fixed step that integrates `rate × fixed_dt` then reproduces the gesture
+    /// exactly, whatever the frame rate. It also happens to be the *definition*
+    /// of ALS's `AimYawRate` — degrees of camera yaw per second — which three
+    /// ported systems read.
+    ///
+    /// Bounded axes pass through untouched: dividing a stick position by `dt`
+    /// would be meaningless. `dt <= 0` (or non-finite) leaves everything alone,
+    /// because the alternative is publishing an infinity into the sim.
+    pub fn axis_snapshot(&self, dt: f64) -> BTreeMap<String, f32> {
+        let scale = if dt.is_finite() && dt > 0.0 {
+            Some((1.0 / dt) as f32)
+        } else {
+            None
+        };
+        self.axis_values
+            .iter()
+            .map(|(name, v)| {
+                let delta = self
+                    .map
+                    .axis_sources(name)
+                    .is_some_and(|s| s.iter().any(|s| matches!(s, AxisSource::MouseAxis { .. })));
+                match (delta, scale) {
+                    (true, Some(k)) => (name.clone(), v * k),
+                    _ => (name.clone(), *v),
+                }
+            })
+            .collect()
     }
 }
 

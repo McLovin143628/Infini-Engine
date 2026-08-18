@@ -106,15 +106,22 @@ pub struct OverlapEvent {
 }
 
 /// A snapshot of the keyboard/action state for one tick: the set of currently
-/// **held** keys/actions (e.g. `"left"`, `"jump"`). Rising edges
-/// (`just_pressed`) are derived by the session from the previous tick's set.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// **held** keys/actions (e.g. `"left"`, `"jump"`) plus this tick's resolved
+/// **analog axes**. Rising edges (`just_pressed`) are derived by the session
+/// from the previous tick's set.
+///
+/// The axes are P29.3 and the MIRROR of `RuntimeInput`'s — see that type for why
+/// a movement component that owns velocity cannot be driven by a set of names,
+/// and for the delta-axes-arrive-as-rates rule
+/// (`inf_input::InputState::axis_snapshot`).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SimInput {
     down: BTreeSet<String>,
+    axes: BTreeMap<String, f32>,
 }
 
 impl SimInput {
-    /// An input state with the given keys/actions held down.
+    /// An input state with the given keys/actions held down and no axes.
     pub fn with_down<I, S>(keys: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -122,7 +129,14 @@ impl SimInput {
     {
         Self {
             down: keys.into_iter().map(Into::into).collect(),
+            axes: BTreeMap::new(),
         }
+    }
+
+    /// Attach this tick's resolved axes (builder-style).
+    pub fn with_axes(mut self, axes: BTreeMap<String, f32>) -> Self {
+        self.axes = axes;
+        self
     }
 
     /// Whether `key` is currently held.
@@ -130,9 +144,20 @@ impl SimInput {
         self.down.contains(key)
     }
 
+    /// This tick's value for `axis`, or `0.0` if nothing bound it.
+    pub fn axis(&self, axis: &str) -> f32 {
+        self.axes.get(axis).copied().unwrap_or(0.0)
+    }
+
     /// Mark `key` held (builder-style).
     pub fn press(mut self, key: impl Into<String>) -> Self {
         self.down.insert(key.into());
+        self
+    }
+
+    /// Set one axis (builder-style) — the shape a test uses.
+    pub fn axis_at(mut self, axis: impl Into<String>, value: f32) -> Self {
+        self.axes.insert(axis.into(), value);
         self
     }
 }

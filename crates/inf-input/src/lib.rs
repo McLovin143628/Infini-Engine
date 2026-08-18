@@ -38,4 +38,7 @@ pub mod poller;
 pub use map::InputMap;
 pub use state::InputState;
 pub use touch::{Rect, TouchButton, TouchControls, VirtualStick};
-pub use types::{ActionSource, AxisSource, GamepadAxis, GamepadButton, InputEvent, TouchPhase};
+pub use types::{
+    ActionSource, AxisSource, GamepadAxis, GamepadButton, InputEvent, MouseAxis, MouseButton,
+    TouchPhase,
+};

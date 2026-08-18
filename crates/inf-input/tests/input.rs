@@ -1,7 +1,10 @@
 //! Tests for the pure input core: action resolution, edges, deadzone/scale math,
 //! and `InputMap` serde round-trip. No device is involved.
 
-use inf_input::{AxisSource, GamepadAxis, GamepadButton, InputEvent, InputMap, InputState};
+use inf_input::{
+    AxisSource, GamepadAxis, GamepadButton, InputEvent, InputMap, InputState, MouseAxis,
+    MouseButton,
+};
 
 fn key(code: &str, pressed: bool) -> InputEvent {
     InputEvent::Key {
@@ -192,3 +195,269 @@ trait Tap: Sized {
     }
 }
 impl Tap for InputMap {}
+
+// ── mouse (P29.3) ───────────────────────────────────────────────────────────
+//
+// Ruling 3's second unscheduled blocker. Before this wave `InputEvent` was
+// `Key | GamepadButton | GamepadAxis | Touch`: there was no mouse source and no
+// mouse-delta event anywhere in the engine, so mouse look did not exist and
+// `AimYawRate` — degrees of camera yaw per second, an input to three ported ALS
+// systems — had nothing to be derived from.
+
+/// A map whose `look_x`/`look_y` read the mouse at a sensitivity, the shape
+/// every consumer of `AimYawRate` will bind.
+fn look_map() -> InputMap {
+    let mut m = InputMap::new();
+    m.bind_axis_mouse("look_x", MouseAxis::X, 0.1)
+        // Negative scale: the platform reports +y DOWN and a look control wants
+        // +pitch UP. The engine does not guess this; the binding states it.
+        .bind_axis_mouse("look_y", MouseAxis::Y, -0.1)
+        .bind_mouse("fire", MouseButton::Left)
+        .bind_mouse("aim", MouseButton::Right);
+    m
+}
+
+#[test]
+fn a_mouse_button_resolves_an_action_and_reports_both_edges() {
+    let mut st = InputState::new(look_map());
+    assert!(!st.pressed("fire"));
+
+    st.apply(&[InputEvent::MouseButton {
+        button: MouseButton::Left,
+        pressed: true,
+    }]);
+    assert!(st.pressed("fire"));
+    assert!(st.just_pressed("fire"));
+    assert!(!st.pressed("aim"), "the right button is a different action");
+
+    st.apply(&[]);
+    assert!(st.pressed("fire"), "a button is level state, like a key");
+    assert!(!st.just_pressed("fire"), "the edge is one frame");
+
+    st.apply(&[InputEvent::MouseButton {
+        button: MouseButton::Left,
+        pressed: false,
+    }]);
+    assert!(!st.pressed("fire"));
+    assert!(st.just_released("fire"));
+}
+
+#[test]
+fn mouse_motion_accumulates_within_a_frame_and_is_gone_by_the_next() {
+    let mut st = InputState::new(look_map());
+
+    // A frame's motion may arrive as any number of OS events; the resolved axis
+    // must not depend on that packetization.
+    st.apply(&[
+        InputEvent::MouseMotion { delta: [4.0, 0.0] },
+        InputEvent::MouseMotion { delta: [4.0, 0.0] },
+        InputEvent::MouseMotion { delta: [2.0, 6.0] },
+    ]);
+    assert!(
+        (st.axis("look_x") - 1.0).abs() < 1e-6,
+        "10 px at 0.1 = 1.0, not 0.4: {}",
+        st.axis("look_x")
+    );
+    assert!(
+        (st.axis("look_y") + 0.6).abs() < 1e-6,
+        "+y is down and the binding inverts it: {}",
+        st.axis("look_y")
+    );
+
+    // The delta belongs to the frame it happened in. Leaving it would make one
+    // flick drive the look forever — the mouse-look form of the stuck key.
+    st.apply(&[]);
+    assert_eq!(st.axis("look_x"), 0.0, "a still mouse contributes nothing");
+    assert_eq!(st.axis("look_y"), 0.0);
+}
+
+#[test]
+fn a_mouse_axis_is_not_clamped_and_a_bounded_one_still_is() {
+    // The load-bearing difference between a delta and a position. A fast flick
+    // is fifty pixels and a slow drag is two; clamping both to 1 makes them the
+    // same gesture, which is the look bug every engine ships once.
+    let mut st = InputState::new(look_map());
+    st.apply(&[InputEvent::MouseMotion {
+        delta: [500.0, 0.0],
+    }]);
+    assert!(
+        (st.axis("look_x") - 50.0).abs() < 1e-4,
+        "a 500 px flick is 50 degrees at 0.1, not 1: {}",
+        st.axis("look_x")
+    );
+
+    // The control, and the reason this is a property of the SOURCE and not of
+    // the axis pipeline: a keyboard axis with five contributions still clamps.
+    let mut m = InputMap::new();
+    m.bind_axis_key("move_x", "KeyD", 1.0)
+        .bind_axis_key("move_x", "KeyE", 1.0)
+        .bind_axis_key("move_x", "KeyR", 1.0);
+    let mut bounded = InputState::new(m);
+    bounded.apply(&[
+        InputEvent::Key {
+            code: "KeyD".into(),
+            pressed: true,
+        },
+        InputEvent::Key {
+            code: "KeyE".into(),
+            pressed: true,
+        },
+        InputEvent::Key {
+            code: "KeyR".into(),
+            pressed: true,
+        },
+    ]);
+    assert_eq!(
+        bounded.axis("move_x"),
+        1.0,
+        "three keys at +1 is still full deflection"
+    );
+}
+
+#[test]
+fn releasing_everything_forgets_the_mouse_too() {
+    // The R2-9 failure met from the mouse's side: a window that loses focus with
+    // the right button held leaves the character aiming for the session.
+    let mut st = InputState::new(look_map());
+    st.apply(&[
+        InputEvent::MouseButton {
+            button: MouseButton::Right,
+            pressed: true,
+        },
+        InputEvent::MouseMotion { delta: [9.0, 9.0] },
+    ]);
+    assert!(st.pressed("aim"));
+
+    st.release_all();
+    assert!(!st.pressed("aim"), "the button is forgotten");
+    assert!(st.just_released("aim"), "and the release edge fires");
+    assert_eq!(st.axis("look_x"), 0.0, "and the pending motion is dropped");
+}
+
+#[test]
+fn the_wheel_is_its_own_pair_of_axes() {
+    let mut m = InputMap::new();
+    m.bind_axis_mouse("zoom", MouseAxis::WheelY, 1.0);
+    let mut st = InputState::new(m);
+    st.apply(&[
+        InputEvent::MouseWheel { delta: [0.0, 1.0] },
+        InputEvent::MouseWheel { delta: [0.0, 2.0] },
+    ]);
+    assert_eq!(st.axis("zoom"), 3.0, "notches accumulate like motion");
+    st.apply(&[]);
+    assert_eq!(st.axis("zoom"), 0.0);
+}
+
+#[test]
+fn the_mouse_source_tokens_are_frozen_and_append_only() {
+    // `ActionSource`/`AxisSource` are saved in a project's `input.toml`, so the
+    // wire law reaches them: a variant may be appended and never inserted, and
+    // the *spelling* is the contract because this format is name-tagged.
+    //
+    // Written as a literal table rather than derived from the variants, because
+    // a table derived from the type agrees with any rename by construction —
+    // the shape of gate this repository has had to repair before.
+    const FROZEN_BUTTONS: [(MouseButton, &str); 7] = [
+        (MouseButton::Left, "Left"),
+        (MouseButton::Middle, "Middle"),
+        (MouseButton::Right, "Right"),
+        (MouseButton::Back, "Back"),
+        (MouseButton::Forward, "Forward"),
+        // ── reserved (P29.3) ──
+        (MouseButton::Reserved5, "Reserved5"),
+        (MouseButton::Reserved6, "Reserved6"),
+    ];
+    const FROZEN_AXES: [(MouseAxis, &str); 6] = [
+        (MouseAxis::X, "X"),
+        (MouseAxis::Y, "Y"),
+        (MouseAxis::WheelX, "WheelX"),
+        (MouseAxis::WheelY, "WheelY"),
+        // ── reserved (P29.3) ──
+        (MouseAxis::Reserved4, "Reserved4"),
+        (MouseAxis::Reserved5, "Reserved5"),
+    ];
+
+    for (b, token) in FROZEN_BUTTONS {
+        let json = serde_json::to_string(&b).expect("a unit variant serializes");
+        assert_eq!(json, format!("\"{token}\""), "{b:?} changed its spelling");
+        let back: MouseButton = serde_json::from_str(&json).expect("and reads back");
+        assert_eq!(back, b);
+    }
+    for (a, token) in FROZEN_AXES {
+        let json = serde_json::to_string(&a).expect("a unit variant serializes");
+        assert_eq!(json, format!("\"{token}\""), "{a:?} changed its spelling");
+        let back: MouseAxis = serde_json::from_str(&json).expect("and reads back");
+        assert_eq!(back, a);
+    }
+
+    // A reserved slot no reader ever asks about is a comment, not a slot. Both
+    // directions, so the accessor cannot answer `Some` for everything.
+    assert_eq!(MouseButton::Reserved5.reserved_slot(), Some(5));
+    assert_eq!(MouseButton::Reserved6.reserved_slot(), Some(6));
+    assert_eq!(MouseButton::Left.reserved_slot(), None);
+    assert_eq!(MouseButton::Forward.reserved_slot(), None);
+    assert_eq!(MouseAxis::Reserved4.reserved_slot(), Some(4));
+    assert_eq!(MouseAxis::Reserved5.reserved_slot(), Some(5));
+    assert_eq!(MouseAxis::X.reserved_slot(), None);
+    assert_eq!(MouseAxis::WheelY.reserved_slot(), None);
+
+    // And the whole map round-trips through the format it actually lives in.
+    let toml_text = toml::to_string(&look_map()).expect("an InputMap serializes to TOML");
+    let back: InputMap = toml::from_str(&toml_text).expect("and reads back");
+    assert_eq!(back, look_map(), "the mouse bindings survive `input.toml`");
+    assert!(
+        toml_text.contains("MouseAxis") && toml_text.contains("MouseButton"),
+        "the round-trip must have exercised the new variants, not an empty map:\n{toml_text}"
+    );
+}
+
+#[test]
+fn a_delta_axis_snapshots_as_a_rate_and_a_bounded_one_as_a_position() {
+    // The frame-rate independence the fixed step rests on: the same gesture
+    // delivered in one slow frame and in four fast ones must integrate to the
+    // same rotation.
+    let mut m = look_map();
+    m.bind_axis_key("move_x", "KeyD", 1.0);
+    let mut st = InputState::new(m);
+
+    st.apply(&[
+        InputEvent::MouseMotion {
+            delta: [100.0, 0.0],
+        },
+        InputEvent::Key {
+            code: "KeyD".into(),
+            pressed: true,
+        },
+    ]);
+    let slow = st.axis_snapshot(0.1);
+    assert!(
+        (slow["look_x"] - 100.0).abs() < 1e-3,
+        "10 degrees over 0.1 s is 100 deg/s: {}",
+        slow["look_x"]
+    );
+    assert_eq!(
+        slow["move_x"], 1.0,
+        "a held key is a POSITION and must not be divided by dt"
+    );
+
+    // A quarter of the motion in a quarter of the time is the same rate.
+    st.apply(&[InputEvent::MouseMotion { delta: [25.0, 0.0] }]);
+    let fast = st.axis_snapshot(0.025);
+    assert!(
+        (fast["look_x"] - slow["look_x"]).abs() < 1e-2,
+        "the same gesture at four times the frame rate is the same rate: {} vs {}",
+        fast["look_x"],
+        slow["look_x"]
+    );
+
+    // A degenerate dt publishes the raw value rather than an infinity.
+    st.apply(&[InputEvent::MouseMotion { delta: [10.0, 0.0] }]);
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let snap = st.axis_snapshot(bad);
+        assert!(
+            snap["look_x"].is_finite(),
+            "dt = {bad} produced {} for look_x",
+            snap["look_x"]
+        );
+    }
+}
