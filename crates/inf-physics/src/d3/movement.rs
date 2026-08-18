@@ -537,11 +537,27 @@ fn step_one(
 
     // ── 5. Capsule resize. The FEET stay planted: the capsule is centred on the
     //    transform, so a half-height change of d moves the centre by d.
+    //
+    //    `old_half` is the capsule the entity is ACTUALLY wearing, not the one
+    //    its previous mode asks for, and on every step but the first those are
+    //    the same number. On the first they need not be: the collider's
+    //    half-height is authored independently of `stand_half_height_m`, the
+    //    component wins (step 12 writes it), and the version that read
+    //    `half_height_for(previous_mode)` skipped the compensation entirely when
+    //    the mode had not changed — so a character authored with a 1.0 capsule
+    //    and a 0.6 stand height had its collider shrunk on step one and its FEET
+    //    lifted 40 cm, which is the one invariant this section names (audit A7).
     let mut half_height = cm.half_height_for(cm.mode);
-    if cm.mode != previous_mode && is_capsule {
-        let old_half = cm.half_height_for(previous_mode);
-        position.y += half_height - old_half;
-        probe.centre = position;
+    let worn_half = if is_capsule {
+        collider.map(|c| c.half_extents.y)
+    } else {
+        None
+    };
+    if let Some(old_half) = worn_half {
+        if (half_height - old_half).abs() > 1e-12 {
+            position.y += half_height - old_half;
+            probe.centre = position;
+        }
     }
     if !is_capsule {
         half_height = collider.map(|c| c.half_extents.y).unwrap_or(half_height);

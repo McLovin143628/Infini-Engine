@@ -1464,3 +1464,84 @@ fn a_swimmer_at_the_surface_is_not_the_same_mode_as_one_underneath() {
         "a swimmer with its head out is at the SURFACE"
     );
 }
+
+/// **The feet stay planted when the component takes over the capsule** (audit A7).
+///
+/// The collider's half-height is authored independently of
+/// `CharacterMovement::stand_half_height_m`, and the component wins — step 12
+/// writes it every step. The resize that comes with that hand-over was gated on
+/// `mode != previous_mode`, which is false on the first step, so the collider
+/// shrank and the character's feet came off the floor by the difference.
+/// Measured on a hero authored with a 1.0 m half-height against a 0.6 m
+/// component: **feet at +0.40 m**, standing on nothing.
+#[test]
+fn adopting_the_components_capsule_does_not_lift_the_feet() {
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(20.0, 0.5, 20.0),
+    );
+    spawn_hero(&mut w, 0.0, 0.0, 0.0);
+    // Re-author the collider TALLER than the component says, and put the feet
+    // back on the floor, which is what a level with a hand-sized capsule looks
+    // like the moment a movement component is added to it.
+    let authored_half = 1.0;
+    {
+        let e = w.entity_of(HERO).unwrap();
+        w.world_mut()
+            .get_mut::<Collider3D>(e)
+            .unwrap()
+            .half_extents
+            .y = authored_half;
+        w.world_mut().get_mut::<Transform>(e).unwrap().translation.y = authored_half + RADIUS;
+    }
+    assert!(
+        hero_feet(&w).abs() < 1e-9,
+        "the fixture starts on the floor"
+    );
+
+    step(&mut w, &mut b, &idle());
+    assert!(
+        (hero_capsule_half(&w) - stand_half()).abs() < 1e-9,
+        "the component owns the capsule: {}",
+        hero_capsule_half(&w)
+    );
+    assert!(
+        hero_feet(&w).abs() < 0.05,
+        "…and the FEET stayed on the floor while it took over: {}",
+        hero_feet(&w)
+    );
+
+    // The control: a capsule SHORTER than the component's is raised rather than
+    // dropped, so the compensation is signed and not a clamp to the ground.
+    let mut w = EcsWorld::new();
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(20.0, 0.5, 20.0),
+    );
+    spawn_hero(&mut w, 0.0, 0.0, 0.0);
+    {
+        let e = w.entity_of(HERO).unwrap();
+        w.world_mut()
+            .get_mut::<Collider3D>(e)
+            .unwrap()
+            .half_extents
+            .y = 0.2;
+        w.world_mut().get_mut::<Transform>(e).unwrap().translation.y = 0.2 + RADIUS;
+    }
+    let before_centre = hero_pos(&w).y;
+    step(&mut w, &mut b, &idle());
+    assert!(
+        hero_pos(&w).y > before_centre + 0.3,
+        "growing to the component's capsule raises the CENTRE: {} -> {}",
+        before_centre,
+        hero_pos(&w).y
+    );
+    assert!(hero_feet(&w).abs() < 0.05, "feet at {}", hero_feet(&w));
+}
