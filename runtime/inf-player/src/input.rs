@@ -15,58 +15,13 @@ use inf_input::{InputMap, InputState};
 
 use crate::runtime_sim::RuntimeInput;
 
-/// The default platformer bindings. Actions match the sample Coyote graph
-/// (`left`, `right`, `jump`); `up`/`down` and a `move_x`/`move_y` axis round out
-/// the vocabulary for other content.
+/// The default bindings — **re-exported from Ring 0** (P29.6).
 ///
-/// Gamepad + touch sources are bound alongside the keyboard: the South face
-/// button → `jump`, the left stick → `move_x`/`move_y`. On touch platforms the
-/// on-screen [`default_touch_controls`] emits exactly these gamepad events, so
-/// touch reuses the same bindings with no separate mapping.
-pub fn default_map() -> InputMap {
-    use inf_input::{GamepadAxis, GamepadButton, MouseAxis, MouseButton};
-    let mut m = InputMap::new();
-    m.bind_key("left", "KeyA")
-        .bind_key("left", "ArrowLeft")
-        .bind_key("right", "KeyD")
-        .bind_key("right", "ArrowRight")
-        .bind_key("up", "KeyW")
-        .bind_key("up", "ArrowUp")
-        .bind_key("down", "KeyS")
-        .bind_key("down", "ArrowDown")
-        .bind_key("jump", "Space")
-        .bind_key("jump", "KeyW")
-        .bind_key("jump", "ArrowUp")
-        .bind_button("jump", GamepadButton::South)
-        .bind_axis_key("move_x", "KeyD", 1.0)
-        .bind_axis_key("move_x", "ArrowRight", 1.0)
-        .bind_axis_key("move_x", "KeyA", -1.0)
-        .bind_axis_key("move_x", "ArrowLeft", -1.0)
-        .bind_axis_stick("move_x", GamepadAxis::LeftStickX, 1.0)
-        // Screen/stick y is +down; invert so "up = forward/positive".
-        .bind_axis_stick("move_y", GamepadAxis::LeftStickY, -1.0)
-        // ── P29.3: look, sprint, walk, crouch ──
-        //
-        // `look_x`/`look_y` are DEGREES per raw device unit; the delta reaches
-        // the sim as degrees per SECOND (`InputState::axis_snapshot`), which is
-        // exactly ALS's `AimYawRate`. 0.15 deg/count is a middle-of-the-road
-        // desktop sensitivity; a project overrides the whole map in `input.toml`.
-        // `look_y` inverts because the platform reports +y down and a look
-        // control wants +pitch up — the binding says so rather than the engine
-        // guessing (see `MouseAxis::Y`).
-        .bind_axis_mouse("look_x", MouseAxis::X, 0.15)
-        .bind_axis_mouse("look_y", MouseAxis::Y, -0.15)
-        .bind_axis_stick("look_x", GamepadAxis::RightStickX, 180.0)
-        .bind_axis_stick("look_y", GamepadAxis::RightStickY, -180.0)
-        .bind_key("sprint", "Shift")
-        .bind_button("sprint", GamepadButton::LeftThumb)
-        .bind_key("walk", "AltLeft")
-        .bind_key("crouch", "KeyC")
-        .bind_button("crouch", GamepadButton::East)
-        .bind_key("prone", "KeyX")
-        .bind_mouse("aim", MouseButton::Right);
-    m
-}
+/// The table used to live here, which was survivable only while the editor's
+/// Simulate could not carry an axis. Both hosts read the same one now; see
+/// [`inf_input::default_map`] for the table and for why the mouse scales are
+/// degrees per count.
+pub use inf_input::default_map;
 
 /// The default on-screen touch layout (P14.1) for touch platforms (web /
 /// Android): a **left virtual stick** driving `move_x`/`move_y` (via the left
@@ -127,13 +82,8 @@ pub fn load_map_beside(level_path: &Path) -> InputMap {
 /// it there rather than at this call site is what keeps the rule from being
 /// spelled once per host.
 pub fn held_actions(state: &InputState, frame_dt: f64) -> RuntimeInput {
-    let held: Vec<String> = state
-        .map()
-        .action_names()
-        .filter(|name| state.pressed(name))
-        .map(str::to_string)
-        .collect();
-    RuntimeInput::with_down(held).with_axes(state.axis_snapshot(frame_dt))
+    let (held, axes) = state.resolved(frame_dt);
+    RuntimeInput::with_down(held).with_axes(axes)
 }
 
 /// Map a winit [`KeyCode`] to the `KeyboardEvent.code` string `inf-input` uses.
@@ -146,6 +96,7 @@ pub fn keycode_to_code(code: KeyCode) -> Option<&'static str> {
         KeyCode::KeyC => "KeyC",
         KeyCode::KeyD => "KeyD",
         KeyCode::KeyE => "KeyE",
+        KeyCode::KeyF => "KeyF",
         KeyCode::KeyQ => "KeyQ",
         KeyCode::KeyR => "KeyR",
         KeyCode::KeyS => "KeyS",
@@ -228,6 +179,93 @@ mod tests {
         assert_eq!(keycode_to_code(KeyCode::AltLeft), Some("AltLeft"));
         assert_eq!(keycode_to_code(KeyCode::ShiftLeft), Some("Shift"));
         assert_eq!(keycode_to_code(KeyCode::KeyC), Some("KeyC"));
+    }
+
+    /// **Every action the movement intent reads is BOUND** (P29.6).
+    ///
+    /// `inf_ecs::movement::actions` is the vocabulary and `inf_input::default_map`
+    /// is the table, and they live in two crates that cannot name each other —
+    /// `inf-input` must not depend on `inf-ecs`. So the claim that they agree is
+    /// held here, in the one crate that names both, and it is the arm rather than
+    /// a comment because a binding that is missing is a control that **silently
+    /// does nothing**: exactly what `move_y`, `move_up`, `roll` and `dive` were
+    /// doing until this wave's course tried to drive a character with them.
+    #[test]
+    fn every_movement_action_the_intent_reads_is_bound() {
+        use inf_ecs::movement::actions as a;
+        let m = default_map();
+        for axis in [a::MOVE_X, a::MOVE_Y, a::LOOK_X, a::LOOK_Y, a::MOVE_UP] {
+            assert!(
+                m.axis_names().any(|n| n == axis),
+                "the `{axis}` axis is unbound — the control does nothing and                  nothing else in the tree would say so"
+            );
+        }
+        for action in [
+            a::SPRINT,
+            a::WALK,
+            a::AIM,
+            a::JUMP,
+            a::CROUCH,
+            a::PRONE,
+            a::ROLL,
+            a::DIVE,
+        ] {
+            assert!(
+                m.action_names().any(|n| n == action),
+                "the `{action}` action is unbound"
+            );
+        }
+        // …and every KEY the table names really maps from a winit keycode, or the
+        // binding is bound to a string the player can never produce.
+        let mut keys: Vec<String> = Vec::new();
+        for (_, sources) in m.actions_iter() {
+            for s in sources {
+                if let inf_input::ActionSource::Key(c) = s {
+                    keys.push(c.clone());
+                }
+            }
+        }
+        for (_, sources) in m.axes_iter() {
+            for s in sources {
+                if let inf_input::AxisSource::Key { code, .. } = s {
+                    keys.push(code.clone());
+                }
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        let reachable: std::collections::BTreeSet<&str> = [
+            KeyCode::KeyA,
+            KeyCode::KeyB,
+            KeyCode::KeyC,
+            KeyCode::KeyD,
+            KeyCode::KeyE,
+            KeyCode::KeyF,
+            KeyCode::KeyQ,
+            KeyCode::KeyR,
+            KeyCode::KeyS,
+            KeyCode::KeyW,
+            KeyCode::KeyX,
+            KeyCode::ArrowLeft,
+            KeyCode::ArrowRight,
+            KeyCode::ArrowUp,
+            KeyCode::ArrowDown,
+            KeyCode::Space,
+            KeyCode::ShiftLeft,
+            KeyCode::Enter,
+            KeyCode::Escape,
+            KeyCode::AltLeft,
+            KeyCode::ControlLeft,
+        ]
+        .into_iter()
+        .filter_map(keycode_to_code)
+        .collect();
+        for k in &keys {
+            assert!(
+                reachable.contains(k.as_str()),
+                "`{k}` is bound but no winit keycode maps to it — the binding is                  unreachable from a keyboard"
+            );
+        }
     }
 
     /// **The wiring, not the model** (P29.3). `inf-input`'s own arms prove that a

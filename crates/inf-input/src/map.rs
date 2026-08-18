@@ -153,3 +153,74 @@ impl InputMap {
         self.axes.iter().map(|(k, v)| (k.as_str(), v.as_slice()))
     }
 }
+
+/// **The engine's default bindings** (P29.6 — moved here from the shipped
+/// player).
+///
+/// It lived in `inf_player::input` from P9.3, which was survivable while the
+/// editor's Simulate took a set of *action names* straight off the frontend and
+/// could not carry an axis at all. P29.6's camera needs the mouse in the editor
+/// too, and a second copy of a binding table is the "two copies across a language
+/// boundary" defect the campaign's Wave I found at this very seam. So the table
+/// is Ring 0, both hosts read it, and a project still overrides the whole thing
+/// with an `input.toml` beside its level.
+///
+/// The vocabulary is `inf_ecs::movement::actions`' by construction — the two are
+/// held together by `inf-player`'s own arm, because `inf-input` must not depend
+/// on `inf-ecs` to say so.
+///
+/// `look_x`/`look_y` are **degrees per raw device unit**; the delta reaches the
+/// sim as degrees per SECOND ([`crate::InputState::axis_snapshot`]), which is
+/// exactly ALS's `AimYawRate`. 0.15 deg/count is a middle-of-the-road desktop
+/// sensitivity. `look_y` inverts because the platform reports `+y` down and a
+/// look control wants `+pitch` up — the binding says so rather than the engine
+/// guessing.
+pub fn default_map() -> InputMap {
+    use crate::types::{GamepadAxis, GamepadButton, MouseAxis, MouseButton};
+    let mut m = InputMap::new();
+    m.bind_key("left", "KeyA")
+        .bind_key("left", "ArrowLeft")
+        .bind_key("right", "KeyD")
+        .bind_key("right", "ArrowRight")
+        .bind_key("up", "KeyW")
+        .bind_key("up", "ArrowUp")
+        .bind_key("down", "KeyS")
+        .bind_key("down", "ArrowDown")
+        .bind_key("jump", "Space")
+        .bind_key("jump", "KeyW")
+        .bind_key("jump", "ArrowUp")
+        .bind_button("jump", GamepadButton::South)
+        .bind_axis_key("move_x", "KeyD", 1.0)
+        .bind_axis_key("move_x", "ArrowRight", 1.0)
+        .bind_axis_key("move_x", "KeyA", -1.0)
+        .bind_axis_key("move_x", "ArrowLeft", -1.0)
+        .bind_axis_stick("move_x", GamepadAxis::LeftStickX, 1.0)
+        // Screen/stick y is +down; invert so "up = forward/positive".
+        .bind_axis_stick("move_y", GamepadAxis::LeftStickY, -1.0)
+        .bind_axis_mouse("look_x", MouseAxis::X, 0.15)
+        .bind_axis_mouse("look_y", MouseAxis::Y, -0.15)
+        .bind_axis_stick("look_x", GamepadAxis::RightStickX, 180.0)
+        .bind_axis_stick("look_y", GamepadAxis::RightStickY, -180.0)
+        .bind_key("sprint", "Shift")
+        .bind_button("sprint", GamepadButton::LeftThumb)
+        .bind_key("walk", "AltLeft")
+        .bind_key("crouch", "KeyC")
+        .bind_button("crouch", GamepadButton::East)
+        .bind_key("prone", "KeyX")
+        // ── P29.6: the four the catalogue names and P29.3 left unbound ──
+        //
+        // `move_y` had no KEYBOARD binding at all — only the left stick — so a
+        // character on a keyboard could strafe but not walk forward. `move_up`,
+        // `roll` and `dive` had no binding on any device. Found by the showcase
+        // course, which is the first content to drive a character.
+        .bind_axis_key("move_y", "KeyW", 1.0)
+        .bind_axis_key("move_y", "ArrowUp", 1.0)
+        .bind_axis_key("move_y", "KeyS", -1.0)
+        .bind_axis_key("move_y", "ArrowDown", -1.0)
+        .bind_axis_key("move_up", "KeyE", 1.0)
+        .bind_axis_key("move_up", "KeyQ", -1.0)
+        .bind_key("roll", "KeyR")
+        .bind_key("dive", "KeyF")
+        .bind_mouse("aim", MouseButton::Right);
+    m
+}

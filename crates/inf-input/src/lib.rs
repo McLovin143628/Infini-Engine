@@ -35,7 +35,7 @@ mod types;
 #[cfg(feature = "gamepad")]
 pub mod poller;
 
-pub use map::InputMap;
+pub use map::{default_map, InputMap};
 pub use state::InputState;
 pub use touch::{Rect, TouchButton, TouchControls, VirtualStick};
 pub use types::{

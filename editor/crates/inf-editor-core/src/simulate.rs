@@ -247,6 +247,14 @@ pub struct SimSession {
     /// `the_detail_draws_differently_and_traces_identically` is what keeps those
     /// two sentences true of the code.
     hair_detail: inf_anim::HairDetail,
+    /// **The locomotion camera** (P29.6). Owned by the session — never a
+    /// component, never a resource, never serialized (Ruling 4) — and stepped at
+    /// the very end of the fixed step through the same Ring-0 door the shipped
+    /// player calls, so PIE and shipping frame the same character identically.
+    camera: inf_ecs::camera::LocomotionCamera,
+    /// The character the camera follows, re-resolved every step; `None` on every
+    /// level with no player-controlled character.
+    camera_subject: Option<Uuid>,
     /// **Tuning edits queued and not yet applied** (P29.5, pillar S4).
     ///
     /// Drained at the very top of [`fixed_step`](Self::fixed_step), before
@@ -451,6 +459,8 @@ impl SimSession {
             cloths: BTreeMap::new(),
             hairs: BTreeMap::new(),
             hair_detail: inf_anim::HairDetail::GUIDES,
+            camera: inf_ecs::camera::LocomotionCamera::default(),
+            camera_subject: None,
             pending_tunes: Vec::new(),
             kept_tunes: Vec::new(),
             input: SimInput::default(),
@@ -688,6 +698,22 @@ impl SimSession {
     /// costs the *preview* its fidelity on a Low-tier machine. Wiring it belongs
     /// with a tier read in `inf_viewport::host`, which is a `cfg`-gated file no
     /// Linux CI leg compiles. Ledgered in ROADMAP §12's P24.4 block.
+    /// The locomotion camera's pose this step, or `None` on a level with no
+    /// player-controlled character.
+    pub fn camera_pose(&self) -> Option<inf_ecs::camera::CameraPose> {
+        self.camera_subject.map(|_| self.camera.pose)
+    }
+
+    /// The camera itself — the editor's viewport reads it, and the gate traces it.
+    pub fn camera(&self) -> &inf_ecs::camera::LocomotionCamera {
+        &self.camera
+    }
+
+    /// …and mutably: view mode, shoulder, and the tuning P29.5's door edits.
+    pub fn camera_mut(&mut self) -> &mut inf_ecs::camera::LocomotionCamera {
+        &mut self.camera
+    }
+
     pub fn set_hair_detail(&mut self, detail: inf_anim::HairDetail) {
         self.hair_detail = detail;
     }
@@ -980,6 +1006,19 @@ impl SimSession {
         // ── P12.3 audio step ── last, so it observes this step's final transforms:
         //    pick the listener, enqueue autoplay, resolve occlusion, drain the queue.
         self.audio_step(doc);
+        // ── P29.6 the locomotion camera ── LAST, and outside everything the trace
+        //    folds: it reads where the character ended this step and writes
+        //    nothing back. (MIRROR of `RuntimeSim::step_camera`.)
+        self.camera_subject = inf_ecs::movement::camera_subject(doc.world());
+        if let Some(subject) = self.camera_subject {
+            inf_physics::d3::step_locomotion_camera(
+                doc.world(),
+                &mut self.bridge3d,
+                &mut self.camera,
+                subject,
+                dt,
+            );
+        }
         // Per-actor caches keyed by `Guid` are pruned to the live world (Hardening
         // D) — MIRROR of `RuntimeSim::capture_positions`'s rule. `audio_started`
         // is dropped by the audio step above; `grounded` had no such rule and

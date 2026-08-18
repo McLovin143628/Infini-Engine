@@ -3458,6 +3458,7 @@ dependencies = [
  "inf-ecs",
  "inf-editor-core",
  "inf-graph",
+ "inf-input",
  "inf-material",
  "inf-mesh",
  "inf-packager",

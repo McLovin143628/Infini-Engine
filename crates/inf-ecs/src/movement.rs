@@ -1008,6 +1008,28 @@ pub fn movement_targets(world: &EcsWorld) -> Vec<Uuid> {
     targets
 }
 
+/// **Who the locomotion camera follows** — the first `player_controlled`
+/// character in `Guid` order, or `None` on a level that has none.
+///
+/// One door, beside [`movement_targets`] and for the same two reasons: both
+/// hosts must pick the same subject or PIE and shipping look at different
+/// things, and the walk has to be deterministic rather than an archetype order.
+/// `O(characters)`, and `O(1)` on a level with no character at all.
+///
+/// "The first" is honest rather than clever: [`apply_intent`] already writes one
+/// intent onto **every** player-controlled character (the P29.3 remainder that a
+/// per-controller binding is a gameplay concern), so a level with two of them has
+/// two characters doing the same thing and the camera watches the first. The day
+/// that binding exists, this reads it.
+pub fn camera_subject(world: &EcsWorld) -> Option<Uuid> {
+    let w = world.world();
+    let mut q = w.try_query_filtered::<(&Guid, &CharacterMovement), With<Transform>>()?;
+    q.iter(w)
+        .filter(|(_, cm)| cm.player_controlled)
+        .map(|(g, _)| g.0)
+        .min()
+}
+
 // ── character space (P29.6: the foot-publish seam) ──────────────────────────
 
 /// **How far below a character's entity transform its own origin sits**, metres.

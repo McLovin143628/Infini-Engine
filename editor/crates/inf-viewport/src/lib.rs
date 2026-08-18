@@ -61,6 +61,17 @@ pub enum ViewportEvent {
     /// stays free of the platform-gated `inf_render::GizmoMode` (Linux builds
     /// this file too).
     GizmoModeChanged(inf_editor_core::ipc::GizmoModeDto),
+    /// **Mouse-look deltas captured while Simulate is running** (P29.6), in raw
+    /// device counts since the last frame.
+    ///
+    /// The airspace rule is why this exists at all: the viewport is a native
+    /// child window, so the mouse over it belongs to the OS child and never
+    /// reaches the webview. A gameplay camera needs that mouse, so the viewport
+    /// captures it while a session is live and forwards the counts; Ring 2
+    /// accumulates them and `inf_input` turns them into `look_x`/`look_y`
+    /// degrees per second — the SAME rule the shipped player's winit device
+    /// motion goes through.
+    SimLook { dx: f32, dy: f32 },
     /// A tool raised a status message, and/or the projected terrain's *streamed*
     /// state changed (P16.4a). Ring 2 forwards it on `viewport://tool-status`:
     /// the message goes to the status bar, the flag greys out sculpt/paint —
@@ -181,6 +192,8 @@ impl ViewportHandle {
     pub fn set_biome(&self, _biome: camera::BiomeSettings) {}
     pub fn set_water(&self, _water: camera::WaterSettings) {}
     pub fn set_voxel(&self, _voxel: camera::VoxelSettings) {}
+    /// P29.6: no native viewport, so nothing to capture a mouse with.
+    pub fn set_sim_running(&self, _running: bool) {}
     pub fn set_biome_palette(&self, _entity: uuid::Uuid, _palette: Vec<[f32; 4]>) {}
     pub fn set_water_hints(&self, _entity: uuid::Uuid, _hints: Vec<Option<f64>>) {}
     pub fn set_gizmo_mode(&self, _mode: inf_editor_core::ipc::GizmoModeDto) {}

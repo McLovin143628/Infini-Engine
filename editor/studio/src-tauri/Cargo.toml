@@ -30,6 +30,11 @@ inf-editor-core = { workspace = true }
 glam = { workspace = true }
 inf-asset = { workspace = true }
 inf-audio = { workspace = true }
+# P29.6: Simulate resolves the frontend's raw physical keys and the native
+# viewport's mouse deltas through the SAME `InputMap` the shipped player reads,
+# so a control cannot mean one thing in the editor and another in a build. The
+# alternative was a third copy of the binding table, in TypeScript.
+inf-input = { workspace = true }
 inf-material = { workspace = true }
 inf-project = { workspace = true }
 inf-packager = { workspace = true }

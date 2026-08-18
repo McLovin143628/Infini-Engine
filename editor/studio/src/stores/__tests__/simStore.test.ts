@@ -21,7 +21,7 @@ import { useShellStore } from "../shellStore";
 import {
   __heldActions,
   __resetSimForTest,
-  codeToAction,
+  simKeyCode,
   useSimStore,
 } from "../simStore";
 
@@ -60,20 +60,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("codeToAction", () => {
-  it("maps arrows and WASD to engine actions", () => {
-    expect(codeToAction("ArrowLeft")).toBe("left");
-    expect(codeToAction("KeyA")).toBe("left");
-    expect(codeToAction("ArrowRight")).toBe("right");
-    expect(codeToAction("KeyD")).toBe("right");
-    expect(codeToAction("Space")).toBe("jump");
-    expect(codeToAction("KeyW")).toBe("jump");
+describe("simKeyCode", () => {
+  const ev = (code: string): KeyboardEvent => new KeyboardEvent("keydown", { code });
+
+  it("passes a physical key through unmapped", () => {
+    // P29.6: the binding table is `inf_input::default_map`'s, Ring 0, shared
+    // with the shipped player. This side must not have an opinion about which
+    // keys are controls, or it will have a smaller opinion than the engine's.
+    for (const code of ["KeyA", "KeyD", "KeyW", "KeyS", "KeyC", "KeyX", "KeyR", "KeyF", "Space"]) {
+      expect(simKeyCode(ev(code))).toBe(code);
+    }
   });
 
-  it("returns null for unmapped / empty keys (edges)", () => {
-    expect(codeToAction("KeyS")).toBeNull();
-    expect(codeToAction("Enter")).toBeNull();
-    expect(codeToAction("")).toBeNull();
+  it("folds the left/right modifiers onto the engine's single name", () => {
+    expect(simKeyCode(ev("ShiftLeft"))).toBe("Shift");
+    expect(simKeyCode(ev("ShiftRight"))).toBe("Shift");
+    expect(simKeyCode(ev("ControlLeft"))).toBe("Control");
+    expect(simKeyCode(ev("ControlRight"))).toBe("Control");
+    // …and `AltLeft` is NOT folded: the engine binds `walk` to that exact name.
+    expect(simKeyCode(ev("AltLeft"))).toBe("AltLeft");
   });
 });
 
@@ -122,14 +127,14 @@ describe("play / pause / resume / stop transitions", () => {
 });
 
 describe("input tracker", () => {
-  it("tracks held actions from window key events while running", async () => {
+  it("tracks held physical keys from window key events while running", async () => {
     await useSimStore.getState().play(); // installs listeners
     window.dispatchEvent(new KeyboardEvent("keydown", { code: "ArrowLeft" }));
     window.dispatchEvent(new KeyboardEvent("keydown", { code: "Space" }));
-    expect(__heldActions().sort()).toEqual(["jump", "left"]);
+    expect(__heldActions().sort()).toEqual(["ArrowLeft", "Space"]);
 
     window.dispatchEvent(new KeyboardEvent("keyup", { code: "ArrowLeft" }));
-    expect(__heldActions()).toEqual(["jump"]);
+    expect(__heldActions()).toEqual(["Space"]);
   });
 
   it("ignores keys while stopped", () => {
@@ -165,11 +170,23 @@ describe("tick loop", () => {
     expect(vi.mocked(sim.tick)).toHaveBeenCalledTimes(2);
   });
 
-  it("feeds the held actions to sim_tick", async () => {
+  it("feeds the held PHYSICAL keys to sim_tick, unmapped", async () => {
     await useSimStore.getState().play();
     window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyD" }));
     runFrame();
-    expect(vi.mocked(sim.tick)).toHaveBeenCalledWith(["right"]);
+    // `KeyD`, not `"right"`: the binding table is the engine's (Ring 0), and a
+    // copy of it here would know a fraction of it (P29.6).
+    expect(vi.mocked(sim.tick)).toHaveBeenCalledWith(["KeyD"]);
+  });
+
+  it("forwards a key the old three-action map had never heard of", async () => {
+    await useSimStore.getState().play();
+    window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyC" }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { code: "ShiftLeft" }));
+    runFrame();
+    // Crouch and sprint reach the backend now. Under the old mapping both were
+    // dropped here and no control in the engine could ever have seen them.
+    expect(vi.mocked(sim.tick)).toHaveBeenCalledWith(["KeyC", "Shift"]);
   });
 
   it("step() advances exactly one fixed step and pauses", async () => {

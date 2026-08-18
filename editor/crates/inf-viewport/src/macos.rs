@@ -74,6 +74,12 @@ enum Cmd {
     SetWater(WaterSettings),
     /// Replace the voxel carve-tool configuration (P21.2).
     SetVoxel(VoxelSettings),
+    /// Whether an in-editor Simulate session is live (P29.6). Carried so the two
+    /// pumps do not drift; macOS input is unwired for the whole viewport, so
+    /// there is no capture to grab and the arm records the flag and does nothing
+    /// with it — the honest state of this platform rather than a missing command
+    /// that would fail to compile.
+    SetSimRunning(bool),
     SetBiomePalette(uuid::Uuid, Vec<[f32; 4]>),
     /// Per-terrain water-level hints by biome id (P20.4).
     SetWaterHints(uuid::Uuid, Vec<Option<f64>>),
@@ -173,6 +179,14 @@ impl ViewportHandle {
     /// only sets the host state (the tool authors once input lands).
     pub fn set_voxel(&self, voxel: VoxelSettings) {
         let _ = self.tx.send(Cmd::SetVoxel(voxel));
+    }
+
+    /// P29.6: accepted and dropped. macOS input is unwired for the whole
+    /// viewport (this file has no capture state machine at all), so the play
+    /// capture has nothing to hook — recorded here rather than left as a
+    /// missing method that would not compile on the platform.
+    pub fn set_sim_running(&self, running: bool) {
+        let _ = self.tx.send(Cmd::SetSimRunning(running));
     }
 
     /// Push a terrain's resolved biome overlay palette (P19.2).
@@ -396,6 +410,11 @@ fn thread_main(
                 Ok(Cmd::SetBiome(b)) => host.set_biome(b),
                 Ok(Cmd::SetWater(w)) => host.set_water(w),
                 Ok(Cmd::SetVoxel(v)) => host.set_voxel(v),
+                // P29.6: recorded and unused — macOS input is unwired for the
+                // whole viewport, so there is no capture to grab. The arm exists
+                // because Ring 2 calls the setter unconditionally and the pump
+                // mirror gate holds the two platforms level.
+                Ok(Cmd::SetSimRunning(_running)) => {}
                 Ok(Cmd::SetBiomePalette(e, p)) => host.set_biome_palette(e, p),
                 Ok(Cmd::SetWaterHints(e, h)) => host.set_water_hints(e, h),
                 Ok(Cmd::SetGizmo(m)) => host.set_gizmo_mode(m),

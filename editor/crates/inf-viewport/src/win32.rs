@@ -123,6 +123,11 @@ enum Cmd {
     SetWater(WaterSettings),
     /// Replace the voxel carve-tool configuration (P21.2).
     SetVoxel(VoxelSettings),
+    /// Whether an in-editor Simulate session is live (P29.6). While it is, a
+    /// plain LMB in the viewport captures the mouse for the GAME camera instead
+    /// of picking, and the deltas are forwarded rather than steering the editor
+    /// camera. Pushed by `sim_start`/`sim_stop`, backend to backend.
+    SetSimRunning(bool),
     /// Push a terrain entity's resolved biome overlay palette (P19.2) — Ring 2
     /// owns the asset lookup, the viewport only draws it.
     SetBiomePalette(uuid::Uuid, Vec<[f32; 4]>),
@@ -236,6 +241,11 @@ impl ViewportHandle {
     /// carve-or-fill / material) — P21.2.
     pub fn set_voxel(&self, voxel: VoxelSettings) {
         let _ = self.tx.send(Cmd::SetVoxel(voxel));
+    }
+
+    /// Tell the viewport whether an in-editor Simulate session is live (P29.6).
+    pub fn set_sim_running(&self, running: bool) {
+        let _ = self.tx.send(Cmd::SetSimRunning(running));
     }
 
     /// Replace the water-tool configuration (kind / river dimensions / level
@@ -365,6 +375,12 @@ enum Capture {
     Orbit,
     Pan,
     Dolly,
+    /// **Mouse-look for a running Simulate** (P29.6). Grabbed by a plain LMB
+    /// while a session is live, released by `Escape` or by the session ending.
+    /// It steers the GAME camera, not the editor one, so the frame loop's
+    /// camera arms deliberately do nothing for it — the deltas leave over
+    /// `ViewportEvent::SimLook` instead.
+    SimLook,
 }
 
 /// A discrete camera action queued by `wnd_proc`, drained by the frame loop.
@@ -399,6 +415,11 @@ struct InputState {
 
 thread_local! {
     static INPUT: RefCell<InputState> = RefCell::new(InputState::default());
+    /// Whether an in-editor Simulate session is live (P29.6). Read by
+    /// `wnd_proc`, which runs on this same thread, and written by the frame
+    /// loop when `Cmd::SetSimRunning` arrives — the two never race because
+    /// there is only one thread.
+    static SIM_RUNNING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn modifier(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {
@@ -487,6 +508,14 @@ fn on_key_down(vk: u32) {
         return;
     }
 
+    // Escape gives the mouse back from the P29.6 play capture. First, and
+    // unconditionally: a player whose pointer is hidden inside a viewport needs
+    // one key that always works.
+    if vk == 0x1B {
+        end_capture(Capture::SimLook);
+        return;
+    }
+
     // F focuses the selection (no modifiers).
     if vk == 0x46 && !ctrl && !alt && !shift {
         INPUT.with(|s| s.borrow_mut().actions.push(Action::Focus));
@@ -563,6 +592,13 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         WM_LBUTTONDOWN => {
             if modifier(VK_MENU) {
                 begin_capture(hwnd, Capture::Orbit);
+            } else if SIM_RUNNING.with(|r| r.get()) {
+                // **Play capture** (P29.6). A live Simulate turns a plain LMB in
+                // the viewport into mouse-look for the GAME camera: the pointer
+                // is hidden and captured exactly as a flycam gesture would, and
+                // the deltas are forwarded to Ring 2 instead of steering the
+                // editor camera. Escape gives it back.
+                begin_capture(hwnd, Capture::SimLook);
             } else if INPUT.with(|s| {
                 matches!(
                     s.borrow().capture,
@@ -595,6 +631,8 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         WM_LBUTTONUP => {
             if end_capture(Capture::Orbit) {
                 // was an orbit gesture
+            } else if end_capture(Capture::SimLook) {
+                // was the P29.6 play capture
             } else {
                 let owns = INPUT.with(|s| {
                     let mut s = s.borrow_mut();
@@ -1027,6 +1065,14 @@ fn thread_main(
                 Ok(Cmd::SetBiome(b)) => host.set_biome(b),
                 Ok(Cmd::SetWater(w)) => host.set_water(w),
                 Ok(Cmd::SetVoxel(v)) => host.set_voxel(v),
+                Ok(Cmd::SetSimRunning(running)) => {
+                    SIM_RUNNING.with(|r| r.set(running));
+                    // Ending a session must give the mouse back, or the cursor
+                    // stays hidden over a viewport nobody is playing in.
+                    if !running {
+                        end_capture(Capture::SimLook);
+                    }
+                }
                 Ok(Cmd::SetBiomePalette(e, p)) => host.set_biome_palette(e, p),
                 Ok(Cmd::SetWaterHints(e, h)) => host.set_water_hints(e, h),
                 Ok(Cmd::SetGizmo(m)) => {
@@ -1547,6 +1593,18 @@ fn thread_main(
                         pivot,
                         dt,
                     );
+                }
+                Capture::SimLook => {
+                    // **The play capture** (P29.6): the deltas belong to the
+                    // GAME camera, so the editor camera is left exactly where it
+                    // is and the counts are forwarded to Ring 2. Sent only when
+                    // there is motion, so an idle held button costs one branch.
+                    if input.dx != 0.0 || input.dy != 0.0 {
+                        sink(ViewportEvent::SimLook {
+                            dx: input.dx,
+                            dy: input.dy,
+                        });
+                    }
                 }
                 Capture::None => {
                     // No button held: the wheel dollies toward the look point.

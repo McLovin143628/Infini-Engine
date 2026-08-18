@@ -45,6 +45,23 @@ impl SimState {
             .unwrap_or(false)
     }
 
+    /// **Accumulate a mouse-look delta from the native viewport** (P29.6).
+    ///
+    /// Raw device counts, drained by the next `sim_tick`. Dropped when no
+    /// session is running — a capture can outlive its `sim_stop` by a frame, and
+    /// a stale delta arriving into the next session would be a mouse jump nobody
+    /// made. A poisoned lock is ignored for the same reason the mixer path
+    /// ignores one: losing a frame of mouse-look is not worth taking a session
+    /// down.
+    pub fn push_look(&self, dx: f32, dy: f32) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if inner.session.is_some() {
+                inner.look.0 += dx;
+                inner.look.1 += dy;
+            }
+        }
+    }
+
     /// Live-apply a mixer to a running Simulate session (E-P9). A no-op when
     /// stopped. Mirrors the mixer load in [`sim_start`] so the Audio Mixer panel's
     /// save is heard immediately in an active Simulate. Poisoned lock is ignored
@@ -58,10 +75,36 @@ impl SimState {
     }
 }
 
-#[derive(Default)]
 struct SimInner {
     session: Option<SimSession>,
     last: Option<Instant>,
+    /// **The editor's own resolved input** (P29.6).
+    ///
+    /// The frontend sends raw `KeyboardEvent.code` values now; this turns them
+    /// into the engine's actions and axes through
+    /// [`inf_input::default_map`] — the SAME table the shipped player reads, so
+    /// a control cannot mean one thing in Simulate and another in a build. It
+    /// used to be a set of *action names* mapped in TypeScript, which was a third
+    /// copy of the binding table across a language boundary (the campaign's Wave
+    /// I defect) and could not carry an analog axis at all.
+    input: inf_input::InputState,
+    /// Raw mouse-delta counts accumulated from the native viewport since the last
+    /// tick, in device units. The viewport captures the pointer while Simulate is
+    /// running (the airspace rule: the mouse over the viewport belongs to the
+    /// native child window, not to the webview), and this is where its deltas
+    /// wait for the next frame.
+    look: (f32, f32),
+}
+
+impl Default for SimInner {
+    fn default() -> Self {
+        Self {
+            session: None,
+            last: None,
+            input: inf_input::InputState::new(inf_input::default_map()),
+            look: (0.0, 0.0),
+        }
+    }
 }
 
 /// Enter Simulate over the current scene: snapshot the world, bind actors —
@@ -202,12 +245,27 @@ pub async fn sim_start(
     let mut inner = sim.inner.lock().map_err(|_| "sim lock poisoned")?;
     inner.session = Some(session);
     inner.last = Some(Instant::now());
+    // ── P29.6 ── the native viewport captures the mouse for the GAME camera
+    //    while a session is live. Backend to backend, `Target::All`, and it must
+    //    be paired with the `false` in `sim_stop` or the pointer stays hidden.
+    if let Some(vp) = app.try_state::<super::ViewportState>() {
+        vp.set_sim_running(true);
+    }
     let _ = app.emit("sim://state", true);
     Ok(())
 }
 
-/// Advance Simulate by one frame with the given held keys/actions (e.g.
-/// `["left","jump"]`). No-op when not running.
+/// Advance Simulate by one frame with the currently-held **physical keys**
+/// (`KeyboardEvent.code` values, e.g. `["KeyA","Space"]`). No-op when not
+/// running.
+///
+/// **Codes, not action names** (P29.6). The frontend used to map three keys onto
+/// three action names in TypeScript, which meant the engine's binding table
+/// existed twice in two languages and the second copy knew about three of its
+/// fourteen entries. It sends the physical key now and
+/// [`inf_input::default_map`] does the mapping — the same table the shipped
+/// player uses, so `C` crouches in Simulate because it crouches in a build, and
+/// an `input.toml` beside the level would change both.
 #[tauri::command]
 pub async fn sim_tick(
     app: AppHandle,
@@ -228,15 +286,59 @@ pub async fn sim_tick(
         .clamp(0.0, 0.25);
     inner.last = Some(now);
 
+    let input = resolve_input(&mut inner, &keys, dt);
     let mut doc = scene.doc.lock().map_err(|_| "scene lock poisoned")?;
     let session = inner.session.as_mut().expect("session present");
-    session.tick(&mut doc, dt, SimInput::with_down(keys));
+    session.tick(&mut doc, dt, input);
     doc.bump_version_for_runtime();
     drop(doc);
     overlay_sim_carves(&app, &scene, session);
     publish_sim_fractures(&app, session);
     emit_debug(&app, session);
     Ok(true)
+}
+
+/// **Turn this frame's raw device state into the engine's own input** (P29.6).
+///
+/// Three things arrive here and one thing leaves. In: the physical keys the
+/// frontend says are held, the mouse counts the native viewport captured since
+/// the last frame, and the frame's own `dt`. Out: a [`SimInput`] carrying the
+/// held **actions** and the resolved **axes** — including `look_x`/`look_y` as
+/// degrees per second, which is what fills the analog axes P29.3 left empty and
+/// what the locomotion camera and `RotationMode::Aiming` both read.
+///
+/// The key set is diffed rather than assigned, because `InputState` is an
+/// event-driven machine: a key that is no longer in the frontend's set must
+/// produce a **release**, or a character sprints for ever after one press.
+///
+/// The mouse accumulator is DRAINED here, so a frame that ran no fixed step does
+/// not throw its motion away and a frame that ran three does not deliver it
+/// three times — `axis_snapshot` turns the whole frame's counts into a rate and
+/// the fixed step integrates that rate, which is the P29.3 rule.
+fn resolve_input(inner: &mut SimInner, held: &[String], frame_dt: f64) -> SimInput {
+    use std::collections::BTreeSet;
+    let want: BTreeSet<&str> = held.iter().map(String::as_str).collect();
+    let have: BTreeSet<String> = inner.input.keys_down().map(str::to_string).collect();
+    let mut events: Vec<inf_input::InputEvent> = Vec::new();
+    for code in want.iter().filter(|c| !have.contains(**c)) {
+        events.push(inf_input::InputEvent::Key {
+            code: (*code).to_string(),
+            pressed: true,
+        });
+    }
+    for code in have.iter().filter(|c| !want.contains(c.as_str())) {
+        events.push(inf_input::InputEvent::Key {
+            code: code.clone(),
+            pressed: false,
+        });
+    }
+    let (dx, dy) = std::mem::take(&mut inner.look);
+    if dx != 0.0 || dy != 0.0 {
+        events.push(inf_input::InputEvent::MouseMotion { delta: [dx, dy] });
+    }
+    inner.input.apply(&events);
+    let (down, axes) = inner.input.resolved(frame_dt);
+    SimInput::with_down(down).with_axes(axes)
 }
 
 /// **Mirror the Simulate session's runtime carves into the viewport's voxel
@@ -390,9 +492,10 @@ pub async fn sim_step_fixed(
     // A fixed step does not advance wall-clock time; reset `last` so the next
     // free-running tick's delta starts fresh from now.
     inner.last = Some(Instant::now());
+    let input = resolve_input(&mut inner, &keys, 1.0 / SIM_HZ);
     let mut doc = scene.doc.lock().map_err(|_| "scene lock poisoned")?;
     let session = inner.session.as_mut().expect("session present");
-    session.step_once(&mut doc, SimInput::with_down(keys));
+    session.step_once(&mut doc, input);
     doc.bump_version_for_runtime();
     drop(doc);
     overlay_sim_carves(&app, &scene, session);
@@ -511,6 +614,9 @@ pub async fn sim_stop(
         if let Ok(mut states) = handle.lock() {
             states.clear();
         }
+    }
+    if let Some(vp) = app.try_state::<super::ViewportState>() {
+        vp.set_sim_running(false);
     }
     let _ = app.emit("sim://state", false);
     Ok(())

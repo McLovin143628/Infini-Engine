@@ -1365,6 +1365,7 @@ export const sim = {
    * Advance one frame with the held actions (`["left","jump"]`). Resolves to
    * whether a session was running (false = no-op). Arg name is camelCase.
    */
+  /** Advance a frame with the currently-held PHYSICAL keys (`KeyboardEvent.code`). */
   tick: (keys: string[]): Promise<boolean> => invoke<boolean>("sim_tick", { keys }),
   /**
    * Advance **exactly one fixed step** with the held actions (B-P4 tier A′):

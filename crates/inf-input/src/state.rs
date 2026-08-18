@@ -114,6 +114,18 @@ impl InputState {
     }
 
     /// The map in use.
+    /// The physical keys currently held, sorted — the raw device state, not the
+    /// resolved actions.
+    ///
+    /// The editor's Simulate needs it: the frontend sends the whole held SET
+    /// every frame and this machine is event-driven, so somebody has to diff the
+    /// two and synthesize the releases. Doing that against this rather than
+    /// against a second copy in Ring 2 is what keeps one authority for "what is
+    /// down".
+    pub fn keys_down(&self) -> impl Iterator<Item = &str> {
+        self.keys_down.iter().map(String::as_str)
+    }
+
     pub fn map(&self) -> &InputMap {
         &self.map
     }
@@ -361,6 +373,27 @@ impl InputState {
                 )
             })
             .collect()
+    }
+
+    /// **The held actions and this frame's axes, as one answer** (P29.6).
+    ///
+    /// The rule "which actions are down, and what are the axes worth" used to be
+    /// spelled once in the shipped player (`inf_player::input::held_actions`) and
+    /// nowhere at all in the editor, whose Simulate took a set of action names
+    /// straight off the frontend and could not carry an axis. Two hosts, one
+    /// input vocabulary: it lives here, and each host only builds its own DTO out
+    /// of the pair.
+    ///
+    /// `frame_dt` is the wall-clock seconds the frame covered, and it is used for
+    /// exactly one thing — see [`axis_snapshot`](Self::axis_snapshot).
+    pub fn resolved(&self, frame_dt: f64) -> (Vec<String>, BTreeMap<String, f32>) {
+        let held: Vec<String> = self
+            .map
+            .action_names()
+            .filter(|name| self.pressed(name))
+            .map(str::to_string)
+            .collect();
+        (held, self.axis_snapshot(frame_dt))
     }
 }
 

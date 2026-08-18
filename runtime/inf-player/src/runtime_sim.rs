@@ -235,6 +235,18 @@ pub struct RuntimeSim {
     /// `the_detail_draws_differently_and_traces_identically` is what keeps those
     /// two sentences true of the code.
     hair_detail: inf_anim::HairDetail,
+    /// **The locomotion camera** (P29.6). A host owns it — it is never a
+    /// component and never a resource, which is Ruling 4 kept literally — and it
+    /// is stepped at the very end of the fixed step, AFTER everything that could
+    /// move the character it follows.
+    ///
+    /// It is not in `state_bytes` and must never be: the camera reads the sim and
+    /// never writes it, and `phase29_gate` asserts both halves.
+    camera: inf_ecs::camera::LocomotionCamera,
+    /// Whether the camera stepped this run at all — `None` on every level with no
+    /// player-controlled character, which is every committed sample before this
+    /// wave, so their view path is untouched.
+    camera_subject: Option<Uuid>,
     stepper: FixedStep,
     /// Actors keyed by `Guid` (deterministic iteration).
     actors: BTreeMap<Uuid, ActorState>,
@@ -446,6 +458,8 @@ impl RuntimeSim {
             cloths: BTreeMap::new(),
             hairs: BTreeMap::new(),
             hair_detail: inf_anim::HairDetail::GUIDES,
+            camera: inf_ecs::camera::LocomotionCamera::default(),
+            camera_subject: None,
             stepper: FixedStep::from_hz(hz),
             actors: states,
             entities,
@@ -1073,11 +1087,56 @@ impl RuntimeSim {
         // ── P12.3 audio step ── last, observing this step's final transforms
         //    (preview == shipped: the same logic the editor SimSession runs).
         self.audio_step();
+        // ── P29.6 the locomotion camera ── LAST, and outside everything the
+        //    trace folds: it reads where the character ended this step and writes
+        //    nothing back. `step_locomotion_camera` is the ONE door, so the
+        //    editor's Simulate and the shipped player cannot frame the same
+        //    character differently. Inert (one `O(characters)` query that answers
+        //    `None`) on every level with no player-controlled character.
+        //    (MIRROR of `SimSession::fixed_step`.)
+        self.step_camera(dt);
         // Roll interpolation history + rising edges.
         std::mem::swap(&mut self.prev_positions, &mut self.cur_positions);
         self.capture_positions();
         self.just_pressed.clear();
         self.steps += 1;
+    }
+
+    /// Advance the locomotion camera against this step's world.
+    ///
+    /// The subject is re-resolved every step rather than latched, because a
+    /// character can be spawned or despawned by gameplay and a camera pinned to a
+    /// guid that has gone is a camera frozen in space.
+    fn step_camera(&mut self, dt: f64) {
+        self.camera_subject = inf_ecs::movement::camera_subject(&self.world);
+        if let Some(subject) = self.camera_subject {
+            inf_physics::d3::step_locomotion_camera(
+                &self.world,
+                &mut self.bridge3d,
+                &mut self.camera,
+                subject,
+                dt,
+            );
+        }
+    }
+
+    /// The camera's pose this step, or `None` on a level with no
+    /// player-controlled character (where the host keeps its own view).
+    pub fn camera_pose(&self) -> Option<inf_ecs::camera::CameraPose> {
+        self.camera_subject.map(|_| self.camera.pose)
+    }
+
+    /// The camera itself — for a host that wants to switch view mode or shoulder,
+    /// and for the gate's camera trace.
+    pub fn camera(&self) -> &inf_ecs::camera::LocomotionCamera {
+        &self.camera
+    }
+
+    /// …and mutably, which is how a host toggles first person. Deliberately not a
+    /// `set_view_mode` pair: the camera is a plain value and hiding it behind two
+    /// setters would invite a third.
+    pub fn camera_mut(&mut self) -> &mut inf_ecs::camera::LocomotionCamera {
+        &mut self.camera
     }
 
     /// Tick attached WASM mods, then propagate their transform edits so

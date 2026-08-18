@@ -312,10 +312,33 @@ impl PlayerApp {
         PlayerRenderHost::new(gpu, surface, width.max(1), height.max(1), render)
     }
 
-    /// Build the render view for the current sim + surface (an ortho follow-cam).
+    /// Build the render view for the current sim + surface.
+    ///
+    /// **Two cameras, and which one runs is decided by the content** (P29.6). A
+    /// level with a player-controlled character gets the locomotion camera — a
+    /// real perspective third/first-person view, sitting where
+    /// `inf_physics::d3::camera` put it after its own collision sweep. Every
+    /// other level keeps the ortho follow-cam it has had since P9.3, so no
+    /// committed sample's picture moves by a pixel.
     fn view(&self) -> Option<RenderView> {
         let live = self.live.as_ref()?;
         let (w, h) = live.host.size();
+        if let Some(pose) = self.sim.camera_pose() {
+            let (_r, up, forward) = inf_ecs::camera::basis(pose.yaw_deg, pose.pitch_deg);
+            return Some(RenderView {
+                origin: live.host.origin(),
+                eye_world: pose.position.to_dvec3(),
+                forward: forward.as_vec3(),
+                up: up.as_vec3(),
+                fov_y: (pose.fov_deg as f32).to_radians(),
+                near: 0.05,
+                width: w,
+                height: h,
+                // Perspective, deliberately: an ortho locomotion camera is a
+                // different game.
+                ortho: None,
+            });
+        }
         let focus = self.sim.camera_focus();
         Some(RenderView {
             origin: live.host.origin(),

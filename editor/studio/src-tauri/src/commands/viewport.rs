@@ -188,6 +188,14 @@ impl ViewportState {
         self.with(target, |h| h.set_content_root(root.clone()));
     }
 
+    /// Tell every viewport whether an in-editor Simulate session is live
+    /// (P29.6), so a plain LMB captures the mouse for the game camera instead of
+    /// picking. `Target::All` on purpose: a session is a fact about the
+    /// *process*, not about one scene slot.
+    pub fn set_sim_running(&self, running: bool) {
+        self.with(Target::All, |h| h.set_sim_running(running));
+    }
+
     /// Rebuild the loose `.inf_terrain` index in place, keeping live streams —
     /// pushed when a terrain import finishes (P16.4a).
     pub fn refresh_asset_index(&self, target: Target) {
@@ -331,6 +339,17 @@ fn event_sink(app: tauri::AppHandle, id: String) -> inf_viewport::ViewportEventS
             };
             if let Err(e) = app.emit("viewport://gizmo", payload) {
                 tracing::warn!("viewport://gizmo emit failed: {e}");
+            }
+        }
+        // **The play capture's deltas** (P29.6). Backend to backend: they never
+        // reach the webview, because the webview has nothing to do with them —
+        // they go straight into the Simulate session's own `InputState`, where
+        // `axis_snapshot` turns them into `look_x`/`look_y` degrees per second.
+        // A session that is not running drops them, which is what happens when a
+        // capture outlives its `sim_stop` by a frame.
+        ViewportEvent::SimLook { dx, dy } => {
+            if let Some(state) = app.try_state::<super::sim::SimState>() {
+                state.push_look(dx, dy);
             }
         }
         // A tool rejection and/or a change in whether the projected terrain

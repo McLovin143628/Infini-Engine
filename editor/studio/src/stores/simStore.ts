@@ -6,13 +6,14 @@
  *
  * 1. **Running state** — mirrors the backend, synced from the `sim://state`
  *    event and `sim_is_running()` on mount (see [`initSimSync`]).
- * 2. **Input tracker** — while running, a window keydown/keyup listener maps
- *    physical keys (`KeyboardEvent.code`) to the engine's action names and keeps
- *    a held-set. Mapping (documented, mirrors the coyote-time platformer sample):
- *      - `ArrowLeft`  / `KeyA` → `"left"`
- *      - `ArrowRight` / `KeyD` → `"right"`
- *      - `Space`      / `KeyW` → `"jump"`  (Space also `preventDefault`s so the
- *        page never scrolls while playing)
+ * 2. **Input tracker** — while running, a window keydown/keyup listener keeps
+ *    the set of held **physical keys** (`KeyboardEvent.code`) and sends it
+ *    verbatim. It does NOT map keys to action names: that table is the engine's
+ *    (`inf_input::default_map`, Ring 0, shared with the shipped player), and the
+ *    version of it that used to live here knew three of its fourteen entries —
+ *    the two-copies-across-a-language-boundary defect the campaign's Wave I
+ *    found at this same seam. `Space` still `preventDefault`s so the page never
+ *    scrolls while playing.
  * 3. **Tick driver** — a `requestAnimationFrame` loop feeds real frame cadence +
  *    the held actions to `sim_tick`. The backend clamps/accumulates into fixed
  *    steps, so the rAF loop only supplies the wall-clock delta (implicitly, via
@@ -31,35 +32,34 @@ import { bindKey } from "../lib/keybindings";
 import { registerCommands } from "../lib/commands";
 import { useShellStore } from "./shellStore";
 
-/** The engine action names Simulate understands (mirrors `SimInput`). */
-export type SimAction = "left" | "right" | "jump";
-
 /**
- * Map a `KeyboardEvent.code` (physical key, layout-independent) to its engine
- * action, or `null` when the key isn't a Simulate control. Exported for tests
- * and so the mapping lives in exactly one place.
+ * The physical keys Simulate forwards, as `KeyboardEvent.code` values.
+ *
+ * A denylist rather than an allowlist, and that is the point: the backend owns
+ * the binding table, so this side must not decide which keys are "controls".
+ * The modifiers are excluded because they arrive as their own events and the
+ * engine's map spells them `Shift` / `AltLeft` / `Control` (see
+ * `keycode_to_code` in the player), which the backend resolves; forwarding the
+ * raw `ShiftLeft` alongside would be a second name for one key.
  */
-export function codeToAction(code: string): SimAction | null {
-  switch (code) {
-    case "ArrowLeft":
-    case "KeyA":
-      return "left";
-    case "ArrowRight":
-    case "KeyD":
-      return "right";
-    case "Space":
-    case "KeyW":
-      return "jump";
+export function simKeyCode(e: KeyboardEvent): string | null {
+  switch (e.code) {
+    case "ShiftLeft":
+    case "ShiftRight":
+      return "Shift";
+    case "ControlLeft":
+    case "ControlRight":
+      return "Control";
     default:
-      return null;
+      return e.code;
   }
 }
 
 // ── Module-local driver state (kept out of the store to avoid re-render churn
 //    on every keypress / frame; the store carries only what the UI reads). ────
 
-/** Currently-held engine actions. */
-const held = new Set<SimAction>();
+/** Currently-held physical keys, as the engine's `KeyboardEvent.code` names. */
+const held = new Set<string>();
 /** Active rAF handle, or null when the tick loop is stopped/paused. */
 let rafId: number | null = null;
 /** True while a `sim_tick` call is awaiting — the overlap guard. */
@@ -76,16 +76,16 @@ function onKeyDown(e: KeyboardEvent): void {
   // Don't hijack typing in a focused text field.
   const el = e.target instanceof HTMLElement ? e.target : null;
   if (el?.closest("input, textarea, [contenteditable]")) return;
-  const action = codeToAction(e.code);
-  if (!action) return;
+  const code = simKeyCode(e);
+  if (!code) return;
   // Stop Space from scrolling the shell while jumping.
   if (e.code === "Space") e.preventDefault();
-  held.add(action);
+  held.add(code);
 }
 
 function onKeyUp(e: KeyboardEvent): void {
-  const action = codeToAction(e.code);
-  if (action) held.delete(action);
+  const code = simKeyCode(e);
+  if (code) held.delete(code);
 }
 
 function installInput(): void {
@@ -306,6 +306,6 @@ export function __resetSimForTest(): void {
 }
 
 /** Test-only: the currently-held engine actions. */
-export function __heldActions(): SimAction[] {
+export function __heldActions(): string[] {
   return [...held];
 }
