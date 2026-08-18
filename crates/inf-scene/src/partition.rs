@@ -446,6 +446,11 @@ pub fn occupies_space(e: &RuntimeEntity) -> bool {
         || e.anim_state_machine.is_some()
         || e.root_motion.is_some()
         || e.attached_to.is_some()
+        // v23 (P29.3). A character with a movement component is somewhere and
+        // moves: an entity that this predicate answered "no" for would be sorted
+        // into the persistent cell as *unplaced*, which is the opposite of what a
+        // walking character is.
+        || e.character_movement.is_some()
 }
 
 /// Why this **single** entity would be persistent, ignoring its hierarchy.
@@ -1309,6 +1314,7 @@ mod tests {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 

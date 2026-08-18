@@ -696,6 +696,7 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
             ik_target,
             cloth_sim,
             hair_guides,
+            character_movement,
         } = e;
 
         let entity = world.spawn_with_guid(guid, &name, None);
@@ -873,6 +874,14 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
                 em.insert(c);
             }
             if let Some(c) = hair_guides {
+                em.insert(c);
+            }
+            // v23 (P29.3). It has a reader from the day it lands:
+            // `inf_physics::d3::step_character_movement` is the one fixed step
+            // both hosts call, and it queries for exactly this component — so a
+            // cooked pack that spawned the slot and never inserted it would be a
+            // character that cannot move, in the shipping build only.
+            if let Some(c) = character_movement {
                 em.insert(c);
             }
         }
@@ -2056,6 +2065,7 @@ mod tests {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         };
         parent.sprite = Some(Sprite {
             size: Vec2d::new(1.0, 1.0),

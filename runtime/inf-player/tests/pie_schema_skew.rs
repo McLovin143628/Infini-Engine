@@ -57,16 +57,21 @@ fn player_bin() -> PathBuf {
 
 /// **A v7 `ScenePayload`, field for field.**
 ///
-/// The real envelope is v8; v8's additions were `cloths` / `hairs` / `materials`
-/// / `textures`, all at the tail. So this is exactly what the previous build
-/// writes — the same fields in the same order, four short — and that is what
-/// makes it a *short read* rather than a value `check_version` could have
-/// refused.
+/// The real envelope is v9; v8's additions were `cloths` / `hairs` / `materials`
+/// / `textures`, all at the tail, and v9 added nothing. So this is what a
+/// pre-v8 build writes — the same fields in the same order, four short — and
+/// that is what makes it a *short read* rather than a value `check_version`
+/// could have refused.
 ///
-/// **Kept at exactly one version behind** (P26.3b): the fixture was the v6 shape
-/// while the wire was v7, and it stays one rung down as the wire moves, because
-/// "an editor built from the previous commit" is the skew a user actually hits
-/// and a two-rung gap could pass for a different failure.
+/// **Kept at the newest SHAPE that is genuinely short.** Through v8 that was
+/// also "exactly one version behind" (P26.3b), because every bump added fields.
+/// P29.3's v9 did not: it is a version-only bump recording that `level_bytes` is
+/// now a scene v23, so a v8-shaped payload has the **same field list** as v9 and
+/// would decode cleanly and be refused by `ScenePayload::check_version` — a
+/// different code path from the one this arm exists for. The fixture therefore
+/// stays at the v7 shape, which is still the newest one that produces a short
+/// read, and the two refusals are covered by two arms: this one for the decode
+/// fault, and `pie::tests::a_version_mismatch_is_refused_loudly` for the value.
 ///
 /// Hand-written rather than derived from the real type on purpose: a shadow
 /// struct generated from the current one would grow with it and stop being
@@ -87,8 +92,9 @@ struct StaleScenePayload {
     voxels: Vec<(Uuid, Vec<u8>)>,
     terrains: Vec<(Uuid, Vec<u8>)>,
     fractures: Vec<(Uuid, Vec<u8>)>,
-    /// v7's one addition, at the tail. Present here because this fixture is a
-    /// **v7** payload now — v8 is the current wire.
+    /// v7's one addition, at the tail. The last field this shape carries: v8's
+    /// four (`cloths` / `hairs` / `materials` / `textures`) are what make it a
+    /// short read, and v9 added none.
     meshes: Vec<(Uuid, Vec<u8>)>,
 }
 
@@ -109,9 +115,10 @@ enum StaleEditorToPlayer {
 
 fn stale_payload() -> StaleScenePayload {
     StaleScenePayload {
-        // A DECREMENTED version, as the ledger entry asks for. It is never read:
-        // the frame does not survive its own decode, which is the finding.
-        schema_version: inf_runtime::pie::SCENE_PAYLOAD_VERSION - 1,
+        // A version this build does not speak. It is never read: the frame does
+        // not survive its own decode, which is the finding. (It is no longer
+        // `CURRENT - 1` because v9 added no field — see the type's docs.)
+        schema_version: 7,
         label: "Stale".into(),
         level_bytes: Vec::new(),
         classes: Vec::new(),

@@ -1,6 +1,6 @@
-schema_version = 22
+schema_version = 23
 guid = "00000000-0000-0000-0000-000084160900"
 title = "Phase 16 World"
 entity_count = 22
-content_hash = "664d0b3e693541e6"
+content_hash = "5aa545a9846b7fb1"
 dependencies = ["00000000-0000-0000-0000-0000841609aa"]

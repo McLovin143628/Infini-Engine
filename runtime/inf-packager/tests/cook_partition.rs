@@ -86,6 +86,7 @@ fn rec(guid: u128, name: &str, at: (f64, f64)) -> inf_scene::RuntimeEntity {
         ik_target: None,
         cloth_sim: None,
         hair_guides: None,
+        character_movement: None,
     }
 }
 

@@ -138,7 +138,20 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   are the same wiring: without `materials` the level names materials nothing
 ///   can resolve, and without `textures` the derived records name textures with
 ///   no bytes behind them — the "two empty maps agreeing" hazard, twice.
-pub const SCENE_PAYLOAD_VERSION: u32 = 8;
+///
+/// * **v9** — P29.3, and it carries **no new slot at all**. The envelope's
+///   version is the *build contract* between the two processes, and this bump
+///   records that `level_bytes` is now a scene **v23** payload (the movement
+///   component).
+///
+///   That is a real refusal rather than bookkeeping. Without it, a v23 editor
+///   handing a stale v8 player a level would pass `check_version` -- the
+///   envelope is unchanged, after all -- and fail several layers deeper, in
+///   `inf_scene::decode`, with a message about a scene schema. The player's own
+///   refusal ("rebuild both from the same commit") is the one that names the
+///   actual fix, and it only fires if the envelope moves when the contract does.
+///   A version with no field behind it is exactly what an envelope is for.
+pub const SCENE_PAYLOAD_VERSION: u32 = 9;
 
 /// Upper bound on a single frame; anything larger means a desynced or
 /// corrupt stream and is treated as an error rather than an allocation. A

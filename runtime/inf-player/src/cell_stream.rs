@@ -1008,6 +1008,7 @@ mod tests {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         };
         e.visible = true;
         e

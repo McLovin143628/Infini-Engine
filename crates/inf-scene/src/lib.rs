@@ -55,9 +55,9 @@ pub use partition::{PartitionSettings, DEFAULT_CELL_SIZE_M};
 
 use inf_ecs::components::{
     AlwaysLoaded, AnimPlayer, AnimStateMachine, AttachedTo, AudioListener, AudioSource, BlendMode,
-    Buoyancy, Camera, CharacterController2D, CharacterController3D, ClothSim, Collider2D,
-    Collider3D, Decal, Destructible, Foliage, HairGuides, IkTarget, Joint2D, Joint3D, Light,
-    Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D, RigidBody3D,
+    Buoyancy, Camera, CharacterController2D, CharacterController3D, CharacterMovement, ClothSim,
+    Collider2D, Collider3D, Decal, Destructible, Foliage, HairGuides, IkTarget, Joint2D, Joint3D,
+    Light, Light2D, LightKind, Material, MeshRef, NineSlice, PcgVolume, RigidBody2D, RigidBody3D,
     RootMotion, SkeletalMesh, SkyAtmosphere, Spline, Sprite, StreamingSource, Terrain,
     TerrainLayer, Text2D, Tilemap, TimeOfDay, Transform, Volume, VoxelVolume, WaterBody,
 };
@@ -332,7 +332,21 @@ use uuid::Uuid;
 ///   The wire cost to a level with no material bindings is **one discriminant
 ///   byte per materialed entity**, the same price every additive field since v8
 ///   has paid.
-pub const SCHEMA_VERSION: u32 = 22;
+/// * **v23** — P29.3: the movement component. [`CharacterMovement`] is a new
+///   entity slot at the record's **tail**, which is the cheap rung of this
+///   ladder — the [`EntityRecordV10`] shape of bump rather than the
+///   [`EntityRecordV14`] one — so every frozen historical record above is
+///   byte-unchanged and only the live record grew. It carries a character's
+///   whole tunable set (per-gait speeds, the four curves keyed on normalized
+///   speed, air control, capsule heights, step height, the sprint gate, the
+///   slide and landing constants), its `MovementMode`, its `RotationMode` and
+///   its overlay id.
+///
+///   The slot is a **new component** rather than fields appended to
+///   `CharacterController3D` precisely because of the paragraph above: that
+///   struct appears inside eighteen frozen records across two mirrors, and
+///   growing it would mean freezing a copy of it into every one of them.
+pub const SCHEMA_VERSION: u32 = 23;
 
 /// File-level simulation settings (schema v3+), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -611,6 +625,11 @@ pub struct RuntimeEntity {
     /// Strand hair (reference + per-wearer knobs). Same story as `cloth_sim`.
     #[serde(default)]
     pub hair_guides: Option<HairGuides>,
+    /// **The movement component** (schema v23, P29.3): the character's tunable
+    /// set, its rotation mode, its overlay id and the mode it is in. The slot
+    /// this version exists for.
+    #[serde(default)]
+    pub character_movement: Option<CharacterMovement>,
 }
 
 /// A decoded level ready for the runtime to instantiate.
@@ -630,7 +649,7 @@ impl RuntimeLevel {
         decode(bytes)
     }
 
-    /// Encode to the **current** schema (v21) — a deterministic bincode payload.
+    /// Encode to the **current** schema (v23) — a deterministic bincode payload.
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode(self)
     }
@@ -667,12 +686,24 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v22 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v23 file layout (current). `entities` reuses [`RuntimeEntity`].
+#[derive(Serialize, Deserialize)]
+struct SceneFileV23 {
+    schema_version: u32,
+    title: String,
+    entities: Vec<RuntimeEntity>,
+    #[serde(default)]
+    settings: RuntimeSettings,
+}
+
+/// A frozen schema-v22 file layout. v23 did not touch [`RuntimeSettings`], so
+/// only `entities` is repointed at the frozen [`EntityRecordV22`] — the shape
+/// this file held as [`RuntimeEntity`] until v23 appended the movement slot.
 #[derive(Serialize, Deserialize)]
 struct SceneFileV22 {
     schema_version: u32,
     title: String,
-    entities: Vec<RuntimeEntity>,
+    entities: Vec<EntityRecordV22>,
     #[serde(default)]
     settings: RuntimeSettings,
 }
@@ -1458,6 +1489,7 @@ impl EntityRecordV1 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 }
@@ -1512,6 +1544,7 @@ impl EntityRecordV2 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 }
@@ -1566,6 +1599,7 @@ impl EntityRecordV3 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 }
@@ -1620,6 +1654,7 @@ impl EntityRecordV4 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 }
@@ -1674,6 +1709,7 @@ impl EntityRecordV5 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 }
@@ -1731,6 +1767,7 @@ impl EntityRecordV6 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 }
@@ -2060,6 +2097,7 @@ impl EntityRecordV7 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 }
@@ -2201,6 +2239,7 @@ impl EntityRecordV8 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 }
@@ -2341,6 +2380,7 @@ impl EntityRecordV9 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 }
@@ -2473,6 +2513,7 @@ impl EntityRecordV10 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 
@@ -2762,6 +2803,7 @@ impl EntityRecordV11 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 
@@ -3123,6 +3165,7 @@ impl EntityRecordV12 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 
@@ -3571,6 +3614,7 @@ impl EntityRecordV13 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 
@@ -3758,6 +3802,7 @@ impl EntityRecordV14 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 
@@ -3946,6 +3991,7 @@ impl EntityRecordV15 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 
@@ -4134,6 +4180,7 @@ impl EntityRecordV16 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 
@@ -4328,6 +4375,7 @@ impl EntityRecordV17 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 
@@ -4954,6 +5002,7 @@ impl EntityRecordV20 {
             ik_target: None,
             cloth_sim: None,
             hair_guides: None,
+            character_movement: None,
         }
     }
 
@@ -5008,6 +5057,218 @@ impl EntityRecordV20 {
             buoyancy: r.buoyancy,
             voxel_volume: r.voxel_volume,
             destructible: r.destructible,
+        }
+    }
+}
+
+/// A frozen schema-v22 entity record: every slot the live record had
+/// **before** P29.3 appended [`CharacterMovement`]. v23 is a pure tail
+/// append, so this differs from the live record by exactly one field and no
+/// component inside it changed shape — which is what makes the whole
+/// historical ladder byte-unchanged by this bump.
+///
+/// This is the shape [`RuntimeEntity`] used to hold as the live record.
+#[derive(Clone, Serialize, Deserialize)]
+struct EntityRecordV22 {
+    guid: Uuid,
+    name: String,
+    parent: Option<Uuid>,
+    transform: Transform,
+    visible: bool,
+    mesh: Option<MeshRef>,
+    material: Option<Material>,
+    light: Option<Light>,
+    camera: Option<Camera>,
+    #[serde(default)]
+    sprite: Option<Sprite>,
+    #[serde(default)]
+    tilemap: Option<Tilemap>,
+    #[serde(default)]
+    nine_slice: Option<NineSlice>,
+    #[serde(default)]
+    text2d: Option<Text2D>,
+    #[serde(default)]
+    light_2d: Option<Light2D>,
+    #[serde(default)]
+    rigid_body_2d: Option<RigidBody2D>,
+    #[serde(default)]
+    collider_2d: Option<Collider2D>,
+    #[serde(default)]
+    character_controller_2d: Option<CharacterController2D>,
+    #[serde(default)]
+    rigid_body_3d: Option<RigidBody3D>,
+    #[serde(default)]
+    collider_3d: Option<Collider3D>,
+    #[serde(default)]
+    character_controller_3d: Option<CharacterController3D>,
+    #[serde(default)]
+    actor: Option<Uuid>,
+    #[serde(default)]
+    terrain: Option<Terrain>,
+    #[serde(default)]
+    pcg_volume: Option<PcgVolume>,
+    #[serde(default)]
+    skeletal_mesh: Option<SkeletalMesh>,
+    #[serde(default)]
+    anim_player: Option<AnimPlayer>,
+    #[serde(default)]
+    anim_state_machine: Option<AnimStateMachine>,
+    #[serde(default)]
+    root_motion: Option<RootMotion>,
+    #[serde(default)]
+    attached_to: Option<AttachedTo>,
+    #[serde(default)]
+    joint_2d: Option<Joint2D>,
+    #[serde(default)]
+    joint_3d: Option<Joint3D>,
+    #[serde(default)]
+    audio_source: Option<AudioSource>,
+    #[serde(default)]
+    audio_listener: Option<AudioListener>,
+    #[serde(default)]
+    decal: Option<Decal>,
+    #[serde(default)]
+    volume: Option<Volume>,
+    #[serde(default)]
+    spline: Option<Spline>,
+    #[serde(default)]
+    foliage: Option<Foliage>,
+    #[serde(default)]
+    streaming_source: Option<StreamingSource>,
+    #[serde(default)]
+    always_loaded: Option<AlwaysLoaded>,
+    #[serde(default)]
+    time_of_day: Option<TimeOfDay>,
+    #[serde(default)]
+    sky_atmosphere: Option<SkyAtmosphere>,
+    #[serde(default)]
+    water_body: Option<WaterBody>,
+    #[serde(default)]
+    buoyancy: Option<Buoyancy>,
+    #[serde(default)]
+    voxel_volume: Option<VoxelVolume>,
+    #[serde(default)]
+    destructible: Option<Destructible>,
+    #[serde(default)]
+    ik_target: Option<IkTarget>,
+    #[serde(default)]
+    cloth_sim: Option<ClothSim>,
+    #[serde(default)]
+    hair_guides: Option<HairGuides>,
+}
+
+impl EntityRecordV22 {
+    /// Lift a frozen v22 record to the live (v23) [`RuntimeEntity`]. Every slot
+    /// carries through unchanged and the new one arrives empty: a pre-v23
+    /// level has no authored movement component, which is exactly what
+    /// `None` means here.
+    fn into_runtime(self) -> RuntimeEntity {
+        RuntimeEntity {
+            guid: self.guid,
+            name: self.name,
+            parent: self.parent,
+            transform: self.transform,
+            visible: self.visible,
+            mesh: self.mesh,
+            material: self.material,
+            light: self.light,
+            camera: self.camera,
+            sprite: self.sprite,
+            tilemap: self.tilemap,
+            nine_slice: self.nine_slice,
+            text2d: self.text2d,
+            light_2d: self.light_2d,
+            rigid_body_2d: self.rigid_body_2d,
+            collider_2d: self.collider_2d,
+            character_controller_2d: self.character_controller_2d,
+            rigid_body_3d: self.rigid_body_3d,
+            collider_3d: self.collider_3d,
+            character_controller_3d: self.character_controller_3d,
+            actor: self.actor,
+            terrain: self.terrain,
+            pcg_volume: self.pcg_volume,
+            skeletal_mesh: self.skeletal_mesh,
+            anim_player: self.anim_player,
+            anim_state_machine: self.anim_state_machine,
+            root_motion: self.root_motion,
+            attached_to: self.attached_to,
+            joint_2d: self.joint_2d,
+            joint_3d: self.joint_3d,
+            audio_source: self.audio_source,
+            audio_listener: self.audio_listener,
+            decal: self.decal,
+            volume: self.volume,
+            spline: self.spline,
+            foliage: self.foliage,
+            streaming_source: self.streaming_source,
+            always_loaded: self.always_loaded,
+            time_of_day: self.time_of_day,
+            sky_atmosphere: self.sky_atmosphere,
+            water_body: self.water_body,
+            buoyancy: self.buoyancy,
+            voxel_volume: self.voxel_volume,
+            destructible: self.destructible,
+            ik_target: self.ik_target,
+            cloth_sim: self.cloth_sim,
+            hair_guides: self.hair_guides,
+            character_movement: None,
+        }
+    }
+
+    /// Project a live [`RuntimeEntity`] back onto the frozen v22 shape (the
+    /// **downgrade-bless** path that regenerates the committed v22 fixture).
+    /// Only the movement component is lost, and it is asserted as a property
+    /// rather than as a field list by the downgrade arm.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn from_current(r: RuntimeEntity) -> Self {
+        Self {
+            guid: r.guid,
+            name: r.name,
+            parent: r.parent,
+            transform: r.transform,
+            visible: r.visible,
+            mesh: r.mesh,
+            material: r.material,
+            light: r.light,
+            camera: r.camera,
+            sprite: r.sprite,
+            tilemap: r.tilemap,
+            nine_slice: r.nine_slice,
+            text2d: r.text2d,
+            light_2d: r.light_2d,
+            rigid_body_2d: r.rigid_body_2d,
+            collider_2d: r.collider_2d,
+            character_controller_2d: r.character_controller_2d,
+            rigid_body_3d: r.rigid_body_3d,
+            collider_3d: r.collider_3d,
+            character_controller_3d: r.character_controller_3d,
+            actor: r.actor,
+            terrain: r.terrain,
+            pcg_volume: r.pcg_volume,
+            skeletal_mesh: r.skeletal_mesh,
+            anim_player: r.anim_player,
+            anim_state_machine: r.anim_state_machine,
+            root_motion: r.root_motion,
+            attached_to: r.attached_to,
+            joint_2d: r.joint_2d,
+            joint_3d: r.joint_3d,
+            audio_source: r.audio_source,
+            audio_listener: r.audio_listener,
+            decal: r.decal,
+            volume: r.volume,
+            spline: r.spline,
+            foliage: r.foliage,
+            streaming_source: r.streaming_source,
+            always_loaded: r.always_loaded,
+            time_of_day: r.time_of_day,
+            sky_atmosphere: r.sky_atmosphere,
+            water_body: r.water_body,
+            buoyancy: r.buoyancy,
+            voxel_volume: r.voxel_volume,
+            destructible: r.destructible,
+            ik_target: r.ik_target,
+            cloth_sim: r.cloth_sim,
+            hair_guides: r.hair_guides,
         }
     }
 }
@@ -5166,6 +5427,7 @@ impl EntityRecordV21 {
             ik_target: self.ik_target,
             cloth_sim: self.cloth_sim,
             hair_guides: self.hair_guides,
+            character_movement: None,
         }
     }
 
@@ -5541,8 +5803,22 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v22: {e}")))?;
             Ok(RuntimeLevel {
                 title: v22.title,
-                entities: v22.entities,
+                entities: v22
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV22::into_runtime)
+                    .collect(),
                 settings: v22.settings,
+            })
+        }
+        23 => {
+            let (v23, _): (SceneFileV23, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v23: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v23.title,
+                entities: v23.entities,
+                settings: v23.settings,
             })
         }
         // A refusal that names the wrong cause sends the user to the wrong fix
@@ -5560,9 +5836,9 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
     }
 }
 
-/// Encode a level to the current schema (v22) as a deterministic bincode payload.
+/// Encode a level to the current schema (v23) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV22 {
+    let file = SceneFileV23 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
@@ -5576,6 +5852,12 @@ pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    // P29.3: the movement component's own types. Reached through `inf_ecs`
+    // directly rather than re-exported from this crate's prelude, because the
+    // wire pin below re-declares the component and needs its field types by
+    // name, not the component itself.
+    use inf_ecs::components::{Gait, MovementMode, MovementRuntime, RotationMode, SpeedCurve};
 
     /// The workspace root, reachable from this crate at `crates/inf-scene`.
     fn workspace_root() -> PathBuf {
@@ -5654,7 +5936,7 @@ mod tests {
         let original = read_committed("samples/platformer-2d/Platformer.inf_lvl");
         assert_eq!(
             original[0], SCHEMA_VERSION as u8,
-            "committed platformer is the current schema (v13)"
+            "committed platformer is the current schema"
         );
         let level = RuntimeLevel::decode(&original).unwrap();
         let reencoded = level.encode().unwrap();
@@ -7442,7 +7724,8 @@ mod tests {
                         + BUOYANCY_SLOT_BYTES
                         + VOXEL_SLOT_BYTES
                         + DESTRUCTIBLE_SLOT_BYTES
-                        + CHARACTER_SLOT_BYTES)
+                        + CHARACTER_SLOT_BYTES
+                        + MOVEMENT_SLOT_BYTES)
                 + materialed * MATERIAL_BINDING_BYTES,
             "the one entity carrying an atmosphere grew by the physical block"
         );
@@ -7894,7 +8177,8 @@ mod tests {
                         + BUOYANCY_SLOT_BYTES
                         + VOXEL_SLOT_BYTES
                         + DESTRUCTIBLE_SLOT_BYTES
-                        + CHARACTER_SLOT_BYTES)
+                        + CHARACTER_SLOT_BYTES
+                        + MOVEMENT_SLOT_BYTES)
                 + materialed * MATERIAL_BINDING_BYTES,
             "the one entity carrying an atmosphere grew by the cloud block"
         );
@@ -8312,7 +8596,8 @@ mod tests {
                         + BUOYANCY_SLOT_BYTES
                         + VOXEL_SLOT_BYTES
                         + DESTRUCTIBLE_SLOT_BYTES
-                        + CHARACTER_SLOT_BYTES)
+                        + CHARACTER_SLOT_BYTES
+                        + MOVEMENT_SLOT_BYTES)
                 + materialed * MATERIAL_BINDING_BYTES,
             "the one entity carrying an atmosphere grew by the weather block"
         );
@@ -8884,7 +9169,7 @@ mod tests {
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {
         assert_eq!(
-            SCHEMA_VERSION, 22,
+            SCHEMA_VERSION, 23,
             "the scene schema moved. Generation-1 frozen tiles (TerrainTileFrozenV1, via \
              TerrainV14) cover .inf_lvl v1..=v14, generation-2 (TerrainTileFrozenV2, via \
              TerrainV15) covers v15, and generation-3 (TerrainTileFrozenV3, which \
@@ -9898,8 +10183,8 @@ mod tests {
         // is what makes the line above a price rather than a coincidence.
         assert_eq!(
             solid_bytes.len(),
-            v20_bytes.len() + CHARACTER_SLOT_BYTES,
-            "the v21 slots must cost exactly three discriminant bytes"
+            v20_bytes.len() + CHARACTER_SLOT_BYTES + MOVEMENT_SLOT_BYTES,
+            "the v21 slots must cost exactly three discriminant bytes, and v23's one"
         );
 
         // …and the whole component round-trips through the live codec, which is
@@ -10160,8 +10445,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             live.len(),
-            frozen.len() + CHARACTER_SLOT_BYTES,
-            "the three v21 slots must cost exactly one discriminant byte each"
+            frozen.len() + CHARACTER_SLOT_BYTES + MOVEMENT_SLOT_BYTES,
+            "the three v21 slots must cost exactly one discriminant byte each, \
+             and v23's movement slot one more"
         );
 
         // A record that CARRIES them costs more than its own discriminants —
@@ -10244,26 +10530,86 @@ mod tests {
         asset: Option<Uuid>,
     }
 
-    /// One entity as the v22 wire lays it out: the frozen 44-field record **with
-    /// its material slot re-declared above**, then the three tails P24.3
-    /// appended. A `type` because clippy counts the tuple's nesting, and because
-    /// naming it says what it is.
-    type V22EntityWire = (
+    /// **`CharacterMovement`, re-declared independently** for the v23 wire pin.
+    ///
+    /// The `MaterialV22Wire` idiom: a shape that is NOT the live struct, so a
+    /// field appended to the component without a schema bump leaves bytes this
+    /// declaration cannot account for. The live `runtime` field is absent
+    /// because it is `#[serde(skip)]` -- and that absence is itself pinned: if
+    /// the skip were ever removed, the byte-consumption check below fails.
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct CharacterMovementWire {
+        mode: MovementMode,
+        gait: Gait,
+        rotation_mode: RotationMode,
+        overlay: String,
+        player_controlled: bool,
+        walk_speed_mps: f64,
+        run_speed_mps: f64,
+        sprint_speed_mps: f64,
+        crouch_speed_mps: f64,
+        prone_speed_mps: f64,
+        swim_surface_speed_mps: f64,
+        swim_under_speed_mps: f64,
+        looking_speed_scale: f64,
+        aiming_speed_scale: f64,
+        acceleration: SpeedCurve,
+        braking: SpeedCurve,
+        ground_friction: SpeedCurve,
+        rotation_rate: SpeedCurve,
+        air_control: f64,
+        air_control_reduced: f64,
+        air_accel_max_mps2: f64,
+        terminal_velocity_mps: f64,
+        gravity_mps2: f64,
+        jump_speed_mps: f64,
+        stand_half_height_m: f64,
+        crouch_half_height_m: f64,
+        prone_half_height_m: f64,
+        step_height_m: f64,
+        step_min_width_m: f64,
+        slope_limit_deg: f64,
+        slide_slope_deg: f64,
+        sprint_input_min: f64,
+        sprint_angle_deg: f64,
+        slide_entry_speed_mps: f64,
+        slide_exit_speed_mps: f64,
+        slide_friction_flat: f64,
+        slide_friction_slope: f64,
+        roll_speed_mps: f64,
+        roll_time_s: f64,
+        dive_speed_mps: f64,
+        dive_up_speed_mps: f64,
+        land_hard_mps: f64,
+        land_ragdoll_mps: f64,
+        brake_friction_input: f64,
+        brake_friction_idle: f64,
+        land_friction_time_s: f64,
+    }
+
+    /// One entity as the v23 wire lays it out: the frozen 44-field record **with
+    /// its material slot re-declared above**, the three tails P24.3 appended,
+    /// and P29.3's movement slot **re-declared field-for-field**. A `type`
+    /// because clippy counts the tuple's nesting, and because naming it says
+    /// what it is.
+    type V23EntityWire = (
         EntityRecordV20Gen<MaterialV22Wire>,
         Option<IkTarget>,
         Option<ClothSim>,
         Option<HairGuides>,
+        Option<CharacterMovementWire>,
     );
 
-    /// The live entity plus one appended slot — the shadow v23's entity.
+    /// The live entity plus one appended slot — the shadow v24's entity.
     ///
     /// Serialized from the **live** record rather than reassembled from frozen
     /// parts, because the shadow's only job is to produce bytes that carry one
     /// slot more than the current wire; reassembling it would make the fixture
     /// depend on the very downgrade the pin is meant to be independent of.
-    type V23EntityShadow<'a> = (&'a RuntimeEntity, Option<u8>);
+    type V24EntityShadow<'a> = (&'a RuntimeEntity, Option<u8>);
 
-    /// **The v22 wire shape, pinned against an INDEPENDENT declaration.**
+    /// **The v23 wire shape, pinned against an INDEPENDENT declaration.**
     ///
     /// The `SkeletonAssetV2Wire` idiom (`inf-anim`), applied to the scene. The
     /// pair this replaces proved nothing: one encoded *and* decoded with
@@ -10283,25 +10629,25 @@ mod tests {
     /// `Material` without a bump shifts every byte after it, which is the case
     /// v22 itself is.
     #[derive(serde::Deserialize)]
-    struct SceneFileV22Wire {
+    struct SceneFileV23Wire {
         schema_version: u32,
         title: String,
-        entities: Vec<V22EntityWire>,
+        entities: Vec<V23EntityWire>,
         settings: RuntimeSettings,
     }
 
-    /// A **shadow v23** — the live wire plus one appended tail slot, exactly
+    /// A **shadow v24** — the live wire plus one appended tail slot, exactly
     /// what an author adding a component would write.
     #[derive(serde::Serialize)]
-    struct SceneFileV23Shadow<'a> {
+    struct SceneFileV24Shadow<'a> {
         schema_version: u32,
         title: &'a str,
-        entities: Vec<V23EntityShadow<'a>>,
+        entities: Vec<V24EntityShadow<'a>>,
         settings: RuntimeSettings,
     }
 
     #[test]
-    fn the_v22_wire_shape_is_pinned_against_an_independent_declaration() {
+    fn the_v23_wire_shape_is_pinned_against_an_independent_declaration() {
         let bound = Uuid::from_u128(0x00FA_7E12);
         let level = RuntimeLevel {
             title: "Pinned".into(),
@@ -10314,6 +10660,7 @@ mod tests {
                     ik_target: Some(v21_fixture_ik_target()),
                     cloth_sim: Some(v21_fixture_cloth()),
                     hair_guides: Some(v21_fixture_hair()),
+                    character_movement: Some(v23_fixture_movement()),
                     ..v9_rec(Uuid::from_u128(0xFD10), "Hero", None).into_runtime()
                 },
                 v9_rec(Uuid::from_u128(0xFD11), "Prop", None).into_runtime(),
@@ -10322,9 +10669,9 @@ mod tests {
         };
         let bytes = encode(&level).unwrap();
 
-        let (wire, consumed): (SceneFileV22Wire, usize) =
+        let (wire, consumed): (SceneFileV23Wire, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode_config())
-                .expect("the pinned v22 shape decodes the v22 wire");
+                .expect("the pinned v23 shape decodes the v23 wire");
         assert_eq!(
             consumed,
             bytes.len(),
@@ -10357,7 +10704,15 @@ mod tests {
             wire.entities[0].3.is_some(),
             "the HairGuides is not in slot 47"
         );
+        assert!(
+            wire.entities[0].4.is_some(),
+            "the CharacterMovement is not in slot 48"
+        );
         assert!(wire.entities[1].1.is_none() && wire.entities[1].3.is_none());
+        assert!(
+            wire.entities[1].4.is_none(),
+            "and an entity without one really has none"
+        );
         let _ = &wire.title;
         let _ = &wire.settings;
     }
@@ -10386,9 +10741,9 @@ mod tests {
             ],
             settings: RuntimeSettings::default(),
         };
-        let v22 = encode(&level).unwrap();
-        let v23 = bincode::serde::encode_to_vec(
-            &SceneFileV23Shadow {
+        let v23 = encode(&level).unwrap();
+        let v24 = bincode::serde::encode_to_vec(
+            &SceneFileV24Shadow {
                 schema_version: SCHEMA_VERSION,
                 title: &level.title,
                 entities: vec![(&level.entities[0], Some(7u8))],
@@ -10405,8 +10760,8 @@ mod tests {
         })
         .unwrap();
         assert!(
-            v23.len() > one_entity.len(),
-            "the shadow v23 is not longer than v22, so nothing was appended and \
+            v24.len() > one_entity.len(),
+            "the shadow v24 is not longer than v23, so nothing was appended and \
              this test is measuring nothing"
         );
         // 2. …and the pinned v22 shape CANNOT READ THEM AT ALL.
@@ -10419,19 +10774,19 @@ mod tests {
         // needs a version bump rather than a `#[serde(default)]`, and it is the
         // failure this pin exists to produce.
         let err =
-            bincode::serde::decode_from_slice::<SceneFileV22Wire, _>(&v23, bincode_config()).err();
+            bincode::serde::decode_from_slice::<SceneFileV23Wire, _>(&v24, bincode_config()).err();
         assert!(
             err.is_some(),
-            "the pinned v22 shape read a payload with an extra entity slot as if nothing had changed — the shape pin has no forcing function at all"
+            "the pinned v23 shape read a payload with an extra entity slot as if nothing had changed — the shape pin has no forcing function at all"
         );
         // …and the SAME bytes minus the appended slot decode cleanly, so the
         // refusal above is the slot's doing and not a broken fixture.
         assert!(
-            bincode::serde::decode_from_slice::<SceneFileV22Wire, _>(&one_entity, bincode_config())
+            bincode::serde::decode_from_slice::<SceneFileV23Wire, _>(&one_entity, bincode_config())
                 .is_ok(),
             "the control payload does not decode either — the fixture is wrong, not the pin"
         );
-        let _ = v22;
+        let _ = v23;
     }
 
     // ── v22 the persisted material binding (P26.3b) ───────────────────────
@@ -10667,15 +11022,16 @@ mod tests {
         };
         assert_eq!(
             live(&materialed).len(),
-            frozen(&materialed).len() + MATERIAL_BINDING_BYTES,
+            frozen(&materialed).len() + MATERIAL_BINDING_BYTES + MOVEMENT_SLOT_BYTES,
             "the v22 binding must cost exactly one discriminant byte on a \
-             materialed entity"
+             materialed entity (and v23's slot one more, since `live` is v23)"
         );
         assert_eq!(
             live(&bare).len(),
-            frozen(&bare).len(),
+            frozen(&bare).len() + MOVEMENT_SLOT_BYTES,
             "an entity with no Material must pay nothing for v22 — the field is \
-             inside the component, not on the entity record"
+             inside the component, not on the entity record — and exactly one \
+             byte for v23, whose slot is on the record"
         );
 
         // A record that CARRIES a binding costs more than its discriminant.
@@ -10733,11 +11089,272 @@ mod tests {
         assert_eq!(decode(&cleared_bytes).unwrap(), cleared);
     }
 
+    // ── v23 the movement component (P29.3) ────────────────────────────────
+
+    /// What the v23 slot costs an entity with no movement component: one
+    /// `Option` discriminant, and nothing else. Unlike v22's binding it is on
+    /// the **record**, not inside a component, so every entity pays it.
+    const MOVEMENT_SLOT_BYTES: usize = 1;
+
+    /// The movement component the v23 arms author — deliberately non-default in
+    /// every family of field (a mode, a gait, a rotation mode, an overlay name,
+    /// a speed, a curve, a capsule height, a threshold), so "it round-trips" is
+    /// a measurement rather than a statement about `Default`.
+    fn v23_fixture_movement() -> CharacterMovement {
+        CharacterMovement {
+            mode: MovementMode::Crouch,
+            gait: Gait::Sprint,
+            rotation_mode: RotationMode::Aiming,
+            overlay: "rifle".into(),
+            player_controlled: true,
+            walk_speed_mps: 1.25,
+            sprint_speed_mps: 7.5,
+            acceleration: SpeedCurve::new(1.0, 2.0, 3.0, 4.0),
+            crouch_half_height_m: 0.28,
+            step_height_m: 0.35,
+            land_ragdoll_mps: 11.5,
+            ..CharacterMovement::default()
+        }
+    }
+
+    /// Rebuild the exact schema-v22 file the committed v22 fixture was generated
+    /// from, out of the frozen v22 record type (the provenance lock).
+    ///
+    /// Built by lifting the **v21** reference one rung and then authoring the
+    /// binding v22 added, so the field list can never drift from the ladder.
+    fn v22_scene_reference() -> SceneFileV22 {
+        let v21 = v21_scene_reference();
+        let mut entities: Vec<EntityRecordV22> = v21
+            .entities
+            .into_iter()
+            .map(|e| EntityRecordV22::from_current(e.into_runtime()))
+            .collect();
+        // The material binding is what only v22 could write.
+        let hero = entities
+            .iter_mut()
+            .find(|e| e.name == "Cube")
+            .expect("the v21 fixture has a Cube");
+        if let Some(m) = hero.material.as_mut() {
+            m.asset = Some(v22_fixture_material_binding());
+        }
+        SceneFileV22 {
+            schema_version: 22,
+            title: "V22 Fixture Level".into(),
+            entities,
+            settings: v21.settings,
+        }
+    }
+
+    /// Regenerate `tests/fixtures/scene_v22.inf_lvl` — the **downgrade-bless**
+    /// path, walked only under `INF_BLESS_FIXTURES=1`.
+    #[test]
+    fn bless_scene_v22_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v22_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 22);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v22.inf_lvl");
+        std::fs::write(&path, &bytes).unwrap();
+        eprintln!("blessed {} ({} bytes)", path.display(), bytes.len());
+    }
+
+    #[test]
+    fn v22_fixture_is_reproducible_and_genuinely_v22() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v22.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v22 fixture present");
+        assert_eq!(bytes[0], 22, "fixture must be a genuine schema-v22 payload");
+        let rebuilt =
+            bincode::serde::encode_to_vec(v22_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v22 fixture must match our frozen v22 writer"
+        );
+    }
+
+    /// A committed **v22** payload still loads, keeps everything v22 could
+    /// express — its hero's IK, garment, hair and material binding — and lifts
+    /// with **no movement component**, which is exactly what a v22 level was.
+    /// The "old bytes load forever" gate for the v23 bump.
+    #[test]
+    fn v22_loads_and_lifts_without_a_movement_component() {
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v22.inf_lvl"),
+        )
+        .expect("committed v22 fixture present");
+        assert_eq!(bytes[0], 22);
+        let level = decode(&bytes).expect("a v22 level decodes");
+        assert!(!level.entities.is_empty());
+        // Nothing in a v22 file could have authored one.
+        for e in &level.entities {
+            assert!(
+                e.character_movement.is_none(),
+                "{} arrived with a movement component out of a v22 file",
+                e.name
+            );
+        }
+        // …and everything v22 COULD express survived the hop, or "it loads"
+        // would be satisfied by a decoder that dropped the payload.
+        let hero = level
+            .entities
+            .iter()
+            .find(|e| e.name == "Cube")
+            .expect("the fixture's hero");
+        assert!(hero.ik_target.is_some(), "the v21 IK survived");
+        assert!(hero.cloth_sim.is_some(), "the v21 garment survived");
+        assert!(hero.hair_guides.is_some(), "the v21 hair survived");
+        assert_eq!(
+            hero.material.and_then(|m| m.asset),
+            Some(v22_fixture_material_binding()),
+            "the v22 material binding survived"
+        );
+        // Re-encoding stamps the CURRENT version — the lift is a real upgrade.
+        let re = encode(&level).unwrap();
+        assert_eq!(re[0], SCHEMA_VERSION as u8);
+        assert_eq!(decode(&re).unwrap(), level);
+    }
+
+    /// The **downgrade** direction: projecting a live record onto the frozen v22
+    /// shape loses the movement component and **nothing else**.
+    ///
+    /// Asserted as a property — everything else compared field-for-field through
+    /// the struct's own `PartialEq` — rather than as a hand-written field list,
+    /// which is the only version of this claim that cannot rot.
+    #[test]
+    fn v22_entity_downgrade_is_lossless_except_for_the_movement_component() {
+        let live = RuntimeEntity {
+            character_movement: Some(v23_fixture_movement()),
+            ik_target: Some(v21_fixture_ik_target()),
+            cloth_sim: Some(v21_fixture_cloth()),
+            hair_guides: Some(v21_fixture_hair()),
+            material: Some(Material {
+                asset: Some(v22_fixture_material_binding()),
+                ..Material::default()
+            }),
+            ..v9_rec(Uuid::from_u128(0xFD22), "Hero", None).into_runtime()
+        };
+        let back = EntityRecordV22::from_current(live.clone()).into_runtime();
+        assert_eq!(
+            back.character_movement, None,
+            "a v22 record cannot carry a movement component"
+        );
+        assert_eq!(
+            RuntimeEntity {
+                character_movement: live.character_movement.clone(),
+                ..back
+            },
+            live,
+            "the v22 downgrade lost something other than the movement component"
+        );
+    }
+
+    /// **The v23 price, isolated.** Every entity pays exactly one discriminant
+    /// byte, and an entity that carries a component pays more than that.
+    ///
+    /// Measured as a delta between the frozen v22 and live v23 encodings of the
+    /// very same record, so it is a *price* rather than an absolute that could
+    /// silently absorb a later bump's growth (the P22.2 lesson).
+    #[test]
+    fn v23_costs_one_byte_per_entity() {
+        let plain = v9_rec(Uuid::from_u128(0xFC03), "Marker", None).into_runtime();
+        let live = |e: &RuntimeEntity| {
+            encode(&RuntimeLevel {
+                title: "t".into(),
+                entities: vec![e.clone()],
+                settings: RuntimeSettings::default(),
+            })
+            .unwrap()
+        };
+        let frozen = |e: &RuntimeEntity| {
+            bincode::serde::encode_to_vec(
+                &SceneFileV22 {
+                    schema_version: 22,
+                    title: "t".into(),
+                    entities: vec![EntityRecordV22::from_current(e.clone())],
+                    settings: RuntimeSettings::default(),
+                },
+                bincode_config(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            live(&plain).len(),
+            frozen(&plain).len() + MOVEMENT_SLOT_BYTES,
+            "the v23 slot must cost exactly one discriminant byte on an entity \
+             that has no movement component"
+        );
+
+        // A record that CARRIES one costs a great deal more than its
+        // discriminant — a ~46-field tunable block — so the byte above really is
+        // the empty slot and not the component.
+        let moving = RuntimeEntity {
+            character_movement: Some(v23_fixture_movement()),
+            ..plain.clone()
+        };
+        assert!(
+            live(&moving).len() > live(&plain).len() + 100,
+            "a carried movement component is {} bytes, which is not a tunable set",
+            live(&moving).len() - live(&plain).len()
+        );
+    }
+
+    /// The v23 addition round-trips through the whole codec — including the
+    /// **new decode arm**, which only a payload stamped v23 exercises.
+    #[test]
+    fn v23_movement_component_round_trips_through_the_codec() {
+        let level = RuntimeLevel {
+            title: "Locomotion".into(),
+            entities: vec![RuntimeEntity {
+                character_movement: Some(v23_fixture_movement()),
+                ..v9_rec(Uuid::from_u128(0xFB03), "Hero", None).into_runtime()
+            }],
+            settings: RuntimeSettings::default(),
+        };
+        let bytes = encode(&level).unwrap();
+        assert_eq!(bytes[0], SCHEMA_VERSION as u8);
+        let back = decode(&bytes).unwrap();
+        assert_eq!(back, level);
+        assert_eq!(
+            encode(&back).unwrap(),
+            bytes,
+            "re-encoding is byte-identical"
+        );
+
+        // Every family of field survived — a hop that kept the mode and
+        // defaulted the curves would still round-trip the entity count.
+        let m = back.entities[0]
+            .character_movement
+            .clone()
+            .expect("the movement component");
+        assert_eq!(m.mode, MovementMode::Crouch);
+        assert_eq!(m.gait, Gait::Sprint);
+        assert_eq!(m.rotation_mode, RotationMode::Aiming);
+        assert_eq!(m.overlay, "rifle");
+        assert!(m.player_controlled);
+        assert_eq!(m.walk_speed_mps, 1.25);
+        assert_eq!(m.acceleration, SpeedCurve::new(1.0, 2.0, 3.0, 4.0));
+        assert_eq!(m.crouch_half_height_m, 0.28);
+        assert_eq!(m.step_height_m, 0.35);
+        assert_eq!(m.land_ragdoll_mps, 11.5);
+        // The live runtime is `#[serde(skip)]`, so it comes back at rest however
+        // the writer left it — the property the wire pin's absent field asserts
+        // from the other side.
+        assert_eq!(m.runtime, MovementRuntime::default());
+
+        // Clearing the component really changes the bytes, so the slot is on the
+        // wire and not merely in the struct.
+        let mut cleared = level.clone();
+        cleared.entities[0].character_movement = None;
+        let cleared_bytes = encode(&cleared).unwrap();
+        assert_ne!(cleared_bytes, bytes);
+        assert_eq!(decode(&cleared_bytes).unwrap(), cleared);
+    }
+
     /// A payload from a **newer** build is refused by name, with both versions in
     /// the message — the [`SceneError::SchemaTooNew`] doctrine, re-checked at the
     /// new ceiling.
     #[test]
-    fn a_v23_payload_is_refused_by_name() {
+    fn a_v24_payload_is_refused_by_name() {
         let level = RuntimeLevel {
             title: "Future".into(),
             entities: vec![v9_rec(Uuid::from_u128(0xFF01), "A", None).into_runtime()],
