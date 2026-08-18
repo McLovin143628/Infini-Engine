@@ -9,30 +9,40 @@
 //! alone), matching [`crate::pose`] — no globals, no allocation-order surprises,
 //! so it can move onto the parallel pose hot loop later without a rewrite.
 //!
-//! # Phase synchronization (v1)
+//! # Phase synchronization
 //!
 //! When two locomotion clips of *different* lengths blend (a 1 s walk vs. a
 //! 0.6 s run), sampling both at the same absolute second would let their feet
-//! drift out of step and slide. v1 therefore blends by **normalized phase**: a
-//! single phase `φ ∈ [0,1)` is derived from the play-head `t` against the
-//! weight-blended duration of the contributing clips, and each clip is sampled
-//! at `φ · clip.duration`. The gait cycles stay locked regardless of clip
-//! length. (A per-clip sync-marker scheme — aligning specific foot-plant events
-//! rather than uniform phase — is the documented follow-up.)
+//! drift out of step and slide. v1 blends by **normalized phase**: a single phase
+//! `φ ∈ [0,1)` is derived from the play-head `t` against the weight-blended
+//! duration of the contributing clips, and each clip is sampled at
+//! `φ · clip.duration`. The gait cycles stay locked regardless of clip length.
 //!
-//! # 2D weighting (v1)
+//! **P29.2 adds the marker scheme that v1's docs deferred.** When every
+//! contributing clip carries markers in a common sync group
+//! ([`crate::sync`], `.inf_anim` v2), the followers are sampled at the time that
+//! puts them at the *same point between the same two named events* as the
+//! highest-weight contributor, instead of at the same fraction of their own
+//! length. Uniform phase remains the answer for clips without markers, so no
+//! committed content moved when this landed.
 //!
-//! True 2D blend spaces triangulate the sample points (Delaunay) and
-//! barycentrically weight the enclosing triangle. v1 ships the simpler
-//! **inverse-distance weighting of the `k = 3` nearest** samples: robust,
-//! allocation-light, exact at a sample, and good enough for aim/locomotion
-//! grids. The Delaunay upgrade is a seam left for later (swap
-//! [`blend_weights_2d`] for a triangulator; the sampling path is unchanged).
+//! # 2D weighting
+//!
+//! v1 shipped **inverse-distance weighting of the `k = 3` nearest** samples and
+//! named the Delaunay upgrade as the seam to swap. P29.2 swaps it: the samples are
+//! triangulated ([`crate::delaunay`]) and the query takes the **barycentric**
+//! weights of the triangle it is inside, which is the unique affine weighting and
+//! — unlike IDW — gives zero weight to every sample that is not a corner of that
+//! triangle. Outside the hull the query projects onto the nearest hull edge (two
+//! samples); a set with no area at all (one point, two points, or a collinear row)
+//! interpolates along its own line, which is the 1D rule and the only meaningful
+//! one there.
 
 use glam::DVec2;
 use serde::{Deserialize, Serialize};
 
 use crate::clip::AnimClip;
+use crate::delaunay::{barycentric, triangulate};
 use crate::pose::{blend_poses, sample_clip, Pose};
 use crate::skeleton::Skeleton;
 
@@ -154,38 +164,163 @@ pub fn blend_weights_1d(space: &BlendSpace1D, param: f64) -> Vec<(usize, f64)> {
     vec![(first, 1.0)]
 }
 
-/// The weighted contribution of each 2D sample at `params`: inverse-distance
-/// weighting of the `k = 3` nearest samples, normalized to sum to 1 (empty if
-/// there are no entries). An exact hit on a sample returns it alone.
+/// The weighted contribution of each 2D sample at `params`: the **barycentric**
+/// weights of the Delaunay triangle containing the query, normalized to sum to 1
+/// (empty if there are no entries). An exact hit on a sample returns it alone.
+///
+/// See [`weights_2d`] for the three cases and why each is what it is; this is
+/// that function over a [`BlendSpace2D`]'s entries.
 pub fn blend_weights_2d(space: &BlendSpace2D, params: DVec2) -> Vec<(usize, f64)> {
-    let n = space.entries.len();
+    let points: Vec<DVec2> = space
+        .entries
+        .iter()
+        .map(|e| DVec2::new(e.pos[0], e.pos[1]))
+        .collect();
+    weights_2d(&points, params)
+}
+
+/// How far outside a triangle a query may sit and still count as inside it.
+///
+/// Barycentric coordinates are dimensionless, so this is an absolute tolerance
+/// and not a relative one. It exists for the query that lands exactly on a shared
+/// edge: without it, floating-point noise can put such a point outside *both*
+/// neighbours and send it down the hull-projection path, which answers correctly
+/// but is a different code path for a point that is plainly interior.
+const INSIDE_EPS: f64 = 1e-9;
+
+/// The barycentric weighting of a 2D sample set at `q`, as `(index, weight)`
+/// pairs summing to 1.
+///
+/// Three cases, in order:
+///
+/// 1. **Exactly at a sample** (within [`EXACT_EPS`]) — that sample alone. Ties go
+///    to the lowest index, so a duplicated position is deterministic.
+/// 2. **Inside the hull** — the containing triangle's barycentric weights.
+///    Triangles are scanned in the triangulation's canonical order and the first
+///    containing one wins, which matters only on a shared edge, where both give
+///    the same answer.
+/// 3. **Outside the hull, or a set with no area** — the nearest point on the
+///    boundary. For a triangulated set that is the nearest hull *edge*, projected
+///    and clamped, so a query beyond a corner collapses to that corner. For a set
+///    with no triangulation at all (one point, two points, a collinear row) it is
+///    the same rule applied to the row itself: project onto the dominant
+///    direction and bracket, which is exactly [`blend_weights_1d`] and the only
+///    meaningful reading of a blend space with no area.
+pub fn weights_2d(points: &[DVec2], q: DVec2) -> Vec<(usize, f64)> {
+    let n = points.len();
     if n == 0 {
         return Vec::new();
     }
-    // (index, squared distance), nearest first.
-    let mut dists: Vec<(usize, f64)> = space
-        .entries
-        .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let d = DVec2::new(e.pos[0], e.pos[1]) - params;
-            (i, d.length_squared())
-        })
-        .collect();
-    dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Exact (or near-exact) hit → that sample alone.
-    if dists[0].1 <= EXACT_EPS * EXACT_EPS {
-        return vec![(dists[0].0, 1.0)];
+    // 1. Exact hit — scanned in index order so the lowest index wins a tie.
+    let mut nearest = (usize::MAX, f64::INFINITY);
+    for (i, p) in points.iter().enumerate() {
+        let d2 = (*p - q).length_squared();
+        if d2 < nearest.1 {
+            nearest = (i, d2);
+        }
+    }
+    if nearest.0 == usize::MAX {
+        // Every point was non-finite; nothing can be said.
+        return Vec::new();
+    }
+    if nearest.1 <= EXACT_EPS * EXACT_EPS {
+        return vec![(nearest.0, 1.0)];
     }
 
-    let k = dists.len().min(3);
-    let raw: Vec<(usize, f64)> = dists[..k].iter().map(|&(i, d2)| (i, 1.0 / d2)).collect();
-    let total: f64 = raw.iter().map(|&(_, w)| w).sum();
-    if total <= 0.0 {
-        return vec![(dists[0].0, 1.0)];
+    // 2. Inside a triangle.
+    let tri = triangulate(points);
+    for t in &tri.triangles {
+        let Some(w) = barycentric(points[t[0]], points[t[1]], points[t[2]], q) else {
+            continue;
+        };
+        if w.iter().all(|x| *x >= -INSIDE_EPS) {
+            let clamped = [w[0].max(0.0), w[1].max(0.0), w[2].max(0.0)];
+            let total: f64 = clamped.iter().sum();
+            if total > 0.0 {
+                let mut out: Vec<(usize, f64)> = t
+                    .iter()
+                    .zip(clamped)
+                    .filter(|(_, x)| *x > 0.0)
+                    .map(|(i, x)| (*i, x / total))
+                    .collect();
+                out.sort_by_key(|(i, _)| *i);
+                return out;
+            }
+        }
     }
-    raw.into_iter().map(|(i, w)| (i, w / total)).collect()
+
+    // 3. Outside the hull, or no hull at all.
+    let edges: Vec<[usize; 2]> = if tri.hull.is_empty() {
+        chain_edges(points)
+    } else {
+        tri.hull.clone()
+    };
+    let mut best: Option<([usize; 2], f64, f64)> = None; // (edge, t, distance²)
+    for e in edges {
+        let (a, b) = (points[e[0]], points[e[1]]);
+        let ab = b - a;
+        let len2 = ab.length_squared();
+        let t = if len2 > 0.0 {
+            ((q - a).dot(ab) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let d2 = (a + ab * t - q).length_squared();
+        if best.as_ref().is_none_or(|(_, _, bd)| d2 < *bd) {
+            best = Some((e, t, d2));
+        }
+    }
+    match best {
+        Some((e, t, _)) => {
+            let mut out = Vec::with_capacity(2);
+            if 1.0 - t > 0.0 {
+                out.push((e[0], 1.0 - t));
+            }
+            if t > 0.0 {
+                out.push((e[1], t));
+            }
+            out.sort_by_key(|(i, _)| *i);
+            out
+        }
+        // One usable point, or none but the nearest: it takes everything.
+        None => vec![(nearest.0, 1.0)],
+    }
+}
+
+/// The consecutive pairs of a point set with **no area**, ordered along its own
+/// dominant direction — the "hull" of a collinear row.
+///
+/// Sorting by the wider of the two axes (ties to X, then to the original index)
+/// makes this a property of the point set rather than of the order it arrived in,
+/// and reduces to [`blend_weights_1d`]'s rule when the row is an axis.
+fn chain_edges(points: &[DVec2]) -> Vec<[usize; 2]> {
+    let n = points.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let (mut lo, mut hi) = (points[0], points[0]);
+    for p in points {
+        if p.is_finite() {
+            lo = lo.min(*p);
+            hi = hi.max(*p);
+        }
+    }
+    let extent = hi - lo;
+    let by_x = extent.x >= extent.y;
+    let key = |p: DVec2| if by_x { (p.x, p.y) } else { (p.y, p.x) };
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        let (ka, kb) = (key(points[a]), key(points[b]));
+        ka.0
+            .partial_cmp(&kb.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                ka.1.partial_cmp(&kb.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.cmp(&b))
+    });
+    order.windows(2).map(|w| [w[0], w[1]]).collect()
 }
 
 /// Incrementally blend a set of `(pose, weight)` contributions into one pose.
@@ -230,12 +365,24 @@ fn sample_weighted<'c>(
     } else {
         0.0
     };
+    let uniform: Vec<f32> = resolved
+        .iter()
+        .map(|(c, _)| (phase * c.duration as f64) as f32)
+        .collect();
+    // **Marker warping, when the content supports it** (P29.2). The leader keeps
+    // its uniform time — so the cycle's rate still comes from the blended duration
+    // — and the followers are moved onto its marker phase. `None` when the clips
+    // do not share a usable sync group, which is every clip written before
+    // `.inf_anim` v2 and is why nothing committed moved.
+    let clips_only: Vec<&AnimClip> = resolved.iter().map(|(c, _)| *c).collect();
+    let weights_only: Vec<f64> = resolved.iter().map(|(_, w)| *w).collect();
+    let leader = crate::sync::leader_index(&weights_only);
+    let times = crate::sync::warped_times(&clips_only, &weights_only, uniform[leader])
+        .unwrap_or(uniform);
     let items: Vec<(Pose, f64)> = resolved
         .iter()
-        .map(|(c, w)| {
-            let ct = (phase * c.duration as f64) as f32;
-            (sample_clip(skeleton, c, ct, true), *w)
-        })
+        .zip(&times)
+        .map(|((c, w), ct)| (sample_clip(skeleton, c, *ct, true), *w))
         .collect();
     weighted_blend(items).unwrap_or_else(|| Pose::rest(skeleton))
 }
@@ -543,6 +690,314 @@ mod tests {
             .angle_between(Quat::IDENTITY)
             .to_degrees();
         assert!((ang - 45.0).abs() < 1.0, "{ang}");
+    }
+
+    /// **A quadrant query is a blend of that quadrant's samples and nothing
+    /// else.**
+    ///
+    /// The fixture is the locomotion diamond a wizard actually emits: idle at the
+    /// centre with forward / right / back / left around it. The query sits in the
+    /// forward-right quadrant, and `back` and `left` take **no** weight, because
+    /// they are not corners of the triangle it is inside.
+    ///
+    /// Honest note on what this arm can and cannot kill: on a *well-formed* grid
+    /// `k = 3` inverse-distance weighting usually picks the same three samples, so
+    /// this arm is about the **support** and not about IDW. The arm that kills IDW
+    /// is its sibling, `the_weights_reproduce_the_query_point` — see there for the
+    /// measured error.
+    ///
+    /// The four outer samples alone (a diamond with no centre) are exactly
+    /// **co-circular**, so *some* triangle spanning the middle must exist and
+    /// "the opposite clip weighs nothing" is not achievable by any triangulation.
+    /// The centre sample is what makes the fan well-formed — which is a fact about
+    /// authoring a blend space, and is why the wizard's set has one.
+    #[test]
+    fn a_quadrant_query_blends_only_its_own_quadrant() {
+        let sp = BlendSpace2D::new(
+            "vx",
+            "vy",
+            vec![
+                BlendEntry2D {
+                    pos: [0.0, 0.0],
+                    clip: id(0),
+                }, // idle
+                BlendEntry2D {
+                    pos: [0.0, 1.0],
+                    clip: id(1),
+                }, // forward
+                BlendEntry2D {
+                    pos: [1.0, 0.0],
+                    clip: id(2),
+                }, // right
+                BlendEntry2D {
+                    pos: [0.0, -1.0],
+                    clip: id(3),
+                }, // back
+                BlendEntry2D {
+                    pos: [-1.0, 0.0],
+                    clip: id(4),
+                }, // left
+            ],
+        );
+        let w = blend_weights_2d(&sp, DVec2::new(0.3, 0.3));
+        let of = |i: usize| w.iter().find(|(j, _)| *j == i).map(|(_, x)| *x);
+        assert_eq!(of(3), None, "the BACKWARD clip took weight: {w:?}");
+        assert_eq!(of(4), None, "the LEFT clip took weight: {w:?}");
+        assert!(
+            of(0).is_some() && of(1).is_some() && of(2).is_some(),
+            "{w:?}"
+        );
+        let total: f64 = w.iter().map(|(_, x)| x).sum();
+        assert!((total - 1.0).abs() < 1e-12, "{w:?}");
+        // On the diagonal the two direction samples are symmetric.
+        assert!((of(1).unwrap() - of(2).unwrap()).abs() < 1e-12, "{w:?}");
+    }
+
+    /// **Barycentric weights are affine, and IDW's are not** — the arm that kills
+    /// the thing this clause replaced.
+    ///
+    /// The claim: weighting the *sample positions* by the returned weights
+    /// reproduces the query position exactly. That is what "these are the right
+    /// weights" means for a parametric blend — the pose you get at `(0.25, 0.4)`
+    /// is the pose the space says lives at `(0.25, 0.4)`.
+    ///
+    /// Measured against the `k = 3` inverse-distance body this replaced, on this
+    /// very fixture: at `(0.25, 0.4)` IDW returns `0.545 / 0.287 / 0.168` over
+    /// `(0,0) / (0,1) / (1,0)`, which reconstructs `(0.168, 0.287)` — **0.14 away**
+    /// on a grid two units wide, so the character blends as if it were at a
+    /// materially different point of its own parameter space. Restoring the IDW
+    /// body fails this arm by six orders of magnitude.
+    #[test]
+    fn the_weights_reproduce_the_query_point() {
+        let entries: Vec<BlendEntry2D> = [
+            (-1.0, -1.0),
+            (0.0, -1.0),
+            (1.0, -1.0),
+            (-1.0, 0.0),
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (-1.0, 1.0),
+            (0.0, 1.0),
+            (1.0, 1.0),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, &(x, y))| BlendEntry2D {
+            pos: [x, y],
+            clip: id(i as u8),
+        })
+        .collect();
+        let sp = BlendSpace2D::new("x", "y", entries.clone());
+        for &(qx, qy) in &[
+            (0.25, 0.4),
+            (-0.7, 0.1),
+            (0.9, -0.9),
+            (0.0, 0.5),
+            (-0.33, -0.66),
+        ] {
+            let q = DVec2::new(qx, qy);
+            let w = blend_weights_2d(&sp, q);
+            let total: f64 = w.iter().map(|(_, x)| x).sum();
+            assert!((total - 1.0).abs() < 1e-12, "({qx},{qy}) {w:?}");
+            let mut p = DVec2::ZERO;
+            for &(i, x) in &w {
+                p += DVec2::new(entries[i].pos[0], entries[i].pos[1]) * x;
+            }
+            assert!(
+                (p - q).length() < 1e-9,
+                "({qx},{qy}) reconstructed as {p:?} from {w:?}"
+            );
+            // At most three samples ever contribute.
+            assert!(w.len() <= 3, "({qx},{qy}) {w:?}");
+        }
+    }
+
+    /// Outside the hull the query collapses onto the nearest boundary **edge**,
+    /// and past a corner onto that corner — never onto an interior sample.
+    #[test]
+    fn a_query_outside_the_hull_lands_on_the_boundary() {
+        let sp = BlendSpace2D::new(
+            "x",
+            "y",
+            vec![
+                BlendEntry2D {
+                    pos: [0.0, 0.0],
+                    clip: id(1),
+                },
+                BlendEntry2D {
+                    pos: [2.0, 0.0],
+                    clip: id(2),
+                },
+                BlendEntry2D {
+                    pos: [0.0, 2.0],
+                    clip: id(3),
+                },
+            ],
+        );
+        // Straight out past the middle of the 0→1 edge.
+        let w = blend_weights_2d(&sp, DVec2::new(1.0, -5.0));
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!((w[0].1 - 0.5).abs() < 1e-12 && (w[1].1 - 0.5).abs() < 1e-12, "{w:?}");
+        // Past a corner: that corner alone.
+        let w = blend_weights_2d(&sp, DVec2::new(-9.0, -9.0));
+        assert_eq!(w, vec![(0, 1.0)]);
+    }
+
+    /// A blend space with **no area** is a row, and a row interpolates along
+    /// itself — the same rule `blend_weights_1d` applies, reached through the 2D
+    /// door.
+    #[test]
+    fn a_collinear_or_degenerate_space_interpolates_along_its_own_line() {
+        let sp = BlendSpace2D::new(
+            "x",
+            "y",
+            vec![
+                BlendEntry2D {
+                    pos: [0.0, 0.0],
+                    clip: id(1),
+                },
+                BlendEntry2D {
+                    pos: [2.0, 0.0],
+                    clip: id(2),
+                },
+                BlendEntry2D {
+                    pos: [4.0, 0.0],
+                    clip: id(3),
+                },
+            ],
+        );
+        let w = blend_weights_2d(&sp, DVec2::new(1.0, 0.0));
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!((w[0].1 - 0.5).abs() < 1e-12, "{w:?}");
+        // Off the line, it still brackets the nearest span.
+        let w = blend_weights_2d(&sp, DVec2::new(3.0, 7.0));
+        assert_eq!(w.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1, 2]);
+        // A single sample takes everything, whatever is asked.
+        let one = BlendSpace2D::new(
+            "x",
+            "y",
+            vec![BlendEntry2D {
+                pos: [5.0, 5.0],
+                clip: id(1),
+            }],
+        );
+        assert_eq!(blend_weights_2d(&one, DVec2::new(-3.0, 8.0)), vec![(0, 1.0)]);
+        // …and an empty one says nothing.
+        assert!(blend_weights_2d(&BlendSpace2D::new("x", "y", Vec::new()), DVec2::ZERO).is_empty());
+    }
+
+    /// The weights are a property of the point set, not of the order it was
+    /// authored in — the determinism law, at the layer a `.inf_sm` actually
+    /// carries.
+    #[test]
+    fn reordering_the_entries_reorders_nothing_else() {
+        let pts = [
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (0.5, 0.5),
+            (1.6, 0.4),
+        ];
+        let entry = |i: usize| BlendEntry2D {
+            pos: [pts[i].0, pts[i].1],
+            clip: id(i as u8),
+        };
+        let q = DVec2::new(0.62, 0.31);
+        let base = BlendSpace2D::new("x", "y", (0..pts.len()).map(entry).collect());
+        let want: std::collections::BTreeMap<usize, f64> =
+            blend_weights_2d(&base, q).into_iter().collect();
+        for shift in 1..pts.len() {
+            let order: Vec<usize> = (0..pts.len()).map(|i| (i + shift) % pts.len()).collect();
+            let sp = BlendSpace2D::new("x", "y", order.iter().map(|&i| entry(i)).collect());
+            let got: std::collections::BTreeMap<usize, f64> = blend_weights_2d(&sp, q)
+                .into_iter()
+                .map(|(i, w)| (order[i], w))
+                .collect();
+            assert_eq!(got, want, "shift {shift}");
+        }
+    }
+
+    /// **Sync markers inside a blend** (P29.2 clause 4), through the sampling door
+    /// rather than through `sync`'s own unit arms.
+    ///
+    /// A 1 s walk and a 0.6 s run whose plants sit at different *fractions* of
+    /// their own lengths. With markers, the run is sampled at its own plant when
+    /// the walk is at the walk's; without them (the same fixture with the markers
+    /// stripped) it is not — which is the foot slide, measured as a pose
+    /// difference rather than described.
+    #[test]
+    fn a_blend_space_warps_its_followers_onto_the_leader_marker_phase() {
+        use crate::channels::AnimMarker;
+        let sk = one_joint_skeleton();
+        // Position along X == clip time, so a sampled pose reads back the time.
+        let walk = slide_clip(0.0, 1.0, 1.0);
+        let run = slide_clip(0.0, 0.6, 0.6);
+        let marked = |c: &AnimClip, a: f32, b: f32| {
+            c.clone().with_markers(vec![
+                AnimMarker::sync(a, "plant_l", "foot"),
+                AnimMarker::sync(b, "plant_r", "foot"),
+            ])
+        };
+        let sp = BlendSpace1D::new(
+            "speed",
+            vec![
+                BlendEntry1D {
+                    pos: 0.0,
+                    clip: id(1),
+                },
+                BlendEntry1D {
+                    pos: 1.0,
+                    clip: id(2),
+                },
+            ],
+        );
+        // Weight 0.75 on the walk → the walk leads. blended_dur = 0.75*1 + 0.25*0.6
+        // = 0.9, so t = 0.63 puts the phase at 0.7 and the walk's play-head at 0.7 —
+        // exactly its `plant_r`.
+        let run_x = |walk_m: Option<(f32, f32)>, run_m: Option<(f32, f32)>| -> f32 {
+            let w = match walk_m {
+                Some((a, b)) => marked(&walk, a, b),
+                None => walk.clone(),
+            };
+            let r = match run_m {
+                Some((a, b)) => marked(&run, a, b),
+                None => run.clone(),
+            };
+            let clips = |x: ClipRef| -> Option<&AnimClip> {
+                if x == id(1) {
+                    Some(&w)
+                } else if x == id(2) {
+                    Some(&r)
+                } else {
+                    None
+                }
+            };
+            // Weight the run at 1.0 in a second probe would change the leader, so
+            // read the run's contribution by sampling the space at the run entry
+            // with the walk still leading: instead, read the blended X and solve.
+            // Simpler and exact: sample with the walk at weight 1 - eps is not
+            // available, so sample the run alone at the warped time by asking the
+            // space at param 0.25 and subtracting the walk's known contribution.
+            let pose = sample_blend_space_1d(&sp, &sk, &clips, 0.25, 0.63);
+            // blended X = 0.75*walk_x + 0.25*run_x, and walk_x is its own play-head.
+            let blended = pose.locals[0].translation[0];
+            (blended - 0.75 * 0.7) / 0.25
+        };
+        // Unmarked: uniform phase puts the run at 0.7 * 0.6 = 0.42.
+        let plain = run_x(None, None);
+        assert!((plain - 0.42).abs() < 1e-3, "unmarked run at {plain}");
+        // Marked: the walk's plant_r is at 0.7, the run's is at 0.35, so the run is
+        // sampled there — 0.07 s earlier than uniform phase would have it.
+        let warped = run_x(Some((0.2, 0.7)), Some((0.05, 0.35)));
+        assert!(
+            (warped - 0.35).abs() < 1e-3,
+            "marked run at {warped}, expected its own plant_r at 0.35"
+        );
+        assert!(
+            (plain - warped).abs() > 0.05,
+            "marker warping changed nothing ({plain} vs {warped})"
+        );
     }
 
     #[test]

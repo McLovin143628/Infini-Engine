@@ -46,17 +46,52 @@
 /// not a consumer of its types — and the alternative is a *second* copy of this
 /// ban list somewhere else, which is how a list becomes two lists that disagree.
 /// Both files are workspace members whose paths are as stable as this file's own.
-const SIM_PATH: [(&str, &str, &str); 11] = [
+const SIM_PATH: [(&str, &str, &str); 17] = [
     (
         "pose.rs",
         include_str!("../src/pose.rs"),
         "blend_poses and skinning_matrices produce the pose that is folded into state_bytes",
     ),
-    // P29.2's `.inf_anim` v2 channel model.
+    // ── P29.2's six new modules, plus the one this gate had always missed ──
+    //
+    // `blend_space.rs` is the "always missed" one: it has driven every 1D and 2D
+    // blend since P11.2 and was never on this list, which was survivable only
+    // because it delegated all of its arithmetic. P29.2 gave it a triangulation
+    // and a marker warp of its own, so the omission stops being survivable.
+    (
+        "blend_space.rs",
+        include_str!("../src/blend_space.rs"),
+        "every blend space's weights and per-clip sample times, which choose the poses everything below blends",
+    ),
     (
         "channels.rs",
         include_str!("../src/channels.rs"),
         "a `.inf_anim` v2 curve value reaches a blend weight, and a blend weight reaches the pose",
+    ),
+    (
+        "delaunay.rs",
+        include_str!("../src/delaunay.rs"),
+        "the triangulation decides WHICH samples a 2D blend space weights, so a different answer here is a different pose",
+    ),
+    (
+        "sync.rs",
+        include_str!("../src/sync.rs"),
+        "a warped sample time is a clip time, and a clip time is a pose",
+    ),
+    (
+        "layers.rs",
+        include_str!("../src/layers.rs"),
+        "additive composition and the layer stack are the last thing applied to a pose before it is folded into state_bytes",
+    ),
+    (
+        "inertialize.rs",
+        include_str!("../src/inertialize.rs"),
+        "the quintic decay is the DEFAULT for state transitions, so it is on the pose path of every machine-driven character",
+    ),
+    (
+        "pose_match.rs",
+        include_str!("../src/pose_match.rs"),
+        "a match chooses the frame a state enters at, which is a play-head, which is committed sim state",
     ),
     (
         "clip.rs",
@@ -364,6 +399,10 @@ fn the_trig_ban_is_looking_at_real_code() {
     assert!(
         by_name("clip.rs").contains("inf_math::pslerp"),
         "clip.rs no longer blends through the portable arc"
+    );
+    assert!(
+        by_name("layers.rs").contains("inf_math::pslerp"),
+        "layers.rs no longer scales its additive rotations through the portable arc"
     );
     // And the ban is a real filter: it fires on a string that contains one.
     let decoy = "let q = a.slerp(b, 0.5);";

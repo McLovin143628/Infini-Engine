@@ -41,19 +41,31 @@ pub mod blend_space;
 // the additive reference, root motion (Y included) and the distance track.
 pub mod channels;
 pub mod clip;
+// P29.2 blend spaces: the deterministic triangulator that closes the P11.2
+// IDW-k3 deferral.
+pub mod delaunay;
 // P24.4 secondary animation: XPBD cloth over the posed skeleton.
 pub mod cloth;
 // P24.4 secondary animation: strand hair, on the same solver primitives.
 pub mod hair;
 // P24.2 inverse kinematics: the post-pass over an evaluated pose.
 pub mod ik;
+// P29.2 inertialization: the quintic decay of a pose deviation, and the blender
+// that makes it the default for state transitions.
+pub mod inertialize;
+// P29.2 blending depth: additive poses, per-bone masks and the layer stack.
+pub mod layers;
 // P24.5 the default locomotion set: clips and a machine derived from a body plan.
 pub mod locomotion;
 // P24.3 modular rigging: assembling one skeleton out of parts.
 pub mod merge;
 pub mod pose;
+// P29.2 pose snapshot + pose matching (P29.4's get-up and landing consumers).
+pub mod pose_match;
 pub mod skeleton;
 pub mod state_machine;
+// P29.2 sync groups: marker-phase warping so a walk↔run blend keeps its feet.
+pub mod sync;
 // P11.3 character tools (sockets / root motion / retarget) — new modules, each
 // pure like the rest of the crate.
 pub mod retarget;
@@ -64,9 +76,10 @@ pub mod template;
 
 pub use asset::{AnimClipAsset, SkeletonAsset, StateMachineAsset};
 pub use blend_space::{
-    blend_weights_1d, blend_weights_2d, sample_blend_space_1d, sample_blend_space_2d, BlendEntry1D,
-    BlendEntry2D, BlendSpace1D, BlendSpace2D, ClipRef,
+    blend_weights_1d, blend_weights_2d, sample_blend_space_1d, sample_blend_space_2d, weights_2d,
+    BlendEntry1D, BlendEntry2D, BlendSpace1D, BlendSpace2D, ClipRef,
 };
+pub use delaunay::{barycentric, triangulate, Triangulation};
 pub use channels::{
     AdditiveRef, AnimMarker, CurveChannel, DistanceTrack, RootMotionTrack,
 };
@@ -83,6 +96,12 @@ pub use ik::{
     fabrik, rotation_between, solve_chain, two_bone_positions, IkError, IkReport,
     FABRIK_ITERATIONS, MIN_BONE_LENGTH_M, REACH_TOLERANCE_M,
 };
+pub use inertialize::{
+    quintic_decay, Inertializer, PoseBlender, SmBlendMode, TransitionEntry,
+};
+pub use layers::{
+    additive_delta, apply_additive, apply_layer, apply_layers, AnimLayer, JointMask, LayerMode,
+};
 pub use locomotion::{
     build_locomotion, locomotion_machine, GaitParams, LegSummary, LocomotionError, LocomotionSet,
     MAX_KEYS_PER_CYCLE, SPEED_VAR, STATE_NAMES,
@@ -95,6 +114,9 @@ pub use pose::{
     advance_clip_time, blend_poses, blend_poses_weighted, global_transforms, sample_clip,
     skinning_matrices, Pose,
 };
+pub use pose_match::{
+    match_clip, match_clips, pose_cost, PoseMatch, PoseMatchWeights, PoseSnapshot,
+};
 pub use retarget::{humanoid_joint_names, retarget_pose, RetargetMap};
 pub use root_motion::{root_delta, root_delta_world, root_joint_index, RootMotionDelta};
 pub use skeleton::{Joint, JointTransform, Skeleton, SkeletonError};
@@ -105,6 +127,7 @@ pub use state_machine::{
     SmError, SmInterrupt, SmParam, SmParamKind, SmRuntime, SmSource, SmState, SmStep, SmSub,
     SmTransition, SmValue, StateMachine, MAX_COND_DEPTH, MAX_COND_NODES, MAX_PARAMS,
 };
+pub use sync::{common_group, leader_index, warped_times, SyncPhase, SyncTrack};
 pub use template::{
     build_template, girdle_name, leg_suffix, BodyParams, BodyPlan, JointLimit, TemplateError,
     MAX_LEGS,
