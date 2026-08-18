@@ -65,6 +65,7 @@ pub fn run() {
         .manage(commands::ErosionState::default())
         .manage(commands::SequencerState::default())
         .manage(commands::PhotogrammetryState::default())
+        .manage(commands::CharacterWizardState::default())
         .invoke_handler(commands::invoke_handler())
         .setup(|app| {
             logging::attach_app(app.handle().clone());

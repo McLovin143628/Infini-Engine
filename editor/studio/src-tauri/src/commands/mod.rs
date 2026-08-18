@@ -42,6 +42,7 @@ mod viewport;
 mod water;
 
 pub use assets::{init_assets_on_boot, AssetState};
+pub use character::CharacterWizardState;
 pub use dcc::DccState;
 pub use diagnostics::{install_crash_hook, set_crash_dir};
 pub use graph::GraphState;

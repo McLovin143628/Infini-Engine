@@ -22,10 +22,12 @@
 //! would put a `world://delta` naming three GUIDs the drawer has never heard of
 //! on the wire, and the Details panel resolves asset names through that snapshot.
 
+use std::sync::Mutex;
+
 use inf_anim::BodyPlan;
 use inf_asset::{AssetId, AssetKind};
 use inf_editor_core::character::{
-    build_character, preview_character, CharacterSpec, CHARACTER_FOLDER,
+    build_character, CharacterPreviewSession, CharacterSpec, CHARACTER_FOLDER,
 };
 use inf_editor_core::ipc::{
     CharacterCreateDto, CharacterPreviewDto, CharacterRigDto, CharacterSpecDto,
@@ -35,6 +37,33 @@ use tauri::{AppHandle, State};
 
 use super::assets::{emit_changed, AssetState};
 use super::scene::{emit_world_delta, SceneState};
+
+/// **The wizard's warm state** (P29.5, ROADMAP §13's F5 item).
+///
+/// Two things are kept between previews, and neither is a rule — the rules are
+/// all in Ring 1:
+///
+/// * the **decoded model**, keyed by `(asset id, content hash)`. `fit_source`
+///   used to `read` and decode the author's `.inf_mesh` on every keystroke, and
+///   that is the half of the cold path that lives up here rather than in
+///   `preview_character`. Keying on the hash and not only on the id is what makes
+///   it correct while the Model Editor is open beside the wizard: an edited mesh
+///   is a new hash, so it is a new decode.
+/// * the Ring-1 [`CharacterPreviewSession`], which keeps the BVH, the locomotion
+///   summary and the mannequin's counts.
+///
+/// One `Mutex` and not two, because a preview reads both and they are only ever
+/// touched from `character_preview`, which is serialized against itself anyway.
+#[derive(Default)]
+pub struct CharacterWizardState {
+    inner: Mutex<Warm>,
+}
+
+#[derive(Default)]
+struct Warm {
+    session: CharacterPreviewSession,
+    model: Option<(AssetId, inf_asset::ContentHash, MeshAsset)>,
+}
 
 /// Parse the wire name of a body plan.
 ///
@@ -76,14 +105,17 @@ fn to_spec(dto: &CharacterSpecDto) -> Result<CharacterSpec, String> {
     })
 }
 
-/// Load the spec's fit source, if it names one. A missing or wrong-kind asset is
-/// a **refusal by name** rather than a silent `None` — the `resolve_rig` rule
-/// P24.4 settled: a wizard that quietly ignored the mesh you picked would
-/// generate a mannequin and look like it had worked.
-fn fit_source(
+/// The identity of the spec's fit source — id and content hash — without
+/// decoding it.
+///
+/// A missing or wrong-kind asset is a **refusal by name** rather than a silent
+/// `None`: the `resolve_rig` rule P24.4 settled, because a wizard that quietly
+/// ignored the mesh you picked would generate a mannequin and look like it had
+/// worked.
+fn fit_source_id(
     state: &State<'_, AssetState>,
     spec: &CharacterSpec,
-) -> Result<Option<MeshAsset>, String> {
+) -> Result<Option<(AssetId, inf_asset::ContentHash)>, String> {
     let Some(id) = spec.mesh else {
         return Ok(None);
     };
@@ -92,21 +124,49 @@ fn fit_source(
         if entry.kind() != AssetKind::Mesh {
             return Err(format!("{} is not a mesh asset", entry.name));
         }
-        p.load_payload::<MeshAsset>(id)
-            .map(Some)
-            .map_err(|e| e.to_string())
+        Ok(Some((id, entry.sidecar.content_hash)))
     })
 }
 
 /// Describe what a spec would produce. Writes nothing.
+///
+/// **The warm path** (P29.5): the panel calls this on every edit, so both the
+/// model decode and the fit's BVH are kept between calls — see
+/// [`CharacterWizardState`]. The answer is identical to the cold one; only what
+/// it costs changed.
 #[tauri::command]
 pub async fn character_preview(
     spec: CharacterSpecDto,
     assets: State<'_, AssetState>,
+    wizard: State<'_, CharacterWizardState>,
 ) -> Result<CharacterPreviewDto, String> {
     let spec = to_spec(&spec)?;
-    let source = fit_source(&assets, &spec)?;
-    Ok(match preview_character(&spec, source.as_ref()) {
+    let ident = fit_source_id(&assets, &spec)?;
+    let mut warm = wizard
+        .inner
+        .lock()
+        .map_err(|_| "the character wizard's state is poisoned".to_string())?;
+    if let Some((id, hash)) = ident {
+        // A decode only when the identity moved. The hash and not just the id:
+        // the Model Editor can be open beside the wizard, and an edited mesh
+        // keeps its GUID.
+        let hit = matches!(&warm.model, Some((i, h, _)) if *i == id && *h == hash);
+        if !hit {
+            let payload = assets
+                .with_project(|p| p.load_payload::<MeshAsset>(id).map_err(|e| e.to_string()))?;
+            warm.model = Some((id, hash, payload));
+        }
+    } else {
+        warm.model = None;
+    }
+    let Warm { session, model } = &mut *warm;
+    // The stamp the Ring-1 session keys its BVH on IS the content hash, folded
+    // to 64 bits — the same identity this side just used for the decode, so the
+    // two caches cannot disagree about which model they are holding.
+    let source = model
+        .as_ref()
+        .map(|(_, h, m)| (m, h.0 as u64 ^ (h.0 >> 64) as u64));
+    Ok(match session.preview(&spec, source) {
         Ok(p) => CharacterPreviewDto {
             refusal: None,
             rig: Some(CharacterRigDto::from_preview(&p)),

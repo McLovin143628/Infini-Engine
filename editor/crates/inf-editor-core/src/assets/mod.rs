@@ -6,6 +6,7 @@
 //! dependency edges the importer discovers, and enforces the
 //! delete-with-references safety check that is the Phase 4 gate.
 
+pub mod anim_derive;
 pub mod biome_set;
 pub mod collections;
 pub mod data;
@@ -26,6 +27,7 @@ use inf_asset::{
     ImportCache, Result,
 };
 
+pub use anim_derive::{rederive_asset, ClipDerivation};
 pub use import::ImportOutcome;
 pub use queue::{ImportProgress, ImportQueue};
 pub use terrain_import::{TerrainImportOutcome, TerrainImportSettings, TERRAIN_IMPORT_FOLDER};

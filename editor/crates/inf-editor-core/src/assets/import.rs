@@ -317,7 +317,28 @@ fn import_mesh_container(
     for clip in &g.clips {
         let skel_id = clip.skeleton.and_then(|i| skeleton_ids.get(i).copied());
         let skel_bytes = skel_id.map(|id| *id.uuid().as_bytes());
-        let asset = inf_anim::AnimClipAsset::new(clip.clip.clone(), skel_bytes);
+        // **Derived before it is written** (P29.5, pillar S2). What Epic ships as
+        // seven AnimModifiers a human runs by hand over 891 clips happens here,
+        // once, on the way in — so there is no window in which a `.inf_anim` in
+        // this project has not been measured, and no clip that was imported on a
+        // day somebody forgot.
+        //
+        // The rig comes out of the import in memory rather than off the asset
+        // just written: same skeleton, one fewer decode.
+        let mut payload = clip.clip.clone();
+        let rig = clip.skeleton.and_then(|i| g.skeletons.get(i));
+        let derived = super::anim_derive::derive_in_place(
+            &clip.name,
+            &mut payload,
+            rig.map(|sk| inf_anim::SkeletonAsset::new(sk.skeleton.clone()))
+                .as_ref(),
+            &inf_anim::DeriveOptions::default(),
+        );
+        advisories.extend(raise(
+            source,
+            super::anim_derive::advisories(&clip.name, &derived),
+        ));
+        let asset = inf_anim::AnimClipAsset::new(payload, skel_bytes);
         let deps: Vec<AssetId> = skel_id.into_iter().collect();
         let name = format!("{}_{}", file_stem(source), clip.name);
         // **The identity tie** (round-2 finding R2.C): the clip's coupling to

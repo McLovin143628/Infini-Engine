@@ -235,16 +235,34 @@ pub fn fit_rig_to_mesh(
     params: &BodyParams,
     payload: &MeshAsset,
 ) -> Result<(SkeletonAsset, inf_dcc::FitReport), CharacterError> {
+    fit_rig_to_bvh(&fit_bvh(payload)?, plan, params)
+}
+
+/// The **expensive half** of [`fit_rig_to_mesh`], split out (P29.5).
+///
+/// Kernel → tessellation → BVH. It depends on the *model* and on nothing the
+/// wizard's sliders touch, which is the whole reason the split exists: a
+/// proportion drag re-fits, and re-fitting is cheap; rebuilding this per
+/// keystroke is what the ROADMAP's F5 item was about.
+pub fn fit_bvh(payload: &MeshAsset) -> Result<inf_dcc::Bvh, CharacterError> {
     let imported =
         inf_dcc::from_mesh_asset(payload).map_err(|e| CharacterError::Mesh(e.to_string()))?;
     let geo = crate::dcc::tessellate(&imported.mesh);
-    let bvh = inf_dcc::Bvh::new(crate::dcc::triangle_soup(&geo));
+    Ok(inf_dcc::Bvh::new(crate::dcc::triangle_soup(&geo)))
+}
+
+/// The **cheap half**: the fit itself, against a BVH somebody else built.
+pub fn fit_rig_to_bvh(
+    bvh: &inf_dcc::Bvh,
+    plan: BodyPlan,
+    params: &BodyParams,
+) -> Result<(SkeletonAsset, inf_dcc::FitReport), CharacterError> {
     let opts = inf_dcc::FitOptions {
         plan,
         params: *params,
         ..inf_dcc::FitOptions::default()
     };
-    inf_dcc::fit_template(&bvh, &opts).map_err(|e| CharacterError::Fit(e.to_string()))
+    inf_dcc::fit_template(bvh, &opts).map_err(|e| CharacterError::Fit(e.to_string()))
 }
 
 /// The rig a spec produces, plus what fitting it cost. Shared by the preview and
@@ -323,49 +341,221 @@ fn rig_height_m(rig: &SkeletonAsset) -> f64 {
 /// The mannequin path is cheap and is the default; the fitted path is linear in
 /// the author's model and will be felt on a real one.
 ///
-/// Ledgered rather than fixed because the fix is a design decision with more than
-/// one shape (debounce the panel, cache the decode by id, or cache the BVH by
-/// content hash), and picking one inside an audit would be choosing the wizard's
-/// interaction model on the way past.
+/// **The cold path, kept**: one preview with nothing remembered. The build path
+/// and every test use it, and it is [`CharacterPreviewSession::preview`] with a
+/// session that is thrown away — one rule, two lifetimes.
 pub fn preview_character(
     spec: &CharacterSpec,
     fit_source: Option<&MeshAsset>,
 ) -> Result<CharacterPreview, CharacterError> {
-    let (rig, _fit) = rig_for(spec, fit_source)?;
-    let set = build_locomotion(spec.plan, &rig, &spec.gait)
-        .map_err(|e| CharacterError::Locomotion(e.to_string()))?;
-    let body = fit_source.is_none().then(|| {
-        let m = block_body_mesh(&rig);
+    CharacterPreviewSession::default().preview(spec, fit_source.map(|m| (m, 0)))
+}
+
+/// **The wizard's kept-warm preview** (P29.5, ROADMAP §13's F5 item; the P23.2a
+/// `PreviewSession` law applied to a rig instead of to a GPU).
+///
+/// # What was actually slow, and it was not the fit
+///
+/// The panel re-previews on **every edit** and nothing debounces it, so before
+/// this a single keystroke on the fitted path was: a `read` plus a full decode of
+/// the author's model (Ring 2), a half-edge kernel build, a tessellation, a BVH
+/// **build**, the fit, and then all three locomotion clips generated from
+/// scratch — and, on the mannequin path, a whole block body mesh generated so
+/// that two integers could be counted off it.
+///
+/// Of those, exactly one depends on the slider being dragged. A session
+/// remembers the other three:
+///
+/// * the **BVH**, keyed by the caller's model stamp — a proportion drag re-fits
+///   against a BVH that is already built;
+/// * the **locomotion set**'s summary, keyed by `(plan, params, gait)` — a
+///   *proportion* drag regenerates it (the clips are derived from the rig) but a
+///   re-preview at the same spec does not, and neither does a drag that only
+///   moves the model;
+/// * the **body counts**, keyed by `(plan, params)` — a *gait* drag does not
+///   rebuild a mesh whose vertex count cannot have changed.
+///
+/// # The stamp is the caller's, and that is deliberate
+///
+/// A session cannot hash a `MeshAsset` cheaply enough to be worth it (that is the
+/// decode it exists to avoid paying twice), so the caller supplies a stamp that
+/// identifies the model — Ring 2 passes the asset's content hash, which is the
+/// same key `EditorRenderAssets` re-keys on. `0` means "no stamp", and a session
+/// handed `0` rebuilds every time rather than guessing: `PreviewSession`'s own
+/// rule, where `0` is the built-in sphere and not a caller's geometry.
+///
+/// # Counters, not claims
+///
+/// [`builds`](Self::builds) reports how much work was actually done. It exists so
+/// the warm path is asserted rather than described — a cache that silently stopped
+/// hitting would keep every number in the preview correct.
+#[derive(Default)]
+pub struct CharacterPreviewSession {
+    bvh: Option<(u64, inf_dcc::Bvh)>,
+    loco: Option<(LocoKey, LocoSummary)>,
+    body: Option<((BodyPlan, BodyParams), (usize, usize))>,
+    builds: PreviewBuilds,
+}
+
+/// What a [`CharacterPreviewSession`] rebuilt, cumulatively.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PreviewBuilds {
+    /// BVHs built from a decoded model.
+    pub bvh: usize,
+    /// Locomotion sets generated (three clips each).
+    pub locomotion: usize,
+    /// Mannequin body meshes generated, to count their vertices.
+    pub body: usize,
+    /// Previews answered — the denominator.
+    pub previews: usize,
+}
+
+/// What the locomotion cache is keyed on: everything `build_locomotion` reads.
+type LocoKey = (BodyPlan, BodyParams, inf_anim::locomotion::GaitParams, u64);
+
+/// The part of a [`inf_anim::LocomotionSet`] a preview reports — kept instead of
+/// the set, because the set holds three whole clips and the preview reads six
+/// numbers and a leg list off them.
+#[derive(Clone, Debug, PartialEq)]
+struct LocoSummary {
+    legs: Vec<(String, f64, f64)>,
+    durations_s: [f32; 3],
+    walk_speed_m_s: f64,
+    run_speed_m_s: f64,
+    walk_threshold_m_s: f64,
+    run_threshold_m_s: f64,
+}
+
+impl CharacterPreviewSession {
+    /// A session with nothing remembered.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// What this session has rebuilt so far.
+    pub fn builds(&self) -> PreviewBuilds {
+        self.builds
+    }
+
+    /// Describe what [`build_character`] would produce, reusing whatever of the
+    /// last answer still applies.
+    ///
+    /// `fit_source` is `(the decoded model, a stamp identifying it)`. See the
+    /// type's docs for what the stamp is for and why `0` disables the cache.
+    pub fn preview(
+        &mut self,
+        spec: &CharacterSpec,
+        fit_source: Option<(&MeshAsset, u64)>,
+    ) -> Result<CharacterPreview, CharacterError> {
+        self.builds.previews += 1;
+        let stamp = fit_source.map(|(_, s)| s).unwrap_or(0);
+        // An unstamped model is an **unidentified** one, and two different models
+        // with no stamp are indistinguishable here. Rather than hit a cache that
+        // might be describing somebody else's mesh, forget: the cold path (and
+        // every test that calls `preview_character`) takes this branch, which is
+        // why the free function is still exactly the old behaviour.
+        if fit_source.is_some() && stamp == 0 {
+            self.bvh = None;
+            self.loco = None;
+        }
+        let rig = match fit_source {
+            None => inf_anim::build_template(spec.plan, &spec.params)
+                .map_err(|e| CharacterError::Template(e.to_string()))?,
+            Some((payload, _)) => {
+                let bvh = self.bvh_for(payload, stamp)?;
+                fit_rig_to_bvh(bvh, spec.plan, &spec.params)?.0
+            }
+        };
+        let loco = self.loco_for(spec, &rig, stamp)?.clone();
+        let body = match fit_source {
+            Some(_) => None,
+            None => Some(self.body_for(spec, &rig)),
+        };
+        Ok(CharacterPreview {
+            joints: rig
+                .skeleton
+                .joints()
+                .iter()
+                .map(|j| PreviewJoint {
+                    name: j.name.clone(),
+                    parent: j.parent,
+                    translation: j.local_bind.translation,
+                })
+                .collect(),
+            sockets: rig.sockets.iter().map(|s| s.name.clone()).collect(),
+            limits: rig.limits.len(),
+            height_m: rig_height_m(&rig),
+            legs: loco.legs,
+            durations_s: loco.durations_s,
+            walk_speed_m_s: loco.walk_speed_m_s,
+            run_speed_m_s: loco.run_speed_m_s,
+            walk_threshold_m_s: loco.walk_threshold_m_s,
+            run_threshold_m_s: loco.run_threshold_m_s,
+            body,
+        })
+    }
+
+    /// The BVH for `stamp`, building it only when the stamp has moved.
+    ///
+    /// A **borrow-returning** accessor rather than a clone: an `inf_dcc::Bvh` over
+    /// an author's model is the largest thing in this file, and cloning it per
+    /// keystroke would replace one cost with another.
+    fn bvh_for(
+        &mut self,
+        payload: &MeshAsset,
+        stamp: u64,
+    ) -> Result<&inf_dcc::Bvh, CharacterError> {
+        let hit = matches!(&self.bvh, Some((s, _)) if *s == stamp && stamp != 0);
+        if !hit {
+            self.builds.bvh += 1;
+            self.bvh = Some((stamp, fit_bvh(payload)?));
+        }
+        Ok(&self.bvh.as_ref().expect("just built or hit").1)
+    }
+
+    fn loco_for(
+        &mut self,
+        spec: &CharacterSpec,
+        rig: &SkeletonAsset,
+        stamp: u64,
+    ) -> Result<&LocoSummary, CharacterError> {
+        let key: LocoKey = (spec.plan, spec.params, spec.gait, stamp);
+        let hit = matches!(&self.loco, Some((k, _)) if *k == key);
+        if !hit {
+            self.builds.locomotion += 1;
+            let set = build_locomotion(spec.plan, rig, &spec.gait)
+                .map_err(|e| CharacterError::Locomotion(e.to_string()))?;
+            let summary = LocoSummary {
+                legs: set
+                    .legs
+                    .iter()
+                    .map(|l| (l.name.clone(), l.length_m, l.phase))
+                    .collect(),
+                durations_s: [set.idle.duration, set.walk.duration, set.run.duration],
+                walk_speed_m_s: set.walk_speed_m_s,
+                run_speed_m_s: set.run_speed_m_s,
+                walk_threshold_m_s: set.walk_threshold_m_s(),
+                run_threshold_m_s: set.run_threshold_m_s(),
+            };
+            self.loco = Some((key, summary));
+        }
+        Ok(&self.loco.as_ref().expect("just built or hit").1)
+    }
+
+    fn body_for(&mut self, spec: &CharacterSpec, rig: &SkeletonAsset) -> (usize, usize) {
+        let key = (spec.plan, spec.params);
+        if let Some((k, counts)) = &self.body {
+            if *k == key {
+                return *counts;
+            }
+        }
+        self.builds.body += 1;
+        let m = block_body_mesh(rig);
         let verts: usize = m.submeshes.iter().map(|s| s.vertices.len()).sum();
         let tris: usize = m.submeshes.iter().map(|s| s.triangle_count()).sum();
+        self.body = Some((key, (verts, tris)));
         (verts, tris)
-    });
-    Ok(CharacterPreview {
-        joints: rig
-            .skeleton
-            .joints()
-            .iter()
-            .map(|j| PreviewJoint {
-                name: j.name.clone(),
-                parent: j.parent,
-                translation: j.local_bind.translation,
-            })
-            .collect(),
-        sockets: rig.sockets.iter().map(|s| s.name.clone()).collect(),
-        limits: rig.limits.len(),
-        height_m: rig_height_m(&rig),
-        legs: set
-            .legs
-            .iter()
-            .map(|l| (l.name.clone(), l.length_m, l.phase))
-            .collect(),
-        durations_s: [set.idle.duration, set.walk.duration, set.run.duration],
-        walk_speed_m_s: set.walk_speed_m_s,
-        run_speed_m_s: set.run_speed_m_s,
-        walk_threshold_m_s: set.walk_threshold_m_s(),
-        run_threshold_m_s: set.run_threshold_m_s(),
-        body,
-    })
+    }
 }
 
 /// Take back the assets a failed build had already written.
@@ -849,6 +1039,203 @@ mod tests {
 
     fn project(dir: &std::path::Path) -> AssetProject {
         AssetProject::open(dir.join("Content")).expect("open project")
+    }
+
+    /// **The warm path answers the same preview** — the first thing a cache has
+    /// to prove, before anything about how fast it is.
+    #[test]
+    fn a_warm_session_answers_exactly_what_the_cold_path_does() {
+        let mut session = CharacterPreviewSession::new();
+        for h in [0.9f64, 1.75, 1.75, 2.6] {
+            for cadence in [1.0f64, 1.6] {
+                let spec = CharacterSpec {
+                    params: BodyParams {
+                        height_m: h,
+                        ..BodyParams::default()
+                    },
+                    gait: inf_anim::locomotion::GaitParams {
+                        walk_cadence_hz: cadence,
+                        ..Default::default()
+                    },
+                    ..CharacterSpec::default()
+                };
+                assert_eq!(
+                    session.preview(&spec, None).unwrap(),
+                    preview_character(&spec, None).unwrap(),
+                    "the warm preview disagreed with the cold one at {h} m / {cadence} Hz"
+                );
+            }
+        }
+        // …and the fitted path, where the BVH is the thing being remembered.
+        let mesh = tube_man();
+        let mut fitted = CharacterPreviewSession::new();
+        for h in [1.6f64, 1.8, 1.8] {
+            let spec = CharacterSpec {
+                params: BodyParams {
+                    height_m: h,
+                    ..BodyParams::default()
+                },
+                mesh: Some(AssetId::new()),
+                ..CharacterSpec::default()
+            };
+            assert_eq!(
+                fitted.preview(&spec, Some((&mesh, 0xABCD))).unwrap(),
+                preview_character(&spec, Some(&mesh)).unwrap(),
+                "the warm fitted preview disagreed at {h} m"
+            );
+        }
+    }
+
+    /// **The warm path is warm, counted rather than claimed** (P29.5, ROADMAP
+    /// §13's F5 item).
+    ///
+    /// Counters and not a clock, because a clock measures this machine and a
+    /// counter measures the mechanism. The panel re-previews on every edit, so
+    /// the numbers below are what one wizard session costs: dragging a
+    /// **proportion** slider must not rebuild the model's BVH, and dragging a
+    /// **gait** slider must not rebuild either the BVH or the body mesh.
+    ///
+    /// The control is the cold path, whose counters are one-per-preview by
+    /// construction — a session that stopped hitting would keep every number in
+    /// the preview correct and fail exactly here.
+    #[test]
+    fn a_warm_session_rebuilds_only_what_the_edit_changed() {
+        let mesh = tube_man();
+        let stamp = 0x5EED_u64;
+        let mut s = CharacterPreviewSession::new();
+
+        // Twenty proportion edits — one BVH, twenty fits.
+        for k in 0..20 {
+            let spec = CharacterSpec {
+                params: BodyParams {
+                    height_m: 1.5 + 0.01 * k as f64,
+                    ..BodyParams::default()
+                },
+                mesh: Some(AssetId::new()),
+                ..CharacterSpec::default()
+            };
+            s.preview(&spec, Some((&mesh, stamp))).unwrap();
+        }
+        let after_proportions = s.builds();
+        assert_eq!(after_proportions.previews, 20);
+        assert_eq!(
+            after_proportions.bvh, 1,
+            "a proportion drag rebuilt the model's BVH: {after_proportions:?}"
+        );
+        assert_eq!(
+            after_proportions.locomotion, 20,
+            "a proportion really does change the rig, so the clips really are regenerated"
+        );
+
+        // Twenty gait edits at one fixed proportion — still one BVH, and now the
+        // rig has stopped moving too, so nothing but the clips is regenerated.
+        let base = BodyParams {
+            height_m: 1.75,
+            ..BodyParams::default()
+        };
+        for k in 0..20 {
+            let spec = CharacterSpec {
+                params: base,
+                gait: inf_anim::locomotion::GaitParams {
+                    walk_cadence_hz: 1.0 + 0.01 * k as f64,
+                    ..Default::default()
+                },
+                mesh: Some(AssetId::new()),
+                ..CharacterSpec::default()
+            };
+            s.preview(&spec, Some((&mesh, stamp))).unwrap();
+        }
+        let after = s.builds();
+        assert_eq!(after.previews, 40);
+        assert_eq!(after.bvh, 1, "forty previews, one BVH: {after:?}");
+
+        // Re-previewing the SAME spec costs nothing at all.
+        let spec = CharacterSpec {
+            params: base,
+            mesh: Some(AssetId::new()),
+            ..CharacterSpec::default()
+        };
+        s.preview(&spec, Some((&mesh, stamp))).unwrap();
+        let before_repeat = s.builds();
+        s.preview(&spec, Some((&mesh, stamp))).unwrap();
+        let repeated = s.builds();
+        assert_eq!(repeated.bvh, before_repeat.bvh);
+        assert_eq!(
+            repeated.locomotion, before_repeat.locomotion,
+            "an identical re-preview regenerated the clips: {repeated:?}"
+        );
+
+        // The mannequin path: a gait drag must not rebuild the body mesh.
+        let mut m = CharacterPreviewSession::new();
+        for k in 0..20 {
+            let spec = CharacterSpec {
+                params: base,
+                gait: inf_anim::locomotion::GaitParams {
+                    walk_cadence_hz: 1.0 + 0.01 * k as f64,
+                    ..Default::default()
+                },
+                ..CharacterSpec::default()
+            };
+            m.preview(&spec, None).unwrap();
+        }
+        assert_eq!(
+            m.builds().body,
+            1,
+            "a gait drag rebuilt the mannequin body: {:?}",
+            m.builds()
+        );
+
+        // **The control.** A fresh session per preview — which is exactly what
+        // the panel did before this existed — rebuilds everything, every time.
+        let mut cold = PreviewBuilds::default();
+        for k in 0..20 {
+            let spec = CharacterSpec {
+                params: BodyParams {
+                    height_m: 1.5 + 0.01 * k as f64,
+                    ..BodyParams::default()
+                },
+                mesh: Some(AssetId::new()),
+                ..CharacterSpec::default()
+            };
+            let mut once = CharacterPreviewSession::new();
+            once.preview(&spec, Some((&mesh, stamp))).unwrap();
+            let b = once.builds();
+            cold.bvh += b.bvh;
+            cold.locomotion += b.locomotion;
+            cold.previews += b.previews;
+        }
+        assert_eq!(
+            cold.bvh, 20,
+            "the control must pay for a BVH every keystroke: {cold:?}"
+        );
+    }
+
+    /// A model with **no stamp** is not cached, because two unidentified models
+    /// are indistinguishable — and the free `preview_character` is that path, so
+    /// it is exactly its pre-P29.5 self.
+    #[test]
+    fn an_unstamped_model_is_never_cached() {
+        let a = tube_man();
+        let mut s = CharacterPreviewSession::new();
+        let spec = CharacterSpec {
+            mesh: Some(AssetId::new()),
+            ..CharacterSpec::default()
+        };
+        s.preview(&spec, Some((&a, 0))).unwrap();
+        s.preview(&spec, Some((&a, 0))).unwrap();
+        assert_eq!(
+            s.builds().bvh,
+            2,
+            "an unstamped model must be rebuilt: {:?}",
+            s.builds()
+        );
+        // A stamp that MOVES also rebuilds — the case that matters when the
+        // author edits the model in the Model Editor while the wizard is open.
+        let mut t = CharacterPreviewSession::new();
+        t.preview(&spec, Some((&a, 1))).unwrap();
+        t.preview(&spec, Some((&a, 1))).unwrap();
+        t.preview(&spec, Some((&a, 2))).unwrap();
+        assert_eq!(t.builds().bvh, 2, "{:?}", t.builds());
     }
 
     #[test]
