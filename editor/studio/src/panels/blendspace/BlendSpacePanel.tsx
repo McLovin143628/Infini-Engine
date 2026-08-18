@@ -17,14 +17,26 @@
  * It is the **real blend**: `blendspace_preview` runs
  * `inf_anim::sample_blend_space_2d` over the placed clips and returns the posed
  * skeleton's joints in model space, which the right-hand pane draws as a stick
- * figure. It is not a shaded render — a lit preview needs the offscreen character
- * preview path, which is P29.5's `preview_character` work and is named in the
- * ROADMAP's remainders rather than faked here.
+ * figure. It is not a shaded render -- a lit preview needs the offscreen
+ * character preview path, and that stays a named remainder rather than being
+ * faked here.
+ *
+ * # The derived pane (P29.5, pillar S2)
+ *
+ * Selecting a sample shows what the IMPORT measured on its clip: the curve
+ * channels with a sparkline each, the foot-plant and footstep markers on a
+ * timeline, and the baked root motion. That is where the questions this panel
+ * raises are actually answered -- "why do these two clips fight over the feet"
+ * is a marker question, and "why is this one at the wrong end of the axis" is a
+ * derived-speed one -- and the re-derive button is beside them because the one
+ * decision a clip cannot make for itself (is its vertical travel or a bob?) has
+ * to be an author's.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useBlendSpaceStore } from "../../stores/blendSpaceStore";
 import { useSmStore } from "../../stores/smStore";
+import { gaitLabel, isFootstep } from "../../lib/animTypes";
 import "../blueprint/blueprint.css";
 import "./blendspace.css";
 
@@ -68,6 +80,11 @@ export default function BlendSpacePanel() {
   const reset = useBlendSpaceStore((s) => s.reset);
   const pullFromState = useBlendSpaceStore((s) => s.pullFromState);
   const pushToState = useBlendSpaceStore((s) => s.pushToState);
+  const derived = useBlendSpaceStore((s) => s.derived);
+  const lastDerive = useBlendSpaceStore((s) => s.lastDerive);
+  const deriving = useBlendSpaceStore((s) => s.deriving);
+  const loadDerived = useBlendSpaceStore((s) => s.loadDerived);
+  const rederive = useBlendSpaceStore((s) => s.rederive);
 
   const clips = useSmStore((s) => s.clips);
   const clipName = useSmStore((s) => s.clipName);
@@ -258,6 +275,10 @@ export default function BlendSpacePanel() {
                       e.stopPropagation();
                       dragRef.current = i;
                       setSelected(i);
+                      // From the HANDLER, not an effect: the derived pane
+                      // follows a gesture, and a fetch fired by a render is how
+                      // `set-state-in-effect` gets re-invented.
+                      void loadDerived(s.clip);
                     }}
                   />
                   <text x={x + 7} y={y - 6} className="bs-label">
@@ -352,9 +373,11 @@ export default function BlendSpacePanel() {
                   <select
                     className="bs-input"
                     value={sel.clip ?? ""}
-                    onChange={(e) =>
-                      void setSampleClip(selected!, e.target.value === "" ? null : e.target.value)
-                    }
+                    onChange={(e) => {
+                      const id = e.target.value === "" ? null : e.target.value;
+                      void setSampleClip(selected!, id);
+                      void loadDerived(id);
+                    }}
                   >
                     <option value="">(none)</option>
                     {clips.map((c) => (
@@ -382,6 +405,124 @@ export default function BlendSpacePanel() {
               <div className="bs-note">Select a sample to assign its clip.</div>
             )}
           </div>
+
+          {sel?.clip && (
+            <div className="bs-section">
+              <div className="bs-section__title">Derived{deriving ? " · …" : ""}</div>
+              {derived?.refusal && <div className="bs-note">{derived.refusal}</div>}
+              {derived && !derived.refusal && (
+                <>
+                  <div className="bs-stat">
+                    {derived.name} · {derived.durationS.toFixed(2)} s
+                  </div>
+                  {derived.rootMotion ? (
+                    <div className="bs-stat">
+                      travels {derived.rootMotion.distanceM.toFixed(2)} m, rises{" "}
+                      {derived.rootMotion.translation[1].toFixed(2)} m, turns{" "}
+                      {derived.rootMotion.yawDeg.toFixed(1)}&deg;
+                    </div>
+                  ) : (
+                    <div className="bs-note">no baked root motion — re-derive to measure it</div>
+                  )}
+
+                  <div className="bs-section__title">Markers</div>
+                  {derived.markers.length === 0 ? (
+                    <div className="bs-note">none</div>
+                  ) : (
+                    <>
+                      <svg viewBox={`0 0 ${VIEW} 22`} className="bs-markers">
+                        <line x1={2} y1={11} x2={VIEW - 2} y2={11} className="bs-axis" />
+                        {derived.markers.map((m, i) => {
+                          const frac =
+                            derived.durationS > 0
+                              ? Math.min(1, Math.max(0, m.timeS / derived.durationS))
+                              : 0;
+                          const x = 2 + (VIEW - 4) * frac;
+                          const event = isFootstep(m);
+                          return (
+                            <line
+                              key={i}
+                              x1={x}
+                              y1={event ? 11 : 3}
+                              x2={x}
+                              y2={event ? 19 : 11}
+                              className={event ? "bs-marker--event" : "bs-marker--sync"}
+                            />
+                          );
+                        })}
+                      </svg>
+                      <div className="bs-marker-list">
+                        {derived.markers.map((m, i) => (
+                          <div key={i} className="bs-stat">
+                            {m.timeS.toFixed(3)} s · {m.name}
+                            {m.group ? ` · group ${m.group}` : " · event"}
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+
+                  <div className="bs-section__title">Channels</div>
+                  {derived.curves.length === 0 ? (
+                    <div className="bs-note">none</div>
+                  ) : (
+                    derived.curves.map((c) => {
+                      const span = c.max - c.min || 1;
+                      const pts = c.samples
+                        .map((v, i) => {
+                          const x = (i / Math.max(1, c.samples.length - 1)) * VIEW;
+                          const y = 20 - ((v - c.min) / span) * 18;
+                          return `${x.toFixed(1)},${y.toFixed(1)}`;
+                        })
+                        .join(" ");
+                      return (
+                        <div className="bs-curve" key={c.name}>
+                          <div className="bs-curve__name">
+                            {c.name}
+                            {c.derived ? "" : " (authored)"}
+                          </div>
+                          <svg viewBox={`0 0 ${VIEW} 22`} className="bs-spark">
+                            <polyline points={pts} className="bs-spark__line" />
+                          </svg>
+                          <div className="bs-stat">
+                            {c.min.toFixed(2)} … {c.max.toFixed(2)} · {c.keys} keys
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+
+                  <div className="bs-section__title">Re-derive</div>
+                  <div className="bs-note">
+                    Idempotent: running it again writes the same bytes. Traversal puts the whole
+                    vertical on the root-motion track — for a mantle or a vault, whose rise IS the
+                    movement.
+                  </div>
+                  <div className="bs-field bs-field--row">
+                    <button className="bp-btn" disabled={deriving} onClick={() => void rederive(false)}>
+                      Gait
+                    </button>
+                    <button className="bp-btn" disabled={deriving} onClick={() => void rederive(true)}>
+                      Traversal
+                    </button>
+                  </div>
+                  {lastDerive && !lastDerive.refusal && (
+                    <div className="bs-stat">
+                      {lastDerive.avgSpeedMps.toFixed(2)} m/s ({gaitLabel(lastDerive.gait)}), stride{" "}
+                      {lastDerive.strideM.toFixed(2)} m, {lastDerive.plants} plant(s),{" "}
+                      {lastDerive.markers} marker(s)
+                    </div>
+                  )}
+                  {lastDerive?.refusal && <div className="bs-note">{lastDerive.refusal}</div>}
+                  {(lastDerive?.advisories ?? []).map((a, i) => (
+                    <div className="bs-note" key={i}>
+                      {a}
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
 
           {status && <div className="bs-note bs-note--status">{status}</div>}
         </div>

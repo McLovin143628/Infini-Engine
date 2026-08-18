@@ -20,7 +20,8 @@ import type {
 } from "./blueprintTypes";
 import type { MaterialCompileResult } from "./materialTypes";
 import type { PcgBiomeResult, PcgCompileResult, PcgEvaluateResult } from "./pcgTypes";
-import type { SmClipDto, SmDoc } from "./smTypes";
+import type { AnimClipInfoDto, AnimDeriveDto } from "./animTypes";
+import type { SmClipDto, SmDoc, SmProposalDto } from "./smTypes";
 import type { BlendPreviewDto, BlendSampleDto } from "./blendSpaceTypes";
 import type { AssetRefDto } from "../bindings/AssetRefDto";
 import type { AssetSnapshot } from "../bindings/AssetSnapshot";
@@ -1042,6 +1043,27 @@ export const sm = {
   save: (id: string, doc: SmDoc, name: string): Promise<string> =>
     invoke<string>("sm_save", { id, doc, name }),
   listClips: (): Promise<SmClipDto[]> => invoke<SmClipDto[]>("sm_list_clips"),
+  /**
+   * **Propose a machine over a clip set** (P29.5, pillar S3). Returns an
+   * ordinary `SmMachineDto` plus the reasoning that produced it; nothing is
+   * written, and the author saves it through `save` like any other document.
+   */
+  propose: (clips: string[]): Promise<SmProposalDto> =>
+    invoke<SmProposalDto>("sm_propose", { clips }),
+};
+
+/**
+ * Animation clip derivation (P29.5, pillar S2). `clipInfo` reads a `.inf_anim`
+ * back -- its curve channels with a sparkline each, its markers, and its baked
+ * root motion -- so a panel shows what the import measured rather than asserting
+ * that it exists. `rederive` runs the derivation again over a clip on disk,
+ * which is safe on a button because the rule un-bakes before it bakes.
+ */
+export const anim = {
+  clipInfo: (id: string): Promise<AnimClipInfoDto> =>
+    invoke<AnimClipInfoDto>("anim_clip_info", { id }),
+  rederive: (id: string, traversal: boolean): Promise<AnimDeriveDto> =>
+    invoke<AnimDeriveDto>("anim_rederive", { id, traversal }),
 };
 
 /**
@@ -1357,6 +1379,24 @@ export const sim = {
    */
   setDebug: (classId: string, breakpoints: number[], capture: boolean): Promise<void> =>
     invoke("sim_set_debug", { classId, breakpoints, capture }),
+  /**
+   * **Queue a live tuning edit** (P29.5, pillar S4). It applies at the top of
+   * the NEXT fixed step, never inside one. `kind` is `"field"` (a reflected
+   * component field -- `typePath` defaults to `CharacterMovement`), `"param"` (a
+   * machine parameter) or `"trigger"` (a machine trigger; `value` is ignored).
+   * `keep` chooses whether the value survives Stop as an ordinary undoable edit.
+   * Resolves to whether a session was running -- `false` is a value, not an
+   * error, because a tuning panel is live over a session the author can stop.
+   */
+  tune: (
+    kind: "field" | "param" | "trigger",
+    guid: string,
+    name: string,
+    value: number,
+    keep: boolean,
+    typePath?: string,
+  ): Promise<boolean> =>
+    invoke<boolean>("sim_tune", { kind, guid, name, value, keep, typePath: typePath ?? null }),
   /** Exit Simulate, restoring the pre-play world. */
   stop: (): Promise<void> => invoke("sim_stop"),
   /** Whether a Simulate session is currently running (mount-time sync). */

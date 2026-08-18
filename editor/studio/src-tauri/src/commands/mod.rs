@@ -8,6 +8,7 @@ mod audio;
 // P29.2 the 2D blend-space authoring panel: stateless geometry + a posed preview.
 mod blendspace;
 // P24.5 New Character from Template: the wizard's Ring-2 door.
+mod anim;
 mod character;
 mod collections;
 mod collision_layers;
@@ -174,6 +175,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         sm::sm_close,
         sm::sm_save,
         sm::sm_list_clips,
+        sm::sm_propose,
+        anim::anim_clip_info,
+        anim::anim_rederive,
         blendspace::blendspace_preview,
         layout::layout_save,
         layout::layout_load,

@@ -163,6 +163,120 @@ export interface SmClipDto {
   name: string;
 }
 
+/** A machine proposed from a clip set (P29.5, pillar S3), with the reasoning
+ *  that produced it.
+ *
+ *  `machine` is an ordinary `SmMachineDto` — the same shape the canvas already
+ *  edits and `sm_save` already writes. That is what "proposed" means: the author
+ *  gets a document, not a mode. */
+export interface SmProposalDto {
+  machine: SmMachineDto;
+  notes: string[];
+  triggers: string[];
+  refusal: string | null;
+}
+
+// ── the condition tree, as something a UI can edit (P29.5) ───────────────────
+//
+// A path is a list of child indices from the root: `[]` is the root itself,
+// `[2]` the third term of an `and`/`or`, `[2, 0]` the operand of a `not` inside
+// it. Every helper below is **immutable** — it returns a new tree — because the
+// store's whole editing model is "produce a new machine", and a mutating tree
+// helper in the middle of that is how a stale render survives an edit.
+
+/** The condition kinds a rule builder offers. */
+export type SmCondKind = SmCondDto["kind"];
+
+export const SM_COND_KINDS: SmCondKind[] = ["always", "compare", "trigger", "and", "or", "not"];
+
+/** A fresh node of `kind`, seeded so it is immediately meaningful. */
+export function defaultCond(kind: SmCondKind, param = "speed"): SmCondDto {
+  switch (kind) {
+    case "always":
+      return { kind: "always" };
+    case "compare":
+      return { kind: "compare", param, op: ">", value: 0, valueKind: "float" };
+    case "trigger":
+      return { kind: "trigger", param };
+    case "and":
+      return { kind: "and", terms: [] };
+    case "or":
+      return { kind: "or", terms: [] };
+    case "not":
+      return { kind: "not", term: { kind: "always" } };
+  }
+}
+
+/** The child nodes of `c`, in the order a builder draws them. Leaves have none. */
+export function condChildren(c: SmCondDto): SmCondDto[] {
+  switch (c.kind) {
+    case "and":
+    case "or":
+      return c.terms;
+    case "not":
+      return [c.term];
+    default:
+      return [];
+  }
+}
+
+/** Replace `c`'s children wholesale, keeping its kind. A `not` takes the first. */
+function withChildren(c: SmCondDto, kids: SmCondDto[]): SmCondDto {
+  switch (c.kind) {
+    case "and":
+      return { kind: "and", terms: kids };
+    case "or":
+      return { kind: "or", terms: kids };
+    case "not":
+      return { kind: "not", term: kids[0] ?? { kind: "always" } };
+    default:
+      return c;
+  }
+}
+
+/** The node at `path`, or `null` when the path does not exist. */
+export function condAt(root: SmCondDto, path: number[]): SmCondDto | null {
+  let cur: SmCondDto | undefined = root;
+  for (const i of path) {
+    if (!cur) return null;
+    cur = condChildren(cur)[i];
+  }
+  return cur ?? null;
+}
+
+/** A copy of `root` with the node at `path` replaced by `next`. */
+export function setCondAt(root: SmCondDto, path: number[], next: SmCondDto): SmCondDto {
+  if (path.length === 0) return next;
+  const [i, ...rest] = path;
+  const kids = condChildren(root);
+  const child = kids[i];
+  if (!child) return root;
+  const replaced = kids.map((k, j) => (j === i ? setCondAt(child, rest, next) : k));
+  return withChildren(root, replaced);
+}
+
+/** A copy of `root` with the node at `path` removed from its parent.
+ *
+ *  Removing the root, or the single operand of a `not`, is refused: both would
+ *  leave a hole rather than a tree, and the builder offers "change kind" for
+ *  that instead. Refusing returns `root` unchanged — a **value**. */
+export function removeCondAt(root: SmCondDto, path: number[]): SmCondDto {
+  if (path.length === 0) return root;
+  const parentPath = path.slice(0, -1);
+  const i = path[path.length - 1];
+  const parent = condAt(root, parentPath);
+  if (!parent || (parent.kind !== "and" && parent.kind !== "or")) return root;
+  const kids = condChildren(parent).filter((_, j) => j !== i);
+  return setCondAt(root, parentPath, withChildren(parent, kids));
+}
+
+/** A copy of `root` with `term` appended to the `and`/`or` at `path`. */
+export function addTermAt(root: SmCondDto, path: number[], term: SmCondDto): SmCondDto {
+  const node = condAt(root, path);
+  if (!node || (node.kind !== "and" && node.kind !== "or")) return root;
+  return setCondAt(root, path, withChildren(node, [...condChildren(node), term]));
+}
+
 /** A short human summary of a state's motion for the node body. */
 export function motionSummary(m: SmMotion, clipName: (id: string | null) => string): string {
   switch (m.kind) {

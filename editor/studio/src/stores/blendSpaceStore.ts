@@ -14,9 +14,10 @@
  */
 import { create } from "zustand";
 
-import { blendSpace as bsIpc } from "../lib/ipc";
+import { anim as animIpc, blendSpace as bsIpc } from "../lib/ipc";
 import { locomotionDiamond, newSample } from "../lib/blendSpaceTypes";
 import type { BlendPreviewDto, BlendSampleDto } from "../lib/blendSpaceTypes";
+import type { AnimClipInfoDto, AnimDeriveDto } from "../lib/animTypes";
 import { useSmStore } from "./smStore";
 
 interface BlendSpaceStore {
@@ -33,6 +34,20 @@ interface BlendSpaceStore {
   /** The last push/pull message, for the toolbar readout. */
   status: string | null;
 
+  // ── the derived-data inspector (P29.5, pillar S2) ──
+  //
+  // What the IMPORT measured on one clip: its curve channels, its foot-plant and
+  // footstep markers, its baked root motion. Kept beside the blend space because
+  // that is where an author asks the question — "why do these two clips fight
+  // over the feet" is answered by their markers, and "why does this one sit at
+  // the wrong end of the axis" by its derived speed.
+  /** The clip the derived pane is showing, or null. */
+  derivedFor: string | null;
+  derived: AnimClipInfoDto | null;
+  /** The last re-derivation's report, shown until the selection changes. */
+  lastDerive: AnimDeriveDto | null;
+  deriving: boolean;
+
   init: () => Promise<void>;
   refresh: () => Promise<void>;
   setParams: (x: string, y: string) => void;
@@ -45,6 +60,11 @@ interface BlendSpaceStore {
   reset: () => Promise<void>;
   pullFromState: (stateIndex: number) => Promise<void>;
   pushToState: (stateIndex: number) => void;
+  /** Read a clip's derived data back. `null` clears the pane. */
+  loadDerived: (clipId: string | null) => Promise<void>;
+  /** Re-run the derivation over the clip the pane is showing. `traversal` picks
+   *  the preset that puts the WHOLE vertical on the root-motion track. */
+  rederive: (traversal: boolean) => Promise<void>;
 }
 
 export const useBlendSpaceStore = create<BlendSpaceStore>((set, get) => ({
@@ -57,6 +77,10 @@ export const useBlendSpaceStore = create<BlendSpaceStore>((set, get) => ({
   preview: null,
   busy: false,
   status: null,
+  derivedFor: null,
+  derived: null,
+  lastDerive: null,
+  deriving: false,
 
   init: async () => {
     // The clip list is `smStore`'s — one asset query, one owner.
@@ -133,6 +157,41 @@ export const useBlendSpaceStore = create<BlendSpaceStore>((set, get) => ({
       status: `pulled from “${doc?.machine.states[stateIndex]?.name ?? stateIndex}”`,
     });
     await get().refresh();
+  },
+
+  loadDerived: async (clipId) => {
+    if (!clipId) {
+      set({ derivedFor: null, derived: null, lastDerive: null });
+      return;
+    }
+    set({ deriving: true, derivedFor: clipId, lastDerive: null });
+    try {
+      set({ derived: await animIpc.clipInfo(clipId) });
+    } catch (e) {
+      console.error("anim.clipInfo failed", e);
+      set({ derived: null });
+    } finally {
+      set({ deriving: false });
+    }
+  },
+
+  // Re-derivation is safe on a button because the rule un-bakes before it bakes:
+  // pressing it twice writes the same bytes as pressing it once. The pane is
+  // reloaded afterwards so the numbers on screen are the ones on disk.
+  rederive: async (traversal) => {
+    const id = get().derivedFor;
+    if (!id) return;
+    set({ deriving: true });
+    try {
+      const report = await animIpc.rederive(id, traversal);
+      set({ lastDerive: report });
+      set({ derived: await animIpc.clipInfo(id) });
+    } catch (e) {
+      console.error("anim.rederive failed", e);
+      set({ lastDerive: null, status: String(e) });
+    } finally {
+      set({ deriving: false });
+    }
   },
 
   pushToState: (stateIndex) => {

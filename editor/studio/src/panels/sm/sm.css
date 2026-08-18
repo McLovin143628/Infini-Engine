@@ -134,3 +134,169 @@
   padding: 1px 7px;
   font-size: 12px;
 }
+
+/* ── v2 authoring surface (P29.5) ──
+ *
+ * The inspector grew three tabs (selection / parameters / profiles), a rule
+ * builder over the condition tree, and two banners: the validator's refusal and
+ * a proposal's reasoning. Everything still rides the `--ink-*` theme vars. */
+
+.sm-inspector {
+  width: 300px;
+  flex: 0 0 300px;
+}
+
+.sm-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--ink-border);
+  background: var(--ink-bg-2);
+}
+.sm-tab {
+  flex: 1 1 0;
+  padding: 5px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+.sm-tab--on {
+  color: var(--ink-text);
+  box-shadow: inset 0 -2px 0 var(--ink-accent);
+}
+
+.sm-insp__row input[type="text"],
+.sm-insp__row input:not([type]) {
+  width: 150px;
+  background: var(--ink-bg-2);
+  border: 1px solid var(--ink-border);
+  border-radius: 4px;
+  color: var(--ink-text);
+  padding: 2px 4px;
+}
+
+.sm-param,
+.sm-profile {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.sm-profile {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  border: 1px solid var(--ink-border);
+  border-radius: 5px;
+  padding: 5px;
+}
+.sm-param__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--ink-bg-2);
+  border: 1px solid var(--ink-border);
+  border-radius: 4px;
+  color: var(--ink-text);
+  padding: 2px 4px;
+}
+.sm-param__val {
+  width: 56px;
+  background: var(--ink-bg-2);
+  border: 1px solid var(--ink-border);
+  border-radius: 4px;
+  color: var(--ink-text);
+  padding: 2px 4px;
+}
+
+/* ── the rule builder ── */
+.sm-rule {
+  border-left: 2px solid var(--ink-border);
+  padding-left: 6px;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.sm-rule--and,
+.sm-rule--or {
+  border-left-color: var(--ink-accent);
+}
+.sm-rule__head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.sm-rule__kind {
+  background: var(--ink-bg-2);
+  border: 1px solid var(--ink-border);
+  border-radius: 4px;
+  color: var(--ink-text);
+  padding: 1px 4px;
+  font-size: 11px;
+}
+.sm-rule__row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.sm-rule__row select {
+  background: var(--ink-bg-2);
+  border: 1px solid var(--ink-border);
+  border-radius: 4px;
+  color: var(--ink-text);
+  padding: 1px 3px;
+  font-size: 11px;
+}
+.sm-rule__param {
+  flex: 1 1 auto;
+  min-width: 40px;
+  background: var(--ink-bg-2);
+  border: 1px solid var(--ink-border);
+  border-radius: 4px;
+  color: var(--ink-text);
+  padding: 1px 4px;
+}
+.sm-rule__val {
+  width: 52px;
+  background: var(--ink-bg-2);
+  border: 1px solid var(--ink-border);
+  border-radius: 4px;
+  color: var(--ink-text);
+  padding: 1px 4px;
+}
+.sm-rule__kids {
+  padding-left: 8px;
+}
+.sm-cond--readonly {
+  color: var(--ink-text-dim);
+  font-style: italic;
+}
+
+/* ── the two banners ── */
+.sm-refusal {
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--ink-danger, #b4453a) 22%, var(--ink-bg-1));
+  border-bottom: 1px solid var(--ink-border);
+  color: var(--ink-text);
+  font-size: 12px;
+}
+.sm-notes {
+  max-height: 150px;
+  overflow-y: auto;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--ink-border);
+  background: var(--ink-bg-2);
+  color: var(--ink-text-dim);
+  font-size: 11px;
+}
+.sm-notes__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--ink-text);
+  margin-bottom: 3px;
+}
+.sm-notes ul {
+  margin: 0;
+  padding-left: 16px;
+  line-height: 1.45;
+}

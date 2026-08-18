@@ -877,6 +877,84 @@ pub async fn sm_list_clips(assets: State<'_, AssetState>) -> Result<Vec<SmClipDt
     })
 }
 
+/// A proposed machine, its reasoning, and the triggers gameplay has to arm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmProposalDto {
+    /// The machine, in exactly the shape [`sm_save`] takes — because it **is** a
+    /// normal machine, and the panel loads it into the same canvas.
+    pub machine: SmMachineDto,
+    /// One line per decision, in the order they were taken.
+    pub notes: Vec<String>,
+    /// The trigger parameters the one-shots declared.
+    pub triggers: Vec<String>,
+    /// Why nothing was proposed. A **value**.
+    pub refusal: Option<String>,
+}
+
+/// **Propose a state machine over a clip set** (P29.5, pillar S3).
+///
+/// The rule is `inf_anim::propose_machine`; this resolves the ids, reads each
+/// clip's derived facts back off it (`inf_anim::facts_of`) and projects the
+/// result into the same DTO the canvas already edits. Nothing is written — the
+/// author gets a document, looks at it, changes it and saves it through
+/// [`sm_save`] like any other, which is what "proposed" means.
+///
+/// A clip that cannot be loaded is **skipped with a note** rather than failing
+/// the proposal: a set of forty clips with one broken asset in it should still
+/// propose thirty-nine.
+#[tauri::command]
+pub async fn sm_propose(
+    clips: Vec<String>,
+    assets: State<'_, AssetState>,
+) -> Result<SmProposalDto, String> {
+    let mut ids: Vec<(inf_asset::AssetId, String)> = Vec::new();
+    for c in &clips {
+        let id = c
+            .parse::<inf_asset::AssetId>()
+            .map_err(|e| format!("bad clip id `{c}`: {e}"))?;
+        ids.push((id, c.clone()));
+    }
+    let (facts, mut notes) = assets.with_project(|p| {
+        let mut facts = Vec::new();
+        let mut notes = Vec::new();
+        for (id, _) in &ids {
+            let Some(entry) = p.db().get(*id) else {
+                notes.push(format!("skipped {id}: no such asset"));
+                continue;
+            };
+            if entry.kind() != AssetKind::AnimClip {
+                notes.push(format!("skipped `{}`: not an animation clip", entry.name));
+                continue;
+            }
+            let name = entry.name.clone();
+            match p.load_payload::<inf_anim::AnimClipAsset>(*id) {
+                Ok(a) => facts.push(inf_anim::facts_of(name, id.uuid().into_bytes(), &a.clip)),
+                Err(e) => notes.push(format!("skipped `{name}`: {e}")),
+            }
+        }
+        Ok((facts, notes))
+    })?;
+
+    match inf_anim::propose_machine(&facts, &inf_anim::ProposalOptions::default()) {
+        Ok(p) => {
+            notes.extend(p.notes);
+            Ok(SmProposalDto {
+                machine: machine_to_dto(&p.machine),
+                notes,
+                triggers: p.triggers,
+                refusal: None,
+            })
+        }
+        Err(e) => Ok(SmProposalDto {
+            machine: machine_to_dto(&StateMachine::default()),
+            notes,
+            triggers: Vec::new(),
+            refusal: Some(e.to_string()),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1320,6 +1398,84 @@ mod tests {
         let (skeleton, deps) = machine_binding(&proj, &machine);
         assert_eq!(skeleton, None);
         assert!(deps.is_empty(), "the nil clip is not a dependency");
+    }
+
+    /// **The proposal the panel receives is one the save door accepts** (P29.5,
+    /// pillar S3).
+    ///
+    /// `sm_propose` projects a Ring-0 [`inf_anim::Proposal`] through
+    /// `machine_to_dto`, and the panel adopts it as its document — so the round
+    /// trip back through `dto_to_machine` has to produce a machine
+    /// `StateMachine::validate` accepts, or the author's first `Save` after a
+    /// proposal is a refusal they did not cause.
+    ///
+    /// The anti-vacuity half matters here: a proposal of an EMPTY machine
+    /// validates perfectly (`validate` returns early on no states), so the arm
+    /// asserts the shapes as well — a blend space, an any-state edge, a declared
+    /// trigger and a non-zero exit time all survive the projection.
+    #[test]
+    fn a_proposed_machine_survives_the_wire_and_validates() {
+        let facts = |name: &str, speed: f32, plants: usize| inf_anim::ClipFacts {
+            name: name.into(),
+            clip: Uuid::from_u128(name.len() as u128 + 1).into_bytes(),
+            duration_s: 1.0,
+            speed_mps: speed,
+            gait: inf_anim::gait_of(speed, [1.65, 3.75, 6.5]),
+            plants,
+        };
+        let proposal = inf_anim::propose_machine(
+            &[
+                facts("Idle", 0.0, 0),
+                facts("Walk", 1.6, 2),
+                facts("Jog", 3.2, 2),
+                facts("Runs", 4.0, 2),
+                facts("Jump", 2.0, 1),
+            ],
+            &inf_anim::ProposalOptions::default(),
+        )
+        .expect("a proposal");
+        proposal
+            .machine
+            .validate()
+            .expect("Ring 0 validates its own");
+
+        let dto = machine_to_dto(&proposal.machine);
+        let json = serde_json::to_string(&dto).expect("the DTO serializes");
+        let back: SmMachineDto = serde_json::from_str(&json).expect("…and comes back");
+        let machine = dto_to_machine(&back);
+        machine
+            .validate()
+            .expect("a proposal must validate after the round trip");
+
+        // The shapes really made it across.
+        assert!(
+            machine
+                .states
+                .iter()
+                .any(|s| matches!(s.motion, Motion::Blend1D(_))),
+            "the blend space did not survive"
+        );
+        assert!(
+            machine
+                .transitions
+                .iter()
+                .any(|t| matches!(t.from, SmSource::Any { .. })),
+            "the any-state edge did not survive"
+        );
+        assert!(
+            machine
+                .params
+                .iter()
+                .any(|p| p.kind == SmParamKind::Trigger && p.name == "play_jump"),
+            "the declared trigger did not survive: {:?}",
+            machine.params
+        );
+        assert!(
+            machine.transitions.iter().any(|t| t.exit_time == Some(0.9)),
+            "the exit time did not survive"
+        );
+        // …and the machine is not the empty one that would validate anyway.
+        assert!(machine.states.len() >= 4, "{:?}", machine.states.len());
     }
 
     #[test]

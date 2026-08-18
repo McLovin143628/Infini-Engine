@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../lib/ipc", () => ({
   blendSpace: { preview: vi.fn() },
+  anim: { clipInfo: vi.fn(), rederive: vi.fn() },
   sm: {
     list: vi.fn(),
     create: vi.fn(),
@@ -21,16 +22,21 @@ vi.mock("../../lib/ipc", () => ({
     close: vi.fn(),
     save: vi.fn(),
     listClips: vi.fn(),
+    propose: vi.fn(),
   },
 }));
 
-import { blendSpace, sm } from "../../lib/ipc";
+import { anim, blendSpace, sm } from "../../lib/ipc";
 import type { BlendPreviewDto } from "../../lib/blendSpaceTypes";
 import type { SmDoc } from "../../lib/smTypes";
 import { useBlendSpaceStore } from "../blendSpaceStore";
 import { __resetSmInitForTest, useSmStore } from "../smStore";
 
 const mockBs = blendSpace as unknown as { preview: ReturnType<typeof vi.fn> };
+const mockAnim = anim as unknown as {
+  clipInfo: ReturnType<typeof vi.fn>;
+  rederive: ReturnType<typeof vi.fn>;
+};
 const mockSm = sm as unknown as {
   list: ReturnType<typeof vi.fn>;
   create: ReturnType<typeof vi.fn>;
@@ -207,5 +213,87 @@ describe("blendSpaceStore", () => {
   it("says so when there is no machine to push into", () => {
     useBlendSpaceStore.getState().pushToState(0);
     expect(useBlendSpaceStore.getState().status).toMatch(/no state machine/);
+  });
+});
+
+// ── the derived-data pane (P29.5, pillar S2) ─────────────────────────────────
+//
+// What the panel shows about a clip is what the IMPORT measured on it, read back
+// through one command. The seam is what is tested here — that a selection loads
+// it, that clearing clears it, and that a re-derive RELOADS rather than trusting
+// the report it just got, because the report describes what was written and the
+// pane has to describe what is on disk.
+describe("derived data", () => {
+  const info = (over: Record<string, unknown> = {}) => ({
+    id: "c1",
+    name: "Walk",
+    durationS: 1.0,
+    curves: [
+      { name: "MoveData_Speed", keys: 31, min: 0, max: 1.7, samples: [0, 1.7], derived: true },
+      { name: "Mask_AimOffset", keys: 1, min: 1, max: 1, samples: [1, 1], derived: false },
+    ],
+    markers: [
+      { timeS: 0.1, name: "plant_upper_leg_l", group: "foot" },
+      { timeS: 0.1, name: "footstep_upper_leg_l", group: "" },
+    ],
+    rootMotion: { translation: [0, 0, 1.6], yawDeg: 0, distanceM: 1.6, keys: 31 },
+    skeleton: "sk1",
+    refusal: null,
+    ...over,
+  });
+
+  it("loads a clip's derived data and clears it for an unassigned sample", async () => {
+    mockAnim.clipInfo.mockResolvedValue(info());
+    await useBlendSpaceStore.getState().loadDerived("c1");
+    const s = useBlendSpaceStore.getState();
+    expect(mockAnim.clipInfo).toHaveBeenCalledWith("c1");
+    expect(s.derivedFor).toBe("c1");
+    expect(s.derived?.markers).toHaveLength(2);
+    expect(s.derived?.curves.filter((c) => c.derived)).toHaveLength(1);
+
+    await useBlendSpaceStore.getState().loadDerived(null);
+    expect(useBlendSpaceStore.getState().derived).toBeNull();
+    expect(useBlendSpaceStore.getState().derivedFor).toBeNull();
+  });
+
+  it("a re-derive re-reads the clip rather than trusting its own report", async () => {
+    mockAnim.clipInfo.mockResolvedValue(info());
+    await useBlendSpaceStore.getState().loadDerived("c1");
+    mockAnim.clipInfo.mockClear();
+
+    mockAnim.rederive.mockResolvedValue({
+      distanceM: 1.6,
+      avgSpeedMps: 1.6,
+      strideM: 0.8,
+      gait: 0.97,
+      riseM: 0,
+      plants: 2,
+      markers: 4,
+      curves: ["MoveData_Speed", "W_Gait"],
+      advisories: [],
+      refusal: null,
+    });
+    mockAnim.clipInfo.mockResolvedValue(info({ durationS: 1.25 }));
+    await useBlendSpaceStore.getState().rederive(true);
+
+    expect(mockAnim.rederive).toHaveBeenCalledWith("c1", true);
+    expect(mockAnim.clipInfo).toHaveBeenCalledWith("c1");
+    const s = useBlendSpaceStore.getState();
+    expect(s.lastDerive?.plants).toBe(2);
+    expect(s.derived?.durationS).toBe(1.25);
+  });
+
+  it("a re-derive with nothing selected does nothing at all", async () => {
+    await useBlendSpaceStore.getState().loadDerived(null);
+    await useBlendSpaceStore.getState().rederive(false);
+    expect(mockAnim.rederive).not.toHaveBeenCalled();
+  });
+
+  it("a refusal is a value the pane can show", async () => {
+    mockAnim.clipInfo.mockResolvedValue(
+      info({ refusal: "Walk is not an animation clip", curves: [], markers: [], rootMotion: null }),
+    );
+    await useBlendSpaceStore.getState().loadDerived("c1");
+    expect(useBlendSpaceStore.getState().derived?.refusal).toMatch(/not an animation clip/);
   });
 });

@@ -205,3 +205,46 @@
 .bs-joint {
   fill: var(--ink-text);
 }
+
+/* ── the derived-data pane (P29.5, pillar S2) ──
+ *
+ * A marker timeline (sync markers above the line, footstep events below), a
+ * sparkline per curve channel, and the re-derive controls. */
+
+.bs-markers {
+  width: 100%;
+  height: 22px;
+  display: block;
+}
+.bs-marker--sync {
+  stroke: var(--ink-accent);
+  stroke-width: 1.5;
+}
+.bs-marker--event {
+  stroke: var(--ink-warn, #d0a24c);
+  stroke-width: 1.5;
+}
+.bs-marker-list {
+  max-height: 90px;
+  overflow-y: auto;
+}
+.bs-curve {
+  margin-top: 4px;
+}
+.bs-curve__name {
+  font-size: 11px;
+  color: var(--ink-text);
+}
+.bs-spark {
+  width: 100%;
+  height: 22px;
+  display: block;
+  background: var(--ink-bg-2);
+  border: 1px solid var(--ink-border);
+  border-radius: 3px;
+}
+.bs-spark__line {
+  fill: none;
+  stroke: var(--ink-accent);
+  stroke-width: 1.2;
+}

@@ -14,6 +14,7 @@ vi.mock("../../lib/ipc", () => ({
     close: vi.fn(),
     save: vi.fn(),
     listClips: vi.fn(),
+    propose: vi.fn(),
   },
 }));
 
@@ -61,7 +62,17 @@ beforeEach(async () => {
   mockSm.save.mockResolvedValue("Main.inf_sm");
   mockSm.close.mockResolvedValue(undefined);
   // Reset the store to a fresh, un-inited state.
-  useSmStore.setState({ doc: null, clips: [], selectedTransition: null, ready: false, saving: false });
+  useSmStore.setState({
+    doc: null,
+    clips: [],
+    selectedTransition: null,
+    ready: false,
+    saving: false,
+    path: [],
+    proposalNotes: [],
+    refusal: null,
+    proposing: false,
+  });
   await useSmStore.getState().init();
 });
 
