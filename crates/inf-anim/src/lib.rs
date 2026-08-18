@@ -104,7 +104,7 @@ pub use layers::{
 };
 pub use locomotion::{
     build_locomotion, locomotion_machine, GaitParams, LegSummary, LocomotionError, LocomotionSet,
-    MAX_KEYS_PER_CYCLE, SPEED_VAR, STATE_NAMES,
+    FOOT_SYNC_GROUP, MAX_KEYS_PER_CYCLE, SPEED_VAR, STATE_NAMES,
 };
 pub use merge::{
     merge_skeletons, mirror_joint_map, mirrored_joint_name, unmatched_sided_joints, SkeletonMerge,

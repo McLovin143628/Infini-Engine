@@ -723,8 +723,45 @@ fn gait_clip(
         tracks.push(track);
     }
 
-    AnimClip::new(name, tracks)
+    AnimClip::new(name, tracks).with_markers(foot_markers(period, legs))
 }
+
+/// The gait cycle's **foot-plant markers**, one per leg, in the `foot` sync group
+/// (P29.2, `.inf_anim` v2).
+///
+/// This is pillar S2 in miniature — *derive at import, by code, every time*. Epic
+/// ships an AnimModifier a human has to remember to run over 891 clips; the plant
+/// time here is not measured from the curves at all, because the generator
+/// **authored** them and knows exactly where the plant is: the knee's flex is
+/// `−A·½(1 + cos(2π(u + phase)))`, which is zero — the leg straight, the foot
+/// under the body — at `u + phase = ½`. So the plant is at
+/// `period · ((½ − phase) mod 1)`.
+///
+/// What it buys, stated honestly. For the generator's **own** walk/run pair the
+/// markers change nothing: one generator authored both and put every plant at the
+/// same *fraction* of its own cycle, so uniform phase already agrees. What they
+/// buy is **interoperability** — a project that blends a wizard walk against an
+/// imported run whose plants sit elsewhere gets its feet aligned, because both
+/// clips name the same markers (one per leg, from the leg's own joint name) in
+/// the same group. `the_generated_gait_clips_sync_on_their_foot_plants` asserts
+/// both halves, including the agreement, so the day the generator stops
+/// phase-aligning itself is a red test rather than a silent change.
+fn foot_markers(period: f64, legs: &[Leg]) -> Vec<crate::AnimMarker> {
+    legs.iter()
+        .map(|l| {
+            let at = (0.5 - l.phase).rem_euclid(1.0) * period;
+            crate::AnimMarker::sync(at as f32, format!("plant_{}", l.name), FOOT_SYNC_GROUP)
+        })
+        .collect()
+}
+
+/// The sync group the generated gait clips place their foot-plant markers in.
+///
+/// Public because it is a **contract between generated content and whatever reads
+/// it**: a project that adds its own locomotion clip has to spell this group the
+/// same way for the blend to align, and a spelling nobody can name is a spelling
+/// that drifts.
+pub const FOOT_SYNC_GROUP: &str = "foot";
 
 /// Reject degenerate gait parameters **as values** — [`crate::template`]'s rule,
 /// for the same reason: a clamped cadence produces a clip that is *almost* what
@@ -1164,5 +1201,98 @@ mod tests {
                 other => panic!("{param} was not refused: {other:?}"),
             }
         }
+    }
+    /// **The generated walk and run carry matching foot-plant markers, and the
+    /// blend between them really warps** (P29.2).
+    ///
+    /// Three claims. The plant times are where the generator *put* the plant —
+    /// the knee is straight at `u + phase = ½`, so leg 0 (phase 0) plants at half
+    /// a cycle and leg 1 (phase ½) plants at the seam. The two clips name the
+    /// same markers even though their cadences differ, which is what makes them
+    /// a sync group at all. And the warp is not merely available: with the walk
+    /// leading at its own plant, the run is sampled at the run's plant, which is
+    /// a *different* time from the uniform-phase answer.
+    #[test]
+    fn the_generated_gait_clips_sync_on_their_foot_plants() {
+        let rig = biped();
+        let gait = GaitParams::default();
+        let set = build_locomotion(BodyPlan::Biped, &rig, &gait).unwrap();
+
+        let walk_period = 1.0 / gait.walk_cadence_hz;
+        let run_period = 1.0 / gait.run_cadence_hz;
+        assert!(
+            (walk_period - run_period).abs() > 1e-3,
+            "the two cadences are equal, so this fixture cannot tell marker sync              from uniform phase"
+        );
+
+        // The markers are in the group, one per leg, named after the leg.
+        let walk_m = set.walk.markers_in(FOOT_SYNC_GROUP);
+        let run_m = set.run.markers_in(FOOT_SYNC_GROUP);
+        assert_eq!(walk_m.len(), 2, "{:?}", set.walk.markers);
+        assert_eq!(run_m.len(), 2);
+        let names = |m: &[&crate::AnimMarker]| -> Vec<String> {
+            let mut v: Vec<String> = m.iter().map(|x| x.name.clone()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(names(&walk_m), names(&run_m), "the groups do not match");
+        assert!(names(&walk_m)[0].starts_with("plant_upper_leg_"));
+        // Leg 0 has phase 0 and therefore plants at HALF a cycle; leg 1 has phase
+        // ½ and plants at the seam. Read by name, not by index.
+        let at = |m: &[&crate::AnimMarker], leg: &str| -> f32 {
+            m.iter()
+                .find(|x| x.name.ends_with(leg))
+                .unwrap_or_else(|| panic!("no plant for {leg}"))
+                .time_s
+        };
+        let l0 = &set.legs[0].name;
+        let l1 = &set.legs[1].name;
+        assert!((at(&walk_m, l0) as f64 - walk_period * 0.5).abs() < 1e-6);
+        assert!((at(&walk_m, l1) as f64).abs() < 1e-6);
+        assert!((at(&run_m, l0) as f64 - run_period * 0.5).abs() < 1e-6);
+
+        // The blend warps onto the plant. The walk leads (weight 1 vs 0) at its
+        // own plant, and the run is sampled at the run's.
+        let lead = at(&walk_m, l0);
+        let times = crate::sync::warped_times(&[&set.walk, &set.run], &[1.0, 0.0], lead)
+            .expect("the two clips share a usable sync group");
+        assert!((times[0] - lead).abs() < 1e-6, "the leader moved: {times:?}");
+        assert!(
+            (times[1] as f64 - run_period * 0.5).abs() < 1e-4,
+            "the run was not put on its own plant: {times:?}"
+        );
+
+        // **And the honest half.** For the generator's OWN pair this is the same
+        // answer uniform phase gives, because one generator authored both and put
+        // every plant at the same *fraction* of its own cycle. The markers are
+        // therefore not a fix for the wizard's set — they are what makes it
+        // interoperable, and the case they serve is an imported clip whose plants
+        // sit somewhere else. That case is built here by retiming the run's
+        // markers, which is exactly what an import would carry.
+        let uniform = (lead as f64 / walk_period) * run_period;
+        assert!(
+            (uniform - times[1] as f64).abs() < 1e-4,
+            "the generator stopped phase-aligning its own clips: {uniform} vs {}",
+            times[1]
+        );
+        let mut imported = set.run.clone();
+        for m in &mut imported.markers {
+            // Plants a fifth of a cycle earlier — a different gait, same names.
+            m.time_s = ((m.time_s as f64 - 0.2 * run_period).rem_euclid(run_period)) as f32;
+        }
+        let times = crate::sync::warped_times(&[&set.walk, &imported], &[1.0, 0.0], lead)
+            .expect("the retimed clip still shares the group");
+        let want = (0.5 - 0.2) * run_period;
+        assert!(
+            (times[1] as f64 - want).abs() < 1e-4,
+            "the retimed clip was not put on ITS plant: {times:?}, wanted {want}"
+        );
+        assert!(
+            (uniform - times[1] as f64).abs() > 1e-3,
+            "marker sync and uniform phase agree even on a retimed clip, so this              arm cannot see the difference"
+        );
+
+        // The idle clip is not a gait and carries no plants.
+        assert!(set.idle.markers.is_empty());
     }
 }
