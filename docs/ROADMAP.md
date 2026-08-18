@@ -16796,7 +16796,7 @@ shows a one-line authoring change as a one-line diff.
 > own tests calls: the day the editor exposes it, PIE has to carry it or the two hosts
 > stop agreeing.
 
-> **STATUS: P29.3 COMPLETE** (2026-08-18) — **local gates green; NOT PUSHED.**
+> **STATUS: P29.3 COMPLETE** (2026-08-18, **audited 2026-08-18**) — **local gates green; NOT PUSHED.**
 > Battery **269 binaries / 4 976 passed / 0 failed / 9 ignored** against the
 > 268 / 4 913 / 0 / 9 baseline (+63 arms and +1 binary, the new `movement_3d`);
 > `clippy -D warnings` and `cargo fmt --check` clean; `cargo doc --no-deps`
@@ -16997,6 +16997,126 @@ shows a one-line authoring change as a one-line diff.
 > `anim.*`. And there are **no timing legs in this wave**, so the paravirtual-macOS
 > law has nothing to name here: every measurement above is a counter, a distance
 > or a byte.
+>
+> ---
+>
+> **P29.3 AUDIT** (2026-08-18) — adversarial pass over `29c8151..1642c06`, ten
+> commits. **Local gates green; NOT PUSHED.** Battery **270 binaries / 4 986
+> passed / 0 failed / 9 ignored** against the wave's 269 / 4 976 / 0 / 9
+> (+10 arms and +1 binary, `movement_parity`). Goldens stay **54** and are
+> byte-unchanged; no schema, no wire enum, no committed level, no P20 assertion
+> and no golden moved. `cargo doc --no-deps` over the three crates this audit
+> touched reports **38 warnings at 1642c06 and 38 after**, measured on both
+> trees.
+>
+> **What the wave claimed and what held.** Every load-bearing claim in the
+> ledger above was re-measured rather than read. `build_mover3d` is **gone**, not
+> deprecated — the two hosts' copies were deleted and every use site now names
+> `mover_for`, and `step_character_movement` is called from exactly two places,
+> one per host, at the same point in both fixed steps. The P20 files are
+> **byte-identical over the range** (`water_buoyancy_3d`, `water_visibility_3d`,
+> `phase20_gate` show an empty diff). The schema arithmetic is exact: all
+> **sixteen** committed levels moved by **precisely their `entity_count`**,
+> verified by arithmetic against each sidecar, and the two `scene_v22.inf_lvl`
+> mirrors are byte-identical. The P24 garment archaeology is right down to the
+> commit — the trip-wire lived in `phase24_gate`, fired on `077d963` (2026-08-12),
+> was deleted leaving its grave marker at that file's line 636, and
+> `phase26_gate` carries the positive arm that replaced it. **The mutation
+> matrix is 9 of 9, re-run independently** (one of the nine needed a corrected
+> mutation: swapping two `MovementMode` variants the way the matrix describes it
+> does not compile, and swapping `SwimSurface`/`SwimUnder` does — it fails the
+> freeze table, as claimed).
+>
+> **Seven findings.** Two of them are the wave's own recorded shape — a value
+> nobody authored written over one somebody did — met twice more.
+>
+> **A1 (the headline).** *An authored facing did not survive the first step.*
+> The step writes `body_yaw_deg` onto the entity's `Transform` every step, and
+> nothing recomputes that number from the world: a character standing still has
+> no velocity to face. Every other runtime field starts at zero and is
+> recomputed before it is read; this one is not. Measured at **90 degrees in, 0
+> out after a single idle step**, for a player character and an NPC alike — an
+> NPC posted facing east faced north on its first frame and a squad snapped to
+> one heading. The runtime now takes the authored yaw once, behind a `seeded`
+> latch, into the body yaw, the smoother's target **and the aim yaw** — the last
+> because the movement intent is expressed in the aim frame, so seeding only the
+> drawn rotation would send a character authored facing east northward the moment
+> it was told to walk forward.
+>
+> **A2.** *`axis_snapshot` divided a stick by the frame time.* The
+> delta-to-rate conversion asked its question of the axis NAME. The shipped
+> `default_map` binds `look_x`/`look_y` to the mouse **and** to the right stick —
+> a look axis is a rate axis, which is exactly why the stick's scale is 180 deg/s
+> rather than 1 — so the stick's contribution was divided by `dt` along with the
+> mouse's: **10 800 deg/s at 60 fps**, and a different number at every other
+> frame rate. The wave made the *clamp* a property of the source and left the
+> *rate conversion* a property of the axis; both are per-source now.
+>
+> **A3.** *The parity twin this wave owed.* `two_identical_worlds_move_byte_for_byte`
+> runs one process twice — a determinism gate, not a PIE-versus-shipping one. It
+> stays green if a host samples a different axis name, builds the intent from a
+> different action set, or skips `apply_intent` entirely, and this wave rewrote
+> both hosts' input plumbing. `movement_parity.rs` is the `pose_parity` shape on
+> movement: 240 steps that walk, sprint, crouch, slide, jump, land and turn,
+> byte-compared between `SimSession` and `RuntimeSim` over a fixture with a
+> dynamic body and real gravity. Mutation-measured — dropping `apply_intent` from
+> the editor's step fails it and nothing else in the tree. Its **honest bound is
+> in the file**: moving the step to after the solver does *not* fail it, because
+> a kinematic mover does not push dynamics and a settled crate is in the same
+> place either way.
+>
+> **A4.** *Four mutations that killed nothing*, found by adding to the matrix
+> rather than trusting it. The integrator's sideways-friction bleed (its own
+> documented second rule) survived being switched off; the movement-direction
+> **quadrant** — the one derived output with memory, and P29.4's blend-space
+> input — survived being frozen at `Forward`, because the determinism trace
+> records the same frozen byte in both of its runs; `SwimSurface` versus
+> `SwimUnder` survived a `SWIM_UNDER_FRACTION` of zero, because the swim arm
+> asserts `is_swimming()` and both halves satisfy it; and the rotation-mode speed
+> scale survived answering 1.0 for every mode. Four arms, each mutation-verified.
+>
+> **A5.** *A character that had never landed was recovering from a landing.*
+> `time_since_land_s` starts at zero like every other runtime field, so the
+> window test alone read "landed this instant" and spent the first half-second of
+> every character's life under ALS's post-landing friction override. It reads the
+> `landing` latch now, which is what the field's own doc already claimed. The
+> wave's expiry arm had the same hole in its fixture and is corrected.
+>
+> **A7.** *The feet came off the floor when the component took the capsule over.*
+> Section 5 names one invariant — "the FEET stay planted" — and gated the
+> compensation on `mode != previous_mode`, false on the first step. Step 12 writes
+> `half_height_for(mode)` onto the collider unconditionally, and the collider's
+> half-height is authored independently of `stand_half_height_m`. Measured at
+> **+0.40 m of feet** for a 1.0 m authored capsule against the 0.6 m default. The
+> compensation now reads the half-height the entity is actually *wearing*; on
+> every step but the first that is the same number, which is why no stance arm
+> moved.
+>
+> **A6, and two ledger corrections.** `is_falling` documented itself as "one of
+> the two airborne modes" and matches three (`Dive` integrates under the same air
+> branch). The ledger's honest-remainders paragraph names the derived outputs as
+> carried and unproduced and does not name the **`OverlayRegistry`**, which has
+> **zero callers anywhere in the tree** — the overlay *string* is on the wire and
+> the registry that interns it is a P29.4 surface, exactly the same shape. And
+> `7db81a0`'s "the behaviour is identical on every input" is very slightly
+> overstated: `cast_shape` with `max_toi = +inf` used to run an unbounded sweep
+> and now answers `None`. No caller passes one; recorded rather than reverted,
+> because refusing an infinite sweep is the better answer.
+>
+> **Declined, with the reason.** `mover_for`'s "two numbers that meant one thing"
+> ruling — a movement component's `slope_limit_deg` overrides
+> `CharacterController3D::max_slope_deg` — has **no arm**, and a mutation that
+> ignores it kills nothing because both defaults are 45 degrees, so the mutation
+> is a no-op on every fixture in the tree. That is the wave's own law met again
+> (a mutation that fails to kill can mean the mutation was wrong), and closing it
+> needs a ramp fixture and a public reader for the mover's slope, neither of which
+> exists. Carried to P29.4, which is the wave that first authors a character with
+> a non-default slope. `MovementRuntime` still does not ride `state_bytes` the way
+> the pose, cloth and hair sections do, so a divergence in a derived output that
+> does not feed position is invisible to the replay fold; it is covered instead by
+> the new parity arm and by `two_identical_worlds_move_byte_for_byte`, and the
+> section belongs with P29.4's bridge, which is the first consumer.
+
 
 - **P29.1 `.inf_sm` model v2** — 1. typed parameters (`Bool`/`Int`/`Float`/`Trigger`, a trigger
   consumed by the transition that read it); 2. condition **trees** (`And`/`Or`/`Not` over typed
