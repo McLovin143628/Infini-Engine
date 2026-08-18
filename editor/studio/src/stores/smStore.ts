@@ -41,6 +41,14 @@ interface SmStore {
   setEntry: (index: number) => void;
   moveState: (index: number, x: number, y: number) => void;
   setStateClip: (index: number, clip: string | null) => void;
+  /** Replace a state's motion with a 2D blend space (P29.2's authoring panel).
+   *  Returns `false` when no document is open, so the caller can say so. */
+  setStateBlend2d: (
+    index: number,
+    paramX: string,
+    paramY: string,
+    entries: { x: number; y: number; clip: string | null }[],
+  ) => boolean;
   setStateSpeed: (index: number, speed: number) => void;
   setStateLooping: (index: number, looping: boolean) => void;
 
@@ -244,6 +252,28 @@ export const useSmStore = create<SmStore>((set, get) => ({
         if (st) st.motion = { kind: "clip", clip };
       }),
     });
+  },
+
+  // The blend-space panel's write door (P29.2). It lives here rather than in
+  // `blendSpaceStore` because the `.inf_sm` document has one owner, and a second
+  // writer would be a second thing `sm_save` has to agree with.
+  setStateBlend2d: (index, paramX, paramY, entries) => {
+    const doc = get().doc;
+    if (!doc || !doc.machine.states[index]) return false;
+    set({
+      doc: editMachine(doc, (m) => {
+        const st = m.states[index];
+        if (st) {
+          st.motion = {
+            kind: "blend2d",
+            paramX,
+            paramY,
+            entries: entries.map((e) => ({ x: e.x, y: e.y, clip: e.clip })),
+          };
+        }
+      }),
+    });
+    return true;
   },
 
   setStateSpeed: (index, speed) => {

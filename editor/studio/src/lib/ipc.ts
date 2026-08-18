@@ -21,6 +21,7 @@ import type {
 import type { MaterialCompileResult } from "./materialTypes";
 import type { PcgBiomeResult, PcgCompileResult, PcgEvaluateResult } from "./pcgTypes";
 import type { SmClipDto, SmDoc } from "./smTypes";
+import type { BlendPreviewDto, BlendSampleDto } from "./blendSpaceTypes";
 import type { AssetRefDto } from "../bindings/AssetRefDto";
 import type { AssetSnapshot } from "../bindings/AssetSnapshot";
 import type { BiomeDefDto } from "../bindings/BiomeDefDto";
@@ -1041,6 +1042,29 @@ export const sm = {
   save: (id: string, doc: SmDoc, name: string): Promise<string> =>
     invoke<string>("sm_save", { id, doc, name }),
   listClips: (): Promise<SmClipDto[]> => invoke<SmClipDto[]>("sm_list_clips"),
+};
+
+/**
+ * Blend-space authoring geometry (P29.2). **Stateless** — the panel owns the
+ * sample list and hands the whole thing over on every change, which is what lets
+ * the same command serve the editing canvas and a future preview without a
+ * backend document to keep in step.
+ *
+ * `preview` returns everything the canvas draws in one round trip: the Delaunay
+ * triangulation, its hull, the barycentric weights at the query point, the
+ * weight-blended cycle length, and the blended pose's joints. It is the engine's
+ * own `inf_anim::delaunay` / `sample_blend_space_2d` — deliberately not a
+ * TypeScript re-implementation, because these weights are sim state and a second
+ * implementation is free to disagree.
+ */
+export const blendSpace = {
+  preview: (
+    samples: BlendSampleDto[],
+    x: number,
+    y: number,
+    timeS: number,
+  ): Promise<BlendPreviewDto> =>
+    invoke<BlendPreviewDto>("blendspace_preview", { samples, x, y, timeS }),
 };
 
 /**

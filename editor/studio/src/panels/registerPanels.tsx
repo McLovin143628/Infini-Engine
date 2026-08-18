@@ -40,6 +40,7 @@ import { BlueprintCanvas } from "./blueprint/BlueprintCanvas";
 import { MaterialCanvas } from "./material/MaterialCanvas";
 import { PcgCanvas } from "./pcg/PcgCanvas";
 import { StateMachineCanvas } from "./sm/StateMachineCanvas";
+import BlendSpacePanel from "./blendspace/BlendSpacePanel";
 import PlaceActorsPanel from "./placeActors/PlaceActorsPanel";
 import WorldSettingsPanel from "./worldSettings/WorldSettingsPanel";
 import ViewportPanel from "../viewport/ViewportPanel";
@@ -266,6 +267,21 @@ registerPanelType({
   singleton: true,
   defaultLocation: "bottom",
   defaultSize: { w: 1040, h: 560 },
+});
+
+// **The blend-space authoring panel** (P29.2). Its own panel rather than a tab of
+// the State Machine canvas: a blend space is edited on a *parameter plane* and a
+// machine on a *graph*, and the two want the whole width at once. It reads the
+// clip list and writes back into the machine through `smStore`, so a `.inf_sm`
+// still has exactly one owner.
+registerPanelType({
+  type: "blendSpace",
+  title: () => "Blend Space",
+  icon: Grid2x2,
+  component: BlendSpacePanel,
+  singleton: true,
+  defaultLocation: "bottom",
+  defaultSize: { w: 960, h: 560 },
 });
 
 registerPanelType({

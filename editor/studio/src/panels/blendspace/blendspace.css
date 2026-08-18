@@ -1,0 +1,207 @@
+/* Blend-space authoring panel (P29.2). Reuses the blueprint canvas chrome
+ * (`bp-canvas` / `bp-toolbar` / `bp-btn`); only the parameter plane, the weight
+ * readout and the pose figure are blend-space specific. Every colour rides the
+ * `--ink-*` theme vars, so the panel follows the four built-in themes without a
+ * second palette. */
+
+.bs-panel {
+  min-width: 0;
+}
+
+.bs-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 8px;
+}
+
+/* ── the parameter plane ── */
+.bs-plane {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  gap: 6px;
+}
+
+.bs-svg {
+  width: 100%;
+  max-width: 520px;
+  aspect-ratio: 1 / 1;
+  background: var(--ink-bg-1);
+  border: 1px solid var(--ink-border);
+  border-radius: 8px;
+  touch-action: none;
+}
+
+.bs-axis {
+  stroke: var(--ink-border);
+  stroke-width: 0.6;
+}
+
+.bs-tri {
+  fill: var(--ink-accent);
+  fill-opacity: 0.07;
+  stroke: var(--ink-accent);
+  stroke-opacity: 0.35;
+  stroke-width: 0.5;
+}
+
+.bs-hull {
+  stroke: var(--ink-accent);
+  stroke-opacity: 0.7;
+  stroke-width: 1;
+}
+
+.bs-sample {
+  fill: var(--ink-bg-2);
+  stroke: var(--ink-text-dim);
+  stroke-width: 1;
+  cursor: grab;
+}
+.bs-sample--live {
+  fill: var(--ink-accent);
+  stroke: var(--ink-accent);
+}
+.bs-sample--sel {
+  stroke: var(--ink-text);
+  stroke-width: 2;
+}
+
+.bs-label {
+  font-size: 5px;
+  fill: var(--ink-text-dim);
+  pointer-events: none;
+}
+
+.bs-cursor {
+  fill: none;
+  stroke: var(--ink-text);
+  stroke-width: 1.2;
+  cursor: crosshair;
+}
+.bs-cursor-cross {
+  stroke: var(--ink-text);
+  stroke-width: 0.8;
+  pointer-events: none;
+}
+
+.bs-hint {
+  font-size: 11px;
+  color: var(--ink-text-dim);
+}
+
+/* ── the side pane ── */
+.bs-side {
+  width: 280px;
+  flex: 0 0 auto;
+  overflow-y: auto;
+  border-left: 1px solid var(--ink-border);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bs-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bs-section__title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-text-dim);
+}
+
+.bs-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-text-dim);
+}
+.bs-field--row {
+  justify-content: space-between;
+}
+
+.bs-input {
+  background: var(--ink-bg-1);
+  color: var(--ink-text);
+  border: 1px solid var(--ink-border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+}
+.bs-input--name {
+  width: 62px;
+}
+
+.bs-weight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--ink-text);
+}
+.bs-weight__name {
+  flex: 0 0 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bs-weight__bar {
+  flex: 1 1 auto;
+  height: 6px;
+  background: var(--ink-bg-1);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.bs-weight__bar > span {
+  display: block;
+  height: 100%;
+  background: var(--ink-accent);
+}
+.bs-weight__pct {
+  flex: 0 0 32px;
+  text-align: right;
+  color: var(--ink-text-dim);
+}
+
+.bs-stat {
+  font-size: 11px;
+  color: var(--ink-text-dim);
+}
+
+.bs-note {
+  font-size: 11px;
+  color: var(--ink-text-dim);
+  line-height: 1.35;
+}
+.bs-note--status {
+  color: var(--ink-accent);
+}
+
+.bs-slider {
+  width: 100%;
+}
+
+.bs-figure {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: var(--ink-bg-1);
+  border: 1px solid var(--ink-border);
+  border-radius: 6px;
+}
+.bs-bone {
+  stroke: var(--ink-accent);
+  stroke-width: 1.4;
+}
+.bs-joint {
+  fill: var(--ink-text);
+}
