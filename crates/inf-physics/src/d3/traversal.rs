@@ -141,7 +141,8 @@ pub fn probe_ledge(
     }
     let band = (settings.max_height_m + settings.min_height_m) * 0.5;
     let span = (settings.max_height_m - settings.min_height_m) * 0.5;
-    if !(span > 0.0) || !(settings.reach_m > 0.0) {
+    if !span.is_finite() || span <= 0.0 || !settings.reach_m.is_finite() || settings.reach_m <= 0.0
+    {
         return None;
     }
 

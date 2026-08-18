@@ -1281,6 +1281,7 @@ impl PhysicsWorld3D {
     /// which is exactly what `exclude` already is. `traversal::probe_ledge` fills
     /// it from the bridge's own character map; that is the port of the profile,
     /// and it is on the caller's side because that is where the knowledge is.
+    #[allow(clippy::too_many_arguments)]
     pub fn cast_shape_where(
         &mut self,
         shape: &ColliderShape3D,

@@ -170,7 +170,7 @@ pub const MIN_WARP_AXIS_M: f64 = 0.01;
 /// to a linear close when the clip barely turns.
 ///
 /// This is what supersedes ALS's `RotationAmount ÷ 30 fps` scheme (§13's
-/// [SUPERSEDE], Ruling 1): there, a 90°-authored clip is rescaled by a scalar
+/// **SUPERSEDE**, Ruling 1): there, a 90°-authored clip is rescaled by a scalar
 /// written into a curve at the authoring frame rate. Here the clip's turn is
 /// read off its own baked track and rescaled against the runtime target, so the
 /// authoring frame rate never enters the arithmetic.

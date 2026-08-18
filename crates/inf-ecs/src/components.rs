@@ -1922,7 +1922,7 @@ pub struct MantleState {
 impl MantleState {
     /// How far through the mantle it is, `[0, 1]`.
     pub fn alpha(&self) -> f64 {
-        if !(self.duration_s > 0.0) {
+        if self.duration_s.is_nan() || self.duration_s <= 0.0 {
             return 1.0;
         }
         (self.elapsed_s / self.duration_s).clamp(0.0, 1.0)

@@ -1481,7 +1481,7 @@ fn step_feet(
             cm.runtime.foot_slide_r_m = slide;
             cm.runtime.foot_world_r = drawn;
         }
-        if !(enable > 0.0) {
+        if enable.is_nan() || enable <= 0.0 {
             continue;
         }
 

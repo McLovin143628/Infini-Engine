@@ -173,7 +173,7 @@ impl FootLock {
         foot_world: Vec3,
         foot_yaw_deg: f64,
     ) {
-        if !(enable > 0.0) || turning {
+        if !crate::positive(enable) || turning {
             self.alpha = 0.0;
             self.locked = false;
             return;
@@ -183,12 +183,15 @@ impl FootLock {
         } else {
             0.0
         };
-        // THE rule (ALS `:376–377`): engage at the threshold, otherwise only ever
-        // release. A value between the two that is *higher* than the current
-        // alpha is ignored — that is what "never blend in" means.
-        if want >= LOCK_ENGAGE {
-            self.alpha = want;
-        } else if want < self.alpha {
+        // THE rule (ALS `:376–377`): engage at the threshold, **or** release —
+        // and nothing else. A value between the two that is *higher* than the
+        // current alpha is ignored, which is what "never blend in" means. The two
+        // admissible cases share one assignment deliberately: they are the same
+        // write for opposite reasons, and spelling them as two identical blocks
+        // says otherwise.
+        let engaging = want >= LOCK_ENGAGE;
+        let releasing = want < self.alpha;
+        if engaging || releasing {
             self.alpha = want;
         }
         if self.alpha >= LOCK_ENGAGE && !self.locked {
@@ -213,7 +216,7 @@ impl FootLock {
     /// The lock is applied by `alpha`, so a releasing lock slides the foot back
     /// onto the animation rather than popping it.
     pub fn resolve(&self, posed_world: Vec3) -> Vec3 {
-        if !self.locked || !(self.alpha > 0.0) {
+        if !self.locked || !crate::positive(self.alpha) {
             return posed_world;
         }
         let a = self.alpha.clamp(0.0, 1.0);
@@ -228,7 +231,7 @@ impl FootLock {
     /// instead of the defect. `0.0` when nothing is locked, which is the honest
     /// answer — an unplanted foot cannot slide.
     pub fn slide_m(&self, posed_world: Vec3) -> f64 {
-        if !self.locked || !(self.alpha > 0.0) {
+        if !self.locked || !crate::positive(self.alpha) {
             return 0.0;
         }
         let d = self.resolve(posed_world) - self.position;
@@ -245,7 +248,7 @@ impl FootLock {
 /// curves, so a character with IK on one leg only gets half the drop.
 pub fn pelvis_offset(enable_l: f32, enable_r: f32, offset_l: Vec3, offset_r: Vec3) -> Vec3 {
     let a = ((enable_l.clamp(0.0, 1.0) + enable_r.clamp(0.0, 1.0)) * 0.5).clamp(0.0, 1.0);
-    if !(a > 0.0) {
+    if !crate::positive(a) {
         return Vec3::ZERO;
     }
     let lower = if offset_l.y <= offset_r.y {

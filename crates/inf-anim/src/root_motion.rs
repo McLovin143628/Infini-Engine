@@ -207,7 +207,8 @@ pub struct RootMotion3D {
     pub yaw: f32,
     /// Ground distance travelled over the interval, metres — the input to
     /// distance matching. Derived from the XZ half of `translation` when the clip
-    /// carries no [`DistanceTrack`], and read off the track when it does.
+    /// carries no [`crate::channels::DistanceTrack`], and read off the track when
+    /// it does.
     pub distance_m: f32,
 }
 
@@ -307,7 +308,8 @@ pub fn root_delta_world_3d(yaw_deg: f64, local: Vec3) -> DVec3 {
     DVec3::new(planar.x, local.y as f64, planar.z)
 }
 
-/// **Bake a clip's root motion into a [`RootMotionTrack`] + [`DistanceTrack`]**
+/// **Bake a clip's root motion into a [`crate::channels::RootMotionTrack`] plus
+/// a [`crate::channels::DistanceTrack`]**
 /// at `fps`, from the clip's own root joint.
 ///
 /// P29.5 owns derivation *at import*, which is the version that reads a source

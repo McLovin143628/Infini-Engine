@@ -90,7 +90,7 @@ pub const MAX_ANGULAR_DAMPING: f64 = 8.0;
 /// stiffness and the constant is already in the right units.
 pub fn angular_damping(speed_mps: f64) -> f64 {
     let top = MOTOR_STIFFNESS_BAND.1;
-    if !(top > 0.0) {
+    if !crate::positive64(top) {
         return 0.0;
     }
     motor_stiffness(speed_mps) / top * MAX_ANGULAR_DAMPING
@@ -100,7 +100,10 @@ pub fn angular_damping(speed_mps: f64) -> f64 {
 pub fn gravity_enabled(vertical_mps: f64) -> bool {
     // A NaN answers `true`: a ragdoll that keeps its gravity behaves like every
     // other body, and a ragdoll that silently loses it floats.
-    !(vertical_mps <= GRAVITY_CUTOFF_MPS)
+    // Spelled as an explicit NaN case rather than a negated comparison: a NaN
+    // keeps its gravity and everything above the cutoff keeps it too, which is
+    // the same answer `!(v <= cutoff)` gives without a suppressed lint.
+    vertical_mps.is_nan() || vertical_mps > GRAVITY_CUTOFF_MPS
 }
 
 /// The flail blend `[0, 1]` — how much of a limb-waving overlay a falling
@@ -199,7 +202,7 @@ pub fn blend_weight(phase: RagdollPhase, time_in_phase_s: f64, blend_s: f64) -> 
         RagdollPhase::Inactive => 0.0,
         RagdollPhase::Simulating => 1.0,
         RagdollPhase::GettingUp => {
-            if !(blend_s > 0.0) || !time_in_phase_s.is_finite() {
+            if !crate::positive64(blend_s) || !time_in_phase_s.is_finite() {
                 return 0.0;
             }
             let a = (time_in_phase_s / blend_s).clamp(0.0, 1.0);

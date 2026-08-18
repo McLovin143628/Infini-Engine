@@ -1261,7 +1261,7 @@ fn apply_foot_ik(
         let (Some(goal), Some(foot)) = (goal, joints[side]) else {
             continue;
         };
-        if !(goal.weight > 0.0) {
+        if goal.weight.is_nan() || goal.weight <= 0.0 {
             continue;
         }
         let all = skeleton.joints();
@@ -1368,7 +1368,7 @@ fn rig_bones(
 /// static clip has one window and it is empty.
 fn wrap_clip_time(t: f64, duration: f32, looping: bool) -> f32 {
     let d = duration as f64;
-    if !(d > 0.0) || !t.is_finite() {
+    if d.is_nan() || d <= 0.0 || !t.is_finite() {
         return 0.0;
     }
     if looping {
@@ -1391,12 +1391,7 @@ fn wrap_clip_time(t: f64, duration: f32, looping: bool) -> f32 {
 /// Sync-group markers are deliberately skipped: they exist to align two clips
 /// ([`inf_anim::sync`]) and firing them as notifies would ring a footstep for
 /// every phase alignment.
-fn crossed_markers<'m>(
-    markers: &'m [inf_anim::AnimMarker],
-    t0: f32,
-    t1: f32,
-    looping: bool,
-) -> Vec<&'m str> {
+fn crossed_markers(markers: &[inf_anim::AnimMarker], t0: f32, t1: f32, looping: bool) -> Vec<&str> {
     if markers.is_empty() || t0 == t1 {
         return Vec::new();
     }
