@@ -1615,6 +1615,7 @@ impl SceneDoc {
     /// half is useful alone: a `SkeletalMesh` with no machine draws a bind pose
     /// forever, and a machine with no skeleton steps its states and poses nothing
     /// (`inf_ecs::pose`'s rule 3).
+    #[allow(clippy::too_many_arguments)]
     pub fn edit_create_character(
         &mut self,
         name: &str,

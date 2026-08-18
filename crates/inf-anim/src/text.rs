@@ -138,18 +138,18 @@ pub fn to_toml(machine: &StateMachine) -> String {
 /// inside a sub-machine — the one level [`Motion::SubMachine`] allows).
 fn write_machine(out: &mut String, m: &StateMachine, prefix: &str) {
     let entry = state_ref(m, m.entry);
-    let _ = write!(out, "\nentry = {entry}\n");
+    let _ = writeln!(out, "\nentry = {entry}");
 
     for p in &m.params {
-        let _ = write!(out, "\n[[{prefix}params]]\n");
-        let _ = write!(out, "name = {}\n", quote(&p.name));
-        let _ = write!(out, "kind = {}\n", quote(param_kind_name(p.kind)));
-        let _ = write!(out, "default = {}\n", value_text(p.default));
+        let _ = writeln!(out, "\n[[{prefix}params]]");
+        let _ = writeln!(out, "name = {}", quote(&p.name));
+        let _ = writeln!(out, "kind = {}", quote(param_kind_name(p.kind)));
+        let _ = writeln!(out, "default = {}", value_text(p.default));
     }
 
     for p in &m.profiles {
-        let _ = write!(out, "\n[[{prefix}profiles]]\n");
-        let _ = write!(out, "name = {}\n", quote(&p.name));
+        let _ = writeln!(out, "\n[[{prefix}profiles]]");
+        let _ = writeln!(out, "name = {}", quote(&p.name));
         let _ = write!(out, "weights = [");
         for (i, w) in p.weights.iter().enumerate() {
             if i > 0 {
@@ -166,25 +166,25 @@ fn write_machine(out: &mut String, m: &StateMachine, prefix: &str) {
     }
 
     for s in &m.states {
-        let _ = write!(out, "\n[[{prefix}states]]\n");
-        let _ = write!(out, "name = {}\n", quote(&s.name));
-        let _ = write!(out, "looping = {}\n", s.looping);
-        let _ = write!(out, "speed = {}\n", num(s.speed));
-        let _ = write!(
+        let _ = writeln!(out, "\n[[{prefix}states]]");
+        let _ = writeln!(out, "name = {}", quote(&s.name));
+        let _ = writeln!(out, "looping = {}", s.looping);
+        let _ = writeln!(out, "speed = {}", num(s.speed));
+        let _ = writeln!(
             out,
-            "position = [{}, {}]\n",
+            "position = [{}, {}]",
             f32num(s.position.0),
             f32num(s.position.1)
         );
         if !s.on_enter.is_empty() {
-            let _ = write!(out, "on_enter = {}\n", string_list(&s.on_enter));
+            let _ = writeln!(out, "on_enter = {}", string_list(&s.on_enter));
         }
         if !s.on_exit.is_empty() {
-            let _ = write!(out, "on_exit = {}\n", string_list(&s.on_exit));
+            let _ = writeln!(out, "on_exit = {}", string_list(&s.on_exit));
         }
         match &s.motion {
             Motion::Clip(c) => {
-                let _ = write!(out, "clip = {}\n", quote(&clip_text(*c)));
+                let _ = writeln!(out, "clip = {}", quote(&clip_text(*c)));
             }
             Motion::Blend1D(b) => {
                 let _ = write!(out, "blend1d = {{ param = {}, entries = [", quote(&b.param));
@@ -232,31 +232,31 @@ fn write_machine(out: &mut String, m: &StateMachine, prefix: &str) {
     }
 
     for t in &m.transitions {
-        let _ = write!(out, "\n[[{prefix}transitions]]\n");
+        let _ = writeln!(out, "\n[[{prefix}transitions]]");
         match t.from {
             SmSource::State(i) => {
-                let _ = write!(out, "from = {}\n", state_ref(m, i));
+                let _ = writeln!(out, "from = {}", state_ref(m, i));
             }
             SmSource::Any { exclude_self } => {
-                let _ = write!(out, "from = \"any\"\n");
+                let _ = writeln!(out, "from = \"any\"");
                 if !exclude_self {
                     out.push_str("any_may_re_enter = true\n");
                 }
             }
         }
-        let _ = write!(out, "to = {}\n", state_ref(m, t.to));
-        let _ = write!(out, "duration = {}\n", num(t.duration));
-        let _ = write!(out, "condition = {}\n", quote(&cond_text(&t.condition)));
+        let _ = writeln!(out, "to = {}", state_ref(m, t.to));
+        let _ = writeln!(out, "duration = {}", num(t.duration));
+        let _ = writeln!(out, "condition = {}", quote(&cond_text(&t.condition)));
         if let Some(x) = t.exit_time {
-            let _ = write!(out, "exit_time = {}\n", num(x));
+            let _ = writeln!(out, "exit_time = {}", num(x));
         }
         if t.priority != 0 {
-            let _ = write!(out, "priority = {}\n", t.priority);
+            let _ = writeln!(out, "priority = {}", t.priority);
         }
-        let _ = write!(out, "curve = {}\n", quote(curve_name(t.curve)));
-        let _ = write!(
+        let _ = writeln!(out, "curve = {}", quote(curve_name(t.curve)));
+        let _ = writeln!(
             out,
-            "interrupt = {}\n",
+            "interrupt = {}",
             quote(&format!(
                 "{}/{}",
                 interrupt_source_name(t.interrupt.source),
@@ -264,7 +264,7 @@ fn write_machine(out: &mut String, m: &StateMachine, prefix: &str) {
             ))
         );
         if let Some(p) = t.profile {
-            let _ = write!(out, "profile = {}\n", profile_ref(m, p));
+            let _ = writeln!(out, "profile = {}", profile_ref(m, p));
         }
     }
 }

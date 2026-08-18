@@ -1520,10 +1520,7 @@ fn driving_and_flying_are_refusals_with_the_wave_that_owns_them_named() {
              a refusal"
         );
         assert!(
-            matches!(
-                verdict.refusal,
-                MovementRefusal::ModeNotYetImplemented { .. }
-            ),
+            matches!(verdict.refusal, MovementRefusal::ModeNotYetImplemented),
             "{mode:?} refused with {:?}, which does not name the wave that owns it",
             verdict.refusal
         );

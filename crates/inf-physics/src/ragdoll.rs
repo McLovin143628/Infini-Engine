@@ -100,7 +100,7 @@ impl Default for RagdollConfig {
 /// The mask is the standard first answer: limbs are members of one bit and filter
 /// everything except that bit, so they collide with the world and with nothing of
 /// their own kind. Every other collider in the engine is a member of **all**
-/// layers ([`CollisionLayers::default`]), so a ragdoll still lands on a floor,
+/// layers ([`crate::CollisionLayers::default`]), so a ragdoll still lands on a floor,
 /// hits a crate and is swept by a camera.
 ///
 /// **The bound**, stated rather than discovered: two *different* ragdolls pass

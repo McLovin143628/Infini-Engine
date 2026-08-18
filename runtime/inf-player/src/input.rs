@@ -197,7 +197,8 @@ mod tests {
         for axis in [a::MOVE_X, a::MOVE_Y, a::LOOK_X, a::LOOK_Y, a::MOVE_UP] {
             assert!(
                 m.axis_names().any(|n| n == axis),
-                "the `{axis}` axis is unbound — the control does nothing and                  nothing else in the tree would say so"
+                "the `{axis}` axis is unbound — the control does nothing and \
+                 nothing else in the tree would say so"
             );
         }
         for action in [
@@ -263,7 +264,8 @@ mod tests {
         for k in &keys {
             assert!(
                 reachable.contains(k.as_str()),
-                "`{k}` is bound but no winit keycode maps to it — the binding is                  unreachable from a keyboard"
+                "`{k}` is bound but no winit keycode maps to it — the binding \
+                 is unreachable from a keyboard"
             );
         }
     }

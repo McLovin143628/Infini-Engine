@@ -701,7 +701,8 @@ pub fn build_character(
         match inf_anim::derive_clip(clip, &rig.skeleton, &derive_opts) {
             Ok((derived, _report)) => *clip = derived,
             Err(e) => derive_warnings.push(format!(
-                "the {label} cycle could not be measured ({e}), so its curves and                  markers are absent — the machine still plays it"
+                "the {label} cycle could not be measured ({e}), so its curves \
+                 and markers are absent — the machine still plays it"
             )),
         }
     }
@@ -830,7 +831,8 @@ pub fn build_character(
                     *run.0.as_bytes(),
                 ),
                 vec![format!(
-                    "the clip set could not be proposed over ({e}), so the                      generated three-state locomotion machine was written instead"
+                    "the clip set could not be proposed over ({e}), so the \
+                     generated three-state locomotion machine was written instead"
                 )],
             ),
         };

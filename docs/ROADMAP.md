@@ -17936,9 +17936,17 @@ shows a one-line authoring change as a one-line diff.
 
 
 > **STATUS: P29.6 COMPLETE** (2026-08-18) — **local gates green; NOT PUSHED.**
-> Battery **BATTERY_LINE**; `clippy -D warnings` over the whole workspace and
-> `cargo fmt --check` clean. The frontend is **FRONTEND_LINE**, with `tsc
-> --noEmit` and eslint clean. Goldens stay **54** — the showcase asserts STATE,
+> Battery **280 binaries / 5 165 passed / 0 failed / 11 ignored** against the
+> P29.5 audit's 278 / 5 115 / 0 / 10 — two binaries added (`camera_3d`,
+> `phase29_gate`), 50 arms, and one more ignored (the course's own coverage
+> probe, which is a diagnostic the gate does not need and a tuner does).
+> `clippy -D warnings` over the whole workspace and `cargo fmt --check` clean;
+> `cargo doc --no-deps` reports **11 / 30 / 4 / 1 / 73 / 1** warnings over
+> `inf-anim` / `inf-ecs` / `inf-physics` / `inf-input` / `inf-editor-core` /
+> `inf-viewport`, which is each crate's pre-wave count — measured by running it
+> before and after, which found three this wave had added and closed them. The
+> frontend is **610 tests across 65 files** against 609 / 65 (+1 arm, no new
+> file), with `tsc --noEmit` and eslint clean. Goldens stay **54** — the showcase asserts STATE,
 > not pixels (the P22 playground precedent). **No schema moves**: `.inf_anim` v2,
 > `.inf_sm` v2, scene v23 and `ScenePayload` v9 all stand, and everything this
 > wave added that has to persist is **text beside the level** rather than a wire
@@ -18299,6 +18307,23 @@ shows a one-line authoring change as a one-line diff.
 > longer slide wants a slope the catalogue does not require.
 > **The ragdoll's self-collision is off wholesale.** Two ragdolls pass through each
 > other; per-ragdoll groups need a group id rather than a wider mask.
+> **An author cannot live-tune a parameter the engine publishes.** The precedence
+> above is right and it has a cost: `Tune::Param` is drained at the top of the
+> fixed step and the movement step publishes later in the same one, so a tune of
+> `speed` on a character with a movement component is overwritten before anything
+> reads it. `live_tuning`'s own arm asserts both halves — the overwrite, and that
+> a parameter the engine does *not* publish survives — so the bound is watched
+> rather than described. Closing it needs an author-override layer over the
+> parameter overlay, which is a feature and not a fix.
+>
+> **The chr(92) law's NINTH catch, on this wave, at the end of it.** Four string
+> literals reached the tree with their `\`-continuations eaten and eighteen to
+> twenty-two spaces in the middle of a sentence — two in the wizard's own refusal
+> messages and two in the binding arm's. Every one came through a shell heredoc,
+> which is precisely what the law forbids; the four repairs went through the
+> editor. The guard found all four in the full battery, which is what it exists
+> for, and the honest reading is that this wave broke the rule four times and the
+> gate is why that cost nothing.
 >
 > **Deliberately not done.** Vehicles and flight (P29.7, and their refusals are
 > asserted). The island. PIE Possess polish (P30). A `character.*` node kit — the

@@ -336,9 +336,25 @@ fn a_session_tune_is_gone_after_stop_and_a_kept_one_is_an_undoable_edit() {
 
 /// **(d) A machine's parameters and triggers are reachable from the editor.**
 ///
-/// They were not before this wave: the `anim.*` kit is a Blueprint's door, so an
-/// author watching a machine had no way to say "what does it do at speed 4?"
-/// without writing a program to say it.
+/// They were not before P29.5: the `anim.*` kit is a Blueprint's door, so an
+/// author watching a machine had no way to say "what does it do at
+/// `aim_blend` 4?" without writing a program to say it.
+///
+/// # Why the parameter is not called `speed` any more (P29.6)
+///
+/// It was, and P29.6 took that name: the movement step now publishes a
+/// character's own state into its machine every step
+/// (`inf_ecs::anim_bridge::publish_character_params`), because `speed` was a
+/// parameter every generated and proposed machine gated on and nothing in the
+/// engine ever set. A character with a `CharacterMovement` therefore **owns**
+/// `speed`, and a tune of it is overwritten later in the same fixed step — which
+/// is the right precedence (one authority for one fact) and is asserted at the
+/// bottom of this arm rather than left to be discovered.
+///
+/// The claim itself is unchanged: a parameter set through the tuning door
+/// reaches the bridge, and a trigger armed through it is armed. `aim_blend` is
+/// a name the engine does not publish, which is every name but the nine in
+/// `anim_bridge::params`.
 #[test]
 fn a_machine_parameter_and_a_trigger_are_editor_reachable() {
     let mut doc = world();
@@ -356,7 +372,7 @@ fn a_machine_parameter_and_a_trigger_are_editor_reachable() {
     sim.tune(
         Tune::Param {
             guid: HERO,
-            name: "speed".into(),
+            name: "aim_blend".into(),
             value: 4.0,
         },
         TuneScope::Session,
@@ -369,10 +385,10 @@ fn a_machine_parameter_and_a_trigger_are_editor_reachable() {
         TuneScope::Session,
     );
     // Nothing before the step.
-    assert_eq!(inf_ecs::anim_param(doc.world(), HERO, "speed"), None);
+    assert_eq!(inf_ecs::anim_param(doc.world(), HERO, "aim_blend"), None);
     sim.step_once(&mut doc, SimInput::default());
     assert_eq!(
-        inf_ecs::anim_param(doc.world(), HERO, "speed"),
+        inf_ecs::anim_param(doc.world(), HERO, "aim_blend"),
         Some(4.0),
         "the parameter overlay did not reach the bridge"
     );
@@ -383,6 +399,36 @@ fn a_machine_parameter_and_a_trigger_are_editor_reachable() {
             .get(&HERO)
             .is_some_and(|t| t.contains("jump")),
         "the trigger was not armed"
+    );
+
+    // **The precedence P29.6 introduced**, asserted rather than described: a
+    // tune of a name the ENGINE publishes is overwritten by the character's own
+    // state, later in the same fixed step. That is one authority for one fact,
+    // and it is also an honest bound on live tuning — an author cannot nudge
+    // `speed` on a character that has a movement component, and the P29.6 ledger
+    // carries it as a named remainder.
+    sim.tune(
+        Tune::Param {
+            guid: HERO,
+            name: inf_ecs::anim_bridge::params::SPEED.into(),
+            value: 4.0,
+        },
+        TuneScope::Session,
+    );
+    sim.step_once(&mut doc, SimInput::default());
+    assert_eq!(
+        inf_ecs::anim_param(doc.world(), HERO, inf_ecs::anim_bridge::params::SPEED),
+        Some(0.0),
+        "a tuned `speed` survived the movement step — the character no longer \
+         owns its own speed, and two authorities for one number is the defect \
+         this precedence exists to prevent"
+    );
+    // …and the tune the engine does NOT own is still there, so the overwrite is
+    // specific rather than a wipe.
+    assert_eq!(
+        inf_ecs::anim_param(doc.world(), HERO, "aim_blend"),
+        Some(4.0),
+        "the movement step cleared a parameter it does not publish"
     );
 
     // The same tune on an entity with **no machine** is a refusal, not a write:

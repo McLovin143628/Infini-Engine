@@ -608,7 +608,8 @@ pub fn anim_events(world: &EcsWorld, guid: Uuid) -> &[String] {
 /// its **feet at the origin** (the P29.4 audit's A12 seam; the ruling and the
 /// arithmetic are on [`crate::movement::feet_offset_m`]).
 ///
-/// So the rule lives here, once. An entity with no [`CharacterMovement`] gets its
+/// So the rule lives here, once. An entity with no
+/// [`CharacterMovement`](crate::components::CharacterMovement) gets its
 /// `GlobalTransform` unchanged — which is every prop, every non-character
 /// skeletal mesh and every committed sample in the tree today, so nothing that
 /// existed before this wave moves by a micrometre.

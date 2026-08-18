@@ -560,7 +560,7 @@ pub fn clear_anim_bridge(world: &mut EcsWorld) {
 /// written down once, so a proposed machine, a wizard-generated one and a
 /// hand-authored one all read the same words for the same numbers.
 ///
-/// [`SPEED`] is `inf_anim::locomotion::SPEED_VAR` by construction — the
+/// `SPEED` is `inf_anim::locomotion::SPEED_VAR` by construction — the
 /// generator has used that name since P24.5 and a second spelling would leave
 /// every wizard character standing still. The arm in this module holds the two
 /// together, because `inf-ecs` cannot reach for the constant without the
@@ -589,7 +589,7 @@ pub mod params {
     /// caller in P29.6).
     pub const OVERLAY: &str = "overlay";
     /// The flail blend `[0, 1]` a falling ragdoll gets, from
-    /// [`inf_anim::flail_rate`].
+    /// [`inf_anim::ragdoll::flail_rate`].
     pub const FLAIL: &str = "flail";
 }
 
