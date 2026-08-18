@@ -855,7 +855,11 @@ pub fn build_character(
     // one fact. What it does is the half only a game can do: consume the
     // footstep notifies the derivation authored and keep the character's own
     // counters.
-    let actor = match write_controller(project, &dir, name, machine) {
+    let footsteps: Vec<String> = inf_anim::DerivedNames::of_skeleton(&rig.skeleton)
+        .event_markers
+        .into_iter()
+        .collect();
+    let actor = match write_controller(project, &dir, name, machine, &footsteps) {
         Ok(id) => {
             written.push(id);
             id
@@ -1054,8 +1058,9 @@ fn write_controller(
     dir: &Path,
     name: &str,
     machine: AssetId,
+    footsteps: &[String],
 ) -> Result<AssetId, CharacterError> {
-    let class = controller_class(name);
+    let class = controller_class(name, footsteps);
     let bytes = crate::samples::encode_actor(&class).map_err(CharacterError::Write)?;
     let path = dir.join(format!("{name} Controller.inf_act"));
     inf_asset::write_atomically(&path, &bytes).map_err(|e| CharacterError::Write(e.to_string()))?;
@@ -1106,7 +1111,27 @@ fn write_controller(
 /// (`anim.set_trigger`) is absent because a trigger is an *event* — a jump, a
 /// hit, a door — and the wizard has no event to arm on a character it knows
 /// nothing else about. Saying so is better than arming something arbitrary.
-fn controller_class(name: &str) -> inf_blueprint::BlueprintClass {
+///
+/// # `footsteps` is the rig's, not a guess
+///
+/// The derivation names an event marker `footstep_<leg>` where `<leg>` is **the
+/// leg joint's own name** — `footstep_upper_leg_l` on the template biped, not
+/// `footstep_l`. The first version of this controller hard-coded the short
+/// spelling and therefore consumed **nothing**, on every character the wizard
+/// has ever made: `anim.consume_notify` answered `false` for ever and the
+/// counter stayed at zero, silently, because a notify that is not there is not
+/// an error. Found by `phase29_gate`'s Blueprint-versus-transpiled arm, which
+/// feeds it a real course segment and then asks what it counted.
+///
+/// So the caller passes [`inf_anim::DerivedNames::event_markers`] for the rig
+/// this character was built with, and the program is a function of the rig.
+/// [`controller_class`], for a caller outside this module (the committed P29.6
+/// sample builds the wizard's own controller with fixed ids).
+pub fn controller_class_for(name: &str, footsteps: &[String]) -> inf_blueprint::BlueprintClass {
+    controller_class(name, footsteps)
+}
+
+fn controller_class(name: &str, footsteps: &[String]) -> inf_blueprint::BlueprintClass {
     use inf_blueprint::{
         BinOp, Binding, BlueprintClass, BlueprintFn, EventBinding, EventKind, Expr, Lit, LocalId,
         Param, Stmt, Ty, Variable,
@@ -1139,6 +1164,52 @@ fn controller_class(name: &str) -> inf_blueprint::BlueprintClass {
         else_body: vec![],
     };
 
+    let mut body = vec![
+        Stmt::Let {
+            id: LocalId(1),
+            binding: Binding::Named("entity".to_string()),
+            ty: None,
+            mutable: false,
+            value: get_var("entity"),
+        },
+        // …then one `consume_notify` per footfall the derivation actually
+        // wrote for THIS rig. See `footsteps`.
+        // How long it has spent running — the readout `anim.query_state` is
+        // for, and the cheapest possible proof that the query is answered
+        // against the machine's real current state.
+        bump(
+            call(&["anim", "query_state"], vec![entity(), str_lit("run")]),
+            "run_time",
+            dt(),
+        ),
+        // …published back so a machine may gate on it (a limp after N steps
+        // is one condition away). The engine publishes the MOVEMENT
+        // parameters; this is the character's own.
+        Stmt::ExprStmt(call(
+            &["anim", "set_param"],
+            vec![entity(), str_lit("steps"), get_var("steps")],
+        )),
+    ];
+    // The footfall counters go in front of the two statements above, in the
+    // order `DerivedNames` sorts them, so the program is a function of the rig
+    // and not of a guess.
+    let counters: Vec<Stmt> = footsteps
+        .iter()
+        .map(|marker| Stmt::If {
+            cond: call(
+                &["anim", "consume_notify"],
+                vec![entity(), Expr::Lit(Lit::Str(marker.clone()))],
+            ),
+            then_body: vec![set_var(
+                "steps",
+                bin(BinOp::Add, get_var("steps"), float_lit(1.0)),
+            )],
+            else_body: vec![],
+        })
+        .collect();
+    let tail = body.split_off(1);
+    body.extend(counters);
+    body.extend(tail);
     let tick = BlueprintFn {
         id: EventKind::Tick.key(),
         name: EventKind::Tick.key(),
@@ -1147,47 +1218,7 @@ fn controller_class(name: &str) -> inf_blueprint::BlueprintClass {
             ty: Ty::Float,
         }],
         ret: Ty::Unit,
-        body: vec![
-            Stmt::Let {
-                id: LocalId(1),
-                binding: Binding::Named("entity".to_string()),
-                ty: None,
-                mutable: false,
-                value: get_var("entity"),
-            },
-            // The two footfalls the derivation found in this creature's own gait.
-            bump(
-                call(
-                    &["anim", "consume_notify"],
-                    vec![entity(), str_lit("footstep_l")],
-                ),
-                "steps",
-                float_lit(1.0),
-            ),
-            bump(
-                call(
-                    &["anim", "consume_notify"],
-                    vec![entity(), str_lit("footstep_r")],
-                ),
-                "steps",
-                float_lit(1.0),
-            ),
-            // How long it has spent running — the readout `anim.query_state` is
-            // for, and the cheapest possible proof that the query is answered
-            // against the machine's real current state.
-            bump(
-                call(&["anim", "query_state"], vec![entity(), str_lit("run")]),
-                "run_time",
-                dt(),
-            ),
-            // …published back so a machine may gate on it (a limp after N steps
-            // is one condition away). The engine publishes the MOVEMENT
-            // parameters; this is the character's own.
-            Stmt::ExprStmt(call(
-                &["anim", "set_param"],
-                vec![entity(), str_lit("steps"), get_var("steps")],
-            )),
-        ],
+        body,
     };
     let begin = BlueprintFn {
         id: EventKind::BeginPlay.key(),

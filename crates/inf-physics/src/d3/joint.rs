@@ -126,6 +126,22 @@ pub struct JointDesc3D {
     pub local_anchor1: DVec3,
     /// Anchor on the second body, in its local frame.
     pub local_anchor2: DVec3,
+    /// Whether the two jointed bodies still **collide** with each other.
+    ///
+    /// `true` is rapier's default and this facade's, because that is what a door,
+    /// a hinge or a rope wants: the leaf must not pass through the frame.
+    ///
+    /// A **ragdoll** wants the opposite, and it is not a preference (P29.6). Its
+    /// limb capsules are built from bones that share an endpoint, so a thigh and
+    /// a shin overlap by two radii **by construction** — and two overlapping
+    /// dynamic bodies that are also constrained to stay together are a
+    /// depenetration force with nowhere to go. Measured on this course's own
+    /// ragdoll before the flag existed: a character that landed at 10.7 m/s was
+    /// launched to **+12.4 m/s upward and 10.3 m/s sideways in a single step**,
+    /// and rose sixty-four metres. Nothing had seen it because every ragdoll
+    /// fixture before this wave spawned one at rest on flat ground, where the
+    /// same force merely made the limbs jitter.
+    pub contacts: bool,
 }
 
 impl JointDesc3D {
@@ -135,7 +151,15 @@ impl JointDesc3D {
             kind,
             local_anchor1: DVec3::ZERO,
             local_anchor2: DVec3::ZERO,
+            contacts: true,
         }
+    }
+
+    /// Turn collision between the two jointed bodies off — see
+    /// [`contacts`](Self::contacts).
+    pub fn without_contacts(mut self) -> Self {
+        self.contacts = false;
+        self
     }
 
     /// Set the anchor on the first body (its local frame).
@@ -154,6 +178,12 @@ impl JointDesc3D {
     pub(crate) fn to_generic(self) -> GenericJoint {
         let a1 = self.local_anchor1;
         let a2 = self.local_anchor2;
+        let mut joint = self.to_generic_inner(a1, a2);
+        joint.contacts_enabled = self.contacts;
+        joint
+    }
+
+    fn to_generic_inner(self, a1: DVec3, a2: DVec3) -> GenericJoint {
         match self.kind {
             JointKind3D::Fixed => FixedJointBuilder::new()
                 .local_anchor1(a1)

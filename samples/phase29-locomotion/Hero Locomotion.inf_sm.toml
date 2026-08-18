@@ -1,0 +1,6 @@
+schema_version = 1
+guid = "00000000-0000-0000-0000-0000840900a5"
+kind = "state_machine"
+content_hash = "8af66fefb43db932536a896c798ff5bd"
+dependencies = []
+tags = []

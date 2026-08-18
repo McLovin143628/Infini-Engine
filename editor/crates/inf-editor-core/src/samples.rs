@@ -1647,7 +1647,7 @@ pub fn write_character_demo() -> Result<(), String> {
         &dir,
         "Character.inf_skel",
         CHARACTER_DEMO_SKELETON_GUID,
-        AssetKind::Skeleton,
+        inf_asset::AssetKind::Skeleton,
         &SkeletonAsset::new(character_demo_skeleton()),
     )?;
 
@@ -1673,7 +1673,7 @@ pub fn write_character_demo() -> Result<(), String> {
             &dir,
             file,
             guid,
-            AssetKind::AnimClip,
+            inf_asset::AssetKind::AnimClip,
             &AnimClipAsset::new(clip, Some(skel_bytes_ref)),
         )?;
     }
@@ -1683,7 +1683,7 @@ pub fn write_character_demo() -> Result<(), String> {
         &dir,
         "Locomotion.inf_sm",
         CHARACTER_DEMO_SM_GUID,
-        AssetKind::StateMachine,
+        inf_asset::AssetKind::StateMachine,
         &StateMachineAsset::new(character_demo_state_machine(), Some(skel_bytes_ref)),
     )?;
 
@@ -8007,6 +8007,586 @@ the advisory the cook draws about exactly that, because it is the truth about th
 class of asset -- see the Phase 23 completion block in `docs/ROADMAP.md`.\n\n\
 Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
 
+// ── Phase 29 gate scene: `samples/phase29-locomotion` (P29.6) ───────────────
+//
+// **The obstacle course**, and it is an obstacle course rather than a level
+// because of what the catalogue amendment asks of it: *"P29.6's course must
+// force every catalogue mode in its one deterministic replay, so the (pose,
+// mode) trace certifies the catalogue and not a subset."* Every block below
+// exists because one mode cannot be reached without it, and the stations are in
+// the order a scripted character meets them:
+//
+// | z | station | the mode it forces |
+// |---|---|---|
+// | 0–10 | open floor | `Grounded` at all three gaits |
+// | 11–17 | a roof at 1.4 m | `Crouch` (and the standing-up refusal under it) |
+// | 18–44 | open floor, 26 m of it | `Prone`, `Slide`, `Roll`, `Dive`, `FallFree` |
+// | 46–52 | four 20 cm risers + a landing | autostep, and `FallControlled` off its edge |
+// | 64–70 | a 1 m ledge | `Mantle`, LOW class |
+// | 70–76 | a 3 m ledge | `Mantle`, HIGH class |
+// | 76–82 | a 5 m ledge | the drop that makes a `Ragdoll` landing |
+// | 100–120 | a 3 m pool | `SwimSurface` and `SwimUnder` |
+//
+// The open stretch is 26 m because a **slide** is entered from a sprint at
+// 4 m/s and a sprint accelerates from a standstill: a station with two metres of
+// runway in it certifies nothing, which is how the first draft of this course
+// reported a catalogue with no slide in it.
+//
+// `FallFree` is a jump and needs no geometry; `Driving` and `Flying` are typed
+// refusals until P29.7 and the gate asserts them AS refusals.
+//
+// **The character is the wizard's own output**, generated here with fixed GUIDs
+// rather than through `build_character` (which mints fresh ones): the same
+// template rig, the same locomotion set, the same `inf_anim::derive_clip` pass
+// and the same `inf_anim::propose` machine. That is what makes this sample the
+// first committed **derived** content in the repository — P29.4's and P29.5's
+// "no committed content is derived" remainder, closed.
+
+/// The committed level's GUID.
+const PHASE29_LEVEL_GUID: Uuid = Uuid::from_u128(0x8409_0000);
+const PHASE29_HERO_GUID: Uuid = Uuid::from_u128(0x8409_0001);
+const PHASE29_SUN_GUID: Uuid = Uuid::from_u128(0x8409_0002);
+const PHASE29_WATER_GUID: Uuid = Uuid::from_u128(0x8409_0003);
+/// The asset GUIDs, stable so the committed level's references resolve.
+const PHASE29_SKELETON_GUID: Uuid = Uuid::from_u128(0x8409_00a0);
+const PHASE29_MESH_GUID: Uuid = Uuid::from_u128(0x8409_00a1);
+const PHASE29_IDLE_GUID: Uuid = Uuid::from_u128(0x8409_00a2);
+const PHASE29_WALK_GUID: Uuid = Uuid::from_u128(0x8409_00a3);
+const PHASE29_RUN_GUID: Uuid = Uuid::from_u128(0x8409_00a4);
+const PHASE29_SM_GUID: Uuid = Uuid::from_u128(0x8409_00a5);
+const PHASE29_ACTOR_GUID: Uuid = Uuid::from_u128(0x8409_00a6);
+/// The course's static blocks start here and run consecutively.
+const PHASE29_BLOCK_BASE: u128 = 0x8409_0100;
+
+/// The character's own height, metres — the number every capsule dimension and
+/// the camera's pivot are derived from.
+pub const PHASE29_HEIGHT_M: f64 = 1.8;
+
+/// Where the character's FEET start, in world space.
+pub fn phase29_start() -> DVec3 {
+    DVec3::new(0.0, 0.0, -4.0)
+}
+
+/// One static block of the course: a centre, a half-extent and a name.
+///
+/// Boxes only, and axis-aligned. A slope is not needed for any mode the
+/// catalogue names — a slide is entered from *sprint plus crouch* and not from
+/// a gradient (`step_one`'s own rule) — and every box being axis-aligned is what
+/// makes the course's geometry checkable by arithmetic in the gate rather than
+/// by a physics query.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Phase29Block {
+    pub name: &'static str,
+    pub centre: DVec3,
+    pub half: DVec3,
+}
+
+impl Phase29Block {
+    /// The block's top surface, metres.
+    pub fn top(&self) -> f64 {
+        self.centre.y + self.half.y
+    }
+}
+
+/// **The course**, in the order a character meets it.
+pub fn phase29_blocks() -> Vec<Phase29Block> {
+    let b = |name, centre: DVec3, half: DVec3| Phase29Block { name, centre, half };
+    let mut out = vec![
+        // The floor, from behind the start to the lip of the pool.
+        b(
+            "floor",
+            DVec3::new(0.0, -0.5, 45.0),
+            DVec3::new(8.0, 0.5, 55.0),
+        ),
+        // A roof low enough to refuse a standing capsule (1.8 m) and clear a
+        // crouched one (1.2 m).
+        b(
+            "low roof",
+            DVec3::new(0.0, 1.6, 14.0),
+            DVec3::new(8.0, 0.2, 3.0),
+        ),
+    ];
+    // Four 20 cm risers — the flight P29.3's autostep arm is built on, here as
+    // committed content rather than as a fixture.
+    for i in 0..4 {
+        let top = 0.2 * (i + 1) as f64;
+        out.push(b(
+            "riser",
+            DVec3::new(0.0, top * 0.5, 46.0 + 0.5 * i as f64),
+            DVec3::new(8.0, top * 0.5, 0.25),
+        ));
+    }
+    out.push(b(
+        "landing",
+        DVec3::new(0.0, 0.4, 50.0),
+        DVec3::new(8.0, 0.4, 2.0),
+    ));
+    // The three ledges: 1 m (low mantle), 3 m (high mantle), 5 m (the drop that
+    // classifies as a ragdoll).
+    out.push(b(
+        "ledge 1 m",
+        DVec3::new(0.0, 0.5, 67.0),
+        DVec3::new(8.0, 0.5, 3.0),
+    ));
+    out.push(b(
+        "ledge 3 m",
+        DVec3::new(0.0, 1.5, 73.0),
+        DVec3::new(8.0, 1.5, 3.0),
+    ));
+    out.push(b(
+        "ledge 5 m",
+        DVec3::new(0.0, 2.5, 79.0),
+        DVec3::new(8.0, 2.5, 3.0),
+    ));
+    // The pool floor, three metres under the water's surface.
+    out.push(b(
+        "pool floor",
+        DVec3::new(0.0, -3.5, 110.0),
+        DVec3::new(8.0, 0.5, 10.0),
+    ));
+    // The far bank — so the course ENDS rather than running out of world. A
+    // character that swims off the end of the geometry falls for ever, and a
+    // trace whose last two thousand steps are a fall is a trace that certifies
+    // nothing about the two thousand before them.
+    out.push(b(
+        "far bank",
+        DVec3::new(0.0, -0.5, 125.0),
+        DVec3::new(8.0, 0.5, 5.0),
+    ));
+    out
+}
+
+/// The pool's surface elevation and half-extent (XZ) — the P20 water body the
+/// swim modes need.
+pub fn phase29_pool() -> (f64, glam::DVec2, DVec3) {
+    (
+        0.0,
+        glam::DVec2::new(8.0, 10.0),
+        DVec3::new(0.0, 0.0, 110.0),
+    )
+}
+
+/// The wizard's spec for this course's character — the DEFAULT biped, so the
+/// sample demonstrates what an author gets from the wizard rather than a shape
+/// tuned to make the gate pass.
+pub fn phase29_spec() -> (
+    inf_anim::BodyPlan,
+    inf_anim::BodyParams,
+    inf_anim::locomotion::GaitParams,
+) {
+    (
+        inf_anim::BodyPlan::Biped,
+        inf_anim::BodyParams {
+            height_m: PHASE29_HEIGHT_M,
+            ..inf_anim::BodyParams::default()
+        },
+        inf_anim::locomotion::GaitParams::default(),
+    )
+}
+
+/// The character's rig, from the template generator.
+pub fn phase29_skeleton() -> inf_anim::SkeletonAsset {
+    let (plan, params, _) = phase29_spec();
+    inf_anim::build_template(plan, &params).expect("the default biped builds")
+}
+
+/// The gait ladder this creature's clips are derived and proposed against.
+///
+/// **Its own, not ALS's.** The generator's walk is around 0.65 m/s, which on the
+/// ported 1.65 / 3.75 / 6.5 ladder tiers as an *idle* (the P29.5 reading), and a
+/// proposal over that clusters the whole set into one state. The wizard passes
+/// the generator's own numbers for exactly this reason and so does the sample.
+pub fn phase29_ladder(set: &inf_anim::LocomotionSet) -> [f32; 3] {
+    [
+        set.walk_speed_m_s as f32,
+        set.run_speed_m_s as f32,
+        (set.run_speed_m_s * 1.75) as f32,
+    ]
+}
+
+/// The three **derived** clips, and the ladder they were measured against.
+///
+/// This is the sample's headline as content: `samples/` has never carried a clip
+/// with a root-motion track, a distance track, foot-plant sync markers or a
+/// `W_Gait` channel on it, which is the "no committed content is derived"
+/// remainder P29.4 and P29.5 both recorded.
+pub fn phase29_clips() -> (inf_anim::LocomotionSet, [f32; 3]) {
+    let (plan, _, gait) = phase29_spec();
+    let rig = phase29_skeleton();
+    let mut set = inf_anim::locomotion::build_locomotion(plan, &rig, &gait)
+        .expect("the default gait generates");
+    let ladder = phase29_ladder(&set);
+    let opts = inf_anim::DeriveOptions {
+        gait_speeds_mps: ladder,
+        ..inf_anim::DeriveOptions::default()
+    };
+    for clip in [&mut set.idle, &mut set.walk, &mut set.run] {
+        let (derived, _) =
+            inf_anim::derive_clip(clip, &rig.skeleton, &opts).expect("a generated cycle measures");
+        *clip = derived;
+    }
+    (set, ladder)
+}
+
+/// The **proposed** machine — `inf_anim::propose` over the derived clips, which
+/// is what the wizard writes and therefore what the sample commits.
+pub fn phase29_machine() -> inf_anim::StateMachine {
+    let (set, ladder) = phase29_clips();
+    let facts = vec![
+        inf_anim::propose::facts_of("idle", *PHASE29_IDLE_GUID.as_bytes(), &set.idle, ladder),
+        inf_anim::propose::facts_of("walk", *PHASE29_WALK_GUID.as_bytes(), &set.walk, ladder),
+        inf_anim::propose::facts_of("run", *PHASE29_RUN_GUID.as_bytes(), &set.run, ladder),
+    ];
+    inf_anim::propose::propose_machine(
+        &facts,
+        &inf_anim::propose::ProposalOptions {
+            gait_speeds_mps: ladder,
+            ..Default::default()
+        },
+    )
+    .expect("three derived cycles propose")
+    .machine
+}
+
+/// The character's controller — the wizard's own, with this sample's id.
+pub fn phase29_controller() -> BlueprintClass {
+    let footsteps: Vec<String> = inf_anim::DerivedNames::of_skeleton(&phase29_skeleton().skeleton)
+        .event_markers
+        .into_iter()
+        .collect();
+    crate::character::controller_class_for("Hero", &footsteps)
+}
+
+/// The blocky mannequin body, one box per bone.
+pub fn phase29_body() -> inf_mesh::MeshAsset {
+    crate::character::block_body_mesh(&phase29_skeleton())
+}
+
+/// The committed course scene.
+pub fn phase29_locomotion_scene() -> SceneDoc {
+    use inf_ecs::components::{
+        ActorClass, AnimStateMachine, BodyKind3D, CharacterController3D, CharacterMovement,
+        Collider3D, ColliderShape3DKind, Light, LightKind, RigidBody3D, SkeletalMesh, WaterBody,
+    };
+
+    let mut doc = SceneDoc::new();
+    doc.set_title("Phase 29 Locomotion Course");
+    // **The 3D solver's gravity comes from `gravity_2d.y`**, which is the
+    // convention every 3D sample in this tree follows (`RuntimeSim::new` builds
+    // its 3D bridge with `DVec3::new(0, gravity.y, 0)`). It matters here because
+    // the ragdoll's limbs are the first DYNAMIC bodies this course has: a
+    // character carries its own `CharacterMovement::gravity_mps2` and falls
+    // whatever the world says, so a level with no gravity looks perfectly fine
+    // right up until something is let go of. The `.inf_lvl`'s own `gravity_3d`
+    // field is authored, serialized and read by NOTHING — see the P29.6 ledger.
+    doc.set_settings(crate::scene::serialize::LevelSettings {
+        gravity_2d: Vec2d::new(0.0, -9.81),
+        ..crate::scene::serialize::LevelSettings::default()
+    });
+
+    for (i, block) in phase29_blocks().into_iter().enumerate() {
+        let guid = Uuid::from_u128(PHASE29_BLOCK_BASE + i as u128);
+        doc.create_with_guid(guid, SpawnKind::Cube, block.name, None);
+        insert!(doc, guid, Transform::from_translation(block.centre));
+        insert!(
+            doc,
+            guid,
+            RigidBody3D {
+                kind: BodyKind3D::Static,
+                ..Default::default()
+            }
+        );
+        insert!(
+            doc,
+            guid,
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Box,
+                half_extents: inf_ecs::math::Vec3d::new(block.half.x, block.half.y, block.half.z),
+                ..Default::default()
+            }
+        );
+    }
+
+    // ── the water ──
+    let (level, half, centre) = phase29_pool();
+    doc.create_with_guid(PHASE29_WATER_GUID, SpawnKind::Empty, "Pool", None);
+    insert!(doc, PHASE29_WATER_GUID, Transform::from_translation(centre));
+    insert!(
+        doc,
+        PHASE29_WATER_GUID,
+        WaterBody::lake(level, Vec2d::new(half.x, half.y))
+    );
+
+    // ── the character, as the wizard makes one ──
+    //
+    // A capsule derived from the creature's own height, a kinematic body, the
+    // movement component with the catalogue defaults, the proposed machine, the
+    // controller — and the transform at the capsule's CENTRE with the feet on
+    // the floor, which is P29.6's character-space ruling applied to committed
+    // content.
+    let radius = (PHASE29_HEIGHT_M * 0.15).clamp(0.1, 0.5);
+    let half_h = (PHASE29_HEIGHT_M * 0.5 - radius).max(0.05);
+    doc.create_with_guid(PHASE29_HERO_GUID, SpawnKind::Empty, "Hero", None);
+    let feet = phase29_start();
+    insert!(
+        doc,
+        PHASE29_HERO_GUID,
+        Transform::from_translation(DVec3::new(feet.x, feet.y + half_h + radius, feet.z))
+    );
+    insert!(
+        doc,
+        PHASE29_HERO_GUID,
+        SkeletalMesh {
+            mesh: Some(PHASE29_MESH_GUID),
+            skeleton: Some(PHASE29_SKELETON_GUID),
+        }
+    );
+    insert!(
+        doc,
+        PHASE29_HERO_GUID,
+        AnimStateMachine {
+            sm: Some(PHASE29_SM_GUID),
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE29_HERO_GUID,
+        RigidBody3D {
+            kind: BodyKind3D::Kinematic,
+            ..Default::default()
+        }
+    );
+    insert!(
+        doc,
+        PHASE29_HERO_GUID,
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Capsule,
+            half_extents: inf_ecs::math::Vec3d::new(radius, half_h, radius),
+            radius,
+            ..Default::default()
+        }
+    );
+    insert!(doc, PHASE29_HERO_GUID, CharacterController3D::default());
+    insert!(
+        doc,
+        PHASE29_HERO_GUID,
+        CharacterMovement {
+            player_controlled: true,
+            stand_half_height_m: half_h,
+            crouch_half_height_m: (half_h * 0.5).max(0.05),
+            prone_half_height_m: (radius * 0.6).max(0.03),
+            ..Default::default()
+        }
+    );
+    insert!(doc, PHASE29_HERO_GUID, ActorClass(PHASE29_ACTOR_GUID));
+
+    // ── a sun, so the course is visible in PIE ──
+    doc.create_with_guid(PHASE29_SUN_GUID, SpawnKind::Empty, "Sun", None);
+    insert!(
+        doc,
+        PHASE29_SUN_GUID,
+        Transform {
+            translation: inf_ecs::math::Vec3d::new(0.0, 40.0, 0.0),
+            rotation: inf_ecs::math::Vec3d::new(-50.0, -30.0, 0.0),
+            scale: inf_ecs::math::Vec3d::new(1.0, 1.0, 1.0),
+        }
+    );
+    insert!(
+        doc,
+        PHASE29_SUN_GUID,
+        Light {
+            kind: LightKind::Directional,
+            color: Color::new(1.0, 0.97, 0.9, 1.0),
+            intensity: 2.5,
+            ..Default::default()
+        }
+    );
+
+    doc.world_mut().propagate();
+    doc.mark_saved();
+    doc
+}
+
+/// The `(guid, class)` actor list for a headless Simulate of the course.
+pub fn phase29_actors() -> Vec<(Uuid, BlueprintClass)> {
+    vec![(PHASE29_HERO_GUID, phase29_controller())]
+}
+
+/// The character's GUID — the gate's subject, and the camera's.
+pub fn phase29_hero() -> Uuid {
+    PHASE29_HERO_GUID
+}
+
+/// The asset GUIDs, so a gate can resolve the committed files without scanning.
+pub fn phase29_asset_guids() -> Phase29Assets {
+    Phase29Assets {
+        skeleton: PHASE29_SKELETON_GUID,
+        mesh: PHASE29_MESH_GUID,
+        idle: PHASE29_IDLE_GUID,
+        walk: PHASE29_WALK_GUID,
+        run: PHASE29_RUN_GUID,
+        machine: PHASE29_SM_GUID,
+        actor: PHASE29_ACTOR_GUID,
+        level: PHASE29_LEVEL_GUID,
+    }
+}
+
+/// See [`phase29_asset_guids`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Phase29Assets {
+    pub skeleton: Uuid,
+    pub mesh: Uuid,
+    pub idle: Uuid,
+    pub walk: Uuid,
+    pub run: Uuid,
+    pub machine: Uuid,
+    pub actor: Uuid,
+    pub level: Uuid,
+}
+
+/// The repo-root `samples/phase29-locomotion/` directory.
+pub fn phase29_locomotion_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../samples/phase29-locomotion")
+}
+
+/// Write the committed course, its character and the three text files.
+pub fn write_phase29_locomotion() -> Result<(), String> {
+    let dir = phase29_locomotion_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    crate::scene::serialize::save(
+        &phase29_locomotion_scene(),
+        &dir.join("Phase29Locomotion.inf_lvl"),
+        Some(PHASE29_LEVEL_GUID),
+    )?;
+
+    let skel = phase29_skeleton();
+    let put = |name: &str,
+               guid: Uuid,
+               kind: inf_asset::AssetKind,
+               bytes: Vec<u8>|
+     -> Result<(), String> {
+        let path = dir.join(name);
+        std::fs::write(&path, &bytes).map_err(|e| format!("write {name}: {e}"))?;
+        inf_asset::AssetSidecar::new(
+            inf_asset::AssetId(guid),
+            kind,
+            inf_asset::ContentHash::of(&bytes),
+        )
+        .save(&path)
+        .map_err(|e| format!("write {name} sidecar: {e}"))
+    };
+
+    put(
+        "Hero.inf_skel",
+        PHASE29_SKELETON_GUID,
+        inf_asset::AssetKind::Skeleton,
+        inf_asset::encode(&skel).map_err(|e| format!("encode skeleton: {e}"))?,
+    )?;
+    put(
+        "Hero Body.inf_mesh",
+        PHASE29_MESH_GUID,
+        inf_asset::AssetKind::Mesh,
+        inf_asset::encode(&phase29_body()).map_err(|e| format!("encode body: {e}"))?,
+    )?;
+
+    let (set, _) = phase29_clips();
+    let skel_bytes = *PHASE29_SKELETON_GUID.as_bytes();
+    for (name, guid, clip) in [
+        ("Hero Idle.inf_anim", PHASE29_IDLE_GUID, &set.idle),
+        ("Hero Walk.inf_anim", PHASE29_WALK_GUID, &set.walk),
+        ("Hero Run.inf_anim", PHASE29_RUN_GUID, &set.run),
+    ] {
+        put(
+            name,
+            guid,
+            inf_asset::AssetKind::AnimClip,
+            inf_asset::encode(&inf_anim::AnimClipAsset::new(
+                clip.clone(),
+                Some(skel_bytes),
+            ))
+            .map_err(|e| format!("encode {name}: {e}"))?,
+        )?;
+    }
+
+    let machine = phase29_machine();
+    put(
+        "Hero Locomotion.inf_sm",
+        PHASE29_SM_GUID,
+        inf_asset::AssetKind::StateMachine,
+        inf_asset::encode(&inf_anim::StateMachineAsset::new(
+            machine.clone(),
+            Some(skel_bytes),
+        ))
+        .map_err(|e| format!("encode machine: {e}"))?,
+    )?;
+    put(
+        "Hero Controller.inf_act",
+        PHASE29_ACTOR_GUID,
+        inf_asset::AssetKind::Blueprint,
+        encode_actor(&phase29_controller())?,
+    )?;
+
+    // ── the text an author owns (pillar S1) ──
+    std::fs::write(
+        dir.join("Hero Locomotion.inf_sm.txt"),
+        inf_anim::to_toml(&machine),
+    )
+    .map_err(|e| format!("write machine text: {e}"))?;
+    std::fs::write(
+        dir.join("camera.toml"),
+        inf_ecs::camera::CameraTuning::default().to_toml()?,
+    )
+    .map_err(|e| format!("write camera table: {e}"))?;
+    std::fs::write(
+        dir.join("input.toml"),
+        toml::to_string_pretty(&inf_input::default_map())
+            .map_err(|e| format!("encode bindings: {e}"))?,
+    )
+    .map_err(|e| format!("write bindings: {e}"))?;
+
+    std::fs::write(dir.join("README.md"), PHASE29_README)
+        .map_err(|e| format!("write readme: {e}"))?;
+    Ok(())
+}
+
+const PHASE29_README: &str = "# Phase 29 Locomotion (the P29.6 gate scene)\n\n\
+An **obstacle course**, and it is a course rather than a level because of what\n\
+the movement-catalogue amendment asks of it: *P29.6's course must force every\n\
+catalogue mode in its one deterministic replay, so the (pose, mode) trace\n\
+certifies the catalogue and not a subset.* Every block in\n\
+`Phase29Locomotion.inf_lvl` exists because one mode cannot be reached without\n\
+it -- a 1.4 m roof to crouch under, four 20 cm risers to autostep up, ledges at\n\
+1 m and 3 m for the two mantle height classes, a 5 m one for the drop a landing\n\
+classifies as a ragdoll, and a 3 m pool to swim in and under.\n\n\
+## The character is the wizard's own output\n\n\
+`Hero.inf_skel`, `Hero Body.inf_mesh`, the three cycles and\n\
+`Hero Locomotion.inf_sm` are what `inf_editor_core::character::build_character`\n\
+produces from the default biped -- generated here with fixed GUIDs so the\n\
+committed bytes are reproducible, but through the same doors: the template rig,\n\
+the rig-derived locomotion set, `inf_anim::derive_clip` at the import door and\n\
+`inf_anim::propose` over what the derivation measured.\n\n\
+**The three cycles are the repository's first committed DERIVED content.** They\n\
+carry a root-motion track, a distance track, foot-plant sync markers, footstep\n\
+notifies and six curve channels -- none of which any committed clip had before,\n\
+which is the remainder P29.4 and P29.5 both wrote down.\n\n\
+## The text beside them is the point\n\n\
+- `Hero Locomotion.inf_sm.txt` -- the machine, as text (pillar S1). One value\n\
+  per line, conditions as expressions, and `phase29_gate`'s one-line-diff arm\n\
+  edits exactly one of those lines and measures what changes.\n\
+- `camera.toml` -- the locomotion camera's table. A camera is not sim state, so\n\
+  it has no home in the scene schema and lives here instead.\n\
+- `input.toml` -- the bindings, in the format the shipped player already reads\n\
+  beside a level.\n\n\
+## What the gate does with it\n\n\
+`runtime/inf-player/tests/phase29_gate.rs`: PIE == shipping byte-for-byte on the\n\
+(pose, mode) trace with every mode named, bit-exact replay across two\n\
+independent cooks, Blueprint-versus-transpiled parity over a course segment\n\
+driven through the `anim.*` kit, the one-line-diff demonstration, and a camera\n\
+trace that is deterministic and is NOT part of the sim trace.\n\n\
+Regenerate with `INF_BLESS_SAMPLES=1 cargo test -p inf-editor-core samples`.\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8372,6 +8952,7 @@ mod tests {
             write_phase21_cavern().expect("regenerate phase21 cavern");
             write_phase22_playground().expect("regenerate phase22 playground");
             write_phase23_workshop().expect("regenerate phase23 workshop");
+            write_phase29_locomotion().expect("regenerate phase29 locomotion");
             eprintln!("samples: regenerated {}", sample_dir().display());
             return;
         }

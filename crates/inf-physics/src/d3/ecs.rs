@@ -1638,11 +1638,31 @@ impl PhysicsBridge3D {
     /// the `physics3d.move_and_slide` host path in either host is a call rather
     /// than a policy.
     pub fn apply_swim_motion(&self, guid: Uuid, motion: DVec3, dt: f64) -> DVec3 {
+        self.apply_swim_motion_where(guid, motion, dt, false)
+    }
+
+    /// [`apply_swim_motion`](Self::apply_swim_motion) with the P29.6
+    /// `deliberate` distinction: whether the downward part of `motion` is a
+    /// **player asking to dive** rather than integrated gravity.
+    ///
+    /// Two doors rather than one flag on the old one, so the fifteen existing
+    /// call sites keep the behaviour they were written against and the one new
+    /// caller — the character movement step, which is the only place in the
+    /// engine that knows an intent axis from an acceleration — names the
+    /// difference explicitly. See [`water::swim_motion`] for what it changes and
+    /// for the number that made it necessary.
+    pub fn apply_swim_motion_where(
+        &self,
+        guid: Uuid,
+        motion: DVec3,
+        dt: f64,
+        deliberate: bool,
+    ) -> DVec3 {
         if !self.is_swimming(guid) {
             return motion;
         }
         let fraction = self.water_probe(guid).map(|p| p.fraction).unwrap_or(0.0);
-        water::swim_motion(motion, fraction, dt)
+        water::swim_motion(motion, fraction, dt, deliberate)
     }
 
     /// A body's pose + velocities + mass, as the water solve wants them.

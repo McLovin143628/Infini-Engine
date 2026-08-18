@@ -931,10 +931,15 @@ fn step_one(
 
     // ── 8. Move. `apply_swim_motion` is the identity when not swimming, which
     //    is why it can be unconditional — the same call `move_and_slide` makes.
-    let motion = bridge.apply_swim_motion(
+    // **`deliberate`** (P29.6): the character step is the one place in the
+    // engine that can tell a player asking to dive from a body integrating
+    // gravity, and `apply_swim_motion` cannot. Without the distinction the float
+    // balance wins every argument and `SwimUnder` is a mode no input reaches.
+    let motion = bridge.apply_swim_motion_where(
         guid,
         DVec3::new(planar.x * dt, vertical * dt, planar.y * dt) + root_world,
         dt,
+        cm.mode.is_swimming() && cm.runtime.intent_vertical < 0.0,
     );
     // The mover is rebuilt with THIS step's capsule, so a crouch takes effect on
     // the step it is decided rather than on the next bridge sync.

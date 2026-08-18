@@ -3339,6 +3339,7 @@ dependencies = [
  "inf-runtime",
  "inf-scene",
  "inf-terrain",
+ "inf-transpile",
  "inf-vgeom",
  "inf-voxel",
  "inf-vt",

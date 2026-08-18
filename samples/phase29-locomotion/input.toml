@@ -1,0 +1,160 @@
+deadzone = 0.1
+
+[[actions.aim]]
+MouseButton = "Right"
+
+[[actions.crouch]]
+Key = "KeyC"
+
+[[actions.crouch]]
+GamepadButton = "East"
+
+[[actions.dive]]
+Key = "KeyF"
+
+[[actions.down]]
+Key = "KeyS"
+
+[[actions.down]]
+Key = "ArrowDown"
+
+[[actions.jump]]
+Key = "Space"
+
+[[actions.jump]]
+Key = "KeyW"
+
+[[actions.jump]]
+Key = "ArrowUp"
+
+[[actions.jump]]
+GamepadButton = "South"
+
+[[actions.left]]
+Key = "KeyA"
+
+[[actions.left]]
+Key = "ArrowLeft"
+
+[[actions.prone]]
+Key = "KeyX"
+
+[[actions.right]]
+Key = "KeyD"
+
+[[actions.right]]
+Key = "ArrowRight"
+
+[[actions.roll]]
+Key = "KeyR"
+
+[[actions.sprint]]
+Key = "Shift"
+
+[[actions.sprint]]
+GamepadButton = "LeftThumb"
+
+[[actions.up]]
+Key = "KeyW"
+
+[[actions.up]]
+Key = "ArrowUp"
+
+[[actions.walk]]
+Key = "AltLeft"
+
+[[axes.look_x]]
+
+[axes.look_x.MouseAxis]
+axis = "X"
+scale = 0.15
+
+[[axes.look_x]]
+
+[axes.look_x.GamepadAxis]
+axis = "RightStickX"
+scale = 180.0
+
+[[axes.look_y]]
+
+[axes.look_y.MouseAxis]
+axis = "Y"
+scale = -0.15
+
+[[axes.look_y]]
+
+[axes.look_y.GamepadAxis]
+axis = "RightStickY"
+scale = -180.0
+
+[[axes.move_up]]
+
+[axes.move_up.Key]
+code = "KeyE"
+scale = 1.0
+
+[[axes.move_up]]
+
+[axes.move_up.Key]
+code = "KeyQ"
+scale = -1.0
+
+[[axes.move_x]]
+
+[axes.move_x.Key]
+code = "KeyD"
+scale = 1.0
+
+[[axes.move_x]]
+
+[axes.move_x.Key]
+code = "ArrowRight"
+scale = 1.0
+
+[[axes.move_x]]
+
+[axes.move_x.Key]
+code = "KeyA"
+scale = -1.0
+
+[[axes.move_x]]
+
+[axes.move_x.Key]
+code = "ArrowLeft"
+scale = -1.0
+
+[[axes.move_x]]
+
+[axes.move_x.GamepadAxis]
+axis = "LeftStickX"
+scale = 1.0
+
+[[axes.move_y]]
+
+[axes.move_y.GamepadAxis]
+axis = "LeftStickY"
+scale = -1.0
+
+[[axes.move_y]]
+
+[axes.move_y.Key]
+code = "KeyW"
+scale = 1.0
+
+[[axes.move_y]]
+
+[axes.move_y.Key]
+code = "ArrowUp"
+scale = 1.0
+
+[[axes.move_y]]
+
+[axes.move_y.Key]
+code = "KeyS"
+scale = -1.0
+
+[[axes.move_y]]
+
+[axes.move_y.Key]
+code = "ArrowDown"
+scale = -1.0

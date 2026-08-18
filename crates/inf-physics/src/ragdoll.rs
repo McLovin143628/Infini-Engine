@@ -49,7 +49,29 @@ pub struct RagdollConfig {
     pub thickness: f64,
     /// Minimum capsule radius (world units), so a short bone still has volume.
     pub min_radius: f64,
-    /// Mass density of every limb body.
+    /// Mass density of every limb body, kg/m³.
+    ///
+    /// # THE PLACEHOLDER, FOR THE FOURTH TIME (P29.6)
+    ///
+    /// This was **1.0** — rapier's "no opinion" value, one kilogram per cubic
+    /// metre, lighter than air — from P12.1 until P29.6, which is seventeen
+    /// sub-phases in which the builder had no runtime consumer to notice. The
+    /// same defect P20.2 found on `Buoyancy`, P22.3 found on `Destructible` and
+    /// P22.4 found again on a 0.4 m wheel that weighed 268 grams.
+    ///
+    /// What it cost here: a limb capsule is a few litres, so at 1 kg/m³ a thigh
+    /// weighed about **six grams**. The P29.6 course lands a character at
+    /// 10.9 m/s — hard enough for the classifier to call a ragdoll — and the
+    /// gram-weight limbs, spawned touching the floor and carrying the whole
+    /// impact velocity, were fired **44 metres into the air** and half a
+    /// kilometre downrange. Nothing had seen it because the only fixtures that
+    /// spawned a ragdoll before this wave spawned it from rest, and because the
+    /// rig published its bones half a capsule ABOVE the floor until P29.6's
+    /// character-space ruling put them where the character actually is.
+    ///
+    /// **985** is human tissue — very slightly denser than water, which is why
+    /// people float with their lungs full and sink with them empty. A 6-litre
+    /// thigh is about 6 kg at it.
     pub density: f64,
 }
 
@@ -58,9 +80,38 @@ impl Default for RagdollConfig {
         Self {
             thickness: 0.14,
             min_radius: 0.04,
-            density: 1.0,
+            density: 985.0,
         }
     }
+}
+
+/// The collision-layer bit a ragdoll's limbs belong to, and the only one they do
+/// **not** collide with (P29.6).
+///
+/// A ragdoll's limb capsules overlap **by construction** — adjacent bones share
+/// an endpoint, and a collapsed pose folds a forearm into a chest — so limbs that
+/// push each other apart are a permanent depenetration force inside the body.
+/// Turning contacts off between *jointed* pairs (`JointDesc3D::without_contacts`)
+/// deals with the adjacent ones and not with the rest: measured on the P29.6
+/// course, a settled ragdoll's pelvis climbed **14 cm per fixed step with a
+/// velocity of four centimetres per second** — a position correction, not a
+/// motion — and rose ten metres.
+///
+/// The mask is the standard first answer: limbs are members of one bit and filter
+/// everything except that bit, so they collide with the world and with nothing of
+/// their own kind. Every other collider in the engine is a member of **all**
+/// layers ([`CollisionLayers::default`]), so a ragdoll still lands on a floor,
+/// hits a crate and is swept by a camera.
+///
+/// **The bound**, stated rather than discovered: two *different* ragdolls pass
+/// through each other. Separating them needs a bit per ragdoll and there are
+/// thirty-two, so the honest version is a per-body group id rather than a wider
+/// mask — the follow-up, and not this wave's.
+pub const RAGDOLL_LAYER_BIT: u32 = 1 << 31;
+
+/// The layers every ragdoll limb carries — see [`RAGDOLL_LAYER_BIT`].
+pub fn ragdoll_layers() -> crate::CollisionLayers {
+    crate::CollisionLayers::new(RAGDOLL_LAYER_BIT, !RAGDOLL_LAYER_BIT)
 }
 
 /// The recognized humanoid bone roles. The classifier maps a free-text bone name
@@ -252,7 +303,8 @@ pub fn build_ragdoll(skeleton: &[RagdollBone], config: RagdollConfig) -> Vec<Rag
             half_height,
             radius,
         })
-        .density(config.density);
+        .density(config.density)
+        .layers(ragdoll_layers());
 
         parts.push(RagdollPart {
             role: *role,
@@ -298,9 +350,23 @@ pub fn build_ragdoll(skeleton: &[RagdollBone], config: RagdollConfig) -> Vec<Rag
         } else {
             JointKind3D::Spherical
         };
+        // **`local_anchor1` is BODY 1's, and body 1 is the PARENT.**
+        // `spawn` calls `add_joint(parent, child, desc)`, so the parent's own
+        // local anchor has to go in slot 1. These two were the other way round
+        // from P12.1 until P29.6, which nothing could see: `inf_physics::ragdoll`
+        // was a pure builder with no runtime consumer for seven phases, and
+        // P29.4's fixtures all spawn a ragdoll AT REST on flat ground, where a
+        // mis-anchored joint still settles into a heap — just the wrong heap.
+        //
+        // What it cost: a ragdoll spawned with real velocity had every joint
+        // yanking two bodies toward two different points, and the solver put
+        // 7 m/s of sideways velocity into a pelvis in ONE step. The P29.6 course
+        // lands a character at 10.7 m/s, which is the first time in this
+        // repository's life that a ragdoll has been given one.
         let desc = JointDesc3D::new(kind)
-            .local_anchor1(child_anchor)
-            .local_anchor2(parent_anchor);
+            .without_contacts()
+            .local_anchor1(parent_anchor)
+            .local_anchor2(child_anchor);
         parts[i].joint = Some(RagdollJoint {
             parent: parent_idx,
             desc,

@@ -182,4 +182,9 @@ inf-vt = { workspace = true }
 # of it rather than restating `1.6` in a test. Dev-only: the shipped player never
 # names `inf-water` — it consumes the derived `RenderWater` its projector builds.
 inf-water = { workspace = true }
+# P29.6: `phase29_gate`'s Blueprint-versus-transpiled parity arm drives the
+# sample's own controller through the interpreter and against a compiled mirror
+# of `generate_fn`'s output — the S6 claim, over the `anim.*` kit, on committed
+# content. Dev-only: the shipped player never transpiles anything.
+inf-transpile = { workspace = true }
 tempfile = { workspace = true }

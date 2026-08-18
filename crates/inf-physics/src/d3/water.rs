@@ -1058,25 +1058,47 @@ pub fn swim_latch(was_swimming: bool, fraction: f64) -> bool {
 ///    integrating gravity **surfaces**, which is the whole point: it has no way to
 ///    know the water should have stopped it.
 /// 2. **Vertical input still works.** Asking to rise is honoured in full, up to
-///    the swim rate; asking to dive is honoured at a quarter, which reads as the
-///    water pushing back.
+///    the swim rate; asking to dive is honoured at a quarter — *unless the dive
+///    is `deliberate`*, in which case it is honoured in full and the float
+///    balance stops opposing it (P29.6). `deliberate` is the distinction this
+///    function could not previously draw: a character integrating gravity and a
+///    player holding "down" arrive here as the same negative `motion.y`, and
+///    treating both as accidents made `MovementMode::SwimUnder` unreachable.
+///    The movement step passes `true` when the intent axis is pushed down; the
+///    Blueprint `move_and_slide` path passes `false`, because its `motion.y` is
+///    integrated gravity and nothing else.
 /// 3. **Horizontal speed is capped** to [`SWIM_SPEED_MAX_M_S`], because a
 ///    character's running speed in deep water is the single clearest tell that a
 ///    game has no swim mode.
 ///
 /// Pure and `dt`-explicit, so both hosts get the same answer from the same
 /// function.
-pub fn swim_motion(motion: DVec3, fraction: f64, dt: f64) -> DVec3 {
+pub fn swim_motion(motion: DVec3, fraction: f64, dt: f64, deliberate: bool) -> DVec3 {
     if dt <= 0.0 {
         return motion;
     }
-    let intent = (motion.y / dt).clamp(-SWIM_VERT_MAX_M_S, SWIM_VERT_MAX_M_S);
-    let intent = if intent < 0.0 {
-        intent * SWIM_SINK_AUTHORITY
+    let raw = (motion.y / dt).clamp(-SWIM_VERT_MAX_M_S, SWIM_VERT_MAX_M_S);
+    let diving = raw < 0.0;
+    // The quarter-strength sink is what stops **gravity** from dragging a
+    // swimmer down; it was never meant to stop a swimmer from choosing to go
+    // under, and until P29.6 this function could not tell the two apart — see
+    // `deliberate`.
+    let intent = if diving && !deliberate {
+        raw * SWIM_SINK_AUTHORITY
     } else {
-        intent
+        raw
     };
     let balance = SWIM_FLOAT_RATE_M_S * (fraction - SWIM_FLOAT_SUBMERSION);
+    // …and the float balance does not oppose one either. Without this the
+    // equilibrium submersion is `0.8 + v x 0.25 / 4`, which at the catalogue's
+    // 1.6 m/s swim speed is **0.88** — so `SWIM_UNDER_FRACTION`'s 0.95 was a
+    // mode no input could reach, and P29.6's course could not get its
+    // character's head under the water however hard it asked. Measured.
+    let balance = if diving && deliberate {
+        balance.min(0.0)
+    } else {
+        balance
+    };
     let y = (intent + balance) * dt;
     let horizontal = DVec2::new(motion.x, motion.z);
     let cap = SWIM_SPEED_MAX_M_S * dt;
@@ -1538,18 +1560,28 @@ mod tests {
         let dt = 1.0 / 60.0;
         // THE load-bearing case: a character doing nothing but integrating
         // gravity arrives asking to fall at 20 m/s, and must SURFACE anyway.
-        let falling = swim_motion(DVec3::new(0.0, -20.0 * dt, 0.0), 1.0, dt);
+        let falling = swim_motion(DVec3::new(0.0, -20.0 * dt, 0.0), 1.0, dt, false);
         assert!(
             falling.y > 0.0,
             "a fully submerged character must rise even while asking to fall: {}",
             falling.y / dt
         );
         // At the float depth, with no vertical asked for, nothing happens.
-        let neutral = swim_motion(DVec3::ZERO, SWIM_FLOAT_SUBMERSION, dt);
+        let neutral = swim_motion(DVec3::ZERO, SWIM_FLOAT_SUBMERSION, dt, false);
         assert!(neutral.y.abs() < 1e-12);
         // Deliberate diving still works — it is just weaker than rising.
-        let dive = swim_motion(DVec3::new(0.0, -2.0 * dt, 0.0), SWIM_FLOAT_SUBMERSION, dt);
-        let rise = swim_motion(DVec3::new(0.0, 2.0 * dt, 0.0), SWIM_FLOAT_SUBMERSION, dt);
+        let dive = swim_motion(
+            DVec3::new(0.0, -2.0 * dt, 0.0),
+            SWIM_FLOAT_SUBMERSION,
+            dt,
+            false,
+        );
+        let rise = swim_motion(
+            DVec3::new(0.0, 2.0 * dt, 0.0),
+            SWIM_FLOAT_SUBMERSION,
+            dt,
+            false,
+        );
         assert!(dive.y < 0.0, "a swimmer must be able to dive");
         assert!(rise.y > 0.0);
         assert!(
@@ -1560,18 +1592,86 @@ mod tests {
         );
         assert!((rise.y / dt - SWIM_VERT_MAX_M_S).abs() < 1e-12);
         // Horizontal is capped.
-        let sprint = swim_motion(DVec3::new(9.0 * dt, 0.0, 12.0 * dt), 0.9, dt);
+        let sprint = swim_motion(DVec3::new(9.0 * dt, 0.0, 12.0 * dt), 0.9, dt, false);
         let speed = DVec2::new(sprint.x, sprint.z).length() / dt;
         assert!(
             (speed - SWIM_SPEED_MAX_M_S).abs() < 1e-9,
             "capped to {SWIM_SPEED_MAX_M_S}, got {speed}"
         );
         // A slow swimmer is not sped up.
-        let dawdle = swim_motion(DVec3::new(0.5 * dt, 0.0, 0.0), 0.9, dt);
+        let dawdle = swim_motion(DVec3::new(0.5 * dt, 0.0, 0.0), 0.9, dt, false);
         assert!((dawdle.x - 0.5 * dt).abs() < 1e-12);
         // A degenerate step is the identity rather than a divide by zero.
         let m = DVec3::new(1.0, 2.0, 3.0);
-        assert_eq!(swim_motion(m, 1.0, 0.0), m);
+        assert_eq!(swim_motion(m, 1.0, 0.0, false), m);
+    }
+
+    /// **A DELIBERATE dive gets the head under** (P29.6), and an accidental one
+    /// still does not.
+    ///
+    /// The distinction is the whole of the fix. `swim_motion` sees one negative
+    /// `motion.y` whether it came from a player holding "down" or from a
+    /// Blueprint integrating gravity, and treating both as accidents made
+    /// [`SWIM_UNDER_FRACTION`] unreachable: the equilibrium submersion is
+    /// `SWIM_FLOAT_SUBMERSION + v x SWIM_SINK_AUTHORITY / SWIM_FLOAT_RATE_M_S`,
+    /// which at the catalogue's 1.6 m/s swim speed is **0.88** against a
+    /// threshold of **0.95**. Measured on the P29.6 course before the flag
+    /// existed: a character asking to dive with the axis at full deflection
+    /// settled at 0.926 submerged and never once entered `SwimUnder`.
+    #[test]
+    fn a_deliberate_dive_sinks_and_an_accidental_one_still_surfaces() {
+        let dt = 1.0 / 60.0;
+        // At the float depth, asking to dive: a quarter of the ask against a
+        // zero balance either way, so both sink — but the deliberate one sinks
+        // FOUR TIMES as fast, which is the authority half.
+        let casual = swim_motion(
+            DVec3::new(0.0, -1.6 * dt, 0.0),
+            SWIM_FLOAT_SUBMERSION,
+            dt,
+            false,
+        );
+        let meant = swim_motion(
+            DVec3::new(0.0, -1.6 * dt, 0.0),
+            SWIM_FLOAT_SUBMERSION,
+            dt,
+            true,
+        );
+        assert!(meant.y < casual.y, "{} vs {}", meant.y, casual.y);
+        assert!(
+            (meant.y / casual.y - 1.0 / SWIM_SINK_AUTHORITY).abs() < 1e-9,
+            "the deliberate dive is not full authority"
+        );
+
+        // **Past the float depth is where it matters.** At 0.94 submerged the
+        // balance is pushing up hard enough to beat a quarter-strength ask; the
+        // casual dive therefore RISES and the deliberate one keeps going down,
+        // which is what makes `SWIM_UNDER_FRACTION` reachable at all.
+        let deep = 0.94;
+        let casual = swim_motion(DVec3::new(0.0, -1.6 * dt, 0.0), deep, dt, false);
+        let meant = swim_motion(DVec3::new(0.0, -1.6 * dt, 0.0), deep, dt, true);
+        assert!(
+            casual.y > 0.0,
+            "at {deep} submerged an ACCIDENTAL sink must still surface: {}",
+            casual.y / dt
+        );
+        assert!(
+            meant.y < 0.0,
+            "at {deep} submerged a DELIBERATE dive must keep going down: {}",
+            meant.y / dt
+        );
+
+        // The load-bearing case is untouched: a body integrating gravity at
+        // 20 m/s while fully submerged surfaces, deliberate or not — because
+        // `deliberate` is `false` on that path by construction, and the arm
+        // above pins it.
+        let falling = swim_motion(DVec3::new(0.0, -20.0 * dt, 0.0), 1.0, dt, false);
+        assert!(falling.y > 0.0);
+
+        // Rising is unaffected by the flag: the balance only stops opposing a
+        // DIVE.
+        let up_a = swim_motion(DVec3::new(0.0, 1.6 * dt, 0.0), 0.94, dt, false);
+        let up_b = swim_motion(DVec3::new(0.0, 1.6 * dt, 0.0), 0.94, dt, true);
+        assert_eq!(up_a, up_b);
     }
 
     #[test]
