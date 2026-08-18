@@ -272,11 +272,7 @@ mod tests {
 
     #[test]
     fn a_flat_surface_lifts_the_foot_by_its_own_thickness_and_does_not_tilt_it() {
-        let g = ground_offset(
-            Vec3::new(0.0, 0.2, 0.0),
-            Vec3::Y,
-            Vec3::new(0.0, 0.0, 0.0),
-        );
+        let g = ground_offset(Vec3::new(0.0, 0.2, 0.0), Vec3::Y, Vec3::new(0.0, 0.0, 0.0));
         assert!((g.offset.y - 0.2).abs() < 1e-6, "{g:?}");
         assert!(g.pitch_deg.abs() < 1e-9 && g.roll_deg.abs() < 1e-9, "{g:?}");
         // A 30-degree slope about the character's right axis reads as pitch.
@@ -284,7 +280,10 @@ mod tests {
         let g = ground_offset(Vec3::ZERO, n, Vec3::ZERO);
         assert!((g.pitch_deg + 30.0).abs() < 0.5, "{g:?}");
         // A degenerate normal is an answer, not a NaN in the pose.
-        assert_eq!(ground_offset(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO), GroundOffset::default());
+        assert_eq!(
+            ground_offset(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO),
+            GroundOffset::default()
+        );
     }
 
     /// **THE rule.** A lock engages at the threshold and afterwards may only
@@ -306,7 +305,11 @@ mod tests {
         // Releasing: a lower value DOES take, and the lock point does not move.
         l.update(1.0, 0.4, false, Vec3::new(5.0, 0.0, 5.0), 0.0);
         assert!((l.alpha - 0.4).abs() < 1e-6);
-        assert_eq!(l.position, Vec3::new(1.0, 0.0, 2.0), "a releasing lock keeps its point");
+        assert_eq!(
+            l.position,
+            Vec3::new(1.0, 0.0, 2.0),
+            "a releasing lock keeps its point"
+        );
         // …and a value back UP is ignored while the lock is still held.
         l.update(1.0, 0.9, false, Vec3::new(5.0, 0.0, 5.0), 0.0);
         assert!((l.alpha - 0.4).abs() < 1e-6, "blended in: {l:?}");
@@ -332,7 +335,11 @@ mod tests {
         assert_eq!(l.resolve(posed), Vec3::ZERO);
         // Half-released, half the slide comes back — which is the blend-out.
         l.update(1.0, 0.5, false, posed, 0.0);
-        assert!((l.slide_m(posed) - 0.06).abs() < 1e-6, "{}", l.slide_m(posed));
+        assert!(
+            (l.slide_m(posed) - 0.06).abs() < 1e-6,
+            "{}",
+            l.slide_m(posed)
+        );
         // Released entirely: the lock has no opinion, and reports none.
         l.release();
         assert_eq!(l.slide_m(posed), 0.0);
@@ -345,20 +352,36 @@ mod tests {
 
     #[test]
     fn the_pelvis_follows_the_lower_foot_and_only_downward() {
-        let p = pelvis_offset(1.0, 1.0, Vec3::new(0.0, -0.2, 0.0), Vec3::new(0.0, -0.05, 0.0));
+        let p = pelvis_offset(
+            1.0,
+            1.0,
+            Vec3::new(0.0, -0.2, 0.0),
+            Vec3::new(0.0, -0.05, 0.0),
+        );
         assert!((p.y + 0.2).abs() < 1e-6, "{p:?}");
         assert_eq!(p.x, 0.0, "the pelvis does not chase a foot sideways");
         // Half the IK, half the drop — the alpha is the MEAN of the two gates,
         // so a character with IK on one leg only drops half as far.
         let half = pelvis_offset(1.0, 0.0, Vec3::new(0.0, -0.2, 0.0), Vec3::ZERO);
         assert!((half.y + 0.1).abs() < 1e-6, "{half:?}");
-        let half = pelvis_offset(1.0, 0.0, Vec3::new(0.0, -0.2, 0.0), Vec3::new(0.0, -0.4, 0.0));
-        assert!((half.y + 0.2).abs() < 1e-6, "the LOWER foot, at half weight: {half:?}");
+        let half = pelvis_offset(
+            1.0,
+            0.0,
+            Vec3::new(0.0, -0.2, 0.0),
+            Vec3::new(0.0, -0.4, 0.0),
+        );
+        assert!(
+            (half.y + 0.2).abs() < 1e-6,
+            "the LOWER foot, at half weight: {half:?}"
+        );
         // Feet ABOVE the pose do not lift the pelvis (that is a jump, not IK).
         let up = pelvis_offset(1.0, 1.0, Vec3::new(0.0, 0.3, 0.0), Vec3::new(0.0, 0.2, 0.0));
         assert_eq!(up.y, 0.0);
         // No IK at all is no offset at all.
-        assert_eq!(pelvis_offset(0.0, 0.0, Vec3::new(0.0, -1.0, 0.0), Vec3::ZERO), Vec3::ZERO);
+        assert_eq!(
+            pelvis_offset(0.0, 0.0, Vec3::new(0.0, -1.0, 0.0), Vec3::ZERO),
+            Vec3::ZERO
+        );
     }
 
     #[test]

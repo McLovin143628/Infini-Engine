@@ -606,6 +606,133 @@ pub fn settings_for(
     }
 }
 
+// ── turn / rotate in place, aim offsets, traversal timing (P29.4) ───────────
+
+/// The aim-versus-body angle past which a **turn in place** may begin, degrees
+/// (ALS `TurnCheckMinAngle`).
+pub const TURN_CHECK_MIN_DEG: f64 = 45.0;
+/// The angle past which the turn is a 180 rather than a 90 (ALS
+/// `Turn180Threshold`) — which animation plays, and therefore how far the warp
+/// has to rescale it.
+pub const TURN_180_DEG: f64 = 130.0;
+/// The camera must be **settled** for a turn in place to start: an aim yaw rate
+/// above this says the player is still looking around (ALS `AimYawRateLimit`).
+pub const TURN_AIM_RATE_LIMIT_DPS: f64 = 50.0;
+/// The longest the delay accumulator can be asked to reach, seconds — the delay
+/// owed to a 180° offset (ALS `MaxAngleDelay`). A 45° offset waits none at all.
+pub const TURN_MAX_DELAY_S: f64 = 0.75;
+/// The aim-versus-body angle past which **rotate in place** engages while
+/// aiming, degrees (ALS `RotateMinThreshold` / `RotateMaxThreshold` = ∓50).
+pub const ROTATE_IN_PLACE_DEG: f64 = 50.0;
+/// The aim-yaw-rate band a rotate-in-place's play rate is mapped from, deg/s
+/// (ALS `{AimYawRateMinRange, AimYawRateMaxRange}`).
+pub const ROTATE_RATE_BAND_DPS: (f64, f64) = (90.0, 270.0);
+/// …onto this play-rate band (ALS `{MinPlayRate, MaxPlayRate}`).
+pub const ROTATE_PLAY_RATE: (f64, f64) = (1.15, 3.0);
+/// How many spine joints the aim yaw is divided across (ALS divides by 4 and
+/// applies the result to each of four spine/pelvis bones, so the chain sums to
+/// the whole angle).
+pub const SPINE_CHAIN_JOINTS: f64 = 4.0;
+
+/// **ALS's turn-in-place delay**: how long the conditions must hold before the
+/// turn fires, given how far the aim has drifted.
+///
+/// A 45° offset fires immediately and a 180° one waits
+/// [`TURN_MAX_DELAY_S`] — so a player who glances sideways does not spin the
+/// character, and one who has genuinely turned around does not stand there
+/// forever.
+pub fn turn_in_place_delay_s(angle_deg: f64) -> f64 {
+    mapped_range(
+        angle_deg.abs(),
+        (TURN_CHECK_MIN_DEG, 180.0),
+        (0.0, TURN_MAX_DELAY_S),
+    )
+}
+
+/// Whether a turn in place is **allowed to be considered** this step: the aim
+/// has drifted far enough and the camera has settled.
+///
+/// Both halves, because either alone is wrong — a large offset with the camera
+/// still moving is a player mid-look, and a settled camera at 10° is nothing to
+/// turn for.
+pub fn turn_in_place_ready(aim_delta_deg: f64, aim_yaw_rate_dps: f64) -> bool {
+    aim_delta_deg.abs() > TURN_CHECK_MIN_DEG && aim_yaw_rate_dps.abs() < TURN_AIM_RATE_LIMIT_DPS
+}
+
+/// **ALS's rotate-in-place**: the two gates and the play-rate scale.
+///
+/// Returns `(rotate_left, rotate_right, play_rate)`. Unlike a turn in place this
+/// has no delay and no target — it is a looping rotate animation whose *rate*
+/// tracks how fast the camera is moving, which is why the third value is the
+/// only interesting one.
+pub fn rotate_in_place(aim_delta_deg: f64, aim_yaw_rate_dps: f64) -> (bool, bool, f64) {
+    let d = if aim_delta_deg.is_finite() {
+        aim_delta_deg
+    } else {
+        0.0
+    };
+    let left = d < -ROTATE_IN_PLACE_DEG;
+    let right = d > ROTATE_IN_PLACE_DEG;
+    let rate = if left || right {
+        mapped_range(
+            aim_yaw_rate_dps.abs(),
+            ROTATE_RATE_BAND_DPS,
+            ROTATE_PLAY_RATE,
+        )
+    } else {
+        1.0
+    };
+    (left, right, rate)
+}
+
+/// **The vertical aim-offset sweep** `[0, 1]` (ALS `AimSweepTime`): `0` looking
+/// straight up, `1` straight down, mapped off the aim pitch.
+pub fn aim_sweep(pitch_deg: f64) -> f64 {
+    mapped_range(pitch_deg, (-90.0, 90.0), (1.0, 0.0))
+}
+
+/// **The per-joint spine yaw** for an aim offset, degrees.
+///
+/// ALS divides the aim/body yaw delta by four and applies the quotient to each of
+/// four bones so the chain sums to the whole angle — a hard-coded chain length,
+/// kept as [`SPINE_CHAIN_JOINTS`] so the constant is a name rather than a `4.0`
+/// in an expression.
+///
+/// `mask` is the clip's `Mask_AimOffset` channel read **inverted** (ALS's
+/// `EnableAimOffset = lerp(1, 0, curve)`), so a state that wants no aim offset
+/// authors a `1` and gets none.
+pub fn spine_yaw_deg(aim_delta_deg: f64, mask: f64) -> f64 {
+    let weight = (1.0 - mask.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    angle_delta_deg(aim_delta_deg, 0.0) / SPINE_CHAIN_JOINTS * weight
+}
+
+/// How long a mantle of `height_m` takes, seconds, before the play rate scales
+/// it.
+///
+/// A low ledge is a quick pull-up and a high one is a climb. The band is ours —
+/// ALS reads the montage's own length and rescales it — and it is here rather
+/// than on [`CharacterMovement`] because that component is on the scene wire and
+/// this wave has no schema budget. The **shape** is the ported thing: duration
+/// rises with height and the play rate from the height remap divides it, so two
+/// different ledges share one animation.
+pub const MANTLE_LOW_TIME_S: f64 = 0.55;
+/// See [`MANTLE_LOW_TIME_S`].
+pub const MANTLE_HIGH_TIME_S: f64 = 1.10;
+/// See [`MANTLE_LOW_TIME_S`].
+pub fn mantle_duration_s(height_m: f64, min_h: f64, max_h: f64, play_rate: f64) -> f64 {
+    let base = mapped_range(
+        height_m,
+        (min_h, max_h.max(min_h + 1e-6)),
+        (MANTLE_LOW_TIME_S, MANTLE_HIGH_TIME_S),
+    );
+    let rate = if play_rate.is_finite() && play_rate > 0.0 {
+        play_rate
+    } else {
+        1.0
+    };
+    (base / rate).max(1.0 / 240.0)
+}
+
 // ── the mode table ──────────────────────────────────────────────────────────
 
 /// Whether `to` may be entered from `from` at all — **the single mode-transition
@@ -632,11 +759,27 @@ pub fn transition_is_legal(from: MovementMode, to: MovementMode) -> bool {
         return true;
     }
     match (from, to) {
+        // **Ragdoll wins over everything**, for the same reason water does and
+        // one step further: it is a fact about the body, not a choice the
+        // controller made, and a character that has just been thrown off a cliff
+        // mid-slide must not be told that a slide cannot become a ragdoll. It is
+        // above the water rows deliberately — a swimmer can ragdoll too.
+        (_, Ragdoll) => true,
+        // …and leaving one has exactly two destinations, which is §13's row
+        // verbatim: on the ground it gets up, in the air it resumes falling.
+        (Ragdoll, Grounded | FallFree | FallControlled) => true,
+        (Ragdoll, _) => false,
         // Water wins over everything a body could otherwise be doing: the latch
         // is a fact about where the character IS, not about what it chose.
         (_, SwimSurface) | (_, SwimUnder) => true,
         (SwimSurface | SwimUnder, Grounded | FallFree | FallControlled) => true,
         (SwimSurface | SwimUnder, _) => false,
+        // **A mantle** is entered from the ground (jump at a wall) or from the
+        // air (ALS's "falling catch"), and always ends standing — the warp puts
+        // the feet on the ledge, so there is nothing else for it to end as.
+        (Grounded | Crouch | FallFree | FallControlled, Mantle) => true,
+        (Mantle, Grounded | FallFree | FallControlled) => true,
+        (Mantle, _) => false,
         // Grounded family.
         (Grounded, Crouch | Prone | Slide | Roll | Dive | FallFree | FallControlled) => true,
         (Crouch, Grounded | Prone | Slide | Roll | FallFree | FallControlled) => true,
@@ -1382,7 +1525,7 @@ mod tests {
     #[test]
     fn a_deferred_mode_refuses_by_name_rather_than_pretending() {
         use MovementMode::*;
-        for deferred in [Mantle, Ragdoll, Driving, Flying, Reserved14, Reserved17] {
+        for deferred in [Driving, Flying, Reserved14, Reserved17] {
             let v = request_mode(Grounded, deferred, true, true);
             assert_eq!(
                 v.mode, Grounded,
@@ -1390,6 +1533,29 @@ mod tests {
             );
             assert_eq!(v.refusal, MovementRefusal::ModeNotYetImplemented);
         }
+        // **And the two this wave took no longer refuse** -- the other half of
+        // the same claim, without which "Mantle is deferred" could be deleted
+        // from the list above and nothing would notice.
+        for taken in [Mantle, Ragdoll] {
+            let v = request_mode(Grounded, taken, true, true);
+            assert_eq!(v.mode, taken, "{taken:?} has its mechanics in P29.4");
+            assert_eq!(v.refusal, MovementRefusal::None);
+        }
+        // A ragdoll may be entered from ANYTHING (it is a fact about the body,
+        // not a choice) and leaves to exactly two places.
+        for from in [Grounded, Crouch, Slide, Dive, FallFree, SwimUnder, Mantle] {
+            assert!(transition_is_legal(from, Ragdoll), "{from:?} -> Ragdoll");
+        }
+        assert!(transition_is_legal(Ragdoll, Grounded));
+        assert!(transition_is_legal(Ragdoll, FallFree));
+        assert!(!transition_is_legal(Ragdoll, Slide));
+        // A mantle is entered from the ground or from the air, and always ends
+        // standing.
+        assert!(transition_is_legal(Grounded, Mantle));
+        assert!(transition_is_legal(FallControlled, Mantle));
+        assert!(!transition_is_legal(Prone, Mantle));
+        assert!(transition_is_legal(Mantle, Grounded));
+        assert!(!transition_is_legal(Mantle, Slide));
         // The three other refusals are distinguishable, which is the point of
         // having four of them.
         assert_eq!(
@@ -1624,5 +1790,92 @@ mod tests {
         let bad = MovementIntent::from_actions(|_| f32::NAN, |_| false, |_| false);
         assert_eq!(bad.move_input, Vec2d::ZERO);
         assert_eq!(bad.look_yaw_dps, 0.0);
+    }
+
+    // -- P29.4: turn/rotate in place, aim offsets, mantle timing --------------
+
+    /// The delay is **angle-dependent**, which is the whole idea: a glance does
+    /// not spin the character and a real turn-around does not stall.
+    #[test]
+    fn the_turn_in_place_delay_rises_with_the_angle() {
+        assert_eq!(turn_in_place_delay_s(45.0), 0.0, "45 degrees fires at once");
+        assert_eq!(turn_in_place_delay_s(180.0), TURN_MAX_DELAY_S);
+        assert!((turn_in_place_delay_s(112.5) - 0.375).abs() < 1e-12);
+        // Sign-free, and clamped rather than extrapolated.
+        assert_eq!(turn_in_place_delay_s(-180.0), TURN_MAX_DELAY_S);
+        assert_eq!(turn_in_place_delay_s(10.0), 0.0);
+        assert_eq!(turn_in_place_delay_s(999.0), TURN_MAX_DELAY_S);
+
+        // **Both gates**, and each alone is not enough: a big offset with the
+        // camera still moving is a player mid-look, and a settled camera at 10
+        // degrees is nothing to turn for.
+        assert!(turn_in_place_ready(60.0, 10.0));
+        assert!(
+            !turn_in_place_ready(60.0, 80.0),
+            "the camera has not settled"
+        );
+        assert!(!turn_in_place_ready(10.0, 0.0), "nothing to turn for");
+        assert!(
+            !turn_in_place_ready(45.0, 0.0),
+            "the threshold is exclusive"
+        );
+        // The 180 threshold is a named constant rather than a literal in a
+        // branch, because it picks WHICH animation plays.
+        assert_eq!(TURN_180_DEG, 130.0);
+    }
+
+    #[test]
+    fn rotate_in_place_gates_on_fifty_degrees_and_scales_its_play_rate() {
+        let (l, r, rate) = rotate_in_place(0.0, 200.0);
+        assert!(!l && !r && rate == 1.0, "inside the band nothing rotates");
+        let (l, r, _) = rotate_in_place(60.0, 0.0);
+        assert!(!l && r);
+        let (l, r, _) = rotate_in_place(-60.0, 0.0);
+        assert!(l && !r);
+        // The rate tracks the camera: slow camera, slow turn.
+        let (_, _, slow) = rotate_in_place(60.0, 90.0);
+        let (_, _, fast) = rotate_in_place(60.0, 270.0);
+        assert!((slow - 1.15).abs() < 1e-12, "{slow}");
+        assert!((fast - 3.0).abs() < 1e-12, "{fast}");
+        let (_, _, mid) = rotate_in_place(60.0, 180.0);
+        assert!(mid > slow && mid < fast, "{mid}");
+        // A NaN offset rotates nothing rather than both ways.
+        let (l, r, _) = rotate_in_place(f64::NAN, 100.0);
+        assert!(!l && !r);
+    }
+
+    #[test]
+    fn the_aim_offset_sweeps_and_the_mask_suppresses_it() {
+        // Looking straight up is 0, straight down is 1, level is the middle.
+        assert_eq!(aim_sweep(-90.0), 1.0);
+        assert_eq!(aim_sweep(90.0), 0.0);
+        assert!((aim_sweep(0.0) - 0.5).abs() < 1e-12);
+
+        // The yaw is divided across the spine chain, so four joints sum to the
+        // whole angle.
+        assert!((spine_yaw_deg(80.0, 0.0) - 20.0).abs() < 1e-12);
+        assert!((spine_yaw_deg(80.0, 0.0) * SPINE_CHAIN_JOINTS - 80.0).abs() < 1e-12);
+        // `Mask_AimOffset` is read INVERTED: a state that authors 1 gets none.
+        assert_eq!(spine_yaw_deg(80.0, 1.0), 0.0);
+        assert!((spine_yaw_deg(80.0, 0.5) - 10.0).abs() < 1e-12);
+        // A wrapped angle takes the short way round rather than 350 degrees.
+        assert!((spine_yaw_deg(-350.0, 0.0) - 2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_mantle_takes_longer_the_higher_it_is_and_the_play_rate_divides_it() {
+        let low = mantle_duration_s(0.5, 0.5, 2.5, 1.0);
+        let high = mantle_duration_s(2.5, 0.5, 2.5, 1.0);
+        assert!((low - MANTLE_LOW_TIME_S).abs() < 1e-12, "{low}");
+        assert!((high - MANTLE_HIGH_TIME_S).abs() < 1e-12, "{high}");
+        assert!(high > low, "a higher ledge takes longer: {low} vs {high}");
+        // The play rate divides it -- two ledges, one animation.
+        let fast = mantle_duration_s(0.5, 0.5, 2.5, 2.0);
+        assert!((fast - MANTLE_LOW_TIME_S / 2.0).abs() < 1e-12, "{fast}");
+        // Degenerate inputs answer a duration rather than an infinity or a zero
+        // that would divide downstream.
+        assert!(mantle_duration_s(1.0, 1.0, 1.0, 1.0).is_finite());
+        assert!(mantle_duration_s(1.0, 0.5, 2.5, 0.0) > 0.0);
+        assert!(mantle_duration_s(f64::NAN, 0.5, 2.5, 1.0) > 0.0);
     }
 }

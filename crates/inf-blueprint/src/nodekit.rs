@@ -1025,7 +1025,10 @@ fn anim_nodes() -> Vec<NodeDef> {
                 PortDef::new("name", PortType::Str).required(),
                 PortDef::new("value", PortType::Float),
             ])
-            .with_outputs(vec![exec_out(EXEC_THEN), PortDef::new("ok", PortType::Bool)]),
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("ok", PortType::Bool),
+            ]),
         NodeDef::new("anim.set_trigger", "Set Anim Trigger", "anim")
             .described(
                 "Arm a declared trigger parameter once. Unlike Set Anim Parameter this is an \
@@ -1038,7 +1041,10 @@ fn anim_nodes() -> Vec<NodeDef> {
                 PortDef::new("entity", PortType::Int).required(),
                 PortDef::new("name", PortType::Str).required(),
             ])
-            .with_outputs(vec![exec_out(EXEC_THEN), PortDef::new("ok", PortType::Bool)]),
+            .with_outputs(vec![
+                exec_out(EXEC_THEN),
+                PortDef::new("ok", PortType::Bool),
+            ]),
         NodeDef::new("anim.query_state", "Is Anim State", "anim")
             .described(
                 "True while this entity's state machine is in the named state. False for an \
@@ -1773,7 +1779,10 @@ mod tests {
                 reg.get(id).unwrap().input("name").unwrap().required,
                 "{id} must name the thing it acts on"
             );
-            assert_eq!(reg.get(id).unwrap().input("name").unwrap().ty, PortType::Str);
+            assert_eq!(
+                reg.get(id).unwrap().input("name").unwrap().ty,
+                PortType::Str
+            );
         }
         for (id, out) in [
             ("anim.set_param", "ok"),

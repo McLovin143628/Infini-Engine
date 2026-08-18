@@ -95,13 +95,13 @@ pub use cloth::{
     ClothError, ClothMaterial, ClothState, GRAVITY_M_S2,
 };
 pub use delaunay::{barycentric, triangulate, Triangulation};
-pub use hair::{
-    render_mesh, ribbon_mesh, roots_for, step_hair, HairAsset, HairDetail, HairGroom, HairMaterial,
-    HairRoot, HairState, HairStrand,
-};
 pub use foot::{
     ground_offset, interp_to, pelvis_offset, FootLock, GroundOffset, FOOT_HEIGHT_M, TRACE_ABOVE_M,
     TRACE_BELOW_M,
+};
+pub use hair::{
+    render_mesh, ribbon_mesh, roots_for, step_hair, HairAsset, HairDetail, HairGroom, HairMaterial,
+    HairRoot, HairState, HairStrand,
 };
 pub use ik::{
     fabrik, rotation_between, solve_chain, two_bone_positions, IkError, IkReport,

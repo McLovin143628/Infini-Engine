@@ -217,9 +217,7 @@ pub fn probe_ledge(
 
     // ── 4. Height, and the classification ALS hard-codes at 125 cm.
     let height_m = landing.y - feet.y;
-    if !height_m.is_finite()
-        || height_m < settings.min_height_m
-        || height_m > settings.max_height_m
+    if !height_m.is_finite() || height_m < settings.min_height_m || height_m > settings.max_height_m
     {
         return None;
     }
@@ -285,7 +283,9 @@ pub fn predict_landing(
     if !velocity.is_finite() || !centre.is_finite() || velocity.y > LAND_PREDICT_MIN_MPS {
         return None;
     }
-    let vy = velocity.y.clamp(LAND_PREDICT_FULL_MPS, LAND_PREDICT_MIN_MPS);
+    let vy = velocity
+        .y
+        .clamp(LAND_PREDICT_FULL_MPS, LAND_PREDICT_MIN_MPS);
     let dir = DVec3::new(velocity.x, vy, velocity.z).normalize_or_zero();
     if dir == DVec3::ZERO {
         return None;

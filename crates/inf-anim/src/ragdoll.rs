@@ -197,7 +197,11 @@ mod tests {
         assert!((motor_stiffness(5.0) - 12_500.0).abs() < 1e-9);
         assert_eq!(motor_stiffness(10.0), 25_000.0);
         assert_eq!(motor_stiffness(99.0), 25_000.0, "clamped, not extrapolated");
-        assert_eq!(motor_stiffness(-3.0), motor_stiffness(3.0), "speed, not velocity");
+        assert_eq!(
+            motor_stiffness(-3.0),
+            motor_stiffness(3.0),
+            "speed, not velocity"
+        );
         assert_eq!(motor_stiffness(f64::NAN), 0.0);
         // 1000 cm/s is 10 m/s: the conversion happened once, here.
         assert_eq!(MOTOR_SPEED_BAND_MPS.1, 10.0);
@@ -209,7 +213,10 @@ mod tests {
         assert!(gravity_enabled(-39.9));
         assert!(!gravity_enabled(-40.0));
         assert!(!gravity_enabled(-500.0));
-        assert!(gravity_enabled(f64::NAN), "a NaN keeps gravity rather than floating");
+        assert!(
+            gravity_enabled(f64::NAN),
+            "a NaN keeps gravity rather than floating"
+        );
     }
 
     #[test]

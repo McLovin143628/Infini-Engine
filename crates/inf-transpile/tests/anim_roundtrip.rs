@@ -346,9 +346,7 @@ fn interpreted_and_compiled_drive_the_bridge_identically() {
                     }
                     p if p == ["anim", "set_trigger"] => Value::Bool(i.set_trigger(&name(1))),
                     p if p == ["anim", "query_state"] => Value::Bool(i.query_state(&name(1))),
-                    p if p == ["anim", "consume_notify"] => {
-                        Value::Bool(i.consume_notify(&name(1)))
-                    }
+                    p if p == ["anim", "consume_notify"] => Value::Bool(i.consume_notify(&name(1))),
                     _ => Value::Unit,
                 })
             });

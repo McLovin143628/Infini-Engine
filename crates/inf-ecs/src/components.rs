@@ -1472,14 +1472,15 @@ impl MovementMode {
 
     /// Whether this mode's mechanics belong to a later sub-phase, so that asking
     /// to enter it is a typed refusal rather than a stub.
+    ///
+    /// **P29.4 took two of the four**: `Mantle` and `Ragdoll` have their
+    /// mechanics now (the ledge probe and the warp; the articulated handoff and
+    /// the pose-matched get-up), so they are ordinary modes with ordinary rows in
+    /// [`crate::movement::transition_is_legal`]. `Driving` and `Flying` are
+    /// P29.7's and still refuse by name.
     pub fn is_deferred(self) -> bool {
-        matches!(
-            self,
-            MovementMode::Mantle
-                | MovementMode::Ragdoll
-                | MovementMode::Driving
-                | MovementMode::Flying
-        ) || self.reserved_slot().is_some()
+        matches!(self, MovementMode::Driving | MovementMode::Flying)
+            || self.reserved_slot().is_some()
     }
 
     /// Whether the character's feet are on something — the modes the ground
@@ -6108,12 +6109,13 @@ mod tests {
         assert_eq!(RotationMode::Reserved4.reserved_slot(), Some(4));
         assert_eq!(RotationMode::Aiming.reserved_slot(), None);
 
-        // The four modes whose mechanics belong to later sub-phases are deferred
+        // The modes whose mechanics belong to a later sub-phase are deferred
         // together with the reserved slots, because entering either is the same
-        // typed refusal.
+        // typed refusal. **P29.4 took two of the four**: Mantle and Ragdoll have
+        // their mechanics now, so they moved to the list below -- and moving one
+        // is the only way this arm can change, which is what makes it a ledger of
+        // what is implemented rather than a restatement of the enum.
         for m in [
-            MovementMode::Mantle,
-            MovementMode::Ragdoll,
             MovementMode::Driving,
             MovementMode::Flying,
             MovementMode::Reserved16,
@@ -6131,8 +6133,10 @@ mod tests {
             MovementMode::FallControlled,
             MovementMode::SwimSurface,
             MovementMode::SwimUnder,
+            MovementMode::Mantle,
+            MovementMode::Ragdoll,
         ] {
-            assert!(!m.is_deferred(), "{m:?} is this wave's own");
+            assert!(!m.is_deferred(), "{m:?} has its mechanics");
         }
         // The three families, asserted rather than described.
         assert!(MovementMode::Slide.is_grounded_family());

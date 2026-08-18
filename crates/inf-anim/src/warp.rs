@@ -174,12 +174,7 @@ pub const MIN_WARP_AXIS_M: f64 = 0.01;
 /// written into a curve at the authoring frame rate. Here the clip's turn is
 /// read off its own baked track and rescaled against the runtime target, so the
 /// authoring frame rate never enters the arithmetic.
-pub fn warp_yaw_deg(
-    delivered_deg: f64,
-    total_deg: f64,
-    target_delta_deg: f64,
-    alpha: f64,
-) -> f64 {
+pub fn warp_yaw_deg(delivered_deg: f64, total_deg: f64, target_delta_deg: f64, alpha: f64) -> f64 {
     let a = if alpha.is_finite() {
         alpha.clamp(0.0, 1.0)
     } else {
@@ -225,7 +220,10 @@ pub const MAX_PLAY_RATE: f64 = 3.0;
 /// Both non-positive inputs answer `1.0` — a rate of "as authored" — because a
 /// caller with nothing left to fit has no rate to derive.
 pub fn play_rate_for(clip_left_s: f64, time_left_s: f64) -> f64 {
-    if !clip_left_s.is_finite() || !time_left_s.is_finite() || clip_left_s <= 0.0 || time_left_s <= 0.0
+    if !clip_left_s.is_finite()
+        || !time_left_s.is_finite()
+        || clip_left_s <= 0.0
+        || time_left_s <= 0.0
     {
         return 1.0;
     }
@@ -368,7 +366,10 @@ mod tests {
         // Yawed: the clip's local frame is rotated into the world's. Facing +X
         // (yaw 90), the clip's forward becomes world +X.
         let yawed = warp_offset(90.0, total, total, DVec3::new(1.6, 1.5, 0.0), 1.0);
-        assert!((yawed - DVec3::new(1.6, 1.5, 0.0)).length() < 1e-9, "{yawed:?}");
+        assert!(
+            (yawed - DVec3::new(1.6, 1.5, 0.0)).length() < 1e-9,
+            "{yawed:?}"
+        );
     }
 
     /// The axis the clip does not move along is **corrected additively** rather
@@ -379,8 +380,14 @@ mod tests {
         let total = Vec3::new(0.0, 0.0, 1.0);
         let target = DVec3::new(0.4, 0.0, 1.0);
         let half = warp_offset(0.0, Vec3::new(0.0, 0.0, 0.5), total, target, 0.5);
-        assert!((half.x - 0.2).abs() < 1e-12, "half the strafe at half alpha: {half:?}");
-        assert!(half.x.is_finite(), "an unscalable axis must not divide: {half:?}");
+        assert!(
+            (half.x - 0.2).abs() < 1e-12,
+            "half the strafe at half alpha: {half:?}"
+        );
+        assert!(
+            half.x.is_finite(),
+            "an unscalable axis must not divide: {half:?}"
+        );
         let end = warp_offset(0.0, total, total, target, 1.0);
         assert!((end - target).length() < 1e-12, "{end:?}");
         // Non-finite inputs are answers, not NaNs downstream.
@@ -405,10 +412,16 @@ mod tests {
         let r = HeightRemap::default();
         // At the low end: start late, play fast.
         let (s, p) = r.resolve(0.5);
-        assert!((s - 0.6).abs() < 1e-12 && (p - 1.2).abs() < 1e-12, "{s} {p}");
+        assert!(
+            (s - 0.6).abs() < 1e-12 && (p - 1.2).abs() < 1e-12,
+            "{s} {p}"
+        );
         // At the high end: start at the beginning, play as authored.
         let (s, p) = r.resolve(1.25);
-        assert!((s - 0.0).abs() < 1e-12 && (p - 1.0).abs() < 1e-12, "{s} {p}");
+        assert!(
+            (s - 0.0).abs() < 1e-12 && (p - 1.0).abs() < 1e-12,
+            "{s} {p}"
+        );
         // Halfway is halfway, and outside the band clamps rather than extrapolates.
         let (s, _) = r.resolve(0.875);
         assert!((s - 0.3).abs() < 1e-12, "{s}");

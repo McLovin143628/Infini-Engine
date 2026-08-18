@@ -54,13 +54,13 @@ pub use components::{
 // P24.2: the IK write door. `pose` and `deform` are otherwise spelled in full
 // by callers (the source-text mirror gates key on that), but a *write door* a
 // gameplay layer calls is a facade item like `update_attachments`.
+pub use anim_bridge::{
+    anim_curve, anim_param, anim_root_motion, anim_state, anim_state_is, anim_state_time,
+    clear_anim_bridge, consume_anim_notify, set_anim_param, set_anim_trigger, set_pose_match_entry,
+    AnimBridgeRes, AnimStateInfo,
+};
 pub use hierarchy::{ChildOf, Children};
 pub use math::{Color, Vec2d, Vec3d};
-pub use anim_bridge::{
-    anim_param, anim_root_motion, anim_state, anim_state_is, anim_state_time, clear_anim_bridge,
-    consume_anim_notify, set_anim_param, set_anim_trigger, set_pose_match_entry, AnimBridgeRes,
-    AnimStateInfo,
-};
 pub use pose::{clear_ik_goals, ik_goals, ik_outcomes, set_ik_goals, IkGoal, IkOutcome};
 // Terrain heightfield types re-exported so downstream editor crates (e.g. the
 // viewport host) reach them through the ECS facade without a direct dep.

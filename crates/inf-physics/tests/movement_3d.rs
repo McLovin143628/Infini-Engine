@@ -452,12 +452,7 @@ fn a_mode_owned_by_a_later_wave_refuses_and_changes_nothing() {
     spawn_hero(&mut w, 0.0, 0.0, 0.0);
     step(&mut w, &mut b, &idle());
 
-    for deferred in [
-        MovementMode::Mantle,
-        MovementMode::Ragdoll,
-        MovementMode::Driving,
-        MovementMode::Flying,
-    ] {
+    for deferred in [MovementMode::Driving, MovementMode::Flying] {
         let before_half = hero_capsule_half(&w);
         let before_pos = hero_pos(&w);
         // Ask through the model door the step itself uses.

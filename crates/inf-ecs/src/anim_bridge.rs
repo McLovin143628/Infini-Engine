@@ -77,6 +77,15 @@ pub struct AnimBridgeRes {
     /// this step (clause 2). Published by the pose step; consumed by
     /// `inf_physics::d3::movement`.
     pub root_motion: BTreeMap<Uuid, RootMotion3D>,
+    /// **The `.inf_anim` v2 curve channels** of the state each machine is in,
+    /// sampled at its play-head (clause 5 and clause 7).
+    ///
+    /// The reason the movement step can read `Enable_FootIK_L`, `FootLock_R` and
+    /// `Mask_AimOffset` at all: those are properties of a *clip*, the clip
+    /// resolver is a host registry, and the pose step is the one place that has
+    /// both it and the play-head. Published rather than queried, which is the
+    /// command-queue shape — the physics side never reaches into the machine.
+    pub curves: BTreeMap<Uuid, BTreeMap<String, f32>>,
     /// Entities whose transitions enter at the **pose-matched** frame
     /// ([`inf_anim::TransitionEntry::PoseMatched`]) rather than at zero.
     ///
@@ -94,6 +103,7 @@ impl AnimBridgeRes {
             && self.triggers.is_empty()
             && self.states.is_empty()
             && self.root_motion.is_empty()
+            && self.curves.is_empty()
             && self.pose_matched.is_empty()
     }
 }
@@ -251,6 +261,20 @@ pub fn anim_root_motion(world: &EcsWorld, guid: Uuid) -> Option<RootMotion3D> {
     bridge(world)?.root_motion.get(&guid).copied()
 }
 
+/// The value of `guid`'s current clip curve `name` at this step's play-head, or
+/// `fallback` when the clip has no such channel.
+///
+/// The reference vocabulary is [`inf_anim::channels::als`]; the names are
+/// free-form `String`s by Ruling 2, so a studio's own channel reads here exactly
+/// like one of the twenty-five.
+pub fn anim_curve(world: &EcsWorld, guid: Uuid, name: &str, fallback: f32) -> f32 {
+    bridge(world)
+        .and_then(|b| b.curves.get(&guid))
+        .and_then(|c| c.get(name))
+        .copied()
+        .unwrap_or(fallback)
+}
+
 /// **Forget every bridge entry.** Called by [`crate::pose::clear_poses`], which is
 /// the one door that forgets a play session's animation state.
 pub fn clear_anim_bridge(world: &mut EcsWorld) {
@@ -285,7 +309,11 @@ mod tests {
         assert!(!set_anim_trigger(&mut w, other, "jump"));
         // A NaN never reaches a condition compare.
         assert!(!set_anim_param(&mut w, guid, "speed", f64::NAN));
-        assert_eq!(anim_param(&w, guid, "speed"), Some(3.5), "the NaN did not land");
+        assert_eq!(
+            anim_param(&w, guid, "speed"),
+            Some(3.5),
+            "the NaN did not land"
+        );
         // An empty name is not a name.
         assert!(!set_anim_param(&mut w, guid, "", 1.0));
         // A world nobody has written has no resource at all.
@@ -313,12 +341,18 @@ mod tests {
                 .collect(),
         ));
         assert!(consume_anim_notify(&mut w, guid, "footstep_l"));
-        assert!(!consume_anim_notify(&mut w, guid, "footstep_l"), "twice is once");
+        assert!(
+            !consume_anim_notify(&mut w, guid, "footstep_l"),
+            "twice is once"
+        );
         assert_eq!(crate::pose::anim_events(&w, guid), ["land"]);
         assert!(consume_anim_notify(&mut w, guid, "land"));
         // The last one out removes the resource, so "nothing fired" has exactly
         // one representation.
-        assert!(w.world().get_resource::<crate::pose::AnimEventsRes>().is_none());
+        assert!(w
+            .world()
+            .get_resource::<crate::pose::AnimEventsRes>()
+            .is_none());
         assert!(!consume_anim_notify(&mut w, guid, "land"));
     }
 

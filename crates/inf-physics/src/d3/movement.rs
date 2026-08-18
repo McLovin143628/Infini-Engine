@@ -45,13 +45,14 @@ use glam::{DQuat, DVec3};
 
 use inf_ecs::components::{
     CharacterController3D, CharacterMovement, Collider3D, ColliderShape3DKind, Gait, LandingKind,
-    MovementMode, MovementRefusal, RotationMode, Transform,
+    MantleState, MovementMode, MovementRefusal, RotationMode, Transform,
 };
 use inf_ecs::math::{Vec2d, Vec3d};
 use inf_ecs::movement as model;
 use inf_ecs::world::EcsWorld;
 
 use super::ecs::PhysicsBridge3D;
+use super::traversal::{self, LedgeSettings};
 use super::water;
 use super::{AutoStep3D, CharacterMover3D, ColliderId3D, ColliderShape3D};
 
@@ -68,6 +69,26 @@ const FALLBACK_RADIUS_M: f64 = 0.3;
 const AIM_BODY_LIMIT_DEG: f64 = 100.0;
 /// The exponential rate the clamp above pulls at (ALS's third argument).
 const AIM_BODY_LIMIT_INTERP: f64 = 20.0;
+
+/// The slowest a turn-in-place may turn, deg/s.
+///
+/// The rotation-rate curve is read at the character's own normalized speed, and
+/// a character standing still reads the *stopped* anchor — which for a sensible
+/// tuning is small or zero, because that is the rate a walking character's body
+/// chases its velocity at. A turn in place is not that: it is a deliberate
+/// re-facing, and ALS gets its rate from the turn animation's own
+/// `RotationAmount` curve. Ours is a floor under the curve, so a project that
+/// tunes a fast turn keeps it and one that tunes a slow walk still turns.
+const TURN_MIN_RATE_DPS: f64 = 90.0;
+/// How close to its target a turn in place must get before it is finished,
+/// degrees. Below this the exponential stage would take unbounded time to
+/// arrive, and a turn that never ends is a character that never turns again.
+const TURN_SETTLE_DEG: f64 = 1.0;
+
+/// How much movement input a mantle attempt needs (ALS gates its jump-triggered
+/// mantle on `bHasMovementInput`): a jump at a wall with the stick centred is a
+/// jump, not a climb.
+const MANTLE_MIN_INPUT: f64 = 0.1;
 
 /// Build the kinematic mover for `guid` from its components — **the one
 /// construction site**, replacing the byte-identical `build_mover3d` pair the
@@ -352,6 +373,21 @@ fn step_one(
         .map(|c| c.shape_kind == ColliderShape3DKind::Capsule)
         .unwrap_or(false);
 
+    // ── 0b. A MANTLE owns the character outright while it runs (P29.4).
+    //
+    //    ALS sets `MOVE_None` and drives the actor transform directly, because
+    //    its montage's displacement is not available as data. Ours does the same
+    //    thing for a different reason: between the ledge probe and the ledge
+    //    there is nothing to integrate — no gait, no ground to snap to, no
+    //    velocity that means anything — and the placement is a warp whose
+    //    endpoint is exact by construction rather than three hand-authored
+    //    correction curves that converge on it.
+    //
+    //    Nothing below this point runs while `Mantle` is the mode.
+    if cm.mode == MovementMode::Mantle {
+        return step_mantle(world, bridge, guid, cm, dt);
+    }
+
     // ── 1. Aim. The look intent is a RATE (degrees per second), so integrating
     //    it here is frame-rate independent by construction — see
     //    `inf_input::InputState::axis_snapshot` for where that conversion is
@@ -469,7 +505,33 @@ fn step_one(
             };
             cm.mode = request(&mut cm, bridge, &probe, to, true, &mut refusal);
         } else if cm.runtime.press_jump {
-            if cm.mode == MovementMode::Crouch || cm.mode == MovementMode::Prone {
+            // **The mantle is tried FIRST** (ALS trigger path 1): a jump at a
+            // ledge with the stick forward is a climb, and only a jump that
+            // finds no ledge is a jump. Ordering it the other way round would
+            // make every mantle a jump that happened to end on a ledge.
+            let wants = cm
+                .runtime
+                .intent_move
+                .x
+                .abs()
+                .max(cm.runtime.intent_move.y.abs())
+                >= MANTLE_MIN_INPUT;
+            let mantled = wants
+                && (cm.mode == MovementMode::Grounded || cm.mode == MovementMode::Crouch)
+                && try_mantle(
+                    &mut cm,
+                    world,
+                    bridge,
+                    &probe,
+                    position,
+                    radius,
+                    &LedgeSettings::default(),
+                    &mut refusal,
+                );
+            if mantled {
+                // The mantle owns the character from here; the rest of this
+                // step's decisions are not its to make.
+            } else if cm.mode == MovementMode::Crouch || cm.mode == MovementMode::Prone {
                 // Jump is also "stand up", and standing up under a table is the
                 // catalogue's own example of a refusal.
                 cm.mode = request(
@@ -494,6 +556,32 @@ fn step_one(
                 }
             }
         }
+        // **The falling catch** (ALS trigger path 3): every airborne step with
+        // movement input reaches for a ledge, with the shorter falling settings.
+        // Deliberately not gated on the jump edge — a character that runs off a
+        // roof and holds forward catches the next one, which is the move the
+        // donor's automatic path exists for.
+        if cm.mode.is_falling()
+            && cm.mode != MovementMode::Dive
+            && cm
+                .runtime
+                .intent_move
+                .x
+                .abs()
+                .max(cm.runtime.intent_move.y.abs())
+                >= MANTLE_MIN_INPUT
+        {
+            try_mantle(
+                &mut cm,
+                world,
+                bridge,
+                &probe,
+                position,
+                radius,
+                &LedgeSettings::falling(),
+                &mut refusal,
+            );
+        }
         // A slide runs out.
         if cm.mode == MovementMode::Slide && speed_planar < cm.slide_exit_speed_mps {
             cm.mode = request(
@@ -516,6 +604,26 @@ fn step_one(
                 &mut refusal,
             );
         }
+    }
+    // A mantle decided anywhere above takes over NOW rather than after a step
+    // of gravity: the warp's first frame must start from where the probe was
+    // taken, or the character drops before it climbs.
+    if cm.mode == MovementMode::Mantle {
+        cm.runtime.press_jump = false;
+        cm.runtime.press_crouch = false;
+        cm.runtime.press_prone = false;
+        cm.runtime.press_roll = false;
+        cm.runtime.press_dive = false;
+        if let Some(mut slot) = world.world_mut().get_mut::<CharacterMovement>(entity) {
+            *slot = cm;
+        }
+        return Some(MoveOutcome {
+            guid,
+            mode: MovementMode::Mantle,
+            refusal,
+            grounded: false,
+            landed: LandingKind::None,
+        });
     }
     // The edges are consumed whether or not they were honoured: an unconsumed
     // edge fires again next step off the same press, which is the P29.1 trigger
@@ -676,11 +784,36 @@ fn step_one(
     };
     cm.runtime.velocity = Vec3d::new(planar.x, vertical, planar.y);
 
+    // ── 7b. **Root motion** (P29.4, clause 2). A `Roll` and a `Dive` are
+    //    root-motion driven by §13's own catalogue row, and until this wave a
+    //    roll was a curve-decayed slide with a timer. The clip's displacement is
+    //    published by the pose step (it has the clip resolver and the play-head)
+    //    and consumed here, in the character's own facing frame, WITH the
+    //    vertical — which is the half `root_delta` drops and a traversal needs.
+    //
+    //    One fixed step of latency, and it is structural rather than an
+    //    oversight: the pose runs after the movement step in both hosts, so this
+    //    reads what the pose published last step. Over any interval the total
+    //    displacement is the same, shifted by 1/60 s.
+    let root_motion = if matches!(cm.mode, MovementMode::Roll | MovementMode::Dive) {
+        inf_ecs::anim_bridge::anim_root_motion(world, guid)
+    } else {
+        None
+    };
+    let root_world = match root_motion {
+        Some(rm) if !rm.is_zero() => {
+            cm.runtime.body_yaw_deg =
+                wrap_deg(cm.runtime.body_yaw_deg + rm.yaw.to_degrees() as f64);
+            inf_anim::root_delta_world_3d(cm.runtime.body_yaw_deg, rm.translation)
+        }
+        _ => DVec3::ZERO,
+    };
+
     // ── 8. Move. `apply_swim_motion` is the identity when not swimming, which
     //    is why it can be unconditional — the same call `move_and_slide` makes.
     let motion = bridge.apply_swim_motion(
         guid,
-        DVec3::new(planar.x * dt, vertical * dt, planar.y * dt),
+        DVec3::new(planar.x * dt, vertical * dt, planar.y * dt) + root_world,
         dt,
     );
     // The mover is rebuilt with THIS step's capsule, so a crouch takes effect on
@@ -713,6 +846,39 @@ fn step_one(
             if !hit.started_penetrating {
                 cm.runtime.ground_normal = Vec3d::from_dvec3(hit.normal);
             }
+        }
+    }
+
+    // ── 9b. **Land prediction** (P29.4, clause 4): the classifier's inputs,
+    //    *before* the touch.
+    //
+    //    A capsule swept along the character's own velocity, not straight down —
+    //    a character thrown off a ledge lands in front of itself, and a downward
+    //    ray would predict the void it is currently over. The sweep answers with
+    //    the speed the character WILL arrive at (it adds the gravity it has yet
+    //    to pick up), so `predicted_landing` is the same verdict step 10 will
+    //    reach, arrived at early enough for an animation to prepare for it.
+    //
+    //    Cleared first, unconditionally: a prediction is a statement about this
+    //    step, and a grounded character predicting a landing is the stale-answer
+    //    defect `PoseStoreRes`'s rule 4 exists to prevent.
+    cm.runtime.land_alpha = 0.0;
+    cm.runtime.land_predicted_mps = 0.0;
+    cm.runtime.predicted_landing = LandingKind::None;
+    if !result.grounded && is_capsule {
+        if let Some(p) = traversal::predict_landing(
+            bridge.world_mut(),
+            position,
+            cm.runtime.velocity.to_dvec3(),
+            radius,
+            half_height,
+            cm.slope_limit_deg,
+            cm.gravity_mps2,
+            &exclude,
+        ) {
+            cm.runtime.land_alpha = p.alpha;
+            cm.runtime.land_predicted_mps = p.impact_mps;
+            cm.runtime.predicted_landing = model::classify_landing(&cm, p.impact_mps, has_input);
         }
     }
 
@@ -806,15 +972,75 @@ fn step_one(
         );
         cm.runtime.target_yaw_deg = t;
         cm.runtime.body_yaw_deg = b;
-    } else if cm.rotation_mode == RotationMode::Aiming {
-        cm.runtime.body_yaw_deg = model::limit_rotation(
-            cm.runtime.body_yaw_deg,
-            cm.runtime.aim_yaw_deg,
-            -AIM_BODY_LIMIT_DEG,
-            AIM_BODY_LIMIT_DEG,
-            AIM_BODY_LIMIT_INTERP,
-            dt,
-        );
+        // A body that is moving is not standing still, and a turn in place that
+        // survived into a walk would fight the velocity it is supposed to face.
+        cm.runtime.turning_in_place = false;
+        cm.runtime.turn_delay_s = 0.0;
+        cm.runtime.rotate_left = false;
+        cm.runtime.rotate_right = false;
+        cm.runtime.rotate_rate = 1.0;
+    } else {
+        // ── Standing still: **rotate in place** while aiming, **turn in place**
+        //    while looking (P29.4, clause 7). ALS gates them on exactly this
+        //    split — aiming/first-person rotates, third-person looking turns —
+        //    and the two are different mechanisms, not two speeds of one.
+        let aim_delta = model::angle_delta_deg(cm.runtime.aim_yaw_deg, cm.runtime.body_yaw_deg);
+        let aiming = cm.rotation_mode == RotationMode::Aiming;
+        let (rl, rr, rate) = model::rotate_in_place(aim_delta, cm.runtime.aim_yaw_rate_dps);
+        cm.runtime.rotate_left = aiming && rl;
+        cm.runtime.rotate_right = aiming && rr;
+        cm.runtime.rotate_rate = if aiming { rate } else { 1.0 };
+        if aiming {
+            // The clamp, unchanged: an idle aiming character is held within a
+            // cone of its own camera rather than dragged round by it.
+            cm.runtime.body_yaw_deg = model::limit_rotation(
+                cm.runtime.body_yaw_deg,
+                cm.runtime.aim_yaw_deg,
+                -AIM_BODY_LIMIT_DEG,
+                AIM_BODY_LIMIT_DEG,
+                AIM_BODY_LIMIT_INTERP,
+                dt,
+            );
+            cm.runtime.turning_in_place = false;
+            cm.runtime.turn_delay_s = 0.0;
+        } else if cm.rotation_mode == RotationMode::LookingDirection {
+            if cm.runtime.turning_in_place {
+                // **Orientation warping, in its simplest consumer.** The target
+                // is a runtime angle and the turn is rate-bounded onto it, which
+                // is what supersedes ALS's `RotationAmount / 30 fps` scalar
+                // (§13's [SUPERSEDE]): no authored-at-30-fps curve enters the
+                // arithmetic, so a 63-degree turn is 63 degrees rather than a
+                // 90-degree animation rescaled by a number in a curve asset.
+                let goal = cm.runtime.turn_target_yaw_deg;
+                let (t, b) = model::smooth_rotation(
+                    cm.runtime.target_yaw_deg,
+                    cm.runtime.body_yaw_deg,
+                    goal,
+                    settings.rotation_rate_dps.max(TURN_MIN_RATE_DPS),
+                    actor_interp,
+                    dt,
+                );
+                cm.runtime.target_yaw_deg = t;
+                cm.runtime.body_yaw_deg = b;
+                if model::angle_delta_deg(goal, b).abs() <= TURN_SETTLE_DEG {
+                    cm.runtime.body_yaw_deg = goal;
+                    cm.runtime.target_yaw_deg = goal;
+                    cm.runtime.turning_in_place = false;
+                    cm.runtime.turn_delay_s = 0.0;
+                }
+            } else if model::turn_in_place_ready(aim_delta, cm.runtime.aim_yaw_rate_dps) {
+                // The delay accumulates only while BOTH gates hold, so a player
+                // who is still moving the camera never starts a turn.
+                cm.runtime.turn_delay_s += dt;
+                if cm.runtime.turn_delay_s > model::turn_in_place_delay_s(aim_delta) {
+                    cm.runtime.turning_in_place = true;
+                    cm.runtime.turn_target_yaw_deg = cm.runtime.aim_yaw_deg;
+                    cm.runtime.target_yaw_deg = cm.runtime.body_yaw_deg;
+                }
+            } else {
+                cm.runtime.turn_delay_s = 0.0;
+            }
+        }
     }
 
     // ── 11. Derived outputs for the P29.4 bridge.
@@ -847,6 +1073,22 @@ fn step_one(
         decelerating,
     );
     cm.runtime.lean = cm.runtime.relative_accel;
+    // **Aim offsets** (P29.4, clause 7), over `Mask_AimOffset` — a `.inf_anim` v2
+    // curve channel the pose step publishes for whatever state the machine is in.
+    // A state that wants no aim offset authors a 1 and gets none, which is ALS's
+    // `EnableAimOffset = lerp(1, 0, curve)` read the way it is written.
+    let aim_mask = inf_ecs::anim_bridge::anim_curve(
+        world,
+        guid,
+        inf_anim::channels::als::MASK_AIM_OFFSET,
+        0.0,
+    ) as f64;
+    cm.runtime.aim_sweep = model::aim_sweep(cm.runtime.aim_pitch_deg);
+    cm.runtime.aim_offset_weight = (1.0 - aim_mask.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+    cm.runtime.spine_yaw_deg = model::spine_yaw_deg(
+        model::angle_delta_deg(cm.runtime.aim_yaw_deg, cm.runtime.body_yaw_deg),
+        aim_mask,
+    );
     cm.runtime.refusal = refusal;
 
     // ── 12. Write the world back: the component, the transform, the capsule,
@@ -884,6 +1126,219 @@ fn step_one(
         refusal,
         grounded,
         landed,
+    })
+}
+
+// ── the mantle (P29.4, clause 4) ────────────────────────────────────────────
+
+/// **Try to enter a mantle**, reaching for a ledge in the character's own facing
+/// direction with `settings`.
+///
+/// Returns whether the mode changed. Everything about the refusal is a value:
+/// no ledge, no room, a ledge that is a floor, a ledge that is a moving crate —
+/// each is a `None` from the probe and a `false` from here, and the character
+/// does whatever it was going to do instead.
+///
+/// The **exclusion set is `IgnoreOnlyPawn`**: the character's own collider is
+/// already in `probe.exclude`, and every other character's is added here, so a
+/// crowd cannot be climbed. That is the port of ALS's collision profile, made
+/// out of the thing this engine actually has.
+#[allow(clippy::too_many_arguments)]
+fn try_mantle(
+    cm: &mut CharacterMovement,
+    world: &EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    probe: &ClearanceProbe<'_>,
+    position: DVec3,
+    radius: f64,
+    settings: &LedgeSettings,
+    refusal: &mut MovementRefusal,
+) -> bool {
+    let half = cm.half_height_for(MovementMode::Grounded);
+    // The capsule is centred on the transform, so the feet are one half-height
+    // plus one radius below it.
+    let feet = position - DVec3::Y * (cm.half_height_for(cm.mode) + radius);
+    let forward = model::rotate_from_frame(Vec2d::new(0.0, 1.0), cm.runtime.body_yaw_deg);
+    // `IgnoreOnlyPawn`, made out of what this engine has: every character's
+    // collider, through the same `O(characters)` door the step's own target walk
+    // goes through, so a crowd cannot be climbed.
+    let mut exclude = probe.exclude.clone();
+    for other in model::movement_targets(world) {
+        if let Some(c) = bridge.collider_of(other) {
+            exclude.insert(c);
+        }
+    }
+    let Some(ledge) = traversal::probe_ledge(
+        bridge.world_mut(),
+        feet,
+        DVec3::new(forward.x, 0.0, forward.y),
+        radius,
+        half,
+        cm.slope_limit_deg,
+        settings,
+        &exclude,
+    ) else {
+        return false;
+    };
+    let from = cm.mode;
+    let verdict = model::request_mode(from, MovementMode::Mantle, true, true);
+    if verdict.refusal != MovementRefusal::None {
+        *refusal = verdict.refusal;
+        cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
+        return false;
+    }
+    // **ALS's height remap**, kept as the reference behaviour: where in the
+    // traversal clip to start and how fast to play it, so a 0.9 m ledge and a
+    // 1.3 m one share one animation. The remap's bands are the settings' own, so
+    // a project that widens what it can climb does not have to retune the clip.
+    let remap = inf_anim::HeightRemap {
+        low_height_m: settings.min_height_m,
+        high_height_m: settings.max_height_m,
+        ..inf_anim::HeightRemap::default()
+    };
+    let (clip_start_s, play_rate) = remap.resolve(ledge.height_m);
+    cm.mode = MovementMode::Mantle;
+    cm.runtime.velocity = Vec3d::ZERO;
+    cm.runtime.time_in_mode_s = 0.0;
+    // The feet start where they ARE and end on the ledge; the warp is expressed
+    // in feet rather than in capsule centres so a stance change on the way in
+    // cannot move the target.
+    cm.runtime.mantle = MantleState {
+        active: true,
+        start: Vec3d::from_dvec3(feet),
+        start_yaw_deg: cm.runtime.body_yaw_deg,
+        target: Vec3d::from_dvec3(ledge.feet),
+        target_yaw_deg: ledge.yaw_deg,
+        elapsed_s: 0.0,
+        duration_s: model::mantle_duration_s(
+            ledge.height_m,
+            settings.min_height_m,
+            settings.max_height_m,
+            play_rate,
+        ),
+        height_m: ledge.height_m,
+        high: ledge.high,
+        clip_start_s,
+        play_rate,
+    };
+    true
+}
+
+/// **Advance a mantle one fixed step**, and hand the character back when it ends.
+///
+/// # The placement, in one sentence
+///
+/// [`inf_anim::warp_offset`] scales the traversal motion delivered so far onto
+/// the runtime target, so consuming the whole window lands **exactly** on the
+/// ledge — no residual, no ease that merely converges.
+///
+/// # What drives the progress today, stated
+///
+/// The clock, shaped by [`inf_anim::warp_ease`], which is what ALS's Timeline
+/// does. The warp is called with the clip's `(delivered, total)` pair, and with
+/// no traversal clip bound those are `total × progress` and `total`, so the scale
+/// is exactly one and the warp degenerates to the ease. The moment P29.5's import
+/// derivation gives the traversal state a baked root-motion track, the same call
+/// scales its arc onto the same target with no change here — which is the whole
+/// reason the placement is a warp and not a lerp.
+fn step_mantle(
+    world: &mut EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    guid: uuid::Uuid,
+    mut cm: CharacterMovement,
+    dt: f64,
+) -> Option<MoveOutcome> {
+    let entity = world.entity_of(guid)?;
+    cm.runtime.time_in_mode_s += dt;
+    cm.runtime.mantle.elapsed_s += dt;
+    // A mantle has no velocity: it is on rails between two known transforms, and
+    // leaving a stale one here would launch the character the instant it lands.
+    cm.runtime.velocity = Vec3d::ZERO;
+    cm.runtime.grounded = false;
+
+    let m = cm.runtime.mantle;
+    let progress = inf_anim::warp_ease(m.alpha());
+    let start = m.start.to_dvec3();
+    let target_offset = m.target.to_dvec3() - start;
+    // The offset expressed in the frame the window opened in — the clip's own
+    // space, which is what a root-motion track would be in.
+    let local = model::rotate_into_frame(
+        Vec2d::new(target_offset.x, target_offset.z),
+        m.start_yaw_deg,
+    );
+    let total = glam::Vec3::new(local.x as f32, target_offset.y as f32, local.y as f32);
+    let delivered = total * progress as f32;
+    let feet =
+        start + inf_anim::warp_offset(m.start_yaw_deg, delivered, total, target_offset, progress);
+
+    let yaw_delta = model::angle_delta_deg(m.target_yaw_deg, m.start_yaw_deg);
+    cm.runtime.body_yaw_deg = wrap_deg(
+        m.start_yaw_deg
+            + inf_anim::warp_yaw_deg(yaw_delta * progress, yaw_delta, yaw_delta, progress),
+    );
+    cm.runtime.target_yaw_deg = cm.runtime.body_yaw_deg;
+
+    // The capsule is standing for the whole climb, so the centre is a fixed
+    // offset above the warped feet.
+    let (radius, is_capsule) = {
+        let w = world.world();
+        match w.get::<Collider3D>(entity) {
+            Some(c) if c.shape_kind == ColliderShape3DKind::Capsule => (c.radius, true),
+            _ => (FALLBACK_RADIUS_M, false),
+        }
+    };
+    let half = cm.half_height_for(MovementMode::Grounded);
+    let position = feet + DVec3::Y * (half + radius);
+
+    let mut refusal = MovementRefusal::None;
+    let done = m.alpha() >= 1.0;
+    if done {
+        cm.runtime.mantle.active = false;
+        let verdict = model::request_mode(MovementMode::Mantle, MovementMode::Grounded, true, true);
+        cm.mode = verdict.mode;
+        refusal = verdict.refusal;
+        if verdict.refusal != MovementRefusal::None {
+            cm.runtime.refusals = cm.runtime.refusals.saturating_add(1);
+        }
+        cm.runtime.grounded = true;
+        cm.runtime.time_in_mode_s = 0.0;
+        // A mantle is not a landing: the character arrived under its own power at
+        // a known transform, so the classifier has nothing to classify and the
+        // post-landing friction override must not fire.
+        cm.runtime.land_alpha = 0.0;
+        cm.runtime.land_predicted_mps = 0.0;
+        cm.runtime.predicted_landing = LandingKind::None;
+    }
+    let mode = cm.mode;
+    let grounded = cm.runtime.grounded;
+    let body_yaw = cm.runtime.body_yaw_deg;
+    {
+        let w = world.world_mut();
+        if let Some(mut t) = w.get_mut::<Transform>(entity) {
+            t.translation.x = position.x;
+            t.translation.y = position.y;
+            t.translation.z = position.z;
+            t.rotation.y = body_yaw;
+        }
+        if is_capsule {
+            if let Some(mut c) = w.get_mut::<Collider3D>(entity) {
+                c.half_extents.y = half;
+            }
+        }
+        if let Some(mut slot) = w.get_mut::<CharacterMovement>(entity) {
+            *slot = cm;
+        }
+    }
+    if let Some(body) = bridge.body_of(guid) {
+        bridge.world_mut().set_body_translation(body, position);
+    }
+    world.mark_dirty();
+    Some(MoveOutcome {
+        guid,
+        mode,
+        refusal,
+        grounded,
+        landed: LandingKind::None,
     })
 }
 

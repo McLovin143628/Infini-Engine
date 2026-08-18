@@ -244,9 +244,7 @@ pub fn root_delta_3d(
 ) -> RootMotion3D {
     let sample = |t: f32| -> Option<(Vec3, f32)> {
         match clip.root_motion.as_ref() {
-            Some(track) => track
-                .sample(t)
-                .map(|(p, yaw)| (Vec3::from_array(p), yaw)),
+            Some(track) => track.sample(t).map(|(p, yaw)| (Vec3::from_array(p), yaw)),
             None => {
                 let root = root_joint_index(skeleton)?;
                 let pose = sample_clip(skeleton, clip, t, false);
@@ -326,7 +324,10 @@ pub fn bake_root_motion(
     clip: &AnimClip,
     skeleton: &Skeleton,
     fps: f32,
-) -> Option<(crate::channels::RootMotionTrack, crate::channels::DistanceTrack)> {
+) -> Option<(
+    crate::channels::RootMotionTrack,
+    crate::channels::DistanceTrack,
+)> {
     let root = root_joint_index(skeleton)?;
     if !crate::positive(clip.duration) || !crate::positive(fps) {
         return None;
@@ -581,7 +582,10 @@ mod tests {
         // …and the world application keeps it too.
         let w = root_delta_world_3d(90.0, full.translation);
         assert!((w.y - 1.1).abs() < 1e-6, "{w:?}");
-        assert!((w.x - 0.8).abs() < 1e-5, "yawed 90 degrees, forward is +X: {w:?}");
+        assert!(
+            (w.x - 0.8).abs() < 1e-5,
+            "yawed 90 degrees, forward is +X: {w:?}"
+        );
     }
 
     /// The bake produces a v2 track, and the consumer **reads the track** rather
@@ -593,7 +597,11 @@ mod tests {
         let clip = straight_line_clip("walk", Vec3::X, 2.0, 1.0);
         let (mut rm, dist) = bake_root_motion(&clip, &sk, 30.0).expect("bake");
         assert_eq!(rm.times.len(), 31, "30 fps over a 1 s clip is 31 keys");
-        assert!((dist.distance_m[30] - 2.0).abs() < 1e-4, "{:?}", dist.distance_m[30]);
+        assert!(
+            (dist.distance_m[30] - 2.0).abs() < 1e-4,
+            "{:?}",
+            dist.distance_m[30]
+        );
 
         // Plant a rise the joint track does not have, so "read the track" is
         // distinguishable from "read the joint".

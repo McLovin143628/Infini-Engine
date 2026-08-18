@@ -765,6 +765,7 @@ pub fn step_pose_evaluation<'c>(
         if let Some(mut b) = w.get_resource_mut::<crate::anim_bridge::AnimBridgeRes>() {
             b.states.clear();
             b.root_motion.clear();
+            b.curves.clear();
             let empty = b.is_empty();
             if empty {
                 w.remove_resource::<crate::anim_bridge::AnimBridgeRes>();
@@ -822,6 +823,7 @@ pub fn step_pose_evaluation<'c>(
         .unwrap_or_default();
     bridge.states.clear();
     bridge.root_motion.clear();
+    bridge.curves.clear();
     // Read once, so a world-level setting cannot mean two things inside one step.
     let mode = blend_mode(world);
     // **The clip-length resolver that makes `exit_time` live** (P29.1). Derived
@@ -925,8 +927,16 @@ pub fn step_pose_evaluation<'c>(
                 if same_state {
                     if let inf_anim::Motion::Clip(cref) = &state.motion {
                         if let Some(clip) = clips(*cref) {
-                            let t0 = wrap_clip_time(time_before * state.speed, clip.duration, state.looping);
-                            let t1 = wrap_clip_time(rt.state_time * state.speed, clip.duration, state.looping);
+                            let t0 = wrap_clip_time(
+                                time_before * state.speed,
+                                clip.duration,
+                                state.looping,
+                            );
+                            let t1 = wrap_clip_time(
+                                rt.state_time * state.speed,
+                                clip.duration,
+                                state.looping,
+                            );
                             if let Some(asset) = rig {
                                 let d = inf_anim::root_delta_3d(
                                     clip,
@@ -941,6 +951,23 @@ pub fn step_pose_evaluation<'c>(
                             }
                             for m in crossed_markers(&clip.markers, t0, t1, state.looping) {
                                 events.push(m.to_string());
+                            }
+                            // The v2 curve channels at THIS step's play-head.
+                            // Published rather than queried: the clip resolver is
+                            // a host registry and this is the one place that has
+                            // both it and the play-head, so the movement step can
+                            // read `Enable_FootIK_L` without reaching into the
+                            // machine (the command-queue shape).
+                            if !clip.curves.is_empty() {
+                                let mut vals: BTreeMap<String, f32> = BTreeMap::new();
+                                for c in &clip.curves {
+                                    if let Some(v) = c.sample(t1) {
+                                        vals.insert(c.name.clone(), v);
+                                    }
+                                }
+                                if !vals.is_empty() {
+                                    bridge.curves.insert(guid, vals);
+                                }
                             }
                         }
                     }
@@ -2273,12 +2300,19 @@ mod tests {
         f.step(&mut w, 1.0 / 60.0, 0.0);
         let e = w.entity_of(guid).unwrap();
         assert_eq!(
-            w.world().get::<AnimStateMachine>(e).unwrap().runtime.current,
+            w.world()
+                .get::<AnimStateMachine>(e)
+                .unwrap()
+                .runtime
+                .current,
             1,
             "the overlay did not reach the machine"
         );
         // ...and it PERSISTS: a parameter is a setting, not an event.
-        assert_eq!(crate::anim_bridge::anim_param(&w, guid, "moving"), Some(1.0));
+        assert_eq!(
+            crate::anim_bridge::anim_param(&w, guid, "moving"),
+            Some(1.0)
+        );
     }
 
     /// An armed trigger fires **once**, is taken by the step that delivers it,
@@ -2291,14 +2325,22 @@ mod tests {
         f.step(&mut w, 1.0 / 60.0);
         let e = w.entity_of(guid).unwrap();
         assert_eq!(
-            w.world().get::<AnimStateMachine>(e).unwrap().runtime.current,
+            w.world()
+                .get::<AnimStateMachine>(e)
+                .unwrap()
+                .runtime
+                .current,
             0
         );
 
         assert!(crate::anim_bridge::set_anim_trigger(&mut w, guid, "go"));
         f.step(&mut w, 1.0 / 60.0);
         assert_eq!(
-            w.world().get::<AnimStateMachine>(e).unwrap().runtime.current,
+            w.world()
+                .get::<AnimStateMachine>(e)
+                .unwrap()
+                .runtime
+                .current,
             1,
             "the armed trigger did not reach the machine"
         );
@@ -2443,5 +2485,4 @@ mod tests {
         assert_eq!(wrap_clip_time(0.5, 0.0, true), 0.0);
         assert_eq!(wrap_clip_time(f64::NAN, 1.0, true), 0.0);
     }
-
 }
