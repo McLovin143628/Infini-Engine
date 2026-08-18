@@ -62,11 +62,11 @@
 //! is one deep (P29.1 measured the second interruption at 40.5° of discontinuity);
 //! this has no depth limit at all, because it never stores states — only the pose.
 
+use crate::blend_space::ClipRef;
 use crate::layers::{additive_delta, apply_additive};
 use crate::pose::Pose;
 use crate::pose_match::{match_clip, PoseMatchWeights, PoseSnapshot};
 use crate::skeleton::Skeleton;
-use crate::blend_space::ClipRef;
 use crate::state_machine::{eval_pose, Motion, SmContext, SmRuntime, SmStep, StateMachine};
 use crate::AnimClip;
 
@@ -97,15 +97,20 @@ pub fn quintic_decay(elapsed: f32, duration: f32, v0: f32) -> f32 {
     // law is untouched and the conditioning is six orders better.
     let v0 = if v0.is_finite() { v0 as f64 } else { 0.0 };
     let t1 = duration as f64;
-    let (t2, t3, t4, t5) = (t1 * t1, t1 * t1 * t1, t1 * t1 * t1 * t1, t1 * t1 * t1 * t1 * t1);
+    let (t2, t3, t4, t5) = (
+        t1 * t1,
+        t1 * t1 * t1,
+        t1 * t1 * t1 * t1,
+        t1 * t1 * t1 * t1 * t1,
+    );
     // The classic coefficients with x0 normalized to 1.
     let a0 = (-8.0 * v0 * t1 - 20.0) / t2;
     let a = -(a0 * t2 + 6.0 * v0 * t1 + 12.0) / (2.0 * t5);
     let b = (3.0 * a0 * t2 + 16.0 * v0 * t1 + 30.0) / (2.0 * t4);
     let c = -(3.0 * a0 * t2 + 12.0 * v0 * t1 + 20.0) / (2.0 * t3);
     let t = elapsed as f64;
-    let y = a * t * t * t * t * t + b * t * t * t * t + c * t * t * t + 0.5 * a0 * t * t + v0 * t
-        + 1.0;
+    let y =
+        a * t * t * t * t * t + b * t * t * t * t + c * t * t * t + 0.5 * a0 * t * t + v0 * t + 1.0;
     if y.is_finite() {
         y as f32
     } else {
@@ -410,13 +415,9 @@ impl PoseBlender {
         if duration > 0.0 {
             if let Some(last) = self.last.clone() {
                 self.inertia = Some(match &self.prev {
-                    Some(prev) => Inertializer::capture_moving(
-                        &last,
-                        prev,
-                        &target,
-                        dt as f32,
-                        duration,
-                    ),
+                    Some(prev) => {
+                        Inertializer::capture_moving(&last, prev, &target, dt as f32, duration)
+                    }
                     None => Inertializer::capture(&last, &target, duration),
                 });
             }
@@ -535,10 +536,7 @@ mod tests {
 
     fn two_states() -> StateMachine {
         StateMachine {
-            states: vec![
-                SmState::clip("a", [1; 16]),
-                SmState::clip("b", [2; 16]),
-            ],
+            states: vec![SmState::clip("a", [1; 16]), SmState::clip("b", [2; 16])],
             transitions: vec![SmTransition::on(0, 1, 0.25, "go", CmpOp::Gt, 0.5)],
             entry: 0,
             ..Default::default()
@@ -918,10 +916,7 @@ mod tests {
         // The interesting half is the *second* interruption, at step 11: the
         // cross-fade's carry slot drops the older partner there, and this does not.
         let window = 9..18;
-        let (wi, wf) = (
-            peak_jerk(&inert[window.clone()]),
-            peak_jerk(&faded[window]),
-        );
+        let (wi, wf) = (peak_jerk(&inert[window.clone()]), peak_jerk(&faded[window]));
         assert!(
             wi < wf,
             "at the second interruption inertialization jerked {wi}°/step² against \

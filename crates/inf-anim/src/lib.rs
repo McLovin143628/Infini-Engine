@@ -79,15 +79,13 @@ pub use blend_space::{
     blend_weights_1d, blend_weights_2d, sample_blend_space_1d, sample_blend_space_2d, weights_2d,
     BlendEntry1D, BlendEntry2D, BlendSpace1D, BlendSpace2D, ClipRef,
 };
-pub use delaunay::{barycentric, triangulate, Triangulation};
-pub use channels::{
-    AdditiveRef, AnimMarker, CurveChannel, DistanceTrack, RootMotionTrack,
-};
+pub use channels::{AdditiveRef, AnimMarker, CurveChannel, DistanceTrack, RootMotionTrack};
 pub use clip::{AnimClip, Interpolation, JointTrack, QuatTrack, Vec3Track};
 pub use cloth::{
     body_capsules, capsules_for, step_cloth, Capsule, ClothAsset, ClothCapsule, ClothEdge,
     ClothError, ClothMaterial, ClothState, GRAVITY_M_S2,
 };
+pub use delaunay::{barycentric, triangulate, Triangulation};
 pub use hair::{
     render_mesh, ribbon_mesh, roots_for, step_hair, HairAsset, HairDetail, HairGroom, HairMaterial,
     HairRoot, HairState, HairStrand,
@@ -96,9 +94,7 @@ pub use ik::{
     fabrik, rotation_between, solve_chain, two_bone_positions, IkError, IkReport,
     FABRIK_ITERATIONS, MIN_BONE_LENGTH_M, REACH_TOLERANCE_M,
 };
-pub use inertialize::{
-    quintic_decay, Inertializer, PoseBlender, SmBlendMode, TransitionEntry,
-};
+pub use inertialize::{quintic_decay, Inertializer, PoseBlender, SmBlendMode, TransitionEntry};
 pub use layers::{
     additive_delta, apply_additive, apply_layer, apply_layers, AnimLayer, JointMask, LayerMode,
 };

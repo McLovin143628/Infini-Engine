@@ -439,11 +439,7 @@ impl AnimClip {
             // `!(a <= b)` rather than `a > b`: a NaN distance fails every ordering
             // comparison it takes part in, so the positive spelling would let it
             // through into the `partition_point` this check exists to protect.
-            if let Some(i) = d
-                .distance_m
-                .windows(2)
-                .position(|w| !(w[0] <= w[1]))
-            {
+            if let Some(i) = d.distance_m.windows(2).position(|w| !(w[0] <= w[1])) {
                 return Err(format!(
                     "clip {:?} distance track: distance goes backwards at key {} ({} then {})",
                     self.name,

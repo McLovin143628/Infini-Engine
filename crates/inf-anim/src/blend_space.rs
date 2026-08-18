@@ -311,13 +311,9 @@ fn chain_edges(points: &[DVec2]) -> Vec<[usize; 2]> {
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
         let (ka, kb) = (key(points[a]), key(points[b]));
-        ka.0
-            .partial_cmp(&kb.0)
+        ka.0.partial_cmp(&kb.0)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                ka.1.partial_cmp(&kb.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .then_with(|| ka.1.partial_cmp(&kb.1).unwrap_or(std::cmp::Ordering::Equal))
             .then_with(|| a.cmp(&b))
     });
     order.windows(2).map(|w| [w[0], w[1]]).collect()
@@ -377,8 +373,8 @@ fn sample_weighted<'c>(
     let clips_only: Vec<&AnimClip> = resolved.iter().map(|(c, _)| *c).collect();
     let weights_only: Vec<f64> = resolved.iter().map(|(_, w)| *w).collect();
     let leader = crate::sync::leader_index(&weights_only);
-    let times = crate::sync::warped_times(&clips_only, &weights_only, uniform[leader])
-        .unwrap_or(uniform);
+    let times =
+        crate::sync::warped_times(&clips_only, &weights_only, uniform[leader]).unwrap_or(uniform);
     let items: Vec<(Pose, f64)> = resolved
         .iter()
         .zip(&times)
@@ -837,7 +833,10 @@ mod tests {
         // Straight out past the middle of the 0→1 edge.
         let w = blend_weights_2d(&sp, DVec2::new(1.0, -5.0));
         assert_eq!(w.len(), 2, "{w:?}");
-        assert!((w[0].1 - 0.5).abs() < 1e-12 && (w[1].1 - 0.5).abs() < 1e-12, "{w:?}");
+        assert!(
+            (w[0].1 - 0.5).abs() < 1e-12 && (w[1].1 - 0.5).abs() < 1e-12,
+            "{w:?}"
+        );
         // Past a corner: that corner alone.
         let w = blend_weights_2d(&sp, DVec2::new(-9.0, -9.0));
         assert_eq!(w, vec![(0, 1.0)]);
@@ -881,7 +880,10 @@ mod tests {
                 clip: id(1),
             }],
         );
-        assert_eq!(blend_weights_2d(&one, DVec2::new(-3.0, 8.0)), vec![(0, 1.0)]);
+        assert_eq!(
+            blend_weights_2d(&one, DVec2::new(-3.0, 8.0)),
+            vec![(0, 1.0)]
+        );
         // …and an empty one says nothing.
         assert!(blend_weights_2d(&BlendSpace2D::new("x", "y", Vec::new()), DVec2::ZERO).is_empty());
     }

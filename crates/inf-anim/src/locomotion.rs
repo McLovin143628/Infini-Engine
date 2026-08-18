@@ -1256,7 +1256,10 @@ mod tests {
         let lead = at(&walk_m, l0);
         let times = crate::sync::warped_times(&[&set.walk, &set.run], &[1.0, 0.0], lead)
             .expect("the two clips share a usable sync group");
-        assert!((times[0] - lead).abs() < 1e-6, "the leader moved: {times:?}");
+        assert!(
+            (times[0] - lead).abs() < 1e-6,
+            "the leader moved: {times:?}"
+        );
         assert!(
             (times[1] as f64 - run_period * 0.5).abs() < 1e-4,
             "the run was not put on its own plant: {times:?}"

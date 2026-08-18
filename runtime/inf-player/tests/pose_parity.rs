@@ -826,31 +826,28 @@ fn a_non_finite_goal_cannot_panic_the_step_or_reach_the_trace() {
 #[test]
 fn a_goal_on_a_non_finite_pose_refuses_instead_of_panicking() {
     fn broken_clips() -> BTreeMap<Uuid, AnimClip> {
-        BTreeMap::from([(
-            IDLE,
-            {
-                let mut c = AnimClip::new(
-                    "broken",
-                    vec![JointTrack {
-                        joint: 1,
-                        // Not a number, in the one place a corrupt clip, a divide
-                        // by zero in a blend, or a bad import would put one — and
-                        // the channel `two_bone_positions` measures. See the doc
-                        // above for why this is the translation and no longer the
-                        // rotation.
-                        translation: Some(Vec3Track::new(
-                            vec![0.0],
-                            vec![[f32::NAN; 3]],
-                            Interpolation::Step,
-                        )),
-                        rotation: None,
-                        scale: None,
-                    }],
-                );
-                c.duration = 1.0;
-                c
-            },
-        )])
+        BTreeMap::from([(IDLE, {
+            let mut c = AnimClip::new(
+                "broken",
+                vec![JointTrack {
+                    joint: 1,
+                    // Not a number, in the one place a corrupt clip, a divide
+                    // by zero in a blend, or a bad import would put one — and
+                    // the channel `two_bone_positions` measures. See the doc
+                    // above for why this is the translation and no longer the
+                    // rotation.
+                    translation: Some(Vec3Track::new(
+                        vec![0.0],
+                        vec![[f32::NAN; 3]],
+                        Interpolation::Step,
+                    )),
+                    rotation: None,
+                    scale: None,
+                }],
+            );
+            c.duration = 1.0;
+            c
+        })])
     }
     fn run(goal: Option<inf_ecs::IkGoal>) -> (Vec<Vec<u8>>, Vec<inf_ecs::IkOutcome>) {
         let mut world = EcsWorld::new();

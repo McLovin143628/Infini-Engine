@@ -111,7 +111,11 @@ impl SyncTrack {
         let (span, into) = if seg == last {
             // Wraps through the clip end: [m_last, m_0 + duration).
             let span = (m[0].0 + dur) - start;
-            let into = if t < m[0].0 { t + dur - start } else { t - start };
+            let into = if t < m[0].0 {
+                t + dur - start
+            } else {
+                t - start
+            };
             (span, into)
         } else {
             (m[seg + 1].0 - start, t - start)

@@ -101,10 +101,7 @@ pub async fn blendspace_preview(
     time_s: f64,
     assets: State<'_, AssetState>,
 ) -> Result<BlendPreviewDto, String> {
-    let points: Vec<glam::DVec2> = samples
-        .iter()
-        .map(|s| glam::DVec2::new(s.x, s.y))
-        .collect();
+    let points: Vec<glam::DVec2> = samples.iter().map(|s| glam::DVec2::new(s.x, s.y)).collect();
     let tri = triangulate(&points);
     let weights: Vec<BlendWeightDto> = weights_2d(&points, glam::DVec2::new(x, y))
         .into_iter()
@@ -175,9 +172,10 @@ pub async fn blendspace_preview(
             "these clips were authored against different skeletons — a blend across two rigs is not a blend".to_string()
         });
     } else if let Some(id) = skeleton_id {
-        match assets
-            .with_project(|p| p.load_payload::<SkeletonAsset>(AssetId(id)).map_err(|e| e.to_string()))
-        {
+        match assets.with_project(|p| {
+            p.load_payload::<SkeletonAsset>(AssetId(id))
+                .map_err(|e| e.to_string())
+        }) {
             Ok(asset) if !asset.skeleton.is_empty() => {
                 joints = pose_joints(&asset.skeleton, &samples, &resolved, x, y, time_s);
             }
@@ -247,13 +245,8 @@ fn pose_joints(
             .find(|(i, _, _)| key(*i) == c)
             .map(|(_, clip, _)| clip)
     };
-    let pose: Pose = sample_blend_space_2d(
-        &space,
-        skeleton,
-        &lookup,
-        glam::DVec2::new(x, y),
-        time_s,
-    );
+    let pose: Pose =
+        sample_blend_space_2d(&space, skeleton, &lookup, glam::DVec2::new(x, y), time_s);
     let globals = global_transforms(skeleton, &pose);
     skeleton
         .joints()

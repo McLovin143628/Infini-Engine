@@ -338,7 +338,11 @@ pub fn apply_additive(base: &Pose, delta: &Pose, weights: &[f32]) -> Pose {
     let mut locals = Vec::with_capacity(n);
     for i in 0..n {
         let w = weights.get(i).copied().unwrap_or(0.0);
-        let w = if w.is_finite() { w.clamp(0.0, 1.0) } else { 0.0 };
+        let w = if w.is_finite() {
+            w.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let b = &base.locals[i];
         let d = &delta.locals[i];
         let t = b.translation_vec() + d.translation_vec() * w;
@@ -413,9 +417,12 @@ mod tests {
             locals: vec![JointTransform::IDENTITY; 4],
         };
         for &(i, deg) in rot {
-            p.locals[i].rotation =
-                inf_math::pslerp(Quat::IDENTITY, Quat::from_xyzw(0.0, 0.0, 1.0, 0.0), deg / 180.0)
-                    .to_array();
+            p.locals[i].rotation = inf_math::pslerp(
+                Quat::IDENTITY,
+                Quat::from_xyzw(0.0, 0.0, 1.0, 0.0),
+                deg / 180.0,
+            )
+            .to_array();
         }
         p
     }

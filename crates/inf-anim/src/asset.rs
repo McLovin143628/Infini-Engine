@@ -686,7 +686,9 @@ mod tests {
     /// construction and pins nothing at all.
     #[test]
     fn the_anim_clip_wire_shape_is_pinned_field_for_field() {
-        use crate::channels::{AdditiveRef, AnimMarker, CurveChannel, DistanceTrack, RootMotionTrack};
+        use crate::channels::{
+            AdditiveRef, AnimMarker, CurveChannel, DistanceTrack, RootMotionTrack,
+        };
 
         #[derive(Deserialize)]
         struct ClipWire {

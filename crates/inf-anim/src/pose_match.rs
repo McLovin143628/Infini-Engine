@@ -406,8 +406,8 @@ mod tests {
         let plain = PoseMatchWeights::default();
         assert!(pose_cost(&sk, &a, None, &b, None, &plain) > 0.1);
         // Joint 1 and its descendant are the only difference; mask them out.
-        let masked = PoseMatchWeights::default()
-            .with_mask(JointMask::new("root-only", [(0u16, 1.0)], 0.0));
+        let masked =
+            PoseMatchWeights::default().with_mask(JointMask::new("root-only", [(0u16, 1.0)], 0.0));
         assert_eq!(pose_cost(&sk, &a, None, &b, None, &masked), 0.0);
     }
 
@@ -495,7 +495,10 @@ mod tests {
         // order is therefore the preference order, which is the contract.
         let q = PoseSnapshot::capture("q", &pose_at(&sk, &small, 0.5), 0.5);
         let m = match_clips(&sk, &q, &[&big, &small], 61, &w).unwrap();
-        assert_eq!(m.candidate, 0, "the tie did not go to the earlier candidate");
+        assert_eq!(
+            m.candidate, 0,
+            "the tie did not go to the earlier candidate"
+        );
         assert!(m.cost < 1e-3, "{m:?}");
         assert_eq!(
             match_clips(&sk, &q, &[&small, &big], 61, &w)

@@ -231,11 +231,7 @@ impl RootMotionTrack {
         let yb = *self.yaw_rad.get(i1)?;
         let lerp = |x: f32, y: f32| x + (y - x) * frac;
         Some((
-            [
-                lerp(a[0], b[0]),
-                lerp(a[1], b[1]),
-                lerp(a[2], b[2]),
-            ],
+            [lerp(a[0], b[0]), lerp(a[1], b[1]), lerp(a[2], b[2])],
             lerp(ya, yb),
         ))
     }

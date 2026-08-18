@@ -24,11 +24,11 @@ use std::cell::Cell;
 use std::time::Instant;
 
 use glam::{Mat4, Quat, Vec3};
+use inf_anim::state_machine::CmpOp;
 use inf_anim::{
-    AnimClip, ClipRef, Interpolation, Joint, JointTransform, JointTrack, PoseBlender, QuatTrack,
+    AnimClip, ClipRef, Interpolation, Joint, JointTrack, JointTransform, PoseBlender, QuatTrack,
     Skeleton, SmContext, SmRuntime, SmState, SmTransition, StateMachine,
 };
-use inf_anim::state_machine::CmpOp;
 
 /// How many joints the benchmark rig has. A real humanoid is 60–90; the point of
 /// the number is that clip sampling has to dominate the loop, or the measurement
