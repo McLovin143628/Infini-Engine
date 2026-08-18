@@ -305,7 +305,21 @@ mod tests {
 
     /// **The unit square** — the co-circular case a hand-authored grid produces.
     /// Two triangles covering it, whichever diagonal; what matters is that it is
-    /// a *cover* and that it is the same one every time.
+    /// a *cover* and that it is **the same one every time, in every input
+    /// order**.
+    ///
+    /// That second half is the arm's real subject, and it is here rather than in
+    /// `the_triangulation_does_not_depend_on_input_order` because that arm's
+    /// point set is in **general position**, where the Delaunay triangulation is
+    /// unique and every insertion order finds it — so it passes with the
+    /// deterministic insertion sort **deleted** (measured, P29.2 audit). The
+    /// square is the one shape where the order actually decides: four
+    /// co-circular corners, a strict predicate that flips nothing, and therefore
+    /// whichever diagonal the insertion happened to build. With the sort removed
+    /// the four rotations of this list give `[[0,1,2],[0,2,3]]`,
+    /// `[[0,1,3],[1,2,3]]`, `[[0,1,2],[0,2,3]]`, `[[0,1,3],[1,2,3]]` — two
+    /// different diagonals, which is two different blends of the same authored
+    /// grid, on a weight that is folded into `state_bytes`.
     #[test]
     fn a_square_triangulates_into_a_cover() {
         let square = pts(&[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]);
@@ -320,10 +334,45 @@ mod tests {
         assert!((area - 1.0).abs() < 1e-12, "covered {area}");
         // Four hull edges, no more.
         assert_eq!(t.hull.len(), 4, "{:?}", t.hull);
+
+        // …and the same two triangles whichever corner the list starts at.
+        for shift in 1..4usize {
+            let rotated = pts(&[
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (1.0, 1.0),
+                (0.0, 1.0),
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (1.0, 1.0),
+            ][shift..shift + 4]);
+            let mut mapped: Vec<[usize; 3]> = triangulate(&rotated)
+                .triangles
+                .iter()
+                .map(|x| {
+                    let mut m = [(x[0] + shift) % 4, (x[1] + shift) % 4, (x[2] + shift) % 4];
+                    m.sort_unstable();
+                    m
+                })
+                .collect();
+            mapped.sort_unstable();
+            assert_eq!(
+                mapped, t.triangles,
+                "shift {shift} chose the other diagonal — the insertion order is \
+                 the caller's, and a co-circular grid is where that shows"
+            );
+        }
     }
 
     /// **Order-independence**, which is the property the determinism law actually
     /// needs: the same point set given in any order is the same triangulation.
+    ///
+    /// This fixture is in **general position**, so it certifies the property on
+    /// the easy half: the triangulation is unique there and any insertion order
+    /// converges on it. The degenerate half — a co-circular square, where the
+    /// order really does choose the diagonal — lives in
+    /// `a_square_triangulates_into_a_cover`, and it is the one that fails when
+    /// the sorted insertion goes.
     #[test]
     fn the_triangulation_does_not_depend_on_input_order() {
         let base = [
