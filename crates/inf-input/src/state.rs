@@ -343,7 +343,7 @@ impl InputState {
     /// contribution was divided by `dt` along with the mouse's: a full deflection
     /// read **10 800 deg/s at 60 fps**, and read differently at every other frame
     /// rate. Only the delta half is a per-frame quantity, so only the delta half
-    /// becomes a rate; see [`axis_parts`](Self::axis_parts).
+    /// becomes a rate; see this type's private `axis_parts`.
     pub fn axis_snapshot(&self, dt: f64) -> BTreeMap<String, f32> {
         let k = if dt.is_finite() && dt > 0.0 {
             (1.0 / dt) as f32
