@@ -12,6 +12,9 @@
 
 use rapier3d_f64::prelude::{ColliderHandle, RigidBodyHandle};
 
+// P29.6 the locomotion camera: the fixed-step door both hosts call, and
+// `cast_shape`'s third consumer (Ruling 3).
+pub mod camera;
 mod character;
 mod ecs;
 mod events;
@@ -26,6 +29,7 @@ pub mod traversal;
 pub mod water;
 mod world;
 
+pub use camera::step_locomotion_camera;
 pub use character::{AutoStep3D, CharacterMove3D, CharacterMover3D};
 pub use ecs::{
     pcg_structure_guid, terrain_tile_collider, terrain_tile_guid, voxel_chunk_guid, BodyDesc3D,

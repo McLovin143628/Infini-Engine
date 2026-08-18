@@ -16,6 +16,9 @@ pub mod anim;
 // movement step share.
 pub mod anim_bridge;
 pub mod attach;
+// P29.6: the locomotion camera's pure half. NOT sim state — it is owned by a
+// host, never a component and never a resource (Ruling 4).
+pub mod camera;
 // P24.4: the fixed-step slot that turns a `ClothSim` into moving cloth.
 pub mod cloth;
 pub mod components;
@@ -38,6 +41,10 @@ pub mod world;
 
 pub use attach::update_attachments;
 pub use bevy_ecs::prelude::Entity;
+pub use camera::{
+    axis_independent_lag, blend_settings, CameraInput, CameraPose, CameraSettings, CameraTuning,
+    GaitCameraSettings, LocomotionCamera, ViewMode,
+};
 pub use components::{
     ActorClass, AnimPlayer, AnimStateMachine, AtlasRect, AttachedTo, BillboardMode, BodyKind2D,
     BodyKind3D, Buoyancy, Camera, CharacterController2D, CharacterController3D, CharacterMovement,

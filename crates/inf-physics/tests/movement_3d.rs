@@ -1540,3 +1540,96 @@ fn adopting_the_components_capsule_does_not_lift_the_feet() {
     );
     assert!(hero_feet(&w).abs() < 0.05, "feet at {}", hero_feet(&w));
 }
+
+/// **A character authored ON the floor stays on it** (P29.6) — the settle, and
+/// the defect it closes.
+///
+/// A level author puts a capsule's feet on the ground, which is the only
+/// placement that looks right in a viewport. The kinematic mover keeps a 2 cm
+/// skin, so that placement starts *inside* the band, and rapier's character
+/// controller does not depenetrate: a sweep that begins in contact reports
+/// `started_penetrating`, the motion is allowed, and the small downward ground
+/// bias the step applies is never given back.
+///
+/// Measured on the shipped code before the fix: **2 mm per fixed step**, about
+/// 12 cm/s, while still reporting `grounded` — and a **crouched** character
+/// through a one-metre floor in 1.6 seconds. Both halves are here, because a
+/// standing character eventually stopped sinking and a crouched one did not, and
+/// an arm that only watched the standing case would have called it a wobble.
+///
+/// The control is the third clause: a character authored a metre in the air must
+/// still FALL. The settle only ever raises, and only within its own reach.
+#[test]
+fn a_character_authored_on_the_floor_does_not_sink_through_it() {
+    for crouched in [false, true] {
+        let mut w = EcsWorld::new();
+        spawn_block(
+            &mut w,
+            GROUND,
+            DVec3::new(0.0, -0.5, 0.0),
+            DVec3::new(40.0, 0.5, 40.0),
+        );
+        spawn_hero(&mut w, 0.0, 0.0, 0.0);
+        let mut b = PhysicsBridge3D::new(GRAVITY);
+        if crouched {
+            step(&mut w, &mut b, &press_crouch());
+            assert_eq!(
+                hero(&w).mode,
+                MovementMode::Crouch,
+                "the fixture never crouched"
+            );
+        }
+        // After the FIRST step, which is where the settle happens: the resting
+        // height is ground + the mover's own skin, not the authored zero.
+        step(&mut w, &mut b, &idle());
+        let after_one = hero_feet(&w);
+        for _ in 0..600 {
+            step(&mut w, &mut b, &idle());
+        }
+        let feet = hero_feet(&w);
+        assert!(
+            hero(&w).runtime.grounded,
+            "crouched={crouched}: the character left the ground while standing still"
+        );
+        assert!(
+            feet > -0.01,
+            "crouched={crouched}: the character sank {:.4} m through the floor in ten seconds",
+            -feet
+        );
+        assert!(
+            (feet - after_one).abs() < 0.005,
+            "crouched={crouched}: the feet drifted {:.4} m over ten idle seconds",
+            (feet - after_one).abs()
+        );
+    }
+}
+
+/// The settle **only raises**, and only within its own reach — a character
+/// authored in the air falls, which is what placing one in the air means.
+#[test]
+fn the_spawn_settle_never_lowers_a_character_and_never_reaches_far() {
+    let mut w = EcsWorld::new();
+    spawn_block(
+        &mut w,
+        GROUND,
+        DVec3::new(0.0, -0.5, 0.0),
+        DVec3::new(40.0, 0.5, 40.0),
+    );
+    spawn_hero(&mut w, 1.5, 0.0, 0.0);
+    let mut b = PhysicsBridge3D::new(GRAVITY);
+    step(&mut w, &mut b, &idle());
+    assert!(
+        hero_feet(&w) > 1.4,
+        "the settle teleported a character 1.5 m down to the ground: {}",
+        hero_feet(&w)
+    );
+    assert!(!hero(&w).runtime.grounded, "…and it is in the air, falling");
+    for _ in 0..180 {
+        step(&mut w, &mut b, &idle());
+    }
+    assert!(
+        hero_feet(&w).abs() < 0.05,
+        "it never landed: {}",
+        hero_feet(&w)
+    );
+}

@@ -310,6 +310,72 @@ fn request(
     verdict.mode
 }
 
+/// How far above its authored placement a spawning character is lifted before
+/// the settling sweep starts, metres.
+///
+/// It has to clear the mover's skin (`CharacterController3D::offset`, 2 cm by
+/// default) with room to spare, or the sweep begins in the same penetrating
+/// state the settle exists to escape.
+const SETTLE_LIFT_M: f64 = 0.25;
+
+/// How far below its authored placement the settle will look for ground, metres.
+///
+/// Bounded on purpose: "put my feet on the floor I am standing on" must not
+/// become "teleport down to whatever is under this level". A character authored
+/// higher than this falls, which is what an author who placed one in the air
+/// meant.
+const SETTLE_REACH_M: f64 = 0.35;
+
+/// **Put an authored character's feet on the ground, once** (P29.6).
+///
+/// See the call site for the measurement. The rule in three clauses:
+///
+/// * it runs on the **first step only**, inside the same `seeded` latch that
+///   takes the authored facing;
+/// * it only ever **raises** — a character authored in the air falls;
+/// * it is **bounded** by [`SETTLE_REACH_M`], so it settles onto the surface the
+///   author placed the character on and never onto a distant one.
+///
+/// A sweep that still starts penetrating after the lift is left alone: something
+/// is genuinely overlapping the character, and guessing where to put it is worse
+/// than letting the mover's own sliding deal with it.
+fn settle_on_spawn(
+    world: &EcsWorld,
+    bridge: &mut PhysicsBridge3D,
+    guid: uuid::Uuid,
+    position: &mut DVec3,
+    half_height: f64,
+    radius: f64,
+    exclude: &BTreeSet<ColliderId3D>,
+) {
+    let offset = world
+        .entity_of(guid)
+        .and_then(|e| world.world().get::<CharacterController3D>(e).copied())
+        .map(|c| c.offset.max(1e-4))
+        .unwrap_or(0.02);
+    let start = *position + DVec3::Y * SETTLE_LIFT_M;
+    let Some(hit) = bridge.world_mut().cast_shape(
+        &ColliderShape3D::Capsule {
+            half_height,
+            radius,
+        },
+        start,
+        DQuat::IDENTITY,
+        -DVec3::Y,
+        SETTLE_LIFT_M + SETTLE_REACH_M,
+        exclude,
+    ) else {
+        return;
+    };
+    if hit.started_penetrating {
+        return;
+    }
+    let settled = start.y - hit.toi + offset;
+    if settled > position.y {
+        position.y = settled;
+    }
+}
+
 /// The slope, in degrees from vertical, of a surface normal.
 fn slope_deg(normal: DVec3) -> f64 {
     let n = normal.normalize_or_zero();
@@ -357,7 +423,8 @@ fn step_one(
     //    Seeded rather than resynced: the smoother owns the yaw from here on (see
     //    `MovementRuntime::body_yaw_deg`), and re-reading the transform every step
     //    would make two authorities fight over one number.
-    if !cm.runtime.seeded {
+    let seeded_this_step = !cm.runtime.seeded;
+    if seeded_this_step {
         cm.runtime.seeded = true;
         let yaw = if authored_yaw_deg.is_finite() {
             authored_yaw_deg
@@ -379,6 +446,41 @@ fn step_one(
     let is_capsule = collider
         .map(|c| c.shape_kind == ColliderShape3DKind::Capsule)
         .unwrap_or(false);
+
+    // ── 0a. **Settle the authored placement, once** (P29.6).
+    //
+    //    A level author puts a character's feet ON the floor, which is the only
+    //    placement that looks right in a viewport — and the kinematic mover keeps
+    //    a *skin* (`CharacterController3D::offset`, 2 cm by default), so a capsule
+    //    authored at exactly `half + radius` starts INSIDE that band. rapier's
+    //    character controller does not depenetrate: a sweep that begins in
+    //    contact reports `started_penetrating` and the motion is allowed, so the
+    //    small downward ground bias step 7 applies is never given back.
+    //
+    //    Measured on the shipped code before this: an idle character authored on
+    //    the floor sank about **2 mm per fixed step** — 12 cm/s — while still
+    //    reporting `grounded`, and a crouched one was through a 1 m floor in
+    //    **1.6 seconds**. The same character spawned one skin-width clear settles
+    //    at ground + offset and never moves again. No committed level carried a
+    //    `CharacterMovement` until this wave, which is why nothing had seen it.
+    //
+    //    The correction is a **one-time placement**, inside the same `seeded`
+    //    latch the authored facing uses and for the same reason: it is the
+    //    author's number being taken once, not an authority the step keeps. It
+    //    only ever raises — a character authored in the air must fall, not be
+    //    magnetised to the ground — and its reach is bounded, so "settle onto the
+    //    floor I am standing on" cannot become "teleport to whatever is below".
+    if seeded_this_step && is_capsule {
+        settle_on_spawn(
+            world,
+            bridge,
+            guid,
+            &mut position,
+            cm.half_height_for(cm.mode),
+            radius,
+            &exclude,
+        );
+    }
 
     // ── 0b. A MANTLE owns the character outright while it runs (P29.4).
     //

@@ -47,9 +47,10 @@
 //! ```
 //!
 //! `&&` binds tighter than `||`, `!` tighter than both, and parentheses group.
-//! The parser is recursive descent with an explicit depth guard (the P19 law),
-//! bounded by [`crate::state_machine::MAX_COND_DEPTH`] — the same bound the
-//! decoder applies, so text cannot smuggle in a tree the binary reader refuses.
+//! The parser is recursive descent with an explicit depth guard (the P19 law) at
+//! [`MAX_COND_PARSE_DEPTH`] — the **decoder's** bound, so the text door and the
+//! binary door refuse at the same depth; the *model's* narrower one stays
+//! `StateMachine::validate`'s, which the caller runs either way.
 //!
 //! # Names, not indices
 //!

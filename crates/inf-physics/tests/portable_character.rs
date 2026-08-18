@@ -30,27 +30,44 @@
 //! with no gate holds until exactly the moment it matters.
 
 /// The three modules, with the reason each one is on the list.
-const CHARACTER_PATH: [(&str, &str, &str); 3] = [
+/// The fourth element is the **minimum** number of non-comment lines the file
+/// must still have. It is per file rather than one number for all of them
+/// because `d3/camera.rs` is deliberately the smallest door on this list — its
+/// model lives in `inf_ecs::camera` and what is here is the world half — and a
+/// single floor would either be vacuous for the big three or unreachable for it.
+/// The guard exists so the ban cannot pass by scanning a file that has been
+/// emptied out from under it.
+const CHARACTER_PATH: [(&str, &str, &str, usize); 4] = [
+    (
+        "d3/camera.rs",
+        include_str!("../src/d3/camera.rs"),
+        "the camera is not sim state, and it is here because `phase29_gate` asserts a DETERMINISTIC camera trace: a claim that only holds on one target is a claim about this machine",
+        50,
+    ),
     (
         "d3/movement.rs",
         include_str!("../src/d3/movement.rs"),
         "the fixed step writes every character's Transform, including the mantle's warped placement, and both hosts run it",
+        100,
     ),
     (
         "d3/traversal.rs",
         include_str!("../src/d3/traversal.rs"),
         "the ledge probe decides where a mantle ENDS and the land-prediction sweep decides which landing the classifier reaches",
+        100,
     ),
     (
         "d3/ragdoll_bridge.rs",
         include_str!("../src/d3/ragdoll_bridge.rs"),
         "the pelvis read chooses supine versus prone and places the capsule, and both are in the parity trace",
+        100,
     ),
 ];
 
 /// A marker that must be present in each file, so the gate cannot pass because
 /// it is scanning something that is no longer the module it names.
-const ANCHORS: [(&str, &[&str]); 3] = [
+const ANCHORS: [(&str, &[&str]); 4] = [
+    ("d3/camera.rs", &["inf_ecs::camera::", "cast_shape_where("]),
     (
         "d3/movement.rs",
         &["inf_anim::warp_offset(", "inf_math::pacos64("],
@@ -118,7 +135,7 @@ fn the_character_step_calls_no_libm() {
             .collect()
     };
 
-    for (name, src, why) in CHARACTER_PATH {
+    for (name, src, why, min_lines) in CHARACTER_PATH {
         // No `#[cfg(test)]` region, so the scope is the whole file. Asserted
         // rather than assumed: the day one grows a test module, a fixture that
         // builds a rotation from an angle would fail this gate for the wrong
@@ -131,7 +148,7 @@ fn the_character_step_calls_no_libm() {
         );
         let code = production_code(src);
         assert!(
-            code.lines().filter(|l| !l.trim().is_empty()).count() > 100,
+            code.lines().filter(|l| !l.trim().is_empty()).count() >= min_lines,
             "`{name}` reduced to nothing after blanking comments — the ban is \
              scanning an empty string"
         );

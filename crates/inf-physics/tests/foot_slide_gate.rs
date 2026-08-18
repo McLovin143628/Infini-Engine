@@ -692,13 +692,17 @@ fn a_feet_at_origin_rig_publishes_its_feet_on_the_floor() {
 
     let left = inf_ecs::anim_bridge::feet_of(&sim.world, HERO).unwrap()[0].expect("a left foot");
     let published = left.world.y;
-    // A centimetre, not an epsilon: the published foot is the drawn one, so it
-    // carries the mover's skin width and — now that the seam is closed — the
-    // foot-IK solve's own correction. The *exact* claim is the lift above.
+    // Against the FLOOR, not against the capsule's soles, and three centimetres
+    // rather than an epsilon. The two differ by the mover's skin (2 cm: the
+    // capsule rests at ground + `CharacterController3D::offset`) and by the foot
+    // IK's own correction, which — now that the seam is closed — drives the sole
+    // onto the surface rather than onto the capsule's bottom. Both of those are
+    // the mechanism working. The *exact* claim is the lift above.
+    const FLOOR_Y: f64 = 0.0;
     assert!(
-        (published - feet_y).abs() < 0.01,
-        "a feet-at-origin rig publishes its feet on the floor: {published} vs \
-         {feet_y}"
+        (published - FLOOR_Y).abs() < 0.03,
+        "a feet-at-origin rig publishes its feet on the floor: {published} \
+         against a floor at {FLOOR_Y} (capsule soles at {feet_y})"
     );
     // …and it is inside the probe envelope now, which is the whole consequence.
     assert!(
