@@ -42,6 +42,8 @@ pub mod scene;
 pub mod sequencer;
 pub mod simulate;
 pub mod skel;
+// P29.6 pillar S1: the `.inf_sm` text sidecar, as a save door.
+pub mod sm_text;
 pub mod sorting;
 /// Editing an asset-backed terrain + the save write-back (P16.4b).
 pub mod terrain_edit;

@@ -583,6 +583,14 @@ pub mod params {
     pub const FALL_SPEED: &str = "fall_speed";
     /// How close a predicted landing is, `[0, 1]`.
     pub const LAND_ALPHA: &str = "land_alpha";
+    /// The **overlay id** this character is wearing — `0` is the default overlay
+    /// and every other value is `crate::movement::OverlayRegistry`'s interning of
+    /// the scene's own string (Ruling 4's "open interned id", given its first
+    /// caller in P29.6).
+    pub const OVERLAY: &str = "overlay";
+    /// The flail blend `[0, 1]` a falling ragdoll gets, from
+    /// [`inf_anim::flail_rate`].
+    pub const FLAIL: &str = "flail";
 }
 
 /// **Publish a character's movement state into its machine's parameters**
@@ -608,13 +616,19 @@ pub fn publish_character_params(
     world: &mut EcsWorld,
     guid: Uuid,
     cm: &crate::components::CharacterMovement,
+    overlay: u32,
 ) -> bool {
     if !has_machine(world, guid) {
         return false;
     }
     let rt = &cm.runtime;
     let planar = (rt.velocity.x * rt.velocity.x + rt.velocity.z * rt.velocity.z).sqrt();
-    let values: [(&str, f64); 7] = [
+    // `flail_rate` gets its first caller here (a P29.4 audit zero-caller item):
+    // how much limb-waving overlay a falling body wants, from its own speed.
+    let flail = f64::from(inf_anim::ragdoll::flail_rate(
+        rt.velocity.to_dvec3().length(),
+    ));
+    let values: [(&str, f64); 9] = [
         (params::SPEED, planar),
         (params::GAIT, rt.mapped_speed),
         (params::GROUNDED, f64::from(u8::from(rt.grounded))),
@@ -622,6 +636,8 @@ pub fn publish_character_params(
         (params::DIRECTION, rt.direction as u8 as f64),
         (params::FALL_SPEED, (-rt.velocity.y).max(0.0)),
         (params::LAND_ALPHA, rt.land_alpha),
+        (params::OVERLAY, f64::from(overlay)),
+        (params::FLAIL, flail),
     ];
     with_bridge(world, |b| {
         let slot = b.params.entry(guid).or_default();
@@ -761,8 +777,11 @@ mod tests {
         cm.runtime.mapped_speed = 1.75;
         cm.runtime.grounded = true;
 
-        assert!(!publish_character_params(&mut w, bare, &cm), "no machine");
-        assert!(publish_character_params(&mut w, guid, &cm));
+        assert!(
+            !publish_character_params(&mut w, bare, &cm, 0),
+            "no machine"
+        );
+        assert!(publish_character_params(&mut w, guid, &cm, 0));
         // 3-4-5: the planar speed is 5, and the vertical is NOT in it.
         assert_eq!(anim_param(&w, guid, params::SPEED), Some(5.0));
         assert_eq!(anim_param(&w, guid, params::GAIT), Some(1.75));
@@ -782,6 +801,8 @@ mod tests {
             params::DIRECTION,
             params::FALL_SPEED,
             params::LAND_ALPHA,
+            params::OVERLAY,
+            params::FLAIL,
         ] {
             assert!(
                 anim_param(&w, guid, name).is_some(),
@@ -807,10 +828,10 @@ mod tests {
         });
         let mut cm = CharacterMovement::default();
         cm.runtime.velocity = Vec3d::new(2.0, 0.0, 0.0);
-        assert!(publish_character_params(&mut w, guid, &cm));
+        assert!(publish_character_params(&mut w, guid, &cm, 0));
         assert_eq!(anim_param(&w, guid, params::SPEED), Some(2.0));
         cm.runtime.velocity = Vec3d::new(f64::NAN, 0.0, 0.0);
-        assert!(publish_character_params(&mut w, guid, &cm));
+        assert!(publish_character_params(&mut w, guid, &cm, 0));
         assert_eq!(
             anim_param(&w, guid, params::SPEED),
             Some(2.0),

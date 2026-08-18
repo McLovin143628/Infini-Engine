@@ -1133,6 +1133,51 @@ impl OverlayRegistry {
     pub fn is_empty(&self) -> bool {
         self.len() <= 1
     }
+
+    /// The id already interned for `name`, or [`OVERLAY_DEFAULT`] for one this
+    /// registry never saw.
+    ///
+    /// A **read**, deliberately: the hot loop asks, it does not intern. Interning
+    /// during the walk would make an id depend on which character was reached
+    /// first, and [`overlay_registry`] exists so that it does not.
+    pub fn id_of(&self, name: &str) -> u32 {
+        self.names
+            .iter()
+            .position(|n| n == name)
+            .map(|i| i as u32)
+            .unwrap_or(OVERLAY_DEFAULT)
+    }
+}
+
+/// **Intern every overlay in the world**, over a sorted walk (P29.6).
+///
+/// Ruling 4 made `OverlayState` an open interned id rather than a wire enum, so
+/// a studio can add Rifle, Torch, Box or Injured without an engine schema bump —
+/// and then nothing interned one for three sub-phases. Two audits named
+/// [`OverlayRegistry`] as having zero callers anywhere in the tree, and both gave
+/// the same reason for not fixing it: an id assigned by *first-seen* order is
+/// session-local, so handing one to gameplay needs the first-seen order to be
+/// deterministic first.
+///
+/// `targets` is [`movement_targets`]' output, which is sorted by `Guid`, so it
+/// is. The ids are a function of the world's contents and of nothing else, and
+/// two hosts stepping the same world assign the same numbers — which is what
+/// lets the movement step publish `overlay` as a machine parameter.
+///
+/// `O(characters × overlays)`, and the second factor is the number of *distinct*
+/// names, which is a handful.
+pub fn overlay_registry(world: &EcsWorld, targets: &[Uuid]) -> OverlayRegistry {
+    let mut out = OverlayRegistry::new();
+    let w = world.world();
+    for guid in targets {
+        if let Some(cm) = world
+            .entity_of(*guid)
+            .and_then(|e| w.get::<CharacterMovement>(e))
+        {
+            out.intern(&cm.overlay);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

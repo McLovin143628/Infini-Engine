@@ -1701,3 +1701,124 @@ fn a_character_with_a_movement_component_publishes_its_own_speed() {
         "a character with no machine published a parameter into nothing"
     );
 }
+
+/// **`OverlayRegistry` gets its first caller, and its ids are deterministic**
+/// (P29.6) — the obligation P29.2 and P29.4 both recorded as owed before an
+/// interned id could be handed to gameplay.
+///
+/// Ruling 4 made `OverlayState` an open interned id so a studio can add Rifle,
+/// Torch, Box or Injured without an engine schema bump, and then nothing
+/// interned one for three sub-phases: two audits found the registry with **zero
+/// callers anywhere in the tree**. The reason both gave for leaving it was the
+/// same — interning by *first-seen* order makes an id session-local, so an id
+/// that reaches gameplay needs "first seen" to be deterministic first.
+///
+/// It is, because the walk is `movement_targets`' and that is sorted by `Guid`.
+/// This arm is that claim: two worlds carrying the same overlays, spawned in
+/// **opposite** orders, assign the same numbers — and the number reaches the
+/// machine as a parameter, which is what makes the registry load-bearing rather
+/// than merely present.
+#[test]
+fn the_overlay_ids_are_a_function_of_the_world_and_not_of_the_spawn_order() {
+    use inf_ecs::components::AnimStateMachine;
+
+    let build = |reverse: bool| -> (EcsWorld, PhysicsBridge3D) {
+        let mut w = EcsWorld::new();
+        spawn_block(
+            &mut w,
+            GROUND,
+            DVec3::new(0.0, -0.5, 0.0),
+            DVec3::new(40.0, 0.5, 40.0),
+        );
+        // Three characters, three overlays. The GUIDs are fixed; only the order
+        // they are created in changes.
+        let mut trio: Vec<(u128, &str, f64)> = vec![
+            (0x2906_2001, "rifle", -3.0),
+            (0x2906_2002, "torch", 0.0),
+            (0x2906_2003, "", 3.0),
+        ];
+        if reverse {
+            trio.reverse();
+        }
+        for (id, overlay, x) in trio {
+            let guid = Uuid::from_u128(id);
+            let cm = CharacterMovement {
+                player_controlled: false,
+                overlay: overlay.to_string(),
+                ..Default::default()
+            };
+            let e = w.spawn_with_guid(guid, "Hero", None);
+            let mut t = Transform::IDENTITY;
+            t.translation = Vec3d::new(x, cm.stand_half_height_m + RADIUS, 0.0);
+            w.world_mut().entity_mut(e).insert((
+                RigidBody3D {
+                    kind: BodyKind3D::Kinematic,
+                    ..Default::default()
+                },
+                Collider3D {
+                    shape_kind: ColliderShape3DKind::Capsule,
+                    half_extents: Vec3d::new(RADIUS, cm.stand_half_height_m, RADIUS),
+                    radius: RADIUS,
+                    ..Default::default()
+                },
+                CharacterController3D::default(),
+                AnimStateMachine {
+                    sm: Some(Uuid::from_u128(0x29_0629)),
+                    ..Default::default()
+                },
+                cm,
+                t,
+            ));
+        }
+        w.mark_dirty();
+        w.propagate();
+        (w, PhysicsBridge3D::new(GRAVITY))
+    };
+
+    let ids = |w: &EcsWorld| -> Vec<(u128, f64)> {
+        [0x2906_2001u128, 0x2906_2002, 0x2906_2003]
+            .into_iter()
+            .map(|id| {
+                let guid = Uuid::from_u128(id);
+                (
+                    id,
+                    inf_ecs::anim_bridge::anim_param(
+                        w,
+                        guid,
+                        inf_ecs::anim_bridge::params::OVERLAY,
+                    )
+                    .expect("every character publishes its overlay id"),
+                )
+            })
+            .collect()
+    };
+
+    let (mut a, mut ba) = build(false);
+    let (mut b, mut bb) = build(true);
+    for _ in 0..4 {
+        step(&mut a, &mut ba, &idle());
+        step(&mut b, &mut bb, &idle());
+    }
+    let (ia, ib) = (ids(&a), ids(&b));
+    assert_eq!(
+        ia, ib,
+        "the same three overlays interned to different ids because the entities \
+         were created in a different order — a session-local number reached a \
+         machine parameter"
+    );
+    // …and the ids really discriminate, or "equal" is a statement about three
+    // zeroes.
+    let distinct: std::collections::BTreeSet<u64> = ia.iter().map(|(_, v)| v.to_bits()).collect();
+    assert_eq!(
+        distinct.len(),
+        3,
+        "three different overlays interned to {} distinct id(s): {ia:?}",
+        distinct.len()
+    );
+    // The default overlay is always zero, whichever order it was met in.
+    assert_eq!(
+        ia.iter().find(|(id, _)| *id == 0x2906_2003).unwrap().1,
+        0.0,
+        "the empty overlay must be id 0"
+    );
+}

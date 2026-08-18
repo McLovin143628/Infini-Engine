@@ -874,11 +874,10 @@ pub fn build_character(
     let mut text: Vec<std::path::PathBuf> = Vec::new();
     // The machine, as text: the reviewable face of the `.inf_sm` beside it, and
     // the thing pillar S1's whole argument is about.
-    let sm_text = inf_anim::to_toml(&machine_model);
-    let sm_path = dir.join(format!("{name} Locomotion.inf_sm.txt"));
-    inf_asset::write_atomically(&sm_path, sm_text.as_bytes())
+    let sm_payload = dir.join(format!("{name} Locomotion.inf_sm"));
+    crate::sm_text::write_text(&sm_payload, &machine_model)
         .map_err(|e| CharacterError::Write(e.to_string()))?;
-    text.push(sm_path);
+    text.push(crate::sm_text::text_path(&sm_payload));
     // The camera table and the input bindings — neither has a home in the scene
     // schema (a camera is not sim state; a binding is a project's), so both are
     // text beside the character, in the formats the shipped player already reads.

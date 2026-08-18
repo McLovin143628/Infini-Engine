@@ -216,6 +216,17 @@ pub fn step_character_movement(
     // rule both live in the model's one door (`movement_targets`'s doc states
     // the measured cost of getting this wrong).
     let targets: Vec<uuid::Uuid> = model::movement_targets(world);
+    // **`OverlayRegistry`'s first caller** (P29.6) — Ruling 4's "open interned
+    // id", which had zero callers anywhere in the tree from P29.3 until now and
+    // was named as such by two audits.
+    //
+    // Interned over `targets`, which is **sorted by guid**, so the ids are a
+    // function of the world's contents and not of the order a bevy archetype
+    // walk happened to produce. That is the interning-determinism obligation
+    // P29.2 and P29.4 both recorded as owed before an id could be handed out: an
+    // id assigned by first-seen order is only safe if "first seen" is itself
+    // deterministic, and here it is.
+    let overlays = model::overlay_registry(world, &targets);
     let mut out = Vec::with_capacity(targets.len());
     for guid in &targets {
         // **The list is walked once and then passed down** (P29.4 audit, A8).
@@ -224,7 +235,7 @@ pub fn step_character_movement(
         // made the falling catch (tried on *every* airborne step with input)
         // O(characters) per character per step. One walk, one sort, one
         // allocation, whoever reads it.
-        if let Some(o) = step_one(world, bridge, *guid, dt, &targets) {
+        if let Some(o) = step_one(world, bridge, *guid, dt, &targets, &overlays) {
             out.push(o);
         }
     }
@@ -392,6 +403,7 @@ fn step_one(
     guid: uuid::Uuid,
     dt: f64,
     characters: &[uuid::Uuid],
+    overlays: &model::OverlayRegistry,
 ) -> Option<MoveOutcome> {
     let entity = world.entity_of(guid)?;
     let (mut cm, mut position, authored_yaw_deg, collider) = {
@@ -494,7 +506,7 @@ fn step_one(
     //
     //    Nothing below this point runs while `Mantle` is the mode.
     if cm.mode == MovementMode::Mantle {
-        return step_mantle(world, bridge, guid, cm, dt);
+        return step_mantle(world, bridge, guid, cm, dt, overlays);
     }
 
     // ── 0c. A RAGDOLL owns it just as completely (P29.4, clause 6), and for the
@@ -1299,7 +1311,8 @@ fn step_one(
     //
     //    Costs one map lookup on a character with no machine, which is every
     //    character in every committed level before this wave.
-    inf_ecs::anim_bridge::publish_character_params(world, guid, &cm);
+    let overlay = overlays.id_of(&cm.overlay);
+    inf_ecs::anim_bridge::publish_character_params(world, guid, &cm, overlay);
     if let Some(body) = bridge.body_of(guid) {
         bridge.world_mut().set_body_translation(body, position);
     }
@@ -1449,6 +1462,7 @@ fn step_mantle(
     guid: uuid::Uuid,
     mut cm: CharacterMovement,
     dt: f64,
+    overlays: &model::OverlayRegistry,
 ) -> Option<MoveOutcome> {
     let entity = world.entity_of(guid)?;
     cm.runtime.time_in_mode_s += dt;
@@ -1563,7 +1577,8 @@ fn step_mantle(
     //
     //    Costs one map lookup on a character with no machine, which is every
     //    character in every committed level before this wave.
-    inf_ecs::anim_bridge::publish_character_params(world, guid, &cm);
+    let overlay = overlays.id_of(&cm.overlay);
+    inf_ecs::anim_bridge::publish_character_params(world, guid, &cm, overlay);
     if let Some(body) = bridge.body_of(guid) {
         bridge.world_mut().set_body_translation(body, position);
     }

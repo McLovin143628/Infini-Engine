@@ -8529,11 +8529,8 @@ pub fn write_phase29_locomotion() -> Result<(), String> {
     )?;
 
     // ── the text an author owns (pillar S1) ──
-    std::fs::write(
-        dir.join("Hero Locomotion.inf_sm.txt"),
-        inf_anim::to_toml(&machine),
-    )
-    .map_err(|e| format!("write machine text: {e}"))?;
+    crate::sm_text::write_text(&dir.join("Hero Locomotion.inf_sm"), &machine)
+        .map_err(|e| format!("write machine text: {e}"))?;
     std::fs::write(
         dir.join("camera.toml"),
         inf_ecs::camera::CameraTuning::default().to_toml()?,

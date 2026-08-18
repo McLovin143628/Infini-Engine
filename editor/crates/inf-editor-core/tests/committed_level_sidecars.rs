@@ -69,10 +69,11 @@ fn committed_levels() -> Vec<PathBuf> {
     out
 }
 
-/// The sixteen the P26.4 audit counted. Exact, not `>= 1`: this arm's whole
-/// subject is *shipped content*, and a walk that quietly found one file would
-/// pass every assertion below.
-const EXPECTED_LEVELS: usize = 16;
+/// The sixteen the P26.4 audit counted, plus P29.6's locomotion course.
+///
+/// Exact, not `>= 1`: this arm's whole subject is *shipped content*, and a walk
+/// that quietly found one file would pass every assertion below.
+const EXPECTED_LEVELS: usize = 17;
 
 #[test]
 fn every_committed_level_sidecar_declares_its_bindings() {
