@@ -9,6 +9,8 @@ import TitleBar from "./shell/TitleBar";
 import MainToolbar from "./shell/MainToolbar";
 import StatusBar from "./shell/StatusBar";
 import LayoutDialog from "./shell/LayoutDialog";
+import PreferencesDialog from "./shell/PreferencesDialog";
+import ProjectSettingsDialog from "./shell/ProjectSettingsDialog";
 import SortingLayersDialog from "./shell/SortingLayersDialog";
 import PackageDialog from "./shell/PackageDialog";
 import ErodeDialog from "./shell/ErodeDialog";
@@ -42,8 +44,9 @@ import { initSimSync, registerSimCommands } from "./stores/simStore";
 import { initPieSync, registerPieCommands } from "./stores/pieStore";
 import { initEditorSync } from "./stores/editorStore";
 import { initLsp } from "./lib/editor/lspBridge";
-import { scene as sceneIpc } from "./lib/ipc";
-import { useShellStore } from "./stores/shellStore";
+import { initSettingsSync } from "./lib/settingsApply";
+import { initAutosave } from "./stores/autosave";
+import { useSettingsStore } from "./stores/settingsStore";
 
 bootstrapShellCommands();
 registerDefaultKeybindings();
@@ -145,6 +148,11 @@ export default function App() {
   // project change (P8.2c). StrictMode-safe.
   useEffect(() => initViewportSync(), []);
 
+  // Load the app-level editor preferences, fold in the legacy localStorage keys
+  // once, and keep theme / keybindings / snap / foliage applied as they change
+  // (Wave E). StrictMode-safe (the disposer drops the subscription).
+  useEffect(() => initSettingsSync(), []);
+
   // `[` / `]` adjust the sculpt brush radius while the Sculpt tool is active
   // (P10.2b). StrictMode-safe (disposer removes the listener).
   useEffect(() => initSculptKeybindings(), []);
@@ -179,6 +187,11 @@ export default function App() {
   // that the StartScreen overlay covers the shell). `maybeAutostart` no-ops if
   // the tour was already seen/dismissed, so re-firing on every project change
   // is safe.
+  //
+  // It also waits on the SETTINGS now (Wave E): `tourSeen` reads the file, and
+  // an unloaded file reads as "seen" so a slow load cannot flash the tour at
+  // someone who dismissed it. Subscribing to both stores is what keeps the
+  // genuine first run — whichever of the two resolves last re-checks.
   useEffect(() => {
     const check = () => {
       const s = useProjectStore.getState();
@@ -187,7 +200,12 @@ export default function App() {
       }
     };
     check();
-    return useProjectStore.subscribe(check);
+    const unsubProject = useProjectStore.subscribe(check);
+    const unsubSettings = useSettingsStore.subscribe(check);
+    return () => {
+      unsubProject();
+      unsubSettings();
+    };
   }, []);
 
   // Subscribe to infinity:open-file so the Code Editor opens tabs (P5.1).
@@ -206,31 +224,10 @@ export default function App() {
     };
   }, []);
 
-  // Debounced crash-recovery autosave (P3.5.4): flush unsaved work every 5 s.
-  // Autosave isn't command-initiated, so its failures surface here — but
-  // rate-limited: a persistent failure re-toasts only when the message changes
-  // or once a minute (every 12th tick), never every 5 s.
-  useEffect(() => {
-    let lastErr: string | null = null;
-    let failCount = 0;
-    const id = window.setInterval(() => {
-      void sceneIpc.autosave().then(
-        () => {
-          lastErr = null;
-          failCount = 0;
-        },
-        (e: unknown) => {
-          const msg = e instanceof Error ? e.message : String(e);
-          failCount += 1;
-          if (msg !== lastErr || failCount % 12 === 0) {
-            lastErr = msg;
-            useShellStore.getState().pushStatus(`Autosave failed: ${msg}`);
-          }
-        },
-      );
-    }, 5000);
-    return () => window.clearInterval(id);
-  }, []);
+  // Crash-recovery autosave (P3.5.4), at the period the editor preferences
+  // hold — `initAutosave` re-arms its interval whenever the setting changes
+  // (Wave E). Failure toasts keep their rate limit. StrictMode-safe.
+  useEffect(() => initAutosave(), []);
 
   // Focus handoff (P2.3.4): the native viewport forwards global-shortcut
   // chords it doesn't consume so the palette/save/etc. keep working while the
@@ -289,6 +286,8 @@ export default function App() {
       <ContentDrawer />
       <StatusBar />
       <LayoutDialog />
+      <PreferencesDialog />
+      <ProjectSettingsDialog />
       <SortingLayersDialog />
       <PackageDialog />
       <ErodeDialog />

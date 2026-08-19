@@ -10,6 +10,14 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// The app-level editor preferences (Wave E batch A).
+///
+/// Re-exported rather than mirrored: the settings file's own struct **is** the
+/// wire type, so a Dto copy cannot drift out of step with the format. The
+/// owner (validation, migration, atomic write) is
+/// [`crate::editor_settings::EditorSettings`].
+pub use crate::editor_settings::EditorSettings;
+
 /// The viewport hole's rectangle in PHYSICAL pixels relative to the window
 /// client area (the frontend multiplies CSS px by `devicePixelRatio`; the
 /// backend rounds to device pixels).

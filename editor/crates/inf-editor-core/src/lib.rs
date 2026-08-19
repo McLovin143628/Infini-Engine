@@ -23,6 +23,10 @@ pub mod groom;
 // P24.3: the Skeleton Editor's Ring-1 half — an editing session over a
 // `SkeletonAsset`, snapshot-undone (see the module docs for why not a journal).
 pub mod diagnostics;
+// Wave E batch A: the app-level (per-user) editor preferences file behind
+// Edit ▸ Editor Preferences… — the sibling of `project_settings`, same
+// absent-default / corrupt-refused / atomic-write doctrine, directory injected.
+pub mod editor_settings;
 pub mod erosion_gpu;
 // Wave G: GIS vector layers become scene entities through the doors that
 // already exist — a stream becomes the same WaterBody+Spline the hydrology tool

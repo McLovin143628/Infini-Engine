@@ -3,10 +3,11 @@
  * the shell's core panels. The state machine lives here (headless-testable);
  * `shell/FirstRunTour.tsx` renders it.
  *
- * Persistence follows the `lib/theme.ts` pattern — a single localStorage key
- * (`infinity:tourSeen`), read/written in try/catch so headless/detached-window
- * contexts never throw. No implicit persist middleware, so what's saved (and
- * when) stays auditable per the `stores/index.ts` convention.
+ * Persistence is the app-level settings file (`tour_seen` in
+ * `editor-settings.toml`) since Wave E; the old `infinity:tourSeen`
+ * localStorage key is folded in once by `lib/settingsApply.ts`. No implicit
+ * persist middleware, so what's saved (and when) stays auditable per the
+ * `stores/index.ts` convention.
  *
  * When does it run? It DEFERS until the first project is open: before that the
  * StartScreen overlay covers the shell and none of the tour's anchors
@@ -15,7 +16,7 @@
  */
 import { create } from "zustand";
 
-const SEEN_KEY = "infinity:tourSeen";
+import { useSettingsStore } from "./settingsStore";
 
 export interface TourStep {
   id: string;
@@ -83,21 +84,23 @@ export const TOUR_STEPS: TourStep[] = [
   },
 ];
 
-/** Has the user already seen (or dismissed) the first-run tour? */
+/**
+ * Has the user already seen (or dismissed) the first-run tour?
+ *
+ * Since Wave E the flag lives in the app-level settings FILE, not in
+ * `localStorage` (the old `infinity:tourSeen` key is folded in once by
+ * `lib/settingsApply.ts`). **Unloaded settings read as "seen"**: the tour is
+ * suppressed until the file has answered, so a slow load can never flash the
+ * tour at someone who dismissed it a year ago. `maybeAutostart` is re-checked
+ * when the settings load, so the genuine first run still gets it.
+ */
 export function tourSeen(): boolean {
-  try {
-    return localStorage.getItem(SEEN_KEY) === "1";
-  } catch {
-    return false;
-  }
+  const s = useSettingsStore.getState();
+  return !s.loaded || s.settings.tour_seen;
 }
 
 function markSeen(): void {
-  try {
-    localStorage.setItem(SEEN_KEY, "1");
-  } catch {
-    // headless / storage-denied — non-fatal.
-  }
+  useSettingsStore.getState().patch({ tour_seen: true });
 }
 
 interface TourState {
@@ -150,10 +153,9 @@ export const useTourStore = create<TourState>((set, get) => ({
 
 /** Test hook: reset the store and clear the persisted seen flag. */
 export function __resetTourForTest(): void {
-  try {
-    localStorage.removeItem(SEEN_KEY);
-  } catch {
-    // ignore
-  }
+  useSettingsStore.setState((s) => ({
+    loaded: true,
+    settings: { ...s.settings, tour_seen: false },
+  }));
   useTourStore.setState({ active: false, step: 0 });
 }

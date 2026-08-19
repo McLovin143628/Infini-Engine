@@ -33,13 +33,16 @@ import type { VoxelToolKindDto } from "../bindings/VoxelToolKindDto";
 import type { ViewModeDto } from "../bindings/ViewModeDto";
 import type { ViewportModeDto } from "../bindings/ViewportModeDto";
 import { useSceneStore } from "./sceneStore";
+import { useSettingsStore } from "./settingsStore";
 import { useShellStore } from "./shellStore";
 
-/** localStorage key for the persisted 3D gizmo snap settings (Wave 2). */
-const SNAP3D_KEY = "inf.viewport.snap3d";
-
-/** localStorage key for the persisted foliage brush settings (E-P6). */
-const FOLIAGE_KEY = "inf.viewport.foliage";
+// The 3D snap increments and the foliage brush used to persist as two ad-hoc
+// `localStorage` blobs (`inf.viewport.snap3d`, `inf.viewport.foliage`) with no
+// schema, no version and no corruption law. Wave E folded both into the
+// app-level settings FILE (`editor-settings.toml`); `settingsApply.ts` migrates
+// the old keys once and pushes the file's values back through the two
+// `apply*FromSettings` doors below. The legacy key names live in that migration
+// and nowhere else.
 
 /** Radius clamp (world metres) and the multiplicative `[` / `]` nudge factor. */
 export const SCULPT_RADIUS_MIN = 0.5;
@@ -320,11 +323,24 @@ function foliageDto(s: ViewportUiState): FoliageSettingsDto {
 function pushFoliage(s: ViewportUiState): void {
   const dto = foliageDto(s);
   void viewport.setFoliage(dto).catch(() => {});
-  try {
-    localStorage.setItem(FOLIAGE_KEY, JSON.stringify(dto));
-  } catch {
-    // ignore quota / privacy-mode failures
-  }
+  useSettingsStore.getState().patch({ foliage: dto });
+}
+
+/**
+ * Apply foliage settings that arrived FROM the settings file: set the store and
+ * push to the native viewport, without writing back (that would be a loop).
+ * The one door `settingsApply.ts` uses.
+ */
+export function applyFoliageFromSettings(dto: FoliageSettingsDto): void {
+  useViewportStore.setState({
+    foliageRadius: dto.radius,
+    foliageDensity: dto.density,
+    foliageErase: dto.erase,
+    foliageKind: dto.kind,
+    foliageScaleJitter: dto.scale_jitter,
+    foliageSeed: dto.seed,
+  });
+  void viewport.setFoliage(dto).catch(() => {});
 }
 
 /** Send the current biome brush settings to the native viewport (P19.2).
@@ -413,11 +429,18 @@ function snap3dDto(s: ViewportUiState): Snap3DDto {
 function pushSnap3d(s: ViewportUiState): void {
   const dto = snap3dDto(s);
   void viewport.setSnap3d(dto).catch(() => {});
-  try {
-    localStorage.setItem(SNAP3D_KEY, JSON.stringify(dto));
-  } catch {
-    // ignore quota / privacy-mode failures
-  }
+  useSettingsStore.getState().patch({ snap_3d: dto });
+}
+
+/** The snap twin of {@link applyFoliageFromSettings} — settings in, no write back. */
+export function applySnap3dFromSettings(dto: Snap3DDto): void {
+  useViewportStore.setState({
+    snap3dEnabled: dto.always_on,
+    snap3dTranslate: dto.translate,
+    snap3dRotate: dto.rotate_deg,
+    snap3dScale: dto.scale,
+  });
+  void viewport.setSnap3d(dto).catch(() => {});
 }
 
 export const useViewportStore = create<ViewportUiState>((set, get) => ({
@@ -861,42 +884,13 @@ export function initViewportSync(): () => void {
   };
   reload();
 
-  // Restore the persisted 3D gizmo snap settings and push them to the viewport
-  // (Wave 2). Malformed / absent storage falls back to the store defaults.
-  try {
-    const raw = localStorage.getItem(SNAP3D_KEY);
-    if (raw) {
-      const p = JSON.parse(raw) as Partial<Snap3DDto>;
-      useViewportStore.setState({
-        snap3dEnabled: typeof p.always_on === "boolean" ? p.always_on : false,
-        snap3dTranslate: typeof p.translate === "number" ? p.translate : 1,
-        snap3dRotate: typeof p.rotate_deg === "number" ? p.rotate_deg : 15,
-        snap3dScale: typeof p.scale === "number" ? p.scale : 0.1,
-      });
-    }
-  } catch {
-    // ignore parse / access failures
-  }
+  // The 3D snap increments and the foliage brush now come from the app-level
+  // settings file, applied through `applySnap3dFromSettings` /
+  // `applyFoliageFromSettings` by `lib/settingsApply.ts` as soon as the file
+  // loads (and again on every change). What remains here is arming the native
+  // side with the store's current values, so a viewport that (re)attaches
+  // before the settings resolve is never left unconfigured.
   void viewport.setSnap3d(snap3dDto(useViewportStore.getState())).catch(() => {});
-
-  // Restore the persisted foliage brush settings (E-P6). Malformed / absent
-  // storage falls back to the store defaults.
-  try {
-    const raw = localStorage.getItem(FOLIAGE_KEY);
-    if (raw) {
-      const p = JSON.parse(raw) as Partial<FoliageSettingsDto>;
-      useViewportStore.setState({
-        foliageRadius: typeof p.radius === "number" ? p.radius : 3,
-        foliageDensity: typeof p.density === "number" ? p.density : 0.4,
-        foliageErase: typeof p.erase === "boolean" ? p.erase : false,
-        foliageKind: typeof p.kind === "number" ? p.kind : 0,
-        foliageScaleJitter: typeof p.scale_jitter === "number" ? p.scale_jitter : 0.2,
-        foliageSeed: typeof p.seed === "number" ? p.seed : 1,
-      });
-    }
-  } catch {
-    // ignore parse / access failures
-  }
   void viewport.setFoliage(foliageDto(useViewportStore.getState())).catch(() => {});
 
   let disposed = false;

@@ -26,6 +26,10 @@ interface ShellState {
   characterWizardOpen: boolean;
   /** Capture wizard open (File ▸ Capture from Photographs…, P25.4). */
   captureWizardOpen: boolean;
+  /** Editor Preferences dialog open (Edit ▸ Editor Preferences… / gear, Wave E). */
+  preferencesOpen: boolean;
+  /** Project Settings dialog open (Edit ▸ Project Settings…, Wave E). */
+  projectSettingsOpen: boolean;
   /** Content Drawer slide-up (P1.4.3). */
   drawerOpen: boolean;
   /** Command palette overlay (P1.4.5). */
@@ -40,6 +44,8 @@ interface ShellState {
   setTerrainImportOpen: (open: boolean) => void;
   setCharacterWizardOpen: (open: boolean) => void;
   setCaptureWizardOpen: (open: boolean) => void;
+  setPreferencesOpen: (open: boolean) => void;
+  setProjectSettingsOpen: (open: boolean) => void;
   setDrawerOpen: (open: boolean) => void;
   toggleDrawer: () => void;
   setPaletteOpen: (open: boolean) => void;
@@ -56,6 +62,8 @@ export const useShellStore = create<ShellState>((set) => ({
   terrainImportOpen: false,
   characterWizardOpen: false,
   captureWizardOpen: false,
+  preferencesOpen: false,
+  projectSettingsOpen: false,
   drawerOpen: false,
   paletteOpen: false,
   pushStatus: (message, ttlMs = 4000) => {
@@ -75,6 +83,8 @@ export const useShellStore = create<ShellState>((set) => ({
   setTerrainImportOpen: (terrainImportOpen) => set({ terrainImportOpen }),
   setCharacterWizardOpen: (characterWizardOpen) => set({ characterWizardOpen }),
   setCaptureWizardOpen: (captureWizardOpen) => set({ captureWizardOpen }),
+  setPreferencesOpen: (preferencesOpen) => set({ preferencesOpen }),
+  setProjectSettingsOpen: (projectSettingsOpen) => set({ projectSettingsOpen }),
   setDrawerOpen: (drawerOpen) => set({ drawerOpen }),
   toggleDrawer: () => set((s) => ({ drawerOpen: !s.drawerOpen })),
   setPaletteOpen: (paletteOpen) => set({ paletteOpen }),

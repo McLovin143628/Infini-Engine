@@ -1,9 +1,13 @@
 /**
  * Keybinding registry (ROADMAP P1.4.5). Chords are normalized strings —
  * `"Ctrl+Shift+P"`, `"F11"`, `"Ctrl+Space"` — mapped to command ids and
- * dispatched through the command registry. Rebinding UI + persistence
- * arrive with editor preferences (P5); Phase 1 ships the registry and the
- * default map.
+ * dispatched through the command registry.
+ *
+ * The Phase-1 promise that "rebinding UI + persistence arrive with editor
+ * preferences" is kept by Wave E: {@link DEFAULT_KEYBINDINGS} is the shipped
+ * table, `editor-settings.toml` stores only the user's OVERRIDES, and
+ * {@link applyKeybindingOverrides} composes the two. The live map is still a
+ * process-lifetime `Map` — it is a projection of the file, never the record.
  */
 import { executeCommand } from "./commands";
 
@@ -47,22 +51,63 @@ export function allKeybindings(): Keybinding[] {
   return [...bindings.values()];
 }
 
-/** The Phase 1 defaults (grows with each phase's commands). */
-export function registerDefaultKeybindings(): void {
-  bindKey({ chord: "Ctrl+Shift+P", command: "tools.commandPalette", allowInInputs: true });
-  bindKey({ chord: "Ctrl+Space", command: "window.contentDrawer" });
-  bindKey({ chord: "F11", command: "window.fullscreen" });
-  bindKey({ chord: "Ctrl+S", command: "file.saveLevel" });
-  bindKey({ chord: "Ctrl+Alt+S", command: "file.saveLevelAs" });
-  bindKey({ chord: "Ctrl+Shift+S", command: "file.saveAll" });
-  bindKey({ chord: "Ctrl+Z", command: "edit.undo" });
-  bindKey({ chord: "Ctrl+Y", command: "edit.redo" });
+/**
+ * The shipped default chords (grows with each phase's commands).
+ *
+ * Data, not code, since Wave E: the Preferences dialog renders this list beside
+ * the user's overrides and "Reset" means "delete the override", so the day a
+ * default changes every user gets it — an override file that copied the whole
+ * table would freeze the defaults of the version that wrote it.
+ */
+export const DEFAULT_KEYBINDINGS: readonly Keybinding[] = [
+  { chord: "Ctrl+Shift+P", command: "tools.commandPalette", allowInInputs: true },
+  { chord: "Ctrl+Space", command: "window.contentDrawer" },
+  { chord: "F11", command: "window.fullscreen" },
+  { chord: "Ctrl+S", command: "file.saveLevel" },
+  { chord: "Ctrl+Alt+S", command: "file.saveLevelAs" },
+  { chord: "Ctrl+Shift+S", command: "file.saveAll" },
+  { chord: "Ctrl+Z", command: "edit.undo" },
+  { chord: "Ctrl+Y", command: "edit.redo" },
   // Scene clipboard + duplicate (editor seams). The listener skips editable
   // targets, so these never steal Ctrl+C/X/V from text fields.
-  bindKey({ chord: "Ctrl+D", command: "edit.duplicate" });
-  bindKey({ chord: "Ctrl+C", command: "edit.copy" });
-  bindKey({ chord: "Ctrl+X", command: "edit.cut" });
-  bindKey({ chord: "Ctrl+V", command: "edit.paste" });
+  { chord: "Ctrl+D", command: "edit.duplicate" },
+  { chord: "Ctrl+C", command: "edit.copy" },
+  { chord: "Ctrl+X", command: "edit.cut" },
+  { chord: "Ctrl+V", command: "edit.paste" },
+  // Wave E: the object-editor routing (Actor ▸ Edit …) and rename.
+  { chord: "F2", command: "actor.rename" },
+] as const;
+
+/** Install the defaults (dropping any overrides currently in force). */
+export function registerDefaultKeybindings(): void {
+  bindings.clear();
+  for (const b of DEFAULT_KEYBINDINGS) bindKey({ ...b });
+}
+
+/**
+ * Rebuild the live map as `defaults + overrides` (Wave E).
+ *
+ * `overrides` is chord → command id, straight out of `editor-settings.toml`.
+ * An **empty** command id means "this chord is unbound" — that is how a user
+ * removes a default without the file having to enumerate the defaults it keeps.
+ *
+ * `allowInInputs` is inherited from the default binding of the SAME COMMAND, so
+ * rebinding the palette to another chord keeps working inside a text field.
+ * Rebuilding from scratch (rather than mutating) is what makes this idempotent:
+ * applying overrides twice, or applying a smaller set after a larger one, always
+ * lands on exactly `defaults + overrides`.
+ */
+export function applyKeybindingOverrides(overrides: Record<string, string>): void {
+  registerDefaultKeybindings();
+  for (const [chord, command] of Object.entries(overrides)) {
+    if (!chord) continue;
+    if (!command) {
+      unbindKey(chord);
+      continue;
+    }
+    const inherited = DEFAULT_KEYBINDINGS.find((b) => b.command === command)?.allowInInputs;
+    bindKey({ chord, command, ...(inherited ? { allowInInputs: true } : {}) });
+  }
 }
 
 /**

@@ -28,7 +28,19 @@ import { useTourStore } from "../stores/tourStore";
  * duplicate are now live too (scene clipboard, editor seams). This table is kept
  * as the mechanism for the handful that remain genuinely unbuilt.
  */
-const STUB_HINTS: [RegExp, string][] = [];
+const STUB_HINTS: [RegExp, string][] = [
+  // Wave E: the two settings surfaces that ARE built now say so by being live.
+  // These two are genuinely unbuilt, and the honest message names what exists
+  // instead of "is not implemented yet".
+  [
+    /^edit\.plugins$/,
+    "There is no plugin manager yet — game modules are cargo crates in the project workspace (see the Explorer panel).",
+  ],
+  [
+    /^platforms\.packagingSettings$/,
+    "Packaging options live in the Package Project dialog (Build ▸ Package Project…); a persisted per-platform settings page is not built yet.",
+  ],
+];
 
 export function stubHint(id: string): string | undefined {
   return STUB_HINTS.find(([re]) => re.test(id))?.[1];
@@ -91,6 +103,20 @@ export function bootstrapShellCommands(): void {
   setCommandHandler("window.sortingLayers", () => {
     useShellStore.getState().setSortingLayersOpen(true);
   });
+
+  // Settings, end to end (Wave E). Both of these were enumerated with no
+  // handler since Phase 1 — the toolbar gear and Edit ▸ Editor Preferences…
+  // reached the unhandled hook and toasted "is not implemented yet".
+  setCommandHandler("edit.editorPreferences", () => {
+    useShellStore.getState().setPreferencesOpen(true);
+  });
+  setCommandHandler("edit.projectSettings", () => {
+    useShellStore.getState().setProjectSettingsOpen(true);
+  });
+
+  // The audio mixer panel has been registered since P12.4 and was reachable
+  // from nowhere (no menu entry, no command, no drawer path).
+  setCommandHandler("window.audioMixer", panelToggle("audioMixer"));
 
   // Cook / Package dialog (P9.2). Both Build entries open the same dialog — the
   // backend command IS the cook (a `.inf_pack` + manifest); per-platform bundling

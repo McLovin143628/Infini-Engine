@@ -292,6 +292,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         collision_layers::collision_layers_set,
         settings::project_settings_get,
         settings::project_settings_set,
+        settings::editor_settings_get,
+        settings::editor_settings_set,
         project::project_templates,
         project::project_recent,
         project::project_current,

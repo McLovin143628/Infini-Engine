@@ -69,6 +69,7 @@ import type { GeoAnchorDto } from "../bindings/GeoAnchorDto";
 import type { PackageErrorDto } from "../bindings/PackageErrorDto";
 import type { PackageResultDto } from "../bindings/PackageResultDto";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
+import type { EditorSettings } from "../bindings/EditorSettings";
 import type { ProjectSettingsDto } from "../bindings/ProjectSettingsDto";
 import type { ProjectTemplateDto } from "../bindings/ProjectTemplateDto";
 import type { PropValueDto } from "../bindings/PropValueDto";
@@ -123,6 +124,7 @@ export type {
   DataFieldDto,
   DeleteResult,
   DetailsDto,
+  EditorSettings,
   FileEntryDto,
   GitStatusDto,
   LayoutSummary,
@@ -477,6 +479,22 @@ export const projectSettings = {
   get: (): Promise<ProjectSettingsDto> => invoke<ProjectSettingsDto>("project_settings_get"),
   set: (settings: ProjectSettingsDto): Promise<ProjectSettingsDto> =>
     invoke<ProjectSettingsDto>("project_settings_set", { settings }),
+};
+
+/**
+ * App-level (per-user) editor preferences (Wave E): theme, autosave period,
+ * camera + viewport-interaction feel, snap/foliage brush defaults and keybinding
+ * overrides, persisted as `<app config>/editor-settings.toml`.
+ *
+ * `get` REJECTS on a corrupt file rather than resolving to defaults (C4-38) —
+ * the store keeps its in-memory values and surfaces the message. `set` returns
+ * the NORMALIZED settings (every scalar finite and in range); the store
+ * hydrates from the reply, never from what it sent.
+ */
+export const editorSettings = {
+  get: (): Promise<EditorSettings> => invoke<EditorSettings>("editor_settings_get"),
+  set: (settings: EditorSettings): Promise<EditorSettings> =>
+    invoke<EditorSettings>("editor_settings_set", { settings }),
 };
 
 /**

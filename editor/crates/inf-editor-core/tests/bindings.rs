@@ -179,6 +179,10 @@ fn export_bindings() {
     RiverBedConflictDto::export_all(&cfg).expect("export RiverBedConflictDto");
     RiverReportDto::export_all(&cfg).expect("export RiverReportDto");
     ProjectSettingsDto::export_all(&cfg).expect("export ProjectSettingsDto");
+    // Wave E batch A: the app-level preferences file. `export_all` also emits
+    // its two nested tables (`Snap3DDto`, `FoliageSettingsDto`), which are
+    // rooted above in their own right.
+    inf_editor_core::ipc::EditorSettings::export_all(&cfg).expect("export EditorSettings");
     ErosionParamsDto::export_all(&cfg).expect("export ErosionParamsDto");
     ErosionReportDto::export_all(&cfg).expect("export ErosionReportDto");
     DataMapExportDto::export_all(&cfg).expect("export DataMapExportDto");

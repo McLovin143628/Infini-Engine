@@ -119,6 +119,8 @@ export const MENU_BAR: TopMenu[] = [
       act("window.sequencer", "Sequencer"),
       act("window.stateMachine", "State Machine"),
       act("window.blendSpace", "Blend Space"),
+      // Registered since P12.4 and reachable from nowhere until Wave E.
+      act("window.audioMixer", "Audio Mixer"),
       act("window.sortingLayers", "Sorting Layers…"),
       sep,
       sub("Load Layout", [
