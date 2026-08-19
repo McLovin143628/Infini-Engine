@@ -365,31 +365,57 @@ mod tests {
     ///
     /// So this is not a feature; it is the alarm that says the feature is now
     /// needed, which is the honest answer to a prescription whose premise the
-    /// engine has not reached. It fails the day a pyramid is registered whose
-    /// mip-0 extent needs more precision than an `f32` uv can carry — and the
-    /// bound it asserts is derived from the mantissa rather than remembered, so
-    /// nobody has to maintain a number.
+    /// engine has not reached.
+    ///
+    /// # What it does and does not watch (corrected by the Wave-T audit)
+    ///
+    /// It is a **constants** tripwire, not a registration one, and the first
+    /// draft of this comment claimed the second. It fires the day someone widens
+    /// the atlas slot field or the tile size past the point where a *resident*
+    /// address space out-resolves an `f32` uv.
+    ///
+    /// It does **not** fire on a registration, and it cannot: `VtTextureDesc`'s
+    /// only depth bound is [`crate::MAX_VT_MIPS`] (32 halvings), so the
+    /// descriptor layer would accept a 2³¹-texel pyramid — a hundred times past
+    /// what an `f32` uv resolves — and nothing in `validate` says otherwise. The
+    /// second assertion below pins that gap open rather than hiding it, so the
+    /// reason this item is *latent* is written down as what it actually is:
+    /// **no content this project can produce is anywhere near the limit** (an
+    /// import decodes a real image file, and `DEFAULT_MAX_TEXTURE_DIM` is 8 192),
+    /// not a structural refusal. A structural refusal is the work the two-`u32`
+    /// path lands with.
     #[test]
     fn an_f32_uv_still_addresses_every_texel_of_the_largest_legal_pyramid() {
         // A texel step at extent `w` is `1/w` in uv; the finest uv step an f32
         // resolves near 1.0 is 2^-23. So `w` texels are separately addressable
         // while `w <= 2^23`.
         const F32_UV_LIMIT: u32 = 1 << 23;
-        // What the engine can actually register today: an atlas dimension of
-        // 8 192 texels caps a single texture's mip 0 at nothing in particular,
-        // but the *virtual* extent is bounded by the tile grid a 16-bit slot
-        // index can address — 65 536 slots of 128 payload texels a side.
-        let addressable_virtual_extent = (MAX_SLOT_INDEX + 1) * 128;
+        // The **resident** address space: 65 536 atlas slots of 128 payload
+        // texels a side is the largest grid a 16-bit slot index can name at once.
+        let resident_extent = (MAX_SLOT_INDEX + 1) * 128;
         assert!(
-            addressable_virtual_extent <= F32_UV_LIMIT,
-            "a virtual texture can now be {addressable_virtual_extent} texels \
-             across, which an f32 uv cannot address to the texel ({F32_UV_LIMIT} \
-             is the mantissa's limit). This is the day the texture document's \
-             two-u32 UV path (integer page + fractional tile offset) has to be \
-             built — see docs/memos/wave-t-textures-disposition.md, item T44"
+            resident_extent <= F32_UV_LIMIT,
+            "the resident address space is now {resident_extent} texels across, \
+             which an f32 uv cannot address to the texel ({F32_UV_LIMIT} is the \
+             mantissa's limit). This is the day the texture document's two-u32 \
+             UV path (integer page + fractional tile offset) has to be built — \
+             see docs/memos/wave-t-textures-disposition.md, item T44"
         );
         // ANTI-VACUITY: the bound is not trivially true by a huge margin that
         // hides a mistake in the arithmetic — it is exactly one power of two.
-        assert_eq!(addressable_virtual_extent, 1 << 23);
+        assert_eq!(resident_extent, 1 << 23);
+
+        // **The gap, pinned open.** The descriptor layer is *not* what keeps a
+        // pyramid inside the f32 uv: 32 halvings is a 2^31 mip 0, and `validate`
+        // has no extent rule at all. Asserted as an inequality in the direction
+        // that is true, so this arm states the honest shape of T44 instead of
+        // implying a guard that does not exist.
+        let descriptor_ceiling: u64 = 1u64 << (crate::MAX_VT_MIPS - 1);
+        assert!(
+            descriptor_ceiling > u64::from(F32_UV_LIMIT),
+            "MAX_VT_MIPS now bounds a pyramid below the f32 uv limit, which \
+             would make T44 structurally impossible rather than merely absent — \
+             a good change, and one that should retire this comment"
+        );
     }
 }

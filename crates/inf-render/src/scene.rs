@@ -133,6 +133,12 @@ impl VtTextureSet {
     /// 16 bits would otherwise corrupt the *detail* slot rather than merely
     /// itself, which is the kind of failure that reads as a texture bug in a
     /// different material.
+    ///
+    /// **This is the GPU's question, and it is not the streamer's.** A packed
+    /// word is not a slot — `word - 1` is not a texture handle once the top half
+    /// carries a detail lane. Anything asking *"which textures does this surface
+    /// name"* wants [`handles`](Self::handles); see the Wave-T audit note there
+    /// for what the two being one function cost.
     #[inline]
     pub fn slots(&self) -> [u32; 3] {
         const M: u32 = 0xFFFF;
@@ -141,6 +147,29 @@ impl VtTextureSet {
             (self.normal & M) | ((self.detail_scale_q8 as u32) << 16),
             self.orm & M,
         ]
+    }
+
+    /// **The texture slots this set names**, unpacked — `handle + 1` each, `0`
+    /// for a slot that names nothing, and the detail map among them.
+    ///
+    /// The door for every consumer that wants *textures* rather than *instance
+    /// words*: the streamer's analytic wants and the feedback request list both
+    /// turn a slot into `VtTextureHandle(slot - 1)`, and a packed word is not a
+    /// slot.
+    ///
+    /// **Wave T audit (the defect this exists to close).** Both of those loops
+    /// read [`slots`](Self::slots). The moment a material bound a detail map,
+    /// word 0 became `albedo | (detail << 16)` and word 1
+    /// `normal | (scale << 16)`, so `slot - 1` named a handle far past the
+    /// registry, `res.desc` answered `None`, and the surface's **albedo and
+    /// normal silently stopped being requested** by both lanes — while the
+    /// detail map, which is in neither word as a bare slot, was never requested
+    /// at all. Everything fell back to the pinned floor and stayed at its
+    /// coarsest three levels for ever. The two questions are now two functions,
+    /// which is the only arrangement in which neither can be asked by mistake.
+    #[inline]
+    pub fn handles(&self) -> [u32; 4] {
+        [self.albedo, self.normal, self.orm, self.detail]
     }
 }
 

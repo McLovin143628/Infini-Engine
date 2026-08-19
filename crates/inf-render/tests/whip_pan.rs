@@ -219,7 +219,10 @@ fn justified_tiles(
         if !on_screen(&view_proj, c.centre, c.radius, ndc_margin(px, half_h)) {
             continue;
         }
-        for slot in c.set.slots() {
+        // `handles`, not `slots` — the twin follows the shipped function, and
+        // the shipped function stopped reading packed instance words in the
+        // Wave-T audit (see `VtTextureSet::handles`).
+        for slot in c.set.handles() {
             if slot == 0 {
                 continue;
             }

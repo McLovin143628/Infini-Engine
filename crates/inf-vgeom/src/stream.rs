@@ -1614,6 +1614,13 @@ mod tests {
     /// which is the half this arm exists for: a v3 page has no materials section,
     /// and leaving `group` in place would hand the shader a group index the
     /// moment anything read the word.
+    ///
+    /// **Wave-T audit: this arm runs `stage_page`.** Its first draft copied the
+    /// staging loop into the test body, so deleting the write from the shipped
+    /// function changed nothing anywhere in the workspace — the arm agreed with
+    /// itself. It now goes through [`VgeomStreamer::plan`], which is the only
+    /// public door a `PageUpload` exists behind, so the bytes asserted below are
+    /// the bytes the pool is written from.
     #[test]
     fn the_staged_meshlet_record_carries_its_material_slot() {
         use crate::asset::{build_vgeom_asset, ClusterTextureSet, MeshletRec, VgeomAssetReader};
@@ -1629,27 +1636,35 @@ mod tests {
             .unwrap()
             .into_bytes();
 
-        let stage = |bytes: &[u8]| -> Vec<Vec<u32>> {
-            let r = VgeomAssetReader::new(bytes).unwrap();
-            (0..r.pages().len())
-                .map(|p| {
-                    let s = r.page_sections(p).unwrap();
-                    let mut recs = s.meshlets.to_vec();
-                    for (i, rec) in bytemuck::cast_slice_mut::<u8, MeshletRec>(&mut recs)
-                        .iter_mut()
-                        .enumerate()
-                    {
-                        rec.group = s.materials.get(i).copied().unwrap_or(0);
-                    }
-                    bytemuck::cast_slice::<u8, MeshletRec>(&recs)
+        /// Page the payload in through the **shipped** streamer and read the
+        /// material word out of every staged meshlet record.
+        fn stage(bytes: &[u8]) -> Vec<u32> {
+            let src = VgeomSource::from_payload(bytes.to_vec()).expect("the payload opens");
+            let mut s = VgeomStreamer::new(VgeomStreamBudget::default());
+            let plan = s.plan(&[VgeomWant {
+                asset: 1,
+                source: &src,
+                threshold: 0.0,
+            }]);
+            assert_eq!(
+                plan.uploads.len(),
+                src.pages().len(),
+                "an unlimited budget must page the whole source in one plan, or \
+                 this arm is about a subset of it"
+            );
+            assert!(plan.failed.is_empty(), "{:?}", plan.failed);
+            plan.uploads
+                .iter()
+                .flat_map(|u| {
+                    bytemuck::cast_slice::<u8, MeshletRec>(&u.meshlets)
                         .iter()
                         .map(|r| r.group)
-                        .collect()
+                        .collect::<Vec<_>>()
                 })
                 .collect()
-        };
+        }
 
-        let got: Vec<u32> = stage(&tagged).into_iter().flatten().collect();
+        let got: Vec<u32> = stage(&tagged);
         let mut sorted = got.clone();
         sorted.sort_unstable();
         let mut want = mesh.meshlet_materials.clone();
@@ -1662,7 +1677,7 @@ mod tests {
 
         // The v3 arm: a page with no materials section stages ZERO, never the
         // group index it carries on disk.
-        let zeros: Vec<u32> = stage(&plain).into_iter().flatten().collect();
+        let zeros: Vec<u32> = stage(&plain);
         assert!(
             zeros.iter().all(|&s| s == 0),
             "a v3 page staged a non-zero material slot — the group index leaked \

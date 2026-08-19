@@ -88,7 +88,8 @@ pub struct VtCoverage {
     pub centre: Vec3,
     /// Bounding-sphere radius (metres).
     pub radius: f32,
-    /// The three slots this surface samples (`handle + 1`, 0 = none).
+    /// The textures this surface samples (`handle + 1`, 0 = none). Read here
+    /// through `VtTextureSet::handles`, never `slots` — see that function.
     pub set: VtTextureSet,
     /// Whether this surface is drawn by the **meshlet** path (P28.1).
     ///
@@ -481,7 +482,10 @@ pub fn camera_wants(
         if !on_screen(&view_proj, c.centre, c.radius, ndc_margin(px, half_h)) {
             continue;
         }
-        for slot in c.set.slots() {
+        // `handles`, NOT `slots` — see `VtTextureSet::handles`. A packed
+        // instance word is not a texture slot, and reading one here made a
+        // surface with a detail map stop requesting its own albedo.
+        for slot in c.set.handles() {
             if slot == 0 {
                 continue;
             }
@@ -624,7 +628,8 @@ pub fn feedback_requests(
         if skip_vgeom && c.vgeom {
             continue;
         }
-        for slot in c.set.slots() {
+        // `handles`, NOT `slots` — see `VtTextureSet::handles`.
+        for slot in c.set.handles() {
             if slot == 0 {
                 continue;
             }

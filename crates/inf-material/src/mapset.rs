@@ -267,6 +267,37 @@ pub fn plan_map_set(files: &[String], float_sources: &[bool]) -> MapSetPlan {
         }
     }
     plan.base_name = bases.first().cloned().unwrap_or_default();
+    // **TIFF is refused BY NAME** (Wave-T audit). `.tif` falls out of
+    // `classify_map` for a reason that has nothing to do with its suffix — the
+    // workspace's `image` pin does not enable the `tiff` feature — so landing it
+    // in `unrecognised` beside a genuinely unnamed map tells the author the one
+    // thing that is not true about it. Megascans ships 16-bit displacement as
+    // `.tif` routinely, so this is the common case rather than an exotic one.
+    // The disposition memo's CANNOT 4.12 says the planner refuses these by name;
+    // this is that sentence.
+    let tiffs: Vec<&String> = plan
+        .unrecognised
+        .iter()
+        .filter(|f| {
+            let (_, ext) = split_name(f);
+            ext == "tif" || ext == "tiff"
+        })
+        .collect();
+    if !tiffs.is_empty() {
+        plan.advisories.push(format!(
+            "{} of these are TIFF ({}), which this build cannot decode at all — the workspace's \
+             `image` pin does not enable the `tiff` feature, and enabling it is a \
+             dependency-surface decision (docs/memos/wave-t-textures-disposition.md, 4.12). \
+             Convert them to PNG or EXR before importing; they are NOT missing a recognised \
+             suffix",
+            tiffs.len(),
+            tiffs
+                .iter()
+                .map(|f| f.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     if bases.len() > 1 {
         plan.advisories.push(format!(
             "these files carry {} different base names ({}); they are being imported as one \
@@ -441,6 +472,46 @@ mod tests {
         // …but a bare suffix IS the whole stem, which is how a per-material
         // folder ("Rock/Albedo.png") is laid out.
         assert_eq!(classify_map("Albedo.png").unwrap().1, MapKind::Albedo);
+    }
+
+    /// **A TIFF is refused BY NAME, not filed under "unrecognised"** (Wave-T
+    /// audit). Megascans ships 16-bit displacement as `.tif` as a matter of
+    /// course, and the reason this build cannot take one has nothing to do with
+    /// its suffix — so reporting it beside a genuinely unnamed map tells the
+    /// author the one thing that is not true about it. The disposition memo's
+    /// CANNOT 4.12 states the planner names them; this is that sentence.
+    #[test]
+    fn a_tiff_source_is_refused_by_name() {
+        let plan = plan_map_set(
+            &f(&[
+                "rock_cliff_2K_Albedo.jpg",
+                "rock_cliff_2K_Displacement.tif",
+                "rock_cliff_2K_Cavity.TIFF",
+                "notes.txt",
+            ]),
+            &[],
+        );
+        assert_eq!(plan.unrecognised.len(), 3);
+        let tiff: Vec<&String> = plan
+            .advisories
+            .iter()
+            .filter(|a| a.contains("TIFF"))
+            .collect();
+        assert_eq!(tiff.len(), 1, "{:?}", plan.advisories);
+        let a = tiff[0];
+        assert!(
+            a.contains("Displacement.tif") && a.contains("Cavity.TIFF"),
+            "the advisory must name the files: {a}"
+        );
+        assert!(
+            !a.contains("notes.txt"),
+            "a non-image was swept into the TIFF advisory: {a}"
+        );
+        assert!(a.contains("`tiff` feature"), "…and say why: {a}");
+        // ANTI-VACUITY: a set with no TIFF in it earns no such advisory.
+        let clean = plan_map_set(&f(&["rock_cliff_2K_Albedo.jpg", "notes.txt"]), &[]);
+        assert!(clean.advisories.iter().all(|a| !a.contains("TIFF")));
+        assert_eq!(clean.unrecognised, vec!["notes.txt".to_string()]);
     }
 
     /// **Exactly one map in a PBR set is sRGB**, and the normal map is BC5 —

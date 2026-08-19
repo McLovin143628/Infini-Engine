@@ -194,7 +194,17 @@ fn vis_vt_mip(block: u32, ddx: vec2<f32>, ddy: vec2<f32>) -> u32 {
 /// directory's own offset exactly as `vt_feedback.wgsl` derives it — never
 /// re-derived by halving, which `vt_sample.wgsl`'s header measured at 1 322 bad
 /// addresses on a 4095-square pyramid.
-fn vis_mark_tile(slot: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) {
+///
+/// **The argument is a per-instance map WORD, not a bare slot** (Wave-T audit).
+/// Wave T packed a detail lane into the top half of two of these words, and this
+/// function read the whole word — so a surface that bound a detail map computed
+/// `handle = (albedo | detail << 16) - 1`, failed the range check below, and
+/// **stopped marking its own albedo**. On the visbuffer path this producer is
+/// the only per-fragment one there is, so that surface stopped refining
+/// entirely. The mask is the same one `vt_sample.wgsl`'s `VT_SLOT_MASK` applies,
+/// and it is applied here for the same reason.
+fn vis_mark_tile(maps_word: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) {
+    let slot = maps_word & 0xFFFFu;
     if (slot == 0u) {
         return;
     }
@@ -323,6 +333,22 @@ fn cs_feedback(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ddx = uv3[0] * d_dx.x + uv3[1] * d_dx.y + uv3[2] * d_dx.z;
     let ddy = uv3[0] * d_dy.x + uv3[1] * d_dy.y + uv3[2] * d_dy.z;
 
+    // **The detail map is marked too, at its own tiling** (Wave-T audit). It
+    // rides the top half of the first two words — slot in x, 8.8 scale in y,
+    // exactly as `vt_sample.wgsl`'s `vt_detail_slot` / `vt_detail_scale` read
+    // them — and `vt_apply_detail` samples it at `uv * scale`, so it must be
+    // marked at `uv * scale` or the streamer pages the wrong tiles of it. Zero
+    // scale (which is every instance written before Wave T) marks nothing,
+    // because `vis_mark_tile` refuses slot 0 and the slot is zero with it.
+    let detail_scale = f32(inst.vt.y >> 16u) / 256.0;
+    if (detail_scale > 0.0) {
+        vis_mark_tile(
+            inst.vt.x >> 16u,
+            uv * detail_scale,
+            ddx * detail_scale,
+            ddy * detail_scale,
+        );
+    }
     vis_mark_tile(inst.vt.x, uv, ddx, ddy);
     vis_mark_tile(inst.vt.y, uv, ddx, ddy);
     vis_mark_tile(inst.vt.z, uv, ddx, ddy);

@@ -7,15 +7,79 @@ why. This memo is that report.
 
 **Wave commits:** `65f6c57` (formats + HDR), `1e19d82` (the bold three),
 `e3c5509` (the sampler), `3f2815a` (the map-set importer), `ca9559b` (this memo),
-`2f4a1ec` (three review fixes), `17a2a5e` (the GPU proofs).
+`2f4a1ec` (three review fixes), `17a2a5e` (the GPU proofs), plus the audit pass
+below.
 
 **Counts:** 10 SHIPPED · 23 ALREADY-HAD · 4 MET-BY-A-DIFFERENT-MECHANISM ·
 6 DEFERRED · 12 CANNOT.
 Schema: `.inf_tex` v2→**v3**, `.inf_vmesh` v3→**v4**, both stamped only on
-payloads that need them. Scene schema: **unmoved**. Goldens: **54, unmoved**.
-New external dependencies: **zero**.
-Battery: **283 binaries / 5 251 passed / 0 failed / 13 ignored** (from 5 231 —
-the wave added 20 arms and moved none). Frontend untouched.
+payloads that need them. Scene schema: **unmoved**. Goldens: **54, unmoved**
+(verified strict, twice, plus the three independent digest gates).
+New external dependencies: **zero** — `half` is newly *named* by `inf-material`
+but has been pinned in `[workspace.dependencies]` and linked by `inf-terrain`
+since P16, so no crate entered the graph (`Cargo.lock` gains one edge, no
+package). Frontend untouched.
+Battery after the audit: **284 binaries / 5 264 passed / 0 failed / 13 ignored**
+(the audit added ten arms and a test binary; the pre-audit tree measured 5 254 on
+this machine against the 5 251 recorded above, a three-arm discrepancy nobody has
+explained and nothing rests on).
+
+### The audit pass, and what it found
+
+The wave was audited after the fact. **Two defects, seven unproven claims and two
+wrong numbers** were found and closed; the ledger below is corrected where it was
+wrong. Mutation-measured throughout: eighteen mutations were run against the
+wave's tree, breaking one rule each — **nine of them changed no test in the
+workspace**. Every one of the nine fails now, and so do the four that falsify the
+audit's own fixes. What follows is what a reader of this memo needs to know:
+
+* **A detail map stopped its own surface streaming — on all three producers.**
+  `VtTextureSet::slots()` packs the detail lane into the top half of two instance
+  words, and every consumer that turns a slot into a texture handle was reading
+  that packed word: `camera_wants` and `feedback_requests` on the CPU (the
+  analytic and per-surface halves), and `vis_mark_tile` in `vis_feedback.wgsl`
+  on the GPU (the per-FRAGMENT half, which on the visbuffer path is the *only*
+  producer, because the per-surface one is handed over to it). All three
+  computed `handle = (albedo | detail << 16) - 1`, found it past the registry,
+  and gave up. So the moment a material bound a detail map, its **albedo and
+  normal silently stopped being requested**, and the detail map was never
+  requested at all; everything fell back to the pinned floor and stayed at its
+  coarsest three levels for ever. Fixed by splitting the two questions into two
+  functions (`slots()` for the GPU wire, `handles()` for anything asking which
+  textures a surface names) and by masking in the shader; and the per-fragment
+  pass now marks the detail lane at `uv * scale`, where `vt_apply_detail`
+  samples it, because the analytic lane asks at the base uv and would leave a
+  map tiled N times `log2(N)` mips too coarse. Not reachable from any shipped
+  content — nothing in either host binds a detail map yet — but it made §0 A a
+  capability that did not work the first time it was used.
+* **A float import baked infinities and NaNs.** A texel of 70 000 (an ordinary
+  sun disc) narrowed to `+inf` and a NaN stayed a NaN, and the box downsample
+  then carried a *single* poisoned texel to every coarser level of the pyramid
+  up to the 1×1 — which is the level a virtual texture pins resident. The import
+  door now clamps: NaN → 0, overflow → ±65 504, said out loud in the advisory.
+* **Seven claims had nothing measuring them**, each proven free by mutation: the
+  meshlet-material staging arm re-implemented the staging loop instead of calling
+  it (so deleting the shipped write failed nothing); the detail-fade fix was
+  probed at a level of detail where the truncating bug and the continuous fix
+  give the same answer; and `slots()`'s own bit layout, `set_for_maps`'s
+  scale-gate, the whole BC5 `reconstruct_z` seam (container → table flag →
+  shader branch — mutating it to a constant `false`, which lights every BC5
+  normal map backwards, failed no test), and **the entirety of §0 B** had no arm
+  at all. All now falsify.
+* **Two numbers in the ledger below were wrong**, and both are the kind a reader
+  quotes: §4.5 called 12.13 "bilinear" when it is the quincunx control (true
+  bilinear is 11.45 — and mislabelling that column is the exact error the memo
+  it cites was written to correct), and T44's tripwire was described as firing on
+  a registration when it watches two constants. Both corrected in place, with
+  what they are instead.
+* **§0 B's textured branch has still never run on a GPU** — see the honest bound
+  recorded there.
+
+Everything else the memo claimed was checked and held: the goldens (strict,
+twice, plus three digest gates), the schema minimum-version rule in both
+containers and both refusal arms, BC5's size and quality numbers
+(re-measured independently, and widened below), the HDR fixtures' fidelity and
+default-off, the CANNOT list's technical reasons, and "zero new crates".
 
 ---
 
@@ -43,9 +107,26 @@ words that have been zero on every instance ever uploaded. That mattered: the
 skinned pipeline already sits exactly on `max_vertex_attributes: 16`
 (`docs/memos/p26-5-vertex-streams.md`), so a fourth word was not available.
 
+*Why those bits really are free, spelled out because the first write-up got the
+reason nearly right:* a slot is `texture handle + 1`, and the handle is bounded
+not by the atlas slot field but by **root seating** — every registered texture
+pins at least one root page, `register_texture` refuses once the pinned roots
+exceed the atlas's slot count, and that count is itself `≤ MAX_SLOT_INDEX`
+(65 535). So a registry cannot hold more textures than the atlas has slots, and
+`handle + 1` cannot leave 16 bits.
+
+*And the cost that was not zero:* a packed word is **not** a texture slot, and
+the two functions that turn a coverage set into stream requests were reading one.
+See the audit note at the top of this memo, and `VtTextureSet::handles`.
+
 The fade is the detail texture's **own mip pyramid** rather than a distance ramp:
 the weight ramps out across the last two levels, which is correct under a zoom as
-well as a walk and needs no camera, no uniform and no tuning.
+well as a walk and needs no camera, no uniform and no tuning. *(This was one of
+the wave's three late fixes — the weight had been taken from the truncating
+`vt_mip`, making the fade a hard cut. The audit found the fix unmeasured: the
+existing probe ran at a level of detail where a truncated weight and a continuous
+one agree. `the_detail_fade_ramps_across_the_last_two_levels` now probes at a
+**fractional** level, where they cannot, and dies if the truncation returns.)*
 
 **Proven on the GPU, not only validated.** `the_detail_map_reaches_the_surface_and_is_inert_without_one` runs the shipped `vt_surface` in a compute pass and asserts both halves: with the lane zero the surface is identical (which is what makes "the 54 goldens did not move" a measurement), and with it set the normal moves in the direction the detail map's XY says and the roughness is multiplied by its alpha. A detail slot with a ZERO SCALE is asserted inert too, because the slot and the scale are one decision.
 
@@ -85,10 +166,26 @@ half-working:
   four layers carry materials fades into the flat colours of the other two
   instead of darkening toward black.
 
-**Honest bound:** planar XZ projection. A shared ground material stretches on a
-cliff face. The procedural triplanar grain over it does not, so the *break-up* on
-a steep face survives and only the material's own pattern stretches. A triplanar
-layer sample is three times the fetches; it is the named follow-up.
+**Honest bound 1 — the projection:** planar XZ. A shared ground material
+stretches on a cliff face. The procedural triplanar grain over it does not, so
+the *break-up* on a steep face survives and only the material's own pattern
+stretches. A triplanar layer sample is three times the fetches; it is the named
+follow-up.
+
+**Honest bound 2 — this branch has never run on a GPU.** `terrain_layers` calls
+`dpdx`/`dpdy`, which are fragment-stage builtins, so it cannot be driven from the
+compute probe that executes `vt_surface` for §0 A; and nothing in either host
+binds a layer material yet, so no golden covers it either. What *is* measured
+(`crates/inf-render/tests/terrain_layers.rs`, added by the audit): the
+world-anchored uv, with the render-local slide it replaced quantified at
+**2.5 tiles per 10 m snap quantum and hundreds of tiles per real rebase**; the
+1/256 weight gate; the covered-fraction renormalisation; and the `layered.any`
+guard that keeps an untextured terrain instruction-for-instruction what it was —
+each as a CPU twin pinned to the shader by a **scope-extracted** source gate,
+and each verified to fail when its rule is mutated out of the shader. What is
+*not* measured is the sampled result itself. A fragment probe over terrain's four
+bind groups is the work that closes it, and it should land with the
+`TerrainLayer` authoring field (2.4) rather than before it.
 
 **Remainder — the authoring field, again.** `inf_ecs::TerrainLayer` carries no
 texture reference and the scene schema is frozen this wave, so the per-layer
@@ -118,10 +215,16 @@ Two decisions worth reading:
   survives the weld, the cache optimisation and every `simplify` call; a
   triangle's is destroyed by the first one.
 * **The record did not grow by a byte.** The GPU meshlet struct's last word was
-  named `pad` and carried the CPU's `group`, which no shader read. The page-in
-  staging overwrites it with the material slot — unconditionally, so a v3 page
-  stages `0` rather than leaking a group index into a word the shader now reads.
-  A 6 % meshlet-pool inflation was available and was not taken.
+  named `pad` and carried the CPU's `group`, which no shader read (verified: the
+  five WGSL modules declaring the struct name the word and none of them reads
+  it). The page-in staging overwrites it with the material slot —
+  unconditionally, so a v3 page stages `0` rather than leaking a group index into
+  a word the shader now reads. A 6 % meshlet-pool inflation was available and was
+  not taken.
+  *Audit note:* the arm asserting this originally copied the staging loop into
+  its own body, so deleting the write from `stage_page` failed nothing. It now
+  runs the shipped streamer (`VgeomStreamer::plan`) and reads the bytes the pool
+  is written from, and it dies when the write is removed.
 
 **Remainder — the shading consumer.** A meshlet's slot is not yet *used* to pick
 a material, because doing so needs a per-instance material **table** (slot → the
@@ -148,14 +251,14 @@ win and leaves only the host→VRAM leg the DMA engine performs anyway.
 
 | # | Prescription | Where |
 |---|---|---|
-| T13 | Normal maps as two channels with `Z = √(1 − X² − Y²)` rebuilt in the shader | `PageFormat::Bc5`, `vt_normal_ts` |
+| T13 | Normal maps as two channels with `Z = √(1 − X² − Y²)` rebuilt in the shader | `PageFormat::Bc5`, `vt_normal_ts` (executed end to end from a real BC5 container by `a_bc5_normal_map_rebuilds_its_z_through_the_shipped_sampler`, added by the audit — before it, the whole container→table-flag→shader-branch seam had no arm) |
 | T14 | Pack loose AO / roughness / metallic into one ORM image | `inf_material::mapset::pack_orm` |
 | T20 | An importer that consumes a Megascans **set** | `inf_material::mapset::plan_map_set` |
 | T20b | Stop flattening EXR/HDR sources to 8 bits | `PageFormat::Rgba16F`, `TextureImportSettings::hdr` |
 | T25 | **BOLD A** — detail maps | `vt_apply_detail` |
 | T26 | **BOLD B** — layered terrain materials | `terrain_layers()` |
 | T27 | **BOLD C** — per-meshlet material slots | `.inf_vmesh` v4 |
-| T44 | UV precision at 32K+ | a **tripwire**, not a feature: `an_f32_uv_still_addresses_every_texel_of_the_largest_legal_pyramid` |
+| T44 | UV precision at 32K+ | a **tripwire**, not a feature: `an_f32_uv_still_addresses_every_texel_of_the_largest_legal_pyramid`. *Audit correction:* it watches the **constants** (a widened slot field or tile size), not a registration — `VtTextureDesc::validate` has no extent rule at all, so what actually keeps a pyramid inside an `f32` uv today is that no content this project can produce comes near it. The arm now pins that gap open instead of implying a guard |
 | T45a | BC5 for normal maps | `inf_material::bc::compress_bc5` |
 | T47 | Trilinear | `vt_sample`, opt-in behind `VirtualTextureSettings::trilinear` |
 
@@ -187,6 +290,21 @@ in normals; a BC5 path is future work."* It was right — about BC1.
   tangent-space normal field, per-channel mean absolute error on X and Y:
   **BC5 = 0.000, BC1 = 2.849**. BC1's 5:6:5 endpoints quantise the red axis to 32
   levels, and the red axis is where a tangent-space X lives.
+  **That 0.000 is exact for that fixture and it is not a claim that BC5 is
+  lossless** — the qualifier matters, so here is the sweep the audit re-measured
+  independently (same encoder, four fixtures, 64² each, MAE on X and Y):
+
+  | fixture | BC5 | BC1 |
+  |---|---|---|
+  | swept normal field (smooth, ≤4 distinct values a block) | **0.000** | 2.849 |
+  | flat block (the degenerate `a0 == a1` mode) | **0.000** | — |
+  | linear gradient across x | 0.250 | — |
+  | uniform noise, i.e. the worst case for a two-endpoint fit | **7.024** | 51.909 |
+
+  So BC5 is *exact* on data whose per-block range is spanned by its eight
+  interpolated levels — which is what a real tangent-space normal map is almost
+  everywhere — and is still **7× better than BC1** on data that is not. The
+  claim to carry forward is the ratio, not the zero.
 * **The rebuild is not an approximation.** A unit normal's Z is determined by X
   and Y. Measured worst-case error of the rebuilt vector against the source:
   **0.021**, and that worst case is on the rim of the unit disc where
@@ -227,6 +345,19 @@ RGBA16F deliberately does **not** need `TEXTURE_COMPRESSION_BC`, so an adapter
 without BC keeps it whole rather than being handed a transcode that would clamp
 exactly the range the format exists to carry; `TiledTextureReader::tile_rgba8`
 refuses a float page for the same reason.
+
+**The ceiling, which the first write-up did not state** (audit). A half is not an
+`f32`: it stops at **65 504**, and `half::f16::from_f32` is faithful about it —
+a texel of 70 000, an ordinary sun disc in a captured sky, became `+inf`, and a
+NaN stayed a NaN. Both were stored, and then `rgba16f_mip_chain` averaged them,
+so **one bad texel made every coarser level of the pyramid NaN**, up to and
+including the 1×1 — which is exactly the level a virtual texture pins resident
+and always samples. `TextureAsset::validate` called the result healthy. The
+import door now applies the P29.5 rule (*a door clamps or refuses, it never
+bakes*): `half_at_the_door` maps NaN to `0.0` and saturates an overflow to
+`±65 504`, the mip chain speaks the same function so a level cannot introduce
+what the door refused, and the "kept" advisory names both. Finite in-range
+samples are untouched, so nothing an honest source carries changed.
 
 ### Why neither schema bump moved a byte of existing content
 
@@ -445,8 +576,18 @@ not have and has no falsifiable bound under the house gates. The document's own
 *fallback* idea — reconstruct detail while the real tile streams — was built as a
 deterministic, integer-only upscale of the finest resident ancestor
 (`inf_vt::fill`) and was **measured before adoption**: plain replication scored a
-texel MAE of **9.92**, beating both bilinear (12.13) and an edge-directed filter
-(12.05). That number is the floor any future learned predictor has to clear.
+texel MAE of **9.92**, beating all three interpolations it was measured against —
+true texel-centre **bilinear 11.45**, the edge-directed filter **12.05**, and the
+quincunx control **12.13** (`docs/memos/p26-5-missing-tile-fill.md`, the `near` /
+`bilin` / `edge` / `box` columns). That 9.92 is the floor any future learned
+predictor has to clear.
+
+*(Corrected by the audit. The first draft of this row called 12.13 "bilinear",
+which is the `box` column — and mislabelling that column as bilinear is the
+precise error `p26-5-missing-tile-fill.md` was written to correct: `box2x` is the
+quincunx lattice with the direction test removed, not what a sampler's
+magnification does. The ruling is unchanged and slightly stronger: replication
+beats the filter the hardware actually performs, by 13 %.)*
 
 **4.6 — Per-tile LZ4 / Zstd disk compression (T17).** Declined deliberately, and it is
 the stronger position. The `.inf_tex` container has a **uniform tile stride** —
@@ -517,8 +658,12 @@ does not claim to handle them. This is the one CANNOT on the list that is a
 *decision away from being possible* rather than structurally blocked: enabling one
 Cargo feature would do it, and that is a dependency-surface decision for the owner
 rather than an implementation one. Until then, TIFF sources should be converted to
-PNG or EXR before import — and the planner refuses them by name rather than
-guessing.
+PNG or EXR before import — and the planner refuses them **by name**: a `.tif` in a
+set earns its own advisory naming the files and the reason, rather than being
+filed under "unrecognised" beside a map that genuinely has no known suffix, which
+would tell the author the one thing that is not true about it. *(The advisory was
+added by the audit; before it, this sentence described behaviour the planner did
+not have.)*
 
 ---
 

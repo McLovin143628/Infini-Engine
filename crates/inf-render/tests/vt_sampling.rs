@@ -2561,3 +2561,413 @@ fn trilinear_blends_two_levels_and_is_off_by_default() {
         sweep.len()
     );
 }
+
+// ── (i) WAVE T AUDIT: the two questions a texture set is asked ──────────────
+
+/// **A detail map must not un-stream the maps beside it** (Wave T audit).
+///
+/// # The defect this arm was written against
+///
+/// `VtTextureSet::slots()` packs Wave T's detail lane into the top half of the
+/// first two instance words. Two shipped functions — `camera_wants` and
+/// `feedback_requests`, the analytic and the GPU-refinement halves of the whole
+/// streaming loop — read that same function and then did
+/// `VtTextureHandle(slot - 1)` with it.
+///
+/// So the moment a material bound a detail map, word 0 became
+/// `albedo | (detail << 16)`, `slot - 1` named a handle far past the registry,
+/// `res.desc` answered `None`, and the surface's **albedo and normal stopped
+/// being requested at all** — by both lanes at once. The detail map, which is
+/// in neither word as a bare slot, was never requested either. Everything fell
+/// back to the pinned floor and stayed at its coarsest three levels for ever,
+/// silently, on the one feature the wave shipped as its headline.
+///
+/// The fix is that the two questions — *"what does the GPU read"* and *"which
+/// textures does this name"* — are now two functions ([`VtTextureSet::slots`]
+/// and `handles`). This arm is what makes that a measurement: it asserts every
+/// bound map, detail included, reaches both want producers, and it asserts the
+/// packing really is happening, so it cannot pass by the lane being empty.
+#[test]
+fn a_detail_map_does_not_unstream_the_maps_beside_it() {
+    use inf_render::{feedback_requests, VtCoverage, VtMaterialMaps, VtTextures};
+    use std::collections::BTreeSet;
+
+    let (mut lib, _) = VtTextures::new(pool_cfg(PageFormat::Rgba8, 512));
+    for g in 1..=4u128 {
+        lib.register_or_record(g, Arc::new(ramp_container(64, false)))
+            .expect("the fixture registers");
+    }
+    let _ = lib.residency_mut().apply_wants(&[]);
+
+    let maps = VtMaterialMaps {
+        albedo: Some(1),
+        normal: Some(2),
+        orm: Some(3),
+        ..Default::default()
+    }
+    .with_detail(4, 8.0);
+    let set = lib.set_for_maps(&maps);
+    assert!(
+        set.albedo != 0 && set.normal != 0 && set.orm != 0 && set.detail != 0,
+        "the fixture never went warm: {set:?}"
+    );
+    // ANTI-VACUITY: the packing this arm is about is actually happening. Without
+    // this the arm would pass on a build where `slots()` had stopped packing,
+    // which is a different bug wearing the same green.
+    assert_ne!(
+        set.slots()[0],
+        set.albedo,
+        "the detail slot is not riding the albedo word, so this arm is not \
+         about the hazard it names"
+    );
+    assert_ne!(set.slots()[1], set.normal, "…nor the scale the normal word");
+    assert_eq!(
+        set.handles(),
+        [set.albedo, set.normal, set.orm, set.detail],
+        "`handles` is the UNPACKED face and must stay one"
+    );
+
+    let coverage = [VtCoverage {
+        centre: glam::Vec3::ZERO,
+        radius: 1.0,
+        set,
+        vgeom: false,
+    }];
+
+    // (1) The analytic/refinement want producer names every bound texture.
+    let wants = inf_render::camera_wants(
+        lib.residency(),
+        &face_view(),
+        &coverage,
+        inf_vt::VT_PRIORITY_FEEDBACK,
+        inf_render::VT_FEEDBACK_MAX_TILES,
+    );
+    let named: BTreeSet<u32> = wants.iter().map(|w| w.texture.0).collect();
+    assert_eq!(
+        named,
+        BTreeSet::from([0, 1, 2, 3]),
+        "the camera want set names {named:?} of the four textures this surface \
+         binds — a map that is never wanted never leaves its floor"
+    );
+
+    // (2) …and so does the GPU feedback request list, which is the other lane.
+    let layout = inf_vt::VtFeedbackLayout::for_residency(lib.residency());
+    let reqs = feedback_requests(&lib, &layout, &coverage, false);
+    assert_eq!(
+        reqs.len(),
+        4,
+        "the feedback list has {} requests for a surface binding four maps",
+        reqs.len()
+    );
+    let blocks: BTreeSet<u32> = reqs.iter().map(|r| r.tex[0]).collect();
+    assert_eq!(blocks.len(), 4, "two requests name one texture block");
+
+    // (3) ANTI-VACUITY the other way: an unbound set produces neither.
+    let empty = [VtCoverage {
+        centre: glam::Vec3::ZERO,
+        radius: 1.0,
+        set: inf_render::VtTextureSet::NONE,
+        vgeom: false,
+    }];
+    assert!(inf_render::camera_wants(
+        lib.residency(),
+        &face_view(),
+        &empty,
+        inf_vt::VT_PRIORITY_FEEDBACK,
+        inf_render::VT_FEEDBACK_MAX_TILES,
+    )
+    .is_empty());
+    assert!(feedback_requests(&lib, &layout, &empty, false).is_empty());
+}
+
+/// **The detail channel's CPU half, end to end** (Wave T audit).
+///
+/// `with_detail` → `texture_guids` → `set_for_maps` → `slots()` is the chain
+/// that turns an author's detail map into two bits of an instance word, and
+/// every link of it was unproven: mutating the packing out of `slots()`, or the
+/// "a scale only rides when a map does" rule out of `set_for_maps`, changed no
+/// test in the workspace. Both are pinned here, by value.
+#[test]
+fn the_detail_lane_is_packed_and_gated_by_one_door() {
+    use inf_render::{detail_scale_q8, VtMaterialMaps, VtTextureSet, VtTextures};
+
+    // The bit layout, as the shader reads it: slot in the low half of word 0,
+    // scale in the high half of word 1, ORM alone in word 2.
+    let set = VtTextureSet {
+        albedo: 7,
+        normal: 9,
+        orm: 11,
+        detail: 5,
+        detail_scale_q8: detail_scale_q8(4.0),
+    };
+    assert_eq!(
+        set.slots(),
+        [7 | (5 << 16), 9 | (1024 << 16), 11],
+        "the instance words are a wire position — `vt_detail_slot` reads word \
+         0's top half and `vt_detail_scale` word 1's"
+    );
+    assert_eq!(detail_scale_q8(4.0), 1024, "8.8 fixed point, exactly");
+    // The fixed point round-trips exactly in both directions, which is the whole
+    // reason it is not an f32: 1024 / 256 is 4.0 on every target.
+    assert_eq!(f32::from(detail_scale_q8(4.0)) / 256.0, 4.0);
+    // Saturation and the floor, both ways. `0` means "no detail", so a scale
+    // that rounded down to zero would switch the feature off silently.
+    assert_eq!(detail_scale_q8(0.0), 0);
+    assert_eq!(detail_scale_q8(-1.0), 0);
+    assert_eq!(detail_scale_q8(f32::NAN), 0, "a NaN is not a tiny positive");
+    assert_eq!(
+        detail_scale_q8(1.0 / 4096.0),
+        1,
+        "…and a tiny one is not zero"
+    );
+    assert_eq!(detail_scale_q8(f32::INFINITY), u16::MAX);
+    assert_eq!(detail_scale_q8(1e9), u16::MAX);
+    // A set with no detail is byte-for-byte the three words that shipped before
+    // Wave T — the property every unmoved golden rests on.
+    let plain = VtTextureSet {
+        detail: 0,
+        detail_scale_q8: 0,
+        ..set
+    };
+    assert_eq!(plain.slots(), [7, 9, 11]);
+
+    // …and the registry's door refuses to emit a scale beside no map.
+    let (mut lib, _) = VtTextures::new(pool_cfg(PageFormat::Rgba8, 256));
+    lib.register_or_record(1, Arc::new(ramp_container(64, false)))
+        .expect("registers");
+    let _ = lib.residency_mut().apply_wants(&[]);
+    let bound = lib.set_for_maps(&VtMaterialMaps::default().with_detail(1, 4.0));
+    assert_eq!(
+        (bound.detail, bound.detail_scale_q8),
+        (1, 1024),
+        "a warm detail map must reach the set with its scale"
+    );
+    // A detail GUID this registry never saw: slot 0, and the scale must go with
+    // it, or the instance word says "detail at 4x" and names no texture.
+    let orphan = lib.set_for_maps(&VtMaterialMaps::default().with_detail(999, 4.0));
+    assert_eq!(
+        (orphan.detail, orphan.detail_scale_q8),
+        (0, 0),
+        "an unregistered detail map left its scale behind in the instance word"
+    );
+    // And the detail GUID is in the registration order, at the END — the order
+    // IS the residency, so inserting it anywhere else would move every existing
+    // material's floor.
+    let maps = VtMaterialMaps {
+        albedo: Some(1),
+        normal: Some(2),
+        orm: Some(3),
+        ..Default::default()
+    }
+    .with_detail(4, 1.0);
+    assert_eq!(
+        maps.texture_guids().collect::<Vec<_>>(),
+        vec![1, 2, 3, 4],
+        "detail must be appended to the slot order, never inserted"
+    );
+}
+
+/// **A BC5 normal map rebuilds its Z on the GPU** (Wave T, T13) — the whole
+/// chain, executed: container format code → `VtTextureDesc::reconstruct_z` →
+/// the indirection table's flag bit 1 → `vt_normal_ts`'s two-channel branch.
+///
+/// Every link of that was unproven. Mutating `reconstruct_z` to a constant
+/// `false` at the container door — which makes every BC5 normal map decode as
+/// `(x, y, -1)` and light backwards — failed no test in the workspace, because
+/// the flag was only ever set by hand in a synthetic descriptor and the rebuild
+/// was only ever measured on the CPU.
+///
+/// The fixture is a real BC5 `.inf_tex` of a swept normal field, so the assertion
+/// is against the *source normals*, not against a second copy of the shader's
+/// arithmetic.
+#[test]
+fn a_bc5_normal_map_rebuilds_its_z_through_the_shipped_sampler() {
+    let Some(gpu) = gpu_or_skip("Wave T BC5 normals") else {
+        return;
+    };
+    // A swept tangent-space normal field. X ramps across, Y down; Z is whatever
+    // makes it a unit vector, and it is NOT stored — that is the point.
+    const N: u32 = 128;
+    let truth = |x: u32, y: u32| -> [f32; 3] {
+        let nx = (x as f32 / (N - 1) as f32) * 1.2 - 0.6;
+        let ny = (y as f32 / (N - 1) as f32) * 1.2 - 0.6;
+        [nx, ny, (1.0 - nx * nx - ny * ny).max(0.0).sqrt()]
+    };
+    let mut rgba = Vec::with_capacity((N * N * 4) as usize);
+    for y in 0..N {
+        for x in 0..N {
+            let n = truth(x, y);
+            let enc = |v: f32| ((v * 0.5 + 0.5) * 255.0).round().clamp(0.0, 255.0) as u8;
+            rgba.extend_from_slice(&[enc(n[0]), enc(n[1]), enc(n[2]), 255]);
+        }
+    }
+    let bytes = inf_material::build_tiled_texture(
+        rgba,
+        N,
+        N,
+        inf_material::TextureImportSettings::normal_map(),
+    )
+    .expect("the fixture tiles")
+    .into_bytes();
+    assert_eq!(
+        inf_vt::stored_page_format(&bytes),
+        Some(PageFormat::Bc5),
+        "the normal-map preset did not produce a BC5 container"
+    );
+
+    let (lib, pools) = resident_many(&gpu, vec![bytes], false);
+    let slot = lib.set_for(Some(1), None, None).albedo;
+    assert_ne!(slot, 0, "the fixture is not warm");
+    // The table really does carry the rebuild flag for this texture — bit 1, the
+    // wire position `the_flags_word_is_freeze_pinned_and_wave_t_appended_to_it`
+    // pins. Read from the live registry, not from a hand-built descriptor.
+    let desc = lib
+        .residency()
+        .desc(VtTextureHandle(slot - 1))
+        .expect("registered");
+    assert!(
+        desc.reconstruct_z,
+        "a BC5 container reached the residency without `reconstruct_z`, so the \
+         shader will read its missing blue as a real channel"
+    );
+
+    // Probe the NORMAL slot, at a tiny derivative so mip 0 answers.
+    let dd = [1e-5f32, 1e-5];
+    let sweep: Vec<(f32, f32)> = [(0.2f32, 0.3f32), (0.5, 0.5), (0.75, 0.25), (0.9, 0.8)].into();
+    let probes: Vec<SurfaceProbe> = sweep
+        .iter()
+        .map(|&(u, v)| SurfaceProbe {
+            maps: [0, slot, 0, 0],
+            uv: [u, v],
+            dd,
+        })
+        .collect();
+    let got = run_surface_probe(&gpu, &pools, &probes);
+
+    let mut worst = 0f32;
+    for (k, &(u, v)) in sweep.iter().enumerate() {
+        let want = truth(
+            ((u * N as f32) as u32).min(N - 1),
+            ((v * N as f32) as u32).min(N - 1),
+        );
+        let n = got[k].0;
+        let d =
+            ((n[0] - want[0]).powi(2) + (n[1] - want[1]).powi(2) + (n[2] - want[2]).powi(2)).sqrt();
+        worst = worst.max(d);
+        assert!(
+            n[2] > 0.5,
+            "probe {k}: the rebuilt Z is {} — a sampler reading the stored blue \
+             of a two-channel page gets -1 here, which is a normal pointing into \
+             the surface",
+            n[2]
+        );
+    }
+    assert!(
+        worst < 0.05,
+        "the rebuilt normal is {worst:.4} from the source at worst; the two \
+         channels are stored at 8 bits and the Z is arithmetic, so this is a \
+         seam failure rather than quantisation"
+    );
+    // ANTI-VACUITY: the fixture is not flat, so "the normal came back" is a
+    // claim about a signal.
+    let spread = got
+        .iter()
+        .map(|(n, _)| n[0])
+        .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
+    assert!(
+        spread.1 - spread.0 > 0.3,
+        "the probed normals barely differ ({spread:?}) — nothing here could have \
+         been rebuilt wrongly and been noticed"
+    );
+}
+
+/// **The detail fade is a RAMP, not a cut** (Wave T audit).
+///
+/// The wave's own review found `vt_apply_detail` computing its weight from
+/// `vt_mip`, which truncates — a weight of 0 or 1 and nothing between, i.e. the
+/// detail map vanishing at one distance, which is the artifact the ramp exists
+/// to avoid rather than a cheaper version of it. It was fixed to `vt_lod`, the
+/// continuous level, and **nothing measured the fix**: putting `vt_mip` back
+/// failed no arm, because the existing detail probe runs at a derivative so
+/// small that both spellings answer 1.
+///
+/// This walks the detail texture's own pyramid instead: at a level of detail
+/// where the ramp is partway out, a truncating weight and a continuous one are
+/// different numbers, and a ramp must produce a strictly intermediate surface
+/// and a MONOTONE one.
+#[test]
+fn the_detail_fade_ramps_across_the_last_two_levels() {
+    let Some(gpu) = gpu_or_skip("Wave T detail fade") else {
+        return;
+    };
+    let base = raw_container(128, |_, _| [128, 128, 255, 255]);
+    // 64² → mips 64,32,16,8,4,2,1 = 7 levels, so the ramp
+    // `clamp((mip_count - 1 - lod) * 0.5)` leaves at lod 6 and is fully in at
+    // lod 4 — the levels this arm probes between.
+    let detail = raw_container(64, |_, _| [255, 0, 128, 255]);
+    let (lib, pools) = resident_many(&gpu, vec![base, detail], false);
+    let base_slot = lib.set_for(Some(1), Some(1), None).normal;
+    let detail_slot = lib.set_for(Some(2), None, None).albedo;
+    assert!(
+        base_slot != 0 && detail_slot != 0,
+        "the fixture is not warm"
+    );
+    let scale = 1.0f32;
+    let maps = [
+        detail_slot << 16,
+        base_slot | (u32::from(inf_render::detail_scale_q8(scale)) << 16),
+        0,
+        0,
+    ];
+
+    // `vt_lod` is `log2(max(|ddx * size|, |ddy * size|))`, and the detail
+    // sample's derivative is the base one times `scale`. The detail texture is
+    // 64 texels across, so a derivative of `2^L / 64` puts its level of detail
+    // at exactly L.
+    let at = |lod: f32| -> f32 {
+        let dd = [2f32.powf(lod) / 64.0 / scale, 2f32.powf(lod) / 64.0 / scale];
+        let probes = [SurfaceProbe {
+            maps,
+            uv: [0.37, 0.41],
+            dd,
+        }];
+        run_surface_probe(&gpu, &pools, &probes)[0].0[0]
+    };
+
+    // Fully in, half a level down, one level down, fully out. The weight
+    // multiplies the detail's X, which is the only source of a non-zero X in
+    // this fixture.
+    let full = at(4.0);
+    let mid = at(4.5);
+    let half = at(5.0);
+    let gone = at(6.0);
+    assert!(
+        full > 0.3,
+        "the detail map is not reaching the surface at all at its own mip 4: {full}"
+    );
+    assert!(
+        gone.abs() < 0.02,
+        "the ramp has not reached zero at the pyramid's last level: {gone}"
+    );
+    assert!(
+        half < full - 0.05 && half > gone + 0.05,
+        "the ramp does not move between whole levels: full {full}, one level \
+         down {half}, gone {gone}"
+    );
+    // **THE FINDING, asserted at the FRACTIONAL level.** A weight computed from
+    // a truncated level of detail is the same number all the way across a level
+    // and then steps — so `at(4.5)` would equal `at(4.0)` exactly. It is the
+    // whole difference between the ramp this comment claims and the hard cut the
+    // wave's own review found, and it is invisible at any integer level.
+    assert!(
+        mid < full - 0.02,
+        "the fade is a CUT, not a ramp: half a level below full engagement the \
+         detail is still at {mid} against {full} — a weight taken from `vt_mip` \
+         (which truncates) is constant within a level and steps between them"
+    );
+    assert!(
+        mid > half + 0.02,
+        "…and it must not have stepped straight to the next level either: \
+         {mid} against {half}"
+    );
+}

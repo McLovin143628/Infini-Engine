@@ -512,7 +512,9 @@ pub fn hdr_import_advisory(source_is_float: bool, kept_float: bool) -> Option<St
             "this is a floating-point source and it is being kept as RGBA16F — 8 bytes a texel, \
              {}× a BC1 page and {}× a BC5 one, because there is no BC6H encoder in this project \
              (see docs/memos/wave-t-textures-disposition.md); import it with hdr = false if the \
-             map's values all live in [0, 1]",
+             map's values all live in [0, 1]. A half holds up to 65 504: anything past that \
+             saturates rather than becoming infinity, and a NaN sample is stored as 0 — see \
+             `half_at_the_door`",
             8 * 4 / 4,
             8 * 4 / 8
         ))
@@ -590,6 +592,29 @@ pub fn decode_image_rgba8(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), MaterialE
 /// 754 specifies exactly (`from_f32`, and in the mip chain a sum of four values
 /// scaled by a power of two). No transcendental, no fused multiply-add, no
 /// libm.
+///
+/// # The door clamps, and never bakes (Wave-T audit)
+///
+/// A half is not an `f32`, and an EXR is not obliged to fit in one. Measured on
+/// this path before [`half_at_the_door`] existed: a texel of `70 000` — an
+/// ordinary sun disc in a captured HDR sky, and below what `1e30` does — narrows
+/// to **`+inf`**, and a texel of `NaN` narrows to `NaN`. Both were written into
+/// the page verbatim, and then `rgba16f_mip_chain` averaged them: a *single*
+/// NaN texel poisons its 2×2 parent, and its parent, all the way to the 1×1, so
+/// **one bad sample in a source made every coarse level of the pyramid NaN** —
+/// which is the level a virtual texture's pinned floor samples, i.e. the one
+/// that is always resident. `TextureAsset::validate` was happy with it.
+///
+/// So this door does what the P29.5 import-door precedent says: a non-finite
+/// sample is clamped or refused, never stored. NaN becomes `0.0` (the only
+/// value that is not a lie about a measurement that does not exist) and an
+/// overflow saturates to `±f16::MAX` rather than to infinity — which keeps the
+/// promise the format was added for (the *range* survives) up to the range the
+/// format actually has, instead of past it. Finite in-range samples are
+/// untouched, so nothing an honest source carries is changed by this.
+///
+/// The trade is stated to the author by [`hdr_import_advisory`], because a
+/// silent clamp is the shape of failure this whole item exists to end.
 pub fn decode_image_rgba16f(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), MaterialError> {
     let img = image::load_from_memory(bytes).map_err(|e| MaterialError::Image(e.to_string()))?;
     let f = img.to_rgba32f();
@@ -597,10 +622,34 @@ pub fn decode_image_rgba16f(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), Materia
     let mut out = Vec::with_capacity(w as usize * h as usize * 8);
     for px in f.pixels() {
         for c in px.0 {
-            out.extend_from_slice(&half::f16::from_f32(c).to_le_bytes());
+            out.extend_from_slice(&half_at_the_door(c).to_le_bytes());
         }
     }
     Ok((out, w, h))
+}
+
+/// **One `f32` sample as a storable half** — the whole non-finite policy, in one
+/// pure function so both the import door and the mip chain speak it.
+///
+/// * `NaN` → `0.0`. A NaN is not a value a texture can carry: it propagates
+///   through every filter that touches it, and a *storage* format that keeps one
+///   hands the poison to the sampler and to every coarser mip.
+/// * anything past the half's range → `±f16::MAX` (65 504). Saturating rather
+///   than overflowing to infinity, for the same reason: `inf * 0.25` is `inf`,
+///   and `inf - inf` in a later blend is a NaN.
+/// * everything else → `half::f16::from_f32`, which is round-to-nearest-even and
+///   therefore a pure function of the input bits on every target.
+///
+/// **This clamps, it does not refuse.** The refusal would have to be the whole
+/// import, and a single blown texel in a 4K capture is not a reason to reject a
+/// map an author has; the advisory carries the news instead.
+#[inline]
+pub fn half_at_the_door(v: f32) -> half::f16 {
+    if v.is_nan() {
+        return half::f16::ZERO;
+    }
+    const MAX: f32 = 65_504.0;
+    half::f16::from_f32(v.clamp(-MAX, MAX))
 }
 
 /// Import an already-decoded **RGBA16F** buffer (four LE halves a texel).
@@ -766,7 +815,13 @@ fn downsample_box_rgba16f(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec
                     + half_at(src, sw, sx0, sy1, c)
                     + half_at(src, sw, sx1, sy1, c);
                 let o = ((y as usize * dw as usize + x as usize) * 4 + c) * 2;
-                out[o..o + 2].copy_from_slice(&half::f16::from_f32(acc * 0.25).to_le_bytes());
+                // `half_at_the_door`, not a bare `from_f32` (Wave-T audit): a
+                // level built from an already-stored page must not be able to
+                // introduce what the import door refuses. Four values ≤ f16::MAX
+                // sum to at most 4× it, which is finite in `f32` and clamps back
+                // here — so the pyramid cannot overflow at a level even where
+                // its parent did not.
+                out[o..o + 2].copy_from_slice(&half_at_the_door(acc * 0.25).to_le_bytes());
             }
         }
     }
@@ -1337,6 +1392,84 @@ mod tests {
                 "eaten continuation: {a:?}"
             );
         }
+    }
+
+    /// **The import door clamps a non-finite sample; it never stores one**
+    /// (Wave-T audit — the P29.5 A1 precedent, applied to the float texture
+    /// door).
+    ///
+    /// # The defect
+    ///
+    /// `half::f16::from_f32` is faithful, which is the problem: `70 000` — an
+    /// ordinary sun disc in a captured sky — is `+inf` in a half, and a `NaN`
+    /// stays a `NaN`. Both were written into the page. Then the box downsample
+    /// averaged them, so **one bad texel made every coarser level of the whole
+    /// pyramid NaN**, including the 1×1 — and the coarsest levels are exactly
+    /// the ones a virtual texture pins resident and always samples.
+    /// `TextureAsset::validate` reported the result healthy.
+    ///
+    /// The arm asserts the world rather than the report: every stored half of
+    /// every level, of a source built to contain all four hazards, is finite.
+    #[test]
+    fn a_float_import_never_stores_an_infinity_or_a_nan() {
+        let (w, h) = (4u32, 4u32);
+        let mut src = image::Rgb32FImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                // An ordinary, in-range value everywhere except the four hazards
+                // below, so the pyramid has real data to be poisoned.
+                src.put_pixel(x, y, image::Rgb([0.5, 1.5, 3.0]));
+            }
+        }
+        src.put_pixel(0, 0, image::Rgb([70_000.0, 1.0, 1.0])); // past f16::MAX
+        src.put_pixel(1, 0, image::Rgb([1.0e30, 1.0, 1.0])); // far past it
+        src.put_pixel(0, 1, image::Rgb([f32::NAN, 1.0, 1.0])); // not a number
+        src.put_pixel(1, 1, image::Rgb([-1.0e30, 1.0, 1.0])); // past it, signed
+        let mut exr: Vec<u8> = Vec::new();
+        image::DynamicImage::ImageRgb32F(src)
+            .write_to(
+                &mut std::io::Cursor::new(&mut exr),
+                image::ImageFormat::OpenExr,
+            )
+            .expect("the fixture encodes");
+
+        let tex = import_texture_bytes(&exr, TextureImportSettings::data_hdr()).unwrap();
+        assert_eq!(tex.format, TextureFormat::Rgba16F);
+        assert!(
+            tex.mips.len() > 1,
+            "the fixture must have a pyramid to poison"
+        );
+        for (i, m) in tex.mips.iter().enumerate() {
+            for (k, b) in m.data.chunks_exact(2).enumerate() {
+                let v = half::f16::from_le_bytes([b[0], b[1]]).to_f32();
+                assert!(
+                    v.is_finite(),
+                    "mip {i} sample {k} is {v} — a non-finite texel reached the \
+                     stored page, and the box downsample carries it to every \
+                     coarser level from here up"
+                );
+            }
+        }
+        // …and the clamp is a SATURATION, not a zeroing: the overflowing texel
+        // still reads as the brightest thing in the image.
+        let m0 = &tex.mips[0].data;
+        let r = |i: usize| half::f16::from_le_bytes([m0[i * 8], m0[i * 8 + 1]]).to_f32();
+        assert_eq!(
+            r(0),
+            65_504.0,
+            "an overflow must saturate, not wrap or zero"
+        );
+        assert_eq!(r(1), 65_504.0);
+        assert_eq!(r(4), 0.0, "a NaN is stored as 0, the only honest answer");
+        assert_eq!(r(5), -65_504.0, "a signed overflow saturates too");
+        // The policy, at its own door, so a change to it is a change to a value.
+        assert_eq!(half_at_the_door(f32::NAN), half::f16::ZERO);
+        assert_eq!(half_at_the_door(f32::INFINITY).to_f32(), 65_504.0);
+        assert_eq!(half_at_the_door(f32::NEG_INFINITY).to_f32(), -65_504.0);
+        assert_eq!(half_at_the_door(1.5).to_f32(), 1.5, "in range is untouched");
+        // And the author is told, rather than left to find it in a lit frame.
+        let kept = hdr_import_advisory(true, true).unwrap();
+        assert!(kept.contains("65 504") && kept.contains("NaN"), "{kept}");
     }
 
     /// The float mip chain halves like every other chain, and is a **pure

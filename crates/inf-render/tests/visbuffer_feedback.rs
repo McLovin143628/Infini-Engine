@@ -757,3 +757,170 @@ fn a_frame_whose_instances_name_no_asset_does_not_report_that_it_marked() {
         "the control never marked either, so `frames == 0` above says nothing"
     );
 }
+
+/// **A detail map must not stop the surface marking its own albedo** (Wave-T
+/// audit) — the per-FRAGMENT half of the defect.
+///
+/// Wave T packed a detail slot into the top half of the albedo instance word and
+/// an 8.8 tiling scale into the top half of the normal word. `vis_mark_tile` read
+/// the whole word and did `handle = word - 1`, so a surface that bound a detail
+/// map computed a handle far past the registry, failed the range check, and
+/// **marked nothing at all**. On the visbuffer path this is the only per-fragment
+/// producer there is and the per-surface one is handed over to it, so that
+/// surface stopped refining entirely and sat on the analytic floor for ever.
+///
+/// This runs the real renderer with the real streaming loop and asserts on the
+/// **resident set**, not on a counter: the wall's own texture must reach exactly
+/// the same tiles with a detail map bound as without one, and the detail map must
+/// itself be refined past its floor.
+#[test]
+fn a_detail_map_does_not_stop_the_per_fragment_pass_marking() {
+    let Some(gpu) = gpu_or_skip("visbuffer detail marking") else {
+        return;
+    };
+    /// Render `frames` with the wall bound to `TEX`, optionally with `TEX_HIDDEN`
+    /// as its **detail** map, and report the resident `(handle, tile)` set.
+    fn run_detail(
+        gpu: &GpuContext,
+        detail: bool,
+    ) -> std::collections::BTreeSet<(u32, inf_vt::TileCoord)> {
+        let bytes = container();
+        let (mut lib, _) = inf_render::VtTextures::new(inf_vt::VtPoolConfig {
+            format: inf_vt::PageFormat::Rgba8,
+            stored_tile_size: inf_vt::STORED_TILE_SIZE,
+            budget_bytes: inf_vt::PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE) * 2048,
+            max_texture_dim: 8192,
+            trilinear: false,
+        });
+        lib.register_or_record(TEX, Arc::new(bytes.clone()))
+            .expect("the fixture registers");
+        lib.register_or_record(TEX_HIDDEN, Arc::new(bytes))
+            .expect("the detail fixture registers");
+        let pools = inf_render::vt::VtPools::new(&gpu.device, &gpu.queue, lib.residency(), false);
+        let target = HeadlessTarget::new(gpu, W, H);
+        let mut r = EngineRenderer::new(gpu, HEADLESS_FORMAT);
+        r.set_settings(settings(true));
+        r.set_vt_level(Some((lib, pools)));
+        let v = view();
+        // A texture is not warm until its bytes have arrived, so the first frame
+        // legitimately binds nothing — the same shape `run` above has. What must
+        // not happen is that it is *never* bound.
+        let mut bound = (false, false);
+        for _ in 0..6 {
+            let set = r
+                .vt_textures()
+                .map(|l| {
+                    let mut s = l.set_for(Some(TEX), None, None);
+                    if detail {
+                        // Through the shipped door, so the encoding lives in one
+                        // place: a warm detail map at 4 tiles per unit uv.
+                        let d = l.set_for(Some(TEX_HIDDEN), None, None).albedo;
+                        s.detail = d;
+                        s.detail_scale_q8 = inf_render::detail_scale_q8(4.0);
+                    }
+                    s
+                })
+                .unwrap_or(VtTextureSet::NONE);
+            bound = (bound.0 || set.albedo != 0, bound.1 || set.detail != 0);
+            r.render(gpu, &scene(set, None), &v, &target.view, (W, H));
+            for _ in 0..8 {
+                if gpu.device.poll(wgpu::PollType::wait_indefinitely()).is_ok() {
+                    break;
+                }
+            }
+        }
+        assert!(bound.0, "the wall's texture never went warm in six frames");
+        assert_eq!(
+            detail, bound.1,
+            "the detail binding did not take (or took when it should not have)"
+        );
+        r.vt_textures()
+            .map(|l| {
+                let res = l.residency();
+                (0..res.geometry().slot_count())
+                    .filter_map(|slot| res.slot_occupant(slot).map(|(h, c)| (h.0, c)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    let plain = run_detail(&gpu, false);
+    let detailed = run_detail(&gpu, true);
+
+    // ANTI-VACUITY: the control really did refine — there are tiles beyond the
+    // three pinned floor levels — or "the same set" below is a statement about
+    // the floor and nothing else.
+    let fine = |set: &std::collections::BTreeSet<(u32, inf_vt::TileCoord)>, handle: u32| {
+        set.iter()
+            .filter(|(h, c)| *h == handle && c.mip < 3)
+            .count()
+    };
+    assert!(
+        fine(&plain, 0) > 0,
+        "the control resident set has no fine tiles of the wall's own texture, \
+         so it is measuring the analytic floor: {plain:?}"
+    );
+
+    // (1) THE DEFECT: the wall's own texture is refined exactly as much with a
+    // detail map bound as without one.
+    let a: std::collections::BTreeSet<_> = plain.iter().filter(|(h, _)| *h == 0).collect();
+    let b: std::collections::BTreeSet<_> = detailed.iter().filter(|(h, _)| *h == 0).collect();
+    assert_eq!(
+        a, b,
+        "binding a detail map changed which tiles of the surface's OWN albedo \
+         are resident. The per-fragment producer is reading the packed instance \
+         word as a texture slot"
+    );
+
+    // (2) …and the detail map is streamed rather than left on its floor, which
+    // is the other half: a map nothing marks is a map that never sharpens.
+    assert!(
+        fine(&detailed, 1) > 0,
+        "the detail map has no tile finer than its pinned floor — nothing marked \
+         it, so it will be blurry for ever: {detailed:?}"
+    );
+    assert_eq!(
+        fine(&plain, 1),
+        0,
+        "the control refined the detail texture without it being bound, so the \
+         assertion above is not about the detail lane"
+    );
+
+    // (3) **The per-FRAGMENT pass marks the detail map at its OWN tiling**, and
+    // this half is a source gate rather than a count.
+    //
+    // The analytic lane alone already gets the detail texture to the right
+    // *level* — it is the same surface at the same screen size — but it asks at
+    // the base uv, so it covers that level thinly and in the wrong places. The
+    // per-fragment mark uses `uv * scale`, which is where `vt_apply_detail`
+    // actually samples. Measured on this fixture the difference is a handful of
+    // tiles at the same level (19 against 25 in one run), and that count is
+    // **not stable enough to assert**: a feedback read that misses moves it, and
+    // this file's own header records that happening under the full battery. So
+    // the claim is pinned where it is deterministic — that the producer marks
+    // the lane, at the scaled uv and the scaled derivatives, exactly as
+    // `vt_sample.wgsl`'s `vt_apply_detail` samples it.
+    let src = include_str!("../src/shaders/vis_feedback.wgsl");
+    let code: String = src
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        code.contains("let slot = maps_word & 0xFFFFu;"),
+        "`vis_mark_tile` no longer masks the packed instance word — assertion \
+         (1) above is what that costs"
+    );
+    assert!(
+        code.contains("let detail_scale = f32(inst.vt.y >> 16u) / 256.0;")
+            && code.contains("inst.vt.x >> 16u,")
+            && code.contains("uv * detail_scale,")
+            && code.contains("ddx * detail_scale,")
+            && code.contains("ddy * detail_scale,"),
+        "the per-fragment producer no longer marks the detail lane at `uv * \
+         scale`; the analytic lane will keep it at the level a surface of this \
+         size justifies, which for a map tiled N times is log2(N) mips too \
+         coarse:\n{code}"
+    );
+}
