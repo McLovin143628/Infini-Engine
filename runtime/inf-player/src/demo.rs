@@ -12,7 +12,6 @@
 //! When P9.2's reader lands, `--level` loads the real cooked platformer and this
 //! demo becomes a self-test fixture (kept for CI, which has no cooked packs yet).
 
-use glam::DVec2;
 use uuid::Uuid;
 
 use inf_blueprint::BlueprintClass;
@@ -50,7 +49,7 @@ fn set_pos(world: &mut EcsWorld, e: Entity, x: f64, y: f64) {
 
 /// Build the demo platformer [`BuiltWorld`].
 ///
-/// Gravity is [`DVec2::ZERO`]: the character applies its own gravity in the
+/// Gravity is [`inf_physics::WorldGravity::NONE`]: the character applies its own gravity in the
 /// blueprint (`vy -= GRAVITY*dt`), exactly like the sample — so passing world
 /// gravity would double it.
 pub fn build() -> BuiltWorld {
@@ -141,7 +140,7 @@ pub fn build() -> BuiltWorld {
     BuiltWorld {
         world,
         actors: vec![(player_guid, coyote_class())],
-        gravity: DVec2::ZERO,
+        gravity: inf_physics::WorldGravity::NONE,
         hz: 60.0,
         render: inf_scene::RenderSettingsRecord::default(),
         label: "platformer-demo".to_string(),

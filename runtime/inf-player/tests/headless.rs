@@ -17,7 +17,7 @@ fn player_bin() -> PathBuf {
 
 fn new_demo_sim() -> RuntimeSim {
     let b = demo::build();
-    RuntimeSim::new(b.world, b.actors, b.gravity, b.hz)
+    RuntimeSim::with_gravity(b.world, b.actors, b.gravity, b.hz)
 }
 
 fn player_guid() -> Uuid {

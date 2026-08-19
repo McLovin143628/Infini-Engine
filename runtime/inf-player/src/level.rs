@@ -55,6 +55,7 @@ use inf_ecs::components::{
 use inf_ecs::{EcsWorld, Guid};
 use inf_pcg::height::FnHeight;
 use inf_pcg::{GrammarPass, PcgAssetPayload, Region};
+use inf_physics::WorldGravity;
 use inf_scene::partition::PartitionSettings;
 use inf_scene::{RenderSettingsRecord, RuntimeEntity};
 
@@ -83,8 +84,10 @@ pub struct BuiltWorld {
     pub world: EcsWorld,
     /// The blueprint actors to tick: `(entity Guid, class)`.
     pub actors: Vec<(Uuid, BlueprintClass)>,
-    /// World gravity for the 2D physics bridge (the platformer uses `ZERO`).
-    pub gravity: DVec2,
+    /// The gravity **both** solvers are built with (P29.7): the 2D bridge from
+    /// `gravity_2d` and the 3D bridge from the level's authored `gravity_3d`.
+    /// See [`inf_physics::WorldGravity`] for the field that was read by nothing.
+    pub gravity: WorldGravity,
     /// Fixed update rate (Hz).
     pub hz: f64,
     /// The level's scene-persisted render block (R-P4 · schema v8): post /
@@ -586,7 +589,14 @@ impl WorldBuilder for InfSceneWorldBuilder {
         };
         // v3 levels carry their own gravity/rate; v1/v2 lift to defaults, which
         // equal the constructor's fallback for the platformer convention.
-        let gravity = DVec2::new(settings.gravity_2d.x, settings.gravity_2d.y);
+        // **Each field feeds the solver its name says** (P29.7). Before this
+        // wave the 3D bridge was built from `gravity_2d.y` and `gravity_3d` was
+        // authored, serialized and read by nothing — so every level that never
+        // touched either field had no 3D gravity while its panel read −9.81.
+        let gravity = WorldGravity::new(
+            DVec2::new(settings.gravity_2d.x, settings.gravity_2d.y),
+            settings.gravity_3d.to_dvec3(),
+        );
         let hz = settings.sim_hz;
         tracing::info!(
             "inf-player: built '{}' — {} actor(s) bound (gravity {:?}, {} Hz)",

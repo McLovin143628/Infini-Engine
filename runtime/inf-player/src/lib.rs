@@ -621,7 +621,7 @@ pub fn sim_from_built(built: BuiltWorld) -> RuntimeSim {
         hairs,
         ..
     } = built;
-    let mut sim = RuntimeSim::new(world, actors, gravity, hz);
+    let mut sim = RuntimeSim::with_gravity(world, actors, gravity, hz);
     sim.set_state_machines(state_machines);
     for (guid, skel, clip) in root_clips {
         sim.register_root_motion_clip(guid, skel, clip);

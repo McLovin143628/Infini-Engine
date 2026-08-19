@@ -432,7 +432,7 @@ fn cook_one(
             // likely to hold a kilometre of river. Every future per-entity advisory
             // on this path belongs above the branch for the same reason.
             advisories.extend(uphill_rivers(guid, &level));
-            advisories.extend(ignored_gravity_3d(guid, &level));
+            advisories.extend(moved_3d_gravity(guid, &level));
             if level.settings.partition.enabled {
                 let (bytes, cells, notes) = build_partition(guid, &level)?;
                 partition = Some((derived_partition_id(guid), bytes, cells));
@@ -2596,43 +2596,42 @@ use inf_water::UPHILL_TOLERANCE_M as RIVER_UPHILL_TOLERANCE_M;
 /// moved or rotated parent is judged where it actually is.
 ///
 /// Deduplicated + sorted (by entity) so the report stays deterministic.
-/// **A level whose authored `gravity_3d` the 3D solver will not read** (P29.6
-/// audit, A6) — the silent-hazard class, given a voice.
+/// **A level whose 3D gravity moved when `gravity_3d` was wired up** (P29.7) —
+/// the silent-hazard class, given a voice, with the hazard inverted.
 ///
-/// `LevelSettings::gravity_3d` is authored in the editor, serialized into the
-/// `.inf_lvl`, round-tripped by the schema and read by **nothing**: both hosts
-/// build their 3D bridge from `gravity_2d.y` (`RuntimeSim::new`, and
-/// `SimSession`'s mirror of it). The P29.6 course found it because every 3D
-/// sample in the tree happens to set both fields to the same number, so the
-/// field has never disagreed with the one that is used.
+/// # What this advisory used to say, and why it does not any more
 ///
-/// The field is **not removed**, because removing a wire field is a schema move
-/// and this wave had no budget for one. What is not acceptable is the silence:
-/// P16's doctrine is that a hazard the cook can SEE and the runtime can only
-/// LOOK WRONG about is an advisory, and an author who types `-3.0` into a
-/// low-gravity level's `gravity_3d` and watches nothing change is exactly that
-/// author.
+/// The P29.6 audit shipped `ignored_gravity_3d`: *"`gravity_3d` is authored,
+/// serialized and read by nothing"*. That sentence was true and is now false.
+/// P29.7 wired each field to the solver its name names — the 2D world from
+/// `gravity_2d`, the 3D world from `gravity_3d` (see
+/// [`inf_physics::WorldGravity`] for the whole finding, including the half the
+/// audit could not fix: `LevelSettings::default()` pairs a `gravity_2d` of zero
+/// with a `gravity_3d` of −9.81, so every level that never touched either field
+/// had **no 3D gravity at all** while its Details panel read −9.81).
 ///
-/// # What it fires on, and the one it deliberately does not
+/// A fix that changes what a committed level does is exactly the kind of change
+/// that owes the author a sentence, so the advisory does not retire — it turns
+/// round. The hazard is now the author who typed a number into **`gravity_2d.y`**
+/// because that was the field the 3D solver read, and whose `gravity_3d` says
+/// something else. Their level's 3D gravity moved from the first number to the
+/// second, once, at this cook.
+///
+/// # What it fires on
 ///
 /// Three conditions, all of them: the level has something 3D to fall; the
-/// authored `gravity_3d` disagrees with the vector the solver will build; and
-/// `gravity_3d` is **not the default**, i.e. somebody actually typed it.
+/// author actually set `gravity_2d.y` (a zero is the untouched default and
+/// claims nothing); and the two numbers disagree, so the move is observable.
 ///
-/// The third clause is the difference between an advisory and noise.
-/// `LevelSettings::default()` pairs a `gravity_2d` of **zero** with a
-/// `gravity_3d` of −9.81, so *every* level that never touched either field
-/// satisfies the first two — including two committed samples (the P23 workshop
-/// and the P19 grammar-bake fixture), whose 3D content therefore falls under no
-/// gravity at all. That is a real defect and it is the **engine's**, not the
-/// author's: telling an author their untouched default is wrong is exactly how
-/// a report stops being read. It is named in ROADMAP §13's P29.6 audit ledger
-/// and routed to the wave that can afford to change a default or the solver's
-/// source, which are both behaviour changes for every level in the tree.
-///
-/// What is left is precisely the dead-wire hazard: a number an author wrote,
-/// that will be ignored.
-fn ignored_gravity_3d(guid: AssetId, level: &inf_scene::RuntimeLevel) -> Vec<String> {
+/// Every committed sample in the tree is quiet: the four that set both fields
+/// set them to the same −9.81, and the fifth leaves `gravity_3d` at a default
+/// that equals its `gravity_2d.y`. The levels whose behaviour *did* change are
+/// the ones that set neither field — the P23 workshop and the P19 grammar-bake
+/// fixture, which had no 3D gravity and now have Earth's — and they are silent
+/// here on purpose, for the reason the previous version of this advisory gave
+/// about the opposite case: an author who never typed a number is not making a
+/// claim the cook should argue with.
+fn moved_3d_gravity(guid: AssetId, level: &inf_scene::RuntimeLevel) -> Vec<String> {
     // A 2D level has no 3D solver to mislead. "3D" is any entity carrying a
     // rigid body, a 3D collider or a character — the three things gravity acts
     // on. The scan is here and the RULE is below, so the rule can be pinned
@@ -2648,28 +2647,22 @@ fn ignored_gravity_3d(guid: AssetId, level: &inf_scene::RuntimeLevel) -> Vec<Str
     )
 }
 
-/// [`ignored_gravity_3d`]'s rule, as a function of four numbers.
+/// [`moved_3d_gravity`]'s rule, as a function of four numbers.
 fn gravity_3d_advisory(
     guid: AssetId,
     gravity_2d_y: f64,
     gravity_3d: inf_ecs::math::Vec3d,
     has_3d: bool,
 ) -> Vec<String> {
-    let used = inf_ecs::math::Vec3d::new(0.0, gravity_2d_y, 0.0);
-    // The default, spelled the way the levels themselves spell it. A level that
-    // never touched the field is not an author making a claim.
-    let untouched = inf_ecs::math::Vec3d::new(0.0, -9.81, 0.0);
+    let was = inf_ecs::math::Vec3d::new(0.0, gravity_2d_y, 0.0);
     // Bit-exact: these are comparisons of authored numbers, not measurements,
     // and a tolerance here would be an invitation to argue.
-    if gravity_3d == used || gravity_3d == untouched || !has_3d {
+    if !has_3d || gravity_2d_y == 0.0 || gravity_3d == was {
         return Vec::new();
     }
     vec![format!(
-        "level {guid}: `gravity_3d` is ({}, {}, {}) and the 3D solver will use \
-         (0, {}, 0) — it reads `gravity_2d.y`, and `gravity_3d` is authored, \
-         serialized and read by nothing. Set `gravity_2d.y` to the vertical \
-         gravity this level wants; a non-vertical 3D gravity is not supported",
-        gravity_3d.x, gravity_3d.y, gravity_3d.z, used.y
+        "level {guid}: this level's 3D gravity is now ({}, {}, {}) from `gravity_3d`; it used to be (0, {}, 0) from `gravity_2d.y`, which since P29.7 drives only the 2D solver. If the 3D behaviour was right before, copy that number into `gravity_3d`",
+        gravity_3d.x, gravity_3d.y, gravity_3d.z, was.y
     )]
 }
 
@@ -3323,49 +3316,48 @@ mod material_advisories {
     }
 }
 
-/// The `gravity_3d`-is-read-by-nothing advisory (P29.6 audit, A6). A pure rule
-/// over a level's settings, so the trigger and the wording are pinned without
-/// running a cook — the `vmesh_advisory` precedent below.
+/// The moved-3D-gravity advisory (P29.7, inverting the P29.6 audit's A6). A pure
+/// rule over a level's settings, so the trigger and the wording are pinned
+/// without running a cook — the `vmesh_advisory` precedent below.
 #[cfg(test)]
 mod gravity_advisory {
     use super::{gravity_3d_advisory, AssetId};
     use inf_ecs::math::Vec3d;
 
-    /// It fires on **disagreement** and on nothing else: the field is authored
-    /// consistently by every committed sample in the tree, so a report that
-    /// mentioned it every time would be noise — and noise is how advisories stop
-    /// being read.
+    /// It fires on a 3D gravity that **moved**, and on nothing else. Every
+    /// committed sample in the tree is quiet, so a report that mentioned this
+    /// every time would be noise — and noise is how advisories stop being read.
     #[test]
-    fn only_a_gravity_3d_that_disagrees_with_the_one_used_is_advisable() {
+    fn only_a_3d_gravity_that_moved_is_advisable() {
         let id = AssetId::new();
-        // The shape every 3D sample in the tree has.
+        // The shape every 3D sample in the tree has: the two agree, so wiring
+        // `gravity_3d` up moved nothing.
         assert!(gravity_3d_advisory(id, -9.81, Vec3d::new(0.0, -9.81, 0.0), true).is_empty());
         // A 2D level has no 3D solver to mislead, even with the two disagreeing.
         assert!(gravity_3d_advisory(id, -20.0, Vec3d::new(0.0, -1.6, 0.0), false).is_empty());
-        // **The untouched default is silent**, even though the solver really
-        // will use zero: that pairing is `LevelSettings::default()`'s own, and an
-        // advisory that fires on a field nobody typed blames the author for the
-        // engine. Named in the P29.6 audit ledger instead. This is the case two
-        // committed samples are in.
+        // **The untouched `gravity_2d.y` is silent.** This level had no 3D
+        // gravity and now has −9.81, which is the defect P29.7 fixed; an author
+        // who never typed a number is not making a claim the cook should argue
+        // with. Two committed samples were in exactly this state.
         assert!(gravity_3d_advisory(id, 0.0, Vec3d::new(0.0, -9.81, 0.0), true).is_empty());
-        // The hazard: a low-gravity level authored in the field nothing reads.
-        let out = gravity_3d_advisory(id, -9.81, Vec3d::new(0.0, -1.6, 0.0), true);
+        // The hazard: a low-gravity level authored in `gravity_2d.y` because that
+        // was the field the 3D solver read. Its 3D gravity moved to −9.81.
+        let out = gravity_3d_advisory(id, -1.6, Vec3d::new(0.0, -9.81, 0.0), true);
         assert_eq!(out.len(), 1, "{out:?}");
         let a = &out[0];
         assert!(
             a.contains(&id.to_string()),
             "the advisory must name the level: {a}"
         );
-        assert!(a.contains("-1.6"), "…what was authored: {a}");
-        assert!(a.contains("-9.81"), "…what will actually be used: {a}");
-        assert!(a.contains("gravity_2d.y"), "…and the remedy: {a}");
-        // A sideways gravity is the same hazard, and is named as unsupported.
+        assert!(a.contains("-1.6"), "…the number that used to be used: {a}");
+        assert!(a.contains("-9.81"), "…the number that is used now: {a}");
+        assert!(a.contains("gravity_3d"), "…and the remedy: {a}");
+        // A sideways `gravity_3d` is now SUPPORTED — the solver takes the whole
+        // vector — so it is advised only because it is a move, and the message
+        // says what it moved to rather than that it is dropped.
         let out = gravity_3d_advisory(id, -9.81, Vec3d::new(3.0, -9.81, 0.0), true);
-        assert_eq!(
-            out.len(),
-            1,
-            "a non-vertical 3D gravity is silently dropped too"
-        );
+        assert_eq!(out.len(), 1, "a 3D gravity with an x component moved too");
+        assert!(out[0].contains('3'), "…and names it: {:?}", out[0]);
         // One line, no mangled whitespace (the chr(92) law at its point of use).
         assert!(!out[0].contains("  "), "mangled whitespace in {:?}", out[0]);
     }

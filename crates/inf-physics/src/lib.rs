@@ -61,9 +61,11 @@
 pub mod d2;
 pub mod d3;
 mod filtering;
+mod gravity;
 mod stepper;
 
 pub use filtering::{CollisionLayers, CombineRule};
+pub use gravity::WorldGravity;
 pub use stepper::FixedStepper;
 
 // The pure ragdoll-setup helper (P12.1): a humanoid skeleton → body/collider/

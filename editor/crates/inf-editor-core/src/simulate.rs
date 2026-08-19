@@ -62,6 +62,7 @@ use inf_physics::d3::{
 };
 use inf_physics::{
     CharacterMover2D, ColliderShape2D, ContactPhase, FixedStepper, PhysicsBridge2D, PhysicsBridge3D,
+    WorldGravity,
 };
 use inf_voxel::VoxelData;
 
@@ -396,10 +397,58 @@ impl SimSession {
     /// `actors` pairs each blueprint-driven entity's `Guid` with the
     /// [`BlueprintClass`] to run on it. `gravity` is world units/s² (a
     /// side-scroller uses `(0, -9.81)`).
+    ///
+    /// **A fixture's door.** One 2D vector means that vector in both dimensions
+    /// ([`WorldGravity::from_2d`]), which is what every caller of this function
+    /// meant before P29.7. The **editor** has a document with two authored
+    /// fields and calls [`enter_with_gravity`](Self::enter_with_gravity), which
+    /// is the mirror of `RuntimeSim::with_gravity`.
     pub fn enter(
         doc: &mut SceneDoc,
         actors: Vec<(Uuid, BlueprintClass)>,
         gravity: DVec2,
+        hz: f64,
+    ) -> Self {
+        Self::enter_with_gravity(doc, actors, WorldGravity::from_2d(gravity), hz)
+    }
+
+    /// **The document's own gravity**, by the same rule the shipped player reads
+    /// a level with (P29.7).
+    ///
+    /// # The finding this closes
+    ///
+    /// The editor's Simulate passed `DVec2::ZERO` — a literal, in
+    /// `commands/sim.rs`, under a comment saying a character applies its own
+    /// gravity in its blueprint. That is true of a *character* and of nothing
+    /// else: a dynamic body in the editor's Simulate therefore floated while the
+    /// same level in the shipped player fell, and no gate could see it because
+    /// until this wave no committed level with a dynamic body was ever played in
+    /// both hosts. It is the same defect shape as the one `sim_from_payload`
+    /// exists for — a boot path that forgets something does not crash, it agrees
+    /// with itself.
+    ///
+    /// One function so the studio command, the gates and any test read the
+    /// document the same way; `inf_player::level`'s two lines are the mirror.
+    pub fn gravity_of(doc: &SceneDoc) -> WorldGravity {
+        let s = doc.settings();
+        WorldGravity::new(
+            glam::DVec2::new(s.gravity_2d.x, s.gravity_2d.y),
+            s.gravity_3d.to_dvec3(),
+        )
+    }
+
+    /// [`enter`](Self::enter) with **both** solvers' gravity — the door the
+    /// editor uses (P29.7).
+    ///
+    /// The 3D bridge is built from `gravity.d3`, i.e. from the document's
+    /// authored `gravity_3d`. Before this wave it came from `gravity_2d.y` and
+    /// `gravity_3d` was read by nothing; [`WorldGravity`] carries the finding and
+    /// the decision, and this function is the editor half of the pair the shipped
+    /// player's `RuntimeSim::with_gravity` is the other half of.
+    pub fn enter_with_gravity(
+        doc: &mut SceneDoc,
+        actors: Vec<(Uuid, BlueprintClass)>,
+        gravity: WorldGravity,
         hz: f64,
     ) -> Self {
         // ScenePersist::Memory, NOT the file projection (P16.4b): this snapshot
@@ -427,10 +476,11 @@ impl SimSession {
         //    would not match the shipped player's, which seeds from rest.
         inf_ecs::cloth::clear_cloth(doc.world_mut());
         inf_ecs::hair::clear_hair(doc.world_mut());
-        let bridge = PhysicsBridge2D::new(gravity);
-        // P11.3: a 3D bridge alongside the 2D one. The 2D vertical gravity maps to
-        // world −Y; a character applies its own gravity through move_and_slide.
-        let bridge3d = PhysicsBridge3D::new(DVec3::new(0.0, gravity.y, 0.0));
+        let bridge = PhysicsBridge2D::new(gravity.d2);
+        // P11.3: a 3D bridge alongside the 2D one — built from the level's own
+        // `gravity_3d` since P29.7 (a character still applies its own gravity
+        // through `move_and_slide`; only a DYNAMIC body reads this number).
+        let bridge3d = PhysicsBridge3D::new(gravity.d3);
 
         // Assign stable i64 ids in Guid order, seed the `entity` variable.
         let mut entities = BTreeMap::new();

@@ -17,7 +17,6 @@
 use std::sync::Mutex;
 use std::time::Instant;
 
-use glam::DVec2;
 use inf_blueprint::{InterpDebug, LocalId};
 use inf_editor_core::samples::bound_actors;
 use inf_editor_core::simulate::{SimDebugHit, SimInput, SimSession, SIM_HZ};
@@ -193,8 +192,12 @@ pub async fn sim_start(
             ),
         }
     }
-    // Character applies its own gravity in the blueprint → world gravity is zero.
-    let mut session = SimSession::enter(&mut doc, actors, DVec2::ZERO, SIM_HZ);
+    // **The document's gravity, not a literal** (P29.7). This line used to read
+    // `DVec2::ZERO` under a comment about characters applying their own gravity;
+    // a dynamic body reads the world's, so Simulate floated what the shipped
+    // player dropped. `gravity_of` is the one rule both hosts read a level with.
+    let gravity = SimSession::gravity_of(&doc);
+    let mut session = SimSession::enter_with_gravity(&mut doc, actors, gravity, SIM_HZ);
     session.set_state_machines(machines);
     for (clip_guid, skeleton, clip) in root_clips {
         session.register_root_motion_clip(clip_guid, skeleton, clip);

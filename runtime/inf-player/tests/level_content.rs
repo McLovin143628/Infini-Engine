@@ -194,7 +194,7 @@ fn scripted_input_moves_the_character_off_the_cooked_pack() {
     assert_eq!(built.actors.len(), 1, "the player's coyote actor is bound");
 
     let player = uuid::Uuid::from_u128(0x8401_0004);
-    let mut sim = RuntimeSim::new(built.world, built.actors, built.gravity, built.hz);
+    let mut sim = RuntimeSim::with_gravity(built.world, built.actors, built.gravity, built.hz);
 
     let x_of = |sim: &RuntimeSim| {
         let e = sim.world().entity_of(player).unwrap();

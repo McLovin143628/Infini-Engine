@@ -62,6 +62,7 @@ use inf_physics::d3::{
 };
 use inf_physics::{
     CharacterMover2D, ColliderShape2D, ContactPhase, PhysicsBridge2D, PhysicsBridge3D,
+    WorldGravity,
 };
 use inf_runtime::FixedStep;
 use inf_voxel::VoxelData;
@@ -423,16 +424,37 @@ impl RuntimeSim {
     /// gravity handed to the physics bridge (the platformer sample uses
     /// [`DVec2::ZERO`] — the character applies its own gravity in the blueprint);
     /// `hz` is the fixed update rate.
+    ///
+    /// **A fixture's door.** One 2D vector means that vector in both dimensions
+    /// ([`WorldGravity::from_2d`]), which is what every caller of this function
+    /// meant before P29.7 and what a hand-built world still means. A **host** has
+    /// a level with two authored fields and calls
+    /// [`with_gravity`](Self::with_gravity) instead — see [`WorldGravity`].
     pub fn new(
-        mut world: EcsWorld,
+        world: EcsWorld,
         actors: Vec<(Uuid, BlueprintClass)>,
         gravity: DVec2,
         hz: f64,
     ) -> Self {
+        Self::with_gravity(world, actors, WorldGravity::from_2d(gravity), hz)
+    }
+
+    /// [`new`](Self::new) with **both** solvers' gravity — the door a host uses
+    /// (P29.7).
+    ///
+    /// The 3D bridge is built from `gravity.d3`, i.e. from the level's authored
+    /// `gravity_3d`. Before this wave it was built from `gravity_2d.y` and
+    /// `gravity_3d` was read by nothing; [`WorldGravity`] carries the whole
+    /// finding and the decision.
+    pub fn with_gravity(
+        mut world: EcsWorld,
+        actors: Vec<(Uuid, BlueprintClass)>,
+        gravity: WorldGravity,
+        hz: f64,
+    ) -> Self {
         world.propagate();
-        let bridge = PhysicsBridge2D::new(gravity);
-        // P11.3: a 3D bridge alongside the 2D one (2D vertical gravity → world −Y).
-        let bridge3d = PhysicsBridge3D::new(DVec3::new(0.0, gravity.y, 0.0));
+        let bridge = PhysicsBridge2D::new(gravity.d2);
+        let bridge3d = PhysicsBridge3D::new(gravity.d3);
 
         // Assign stable i64 ids in Guid order, seed the `entity` variable.
         let mut entities = BTreeMap::new();
