@@ -91,8 +91,9 @@ fn pack_sim(pack_dir: &Path) -> RuntimeSim {
     let source = PackLevelSource::open(pack_dir).expect("pack opens");
     let mut built = inf_player::build_world_from_pack(&source).expect("pack level builds");
     let partition = built.take_partition();
+    let pcg_ctx = built.take_pcg_context();
     let mut sim = inf_player::sim_from_built(built);
-    inf_player::attach_cell_streaming(&mut sim, &partition);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg_ctx);
     sim
 }
 
@@ -104,8 +105,9 @@ fn loose_sim(content: &Path) -> RuntimeSim {
     let builder = InfSceneWorldBuilder::with_defaults(Vec::new());
     let mut built = level::load(&source, &builder).expect("loose level builds");
     let partition = built.take_partition();
+    let pcg_ctx = built.take_pcg_context();
     let mut sim = inf_player::sim_from_built(built);
-    inf_player::attach_cell_streaming(&mut sim, &partition);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg_ctx);
     sim
 }
 
@@ -792,8 +794,9 @@ fn a_persistent_blueprint_binds_in_a_partitioned_level() {
     // else, which is the intended order. The cook warns about exactly this shape
     // (`inf_scene::partition::streamed_actors`).
     let partition = built.take_partition();
+    let pcg_ctx = built.take_pcg_context();
     let mut sim = inf_player::sim_from_built(built);
-    inf_player::attach_cell_streaming(&mut sim, &partition);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg_ctx);
     for _ in 0..8 {
         sim.step_once(RuntimeInput::default());
     }
@@ -875,8 +878,9 @@ fn an_empty_partitioned_level_plays_off_pack() {
     // And it runs: an empty world steps without incident.
     let mut built = built;
     let partition = built.take_partition();
+    let pcg_ctx = built.take_pcg_context();
     let mut sim = inf_player::sim_from_built(built);
-    inf_player::attach_cell_streaming(&mut sim, &partition);
+    inf_player::attach_cell_streaming(&mut sim, &partition, pcg_ctx);
     for _ in 0..4 {
         sim.step_once(RuntimeInput::default());
     }

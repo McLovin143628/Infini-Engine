@@ -205,6 +205,10 @@ fn build_world(args: &Args) -> Result<(BuiltWorld, TerrainContent), String> {
             let cloths = level::load_cloth_assets_from_dir(&content_dir);
             let hairs = level::load_hair_assets_from_dir(&content_dir);
             let terrains = level::terrain_paths_by_guid_from_dir(&content_dir);
+            // IB-1: PCG pages its ground from the same `.inf_terrain` files the
+            // streamer will. Resolved lazily, per terrain the level actually
+            // references, so a content directory full of terrains costs nothing.
+            let pcg_terrains = terrains.clone();
             let builder = InfSceneWorldBuilder::with_defaults(actors)
                 .with_bindings(by_guid)
                 .with_pcgs(pcgs)
@@ -212,7 +216,17 @@ fn build_world(args: &Args) -> Result<(BuiltWorld, TerrainContent), String> {
                 .with_anim_assets(skeletons, clips, machines)
                 .with_cloth_assets(cloths)
                 .with_hair_assets(hairs)
-                .with_audio(audio);
+                .with_audio(audio)
+                .with_terrain_resolver(std::sync::Arc::new(move |g| {
+                    let path = pcg_terrains.get(&g)?;
+                    match level::terrain_source_from_file(path) {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            tracing::error!("inf-player: terrain asset {g} (for PCG): {e}");
+                            None
+                        }
+                    }
+                }));
             Ok((
                 level::load(&source, &builder)?,
                 TerrainContent::Dir(terrains),
@@ -256,7 +270,16 @@ pub fn material_content_for_world(content: &TerrainContent) -> MaterialContent {
 /// The persistent cell is already in `sim`'s world: the level builder spawned it
 /// before actor binding, because it *is* the level at step 0. This only attaches
 /// the manager for what streams.
-pub fn attach_cell_streaming(sim: &mut RuntimeSim, content: &level::PartitionContent) {
+/// `pcg` is the [`BuiltWorld`](level::BuiltWorld)'s own PCG context (island
+/// phase, IB-1) — the same graphs and the same terrain resolver the load-time
+/// pass used, so a `PcgVolume` that arrives with a cell is evaluated the way one
+/// in the persistent cell was, rather than not at all. Pass
+/// [`PcgContext::default`](level::PcgContext::default) for a world with no PCG.
+pub fn attach_cell_streaming(
+    sim: &mut RuntimeSim,
+    content: &level::PartitionContent,
+    pcg: level::PcgContext,
+) {
     let Some(store) = content.store() else {
         return;
     };
@@ -264,7 +287,8 @@ pub fn attach_cell_streaming(sim: &mut RuntimeSim, content: &level::PartitionCon
         store.clone(),
         content.settings(),
         cell_stream::CellStreamBudget::default(),
-    );
+    )
+    .with_pcg(pcg);
     sim.set_cell_streaming(cells);
 }
 
@@ -310,7 +334,20 @@ pub fn build_world_from_pack(source: &PackLevelSource) -> Result<BuiltWorld, Str
         .with_audio(audio)
         // P16.5: a partitioned cooked level resolves its derived `.inf_part` out
         // of this same (already-open) pack mapping.
-        .with_partition_pack(source.reader().clone(), source.root_level());
+        .with_partition_pack(source.reader().clone(), source.root_level())
+        // IB-1: …and PCG pages its ground out of it too, so a scatter over a
+        // streamed terrain lands on the terrain instead of on sea level. Sliced
+        // from the mmap already open above, so this costs no bytes.
+        .with_terrain_resolver({
+            let s = source.clone();
+            std::sync::Arc::new(move |g| match s.terrain_source(g) {
+                Ok(src) => src,
+                Err(e) => {
+                    tracing::error!("inf-player: terrain asset {g} (for PCG): {e}");
+                    None
+                }
+            })
+        });
     level::load(source, &builder)
 }
 
@@ -329,6 +366,8 @@ pub fn run_headless(args: &Args) -> ExitCode {
         }
     };
     let partition = built.take_partition();
+    // IB-1: the graphs + terrain resolver a streamed cell's PcgVolumes need.
+    let pcg_ctx = built.take_pcg_context();
     let label = built.label.clone();
     let frames = args.run_frames;
     let panic_after = args.panic_after;
@@ -338,7 +377,7 @@ pub fn run_headless(args: &Args) -> ExitCode {
     let mut sim = sim_from_built(built);
     // Cells first: terrain residency is derived from the sim's entities, and a
     // freshly-activated cell brings some of them in.
-    attach_cell_streaming(&mut sim, &partition);
+    attach_cell_streaming(&mut sim, &partition, pcg_ctx);
     attach_terrain_streaming(&mut sim, &terrain_content);
     attach_voxel_volumes(&mut sim, &load_voxel_assets(args));
     // P22.3: what a level's destructible actors break into. Only a cooked
@@ -373,6 +412,8 @@ pub fn run_windowed(args: &Args) -> ExitCode {
         }
     };
     let partition = built.take_partition();
+    // IB-1: the graphs + terrain resolver a streamed cell's PcgVolumes need.
+    let pcg_ctx = built.take_pcg_context();
     let map = match &args.world {
         WorldChoice::Level(path) => input::load_map_beside(path),
         WorldChoice::Demo | WorldChoice::Pack(_) => input::default_map(),
@@ -403,7 +444,7 @@ pub fn run_windowed(args: &Args) -> ExitCode {
     if let WorldChoice::Level(path) = &args.world {
         sim.camera_mut().tuning = input::load_camera_beside(path);
     }
-    attach_cell_streaming(&mut sim, &partition);
+    attach_cell_streaming(&mut sim, &partition, pcg_ctx);
     attach_terrain_streaming(&mut sim, &terrain_content);
     // The SAME registry the render host will page from — one source of bytes, two
     // working sets, and the sim's is the one that decides where the floor is.
@@ -800,13 +841,29 @@ pub fn build_world_from_payload(payload: &ScenePayload) -> Result<BuiltWorld, St
             inf_asset::decode(bytes).map_err(|e| format!("decode hair {guid}: {e}"))?,
         );
     }
+    // IB-1: the `.inf_terrain` bytes the payload already carries are also where
+    // PIE's PCG pages its ground. Without this a PIE session over a streamed
+    // terrain scattered at sea level while the cooked build scattered on the
+    // hill — a preview that differs from the build, which is the whole point of
+    // the envelope carrying these bytes at all.
+    let terrains: HashMap<uuid::Uuid, Vec<u8>> = payload.terrains.iter().cloned().collect();
     let builder = InfSceneWorldBuilder::with_defaults(fallback)
         .with_bindings(by_guid)
         .with_pcgs(pcgs)
         .with_biome_sets(biome_sets)
         .with_anim_assets(skeletons, clips, machines)
         .with_cloth_assets(cloths)
-        .with_hair_assets(hairs);
+        .with_hair_assets(hairs)
+        .with_terrain_resolver(std::sync::Arc::new(move |g| {
+            let bytes = terrains.get(&g)?;
+            match level::terrain_source_from_bytes(bytes.clone()) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::error!("inf-player: terrain payload {g} (for PCG): {e}");
+                    None
+                }
+            }
+        }));
     builder.build(&payload.level_bytes)
 }
 
@@ -1099,10 +1156,12 @@ pub fn sim_from_payload(payload: &ScenePayload) -> Result<PayloadSim, String> {
     // cook would. Skipping it would run an empty world and quietly break
     // PIE == shipping.
     let partition = built.take_partition();
+    // IB-1: the graphs + terrain resolver a streamed cell's PcgVolumes need.
+    let pcg_ctx = built.take_pcg_context();
     let mut sim = sim_from_built(built);
     // Cells first: a freshly-activated cell can bring in a `VoxelVolume` entity,
     // and the voxel resolution below walks the world as it stands.
-    attach_cell_streaming(&mut sim, &partition);
+    attach_cell_streaming(&mut sim, &partition, pcg_ctx);
     attach_voxel_volumes(
         &mut sim,
         &voxel::VoxelRegistry::from_payload(&payload.voxels),

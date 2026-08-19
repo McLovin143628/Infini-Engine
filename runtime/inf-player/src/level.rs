@@ -132,6 +132,9 @@ pub struct BuiltWorld {
     /// [`PartitionContent::None`] for every unpartitioned level, in which case
     /// `world` already holds every entity and nothing streams.
     pub partition: PartitionContent,
+    /// The graphs + terrain sources a streamed cell's [`PcgVolume`]s need when
+    /// they arrive (island phase, IB-1). See [`PcgContext`].
+    pub pcg: PcgContext,
 }
 
 impl BuiltWorld {
@@ -140,6 +143,41 @@ impl BuiltWorld {
     /// [`sim_from_built`](crate::sim_from_built) consumes the rest).
     pub fn take_partition(&mut self) -> PartitionContent {
         std::mem::replace(&mut self.partition, PartitionContent::None)
+    }
+
+    /// Take the PCG context out of the built world — it goes to the same place
+    /// the partition does, for the same reason (island phase, IB-1).
+    pub fn take_pcg_context(&mut self) -> PcgContext {
+        std::mem::take(&mut self.pcg)
+    }
+}
+
+/// **What the PCG passes need that the world does not carry**: the graphs, and
+/// where a streamed terrain's heights come from (island phase, IB-1).
+///
+/// Carried on [`BuiltWorld`] and handed to cell streaming, so a [`PcgVolume`]
+/// that arrives with a partition cell is evaluated when its cell activates.
+/// Before this it was spawned and never evaluated at all.
+///
+/// It is a plain struct rather than a bevy resource on purpose: `TerrainSource`
+/// is a Ring-2 type and `inf-ecs` is the only crate in the tree that may name
+/// `bevy_ecs`. Session state either way — nothing here is serialized, and no
+/// schema moves for it.
+#[derive(Clone, Default)]
+pub struct PcgContext {
+    /// `.inf_pcg` graph payloads keyed by asset GUID.
+    pub pcgs: HashMap<Uuid, PcgAssetPayload>,
+    /// Resolve a `Terrain.asset` GUID to its tile source — see
+    /// [`page_terrains_for_pcg`].
+    #[allow(clippy::type_complexity)]
+    pub terrain: Option<Arc<dyn Fn(Uuid) -> Option<TerrainSource> + Send + Sync>>,
+}
+
+impl PcgContext {
+    /// Whether there is anything to evaluate at all (no graphs ⇒ no volumes can
+    /// resolve, so a streaming reconcile skips the whole pass).
+    pub fn is_empty(&self) -> bool {
+        self.pcgs.is_empty()
     }
 }
 
@@ -361,6 +399,20 @@ pub struct InfSceneWorldBuilder {
     /// resolved to its derived `.inf_part` (P16.5). `None` on the loose /
     /// PIE path, where a partitioned level is binned in memory instead.
     partition_pack: Option<(Arc<PackReader>, AssetId)>,
+    /// Resolve a `Terrain.asset` GUID to its tile source (island phase, IB-1) —
+    /// **where PCG's ground comes from when the terrain is streamed**.
+    ///
+    /// The same resolution [`attach_terrain_streaming`](crate::attach_terrain_streaming)
+    /// performs, handed to the builder as well because the streamer attaches
+    /// *after* `RuntimeSim::new` and the scatter is baked long before that. See
+    /// [`page_terrains_for_pcg`].
+    ///
+    /// A closure rather than a resolved map because that is the shape
+    /// `TerrainStreaming::attach` already takes, and because the pack path's
+    /// resolution is an mmap sub-slice: resolving eagerly for terrains a level
+    /// does not reference would open stores nothing reads.
+    #[allow(clippy::type_complexity)]
+    terrain_resolver: Option<Arc<dyn Fn(Uuid) -> Option<TerrainSource> + Send + Sync>>,
 }
 
 impl InfSceneWorldBuilder {
@@ -380,6 +432,7 @@ impl InfSceneWorldBuilder {
             gravity,
             hz,
             partition_pack: None,
+            terrain_resolver: None,
         }
     }
 
@@ -409,6 +462,23 @@ impl InfSceneWorldBuilder {
     /// source's biome-set index (or a PIE payload).
     pub fn with_biome_sets(mut self, biome_sets: HashMap<Uuid, inf_terrain::BiomeSet>) -> Self {
         self.biome_sets = biome_sets;
+        self
+    }
+
+    /// Attach the `.inf_terrain` resolver PCG pages its ground from (island
+    /// phase, IB-1).
+    ///
+    /// **Without this a streamed terrain scatters at sea level** — see
+    /// [`page_terrains_for_pcg`] for the measurement. Builder style, exactly like
+    /// [`with_pcgs`](Self::with_pcgs), and wired from the same
+    /// [`TerrainContent`](crate::TerrainContent) that
+    /// [`attach_terrain_streaming`](crate::attach_terrain_streaming) uses, so
+    /// there is one answer to "where are this terrain's tiles" rather than two.
+    pub fn with_terrain_resolver(
+        mut self,
+        resolve: Arc<dyn Fn(Uuid) -> Option<TerrainSource> + Send + Sync>,
+    ) -> Self {
+        self.terrain_resolver = Some(resolve);
         self
     }
 
@@ -572,6 +642,16 @@ impl WorldBuilder for InfSceneWorldBuilder {
 
         let mut world = populate_world(entities);
         world.propagate();
+        // **Page the ground PCG is about to ask about** (island phase, IB-1).
+        // An asset-backed terrain has no inline tiles and the streamer attaches
+        // after `RuntimeSim::new`, so without this every scattered instance over
+        // a streamed terrain landed at exactly y = 0 — 929 of 929, measured —
+        // with a different instance count because the slope and height masks
+        // were reading a plane. Runs before BOTH evaluation passes below,
+        // because the biome binding picks its height source the same way.
+        if let Some(resolve) = &self.terrain_resolver {
+            page_terrains_for_pcg(&mut world, |g| resolve(g));
+        }
         // Evaluate PCG scatter volumes on load: their `evaluated` cache is never
         // persisted (`#[serde(skip)]`), so the player recomputes it from the
         // referenced `.inf_pcg` graph against the level's terrain (P10.6).
@@ -625,6 +705,13 @@ impl WorldBuilder for InfSceneWorldBuilder {
             cloths: self.cloths.iter().map(|(g, c)| (*g, c.clone())).collect(),
             hairs: self.hairs.iter().map(|(g, h)| (*g, h.clone())).collect(),
             partition,
+            // IB-1: the same graphs and the same terrain resolver the load-time
+            // pass above used, carried forward so a volume that arrives with a
+            // streamed cell is evaluated the same way rather than not at all.
+            pcg: PcgContext {
+                pcgs: self.pcgs.clone(),
+                terrain: self.terrain_resolver.clone(),
+            },
         })
     }
 }
@@ -917,6 +1004,166 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
     spawned
 }
 
+/// **The rectangles procedural generation is about to ask about**, in world XZ,
+/// deterministically ordered — one per [`PcgVolume`], plus one per [`Spline`]
+/// (the `grammar.spline` seam runs its passes along a centreline that need not
+/// sit inside any volume's extent).
+///
+/// MIRROR: `commands::pcg::pcg_regions_of` in the editor. The two hosts must ask
+/// for the same ground or they get different worlds — and getting *different*
+/// worlds silently is precisely what IB-1 was.
+///
+/// `O(volumes + spline points)`. A bounding box over the union is NOT used: at
+/// island scale two volumes a kilometre apart would page the kilometre between
+/// them, which is the whole terrain and the whole point of streaming.
+pub fn pcg_regions_of(world: &EcsWorld) -> Vec<(DVec2, DVec2)> {
+    let mut out: Vec<(DVec2, DVec2)> = Vec::new();
+    let mut ents: Vec<(Uuid, inf_ecs::Entity)> = {
+        let w = world.world();
+        let mut v: Vec<(Uuid, inf_ecs::Entity)> = w
+            .iter_entities()
+            .filter_map(|e| e.get::<Guid>().map(|g| (g.0, e.id())))
+            .collect();
+        v.sort_by_key(|(g, _)| *g);
+        v
+    };
+    let w = world.world();
+    for (_, e) in ents.drain(..) {
+        let origin = w
+            .get::<GlobalTransform>(e)
+            .map(|g| g.translation())
+            .unwrap_or(DVec3::ZERO);
+        if let Some(v) = w.get::<PcgVolume>(e) {
+            let c = DVec2::new(origin.x, origin.z);
+            let half = DVec2::new(v.extent.x, v.extent.y);
+            out.push((c - half, c + half));
+        }
+        if let Some(s) = w.get::<Spline>(e) {
+            let mut lo = DVec2::splat(f64::INFINITY);
+            let mut hi = DVec2::splat(f64::NEG_INFINITY);
+            for p in &s.points {
+                let wp = DVec2::new(origin.x + p.x, origin.z + p.z);
+                lo = lo.min(wp);
+                hi = hi.max(wp);
+            }
+            if lo.is_finite() && hi.is_finite() {
+                out.push((lo, hi));
+            }
+        }
+    }
+    out
+}
+
+/// **Page a streamed terrain's heights before PCG asks for them** — the island
+/// phase's IB-1 fix.
+///
+/// # The defect this closes, measured
+///
+/// [`evaluate_pcg_volumes`] picks its height source with `if t.data.is_empty() {
+/// return None }`, and its `None` arm is a flat `Some(0.0)`. An **asset-backed**
+/// terrain ships no inline tiles — its heights live in the `.inf_terrain` and are
+/// paged by the streamer — and `attach_terrain_streaming` runs *after*
+/// `RuntimeSim::new`, i.e. long after the world builder evaluated PCG. So there
+/// was no arrangement of a level in which a streamed terrain had pages resident
+/// at the moment PCG asked, and the scatter over a 50 km² world was measured at
+/// **929 of 929 instances at exactly `y = 0`** against 220 that followed an
+/// authored hill from the same volume and the same graph. The instance *count*
+/// differed too, because the slope and height masks were evaluating against a
+/// plane: not a world that needed nudging downward, a different world.
+///
+/// # Why a pre-pass rather than a new height provider
+///
+/// Because `t.data.is_empty()` is not a *bug* — it is a true statement that the
+/// terrain has no heights yet, and the honest fix is to make it false. Paging the
+/// tiles PCG needs into the terrain's own working set leaves the evaluator, the
+/// provider closure, the seed folding and both mirror gates byte-unchanged, and
+/// makes the authored and streamed paths converge on one code path instead of
+/// two. A second `HeightProvider` that could page would have been a second
+/// spelling of "what is the ground here", which is the defect this repository has
+/// paid for at four separate seams.
+///
+/// # What it does not do
+///
+/// Level 0 only, additive, and *synchronous* — every load in this stack already
+/// is. It never evicts, so a terrain that is already fully resident (every
+/// authored inline-tile level) pays a residency check per tile and nothing else.
+/// The streamer attaches afterwards and reconciles residency normally; the
+/// scatter is already baked into `PcgVolume::evaluated` by then, so what the
+/// streamer evicts cannot change the world.
+///
+/// Returns the number of tiles paged — a caller (and a gate) can tell "there was
+/// nothing to page" from "the paging did nothing", which is the difference
+/// between a healthy authored level and a silently broken streamed one.
+pub fn page_terrains_for_pcg(
+    world: &mut EcsWorld,
+    mut resolve: impl FnMut(Uuid) -> Option<TerrainSource>,
+) -> usize {
+    let regions = pcg_regions_of(world);
+    if regions.is_empty() {
+        return 0;
+    }
+    // Guid-sorted, exactly as `TerrainStreaming::attach` gathers its targets —
+    // the same walk, so the two cannot disagree about which terrains exist.
+    let targets: Vec<(Uuid, Uuid, DVec3)> = {
+        let w = world.world();
+        let mut v: Vec<(Uuid, Uuid, DVec3)> = w
+            .iter_entities()
+            .filter_map(|e| {
+                let guid = e.get::<Guid>()?.0;
+                let asset = e.get::<Terrain>()?.asset?;
+                let origin = e
+                    .get::<GlobalTransform>()
+                    .map(|g| g.translation())
+                    .unwrap_or(DVec3::ZERO);
+                Some((guid, asset, origin))
+            })
+            .collect();
+        v.sort_by_key(|(g, _, _)| *g);
+        v
+    };
+
+    let mut paged = 0usize;
+    for (entity, asset, origin) in targets {
+        let Some(source) = resolve(asset) else {
+            continue;
+        };
+        let Some(e) = world.entity_of(entity) else {
+            continue;
+        };
+        let Some(mut t) = world.world_mut().get_mut::<Terrain>(e) else {
+            continue;
+        };
+        // The working set must sit on the ASSET's grid — a streamed page's origin
+        // is derived from its coordinate, so a stale level config would place
+        // every tile in the wrong place. Same rule, same words, as
+        // `TerrainStreaming::attach`; a terrain holding inline tiles on a
+        // different grid is left alone there and is left alone here.
+        let stale = t.data.tile_resolution() != source.tile_resolution
+            || t.data.meters_per_sample() != source.meters_per_sample;
+        if stale {
+            if !t.data.is_empty() {
+                continue;
+            }
+            t.data = inf_terrain::TerrainData::new(source.tile_resolution, source.meters_per_sample);
+        }
+        for (min, max) in &regions {
+            let local_min = DVec2::new(min.x - origin.x, min.y - origin.z);
+            let local_max = DVec2::new(max.x - origin.x, max.y - origin.z);
+            let report = inf_terrain::residency::page_region(
+                &mut t.data,
+                source.store.as_ref(),
+                local_min,
+                local_max,
+            );
+            paged += report.loaded.len();
+        }
+    }
+    if paged > 0 {
+        tracing::info!("inf-player: paged {paged} terrain tile(s) for PCG evaluation");
+    }
+    paged
+}
+
 /// Evaluate every [`PcgVolume`] whose `graph` ref resolves in `pcgs`, refreshing
 /// its `evaluated` instance cache from the scatter graph over the level's terrain
 /// (P10.6). This is the runtime twin of the editor's `pcg_evaluate` command: the
@@ -951,7 +1198,39 @@ pub fn spawn_entities(world: &mut EcsWorld, entities: Vec<RuntimeEntity>) -> Vec
 /// grammar-built building is enterable rather than merely drawn. Like
 /// `evaluated`, it is derived state and is never serialized.
 pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetPayload>) {
-    if pcgs.is_empty() {
+    evaluate_pcg_volumes_in(world, pcgs, None)
+}
+
+/// [`evaluate_pcg_volumes`], restricted to the volumes among `only` — **the door
+/// world-partition cell streaming goes through** (island phase, IB-1).
+///
+/// # Why a restriction rather than a second pass
+///
+/// `cell_stream.rs` calls [`spawn_entities`] in six places and called
+/// `evaluate_pcg_volumes` in none, so a `PcgVolume` inside a streamed partition
+/// cell was spawned and **never evaluated at all** — not scattered at the wrong
+/// height, not scattered. The engine documented this about itself ("PCG
+/// evaluation is a load-time pass"), which is correct for a hand-authored level
+/// and is exactly the assumption a 50 km² streamed world breaks.
+///
+/// Evaluating *everything* on every cell activation would be correct and
+/// unaffordable: activation is O(1) cells and the volume set is O(world), so the
+/// load would grow with the map rather than with what entered it. `only` is the
+/// guid set `spawn_entities` just returned, so the work is O(what arrived) —
+/// the standing O(subjects) rule.
+///
+/// **What is deliberately NOT restricted**: the terrain pick and the spline
+/// fetch. A streamed cell's volume scatters over the level's *terrain*, which
+/// lives in the persistent cell, and its grammar passes follow splines that may
+/// too. Restricting those would make a cell's population depend on which cells
+/// happened to be resident — the nondeterminism this whole subsystem is built to
+/// refuse.
+pub fn evaluate_pcg_volumes_in(
+    world: &mut EcsWorld,
+    pcgs: &HashMap<Uuid, PcgAssetPayload>,
+    only: Option<&std::collections::BTreeSet<Uuid>>,
+) {
+    if pcgs.is_empty() || only.is_some_and(|s| s.is_empty()) {
         return;
     }
 
@@ -1001,6 +1280,7 @@ pub fn evaluate_pcg_volumes(world: &mut EcsWorld, pcgs: &HashMap<Uuid, PcgAssetP
     let jobs: Vec<Job> = {
         let w = world.world();
         ents.iter()
+            .filter(|(guid, _)| only.is_none_or(|s| s.contains(guid)))
             .filter_map(|&(guid, e)| {
                 let vol = w.get::<PcgVolume>(e)?;
                 let graph_guid = vol.graph?;
@@ -1495,6 +1775,11 @@ struct BootManifest {
 /// A [`LevelSource`] backed by a cooked `content.inf_pack` (+ optional
 /// `manifest.toml`). Opens the pack, resolves the root level GUID, and reads its
 /// bytes; `.inf_act` classes are read straight out of the pack too.
+///
+/// `Clone` is an `Arc` bump plus two small fields — the mapping is shared, never
+/// re-opened — so a caller that needs the pack in two places (the world builder's
+/// PCG terrain resolver and the streamer, IB-1) holds one mapping between them.
+#[derive(Clone)]
 pub struct PackLevelSource {
     /// `Arc` so a streaming store can hold the mapping open beyond the source's
     /// own lifetime (P16.3b2): a [`PackTileStore`](inf_terrain::PackTileStore)

@@ -153,6 +153,9 @@ pub fn build() -> BuiltWorld {
         hairs: std::collections::BTreeMap::new(),
         // The programmatic demo is a single document — nothing streams.
         partition: crate::level::PartitionContent::None,
+        // …and it authors no PCG, so there is nothing for a streamed cell's
+        // volumes to evaluate against (island phase, IB-1).
+        pcg: crate::level::PcgContext::default(),
     }
 }
 

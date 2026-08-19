@@ -505,6 +505,18 @@ pub struct CellStreaming {
     /// (P16.6) — once per GUID, not once per step, so a cell that stays out of
     /// residency for a thousand steps says it one time.
     logged_unresolved: BTreeSet<Uuid>,
+    /// **The graphs and the ground a streamed [`PcgVolume`] needs** (island
+    /// phase, IB-1). Empty for a world with no `.inf_pcg` content, in which case
+    /// the activation pass below costs one `is_empty` check.
+    ///
+    /// Before this, a `PcgVolume` inside a partition cell was spawned and never
+    /// evaluated at all: this file calls `spawn_entities` in six places and
+    /// called `evaluate_pcg_volumes` in none. A 50 km² world is exactly the
+    /// content whose PCG lives in cells rather than in the persistent one.
+    pcg: crate::level::PcgContext,
+    /// How many volumes streaming has evaluated this session — the anti-vacuity
+    /// counter for the arm that says it happens at all.
+    pcg_evaluated: u64,
 }
 
 impl CellStreaming {
@@ -542,7 +554,26 @@ impl CellStreaming {
             events: inf_core::BoundedLog::default(),
             warned_ceiling: false,
             logged_unresolved: BTreeSet::new(),
+            pcg: crate::level::PcgContext::default(),
+            pcg_evaluated: 0,
         }
+    }
+
+    /// Attach the PCG context a streamed cell's volumes are evaluated with
+    /// (island phase, IB-1). Builder style so every boot path wires it from the
+    /// same [`BuiltWorld`](crate::level::BuiltWorld) the load-time pass used.
+    pub fn with_pcg(mut self, pcg: crate::level::PcgContext) -> Self {
+        self.pcg = pcg;
+        self
+    }
+
+    /// How many streamed [`PcgVolume`]s this manager has evaluated. Zero for a
+    /// world whose PCG all lives in the persistent cell — which is what every
+    /// pre-island level is, and why this counter exists: an arm that could not
+    /// tell "no volumes streamed in" from "streamed volumes are not evaluated"
+    /// would be the vacuous check IB-1 was hiding behind.
+    pub fn pcg_evaluated(&self) -> u64 {
+        self.pcg_evaluated
     }
 
     /// Whether anything streams (an unpartitioned world streams nothing).
@@ -727,6 +758,10 @@ impl CellStreaming {
             .copied()
             .filter(|c| !self.resident.contains_key(c))
             .collect();
+        // The guids this reconcile spawned — the subject set for step 6b.
+        // `BTreeSet` because it is handed to `evaluate_pcg_volumes_in`, whose
+        // output order must be a function of the content and not of a hash seed.
+        let mut arrived: BTreeSet<Uuid> = BTreeSet::new();
         for coord in entering {
             let entities = match self.loaded.remove(&coord) {
                 Some(e) => e,
@@ -758,11 +793,36 @@ impl CellStreaming {
                 coord.1,
                 guids.len()
             );
+            arrived.extend(guids.iter().copied());
             self.resident.insert(coord, guids);
         }
 
         // 6. One propagate for the whole reconcile.
         world.propagate();
+
+        // 6b. **Evaluate the PCG volumes that just arrived** (island phase,
+        //     IB-1). Before this, a `PcgVolume` in a streamed cell was spawned
+        //     and never evaluated at all — the engine's own note says "PCG
+        //     evaluation is a load-time pass", which is true of a hand-authored
+        //     level and is exactly what a 50 km² streamed world breaks.
+        //
+        //     After the propagate, because the evaluator reads each volume's
+        //     `GlobalTransform`; restricted to what arrived, because activation
+        //     is O(1) cells and the volume set is O(world). The ground is paged
+        //     first, for the same reason the load path pages it.
+        if !self.pcg.is_empty() && !arrived.is_empty() {
+            let before = pcg_volume_count(world, &arrived);
+            if before > 0 {
+                if let Some(resolve) = &self.pcg.terrain {
+                    crate::level::page_terrains_for_pcg(world, |g| resolve(g));
+                }
+                crate::level::evaluate_pcg_volumes_in(world, &self.pcg.pcgs, Some(&arrived));
+                self.pcg_evaluated += before as u64;
+                tracing::debug!(
+                    "inf-player: evaluated {before} streamed PcgVolume(s) on activation"
+                );
+            }
+        }
         self.refresh_stats(&activate);
         // 7. Cross-cell reference health (P16.6). A read-only scan of sim state
         //    AFTER the reconcile, so the count describes the world the step is
@@ -944,6 +1004,27 @@ fn load_cells(
     coords.iter().map(|c| store.cell(*c)).collect()
 }
 
+/// How many of `guids` carry a [`PcgVolume`](inf_ecs::components::PcgVolume)
+/// with a graph reference — the anti-vacuity precondition for the streamed-cell
+/// evaluation (island phase, IB-1).
+///
+/// Counting *before* evaluating is what lets
+/// [`CellStreaming::pcg_evaluated`] mean "volumes that streamed in and were
+/// evaluated" rather than "times the pass ran". A counter that cannot tell those
+/// apart is how a pass that does nothing looks alive.
+fn pcg_volume_count(world: &EcsWorld, guids: &BTreeSet<Uuid>) -> usize {
+    let w = world.world();
+    guids
+        .iter()
+        .filter(|g| {
+            world
+                .entity_of(**g)
+                .and_then(|e| w.get::<inf_ecs::components::PcgVolume>(e))
+                .is_some_and(|v| v.graph.is_some())
+        })
+        .count()
+}
+
 /// The per-axis distance from a world XZ point to a cell — re-exported so the
 /// gate can assert residency bounds without re-deriving the rule.
 pub fn distance_to_cell(coord: CellCoord, x: f64, z: f64, cell_size_m: f64) -> f64 {
@@ -1063,6 +1144,187 @@ mod tests {
         let e = world.entity_of(guid(0xF1)).expect("source");
         inf_ecs::sim::set_translation(world, e, inf_ecs::Vec3d::new(x, 0.0, 0.0));
         world.propagate();
+    }
+
+    /// The graph asset guid the streamed-PCG fixture binds.
+    const STREAMED_GRAPH_GUID: u128 = 0xBEEF;
+
+    /// A fixture whose **third cell holds a `PcgVolume`**, over a terrain that
+    /// lives in the persistent cell — the shape a 50 km² world has, and the one
+    /// the AAA-readiness certification measured as never evaluated at all.
+    fn pcg_fixture() -> (EcsWorld, CellStreaming) {
+        use inf_ecs::components::{PcgVolume, Terrain};
+
+        // A hill in the persistent cell. Portable trig (the P14 law): this shape
+        // decides instance positions that a determinism trace folds.
+        let mut terrain = Terrain::configured(17, 4.0);
+        terrain.data.write_region(
+            glam::DVec2::new(-64.0, -64.0),
+            glam::DVec2::new(384.0, 64.0),
+            |x, z| 20.0 + 5.0 * inf_math::psin64(x * 0.02) * inf_math::pcos64(z * 0.02),
+        );
+
+        let mut entities = vec![
+            RuntimeEntity {
+                always_loaded: Some(AlwaysLoaded),
+                mesh: None,
+                terrain: Some(terrain),
+                ..rec(0xF0, "Terrain", (0.0, 0.0))
+            },
+            RuntimeEntity {
+                streaming_source: Some(StreamingSource { radius_m: 0.0 }),
+                ..rec(0xF1, "Player", (0.0, 0.0))
+            },
+        ];
+        // The volume sits at x = 250 — cell 2 of the 100 m grid, well outside the
+        // 10 m activation radius until the source walks there.
+        entities.push(RuntimeEntity {
+            mesh: None,
+            pcg_volume: Some(PcgVolume {
+                graph: Some(guid(STREAMED_GRAPH_GUID)),
+                extent: inf_ecs::math::Vec2d::new(20.0, 20.0),
+                ..PcgVolume::default()
+            }),
+            ..rec(0x200, "Streamed Scatter", (250.0, 0.0))
+        });
+
+        let store: Arc<dyn CellStore> =
+            Arc::new(MemoryCellStore::from_entities(&entities, &settings()));
+        let mut world = EcsWorld::new();
+        crate::level::spawn_entities(&mut world, store.persistent().unwrap());
+        world.propagate();
+
+        let mut pcgs = std::collections::HashMap::new();
+        pcgs.insert(
+            guid(STREAMED_GRAPH_GUID),
+            inf_pcg::PcgAssetPayload {
+                schema_version: inf_pcg::PcgAssetPayload::CURRENT_VERSION,
+                graph_json: None,
+                document: inf_editor_core::samples::terrain_demo_pcg_document(),
+            },
+        );
+        let s = CellStreaming::attach(
+            store,
+            settings(),
+            CellStreamBudget {
+                max_prefetch_per_sync: 0,
+            },
+        )
+        .with_pcg(crate::level::PcgContext {
+            pcgs,
+            terrain: None,
+        });
+        (world, s)
+    }
+
+    /// Read a volume's baked instance heights.
+    fn evaluated_ys(world: &EcsWorld, g: Uuid) -> Vec<f64> {
+        let Some(e) = world.entity_of(g) else {
+            return Vec::new();
+        };
+        world
+            .world()
+            .get::<inf_ecs::components::PcgVolume>(e)
+            .map(|v| v.evaluated.iter().map(|i| i.position.y).collect())
+            .unwrap_or_default()
+    }
+
+    /// **A `PcgVolume` that streams in is evaluated** — island phase, IB-1.
+    ///
+    /// The certification's second finding: `evaluate_pcg_volumes` had exactly one
+    /// production caller (the world builder), and this file called
+    /// `spawn_entities` in six places and it in none. So a volume inside a
+    /// streamed partition cell was spawned and **never evaluated at all** — not
+    /// scattered at the wrong height, not scattered.
+    ///
+    /// Asserts the WORLD: the instances exist, and they stand on the hill the
+    /// persistent cell's terrain describes rather than at sea level.
+    #[test]
+    fn a_streamed_pcg_volume_is_evaluated_when_its_cell_activates() {
+        let (mut world, mut s) = pcg_fixture();
+        // Before its cell activates the volume is not even spawned.
+        assert!(world.entity_of(guid(0x200)).is_none());
+        assert_eq!(s.pcg_evaluated(), 0);
+
+        // Walk the source onto the volume's cell.
+        move_source(&mut world, 250.0);
+        s.sync_sim(&mut world, 1);
+
+        assert!(
+            world.entity_of(guid(0x200)).is_some(),
+            "the volume's cell did not activate — the fixture is not posing the \
+             problem"
+        );
+        assert_eq!(
+            s.pcg_evaluated(),
+            1,
+            "the streamed volume was spawned and never evaluated, which is IB-1 \
+             exactly"
+        );
+        let ys = evaluated_ys(&world, guid(0x200));
+        assert!(
+            !ys.is_empty(),
+            "the streamed volume was evaluated to zero instances"
+        );
+        let (lo, hi) = (
+            ys.iter().cloned().fold(f64::INFINITY, f64::min),
+            ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        );
+        assert!(
+            lo > 10.0 && hi > lo,
+            "the streamed scatter is not standing on the persistent cell's \
+             terrain — y in {lo}..{hi}, and the hill is around 20 m"
+        );
+        eprintln!(
+            "IB-1 streamed cell: {} instance(s), y {lo:.3}..{hi:.3}",
+            ys.len()
+        );
+    }
+
+    /// **Re-activating a cell does not re-do the whole world's PCG** — the
+    /// O(subjects) half.
+    ///
+    /// Activation is O(1) cells and the volume set is O(world), so a pass that
+    /// evaluated everything on every activation would make walking across a map
+    /// cost more the bigger the map is. Measured as a count rather than described.
+    #[test]
+    fn activation_evaluates_what_arrived_and_not_the_whole_world() {
+        let (mut world, mut s) = pcg_fixture();
+        move_source(&mut world, 250.0);
+        s.sync_sim(&mut world, 1);
+        assert_eq!(s.pcg_evaluated(), 1);
+
+        // Leave, and come back. One volume arrived each time — never two, and
+        // never the persistent cell's contents again.
+        move_source(&mut world, 0.0);
+        s.sync_sim(&mut world, 2);
+        assert!(world.entity_of(guid(0x200)).is_none(), "it did not leave");
+        move_source(&mut world, 250.0);
+        s.sync_sim(&mut world, 3);
+        assert_eq!(
+            s.pcg_evaluated(),
+            2,
+            "an activation evaluated something other than what arrived"
+        );
+
+        // …and a sync that activates nothing evaluates nothing.
+        s.sync_sim(&mut world, 4);
+        assert_eq!(s.pcg_evaluated(), 2, "a no-op sync re-evaluated a volume");
+    }
+
+    /// **A world with no PCG content pays nothing**, and the counter says so —
+    /// the anti-vacuity control for the two arms above.
+    #[test]
+    fn a_world_without_pcg_content_evaluates_nothing_on_activation() {
+        let (mut world, mut s) = fixture();
+        move_source(&mut world, 150.0);
+        s.sync_sim(&mut world, 1);
+        assert!(s.stats().activations > 0, "nothing activated");
+        assert_eq!(
+            s.pcg_evaluated(),
+            0,
+            "a world whose cells hold no PcgVolume reported evaluating some"
+        );
     }
 
     #[test]

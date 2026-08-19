@@ -34,6 +34,10 @@ use inf_asset::AssetId;
 use inf_ecs::components::{
     GlobalTransform, PcgVolume, ScatteredInstance, Spline, Terrain, Transform,
 };
+// IB-1: the paging pre-pass walks entities by stable `Guid`, in the same
+// spelling the player's mirror uses — `grammar_span_mirror` compares the two
+// bodies character for character.
+use inf_ecs::Guid;
 use inf_graph::{
     apply_edits, compile::validate, GraphDoc, GraphEdit, GraphIssue, GraphJournal, Link, NodeDef,
     NodeId, NodeRegistry,
@@ -49,6 +53,134 @@ use uuid::Uuid;
 
 use super::assets::AssetState;
 use super::scene::{emit_world_delta, SceneState};
+
+/// **The rectangles procedural generation is about to ask about**, in world XZ,
+/// deterministically ordered — one per [`PcgVolume`], plus one per [`Spline`].
+///
+/// MIRROR: `inf_player::level::pcg_regions_of`. The two hosts must ask for the
+/// same ground or they get different worlds — and getting *different* worlds
+/// silently is precisely what the island phase's IB-1 was.
+fn pcg_regions_of(world: &inf_ecs::EcsWorld) -> Vec<(DVec2, DVec2)> {
+    let mut out: Vec<(DVec2, DVec2)> = Vec::new();
+    let mut ents: Vec<(Uuid, inf_ecs::Entity)> = {
+        let w = world.world();
+        let mut v: Vec<(Uuid, inf_ecs::Entity)> = w
+            .iter_entities()
+            .filter_map(|e| e.get::<Guid>().map(|g| (g.0, e.id())))
+            .collect();
+        v.sort_by_key(|(g, _)| *g);
+        v
+    };
+    let w = world.world();
+    for (_, e) in ents.drain(..) {
+        let origin = w
+            .get::<GlobalTransform>(e)
+            .map(|g| g.translation())
+            .unwrap_or(DVec3::ZERO);
+        if let Some(v) = w.get::<PcgVolume>(e) {
+            let c = DVec2::new(origin.x, origin.z);
+            let half = DVec2::new(v.extent.x, v.extent.y);
+            out.push((c - half, c + half));
+        }
+        if let Some(s) = w.get::<Spline>(e) {
+            let mut lo = DVec2::splat(f64::INFINITY);
+            let mut hi = DVec2::splat(f64::NEG_INFINITY);
+            for p in &s.points {
+                let wp = DVec2::new(origin.x + p.x, origin.z + p.z);
+                lo = lo.min(wp);
+                hi = hi.max(wp);
+            }
+            if lo.is_finite() && hi.is_finite() {
+                out.push((lo, hi));
+            }
+        }
+    }
+    out
+}
+
+/// **Page a streamed terrain's heights before PCG asks for them** (island phase,
+/// IB-1) — the editor half.
+///
+/// MIRROR: `inf_player::level::page_terrains_for_pcg`. The player pages from the
+/// pack mapping (or the PIE payload's bytes); the editor pages from the
+/// `.inf_terrain` files in the content root, which is the only difference between
+/// them and is exactly the difference between the two hosts everywhere else.
+///
+/// **Without it the two hosts disagree.** Before this, both hosts fell back to
+/// `Some(0.0)` over a streamed terrain and therefore *agreed on the wrong
+/// answer*, which is why the PIE-equals-shipping gate never caught IB-1. Fixing
+/// only the player would have replaced a shared wrong answer with two different
+/// answers, which is worse.
+fn page_terrains_for_pcg(
+    world: &mut inf_ecs::EcsWorld,
+    paths: &std::collections::HashMap<Uuid, std::path::PathBuf>,
+) -> usize {
+    if paths.is_empty() {
+        return 0;
+    }
+    let regions = pcg_regions_of(world);
+    if regions.is_empty() {
+        return 0;
+    }
+    let targets: Vec<(Uuid, Uuid, DVec3)> = {
+        let w = world.world();
+        let mut v: Vec<(Uuid, Uuid, DVec3)> = w
+            .iter_entities()
+            .filter_map(|e| {
+                let guid = e.get::<Guid>()?.0;
+                let asset = e.get::<Terrain>()?.asset?;
+                let origin = e
+                    .get::<GlobalTransform>()
+                    .map(|g| g.translation())
+                    .unwrap_or(DVec3::ZERO);
+                Some((guid, asset, origin))
+            })
+            .collect();
+        v.sort_by_key(|(g, _, _)| *g);
+        v
+    };
+
+    let mut paged = 0usize;
+    for (entity, asset, origin) in targets {
+        let Some(path) = paths.get(&asset) else {
+            continue;
+        };
+        let store = match inf_terrain::open_file_tile_store(path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("pcg: open {} for paging: {e}", path.display());
+                continue;
+            }
+        };
+        let header = *store.header();
+        let Some(e) = world.entity_of(entity) else {
+            continue;
+        };
+        let Some(mut t) = world.world_mut().get_mut::<Terrain>(e) else {
+            continue;
+        };
+        let stale = t.data.tile_resolution() != header.tile_resolution
+            || t.data.meters_per_sample() != header.meters_per_sample;
+        if stale {
+            if !t.data.is_empty() {
+                continue;
+            }
+            t.data =
+                inf_ecs::TerrainData::new(header.tile_resolution, header.meters_per_sample);
+        }
+        for (min, max) in &regions {
+            let local_min = DVec2::new(min.x - origin.x, min.y - origin.z);
+            let local_max = DVec2::new(max.x - origin.x, max.y - origin.z);
+            let report =
+                inf_terrain::residency::page_region(&mut t.data, &store, local_min, local_max);
+            paged += report.loaded.len();
+        }
+    }
+    if paged > 0 {
+        tracing::info!("pcg: paged {paged} terrain tile(s) for evaluation");
+    }
+    paged
+}
 
 /// The editor's [`MaskSource`]: resolves a `mask.image` node's texture GUID to
 /// the live project's `.inf_tex` pixels.
@@ -608,12 +740,25 @@ pub async fn pcg_evaluate(
     // that a consistent snapshot beats a shorter hold. What changes is *who*
     // waits — a viewport frame that wants the document still does; the runtime
     // that serves everything else no longer does.
+    // IB-1: where a streamed terrain's heights come from. Resolved OUTSIDE the
+    // doc lock (a directory walk under it would block every viewport frame), and
+    // handed in as an index exactly as the viewport's own streamer takes one.
+    let terrain_paths = assets
+        .content_root()
+        .map(|root| inf_editor_core::terrain_stream::terrain_paths_by_guid(&root))
+        .unwrap_or_default();
     let doc_handle = Arc::clone(&scene.doc);
     let entity_arg = entity.clone();
     let placed_entity = tauri::async_runtime::spawn_blocking(move || {
         let entity = entity_arg;
         let mut doc = doc_handle.lock().map_err(|e| e.to_string())?;
         doc.world_mut().propagate();
+        // **Page the ground before asking about it** (island phase, IB-1). An
+        // asset-backed terrain carries no inline tiles, so without this the
+        // provider below took its `None` arm — a flat `Some(0.0)` — and the
+        // editor previewed a scatter at sea level that the shipped build also
+        // placed at sea level. The two hosts agreed, on the wrong world.
+        page_terrains_for_pcg(doc.world_mut(), &terrain_paths);
 
         // Resolve the target entity GUID.
         let guid = match &entity {

@@ -62,13 +62,15 @@ async fn run(canvas_id: String, pack_url: String) -> Result<(), String> {
     let source = crate::level::PackLevelSource::from_reader(reader, "web")?;
     let mut built = crate::build_world_from_pack(&source)?;
     let partition = built.take_partition();
+    // IB-1: the graphs + terrain resolver a streamed cell's PcgVolumes need.
+    let pcg_ctx = built.take_pcg_context();
     let title = format!("Infinity Engine (Web) — {}", built.label);
     let mut sim = crate::sim_from_built(built);
     // P16.5 cell streaming works here too: the in-memory `PackReader` hands
     // `read_ref` a borrowed slice for the (uncompressed, streaming-class)
     // `.inf_part`, so a cell is sub-sliced with no copy, and the prefetch batch
     // takes the serial path on wasm (no thread pool) for an identical result.
-    crate::attach_cell_streaming(&mut sim, &partition);
+    crate::attach_cell_streaming(&mut sim, &partition, pcg_ctx);
     // Terrain streaming (P16.3b2) works here too: the in-memory `PackReader` still
     // hands `read_ref` a borrowed slice for an uncompressed (streaming-class)
     // entry, so tiles are sub-sliced with no copy. The load batch takes the serial

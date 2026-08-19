@@ -120,6 +120,64 @@ fn both_evaluation_paths_go_through_the_same_grammar_seams() {
     }
 }
 
+/// **Both hosts page the same ground before they ask about it** — the island
+/// phase's IB-1, at the seam that made it invisible.
+///
+/// The defect was not that one host was wrong. It was that BOTH fell back to
+/// `FnHeight::new(|_, _| Some(0.0))` over an asset-backed terrain, so the
+/// PIE-equals-shipping gate compared two hosts agreeing on a world in which 929
+/// of 929 instances sat at sea level. Fixing one host alone would have replaced
+/// a shared wrong answer with two different answers, which is worse — so the
+/// region rule is mirrored and this is what keeps it mirrored.
+///
+/// The **region set** is compared character for character (whitespace-collapsed),
+/// because that is the drift surface: a host that asked for a different rectangle
+/// would page different tiles, and a tile that is not resident answers `None` —
+/// which `FnHeight` propagates and the scatter drops. Silently, and only over the
+/// part of the world the other host happened to load.
+#[test]
+fn both_hosts_page_the_same_ground_before_evaluating() {
+    let editor = read(EDITOR);
+    let player = read(PLAYER);
+
+    // The rectangles, character for character.
+    assert_eq!(
+        squash(&body_of(&editor, "fn pcg_regions_of(")),
+        squash(&body_of(&player, "pub fn pcg_regions_of(")),
+        "the editor and the player ask about different ground — one of them will \
+         scatter over tiles the other never loaded"
+    );
+
+    for needle in [
+        // The pre-pass, by name, on both sides.
+        "fn page_terrains_for_pcg(",
+        "page_terrains_for_pcg(",
+        // …through the ONE Ring-0 rule, not a second spelling of it.
+        "inf_terrain::residency::page_region(",
+        // …onto the ASSET's grid. A host that skipped this check would page
+        // tiles onto a stale level grid and place every one of them wrong.
+        "tile_resolution()",
+        "meters_per_sample()",
+        // The region set both sides feed it.
+        "pcg_regions_of(",
+    ] {
+        assert!(editor.contains(needle), "editor lost `{needle}`");
+        assert!(player.contains(needle), "player lost `{needle}`");
+    }
+
+    // ANTI-VACUITY: the sea-level fallback still EXISTS on both sides (it is the
+    // documented answer for a level with no terrain at all), so the assertions
+    // above are about the paging having been added rather than about the
+    // fallback having been deleted.
+    for (label, src) in [("editor", &editor), ("player", &player)] {
+        assert!(
+            src.contains("FnHeight::new(|_, _| Some(0.0))"),
+            "{label}: the no-terrain fallback is gone, so this gate is now \
+             asserting something else"
+        );
+    }
+}
+
 /// The argument name each side's document happens to have — the only thing that
 /// legitimately differs between the two `inf_pcg::evaluate` calls.
 fn doc_arg(side: &str) -> &'static str {
