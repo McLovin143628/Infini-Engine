@@ -493,10 +493,17 @@ fn the_import_writes_five_assets_under_the_project_root_and_says_so() {
     let ids = session
         .import(&mut project, "Ridge")
         .expect("the import writes");
-    assert_eq!(
-        project.db().len() - before,
-        SCAN_ASSETS,
-        "an import is five assets or none"
+    // **Five AUTHORED assets, plus whatever was DERIVED from them** (Wave D).
+    // The all-or-none set is still five — that is `write_finished`'s property
+    // and it is unchanged — and the import now derives the mesh's meshlet DAG
+    // right after it, which is the P25 carried remainder ("no `.inf_vmesh` at
+    // photogrammetry import") closing exactly where `write_finished`'s own doc
+    // said it belonged. The bound is written as "five plus at most one" rather
+    // than relaxed to `>=`, so a seventh asset appearing is still a failure.
+    let written = project.db().len() - before;
+    assert!(
+        written == SCAN_ASSETS || written == SCAN_ASSETS + 1,
+        "an import is five authored assets plus at most one derived DAG, got {written}"
     );
 
     // THE TRAP, closed at this end: `AssetProject::write_asset` takes its
@@ -540,21 +547,30 @@ fn the_import_writes_five_assets_under_the_project_root_and_says_so() {
     assert_eq!(after.first().map(|e| e.phase), Some(CapturePhase::Started));
     assert_eq!(after.last().map(|e| e.phase), Some(CapturePhase::Finished));
 
-    // And the honest note about what the viewport will draw is now on the
-    // product, because that is the moment a user goes looking for their scan.
+    // **The placeholder-cube note now tracks the truth** (Wave D). It used to be
+    // raised unconditionally because nothing derived a DAG; the import derives
+    // one, so the note fires exactly when the viewport really will draw a cube —
+    // a scan under `[vgeom] min_triangles`, or a derivation that failed.
     let has_note = session
         .with_product(|p| p.issues.contains(&CaptureIssue::NoMeshletDag))
         .unwrap_or(false);
-    assert!(
-        has_note,
-        "the wizard imported a scan and did not say it draws as a placeholder cube"
+    let derived = project
+        .db()
+        .by_kind(inf_asset::AssetKind::MeshletMesh)
+        .next()
+        .is_some();
+    assert_ne!(
+        has_note, derived,
+        "the note and the DAG must be opposites: a scan with a DAG does not draw \
+         as a cube, and one without it does. note={has_note} derived={derived}"
     );
-    // …and it is what the PANEL reads, which is a different question: `findings`
-    // is the one rule deciding whether a caller sees the pre-flight, a failed
-    // run's own, or the product's, and this is the branch where a product wins.
-    assert!(
+    // …and whichever it is, `findings` — the one rule deciding whether a caller
+    // sees the pre-flight, a failed run's own, or the product's issues — agrees
+    // with the product, which is a different question from the product having it.
+    assert_eq!(
         session.findings().contains(&CaptureIssue::NoMeshletDag),
-        "the placeholder-cube note is on the product and not on the door a panel reads: {:?}",
+        has_note,
+        "the note is on the product and not on the door a panel reads: {:?}",
         session.findings()
     );
 }

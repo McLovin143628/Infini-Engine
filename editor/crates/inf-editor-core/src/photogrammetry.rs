@@ -1761,6 +1761,12 @@ fn uv_span(asset: &MeshAsset) -> (f64, f64) {
 /// function's all-or-none set. P25.4's wizard is the door that places a finish in
 /// a scene and is where the derivation belongs, on the pattern the import
 /// orchestrator already uses.
+///
+/// **Wave D did exactly that**: `capture::PhotogrammetrySession::import` calls
+/// `ensure_vmesh` right after this returns, synchronously, and raises
+/// `CaptureIssue::NoMeshletDag` only when the viewport really will draw a cube.
+/// This function is unchanged, and the reason it is unchanged is the paragraph
+/// above: the five assets still land together or not at all.
 pub fn write_finished(
     project: &mut crate::assets::AssetProject,
     dir: &Path,

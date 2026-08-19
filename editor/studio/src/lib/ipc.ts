@@ -1034,9 +1034,20 @@ export const dcc = {
   amend: (id: string, index: number, value: number): Promise<DccApplyDto> =>
     invoke<DccApplyDto>("dcc_amend", { id, index, value }),
   redo: (id: string): Promise<DccDocDto> => invoke<DccDocDto>("dcc_redo", { id }),
-  /** One offscreen frame as a PNG data-URL, with the overlay composited in. */
-  preview: (id: string, size: number): Promise<DccPreviewDto> =>
-    invoke<DccPreviewDto>("dcc_preview", { id, size }),
+  /**
+   * One offscreen frame as a PNG data-URL, with the overlay composited in.
+   *
+   * `hover` is `[x, y, radiusM]` in the preview's own pixel space and metres —
+   * the **hover brush ring** (Wave D). Sent only while a brush tool is armed and
+   * the pointer is over the image, because it costs a frame per pointer-move:
+   * the same cost as an orbit frame, which the panel already pays.
+   */
+  preview: (
+    id: string,
+    size: number,
+    hover?: [number, number, number] | null,
+  ): Promise<DccPreviewDto> =>
+    invoke<DccPreviewDto>("dcc_preview", { id, size, hover: hover ?? null }),
   /** Write the mesh back to its asset (rewrite + synchronous vmesh derive). */
   save: (id: string): Promise<DccSaveDto> => invoke<DccSaveDto>("dcc_save", { id }),
   /** Drop another mesh asset in as a second component. */

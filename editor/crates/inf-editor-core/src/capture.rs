@@ -426,9 +426,15 @@ pub enum CaptureIssue {
     /// draws it as a placeholder cube.
     ///
     /// A **note** rather than a warning: the asset is correct, complete and
-    /// re-openable, and the sweep that derives the DAG runs on its own. It is
-    /// said out loud because the alternative is a user watching a cube appear
-    /// where their scan should be and concluding the wizard failed.
+    /// re-openable. It is said out loud because the alternative is a user
+    /// watching a cube appear where their scan should be and concluding the
+    /// wizard failed.
+    ///
+    /// **Wave D: raised only when it is TRUE.** The import now derives the DAG
+    /// synchronously, so this fires for the two cases where a cube really is
+    /// what the viewport will draw — a scan below `[vgeom] min_triangles`
+    /// (`VmeshDerivation::Skipped`) and a derivation that failed. It used to
+    /// fire unconditionally, because nothing derived anything.
     NoMeshletDag,
 }
 
@@ -1297,12 +1303,42 @@ impl PhotogrammetrySession {
         };
         match written {
             Ok(ids) => {
+                // **The meshlet DAG, derived here** (Wave D) — closing the P25
+                // carried remainder exactly where `write_finished`'s own doc
+                // says it belongs: *"P25.4's wizard is the door that places a
+                // finish in a scene and is where the derivation belongs, on the
+                // pattern the import orchestrator already uses."*
+                //
+                // Synchronously, and after the all-or-none write rather than
+                // inside it — the reason that doc gives for keeping it out of
+                // `write_finished` is that a sixth artifact would join a set
+                // whose whole property is that it lands together or not at all.
+                // A derivation that fails leaves five correct assets and a note,
+                // which is a different and much smaller failure.
+                //
+                // It is seconds on a fifteen-thousand-triangle scan. That is the
+                // right place to spend them: the author pressed Import and the
+                // next thing they do is look at the viewport, and a queued
+                // derivation is a window in which their scan is a cube.
+                send(CapturePhase::Finished, "deriving the meshlet DAG", None);
+                let dag = crate::assets::vmesh::ensure_vmesh(project, ids.mesh);
+                let drew_a_cube = match &dag {
+                    Ok(crate::assets::vmesh::VmeshDerivation::Skipped) | Err(_) => true,
+                    Ok(_) => false,
+                };
+                if let Err(e) = &dag {
+                    tracing::warn!("the scan's meshlet DAG could not be derived: {e}");
+                }
                 send(CapturePhase::Finished, "five assets written", None);
                 self.state = CaptureState::Imported;
                 if let Ok(mut guard) = self.shared.lock() {
                     guard.state = Some(CaptureState::Imported);
                     if let Some(product) = guard.product.as_mut() {
-                        if !product.issues.contains(&CaptureIssue::NoMeshletDag) {
+                        // The note is raised only when the viewport really will
+                        // draw a cube. Raising it unconditionally — which is what
+                        // it did while nothing derived the DAG — would now be
+                        // telling the author about a hazard that is not there.
+                        if drew_a_cube && !product.issues.contains(&CaptureIssue::NoMeshletDag) {
                             product.issues.push(CaptureIssue::NoMeshletDag);
                         }
                     }

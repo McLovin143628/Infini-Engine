@@ -1809,6 +1809,12 @@ pub async fn dcc_redo(
 pub async fn dcc_preview(
     id: String,
     size: u32,
+    // **Where the pointer is hovering and how big the brush is**, in preview
+    // pixels and metres — `[x, y, radius_m]` (Wave D). `None` for every caller
+    // that is not hovering a brush, which is most of them: the panel sends it
+    // only while a brush tool is armed and the pointer is over the image, so
+    // the extra frames are paid for exactly when they buy something.
+    hover: Option<[f64; 3]>,
     state: State<'_, DccState>,
 ) -> Result<DccPreviewDto, String> {
     let size = size.clamp(64, 1024);
@@ -1827,9 +1833,15 @@ pub async fn dcc_preview(
         let (geo, mesh) =
             doc.preview
                 .get_with_pending(session, &doc.selection, doc.mode, doc.pending.as_ref());
-        // A brush ring while a stroke is live. **Only while it is live**: a hover
-        // ring would need a pointer-move round trip the panel does not make, and
-        // it is a stated remainder rather than a silently missing feature.
+        // A brush ring while a stroke is live — **or under a hovering pointer**
+        // (Wave D, closing the P23 remainder). The hover ring costs a
+        // pointer-move round trip, which is why it was not built: it is the same
+        // cost as an orbit (0.09 ms render, 0.34 ms encode at 256²) and the
+        // panel already pays that per orbit frame. It sends `hover` only while a
+        // brush tool is armed, so nothing pays for it otherwise.
+        //
+        // The LIVE stroke wins when both are available: a ring that jumped
+        // between the last dab and the raw pointer would read as two brushes.
         let brush = match &doc.pending {
             Some(PendingDrag::Stroke(st)) => {
                 st.path.last().map(|&c| (c, st.last_normal, st.radius))
@@ -1841,7 +1853,16 @@ pub async fn dcc_preview(
                 .path
                 .last()
                 .map(|&c| (c, st.last_normal, st.brush.radius)),
-            _ => None,
+            _ => hover.and_then(|[hx, hy, radius]| {
+                let proj = Projector::new(doc.view, size);
+                // Through `pick_surface` — the SAME ray the stroke itself uses,
+                // so the ring lands where the first dab would and an author is
+                // never shown a footprint the brush will not have.
+                dcc::pick_surface(&mesh, &proj, hx as f32, hy as f32).map(|(face, hit)| {
+                    let n = inf_dcc::face_normal(&mesh, face).unwrap_or(glam::DVec3::Y);
+                    (hit, n, radius)
+                })
+            }),
         };
         // The gizmo is drawn against the COMMITTED selection's pivot, which is
         // where the drag was begun — recomputing it from the scratch mesh would

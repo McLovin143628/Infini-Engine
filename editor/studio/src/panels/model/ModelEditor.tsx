@@ -220,6 +220,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const newMesh = useDccStore((s) => s.newMesh);
   const historyRefresh = useDccStore((s) => s.historyRefresh);
   const amend = useDccStore((s) => s.amend);
+  const setHover = useDccStore((s) => s.setHover);
   const assetsById = useAssetStore((s) => s.assets);
   // What the drawer is dragging right now, so the zone lights up for a drop it
   // can actually accept rather than for any native drag that crosses it.
@@ -440,9 +441,29 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
     });
   };
 
+  /**
+   * The hover brush ring (Wave D, closing the P23 remainder). Sent only while a
+   * brush tool is armed — `setHover` collapses a repeat, and the store's preview
+   * gate collapses the storm, so this is one queued frame per move at worst.
+   */
+  const trackHover = (e: React.PointerEvent | null) => {
+    if (!assetId) return;
+    const brushing = tool === "sculpt" || tool === "weights";
+    if (!brushing || !e) {
+      setHover(assetId, null);
+      return;
+    }
+    const [px, py] = toPreviewPx(e);
+    setHover(assetId, [px, py, brushRadius]);
+  };
+
   const onPointerMove = (e: React.PointerEvent) => {
     const d = drag.current;
-    if (!d) return;
+    if (!d) {
+      // No drag: this is a hover, and the ring is what it is for.
+      trackHover(e);
+      return;
+    }
     const dx = e.clientX - d.x;
     const dy = e.clientY - d.y;
     if (!d.moved && Math.abs(dx) + Math.abs(dy) < 3) return;

@@ -142,6 +142,12 @@ interface DccState {
   /** P24.4: grow guides out of the face selection into a `.inf_hair`. */
   growHair: (assetId: string, spec: DccGroomDto) => Promise<void>;
   refresh: (assetId: string) => void;
+  /**
+   * **Move the hover brush ring** (Wave D). `null` when the pointer leaves the
+   * image or the tool is not a brush; a re-render follows only when the value
+   * really changed, so a hover over a non-brush tool costs nothing.
+   */
+  setHover: (assetId: string, hover: [number, number, number] | null) => void;
 
   // ── pointer drags (P23.5) ───────────────────────────────────────────────
   setGizmo: (assetId: string, mode: DccGizmoModeDto | null) => Promise<void>;
@@ -197,6 +203,14 @@ const flight = new Map<string, { inFlight: boolean; queued: boolean }>();
  */
 const tombstones = new Set<string>();
 
+/**
+ * **Where a brush is hovering, per document** (Wave D) — outside the store for
+ * the reason `flight` is: it changes on every pointer-move, and putting that in
+ * zustand would re-render the whole panel per move to draw a circle the backend
+ * composites into the frame anyway.
+ */
+const hovers = new Map<string, [number, number, number] | null>();
+
 function gate(assetId: string): { inFlight: boolean; queued: boolean } {
   let g = flight.get(assetId);
   if (!g) {
@@ -232,7 +246,7 @@ export const useDccStore = create<DccState>((set, get) => {
     }
     g.inFlight = true;
     try {
-      const frame = await dccIpc.preview(doc.id, DCC_PREVIEW_SIZE);
+      const frame = await dccIpc.preview(doc.id, DCC_PREVIEW_SIZE, hovers.get(assetId) ?? null);
       patch(assetId, { image: frame.image, previewError: frame.error });
     } catch (e) {
       patch(assetId, { previewError: String(e) });
@@ -324,6 +338,9 @@ export const useDccStore = create<DccState>((set, get) => {
     close: async (assetId) => {
       tombstones.add(assetId);
       flight.delete(assetId);
+      // The hover belongs to the panel that is closing — an entry left behind
+      // would be read by the next document to take this asset id.
+      hovers.delete(assetId);
       set((s) => {
         const docs = { ...s.docs };
         delete docs[assetId];
@@ -431,6 +448,22 @@ export const useDccStore = create<DccState>((set, get) => {
     // a rejected `dcc_undo` was an unhandled promise rejection and the panel
     // showed nothing at all. `skelStore.run` already does exactly this, for the
     // reason written above it.
+    setHover: (assetId, hover) => {
+      const prev = hovers.get(assetId) ?? null;
+      const same =
+        prev === hover ||
+        (prev !== null &&
+          hover !== null &&
+          prev[0] === hover[0] &&
+          prev[1] === hover[1] &&
+          prev[2] === hover[2]);
+      if (same) return;
+      hovers.set(assetId, hover);
+      // The gate collapses the storm: a pointer-move during a frame queues one
+      // and no more, which is the same rule an orbit already lives under.
+      void pump(assetId);
+    },
+
     historyRefresh: async (assetId) => {
       const doc = entry(assetId).doc;
       if (!doc) return;
