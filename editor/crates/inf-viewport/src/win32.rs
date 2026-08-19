@@ -27,26 +27,30 @@ use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE,
     RAWINPUTDEVICE_FLAGS, RAWINPUTHEADER, RID_INPUT, RIM_TYPEMOUSE,
 };
+use windows::Win32::UI::WindowsAndMessaging::CS_DBLCLKS;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetWindowLongPtrW,
     GetWindowRect, IsWindow, PeekMessageW, RegisterClassW, SetCursorPos, SetParent,
     SetWindowLongPtrW, SetWindowPos, ShowCursor, ShowWindow, TranslateMessage, GWL_STYLE, HWND_TOP,
     MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE,
-    WM_CAPTURECHANGED, WM_ERASEBKGND, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    WM_CAPTURECHANGED, WM_ERASEBKGND, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW,
+    WS_VISIBLE,
 };
 
 use glam::DVec2;
 
 use crate::camera::{
     BiomeSettings, Bookmarks, Camera2D, EditorCamera, FlyInput, FoliageSettings, GizmoSpace,
-    NavInput, NavMode, SculptSettings, Snap2DSettings, SnapSettings, ToolMode, ViewportMode,
-    VoxelSettings, WaterSettings,
+    InteractionSettings, NavInput, NavMode, SculptSettings, Snap2DSettings, SnapSettings, ToolMode,
+    ViewportMode, VoxelSettings, WaterSettings,
 };
 use crate::host::EngineHost;
 use crate::{KeyChord, SharedScene, SurfaceTarget, ViewportEvent, ViewportEventSink, ViewportRect};
-use inf_editor_core::ipc::{GizmoModeDto, ViewModeDto, ViewportToolStatusDto};
+use inf_editor_core::ipc::{
+    GizmoModeDto, ViewModeDto, ViewportActivateDto, ViewportContextMenuDto, ViewportToolStatusDto,
+};
 use inf_render::{GizmoMode, ViewMode};
 
 /// Map the IPC gizmo-mode DTO to the renderer enum (Wave 2). Kept next to the
@@ -141,6 +145,13 @@ enum Cmd {
     SetGizmoSpace(GizmoSpace),
     /// Replace the 3D transform-gizmo snap increments from the toolbar (Wave 2).
     SetSnap3D(SnapSettings),
+    /// Replace the pointer/camera feel from the editor preferences (Wave E):
+    /// flycam speed, look sensitivity, and the right-button click-vs-drag
+    /// thresholds the context-menu gesture is discriminated on.
+    SetInteraction(InteractionSettings),
+    /// Frame the current selection (the `F` key's action, reached from the
+    /// context menu / command palette, which cannot press a native key).
+    FocusSelection,
     /// Set the shading view mode (Lit / Unlit / Wireframe) from the toolbar
     /// (R-P2). The renderer clamps Wireframe→Unlit if unsupported.
     SetViewMode(ViewMode),
@@ -283,6 +294,20 @@ impl ViewportHandle {
         let _ = self.tx.send(Cmd::SetSnap3D(snap));
     }
 
+    /// Replace the pointer/camera feel from the editor preferences (Wave E).
+    pub fn set_interaction(&self, settings: InteractionSettings) {
+        let _ = self.tx.send(Cmd::SetInteraction(settings));
+    }
+
+    /// Frame the current selection — what the `F` key does natively (Wave E).
+    ///
+    /// Needed because a context menu is DOM, and the F key is consumed by the
+    /// native child window: without this the menu's "Focus" row would have been
+    /// a dead item, which is the thing the whole wave is against.
+    pub fn focus_selection(&self) {
+        let _ = self.tx.send(Cmd::FocusSelection);
+    }
+
     /// Set the shading view mode (Lit / Unlit / Wireframe) from the toolbar
     /// (R-P2). Takes the IPC DTO so Ring 2 needn't name the renderer enum.
     pub fn set_view_mode(&self, mode: ViewModeDto) {
@@ -423,9 +448,25 @@ struct InputState {
     cursor_moved: bool,
     /// Plain-LMB (no Alt) is held: select/gizmo, not orbit.
     left_down: bool,
-    /// A plain-LMB press this frame: (x, y, ctrl-held) for select/gizmo-begin.
-    left_press: Option<(i32, i32, bool)>,
+    /// A plain-LMB press this frame: (x, y, ctrl, shift) for select/gizmo-begin.
+    /// **Shift is append-without-toggle, ctrl is toggle** — two different
+    /// selection verbs, so both modifiers ride the press (Wave E).
+    left_press: Option<(i32, i32, bool, bool)>,
     left_release: bool,
+    /// A double-click this frame: (x, y). Windows sends DOWN, UP, DBLCLK, UP,
+    /// so the first click has already SELECTED by the time this arrives —
+    /// select-then-activate, which is the sequence we want.
+    left_dbl: Option<(i32, i32)>,
+    /// Where and when the right button went down, for the click-vs-drag test.
+    right_press: Option<(i32, i32)>,
+    right_down_at: Option<std::time::Instant>,
+    /// Raw-input travel accumulated for THIS right-button gesture, in device
+    /// counts. **Deliberately not `mouse_dx`/`mouse_dy`**: those are drained
+    /// every frame, so a slow drag reads zero on each of them and every drag
+    /// would look like a click.
+    right_travel: f32,
+    /// A right-button gesture that ended within both thresholds: (x, y).
+    context_menu: Option<(i32, i32)>,
 }
 
 thread_local! {
@@ -435,6 +476,16 @@ thread_local! {
     /// loop when `Cmd::SetSimRunning` arrives — the two never race because
     /// there is only one thread.
     static SIM_RUNNING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The pointer feel `wnd_proc` needs (Wave E). A thread-local mirror for
+    /// `SIM_RUNNING`'s reason and by its rule: written by the frame loop when
+    /// `Cmd::SetInteraction` arrives, read by the wnd_proc on the same thread,
+    /// so the two can never race.
+    static INTERACTION: RefCell<InteractionSettings> = RefCell::new(InteractionSettings {
+        fly_speed_mps: 8.0,
+        look_sensitivity: 1.0,
+        rmb_click_travel_px: 4.0,
+        rmb_click_ms: 250,
+    });
 }
 
 fn modifier(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {
@@ -586,8 +637,23 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         // erase kills the white flash during splitter resizes.
         WM_ERASEBKGND => LRESULT(1),
 
-        // RMB: flycam, or dolly when Alt is held.
+        // RMB: flycam, or dolly when Alt is held - and, since Wave E, a
+        // CONTEXT MENU when the gesture turns out to have been a click.
+        //
+        // Capture still begins on button-DOWN, unchanged: the flycam's feel is
+        // the thing that must not regress, and deferring the grab until the
+        // thresholds elapsed would put a 250 ms dead zone at the start of every
+        // fly. The discrimination happens on button-UP instead, by which time
+        // the gesture is over and both facts are known.
         WM_RBUTTONDOWN => {
+            let x = (lparam.0 & 0xffff) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+            INPUT.with(|s| {
+                let mut s = s.borrow_mut();
+                s.right_press = Some((x, y));
+                s.right_down_at = Some(std::time::Instant::now());
+                s.right_travel = 0.0;
+            });
             let kind = if modifier(VK_MENU) {
                 Capture::Dolly
             } else {
@@ -600,6 +666,21 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             // RMB owns whichever of Fly/Dolly it started.
             end_capture(Capture::Fly);
             end_capture(Capture::Dolly);
+            let settings = INTERACTION.with(|i| *i.borrow());
+            INPUT.with(|s| {
+                let mut s = s.borrow_mut();
+                let elapsed = s
+                    .right_down_at
+                    .take()
+                    .map(|t| t.elapsed().as_millis())
+                    .unwrap_or(u128::MAX);
+                let travel = std::mem::take(&mut s.right_travel);
+                if let Some(at) = s.right_press.take() {
+                    if crate::camera::is_context_click(travel, elapsed, &settings) {
+                        s.context_menu = Some(at);
+                    }
+                }
+            });
             LRESULT(0)
         }
 
@@ -628,6 +709,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let x = (lparam.0 & 0xffff) as i16 as i32;
                 let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
                 let ctrl = modifier(VK_CONTROL);
+                let shift = modifier(VK_SHIFT);
                 unsafe {
                     // Capture so we keep getting moves/up even off-window while
                     // dragging a gizmo. This is the plain-LMB path (not orbit).
@@ -637,9 +719,25 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 INPUT.with(|s| {
                     let mut s = s.borrow_mut();
                     s.left_down = true;
-                    s.left_press = Some((x, y, ctrl));
+                    s.left_press = Some((x, y, ctrl, shift));
                     s.cursor = (x, y);
                 });
+            }
+            LRESULT(0)
+        }
+        // **Double-click = open** (Wave E). Undeliverable before this wave: the
+        // window class was registered without `CS_DBLCLKS`, so Windows never
+        // synthesized this message at all and a double-click in the 3D view did
+        // not exist at the OS level.
+        //
+        // The sequence is DOWN, UP, DBLCLK, UP - so the first click has already
+        // run the ordinary pick-and-select by the time this arrives. That is the
+        // order we want: select, then activate what is selected.
+        WM_LBUTTONDBLCLK => {
+            if !modifier(VK_MENU) && !SIM_RUNNING.with(|r| r.get()) {
+                let x = (lparam.0 & 0xffff) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+                INPUT.with(|s| s.borrow_mut().left_dbl = Some((x, y)));
             }
             LRESULT(0)
         }
@@ -754,6 +852,17 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                             s.mouse_dx += mouse.lLastX as f32;
                             s.mouse_dy += mouse.lLastY as f32;
                         }
+                        // Per-GESTURE travel for the right button (Wave E).
+                        // It must NOT reuse `mouse_dx`/`mouse_dy`: those are
+                        // drained every frame, so a slow drag reads zero on each
+                        // one and every drag would be classified as a click.
+                        if s.right_down_at.is_some()
+                            && matches!(s.capture, Capture::Fly | Capture::Dolly)
+                        {
+                            let dx = mouse.lLastX as f32;
+                            let dy = mouse.lLastY as f32;
+                            s.right_travel += (dx * dx + dy * dy).sqrt();
+                        }
                     });
                 }
             }
@@ -769,7 +878,13 @@ fn create_child_window(parent_hwnd: isize) -> windows::core::Result<HWND> {
         let hinstance = GetModuleHandleW(None)?;
         let class_name = w!("InfinityViewportClass");
 
+        // `CS_DBLCLKS` is load-bearing (Wave E): Windows only synthesizes
+        // `WM_*BUTTONDBLCLK` for window classes that carry it. Without it the
+        // class default (`WNDCLASS_STYLES(0)`) meant a double-click in the 3D
+        // view could not be delivered - not "was not handled", but did not
+        // exist. Pinned by `the_window_class_asks_for_double_clicks`.
         let wc = WNDCLASSW {
+            style: CS_DBLCLKS,
             lpfnWndProc: Some(wnd_proc),
             hInstance: hinstance.into(),
             lpszClassName: class_name,
@@ -883,8 +998,10 @@ struct FrameInput {
     cursor: (i32, i32),
     cursor_moved: bool,
     left_down: bool,
-    left_press: Option<(i32, i32, bool)>,
+    left_press: Option<(i32, i32, bool, bool)>,
     left_release: bool,
+    left_dbl: Option<(i32, i32)>,
+    context_menu: Option<(i32, i32)>,
 }
 
 fn drain_input() -> FrameInput {
@@ -902,6 +1019,8 @@ fn drain_input() -> FrameInput {
             left_down: s.left_down,
             left_press: std::mem::take(&mut s.left_press),
             left_release: std::mem::take(&mut s.left_release),
+            left_dbl: std::mem::take(&mut s.left_dbl),
+            context_menu: std::mem::take(&mut s.context_menu),
         }
     })
 }
@@ -1009,6 +1128,9 @@ fn thread_main(
     tracing::info!("inf-viewport: child window + engine renderer up");
 
     let mut camera = EditorCamera::default();
+    // Multiplier over the camera's built-in look constants, from the editor
+    // preferences (Wave E). 1.0 is the shipped feel.
+    let mut look_scale: f32 = 1.0;
     // A separate 2D ortho camera; switching modes preserves both poses (P8.2c).
     let mut camera_2d = Camera2D::default();
     let mut bookmarks = Bookmarks::default();
@@ -1097,6 +1219,28 @@ fn thread_main(
                 }
                 Ok(Cmd::SetGizmoSpace(s)) => host.set_gizmo_space(s),
                 Ok(Cmd::SetSnap3D(s)) => host.set_snap_3d(s),
+                Ok(Cmd::FocusSelection) => {
+                    // The SAME queue the F key pushes onto, so the two paths
+                    // cannot drift: one focus implementation, two doors.
+                    INPUT.with(|s| s.borrow_mut().actions.push(Action::Focus));
+                }
+                Ok(Cmd::SetInteraction(s)) => {
+                    // The thresholds are read by `wnd_proc`, which cannot see
+                    // the host; the camera half is applied here, where the
+                    // camera lives. `fly_speed` is a live value the wheel also
+                    // scales, so this SETS it rather than clamping it - the
+                    // preference is the speed a session starts at, and changing
+                    // it in Preferences is an explicit act.
+                    INTERACTION.with(|i| *i.borrow_mut() = s);
+                    camera.fly_speed = s
+                        .fly_speed_mps
+                        .clamp(crate::camera::FLY_SPEED_MIN, crate::camera::FLY_SPEED_MAX);
+                    look_scale = if s.look_sensitivity.is_finite() {
+                        s.look_sensitivity.clamp(0.05, 10.0)
+                    } else {
+                        1.0
+                    };
+                }
                 Ok(Cmd::SetViewMode(m)) => host.set_view_mode(m),
                 Ok(Cmd::SetContentRoot(root)) => host.set_content_root(root),
                 Ok(Cmd::RefreshAssetIndex) => host.refresh_asset_index(),
@@ -1235,6 +1379,10 @@ fn thread_main(
         // write a crash report, and exit the loop with the same semantics as a
         // render panic. (render_frame rebuilds the picker on the fresh device, so
         // the normal recovery path stays lossless; this only backstops a panic.)
+        // Events raised from inside the interaction block (Wave E). Collected
+        // rather than emitted in place, because the block holds the scene lock
+        // and the sink crosses into Ring 2 - which may re-enter the document.
+        let mut ui_events: Vec<ViewportEvent> = Vec::new();
         let interaction = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut world_changed = false;
             if let Ok(mut doc) = scene.lock() {
@@ -1315,7 +1463,7 @@ fn thread_main(
                     world_changed = true;
                 }
                 if sculpting {
-                    if let Some((x, y, ctrl)) = input.left_press {
+                    if let Some((x, y, ctrl, _shift)) = input.left_press {
                         let (px, py) = (x.max(0) as u32, y.max(0) as u32);
                         host.begin_sculpt(&mut doc, &interact_view, px, py, ctrl);
                     }
@@ -1339,7 +1487,7 @@ fn thread_main(
                         }
                     }
                 } else if voxel {
-                    if let Some((x, y, ctrl)) = input.left_press {
+                    if let Some((x, y, ctrl, _shift)) = input.left_press {
                         let (px, py) = (x.max(0) as u32, y.max(0) as u32);
                         // Ctrl is the tunnel's COMMIT modifier here, not the
                         // sculpt brush's invert: a tunnel needs a "that was the
@@ -1372,7 +1520,7 @@ fn thread_main(
                         }
                     }
                 } else if water {
-                    if let Some((x, y, _ctrl)) = input.left_press {
+                    if let Some((x, y, _ctrl, _shift)) = input.left_press {
                         let (px, py) = (x.max(0) as u32, y.max(0) as u32);
                         if host.begin_water(&mut doc, &interact_view, px, py) {
                             world_changed = true;
@@ -1405,7 +1553,7 @@ fn thread_main(
                     // erases) instances onto the terrain under the brush, exactly
                     // mirroring the sculpt seam — the stroke lives on the viewport
                     // thread and commits ONE undo step at mouse-up (E-P6).
-                    if let Some((x, y, _ctrl)) = input.left_press {
+                    if let Some((x, y, _ctrl, _shift)) = input.left_press {
                         let (px, py) = (x.max(0) as u32, y.max(0) as u32);
                         host.begin_foliage(&mut doc, &interact_view, px, py);
                     }
@@ -1434,17 +1582,30 @@ fn thread_main(
                 } else {
                     // Plain LMB: a handle under the cursor begins a gizmo drag (one
                     // undo transaction), otherwise it selects the picked entity.
-                    if let Some((x, y, ctrl)) = input.left_press {
+                    if let Some((x, y, ctrl, shift)) = input.left_press {
                         let (px, py) = (x.max(0) as u32, y.max(0) as u32);
                         if host.try_begin_gizmo(&interact_view, px, py) {
                             doc.begin_transaction("Move");
                         } else {
                             match host.pick_guid(&interact_view, px, py) {
                                 Some(guid) => {
-                                    doc.select(&[guid], ctrl);
+                                    // Ctrl TOGGLES (it always has); Shift
+                                    // APPENDS (Wave E). Two different verbs, so
+                                    // two different doors - overloading
+                                    // `additive` would make shift-clicking
+                                    // across a group deselect half of it.
+                                    if shift {
+                                        doc.select_append(&[guid]);
+                                    } else {
+                                        doc.select(&[guid], ctrl);
+                                    }
                                     world_changed = true;
                                 }
-                                None if !ctrl => {
+                                // Clicking empty space clears - unless a
+                                // modifier says the user is building a
+                                // selection, in which case a miss must not throw
+                                // the whole thing away.
+                                None if !ctrl && !shift => {
                                     doc.clear_selection();
                                     world_changed = true;
                                 }
@@ -1452,6 +1613,51 @@ fn thread_main(
                             }
                             host.sync_from_doc(&doc); // reflect the new selection now
                         }
+                    }
+
+                    // **Double-click = open** (Wave E). The first click of the
+                    // pair already selected, so this only has to name what was
+                    // hit; the frontend routes it through the same resolver the
+                    // Outliner's double-click uses.
+                    if let Some((x, y)) = input.left_dbl {
+                        let (px, py) = (x.max(0) as u32, y.max(0) as u32);
+                        if let Some(guid) = host.pick_guid(&interact_view, px, py) {
+                            ui_events.push(ViewportEvent::ObjectActivated(ViewportActivateDto {
+                                guid: guid.to_string(),
+                                // EMPTY on purpose: the viewport thread does not
+                                // know its own key - Ring 2 stamps it on the way
+                                // out (the `ViewportToolStatusDto` precedent).
+                                viewport: String::new(),
+                            }));
+                        }
+                    }
+
+                    // **Right-click = context menu** (Wave E), once the gesture
+                    // has been discriminated from a flycam drag on button-up.
+                    //
+                    // The UE rule for what it acts on: a right-click on an
+                    // object OUTSIDE the current selection selects that object;
+                    // a right-click INSIDE an existing multi-selection preserves
+                    // it. Without the second half a multi-object menu would be
+                    // unreachable - every right-click would collapse the
+                    // selection it was about to act on.
+                    if let Some((x, y)) = input.context_menu {
+                        let (px, py) = (x.max(0) as u32, y.max(0) as u32);
+                        let hit = host.pick_guid(&interact_view, px, py);
+                        if let Some(guid) = hit {
+                            if !doc.selection().contains(&guid) {
+                                doc.select(&[guid], false);
+                                world_changed = true;
+                                host.sync_from_doc(&doc);
+                            }
+                        }
+                        ui_events.push(ViewportEvent::ContextMenu(ViewportContextMenuDto {
+                            x: x as f64,
+                            y: y as f64,
+                            guid: hit.map(|g| g.to_string()),
+                            selection: doc.selection().iter().map(|g| g.to_string()).collect(),
+                            viewport: String::new(),
+                        }));
                     }
 
                     if input.left_down && host.is_dragging_gizmo() {
@@ -1532,6 +1738,11 @@ fn thread_main(
         if world_changed {
             sink(ViewportEvent::WorldChanged);
         }
+        // …then the pointer gestures, AFTER `WorldChanged`: a context menu that
+        // changed the selection must not be rendered against a stale one.
+        for event in ui_events.drain(..) {
+            sink(event);
+        }
 
         // Drain the tool-status seam (P16.4a). A rejection is one-shot; the
         // streamed flag is a standing fact, so it is published only on change —
@@ -1592,8 +1803,12 @@ fn thread_main(
             match input.capture {
                 Capture::Fly => {
                     let fly = FlyInput {
-                        mouse_dx: input.dx,
-                        mouse_dy: input.dy,
+                        // The preference is a MULTIPLIER over the camera's own
+                        // radians-per-count constants, applied here rather than
+                        // inside `EditorCamera` so the camera keeps its
+                        // exhaustively-constructed shape and its unit tests.
+                        mouse_dx: input.dx * look_scale,
+                        mouse_dy: input.dy * look_scale,
                         wheel_steps: input.wheel,
                         forward: key_down(0x57), // W
                         back: key_down(0x53),    // S
@@ -1615,8 +1830,8 @@ fn thread_main(
                     camera.apply_navigate(
                         &NavInput {
                             mode,
-                            mouse_dx: input.dx,
-                            mouse_dy: input.dy,
+                            mouse_dx: input.dx * look_scale,
+                            mouse_dy: input.dy * look_scale,
                             wheel_steps: input.wheel,
                         },
                         pivot,

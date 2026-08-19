@@ -185,6 +185,14 @@ fn export_bindings() {
     inf_editor_core::ipc::EditorSettings::export_all(&cfg).expect("export EditorSettings");
     // Wave E batch B: the answer to "which editors can open this object".
     inf_editor_core::ipc::EntityEditorsDto::export_all(&cfg).expect("export EntityEditorsDto");
+    // Wave E batch C: the two native-viewport pointer gestures and the pointer
+    // feel the preferences push into the input state machine.
+    inf_editor_core::ipc::ViewportContextMenuDto::export_all(&cfg)
+        .expect("export ViewportContextMenuDto");
+    inf_editor_core::ipc::ViewportActivateDto::export_all(&cfg)
+        .expect("export ViewportActivateDto");
+    inf_editor_core::ipc::ViewportInteractionDto::export_all(&cfg)
+        .expect("export ViewportInteractionDto");
     ErosionParamsDto::export_all(&cfg).expect("export ErosionParamsDto");
     ErosionReportDto::export_all(&cfg).expect("export ErosionReportDto");
     DataMapExportDto::export_all(&cfg).expect("export DataMapExportDto");

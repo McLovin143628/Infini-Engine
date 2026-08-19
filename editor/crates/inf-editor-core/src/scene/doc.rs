@@ -547,6 +547,28 @@ impl SceneDoc {
         self.version += 1; // resync UI, but selection is not an unsaved edit
     }
 
+    /// **Append without toggling** — Shift+click in the viewport (Wave E).
+    ///
+    /// A separate method rather than a second meaning for `additive`, because
+    /// `additive` is documented and relied on as a TOGGLE (Ctrl+click removes an
+    /// object that is already selected, which is exactly what Shift+click must
+    /// NOT do — shift-clicking across a group would deselect half of it).
+    /// Already-selected guids keep their position, so the primary (the first
+    /// entry, which the gizmo centres on) does not move under the user.
+    pub fn select_append(&mut self, guids: &[Uuid]) {
+        let mut changed = false;
+        for g in guids {
+            if self.world.entity_of(*g).is_none() || self.selection.contains(g) {
+                continue;
+            }
+            self.selection.push(*g);
+            changed = true;
+        }
+        if changed {
+            self.version += 1;
+        }
+    }
+
     pub fn clear_selection(&mut self) {
         if !self.selection.is_empty() {
             self.selection.clear();
@@ -4190,6 +4212,40 @@ mod tests {
         assert_eq!(doc.selection(), &[a, b]);
         doc.select(&[a], true); // toggle a off
         assert_eq!(doc.selection(), &[b]);
+    }
+
+    /// **Shift APPENDS; Ctrl TOGGLES** (Wave E) — two verbs, deliberately not
+    /// one. Overloading `additive` would make a shift-click across a group
+    /// deselect the half that was already in it, which is the opposite of what
+    /// the gesture means everywhere else in every editor.
+    #[test]
+    fn selection_append_never_removes() {
+        let mut doc = SceneDoc::new();
+        let a = doc.create(SpawnKind::Empty, "A", None);
+        let b = doc.create(SpawnKind::Empty, "B", None);
+        let c = doc.create(SpawnKind::Empty, "C", None);
+        doc.select(&[a], false);
+        doc.select_append(&[b]);
+        assert_eq!(doc.selection(), &[a, b]);
+
+        // The distinction: appending something already selected is a NO-OP,
+        // where `select(.., true)` would have removed it.
+        doc.select_append(&[a]);
+        assert_eq!(doc.selection(), &[a, b], "append must never toggle off");
+
+        // …and the primary (the entry the gizmo centres on) does not move.
+        doc.select_append(&[c]);
+        assert_eq!(doc.selection(), &[a, b, c]);
+        assert_eq!(doc.selection()[0], a);
+
+        // Unknown guids are dropped, exactly as `select` drops them.
+        let before = doc.version;
+        doc.select_append(&[uuid::Uuid::from_u128(0xDEAD)]);
+        assert_eq!(doc.selection(), &[a, b, c]);
+        assert_eq!(
+            before, doc.version,
+            "a no-op append does not bump the version"
+        );
     }
 
     #[test]

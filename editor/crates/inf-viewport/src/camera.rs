@@ -942,6 +942,116 @@ fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
     a + d * t
 }
 
+// ── pointer feel (Wave E) ────────────────────────────────────────────────
+//
+// Lives here rather than in `win32.rs` for the reason the spoil rule moved: the
+// win32 module is `#[cfg(windows)]`, so a predicate written there is invisible
+// to two of the three CI legs. This file is platform-neutral and its tests run
+// everywhere; the host is left with a call site.
+
+/// How the native viewport's pointer and camera feel — the editor-preferences
+/// values that have to reach the input state machine.
+///
+/// [`Self::default`] reproduces the shipped feel exactly, so a user who never
+/// opens Preferences notices no change.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InteractionSettings {
+    /// Flycam speed at session start, m/s. The wheel still scales it live.
+    pub fly_speed_mps: f32,
+    /// Multiplier over the built-in radians-per-count look constants.
+    pub look_sensitivity: f32,
+    /// Click-vs-drag travel threshold for the right button, in **raw device
+    /// counts** — equal to pixels at the default OS pointer speed, which is why
+    /// the setting is spelled "px" in the UI. Raw counts are what the flycam
+    /// already consumes, and mixing units to gain a nominal accuracy the
+    /// pointer-acceleration curve does not provide would be worse.
+    pub rmb_click_travel_px: f32,
+    /// Click-vs-drag time threshold for the right button, ms.
+    pub rmb_click_ms: u32,
+}
+
+impl Default for InteractionSettings {
+    fn default() -> Self {
+        Self {
+            fly_speed_mps: 8.0,
+            look_sensitivity: 1.0,
+            rmb_click_travel_px: 4.0,
+            rmb_click_ms: 250,
+        }
+    }
+}
+
+/// **Was that right-button gesture a click, or a flycam drag?**
+///
+/// Both thresholds must hold. Travel alone would make a long press with a
+/// perfectly still hand open a menu after the user had been flying nowhere for
+/// two seconds; time alone would make a fast flick open a menu. UE's rule, and
+/// the reason a quick right-click opens a menu while a held right-drag flies.
+///
+/// The comparison is strictly `<`, so a gesture exactly AT a threshold is a
+/// drag: the flycam is the incumbent behaviour and ties go to it.
+pub fn is_context_click(travel: f32, elapsed_ms: u128, s: &InteractionSettings) -> bool {
+    travel.is_finite() && travel < s.rmb_click_travel_px && elapsed_ms < s.rmb_click_ms as u128
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+
+    /// The predicate at the thresholds and just past them, in both dimensions.
+    ///
+    /// The flycam's feel is the thing that must not regress, so the arm is
+    /// written from its side: everything that used to fly must still fly.
+    #[test]
+    fn a_right_click_is_a_click_only_inside_both_thresholds() {
+        let s = InteractionSettings::default(); // 4 px, 250 ms
+        assert!(is_context_click(0.0, 0, &s), "an instant tap is a click");
+        assert!(
+            is_context_click(3.9, 249, &s),
+            "just inside both is a click"
+        );
+
+        // Exactly AT either threshold is a DRAG: ties go to the incumbent.
+        assert!(!is_context_click(4.0, 100, &s));
+        assert!(!is_context_click(1.0, 250, &s));
+
+        // Just past either one is a drag.
+        assert!(!is_context_click(4.1, 10, &s), "a flick is a drag");
+        assert!(!is_context_click(0.0, 251, &s), "a still hold is a drag");
+        // A long, far gesture — an ordinary flycam fly — is emphatically a drag.
+        assert!(!is_context_click(900.0, 4000, &s));
+    }
+
+    /// A NaN travel accumulator must not be read as "did not move". Raw input
+    /// deltas are integers, but the accumulator is an f32 and this is the door.
+    #[test]
+    fn a_non_finite_travel_is_never_a_click() {
+        let s = InteractionSettings::default();
+        assert!(!is_context_click(f32::NAN, 0, &s));
+        assert!(!is_context_click(f32::INFINITY, 0, &s));
+    }
+
+    /// The thresholds are configurable, and configuring them to zero disables
+    /// the context menu rather than firing it constantly — which is the safe
+    /// direction for a user who dislikes the gesture.
+    #[test]
+    fn zero_thresholds_disable_the_gesture_entirely() {
+        let s = InteractionSettings {
+            rmb_click_travel_px: 0.0,
+            rmb_click_ms: 0,
+            ..Default::default()
+        };
+        assert!(!is_context_click(0.0, 0, &s));
+    }
+
+    #[test]
+    fn the_defaults_are_the_shipped_feel() {
+        let s = InteractionSettings::default();
+        assert_eq!(s.fly_speed_mps, EditorCamera::default().fly_speed);
+        assert_eq!(s.look_sensitivity, 1.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// **The spoil rule, tested where every CI leg can see it** (the M11 move,

@@ -23,10 +23,11 @@ import StartScreen from "./shell/StartScreen";
 import FirstRunTour from "./shell/FirstRunTour";
 import { DockWorkspace } from "./panels/dock/DockWorkspace";
 import ViewportPanel from "./viewport/ViewportPanel";
+import ViewportContextMenu from "./viewport/ViewportContextMenu";
 import { bootstrapShellCommands } from "./shell/shellCommands";
 import { installKeybindingListener, registerDefaultKeybindings } from "./lib/keybindings";
 import { listenTo } from "./lib/events";
-import { PRIMARY_VIEWPORT } from "./lib/viewportIds";
+import { PRIMARY_VIEWPORT, isPrimaryViewport } from "./lib/viewportIds";
 import { focusViewport, handleViewportChord, VIEWPORT_PANEL_ID } from "./lib/viewportFocus";
 import { startLogListener } from "./stores/logStore";
 import { initSceneSync, registerSceneCommands } from "./stores/sceneStore";
@@ -41,7 +42,7 @@ import {
   registerViewportCommands,
 } from "./stores/viewportStore";
 import { initSimSync, registerSimCommands } from "./stores/simStore";
-import { registerObjectEditorCommands } from "./stores/objectEditorCommands";
+import { openObject, registerObjectEditorCommands } from "./stores/objectEditorCommands";
 import { initPieSync, registerPieCommands } from "./stores/pieStore";
 import { initEditorSync } from "./stores/editorStore";
 import { initLsp } from "./lib/editor/lspBridge";
@@ -262,6 +263,28 @@ export default function App() {
     };
   }, []);
 
+  // **Double-click in the 3D view opens the object** (Wave E). The native
+  // child window swallows pointer events, so this event is the only way a
+  // double-click there can reach the shell; it routes through the SAME resolver
+  // the Outliner's double-click uses, so the two gestures cannot mean different
+  // things. StrictMode-safe (`disposed` guard, as the chord listener above).
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    listenTo("viewport://activate", (payload) => {
+      if (!isPrimaryViewport(payload.viewport)) return;
+      focusViewport();
+      void openObject(payload.guid);
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   return (
     <div className="flex h-full flex-col">
       <TitleBar />
@@ -286,6 +309,7 @@ export default function App() {
         </div>
       </DockWorkspace>
       <ContentDrawer />
+      <ViewportContextMenu />
       <StatusBar />
       <LayoutDialog />
       <PreferencesDialog />

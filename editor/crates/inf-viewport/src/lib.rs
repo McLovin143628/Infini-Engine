@@ -78,6 +78,19 @@ pub enum ViewportEvent {
     /// which is the smallest honest surface for "this terrain streams and the
     /// brushes cannot touch it yet".
     ToolStatus(inf_editor_core::ipc::ViewportToolStatusDto),
+    /// **A right-click that was a click, not a flycam drag** (Wave E). Ring 2
+    /// forwards it on `viewport://context-menu` and the frontend renders the
+    /// shell's own menu at the point — the airspace rule means the 3D view
+    /// blanks for the menu's lifetime, which is the standing behaviour for every
+    /// overlay in this shell.
+    ///
+    /// Carries the IPC DTO directly, exactly as [`Self::ToolStatus`] does, so
+    /// the enum stays free of platform-gated types and Linux still compiles it.
+    ContextMenu(inf_editor_core::ipc::ViewportContextMenuDto),
+    /// **A double-click on an object** (Wave E) — "open this". Ring 2 forwards
+    /// it on `viewport://activate`; the frontend routes it through the same
+    /// resolver the Outliner's double-click uses.
+    ObjectActivated(inf_editor_core::ipc::ViewportActivateDto),
 }
 
 /// Sink the host installs to receive [`ViewportEvent`]s. `Arc` so the render

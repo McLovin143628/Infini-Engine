@@ -200,6 +200,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         viewport::viewport_set_gizmo_mode,
         viewport::viewport_set_gizmo_space,
         viewport::viewport_set_snap3d,
+        viewport::viewport_set_interaction,
+        viewport::viewport_focus,
         viewport::viewport_set_view_mode,
         scene::scene_snapshot,
         scene::scene_details,

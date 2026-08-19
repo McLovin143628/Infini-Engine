@@ -1516,6 +1516,54 @@ pub struct DataMapExportDto {
     pub unit: String,
 }
 
+/// **A right-click in the native 3D view** (`viewport://context-menu`, Wave E).
+///
+/// The airspace rule is why this is an event rather than a DOM handler: the
+/// viewport is a native child window and swallows pointer events, so a
+/// right-click there is not a DOM event and the frontend has no other way to
+/// learn of it. `x`/`y` are PHYSICAL pixels relative to the hole's top-left —
+/// the same contract [`ViewportDrop`] uses in the other direction, so the
+/// frontend converts with `cssX = holeRect.left + x / dpr`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ViewportContextMenuDto {
+    pub x: f64,
+    pub y: f64,
+    /// The entity under the cursor, if the right-click hit one.
+    pub guid: Option<String>,
+    /// The selection AFTER the click resolved it (right-clicking an unselected
+    /// object selects it; right-clicking inside a multi-selection keeps it).
+    pub selection: Vec<String>,
+    /// Which viewport — stamped by Ring 2 on the way out, because the viewport
+    /// thread does not know its own key (the `ViewportKey` precedent).
+    pub viewport: String,
+}
+
+/// **A double-click in the native 3D view** (`viewport://activate`, Wave E) —
+/// "open this object", the gesture that routes to the Model Editor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ViewportActivateDto {
+    pub guid: String,
+    /// Stamped by Ring 2, as on [`ViewportContextMenuDto`].
+    pub viewport: String,
+}
+
+/// **How the native viewport's pointer and camera feel** (`viewport_set_interaction`,
+/// Wave E) — the editor-preferences half that has to reach Ring 1.
+///
+/// The two `rmb_click_*` fields are the click-vs-drag discrimination: a
+/// right-button gesture that travels less than `rmb_click_travel_px` AND lasts
+/// less than `rmb_click_ms` is a CLICK (context menu); anything longer or
+/// further is a flycam drag, exactly as before. Defaults reproduce the shipped
+/// feel, so a user who never opens Preferences notices no change.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct ViewportInteractionDto {
+    pub fly_speed_mps: f32,
+    /// Multiplier over the built-in radians-per-pixel constants (1.0 = shipped).
+    pub look_sensitivity: f32,
+    pub rmb_click_travel_px: f32,
+    pub rmb_click_ms: u32,
+}
+
 /// **Which editors can open this entity** (`scene_entity_editors`, Wave E).
 ///
 /// One row per selected object. Every asset field is `Some` exactly when the

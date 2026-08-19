@@ -72,6 +72,7 @@ import type { PackageResultDto } from "../bindings/PackageResultDto";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
 import type { EditorSettings } from "../bindings/EditorSettings";
 import type { EntityEditorsDto } from "../bindings/EntityEditorsDto";
+import type { ViewportInteractionDto } from "../bindings/ViewportInteractionDto";
 import type { ProjectSettingsDto } from "../bindings/ProjectSettingsDto";
 import type { ProjectTemplateDto } from "../bindings/ProjectTemplateDto";
 import type { PropValueDto } from "../bindings/PropValueDto";
@@ -128,6 +129,7 @@ export type {
   DetailsDto,
   EditorSettings,
   EntityEditorsDto,
+  ViewportInteractionDto,
   FileEntryDto,
   GitStatusDto,
   LayoutSummary,
@@ -218,6 +220,20 @@ export const viewport = {
   /** Switch the active projection (Perspective ↔ 2D ortho) (P8.2c). */
   setMode: (mode: ViewportModeDto, viewport?: string): Promise<void> =>
     invoke("viewport_set_mode", { mode, viewport }),
+  /**
+   * Push the pointer/camera feel from the editor preferences (Wave E): flycam
+   * speed, look sensitivity, and the right-button click-vs-drag thresholds the
+   * context-menu gesture is discriminated on. Every field is re-guarded at the
+   * backend door.
+   */
+  setInteraction: (interaction: ViewportInteractionDto, viewport?: string): Promise<void> =>
+    invoke("viewport_set_interaction", { interaction, viewport }),
+  /**
+   * Frame the current selection — what the `F` key does natively (Wave E).
+   * Needed because the context menu and the palette are HTML and `F` is
+   * consumed by the native child window.
+   */
+  focus: (viewport?: string): Promise<void> => invoke("viewport_focus", { viewport }),
   /** Push the 2D-mode grid/pixel snapping configuration to the viewport. */
   setSnap2d: (snap: Snap2DDto, viewport?: string): Promise<void> =>
     invoke("viewport_set_snap2d", { snap, viewport }),

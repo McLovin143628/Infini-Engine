@@ -12,9 +12,10 @@ use std::sync::Mutex;
 use inf_editor_core::ipc::{
     BiomeSettingsDto, FoliageSettingsDto, GizmoModeDto, GizmoSpaceDto, SculptFalloffDto,
     SculptOpDto, SculptSettingsDto, Snap2DDto, Snap3DDto, SpoilModeDto, ToolModeDto, ViewModeDto,
-    ViewportDrop, ViewportGizmoDto, ViewportKey, ViewportModeDto, ViewportRect,
-    ViewportToolStatusDto, VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto,
-    WaterSettingsDto, WaterToolKindDto,
+    ViewportActivateDto, ViewportContextMenuDto, ViewportDrop, ViewportGizmoDto,
+    ViewportInteractionDto, ViewportKey, ViewportModeDto, ViewportRect, ViewportToolStatusDto,
+    VoxelOpModeDto, VoxelSettingsDto, VoxelStatusDto, VoxelToolKindDto, WaterSettingsDto,
+    WaterToolKindDto,
 };
 use inf_viewport::camera::{BiomeSettings, WaterSettings, WaterToolKind};
 use inf_viewport::{
@@ -303,6 +304,23 @@ fn stamp_tool_status(mut status: ViewportToolStatusDto, id: &str) -> ViewportToo
     status
 }
 
+/// Stamp a context-menu request with the viewport that raised it (Wave E).
+///
+/// `stamp_tool_status`'s twin, pulled out for its reason: the viewport thread
+/// cannot know its own key, and an unstamped payload reaches the frontend as
+/// `viewport: ""` — which the primary-viewport filter drops, so the menu never
+/// opens and nothing anywhere says why.
+fn stamp_context_menu(mut menu: ViewportContextMenuDto, id: &str) -> ViewportContextMenuDto {
+    menu.viewport = id.to_string();
+    menu
+}
+
+/// The double-click twin of [`stamp_context_menu`].
+fn stamp_activate(mut activate: ViewportActivateDto, id: &str) -> ViewportActivateDto {
+    activate.viewport = id.to_string();
+    activate
+}
+
 /// Build the event sink that turns [`ViewportEvent`]s into namespaced webview
 /// events, stamped with `id` (P23.2a). Forwarded key chords arrive on
 /// `viewport://key` so the frontend's keybinding dispatcher can replay them
@@ -358,6 +376,21 @@ fn event_sink(app: tauri::AppHandle, id: String) -> inf_viewport::ViewportEventS
         ViewportEvent::ToolStatus(status) => {
             if let Err(e) = app.emit("viewport://tool-status", stamp_tool_status(status, &id)) {
                 tracing::warn!("viewport://tool-status emit failed: {e}");
+            }
+        }
+        // **A right-click in the 3D view** (Wave E). The frontend renders the
+        // shell's own menu at the point — the airspace rule means the native
+        // child is hidden for the menu's lifetime, which is what every overlay
+        // in this shell already does.
+        ViewportEvent::ContextMenu(menu) => {
+            if let Err(e) = app.emit("viewport://context-menu", stamp_context_menu(menu, &id)) {
+                tracing::warn!("viewport://context-menu emit failed: {e}");
+            }
+        }
+        // **A double-click on an object** (Wave E) — "open this".
+        ViewportEvent::ObjectActivated(activate) => {
+            if let Err(e) = app.emit("viewport://activate", stamp_activate(activate, &id)) {
+                tracing::warn!("viewport://activate emit failed: {e}");
             }
         }
     })
@@ -803,6 +836,52 @@ pub async fn viewport_set_view_mode(
     Ok(())
 }
 
+/// **Push the pointer/camera feel from the editor preferences** (Wave E).
+///
+/// Every field is guarded here as well as in the settings file: this command is
+/// the door into the input state machine, and a NaN threshold would make
+/// `is_context_click` answer `false` for ever (killing the context menu) while
+/// a NaN sensitivity would put the camera's yaw beyond recovery. Guarding at
+/// both ends is deliberate — the settings file is not the only caller a door
+/// can have.
+#[tauri::command]
+pub async fn viewport_set_interaction(
+    interaction: ViewportInteractionDto,
+    viewport: Option<String>,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    fn guard(v: f32, lo: f32, hi: f32, fallback: f32) -> f32 {
+        if v.is_finite() {
+            v.clamp(lo, hi)
+        } else {
+            fallback
+        }
+    }
+    let settings = inf_viewport::camera::InteractionSettings {
+        fly_speed_mps: guard(interaction.fly_speed_mps, 0.05, 10_000.0, 8.0),
+        look_sensitivity: guard(interaction.look_sensitivity, 0.05, 10.0, 1.0),
+        rmb_click_travel_px: guard(interaction.rmb_click_travel_px, 0.0, 64.0, 4.0),
+        rmb_click_ms: interaction.rmb_click_ms.clamp(0, 2000),
+    };
+    state.with(Target::from_arg(viewport), |h| h.set_interaction(settings));
+    Ok(())
+}
+
+/// **Frame the current selection** — the `F` key, reachable from the DOM.
+///
+/// The context menu and the command palette are HTML; `F` is consumed by the
+/// native child window, so without this door a "Focus" menu row could not work
+/// at all. It queues the SAME action the key does, so there is one focus
+/// implementation with two doors rather than two that drift.
+#[tauri::command]
+pub async fn viewport_focus(
+    viewport: Option<String>,
+    state: tauri::State<'_, ViewportState>,
+) -> Result<(), String> {
+    state.with(Target::from_arg(viewport), |h| h.focus_selection());
+    Ok(())
+}
+
 /// Push the 3D transform-gizmo snap increments (translate/rotate/scale +
 /// always-on) from the toolbar (Wave 2).
 #[tauri::command]
@@ -824,7 +903,9 @@ pub async fn viewport_set_snap3d(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use inf_editor_core::ipc::ViewportToolStatusDto;
+    use inf_editor_core::ipc::{
+        ViewportActivateDto, ViewportContextMenuDto, ViewportToolStatusDto,
+    };
 
     /// A stand-in for `ViewportHandle`, which cannot be constructed without a
     /// real OS window. The map's resolution rule is the thing under test and it
@@ -910,6 +991,37 @@ mod tests {
         assert_eq!(out.viewport, PRIMARY_VIEWPORT);
         assert_eq!(out.message.as_deref(), Some("nope"), "nothing else moves");
         assert!(out.terrain_streamed);
+    }
+
+    /// The Wave-E twins of the arm above, for the two pointer gestures. Same
+    /// claim, same consequence: an unstamped payload is dropped by the
+    /// frontend's primary filter, so the right-click menu never opens and the
+    /// double-click opens nothing.
+    #[test]
+    fn the_sink_stamps_the_viewport_id_onto_the_pointer_events() {
+        let raw = ViewportContextMenuDto {
+            x: 12.0,
+            y: 34.0,
+            guid: Some("g-1".into()),
+            selection: vec!["g-1".into(), "g-2".into()],
+            viewport: String::new(),
+        };
+        assert_eq!(raw.viewport, "", "the viewport builds it unstamped");
+        let out = stamp_context_menu(raw, PRIMARY_VIEWPORT);
+        assert_eq!(out.viewport, PRIMARY_VIEWPORT);
+        // Nothing else moves — the point is the hole-relative physical pixels
+        // and the resolved selection survive the stamp untouched.
+        assert_eq!((out.x, out.y), (12.0, 34.0));
+        assert_eq!(out.guid.as_deref(), Some("g-1"));
+        assert_eq!(out.selection.len(), 2);
+
+        let raw = ViewportActivateDto {
+            guid: "g-9".into(),
+            viewport: String::new(),
+        };
+        let out = stamp_activate(raw, PRIMARY_VIEWPORT);
+        assert_eq!(out.viewport, PRIMARY_VIEWPORT);
+        assert_eq!(out.guid, "g-9");
     }
 
     /// **The exactly-one-store invariant** (the hoist). Every clone a viewport

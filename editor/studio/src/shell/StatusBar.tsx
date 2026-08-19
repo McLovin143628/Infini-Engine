@@ -7,11 +7,20 @@ import { useEffect, useState } from "react";
 import { ChevronUp, GitBranch, ScrollText, TerminalSquare } from "lucide-react";
 import { app } from "../lib/ipc";
 import { executeCommand } from "../lib/commands";
+import { useSceneStore } from "../stores/sceneStore";
 import { useShellStore } from "../stores/shellStore";
 
 export default function StatusBar() {
   const [version, setVersion] = useState("dev");
   const statusMessage = useShellStore((s) => s.statusMessage);
+  /**
+   * **Discoverability for multi-select** (Wave E). Ctrl+click in the native
+   * viewport has toggled the selection since Wave 2 and NOTHING said so — the
+   * outline is the only feedback, and it is easy to miss on a small object. A
+   * count in the status bar is the cheapest honest signal that the gesture did
+   * something.
+   */
+  const selectionCount = useSceneStore((s) => s.selection.length);
 
   useEffect(() => {
     app
@@ -54,6 +63,9 @@ export default function StatusBar() {
 
       <div className="flex-1" />
 
+      {selectionCount > 1 && (
+        <span className="px-2 text-(--ink-text)">{selectionCount} selected</span>
+      )}
       <span className="px-2">All changes saved</span>
       <button className="flex h-full items-center gap-1 px-2 hover:bg-(--ink-bg-3) hover:text-(--ink-text)">
         <GitBranch size={13} />

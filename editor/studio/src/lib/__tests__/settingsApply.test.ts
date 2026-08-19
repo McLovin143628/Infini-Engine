@@ -5,6 +5,8 @@ import type { EditorSettings } from "../../bindings/EditorSettings";
 
 vi.mock("../ipc", () => ({
   editorSettings: { get: vi.fn(), set: vi.fn() },
+  // Batch C: the pointer feel is pushed into the native viewport too.
+  viewport: { setInteraction: vi.fn().mockResolvedValue(undefined) },
 }));
 
 // The two viewport doors are mocked: `viewportStore` pulls in the whole native
@@ -15,7 +17,7 @@ vi.mock("../../stores/viewportStore", () => ({
   applyFoliageFromSettings: vi.fn(),
 }));
 
-import { editorSettings as settingsIpc } from "../ipc";
+import { editorSettings as settingsIpc, viewport as viewportIpc } from "../ipc";
 import {
   applyFoliageFromSettings,
   applySnap3dFromSettings,
@@ -145,6 +147,29 @@ describe("applySettings — what actually applies live", () => {
     });
     expect(bindingFor("Ctrl+Shift+P")?.command).toBe("tools.commandPalette");
     expect(bindingFor("Ctrl+Alt+P")).toBeUndefined();
+  });
+
+  it("the pointer feel reaches the native viewport, and only when it CHANGES", () => {
+    vi.mocked(viewportIpc.setInteraction).mockClear();
+    const prev = base();
+    applySettings(prev, null);
+    expect(viewportIpc.setInteraction).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(viewportIpc.setInteraction).mock.calls[0][0]).toEqual({
+      fly_speed_mps: 8,
+      look_sensitivity: 1,
+      rmb_click_travel_px: 4,
+      rmb_click_ms: 250,
+    });
+
+    vi.mocked(viewportIpc.setInteraction).mockClear();
+    // A theme change is not a pointer change.
+    applySettings({ ...prev, theme_id: "midnight" }, prev);
+    expect(viewportIpc.setInteraction).not.toHaveBeenCalled();
+
+    // A threshold change is.
+    applySettings({ ...prev, rmb_click_ms: 400 }, prev);
+    expect(viewportIpc.setInteraction).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(viewportIpc.setInteraction).mock.calls[0][0].rmb_click_ms).toBe(400);
   });
 
   it("snap + foliage reach the viewport doors, and only when they CHANGE", () => {

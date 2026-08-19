@@ -36,7 +36,7 @@
 import type { EditorSettings } from "../bindings/EditorSettings";
 import type { FoliageSettingsDto } from "../bindings/FoliageSettingsDto";
 import type { Snap3DDto } from "../bindings/Snap3DDto";
-import { editorSettings as settingsIpc } from "./ipc";
+import { editorSettings as settingsIpc, viewport as viewportIpc } from "./ipc";
 import { applyKeybindingOverrides } from "./keybindings";
 import { setTheme } from "./theme";
 import {
@@ -167,7 +167,28 @@ export function applySettings(next: EditorSettings, prev: EditorSettings | null)
   // numbers back at the native viewport on every keystroke.
   if (!prev || !sameSnap(prev.snap_3d, next.snap_3d)) applySnap3dFromSettings(next.snap_3d);
   if (!prev || !sameFoliage(prev.foliage, next.foliage)) applyFoliageFromSettings(next.foliage);
+  // The pointer feel reaches the native input state machine (Wave E batch C):
+  // flycam speed, look sensitivity, and the right-button click-vs-drag
+  // thresholds the context-menu gesture is discriminated on.
+  if (!prev || !sameInteraction(prev, next)) {
+    void viewportIpc
+      .setInteraction({
+        fly_speed_mps: next.camera_fly_speed_mps,
+        look_sensitivity: next.camera_look_sensitivity,
+        rmb_click_travel_px: next.rmb_click_travel_px,
+        rmb_click_ms: next.rmb_click_ms,
+      })
+      .catch(() => {
+        // No native viewport (headless test, detached window) — nothing to feel.
+      });
+  }
 }
+
+const sameInteraction = (a: EditorSettings, b: EditorSettings): boolean =>
+  a.camera_fly_speed_mps === b.camera_fly_speed_mps &&
+  a.camera_look_sensitivity === b.camera_look_sensitivity &&
+  a.rmb_click_travel_px === b.rmb_click_travel_px &&
+  a.rmb_click_ms === b.rmb_click_ms;
 
 const sameSnap = (a: Snap3DDto, b: Snap3DDto): boolean =>
   a.translate === b.translate &&

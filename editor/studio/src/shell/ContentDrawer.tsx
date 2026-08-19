@@ -48,6 +48,7 @@ import { cn } from "../lib/utils";
 import { deliverAssetDrop } from "../lib/assetDrop";
 import { executeCommand } from "../lib/commands";
 import { scene as sceneIpc, shell, viewport } from "../lib/ipc";
+import { useViewportOverlay } from "../lib/viewportOverlay";
 import { useDockLayout } from "../panels/dock/dockLayoutStore";
 import { useShellStore } from "../stores/shellStore";
 import { useSpriteSheetStore } from "../stores/spriteSheetStore";
@@ -955,6 +956,25 @@ function AssetContextMenu({
   const removeFromCollection = useAssetStore((s) => s.removeFromCollection);
   const createCollection = useAssetStore((s) => s.createCollection);
   const [subOpen, setSubOpen] = useState(false);
+  /**
+   * **The airspace guard this menu never had** (Wave E, E2-4).
+   *
+   * It is a `position: fixed` popup at the cursor: with the drawer open near the
+   * bottom of the window it opens UPWARD, across the viewport hole, and the
+   * native child window draws over it — so the menu was invisible under the 3D
+   * view, and clicking where an item appeared to be hit the viewport instead.
+   * Every other overlay in the shell has held this guard since Phase 1; this one
+   * was hand-rolled and skipped it.
+   *
+   * Held for the component's whole lifetime, which is exactly the menu's: it is
+   * mounted only while open (`{menu && <AssetContextMenu …>}`).
+   *
+   * Not migrated onto `ContextMenuSurface` (the shared surface Wave E split out)
+   * because this menu has an inline expanding submenu — "Add to Collection ▸" —
+   * that the surface does not model. Carried as a named remainder; the HAZARD is
+   * closed here, which is the half that mattered.
+   */
+  useViewportOverlay(true);
   const store = {
     rename: useAssetStore((s) => s.rename),
     duplicate: useAssetStore((s) => s.duplicate),

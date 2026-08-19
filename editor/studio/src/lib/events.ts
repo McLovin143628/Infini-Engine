@@ -19,6 +19,8 @@ import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
 import type { SceneDelta } from "../bindings/SceneDelta";
 import type { ViewportGizmoDto } from "../bindings/ViewportGizmoDto";
 import type { ViewportKey } from "../bindings/ViewportKey";
+import type { ViewportActivateDto } from "../bindings/ViewportActivateDto";
+import type { ViewportContextMenuDto } from "../bindings/ViewportContextMenuDto";
 import type { ViewportToolStatusDto } from "../bindings/ViewportToolStatusDto";
 
 export type { UnlistenFn };
@@ -78,6 +80,15 @@ export interface EventPayloads {
    * in the document yet).
    */
   "viewport://tool-status": ViewportToolStatusDto;
+  /**
+   * **A right-click in the native 3D view** (Wave E) — the shell renders its own
+   * menu at the point. The viewport is a child window and swallows pointer
+   * events, so this event is the ONLY way a right-click there can be known.
+   * `x`/`y` are physical pixels relative to the hole's top-left.
+   */
+  "viewport://context-menu": ViewportContextMenuDto;
+  /** **A double-click on an object in the 3D view** (Wave E) — "open this". */
+  "viewport://activate": ViewportActivateDto;
   /** Incremental world change after any mutation (P3.2). */
   "world://delta": SceneDelta;
   /** Content changed (import/delete/rename/watcher) → re-fetch snapshot (P4.4). */

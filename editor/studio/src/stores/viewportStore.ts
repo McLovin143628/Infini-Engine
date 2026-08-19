@@ -790,12 +790,26 @@ export function registerViewportCommands(): void {
     { id: "view.biomes", title: "View Mode: Biomes", category: "View" },
     { id: "view.vtResidency", title: "View Mode: VT Residency", category: "View" },
     { id: "view.vsmPages", title: "View Mode: Shadow Pages", category: "View" },
+    // Wave E: `F` is consumed by the native child window, so the context menus
+    // and the palette need a door of their own. `lib/objectMenu.ts` offers its
+    // Focus row only when this command is registered — never a dead item.
+    {
+      id: "view.focusSelection",
+      title: "Focus Selection",
+      category: "View",
+      shortcut: "F",
+    },
     { id: "tool.select", title: "Tool: Select", category: "Tools" },
     { id: "tool.sculpt", title: "Tool: Sculpt Terrain", category: "Tools" },
     { id: "tool.foliage", title: "Tool: Paint Foliage", category: "Tools" },
     { id: "tool.biome", title: "Tool: Paint Biomes", category: "Tools" },
     { id: "tool.voxel", title: "Tool: Carve Voxels", category: "Tools" },
   ]);
+  if (getCommand("view.focusSelection")) {
+    setCommandHandler("view.focusSelection", () => {
+      void viewport.focus().catch(() => {});
+    });
+  }
   if (getCommand("view.toggle2D")) {
     setCommandHandler("view.toggle2D", () => useViewportStore.getState().toggleMode());
   }
