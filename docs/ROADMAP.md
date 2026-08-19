@@ -22730,3 +22730,249 @@ files** (676/75 before). `cargo fmt --all --check`, `cargo clippy --workspace
 --all-targets`, `npm run typecheck`, eslint `--max-warnings=0` and `npm run build` all
 green. Goldens 54, byte-untouched. No schema movement, no wire-type movement, no golden
 re-blessing — the audit's thirteen new arms are all over behaviour or source scope.
+
+---
+
+## Wave D (2026-08-19) — the DCC build-out: Blender parity, and one thing past it
+
+The mandate, verbatim: *"continue to build on what we already have for the DCC module and
+make it on parity with or even better than Blender and more robust."* The scoping scout's
+one-sentence verdict was the plan's spine — **the kernel was in far better shape than the
+product built on it** — so a large fraction of this wave is reachability work over code
+that has been sitting in `inf-dcc` since P23, and the rest is the two things the ledger
+had been carrying longest.
+
+**ONE schema move, and it is not for a new op.** `SessionSave` v3 → **v4**, because
+`Op::BevelEdges` grew a `segments: u32` — the first and only time this crate has changed
+an *existing* variant's shape. The discriminant did not move (16 is still 16), which is
+exactly the change the frozen-discriminant match cannot see and the version exists to
+guard; both are asserted, in bytes, in both directions. The **seven appended variants**
+(31…37) needed no bump, and the file says so twice so the distinction stays legible.
+
+### What landed
+
+**The daily modelling verbs.** `MoveVerts` (per-vertex deltas), `SetEdgesSharp`,
+`SetEdgesSeam`, `MoveUvs`, `FlipFaces`, `DissolveEdges`, `BridgeLoops` — each with an
+exhaustive arm in `op_preserves_ids`, `frozen_discriminant`, `frozen_nested` and the new
+`op_amendable`. Bevel takes a **segment count** whose profile follows a circular arc
+sampled by a *normalized lerp* (`acos`/`sin` are banned from a replayed journal by the P14
+law; `sqrt` is not), and `segments = 1` is **bit-identical** to the P23.4 chamfer — same
+vertices, same ids, same interleaved allocation order — so the feature is opt-in rather
+than applied to every mesh in the tree.
+
+**You can start a model.** `dcc_new` mints a `.inf_mesh` from cube/plane/cylinder/torus —
+the four primitives the kernel has had since P23.3 with no Ring-2 door — through
+`write_asset` and a **synchronous** `ensure_vmesh`, the same two doors in the same order
+the save path takes.
+
+**The numeric transform box the panel had been claiming to have** since P23.4 (*"The
+Translate box below journals the identical op"*, beside no box at all). `Translate` had no
+caller, `Rotate`/`Scale` did not exist as tools; all three now go through
+`dcc::transform_ops`, the same function the dragged gizmo commits through.
+
+**Pivot and orientation**, the two hard-wired constants — the pivot at one site and
+`Quat::IDENTITY` at *two* (the hit-test and the drag, independently, which is the shape
+where the gizmo picks one axis and drags along another). Median / bbox / world-origin /
+active element, and global / normal / view. *Individual origins* is refused by name: it
+means one op per element and `transform_ops` produces one op.
+
+**Material slots**, **box select with an x-ray toggle**, **the keyboard through the ONE
+registry** (1/2/3, G/R/S, A/Alt+A, Ctrl+I, L, Alt+L/R, F, Ctrl+Shift+M — rebindable in
+Preferences, in the palette, in the conflict check), and **the live drag readout** for all
+three gizmo modes.
+
+**`NOT_SHOWN` is EMPTY.** The report-drift gate froze ten counters that reached the DTO
+and no author. All ten have rows. The list stays, empty, because its value was never the
+ten entries — it is that a NEW counter must get a row or be added by hand.
+
+### The two long-carried items
+
+**THE LSCM COLLAPSE, DIAGNOSED AND FIXED.** P25 measured 953 of 995 zero-UV-area triangles
+carrying *healthy 3D area* and left the mechanism unknown. The instrument that found it is
+the one the P25 law prescribed — **per chart, because an average hides a station**. The
+worst charts read `degen 24/24 tris, residual 0.60, convergence 3e-16, pin_distance 0.20`:
+a **whole chart mapped onto a LINE**. On a chart far from developable the two-pin LSCM
+energy is genuinely minimized by squashing everything onto the line through its pins —
+shrinking the area costs the energy nothing and buys a large reduction in the conformal
+term — so the solve *converges* to a degenerate answer.
+
+Two hypotheses retired with numbers: the pins are the chart's 3D diameter by construction
+(`pin_pair` takes the farthest vertex), and every collapsed chart converged to machine
+epsilon. A third — the packer's uniform scale putting a chart under `f32` resolution — is
+real arithmetic at a size ratio near a million, and the measured ratio here is **2.5e2**.
+
+The fix is a **planar-projection fallback** when a chart's UV area falls under
+`COLLAPSE_AREA_FRACTION` of its bounding box's **diagonal squared**. The denominator is
+the diagonal and not the box's area, and that is the difference between a detector that
+works and one that does not: a chart squashed onto a line has a bounding box squashed with
+it. Measured — the first version caught 86 of 692; the diagonal version catches 664.
+
+| | before | after |
+| --- | --- | --- |
+| degenerate UV triangles | 995 / 15 101 (6.6%) | **331 (2.2%)** |
+| …with exactly zero `f32` area | 692 | **28** |
+| …unaccounted for by a fold | 418 | **5** |
+| charts projected | — | 226 of 656 |
+| atlas coverage | 0.297 | 0.311 |
+
+`MAX_DEGENERATE_UV_FRACTION` comes down **0.20 → 0.08** — the exit criterion its own
+paragraph wrote for the day this was diagnosed — and the 5 survivors are the sliver floor
+it predicted, now **gated** (`unexplained <= 60`). `MAX_OVERLAP_FRACTION` goes 0.02 → 0.04
+and the ledger carries why: a projected chart has area, so it occupies texels a segment
+did not (661 → 1 518 of 65 536). An overlapped texel is textured from one of two triangles;
+a degenerate triangle has *no texels*. 857 of "slightly wrong" for 664 of "textured at
+all".
+
+**THE ~100k LIVE-SCULPT CEILING, RETIRED WITH A NUMBER.** The other P23 ledger item, in
+its own words: *"displacing the cached vertex buffer in place rather than re-running the
+exporter, which needs the writer to expose its corner→vertex map."* `to_mesh_asset_sourced`
+hands back the **corner** each written vertex was interned from — a corner and not merely
+its vertex, because the normal the writer emits is a property of the corner — and
+`dcc::displace` asks `inf_dcc::corner_normal`, the *writer's own rule*, for the normals. A
+vertex-average would be a different number on any hard-shaded mesh, and the memo-7b law
+says the preview is the geometry the save produces.
+
+| mesh | full `tessellate` | **displaced drag frame** |
+| --- | --- | --- |
+| 26 v | 0.21 ms | **0.01 ms** |
+| 1 538 v | 8.53 ms | **0.29 ms** |
+| 24 578 v | 141.98 ms | **4.35 ms** |
+
+29–33×, linear in vertices rather than in the exporter's `BTreeMap` interning. Proven, not
+assumed: the fast frame is compared against a full re-export **vertex for vertex** in both
+branches (authored-normal and derived-normal), and `scratch_tessellations` counts only the
+fallback and is asserted at **zero**.
+
+### The other robustness half
+
+**Non-manifold edges are REPAIRED, not refused.** Through P24 the reader turned away any
+asset with the same directed edge used twice — coincident triangles, a winding flipped by
+an exporter, three faces at an interior partition. Those are *ordinary* in shipped game
+content and every other DCC opens all of it. Three stages, in the order that loses the
+least: duplicate faces dropped; winding made consistent by a BFS over shared edges (the
+**lossless** stage, and the commonest cause); whatever still shares a directed edge given
+private vertices (the lossy one, counted apart). All three counts have panel rows.
+
+**Two carried remainders closed themselves, and the gates are what noticed.** `bake.rs`'s
+`reopenable` asserted `!reopenable` from P23 and now fails — a baked building opens, with
+the abutting slab sheets detached and counted. The photogrammetry manifold filter's arm
+asserted the kernel *refuses* a fin; it now detaches it, and the filter's claim is restated
+as what it saves the author. Both assertions were inverted, not deleted.
+
+### The signature: an op journal that can be amended
+
+`MeshSession::amend(index, op)` — the journal's answer to a modifier stack, and the one
+claim in this wave Blender cannot match for mesh editing. Blender's F9 panel
+re-parameterizes the operation you just did; this re-parameterizes one with twenty-eight
+edits in front of it, and the eleven behind it re-derive.
+
+**Two gates, neither trusted alone.** `op_amendable` + `op_structure`, two exhaustive
+matches so a new `Op` stops the crate compiling until someone says which of its fields the
+id allocation depends on — and a **topology comparison after every replayed op**, with
+geometry and attributes deliberately excluded. The second is what makes `Op::Mirror`'s
+coordinate amendable at all: moving the plane changes how many vertices weld onto it, and
+no static classifier can decide that. Skipped when the amended op is the last one, because
+then there is nothing downstream to protect — which is Blender's redo panel as a *special
+case* of the general feature rather than as a second mechanism.
+
+**THE PROOF**: amending an extrude twelve ops from the end of a forty-op session (three
+structural ops among the eleven that follow) produces a mesh **byte-identical** to the same
+session authored with the new parameter from the start — and so do its history, its cursor
+and its `restore`. Property-tested too: an amendment either refuses inertly or leaves the
+session a pure function of its ops, cross-checked through `restore`, a path `amend` never
+touches.
+
+**Mutation-verified, three arms**: disable the topology gate → the mirror test fails;
+forget to write the op back → three fail including the headline; keep stale checkpoints →
+the undo-after-amend test fails.
+
+The **history panel** is its surface — the op list `edit.undoHistory` has advertised since
+Phase 1 with nothing behind it — with one draggable number per op and *a route or a
+reason, never neither* at row scope, three different situations getting three different
+sentences.
+
+### The CODE TAB
+
+Wave E shipped four object-editor tabs and no code one, and said why: *"a blueprint class
+has no on-disk Rust to open… inventing a path for it is a transpiler-workflow decision,
+not a UX one."* The decision: `<project_root>/src/blueprints/<ClassName>_<guid8>.rs`, one
+file per class, **committed not ignored**, written **on demand and on staleness** against
+the graph's content hash in the file's banner. A hand-written file at a generated path is
+refused by name and left byte-identical. The path guard is *structural* — the name is
+`sanitize_ident` output plus hex digits, so no class name reaches a separator — and eight
+hostile names are asserted to stay inside the directory. New projects scaffold
+`pub mod blueprints;` and the index beside it; existing ones are not edited behind their
+author's back.
+
+### The fifteen-remainder sweep
+
+**Closed:** rotate-gizmo angle readout (all three modes) · UV-space dragging · auto-seam ·
+bevel segments · weight-table sculpt op (`Op::MoveVerts` — a soft drag is ONE entry, and
+`SOFT_WEIGHT_STEPS`'s quantization went with the op count it existed to bound) ·
+~100k live-sculpt ceiling · hover brush ring · LSCM healthy-triangle collapse ·
+`.inf_vmesh` at photogrammetry import · non-manifold import refusal · the ten `NOT_SHOWN`
+report fields · the bake's re-openability.
+
+**Re-carried, by name and with the reason:**
+
+* **Corner-join bevel.** Still refused. `segments` rounds the profile; two edges meeting at
+  a right angle still put two vertices in one place. A true corner join is a *global*
+  construction — every vertex incident to a beveled edge gets a corner patch, with a case
+  per valence — and it is a rewrite of `bevel_edges` rather than an addition to it. It
+  remains the highest-value kernel feature.
+* **Free-form knife.** Needs a ray-vs-face solve in the panel; `pick_surface` and `Bvh`
+  both exist and nothing joins them yet.
+* **Wireframe depth-testing.** Still back-face culling. Wave D added the **x-ray toggle**
+  the depth path would have wanted, and box select states the limitation in its own doc
+  (the far side of a *fold* is still caught).
+* **Detached-window keybindings.** Unchanged: a detached panel window is a lean bootstrap
+  that skips `installKeybindingListener`, and which of the shell's global chords a panel
+  window owns is a design question, not a line of code. Wave D made it *worse in effect* by
+  giving the Model Editor fourteen chords it does not have when torn off — which is a
+  reason to schedule it, and is why it is named here rather than in a footnote.
+* **The bake's merged-not-welded scope** and its tiling, non-atlas UVs. The bake now
+  re-opens; the parts still abut rather than weld, and the sheets arrive detached.
+* **Edit during embedded PIE.** Two blockers, neither of them DCC work (the embedded player
+  draws placeholder cubes for asset meshes; `embed_foreign` hides the editor viewport).
+* **BVH-backed picking.** Deliberately NOT built, and the reason is a measurement rather
+  than a plan: the ledger's own numbers say the per-*interaction* cost is dominated by
+  tessellation, not by picking, and Wave D took that from 142 ms to 4.35 ms at 24.5k
+  vertices. A pick is one click's worth of projection. The prescription is re-carried
+  unspent rather than applied to the cheaper of the two paths.
+* **Voxel booleans / remesh**, **subdivision preview**, **shrinkwrap** — the D5 items past
+  the amend feature. Not built, not started.
+* **Slot-level `transact`.** Not measured, therefore not built (memo §7e: a measurement may
+  refuse a prescribed fix, and should).
+* **A `dcc://sync` frontend listener**, `viewport_detach`, the lost-preview-device rebuild.
+  Unchanged.
+
+### Laws this wave paid for
+
+* **A metric can be right in shape and wrong in denominator.** The collapse detector's
+  first version compared UV area to the *bounding box's area* and caught 86 of 692 — a
+  chart squashed onto a line has a bounding box squashed with it. Against the **diagonal
+  squared** it caught 664. The instrument was measuring the thing it named and answering
+  about something else.
+* **The answer can already be in the report, one column to the left.** The P25 defect was
+  carried as "undiagnosed" beside a `flipped` counter that was measuring the same event.
+  Per-chart is what made the two visible together.
+* **A preview must reproduce the writer's rule, not approximate it.** `displace`'s first
+  normal pass was a vertex-average, which is a *different number* on any hard-shaded mesh
+  because a derived normal stops at sharp edges. Calling `inf_dcc::corner_normal` — the
+  writer's own function, on the writer's own corners — is what made the fast frame
+  comparable to the slow one vertex for vertex.
+* **A gate written to notice an improvement is a gate that reports one.** Three arms turned
+  red because a defect was fixed (`bake.rs`'s `reopenable`, the photogrammetry fin, the
+  P23 bevel premise). Each was *inverted*, not deleted.
+* **A comparison needs both sides in the same unit.** "The mesh changed" failed on
+  `face_count` (kernel n-gons) versus a written face count (triangles). Counted in
+  triangles it says what it means.
+* **Backticks inside a bash double-quoted string are command substitution.** The
+  chr(92)-family law, eleventh catch: two doc comments came back with their code spans
+  eaten. Rust strings and doc text go through the editor or a heredoc.
+
+### Counts
+
+`inf-dcc` 300 lib + 12 property + 10 determinism-law + 2 fracture; `inf-editor-core` 719
+lib + report_drift + capture_wizard_gate 13 + photogrammetry_gate 24; `inf-studio` 110;
+`phase23_gate` 13/13. Frontend **687 tests / 76 files**. Goldens **54**, byte-untouched.
