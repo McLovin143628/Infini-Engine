@@ -25,8 +25,9 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
 use crate::camera::{
-    BiomeSettings, Camera2D, EditorCamera, FoliageSettings, GizmoSpace, SculptSettings,
-    Snap2DSettings, SnapSettings, ToolMode, ViewportMode, VoxelSettings, WaterSettings,
+    BiomeSettings, Camera2D, EditorCamera, FoliageSettings, GizmoSpace, InteractionSettings,
+    SculptSettings, Snap2DSettings, SnapSettings, ToolMode, ViewportMode, VoxelSettings,
+    WaterSettings,
 };
 use crate::host::EngineHost;
 use crate::{SharedScene, SurfaceTarget, ViewportEventSink, ViewportRect};
