@@ -1930,7 +1930,6 @@ pub fn selection_revision(selection: &SelectionSet) -> u64 {
     Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, ts_rs::TS,
 )]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum DccPivotDto {
     /// The mean of the selected vertices. What P23.5 hard-wired, and still the
     /// default because it is what a modeller means nine times in ten.
@@ -1955,7 +1954,6 @@ pub enum DccPivotDto {
     Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, ts_rs::TS,
 )]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum DccOrientDto {
     /// World axes. What was hard-wired.
     #[default]
@@ -5188,7 +5186,8 @@ mod tests {
         assert_eq!(
             cache.tessellations(),
             1,
-            "the committed geometry is tessellated ONCE, as the base the drag              displaces — it used to be zero because the scratch re-exported"
+            "the committed geometry is tessellated ONCE, as the base the drag \
+             displaces — it used to be zero because the scratch re-exported"
         );
 
         stroke.path.push(DVec3::new(0.6, 0.5, 0.5));

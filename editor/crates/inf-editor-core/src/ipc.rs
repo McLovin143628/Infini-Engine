@@ -3418,7 +3418,6 @@ pub struct DccGroomStatDto {
 /// **One entry of a mesh session's history** (Wave D — the history panel).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct DccHistoryEntryDto {
     /// Its index in the journal — what `dcc_amend` takes.
     pub index: u32,
@@ -3449,7 +3448,6 @@ pub struct DccHistoryEntryDto {
 /// written (Wave D — the CODE TAB).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct GeneratedSourceDto {
     /// The absolute path, ready for `requestOpenFile`.
     pub path: String,
@@ -3469,7 +3467,6 @@ pub struct GeneratedSourceDto {
 /// other people's geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum DccPrimitiveDto {
     Cube,
     Plane,
@@ -3480,7 +3477,6 @@ pub enum DccPrimitiveDto {
 /// What a new mesh is made of, and what it is called.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct DccNewDto {
     pub primitive: DccPrimitiveDto,
     /// The asset name. Blank means the primitive's own name.
