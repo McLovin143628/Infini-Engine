@@ -213,6 +213,7 @@ mod tests {
             stored_tile_size: 136,
             budget_bytes: PageFormat::Bc1.page_bytes(136) * pages,
             max_texture_dim: 8192,
+            trilinear: false,
         });
         r
     }

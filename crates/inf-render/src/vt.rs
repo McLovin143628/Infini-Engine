@@ -576,6 +576,53 @@ mod tests {
             );
             assert_eq!(wgpu_fmt.is_srgb(), srgb, "{fmt:?}");
         }
+        // Wave T's two formats, on the same arithmetic. They are excluded from
+        // the sRGB half of the sweep above deliberately and the exclusion is
+        // asserted here: neither has an sRGB variant, and neither wants one — a
+        // transfer curve on a normal's X and Y is meaningless, and RGBA16F is
+        // linear by construction.
+        for fmt in [PageFormat::Bc5, PageFormat::Rgba16F] {
+            for srgb in [false, true] {
+                let wgpu_fmt = page_format(fmt, srgb);
+                let (bw, bh) = wgpu_fmt.block_dimensions();
+                let block = wgpu_fmt.block_copy_size(None).expect("colour format");
+                let side = 136u32;
+                assert_eq!(
+                    fmt.page_bytes(side),
+                    u64::from(side.div_ceil(bw) * side.div_ceil(bh) * block),
+                    "{fmt:?} → {wgpu_fmt:?}"
+                );
+                assert!(!wgpu_fmt.is_srgb(), "{fmt:?} must have no sRGB variant");
+            }
+        }
+        // The claim the BC5 path exists for, in wgpu's own arithmetic.
+        assert_eq!(
+            PageFormat::Rgba8.page_bytes(136) / PageFormat::Bc5.page_bytes(136),
+            4
+        );
+    }
+
+    /// **A float pool is NOT clamped by the BC feature** (Wave T), and
+    /// **trilinear is off by default** (Wave T's golden constraint).
+    #[test]
+    fn wave_t_defaults_leave_the_frame_exactly_as_it_was() {
+        let mut settings = RenderSettings::default();
+        assert!(
+            !settings.vt.trilinear,
+            "trilinear on by default would move every textured golden"
+        );
+        // An adapter without BC transcodes the block formats and leaves the
+        // float one alone — flattening an RGBA16F page to RGBA8 is precisely the
+        // silent loss the format was added to end, and a mobile adapter is the
+        // one class that cannot argue back.
+        settings.vt.bc_tiles = false;
+        assert_eq!(
+            pool_format(&settings, PageFormat::Rgba16F),
+            PageFormat::Rgba16F
+        );
+        assert_eq!(pool_format(&settings, PageFormat::Bc5), PageFormat::Rgba8);
+        settings.vt.bc_tiles = true;
+        assert_eq!(pool_format(&settings, PageFormat::Bc5), PageFormat::Bc5);
     }
 
     /// The clamp's first reader does what the clamp meant.

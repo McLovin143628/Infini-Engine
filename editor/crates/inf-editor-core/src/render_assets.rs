@@ -1560,6 +1560,7 @@ mod tests {
             stored_tile_size: inf_render::STORED_TILE_SIZE,
             budget_bytes: inf_render::DEFAULT_VT_BUDGET_BYTES,
             max_texture_dim: 8192,
+            trilinear: false,
         });
         let n = lib.register_materials(&content.materials, |g| content.source(g));
         assert_eq!(n, 2);

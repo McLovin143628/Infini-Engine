@@ -60,6 +60,7 @@ fn library(n: u32, budget_pages: u64) -> VtTextures {
         stored_tile_size: inf_vt::STORED_TILE_SIZE,
         budget_bytes: PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE) * budget_pages,
         max_texture_dim: 8192,
+        trilinear: false,
     });
     let bytes = Arc::new(tiled(n)) as Arc<dyn VtTileSource>;
     let mut mats = std::collections::BTreeMap::new();

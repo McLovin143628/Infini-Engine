@@ -867,6 +867,7 @@ fn a_bound_material_becomes_a_per_instance_texture_set_on_both_wires() {
             stored_tile_size: inf_vt::STORED_TILE_SIZE,
             budget_bytes: inf_vt::DEFAULT_VT_BUDGET_BYTES,
             max_texture_dim: 8192,
+            trilinear: false,
         });
         let n = lib.register_materials(&mats, |g| content.source(g));
         assert_eq!(n, BOUND_TEXTURES, "the door registered the wrong count");

@@ -119,6 +119,21 @@ pub struct VtPoolConfig {
     /// `Limits::max_texture_dimension_2d` of the device the atlas will live on.
     /// Probed by the mirror rather than assumed here — `inf-vt` names no `wgpu`.
     pub max_texture_dim: u32,
+    /// **Blend between two pyramid levels instead of snapping to one** (Wave T,
+    /// the texture document's trilinear item T47).
+    ///
+    /// `false` by default, and that is a golden constraint rather than a
+    /// preference: turning it on changes the pixels of every textured scene, and
+    /// the 54 committed goldens are frozen. It is carried here — in the pool
+    /// config the residency already receives — rather than in a shader define,
+    /// because a settings-dependent shader source means a pipeline rebuild the
+    /// moment the setting moves; as a flag bit in the indirection table it is a
+    /// buffer write.
+    ///
+    /// Reaches the shader as bit 2 of each texture's flags word (bit 0 srgb,
+    /// bit 1 reconstruct_z). Pool-wide today and per-texture by construction,
+    /// which is the shape filtering has in every graphics API.
+    pub trilinear: bool,
 }
 
 /// `Limits::default().max_texture_dimension_2d` in wgpu 30 — the value the
@@ -133,6 +148,7 @@ impl Default for VtPoolConfig {
             stored_tile_size: 136,
             budget_bytes: DEFAULT_VT_BUDGET_BYTES,
             max_texture_dim: DEFAULT_MAX_TEXTURE_DIM,
+            trilinear: false,
         }
     }
 }

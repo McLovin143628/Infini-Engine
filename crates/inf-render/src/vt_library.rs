@@ -657,6 +657,9 @@ pub fn build_vt_level(
         stored_tile_size: inf_vt::STORED_TILE_SIZE,
         budget_bytes,
         max_texture_dim: device.limits().max_texture_dimension_2d,
+        // Wave T (T47). One door, so the editor viewport and the shipped player
+        // cannot filter a virtual texture differently — the P16.6 mirror law.
+        trilinear: settings.vt.trilinear,
     });
     let mut by_guid: BTreeMap<u128, Arc<dyn VtTileSource>> = BTreeMap::new();
     for (g, bytes) in resolved {
@@ -698,6 +701,7 @@ mod tests {
             stored_tile_size: STORED_TILE_SIZE,
             budget_bytes: DEFAULT_VT_BUDGET_BYTES,
             max_texture_dim: 8192,
+            trilinear: false,
         }
     }
 

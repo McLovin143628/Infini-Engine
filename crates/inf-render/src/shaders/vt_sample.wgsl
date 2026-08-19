@@ -174,6 +174,16 @@ fn vt_tiles_y(height: u32, tile_size: u32) -> u32 {
 /// level's tile — so the hardware has nothing to select between.
 fn vt_mip(block: u32, ddx: vec2<f32>, ddy: vec2<f32>) -> u32 {
     let mip_count = vt_table[block];
+    let lod = vt_lod(block, ddx, ddy);
+    return min(u32(lod), mip_count - 1u);
+}
+
+/// [`vt_mip`] **before the truncation** — the continuous level of detail.
+///
+/// Split out for Wave T's trilinear arm (T47): the fractional part is exactly
+/// the blend weight between two levels, and `vt_mip` used to throw it away, which
+/// is what a mip band popping as the camera dollies *is*.
+fn vt_lod(block: u32, ddx: vec2<f32>, ddy: vec2<f32>) -> f32 {
     let rec0 = block + VT_TEX_HEADER_WORDS;
     let size = vec2<f32>(f32(vt_table[rec0]), f32(vt_table[rec0 + 1u]));
     let dx = ddx * size;
@@ -181,8 +191,15 @@ fn vt_mip(block: u32, ddx: vec2<f32>, ddy: vec2<f32>) -> u32 {
     let rho = max(length(dx), length(dy));
     // `max(rho, 1e-8)` keeps `log2` off -inf on a degenerate (zero-area)
     // fragment; the `max(…, 0.0)` keeps a magnified sample on mip 0.
+    //
+    // **This line is byte-pinned** against `vis_feedback.wgsl`'s copy by
+    // `inf_render::visbuffer::tests::the_per_pixel_mark_uses_the_same_mip_rule`
+    // — the level the streamer is asked for and the level the sampler reads are
+    // one rule, and a feedback pass chasing a different one is a streamer paging
+    // tiles nothing samples. It stayed spelled exactly this way through Wave T's
+    // split of the fractional part out of `vt_mip`.
     let lod = max(log2(max(rho, 1e-8)), 0.0);
-    return min(u32(lod), mip_count - 1u);
+    return lod;
 }
 
 /// What an address resolved to: the physical page, the mip it was actually
@@ -249,9 +266,7 @@ fn vt_resolve(b: u32, w_uv: vec2<f32>, m: u32) -> VtResolved {
 fn vt_sample(word: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f32> {
     let slot = word & VT_SLOT_MASK;
     let b = vt_table[VT_HEADER_WORDS + (slot - 1u)];
-    let tsz = vt_table[b + 1u];
-    let tile_sz = f32(tsz);
-    let border = f32(vt_table[b + 2u]);
+    let mip_count = vt_table[b];
 
     // A virtual texture's address space is [0,1)²; a tiling material wraps into
     // it. `uv - floor(uv)` is `fract` with the sign behaviour repeat wants, and
@@ -259,7 +274,41 @@ fn vt_sample(word: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f
     // collapse to mip 0.
     let w_uv = uv - floor(uv);
 
-    let m = vt_mip(b, ddx, ddy);
+    let lod = vt_lod(b, ddx, ddy);
+    let m = min(u32(lod), mip_count - 1u);
+    let lo = vt_tap(b, w_uv, m);
+
+    // ── WAVE T · TRILINEAR (T47) ────────────────────────────────────────────
+    // `vt_mip` truncated the level of detail and sampled one page, so the image
+    // changed in a single step as the camera dollied — the mip band this
+    // document's §"Trilinear" asks to remove. Off by default (flags bit 2 of the
+    // texture's header word, set pool-wide from `VirtualTextureSettings::
+    // trilinear`), because turning it on moves pixels in every textured scene
+    // and the committed goldens are frozen.
+    //
+    // The doc's early-outs are kept and they matter: at `blend < 0.01` the
+    // second tap changes nothing an 8-bit output can show, and at the pyramid's
+    // floor there is no coarser level to blend toward. Both are the common case
+    // — a surface at its native scale, and a surface at its coarsest — so the
+    // second address walk is paid only where it is visible.
+    if ((vt_table[b + 3u] & 4u) != 0u) {
+        let blend = lod - floor(lod);
+        if (blend > 0.01 && m + 1u < mip_count) {
+            return mix(lo, vt_tap(b, w_uv, m + 1u), blend);
+        }
+    }
+    return lo;
+}
+
+/// **One tap**: resolve `w_uv` at mip `m` and read the physical page.
+///
+/// Factored out of [`vt_sample`] for the trilinear arm, on exactly the pattern
+/// P26.4 used for [`vt_resolve`] — the address walk and the atlas read are one
+/// piece of arithmetic, and two copies of it would be two things that can stop
+/// agreeing about the border offset.
+fn vt_tap(b: u32, w_uv: vec2<f32>, m: u32) -> vec4<f32> {
+    let tile_sz = f32(vt_table[b + 1u]);
+    let border = f32(vt_table[b + 2u]);
     let r = vt_resolve(b, w_uv, m);
 
     let grec = b + VT_TEX_HEADER_WORDS + r.got * VT_MIP_REC_WORDS;

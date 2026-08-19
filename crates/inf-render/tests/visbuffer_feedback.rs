@@ -224,6 +224,7 @@ fn run(gpu: &GpuContext, visbuffer: bool, hidden: bool, frames: usize) -> Run {
         // a story about eviction order instead.
         budget_bytes: inf_vt::PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE) * 2048,
         max_texture_dim: 8192,
+        trilinear: false,
     });
     lib.register_or_record(TEX, Arc::new(bytes.clone()))
         .unwrap_or_else(|| panic!("the fixture registers: {:?}", lib.refusals()));
@@ -471,6 +472,7 @@ fn the_meshlet_set_is_handed_over_and_not_marked_twice() {
         stored_tile_size: inf_vt::STORED_TILE_SIZE,
         budget_bytes: inf_vt::PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE) * 256,
         max_texture_dim: 8192,
+        trilinear: false,
     });
     lib.register_or_record(TEX, Arc::new(container()))
         .expect("registers");
@@ -535,6 +537,7 @@ fn the_analytic_floor_still_covers_a_handed_over_meshlet_surface() {
         stored_tile_size: inf_vt::STORED_TILE_SIZE,
         budget_bytes: inf_vt::PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE) * 256,
         max_texture_dim: 8192,
+        trilinear: false,
     });
     lib.register_or_record(TEX, Arc::new(container()))
         .expect("registers");

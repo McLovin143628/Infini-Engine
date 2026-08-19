@@ -234,6 +234,7 @@ fn harness_as(
         stored_tile_size: stored_side,
         budget_bytes: format.page_bytes(stored_side) * pages,
         max_texture_dim: gpu.device.limits().max_texture_dimension_2d,
+        trilinear: false,
     });
     assert!(advisories.is_empty(), "{advisories:?}");
     let handle = residency.register_texture(desc).expect("the floor fits");

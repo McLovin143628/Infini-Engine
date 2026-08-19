@@ -414,7 +414,12 @@ impl VtResidency {
         let page_bytes = cfg.format.page_bytes(geometry.stored_tile_size);
         let n = geometry.slot_count();
         debug_assert!(n <= MAX_SLOT_INDEX + 1, "a slot index must fit 16 bits");
-        let table = TableImage::layout(&[], geometry.slots_x, geometry.stored_tile_size);
+        let table = TableImage::layout(
+            &[],
+            geometry.slots_x,
+            geometry.stored_tile_size,
+            cfg.trilinear,
+        );
         let this = Self {
             cfg,
             geometry,
@@ -802,6 +807,7 @@ impl VtResidency {
             &descs,
             self.geometry.slots_x,
             self.geometry.stored_tile_size,
+            self.cfg.trilinear,
         );
         for t in 0..self.textures.len() {
             self.recompute_entries(t);
@@ -1036,6 +1042,7 @@ mod tests {
             stored_tile_size: 136,
             budget_bytes: PageFormat::Bc1.page_bytes(136) * pages,
             max_texture_dim: 8192,
+            trilinear: false,
         });
         r
     }

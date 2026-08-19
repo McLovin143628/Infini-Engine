@@ -787,6 +787,7 @@ fn parity_textured_virtual_texture() {
             stored_tile_size: inf_vt::STORED_TILE_SIZE,
             budget_bytes: inf_vt::PageFormat::Rgba8.page_bytes(inf_vt::STORED_TILE_SIZE) * 256,
             max_texture_dim: 8192,
+            trilinear: false,
         });
         lib.register_or_record(1, Arc::new(bytes.clone()))
             .unwrap_or_else(|| panic!("the fixture registers: {:?}", lib.refusals()));

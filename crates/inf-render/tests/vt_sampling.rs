@@ -89,6 +89,7 @@ fn pool_cfg(format: PageFormat, pages: u64) -> VtPoolConfig {
         stored_tile_size: STORED_TILE_SIZE,
         budget_bytes: format.page_bytes(STORED_TILE_SIZE) * pages,
         max_texture_dim: 8192,
+        trilinear: false,
     }
 }
 

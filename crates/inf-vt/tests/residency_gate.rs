@@ -37,6 +37,7 @@ fn pool(pages: u64) -> VtResidency {
         stored_tile_size: 136,
         budget_bytes: PageFormat::Bc1.page_bytes(136) * pages,
         max_texture_dim: 8192,
+        trilinear: false,
     });
     assert!(advisories.is_empty(), "unexpected advisory: {advisories:?}");
     assert_eq!(r.geometry().slot_count() as u64, pages, "{pages} pages");

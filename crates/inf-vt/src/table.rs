@@ -40,7 +40,7 @@
 //! │ [b+0] mip_count                                                   │
 //! │ [b+1] tile_size        (PAYLOAD texels per tile side)             │
 //! │ [b+2] border                                                      │
-//! │ [b+3] flags            bit 0 = srgb · bit 1 = reconstruct_z       │
+//! │ [b+3] flags     bit 0 srgb · bit 1 reconstruct_z · bit 2 trilinear│
 //! ├ mip records (mip_count × [`TABLE_MIP_REC_WORDS`] = 4) ────────────┤
 //! │ width · height · tiles_x · first_entry (ABSOLUTE word offset)     │
 //! ├ entries (one per tile of the pyramid, in (mip, y, x) order) ──────┤
@@ -209,7 +209,12 @@ impl TableImage {
     /// every block that follows it. Registration happens at load, not per frame,
     /// and a `layout_rebuilt` transaction tells the mirror to re-create and
     /// re-upload the buffer rather than patch it.
-    pub fn layout(descs: &[VtTextureDesc], slots_x: u32, stored_tile_size: u32) -> Self {
+    pub fn layout(
+        descs: &[VtTextureDesc],
+        slots_x: u32,
+        stored_tile_size: u32,
+        trilinear: bool,
+    ) -> Self {
         let n = descs.len();
         let mut words = vec![0u32; TABLE_HEADER_WORDS + n];
         words[0] = TABLE_MAGIC;
@@ -224,11 +229,16 @@ impl TableImage {
             words.push(desc.mip_count());
             words.push(desc.tile_size);
             words.push(desc.border);
-            // bit 0 = srgb, bit 1 = reconstruct_z (Wave T). Appended rather than
-            // renumbered: the flags word is read by a shipped shader, so a bit
-            // is a wire position. `reconstruct_z` is false for every format that
-            // predates Wave T, so the word is unchanged for existing content.
-            words.push(u32::from(desc.srgb) | (u32::from(desc.reconstruct_z) << 1));
+            // bit 0 = srgb, bit 1 = reconstruct_z, bit 2 = trilinear (Wave T).
+            // Appended rather than renumbered: the flags word is read by a
+            // shipped shader, so a bit is a wire position. Both new bits are
+            // false for existing content and for the default pool, so the word
+            // is unchanged and every textured golden is byte-stable.
+            words.push(
+                u32::from(desc.srgb)
+                    | (u32::from(desc.reconstruct_z) << 1)
+                    | (u32::from(trilinear) << 2),
+            );
             let entries = base + TABLE_TEXTURE_HEADER_WORDS + TABLE_MIP_REC_WORDS * desc.mips.len();
             for (m, mip) in desc.mips.iter().enumerate() {
                 words.push(mip.width);
@@ -275,7 +285,7 @@ mod tests {
             full_pyramid(320, 192, 128, 4, true),
             full_pyramid(129, 129, 128, 4, false),
         ];
-        let img = TableImage::layout(&descs, 46, 136);
+        let img = TableImage::layout(&descs, 46, 136, false);
         assert_eq!(img.words[0], TABLE_MAGIC);
         assert_eq!(img.words[1], 2);
         assert_eq!(img.words[2], 46);
@@ -308,5 +318,78 @@ mod tests {
             seen.len(),
             (descs[0].tile_count() + descs[1].tile_count()) as usize
         );
+    }
+
+    /// **The flags word is a wire position, and Wave T appended to it** — bit 0
+    /// srgb, bit 1 reconstruct_z, bit 2 trilinear.
+    ///
+    /// Asserted by value in both directions, because this word is read by a
+    /// shipped fragment shader: a bit that moved would silently make every
+    /// normal map an sRGB base colour, or make every base colour rebuild a Z it
+    /// does not have. And the default pool writes **zero** for both new bits,
+    /// which is what makes every existing texture's table word unchanged and
+    /// every committed golden byte-stable.
+    #[test]
+    fn the_flags_word_is_freeze_pinned_and_wave_t_appended_to_it() {
+        let plain = full_pyramid(256, 256, 128, 4, false);
+        let srgb = full_pyramid(256, 256, 128, 4, true);
+        let mut normal = plain.clone();
+        normal.reconstruct_z = true;
+
+        let flags = |descs: &[VtTextureDesc], trilinear: bool| -> Vec<u32> {
+            let img = TableImage::layout(descs, 46, 136, trilinear);
+            img.blocks.iter().map(|b| img.words[b.base + 3]).collect()
+        };
+
+        assert_eq!(flags(&[plain.clone()], false), vec![0]);
+        assert_eq!(flags(&[srgb.clone()], false), vec![1]);
+        assert_eq!(flags(&[normal.clone()], false), vec![2]);
+        assert_eq!(flags(&[plain.clone()], true), vec![4]);
+        // All three at once, which is the arrangement a mistake in the shifts
+        // would show up in and a one-flag-at-a-time sweep would not.
+        let mut all = srgb.clone();
+        all.reconstruct_z = true;
+        assert_eq!(flags(&[all], true), vec![7]);
+        // Per texture, not per pool, for the two that are per texture.
+        assert_eq!(flags(&[plain, srgb, normal], true), vec![4, 5, 6]);
+    }
+
+    /// **The UV-precision tripwire** (Wave T, the texture document's T44).
+    ///
+    /// The document asks for two-`u32` virtual UVs — an integer page part and a
+    /// fractional tile part — *"for 32K+ virtual textures"*, and the reason is
+    /// real: `vt_sample` does all its addressing in `f32`, whose 24-bit mantissa
+    /// resolves 16 777 216 distinct values, so a virtual extent past that
+    /// cannot address its own texels. It is **latent, not urgent**, because a
+    /// slot index is 16 bits and the default `max_texture_dimension_2d` is 8 192.
+    ///
+    /// So this is not a feature; it is the alarm that says the feature is now
+    /// needed, which is the honest answer to a prescription whose premise the
+    /// engine has not reached. It fails the day a pyramid is registered whose
+    /// mip-0 extent needs more precision than an `f32` uv can carry — and the
+    /// bound it asserts is derived from the mantissa rather than remembered, so
+    /// nobody has to maintain a number.
+    #[test]
+    fn an_f32_uv_still_addresses_every_texel_of_the_largest_legal_pyramid() {
+        // A texel step at extent `w` is `1/w` in uv; the finest uv step an f32
+        // resolves near 1.0 is 2^-23. So `w` texels are separately addressable
+        // while `w <= 2^23`.
+        const F32_UV_LIMIT: u32 = 1 << 23;
+        // What the engine can actually register today: an atlas dimension of
+        // 8 192 texels caps a single texture's mip 0 at nothing in particular,
+        // but the *virtual* extent is bounded by the tile grid a 16-bit slot
+        // index can address — 65 536 slots of 128 payload texels a side.
+        let addressable_virtual_extent = (MAX_SLOT_INDEX + 1) * 128;
+        assert!(
+            addressable_virtual_extent <= F32_UV_LIMIT,
+            "a virtual texture can now be {addressable_virtual_extent} texels \
+             across, which an f32 uv cannot address to the texel ({F32_UV_LIMIT} \
+             is the mantissa's limit). This is the day the texture document's \
+             two-u32 UV path (integer page + fractional tile offset) has to be \
+             built — see docs/memos/wave-t-textures-disposition.md, item T44"
+        );
+        // ANTI-VACUITY: the bound is not trivially true by a huge margin that
+        // hides a mistake in the arithmetic — it is exactly one power of two.
+        assert_eq!(addressable_virtual_extent, 1 << 23);
     }
 }

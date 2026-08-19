@@ -559,6 +559,26 @@ pub struct VirtualTextureSettings {
     /// the editor viewport and the shipped player would otherwise be two places
     /// that decide how much VRAM a level gets.
     pub budget_bytes: u64,
+    /// **Blend between two pyramid levels instead of snapping to one** (Wave T,
+    /// the texture document's trilinear item).
+    ///
+    /// `vt_mip` truncates the gradient level of detail and samples one page, so
+    /// a virtual texture changes in a visible step as the camera dollies. With
+    /// this on, `vt_sample` takes a second tap at `m + 1` and mixes on the
+    /// fractional part — the document's own prescription, early-outs included
+    /// (`blend < 0.01`, and the pyramid's floor), so the second address walk is
+    /// paid only where it shows.
+    ///
+    /// **Off by default, and that is a law rather than a taste.** It moves
+    /// pixels in every textured scene, and the 54 committed goldens are frozen
+    /// (`phase26_gate` / `phase27_gate` / `phase28_gate` each assert the set's
+    /// digest independently). Turning it on is a blessed decision with a
+    /// measurement behind it, not a default flip.
+    ///
+    /// Not a tier knob: it is one extra tap on the fragments that are actually
+    /// between levels, which is a quality/cost trade an author makes rather than
+    /// a capability a machine has.
+    pub trilinear: bool,
 }
 
 impl Default for VirtualTextureSettings {
@@ -566,6 +586,7 @@ impl Default for VirtualTextureSettings {
         Self {
             bc_tiles: true,
             budget_bytes: crate::DEFAULT_VT_BUDGET_BYTES,
+            trilinear: false,
         }
     }
 }
