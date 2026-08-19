@@ -411,8 +411,13 @@ fn planar_uv(
     Some(out)
 }
 
-/// The total `|UV area|` of a chart's triangles, and its bounding box's area.
-fn uv_area_and_box(tris: &[[VertId; 3]], uv: &BTreeMap<VertId, DVec2>) -> (f64, f64) {
+/// The total `|UV area|` of a chart's triangles, and its bounding box's
+/// **diagonal squared** — NOT the box's area. See the comment on the return.
+///
+/// The name says `_diag2` because the value is: an audit found the doc line
+/// and the call-site binding both still saying "area", which is the exact
+/// drift that puts the defect back.
+fn uv_area_and_diag2(tris: &[[VertId; 3]], uv: &BTreeMap<VertId, DVec2>) -> (f64, f64) {
     let mut area = 0.0f64;
     for t in tris {
         let (Some(a), Some(b), Some(c)) = (uv.get(&t[0]), uv.get(&t[1]), uv.get(&t[2])) else {
@@ -845,8 +850,8 @@ pub fn unwrap(mesh: &Mesh) -> Result<Unwrapped, OpError> {
         };
         // **THE COLLAPSE FALLBACK** (Wave D) — see `planar_uv` for the mechanism
         // and for why a converged solve can hand back a segment.
-        let (uv_area, uv_box) = uv_area_and_box(&tris, &uv);
-        let (uv, projected) = if uv_area <= uv_box * COLLAPSE_AREA_FRACTION {
+        let (uv_area, uv_diag2) = uv_area_and_diag2(&tris, &uv);
+        let (uv, projected) = if uv_area <= uv_diag2 * COLLAPSE_AREA_FRACTION {
             match planar_uv(mesh, &verts, &tris) {
                 Some(flat) => (flat, true),
                 // No plane either — the chart's normals cancel exactly AND the
@@ -1806,6 +1811,65 @@ mod tests {
         }
     }
 
+    /// **The fallback FIRES, and it is what removes the zeros** (audit fix).
+    ///
+    /// `no_chart_survives_unwrap_mapped_onto_a_line` above is a statement about
+    /// the output, and on any fixture that does not collapse it passes
+    /// unchanged with `planar_uv` stubbed to `None` — so the crate's own tests
+    /// could not tell whether the fix was wired in at all. (`projected` is
+    /// asserted nowhere else in this crate; the only armed proof of firing was
+    /// one aggregate in a different crate's gate, on a photogrammetry fixture.)
+    ///
+    /// This names the mechanism instead. A seamless cylinder is ONE chart and a
+    /// closed non-developable surface, so the two-pin conformal energy is
+    /// minimized by squashing it onto the line through its pins and the solve
+    /// converges to that. Three claims, and each one dies to a different defect:
+    /// the fallback fired, the chart came back with an extent in **both**
+    /// directions, and every triangle ended up with `f32` area.
+    ///
+    /// The middle one is also the sentence the overlap ceiling's loosening
+    /// rests on: a projected chart *has* area, so it claims texels a segment
+    /// did not.
+    #[test]
+    fn the_collapse_fallback_fires_and_is_what_removes_the_zero_area_triangles() {
+        let m = cylinder(0.5, 2.0, 8);
+        let out = unwrap(&m).expect("unwraps");
+        assert_eq!(out.report.charts.len(), 1, "the fixture must be one chart");
+        let c = &out.report.charts[0];
+        assert!(
+            c.convergence < 1e-9,
+            "the solve did not converge, so this chart is not the collapse the fix is about: {c:?}"
+        );
+        assert!(
+            c.pin_distance > 1e-6 && c.area3 > 1e-6,
+            "healthy pins and healthy 3D area are what make it the P25 defect: {c:?}"
+        );
+        assert_eq!(
+            out.report.projected, 1,
+            "the collapse fallback did not fire on a chart that collapses, so nothing below is about it"
+        );
+        assert!(c.projected, "…and the per-chart flag says so too");
+        assert!(
+            c.uv_extent > 1e-6,
+            "the projected chart is still a segment: extent {}",
+            c.uv_extent
+        );
+        assert_eq!(
+            out.report.degenerate_uv, 0,
+            "the projection did not give every triangle f32 area"
+        );
+        // The control: a chart that IS developable. The conformal solve is fine
+        // on its own there and the fallback must stay out of the way — without
+        // this arm, a `planar_uv` that projected everything would pass.
+        let flat = subdivided_plane(3);
+        let plane_out = unwrap(&flat).expect("unwraps");
+        assert_eq!(
+            plane_out.report.projected, 0,
+            "the fallback fired on a developable chart, so it is not keyed on collapse at all"
+        );
+        assert_eq!(plane_out.report.degenerate_uv, 0);
+    }
+
     /// The fallback's own arithmetic, on a chart that would collapse: a planar
     /// projection gives **every** triangle area, and it is a pure function of
     /// the mesh.
@@ -1818,7 +1882,7 @@ mod tests {
         let a = planar_uv(&m, &verts, &tris).expect("a plane has a plane");
         let b = planar_uv(&m, &verts, &tris).expect("twice");
         assert_eq!(a, b, "the projection is not a pure function of the mesh");
-        let (area, diag2) = uv_area_and_box(&tris, &a);
+        let (area, diag2) = uv_area_and_diag2(&tris, &a);
         assert!(
             area > diag2 * COLLAPSE_AREA_FRACTION,
             "the projection itself reads as collapsed: {area} vs {diag2}"
