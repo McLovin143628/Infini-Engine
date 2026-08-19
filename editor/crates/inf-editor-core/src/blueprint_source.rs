@@ -126,7 +126,7 @@ pub enum SourceError {
 /// escapes `<root>/src/blueprints/`, because the escape characters do not
 /// survive the sanitizer. Asserted below.
 pub fn source_file_name(class_name: &str, asset_id: &str) -> Result<String, SourceError> {
-    let ident = inf_asset::data::sanitize_ident(class_name, "");
+    let ident = module_stem(class_name);
     let guid8: String = asset_id
         .chars()
         .filter(|c| c.is_ascii_hexdigit())
@@ -141,11 +141,56 @@ pub fn source_file_name(class_name: &str, asset_id: &str) -> Result<String, Sour
     if ident.is_empty() {
         return Ok(format!("Blueprint_{guid8}.rs"));
     }
+    // **Never a bare stem.** With no guid to append, `CON`/`NUL`/`COM1` would
+    // reach the filesystem as themselves, and on Windows a DOS device name is a
+    // device *in any directory* and before any extension — the staged temp
+    // sibling too. The suffix costs nothing and makes the case unreachable.
     if guid8.is_empty() {
-        return Ok(format!("{ident}.rs"));
+        return Ok(format!("{ident}_bp.rs"));
     }
     Ok(format!("{ident}_{guid8}.rs"))
 }
+
+/// The **module stem** for a class: the P4 sanitizer's output, narrowed to what
+/// a Rust `pub mod` line and a Windows path both accept.
+///
+/// Not a second sanitizer — [`inf_asset::data::sanitize_ident`] is still the
+/// sanitizer, and it is the thing that makes the path guard structural. This is
+/// the narrowing on top, and every clause of it is a defect that shipped:
+///
+/// * **The empty fallback disables the sanitizer's own leading-digit guard.**
+///   `sanitize_ident(s, "")`'s repair is `format!("{fallback}{out}")`, which is
+///   `out` when the fallback is empty — and the fallback has to stay empty here,
+///   because an empty ident is what makes [`SourceError::Unnameable`] reachable.
+///   So `3D Door` sanitized to `3DDoor`, the file wrote fine, and the index
+///   beside it emitted `pub mod 3DDoor_a1b2c3d4;` — **a lex error in the
+///   author's own crate, in a file they never wrote**. `3D`/`2D`/`4x4` are
+///   ordinary class names.
+/// * **`char::is_alphanumeric` is Unicode-wide**, so it keeps `½` (category
+///   `No`), which is not `XID_Continue` and is therefore not a Rust identifier
+///   either. ASCII, because this string is a module name in generated code.
+/// * **Length.** Nothing bounded it, so a 300-character class name produced a
+///   312-byte file name and failed at `fs::write` with a raw Win32 error about
+///   an invalid name. Truncated; the guid keeps two long names apart.
+fn module_stem(class_name: &str) -> String {
+    let sanitized = inf_asset::data::sanitize_ident(class_name, "");
+    let mut out: String = sanitized
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(MAX_STEM_CHARS)
+        .collect();
+    if out.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        out.insert_str(0, "Bp");
+    }
+    out
+}
+
+/// The most characters of a class name that reach a file name.
+///
+/// NTFS caps a path *component* at 255 UTF-16 units and Rust's std does not opt
+/// into long paths, so an unbounded stem is a write that fails with an error
+/// about the name rather than about the length.
+pub const MAX_STEM_CHARS: usize = 64;
 
 /// The absolute path a class's generated Rust belongs at.
 pub fn source_path(
@@ -224,14 +269,37 @@ pub fn write_if_stale(
         path: path.display().to_string(),
         message: e.to_string(),
     };
-    if let Ok(existing) = std::fs::read_to_string(&path) {
-        if !is_generated(&existing) {
-            return Err(SourceError::NotOurs {
-                path: path.display().to_string(),
-            });
+    // **A read that fails is not a file that is absent.** This was
+    // `if let Ok(existing)`, which discarded the error and fell through to the
+    // write — so a hand-written file that is unreadable (an ACL) or not UTF-8
+    // (Latin-1 in a comment) was *renamed over*, which needs directory rights
+    // and not read rights, and the caller was told `Rewritten`. Everything
+    // except "there is nothing there" is a refusal.
+    match std::fs::read_to_string(&path) {
+        Ok(existing) => {
+            if !is_generated(&existing) {
+                return Err(SourceError::NotOurs {
+                    path: path.display().to_string(),
+                });
+            }
+            if stamped_hash(&existing) == Some(graph_hash) {
+                // The class file is current; the INDEX may still be missing —
+                // deleted by hand, or lost to a crash — and this early return
+                // used to be the one path that never rebuilt it, so no amount
+                // of re-opening the tab restored it.
+                write_module_index(project_root)?;
+                return Ok((path, SourceWrite::Current));
+            }
         }
-        if stamped_hash(&existing) == Some(graph_hash) {
-            return Ok((path, SourceWrite::Current));
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(SourceError::Io {
+                path: path.display().to_string(),
+                message: format!(
+                    "something is already there and could not be read ({e}); \
+                     it will not be overwritten"
+                ),
+            })
         }
     }
     let existed = path.exists();
@@ -270,6 +338,27 @@ fn write_module_index(project_root: &Path) -> Result<(), SourceError> {
         path: dir.display().to_string(),
         message: e.to_string(),
     };
+    // **An existing index is only ours to rewrite if we wrote it.** This wrote
+    // unconditionally, and an existing project's author has to create
+    // `src/blueprints/mod.rs` by hand to make `pub mod blueprints;` compile —
+    // so the first Code-tab generate destroyed it. The class files were guarded
+    // against exactly this and the index was not.
+    let index = dir.join("mod.rs");
+    match std::fs::read_to_string(&index) {
+        Ok(existing) if !is_generated(&existing) => {
+            return Err(SourceError::NotOurs {
+                path: index.display().to_string(),
+            })
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(SourceError::Io {
+                path: index.display().to_string(),
+                message: e.to_string(),
+            })
+        }
+    }
     let mut mods: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&dir).map_err(err)?.flatten() {
         let p = entry.path();
@@ -278,6 +367,14 @@ fn write_module_index(project_root: &Path) -> Result<(), SourceError> {
                 continue;
             };
             if stem == "mod" {
+                continue;
+            }
+            // **A stem that is not an identifier is not a module.** The index is
+            // built from a directory listing, so a file an author drops in as
+            // `my-helper.rs` used to emit `pub mod my-helper;` and break their
+            // build from a file they did not write. Skipped rather than
+            // sanitized: renaming it would claim a module that does not exist.
+            if !is_module_ident(stem) {
                 continue;
             }
             mods.push(stem.to_string());
@@ -296,15 +393,149 @@ fn write_module_index(project_root: &Path) -> Result<(), SourceError> {
     for m in &mods {
         text.push_str(&format!("pub mod {m};\n"));
     }
-    inf_asset::write_atomically(&dir.join("mod.rs"), text.as_bytes()).map_err(|e| SourceError::Io {
-        path: dir.join("mod.rs").display().to_string(),
+    // Idempotent on the byte level, so the index is not a permanent git diff and
+    // the `Current` path above can call this unconditionally.
+    if std::fs::read_to_string(&index).is_ok_and(|old| old == text) {
+        return Ok(());
+    }
+    inf_asset::write_atomically(&index, text.as_bytes()).map_err(|e| SourceError::Io {
+        path: index.display().to_string(),
         message: e.to_string(),
     })
+}
+
+/// Whether a file stem may be written as `pub mod <stem>;`.
+///
+/// Deliberately ASCII and deliberately narrow: this decides what goes into a
+/// generated file in the author's own crate, and the cost of being wrong is
+/// their build.
+fn is_module_ident(stem: &str) -> bool {
+    let mut chars = stem.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Every stem this door can produce is a Rust module name** (audit fix).
+    ///
+    /// The file is only half the convention — the other half is the `pub mod`
+    /// line the index writes beside it, in the *author's* crate. A stem that is
+    /// a legal file name and not a legal identifier is a build break in a file
+    /// they never wrote, and `3D Door` / `2D Sprite` / `4x4 Truck` are ordinary
+    /// class names. Stated over the whole hostile corpus rather than over the
+    /// one case that prompted it.
+    #[test]
+    fn every_generated_stem_is_also_a_module_name() {
+        for name in [
+            "3D Door",
+            "2D Sprite",
+            "4x4 Truck",
+            "123",
+            "½",
+            "模型",
+            "\u{202e}\u{200d}",
+            "../../../etc/passwd",
+            "C:/absolute",
+            "con",
+            "CON",
+            "NUL",
+            "COM1",
+            "  ",
+            "",
+            &"A".repeat(300),
+        ] {
+            let file = source_file_name(name, "a1b2c3d4-0000").expect("a nameable class");
+            let stem = file.strip_suffix(".rs").expect("a rust file");
+            assert!(
+                is_module_ident(stem),
+                "class {name:?} produced `pub mod {stem};`, which is not an \
+                 identifier — the author's crate stops compiling"
+            );
+            assert!(
+                stem.chars().count() <= MAX_STEM_CHARS + 16,
+                "class {name:?} produced a {}-character stem",
+                stem.chars().count()
+            );
+        }
+        // …and the specific shape the defect had, pinned.
+        assert_eq!(
+            source_file_name("3D Door", "a1b2c3d4-0000").expect("nameable"),
+            "Bp3DDoor_a1b2c3d4.rs"
+        );
+        // A bare stem is never produced, so a DOS device name cannot be one.
+        assert_eq!(
+            source_file_name("CON", "zzzz").expect("nameable"),
+            "CON_bp.rs"
+        );
+    }
+
+    /// A file that **cannot be read** is not a file that is absent.
+    #[test]
+    fn a_file_that_cannot_be_read_is_refused_rather_than_clobbered() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let root = dir.path();
+        let path = source_path(root, "Door", "a1b2c3d4").expect("a path");
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        // Latin-1 in a comment: a perfectly ordinary hand-written Rust file that
+        // `read_to_string` refuses.
+        let bytes: Vec<u8> = b"// caf\xe9\nfn main() {}\n".to_vec();
+        std::fs::write(&path, &bytes).expect("write");
+        let err = write_if_stale(root, "Door", "a1b2c3d4", 7, "fn generated() {}")
+            .expect_err("a file that cannot be read must not be renamed over");
+        assert!(matches!(err, SourceError::Io { .. }), "{err:?}");
+        assert_eq!(
+            std::fs::read(&path).expect("still there"),
+            bytes,
+            "the refusal is not inert"
+        );
+    }
+
+    /// The **index** gets the same protection the class files always had.
+    #[test]
+    fn a_hand_written_module_index_is_not_overwritten() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let root = dir.path();
+        let index = root.join(BLUEPRINT_SRC_DIR).join("mod.rs");
+        std::fs::create_dir_all(index.parent().expect("a parent")).expect("mkdir");
+        let mine = "// mine, thanks\npub mod helpers;\n";
+        std::fs::write(&index, mine).expect("write");
+        let err = write_if_stale(root, "Door", "a1b2c3d4", 7, "fn generated() {}")
+            .expect_err("an author's index is theirs");
+        assert!(matches!(err, SourceError::NotOurs { .. }), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&index).expect("still there"), mine);
+    }
+
+    /// A hand-added file that is not a module name is left **out** of the index
+    /// rather than written into it as one, and a missing index is restored even
+    /// when every class file is already current.
+    #[test]
+    fn the_index_skips_non_identifiers_and_is_restored_when_missing() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let root = dir.path();
+        let (_, what) =
+            write_if_stale(root, "Door", "a1b2c3d4", 7, "fn generated() {}").expect("writes");
+        assert_eq!(what, SourceWrite::Created);
+        let bp = root.join(BLUEPRINT_SRC_DIR);
+        std::fs::write(bp.join("my-helper.rs"), "fn helper() {}").expect("write");
+        std::fs::remove_file(bp.join("mod.rs")).expect("remove the index");
+
+        // The stamp still matches, so this is the path that used to return early
+        // and never rebuild the index.
+        let (_, what) =
+            write_if_stale(root, "Door", "a1b2c3d4", 7, "fn generated() {}").expect("writes");
+        assert_eq!(what, SourceWrite::Current);
+        let index = std::fs::read_to_string(bp.join("mod.rs")).expect("the index came back");
+        assert!(index.contains("pub mod Door_a1b2c3d4;"), "{index}");
+        assert!(
+            !index.contains("my-helper"),
+            "`pub mod my-helper;` is a lex error: {index}"
+        );
+    }
 
     #[test]
     fn the_file_name_is_the_class_and_the_guids_first_eight_digits() {
@@ -377,6 +608,17 @@ mod tests {
         );
         // A hand-written file has neither.
         assert!(!is_generated("fn main() {}"));
+        // **The marker is a PREFIX, not a search** (audit fix).
+        // `starts_with` is what keeps a hand-written file that merely
+        // *mentions* the marker — in a comment, in a doc example, in a
+        // string — the author's, and nothing asserted it: swapping
+        // `starts_with` for `contains` killed no test in the crate.
+        assert!(!is_generated(
+            "//! Notes\n//\n// Files here carry\n// @generated by Infinity Engine\nfn mine() {}"
+        ));
+        assert!(is_generated(&format!(
+            "{GENERATED_MARKER} — edits may be overwritten."
+        )));
         assert_eq!(stamped_hash("fn main() {}\n// nothing"), None);
     }
 

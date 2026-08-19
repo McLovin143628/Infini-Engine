@@ -276,10 +276,33 @@ pub async fn graph_open_actor(
 /// label — two `Custom` events could share a label after a rename, never a key.
 type ActorCandidate<'a> = (String, String, &'a inf_blueprint::BlueprintFn);
 
+/// What separates a class from its handler in a document title. **One
+/// spelling**, and it is a constant because it is read from two directions:
+/// `actor_doc_name` joins with it and `class_of_doc_name` splits on it.
+///
+/// It was two spellings. The join used this character and the split used an
+/// em dash and an ASCII hyphen, so nothing ever split: the CODE tab wrote
+/// `<Class><Handler>_<guid8>.rs`, one file per HANDLER rather than the one
+/// file per class the convention is, and a class with a hyphen in its name
+/// (`Fire-Door`) was truncated at the hyphen for good measure.
+const ACTOR_DOC_SEPARATOR: &str = " ▸ ";
+
 /// The document title for a raised handler. One spelling, because it is also
 /// the equality test the idempotent re-open above uses.
 fn actor_doc_name(class_name: &str, handler_label: &str) -> String {
-    format!("{class_name} ▸ {handler_label}")
+    format!("{class_name}{ACTOR_DOC_SEPARATOR}{handler_label}")
+}
+
+/// The class half of a document title — the inverse of [`actor_doc_name`],
+/// and asserted to be.
+///
+/// `rsplit_once`, so a class name that itself contains the separator keeps
+/// all of itself and the handler half — always the last segment — is what
+/// is dropped.
+fn class_of_doc_name(name: &str) -> &str {
+    name.rsplit_once(ACTOR_DOC_SEPARATOR)
+        .map_or(name, |(class, _)| class)
+        .trim()
 }
 
 /// The live document for `doc_id`, but **only when it is already showing
@@ -794,14 +817,10 @@ pub async fn graph_write_source(
             .unwrap_or_else(|| asset_id.to_string());
         Ok((hash, rust, name))
     })?;
-    // The document name is "<Class> — <handler>"; the FILE is per class, so the
-    // handler half is dropped rather than sanitized into the path.
-    let class = name
-        .split(['—', '-'])
-        .next()
-        .unwrap_or(&name)
-        .trim()
-        .to_string();
+    // The document name is "<Class> ▸ <handler>"; the FILE is per
+    // class, so the handler half is dropped rather than sanitized into the
+    // path.
+    let class = class_of_doc_name(&name).to_string();
     let (path, what) =
         src::write_if_stale(&root, &class, asset_id, hash, &rust).map_err(|e| e.to_string())?;
     Ok(GeneratedSourceDto {
@@ -908,6 +927,38 @@ fn fmt_args(args: &[Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The document title round-trips through its own separator** (audit fix).
+    ///
+    /// `graph_write_source` derives the CODE tab's file name from the class half
+    /// of the title, and for a while it split on characters `actor_doc_name` has
+    /// never joined with — so the "one file per class" convention was in fact
+    /// one file per *handler*, and every class name containing an ASCII hyphen
+    /// lost everything after it. The two directions are asserted against each
+    /// other rather than against a literal, which is the only form that cannot
+    /// drift.
+    #[test]
+    fn a_document_title_round_trips_to_its_class() {
+        for (class, handler) in [
+            ("Door", "Tick"),
+            ("Fire-Door", "Begin Play"),
+            ("Turret", "Custom: Fire"),
+            ("A", "B"),
+            ("Class With Spaces", "Tick"),
+            // a class that contains the separator itself keeps all of itself
+            ("Odd \u{25b8} Name", "Tick"),
+        ] {
+            let name = actor_doc_name(class, handler);
+            assert_eq!(
+                class_of_doc_name(&name),
+                class,
+                "{name:?} did not split back into its class"
+            );
+        }
+        // …and a title with no separator at all is entirely the class, which is
+        // the fallback `graph_write_source` relies on for a bare asset id.
+        assert_eq!(class_of_doc_name("Lonely"), "Lonely");
+    }
 
     /// Insert a bare document + journal directly (mimics `graph_create`, which
     /// needs a Tauri `State`/`AppHandle` we can't build in a unit test).
@@ -1164,11 +1215,28 @@ mod tests {
     fn the_document_name_has_exactly_one_spelling() {
         assert_eq!(actor_doc_name("Turret", "Tick"), "Turret ▸ Tick");
         let src = include_str!("graph.rs");
+        // The separator is a CONSTANT now, because the title is read from
+        // two directions and the reader used to spell it differently from
+        // the writer. So the pin moved with it: one declaration, and one
+        // site that mints a title.
         assert_eq!(
-            src.matches("format!(\"{class_name} ▸ {handler_label}\")")
+            src.matches("const ACTOR_DOC_SEPARATOR: &str = \" ▸ \";")
                 .count(),
             1,
+            "the separator must be declared exactly once"
+        );
+        assert_eq!(
+            src.matches("format!(\"{class_name}").count(),
+            1,
             "the class ▸ handler title must be minted only by `actor_doc_name`"
+        );
+        // …and exactly one site splits it back, which is the half that was
+        // missing when the two spellings diverged.
+        assert_eq!(
+            src.matches(concat!("rsplit_once(ACTOR_DOC", "_SEPARATOR)"))
+                .count(),
+            1,
+            "the title must be split back only by `class_of_doc_name`"
         );
     }
 

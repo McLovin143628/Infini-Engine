@@ -45,7 +45,43 @@ export const OBJECT_EDIT_COMMANDS: {
   { id: "object.edit.rig", title: "Actor: Edit Skeleton", route: "rig" },
   { id: "object.edit.blueprint", title: "Actor: Open Blueprint", route: "blueprint" },
   { id: "object.edit.material", title: "Actor: Edit Material", route: "material" },
+  // Wave D shipped the CODE tab's whole write door and never registered a
+  // command for it, so `openGeneratedCode` had no caller anywhere in the app.
+  { id: "object.edit.code", title: "Actor: Open Generated Rust", route: "code" },
 ];
+
+/**
+ * Route ids whose `panelType` is a **marker**, not a registered dock panel.
+ *
+ * `code` is one: the opener calls the backend and hands the resulting PATH to
+ * the shell's existing Editor panel, because a second code editor would be a
+ * second answer to a question Phase 5 already answered. Anything listed here
+ * MUST be dispatched by `openRoute` rather than docked — `openPanel("code")`
+ * opens an untitled, empty tab, which is what shipped.
+ */
+const MARKER_ROUTES: ReadonlySet<ObjectEditorRoute["id"]> = new Set(["code"]);
+
+/**
+ * Open one route: through the dock for a real panel, through its named opener
+ * for a marker.
+ *
+ * **The one door.** Both `openObjectEditor` and `openObject` used to call
+ * `dock.openPanel`/`openBesidePanel` directly, so a route the dock cannot open
+ * became an empty tab in two places rather than a refusal in none.
+ */
+async function openRoute(
+  route: ObjectEditorRoute,
+  dock: ReturnType<typeof useDockLayout.getState>,
+  anchor: string | null,
+): Promise<string | null> {
+  if (MARKER_ROUTES.has(route.id)) {
+    await openGeneratedCode(route.assetId);
+    return anchor;
+  }
+  return anchor
+    ? dock.openBesidePanel(anchor, route.panelType, route.params)
+    : dock.openPanel(route.panelType, route.params);
+}
 
 /** Report a refusal in the status bar — never silently do nothing. */
 function refuse(message: string): void {
@@ -82,10 +118,7 @@ export async function openObjectEditor(
   for (const dto of dtos) {
     const route = resolveObjectEditors(dto).find((r) => r.id === routeId);
     if (!route) continue;
-    const id: string = anchor
-      ? dock.openBesidePanel(anchor, route.panelType, route.params)
-      : dock.openPanel(route.panelType, route.params);
-    anchor ??= id;
+    anchor = await openRoute(route, dock, anchor);
     opened += 1;
   }
   if (opened === 0) {
@@ -101,11 +134,13 @@ export async function openObjectEditor(
  * object's blueprint sits beside it. The grouping is why `openBesidePanel`
  * exists; without it three routes would open three panels in three places.
  *
- * **A CODE tab is not among them, and that is honest rather than an oversight**:
- * a blueprint class has no on-disk Rust to open. `.inf_act` stores the lowered
- * IR, and `graph_generate`'s output has never been written to a file — inventing
- * a path for it is a transpiler-workflow decision, not a UX one. Carried as a
- * named remainder in the Wave E ledger.
+ * **A CODE tab IS among them since Wave D.** Wave E's reason for its absence —
+ * *"a blueprint class has no on-disk Rust to open"* — stopped being true when
+ * `graph_write_source` started rendering the class into
+ * `<project>/src/blueprints/<Class>_<guid8>.rs`. It is not a dock panel, though:
+ * its route is a marker, `openRoute` calls the backend and the PATH goes to the
+ * shell's Editor panel. Docking it as a panel type (which is what shipped)
+ * opens an empty untitled tab, because no panel of that type is registered.
  */
 export async function openObject(guid: string): Promise<void> {
   const [dto] = await sceneIpc.entityEditors([guid]);
@@ -124,13 +159,13 @@ export async function openObject(guid: string): Promise<void> {
     return;
   }
   const dock = useDockLayout.getState();
-  const anchor = dock.openPanel(primary.panelType, primary.params);
+  const anchor = await openRoute(primary, dock, null);
   for (const route of resolveObjectEditors(dto)) {
     if (route.id === primary.id) continue;
-    dock.openBesidePanel(anchor, route.panelType, route.params);
+    await openRoute(route, dock, anchor);
   }
   // The primary stays the active tab: it is what the user asked for.
-  dock.activateTab(anchor);
+  if (anchor) dock.activateTab(anchor);
   useShellStore.getState().pushStatus(`Opened ${dto.name} — ${primary.label}.`);
 }
 

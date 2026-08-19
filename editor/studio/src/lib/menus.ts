@@ -221,6 +221,7 @@ export const MENU_BAR: TopMenu[] = [
       act("object.edit.mesh", "Edit Mesh"),
       act("object.edit.rig", "Edit Skeleton"),
       act("object.edit.blueprint", "Open Blueprint"),
+      act("object.edit.code", "Open Generated Rust"),
       act("object.edit.material", "Edit Material"),
       sep,
       act("actor.duplicate", "Duplicate", "Ctrl+W"),
