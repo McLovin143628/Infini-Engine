@@ -111,7 +111,15 @@ pub fn op_preserves_ids(op: &Op) -> bool {
         // P24.3: appending a name to the slot TABLE creates, moves and destroys
         // no element. (It does change what `Mesh::canonical` reports, which is a
         // different claim and the round-trip gates' business.)
-        | Op::AddMaterialSlots { .. } => true,
+        | Op::AddMaterialSlots { .. }
+        // Wave D: a per-vertex move writes POSITIONS, exactly as
+        // `Op::TranslateVerts` does — and this one is load-bearing for the same
+        // reason `Op::Sculpt` is: a soft drag is now ONE op, and an author who
+        // proportionally dragged a selected region must still have it selected
+        // when the drag lands.
+        | Op::MoveVerts { .. }
+        // …and a batch sharpness write is `Op::SetEdgeSharp` N times over.
+        | Op::SetEdgesSharp { .. } => true,
         // Everything else frees slots (which the LIFO free list then hands back
         // to something different) or rebuilds a patch outright.
         Op::RemoveVertex { .. }
@@ -129,7 +137,13 @@ pub fn op_preserves_ids(op: &Op) -> bool {
         | Op::Knife { .. }
         | Op::MergeVerts { .. }
         | Op::SubdivideFaces { .. }
-        | Op::Mirror { .. } => false,
+        | Op::Mirror { .. }
+        // Wave D: all three rebuild patches. `FlipFaces` removes and re-adds
+        // every named face, so even a "pure winding change" hands its face and
+        // half-edge ids back to the free list.
+        | Op::FlipFaces { .. }
+        | Op::DissolveEdges { .. }
+        | Op::BridgeLoops { .. } => false,
     }
 }
 
@@ -1051,6 +1065,7 @@ mod tests {
                 Op::BevelEdges {
                     edges: vec![],
                     amount: 0.1,
+                    segments: 1,
                 },
                 false,
             ),

@@ -1018,18 +1018,46 @@ impl VertTransform {
 
 /// Turn a transform into journal ops, honouring soft-select weights.
 ///
-/// **One op per distinct weight**, which is the `SoftTranslate` shape P23.4
-/// established and the reason `Op::RotateVerts` / `Op::ScaleVerts` do not carry a
-/// weight table (see [`inf_dcc::xform`]). `soft` is `Some((radius, falloff))` for
-/// a soft transform and `None` for a hard one; a hard transform therefore emits
-/// exactly one op, over the resolved vertices in ascending id order.
+/// `soft` is `Some((radius, falloff))` for a proportional transform and `None`
+/// for a hard one.
 ///
-/// The weight blends toward the identity, per kind:
+/// # A hard transform is ONE PARAMETRIC op; a soft one is ONE RESULT op
+///
+/// The two halves are shaped differently on purpose, and Wave D is where the
+/// difference became visible.
+///
+/// * **Hard** — one `TranslateVerts` / `RotateVerts` / `ScaleVerts` over the
+///   resolved vertices in ascending id order. The op still *says what it is*
+///   ("rotate 30° about this axis"), which is what makes it re-parameterizable by
+///   [`inf_dcc::MeshSession::amend`] twelve steps later.
+/// * **Soft** — one [`Op::MoveVerts`] carrying the finished per-vertex deltas.
+///
+/// The soft shape is the **weight-table op the P23 ledger named and did not
+/// build** (`inf_dcc::ops::Op::MoveVerts`). What it replaces: "one op per
+/// distinct weight", which was the right *shape* — ordinary journal entries, so
+/// an undo gives the author their shape back — and the wrong *granularity*. A
+/// 289-vertex plane with a 3 m radius produced **105 ops from one drag** before
+/// `SOFT_WEIGHT_STEPS` capped it at 64, and 64 ops at `CHECKPOINT_INTERVAL = 32`
+/// still takes two full mesh snapshots and evicts most of the eight-slot
+/// checkpoint history, per drag. Now it is one op and one undo press, which is
+/// what an author means by "I dragged that once".
+///
+/// **The quantization went with it.** `quantize_weight` existed to bound the op
+/// count; the op count is now 1, so rounding the falloff to 64 steps buys nothing
+/// and costs the author the exact curve they chose. It stays public and tested
+/// because it is still the right rounding for anything that must bound a *count*;
+/// it is simply not this path's problem any more.
+///
+/// The weight blends toward the identity, per kind, and the blend is unchanged:
 /// * translate — the delta is scaled;
 /// * rotate — the **angle** is scaled, so every vertex still travels on a circle
 ///   about the pivot rather than being dragged off one by a scaled chord;
 /// * scale — the factor is lerped from `1`, so weight `0` is "unchanged" rather
 ///   than "collapsed onto the pivot".
+///
+/// The soft path computes its positions through [`inf_dcc::Rotation`] and
+/// [`inf_dcc::scale_point`] — **the kernel's own maps**, not a second Rodrigues
+/// written one ring up where the crate's portable-trig gate cannot read it.
 pub fn transform_ops(
     mesh: &Mesh,
     selection: &SelectionSet,
@@ -1038,52 +1066,66 @@ pub fn transform_ops(
     xform: VertTransform,
     soft: Option<(f64, inf_terrain::Falloff)>,
 ) -> Vec<Op> {
-    let groups: std::collections::BTreeMap<u64, Vec<VertId>> = match soft {
-        Some((radius, falloff)) => {
-            let mut by_weight: std::collections::BTreeMap<u64, Vec<VertId>> =
-                std::collections::BTreeMap::new();
-            for (v, w) in selection.soft_weights(mesh, mode, radius, falloff) {
-                let q = quantize_weight(w);
-                if q <= 0.0 {
-                    continue;
-                }
-                by_weight.entry(q.to_bits()).or_default().push(v);
-            }
-            by_weight
+    let Some((radius, falloff)) = soft else {
+        let verts: Vec<VertId> = selection.resolved_verts(mesh, mode).into_iter().collect();
+        if verts.is_empty() {
+            return Vec::new();
         }
-        None => {
-            let verts: Vec<VertId> = selection.resolved_verts(mesh, mode).into_iter().collect();
-            if verts.is_empty() {
-                Default::default()
-            } else {
-                [(1.0f64.to_bits(), verts)].into_iter().collect()
-            }
-        }
+        return vec![match xform {
+            VertTransform::Translate(d) => Op::TranslateVerts {
+                verts,
+                delta: d.to_array(),
+            },
+            VertTransform::Rotate { axis, radians } => Op::RotateVerts {
+                verts,
+                pivot: pivot.to_array(),
+                axis: axis.to_array(),
+                radians,
+            },
+            VertTransform::Scale(f) => Op::ScaleVerts {
+                verts,
+                pivot: pivot.to_array(),
+                factor: f.to_array(),
+            },
+        }];
     };
 
-    groups
-        .into_iter()
-        .map(|(bits, verts)| {
-            let w = f64::from_bits(bits);
-            match xform {
-                VertTransform::Translate(d) => Op::TranslateVerts {
-                    verts,
-                    delta: (d * w).to_array(),
-                },
-                VertTransform::Rotate { axis, radians } => Op::RotateVerts {
-                    verts,
-                    pivot: pivot.to_array(),
-                    axis: axis.to_array(),
-                    radians: radians * w,
-                },
-                VertTransform::Scale(f) => Op::ScaleVerts {
-                    verts,
-                    pivot: pivot.to_array(),
-                    factor: (DVec3::ONE + (f - DVec3::ONE) * w).to_array(),
-                },
+    // A rotation is prepared per weight, because the ANGLE is what the weight
+    // scales. `Rotation::new` refuses a zero axis and an out-of-range angle
+    // exactly as the op would; a refusal here means the whole drag journals
+    // nothing, which is the same outcome the op's refusal produced.
+    let mut moves: Vec<(VertId, [f64; 3])> = Vec::new();
+    for (v, w) in selection.soft_weights(mesh, mode, radius, falloff) {
+        if !(w.is_finite() && w > 0.0) {
+            continue;
+        }
+        let Some(p) = mesh.position(v) else { continue };
+        let to = match xform {
+            VertTransform::Translate(d) => p + d * w,
+            VertTransform::Rotate { axis, radians } => {
+                match inf_dcc::Rotation::new(pivot.to_array(), axis.to_array(), radians * w) {
+                    Ok(rot) => rot.apply(p),
+                    Err(_) => return Vec::new(),
+                }
             }
-        })
-        .collect()
+            VertTransform::Scale(f) => {
+                inf_dcc::scale_point(p, pivot, DVec3::ONE + (f - DVec3::ONE) * w)
+            }
+        };
+        let delta = to - p;
+        if delta == DVec3::ZERO {
+            continue;
+        }
+        moves.push((v, delta.to_array()));
+    }
+    if moves.is_empty() {
+        return Vec::new();
+    }
+    // `soft_weights` walks a `BTreeMap`, so this is already ascending — sorted
+    // anyway, because the op's wire convention is "sorted by vertex id" and a
+    // convention nobody enforces is a convention that drifts.
+    moves.sort_by_key(|&(v, _)| v);
+    vec![Op::MoveVerts { moves }]
 }
 
 /// How many distinct weights a soft transform may use — and therefore the most
@@ -1121,6 +1163,324 @@ pub fn quantize_weight(w: f64) -> f64 {
         return 0.0;
     }
     (w.clamp(0.0, 1.0) * SOFT_WEIGHT_STEPS).round() / SOFT_WEIGHT_STEPS
+}
+
+// ── the Wave-D derived tools ───────────────────────────────────────────────
+//
+// Each of these turns a *gesture* into the ops the kernel takes, and each one is
+// here rather than in a `#[tauri::command]` for the memo §7c LAW: a command
+// cannot be driven from a test, so a rule written there is a rule no gate can
+// see. They are also all **solvers whose answer is journalled**, on the
+// `Op::Unwrap` precedent — an op that re-derived "which boundary edge pairs with
+// which" would silently rewrite every recorded session the day the matcher
+// improved.
+
+/// The boundary loops among a set of half-edges, each in `next` order.
+///
+/// A boundary loop is a cycle of half-edges with `face == None`, exactly like a
+/// face loop (the kernel's first decision: `twin` is total and `face` is the
+/// `Option`). Loops come back sorted by their lowest member so the answer does
+/// not depend on which edge the author clicked first.
+pub fn boundary_loops(mesh: &Mesh, edges: &[HalfId]) -> Vec<Vec<HalfId>> {
+    let wanted: std::collections::BTreeSet<HalfId> = edges
+        .iter()
+        .flat_map(|&h| {
+            // An author selects an *undirected* edge; only one of its halves is
+            // the boundary one.
+            [Some(h), mesh.twin(h)].into_iter().flatten()
+        })
+        .filter(|&h| mesh.is_boundary(h) == Some(true))
+        .collect();
+    let mut seen: std::collections::BTreeSet<HalfId> = std::collections::BTreeSet::new();
+    let mut loops: Vec<Vec<HalfId>> = Vec::new();
+    for &start in &wanted {
+        if seen.contains(&start) {
+            continue;
+        }
+        let mut cycle = Vec::new();
+        let mut h = start;
+        loop {
+            if !seen.insert(h) {
+                break;
+            }
+            cycle.push(h);
+            match mesh.next(h) {
+                Some(n) if n != start => h = n,
+                _ => break,
+            }
+        }
+        loops.push(cycle);
+    }
+    loops.sort_by_key(|c| c.iter().copied().min());
+    loops
+}
+
+/// Pair two boundary loops for a bridge, and refuse — as a value — when the
+/// selection is not two loops of the same length.
+///
+/// The pairing rule, derived rather than guessed: quad `k` uses `a[k]` and
+/// `b[m]`, and quad `k + 1` shares an edge with it only if `b[m']` **ends** where
+/// `b[m]` starts. So loop B is walked **backwards**, which is the same statement
+/// as "two rings facing each other have boundary loops running opposite ways".
+/// The offset `m0` is chosen by nearest midpoint, so the bridge does not put a
+/// twist in a ring the author lined up by eye.
+pub fn bridge_pairs(mesh: &Mesh, edges: &[HalfId]) -> Result<Vec<(HalfId, HalfId)>, String> {
+    let loops = boundary_loops(mesh, edges);
+    if loops.len() != 2 {
+        return Err(format!(
+            "a bridge needs exactly two open borders; this selection touches {}",
+            loops.len()
+        ));
+    }
+    let (a, b) = (&loops[0], &loops[1]);
+    if a.len() != b.len() {
+        return Err(format!(
+            "the two borders have {} and {} edges; a bridge needs them equal",
+            a.len(),
+            b.len()
+        ));
+    }
+    let mid = |h: HalfId| -> DVec3 {
+        let o = mesh.origin(h).and_then(|v| mesh.position(v));
+        let d = mesh.dest(h).and_then(|v| mesh.position(v));
+        match (o, d) {
+            (Some(o), Some(d)) => (o + d) * 0.5,
+            _ => DVec3::ZERO,
+        }
+    };
+    let anchor = mid(a[0]);
+    let mut best = (0usize, f64::INFINITY);
+    for (m, &h) in b.iter().enumerate() {
+        let d = (mid(h) - anchor).length_squared();
+        // `<` and not `<=`, so ties go to the lower index and the answer is a
+        // pure function of the mesh.
+        if d < best.1 {
+            best = (m, d);
+        }
+    }
+    let n = a.len();
+    Ok((0..n)
+        .map(|k| (a[k], b[(best.0 + n - k % n) % n]))
+        .collect())
+}
+
+/// Where an edge/vertex **slide** puts each selected vertex, as one
+/// [`Op::MoveVerts`]'s worth of deltas.
+///
+/// The direction is the vertex's own **ring** edge — the incident edge whose far
+/// endpoint is *not* selected — which is precisely what makes selecting an edge
+/// loop and sliding it do what a modeller expects: the loop's own edges have both
+/// endpoints selected and are skipped, so what is left is the perpendicular ring.
+/// `t > 0` slides toward the lower-id ring neighbour and `t < 0` toward its most
+/// opposite partner, so one slider covers both directions and the sign is stable
+/// across a drag.
+///
+/// `t` is clamped to `[-1, 1]`: `1` lands exactly on the neighbour, and past it
+/// the vertex would cross the ring edge and invert the quad. Clamped rather than
+/// refused because this is a *drag*, and refusing the far end of a gesture is
+/// refusing the gesture.
+pub fn slide_moves(
+    mesh: &Mesh,
+    selection: &SelectionSet,
+    mode: SelectMode,
+    t: f64,
+) -> Vec<(VertId, [f64; 3])> {
+    if !t.is_finite() || t == 0.0 {
+        return Vec::new();
+    }
+    let t = t.clamp(-1.0, 1.0);
+    let selected: std::collections::BTreeSet<VertId> = selection.resolved_verts(mesh, mode);
+    let mut moves: Vec<(VertId, [f64; 3])> = Vec::new();
+    for &v in &selected {
+        let Some(p) = mesh.position(v) else { continue };
+        // The ring neighbours, in half-edge id order — deterministic.
+        let mut ring: Vec<(HalfId, VertId, DVec3)> = Vec::new();
+        for &h in mesh.vert_outgoing(v).unwrap_or(&[]) {
+            let Some(w) = mesh.dest(h) else { continue };
+            if selected.contains(&w) {
+                continue;
+            }
+            let Some(q) = mesh.position(w) else { continue };
+            if ring.iter().any(|&(_, x, _)| x == w) {
+                continue;
+            }
+            ring.push((h, w, q - p));
+        }
+        if ring.is_empty() {
+            continue;
+        }
+        ring.sort_by_key(|&(h, _, _)| h);
+        let forward = ring[0].2;
+        let dir = if t > 0.0 {
+            forward
+        } else {
+            // The most opposite ring edge, so a negative `t` really is the other
+            // way rather than an arbitrary second neighbour.
+            let mut best = (ring[0].2, f64::INFINITY);
+            for &(_, _, d) in &ring[1..] {
+                let c = d.normalize_or_zero().dot(forward.normalize_or_zero());
+                if c < best.1 {
+                    best = (d, c);
+                }
+            }
+            best.0
+        };
+        let delta = dir * t.abs();
+        if delta == DVec3::ZERO || !delta.is_finite() {
+            continue;
+        }
+        moves.push((v, delta.to_array()));
+    }
+    moves.sort_by_key(|&(v, _)| v);
+    moves
+}
+
+/// Cluster selected vertices that are within `tolerance` metres of each other.
+///
+/// The **kernel's reader never welds by epsilon** (`WELD_TOLERANCE` is exactly
+/// zero, and that is a law): a file that comes back smaller than it went in is
+/// data loss nobody asked for. A *tool* is a different thing — the author asked,
+/// the result is one journal entry per cluster, and undo puts it back. The law
+/// already says so at `inf_dcc::build`'s tolerance note.
+///
+/// Deterministic: single-linkage over pairs enumerated in ascending id order,
+/// and every cluster comes back sorted with the whole list sorted by first
+/// member. The honest bound is the op count — **one `MergeVerts` per cluster** —
+/// so a selection with a thousand duplicate pairs is a thousand undo steps. That
+/// is the shape the kernel offers (`MergeVerts` fuses one set), and a
+/// result-carrying batch op is a wire change this wave's single schema move is
+/// already spent on.
+pub fn merge_clusters(
+    mesh: &Mesh,
+    verts: &[VertId],
+    tolerance: f64,
+) -> Result<Vec<Vec<VertId>>, String> {
+    if !(tolerance.is_finite() && tolerance >= 0.0) {
+        return Err(format!(
+            "a merge tolerance must be finite and ≥ 0, got {tolerance}"
+        ));
+    }
+    let mut ids: Vec<VertId> = verts.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let n = ids.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let tol2 = tolerance * tolerance;
+    for i in 0..n {
+        let Some(pi) = mesh.position(ids[i]) else {
+            continue;
+        };
+        for j in (i + 1)..n {
+            let Some(pj) = mesh.position(ids[j]) else {
+                continue;
+            };
+            if (pi - pj).length_squared() <= tol2 {
+                let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                if a != b {
+                    // Union toward the LOWER root, so the forest is a pure
+                    // function of the input rather than of the visit order.
+                    parent[a.max(b)] = a.min(b);
+                }
+            }
+        }
+    }
+    let mut groups: std::collections::BTreeMap<usize, Vec<VertId>> =
+        std::collections::BTreeMap::new();
+    for i in 0..n {
+        let r = find(&mut parent, i);
+        groups.entry(r).or_default().push(ids[i]);
+    }
+    Ok(groups.into_values().filter(|g| g.len() > 1).collect())
+}
+
+/// The edges shade-smooth / shade-flat / auto-smooth marks, split into the set to
+/// make **sharp** and the set to make **smooth**.
+///
+/// `faces` empty means "the whole mesh" — "recalculate shading" with nothing
+/// selected is the gesture every modeller expects to apply everywhere.
+///
+/// `angle_deg` is the auto-smooth threshold: an edge whose two faces disagree by
+/// more than it becomes sharp, the rest become smooth. The comparison is
+/// `dot(n1, n2) < cos(threshold)` — **no `acos`**, which is both faster and the
+/// only version the P14 portability law permits on a path that writes committed
+/// content. `cos` itself comes from [`inf_math::pcos64`] for the same reason.
+pub fn shade_edges(
+    mesh: &Mesh,
+    faces: &[FaceId],
+    smooth: bool,
+    angle_deg: Option<f64>,
+) -> (Vec<HalfId>, Vec<HalfId>) {
+    let scope: std::collections::BTreeSet<FaceId> = if faces.is_empty() {
+        mesh.face_ids().collect()
+    } else {
+        faces.iter().copied().collect()
+    };
+    let mut edges: std::collections::BTreeSet<HalfId> = std::collections::BTreeSet::new();
+    for &f in &scope {
+        for h in mesh.face_loop(f).unwrap_or_default() {
+            if let Some(c) = inf_dcc::canonical_edge(mesh, h) {
+                edges.insert(c);
+            }
+        }
+    }
+    let Some(deg) = angle_deg else {
+        let all: Vec<HalfId> = edges.into_iter().collect();
+        return if smooth {
+            (Vec::new(), all)
+        } else {
+            (all, Vec::new())
+        };
+    };
+    let threshold = inf_math::pcos64(deg.clamp(0.0, 180.0) * std::f64::consts::PI / 180.0);
+    let (mut sharp, mut soft) = (Vec::new(), Vec::new());
+    for h in edges {
+        let Some(t) = mesh.twin(h) else { continue };
+        let n1 = mesh.face_of(h).flatten().map(|f| face_normal_of(mesh, f));
+        let n2 = mesh.face_of(t).flatten().map(|f| face_normal_of(mesh, f));
+        match (n1, n2) {
+            (Some(a), Some(b)) if a != DVec3::ZERO && b != DVec3::ZERO => {
+                if a.normalize().dot(b.normalize()) < threshold {
+                    sharp.push(h);
+                } else {
+                    soft.push(h);
+                }
+            }
+            // A boundary edge has no dihedral. It is marked SHARP, which is what
+            // it looks like anyway: the surface really does end there.
+            _ => sharp.push(h),
+        }
+    }
+    (sharp, soft)
+}
+
+/// A face's area-weighted normal, or zero for a degenerate face.
+fn face_normal_of(mesh: &Mesh, f: FaceId) -> DVec3 {
+    let verts = mesh.face_verts(f).unwrap_or_default();
+    if verts.len() < 3 {
+        return DVec3::ZERO;
+    }
+    // Newell's method, which is the one the kernel's exporter uses and the only
+    // one that is right for a non-planar n-gon.
+    let mut n = DVec3::ZERO;
+    for i in 0..verts.len() {
+        let (Some(a), Some(b)) = (
+            mesh.position(verts[i]),
+            mesh.position(verts[(i + 1) % verts.len()]),
+        ) else {
+            return DVec3::ZERO;
+        };
+        n.x += (a.y - b.y) * (a.z + b.z);
+        n.y += (a.z - b.z) * (a.x + b.x);
+        n.z += (a.x - b.x) * (a.y + b.y);
+    }
+    n
 }
 
 /// A **content revision of the selection** — the number a view keys on to know
@@ -3173,11 +3533,14 @@ mod tests {
         );
     }
 
+    /// Wave D: a whole proportional drag is **one** journal entry, and it still
+    /// blends toward the identity in the same three ways.
     #[test]
-    fn a_soft_transform_is_one_op_per_weight_and_blends_toward_the_identity() {
+    fn a_soft_transform_is_one_op_and_blends_toward_the_identity() {
         let m = cube(2.0);
         let mut sel = SelectionSet::new(1);
-        sel.set_vert(m.vert_ids().next().expect("a vertex"), true);
+        let seed = m.vert_ids().next().expect("a vertex");
+        sel.set_vert(seed, true);
         let pivot = gizmo_pivot(&m, &sel, SelectMode::Vert).expect("a pivot");
         let soft = Some((6.0, inf_terrain::Falloff::Linear));
 
@@ -3190,56 +3553,56 @@ mod tests {
             VertTransform::Scale(DVec3::splat(2.0)),
         ] {
             let ops = transform_ops(&m, &sel, SelectMode::Vert, pivot, xform, soft);
-            assert!(ops.len() > 1, "the neighbourhood moves too: {ops:?}");
-            // **The CAP, not merely "more than one".** The old assertion was
-            // `> 1` and passed just as happily on the 105-op drag the audit
-            // measured — it named the defect as a feature.
+            assert_eq!(ops.len(), 1, "a soft drag is ONE op now: {ops:?}");
+            let Op::MoveVerts { moves } = &ops[0] else {
+                panic!("a soft drag journals a weight table: {:?}", ops[0]);
+            };
             assert!(
-                ops.len() <= SOFT_WEIGHT_STEPS as usize,
-                "a soft drag journalled {} ops; the quantization caps it at {}",
-                ops.len(),
-                SOFT_WEIGHT_STEPS
+                moves.len() > 1,
+                "the neighbourhood moves too: {} vertices",
+                moves.len()
             );
-            for op in &ops {
-                match op {
-                    // The weight scales the DELTA…
-                    Op::TranslateVerts { delta, .. } => {
-                        assert!(delta[1] > 0.0 && delta[1] <= 1.0, "{delta:?}")
-                    }
-                    // …the ANGLE (so every vertex still travels on a circle)…
-                    Op::RotateVerts {
-                        radians, pivot: p, ..
-                    } => {
-                        assert!(*radians > 0.0 && *radians <= 0.5, "{radians}");
-                        assert_eq!(*p, pivot.to_array(), "every op shares the pivot");
-                    }
-                    // …and the FACTOR lerps from 1, not from 0.
-                    Op::ScaleVerts { factor, .. } => {
-                        assert!(factor[0] > 1.0 && factor[0] <= 2.0, "{factor:?}")
-                    }
-                    other => panic!("{other:?}"),
+            // Sorted by vertex id — the op's wire convention.
+            assert!(moves.windows(2).all(|w| w[0].0 < w[1].0), "{moves:?}");
+            // …and it is a legal op on the mesh it was computed from.
+            let mut probe = m.clone();
+            inf_dcc::ops::apply(&mut probe, &ops[0]).expect("the soft drag applies");
+
+            // The identity-blend, stated where it is a statement about NUMBERS.
+            // Only for translate: a soft rotate and a soft scale are about the
+            // selection's own pivot, so the selected vertex is the one that moves
+            // LEAST (it is the pivot) — asserting "the seed moves most" there
+            // would be asserting a falsehood that happens to be about the right
+            // idea, which is how a vacuous gate is born.
+            if let VertTransform::Translate(_) = xform {
+                let len = |d: &[f64; 3]| (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                let seed_move = moves
+                    .iter()
+                    .find(|(v, _)| *v == seed)
+                    .map(|(_, d)| len(d))
+                    .expect("the selected vertex moves");
+                assert!((seed_move - 1.0).abs() < 1e-12, "full weight is 1 m");
+                for (v, d) in moves {
+                    assert!(
+                        len(d) <= seed_move + 1e-12,
+                        "vertex {v} moved further than the selection did"
+                    );
                 }
+                let at_full = moves
+                    .iter()
+                    .filter(|(_, d)| (len(d) - seed_move).abs() < 1e-12)
+                    .count();
+                assert_eq!(at_full, 1, "only the selection is at full weight");
             }
-            // Exactly one group is at full weight — the selection itself.
-            let full = ops
-                .iter()
-                .filter(|o| match o {
-                    Op::TranslateVerts { delta, .. } => delta[1] == 1.0,
-                    Op::RotateVerts { radians, .. } => *radians == 0.5,
-                    Op::ScaleVerts { factor, .. } => factor[0] == 2.0,
-                    _ => false,
-                })
-                .count();
-            assert_eq!(full, 1, "{ops:?}");
         }
     }
 
     #[test]
-    fn a_soft_drag_over_a_dense_selection_stays_inside_the_op_cap() {
-        // The measurement the cap is sized against: a 289-vertex plane with a 3 m
-        // radius produced **105 ops from one drag** before quantization, which is
-        // ~3 full mesh snapshots at `CHECKPOINT_INTERVAL = 32` and evicts the
-        // whole 8-slot checkpoint history — per drag.
+    fn a_soft_drag_over_a_dense_selection_is_still_one_op() {
+        // The measurement this retires: a 289-vertex plane with a 3 m radius
+        // produced **105 ops from one drag**, which `SOFT_WEIGHT_STEPS` capped at
+        // 64 — still two full mesh snapshots at `CHECKPOINT_INTERVAL = 32` and
+        // most of the 8-slot checkpoint history evicted, per drag. It is 1 now.
         let mut m = plane(2.0);
         for _ in 0..4 {
             let faces: Vec<_> = m.face_ids().collect();
@@ -3276,26 +3639,185 @@ mod tests {
             VertTransform::Translate(DVec3::Y),
             Some((3.0, inf_terrain::Falloff::Linear)),
         );
-        println!(
-            "soft drag: {} verts, {} ops (cap {})",
-            m.vert_count(),
-            ops.len(),
-            SOFT_WEIGHT_STEPS
-        );
-        assert!(
-            ops.len() <= SOFT_WEIGHT_STEPS as usize,
-            "{} ops from one drag",
-            ops.len()
-        );
-        // …and the quantization did not throw the neighbourhood away.
-        let moved: usize = ops
-            .iter()
-            .map(|o| match o {
-                Op::TranslateVerts { verts, .. } => verts.len(),
-                _ => 0,
-            })
-            .sum();
+        let moved = match ops.as_slice() {
+            [Op::MoveVerts { moves }] => moves.len(),
+            other => panic!("a soft drag journalled {} ops: {other:?}", other.len()),
+        };
+        println!("soft drag: {} verts, 1 op, {moved} moves", m.vert_count());
+        // …and collapsing to one op did not throw the neighbourhood away. The
+        // count is the whole neighbourhood now, not a quantized subset of it:
+        // every distinct weight is carried, because there is no longer a reason
+        // to round them together.
         assert!(moved > 100, "only {moved} vertices move");
+    }
+
+    // ── Wave D: the derived tools ──────────────────────────────────────────
+
+    /// Two separate open rings — the shape an author actually bridges — must
+    /// close into one solid, with every wall quad legal and no border left.
+    ///
+    /// **Not a cap-less cylinder**, and the difference is the test's whole point:
+    /// a cylinder with its caps removed still has its *walls*, so bridging its
+    /// two rims would ask for the wall edges a second time and refuse. The
+    /// fixture has to be two rings with nothing between them.
+    #[test]
+    fn bridge_pairs_closes_two_open_rings_without_a_twist() {
+        let mut m = Mesh::new();
+        let k = vec![inf_dcc::CornerData::default(); 4];
+        let ring = |m: &mut Mesh, y: f64| -> Vec<VertId> {
+            [[0.0, y, 0.0], [1.0, y, 0.0], [1.0, y, 1.0], [0.0, y, 1.0]]
+                .iter()
+                .map(|p| {
+                    let out =
+                        inf_dcc::ops::apply(m, &Op::AddVertex { position: *p }).expect("a vertex");
+                    out.verts[0]
+                })
+                .collect()
+        };
+        let lo = ring(&mut m, 0.0);
+        let hi = ring(&mut m, 1.0);
+        // Wound opposite ways, so their boundary loops run opposite ways — which
+        // is what makes two rings *face* each other.
+        inf_dcc::ops::apply(
+            &mut m,
+            &Op::AddFace {
+                verts: lo.clone(),
+                corners: k.clone(),
+                slot: None,
+            },
+        )
+        .expect("the floor");
+        inf_dcc::ops::apply(
+            &mut m,
+            &Op::AddFace {
+                verts: hi.iter().rev().copied().collect(),
+                corners: k,
+                slot: None,
+            },
+        )
+        .expect("the lid");
+        let border: Vec<HalfId> = m
+            .half_ids()
+            .filter(|&h| m.is_boundary(h) == Some(true))
+            .collect();
+        assert_eq!(boundary_loops(&m, &border).len(), 2, "two rings");
+        let pairs = bridge_pairs(&m, &border).expect("a pairing");
+        assert_eq!(pairs.len(), 4);
+        inf_dcc::ops::apply(&mut m, &Op::BridgeLoops { pairs }).expect("the bridge applies");
+        assert_eq!(inf_dcc::validate(&m), Ok(()));
+        assert_eq!(m.face_count(), 6, "a closed box");
+        assert!(
+            m.half_ids().all(|h| m.is_boundary(h) == Some(false)),
+            "the bridge closed the box"
+        );
+    }
+
+    /// One open border is not two, and the refusal is a **value with a reason** —
+    /// not a panic and not a silently-empty op list.
+    #[test]
+    fn bridging_one_border_refuses_with_a_reason() {
+        let m = plane(2.0);
+        let border: Vec<HalfId> = m
+            .half_ids()
+            .filter(|&h| m.is_boundary(h) == Some(true))
+            .collect();
+        let err = bridge_pairs(&m, &border).expect_err("one loop cannot be bridged");
+        assert!(err.contains("exactly two"), "{err}");
+    }
+
+    /// Slide moves a selected loop along its **ring** edges. On a subdivided
+    /// plane the middle row's ring edges run perpendicular to the row, so a slide
+    /// moves the row sideways and never along itself.
+    #[test]
+    fn a_slide_moves_along_the_ring_edge_and_not_along_the_loop() {
+        let mut m = plane(2.0);
+        for _ in 0..2 {
+            let faces: Vec<inf_dcc::FaceId> = m.face_ids().collect();
+            inf_dcc::ops::apply(&mut m, &Op::SubdivideFaces { faces }).expect("subdivides");
+        }
+        // The row of vertices at z ≈ 0 (the plane spans x/z).
+        let mut sel = SelectionSet::new(1);
+        let mut row = 0;
+        for v in m.vert_ids() {
+            let p = m.position(v).expect("live");
+            if p.z.abs() < 1e-9 {
+                sel.set_vert(v, true);
+                row += 1;
+            }
+        }
+        assert!(row >= 3, "found only {row} vertices in the row");
+        let moves = slide_moves(&m, &sel, SelectMode::Vert, 0.5);
+        assert_eq!(moves.len(), row, "every selected vertex slides");
+        for (v, d) in &moves {
+            let d = DVec3::from_array(*d);
+            assert!(d.length() > 0.0, "vertex {v} did not move");
+            // The ring direction is ±z here; a move along x would mean the tool
+            // picked a LOOP edge, which is the defect this test names.
+            assert!(
+                d.z.abs() > 1e-9 && d.x.abs() < 1e-9,
+                "vertex {v} slid along the loop, not the ring: {d:?}"
+            );
+        }
+        // …and reversing the sign really goes the other way.
+        let back = slide_moves(&m, &sel, SelectMode::Vert, -0.5);
+        for ((_, f), (_, b)) in moves.iter().zip(back.iter()) {
+            assert!(
+                DVec3::from_array(*f).dot(DVec3::from_array(*b)) < 0.0,
+                "a negative slide went the same way"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_clusters_groups_only_what_is_inside_the_tolerance() {
+        let mut m = cube(2.0);
+        let ids: Vec<VertId> = m.vert_ids().collect();
+        // Drag two vertices to within 1 mm of each other; leave the rest apart.
+        let a = m.position(ids[0]).expect("live");
+        let b = m.position(ids[1]).expect("live");
+        inf_dcc::ops::apply(
+            &mut m,
+            &Op::TranslateVerts {
+                verts: vec![ids[1]],
+                delta: (a + DVec3::X * 0.0005 - b).to_array(),
+            },
+        )
+        .expect("drags");
+        let clusters = merge_clusters(&m, &ids, 0.001).expect("a clustering");
+        assert_eq!(clusters.len(), 1, "one pair is close enough: {clusters:?}");
+        assert_eq!(clusters[0], vec![ids[0], ids[1]]);
+        // A zero tolerance groups only *exactly* coincident vertices, which a
+        // cube has none of.
+        assert!(merge_clusters(&m, &ids, 0.0)
+            .expect("a clustering")
+            .is_empty());
+        assert!(merge_clusters(&m, &ids, f64::NAN).is_err());
+    }
+
+    /// Auto-smooth splits a cube's 90° edges from a smooth cylinder's shallow
+    /// ones, and it does it without `acos` anywhere.
+    #[test]
+    fn auto_smooth_creases_only_the_edges_over_the_threshold() {
+        let m = cube(2.0);
+        let (sharp, soft) = shade_edges(&m, &[], true, Some(30.0));
+        assert_eq!(soft.len(), 0, "every cube edge is 90°");
+        assert_eq!(sharp.len(), m.edge_count(), "…so all of them crease");
+
+        // A 16-sided cylinder's wall edges are 22.5° apart — under the threshold.
+        let c = inf_dcc::cylinder(0.5, 2.0, 16);
+        let (sharp, soft) = shade_edges(&c, &[], true, Some(30.0));
+        assert!(!soft.is_empty(), "the wall edges should stay smooth");
+        assert!(
+            !sharp.is_empty(),
+            "the cap rim is 90° and must still crease"
+        );
+        assert_eq!(sharp.len() + soft.len(), c.edge_count());
+
+        // …and with no threshold it is all-or-nothing.
+        let (sharp, soft) = shade_edges(&m, &[], true, None);
+        assert!(sharp.is_empty() && soft.len() == m.edge_count());
+        let (sharp, soft) = shade_edges(&m, &[], false, None);
+        assert!(soft.is_empty() && sharp.len() == m.edge_count());
     }
 
     #[test]

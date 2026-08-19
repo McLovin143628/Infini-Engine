@@ -3399,6 +3399,10 @@ pub enum DccToolDto {
     },
     Bevel {
         amount: f64,
+        /// `1` is the flat chamfer this tool shipped with; above it the profile
+        /// rounds. Range `1..=inf_dcc::model::MAX_BEVEL_SEGMENTS`, refused by the
+        /// kernel outside it rather than clamped here.
+        segments: u32,
     },
     LoopCut {
         cuts: u32,
@@ -3430,6 +3434,41 @@ pub enum DccToolDto {
         falloff: SculptFalloffDto,
     },
     Delete,
+
+    // ── the Wave-D modelling verbs ─────────────────────────────────────────
+    /// Merge the two faces across each selected edge into one n-gon, keeping
+    /// every vertex.
+    Dissolve,
+    /// Bridge two open borders. The **pairing** is computed here — nearest
+    /// boundary half-edge, walking both loops — and the answer is journalled, so
+    /// the op does not depend on which build's matcher ran.
+    Bridge,
+    /// Reverse the winding of the selected faces (or of everything, when nothing
+    /// is selected — "recalculate outside" in one press).
+    Flip,
+    /// Shade the selected faces smooth or flat, or — when `angle_deg` is `Some`
+    /// — mark every edge whose dihedral exceeds it sharp and the rest smooth.
+    Shade {
+        smooth: bool,
+        /// `rename_all = "camelCase"` on this enum renames its **variants**, not
+        /// their fields (serde's `rename_all_fields` is the other knob), and
+        /// every other field here happens to be one word — so this is the first
+        /// one that would have crossed the wire as `angle_deg` in a codebase
+        /// whose contract is camelCase. Named explicitly rather than spelled
+        /// around.
+        #[serde(rename = "angleDeg")]
+        angle_deg: Option<f64>,
+    },
+    /// Slide the selected vertices along their own edge loop by `t ∈ [-1, 1]`.
+    /// One [`inf_dcc::Op::MoveVerts`], so one undo step.
+    Slide {
+        t: f64,
+    },
+    /// Fuse every pair of selected vertices closer together than `tolerance`
+    /// metres. The clusters are computed here and the **result** is journalled.
+    MergeByDistance {
+        tolerance: f64,
+    },
 }
 
 /// A selection command.

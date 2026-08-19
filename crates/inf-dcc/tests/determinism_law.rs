@@ -42,7 +42,7 @@
 /// not cover it, and a new module is exactly where the next `.sin()` or `HashMap`
 /// would land. `every_source_file_is_covered` reads the directory and fails if
 /// this list has fallen behind, so the coverage cannot rot silently.
-const SOURCES: [(&str, &str); 16] = [
+const SOURCES: [(&str, &str); 17] = [
     ("lib.rs", include_str!("../src/lib.rs")),
     ("topo.rs", include_str!("../src/topo.rs")),
     ("validate.rs", include_str!("../src/validate.rs")),
@@ -59,6 +59,10 @@ const SOURCES: [(&str, &str); 16] = [
     ("autofit.rs", include_str!("../src/autofit.rs")),
     ("heat.rs", include_str!("../src/heat.rs")),
     ("paint.rs", include_str!("../src/paint.rs")),
+    // Wave D. The amendment module rewrites HISTORY, so every law here applies
+    // to it twice over: a `HashMap` or an `f32` on this path would make two
+    // machines re-derive a re-parameterized model differently.
+    ("amend.rs", include_str!("../src/amend.rs")),
 ];
 
 const JOURNAL: &str = include_str!("../src/journal.rs");

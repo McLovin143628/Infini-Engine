@@ -36,7 +36,7 @@ struct Choice {
 }
 
 fn choice() -> impl Strategy<Value = Choice> {
-    (0u8..25, any::<u16>(), any::<u16>(), any::<u8>()).prop_map(|(kind, a, b, p)| Choice {
+    (0u8..30, any::<u16>(), any::<u16>(), any::<u8>()).prop_map(|(kind, a, b, p)| Choice {
         kind,
         a,
         b,
@@ -158,6 +158,9 @@ fn make_op(mesh: &Mesh, c: Choice) -> Op {
         16 => Op::BevelEdges {
             edges: vec![pick(&halfs, c.a, dead_h)],
             amount: 0.01 + 0.1 * (c.p as f64 / 255.0),
+            // Wave D: the segment count VARIES, so the multi-strip construction
+            // is inside the determinism law rather than beside it.
+            segments: 1 + (c.p % 4) as u32,
         },
         17 => Op::LoopCut {
             half: pick(&halfs, c.a, dead_h),
@@ -245,7 +248,7 @@ fn make_op(mesh: &Mesh, c: Choice) -> Op {
             axis: [0.0, 1.0, 0.0],
             radians: scale(c.a) * 0.5,
         },
-        _ => Op::ScaleVerts {
+        24 => Op::ScaleVerts {
             verts: vec![pick(&verts, c.a, dead_v), pick(&verts, c.b, dead_v)],
             pivot: [0.0, 0.0, 0.0],
             factor: [
@@ -254,6 +257,79 @@ fn make_op(mesh: &Mesh, c: Choice) -> Op {
                 1.0 + scale(c.a) * 0.1,
             ],
         },
+
+        // ── the Wave-D set ─────────────────────────────────────────────────
+        //
+        // Reachability is the point (the P19 vacuous-check law), so each of
+        // these is resolved against the mesh as it stands and shaped so that the
+        // *applied* outcome is genuinely reachable — a generator that only ever
+        // produces refusals leaves every property below vacuous for its kind.
+        25 => {
+            // Two DISTINCT vertices with different deltas, so the "each by its
+            // own" half of the op is what is being replayed. The fallback pair
+            // collapses to one id, which is the `SameVertex` refusal.
+            let mut ids = vec![pick(&verts, c.a, dead_v), pick(&verts, c.b, dead_v)];
+            ids.sort_unstable();
+            ids.dedup();
+            Op::MoveVerts {
+                moves: ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| {
+                        (
+                            v,
+                            [
+                                scale(c.a) * 0.1 * (i + 1) as f64,
+                                scale(c.b) * 0.1,
+                                0.05 * i as f64,
+                            ],
+                        )
+                    })
+                    .collect(),
+            }
+        }
+        26 => Op::SetEdgesSharp {
+            halfs: vec![pick(&halfs, c.a, dead_h), pick(&halfs, c.b, dead_h)],
+            sharp: c.p.is_multiple_of(2),
+        },
+        27 => {
+            // Flipping ONE face of a closed shell always refuses, so half the
+            // draws flip the WHOLE mesh — otherwise this kind would be
+            // unreachable on three of the four base meshes.
+            if c.p.is_multiple_of(2) {
+                Op::FlipFaces {
+                    faces: faces.clone(),
+                }
+            } else {
+                Op::FlipFaces {
+                    faces: two_faces(&faces, c),
+                }
+            }
+        }
+        28 => Op::DissolveEdges {
+            // `corners` is the interior half-edges; a boundary one is the
+            // `DissolveBoundaryEdge` refusal and `dead_h` is `NoSuchHalf`.
+            edges: vec![pick(&corners, c.a, dead_h)],
+        },
+        _ => {
+            // A bridge needs two boundary half-edges that are not neighbours;
+            // pairing across the loop is the shape that closes an open mesh.
+            let border: Vec<HalfId> = halfs
+                .iter()
+                .copied()
+                .filter(|&h| mesh.is_boundary(h) == Some(true))
+                .collect();
+            if border.len() < 4 {
+                return Op::BridgeLoops {
+                    pairs: vec![(dead_h, dead_h)],
+                };
+            }
+            let i = c.a as usize % border.len();
+            let j = (i + border.len() / 2) % border.len();
+            Op::BridgeLoops {
+                pairs: vec![(border[i], border[j])],
+            }
+        }
     }
 }
 
@@ -344,7 +420,7 @@ fn the_generator_reaches_both_applied_and_refused_ops() {
         };
         let script: Vec<Choice> = (0..200)
             .map(|_| Choice {
-                kind: (next() % 25) as u8,
+                kind: (next() % 30) as u8,
                 a: next() as u16,
                 b: next() as u16,
                 p: next() as u8,
@@ -380,7 +456,7 @@ fn every_modelling_op_applies_at_least_once_somewhere_in_the_battery() {
         ("cylinder", cylinder(0.5, 2.0, 6)),
         ("torus", torus(1.0, 0.3, 6, 4)),
     ];
-    let mut applied = [0usize; 25];
+    let mut applied = [0usize; 30];
     for (_, base) in bases {
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut next = || {
@@ -393,7 +469,7 @@ fn every_modelling_op_applies_at_least_once_somewhere_in_the_battery() {
         let mut session = MeshSession::new(base);
         for _ in 0..600 {
             let c = Choice {
-                kind: (next() % 25) as u8,
+                kind: (next() % 30) as u8,
                 a: next() as u16,
                 b: next() as u16,
                 p: next() as u8,
@@ -416,7 +492,7 @@ fn every_modelling_op_applies_at_least_once_somewhere_in_the_battery() {
         }
         assert_eq!(validate(session.mesh()), Ok(()));
     }
-    for kind in 13..25 {
+    for kind in 13..30 {
         assert!(
             applied[kind] > 0,
             "op kind {kind} never applied — the generator cannot reach it, so \
@@ -680,4 +756,183 @@ proptest! {
             }
         }
     }
+
+    /// **The amendment law** (Wave D), and it is the journal's determinism law
+    /// pointed at the new door: after re-parameterizing an op somewhere in the
+    /// middle of a random history, the session is *still* nothing but its ops.
+    ///
+    /// Two outcomes, no third:
+    ///
+    /// * **`Ok`** — the mesh must equal what `MeshSession::restore` builds from
+    ///   the saved history. That is a genuinely independent check: `restore`
+    ///   replays from the base through `crate::ops::apply`, never touching a
+    ///   line of `amend`. An `amend` that patched the live mesh without writing
+    ///   the op back — or wrote the op back and left a stale mesh — fails here
+    ///   and cannot fail anywhere else.
+    /// * **`Err`** — the session is byte-identical, ops included. The refusals-
+    ///   are-inert law, which the ops have obeyed since P23.3 and which a
+    ///   history rewrite is the easiest thing in the crate to break.
+    #[test]
+    fn an_amendment_either_refuses_inertly_or_leaves_a_pure_function_of_the_ops(
+        base in base_mesh(),
+        script in prop::collection::vec(choice(), 4..40),
+        pick_at in any::<u16>(),
+    ) {
+        let mut session = MeshSession::new(base);
+        drive(&mut session, &script);
+        if session.cursor() == 0 {
+            return Ok(());
+        }
+        // Walk from a random start so every op in the history gets reached
+        // across the battery, and take the first one that has a perturbation.
+        let n = session.cursor();
+        let start = pick_at as usize % n;
+        let Some((index, amended)) = (0..n).find_map(|k| {
+            let i = (start + k) % n;
+            perturb(&session.ops()[i]).map(|op| (i, op))
+        }) else {
+            return Ok(());
+        };
+
+        let before_mesh = session.mesh().encoded();
+        let before_ops = session.ops().to_vec();
+        let before_cursor = session.cursor();
+        match session.amend(index, amended) {
+            Ok(()) => {
+                prop_assert_eq!(validate(session.mesh()), Ok(()));
+                prop_assert_eq!(session.cursor(), before_cursor, "the cursor travelled");
+                prop_assert_eq!(session.ops().len(), before_ops.len(), "an op appeared or vanished");
+                let back = MeshSession::restore(session.save())
+                    .map_err(|e| TestCaseError::fail(format!("the amended save does not restore: {e}")))?;
+                prop_assert_eq!(back.mesh().encoded(), session.mesh().encoded());
+            }
+            Err(_) => {
+                prop_assert_eq!(session.mesh().encoded(), before_mesh);
+                prop_assert_eq!(session.ops(), &before_ops[..]);
+                prop_assert_eq!(session.cursor(), before_cursor);
+            }
+        }
+    }
+
+    /// The classifier is not decoration: an op it calls
+    /// [`inf_dcc::Amendability::Never`] is refused **before** anything is
+    /// replayed, and an op it calls amendable never comes back as
+    /// `DifferentKind` or `StructureChanged` for a perturbation that only moved
+    /// a parameter.
+    #[test]
+    fn the_classifier_and_the_perturbation_agree(
+        base in base_mesh(),
+        script in prop::collection::vec(choice(), 1..24),
+    ) {
+        let mut session = MeshSession::new(base);
+        drive(&mut session, &script);
+        for i in 0..session.cursor() {
+            let op = session.ops()[i].clone();
+            let Some(amended) = perturb(&op) else { continue };
+            match inf_dcc::op_amendable(&op) {
+                inf_dcc::Amendability::Never => {
+                    prop_assert!(
+                        inf_dcc::amend_shape_ok(&op, &amended).is_err(),
+                        "{} is Never but its perturbation passed gate 1",
+                        inf_dcc::op_kind(&op)
+                    );
+                }
+                _ => {
+                    prop_assert!(
+                        inf_dcc::amend_shape_ok(&op, &amended).is_ok(),
+                        "{} refused a parameter-only perturbation at gate 1",
+                        inf_dcc::op_kind(&op)
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Move an op's **parameters** and nothing else, or `None` for an op with no
+/// parameter to move.
+///
+/// Deliberately covers only the ops an author would reach for a slider on. The
+/// perturbation is a pure function of the op, so a shrunk proptest case is
+/// reproducible.
+fn perturb(op: &Op) -> Option<Op> {
+    Some(match op {
+        Op::AddVertex { position } => Op::AddVertex {
+            position: [position[0] + 0.1, position[1], position[2]],
+        },
+        Op::TranslateVerts { verts, delta } => Op::TranslateVerts {
+            verts: verts.clone(),
+            delta: [delta[0] + 0.05, delta[1] - 0.02, delta[2]],
+        },
+        Op::MoveVerts { moves } => Op::MoveVerts {
+            moves: moves
+                .iter()
+                .map(|&(v, d)| (v, [d[0] * 0.5, d[1] * 0.5, d[2] * 0.5]))
+                .collect(),
+        },
+        Op::SplitEdge { half, t } => Op::SplitEdge {
+            half: *half,
+            // Still strictly inside (0, 1), so the perturbation tests the
+            // parameter rather than the range check.
+            t: (t * 0.5 + 0.25).clamp(0.05, 0.95),
+        },
+        Op::ExtrudeFaces { faces, distance } => Op::ExtrudeFaces {
+            faces: faces.clone(),
+            distance: distance * 0.5,
+        },
+        Op::ExtrudeEdges { edges, delta } => Op::ExtrudeEdges {
+            edges: edges.clone(),
+            delta: [delta[0] * 0.5, delta[1] * 0.5, delta[2] * 0.5],
+        },
+        Op::InsetFaces {
+            faces,
+            amount,
+            individual,
+        } => Op::InsetFaces {
+            faces: faces.clone(),
+            amount: amount * 0.5,
+            individual: *individual,
+        },
+        Op::BevelEdges {
+            edges,
+            amount,
+            segments,
+        } => Op::BevelEdges {
+            edges: edges.clone(),
+            amount: amount * 0.5,
+            segments: *segments,
+        },
+        Op::Mirror { axis, coord } => Op::Mirror {
+            axis: *axis,
+            coord: coord + 0.3,
+        },
+        Op::ScaleVerts {
+            verts,
+            pivot,
+            factor,
+        } => Op::ScaleVerts {
+            verts: verts.clone(),
+            pivot: *pivot,
+            factor: [factor[0] * 0.9, factor[1], factor[2]],
+        },
+        Op::RotateVerts {
+            verts,
+            pivot,
+            axis,
+            radians,
+        } => Op::RotateVerts {
+            verts: verts.clone(),
+            pivot: *pivot,
+            axis: *axis,
+            radians: radians * 0.5,
+        },
+        // …and one that the classifier must REFUSE, so the battery reaches the
+        // `Never` arm of `the_classifier_and_the_perturbation_agree` rather than
+        // only ever generating amendable ops.
+        Op::LoopCut { half, cuts } => Op::LoopCut {
+            half: *half,
+            cuts: cuts + 1,
+        },
+        _ => return None,
+    })
 }

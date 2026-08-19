@@ -7849,6 +7849,10 @@ pub fn phase23_model_prop(session: &mut inf_dcc::MeshSession) -> Result<(), Stri
         .apply(Op::BevelEdges {
             edges: pair.to_vec(),
             amount: PHASE23_BEVEL_M,
+            // The committed baseline is pinned byte-for-byte by the P23 gate, so
+            // it stays on the single-segment construction Wave D proved to be
+            // bit-identical to P23.4's. A segment count here would move the pin.
+            segments: 1,
         })
         .map_err(|e| format!("bevel: {e}"))?;
     Ok(())

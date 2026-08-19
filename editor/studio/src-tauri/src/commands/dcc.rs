@@ -614,13 +614,14 @@ fn build_ops(doc: &DccDoc, session: &MeshSession, tool: &DccToolDto) -> Result<V
                 }]
             }
         }
-        DccToolDto::Bevel { amount } => {
+        DccToolDto::Bevel { amount, segments } => {
             if edges.is_empty() {
                 Vec::new()
             } else {
                 vec![Op::BevelEdges {
                     edges,
                     amount: *amount,
+                    segments: *segments,
                 }]
             }
         }
@@ -731,6 +732,77 @@ fn build_ops(doc: &DccDoc, session: &MeshSession, tool: &DccToolDto) -> Result<V
                 ops
             }
         },
+
+        // ── the Wave-D verbs ───────────────────────────────────────────────
+        //
+        // Every one of these resolves its gesture in **Ring 1** and journals the
+        // answer. A refusal comes back as `Err`, so the panel says why rather
+        // than silently doing nothing — the shape `dcc_apply` already gives a
+        // kernel `OpError`.
+        DccToolDto::Dissolve => {
+            if edges.is_empty() {
+                Vec::new()
+            } else {
+                vec![Op::DissolveEdges { edges }]
+            }
+        }
+        DccToolDto::Bridge => {
+            if edges.is_empty() {
+                Vec::new()
+            } else {
+                vec![Op::BridgeLoops {
+                    pairs: dcc::bridge_pairs(mesh, &edges)?,
+                }]
+            }
+        }
+        DccToolDto::Flip => {
+            // Nothing selected means "recalculate outside", which is what every
+            // modeller's version of this button does.
+            let scope = if faces.is_empty() {
+                mesh.face_ids().collect()
+            } else {
+                faces
+            };
+            if scope.is_empty() {
+                Vec::new()
+            } else {
+                vec![Op::FlipFaces { faces: scope }]
+            }
+        }
+        DccToolDto::Shade { smooth, angle_deg } => {
+            let (sharp, soft) = dcc::shade_edges(mesh, &faces, *smooth, *angle_deg);
+            // Two ops at most — one for each answer — rather than one per edge.
+            // Shade-smooth is one gesture and must be one undo step.
+            let mut ops = Vec::new();
+            if !sharp.is_empty() {
+                ops.push(Op::SetEdgesSharp {
+                    halfs: sharp,
+                    sharp: true,
+                });
+            }
+            if !soft.is_empty() {
+                ops.push(Op::SetEdgesSharp {
+                    halfs: soft,
+                    sharp: false,
+                });
+            }
+            ops
+        }
+        DccToolDto::Slide { t } => {
+            let moves = dcc::slide_moves(mesh, &doc.selection, doc.mode, *t);
+            if moves.is_empty() {
+                Vec::new()
+            } else {
+                vec![Op::MoveVerts { moves }]
+            }
+        }
+        DccToolDto::MergeByDistance { tolerance } => dcc::merge_clusters(mesh, &verts, *tolerance)?
+            .into_iter()
+            .map(|verts| Op::MergeVerts {
+                verts,
+                target: MergeTarget::Center,
+            })
+            .collect(),
     })
 }
 

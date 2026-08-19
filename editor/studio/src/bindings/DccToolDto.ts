@@ -5,4 +5,19 @@ import type { SculptFalloffDto } from "./SculptFalloffDto";
  * A modelling tool press. Parameters arrive from the toolbar popovers; the
  * *operands* are the document's current selection, resolved backend-side.
  */
-export type DccToolDto = { "tool": "extrude", distance: number, } | { "tool": "extrudeEdges", delta: [number, number, number], } | { "tool": "inset", amount: number, individual: boolean, } | { "tool": "bevel", amount: number, } | { "tool": "loopCut", cuts: number, } | { "tool": "knife" } | { "tool": "merge", center: boolean, } | { "tool": "subdivide" } | { "tool": "mirror", axis: string, coord: number, } | { "tool": "translate", delta: [number, number, number], } | { "tool": "seam", seam: boolean, } | { "tool": "softTranslate", delta: [number, number, number], radius: number, falloff: SculptFalloffDto, } | { "tool": "delete" };
+export type DccToolDto = { "tool": "extrude", distance: number, } | { "tool": "extrudeEdges", delta: [number, number, number], } | { "tool": "inset", amount: number, individual: boolean, } | { "tool": "bevel", amount: number, 
+/**
+ * `1` is the flat chamfer this tool shipped with; above it the profile
+ * rounds. Range `1..=inf_dcc::model::MAX_BEVEL_SEGMENTS`, refused by the
+ * kernel outside it rather than clamped here.
+ */
+segments: number, } | { "tool": "loopCut", cuts: number, } | { "tool": "knife" } | { "tool": "merge", center: boolean, } | { "tool": "subdivide" } | { "tool": "mirror", axis: string, coord: number, } | { "tool": "translate", delta: [number, number, number], } | { "tool": "seam", seam: boolean, } | { "tool": "softTranslate", delta: [number, number, number], radius: number, falloff: SculptFalloffDto, } | { "tool": "delete" } | { "tool": "dissolve" } | { "tool": "bridge" } | { "tool": "flip" } | { "tool": "shade", smooth: boolean, 
+/**
+ * `rename_all = "camelCase"` on this enum renames its **variants**, not
+ * their fields (serde's `rename_all_fields` is the other knob), and
+ * every other field here happens to be one word — so this is the first
+ * one that would have crossed the wire as `angle_deg` in a codebase
+ * whose contract is camelCase. Named explicitly rather than spelled
+ * around.
+ */
+angleDeg: number | null, } | { "tool": "slide", t: number, } | { "tool": "mergeByDistance", tolerance: number, };

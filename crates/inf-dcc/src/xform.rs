@@ -58,99 +58,146 @@ pub(crate) fn rotate_verts(
     axis: [f64; 3],
     radians: f64,
 ) -> Result<OpOutcome, OpError> {
-    finite("a rotation pivot", &pivot)?;
-    finite("a rotation axis", &axis)?;
-    finite("a rotation angle", &[radians])?;
-    let k = DVec3::from_array(axis);
-    let len = k.length();
-    if !(len.is_finite() && len > 1e-12) {
-        return Err(OpError::ZeroAxis { axis });
-    }
-    let k = k / len;
-    let pivot = DVec3::from_array(pivot);
-    // **The angle is bounded before the polynomials see it** (P23.5 audit).
-    //
-    // The failure this closes: past ~2e16 `psin64` and `pcos64` both return
-    // exactly zero, and Rodrigues with `s = c = 0` is `pivot + k·(k·r)` — an axis
-    // **projection**. Every coordinate stays finite, so it was accepted, and
-    // `validate` passed because it audits topology and not geometry: θ = 1e100
-    // returned a quad whose four vertices were collinear. `Op::RotateVerts` is
-    // public API and rides in a session save, so a mistyped exponent in a numeric
-    // box was a data-loss bug.
-    //
-    // The `is_finite` conjunct is not decoration: a NaN compares false against
-    // every bound and would otherwise be admitted by an `<=` test.
-    if !(radians.is_finite() && radians.abs() <= MAX_ROTATION_RADIANS) {
-        return Err(OpError::AngleOutOfRange {
-            radians,
-            limit: MAX_ROTATION_RADIANS,
-        });
-    }
+    let rot = Rotation::new(pivot, axis, radians)?;
+    write_all(mesh, verts, |p| rot.apply(p))
+}
 
-    // # The audit prescribed a `mod 2π` fold here, and the measurement says no
-    //
-    // The prescription was to reduce before calling the polynomials, on the
-    // grounds that it closes both the collapse and a ~5.7e-10 accuracy droop at
-    // θ = 1e6. Measured across `[6.5, 4.5e15]`, it closes **neither**:
-    //
-    // | θ | angle error raw | reduced |
-    // | --- | --- | --- |
-    // | 1e6 | 5.99e-10 | 6.16e-10 |
-    // | 1e12 | 3.37e-5 | 4.98e-5 |
-    // | 1e15 | 6.87e-2 | 1.53e-2 |
-    //
-    // The fold moves the error around and does not remove it, because at those
-    // magnitudes the error is the **input's own resolution** — consecutive `f64`s
-    // at 1e12 are 1.2e-4 radians apart — and no reduction recovers a digit that
-    // was never stored. What the fold *does* improve is `|s² + c²| − 1` before
-    // normalization (2.5e-2 → 1.7e-10 at 1e15), and that is precisely the
-    // quantity the renormalization below already fixes.
-    //
-    // So it is not here. The collapse is closed by the bound above and by the
-    // refusal below, both of which are gated; a third mechanism that no
-    // measurement supports and no test can distinguish is code that will be
-    // maintained for ever on the strength of a comment.
-    let theta = radians;
-    // Rodrigues: r·cos θ + (k × r)·sin θ + k·(k · r)(1 − cos θ).
-    //
-    // **The pair is renormalized, and that is the difference between "a rotation
-    // by roughly θ" and "roughly a rotation".** `psin64` is a degree-11 Taylor
-    // polynomial with an endpoint error near 5.7e-8, so `s² + c²` is not exactly
-    // 1 and the raw matrix is a rotation *composed with a slight scale*: a
-    // quarter-turn of a 1 m vertex came back 56 nm short, and repeated drags
-    // would shrink a selection with nothing to tell the author why.
-    //
-    // Dividing by `√(s² + c²)` — `sqrt` is exactly specified by IEEE-754 and
-    // therefore still bit-portable — makes the transform an exact rotation to
-    // `f64` rounding. What remains is an **angle** error of at most ~6e-8 rad
-    // (≈ 3.4e-6 degrees), which is the honest cost of the portability law and is
-    // four orders below anything a modeller can express.
-    let (s, c) = {
-        let (s, c) = (psin64(theta), pcos64(theta));
-        let n = (s * s + c * c).sqrt();
-        if n.is_finite() && n > 1e-12 {
-            (s / n, c / n)
-        } else {
-            // **Unreachable below the bound, and kept anyway.** Swept across
-            // fifteen decades by `no_angle_inside_the_limit_degenerates_the_
-            // sine_cosine_pair`, the worst `|s, c|` inside the limit is 0.968 —
-            // so the renormalization above always has something to work with.
-            //
-            // It is a refusal rather than a fallthrough because the fallthrough is
-            // exactly how the collapse got in: a degenerate pair used to be
-            // *accepted*, and Rodrigues with `s = c = 0` is a projection onto the
-            // axis, not a rotation. Two mechanisms hold one failure, and the
-            // mutation table records that each closes it alone.
+/// **The point map [`crate::ops::Op::RotateVerts`] applies**, prepared once.
+///
+/// Public since Wave D, and for a reason worth stating: a caller that has to
+/// *pre-compute* soft-weighted results — `inf_editor_core::dcc`'s
+/// `transform_ops`, which now collapses a whole proportional drag into one
+/// [`crate::ops::Op::MoveVerts`] — needs the same rotation the op would have
+/// applied. Reimplementing Rodrigues one ring up would put a **second** copy of
+/// the portability law's trig in the tree, in a crate the kernel's own
+/// determinism gate does not read. One door, and the op goes through it too.
+///
+/// The trig is evaluated once in [`Rotation::new`], not per point, so this is
+/// also strictly cheaper than the shape it replaced.
+#[derive(Debug, Clone, Copy)]
+pub struct Rotation {
+    pivot: DVec3,
+    /// The **unit** axis.
+    axis: DVec3,
+    /// `sin θ` and `cos θ`, renormalized — see the construction.
+    s: f64,
+    c: f64,
+}
+
+impl Rotation {
+    /// Prepare a rotation, refusing a zero axis or an angle past
+    /// [`MAX_ROTATION_RADIANS`] exactly as the op does.
+    pub fn new(pivot: [f64; 3], axis: [f64; 3], radians: f64) -> Result<Self, OpError> {
+        finite("a rotation pivot", &pivot)?;
+        finite("a rotation axis", &axis)?;
+        finite("a rotation angle", &[radians])?;
+        let k = DVec3::from_array(axis);
+        let len = k.length();
+        if !(len.is_finite() && len > 1e-12) {
+            return Err(OpError::ZeroAxis { axis });
+        }
+        let k = k / len;
+        let pivot = DVec3::from_array(pivot);
+        // **The angle is bounded before the polynomials see it** (P23.5 audit).
+        //
+        // The failure this closes: past ~2e16 `psin64` and `pcos64` both return
+        // exactly zero, and Rodrigues with `s = c = 0` is `pivot + k·(k·r)` — an axis
+        // **projection**. Every coordinate stays finite, so it was accepted, and
+        // `validate` passed because it audits topology and not geometry: θ = 1e100
+        // returned a quad whose four vertices were collinear. `Op::RotateVerts` is
+        // public API and rides in a session save, so a mistyped exponent in a numeric
+        // box was a data-loss bug.
+        //
+        // The `is_finite` conjunct is not decoration: a NaN compares false against
+        // every bound and would otherwise be admitted by an `<=` test.
+        if !(radians.is_finite() && radians.abs() <= MAX_ROTATION_RADIANS) {
             return Err(OpError::AngleOutOfRange {
                 radians,
                 limit: MAX_ROTATION_RADIANS,
             });
         }
-    };
-    write_all(mesh, verts, |p| {
-        let r = p - pivot;
-        pivot + r * c + k.cross(r) * s + k * (k.dot(r) * (1.0 - c))
-    })
+
+        // # The audit prescribed a `mod 2π` fold here, and the measurement says no
+        //
+        // The prescription was to reduce before calling the polynomials, on the
+        // grounds that it closes both the collapse and a ~5.7e-10 accuracy droop at
+        // θ = 1e6. Measured across `[6.5, 4.5e15]`, it closes **neither**:
+        //
+        // | θ | angle error raw | reduced |
+        // | --- | --- | --- |
+        // | 1e6 | 5.99e-10 | 6.16e-10 |
+        // | 1e12 | 3.37e-5 | 4.98e-5 |
+        // | 1e15 | 6.87e-2 | 1.53e-2 |
+        //
+        // The fold moves the error around and does not remove it, because at those
+        // magnitudes the error is the **input's own resolution** — consecutive `f64`s
+        // at 1e12 are 1.2e-4 radians apart — and no reduction recovers a digit that
+        // was never stored. What the fold *does* improve is `|s² + c²| − 1` before
+        // normalization (2.5e-2 → 1.7e-10 at 1e15), and that is precisely the
+        // quantity the renormalization below already fixes.
+        //
+        // So it is not here. The collapse is closed by the bound above and by the
+        // refusal below, both of which are gated; a third mechanism that no
+        // measurement supports and no test can distinguish is code that will be
+        // maintained for ever on the strength of a comment.
+        let theta = radians;
+        // Rodrigues: r·cos θ + (k × r)·sin θ + k·(k · r)(1 − cos θ).
+        //
+        // **The pair is renormalized, and that is the difference between "a rotation
+        // by roughly θ" and "roughly a rotation".** `psin64` is a degree-11 Taylor
+        // polynomial with an endpoint error near 5.7e-8, so `s² + c²` is not exactly
+        // 1 and the raw matrix is a rotation *composed with a slight scale*: a
+        // quarter-turn of a 1 m vertex came back 56 nm short, and repeated drags
+        // would shrink a selection with nothing to tell the author why.
+        //
+        // Dividing by `√(s² + c²)` — `sqrt` is exactly specified by IEEE-754 and
+        // therefore still bit-portable — makes the transform an exact rotation to
+        // `f64` rounding. What remains is an **angle** error of at most ~6e-8 rad
+        // (≈ 3.4e-6 degrees), which is the honest cost of the portability law and is
+        // four orders below anything a modeller can express.
+        let (s, c) = {
+            let (s, c) = (psin64(theta), pcos64(theta));
+            let n = (s * s + c * c).sqrt();
+            if n.is_finite() && n > 1e-12 {
+                (s / n, c / n)
+            } else {
+                // **Unreachable below the bound, and kept anyway.** Swept across
+                // fifteen decades by `no_angle_inside_the_limit_degenerates_the_
+                // sine_cosine_pair`, the worst `|s, c|` inside the limit is 0.968 —
+                // so the renormalization above always has something to work with.
+                //
+                // It is a refusal rather than a fallthrough because the fallthrough is
+                // exactly how the collapse got in: a degenerate pair used to be
+                // *accepted*, and Rodrigues with `s = c = 0` is a projection onto the
+                // axis, not a rotation. Two mechanisms hold one failure, and the
+                // mutation table records that each closes it alone.
+                return Err(OpError::AngleOutOfRange {
+                    radians,
+                    limit: MAX_ROTATION_RADIANS,
+                });
+            }
+        };
+        Ok(Self {
+            pivot,
+            axis: k,
+            s,
+            c,
+        })
+    }
+
+    /// Rodrigues: `r·cos θ + (k × r)·sin θ + k·(k · r)(1 − cos θ)`, about the
+    /// pivot.
+    pub fn apply(&self, p: DVec3) -> DVec3 {
+        let (k, s, c) = (self.axis, self.s, self.c);
+        let r = p - self.pivot;
+        self.pivot + r * c + k.cross(r) * s + k * (k.dot(r) * (1.0 - c))
+    }
+}
+
+/// The point map [`crate::ops::Op::ScaleVerts`] applies — the companion to
+/// [`Rotation::apply`], public for the same one-door reason.
+pub fn scale_point(p: DVec3, pivot: DVec3, factor: DVec3) -> DVec3 {
+    pivot + (p - pivot) * factor
 }
 
 /// Scale vertices about `pivot` by a per-axis `factor`.
@@ -169,7 +216,7 @@ pub(crate) fn scale_verts(
     finite("a scale factor", &factor)?;
     let pivot = DVec3::from_array(pivot);
     let f = DVec3::from_array(factor);
-    write_all(mesh, verts, |p| pivot + (p - pivot) * f)
+    write_all(mesh, verts, |p| scale_point(p, pivot, f))
 }
 
 /// Check every id, compute every new position, check every RESULT, then write.

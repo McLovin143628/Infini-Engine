@@ -30,6 +30,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Box,
   ChevronsLeftRight,
+  Circle,
   CircleDot,
   Crosshair,
   Expand,
@@ -37,6 +38,7 @@ import {
   Grid2x2,
   Layers,
   Merge,
+  Move,
   Redo2,
   Save,
   Scissors,
@@ -55,7 +57,7 @@ import {
   onAssetDrop,
   type AssetDropDetail,
 } from "../../lib/assetDrop";
-import { DCC_PREVIEW_SIZE } from "../../lib/ipc";
+import { DCC_PREVIEW_SIZE, MAX_BEVEL_SEGMENTS } from "../../lib/ipc";
 import { useAssetStore } from "../../stores/assetStore";
 import { useDccEntry, useDccStore } from "../../stores/dccStore";
 import type { DccDragDto } from "../../bindings/DccDragDto";
@@ -211,10 +213,15 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const [distance, setDistance] = useState(0.25);
   const [inset, setInset] = useState(0.1);
   const [bevel, setBevel] = useState(0.05);
+  const [bevelSegments, setBevelSegments] = useState(1);
   const [cuts, setCuts] = useState(1);
   const [mirrorAxis, setMirrorAxis] = useState("x");
   const [individual, setIndividual] = useState(false);
   const [dropTarget, setDropTarget] = useState(false);
+  // ── Wave D tool parameters ───────────────────────────────────────────────
+  const [slide, setSlide] = useState(0.25);
+  const [smoothAngle, setSmoothAngle] = useState(30);
+  const [mergeTolerance, setMergeTolerance] = useState(0.001);
 
   // ── P23.5 tool state ─────────────────────────────────────────────────────
   const [tool, setTool] = useState<PointerTool>("select");
@@ -873,12 +880,18 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           onClick={() => assetId && void apply(assetId, { tool: "inset", amount: inset, individual })}
         />
         <Num label="Bevel (m)" value={bevel} onChange={setBevel} />
+        <Num
+          label="Bevel segments"
+          value={bevelSegments}
+          step={1}
+          onChange={(v) => setBevelSegments(Math.min(MAX_BEVEL_SEGMENTS, Math.max(1, Math.round(v))))}
+        />
         <ToolButton
           label="Bevel"
           icon={<Slice size={12} />}
           disabled={nothing || mode !== "edge"}
-          onClick={() => assetId && void apply(assetId, { tool: "bevel", amount: bevel })}
-          title="One flat chamfer strip per edge (v1 is a single segment)"
+          onClick={() => assetId && void apply(assetId, { tool: "bevel", amount: bevel, segments: bevelSegments })}
+          title="1 segment is a flat chamfer; above it the profile rounds on a circular arc. Edges that MEET at a right angle still refuse — a corner join is not built."
         />
         <Num label="Cuts" value={cuts} step={1} onChange={(v) => setCuts(Math.max(1, Math.round(v)))} />
         <ToolButton
@@ -940,6 +953,73 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           icon={<Crosshair size={12} />}
           disabled={nothing}
           onClick={() => assetId && void apply(assetId, { tool: "delete" })}
+        />
+
+        <div className="text-[10px] font-semibold tracking-wide text-(--ink-text-dim)">TOPOLOGY</div>
+        <div className="grid grid-cols-2 gap-1">
+          <ToolButton
+            label="Dissolve"
+            icon={<Slice size={12} />}
+            disabled={nothing || mode !== "edge"}
+            onClick={() => assetId && void apply(assetId, { tool: "dissolve" })}
+            title="Merge the two faces across each selected edge into one n-gon. The vertices stay — that is the difference from a collapse."
+          />
+          <ToolButton
+            label="Bridge"
+            icon={<Merge size={12} />}
+            disabled={nothing || mode !== "edge"}
+            onClick={() => assetId && void apply(assetId, { tool: "bridge" })}
+            title="Stitch two open borders together. Needs exactly two loops with the same edge count."
+          />
+        </div>
+        <ToolButton
+          label="Flip / recalc normals"
+          icon={<Triangle size={12} />}
+          onClick={() => assetId && void apply(assetId, { tool: "flip" })}
+          title="Reverse the winding of the selected faces, or of the whole mesh when nothing is selected."
+        />
+        <div className="grid grid-cols-2 gap-1">
+          <ToolButton
+            label="Shade smooth"
+            icon={<Circle size={12} />}
+            onClick={() => assetId && void apply(assetId, { tool: "shade", smooth: true, angleDeg: null })}
+            title="Clear the crease on every edge of the selection (or of the whole mesh)."
+          />
+          <ToolButton
+            label="Shade flat"
+            icon={<Square size={12} />}
+            onClick={() => assetId && void apply(assetId, { tool: "shade", smooth: false, angleDeg: null })}
+          />
+        </div>
+        <Num
+          label="Auto-smooth (°)"
+          value={smoothAngle}
+          step={1}
+          onChange={(v) => setSmoothAngle(Math.min(180, Math.max(0, v)))}
+        />
+        <ToolButton
+          label="Auto-smooth"
+          icon={<Circle size={12} />}
+          onClick={() =>
+            assetId && void apply(assetId, { tool: "shade", smooth: true, angleDeg: smoothAngle })
+          }
+          title="Crease every edge whose two faces disagree by more than the angle; smooth the rest."
+        />
+        <Num label="Slide (−1…1)" value={slide} onChange={(v) => setSlide(Math.min(1, Math.max(-1, v)))} />
+        <ToolButton
+          label="Slide"
+          icon={<Move size={12} />}
+          disabled={nothing}
+          onClick={() => assetId && void apply(assetId, { tool: "slide", t: slide })}
+          title="Slide the selection along its own ring edges — select an edge loop and this is edge slide. One undo step."
+        />
+        <Num label="Merge dist (m)" value={mergeTolerance} onChange={setMergeTolerance} />
+        <ToolButton
+          label="Merge by distance"
+          icon={<Merge size={12} />}
+          disabled={nothing}
+          onClick={() => assetId && void apply(assetId, { tool: "mergeByDistance", tolerance: mergeTolerance })}
+          title="Fuse selected vertices closer than the tolerance. One undo step per cluster — the reader itself never welds by epsilon."
         />
 
         <div className="text-[10px] font-semibold tracking-wide text-(--ink-text-dim)">UV</div>

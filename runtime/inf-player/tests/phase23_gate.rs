@@ -446,6 +446,7 @@ fn the_bevel_refuses_the_corner_it_cannot_save() {
         &Op::BevelEdges {
             edges: rim.clone(),
             amount: PHASE23_BEVEL_M,
+            segments: 1,
         },
     )
     .expect_err("beveling four meeting edges must be refused");
@@ -517,6 +518,7 @@ fn the_bevel_refuses_the_corner_it_cannot_save() {
         &Op::BevelEdges {
             edges: pair.to_vec(),
             amount: PHASE23_BEVEL_M,
+            segments: 1,
         },
     )
     .expect("two disjoint edges must still bevel");

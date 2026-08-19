@@ -26,13 +26,34 @@
 //! Each of these is a real tool with a real boundary, and the boundary is a typed
 //! refusal rather than a silent approximation:
 //!
-//! * **Bevel is `segments = 1`** — one flat chamfer strip per edge, no rounding.
-//!   Its construction *keeps* both endpoints and caps each end of the strip with
-//!   a triangle, which is what makes it work at **any vertex valence** (see
-//!   `bevel_edges`). Blender dissolves the endpoint into an n-gon instead; that
-//!   is a nicer result and a much larger algorithm, and beveling several edges
-//!   that meet at one vertex produces one strip each with a wedge between them
-//!   rather than a true vertex bevel. Both are named remainders.
+//! * **Bevel takes a segment count** (Wave D; it was fixed at 1 through P24).
+//!   `segments = 1` is one flat chamfer strip per edge and is *bit-identical* to
+//!   the construction P23.4 shipped — same vertices, same ids, same order — so
+//!   the feature is opt-in rather than applied to every mesh in the tree.
+//!   Above 1 the strip becomes `segments` strips whose profile follows a
+//!   circular arc sampled by a **normalized lerp** (`bevel_profile`: `acos`/`sin`
+//!   are banned from a replayed journal by the P14 portability law, `sqrt` is
+//!   not), and each end cap grows from a triangle to a `segments + 2`-gon. Its
+//!   construction still *keeps* both endpoints, which is what makes it work at
+//!   **any vertex valence**. Blender dissolves the endpoint into an n-gon
+//!   instead; beveling several edges that meet at one vertex still produces one
+//!   strip each with a wedge between them rather than a true vertex bevel, and
+//!   a right-angled corner still refuses ([`crate::ops::OpError::BevelCoincidentVertex`]).
+//!   The corner join remains a named remainder.
+//! * **Dissolve** (Wave D) merges the two faces across an edge into one n-gon and
+//!   is the inverse of `SplitFace`, not of `SplitEdge`: the vertices stay. It
+//!   refuses when the merge would make a face that visits a vertex twice, which
+//!   is what two faces sharing more than one edge produce.
+//! * **Bridge** (Wave D) takes an explicit **pairing** of boundary half-edges and
+//!   builds one quad per pair. The correspondence is on the wire, not solved
+//!   inside the op — the [`crate::ops::Op::Unwrap`] precedent, for the same
+//!   reason: a journal is replayed by a different build than wrote it, so an op
+//!   whose effect is "whatever this build's matcher says" silently rewrites
+//!   every session ever recorded when the matcher improves.
+//! * **Flip** (Wave D) reverses winding. It removes every named face *before*
+//!   re-adding any, so flipping a whole shell works while flipping one face of a
+//!   closed one refuses (its neighbours would then use an edge twice in the same
+//!   direction) — which is the honest answer, not a special case.
 //! * **Knife is a path of existing vertices and points on existing edges** —
 //!   straight cuts through the surface, applied as one atomic transaction.
 //!   Free-form cutting (a screen-space polyline projected onto arbitrary
@@ -70,6 +91,16 @@ use crate::topo::{CornerData, EdgeFlags, FaceId, HalfId, Mesh, VertId};
 /// and the op allocates `cuts × ring length` vertices before it can refuse
 /// anything.
 pub const MAX_LOOP_CUTS: u32 = 64;
+
+/// The most profile segments one [`crate::ops::Op::BevelEdges`] may cut.
+///
+/// A cap for the same reason [`MAX_LOOP_CUTS`] is one: `segments` arrives from a
+/// UI spinner and the op allocates `2 × (segments + 1)` vertices and
+/// `segments + 2` faces **per beveled edge** before it can refuse anything. 16 is
+/// past the point where more segments are visible on a chamfer — Blender's own
+/// default is 1 and its rounded presets sit at 2–4 — and it keeps a 12-edge cube
+/// bevel under 400 new elements.
+pub const MAX_BEVEL_SEGMENTS: u32 = 16;
 
 /// Where a [`crate::ops::Op::MergeVerts`] puts the survivor.
 ///
@@ -857,12 +888,21 @@ pub(crate) fn bevel_edges(
     mesh: &mut Mesh,
     edges: &[HalfId],
     amount: f64,
+    segments: u32,
 ) -> Result<OpOutcome, OpError> {
     finite("a bevel amount", &[amount])?;
     if !above(amount, 0.0) {
         return Err(OpError::AmountNotPositive {
             what: "a bevel amount",
             value: amount,
+        });
+    }
+    if segments < 1 || segments > MAX_BEVEL_SEGMENTS {
+        return Err(OpError::CountOutOfRange {
+            what: "a bevel segment count",
+            value: segments,
+            min: 1,
+            max: MAX_BEVEL_SEGMENTS,
         });
     }
     if edges.is_empty() {
@@ -905,7 +945,7 @@ pub(crate) fn bevel_edges(
         let mut verts = Vec::new();
         for &(a, b) in &pairs {
             let h = m.find_half(a, b).ok_or(OpError::NoSuchVert(a))?;
-            let out = bevel_one(m, h, amount)?;
+            let out = bevel_one(m, h, amount, segments)?;
             for &v in &out.verts {
                 let p = pos(m, v);
                 match seen.entry(crate::build::bits3(p.to_array())) {
@@ -932,7 +972,44 @@ pub(crate) fn bevel_edges(
     })
 }
 
-fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64) -> Result<OpOutcome, OpError> {
+/// The profile ring of a bevel at one endpoint: `segments + 1` offset
+/// directions, from `u1` (into the first face) round to `u2` (into the second).
+///
+/// # Why a normalized lerp and not a slerp
+///
+/// A slerp is the textbook circular arc and it needs `acos` and `sin`, which the
+/// P14 law bans from anything a journal replays: `f32`/`f64` `std` trigonometry
+/// is **not bit-portable**, so a bevel solved with it would produce a different
+/// mesh on a different machine from the same op — the exact property the journal
+/// exists to guarantee. Normalizing a linear interpolation between two unit
+/// vectors traces the **same circular arc** (every sample has unit length by
+/// construction) at slightly non-uniform angular spacing, out of nothing but
+/// multiply, add and `sqrt` — and `sqrt` is correctly rounded by IEEE-754 and
+/// therefore portable (the distinction this crate's module docs already draw).
+///
+/// The endpoints are handed back **verbatim**, not re-normalized: `segments = 1`
+/// must reduce to exactly the two-vertex construction P23.4 shipped, bit for
+/// bit, or every mesh in the tree moves under a feature nobody asked to apply.
+fn bevel_profile(u1: DVec3, u2: DVec3, amount: f64, segments: u32) -> Option<Vec<DVec3>> {
+    let n = segments as usize;
+    let mut out = Vec::with_capacity(n + 1);
+    out.push(u1 * amount);
+    for k in 1..n {
+        let t = k as f64 / n as f64;
+        let d = u1 * (1.0 - t) + u2 * t;
+        // `u1 == -u2` exactly — two coplanar faces folded flat against each
+        // other — leaves the midpoint with no direction. `None` rather than an
+        // arbitrary choice: the caller turns it into a typed refusal.
+        if !above(d.length(), 1e-12) {
+            return None;
+        }
+        out.push(d.normalize() * amount);
+    }
+    out.push(u2 * amount);
+    Some(out)
+}
+
+fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64, segments: u32) -> Result<OpOutcome, OpError> {
     let t = mesh.twin(h).expect("live half-edge id");
     let f1 = match mesh.face_of(h).expect("live half-edge id") {
         Some(f) => f,
@@ -961,9 +1038,15 @@ fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64) -> Result<OpOutcome, OpErr
     // Into f1 across `a→b`; into f2 across `b→a` (its own half runs the other way).
     let in1 = n1.normalize().cross(eu) * amount;
     let in2 = n2.normalize().cross(-eu) * amount;
-    let new_pos = [pa + in1, pb + in1, pa + in2, pb + in2];
-    for p in &new_pos {
-        finite("a bevel vertex position", &p.to_array())?;
+    // The profile ring, `segments + 1` offsets from `in1` round to `in2`. At
+    // `segments == 1` this is exactly `[in1, in2]` and everything below reduces
+    // to the P23.4 construction, vertex allocation order included.
+    let ring = bevel_profile(in1.normalize(), in2.normalize(), amount, segments)
+        .ok_or(OpError::DegenerateFace(f1))?;
+    let segs = segments as usize;
+    for d in &ring {
+        finite("a bevel vertex position", &(pa + *d).to_array())?;
+        finite("a bevel vertex position", &(pb + *d).to_array())?;
     }
     let was_sharp = mesh.is_sharp(h) == Some(true);
 
@@ -979,14 +1062,22 @@ fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64) -> Result<OpOutcome, OpErr
 
     mesh.remove_face_raw(f1);
     mesh.remove_face_raw(f2);
-    // Each chamfer vertex is an offset copy of `a` or `b` (`new_pos` is
-    // `[pa+in1, pb+in1, pa+in2, pb+in2]`), so it inherits that endpoint's skin
-    // (P24.2). Both endpoints are still live here — `remove_face_raw` frees
-    // face-less edges, never vertices.
-    let va1 = mesh.alloc_vert_blended(new_pos[0].to_array(), &[(a, 1.0)]);
-    let vb1 = mesh.alloc_vert_blended(new_pos[1].to_array(), &[(b, 1.0)]);
-    let va2 = mesh.alloc_vert_blended(new_pos[2].to_array(), &[(a, 1.0)]);
-    let vb2 = mesh.alloc_vert_blended(new_pos[3].to_array(), &[(b, 1.0)]);
+    // Each chamfer vertex is an offset copy of `a` or `b`, so it inherits that
+    // endpoint's skin (P24.2). Both endpoints are still live here —
+    // `remove_face_raw` frees face-less edges, never vertices.
+    //
+    // **The allocation order is interleaved (`va[0], vb[0], va[1], vb[1], …`)
+    // and that is load-bearing**: at `segments == 1` it hands out exactly the
+    // four ids P23.4's `va1, vb1, va2, vb2` did, in that order, so a
+    // single-segment bevel is byte-identical to the one this crate has always
+    // produced. Ids are arena slots and the journal's determinism law is stated
+    // in bytes, so "the same edit, renumbered" is a mesh change.
+    let mut va: Vec<VertId> = Vec::with_capacity(segs + 1);
+    let mut vb: Vec<VertId> = Vec::with_capacity(segs + 1);
+    for d in &ring {
+        va.push(mesh.alloc_vert_blended((pa + *d).to_array(), &[(a, 1.0)]));
+        vb.push(mesh.alloc_vert_blended((pb + *d).to_array(), &[(b, 1.0)]));
+    }
 
     let n_1 = c1.verts.len();
     let n_2 = c2.verts.len();
@@ -994,75 +1085,87 @@ fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64) -> Result<OpOutcome, OpErr
     let cb_1 = c1.corners[(i1 + 1) % n_1];
     let cb_2 = c2.corners[i2];
     let ca_2 = c2.corners[(i2 + 1) % n_2];
+    // The ring's UVs interpolate the two corner records the chamfer replaces,
+    // so a textured surface reads across it instead of repeating one corner.
+    let ca_uv: Vec<[f64; 2]> = (0..=segs)
+        .map(|k| uv_along(ca_1.uv, ca_2.uv, k, segs))
+        .collect();
+    let cb_uv: Vec<[f64; 2]> = (0..=segs)
+        .map(|k| uv_along(cb_1.uv, cb_2.uv, k, segs))
+        .collect();
 
     // f1: … a, a1, b1, b … — a and b keep their corners, the copies take theirs.
     let mut v1 = c1.verts.clone();
     let mut k1 = c1.corners.clone();
-    v1.splice(i1 + 1..i1 + 1, [va1, vb1]);
+    v1.splice(i1 + 1..i1 + 1, [va[0], vb[0]]);
     k1.splice(i1 + 1..i1 + 1, [ca_1, cb_1]);
     // f2: … b, b2, a2, a …
     let mut v2 = c2.verts.clone();
     let mut k2 = c2.corners.clone();
-    v2.splice(i2 + 1..i2 + 1, [vb2, va2]);
+    v2.splice(i2 + 1..i2 + 1, [vb[segs], va[segs]]);
     k2.splice(i2 + 1..i2 + 1, [cb_2, ca_2]);
 
-    // The two grown faces, then the strip, then a cap at each end. Every one of
-    // the eight new directed edges is twinned inside these five loops -- that is
-    // the whole proof that the construction is manifold at any valence.
+    // The two grown faces, then the strips, then a cap at each end. Every one of
+    // the new directed edges is twinned inside these loops -- that is the whole
+    // proof that the construction is manifold at any valence.
     let grown = [
         mesh.add_face_raw(&v1, &k1, c1.slot)?,
         mesh.add_face_raw(&v2, &k2, c2.slot)?,
     ];
     refuse_if_inverted(mesh, &grown, &normals, "a bevel amount", amount)?;
-    // The STRIP is the successor: bevel-then-drag must move the chamfer, not the
-    // two faces it was cut out of.
-    let strip = mesh.add_face_raw(
-        &[va1, va2, vb2, vb1],
-        &[
-            derived_corner(ca_1.uv),
-            derived_corner(ca_2.uv),
-            derived_corner(cb_2.uv),
-            derived_corner(cb_1.uv),
-        ],
-        c1.slot,
-    )?;
+    // The STRIPS are the successor: bevel-then-drag must move the chamfer, not
+    // the two faces it was cut out of.
+    let mut strips = Vec::with_capacity(segs);
+    for k in 0..segs {
+        strips.push(mesh.add_face_raw(
+            &[va[k], va[k + 1], vb[k + 1], vb[k]],
+            &[
+                derived_corner(ca_uv[k]),
+                derived_corner(ca_uv[k + 1]),
+                derived_corner(cb_uv[k + 1]),
+                derived_corner(cb_uv[k]),
+            ],
+            c1.slot,
+        )?);
+    }
 
+    // The caps are `segments + 2`-gons — a triangle at `segments == 1`, exactly
+    // as before. The kernel holds n-gons natively, so a rounded end needs no fan.
+    let mut cap_a_verts = vec![va[0], a];
+    let mut cap_a_corners = vec![derived_corner(ca_uv[0]), derived_corner(ca_1.uv)];
+    for k in (1..=segs).rev() {
+        cap_a_verts.push(va[k]);
+        cap_a_corners.push(derived_corner(ca_uv[k]));
+    }
+    let mut cap_b_verts = vec![b];
+    let mut cap_b_corners = vec![derived_corner(cb_1.uv)];
+    for k in 0..=segs {
+        cap_b_verts.push(vb[k]);
+        cap_b_corners.push(derived_corner(cb_uv[k]));
+    }
     let caps = [
-        mesh.add_face_raw(
-            &[va1, a, va2],
-            &[
-                derived_corner(ca_1.uv),
-                derived_corner(ca_1.uv),
-                derived_corner(ca_2.uv),
-            ],
-            c1.slot,
-        )?,
-        mesh.add_face_raw(
-            &[b, vb1, vb2],
-            &[
-                derived_corner(cb_1.uv),
-                derived_corner(cb_1.uv),
-                derived_corner(cb_2.uv),
-            ],
-            c1.slot,
-        )?,
+        mesh.add_face_raw(&cap_a_verts, &cap_a_corners, c1.slot)?,
+        mesh.add_face_raw(&cap_b_verts, &cap_b_corners, c1.slot)?,
     ];
     let _ = (&grown, &caps);
 
     mesh.apply_edge_flags(&sharp);
     if was_sharp {
         // The chamfer keeps the crease it replaced: a flat-shaded box beveled
-        // stays flat-shaded, rather than acquiring a smooth band nobody asked for.
-        for (x, y) in [
-            (va1, vb1),
-            (va2, vb2),
-            (va1, va2),
-            (vb1, vb2),
-            (va1, a),
-            (a, va2),
-            (b, vb1),
-            (vb2, b),
-        ] {
+        // stays flat-shaded, rather than acquiring a smooth band nobody asked
+        // for. At `segments == 1` this is exactly the eight edges P23.4 marked;
+        // above it the ring edges join them, so a multi-segment chamfer off a
+        // sharp edge reads as facets rather than as a smooth band the author
+        // did not ask for either. (A sharp edge is opt-in on the source edge:
+        // a smooth-shaded model bevels smooth, at any segment count.)
+        for k in 0..=segs {
+            sharpen(mesh, va[k], vb[k]);
+            if k < segs {
+                sharpen(mesh, va[k], va[k + 1]);
+                sharpen(mesh, vb[k], vb[k + 1]);
+            }
+        }
+        for (x, y) in [(va[0], a), (a, va[segs]), (b, vb[0]), (vb[segs], b)] {
             sharpen(mesh, x, y);
         }
     }
@@ -1070,15 +1173,35 @@ fn bevel_one(mesh: &mut Mesh, h: HalfId, amount: f64) -> Result<OpOutcome, OpErr
         .verts
         .iter()
         .chain(c2.verts.iter())
+        .chain(va.iter())
+        .chain(vb.iter())
         .copied()
-        .chain([va1, vb1, va2, vb2])
         .collect();
     mesh.finish_patch(&touched)?;
+    let mut made: Vec<VertId> = Vec::with_capacity(2 * (segs + 1));
+    for k in 0..=segs {
+        made.push(va[k]);
+        made.push(vb[k]);
+    }
     Ok(OpOutcome {
-        verts: vec![va1, vb1, va2, vb2],
-        faces: vec![strip],
+        verts: made,
+        faces: strips,
         ..Default::default()
     })
+}
+
+/// The UV at ring step `k` of `segs`, linear between the two corner records the
+/// chamfer replaces. The endpoints are handed back **verbatim** so that
+/// `segs == 1` reproduces P23.4's `derived_corner(ca_1.uv)` exactly.
+fn uv_along(a: [f64; 2], b: [f64; 2], k: usize, segs: usize) -> [f64; 2] {
+    if k == 0 {
+        return a;
+    }
+    if k == segs {
+        return b;
+    }
+    let t = k as f64 / segs as f64;
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
 }
 
 fn index_of(verts: &[VertId], v: VertId) -> usize {
@@ -1745,6 +1868,296 @@ pub(crate) fn mirror(mesh: &mut Mesh, axis: MirrorAxis, coord: f64) -> Result<Op
     })
 }
 
+// ── dissolve ───────────────────────────────────────────────────────────────
+
+/// Merge the two faces across each named edge into one n-gon.
+///
+/// The inverse of `SplitFace`, not of `SplitEdge`: **the vertices stay**. That
+/// is what an author means by "dissolve this edge" in a box-modelling flow —
+/// the wire goes, the shape does not. (Dissolving the *vertices* left behind is
+/// [`crate::ops::Op::WeldVerts`]'s job and a separate, separately-undoable step.)
+///
+/// Edges are addressed by their **endpoint pair**, re-found before each merge,
+/// for the reason [`bevel_edges`] does the same: each dissolve rebuilds a patch,
+/// so a half-edge id captured before the loop may name a different edge by the
+/// time its turn comes. Endpoints survive every dissolve, so the pair does.
+///
+/// Refusals, all inert (`Mesh::transact` wraps the whole batch, so a batch that
+/// refuses on its last edge leaves the mesh byte-identical):
+///
+/// * a **boundary** edge — there is no second face to merge with;
+/// * the same face on both sides — a slit inside one face, whose merge is not a
+///   face at all;
+/// * a merged loop that visits a vertex twice, which is exactly what two faces
+///   sharing more than one edge produce. `add_face_raw` would refuse it anyway
+///   ([`OpError::RepeatedVertex`]); it is checked here so the message names the
+///   edge the author clicked.
+pub(crate) fn dissolve_edges(mesh: &mut Mesh, edges: &[HalfId]) -> Result<OpOutcome, OpError> {
+    if edges.is_empty() {
+        return Err(OpError::EmptyOperand {
+            what: "an edge set",
+        });
+    }
+    let mut pairs: Vec<(VertId, VertId)> = Vec::with_capacity(edges.len());
+    for &h in edges {
+        if !mesh.has_half(h) {
+            return Err(OpError::NoSuchHalf(h));
+        }
+        let t = mesh.twin(h).expect("live half-edge id");
+        let a = mesh.origin(h).expect("live half-edge id");
+        let b = mesh.origin(t).expect("live half-edge id");
+        pairs.push(canonical_pair(a, b));
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
+
+    mesh.transact(|m| {
+        let mut made = Vec::with_capacity(pairs.len());
+        for &(a, b) in &pairs {
+            made.push(dissolve_one(m, a, b)?);
+        }
+        Ok(OpOutcome {
+            faces: made,
+            ..Default::default()
+        })
+    })
+}
+
+fn dissolve_one(mesh: &mut Mesh, a: VertId, b: VertId) -> Result<FaceId, OpError> {
+    let h = mesh.find_half(a, b).ok_or(OpError::NoSuchVert(a))?;
+    let t = mesh.twin(h).expect("live half-edge id");
+    let f1 = mesh
+        .face_of(h)
+        .expect("live half-edge id")
+        .ok_or(OpError::DissolveBoundaryEdge(h))?;
+    let f2 = mesh
+        .face_of(t)
+        .expect("live half-edge id")
+        .ok_or(OpError::DissolveBoundaryEdge(h))?;
+    if f1 == f2 {
+        return Err(OpError::DissolveSameFace(f1));
+    }
+    // f1's loop rotated to start at `h`, f2's rotated to start at `t`.
+    let l1 = rotate_loop(mesh, f1, h);
+    let l2 = rotate_loop(mesh, f2, t);
+    let (v1, k1) = loop_data(mesh, &l1);
+    let (v2, k2) = loop_data(mesh, &l2);
+    // The merged loop: f1 from `b` all the way round to `a` (its whole loop,
+    // starting one past `h`), then f2's interior — everything strictly between
+    // `a` and `b` on the far side.
+    let mut verts: Vec<VertId> = v1[1..].to_vec();
+    verts.push(v1[0]);
+    let mut corners: Vec<CornerData> = k1[1..].to_vec();
+    corners.push(k1[0]);
+    verts.extend_from_slice(&v2[2..]);
+    corners.extend_from_slice(&k2[2..]);
+    if verts.len() < 3 {
+        return Err(OpError::FaceTooSmall { verts: verts.len() });
+    }
+    {
+        let mut seen = BTreeSet::new();
+        for &v in &verts {
+            if !seen.insert(v) {
+                return Err(OpError::DissolveWouldPinch { edge: h, vert: v });
+            }
+        }
+    }
+    let slot = mesh.face_slot(f1).expect("live face id");
+    let flags = mesh.capture_edge_flags(&[f1, f2]);
+    let touched: BTreeSet<VertId> = verts.iter().copied().collect();
+    mesh.remove_face_raw(f1);
+    mesh.remove_face_raw(f2);
+    let f = mesh.add_face_raw(&verts, &corners, slot)?;
+    mesh.apply_edge_flags(&flags);
+    mesh.finish_patch(&touched)?;
+    Ok(f)
+}
+
+/// A face's half-edge loop, rotated so it starts at `start`.
+fn rotate_loop(mesh: &Mesh, f: FaceId, start: HalfId) -> Vec<HalfId> {
+    let loop_ = mesh.face_loop(f).expect("live face id");
+    let i = loop_
+        .iter()
+        .position(|&x| x == start)
+        .expect("the half-edge's own face contains it");
+    loop_[i..].iter().chain(&loop_[..i]).copied().collect()
+}
+
+/// The origins and corner records of a half-edge loop, in order.
+fn loop_data(mesh: &Mesh, loop_: &[HalfId]) -> (Vec<VertId>, Vec<CornerData>) {
+    let mut verts = Vec::with_capacity(loop_.len());
+    let mut corners = Vec::with_capacity(loop_.len());
+    for &h in loop_ {
+        verts.push(mesh.origin(h).expect("live half-edge id"));
+        corners.push(CornerData {
+            uv: mesh.corner_uv(h).expect("live half-edge id"),
+            normal: mesh.corner_normal(h).expect("live half-edge id"),
+        });
+    }
+    (verts, corners)
+}
+
+// ── bridge ─────────────────────────────────────────────────────────────────
+
+/// Build one quad per **pair** of boundary half-edges, stitching two open
+/// borders together.
+///
+/// `pairs[i] = (p, q)` makes the quad `[origin(p), dest(p), origin(q), dest(q)]`,
+/// which contains the directed edges `p` and `q` — the two slots the boundary
+/// left empty. Two rings facing each other (the open ends of a tube) have
+/// boundary loops that run in **opposite** directions, so this pairing is the one
+/// that closes them; a pairing that runs the same way makes a Möbius twist and
+/// comes back as [`OpError::EdgeAlreadyFaced`] or a self-intersecting quad, not
+/// as a silently wrong surface.
+///
+/// **The correspondence is on the wire.** Nothing here solves "which edge goes
+/// with which" — `inf_editor_core` does that from the two loops the author
+/// selected and journals the answer, on the [`crate::ops::Op::Unwrap`]
+/// precedent: an op whose effect is "whatever this build's matcher says" means
+/// improving the matcher silently rewrites every session ever recorded.
+pub(crate) fn bridge_loops(
+    mesh: &mut Mesh,
+    pairs: &[(HalfId, HalfId)],
+) -> Result<OpOutcome, OpError> {
+    if pairs.is_empty() {
+        return Err(OpError::EmptyOperand {
+            what: "a bridge pairing",
+        });
+    }
+    let mut seen: BTreeSet<HalfId> = BTreeSet::new();
+    let mut quads: Vec<[VertId; 4]> = Vec::with_capacity(pairs.len());
+    for &(p, q) in pairs {
+        for h in [p, q] {
+            if !mesh.has_half(h) {
+                return Err(OpError::NoSuchHalf(h));
+            }
+            if mesh.is_boundary(h) != Some(true) {
+                return Err(OpError::BridgeNotBoundary(h));
+            }
+            if !seen.insert(h) {
+                return Err(OpError::SameCorner(h));
+            }
+        }
+        quads.push([
+            mesh.origin(p).expect("live half-edge id"),
+            mesh.dest(p).expect("live half-edge id"),
+            mesh.origin(q).expect("live half-edge id"),
+            mesh.dest(q).expect("live half-edge id"),
+        ]);
+    }
+    mesh.transact(|m| {
+        let mut made = Vec::with_capacity(quads.len());
+        let mut touched: BTreeSet<VertId> = BTreeSet::new();
+        for quad in &quads {
+            // The bridge's corners are derived, not authored: the quad is a
+            // surface that did not exist a moment ago, so it takes the UVs of
+            // the boundary corners it grows from and hands its shading back to
+            // export's smooth-fan rule.
+            let corners: Vec<CornerData> = quad
+                .iter()
+                .map(|&v| derived_corner(boundary_uv(m, v).unwrap_or([0.0, 0.0])))
+                .collect();
+            made.push(m.add_face_raw(quad, &corners, None)?);
+            touched.extend(quad.iter().copied());
+        }
+        m.finish_patch(&touched)?;
+        Ok(OpOutcome {
+            faces: made,
+            ..Default::default()
+        })
+    })
+}
+
+/// Any face-corner UV at `v`, lowest half-edge id first so the choice is a pure
+/// function of the mesh rather than of iteration order.
+fn boundary_uv(mesh: &Mesh, v: VertId) -> Option<[f64; 2]> {
+    let out = mesh.vert_outgoing(v)?;
+    let mut best: Option<(HalfId, [f64; 2])> = None;
+    for &h in out {
+        if mesh.is_boundary(h) == Some(true) {
+            continue;
+        }
+        let uv = mesh.corner_uv(h)?;
+        if best.is_none_or(|(id, _)| h < id) {
+            best = Some((h, uv));
+        }
+    }
+    best.map(|(_, uv)| uv)
+}
+
+// ── flip ───────────────────────────────────────────────────────────────────
+
+/// Reverse the winding of every named face.
+///
+/// **Every named face is removed before any is re-added**, and that is the whole
+/// design rather than an implementation detail. Winding *is* topology here — a
+/// directed edge carries at most one face — so flipping one face of a closed
+/// shell while its neighbours stand would ask two faces to use `a→b`. Removing
+/// the whole set first means "flip everything" and "flip this connected patch"
+/// both work, and "flip one face out of a shell" refuses with
+/// [`OpError::EdgeAlreadyFaced`] naming the edge that would be used twice —
+/// which is the honest answer to an author who asked for an impossible surface,
+/// not a special case.
+///
+/// Authored corner normals are **negated**, because an authored normal describes
+/// the side the surface faces and that side has just changed. A corner with no
+/// authored normal keeps `None` and is re-derived by export's smooth-fan rule
+/// against the new winding.
+pub(crate) fn flip_faces(mesh: &mut Mesh, faces: &[FaceId]) -> Result<OpOutcome, OpError> {
+    if faces.is_empty() {
+        return Err(OpError::EmptyOperand { what: "a face set" });
+    }
+    let mut ids: Vec<FaceId> = faces.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    for &f in &ids {
+        if !mesh.has_face(f) {
+            return Err(OpError::NoSuchFace(f));
+        }
+    }
+    mesh.transact(|m| {
+        let captured: Vec<Captured> = ids.iter().map(|&f| capture(m, f)).collect();
+        let flags = m.capture_edge_flags(&ids);
+        let mut touched: BTreeSet<VertId> = BTreeSet::new();
+        for c in &captured {
+            touched.extend(c.verts.iter().copied());
+        }
+        for &f in &ids {
+            m.remove_face_raw(f);
+        }
+        let mut made = Vec::with_capacity(captured.len());
+        for c in &captured {
+            let n = c.verts.len();
+            // Reversing the loop puts the corner that belonged to `v` back on
+            // `v`: in `[v0, v1, v2]` corner `i` is the one at `v_i`, and the
+            // reversed loop `[v2, v1, v0]` wants `[k2, k1, k0]`.
+            let verts: Vec<VertId> = c.verts.iter().rev().copied().collect();
+            let corners: Vec<CornerData> = c
+                .corners
+                .iter()
+                .rev()
+                .map(|k| {
+                    let mut k = *k;
+                    if let Some(nrm) = k.normal.as_mut() {
+                        for x in nrm.iter_mut() {
+                            *x = -*x;
+                        }
+                    }
+                    k
+                })
+                .collect();
+            debug_assert_eq!(verts.len(), n);
+            made.push(m.add_face_raw(&verts, &corners, c.slot)?);
+        }
+        m.apply_edge_flags(&flags);
+        m.finish_patch(&touched)?;
+        Ok(OpOutcome {
+            faces: made,
+            ..Default::default()
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2083,6 +2496,7 @@ mod tests {
             Op::BevelEdges {
                 edges: vec![h],
                 amount: 0.25,
+                segments: 1,
             },
         );
         assert_eq!(
@@ -2121,6 +2535,7 @@ mod tests {
             Op::BevelEdges {
                 edges: vec![h],
                 amount: 0.1,
+                segments: 1,
             },
         );
         assert_eq!(validate(&m), Ok(()));
@@ -2166,6 +2581,7 @@ mod tests {
             Op::BevelEdges {
                 edges: vec![e0, disjoint],
                 amount: 0.2,
+                segments: 1,
             },
         );
         let (asset, report) = crate::to_mesh_asset(&m, &crate::ExportOptions::default());
@@ -2198,6 +2614,7 @@ mod tests {
             Op::BevelEdges {
                 edges: vec![e0, sharing],
                 amount: 0.2,
+                segments: 1,
             },
         );
         assert!(
@@ -2221,6 +2638,7 @@ mod tests {
             Op::BevelEdges {
                 edges: all,
                 amount: 0.2,
+                segments: 1,
             },
         );
         assert!(
@@ -2252,6 +2670,7 @@ mod tests {
             Op::BevelEdges {
                 edges: rim,
                 amount: 0.2,
+                segments: 1,
             },
         );
         assert!(
@@ -2274,6 +2693,7 @@ mod tests {
             Op::BevelEdges {
                 edges: vec![h],
                 amount: 2.0,
+                segments: 1,
             },
         );
         // It is caught by *something* — either the inversion guard (the chamfer
@@ -2304,7 +2724,8 @@ mod tests {
                 &mut m,
                 Op::BevelEdges {
                     edges: vec![b],
-                    amount: 0.1
+                    amount: 0.1,
+                    segments: 1,
                 }
             ),
             OpError::BevelBoundaryEdge(b)
@@ -2316,7 +2737,8 @@ mod tests {
                 &mut c,
                 Op::BevelEdges {
                     edges: vec![h],
-                    amount: 0.0
+                    amount: 0.0,
+                    segments: 1,
                 }
             ),
             OpError::AmountNotPositive {
@@ -2887,6 +3309,7 @@ mod tests {
             Op::BevelEdges {
                 edges: vec![h],
                 amount: 0.2,
+                segments: 1,
             },
         );
         assert!(
@@ -2901,6 +3324,7 @@ mod tests {
             Op::BevelEdges {
                 edges: vec![h],
                 amount: 2.83,
+                segments: 1,
             },
         );
         assert!(
@@ -2995,6 +3419,7 @@ mod tests {
                 &Op::BevelEdges {
                     edges: vec![h],
                     amount: 0.05,
+                    segments: 1,
                 },
             );
             let some: Vec<FaceId> = m.face_ids().take(3).collect();
@@ -3002,5 +3427,364 @@ mod tests {
             m
         };
         assert_eq!(script(cube(2.0)).encoded(), script(cube(2.0)).encoded());
+    }
+
+    // ── Wave D: bevel segments ─────────────────────────────────────────────
+
+    /// One beveled cube edge at `segments = n` must make `n` strips, `n + 1`
+    /// vertices at each endpoint, and put every one of them **exactly** `amount`
+    /// from the endpoint it came from — the arc property, which is what
+    /// `bevel_profile`'s normalized lerp buys and a plain lerp would not.
+    #[test]
+    fn a_multi_segment_bevel_rounds_at_a_constant_radius() {
+        for segments in [1u32, 2, 3, 7] {
+            let mut m = cube(2.0);
+            let h = m.half_ids().next().expect("an edge");
+            let a = pos(&m, m.origin(h).expect("live"));
+            let b = pos(&m, m.twin(h).and_then(|t| m.origin(t)).expect("live"));
+            let out = ok(
+                &mut m,
+                Op::BevelEdges {
+                    edges: vec![h],
+                    amount: 0.25,
+                    segments,
+                },
+            );
+            let n = segments as usize;
+            assert_eq!(out.faces.len(), n, "one strip per segment at n={segments}");
+            assert_eq!(
+                out.verts.len(),
+                2 * (n + 1),
+                "a ring at each endpoint at n={segments}"
+            );
+            for (i, &v) in out.verts.iter().enumerate() {
+                // The outcome is interleaved `va[0], vb[0], va[1], vb[1], …`.
+                let from = if i % 2 == 0 { a } else { b };
+                let r = (pos(&m, v) - from).length();
+                assert!(
+                    (r - 0.25).abs() < 1e-12,
+                    "n={segments} ring vertex {i} sits at {r}, not 0.25 — the \
+                     profile is not on the arc"
+                );
+            }
+            // A convex chamfer removes material: more segments removes less,
+            // because the profile bulges out toward the original corner.
+            assert!(six_volume(&m) < six_volume(&cube(2.0)));
+        }
+    }
+
+    /// The compatibility claim, as a mesh rather than as a comment: a
+    /// single-segment bevel makes exactly the four vertices, one strip and two
+    /// triangular caps P23.4 shipped, in that id order.
+    #[test]
+    fn one_segment_is_the_construction_p23_shipped() {
+        let mut m = cube(2.0);
+        let before = (m.vert_count(), m.face_count());
+        let h = m.half_ids().next().expect("an edge");
+        let out = ok(
+            &mut m,
+            Op::BevelEdges {
+                edges: vec![h],
+                amount: 0.25,
+                segments: 1,
+            },
+        );
+        assert_eq!(out.verts.len(), 4);
+        assert_eq!(out.faces.len(), 1, "one strip");
+        // +4 vertices; the two beveled faces are rebuilt and three faces are new
+        // (strip + two caps).
+        assert_eq!(m.vert_count(), before.0 + 4);
+        assert_eq!(m.face_count(), before.1 + 3);
+        for &f in &out.faces {
+            assert_eq!(m.face_verts(f).expect("live face").len(), 4);
+        }
+    }
+
+    #[test]
+    fn a_segment_count_outside_the_range_is_refused_inertly() {
+        let mut m = cube(2.0);
+        let h = m.half_ids().next().expect("an edge");
+        for bad in [0u32, MAX_BEVEL_SEGMENTS + 1] {
+            let err = refuses(
+                &mut m,
+                Op::BevelEdges {
+                    edges: vec![h],
+                    amount: 0.25,
+                    segments: bad,
+                },
+            );
+            assert!(
+                matches!(err, OpError::CountOutOfRange { value, .. } if value == bad),
+                "{err:?}"
+            );
+        }
+    }
+
+    // ── Wave D: dissolve ───────────────────────────────────────────────────
+
+    #[test]
+    fn dissolving_a_cube_edge_merges_two_quads_into_a_hexagon() {
+        let mut m = cube(2.0);
+        let v0 = six_volume(&m);
+        let (v, e, f) = (m.vert_count(), m.edge_count(), m.face_count());
+        let h = m.half_ids().next().expect("an edge");
+        let out = ok(&mut m, Op::DissolveEdges { edges: vec![h] });
+        assert_eq!(out.faces.len(), 1);
+        assert_eq!(
+            m.face_verts(out.faces[0]).expect("live face").len(),
+            6,
+            "quad + quad − the shared edge = a hexagon"
+        );
+        assert_eq!(m.vert_count(), v, "dissolve keeps every vertex");
+        assert_eq!(m.edge_count(), e - 1);
+        assert_eq!(m.face_count(), f - 1);
+        assert_eq!(euler(&m), 2, "still a sphere");
+        // The shape does not move — that is the whole point of dissolve-not-collapse.
+        assert!((six_volume(&m) - v0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn dissolving_a_boundary_edge_is_refused_inertly() {
+        let mut m = plane(2.0);
+        let h = m
+            .half_ids()
+            .find(|&h| m.is_boundary(h) == Some(true))
+            .expect("a boundary half-edge");
+        let err = refuses(&mut m, Op::DissolveEdges { edges: vec![h] });
+        assert!(matches!(err, OpError::DissolveBoundaryEdge(_)), "{err:?}");
+    }
+
+    /// The pinch case, and it is not hypothetical: a cylinder cap and its
+    /// neighbour share exactly one edge, but two faces of a **two-quad**
+    /// cylinder share two — dissolving one leaves the other pinching the merge
+    /// into a figure of eight.
+    #[test]
+    fn a_dissolve_that_would_pinch_is_refused_by_name() {
+        // A degenerate tube: two quads sharing two edges.
+        let mut m = Mesh::new();
+        let a = m.alloc_vert([0.0, 0.0, 0.0]);
+        let b = m.alloc_vert([1.0, 0.0, 0.0]);
+        let c = m.alloc_vert([1.0, 1.0, 0.0]);
+        let d = m.alloc_vert([0.0, 1.0, 0.0]);
+        let k = [CornerData::default(); 4];
+        ok(
+            &mut m,
+            Op::AddFace {
+                verts: vec![a, b, c, d],
+                corners: k.to_vec(),
+                slot: None,
+            },
+        );
+        ok(
+            &mut m,
+            Op::AddFace {
+                verts: vec![d, c, b, a],
+                corners: k.to_vec(),
+                slot: None,
+            },
+        );
+        let h = m.find_half(a, b).expect("the shared edge");
+        let err = refuses(&mut m, Op::DissolveEdges { edges: vec![h] });
+        assert!(matches!(err, OpError::DissolveWouldPinch { .. }), "{err:?}");
+    }
+
+    // ── Wave D: flip ───────────────────────────────────────────────────────
+
+    #[test]
+    fn flipping_every_face_turns_the_solid_inside_out_and_keeps_it_valid() {
+        let mut m = cube(2.0);
+        let v0 = six_volume(&m);
+        assert!(v0 > 0.0, "a cube is wound outward");
+        let all: Vec<FaceId> = m.face_ids().collect();
+        let out = ok(&mut m, Op::FlipFaces { faces: all.clone() });
+        assert_eq!(out.faces.len(), all.len());
+        assert!(
+            (six_volume(&m) + v0).abs() < 1e-9,
+            "the sign flipped exactly"
+        );
+        assert_eq!(euler(&m), 2);
+        // …and flipping back is the identity on the canonical form.
+        let all: Vec<FaceId> = m.face_ids().collect();
+        ok(&mut m, Op::FlipFaces { faces: all });
+        assert!((six_volume(&m) - v0).abs() < 1e-9);
+    }
+
+    /// Flipping ONE face of a closed shell asks two faces to use the same
+    /// directed edge. The refusal is the honest answer and it must be inert.
+    #[test]
+    fn flipping_one_face_of_a_closed_shell_is_refused_inertly() {
+        let mut m = cube(2.0);
+        let f = m.face_ids().next().expect("a face");
+        let err = refuses(&mut m, Op::FlipFaces { faces: vec![f] });
+        assert!(matches!(err, OpError::EdgeAlreadyFaced { .. }), "{err:?}");
+    }
+
+    /// An OPEN mesh has no neighbour on its far side, so one face may flip.
+    #[test]
+    fn flipping_the_only_face_of_a_plane_reverses_its_normal() {
+        let mut m = plane(2.0);
+        let f = m.face_ids().next().expect("a face");
+        let n0 = newell(&m, f);
+        let out = ok(&mut m, Op::FlipFaces { faces: vec![f] });
+        let n1 = newell(&m, out.faces[0]);
+        assert!(n1.dot(n0) < 0.0, "the normal did not reverse");
+    }
+
+    // ── Wave D: bridge ─────────────────────────────────────────────────────
+
+    /// Two open squares facing each other bridge into a closed box.
+    #[test]
+    fn bridging_two_open_squares_closes_a_box() {
+        let mut m = Mesh::new();
+        let k = [CornerData::default(); 4];
+        // Bottom, wound +Y; top, wound −Y. Their boundary loops therefore run
+        // opposite ways, which is what makes the pairing below close the tube.
+        let lo: Vec<VertId> = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+        ]
+        .iter()
+        .map(|p| m.alloc_vert(*p))
+        .collect();
+        let hi: Vec<VertId> = [
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ]
+        .iter()
+        .map(|p| m.alloc_vert(*p))
+        .collect();
+        ok(
+            &mut m,
+            Op::AddFace {
+                verts: lo.clone(),
+                corners: k.to_vec(),
+                slot: None,
+            },
+        );
+        ok(
+            &mut m,
+            Op::AddFace {
+                verts: hi.iter().rev().copied().collect(),
+                corners: k.to_vec(),
+                slot: None,
+            },
+        );
+        // The boundary half of `lo[i] → lo[i+1]`'s edge is the twin of the face
+        // half; ditto on top, where the face runs the other way.
+        let mut pairs = Vec::new();
+        for i in 0..4 {
+            let p = m
+                .find_half(lo[(i + 1) % 4], lo[i])
+                .expect("the bottom boundary");
+            let q = m
+                .find_half(hi[i], hi[(i + 1) % 4])
+                .expect("the top boundary");
+            assert_eq!(m.is_boundary(p), Some(true));
+            assert_eq!(m.is_boundary(q), Some(true));
+            pairs.push((p, q));
+        }
+        let out = ok(&mut m, Op::BridgeLoops { pairs });
+        assert_eq!(out.faces.len(), 4, "four walls");
+        assert_eq!(m.face_count(), 6, "a closed box");
+        assert_eq!(euler(&m), 2, "a sphere");
+        assert!(
+            six_volume(&m).abs() > 5.0,
+            "the box has volume, so the walls closed it"
+        );
+        for h in m.half_ids() {
+            assert_eq!(m.is_boundary(h), Some(false), "no border left");
+        }
+    }
+
+    #[test]
+    fn bridging_a_half_edge_that_already_has_a_face_is_refused_inertly() {
+        let mut m = cube(2.0);
+        let h = m.half_ids().next().expect("an edge");
+        let t = m.twin(h).expect("live");
+        let err = refuses(
+            &mut m,
+            Op::BridgeLoops {
+                pairs: vec![(h, t)],
+            },
+        );
+        assert!(matches!(err, OpError::BridgeNotBoundary(_)), "{err:?}");
+    }
+
+    // ── Wave D: the per-vertex move and the batch sharpness write ──────────
+
+    #[test]
+    fn a_per_vertex_move_moves_each_vertex_by_its_own_delta() {
+        let mut m = cube(2.0);
+        let ids: Vec<VertId> = m.vert_ids().take(3).collect();
+        let before: Vec<DVec3> = ids.iter().map(|&v| pos(&m, v)).collect();
+        ok(
+            &mut m,
+            Op::MoveVerts {
+                moves: vec![
+                    (ids[0], [1.0, 0.0, 0.0]),
+                    (ids[1], [0.0, 2.0, 0.0]),
+                    (ids[2], [0.0, 0.0, 3.0]),
+                ],
+            },
+        );
+        assert_eq!(pos(&m, ids[0]) - before[0], DVec3::new(1.0, 0.0, 0.0));
+        assert_eq!(pos(&m, ids[1]) - before[1], DVec3::new(0.0, 2.0, 0.0));
+        assert_eq!(pos(&m, ids[2]) - before[2], DVec3::new(0.0, 0.0, 3.0));
+    }
+
+    #[test]
+    fn naming_a_vertex_twice_in_a_move_is_refused_rather_than_summed() {
+        let mut m = cube(2.0);
+        let v = m.vert_ids().next().expect("a vertex");
+        let err = refuses(
+            &mut m,
+            Op::MoveVerts {
+                moves: vec![(v, [1.0, 0.0, 0.0]), (v, [1.0, 0.0, 0.0])],
+            },
+        );
+        assert!(matches!(err, OpError::SameVertex(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_batch_sharpness_write_is_the_single_one_n_times_over() {
+        let mut m = cube(2.0);
+        let halfs: Vec<HalfId> = m.half_ids().collect();
+        ok(
+            &mut m,
+            Op::SetEdgesSharp {
+                halfs: halfs.clone(),
+                sharp: true,
+            },
+        );
+        assert!(m.half_ids().all(|h| m.is_sharp(h) == Some(true)));
+        ok(
+            &mut m,
+            Op::SetEdgesSharp {
+                halfs,
+                sharp: false,
+            },
+        );
+        assert!(m.half_ids().all(|h| m.is_sharp(h) == Some(false)));
+    }
+
+    /// One dead id anywhere in a batch refuses the WHOLE batch, inertly — the
+    /// alternative (write the live ones, report the dead) is a half-applied op,
+    /// which this crate's first rule forbids.
+    #[test]
+    fn a_batch_with_one_dead_id_writes_nothing() {
+        let mut m = cube(2.0);
+        let live = m.half_ids().next().expect("an edge");
+        let err = refuses(
+            &mut m,
+            Op::SetEdgesSharp {
+                halfs: vec![live, HalfId(9999)],
+                sharp: true,
+            },
+        );
+        assert!(matches!(err, OpError::NoSuchHalf(_)), "{err:?}");
     }
 }

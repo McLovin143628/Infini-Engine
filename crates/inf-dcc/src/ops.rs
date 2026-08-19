@@ -190,6 +190,30 @@ pub enum OpError {
     /// Two consecutive knife waypoints are not corners of any one face.
     #[error("vertices {from} and {to} share no face, so the knife cannot cut between them")]
     KnifeNoCommonFace { from: VertId, to: VertId },
+    // ── the Wave-D modelling ops ───────────────────────────────────────────
+    /// A dissolve aimed at an edge with only one face beside it. There is
+    /// nothing to merge it with, and deleting it instead would be a different
+    /// tool with a different undo story.
+    #[error("edge {0} is on a boundary; a dissolve needs a face on both sides")]
+    DissolveBoundaryEdge(HalfId),
+    /// A dissolve aimed at an edge whose two half-edges belong to the **same**
+    /// face — a slit reaching into a face's interior. Merging a face with itself
+    /// is not a face.
+    #[error("both sides of that edge belong to face {0}, so there is nothing to merge it with")]
+    DissolveSameFace(FaceId),
+    /// The merged loop would visit one vertex twice.
+    ///
+    /// What two faces sharing **more than one** edge produce: dissolving one of
+    /// the shared edges leaves the other pinching the result into a figure of
+    /// eight. `add_face_raw` refuses it as [`OpError::RepeatedVertex`] anyway;
+    /// this fires first so the message names the edge the author clicked and the
+    /// vertex that pinches, rather than an id from inside a rebuild.
+    #[error("dissolving edge {edge} would make a face that visits vertex {vert} twice (the two faces share more than one edge)")]
+    DissolveWouldPinch { edge: HalfId, vert: VertId },
+    /// A bridge was pointed at a half-edge that already carries a face. A bridge
+    /// fills the empty side of a border; it never replaces a surface.
+    #[error("half-edge {0} already carries a face, so a bridge has nothing to fill there")]
+    BridgeNotBoundary(HalfId),
     /// An offset large enough to fold a rebuilt face through itself.
     ///
     /// `validate` is a **topology** auditor and is blind to winding, so an
@@ -379,8 +403,24 @@ pub enum Op {
         amount: f64,
         individual: bool,
     },
-    /// Chamfer interior edges — one segment (see [`crate::model`]).
-    BevelEdges { edges: Vec<HalfId>, amount: f64 },
+    /// Chamfer interior edges (see [`crate::model`]).
+    ///
+    /// `segments` is the **only field this crate has ever added to an existing
+    /// variant**, and it is why [`crate::SessionSave::CURRENT_VERSION`] moved to
+    /// 4. bincode is positional: a v3 save decodes `[16, len, edges…, f64]` and
+    /// a v4 one decodes a `u32` after it, so a v3 `BevelEdges` read as v4 runs
+    /// off the end of the stream and a v4 read as v3 leaves four bytes of
+    /// trailing garbage. The discriminant did **not** move — 16 is still 16 —
+    /// which is exactly the distinction the version guards and the
+    /// frozen-discriminant match does not.
+    ///
+    /// `segments = 1` reproduces the P23.4 chamfer bit for bit (see
+    /// [`crate::model`]); the range is `1..=`[`crate::model::MAX_BEVEL_SEGMENTS`].
+    BevelEdges {
+        edges: Vec<HalfId>,
+        amount: f64,
+        segments: u32,
+    },
     /// Cut `cuts` parallel loops across the quad strip through `half`.
     LoopCut { half: HalfId, cuts: u32 },
     /// Cut across faces along a path of vertices and points on edges, atomically.
@@ -553,6 +593,58 @@ pub enum Op {
         /// index is not one.
         names: Vec<String>,
     },
+
+    // ── the Wave-D ops — appended at 31..=35 ───────────────────────────────
+    //
+    // Sixth batch, same discipline: `frozen_discriminant` has no wildcard, so
+    // each of these stopped the crate compiling until it was given the next free
+    // index by hand, and `Op::CollapseEdge { half: 7 }` still encodes `[5, 7]`.
+    // `SessionSave::CURRENT_VERSION` DID move in this batch — not for these five,
+    // but because `BevelEdges` grew a `segments` field and a variant's field list
+    // is part of the struct's shape. That distinction is exactly what this match
+    // and that constant are for, and keeping it legible is why it is written down
+    // twice.
+    /// **Move vertices by a delta each**, in metres.
+    ///
+    /// [`Op::TranslateVerts`] moves a set by ONE delta; this moves each vertex by
+    /// its own. Three tools need it and none of them could be one journal entry
+    /// without it:
+    ///
+    /// * **soft (proportional) transforms** — the falloff gives every vertex a
+    ///   different weighted delta, so P23.5 emitted up to 64 `TranslateVerts` per
+    ///   drag and cost the author 64 undo presses. This is the "weight-table op"
+    ///   the P23 ledger named and did not build, in its general form.
+    /// * **edge and vertex slide** — a constrained move along each vertex's own
+    ///   loop direction.
+    /// * **symmetry** — the mirrored partner of a moved vertex moves by the
+    ///   reflected delta, which is a different delta.
+    ///
+    /// `moves` is `(vertex, delta)`, and every caller in this workspace writes it
+    /// **sorted by vertex id** so two runs of one gesture produce one byte
+    /// string. The *result* does not depend on the order — a vertex named twice
+    /// is refused ([`OpError::SameVertex`]) rather than summed, so the moves are
+    /// independent by construction — which is why this is a convention the
+    /// callers keep rather than a precondition the op enforces. (Summing would be
+    /// the alternative, and it turns a caller bug into a plausible result.)
+    MoveVerts { moves: Vec<(VertId, [f64; 3])> },
+    /// Mark or clear sharpness on **many** undirected edges at once.
+    ///
+    /// The batch form of [`Op::SetEdgeSharp`], and the op behind shade-smooth,
+    /// shade-flat and auto-smooth-by-angle. Those are one gesture and must be one
+    /// undo step; the angle threshold is resolved to an edge list by the caller
+    /// and the **result** is what lands here, on the [`Op::Unwrap`] precedent —
+    /// an op that re-derived "which edges are over 30°" would change meaning the
+    /// day the dihedral measurement changed.
+    SetEdgesSharp { halfs: Vec<HalfId>, sharp: bool },
+    /// **Reverse the winding** of faces — flip or recalculate normals.
+    FlipFaces { faces: Vec<FaceId> },
+    /// **Dissolve edges**: merge the two faces across each into one n-gon,
+    /// keeping every vertex.
+    DissolveEdges { edges: Vec<HalfId> },
+    /// **Bridge two open borders**: one quad per paired boundary half-edge.
+    ///
+    /// The pairing is carried, not solved — see [`crate::model::bridge_loops`].
+    BridgeLoops { pairs: Vec<(HalfId, HalfId)> },
 }
 
 /// Apply one op. See the module docs for the three rules this upholds.
@@ -707,7 +799,11 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
             amount,
             individual,
         } => model::inset_faces(mesh, faces, *amount, *individual),
-        Op::BevelEdges { edges, amount } => model::bevel_edges(mesh, edges, *amount),
+        Op::BevelEdges {
+            edges,
+            amount,
+            segments,
+        } => model::bevel_edges(mesh, edges, *amount, *segments),
         Op::LoopCut { half, cuts } => model::loop_cut(mesh, *half, *cuts),
         Op::Knife { path } => model::knife(mesh, path),
         Op::MergeVerts { verts, target } => model::merge_verts(mesh, verts, *target),
@@ -858,6 +954,67 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
             }
             Ok(OpOutcome::default())
         }
+
+        // ── the Wave-D ops ─────────────────────────────────────────────────
+        Op::MoveVerts { moves } => {
+            if moves.is_empty() {
+                return Err(OpError::EmptyOperand {
+                    what: "a vertex move list",
+                });
+            }
+            // Every id and every value is checked before the first write, so the
+            // refusal is inert without a transaction — `Op::TranslateVerts`'s
+            // shape, for the same reason and with one addition: a vertex named
+            // twice is a caller bug, and summing the two deltas would produce a
+            // plausible result that hides it.
+            let mut seen: BTreeSet<VertId> = BTreeSet::new();
+            for (v, d) in moves {
+                if !mesh.has_vert(*v) {
+                    return Err(OpError::NoSuchVert(*v));
+                }
+                if !seen.insert(*v) {
+                    return Err(OpError::SameVertex(*v));
+                }
+                finite("a vertex move delta", d)?;
+            }
+            // The RESULT, not just the operand: two finite values can add to an
+            // infinity. Computed for every vertex before the first write.
+            let moved: Vec<[f64; 3]> = moves
+                .iter()
+                .map(|(v, d)| {
+                    let p = mesh.vert_ref(*v).position;
+                    [p[0] + d[0], p[1] + d[1], p[2] + d[2]]
+                })
+                .collect();
+            for p in &moved {
+                finite("a moved vertex position", p)?;
+            }
+            for ((v, _), p) in moves.iter().zip(moved) {
+                mesh.vert_mut(*v).position = p;
+            }
+            Ok(OpOutcome::default())
+        }
+
+        Op::SetEdgesSharp { halfs, sharp } => {
+            if halfs.is_empty() {
+                return Err(OpError::EmptyOperand {
+                    what: "an edge set",
+                });
+            }
+            for h in halfs {
+                if !mesh.has_half(*h) {
+                    return Err(OpError::NoSuchHalf(*h));
+                }
+            }
+            for h in halfs {
+                mesh.set_sharp_pair(*h, *sharp);
+            }
+            Ok(OpOutcome::default())
+        }
+
+        Op::FlipFaces { faces } => model::flip_faces(mesh, faces),
+        Op::DissolveEdges { edges } => model::dissolve_edges(mesh, edges),
+        Op::BridgeLoops { pairs } => model::bridge_loops(mesh, pairs),
     }
 }
 

@@ -1046,6 +1046,17 @@ export const dcc = {
  */
 export const DCC_PREVIEW_SIZE = 256;
 
+/**
+ * The most profile segments one bevel may cut — mirrors
+ * `inf_dcc::MAX_BEVEL_SEGMENTS`.
+ *
+ * A **mirror**, not a source of truth: the kernel refuses anything outside
+ * `1..=16` as a typed value, so a frontend that drifted past it would get a
+ * refusal with a message rather than a bad mesh. The number is here so the
+ * spinner stops where the tool stops instead of collecting a refusal per press.
+ */
+export const MAX_BEVEL_SEGMENTS = 16;
+
 export const material = {
   registry: (): Promise<NodeDef[]> => invoke<NodeDef[]>("material_registry"),
   list: (): Promise<BpDoc[]> => invoke<BpDoc[]>("material_list"),

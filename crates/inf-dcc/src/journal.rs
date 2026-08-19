@@ -113,6 +113,16 @@ impl SessionSave {
     ///   variants (27/28/29) did **not** need this bump; they are appended, and
     ///   `op_discriminants_are_frozen` is what says so in bytes.
     ///
+    /// * **v4** (Wave D): [`Op::BevelEdges`] grew a `segments: u32` field — the
+    ///   first and only time this crate has changed an **existing** variant's
+    ///   shape. bincode is positional, so a v3 `BevelEdges` read as v4 runs off
+    ///   the end of the stream at the next op and a v4 read as v3 leaves four
+    ///   bytes of garbage where the next discriminant should be. The
+    ///   *discriminant* did not move (16 is still 16), which is why the
+    ///   frozen-discriminant match is silent about this and the version is not:
+    ///   the two gates see different halves of the wire and both are needed.
+    ///   Wave D's five appended variants (31..=35) did **not** need this bump.
+    ///
     /// **No migration, and that is still the honest answer**: `MeshSession` has
     /// only ever lived in `DccState` for the life of a process, so **zero v1 or
     /// v2 sessions exist** on any disk. Writing a migration would be writing a
@@ -126,7 +136,7 @@ impl SessionSave {
     /// Bump on any change to this struct's shape, to `Mesh`'s, or to the `Op`
     /// discriminants — the last of which is pinned separately, because a
     /// mis-numbered variant produces a structurally valid save of the wrong edit.
-    pub const CURRENT_VERSION: u32 = 3;
+    pub const CURRENT_VERSION: u32 = 4;
 
     /// What to do about a session this build is too new to read.
     ///
@@ -367,6 +377,90 @@ impl MeshSession {
         evict_checkpoints(&mut self.checkpoints, self.cursor);
     }
 
+    /// **Re-parameterize an op that is already in the past**, and re-derive
+    /// everything after it.
+    ///
+    /// The wave's signature capability and the journal finally earning its
+    /// shape: `ops[index] = op`, then replay. See [the `amend` module](mod@crate::amend)
+    /// for the two gates this runs and why neither is trusted alone.
+    ///
+    /// **Every refusal is inert** — the session is byte-identical, the same law
+    /// the ops themselves obey. Nothing is written until the last check passes,
+    /// because everything is computed on clones.
+    ///
+    /// On success the cursor does not move: the author asked to change an edit,
+    /// not to travel to it. The generation stamp **does** move, because the mesh
+    /// changed and every cached id must be re-fetched (the id-reuse rule) — even
+    /// though this particular change is guaranteed not to have renumbered
+    /// anything, because that guarantee is exactly what
+    /// [`crate::amend::Topology`] just checked and a consumer has no way to know
+    /// that from the stamp.
+    pub fn amend(&mut self, index: usize, op: Op) -> Result<(), crate::amend::AmendError> {
+        use crate::amend::{amend_shape_ok, topology, AmendError};
+
+        if index >= self.cursor {
+            return Err(AmendError::OutOfRange {
+                index,
+                cursor: self.cursor,
+                ops: self.ops.len(),
+            });
+        }
+        amend_shape_ok(&self.ops[index], &op)?;
+
+        // The prefix is shared by both branches, so it is replayed once. It
+        // cannot refuse: it is the journal's own history, and `apply` only ever
+        // recorded ops that succeeded.
+        let prefix =
+            Self::replay(&self.base, &self.ops[..index]).expect("a journalled prefix replays");
+        let mut old = prefix.clone();
+        ops::apply(&mut old, &self.ops[index]).expect("a journalled op replays");
+        let mut new = prefix;
+        ops::apply(&mut new, &op).map_err(AmendError::Refused)?;
+        // **Only when there is something after it.** The topology check exists to
+        // protect the ops that name ids the amended one minted; the LAST op in a
+        // journal has none, so amending it is free even when it restructures.
+        // That is Blender's F9 redo panel as a special case of the general
+        // feature, rather than as a second mechanism.
+        if index + 1 < self.ops.len() && topology(&old) != topology(&new) {
+            return Err(AmendError::IdAllocationChanged { index: index + 1 });
+        }
+
+        // **The whole tail, including the redo half.** A redo the author has not
+        // pressed is still their work; leaving it un-replayed would mean an
+        // amendment could silently make a future redo apply to different
+        // geometry, which is the exact hazard this function exists to close.
+        let mut current: Option<Mesh> = None;
+        for (i, tail) in self.ops[index + 1..].iter().enumerate() {
+            let at = index + 1 + i;
+            if at == self.cursor {
+                current = Some(new.clone());
+            }
+            ops::apply(&mut old, tail).expect("a journalled op replays");
+            ops::apply(&mut new, tail)
+                .map_err(|source| AmendError::TailRefused { index: at, source })?;
+            // Compared at EVERY step, not only at the end: an intermediate
+            // divergence that happens to converge again would leave the ops in
+            // between having landed on the wrong polygons, and a final
+            // comparison cannot see that.
+            if topology(&old) != topology(&new) {
+                return Err(AmendError::IdAllocationChanged { index: at });
+            }
+        }
+        let current = current.unwrap_or_else(|| new.clone());
+        validate(&current).map_err(AmendError::InvalidResult)?;
+
+        // Nothing above wrote to `self`. Commit.
+        self.ops[index] = op;
+        self.current = current;
+        // Every snapshot at or after the amended op describes a mesh that no
+        // longer exists. The ones before it are still exactly right, which is
+        // why this is a `retain` and not a `clear`.
+        self.checkpoints.retain(|&k, _| k <= index);
+        self.generation = fresh_generation();
+        self.evict();
+        Ok(())
+    }
+
     /// Replay an op sequence onto a base mesh (`evict_checkpoints` carries the
     /// bound the two insertion points share). **The definition of the journal**:
     /// `replay(base, &session.ops()[..session.cursor()])` is byte-identical to
@@ -533,13 +627,145 @@ fn evict_checkpoints(checkpoints: &mut BTreeMap<usize, Mesh>, cursor: usize) {
     }
 }
 
+/// **One sample of every [`Op`] variant**, in wire order.
+///
+/// Shared by the frozen-discriminant test and by [`crate::amend`]'s classifier
+/// tests, because two lists of "every op" is one list that goes stale. It is
+/// also why the discriminant freeze and the amendability classifier cannot
+/// disagree about how many variants exist.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+    use crate::model::{MergeTarget, MirrorAxis};
+    use crate::sculpt::{SculptFalloff, SculptMode};
+    use crate::topo::{FaceId, HalfId, VertId};
+
+    pub(crate) fn one_of_every_op() -> Vec<Op> {
+        vec![
+            Op::AddVertex { position: [0.0; 3] },
+            Op::RemoveVertex { vert: VertId(0) },
+            Op::AddFace {
+                verts: vec![],
+                corners: vec![],
+                slot: None,
+            },
+            Op::RemoveFace { face: FaceId(0) },
+            Op::SplitEdge {
+                half: HalfId(0),
+                t: 0.5,
+            },
+            Op::CollapseEdge { half: HalfId(7) },
+            Op::SplitFace {
+                from: HalfId(0),
+                to: HalfId(1),
+            },
+            Op::WeldVerts {
+                keep: VertId(0),
+                merge: VertId(1),
+            },
+            Op::TranslateVerts {
+                verts: vec![],
+                delta: [0.0; 3],
+            },
+            Op::SetCornerUv {
+                half: HalfId(0),
+                uv: [0.0; 2],
+            },
+            Op::SetCornerNormal {
+                half: HalfId(0),
+                normal: None,
+            },
+            Op::SetEdgeSharp {
+                half: HalfId(0),
+                sharp: true,
+            },
+            Op::SetFaceSlot {
+                face: FaceId(0),
+                slot: None,
+            },
+            Op::ExtrudeFaces {
+                faces: vec![],
+                distance: 1.0,
+            },
+            Op::ExtrudeEdges {
+                edges: vec![],
+                delta: [0.0; 3],
+            },
+            Op::InsetFaces {
+                faces: vec![],
+                amount: 0.1,
+                individual: false,
+            },
+            Op::BevelEdges {
+                edges: vec![],
+                amount: 0.1,
+                segments: 1,
+            },
+            Op::LoopCut {
+                half: HalfId(0),
+                cuts: 1,
+            },
+            Op::Knife { path: vec![] },
+            Op::MergeVerts {
+                verts: vec![],
+                target: MergeTarget::Center,
+            },
+            Op::SubdivideFaces { faces: vec![] },
+            Op::Mirror {
+                axis: MirrorAxis::X,
+                coord: 0.0,
+            },
+            Op::Sculpt {
+                mode: SculptMode::Draw,
+                dabs: vec![],
+                radius: 1.0,
+                strength: 0.1,
+                falloff: SculptFalloff::Smooth,
+            },
+            Op::RotateVerts {
+                verts: vec![],
+                pivot: [0.0; 3],
+                axis: [0.0, 1.0, 0.0],
+                radians: 0.0,
+            },
+            Op::ScaleVerts {
+                verts: vec![],
+                pivot: [0.0; 3],
+                factor: [1.0; 3],
+            },
+            Op::SetEdgeSeam {
+                half: HalfId(0),
+                seam: true,
+            },
+            Op::Unwrap { corners: vec![] },
+            Op::BindSkin {
+                skeleton: None,
+                joints: 1,
+            },
+            Op::AssignWeights { weights: vec![] },
+            Op::ClearSkin,
+            Op::AddMaterialSlots {
+                names: vec!["Default".into()],
+            },
+            Op::MoveVerts { moves: vec![] },
+            Op::SetEdgesSharp {
+                halfs: vec![],
+                sharp: true,
+            },
+            Op::FlipFaces { faces: vec![] },
+            Op::DissolveEdges { edges: vec![] },
+            Op::BridgeLoops { pairs: vec![] },
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::build::{cube, plane};
     use crate::model::{KnifePoint, MergeTarget, MirrorAxis};
     use crate::sculpt::{SculptFalloff, SculptMode};
-    use crate::topo::{CornerData, FaceId, HalfId, VertId};
+    use crate::topo::{CornerData, HalfId, VertId};
     use crate::validate::validate;
 
     /// A deterministic, mildly adversarial edit script over a cube.
@@ -875,6 +1101,18 @@ mod tests {
             // `[5, 7]`, and `SessionSave::CURRENT_VERSION` does NOT move — `Mesh`
             // gained no field, only entries in a `Vec<String>` it already had.
             Op::AddMaterialSlots { .. } => 30,
+            // Wave D's FIVE, appended at the next free indices. Sixth batch,
+            // same rule: nothing above moved, `CollapseEdge{7}` is still
+            // `[5, 7]`. `SessionSave::CURRENT_VERSION` DID move in this batch,
+            // and **not for these** — `Op::BevelEdges` grew a `segments` field,
+            // which is a change to variant 16's shape while leaving its
+            // discriminant at 16. That is precisely the change this match cannot
+            // see, and precisely what the version exists to guard.
+            Op::MoveVerts { .. } => 31,
+            Op::SetEdgesSharp { .. } => 32,
+            Op::FlipFaces { .. } => 33,
+            Op::DissolveEdges { .. } => 34,
+            Op::BridgeLoops { .. } => 35,
         }
     }
 
@@ -958,119 +1196,22 @@ mod tests {
             | Op::ClearSkin
             // P24.3's carries a `Vec<String>` — strings, not a domain enum
             // anyone can renumber.
-            | Op::AddMaterialSlots { .. } => Vec::new(),
+            | Op::AddMaterialSlots { .. }
+            // Wave D's five carry ids, floats and a bool. No domain enum among
+            // them, and `Op::BevelEdges`'s new `segments` is a `u32` — which is
+            // why it is invisible here and visible to the version.
+            | Op::MoveVerts { .. }
+            | Op::SetEdgesSharp { .. }
+            | Op::FlipFaces { .. }
+            | Op::DissolveEdges { .. }
+            | Op::BridgeLoops { .. } => Vec::new(),
         }
     }
 
     #[test]
     fn op_discriminants_are_frozen() {
-        let every: Vec<Op> = vec![
-            Op::AddVertex { position: [0.0; 3] },
-            Op::RemoveVertex { vert: VertId(0) },
-            Op::AddFace {
-                verts: vec![],
-                corners: vec![],
-                slot: None,
-            },
-            Op::RemoveFace { face: FaceId(0) },
-            Op::SplitEdge {
-                half: HalfId(0),
-                t: 0.5,
-            },
-            Op::CollapseEdge { half: HalfId(7) },
-            Op::SplitFace {
-                from: HalfId(0),
-                to: HalfId(1),
-            },
-            Op::WeldVerts {
-                keep: VertId(0),
-                merge: VertId(1),
-            },
-            Op::TranslateVerts {
-                verts: vec![],
-                delta: [0.0; 3],
-            },
-            Op::SetCornerUv {
-                half: HalfId(0),
-                uv: [0.0; 2],
-            },
-            Op::SetCornerNormal {
-                half: HalfId(0),
-                normal: None,
-            },
-            Op::SetEdgeSharp {
-                half: HalfId(0),
-                sharp: true,
-            },
-            Op::SetFaceSlot {
-                face: FaceId(0),
-                slot: None,
-            },
-            Op::ExtrudeFaces {
-                faces: vec![],
-                distance: 1.0,
-            },
-            Op::ExtrudeEdges {
-                edges: vec![],
-                delta: [0.0; 3],
-            },
-            Op::InsetFaces {
-                faces: vec![],
-                amount: 0.1,
-                individual: false,
-            },
-            Op::BevelEdges {
-                edges: vec![],
-                amount: 0.1,
-            },
-            Op::LoopCut {
-                half: HalfId(0),
-                cuts: 1,
-            },
-            Op::Knife { path: vec![] },
-            Op::MergeVerts {
-                verts: vec![],
-                target: MergeTarget::Center,
-            },
-            Op::SubdivideFaces { faces: vec![] },
-            Op::Mirror {
-                axis: MirrorAxis::X,
-                coord: 0.0,
-            },
-            Op::Sculpt {
-                mode: SculptMode::Draw,
-                dabs: vec![],
-                radius: 1.0,
-                strength: 0.1,
-                falloff: SculptFalloff::Smooth,
-            },
-            Op::RotateVerts {
-                verts: vec![],
-                pivot: [0.0; 3],
-                axis: [0.0, 1.0, 0.0],
-                radians: 0.0,
-            },
-            Op::ScaleVerts {
-                verts: vec![],
-                pivot: [0.0; 3],
-                factor: [1.0; 3],
-            },
-            Op::SetEdgeSeam {
-                half: HalfId(0),
-                seam: true,
-            },
-            Op::Unwrap { corners: vec![] },
-            Op::BindSkin {
-                skeleton: None,
-                joints: 1,
-            },
-            Op::AssignWeights { weights: vec![] },
-            Op::ClearSkin,
-            Op::AddMaterialSlots {
-                names: vec!["Default".into()],
-            },
-        ];
-        assert_eq!(every.len(), 31, "one sample per variant");
+        let every: Vec<Op> = tests_support::one_of_every_op();
+        assert_eq!(every.len(), 36, "one sample per variant");
         let cfg = bincode::config::standard();
         for op in &every {
             let bytes = bincode::serde::encode_to_vec(op, cfg).unwrap();
@@ -1088,11 +1229,37 @@ mod tests {
             vec![5, 7],
         );
         // The op discriminants are append-only and every byte string above is
-        // unchanged. The version moved at P23.5 and again at P24.2, and neither
-        // time for them: `Mesh` grew a `seam` field and then a skin channel, and
-        // both change the shape of the `base` this struct carries. See
+        // unchanged. The version moved at P23.5, at P24.2 and again in Wave D,
+        // and none of the three times for the discriminants: `Mesh` grew a
+        // `seam` field, then a skin channel, and then `Op::BevelEdges` grew a
+        // `segments` field — the first two change the shape of the `base` this
+        // struct carries, the third changes the shape of a variant whose
+        // discriminant this match still pins at 16. See
         // `SessionSave::CURRENT_VERSION`.
-        assert_eq!(SessionSave::CURRENT_VERSION, 3);
+        assert_eq!(SessionSave::CURRENT_VERSION, 4);
+        // …and the shape change itself, as bytes. `[16, 1, 7, <8 f64 bytes>, 2]`
+        // is discriminant 16, one edge (`HalfId(7)`), the amount, and **then the
+        // segment count** — the four trailing bytes a v3 reader does not know are
+        // there. This is the assertion that fails if anyone ever "tidies"
+        // `segments` back out of the variant or moves it in front of `amount`.
+        {
+            let bytes = bincode::serde::encode_to_vec(
+                Op::BevelEdges {
+                    edges: vec![HalfId(7)],
+                    amount: 0.5,
+                    segments: 2,
+                },
+                cfg,
+            )
+            .unwrap();
+            assert_eq!(bytes[0], 16, "the bevel discriminant did not move");
+            assert_eq!(bytes[1..3], [1, 7], "one edge, HalfId(7)");
+            assert_eq!(
+                *bytes.last().expect("a non-empty encoding"),
+                2,
+                "the segment count is the LAST field on the wire"
+            );
+        }
         // `ClearSkin` is a UNIT variant, so its whole encoding is its
         // discriminant — one byte, and the last free index. Pinned as bytes
         // because a unit variant is the easiest kind to renumber by accident
@@ -1101,10 +1268,9 @@ mod tests {
             bincode::serde::encode_to_vec(Op::ClearSkin, cfg).unwrap(),
             vec![29]
         );
-        // P24.3's op is the new last free index, pinned as bytes for the same
-        // reason: `[30, 1, 1, 65]` is discriminant 30, one name, one byte long,
-        // `"A"`. `SessionSave::CURRENT_VERSION` is still 3 — asserted above —
-        // because appending an `Op` variant is not a shape change.
+        // P24.3's op, pinned as bytes for the same reason: `[30, 1, 1, 65]` is
+        // discriminant 30, one name, one byte long, `"A"`. Unchanged by Wave D's
+        // five appended variants — which is the append-only claim, in bytes.
         assert_eq!(
             bincode::serde::encode_to_vec(
                 Op::AddMaterialSlots {
@@ -1114,6 +1280,18 @@ mod tests {
             )
             .unwrap(),
             vec![30, 1, 1, 65]
+        );
+        // Wave D's last free index, pinned the same way: `[35, 1, 3, 4]` is
+        // discriminant 35, one pair, `HalfId(3)` and `HalfId(4)`.
+        assert_eq!(
+            bincode::serde::encode_to_vec(
+                Op::BridgeLoops {
+                    pairs: vec![(HalfId(3), HalfId(4))]
+                },
+                cfg
+            )
+            .unwrap(),
+            vec![35, 1, 3, 4]
         );
     }
 
@@ -1365,7 +1543,7 @@ mod tests {
         assert!(
             consumed < v4.len(),
             "an appended tail field left NO trailing bytes, so \
-             `a_v3_save_decodes_consuming_every_byte` could not see it either — \
+             `a_v4_save_decodes_consuming_every_byte` could not see it either — \
              the ladder has no forcing function at all"
         );
         assert_eq!(
@@ -1521,7 +1699,7 @@ mod tests {
     /// decoder consumed **every** byte is what turns a successful decode into a
     /// statement about the shape.
     #[test]
-    fn a_v3_save_decodes_consuming_every_byte() {
+    fn a_v4_save_decodes_consuming_every_byte() {
         let mut s = MeshSession::new(cube(1.0));
         s.apply(Op::BindSkin {
             skeleton: Some([3; 16]),
@@ -1540,7 +1718,7 @@ mod tests {
         let cfg = bincode::config::standard();
         let save = s.save();
         let bytes = bincode::serde::encode_to_vec(&save, cfg).unwrap();
-        assert_eq!(bytes[0], 3, "the version is the first byte");
+        assert_eq!(bytes[0], 4, "the version is the first byte");
         let (back, consumed): (SessionSave, usize) =
             bincode::serde::decode_from_slice(&bytes, cfg).unwrap();
         assert_eq!(

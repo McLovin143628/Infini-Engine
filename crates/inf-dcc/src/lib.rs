@@ -76,6 +76,7 @@
 //! the bitangent handedness sign (±1), the glTF convention `MeshVertex` already
 //! carries.
 
+pub mod amend;
 pub mod autofit;
 pub mod build;
 pub mod bvh;
@@ -93,6 +94,10 @@ pub mod uv;
 pub mod validate;
 pub mod xform;
 
+pub use amend::{
+    amend_shape_ok, op_amendable, op_kind, op_structure, topology, AmendError, Amendability,
+    OpStructure, Topology,
+};
 pub use autofit::{fit_template, FitError, FitOptions, FitReport};
 pub use build::{
     cube, cylinder, from_mesh_asset, plane, torus, ImportError, ImportReport, MeshImport,
@@ -102,7 +107,7 @@ pub use bvh::{Bvh, ClosestHit, RayHit, Tri};
 pub use export::{to_mesh_asset, ExportOptions, ExportReport, NormalPolicy, TANGENT_FALLBACK};
 pub use heat::{solve_heat_weights, BoneReport, HeatError, HeatReport};
 pub use journal::{MeshSession, SessionError, SessionSave, CHECKPOINT_INTERVAL, MAX_CHECKPOINTS};
-pub use model::{KnifePoint, MergeTarget, MirrorAxis, MAX_LOOP_CUTS};
+pub use model::{KnifePoint, MergeTarget, MirrorAxis, MAX_BEVEL_SEGMENTS, MAX_LOOP_CUTS};
 pub use ops::{Op, OpError, OpOutcome};
 pub use paint::{paint_weights, PaintMode};
 pub use sculpt::{
@@ -120,4 +125,4 @@ pub use uv::{
     CG_ITERATION_CAP,
 };
 pub use validate::{validate, Violation};
-pub use xform::MAX_ROTATION_RADIANS;
+pub use xform::{scale_point, Rotation, MAX_ROTATION_RADIANS};
