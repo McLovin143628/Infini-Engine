@@ -117,24 +117,12 @@ impl AssetState {
         inf_editor_core::assets::material_instance::material_binding_root(&proj, id, 0)
     }
 
-    /// Load a `.inf_act` blueprint **class** by its asset GUID (P9.5): decodes
-    /// the committed JSON payload. `None` if the asset is missing or not a
-    /// blueprint. Used by Simulate to resolve a scene's persisted `ActorClass`
-    /// bindings to runnable classes.
-    /// **A blueprint that is present but unreadable is logged, not silently
-    /// dropped** (C4-42).
+    /// `load_blueprint_class` with the REASON kept (Wave E).
     ///
-    /// The DB entry was already found, so a failure past that point is a real
-    /// one — a corrupt, locked or half-written `.inf_act` — and both consumers
-    /// (`bound_actors` in Simulate, and the PIE payload builder) read `None` as
-    /// **"no blueprint bound"**. The actor then runs with no gameplay logic at
-    /// all, and nothing anywhere says why.
-    /// [`Self::load_blueprint_class`] with the REASON kept (Wave E).
-    ///
-    /// The `Option` twin exists for Simulate and the PIE payload builder, where
-    /// "no blueprint bound" and "the file will not parse" both mean *run without
-    /// gameplay logic*. A user who asked to OPEN this blueprint needs the other
-    /// answer: which asset, and what is wrong with it.
+    /// The `Option` twin below exists for Simulate and the PIE payload builder,
+    /// where "no blueprint bound" and "the file will not parse" both mean *run
+    /// without gameplay logic*. A user who asked to OPEN this blueprint needs
+    /// the other answer: which asset, and what is wrong with it.
     pub fn load_blueprint_class_result(
         &self,
         id: AssetId,
@@ -152,6 +140,18 @@ impl AssetState {
         serde_json::from_slice(&bytes).map_err(|e| format!("{name} will not parse: {e}"))
     }
 
+    /// Load a `.inf_act` blueprint **class** by its asset GUID (P9.5): decodes
+    /// the committed JSON payload. `None` if the asset is missing or not a
+    /// blueprint. Used by Simulate to resolve a scene's persisted `ActorClass`
+    /// bindings to runnable classes.
+    /// **A blueprint that is present but unreadable is logged, not silently
+    /// dropped** (C4-42).
+    ///
+    /// The DB entry was already found, so a failure past that point is a real
+    /// one — a corrupt, locked or half-written `.inf_act` — and both consumers
+    /// (`bound_actors` in Simulate, and the PIE payload builder) read `None` as
+    /// **"no blueprint bound"**. The actor then runs with no gameplay logic at
+    /// all, and nothing anywhere says why.
     pub fn load_blueprint_class(&self, id: AssetId) -> Option<inf_blueprint::BlueprintClass> {
         let guard = self.inner.lock().ok()?;
         let inner = guard.as_ref()?;
