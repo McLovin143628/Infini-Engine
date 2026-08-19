@@ -22423,7 +22423,9 @@ are in the memo with their landing sites.
 Answers items 4–6 of the owner's campaign mandate: *make the embedded DCC obvious and
 reachable*, *right-click and multi-select in the game viewport*, and *the preferences menu
 is not reachable today*. Three batches, ordered so the only one touching `inf-viewport`
-ran last and alone. Commits `e748e19` (A), `6f34955` + `455fdab` (B), `1be8e58` (C).
+ran last and alone. Commits `984cd3a` (A), `7ae6089` + `c2fa058` (B), `063589c` + `b8e7d4c`
+(C), `07786db` + `5182194` (docs + clippy), then the audit block at the end of this section.
+(The first write-up cited the pre-rebase shas, which are not ancestors of `main`.)
 
 ### The finding that shaped the wave
 
@@ -22506,10 +22508,18 @@ The payload now carries the asset KIND (`asset:<kind>:<id>:<name>`), parsed in R
 the Linux leg exercises it, and only a `mesh` binds — binding a texture's GUID to a
 `MeshRef` would render a missing mesh instead of an honest cube. The arm walks the whole
 path in ONE test, because each half passes alone while the feature stays broken.
+*(Audit correction: as first written that arm reached neither real drop path — it called
+`SceneDoc::edit_create_mesh_asset` directly, so the mutation its own comment named
+("delete the `mesh_asset()` branch in `spawn_drop`") left it green, measured. Both doors
+now route through one `viewport_drop::spawn_asset_entity`, which the arm drives; see the
+audit block.)*
 
 `graph_open_actor` gives `inf_blueprint::raise_fn` **its first Ring-2 caller**. Every
 piece of "open the blueprint OF this actor" existed and none were joined. Doc id
-`bp:<asset>` — idempotent by asset, mirroring `dcc_open` — which also retires, for actor
+`bp:<asset>` — idempotent by asset, mirroring `dcc_open` *(audit correction: the ID was
+idempotent and the DOCUMENT was not — a re-open rebuilt it and reset its journal; it now
+hands back the live document when the handler is unchanged, as `dcc_open` does)* — which
+also retires, for actor
 graphs, the process-scoped `bp:{counter}` identity `blueprintStore` documents at length.
 `raise` only inverts lowering's IMAGE, so every handler is reported with
 `raisable`/`reason` and a class where nothing raises is a named `Err`, never a blank
@@ -22600,3 +22610,123 @@ overlay-guard lifetime and the whole routing resolver.
   Windows-only until the hardware pass.
 * Keybinding rebinding ships, but conflict *resolution* is a toast rather than a dialog,
   and the sculpt `[`/`]` listener is still outside the registry.
+
+### Wave E audit (2026-08-19) — nine defects, three corrected claims
+
+Adversarial pass over `2efdf03..5182194`. The rebase is clean: `ipc.rs` was the only
+overlap with the doc-ratchet hotfix and both sides survive at HEAD (the `validate_mixer`
+link fix *and* the `pub use EditorSettings` + the five new DTOs). Goldens 54, untouched;
+scene schema v24, untouched; rustdoc 438 warnings against a ceiling of 450, with **zero**
+from any file this wave added.
+
+**A1 — the settings file does not own the whole keymap** (the one that reached a user).
+`applyKeybindingOverrides` rebuilt the live map with `bindings.clear()`. But `simStore`
+binds `Alt+P` (Simulate) and `pieStore` binds `Shift+Alt+P` (PIE) at bootstrap, from
+nowhere the preferences file can see — so **both shortcuts died the instant
+`initSettingsSync` applied its first, usually EMPTY, override set**, on every launch,
+silently: no menu id dispatches them, so the only evidence is the key not working. An
+apply now undoes exactly what a previous apply installed and owns nothing it did not.
+Mutation-verified: restoring the `clear()` reddens the new arm on `Alt+P` precisely.
+
+**A2 — the preference's range was not the camera's range.** `FLY_SPEED_RANGE_MPS` was
+`(0.05, 10 000)` while `EditorCamera` clamps to `(0.2, 250)`, so a hand-edited or
+dialog-entered 1 000 m/s normalized to 1 000, round-tripped back to the UI as 1 000 — the
+reply "confirming" a number that would never take effect — and flew at 250. Ring 1 cannot
+name `inf-viewport`, so the pair is pinned from the other side. While there: the shipped
+feel existed in **four** places (the settings constants, `InteractionSettings::default`,
+the win32 thread-local, and a second literal range inside `viewport_set_interaction`); the
+thread-local now seeds from a `const fn shipped()`, the Ring-2 door uses the settings
+constants, and the remaining two are pinned to each other.
+
+**A3 — "idempotent by asset" was true of the id and false of the document.**
+`graph_open_actor` overwrote `s.docs[bp:<asset>]` and reset its journal on every call,
+where `dcc_open` — the thing it says it mirrors — returns the document already in flight.
+It also had **no arm at all** (the command needs a Tauri `State`). The handler
+enumeration, the raisable/reason report, the choice rule and the reuse test are now pure
+functions with five arms, including the case the brief asks for: a class where 2 of 3
+handlers raise opens on one of the two and reports the third with its reason, rather than
+failing whole or hiding it.
+
+**A6 — the drop-gap arm named a mutation it could not catch.** Measured: deleting the
+`mesh_asset()` branch in `EngineHost::spawn_drop` left the arm GREEN, because the arm
+lives in `inf-editor-core` and `spawn_drop` lives in `inf-viewport`, which that crate does
+not depend on. Neither production door — the viewport drag and `scene_spawn_asset` — was
+covered at all; Wave E had taught the binding rule to each of them **separately**, which
+is exactly how two paths come to disagree. One door now (`viewport_drop::spawn_asset_entity`),
+both callers on it, and each of the three steps falsifies independently: bypass the door
+in `spawn_drop` → `inf-viewport`'s `drop_gate` reddens; bypass it in `scene_spawn_asset` →
+`inf-studio`'s pin reddens; drop the binding inside the door → the 4-step arm reddens.
+
+**A7 — a vacuous check in `openBesidePanel`.** `model`, `skeleton` and `blueprint` all
+register `defaultLocation: "bottom"`, so a plain `openPanel` already lands them in one
+group: replacing the entire body of `openBesidePanel` with `openPanel` left its test
+green. The claim only has teeth across a side boundary, and the new arm anchors on a
+RIGHT-docked panel. Same law, second sighting this wave: the "checked BEFORE `MeshRef`"
+ordering in `kind_of`'s new `Skeletal Mesh` arm was asserted over an `Empty` entity that
+carries no `MeshRef`, so moving the arm below it stayed green; the fixture is a Cube now.
+
+**A8 — the right-click menu fired during Simulate.** The double-click arm consults
+`SIM_RUNNING`; the right-click arm did not, and every overlay in this shell acquires the
+airspace guard — so a stray right-click tap **blanked a running preview**. Gated, and both
+arms are now pinned together by a source gate, because the failure is asymmetric by nature
+(two different message handlers, one gate).
+
+**A4 / A5 / A9 — three smaller ones.** `resetToDefaults` cleared the debounce timer but
+not the promise that timer was going to settle, so the Preferences dialog's Close →
+`flush()` awaited a promise nobody would ever resolve (no throw; it simply never returns).
+`openObject` on a guid the document no longer has returned in silence — `entity_editors_many`
+deliberately skips unknown guids, so a context menu left open across a delete did nothing
+and said nothing, against the wave's own "a refusal is a value". And the `object.edit.*`
+handlers `void`-ed their promise, so `executeCommand`'s status-bar surfacing of a rejected
+handler could never see one.
+
+**Hardened rather than broken:** the settings file is the wave's one new attack surface, so
+its hostile shapes are now asserted instead of assumed — wrong type per field (scalar,
+bool, table, map), duplicate keys, 512-deep inline nesting, a megabyte-long string in a
+numeric field, and binary junk. Every one is refused as a value, none panics or hangs, and
+the bytes on disk survive byte-identical. (A long but well-typed `theme_id` is deliberately
+NOT refused: the theme lookup falls back, and losing the file over it would be worse.)
+
+**Held as written:** the absent-default / corrupt-refused / atomic-write doctrine (the
+shared `inf_asset::write_atomically` door, which creates the config directory — verified,
+not assumed); NaN-first normalization in both halves; the newer-schema refusal; "a refused
+load writes NOTHING" (traced through `applySnap3dFromSettings`, which sets store state
+without the write-back door); the migration marker's edge cases (a corrupt marker re-folds
+a theme key that `setTheme` keeps current, so it is a no-op; a marker with no file keeps
+the file authoritative); the E1 routing matrix and its intersection rule; the RMB
+discrimination predicate, its strict-`<` tie rule and its NaN door; capture still on
+button-DOWN; the wnd_proc RefCell law across all three new handlers (every Win32 call is
+outside the borrow); `viewport://context-menu` / `viewport://activate` id-stamping; the
+`ContextMenuSurface` guard lifetime including unmount-while-open; and the frontend
+discipline (no `invoke()` outside `ipc.ts`, no set-state-in-effect, one command registry).
+
+**Settings apply is sim-pure:** `Cmd::SetInteraction` touches `camera.fly_speed`, a look
+multiplier and a thread-local; `Cmd::FocusSelection` queues the same `Action::Focus` the
+`F` key does, which frames the camera. Neither reaches the document, the ECS world or any
+committed content, so a preference change during Simulate cannot enter a determinism
+trace.
+
+**Three observations that are not defects.** The blueprint panel is still
+`singleton: true` — the scout's design asked for a non-singleton one and the wave declared
+the single-document store as a named remainder instead, which is honest; what makes it
+work is `openPanel` adopting new params, and that IS armed. `view.focusSelection`
+advertises `F` in the menu and the palette but binds no DOM chord: `F` is a native
+viewport gesture, so the accelerator is true where the gesture lives and inert in the
+Outliner — named here rather than "fixed" by binding a bare letter globally. And
+`editor_settings.rs` was left CRLF in the working tree; the committed blob is LF (git
+normalizes on check-in under `*.rs text eol=lf`), so no gate is at risk, but it is
+normalized now because the next `include_str!` gate will not be so lucky.
+
+**Mutations.** Twenty-five were run: four re-runs of the implementer's own claimed ones,
+eighteen new, and three re-runs of the repaired drop chain. Twenty-three reddened the arm
+they were aimed at. **Two came back GREEN, and those two are findings A6 and A7** — the
+drop-gap arm could not see `spawn_drop`, and `openBesidePanel`'s test could not see
+`openBesidePanel` — both of which now redden after the repairs. That is the whole case for
+running the implementer's own mutation list rather than reading it.
+
+**Counts after the audit.** Rust battery **290 blocks / 5 428 passed / 0 failed / 13
+ignored** (289/5 415/0/13 before, +1 test binary and +13 arms); frontend **681 tests / 75
+files** (676/75 before). `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets`, `npm run typecheck`, eslint `--max-warnings=0` and `npm run build` all
+green. Goldens 54, byte-untouched. No schema movement, no wire-type movement, no golden
+re-blessing — the audit's thirteen new arms are all over behaviour or source scope.
