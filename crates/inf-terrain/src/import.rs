@@ -2256,7 +2256,7 @@ mod tests {
         assert!(
             (rows[0][2] - 30.0).abs() < 1e-9 && (rows[0][3] - 40.0).abs() < 1e-9,
             "a 2-wide void between 20 and 50 fills to 30 and 40, got {:?}",
-            &rows[0]
+            rows[0]
         );
         assert_eq!(report.substituted, 2);
         assert_eq!(report.filled_runs, 1);

@@ -347,7 +347,7 @@ mod tests {
         assert!((body.river_width_start_m - 6.5).abs() < 1e-9);
         // …and the ones it did NOT carry took the documented defaults.
         assert!((body.river_depth_start_m - DEFAULT_STREAM_DEPTH_M).abs() < 1e-9);
-        assert_eq!(world.name_of(e).as_deref(), Some("Still Creek"));
+        assert_eq!(world.name_of(e), Some("Still Creek"));
     }
 
     /// **Flow direction is the vertex order**, and `reverse_flow` is the escape

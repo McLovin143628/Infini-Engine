@@ -14318,7 +14318,7 @@ mod tests {
                     .into_current(),
             ],
             settings: LevelSettings::default(),
-            geo: Default::default(),
+            geo: v24_fixture_geo(),
         };
         let bytes = bincode::serde::encode_to_vec(&level, bincode_config()).unwrap();
 
@@ -14358,6 +14358,24 @@ mod tests {
             "the HairGuides is not in slot 47"
         );
         assert!(wire.entities[1].1.is_none() && wire.entities[1].3.is_none());
+        // The v24 tail landed in ITS OWN slot, field for field — the anchor is
+        // the file's growth, and nothing else in this shape would notice if it
+        // were short, long, or reordered.
+        assert!(
+            wire.geo.enabled,
+            "the anchor is not in the file's tail position"
+        );
+        assert_eq!(wire.geo.crs, v24_fixture_geo().crs);
+        assert_eq!(
+            wire.geo.origin_easting_m,
+            v24_fixture_geo().origin_easting_m
+        );
+        assert_eq!(wire.geo.vertical_datum, v24_fixture_geo().vertical_datum);
+        assert_eq!(
+            wire.geo.grid_convergence_deg,
+            v24_fixture_geo().grid_convergence_deg,
+            "the LAST field of the anchor — if this is wrong the tail is short",
+        );
         let _ = &wire.title;
         let _ = &wire.settings;
     }

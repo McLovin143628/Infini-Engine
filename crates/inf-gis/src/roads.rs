@@ -873,7 +873,7 @@ mod tests {
         // what mitring means) but bounded — a runaway miter is the classic defect.
         let corner_w = (r.vertices[3].xz() - r.vertices[2].xz()).length();
         assert!(
-            corner_w >= 10.0 && corner_w < 20.0,
+            (10.0..20.0).contains(&corner_w),
             "the mitred corner is {corner_w} m across — a 90 degree corner should \
              widen to ~14.1 m, not collapse and not run away"
         );

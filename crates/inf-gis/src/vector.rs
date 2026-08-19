@@ -229,10 +229,17 @@ fn geojson_geometry(value: &geojson::Value, tf: &Transform) -> Result<Vec<GeoGeo
     })
 }
 
-fn geojson_polygon(
-    rings: &[Vec<Vec<f64>>],
-    ring: &dyn Fn(&Vec<Vec<f64>>) -> Result<Vec<DVec3>, GisError>,
-) -> Result<GeoGeometry, GisError> {
+/// A GeoJSON ring as the format stores it: a list of positions, each a list of
+/// numbers. Named because clippy is right that the closure type below is
+/// unreadable inline, and because saying it once explains the nesting.
+type WireRing = Vec<Vec<f64>>;
+
+/// Reprojects one wire ring into world metres — the closure `geojson_geometry`
+/// already holds, passed down so a polygon's rings go through the same door as
+/// everything else.
+type RingReader<'a> = &'a dyn Fn(&WireRing) -> Result<Vec<DVec3>, GisError>;
+
+fn geojson_polygon(rings: &[WireRing], ring: RingReader<'_>) -> Result<GeoGeometry, GisError> {
     let mut it = rings.iter();
     let exterior =
         strip_closing(ring(it.next().ok_or_else(|| {

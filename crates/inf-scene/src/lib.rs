@@ -11159,7 +11159,7 @@ mod tests {
                 v9_rec(Uuid::from_u128(0xFD11), "Prop", None).into_runtime(),
             ],
             settings: RuntimeSettings::default(),
-            geo: Default::default(),
+            geo: v24_fixture_geo(),
         };
         let bytes = encode(&level).unwrap();
 
@@ -11206,6 +11206,28 @@ mod tests {
         assert!(
             wire.entities[1].4.is_none(),
             "and an entity without one really has none"
+        );
+        // The v24 tail landed in ITS OWN slot, field for field — the anchor is
+        // the file's growth, and nothing else in this shape would notice if it
+        // were short, long, or reordered.
+        assert!(
+            wire.geo.enabled,
+            "the anchor is not in the file's tail position"
+        );
+        assert_eq!(wire.geo.crs, v24_fixture_geo().crs);
+        assert_eq!(
+            wire.geo.origin_easting_m,
+            v24_fixture_geo().origin_easting_m
+        );
+        assert_eq!(
+            wire.geo.origin_northing_m,
+            v24_fixture_geo().origin_northing_m
+        );
+        assert_eq!(wire.geo.vertical_datum, v24_fixture_geo().vertical_datum);
+        assert_eq!(
+            wire.geo.grid_convergence_deg,
+            v24_fixture_geo().grid_convergence_deg,
+            "the LAST field of the anchor — if this is wrong the tail is short"
         );
         let _ = &wire.title;
         let _ = &wire.settings;

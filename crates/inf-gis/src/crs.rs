@@ -661,12 +661,13 @@ mod tests {
         // And whatever the projection hands back is checked before it is used —
         // nothing non-finite ever escapes this door as a success.
         for lat in [89.999_9, -89.999_9, 90.0, -90.0] {
-            match t.to_world(-123.12, lat, 0.0) {
-                Ok(w) => assert!(
+            // A refusal is equally correct at the pole; the claim is only that
+            // nothing NON-FINITE escapes as a success.
+            if let Ok(w) = t.to_world(-123.12, lat, 0.0) {
+                assert!(
                     w.is_finite(),
                     "latitude {lat} produced the non-finite world position {w:?} as a SUCCESS"
-                ),
-                Err(_) => {} // refusing it is equally correct
+                );
             }
         }
     }

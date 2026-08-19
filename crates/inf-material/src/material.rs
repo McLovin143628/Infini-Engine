@@ -205,6 +205,11 @@ struct MaterialAssetV2 {
 /// the failure mode that leaves old materials decoding into the wrong fields.
 #[cfg(test)]
 #[derive(Deserialize)]
+// A wire pin exists to be DECODED THROUGH: a few fields are read by name below,
+// and the rest are the SHAPE, which is the point. Dropping one to satisfy
+// dead-code analysis would stop the pin noticing a field appended without a
+// bump — the exact failure it exists to catch.
+#[allow(dead_code)]
 struct MaterialAssetV3Wire {
     schema_version: u32,
     base_color: [f32; 4],
