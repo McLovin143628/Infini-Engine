@@ -2759,12 +2759,15 @@ fn terrain_height_at(
     // machine: 0.0137 ms/call over 1 000 entities, 0.0668 over 5 000, 0.2032
     // over 15 000 — linear in the world, for a query whose answer set is one.
     //
-    // The answer is UNCHANGED, which is why this is a repair and not a policy:
-    // the winner is still the lowest `Guid` among non-empty terrains, chosen by
-    // an explicit comparison rather than by iteration order, so the query's
-    // (unspecified) order cannot move it. Nothing is cached and nothing goes
-    // stale — an entity that gains or loses a `Terrain` this step is seen on the
-    // very next call, exactly as before.
+    // The answer is now POSITION-AWARE (island phase, IB-15). It used to be "the
+    // lowest `Guid` among non-empty terrains", with no test of whether that
+    // terrain covers `(x, z)` at all — so over a SECOND terrain the query sampled
+    // the first one outside its authored extent, got `None`, and fell through to
+    // the `0.0` below. A character walking from one terrain onto another dropped
+    // to sea level at the border, and no committed scene placed two terrains
+    // within a kilometre of each other, so nothing saw it. Every non-empty
+    // terrain is now handed to the Ring-0 rule, which takes the topmost surface
+    // that answers — see `inf_voxel::ground_height_at`.
     let mut query = world.world_mut().query::<(
         Entity,
         &Guid,
@@ -2772,7 +2775,7 @@ fn terrain_height_at(
         Option<&GlobalTransform>,
         Option<&Transform>,
     )>();
-    let mut picked: Option<(Uuid, DVec3, Entity)> = None;
+    let mut found: Vec<(Uuid, Entity, DVec3)> = Vec::new();
     let w = world.world();
     for (entity, guid, t, global, local) in query.iter(w) {
         if t.data.is_empty() {
@@ -2782,18 +2785,18 @@ fn terrain_height_at(
             .map(|g| g.translation())
             .or_else(|| local.map(|t| t.translation.to_dvec3()))
             .unwrap_or(DVec3::ZERO);
-        if picked.as_ref().map(|(g, _, _)| guid.0 < *g).unwrap_or(true) {
-            picked = Some((guid.0, origin, entity));
-        }
+        found.push((guid.0, entity, origin));
     }
-    let picked = picked.and_then(|(_, origin, e)| w.get::<Terrain>(e).map(|t| (origin, t)));
-    let (origin, terrain) = match &picked {
-        Some((origin, t)) => (*origin, Some(&t.data)),
-        // No terrain at all is not "no ground": a level may be nothing but caves,
-        // and the voxel half still answers.
-        None => (DVec3::ZERO, None),
-    };
-    inf_voxel::ground_height_at(terrain, origin, voxels, x, z).unwrap_or(0.0)
+    // `Guid` order, so the rule's tie-break is a function of the level rather
+    // than of a bevy archetype walk.
+    found.sort_unstable_by_key(|(g, _, _)| *g);
+    let terrains: Vec<(&inf_ecs::TerrainData, DVec3)> = found
+        .iter()
+        .filter_map(|(_, e, o)| w.get::<Terrain>(*e).map(|t| (&t.data, *o)))
+        .collect();
+    // No terrain at all is not "no ground": a level may be nothing but caves,
+    // and the voxel half still answers.
+    inf_voxel::ground_height_at(&terrains, voxels, x, z).unwrap_or(0.0)
 }
 
 /// **One gameplay carve or fill** (P21.4) — the voxel half through the shared

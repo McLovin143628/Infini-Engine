@@ -9112,8 +9112,7 @@ mod tests {
         // The combined query agrees, because the pit holed the ground above it.
         assert_eq!(
             inf_voxel::ground_height_at(
-                Some(terrain),
-                DVec3::ZERO,
+                &[(terrain, DVec3::ZERO)],
                 &std::collections::BTreeMap::from([(0u8, vol.clone())]),
                 px,
                 pz,

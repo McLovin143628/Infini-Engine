@@ -30,8 +30,8 @@
 //! The asymmetry in [`ground_height_at`]'s signature is real and not an oversight:
 //! a [`VoxelData`] carries its own world anchor ([`VoxelData::origin`]) so the map
 //! alone places every volume, while a [`TerrainData`] carries none — its placement
-//! is the terrain entity's transform, which only the caller has. Hence the explicit
-//! `terrain_origin`.
+//! is the terrain entity's transform, which only the caller has. Hence each
+//! terrain arrives paired with its origin.
 
 use std::collections::BTreeMap;
 
@@ -44,10 +44,11 @@ use crate::data::VoxelData;
 /// The **ground** height at world XZ: the heightfield where it is solid, the
 /// topmost voxel surface where it is holed or absent.
 ///
-/// * `terrain` — the sim's heightfield, or `None` for a level with none.
-/// * `terrain_origin` — the terrain entity's world translation. `terrain` is
-///   sampled at `(x, z) − origin.xz` and its answer is lifted by `origin.y`,
-///   which is exactly what the two `terrain.height_at` host seams already did.
+/// * `terrains` — every heightfield in the world with its entity's world
+///   translation, in the caller's order (both hosts use `Guid` order). Empty for
+///   a level with none. Each is sampled at `(x, z) − origin.xz` and its answer
+///   lifted by `origin.y`, which is exactly what the two `terrain.height_at`
+///   host seams already did for the single one they used to pass.
 /// * `volumes` — the voxel volumes, keyed by **entity id**. Each value's
 ///   [`origin`](VoxelData::origin) is its world anchor, so the map alone places
 ///   them; a host whose volume entities carry a transform folds it in when it
@@ -89,17 +90,47 @@ use crate::data::VoxelData;
 /// * It returns `None` — never `0.0` — when nothing answers. Both host seams keep
 ///   their own documented default, so this function cannot invent a sea-level
 ///   floor under a level that has no ground at all.
+/// # Multiple terrains: the position-aware rule (island phase, IB-15)
+///
+/// This used to take **one** `Option<&TerrainData>`, and both host seams picked
+/// it as *the lowest-`Guid` non-empty terrain in the world, with no position test
+/// at all*. Over any second terrain that answer was `None` — the query was
+/// sampling terrain A at terrain B's coordinates, outside A's authored extent —
+/// so the host default took over and a character walking from A to B **fell to
+/// y = 0 at the border**. Nothing caught it because no committed scene places two
+/// terrains within a kilometre of each other.
+///
+/// Now the caller passes every non-empty terrain with its world origin and
+/// **the greatest surface `y` wins**, ties resolving to the first in the caller's
+/// order — the same rule the voxel arm below already used, stated once for both.
+/// Both hosts pass them in `Guid` order, so a point covered by two terrains has
+/// one answer that does not depend on which was authored first.
+///
+/// It also settles a real inconsistency: the editor viewport's scatter placement
+/// (`topmost_surface`) already used greatest-`y`, so gameplay height and authored
+/// scatter now agree where before they could pick different terrains.
+///
+/// `O(terrains)` per query, and terrains are entities in a scene rather than
+/// tiles in a grid — a partitioned island has a handful, not thousands. A
+/// bounds-indexed lookup is the follow-up the day one has thousands.
 pub fn ground_height_at<K: Ord>(
-    terrain: Option<&TerrainData>,
-    terrain_origin: DVec3,
+    terrains: &[(&TerrainData, DVec3)],
     volumes: &BTreeMap<K, VoxelData>,
     x: f64,
     z: f64,
 ) -> Option<f64> {
-    if let Some(h) =
-        terrain.and_then(|t| t.height_at(DVec2::new(x - terrain_origin.x, z - terrain_origin.z)))
-    {
-        return Some(h + terrain_origin.y);
+    let mut best: Option<f64> = None;
+    for (t, origin) in terrains {
+        let Some(h) = t.height_at(DVec2::new(x - origin.x, z - origin.z)) else {
+            continue;
+        };
+        let y = h + origin.y;
+        if best.is_none_or(|b| y > b) {
+            best = Some(y);
+        }
+    }
+    if best.is_some() {
+        return best;
     }
     topmost_voxel_surface(volumes, x, z)
 }
@@ -339,11 +370,11 @@ mod tests {
         let t = flat_terrain(10.0);
         let mut volumes = BTreeMap::new();
         volumes.insert(1u128, floor_volume(14.0, 0..=1));
-        let got = ground_height_at(Some(&t), DVec3::ZERO, &volumes, 2.0, 2.0).unwrap();
+        let got = ground_height_at(&[(&t, DVec3::ZERO)], &volumes, 2.0, 2.0).unwrap();
         assert!((got - 10.0).abs() < 1e-9, "{got}");
         // …and the entity transform is honoured on both halves.
         let anchor = DVec3::new(100.0, 5.0, -40.0);
-        let got = ground_height_at(Some(&t), anchor, &volumes, 102.0, -38.0).unwrap();
+        let got = ground_height_at(&[(&t, anchor)], &volumes, 102.0, -38.0).unwrap();
         assert!((got - 15.0).abs() < 1e-9, "{got}");
     }
 
@@ -360,7 +391,7 @@ mod tests {
         // The cell around the holed sample is gone from the heightfield…
         assert!(t.height_at(DVec2::new(2.0, 2.0)).is_none());
         // …and the query lands on the voxel floor.
-        let got = ground_height_at(Some(&t), DVec3::ZERO, &volumes, 2.0, 2.0).unwrap();
+        let got = ground_height_at(&[(&t, DVec3::ZERO)], &volumes, 2.0, 2.0).unwrap();
         assert!(
             (got - 3.5).abs() < 1e-9,
             "expected the cave floor, got {got}"
@@ -368,7 +399,7 @@ mod tests {
         assert_ne!(got, 10.0, "the pre-carve height must not survive the carve");
 
         // One cell over — outside the poisoned cell — the terrain still answers.
-        let solid = ground_height_at(Some(&t), DVec3::ZERO, &volumes, 0.5, 0.5).unwrap();
+        let solid = ground_height_at(&[(&t, DVec3::ZERO)], &volumes, 0.5, 0.5).unwrap();
         assert!((solid - 10.0).abs() < 1e-9, "{solid}");
     }
 
@@ -380,7 +411,7 @@ mod tests {
         carve_hole(&mut t, 2, 2);
         let empty: BTreeMap<u128, VoxelData> = BTreeMap::new();
         assert_eq!(
-            ground_height_at(Some(&t), DVec3::ZERO, &empty, 2.0, 2.0),
+            ground_height_at(&[(&t, DVec3::ZERO)], &empty, 2.0, 2.0),
             None
         );
         // A volume that IS loaded but holds no surface in this column is the same
@@ -393,11 +424,11 @@ mod tests {
             v
         });
         assert_eq!(
-            ground_height_at(Some(&t), DVec3::ZERO, &air, 2.0, 2.0),
+            ground_height_at(&[(&t, DVec3::ZERO)], &air, 2.0, 2.0),
             None
         );
         // …and so is a level with no terrain at all.
-        assert_eq!(ground_height_at(None, DVec3::ZERO, &empty, 2.0, 2.0), None);
+        assert_eq!(ground_height_at(&[], &empty, 2.0, 2.0), None);
     }
 
     /// Two volumes overlapping the same column: the **greatest** surface wins, and
