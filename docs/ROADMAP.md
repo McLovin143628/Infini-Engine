@@ -18685,9 +18685,16 @@ shows a one-line authoring change as a one-line diff.
 
 > **STATUS: P29.7 COMPLETE — AND WITH IT PHASE 29** (2026-08-18) — **local gates
 > green; NOT PUSHED.**
-> Battery **BATTERY_LINE**. `clippy -D warnings` over the whole workspace and
-> `cargo fmt --check` clean. The frontend is **FRONTEND_LINE**, with `tsc --noEmit`
-> and eslint clean. Goldens stay **54** — the showcase asserts STATE, not pixels.
+> Battery **283 binaries / 5 229 passed / 0 failed / 13 ignored** against the
+> P29.6 audit's 280 / 5 177 / 0 / 11 — three binaries added (`gravity_3d`,
+> `vehicle_3d`, `cook_determinism`), fifty-two arms, and two more ignored, both
+> of them diagnostics a tuner runs by name (`probe_brake`, which found the pitch
+> pump, and `probe_host_divergence`, which found that there is no longer a
+> divergence to bound). `clippy -D warnings` over the whole workspace and
+> `cargo fmt --check` clean. The frontend is **611 tests across 65 files**,
+> unchanged, with `tsc --noEmit` and eslint clean — what guards this wave's two
+> new panel groups is on the Rust side, deliberately, because the truth they are
+> checked against is. Goldens stay **54** — the showcase asserts STATE, not pixels.
 > **No schema moves**: `.inf_anim` v2, `.inf_sm` v2, scene v23 and `ScenePayload`
 > v9 all stand. Everything this wave added that has to persist is expressed in
 > components the wire already carried; everything that must not persist is on
@@ -18957,6 +18964,31 @@ shows a one-line authoring change as a one-line diff.
 >
 > ---
 >
+> **TWO COVERAGE HOLES THIS WAVE OPENED, AND CLOSED.** `CAMERA_STEPS` was a
+> 1 800-step prefix — chosen in P29.6 because the course's first thousand steps
+> are where a third-person camera has the most to do — and the drive begins at
+> step 3 662, so the camera path this wave added was covered by nothing at all.
+> It is the whole course now. And the vehicle exclusion had **no falsifier**:
+> deleting it leaves the gate arm green, because the showcase's car is a metre
+> tall with the driver on its roof and the boom clears the bodywork on its way
+> past. `camera_3d` gets a fixture built to bite — a six-metre car with the
+> camera pitched up, so the boom comes down inside it — where the same deletion
+> puts the camera **0.896 m** from the driver. The gate arm's doc now says which
+> of the two it is; claiming a mutation that was never run is the failure this
+> repository has a law about.
+>
+> **THE PANEL, AND A THIRD SOURCE GATE.** `LiveTuning.tsx` grew a Vehicle group
+> and a Camera group, so the two doors above are reachable from the editor rather
+> than only from the IPC. Each list is kept honest across the language boundary by
+> its own Rust source gate — P29.5's pattern, now three lists against three
+> truths: `bevy_reflect` fields, `VehicleTuning::set` and `CameraTuning::set`. The
+> keys are `mfield` / `vfield` / `cfield` and not all `field`, because a
+> `field: "` split matches `vfield: "` too, which is how the first draft made the
+> movement gate report that `stiffness_n_per_m` is not a field of
+> `CharacterMovement`. The frontend test count is unchanged: what guards these
+> lists is on the Rust side, deliberately, because the truth they are checked
+> against is.
+>
 > **THE GARMENT LIFT** (the P29.6 remainder, closed). The foot-publish seam reached
 > the pose, the ragdoll rig, the sockets and both skinned draws; it did not reach
 > the two cloth/hair projectors, which were handed the entity's translation — a
@@ -18999,6 +19031,11 @@ shows a one-line authoring change as a one-line diff.
 > that the law was broken by the same shortcut it was written about.
 >
 > **Honest remainders of this wave.**
+> **The showcase's own car does not need the camera exclusion.** It is a metre
+> tall and the driver rides its roof, so the boom clears it; the rule is there for
+> a seat inside a body, which is what the island's fleet will have, and its
+> falsifier is a fixture rather than the committed content. Named because the
+> alternative is a reader assuming the course proves it.
 > **The vehicle has no per-vehicle authored tuning.** A committed rig uses the
 > Ring-0 defaults in both hosts, because a tune is an editor-only door by law and a
 > scene field is a schema move. The course therefore adapts to the car (six tenths

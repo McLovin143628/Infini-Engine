@@ -214,7 +214,7 @@ fn a_level_that_touched_neither_field_now_falls_at_earth_gravity() {
 fn a_level_that_authors_zero_3d_gravity_gets_none() {
     let settings = settings(-9.81, 0.0);
     assert_eq!(
-        player_fall(settings.clone()),
+        player_fall(settings),
         0.0,
         "a zero `gravity_3d` must float the crate even though `gravity_2d.y` is -9.81"
     );
