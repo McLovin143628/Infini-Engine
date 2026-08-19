@@ -841,11 +841,18 @@ pub fn project_scene_full(
                 .map(|g| g.0)
                 .unwrap_or(glam::DAffine3::IDENTITY);
             let (cloth_scale, cloth_rot, _t) = affine.to_scale_rotation_translation();
+            // ── P29.7 character space ── a garment's vertices are in the
+            //    wearer's MODEL space (feet at the origin) and this translation
+            //    is the entity's (a capsule CENTRE), so the lift goes through
+            //    the one door that knows the difference. Without it a coat is
+            //    drawn nearly a metre above the character wearing it. Zero for
+            //    an entity with no movement component, which is every prop.
+            let cloth_at = translation + inf_ecs::pose::model_offset_world(world, entity);
             project_cloth(
                 scene,
                 world,
                 guid,
-                translation,
+                cloth_at,
                 cloth_rot.as_quat(),
                 cloth_scale.as_vec3(),
             );
@@ -853,7 +860,7 @@ pub fn project_scene_full(
                 scene,
                 world,
                 guid,
-                translation,
+                cloth_at,
                 cloth_rot.as_quat(),
                 cloth_scale.as_vec3(),
             );

@@ -636,6 +636,43 @@ pub fn model_to_world_of(world: &EcsWorld, guid: Uuid) -> Option<glam::DAffine3>
     world.entity_of(guid).map(|e| model_to_world(world, e))
 }
 
+/// **The same lift as a world-space offset** (P29.7) — for a caller that already
+/// has a translation and cannot use the whole affine.
+///
+/// # The caller this exists for
+///
+/// The cloth and hair projectors. A simulated garment's vertices are in the
+/// wearer's **model space**, which is feet-at-origin character space; the
+/// translation the projectors were handed is the entity's, which for a character
+/// is its capsule **centre**. So a coat was drawn `feet_offset_m` — nearly a
+/// metre on a 1.8 m biped — above the character wearing it. It is the P29.6
+/// foot-publish seam, at the two call sites that wave did not reach, and it was
+/// carried into this one by name.
+///
+/// [`model_to_world`] is the door and cannot be used here: the shipped player's
+/// projector passes the sim's **interpolated** actor position, not the affine's,
+/// and re-deriving the translation from the affine would silently drop the
+/// interpolation on every garment in the game. So the offset comes back on its
+/// own and the caller adds it to whatever translation it holds.
+///
+/// Composed in the entity's own frame (`matrix3 × down`), exactly as
+/// [`model_to_world`] composes it on the right — a character on a rotated
+/// platform drops along its own down axis. `DVec3::ZERO` for an entity with no
+/// [`CharacterMovement`](crate::components::CharacterMovement), which is every
+/// prop in the tree, so nothing that existed before this moves.
+pub fn model_offset_world(world: &EcsWorld, entity: Entity) -> glam::DVec3 {
+    let w = world.world();
+    let Some(cm) = w.get::<crate::components::CharacterMovement>(entity) else {
+        return glam::DVec3::ZERO;
+    };
+    let drop = crate::movement::feet_offset_m(cm, w.get::<crate::components::Collider3D>(entity));
+    let m = w
+        .get::<crate::components::GlobalTransform>(entity)
+        .map(|g| g.0.matrix3)
+        .unwrap_or(glam::DMat3::IDENTITY);
+    m * glam::DVec3::new(0.0, -drop, 0.0)
+}
+
 /// How many entities the sim posed this step (`0` on a world that has never
 /// posed one).
 pub fn posed_count(world: &EcsWorld) -> usize {
@@ -3121,6 +3158,71 @@ mod tests {
         assert_eq!(
             foot_joints(&skel(&["a", "foot_l", "foot_l_toe"])),
             [Some(1), None]
+        );
+    }
+
+    /// **The garment lift** (P29.7): the offset a projector adds to a
+    /// host-interpolated translation is exactly the one `model_to_world`
+    /// composes, and it is zero for anything that is not a character.
+    ///
+    /// This closes the P29.6 remainder by name: the cloth and hair projectors
+    /// were handed the entity's translation — a capsule CENTRE — while a
+    /// garment's vertices are in feet-at-origin model space, so a coat was drawn
+    /// nearly a metre above its wearer. Both hosts add this now.
+    #[test]
+    fn the_garment_lift_is_the_one_the_model_door_composes() {
+        use crate::components::{CharacterMovement, Collider3D, ColliderShape3DKind, Transform};
+        let mut world = EcsWorld::new();
+
+        // A prop: no movement component, no lift, and therefore not one micron
+        // of movement for anything that existed before this function.
+        let prop = world.spawn_with_guid(Uuid::from_u128(0x2907_3001), "Prop", None);
+        world
+            .world_mut()
+            .entity_mut(prop)
+            .insert(Transform::from_translation(glam::DVec3::new(3.0, 2.0, 1.0)));
+        world.mark_dirty();
+        world.propagate();
+        assert_eq!(model_offset_world(&world, prop), glam::DVec3::ZERO);
+
+        // A character wearing a capsule: the lift is the worn half-height plus
+        // the radius, downward, and it is read off the door rather than restated
+        // as a constant here.
+        let cm = CharacterMovement::default();
+        let radius = 0.3;
+        let hero = world.spawn_with_guid(Uuid::from_u128(0x2907_3002), "Hero", None);
+        world.world_mut().entity_mut(hero).insert((
+            Transform::from_translation(glam::DVec3::new(
+                0.0,
+                cm.stand_half_height_m + radius,
+                0.0,
+            )),
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Capsule,
+                half_extents: crate::math::Vec3d::new(radius, cm.stand_half_height_m, radius),
+                radius,
+                ..Default::default()
+            },
+            cm.clone(),
+        ));
+        world.mark_dirty();
+        world.propagate();
+        let offset = model_offset_world(&world, hero);
+        assert!(offset.y < -0.5, "the lift is {offset:?}, not a drop");
+        assert!(offset.x.abs() < 1e-12 && offset.z.abs() < 1e-12);
+
+        // …and it is the SAME offset the whole-affine door composes, which is
+        // what stops the two from drifting: a projector that added this to the
+        // entity's translation must land where `model_to_world` puts the pose.
+        let door = model_to_world(&world, hero).translation;
+        let raw = world
+            .world()
+            .get::<crate::components::GlobalTransform>(hero)
+            .map(|g| g.0.translation)
+            .expect("propagated");
+        assert!(
+            (door - (raw + offset)).length() < 1e-12,
+            "the offset {offset:?} does not compose to the door's {door:?}"
         );
     }
 }

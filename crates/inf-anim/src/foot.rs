@@ -80,14 +80,22 @@ pub fn interp_to(current: f64, target: f64, speed: f64, dt: f64) -> f64 {
     current + (target - current) * a
 }
 
-/// [`interp_to`] on a vector, componentwise at one speed.
-pub fn interp_to_vec(current: Vec3, target: Vec3, speed: f64, dt: f64) -> Vec3 {
-    Vec3::new(
-        interp_to(current.x as f64, target.x as f64, speed, dt) as f32,
-        interp_to(current.y as f64, target.y as f64, speed, dt) as f32,
-        interp_to(current.z as f64, target.z as f64, speed, dt) as f32,
-    )
-}
+// **`interp_to_vec` was deleted here** (P29.7).
+//
+// It was `interp_to` applied componentwise to a `Vec3`, it had **zero callers**
+// from the day it was written, and three ledgers in a row named it and routed
+// it forward. P29.6 supplied the reason the hope was wrong rather than late:
+// the brief had expected the locomotion camera's lag to consume it, and the
+// camera cannot — that helper is `Vec3` (f32, pose space) and the camera is f64
+// world space, and casting a world position through f32 to reuse a two-line
+// lerp is the wrong trade.
+//
+// P29.7 looked for a consumer in the vehicle and flight work and found none
+// either: the flight bank interpolates one angle (a scalar, so `interp_to`), the
+// suspension is a spring rather than a lerp, and the seat warp is a warp. So the
+// disposition is the honest one rather than a fourth routing — a knob nobody
+// turns documents a choice nobody made, and the code is one line to write again
+// the day something wants it. `interp_to` above is live and stays.
 
 /// What a ground hit under one foot means for that foot's IK.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
