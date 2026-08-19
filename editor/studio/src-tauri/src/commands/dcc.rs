@@ -1010,6 +1010,29 @@ fn build_ops(doc: &DccDoc, session: &MeshSession, tool: &DccToolDto) -> Result<V
             .into_iter()
             .map(|face| Op::SetFaceSlot { face, slot: *slot })
             .collect(),
+        DccToolDto::AutoSeam { angle_deg, replace } => {
+            let cut = dcc::auto_seam_edges(mesh, *angle_deg);
+            let mut ops = Vec::new();
+            if *replace {
+                let all: Vec<HalfId> = mesh
+                    .half_ids()
+                    .filter(|&h| inf_dcc::canonical_edge(mesh, h) == Some(h))
+                    .collect();
+                if !all.is_empty() {
+                    ops.push(Op::SetEdgesSeam {
+                        halfs: all,
+                        seam: false,
+                    });
+                }
+            }
+            if !cut.is_empty() {
+                ops.push(Op::SetEdgesSeam {
+                    halfs: cut,
+                    seam: true,
+                });
+            }
+            ops
+        }
         DccToolDto::AddSlots { names } => {
             let names: Vec<String> = names
                 .iter()

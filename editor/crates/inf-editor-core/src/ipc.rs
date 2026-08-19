@@ -3583,6 +3583,17 @@ pub enum DccToolDto {
     AddSlots {
         names: Vec<String>,
     },
+    /// **Auto-seam**: cut every edge whose two faces disagree by more than
+    /// `angle_deg`, plus every boundary edge. One op, so one undo step — unlike
+    /// marking edges by hand, which is one op each on purpose.
+    ///
+    /// `replace` clears the existing seams first. Off means "add to what is
+    /// already cut", which is how an author refines a layout.
+    AutoSeam {
+        #[serde(rename = "angleDeg")]
+        angle_deg: f64,
+        replace: bool,
+    },
 }
 
 /// A selection command.

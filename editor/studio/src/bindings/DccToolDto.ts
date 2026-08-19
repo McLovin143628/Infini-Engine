@@ -25,4 +25,4 @@ angleDeg: number | null, } | { "tool": "slide", t: number, } | { "tool": "mergeB
  * A world-space axis. Normalized backend-side; a zero axis is refused
  * by the kernel as a value.
  */
-axis: [number, number, number], degrees: number, } | { "tool": "scale", factor: [number, number, number], } | { "tool": "assignSlot", slot: number | null, } | { "tool": "addSlots", names: Array<string>, };
+axis: [number, number, number], degrees: number, } | { "tool": "scale", factor: [number, number, number], } | { "tool": "assignSlot", slot: number | null, } | { "tool": "addSlots", names: Array<string>, } | { "tool": "autoSeam", angleDeg: number, replace: boolean, };

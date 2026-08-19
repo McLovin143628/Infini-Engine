@@ -374,6 +374,24 @@ pub enum FinishAdvisory {
         flipped: usize,
         /// Corners the unwrap wrote.
         corners: usize,
+        /// **Triangles with no UV area in the written `f32` layout**, summed
+        /// over charts (Wave D).
+        ///
+        /// Carried here, beside the fold count, because that is where the P25
+        /// defect's answer was: a zero-area UV triangle with healthy 3D area is
+        /// the *crease* of a fold, and the two numbers are one event counted
+        /// twice.
+        degenerate_uv: usize,
+        /// The worst single chart's share of it — because an average hides a
+        /// station, and a chart-wide collapse and a scattering of creases look
+        /// identical in a sum.
+        worst_chart_degenerate: usize,
+        /// **Degeneracies the fold count cannot account for**, summed per chart.
+        ///
+        /// The sharp number. Zero means every zero-area UV triangle is a fold
+        /// crease and there is no unexplained collapse left; non-zero is a
+        /// second mechanism and is what the gate is pointed at.
+        unexplained: usize,
     },
     /// Two triangles claimed the same texel — a chart overlapping itself or
     /// another in the atlas.
@@ -461,12 +479,21 @@ impl std::fmt::Display for FinishAdvisory {
                  threshold of {threshold}, so a SHIPPED build draws it as a placeholder cube; raise \
                  the triangle budget or lower [vgeom] min_triangles"
             ),
-            FinishAdvisory::UvChartsFlipped { flipped, corners } => write!(
+            FinishAdvisory::UvChartsFlipped {
+                flipped,
+                corners,
+                degenerate_uv,
+                worst_chart_degenerate,
+                unexplained,
+            } => write!(
                 f,
                 "{flipped} triangles folded during UV unwrap over {corners} corners; those texels \
                  are sampled from the wrong side of the surface — lower `min_chart_faces` so a \
                  bent region is cut into a chart of its own instead of folded into a neighbour, \
-                 which costs charts and atlas density"
+                 which costs charts and atlas density. {degenerate_uv} of them have NO UV area at \
+                 all (worst single chart {worst_chart_degenerate}, {unexplained} not accounted \
+                 for by a fold): a zero-area UV triangle with healthy 3D area is the crease of a \
+                 fold, so the same remedy fixes both"
             ),
             FinishAdvisory::AtlasOverlaps { texels } => write!(
                 f,
@@ -525,6 +552,13 @@ pub struct FinishReport {
     pub charts: usize,
     /// Folded triangles over all charts.
     pub flipped: usize,
+    /// **Charts the conformal solve collapsed onto a line, which a planar
+    /// projection replaced** (Wave D).
+    ///
+    /// The P25 defect's fix, as a number the gate can see fire. Zero on a
+    /// fixture measured to collapse means the fallback is not running, which is
+    /// a different failure from "the fallback ran and was not enough".
+    pub projected_charts: usize,
     /// The worst chart's conformal residual.
     pub worst_residual: f64,
     /// The worst chart's solver convergence residual.
@@ -1428,6 +1462,24 @@ pub fn finish_reconstruction_with_progress(
         advisories.push(FinishAdvisory::UvChartsFlipped {
             flipped: unwrap_report.flipped,
             corners: unwrap_report.corners,
+            // Wave D: the per-chart instrument's aggregate, carried beside the
+            // fold count it is explained by. Two numbers side by side is the
+            // whole of the diagnosis the P25 ledger carried as unknown — see
+            // `inf_dcc::uv`'s `every_degenerate_uv_triangle_is_the_crease_of_a_fold`.
+            degenerate_uv: unwrap_report.degenerate_uv,
+            // …and the worst chart, so "an average hides a station" cannot
+            // happen to this pair too.
+            worst_chart_degenerate: unwrap_report
+                .charts
+                .iter()
+                .map(|c| c.degenerate_uv)
+                .max()
+                .unwrap_or(0),
+            unexplained: unwrap_report
+                .charts
+                .iter()
+                .map(|c| c.degenerate_uv.saturating_sub(c.flipped))
+                .sum(),
         });
     }
 
@@ -1550,6 +1602,7 @@ pub fn finish_reconstruction_with_progress(
         seams: unwrap_report.seams,
         charts: unwrap_report.charts.len(),
         flipped: unwrap_report.flipped,
+        projected_charts: unwrap_report.projected,
         worst_residual: unwrap_report.worst_residual,
         worst_convergence: unwrap_report.worst_convergence,
         atlas_coverage: atlas.covered_count() as f64
@@ -2204,6 +2257,9 @@ mod tests {
             FinishAdvisory::UvChartsFlipped {
                 flipped: 8,
                 corners: 9,
+                degenerate_uv: 4,
+                worst_chart_degenerate: 3,
+                unexplained: 0,
             },
             FinishAdvisory::AtlasOverlaps { texels: 10 },
             FinishAdvisory::UnseenTexels {

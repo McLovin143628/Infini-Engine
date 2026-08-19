@@ -645,6 +645,23 @@ pub enum Op {
     ///
     /// The pairing is carried, not solved — see [`crate::model::bridge_loops`].
     BridgeLoops { pairs: Vec<(HalfId, HalfId)> },
+    /// Mark or clear **UV seams** on many undirected edges at once.
+    ///
+    /// The batch form of [`Op::SetEdgeSeam`], and the op behind auto-seam. The
+    /// single form stays: marking edges by hand is one op per edge on purpose,
+    /// so an undo peels one mark at a time. An *automatic* seam is one gesture
+    /// over the whole mesh and must be one undo step, which is a different
+    /// statement and gets a different op.
+    ///
+    /// The angle threshold is resolved to an edge list by the caller and the
+    /// **result** lands here, on the [`Op::Unwrap`] precedent: an op that
+    /// re-derived "which edges are over 40°" would change meaning the day the
+    /// dihedral measurement changed.
+    ///
+    /// Appended at 36. `SessionSave::CURRENT_VERSION` does **not** move for it —
+    /// appending a variant is not a shape change, which is the distinction the
+    /// frozen-discriminant match and the version between them keep legible.
+    SetEdgesSeam { halfs: Vec<HalfId>, seam: bool },
 }
 
 /// Apply one op. See the module docs for the three rules this upholds.
@@ -1008,6 +1025,23 @@ pub fn apply(mesh: &mut Mesh, op: &Op) -> Result<OpOutcome, OpError> {
             }
             for h in halfs {
                 mesh.set_sharp_pair(*h, *sharp);
+            }
+            Ok(OpOutcome::default())
+        }
+
+        Op::SetEdgesSeam { halfs, seam } => {
+            if halfs.is_empty() {
+                return Err(OpError::EmptyOperand {
+                    what: "an edge set",
+                });
+            }
+            for h in halfs {
+                if !mesh.has_half(*h) {
+                    return Err(OpError::NoSuchHalf(*h));
+                }
+            }
+            for h in halfs {
+                mesh.set_seam_pair(*h, *seam);
             }
             Ok(OpOutcome::default())
         }

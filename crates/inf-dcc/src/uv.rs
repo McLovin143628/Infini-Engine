@@ -150,6 +150,55 @@ pub struct ChartReport {
     pub flipped: usize,
     /// Triangles in the chart, so `flipped` has a denominator.
     pub triangles: usize,
+
+    // ── the Wave-D instrument (see the module docs' collapse section) ──────
+    /// **Triangles with no UV area once the layout is packed and rounded to
+    /// `f32`** — the number the P25 defect is about, per chart rather than in
+    /// aggregate.
+    ///
+    /// Measured *after* packing and *in `f32`*, which is the whole point: the
+    /// solver's own output is `f64` and packing is a uniform affine map, so a
+    /// triangle that reads healthy in either of those can still land on three
+    /// identical `f32` UVs in the file. `flipped` is measured before packing
+    /// because a winding cannot change under a positive scale; this cannot
+    /// borrow that argument, because *resolution* is exactly what the scale
+    /// changes.
+    ///
+    /// **An average hides a station** (the P25 law): a chart-wide collapse and a
+    /// scattering of slivers look identical in a global fraction and nothing
+    /// alike here.
+    pub degenerate_uv: usize,
+    /// The chart's packed UV bounding-box diagonal.
+    ///
+    /// The instrument's other half. `pack` scales **every** chart by one factor,
+    /// so a chart whose UV extent is orders of magnitude below the largest one's
+    /// comes out of packing spanning a handful of `f32` steps — and its
+    /// triangles are then degenerate for a reason that has nothing to do with
+    /// its 3D shape.
+    pub uv_extent: f64,
+    /// The 3D distance between the two pinned vertices.
+    ///
+    /// [`pin_pair`] takes the *farthest* vertex from the lowest id, so this is a
+    /// chart's 3D diameter and cannot be small unless the chart is. Recorded to
+    /// **retire** the ill-conditioned-pins hypothesis with a number rather than
+    /// leaving it as a suspicion.
+    pub pin_distance: f64,
+    /// The chart's total 3D area — the denominator for "healthy 3D area, no UV
+    /// area".
+    pub area3: f64,
+    /// **The conformal solve collapsed this chart onto a line and a planar
+    /// projection replaced it** (Wave D).
+    ///
+    /// The P25 defect's fix and its instrument in one field. See `planar_uv`:
+    /// on a chart far from developable, the two-pin LSCM energy is genuinely
+    /// minimized by squashing everything onto the line through the pins, and the
+    /// solve **converges** to it. A projection is a worse map and an infinitely
+    /// better one, because every triangle has area and can therefore be
+    /// textured.
+    ///
+    /// A non-zero count is not a failure — it is a chart the author should cut
+    /// smaller, and the advisory says so.
+    pub projected: bool,
 }
 
 /// What an unwrap did.
@@ -164,6 +213,14 @@ pub struct UnwrapReport {
     pub worst_convergence: f64,
     /// Folded triangles across every chart (see [`ChartReport::flipped`]).
     pub flipped: usize,
+    /// Triangles with no UV area in the written `f32` layout, across every chart
+    /// (see [`ChartReport::degenerate_uv`]). The aggregate the P25 measurement
+    /// was taken in — kept, because a caller wants one number, and now with the
+    /// per-chart split beside it that says which kind of zero it is.
+    pub degenerate_uv: usize,
+    /// Charts the conformal solve collapsed onto a line, which a planar
+    /// projection replaced (see [`ChartReport::projected`]).
+    pub projected: usize,
     /// Corners written.
     pub corners: usize,
     /// Seam edges the charts were cut along.
@@ -261,6 +318,128 @@ pub fn pin_pair(mesh: &Mesh, verts: &BTreeSet<VertId>) -> Option<[VertId; 2]> {
     }
     let (d, p1) = best?;
     (d > 1e-12).then_some([p0, p1])
+}
+
+/// How flat a chart's parameterization has to be before it counts as
+/// **collapsed** — total `|UV area|` below this fraction of its bounding box's
+/// **diagonal squared**.
+///
+/// The denominator is the diagonal and not the box's area, and that is the
+/// difference between a detector that works and one that does not: a chart
+/// squashed onto a line has a bounding box squashed with it, so `area / (w·h)`
+/// stays near ½ for a segment. `area / diag²` is the chart's aspect ratio.
+///
+/// `1e-4` is an aspect worse than about 1 : 10 000 — a chart that thin carries no
+/// texels a bake could read whatever the solver meant by it, and no legitimate
+/// parameterization of a surface patch is anywhere near it. Measured on the P25
+/// scan fixture; see the ledger for the before/after counts.
+pub const COLLAPSE_AREA_FRACTION: f64 = 1e-4;
+
+/// **The fallback for a chart LSCM collapsed onto a line** — a planar
+/// projection along the chart's own area-weighted normal.
+///
+/// # Why a chart collapses, and why this is the answer
+///
+/// A two-pin LSCM fixes translation, rotation and scale by pinning two
+/// vertices, and then minimizes conformal error over everything else. On a chart
+/// that is far from developable — a scan patch with real Gaussian curvature,
+/// residual 0.5 to 0.8 where a flat chart reads 1e-14 — the minimum of that
+/// energy is genuinely a map that squashes the whole chart onto the line through
+/// its two pins: shrinking the area costs nothing the energy measures and buys a
+/// large reduction in the conformal term. The solve **converges** (measured:
+/// 1e-16) to a **degenerate** answer.
+///
+/// That is the P25 defect, and it is why "healthy 3D area, no UV area" was the
+/// reading: the 3D chart is fine, the map is a segment. The bounding box is not
+/// small either — a collapsed chart spans a normal-looking `uv_extent` because a
+/// segment has length — which is exactly why a per-chart *extent* instrument
+/// alone would have missed it and the per-chart *area* one finds it.
+///
+/// A planar projection is worse than a good conformal map and infinitely better
+/// than a segment: every triangle has area, so every triangle can be textured.
+/// It is what a box-projection unwrap would have given the chart in the first
+/// place. Deterministic: the normal is the same Newell sum the rest of the crate
+/// uses, and the tangent is built from whichever world axis is *least* aligned
+/// with it, which is a comparison and not a choice.
+fn planar_uv(
+    mesh: &Mesh,
+    verts: &BTreeSet<VertId>,
+    tris: &[[VertId; 3]],
+) -> Option<BTreeMap<VertId, DVec2>> {
+    let mut n = glam::DVec3::ZERO;
+    for t in tris {
+        let (a, b, c) = (
+            mesh.position(t[0])?,
+            mesh.position(t[1])?,
+            mesh.position(t[2])?,
+        );
+        n += (b - a).cross(c - a);
+    }
+    let len = n.length();
+    // A chart whose triangle normals cancel exactly — a closed shell cut into
+    // one chart — has no plane to project onto. `+Y` is as good as any other
+    // answer and is at least an answer; the alternative is refusing an unwrap
+    // over a chart the author can fix with one more seam.
+    let n = if len.is_finite() && len > 1e-18 {
+        n / len
+    } else {
+        glam::DVec3::Y
+    };
+    let a = n.abs();
+    let axis = if a.x <= a.y && a.x <= a.z {
+        glam::DVec3::X
+    } else if a.y <= a.z {
+        glam::DVec3::Y
+    } else {
+        glam::DVec3::Z
+    };
+    let t = axis.cross(n);
+    let tl = t.length();
+    if !(tl.is_finite() && tl > 1e-18) {
+        return None;
+    }
+    let t = t / tl;
+    let b = n.cross(t);
+    let mut out = BTreeMap::new();
+    for &v in verts {
+        let p = mesh.position(v)?;
+        if !p.is_finite() {
+            return None;
+        }
+        out.insert(v, DVec2::new(p.dot(t), p.dot(b)));
+    }
+    Some(out)
+}
+
+/// The total `|UV area|` of a chart's triangles, and its bounding box's area.
+fn uv_area_and_box(tris: &[[VertId; 3]], uv: &BTreeMap<VertId, DVec2>) -> (f64, f64) {
+    let mut area = 0.0f64;
+    for t in tris {
+        let (Some(a), Some(b), Some(c)) = (uv.get(&t[0]), uv.get(&t[1]), uv.get(&t[2])) else {
+            continue;
+        };
+        area += ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs() * 0.5;
+    }
+    let (mut lo, mut hi) = (DVec2::splat(f64::MAX), DVec2::splat(f64::MIN));
+    for p in uv.values() {
+        lo = lo.min(*p);
+        hi = hi.max(*p);
+    }
+    let d = hi - lo;
+    // **The diagonal SQUARED, not the box's area.** A chart squashed onto a line
+    // has a bounding box that is squashed with it, so `area / (w·h)` stays near
+    // 0.5 for a segment and the detector reads healthy — measured, and it is why
+    // the first version of this fix caught only a fraction of the charts. The
+    // diagonal is a length the collapse does NOT shrink, so `area / diag²` is the
+    // chart's aspect ratio and goes to zero exactly when it should.
+    (
+        area,
+        if d.is_finite() {
+            d.length_squared()
+        } else {
+            0.0
+        },
+    )
 }
 
 /// A chart's faces, triangulated by a fan for the purposes of the solve.
@@ -634,6 +813,9 @@ pub fn unwrap(mesh: &Mesh) -> Result<Unwrapped, OpError> {
     let chart_faces = charts(mesh);
     let mut per_chart: Vec<BTreeMap<VertId, DVec2>> = Vec::with_capacity(chart_faces.len());
     let mut reports: Vec<ChartReport> = Vec::with_capacity(chart_faces.len());
+    // The triangulation each chart was solved over, kept so the post-pack
+    // instrument measures the same triangles the solve did.
+    let mut chart_tris: Vec<Vec<[VertId; 3]>> = Vec::with_capacity(chart_faces.len());
 
     for (ci, faces) in chart_faces.iter().enumerate() {
         let verts: BTreeSet<VertId> = faces
@@ -661,10 +843,34 @@ pub fn unwrap(mesh: &Mesh) -> Result<Unwrapped, OpError> {
                 why: "the conformal solve produced a non-finite coordinate",
             });
         };
+        // **THE COLLAPSE FALLBACK** (Wave D) — see `planar_uv` for the mechanism
+        // and for why a converged solve can hand back a segment.
+        let (uv_area, uv_box) = uv_area_and_box(&tris, &uv);
+        let (uv, projected) = if uv_area <= uv_box * COLLAPSE_AREA_FRACTION {
+            match planar_uv(mesh, &verts, &tris) {
+                Some(flat) => (flat, true),
+                // No plane either — the chart's normals cancel exactly AND the
+                // tangent degenerates. Keep the conformal answer: a segment is a
+                // bad UV layout and refusing the whole unwrap over one chart
+                // would take away the picture that shows the author where to cut.
+                None => (uv, false),
+            }
+        } else {
+            (uv, false)
+        };
         // Counted BEFORE packing: packing translates and scales uniformly, which
         // cannot change a winding, but counting on the solver's own output keeps
         // the number a statement about the solve.
         let flipped = count_flipped(&tris, &uv);
+        let pin_distance = match (mesh.position(pins[0]), mesh.position(pins[1])) {
+            (Some(a), Some(b)) => (b - a).length(),
+            _ => 0.0,
+        };
+        let area3: f64 = tris
+            .iter()
+            .filter_map(|&t| tri_area2(mesh, t))
+            .map(|a2| a2 * 0.5)
+            .sum();
         reports.push(ChartReport {
             faces: faces.len(),
             verts: verts.len(),
@@ -673,11 +879,49 @@ pub fn unwrap(mesh: &Mesh) -> Result<Unwrapped, OpError> {
             convergence,
             flipped,
             triangles: tris.len(),
+            // Filled after packing — the two fields that are statements about
+            // what lands in the FILE rather than about the solve.
+            degenerate_uv: 0,
+            uv_extent: 0.0,
+            pin_distance,
+            area3,
+            projected,
         });
         per_chart.push(uv);
+        chart_tris.push(tris);
     }
 
     pack(&mut per_chart);
+
+    // **The Wave-D instrument, measured where the defect lives.** After packing
+    // and in `f32`, because that is the domain the asset is written in and the
+    // domain the collapse happens in — see `ChartReport::degenerate_uv`.
+    for (ci, chart) in per_chart.iter().enumerate() {
+        let (mut lo, mut hi) = (DVec2::splat(f64::MAX), DVec2::splat(f64::MIN));
+        for p in chart.values() {
+            lo = lo.min(*p);
+            hi = hi.max(*p);
+        }
+        reports[ci].uv_extent = if lo.is_finite() && hi.is_finite() {
+            (hi - lo).length()
+        } else {
+            0.0
+        };
+        reports[ci].degenerate_uv = chart_tris[ci]
+            .iter()
+            .filter(|t| {
+                let uv = |v: &VertId| {
+                    chart
+                        .get(v)
+                        .map(|p| (p.x as f32, p.y as f32))
+                        .unwrap_or((0.0, 0.0))
+                };
+                let (a, b, c) = (uv(&t[0]), uv(&t[1]), uv(&t[2]));
+                let area2 = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+                !(area2.abs() > 0.0)
+            })
+            .count();
+    }
 
     // Per-CORNER, keyed by half-edge, ordered by half-edge — the op's wire form.
     // A vertex on a seam has a different UV in each chart it belongs to, which is
@@ -705,6 +949,8 @@ pub fn unwrap(mesh: &Mesh) -> Result<Unwrapped, OpError> {
             .fold(0.0f64, |a, b| if b > a { b } else { a })
     };
     let report = UnwrapReport {
+        degenerate_uv: reports.iter().map(|r| r.degenerate_uv).sum(),
+        projected: reports.iter().filter(|r| r.projected).count(),
         corners: corners.len(),
         seams: seam_count(mesh),
         worst_residual: worst(|r| r.residual),
@@ -1425,5 +1671,222 @@ mod tests {
         assert_eq!(out.report.charts.len(), 0);
         assert_eq!(out.report.corners, 0);
         assert_eq!(out.op, Op::Unwrap { corners: vec![] });
+    }
+
+    // ── Wave D: the LSCM collapse, diagnosed ───────────────────────────────
+
+    /// **THE DIAGNOSIS.** P25 measured 953 of 995 locally-degenerate UV
+    /// triangles carrying *healthy 3D area*, called the mechanism unknown, and
+    /// carried it. This is the mechanism, and it was in the report all along —
+    /// one column to the left.
+    ///
+    /// A zero-UV-area triangle with healthy 3D area is **the crease of a fold**.
+    /// An LSCM solve that overlaps itself has a Jacobian determinant that changes
+    /// sign across the chart; by continuity it passes through zero, and the
+    /// triangles straddling that locus are flat in UV and perfectly ordinary in
+    /// 3D. That is the P25 reading exactly. The fixture it was measured on folds
+    /// **1 225** triangles and reports **995** degenerate — one number is not a
+    /// mystery beside the other, it is the same event counted twice.
+    ///
+    /// Two hypotheses this retires, with numbers rather than argument:
+    ///
+    /// * **ill-conditioned pins.** [`pin_pair`] takes the vertex FARTHEST from
+    ///   the lowest id, so `pin_distance` is the chart's 3D diameter by
+    ///   construction and cannot be small unless the chart is. Asserted below on
+    ///   the very charts that collapse.
+    /// * **an unconverged solve.** `convergence` is at machine epsilon on the
+    ///   collapsed charts, so the solver finished; what it finished with was an
+    ///   overlapping map, which is a genuine least-squares optimum for a chart
+    ///   that is not a disk.
+    ///
+    /// The **third** — the packer's uniform scale putting a small chart under
+    /// `f32` resolution — is real arithmetic and is *not* what happened here. It
+    /// has its own test below, which measures how far away it is.
+    ///
+    /// The consequence for the gate: `degenerate_uv <= flipped` is the sharp
+    /// statement — *every zero-area triangle is accounted for by a fold* — and it
+    /// is what replaces a wholesale 20% fraction. The remedy is unchanged and
+    /// already documented (`min_chart_faces`, more seams); what changes is that
+    /// an *unexplained* collapse is now a failing test.
+    #[test]
+    fn every_degenerate_uv_triangle_is_the_crease_of_a_fold() {
+        // A tube: conformal, not a disk, so it folds — the crate's own fixture
+        // for "the solve converged and the map still overlaps itself".
+        let m = cylinder(1.0, 2.0, 12);
+        let out = unwrap(&m).expect("unwraps");
+        let mut any_folded = false;
+        for (i, c) in out.report.charts.iter().enumerate() {
+            println!(
+                "chart {i}: tris {} flipped {} degenerate_uv {} uv_extent {:.3e} area3 {:.3e} pin {:.3e} conv {:.2e}",
+                c.triangles,
+                c.flipped,
+                c.degenerate_uv,
+                c.uv_extent,
+                c.area3,
+                c.pin_distance,
+                c.convergence
+            );
+            // **THE CLAIM**, per chart: a degeneracy is never unexplained.
+            assert!(
+                c.degenerate_uv <= c.flipped,
+                "chart {i} has {} zero-area UV triangles and only {} folds — that is a collapse the fold count cannot account for, which is the defect this test exists to catch",
+                c.degenerate_uv,
+                c.flipped
+            );
+            if c.flipped > 0 {
+                any_folded = true;
+                // …and it is not the pins, and not the solver.
+                assert!(
+                    c.pin_distance > 1e-6,
+                    "chart {i}'s pins are coincident after all: {}",
+                    c.pin_distance
+                );
+                assert!(
+                    c.convergence < 1e-6,
+                    "chart {i} did not converge: {}",
+                    c.convergence
+                );
+                assert!(c.area3 > 1e-9, "chart {i} has no 3D area to begin with");
+            }
+        }
+        assert!(
+            any_folded,
+            "the fixture must actually fold, or this is vacuous"
+        );
+        assert!(
+            out.report.degenerate_uv <= out.report.flipped,
+            "{} degenerate of {} folded",
+            out.report.degenerate_uv,
+            out.report.flipped
+        );
+
+        // The control: a chart that does NOT fold has no degeneracies at all,
+        // which is what makes the inequality above a statement rather than a
+        // tautology satisfied by zero.
+        let flat = unwrap(&subdivided_plane(3)).expect("unwraps");
+        assert_eq!(flat.report.flipped, 0);
+        assert_eq!(
+            flat.report.degenerate_uv, 0,
+            "a chart with no fold produced a zero-area UV triangle — the diagnosis is wrong"
+        );
+        assert!(flat.report.charts.iter().all(|c| c.uv_extent > 0.1));
+    }
+
+    /// **The collapse fallback, as an invariant**: after [`unwrap`], no chart is
+    /// entirely degenerate.
+    ///
+    /// A chart every one of whose triangles has zero UV area is a chart mapped
+    /// onto a line — it carries no texels at all, so nothing downstream can
+    /// texture it, and it is the P25 defect. A *few* degenerate triangles inside
+    /// a chart with area are fold creases and slivers, which is a different and
+    /// much smaller thing.
+    ///
+    /// Stated over every fixture this module has, including the two that fold.
+    #[test]
+    fn no_chart_survives_unwrap_mapped_onto_a_line() {
+        for (name, m) in [
+            ("plane", subdivided_plane(3)),
+            ("cylinder", cylinder(1.0, 2.0, 12)),
+            ("torus", crate::build::torus(1.0, 0.3, 12, 8)),
+            ("cube", cube(2.0)),
+        ] {
+            let out = unwrap(&m).expect("unwraps");
+            for (i, c) in out.report.charts.iter().enumerate() {
+                assert!(
+                    c.triangles == 0 || c.degenerate_uv < c.triangles,
+                    "{name} chart {i}: all {} triangles have zero UV area — the \
+                     chart is a segment and the collapse fallback did not fire",
+                    c.triangles
+                );
+            }
+        }
+    }
+
+    /// The fallback's own arithmetic, on a chart that would collapse: a planar
+    /// projection gives **every** triangle area, and it is a pure function of
+    /// the mesh.
+    #[test]
+    fn a_planar_projection_gives_every_triangle_area_and_is_deterministic() {
+        let m = subdivided_plane(2);
+        let verts: BTreeSet<VertId> = m.vert_ids().collect();
+        let faces: Vec<FaceId> = m.face_ids().collect();
+        let (tris, _) = triangles(&m, &faces);
+        let a = planar_uv(&m, &verts, &tris).expect("a plane has a plane");
+        let b = planar_uv(&m, &verts, &tris).expect("twice");
+        assert_eq!(a, b, "the projection is not a pure function of the mesh");
+        let (area, diag2) = uv_area_and_box(&tris, &a);
+        assert!(
+            area > diag2 * COLLAPSE_AREA_FRACTION,
+            "the projection itself reads as collapsed: {area} vs {diag2}"
+        );
+        for t in &tris {
+            let (p, q, r) = (a[&t[0]], a[&t[1]], a[&t[2]]);
+            let d = (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+            assert!(d.abs() > 1e-12, "a projected triangle has no area");
+        }
+    }
+
+    /// The third hypothesis, measured and set aside: the packer's **uniform
+    /// scale** really can put a chart under `f32` resolution, and the ratio it
+    /// takes is far past anything a merged-chart scan produces.
+    ///
+    /// [`pack`] normalizes each chart to its own origin and then scales **every**
+    /// chart by one factor, so a chart whose UV extent is orders of magnitude
+    /// below the atlas's comes out spanning a handful of `f32` steps. Kept as a
+    /// test rather than as a paragraph because it is the arithmetic that says
+    /// *how far* — the day someone packs a millimetre detail beside a
+    /// forty-metre wall, this is the number they need.
+    #[test]
+    fn the_packers_uniform_scale_is_a_hazard_at_a_ratio_no_merged_chart_scan_reaches() {
+        for ratio in [1e2, 1e4] {
+            let mut mesh = Mesh::new();
+            grid_patch(&mut mesh, DVec3::ZERO, 40.0, 3);
+            grid_patch(&mut mesh, DVec3::new(200.0, 0.0, 0.0), 40.0 / ratio, 3);
+            let out = unwrap(&mesh).expect("it unwraps");
+            let extents: Vec<f64> = out.report.charts.iter().map(|c| c.uv_extent).collect();
+            let degenerate: usize = out.report.charts.iter().map(|c| c.degenerate_uv).sum();
+            println!("ratio {ratio:.0e}: uv extents {extents:?} degenerate {degenerate}");
+            assert_eq!(
+                degenerate, 0,
+                "a {ratio:.0e} size ratio already collapses a chart — the packer hazard is closer than the diagnosis says and the ledger is wrong"
+            );
+        }
+    }
+
+    /// A disconnected square patch of `n × n` quads at `origin`, `size` metres
+    /// across, added through the op path.
+    fn grid_patch(mesh: &mut Mesh, origin: DVec3, size: f64, n: usize) -> Vec<FaceId> {
+        let step = size / n as f64;
+        let mut ids = Vec::new();
+        let mut faces = Vec::new();
+        for j in 0..=n {
+            for i in 0..=n {
+                let p = origin + DVec3::new(i as f64 * step, 0.0, j as f64 * step);
+                let out = crate::ops::apply(
+                    mesh,
+                    &Op::AddVertex {
+                        position: p.to_array(),
+                    },
+                )
+                .expect("a vertex");
+                ids.push(out.verts[0]);
+            }
+        }
+        let at = |i: usize, j: usize| ids[j * (n + 1) + i];
+        for j in 0..n {
+            for i in 0..n {
+                let out = crate::ops::apply(
+                    mesh,
+                    &Op::AddFace {
+                        verts: vec![at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)],
+                        corners: vec![crate::topo::CornerData::default(); 4],
+                        slot: None,
+                    },
+                )
+                .expect("a face");
+                faces.push(out.faces[0]);
+            }
+        }
+        faces
     }
 }

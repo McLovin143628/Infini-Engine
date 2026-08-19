@@ -236,6 +236,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   // ── Wave D tool parameters ───────────────────────────────────────────────
   const [slide, setSlide] = useState(0.25);
   const [smoothAngle, setSmoothAngle] = useState(30);
+  const [seamAngle, setSeamAngle] = useState(40);
   const [mergeTolerance, setMergeTolerance] = useState(0.001);
   /** The rubber band, while a marquee is being dragged. */
   const [marquee, setMarquee] = useState<Marquee | null>(null);
@@ -1383,6 +1384,32 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
             icon={<Scissors size={12} />}
             disabled={nothing || mode !== "edge"}
             onClick={() => assetId && void apply(assetId, { tool: "seam", seam: false })}
+          />
+        </div>
+        <Num
+          label="Auto-seam (°)"
+          value={seamAngle}
+          step={1}
+          onChange={(v) => setSeamAngle(Math.min(180, Math.max(0, v)))}
+        />
+        <div className="grid grid-cols-2 gap-1">
+          <ToolButton
+            label="Auto-seam"
+            icon={<Scissors size={12} />}
+            onClick={() =>
+              assetId &&
+              void apply(assetId, { tool: "autoSeam", angleDeg: seamAngle, replace: true })
+            }
+            title="Cut every edge whose faces disagree by more than the angle, plus every border. One undo step, unlike marking by hand."
+          />
+          <ToolButton
+            label="Add seams"
+            icon={<Scissors size={12} />}
+            onClick={() =>
+              assetId &&
+              void apply(assetId, { tool: "autoSeam", angleDeg: seamAngle, replace: false })
+            }
+            title="The same cuts, added to the seams you already have"
           />
         </div>
         <ToolButton

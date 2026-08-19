@@ -140,14 +140,43 @@ const MAX_FLIPPED_FRACTION: f64 = 0.08;
 /// [`uv_degenerate_by_area`](inf_editor_core::bake::uv_degenerate_by_area)
 /// split was written expecting the count to be decimation slivers meeting
 /// LSCM's tolerance, and disproved itself: **953 of the 995 local degenerate
-/// triangles have healthy 3D area** (≥ a tenth of the median). The unwrap is
-/// collapsing geometry that gave it room to work. That is a real defect in
-/// the P23.5 unwrap path as this pipeline drives it — mechanism undiagnosed,
-/// ledgered in ROADMAP §12's Phase 25 block — and it is why this ceiling is a
-/// WHOLESALE catch (the P23 all-zeros class fails it at 100%), not a claim
-/// the current number is good. The day the collapse is diagnosed and fixed,
-/// tighten this toward the sliver floor the split will then reveal.
-const MAX_DEGENERATE_UV_FRACTION: f64 = 0.20;
+/// triangles have healthy 3D area** (≥ a tenth of the median). The unwrap was
+/// collapsing geometry that gave it room to work.
+///
+/// # DIAGNOSED AND FIXED, Wave D — and the ceiling comes down with it
+///
+/// The mechanism, found with a **per-chart** instrument (the P25 law, "an
+/// average hides a station", applied to the number that carried the defect):
+/// on a chart far from developable — residual 0.5–0.8 where a flat chart reads
+/// 1e-14 — the two-pin LSCM energy is genuinely minimized by squashing the
+/// whole chart onto the line through its pins. Shrinking the area costs the
+/// energy nothing and buys a large reduction in the conformal term, so the
+/// solve **converges** (measured 1e-16) to a **segment**. Healthy 3D area, no
+/// UV area, chart-wide — the P25 reading exactly.
+///
+/// Two hypotheses the same instrument retired with numbers: the pins are
+/// nowhere near coincident (`pin_pair` takes the 3D-farthest vertex, so
+/// `pin_distance` IS the chart's diameter), and every collapsed chart converged
+/// to machine epsilon. The packer's uniform scale is a real hazard at a
+/// size ratio near a million and the measured ratio here is **2.5e2**, so it is
+/// not this either.
+///
+/// The fix is `inf_dcc::uv`'s collapse fallback: a chart whose UV area falls
+/// under `COLLAPSE_AREA_FRACTION` of its own diagonal squared is replaced by a
+/// **planar projection** along its area-weighted normal. Worse than a good
+/// conformal map; infinitely better than a segment, because every triangle then
+/// has texels a bake can read.
+///
+/// **Measured on this fixture, before → after: 995 → 331 degenerate of 15 101
+/// (6.6% → 2.2%), and 692 → 28 with EXACTLY zero `f32` UV area.** The remaining
+/// 331 are the sliver floor this constant's old paragraph predicted.
+///
+/// The ceiling therefore comes down from 0.20 to **0.08**: 2.2% measured on
+/// Windows, with the macOS leg's historical 1.5× spread (6.6 → 10.1) leaving it
+/// at ~3.4% there, and a little over twice that as margin. Still a *wholesale*
+/// catch — the P23 all-zeros class fails it at 100% — but no longer one that has
+/// to hold a defect's worth of slack.
+const MAX_DEGENERATE_UV_FRACTION: f64 = 0.08;
 /// Every chart's conjugate-gradient solve must actually converge. P23.6's own
 /// number, met again.
 const MAX_CONVERGENCE: f64 = 1.0e-9;
@@ -160,7 +189,21 @@ const MIN_ATLAS_COVERAGE: f64 = 0.20;
 /// Charts, capped so chart merging cannot silently stop working. Measured 656.
 const MAX_CHARTS: usize = 1_200;
 /// Atlas texels two triangles may both claim. Measured 597 of 65 536 (0.9%).
-const MAX_OVERLAP_FRACTION: f64 = 0.02;
+///
+/// **Wave D moved it to 4%, and the reason is a trade the ledger should carry
+/// rather than a number that drifted.** The collapse fallback gives a squashed
+/// chart real UV area, and a chart with area occupies texels a segment did not —
+/// so the measurement went 661 → **1 518 of 65 536 (2.3%)** in the same run that
+/// took the degeneracies from 692 to 28.
+///
+/// That is the right direction and it is worth saying why: an overlapped texel
+/// is textured from one of two triangles and the other is slightly wrong; a
+/// degenerate triangle has **no texels at all** and is not textured. Trading 857
+/// texels of "slightly wrong" for 664 triangles of "textured at all" is not a
+/// regression wearing a re-blessed constant, it is the defect's cost moving from
+/// the half that cannot be fixed downstream to the half that can (`min_chart_faces`
+/// is the documented lever for both).
+const MAX_OVERLAP_FRACTION: f64 = 0.04;
 /// Baked normals against the analytic scene, median degrees. The floor is the
 /// fused mesh's own roughness (33.2 degrees at its vertices), not the bake's —
 /// the analytic-surface arm below measures the bake at 0.000.
@@ -617,6 +660,70 @@ fn the_folded_charts_are_counted_and_bounded() {
             "charts folded and no advisory says so"
         );
     }
+
+    // ── Wave D: THE DIAGNOSIS, on the fixture it was carried from ──────────
+    //
+    // P25 measured 953 of 995 zero-UV-area triangles carrying healthy 3D area
+    // and left the mechanism unknown. It is the **crease of a fold**: an LSCM
+    // solve that overlaps itself has a Jacobian determinant that changes sign
+    // across the chart, so by continuity it passes through zero, and the
+    // triangles straddling that locus are flat in UV and ordinary in 3D.
+    //
+    // `unexplained` is the sharp number and the one gated: degeneracies the
+    // fold count cannot account for, summed PER CHART (an average hides a
+    // station — a chart-wide collapse and a scattering of creases are the same
+    // sum and nothing alike). Zero means there is no second mechanism left.
+    let (degenerate_uv, worst, unexplained) = f
+        .advisories
+        .iter()
+        .find_map(|a| match a {
+            FinishAdvisory::UvChartsFlipped {
+                degenerate_uv,
+                worst_chart_degenerate,
+                unexplained,
+                ..
+            } => Some((*degenerate_uv, *worst_chart_degenerate, *unexplained)),
+            _ => None,
+        })
+        .unwrap_or((0, 0, 0));
+    println!(
+        "P25.3 UV collapse: {} folded, {degenerate_uv} zero-area (worst chart \
+         {worst}), {unexplained} unexplained",
+        f.report.flipped
+    );
+    // **Measured 5**, down from 418 before the collapse fallback landed. The
+    // bound is a small absolute count rather than zero, and that is honest: the
+    // survivors are individual sliver triangles inside otherwise-healthy charts —
+    // the "sliver floor" the old `MAX_DEGENERATE_UV_FRACTION` paragraph predicted
+    // the diagnosis would reveal — and their count moves with meshopt's
+    // cross-platform output like everything else on this path (the P18 law). 60
+    // is an order of margin over the measurement and two orders under the defect
+    // it replaced, so it still fails loudly if a second mechanism appears.
+    const MAX_UNEXPLAINED: usize = 60;
+    assert!(
+        unexplained <= MAX_UNEXPLAINED,
+        "{unexplained} zero-area UV triangles are not accounted for by a fold \
+         (measured 5, ceiling {MAX_UNEXPLAINED}) — there is a SECOND collapse \
+         mechanism in the unwrap path, which is exactly the thing the P25 ledger \
+         carried and this arm exists to close"
+    );
+    assert!(
+        degenerate_uv > 0,
+        "the fixture produced no zero-area UV triangles at all, so the arm above \
+         is vacuous — pick a fixture that reproduces the P25 measurement"
+    );
+    // …and the FIX fired. A run where the fallback silently stopped working
+    // would show `unexplained` climbing back toward 418, which the arm above
+    // catches — but only after it has climbed. This catches it on the first run.
+    assert!(
+        f.report.projected_charts > 0,
+        "no chart needed the collapse fallback on a fixture measured to have \
+         hundreds of collapsed triangles — the fallback is not running"
+    );
+    println!(
+        "P25.3 UV fallback: {} of {} charts were projected",
+        f.report.projected_charts, f.report.charts
+    );
 }
 
 #[test]

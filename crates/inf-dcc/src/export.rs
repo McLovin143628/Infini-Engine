@@ -299,7 +299,7 @@ pub fn to_mesh_asset_sourced(
     let mut submeshes = Vec::with_capacity(by_slot.len());
     let mut all_sources: Vec<Vec<HalfId>> = Vec::with_capacity(by_slot.len());
     for (slot, faces) in by_slot {
-        let (vertices, indices, skin, fallbacks, sources, authored) =
+        let (vertices, indices, skin, fallbacks, _sources, authored) =
             build_submesh(mesh, &faces, opts, &mut report, &mut emitted, &mut written);
         report.fan_fallbacks += fallbacks;
         if indices.is_empty() {
@@ -494,8 +494,8 @@ fn build_submesh(
     // change nothing except the intern order this function's round-trip
     // guarantee depends on.
     let mut sources: Vec<VertId> = Vec::new();
-    // Wave D: the CORNER each written vertex was interned from — i.e. the
-    // (the half-edge, not merely its vertex). A caller that displaces a cached
+    // Wave D: the CORNER each written vertex was interned from — the half-edge,
+    // not merely its vertex. A caller that displaces a cached
     // vertex buffer needs the corner and not the vertex, because the normal the
     // writer emits is a property of the CORNER — an authored one is copied
     // verbatim and a derived one is the corner's smooth fan, which stops at

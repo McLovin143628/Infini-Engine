@@ -1708,6 +1708,52 @@ pub fn shade_edges(
     (sharp, soft)
 }
 
+/// **Auto-seam**: every edge whose two faces disagree by more than `angle_deg`,
+/// plus every boundary edge.
+///
+/// The modeller's half of "smart UV project", and it is the same dihedral
+/// measurement [`shade_edges`] makes — one rule, two uses, because "where does
+/// this surface crease" has one answer and giving it two would let them drift.
+/// A boundary edge is always a seam: the surface really does end there, and a
+/// chart that walks off the edge of the mesh is not a chart.
+///
+/// The angle is degrees at the UI boundary; the comparison is
+/// `dot(n1, n2) < cos(threshold)` — **no `acos`**, both because it is faster and
+/// because the P14 portability law bans `std` trigonometry from anything that
+/// writes committed content. `cos` itself is [`inf_math::pcos64`].
+///
+/// The **result** is what gets journalled (one [`inf_dcc::Op::SetEdgesSeam`]),
+/// not the angle: an op that re-derived the edge set would change meaning the
+/// day the measurement did — the `Op::Unwrap` precedent.
+pub fn auto_seam_edges(mesh: &Mesh, angle_deg: f64) -> Vec<HalfId> {
+    let threshold = inf_math::pcos64(angle_deg.clamp(0.0, 180.0) * std::f64::consts::PI / 180.0);
+    let mut out: Vec<HalfId> = Vec::new();
+    let mut seen: std::collections::BTreeSet<HalfId> = std::collections::BTreeSet::new();
+    for h in mesh.half_ids() {
+        let Some(c) = inf_dcc::canonical_edge(mesh, h) else {
+            continue;
+        };
+        if !seen.insert(c) {
+            continue;
+        }
+        let Some(t) = mesh.twin(c) else { continue };
+        match (mesh.face_of(c).flatten(), mesh.face_of(t).flatten()) {
+            (Some(f), Some(g)) => {
+                let (a, b) = (face_normal_of(mesh, f), face_normal_of(mesh, g));
+                if a == DVec3::ZERO || b == DVec3::ZERO {
+                    continue;
+                }
+                if a.normalize().dot(b.normalize()) < threshold {
+                    out.push(c);
+                }
+            }
+            // A boundary edge. The surface ends here, so a chart must too.
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// A face's area-weighted normal, or zero for a degenerate face.
 fn face_normal_of(mesh: &Mesh, f: FaceId) -> DVec3 {
     let verts = mesh.face_verts(f).unwrap_or_default();
@@ -4629,6 +4675,63 @@ mod tests {
             .expect("a clustering")
             .is_empty());
         assert!(merge_clusters(&m, &ids, f64::NAN).is_err());
+    }
+
+    /// Auto-seam cuts a cube into six charts and leaves a smooth cylinder's
+    /// barrel whole — the two ends of the rule, on the two shapes that make it
+    /// a rule rather than a threshold.
+    #[test]
+    fn auto_seam_cuts_the_creases_and_the_borders_and_nothing_else() {
+        let cube = cube(2.0);
+        let seams = auto_seam_edges(&cube, 40.0);
+        assert_eq!(
+            seams.len(),
+            cube.edge_count(),
+            "every cube edge is 90°, so every one is a seam"
+        );
+        // …and applying them really cuts it into six charts.
+        let mut m = cube.clone();
+        inf_dcc::ops::apply(
+            &mut m,
+            &Op::SetEdgesSeam {
+                halfs: seams,
+                seam: true,
+            },
+        )
+        .expect("marks");
+        assert_eq!(inf_dcc::charts(&m).len(), 6, "a cube cuts into six faces");
+
+        // A 16-sided cylinder: the barrel is 22.5° and stays whole; the two cap
+        // rims are 90° and cut.
+        let c = inf_dcc::cylinder(0.5, 2.0, 16);
+        let seams = auto_seam_edges(&c, 40.0);
+        assert!(!seams.is_empty() && seams.len() < c.edge_count());
+        let mut m = c.clone();
+        inf_dcc::ops::apply(
+            &mut m,
+            &Op::SetEdgesSeam {
+                halfs: seams,
+                seam: true,
+            },
+        )
+        .expect("marks");
+        assert_eq!(
+            inf_dcc::charts(&m).len(),
+            3,
+            "barrel plus two caps: {}",
+            inf_dcc::charts(&m).len()
+        );
+
+        // A PLANE: no crease anywhere, so only its border is cut — which is the
+        // arm that says the boundary rule is doing something rather than being
+        // carried by the angle one.
+        let p = plane(2.0);
+        let seams = auto_seam_edges(&p, 40.0);
+        assert_eq!(
+            seams.len(),
+            4,
+            "a quad's four border edges, and nothing else"
+        );
     }
 
     /// Auto-smooth splits a cube's 90° edges from a smooth cylinder's shallow

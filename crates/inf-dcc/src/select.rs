@@ -118,8 +118,10 @@ pub fn op_preserves_ids(op: &Op) -> bool {
         // proportionally dragged a selected region must still have it selected
         // when the drag lands.
         | Op::MoveVerts { .. }
-        // …and a batch sharpness write is `Op::SetEdgeSharp` N times over.
-        | Op::SetEdgesSharp { .. } => true,
+        // …and the two batch attribute writes are `Op::SetEdgeSharp` and
+        // `Op::SetEdgeSeam` N times over.
+        | Op::SetEdgesSharp { .. }
+        | Op::SetEdgesSeam { .. } => true,
         // Everything else frees slots (which the LIFO free list then hands back
         // to something different) or rebuilds a patch outright.
         Op::RemoveVertex { .. }
