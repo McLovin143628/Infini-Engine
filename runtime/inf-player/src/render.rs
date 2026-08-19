@@ -1426,6 +1426,12 @@ pub fn project_terrain(
         albedo: terrain.layers[k].albedo.to_array(),
         roughness: terrain.layers[k].roughness as f32,
         tex_scale: terrain.layers[k].tex_scale as f32,
+        // Wave T's per-layer virtual material has no persisted field to
+        // come from yet — `inf_ecs::TerrainLayer` carries no texture
+        // reference and the scene schema is frozen for that wave. Both hosts
+        // spell the default the same way, so neither can start binding one
+        // without the other. See docs/memos/wave-t-textures-disposition.md.
+        vt: Default::default(),
     });
     let macro_variation = terrain.macro_variation as f32;
     // EMPTY on purpose (P19.2) — see the `biome_palette` note at the tail of this
@@ -1731,6 +1737,12 @@ fn project_voxel(
             albedo: t.layers[k].albedo.to_array(),
             roughness: t.layers[k].roughness as f32,
             tex_scale: t.layers[k].tex_scale as f32,
+            // Wave T's per-layer virtual material has no persisted field to
+            // come from yet — `inf_ecs::TerrainLayer` carries no texture
+            // reference and the scene schema is frozen for that wave. Both hosts
+            // spell the default the same way, so neither can start binding one
+            // without the other. See docs/memos/wave-t-textures-disposition.md.
+            vt: Default::default(),
         },
         None => RenderTerrainLayer::default(),
     });

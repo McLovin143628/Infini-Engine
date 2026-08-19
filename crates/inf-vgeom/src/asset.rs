@@ -138,7 +138,28 @@ pub const VMESH_ASSET_MAGIC: [u8; 8] = *b"INFVMSH\0";
 /// with the tangent channel. All three keep loading — v1 and v2 by lifting into
 /// a v3 image at open (see [`VgeomSource::from_payload`]), which is the same
 /// arrangement, and the same cost note, P18.2 gave v1.
-pub const VMESH_ASSET_SCHEMA_VERSION: u32 = 3;
+/// v4 (Wave T) appends the **materials section**: one `u32` material slot per
+/// on-disk meshlet record, at [`VgeomAssetHeader::materials_off`]. It is stamped
+/// only on a mesh that actually carries per-meshlet materials — see
+/// [`vmesh_min_schema_version`] — so a single-material mesh is byte-identical to
+/// what it was before Wave T.
+pub const VMESH_ASSET_SCHEMA_VERSION: u32 = 4;
+
+/// The **lowest** container version that can express this mesh — what the writer
+/// stamps (Wave T, the same discipline `.inf_tex` took in the same wave).
+///
+/// A version is a refusal contract: stamping v4 on a mesh every v3 reader could
+/// have read would refuse those readers for nothing *and* move the bytes of
+/// every `.inf_vmesh` in the project, invalidating content hashes and the cook's
+/// reproducibility for a section that is not there. So only a mesh with a
+/// materials section is v4.
+pub const fn vmesh_min_schema_version(has_materials: bool) -> u32 {
+    if has_materials {
+        4
+    } else {
+        3
+    }
+}
 
 /// Sections start on multiples of this many bytes — the same constant, and the
 /// same reasoning, as [`inf_asset::BLOB_ALIGN`] and `.inf_terrain`'s `TILE_ALIGN`.
@@ -491,6 +512,23 @@ pub struct VgeomAssetHeader {
     pub groups_len: u64,
     /// Payload length as written.
     pub total_len: u64,
+    /// **The materials section** (v4, Wave T): absolute offset of
+    /// `meshlet_count × 4` bytes, one `u32` material slot per on-disk meshlet
+    /// record in **directory order** — page 0's records, then page 1's, matching
+    /// the order the meshlet sections are laid down in.
+    ///
+    /// `0` means the mesh has none, which is every mesh cooked before Wave T and
+    /// every single-material mesh after it. A meshlet with no slot is slot `0`,
+    /// which is the instance's own material — i.e. exactly what a Nanite mesh
+    /// rendered as when `inf-vgeom`'s crate docs said *"v1 flattens all submeshes
+    /// into one geometry; material-slot tagging per meshlet is a follow-up."*
+    ///
+    /// It is a whole-mesh section rather than a per-page one, unlike the v3
+    /// tiles, and that is a size argument rather than a doctrinal exception: four
+    /// bytes a meshlet is 400 KB for a hundred-thousand-meshlet mesh, it is read
+    /// once when the source is opened, and there is therefore nothing to page.
+    /// The groups section beside it is resident whole for the same reason.
+    pub materials_off: u64,
 }
 
 /// One page-directory entry: everything the streamer needs about a page
@@ -575,6 +613,10 @@ pub struct VgeomPageSections<'a> {
     /// `tile_count` × [`TILE_REF_LEN`] bytes of [`ClusterTileRef`] — the tiles
     /// this cluster page's materials sample at its detail level (v3).
     pub tiles: &'a [u8],
+    /// One material slot per meshlet record (v4, Wave T), or **empty** when the
+    /// mesh names none — which is every mesh cooked before Wave T, and is read
+    /// as slot 0 (the instance's own material) rather than as an error.
+    pub materials: &'a [u32],
 }
 
 impl VgeomPageSections<'_> {
@@ -769,6 +811,27 @@ pub fn build_vgeom_asset(
         }
         offsets.push(here);
     }
+    // **The materials section** (v4, Wave T), in on-disk meshlet order — page 0's
+    // records, then page 1's — so `materials[page_meshlet_start + i]` is record
+    // `i` of that page and the streamer needs no second index. Written only when
+    // some meshlet actually names a material other than slot 0; otherwise the
+    // section does not exist, the offset is 0, and the payload is stamped v3 and
+    // is byte-identical to what it was before Wave T.
+    let mut materials: Vec<u32> = Vec::new();
+    if !mesh.meshlet_materials.is_empty() {
+        materials.reserve(mesh.meshlets.len());
+        for members in page_members.iter().take(page_count) {
+            for &m in members {
+                materials.push(mesh.meshlet_materials.get(m as usize).copied().unwrap_or(0));
+            }
+        }
+    }
+    let has_materials = materials.iter().any(|&s| s != 0);
+    let materials_off = if has_materials { off } else { 0 };
+    if has_materials {
+        off = align_up(off + materials.len() as u64 * 4);
+    }
+
     let groups_off = off;
     let groups_bytes = bincode::serde::encode_to_vec(&mesh.groups, inf_asset::bincode_config())
         .map_err(|e| VgeomAssetError::Malformed(format!("encode groups: {e}")))?;
@@ -784,7 +847,8 @@ pub fn build_vgeom_asset(
     // ── 5. Emit ──
     let mut out: Vec<u8> = Vec::with_capacity(total_len as usize);
     out.extend_from_slice(&VMESH_ASSET_MAGIC);
-    out.extend_from_slice(&VMESH_ASSET_SCHEMA_VERSION.to_le_bytes());
+    // The LOWEST version this payload needs — see `vmesh_min_schema_version`.
+    out.extend_from_slice(&vmesh_min_schema_version(has_materials).to_le_bytes());
     out.extend_from_slice(&(page_count as u32).to_le_bytes());
     out.extend_from_slice(&(mesh.meshlets.len() as u32).to_le_bytes());
     out.extend_from_slice(&(mesh.vertices.len() as u32).to_le_bytes());
@@ -801,6 +865,8 @@ pub fn build_vgeom_asset(
     out.extend_from_slice(&groups_off.to_le_bytes());
     out.extend_from_slice(&(groups_bytes.len() as u64).to_le_bytes());
     out.extend_from_slice(&total_len.to_le_bytes());
+    debug_assert_eq!(out.len(), 88, "the v4 materials offset lands at 88");
+    out.extend_from_slice(&materials_off.to_le_bytes());
     debug_assert!(out.len() as u64 <= HEADER_LEN);
     out.resize(HEADER_LEN as usize, 0);
 
@@ -852,6 +918,11 @@ pub fn build_vgeom_asset(
         }
         out.resize(o[5] as usize, 0);
         out.extend_from_slice(&b.tiles);
+    }
+
+    if has_materials {
+        out.resize(materials_off as usize, 0);
+        out.extend_from_slice(bytemuck::cast_slice(&materials));
     }
 
     out.resize(groups_off as usize, 0);
@@ -1068,7 +1139,45 @@ impl<B: AsRef<[u8]>> VgeomAssetReader<B> {
                 e.vertex_count as u64 * vertex_rec_len(self.header.schema_version) as u64,
             ),
             tiles: take(e.tiles_off, e.tile_count as u64 * TILE_REF_LEN as u64),
+            materials: self.page_materials(index),
         })
+    }
+
+    /// **This page's material slots** (v4, Wave T), one per meshlet record, or an
+    /// empty slice when the mesh carries none.
+    ///
+    /// The section is whole-mesh and in on-disk record order, so a page's window
+    /// into it is the prefix sum of the directory's `meshlet_count`s — the same
+    /// arithmetic `vertex_start` spells out for vertices, computed rather than
+    /// stored because a stored second copy of a prefix sum is a second thing that
+    /// can stop agreeing with the first.
+    pub fn page_materials(&self, index: usize) -> &[u32] {
+        if self.header.materials_off == 0 || index >= self.pages.len() {
+            return &[];
+        }
+        let start: usize = self.pages[..index]
+            .iter()
+            .map(|p| p.meshlet_count as usize)
+            .sum();
+        let n = self.pages[index].meshlet_count as usize;
+        let all = self.materials();
+        all.get(start..start + n).unwrap_or(&[])
+    }
+
+    /// The whole materials section, in on-disk meshlet-record order, or empty.
+    pub fn materials(&self) -> &[u32] {
+        if self.header.materials_off == 0 {
+            return &[];
+        }
+        let lo = self.header.materials_off as usize;
+        let hi = lo + self.header.meshlet_count as usize * 4;
+        // Bounds and 16-byte alignment were validated in `parse`, which is what
+        // makes this cast exact rather than hopeful.
+        self.bytes
+            .as_ref()
+            .get(lo..hi)
+            .map(bytemuck::cast_slice)
+            .unwrap_or(&[])
     }
 
     /// The DAG groups (decoded from the trailing section).
@@ -1128,8 +1237,17 @@ impl<B: AsRef<[u8]>> VgeomAssetReader<B> {
         let mut meshlet_vertices: Vec<u32> = Vec::new();
         let mut meshlet_triangles: Vec<u8> = Vec::new();
         let mut level_of: Vec<(u8, u32)> = Vec::with_capacity(n);
+        // The v4 material slots come back in GLOBAL meshlet order, which is what
+        // `VgeomMesh` speaks; the section on disk is in on-disk record order, so
+        // the scatter below is the inverse of the writer's gather.
+        let has_materials = h.materials_off != 0;
+        let mut meshlet_materials: Vec<u32> = if has_materials {
+            vec![0; n]
+        } else {
+            Vec::new()
+        };
         for (g, slot) in recs.iter().enumerate() {
-            let (rec, p, _) = slot.ok_or(VgeomAssetError::Malformed(format!(
+            let (rec, p, k) = slot.ok_or(VgeomAssetError::Malformed(format!(
                 "meshlet {g} is missing from every page"
             )))?;
             let s = self.page_sections(p).expect("page validated above");
@@ -1156,6 +1274,9 @@ impl<B: AsRef<[u8]>> VgeomAssetReader<B> {
                 error: rec.error,
                 parent_error: rec.parent_error,
             });
+            if has_materials {
+                meshlet_materials[g] = self.page_materials(p).get(k as usize).copied().unwrap_or(0);
+            }
             level_of.push((rec.lod_level as u8, g as u32));
         }
 
@@ -1183,6 +1304,7 @@ impl<B: AsRef<[u8]>> VgeomAssetReader<B> {
             levels,
             center: h.center,
             radius: h.radius,
+            meshlet_materials,
         };
         // **The third entrance** (round 3). `VgeomMesh::validate` is the rule
         // for a payload nobody has vouched for, and it had two entrances: the
@@ -1260,7 +1382,18 @@ fn parse(data: &[u8]) -> Result<(VgeomAssetHeader, Vec<VgeomPageEntry>)> {
         groups_off: u64_at(64),
         groups_len: u64_at(72),
         total_len: u64_at(80),
+        // v4 (Wave T). A v3 payload has zeros in the reserved lane, which is
+        // exactly the "no materials section" encoding — so the field needs no
+        // version branch to read, only one to *refuse*.
+        materials_off: u64_at(88),
     };
+    if schema_version < 4 && header.materials_off != 0 {
+        return Err(VgeomAssetError::Malformed(format!(
+            "a v{schema_version} payload names a materials section at {}; the \
+             section is v4 (Wave T)",
+            header.materials_off
+        )));
+    }
 
     // Every record the header claims has to be *stored*, so the payload length
     // bounds the counts from above. Without this a doctored header can name
@@ -1318,6 +1451,24 @@ fn parse(data: &[u8]) -> Result<(VgeomAssetHeader, Vec<VgeomPageEntry>)> {
         return Err(VgeomAssetError::Malformed(
             "groups section is out of bounds".into(),
         ));
+    }
+    // The materials section (v4), bounded and aligned by the same rule — a
+    // section whose bytes the file does not contain is the aliasing class the
+    // walk below closes for pages, arriving through a header field instead.
+    if header.materials_off != 0 {
+        let len = header.meshlet_count as u64 * 4;
+        if !header.materials_off.is_multiple_of(SECTION_ALIGN)
+            || header.materials_off < dir_end
+            || header
+                .materials_off
+                .checked_add(len)
+                .is_none_or(|e| e > end)
+        {
+            return Err(VgeomAssetError::Malformed(format!(
+                "materials section at {} ({len} B) is out of bounds or misaligned",
+                header.materials_off
+            )));
+        }
     }
 
     let mut pages = Vec::with_capacity(page_count as usize);
@@ -1835,6 +1986,10 @@ mod v1_records {
                 levels: self.levels,
                 center: self.center,
                 radius: self.radius,
+                // A v1 mesh predates per-meshlet materials by two containers:
+                // empty is "every meshlet is slot 0", which is exactly what it
+                // rendered as.
+                meshlet_materials: Vec::new(),
             }
         }
     }
@@ -2828,6 +2983,111 @@ mod tests {
         assert_eq!(src.meshlet_count(), m.meshlets.len() as u32);
     }
 
+    /// **The v4 materials section: per-meshlet material slots round-trip, and a
+    /// mesh without them is still v3, byte for byte** (Wave T, §3 C).
+    ///
+    /// Three claims, and the third is the one that makes the bump cheap:
+    ///
+    /// 1. a mesh with per-meshlet slots writes a v4 image whose slots come back
+    ///    through `to_mesh` in global meshlet order and through `page_materials`
+    ///    in on-disk order — two different orders over the same section, which is
+    ///    exactly where a scatter/gather inverse goes wrong;
+    /// 2. every slot the writer was given is one it hands back (no meshlet is
+    ///    silently reassigned by the page permutation);
+    /// 3. **a mesh with no slots is the same bytes it was before Wave T** —
+    ///    v3-stamped, no section, so no content hash moves and no cook stops
+    ///    reproducing. Asserted by comparing whole payloads, not by reading a
+    ///    version field, because "the version says 3" and "the bytes are the
+    ///    same" are two different claims and only the second one matters.
+    #[test]
+    fn the_material_section_round_trips_and_only_a_material_mesh_is_v4() {
+        let plain = dense_mesh(24);
+        let plain_bytes = build_vgeom_asset(&plain, &ClusterTextureSet::none())
+            .unwrap()
+            .into_bytes();
+        assert_eq!(
+            u32::from_le_bytes(plain_bytes[8..12].try_into().unwrap()),
+            3,
+            "a mesh with no per-meshlet materials must still stamp v3"
+        );
+        assert_eq!(
+            u64::from_le_bytes(plain_bytes[88..96].try_into().unwrap()),
+            0,
+            "…and name no materials section"
+        );
+
+        // The same geometry, with slots. Deliberately not all equal and not a
+        // function of the index alone: `k % 3 + 1` gives three live slots and
+        // leaves 0 unused, so a reader that answered "0 everywhere" fails.
+        let mut tagged = plain.clone();
+        tagged.meshlet_materials = (0..tagged.meshlets.len())
+            .map(|k| (k % 3) as u32 + 1)
+            .collect();
+        let bytes = build_vgeom_asset(&tagged, &ClusterTextureSet::none())
+            .unwrap()
+            .into_bytes();
+        assert_eq!(
+            u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            4,
+            "a mesh WITH per-meshlet materials must stamp v4"
+        );
+
+        // **Nothing before the new section moved.** The materials section is
+        // appended between the last page and the groups, so everything from the
+        // magic to the plain payload's `groups_off` — the whole directory and
+        // every page section, byte for byte — has to be identical, and only the
+        // version word may differ. `groups_off` and `total_len` legitimately
+        // move, because the section sits in front of them.
+        let plain_groups_off = u64::from_le_bytes(plain_bytes[64..72].try_into().unwrap()) as usize;
+        assert_eq!(
+            &plain_bytes[12..64],
+            &bytes[12..64],
+            "the v4 bump moved a header field other than the version"
+        );
+        assert_eq!(
+            &plain_bytes[128..plain_groups_off],
+            &bytes[128..plain_groups_off],
+            "the v4 bump moved the directory or a page section"
+        );
+
+        let r = VgeomAssetReader::new(&bytes).unwrap();
+        assert_eq!(r.materials().len(), tagged.meshlets.len());
+        // (1) + (2): global order out of `to_mesh`.
+        let back = r.to_mesh().unwrap();
+        assert_eq!(
+            back.meshlet_materials, tagged.meshlet_materials,
+            "the slots did not survive the page permutation"
+        );
+        // The on-disk order is a permutation of the same multiset — every page's
+        // window, concatenated, is the whole section.
+        let mut on_disk: Vec<u32> = Vec::new();
+        for p in 0..r.pages().len() {
+            on_disk.extend_from_slice(r.page_materials(p));
+        }
+        assert_eq!(on_disk.len(), tagged.meshlets.len());
+        let (mut a, mut b) = (on_disk.clone(), tagged.meshlet_materials.clone());
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b, "the on-disk order is not a permutation of the input");
+        // ANTI-VACUITY: the fixture really does carry more than one slot, and
+        // the pages really are more than one.
+        assert!(
+            a.iter().any(|&s| s != a[0]),
+            "the fixture is single-material"
+        );
+        assert!(r.pages().len() > 1, "the fixture is one page");
+
+        // A v3 payload that names a materials section is refused — the version
+        // and the section are one contract.
+        let mut lying = bytes.clone();
+        lying[8..12].copy_from_slice(&3u32.to_le_bytes());
+        let e = VgeomAssetReader::new(&lying).unwrap_err();
+        assert!(
+            matches!(&e, VgeomAssetError::Malformed(m) if m.contains("materials section")),
+            "{e:?}"
+        );
+    }
+
     /// An empty mesh (no geometry) still produces a valid, openable image.
     #[test]
     fn empty_mesh_round_trips() {
@@ -2841,6 +3101,7 @@ mod tests {
             levels: Vec::new(),
             center: [0.0; 3],
             radius: 0.0,
+            meshlet_materials: Vec::new(),
         };
         let src = VgeomSource::from_mesh(&m).unwrap();
         assert_eq!(src.pages().len(), 0);

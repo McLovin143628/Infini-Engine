@@ -267,6 +267,37 @@ pub fn build_vgeom(
     indices: &[u32],
     params: BuildParams,
 ) -> VgeomMesh {
+    build_vgeom_with_materials(positions, normals, uvs, tangents, indices, &[], params)
+}
+
+/// [`build_vgeom`] with a **per-vertex material slot**, so every meshlet comes
+/// out tagged with the material its geometry belongs to (Wave T — the texture
+/// document's §3 C, *"storing material properties per meshlet cluster"*).
+///
+/// This closes the follow-up this crate's own docs have carried since v1: *"v1
+/// flattens all submeshes into one geometry; material-slot tagging per meshlet
+/// is a follow-up."* A caller with submeshes writes each submesh's slot into
+/// every vertex it owns; `vertex_materials` shorter than `positions` reads as 0
+/// past its end, and empty means "one material", which produces exactly the mesh
+/// [`build_vgeom`] always produced — no slots, no `.inf_vmesh` v4 section, the
+/// same bytes.
+///
+/// **Per vertex and not per triangle**, because a vertex index is the one
+/// identity that survives the pipeline: the weld, the cache optimisation, the
+/// clusterizer and every level of simplification all speak in vertex indices,
+/// while a triangle's identity is destroyed by the first `simplify` call. A
+/// cluster's slot is then the majority of its vertices' — see
+/// [`dominant_material`] for what that costs at a coarse LOD, and why a vote is
+/// the honest answer rather than a lossy one.
+pub fn build_vgeom_with_materials(
+    positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+    uvs: &[[f32; 2]],
+    tangents: &[[f32; 4]],
+    indices: &[u32],
+    vertex_materials: &[u32],
+    params: BuildParams,
+) -> VgeomMesh {
     // Meshlet-DAG build span (P15.1): the heaviest single cook stage. Free at the
     // default filter; a Tracy capture shows the clusterize→group→simplify loop.
     let _span = tracing::info_span!(
@@ -356,6 +387,7 @@ pub fn build_vgeom(
             levels: Vec::new(),
             center,
             radius,
+            meshlet_materials: Vec::new(),
         };
     }
 
@@ -365,9 +397,34 @@ pub fn build_vgeom(
     let index = remap_index_buffer(Some(indices), indices.len(), &remap);
     let index = optimize_vertex_cache(&index, vertices.len());
 
+    // Carry the per-vertex material slots through the weld (Wave T). Two source
+    // vertices that weld into one may in principle disagree; **the lowest source
+    // index wins**, which is deterministic and is the only rule available —
+    // `generate_vertex_remap` welds on the whole vertex record, so two vertices
+    // that weld are the same position, normal, uv and tangent, and a material
+    // boundary that is not also a uv or normal seam is a boundary the geometry
+    // does not express.
+    let mut welded_materials: Vec<u32> = Vec::new();
+    if !vertex_materials.is_empty() {
+        welded_materials = vec![u32::MAX; vertices.len()];
+        for (i, &to) in remap.iter().enumerate() {
+            let slot = vertex_materials.get(i).copied().unwrap_or(0);
+            if let Some(cell) = welded_materials.get_mut(to as usize) {
+                if *cell == u32::MAX {
+                    *cell = slot;
+                }
+            }
+        }
+        for c in welded_materials.iter_mut() {
+            if *c == u32::MAX {
+                *c = 0;
+            }
+        }
+    }
+
     // ── LOD 0 ───────────────────────────────────────────────────────────────
     let level0 = clusterize(&vertices, &index, &params, 0, 0.0);
-    build_dag(vertices, level0, &params)
+    build_dag(vertices, level0, &params, &welded_materials)
 }
 
 /// Everything after clusterization: group → simplify → recluster → link, level by
@@ -385,6 +442,7 @@ fn build_dag(
     vertices: Vec<VgeomVertex>,
     level0: Vec<BuiltMeshlet>,
     params: &BuildParams,
+    vertex_materials: &[u32],
 ) -> VgeomMesh {
     let mut levels: Vec<Vec<BuiltMeshlet>> = vec![level0];
     let mut groups: Vec<BuiltGroup> = Vec::new();
@@ -508,7 +566,7 @@ fn build_dag(
         level += 1;
     }
 
-    assemble(vertices, levels, &groups)
+    assemble(vertices, levels, &groups, vertex_materials)
 }
 
 /// Clusterize an index buffer into [`BuiltMeshlet`]s tagged with `lod`/`error`.
@@ -878,6 +936,7 @@ fn assemble(
     vertices: Vec<VgeomVertex>,
     levels: Vec<Vec<BuiltMeshlet>>,
     groups: &[BuiltGroup],
+    vertex_materials: &[u32],
 ) -> VgeomMesh {
     // New base meshlet index per level, laid out coarsest (highest lod) first.
     // Within a level, creation order is preserved, so each group's produced range
@@ -894,10 +953,17 @@ fn assemble(
     let mut meshlet_vertices: Vec<u32> = Vec::new();
     let mut meshlet_triangles: Vec<u8> = Vec::new();
     let mut level_ranges: Vec<LevelRange> = Vec::new();
+    let mut meshlet_materials: Vec<u32> = Vec::new();
+    if !vertex_materials.is_empty() {
+        meshlet_materials.reserve(total);
+    }
 
     for lod in (0..levels.len()).rev() {
         let start = meshlets.len() as u32;
         for bm in &levels[lod] {
+            if !vertex_materials.is_empty() {
+                meshlet_materials.push(dominant_material(&bm.verts, vertex_materials));
+            }
             let vertex_offset = meshlet_vertices.len() as u32;
             meshlet_vertices.extend_from_slice(&bm.verts);
             let triangle_offset = meshlet_triangles.len() as u32;
@@ -961,7 +1027,42 @@ fn assemble(
         levels: level_ranges,
         center,
         radius,
+        meshlet_materials,
     }
+}
+
+/// **A cluster's material: the one most of its vertices carry**, ties broken by
+/// the lowest slot (Wave T, §3 C).
+///
+/// A vote rather than a rule, and the reason is what a coarse LOD *is*. At LOD 0
+/// a cluster is a patch of one submesh and the vote is unanimous. Above it,
+/// simplification is allowed to merge across a material boundary — that is how a
+/// coarse LOD gets to be coarse — so a cluster can genuinely span two materials
+/// and there is no answer that is right for both. The majority is the answer that
+/// is wrong for the smallest number of triangles, and it is stable: the tie-break
+/// is on the slot value, not on iteration order, so the same geometry votes the
+/// same way on every machine.
+///
+/// The honest bound, stated where it is paid: a coarse cluster straddling a
+/// boundary shades wholly as its majority material. Clustering *per material* at
+/// LOD 0 would keep the boundary exact at every level at the cost of more, and
+/// smaller, clusters at the seams; it is the named follow-up.
+fn dominant_material(verts: &[u32], vertex_materials: &[u32]) -> u32 {
+    let mut counts: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+    for &v in verts {
+        let m = vertex_materials.get(v as usize).copied().unwrap_or(0);
+        *counts.entry(m).or_insert(0) += 1;
+    }
+    // `BTreeMap` iterates by key, so `max_by_key` on the count alone keeps the
+    // FIRST maximum — the lowest slot — with no tie-break of its own to get
+    // wrong. (`max_by_key` keeps the LAST maximum, so the fold is explicit.)
+    let mut best = (0u32, 0u32);
+    for (&slot, &n) in &counts {
+        if n > best.1 {
+            best = (slot, n);
+        }
+    }
+    best.0
 }
 
 /// A bounding sphere (AABB center + farthest-corner radius) over vertex positions.
@@ -1358,7 +1459,7 @@ mod tests {
                         ..BuildParams::default()
                     }
                     .validated();
-                    let mesh = build_dag(vertices.clone(), level0, &params);
+                    let mesh = build_dag(vertices.clone(), level0, &params, &[]);
                     let what = format!(
                         "seed={seed} mode={mode:?} gs={max_group_size} ratio={target_ratio}"
                     );

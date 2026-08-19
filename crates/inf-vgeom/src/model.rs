@@ -399,6 +399,23 @@ pub struct VgeomMesh {
     pub center: [f32; 3],
     /// Whole-mesh bounding-sphere radius.
     pub radius: f32,
+    /// **One material slot per meshlet** (Wave T — the texture document's §3 C,
+    /// *"consider storing material properties per meshlet cluster"*), parallel to
+    /// [`meshlets`](Self::meshlets). Empty means "every meshlet is slot 0", which
+    /// is the instance's own material and is what a Nanite mesh has always
+    /// rendered as — closing this crate's own named follow-up (*"v1 flattens all
+    /// submeshes into one geometry; material-slot tagging per meshlet is a
+    /// follow-up"*).
+    ///
+    /// **`#[serde(skip)]`, deliberately.** The v1 bincode form of this struct is
+    /// decode-only — nothing in the tree writes it any more — and bincode is
+    /// positional, so an appended field would make every committed v1 fixture
+    /// undecodable to buy nothing. `skip` is unconditional on *both* sides, so it
+    /// stays symmetric; the house law that bit three times is about
+    /// `skip_serializing_if`, which is conditional and therefore asymmetric. The
+    /// slots' real home on disk is the `.inf_vmesh` v4 materials section.
+    #[serde(skip)]
+    pub meshlet_materials: Vec<u32>,
 }
 
 impl VgeomMesh {

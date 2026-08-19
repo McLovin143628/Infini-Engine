@@ -41,6 +41,16 @@ struct TerrainMaterial {
     albedo: array<vec4<f32>, 4>,
     params: array<vec4<f32>, 4>,
     macro_amp: vec4<f32>,
+    // **WAVE T (the texture document's §3 B): each splat layer's virtual-texture
+    // slots**, in `VtTextureSet::slots()` order — albedo (+ detail in the top
+    // half), normal (+ detail scale in the top half), ORM, unused.
+    //
+    // All zero on every terrain that does not bind layer materials, which is
+    // every terrain that has ever existed: `layer_is_textured` is then false for
+    // all four layers and the fragment takes the flat-colour path below it,
+    // instruction for instruction. That is what keeps the committed terrain
+    // goldens byte-stable while the capability ships on by construction.
+    slots: array<vec4<u32>, 4>,
 };
 @group(2) @binding(0) var<uniform> material: TerrainMaterial;
 
@@ -258,6 +268,79 @@ fn triplanar_grain(world: vec3<f32>, n: vec3<f32>, tex_scale: f32) -> f32 {
     return gx * tw.x + gy * tw.y + gz * tw.z;
 }
 
+/// What [`terrain_layers`] resolved: the weight-blended surface of whichever
+/// splat layers bind a virtual material, and how much of the fragment they cover.
+struct TerrainLayered {
+    albedo: vec3<f32>,
+    roughness: f32,
+    /// Sum of the weights of the layers that were textured, in `[0, 1]`. It is
+    /// the mix factor against the flat-colour blend, so a terrain where only two
+    /// of four layers carry materials fades correctly into the colours of the
+    /// two that do not, rather than darkening toward black.
+    coverage: f32,
+    any: bool,
+};
+
+/// **Weight-blend the four splat layers' virtual materials** (Wave T, §3 B).
+///
+/// A planar XZ projection, deliberately: the shared material is authored as a
+/// tiling ground texture and terrain is a heightfield, so `world.xz / tex_scale`
+/// is the parametrization the content is drawn for. It stretches on a cliff
+/// face — the honest bound, and the same one every heightfield engine has until
+/// it pays for a triplanar variant (three times the fetches for the axis-weighted
+/// version). The procedural grain above already runs triplanar, so the *break-up*
+/// on a steep face survives; only the material's own pattern stretches. A
+/// triplanar layer sample is the named follow-up.
+///
+/// The gradients are taken **once, at the top, outside every branch**: `dpdx` of
+/// a value computed inside a divergent branch has no neighbour to difference
+/// against. That is the same rule `vt_surface`'s callers follow and the reason it
+/// takes its derivatives as parameters.
+fn terrain_layers(world: vec3<f32>, w: vec4<f32>, tex_scale: f32) -> TerrainLayered {
+    var out: TerrainLayered;
+    out.albedo = vec3<f32>(0.0);
+    out.roughness = 0.0;
+    out.coverage = 0.0;
+    out.any = false;
+    if (!vt_active()) {
+        return out;
+    }
+    let inv = 1.0 / max(tex_scale, 0.001);
+    let uv = world.xz * inv;
+    let ddx = dpdx(uv);
+    let ddy = dpdy(uv);
+    let weights = array<f32, 4>(w.x, w.y, w.z, w.w);
+    for (var k = 0u; k < 4u; k = k + 1u) {
+        let wk = weights[k];
+        // Below a 256th the layer cannot change a texel of an 8-bit output, and
+        // the weights are stored as bytes summing to 255 — so this threshold is
+        // the weight's own quantum rather than a tuned epsilon.
+        if (wk < 0.0039) {
+            continue;
+        }
+        let slots = material.slots[k].xyz;
+        if (!vt_bound(slots.x) && !vt_bound(slots.y) && !vt_bound(slots.z)) {
+            continue;
+        }
+        let s = vt_surface(slots, uv, ddx, ddy,
+                           material.albedo[k].rgb, 1.0, 0.0, material.params[k].x);
+        out.albedo = out.albedo + s.albedo * wk;
+        out.roughness = out.roughness + s.roughness * wk;
+        out.coverage = out.coverage + wk;
+        out.any = true;
+    }
+    if (out.coverage > 0.0) {
+        // Renormalise INSIDE the covered fraction, so the textured layers'
+        // colours are their own rather than scaled by how much of the fragment
+        // they happen to own; `coverage` then carries that information to the
+        // mix at the call site. Getting this wrong is how a half-textured
+        // terrain goes dark.
+        out.albedo = out.albedo / out.coverage;
+        out.roughness = out.roughness / out.coverage;
+    }
+    return out;
+}
+
 @vertex
 fn vs(in: VIn) -> VOut {
     let uv = in.uv_skirt.xy;
@@ -353,6 +436,33 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         0.04, 1.0);
     let tex_scale = w.x * material.params[0].y + w.y * material.params[1].y
         + w.z * material.params[2].y + w.w * material.params[3].y;
+
+    // ── WAVE T · MATERIAL LAYERING VIA VIRTUAL TEXTURES (§3 B) ─────────────
+    // *"For terrain or large props, store blend weights in a virtual texture
+    // mask and sample shared, tileable PBR materials. This delivers infinite
+    // visual variety with minimal unique texture storage."*
+    //
+    // The weights half has shipped since P10.4 — a per-sample RGBA8 mask that
+    // renormalises to exactly 255. What was missing is the other half: a layer
+    // was a FLAT COLOUR, and the component said so in its own doc comment
+    // ("a texture GUID is deliberately absent... per-layer albedo/normal/ORM
+    // texture refs are the documented follow-up"). This is that follow-up.
+    //
+    // Each layer that binds one samples a **shared, tileable** virtual material
+    // at `world.xz / tex_scale`, which is the same `tex_scale` the procedural
+    // grain already used — so a layer's authored tiling means one thing, not
+    // two. Sharing is what makes the storage claim true: `VtTextures` dedupes
+    // by GUID, so four terrains using one rock material register it once, and a
+    // 2K rock set covers a 50 km world at whatever density `tex_scale` asks for.
+    //
+    // Weight-gated per layer: a layer whose weight is zero here contributes no
+    // texture fetch at all, so the cost is what is actually visible at this
+    // fragment (typically one or two layers) rather than four unconditionally.
+    let layered = terrain_layers(in.world_local, w, tex_scale);
+    if (layered.any) {
+        albedo = mix(albedo, layered.albedo, layered.coverage);
+        roughness = clamp(mix(roughness, layered.roughness, layered.coverage), 0.04, 1.0);
+    }
 
     // Triplanar detail grain (subtle multiplicative tint, ±15%).
     let grain = triplanar_grain(in.world_local, n, tex_scale);

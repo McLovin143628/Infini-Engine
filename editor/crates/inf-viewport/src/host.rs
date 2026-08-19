@@ -3288,6 +3288,11 @@ fn project_terrain(
         albedo: terrain.layers[k].albedo.to_array(),
         roughness: terrain.layers[k].roughness as f32,
         tex_scale: terrain.layers[k].tex_scale as f32,
+        // Wave T's per-layer virtual material has no persisted field to come
+        // from yet — the scene schema is frozen for that wave, and the player
+        // projector (`inf_player::render`) spells this default identically so
+        // the two hosts cannot drift. See docs/memos/wave-t-textures-disposition.md.
+        vt: Default::default(),
     });
     let macro_variation = terrain.macro_variation as f32;
     // Hardening Wave E's P1 memo: the signature of the tile list this projection
@@ -3578,6 +3583,11 @@ fn project_voxel(
             albedo: t.layers[k].albedo.to_array(),
             roughness: t.layers[k].roughness as f32,
             tex_scale: t.layers[k].tex_scale as f32,
+            // Wave T's per-layer virtual material has no persisted field to come
+            // from yet — the scene schema is frozen for that wave, and the player
+            // projector (`inf_player::render`) spells this default identically so
+            // the two hosts cannot drift. See docs/memos/wave-t-textures-disposition.md.
+            vt: Default::default(),
         },
         None => RenderTerrainLayer::default(),
     });

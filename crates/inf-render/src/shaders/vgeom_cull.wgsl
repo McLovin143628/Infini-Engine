@@ -78,7 +78,14 @@ struct Meshlet {
     error: f32,
     parent_error: f32,
     lod_level: u32,
-    pad: u32,
+    // **The material slot** (Wave T, the texture document's section 3 C). This
+    // word carries `MeshletRec::group` on disk and was `pad` here because no
+    // shader read it; `inf_vgeom::stream::stage_page` now overwrites it with the
+    // meshlet's material slot on the way into the pool, unconditionally, so the
+    // word means one thing on the GPU for every container version. `0` is the
+    // instance's own material, which is what every mesh cooked before Wave T
+    // resolves to.
+    material_slot: u32,
 };
 
 struct Instance {

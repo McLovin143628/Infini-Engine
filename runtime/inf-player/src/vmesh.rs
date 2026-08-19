@@ -253,6 +253,7 @@ mod tests {
             levels: Vec::new(),
             center: [0.0; 3],
             radius: 0.0,
+            meshlet_materials: Vec::new(),
         }
     }
 }

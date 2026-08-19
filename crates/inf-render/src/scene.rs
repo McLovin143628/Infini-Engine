@@ -1344,6 +1344,29 @@ pub struct RenderTerrainLayer {
     pub roughness: f32,
     /// World metres per detail-grain tile.
     pub tex_scale: f32,
+    /// **The layer's shared, tileable PBR material** (Wave T — the texture
+    /// document's §3 B, *"store blend weights in a virtual texture mask and
+    /// sample shared, tileable PBR materials"*).
+    ///
+    /// [`VtTextureSet::NONE`] — the default, and what every projector writes
+    /// today — is exactly the flat-colour layer this has always been: the
+    /// terrain fragment shader's textured branch is not taken and the arithmetic
+    /// is instruction-for-instruction what it was, which is what keeps the
+    /// committed terrain goldens byte-stable.
+    ///
+    /// When it names textures, the layer samples them at `world.xz / tex_scale`
+    /// and the four layers' samples are weight-blended by the same per-sample
+    /// splat mask that already blends their colours. Because virtual textures
+    /// are deduplicated by GUID, four terrains sharing one rock material pay for
+    /// it once — which is the "minimal unique texture storage" half of the
+    /// document's claim, and it is structural rather than a policy.
+    ///
+    /// **The authoring field is not here.** `inf_ecs::TerrainLayer` — the
+    /// persisted, scene-schema half — carries no texture reference yet, and the
+    /// scene schema is frozen for this wave; see
+    /// `docs/memos/wave-t-textures-disposition.md`, item T26. A host binds this
+    /// directly today.
+    pub vt: VtTextureSet,
 }
 
 impl Default for RenderTerrainLayer {
@@ -1352,6 +1375,7 @@ impl Default for RenderTerrainLayer {
             albedo: [0.35, 0.35, 0.35, 1.0],
             roughness: 0.9,
             tex_scale: 8.0,
+            vt: VtTextureSet::NONE,
         }
     }
 }
@@ -2366,6 +2390,7 @@ mod tests {
                     albedo: [0.2, 0.4, 0.1, 1.0],
                     roughness: 0.8,
                     tex_scale: 1.0,
+                    ..RenderTerrainLayer::default()
                 },
                 RenderTerrainLayer::default(),
                 RenderTerrainLayer::default(),

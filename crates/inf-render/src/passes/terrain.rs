@@ -693,20 +693,32 @@ struct MaterialRaw {
     albedo: [[f32; 4]; 4],
     params: [[f32; 4]; 4],
     macro_amp: [f32; 4],
+    /// **Wave T (§3 B): each layer's virtual-texture slots**, in
+    /// `VtTextureSet::slots()` order with a fourth word reserved.
+    ///
+    /// All zero on a terrain whose layers bind no materials — which is every
+    /// terrain a projector writes today — and the shader's textured branch is
+    /// then not taken. Appended at the END of the uniform, so nothing above it
+    /// moved a byte.
+    slots: [[u32; 4]; 4],
 }
 
 impl MaterialRaw {
     fn from_terrain(terrain: &RenderTerrain) -> Self {
         let mut albedo = [[0.0f32; 4]; 4];
         let mut params = [[0.0f32; 4]; 4];
+        let mut slots = [[0u32; 4]; 4];
         for (k, layer) in terrain.layers.iter().enumerate() {
             albedo[k] = layer.albedo;
             params[k] = [layer.roughness, layer.tex_scale.max(1e-3), 0.0, 0.0];
+            let s = layer.vt.slots();
+            slots[k] = [s[0], s[1], s[2], 0];
         }
         MaterialRaw {
             albedo,
             params,
             macro_amp: [terrain.macro_variation, 0.0, 0.0, 0.0],
+            slots,
         }
     }
 }

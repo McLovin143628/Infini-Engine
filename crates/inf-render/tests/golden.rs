@@ -763,21 +763,25 @@ fn default_layers() -> [RenderTerrainLayer; 4] {
             albedo: [0.20, 0.34, 0.14, 1.0], // grass
             roughness: 0.92,
             tex_scale: 6.0,
+            vt: Default::default(),
         },
         RenderTerrainLayer {
             albedo: [0.33, 0.30, 0.27, 1.0], // rock
             roughness: 0.85,
             tex_scale: 4.0,
+            vt: Default::default(),
         },
         RenderTerrainLayer {
             albedo: [0.42, 0.30, 0.18, 1.0], // dirt
             roughness: 0.95,
             tex_scale: 5.0,
+            vt: Default::default(),
         },
         RenderTerrainLayer {
             albedo: [0.86, 0.89, 0.94, 1.0], // snow
             roughness: 0.65,
             tex_scale: 10.0,
+            vt: Default::default(),
         },
     ]
 }
@@ -3088,6 +3092,7 @@ fn golden_gi_terrain() {
                 albedo: [0.95, 0.06, 0.06, 1.0],
                 roughness: 0.9,
                 tex_scale: 8.0,
+                vt: Default::default(),
             },
             RenderTerrainLayer::default(),
             RenderTerrainLayer::default(),
@@ -7205,16 +7210,19 @@ fn voxel_scene() -> RenderScene {
                     albedo: [0.16, 0.14, 0.13, 1.0],
                     roughness: 0.95,
                     tex_scale: 4.0,
+                    vt: Default::default(),
                 },
                 RenderTerrainLayer {
                     albedo: [0.46, 0.24, 0.15, 1.0],
                     roughness: 0.85,
                     tex_scale: 4.0,
+                    vt: Default::default(),
                 },
                 RenderTerrainLayer {
                     albedo: [0.62, 0.60, 0.52, 1.0],
                     roughness: 0.70,
                     tex_scale: 4.0,
+                    vt: Default::default(),
                 },
                 RenderTerrainLayer::default(),
             ],
@@ -7493,6 +7501,7 @@ fn cave_mouth_scene() -> RenderScene {
                 albedo: [0.22, 0.34, 0.16, 1.0],
                 roughness: 0.9,
                 tex_scale: 6.0,
+                vt: Default::default(),
             },
             RenderTerrainLayer::default(),
             RenderTerrainLayer::default(),

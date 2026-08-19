@@ -1548,9 +1548,25 @@ fn stage_page(
     let mut meshlets = s.meshlets.to_vec();
     let mlvert_base = blocks.mlverts.offset as u32;
     let mltri_byte_base = (blocks.mltris.offset * 4) as u32;
-    for r in bytemuck::cast_slice_mut::<u8, MeshletRec>(&mut meshlets) {
+    for (i, r) in bytemuck::cast_slice_mut::<u8, MeshletRec>(&mut meshlets)
+        .iter_mut()
+        .enumerate()
+    {
         r.vertex_offset += mlvert_base;
         r.triangle_offset += mltri_byte_base;
+        // **The third rebase** (Wave T): the record's last word carries `group`
+        // on disk, which the shaders have never read — it is the word the GPU
+        // struct spells `pad`. The staged copy overwrites it with the meshlet's
+        // MATERIAL SLOT, so a per-meshlet material reaches the GPU in a record
+        // that did not grow by one byte, and the meshlet pool did not grow by
+        // 6 % to carry sixteen bits.
+        //
+        // **Unconditionally**, including the zero: a v3 page has no materials
+        // section, and leaving `group` in place would hand the shader a group
+        // index as a material slot the moment anything read the word. The word
+        // means one thing on the GPU now, and it means it for every container
+        // version.
+        r.group = s.materials.get(i).copied().unwrap_or(0);
     }
 
     let src_mlverts = bytemuck::cast_slice::<u8, u32>(s.mlverts);
@@ -1587,6 +1603,144 @@ mod tests {
 
     /// Headroom generous enough that growth is never the thing under test.
     const ROOMY: u64 = 1 << 24;
+
+    /// **The material slot reaches the GPU record, in the word that used to be
+    /// dead** (Wave T, §3 C).
+    ///
+    /// `MeshletRec::group` is the word `vgeom_cull.wgsl` spelled `pad` and no
+    /// shader read. `stage_page` overwrites it with the meshlet's material slot
+    /// on the way into the pool, so a per-meshlet material reaches the shader in
+    /// a record that did not grow by a byte — and it does so **unconditionally**,
+    /// which is the half this arm exists for: a v3 page has no materials section,
+    /// and leaving `group` in place would hand the shader a group index the
+    /// moment anything read the word.
+    #[test]
+    fn the_staged_meshlet_record_carries_its_material_slot() {
+        use crate::asset::{build_vgeom_asset, ClusterTextureSet, MeshletRec, VgeomAssetReader};
+
+        let mut mesh = dense_mesh(24);
+        mesh.meshlet_materials = (0..mesh.meshlets.len())
+            .map(|k| (k % 3) as u32 + 1)
+            .collect();
+        let tagged = build_vgeom_asset(&mesh, &ClusterTextureSet::none())
+            .unwrap()
+            .into_bytes();
+        let plain = build_vgeom_asset(&dense_mesh(24), &ClusterTextureSet::none())
+            .unwrap()
+            .into_bytes();
+
+        let stage = |bytes: &[u8]| -> Vec<Vec<u32>> {
+            let r = VgeomAssetReader::new(bytes).unwrap();
+            (0..r.pages().len())
+                .map(|p| {
+                    let s = r.page_sections(p).unwrap();
+                    let mut recs = s.meshlets.to_vec();
+                    for (i, rec) in bytemuck::cast_slice_mut::<u8, MeshletRec>(&mut recs)
+                        .iter_mut()
+                        .enumerate()
+                    {
+                        rec.group = s.materials.get(i).copied().unwrap_or(0);
+                    }
+                    bytemuck::cast_slice::<u8, MeshletRec>(&recs)
+                        .iter()
+                        .map(|r| r.group)
+                        .collect()
+                })
+                .collect()
+        };
+
+        let got: Vec<u32> = stage(&tagged).into_iter().flatten().collect();
+        let mut sorted = got.clone();
+        sorted.sort_unstable();
+        let mut want = mesh.meshlet_materials.clone();
+        want.sort_unstable();
+        assert_eq!(sorted, want, "the staged slots are not the mesh's");
+        assert!(
+            got.iter().any(|&s| s != got[0]),
+            "the fixture is single-material"
+        );
+
+        // The v3 arm: a page with no materials section stages ZERO, never the
+        // group index it carries on disk.
+        let zeros: Vec<u32> = stage(&plain).into_iter().flatten().collect();
+        assert!(
+            zeros.iter().all(|&s| s == 0),
+            "a v3 page staged a non-zero material slot — the group index leaked \
+             into the word the shader now reads as a material"
+        );
+        // ANTI-VACUITY: the group indices on disk are NOT all zero, so "stage
+        // zero" is a thing that had to be done rather than a thing that was true.
+        let r = VgeomAssetReader::new(&plain).unwrap();
+        let s = r.page_sections(0).unwrap();
+        assert!(
+            bytemuck::cast_slice::<u8, MeshletRec>(s.meshlets)
+                .iter()
+                .any(|m| m.group != 0),
+            "the fixture's page 0 has no non-zero group to leak"
+        );
+    }
+
+    /// **A cluster's material is the majority of its vertices'** (Wave T) — and
+    /// a single-material build is byte-identical to what `build_vgeom` always
+    /// produced.
+    #[test]
+    fn the_builder_votes_a_material_per_cluster() {
+        use crate::build::{build_vgeom, build_vgeom_with_materials, BuildParams};
+
+        // A 2×N strip split down the middle: the left half is material 1, the
+        // right half material 2. Deliberately not a checkerboard — a per-vertex
+        // pattern finer than a cluster would make every vote a coin toss and the
+        // assertion below meaningless.
+        let n = 40usize;
+        let mut pos: Vec<[f32; 3]> = Vec::new();
+        let mut mats: Vec<u32> = Vec::new();
+        for j in 0..n {
+            for i in 0..n {
+                pos.push([i as f32, 0.0, j as f32]);
+                mats.push(if i * 2 < n { 1 } else { 2 });
+            }
+        }
+        let mut idx: Vec<u32> = Vec::new();
+        for j in 0..n - 1 {
+            for i in 0..n - 1 {
+                let a = (j * n + i) as u32;
+                let (b, c, d) = (a + 1, a + n as u32 + 1, a + n as u32);
+                idx.extend_from_slice(&[a, b, c, a, c, d]);
+            }
+        }
+        let p = BuildParams::default();
+        let tagged = build_vgeom_with_materials(&pos, &[], &[], &[], &idx, &mats, p);
+        let plain = build_vgeom(&pos, &[], &[], &[], &idx, p);
+
+        assert_eq!(
+            tagged.meshlet_materials.len(),
+            tagged.meshlets.len(),
+            "every meshlet gets a slot"
+        );
+        assert!(
+            plain.meshlet_materials.is_empty(),
+            "no materials in, no materials out — the byte-identical path"
+        );
+        assert_eq!(
+            tagged.meshlets.len(),
+            plain.meshlets.len(),
+            "the material channel must not move the DAG"
+        );
+        // Every slot is one of the two the fixture uses — never 0, which is what
+        // a vote over an empty or mis-indexed vertex list would produce.
+        assert!(
+            tagged.meshlet_materials.iter().all(|&s| s == 1 || s == 2),
+            "a cluster voted for a material the mesh does not have: {:?}",
+            tagged.meshlet_materials
+        );
+        // …and both are represented: a fixture split down the middle cannot be
+        // wholly one material unless the vote is broken.
+        assert!(tagged.meshlet_materials.contains(&1));
+        assert!(tagged.meshlet_materials.contains(&2));
+        // Deterministic.
+        let again = build_vgeom_with_materials(&pos, &[], &[], &[], &idx, &mats, p);
+        assert_eq!(again.meshlet_materials, tagged.meshlet_materials);
+    }
 
     #[test]
     fn alloc_free_never_overlaps_and_reuses_holes() {

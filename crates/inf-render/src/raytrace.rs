@@ -593,6 +593,7 @@ mod tests {
             }],
             center: [0.0; 3],
             radius: 1.0,
+            meshlet_materials: Vec::new(),
         };
         let src = RtBlasSource::from_meshlet_level(&mesh, 0).expect("level 0 exists");
         assert_eq!(src.triangle_count(), 2, "both meshlets' triangles");
