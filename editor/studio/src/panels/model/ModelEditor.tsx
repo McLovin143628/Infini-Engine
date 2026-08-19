@@ -194,7 +194,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   // time; a store read that did not name the asset gave both of them whichever
   // document was opened last, and every tool press went to the wrong mesh.
   const assetId = params;
-  const { doc, image, previewError, refusal, lastSave, lastGroom, lastUnwrap, uvImage, status, busy } =
+  const { doc, image, previewError, refusal, lastSave, lastGroom, lastUnwrap, uvImage, status, busy, history } =
     useDccEntry(assetId);
   const open = useDccStore((s) => s.open);
   const close = useDccStore((s) => s.close);
@@ -218,6 +218,8 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const boxSelect = useDccStore((s) => s.boxSelect);
   const setViewOpts = useDccStore((s) => s.setViewOpts);
   const newMesh = useDccStore((s) => s.newMesh);
+  const historyRefresh = useDccStore((s) => s.historyRefresh);
+  const amend = useDccStore((s) => s.amend);
   const assetsById = useAssetStore((s) => s.assets);
   // What the drawer is dragging right now, so the zone lights up for a drop it
   // can actually accept rather than for any native drag that crosses it.
@@ -237,6 +239,7 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
   const [slide, setSlide] = useState(0.25);
   const [smoothAngle, setSmoothAngle] = useState(30);
   const [seamAngle, setSeamAngle] = useState(40);
+  const [showHistory, setShowHistory] = useState(false);
   const [mergeTolerance, setMergeTolerance] = useState(0.001);
   /** The rubber band, while a marquee is being dragged. */
   const [marquee, setMarquee] = useState<Marquee | null>(null);
@@ -1248,6 +1251,68 @@ export default function ModelEditor({ params }: { panelId: string; params: strin
           disabled={nothing}
           onClick={() => assetId && void apply(assetId, { tool: "delete" })}
         />
+
+        {/* ── the history (Wave D) ──────────────────────────────────────────
+            `edit.undoHistory` has been in the Edit menu since Phase 1 with no
+            panel behind it. This is the panel — and it does the thing Blender's
+            redo panel cannot: re-parameterize an edit that is NOT the last one,
+            and re-derive everything after it. */}
+        <ToolButton
+          label={showHistory ? "History ▾" : "History ▸"}
+          icon={<Layers size={12} />}
+          onClick={() => {
+            const next = !showHistory;
+            setShowHistory(next);
+            if (next && assetId) void historyRefresh(assetId);
+          }}
+          title="Every edit in this session. An edit with a single number can be changed where it is, and the rest of the model re-derives."
+        />
+        {showHistory && (
+          <div className="flex max-h-64 flex-col gap-0.5 overflow-y-auto rounded border border-(--ink-border) bg-(--ink-bg-2) p-1">
+            {history.length === 0 && (
+              <span className="px-1 py-0.5 text-[11px] text-(--ink-text-dim)">
+                No edits yet.
+              </span>
+            )}
+            {history.map((h) => (
+              <div
+                key={h.index}
+                className={cn(
+                  "flex items-center gap-1 rounded px-1 py-0.5 text-[11px]",
+                  !h.applied && "opacity-40",
+                )}
+                title={h.reason ?? "Change this edit; everything after it re-derives."}
+              >
+                <span className="w-6 shrink-0 text-right font-mono text-[10px] text-(--ink-text-dim)">
+                  {h.index}
+                </span>
+                <span className="min-w-0 flex-1 truncate">{h.kind}</span>
+                {h.value !== null && (
+                  <input
+                    type="number"
+                    step={0.01}
+                    defaultValue={h.value}
+                    disabled={!h.amendable}
+                    // `onBlur` and Enter, not `onChange`: an amendment replays the
+                    // whole tail, and doing that on every keystroke would replay
+                    // it four times for "0.65".
+                    onBlur={(e) => {
+                      const v = Number(e.target.value);
+                      if (assetId && Number.isFinite(v) && v !== h.value) {
+                        void amend(assetId, h.index, v);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") e.currentTarget.blur();
+                    }}
+                    className="w-16 rounded border border-(--ink-border) bg-(--ink-bg-1) px-1 py-0 text-right outline-none focus:border-(--ink-accent) disabled:opacity-40"
+                  />
+                )}
+                <span className="w-4 shrink-0 text-[10px] text-(--ink-text-dim)">{h.unit}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="text-[10px] font-semibold tracking-wide text-(--ink-text-dim)">TOPOLOGY</div>
         <div className="grid grid-cols-2 gap-1">

@@ -251,8 +251,68 @@ pub fn op_kind(op: &Op) -> &'static str {
     }
 }
 
+/// **The one number an author may drag on an op**, and its unit — or `None`
+/// when the op has no scalar to change.
+///
+/// Deliberately one number and not a form. The ops an author reaches back for
+/// are the ones with a *magnitude* — how far did that extrude go, how big was
+/// that bevel — and a general parameter editor over a wire enum would be a
+/// second reflection system, which is the drift the P23 memo's no-DNA/RNA ruling
+/// forbids. An op with more than one interesting number (a translate's three
+/// components, a sculpt's radius *and* strength) reports `None` rather than
+/// picking one arbitrarily and pretending the others do not exist.
+///
+/// Units: metres for a distance, **degrees** for an angle (the units doctrine —
+/// degrees at the UI boundary, radians in the op), and a bare number for a
+/// parameter.
+pub fn op_scalar(op: &Op) -> Option<(f64, &'static str)> {
+    match op {
+        Op::ExtrudeFaces { distance, .. } => Some((*distance, "m")),
+        Op::InsetFaces { amount, .. } => Some((*amount, "m")),
+        Op::BevelEdges { amount, .. } => Some((*amount, "m")),
+        Op::Mirror { coord, .. } => Some((*coord, "m")),
+        Op::SplitEdge { t, .. } => Some((*t, "")),
+        _ => None,
+    }
+}
+
+/// Replace an op's scalar, leaving every other field alone. `None` when the op
+/// has no scalar — which is the same set [`op_scalar`] answers `None` for, and
+/// the two are asserted to agree.
+pub fn with_scalar(op: &Op, value: f64) -> Option<Op> {
+    Some(match op {
+        Op::ExtrudeFaces { faces, .. } => Op::ExtrudeFaces {
+            faces: faces.clone(),
+            distance: value,
+        },
+        Op::InsetFaces {
+            faces, individual, ..
+        } => Op::InsetFaces {
+            faces: faces.clone(),
+            amount: value,
+            individual: *individual,
+        },
+        Op::BevelEdges {
+            edges, segments, ..
+        } => Op::BevelEdges {
+            edges: edges.clone(),
+            amount: value,
+            segments: *segments,
+        },
+        Op::Mirror { axis, .. } => Op::Mirror {
+            axis: *axis,
+            coord: value,
+        },
+        Op::SplitEdge { half, .. } => Op::SplitEdge {
+            half: *half,
+            t: value,
+        },
+        _ => return None,
+    })
+}
+
 /// Why a [`Amendability::Never`] op is one, in words a panel can show.
-fn why_never(op: &Op) -> &'static str {
+pub fn why_never(op: &Op) -> &'static str {
     match op {
         Op::LoopCut { .. } => {
             "its cut count decides how many loops exist, so changing it is a different edit"
@@ -447,6 +507,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The two scalar accessors answer for exactly the same ops, and the setter
+    /// really sets what the getter reads. A drift between them is a slider that
+    /// appears and does nothing.
+    #[test]
+    fn the_scalar_getter_and_setter_agree_on_which_ops_have_one() {
+        for op in crate::journal::tests_support::one_of_every_op() {
+            let has = op_scalar(&op).is_some();
+            assert_eq!(
+                has,
+                with_scalar(&op, 1.0).is_some(),
+                "{} disagrees about having a scalar",
+                op_kind(&op)
+            );
+            if has {
+                let changed = with_scalar(&op, 7.5).expect("it has one");
+                assert_eq!(op_scalar(&changed).map(|(v, _)| v), Some(7.5));
+                // …and the STRUCTURE is untouched, which is what makes the
+                // slider legal under gate 1.
+                assert!(
+                    amend_shape_ok(&op, &changed).is_ok(),
+                    "{} 's slider changes its structure",
+                    op_kind(&op)
+                );
+            }
+        }
+        // Not vacuous: the ops an author actually reaches for really do have one.
+        assert!(op_scalar(&Op::ExtrudeFaces {
+            faces: vec![],
+            distance: 0.4
+        })
+        .is_some());
     }
 
     #[test]

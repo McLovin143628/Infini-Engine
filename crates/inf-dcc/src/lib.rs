@@ -95,8 +95,8 @@ pub mod validate;
 pub mod xform;
 
 pub use amend::{
-    amend_shape_ok, op_amendable, op_kind, op_structure, topology, AmendError, Amendability,
-    OpStructure, Topology,
+    amend_shape_ok, op_amendable, op_kind, op_scalar, op_structure, topology, why_never,
+    with_scalar, AmendError, Amendability, OpStructure, Topology,
 };
 pub use autofit::{fit_template, FitError, FitOptions, FitReport};
 pub use build::{

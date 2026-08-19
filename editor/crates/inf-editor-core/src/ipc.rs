@@ -3415,6 +3415,36 @@ pub struct DccGroomStatDto {
     pub value: u32,
 }
 
+/// **One entry of a mesh session's history** (Wave D — the history panel).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DccHistoryEntryDto {
+    /// Its index in the journal — what `dcc_amend` takes.
+    pub index: u32,
+    /// A one-word name for the op ("extrude", "bevel", "sculpt stroke").
+    pub kind: String,
+    /// Whether it is still applied, or sits in the redo tail past the cursor.
+    pub applied: bool,
+    /// **The single number an author may drag**, when the op has one — an
+    /// extrude's distance, an inset's or bevel's amount, a mirror's coordinate,
+    /// a split's parameter. `None` for an op with nothing scalar to change,
+    /// which is most of them.
+    ///
+    /// One number and not a form, deliberately: the ops an author reaches back
+    /// for are the ones with a magnitude, and a general parameter editor over a
+    /// wire enum is a second reflection system this codebase has already refused
+    /// once (the memo's no-DNA/RNA ruling).
+    pub value: Option<f64>,
+    /// A unit for it, for the row's label: `"m"`, `"°"`, `""`.
+    pub unit: String,
+    /// Whether [`inf_dcc::op_amendable`] permits re-parameterizing it at all.
+    pub amendable: bool,
+    /// Why not, when it does not. Never empty when `amendable` is false — the
+    /// Wave-E invariant "a route or a reason, never neither", applied to a row.
+    pub reason: Option<String>,
+}
+
 /// Where a blueprint class's generated Rust landed, and whether it had to be
 /// written (Wave D — the CODE TAB).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

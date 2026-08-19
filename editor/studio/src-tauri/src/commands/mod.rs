@@ -103,6 +103,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         dcc::dcc_frame,
         dcc::dcc_undo,
         dcc::dcc_redo,
+        // Wave D: the history panel, and the signature capability behind it.
+        dcc::dcc_history,
+        dcc::dcc_amend,
         dcc::dcc_preview,
         dcc::dcc_save,
         dcc::dcc_merge_asset,

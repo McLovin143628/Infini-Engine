@@ -149,6 +149,7 @@ describe("dccStore (L7.M4)", () => {
           uvImage: null,
           lastUnwrap: null,
           lastGroom: null,
+          history: [],
         },
       },
     });

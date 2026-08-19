@@ -17,8 +17,8 @@ use inf_editor_core::ipc::{
     CharacterRigDto, CharacterSpecDto, ComponentDto, CoverageDto, CoverageViewDto, DataAssetDto,
     DataFieldDto, DataMapExportDto, DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto,
     DccExportDto, DccGarmentDto, DccGizmoModeDto, DccGroomDto, DccGroomResultDto, DccGroomStatDto,
-    DccImportDto, DccModeDto, DccNewDto, DccPaintModeDto, DccPreviewDto, DccSaveDto,
-    DccSculptModeDto, DccSelectDto, DccToolDto, DccUnwrapDto, DeleteResult, DetailsDto,
+    DccHistoryEntryDto, DccImportDto, DccModeDto, DccNewDto, DccPaintModeDto, DccPreviewDto,
+    DccSaveDto, DccSculptModeDto, DccSelectDto, DccToolDto, DccUnwrapDto, DeleteResult, DetailsDto,
     ErosionParamsDto, ErosionReportDto, FileEntryDto, FoliageSettingsDto, GaitParamsDto,
     GeneratedSourceDto, GitFileDto, GitStatusDto, GizmoModeDto, GizmoSpaceDto, ImportEventDto,
     LakePreviewDto, LayoutSummary, LevelSettingsDto, LogLine, PackageErrorDto, PackageKindCountDto,
@@ -69,6 +69,7 @@ fn export_bindings() {
     // were hard-wired constants until this wave. All three are rooted because
     // the panel holds each of them in local state before any call carries one.
     DccNewDto::export_all(&cfg).expect("export DccNewDto");
+    DccHistoryEntryDto::export_all(&cfg).expect("export DccHistoryEntryDto");
     // Wave D: the CODE TAB's reply.
     GeneratedSourceDto::export_all(&cfg).expect("export GeneratedSourceDto");
     inf_editor_core::dcc::DccPivotDto::export_all(&cfg).expect("export DccPivotDto");

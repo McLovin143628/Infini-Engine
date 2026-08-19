@@ -49,6 +49,7 @@ import type { DccGarmentDto } from "../bindings/DccGarmentDto";
 import type { DccGroomDto } from "../bindings/DccGroomDto";
 import type { DccGroomResultDto } from "../bindings/DccGroomResultDto";
 import type { DccSelectDto } from "../bindings/DccSelectDto";
+import type { DccHistoryEntryDto } from "../bindings/DccHistoryEntryDto";
 import type { DccNewDto } from "../bindings/DccNewDto";
 import type { GeneratedSourceDto } from "../bindings/GeneratedSourceDto";
 import type { DccOrientDto } from "../bindings/DccOrientDto";
@@ -1017,6 +1018,21 @@ export const dcc = {
     invoke("dcc_orbit", { id, yawDeg, pitchDeg, dolly }),
   frame: (id: string): Promise<void> => invoke("dcc_frame", { id }),
   undo: (id: string): Promise<DccDocDto> => invoke<DccDocDto>("dcc_undo", { id }),
+  /**
+   * **The history**, as rows — the op list the Edit menu has advertised since
+   * Phase 1 and never had behind it. The whole journal, redo tail included.
+   */
+  history: (id: string): Promise<DccHistoryEntryDto[]> =>
+    invoke<DccHistoryEntryDto[]>("dcc_history", { id }),
+  /**
+   * **Re-parameterize an edit that is already in the past**, and re-derive
+   * everything after it — the wave's signature capability.
+   *
+   * A refusal is a value: the reply carries `ok: false` and a reason, and the
+   * session is byte-identical.
+   */
+  amend: (id: string, index: number, value: number): Promise<DccApplyDto> =>
+    invoke<DccApplyDto>("dcc_amend", { id, index, value }),
   redo: (id: string): Promise<DccDocDto> => invoke<DccDocDto>("dcc_redo", { id }),
   /** One offscreen frame as a PNG data-URL, with the overlay composited in. */
   preview: (id: string, size: number): Promise<DccPreviewDto> =>

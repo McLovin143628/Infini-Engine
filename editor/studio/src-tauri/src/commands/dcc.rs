@@ -55,9 +55,9 @@ use inf_editor_core::dcc::{
 };
 use inf_editor_core::ipc::{
     DccApplyDto, DccDocDto, DccDragBeginDto, DccDragDto, DccExportDto, DccGarmentDto,
-    DccGizmoModeDto, DccGroomDto, DccGroomResultDto, DccGroomStatDto, DccImportDto, DccModeDto,
-    DccNewDto, DccPaintModeDto, DccPreviewDto, DccPrimitiveDto, DccSaveDto, DccSculptModeDto,
-    DccSelectDto, DccToolDto, DccUnwrapDto, SculptFalloffDto,
+    DccGizmoModeDto, DccGroomDto, DccGroomResultDto, DccGroomStatDto, DccHistoryEntryDto,
+    DccImportDto, DccModeDto, DccNewDto, DccPaintModeDto, DccPreviewDto, DccPrimitiveDto,
+    DccSaveDto, DccSculptModeDto, DccSelectDto, DccToolDto, DccUnwrapDto, SculptFalloffDto,
 };
 use inf_editor_core::thumbnail::{encode_png_fast, PreviewView, Thumbnailer};
 use tauri::{AppHandle, Emitter, State};
@@ -1644,6 +1644,133 @@ pub async fn dcc_undo(
     Ok(dto)
 }
 
+/// **The history**, as rows a panel can draw — the op list the Edit menu has
+/// advertised since Phase 1 and never had behind it.
+///
+/// The whole journal, redo tail included, because a redo an author has not
+/// pressed is still their work and hiding it makes the list lie about where the
+/// cursor is.
+#[tauri::command]
+pub async fn dcc_history(
+    id: String,
+    state: State<'_, DccState>,
+) -> Result<Vec<DccHistoryEntryDto>, String> {
+    state.with(|s| {
+        let (_, session) = s.pair(&id)?;
+        let cursor = session.cursor();
+        Ok(session
+            .ops()
+            .iter()
+            .enumerate()
+            .map(|(i, op)| {
+                let scalar = inf_dcc::op_scalar(op);
+                let amendable = !matches!(inf_dcc::op_amendable(op), inf_dcc::Amendability::Never)
+                    && scalar.is_some()
+                    && i < cursor;
+                DccHistoryEntryDto {
+                    index: i as u32,
+                    kind: inf_dcc::op_kind(op).to_string(),
+                    applied: i < cursor,
+                    value: scalar.map(|(v, _)| v),
+                    unit: scalar.map(|(_, u)| u.to_string()).unwrap_or_default(),
+                    amendable,
+                    // A reason for every row that is not amendable — the Wave-E
+                    // invariant "a route or a reason, never neither" at row
+                    // scope. Three different situations, three different
+                    // sentences, because "not amendable" would be the same
+                    // useless answer to all of them.
+                    reason: if amendable {
+                        None
+                    } else if i >= cursor {
+                        Some("this edit is undone; redo it before changing it".into())
+                    } else if scalar.is_none() {
+                        Some(
+                            "this edit has no single number to change — undo to it and \
+                             make the edit you meant instead"
+                                .into(),
+                        )
+                    } else {
+                        Some(inf_dcc::why_never(op).to_string())
+                    },
+                }
+            })
+            .collect())
+    })
+}
+
+/// **Re-parameterize an edit that is already in the past**, and re-derive
+/// everything after it.
+///
+/// The wave's signature capability at the product boundary. Everything with a
+/// rule in it is `inf_dcc::MeshSession::amend` — two gates, a full tail replay
+/// and a topology comparison at every step — and this is the wiring: find the
+/// op, put the new number in it, hand it over.
+///
+/// A refusal is a **value**: the kernel's typed `AmendError` comes back as
+/// `DccApplyDto::refusal`, the session is byte-identical, and the panel says
+/// why. That is the same shape `dcc_apply` already has, for the same reason.
+#[tauri::command]
+pub async fn dcc_amend(
+    app: AppHandle,
+    id: String,
+    index: u32,
+    value: f64,
+    state: State<'_, DccState>,
+) -> Result<DccApplyDto, String> {
+    let out = state.with(|s| {
+        let (doc, session) = s.pair(&id)?;
+        // Settle first, exactly as undo does: an amendment with a drag in flight
+        // must not throw the drag away, and it must not be replayed *under* it.
+        let settled = settle_reported(doc, session, "dcc_amend");
+        let i = index as usize;
+        let Some(op) = session.ops().get(i).cloned() else {
+            return Ok(DccApplyDto {
+                ok: false,
+                refusal: Some(chain_refusals(
+                    settled,
+                    format!("there is no edit {index} in this history"),
+                )),
+                doc: doc_dto(doc, session),
+            });
+        };
+        if !value.is_finite() {
+            return Ok(DccApplyDto {
+                ok: false,
+                refusal: Some(chain_refusals(
+                    settled,
+                    format!("{value} is not a number this edit can take"),
+                )),
+                doc: doc_dto(doc, session),
+            });
+        }
+        let Some(amended) = inf_dcc::with_scalar(&op, value) else {
+            return Ok(DccApplyDto {
+                ok: false,
+                refusal: Some(chain_refusals(
+                    settled,
+                    format!("a {} has no single number to change", inf_dcc::op_kind(&op)),
+                )),
+                doc: doc_dto(doc, session),
+            });
+        };
+        let refusal = match session.amend(i, amended) {
+            Ok(()) => settled,
+            Err(e) => Some(chain_refusals(settled, e.to_string())),
+        };
+        // The amendment moves the generation stamp, so the selection's ids are
+        // stale by the crate's own rule even though the topology is proven
+        // identical. `sync` is what says so rather than assuming.
+        sync(doc, session);
+        Ok(DccApplyDto {
+            ok: refusal.is_none(),
+            refusal,
+            doc: doc_dto(doc, session),
+        })
+    })?;
+    let _ = app.emit("dcc://sync", id);
+    Ok(out)
+}
+
 /// Step the journal forward one op.
 #[tauri::command]
 pub async fn dcc_redo(
@@ -2781,7 +2908,7 @@ mod tests {
     /// Hand-written on purpose: a table derived from the code would agree with the
     /// code by construction and prove nothing. This is the decision, written down
     /// once, and the gate holds the code to it.
-    const DRAG_POLICY: [(&str, DragPolicy); 25] = [
+    const DRAG_POLICY: [(&str, DragPolicy); 27] = [
         ("dcc_open", DragPolicy::NoJournal),
         // Wave D. `dcc_new` touches no existing document at all — it mints one —
         // so there is nothing of the author's in flight for it to settle or
@@ -2790,6 +2917,12 @@ mod tests {
         ("dcc_new", DragPolicy::NoJournal),
         ("dcc_box_select", DragPolicy::Settles),
         ("dcc_set_view_opts", DragPolicy::Settles),
+        // The history panel. `dcc_history` READS and journals nothing;
+        // `dcc_amend` rewrites the journal and therefore settles first, exactly
+        // as undo does — an amendment with a drag in flight must neither throw
+        // the drag away nor be replayed underneath it.
+        ("dcc_history", DragPolicy::NoJournal),
+        ("dcc_amend", DragPolicy::Settles),
         ("dcc_close", DragPolicy::Abandons),
         ("dcc_list", DragPolicy::NoJournal),
         ("dcc_apply", DragPolicy::Settles),

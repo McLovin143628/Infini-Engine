@@ -44,6 +44,7 @@ import type { DccGarmentDto } from "../bindings/DccGarmentDto";
 import type { DccGizmoModeDto } from "../bindings/DccGizmoModeDto";
 import type { DccGroomDto } from "../bindings/DccGroomDto";
 import type { DccGroomResultDto } from "../bindings/DccGroomResultDto";
+import type { DccHistoryEntryDto } from "../bindings/DccHistoryEntryDto";
 import type { DccModeDto } from "../bindings/DccModeDto";
 import type { DccNewDto } from "../bindings/DccNewDto";
 import type { DccOrientDto } from "../bindings/DccOrientDto";
@@ -83,6 +84,12 @@ export interface DccEntry {
    * mouse would otherwise never learn where it went.
    */
   lastGroom: DccGroomResultDto | null;
+  /**
+   * **The journal, as rows** (Wave D) — refreshed on demand rather than with
+   * every document, because a forty-op history is forty rows the panel does not
+   * draw until an author opens the list.
+   */
+  history: DccHistoryEntryDto[];
 }
 
 interface DccState {
@@ -120,6 +127,13 @@ interface DccState {
   orbit: (assetId: string, yawDeg: number, pitchDeg: number, dolly: number) => Promise<void>;
   frame: (assetId: string) => Promise<void>;
   undo: (assetId: string) => Promise<void>;
+  /** Refresh the history rows for a document. */
+  historyRefresh: (assetId: string) => Promise<void>;
+  /**
+   * **Re-parameterize an edit that is already in the past.** A refusal lands in
+   * `refusal`, exactly like a tool press.
+   */
+  amend: (assetId: string, index: number, value: number) => Promise<void>;
   redo: (assetId: string) => Promise<void>;
   save: (assetId: string) => Promise<void>;
   mergeAsset: (assetId: string, dropped: string) => Promise<void>;
@@ -154,6 +168,7 @@ const EMPTY: DccEntry = {
   uvImage: null,
   lastUnwrap: null,
   lastGroom: null,
+  history: [],
 };
 
 /**
@@ -416,6 +431,28 @@ export const useDccStore = create<DccState>((set, get) => {
     // a rejected `dcc_undo` was an unhandled promise rejection and the panel
     // showed nothing at all. `skelStore.run` already does exactly this, for the
     // reason written above it.
+    historyRefresh: async (assetId) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      try {
+        patch(assetId, { history: await dccIpc.history(doc.id) });
+      } catch (e) {
+        console.error("dcc.history failed", e);
+      }
+    },
+
+    amend: async (assetId, index, value) => {
+      const doc = entry(assetId).doc;
+      if (!doc) return;
+      try {
+        applyResult(assetId, await dccIpc.amend(doc.id, index, value));
+        // The rows describe the journal, and the journal just changed.
+        await get().historyRefresh(assetId);
+      } catch (e) {
+        patch(assetId, { refusal: String(e) });
+      }
+    },
+
     undo: async (assetId) => {
       const doc = entry(assetId).doc;
       if (!doc) return;
