@@ -2734,14 +2734,9 @@ pub const TERRAIN_LAYERS: usize = 4;
 /// One splat material layer definition (P10.4): the surface a terrain sample
 /// blends toward where its weight channel dominates.
 ///
-/// A **texture GUID is deliberately absent**: the interactive viewport can't yet
-/// upload asset textures (the same documented gap as [`Sprite::texture`] /
-/// material previews), so a layer is proven by its solid `albedo` + a procedural
-/// triplanar detail grain scaled by `tex_scale`. Per-layer albedo/normal/ORM
-/// texture refs are the documented follow-up. As a nested `#[reflect(ignore)]`
-/// array element it isn't surfaced in the generic Details grid (authored via the
-/// paint panel / defaults); it derives `Reflect` + `Default` so the array
-/// serdes and reflect-constructs.
+/// As a nested `#[reflect(ignore)]` array element it isn't surfaced in the
+/// generic Details grid (authored via the paint panel / defaults); it derives
+/// `Reflect` + `Default` so the array serdes and reflect-constructs.
 #[derive(Reflect, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[reflect(Default)]
 pub struct TerrainLayer {
@@ -2753,6 +2748,37 @@ pub struct TerrainLayer {
     /// World metres per procedural detail-grain tile (triplanar detail scale).
     #[serde(default = "default_layer_tex_scale")]
     pub tex_scale: f64,
+    /// The `.inf_mat` whose textures this layer samples (schema **v24**,
+    /// Wave G) — `None` keeps the solid-albedo-plus-procedural-grain surface
+    /// every terrain had before.
+    ///
+    /// # The remainder this closes
+    ///
+    /// The comment that used to stand here said a texture GUID was *deliberately
+    /// absent* because "the interactive viewport can't yet upload asset
+    /// textures". That stopped being true at Wave T: the terrain shader grew a
+    /// four-layer virtual-texture path (`RenderTerrainLayer::vt`,
+    /// `terrain_layers` in `terrain.wgsl`) which resolves real albedo/normal/ORM
+    /// pages per splat layer. What it did not grow was any way for an author to
+    /// *say which material* — every projector wrote `VtTextureSet::NONE`, so the
+    /// branch could never execute. Wave T's own disposition memo names this field
+    /// as the thing that turns that path from a capability into a feature.
+    ///
+    /// # Wire note
+    ///
+    /// This is stored as a bare `Uuid` rather than an `AssetId` because
+    /// `inf-ecs` deliberately does not depend on `inf-asset` (the same reason
+    /// [`Terrain::asset`] and [`Terrain::biome_set`] are `Option<Uuid>`); the
+    /// editor glue resolves it. Appending it grows `TerrainLayer`, which is a
+    /// wire-format change under positional bincode — hence the frozen
+    /// `TerrainLayerV23` in both scene codec mirrors.
+    ///
+    /// `#[reflect(ignore)]` for the same reason every other asset reference in
+    /// this file carries it: `Uuid` is not `Reflect`, and an asset binding is
+    /// picked from the Content Drawer rather than typed into the Details grid.
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub material: Option<uuid::Uuid>,
 }
 
 fn default_layer_roughness() -> f64 {
@@ -2768,6 +2794,7 @@ impl Default for TerrainLayer {
             albedo: Color::new(0.35, 0.35, 0.35, 1.0),
             roughness: default_layer_roughness(),
             tex_scale: default_layer_tex_scale(),
+            material: None,
         }
     }
 }
@@ -2781,21 +2808,25 @@ pub fn default_terrain_layers() -> [TerrainLayer; TERRAIN_LAYERS] {
             albedo: Color::new(0.20, 0.34, 0.14, 1.0), // grass
             roughness: 0.92,
             tex_scale: 6.0,
+            material: None,
         },
         TerrainLayer {
             albedo: Color::new(0.33, 0.30, 0.27, 1.0), // rock
             roughness: 0.85,
             tex_scale: 4.0,
+            material: None,
         },
         TerrainLayer {
             albedo: Color::new(0.42, 0.30, 0.18, 1.0), // dirt
             roughness: 0.95,
             tex_scale: 5.0,
+            material: None,
         },
         TerrainLayer {
             albedo: Color::new(0.86, 0.89, 0.94, 1.0), // snow
             roughness: 0.65,
             tex_scale: 10.0,
+            material: None,
         },
     ]
 }

@@ -114,6 +114,7 @@ fn level(entities: Vec<inf_scene::RuntimeEntity>) -> inf_scene::RuntimeLevel {
         title: "Water".into(),
         entities,
         settings: inf_scene::RuntimeSettings::default(),
+        geo: Default::default(),
     }
 }
 
@@ -133,6 +134,7 @@ fn partitioned(entities: Vec<inf_scene::RuntimeEntity>) -> inf_scene::RuntimeLev
             },
             ..Default::default()
         },
+        geo: Default::default(),
     }
 }
 

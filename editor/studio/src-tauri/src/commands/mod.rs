@@ -232,6 +232,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + '
         scene::scene_autosave,
         scene::scene_current_path,
         scene::scene_get_settings,
+        scene::scene_get_geo_anchor,
+        scene::scene_set_geo_anchor,
         scene::scene_set_settings,
         shell::shell_reveal,
         sim::sim_start,

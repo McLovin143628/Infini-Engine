@@ -3588,6 +3588,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "inf-ecs",
+ "inf-math",
  "inf-terrain",
  "serde",
  "thiserror 2.0.19",

@@ -161,6 +161,7 @@ fn hazard_level(partitioned: bool) -> inf_scene::RuntimeLevel {
             },
             ..Default::default()
         },
+        geo: Default::default(),
     }
 }
 

@@ -757,6 +757,7 @@ fn a_persistent_blueprint_binds_in_a_partitioned_level() {
             },
             ..Default::default()
         },
+        geo: Default::default(),
     };
     let bytes = level.encode().unwrap();
 
@@ -855,6 +856,7 @@ fn an_empty_partitioned_level_plays_off_pack() {
             },
             ..Default::default()
         },
+        geo: Default::default(),
     };
     let bytes = level.encode().unwrap();
 

@@ -2333,6 +2333,85 @@ impl LevelSettingsDto {
     }
 }
 
+// ── The geo-anchor (Wave G) ──────────────────────────────────────────────────
+
+/// Where on Earth world `(0, 0, 0)` is — `scene_get_geo_anchor` /
+/// `scene_set_geo_anchor`.
+///
+/// **A separate DTO rather than a field on [`LevelSettingsDto`]**, for the same
+/// reason the anchor is a scene-file field rather than a settings block: it is
+/// document provenance, not a simulation parameter. (It is also the practical
+/// answer — `LevelSettingsDto` is `Copy`, and an anchor carries two strings.)
+///
+/// Units, per the doctrine: the origin components are **metres**; latitude,
+/// longitude and convergence are **degrees**, which is legal at a data boundary
+/// for the same reason euler angles are.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GeoAnchorDto {
+    /// Whether this level is georeferenced at all.
+    pub enabled: bool,
+    /// The projected CRS the world plane lives in — an authority code
+    /// (`"EPSG:32610"`) or a full proj4 string.
+    pub crs: String,
+    /// The CRS easting (metres) world `X = 0` means.
+    pub origin_easting_m: f64,
+    /// The CRS northing (metres) world `Z = 0` means. `+Z` is **south**.
+    pub origin_northing_m: f64,
+    /// The elevation (metres) world `Y = 0` means.
+    pub origin_height_m: f64,
+    /// Geodetic latitude of the origin, degrees, `+` north. Derived at the
+    /// import door; the panel shows it and does not ask for it.
+    pub origin_latitude_deg: f64,
+    pub origin_longitude_deg: f64,
+    /// Degrees from grid north to true north at the origin.
+    pub grid_convergence_deg: f64,
+    /// The vertical datum the heights are referenced to (informational — this
+    /// engine applies no geoid model).
+    pub vertical_datum: String,
+    /// A human explanation of why this anchor cannot be used, or `null` when it
+    /// is fine. Computed by the same `validate` every import door calls, so the
+    /// panel and the importer cannot disagree about what is wrong.
+    pub issue: Option<String>,
+}
+
+impl GeoAnchorDto {
+    pub fn from_anchor(a: &inf_math::geo::GeoAnchor) -> Self {
+        Self {
+            enabled: a.enabled,
+            crs: a.crs.clone(),
+            origin_easting_m: a.origin_easting_m,
+            origin_northing_m: a.origin_northing_m,
+            origin_height_m: a.origin_height_m,
+            origin_latitude_deg: a.origin_latitude_deg,
+            origin_longitude_deg: a.origin_longitude_deg,
+            grid_convergence_deg: a.grid_convergence_deg,
+            vertical_datum: a.vertical_datum.clone(),
+            // A disabled anchor is not an "issue" — it is the ordinary state of
+            // a made-up world, and reporting it as a problem would train an
+            // author to ignore this field.
+            issue: if a.enabled {
+                a.validate().err().map(|e| e.to_string())
+            } else {
+                None
+            },
+        }
+    }
+
+    pub fn to_anchor(&self) -> inf_math::geo::GeoAnchor {
+        inf_math::geo::GeoAnchor {
+            enabled: self.enabled,
+            crs: self.crs.trim().to_string(),
+            origin_easting_m: self.origin_easting_m,
+            origin_northing_m: self.origin_northing_m,
+            origin_height_m: self.origin_height_m,
+            origin_latitude_deg: self.origin_latitude_deg,
+            origin_longitude_deg: self.origin_longitude_deg,
+            grid_convergence_deg: self.grid_convergence_deg,
+            vertical_datum: self.vertical_datum.trim().to_string(),
+        }
+    }
+}
+
 // ── Material-instance override editor (E-P2) ─────────────────────────────────
 //
 // A `.inf_mati` inherits a parent material and overrides a sparse subset of its

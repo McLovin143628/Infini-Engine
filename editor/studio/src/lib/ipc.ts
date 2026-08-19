@@ -65,6 +65,7 @@ import type { HeightmapProbeDto } from "../bindings/HeightmapProbeDto";
 import type { LakePreviewDto } from "../bindings/LakePreviewDto";
 import type { LayoutSummary } from "../bindings/LayoutSummary";
 import type { LevelSettingsDto } from "../bindings/LevelSettingsDto";
+import type { GeoAnchorDto } from "../bindings/GeoAnchorDto";
 import type { PackageErrorDto } from "../bindings/PackageErrorDto";
 import type { PackageResultDto } from "../bindings/PackageResultDto";
 import type { ProjectInfoDto } from "../bindings/ProjectInfoDto";
@@ -545,6 +546,16 @@ export const scene = {
   /** Replace the level settings as one undo step (World Settings panel; debounced). */
   setSettings: (settings: LevelSettingsDto): Promise<void> =>
     invoke("scene_set_settings", { settings }),
+  /**
+   * Where on Earth world (0,0,0) is (Wave G).
+   *
+   * Its own pair rather than a field on the settings DTO, matching the schema
+   * decision: the anchor is document provenance, not a simulation parameter.
+   */
+  getGeoAnchor: (): Promise<GeoAnchorDto> => invoke<GeoAnchorDto>("scene_get_geo_anchor"),
+  /** Replace the geo-anchor. Rejects an anchor that cannot be transformed through. */
+  setGeoAnchor: (anchor: GeoAnchorDto): Promise<void> =>
+    invoke("scene_set_geo_anchor", { anchor }),
   /** Write the crash-recovery file if there are unsaved changes. */
   autosave: (): Promise<void> => invoke("scene_autosave"),
   /** Spawn a Content-Drawer asset dropped over the viewport (P4.4). */

@@ -1,6 +1,6 @@
-schema_version = 23
+schema_version = 24
 guid = "20040000-0000-4000-8000-000000000001"
 title = "Phase 20 Coastal"
 entity_count = 16
-content_hash = "c4a5b5987d9dab89"
+content_hash = "a509e7724f2bc2f0"
 dependencies = []

@@ -702,6 +702,44 @@ pub async fn scene_get_settings(state: State<'_, SceneState>) -> Result<LevelSet
     Ok(LevelSettingsDto::from_doc(&doc))
 }
 
+/// Where on Earth world `(0, 0, 0)` is (Wave G).
+///
+/// Its own command pair rather than a field on the settings DTO, matching the
+/// schema decision: the anchor is document provenance, not a simulation
+/// parameter — see `inf_math::geo`.
+#[tauri::command]
+pub async fn scene_get_geo_anchor(
+    state: State<'_, SceneState>,
+) -> Result<inf_editor_core::ipc::GeoAnchorDto, String> {
+    let doc = lock(&state.doc)?;
+    Ok(inf_editor_core::ipc::GeoAnchorDto::from_anchor(doc.geo()))
+}
+
+/// Replace the level's geo-anchor.
+///
+/// **Refused rather than stored when it cannot be used**, through the same
+/// `validate` every import door calls — an anchor with a NaN origin or an
+/// out-of-range latitude would make every coordinate imported against it
+/// non-finite, and a non-finite elevation survives `f32::min`/`max` looking
+/// perfectly healthy. Better to refuse at the one place an author types it.
+#[tauri::command]
+pub async fn scene_set_geo_anchor(
+    app: AppHandle,
+    state: State<'_, SceneState>,
+    anchor: inf_editor_core::ipc::GeoAnchorDto,
+) -> Result<(), String> {
+    let a = anchor.to_anchor();
+    if a.enabled {
+        a.validate().map_err(|e| e.to_string())?;
+    }
+    {
+        let mut doc = lock(&state.doc)?;
+        doc.edit_geo(a);
+    }
+    emit_world_delta(&app, &state);
+    Ok(())
+}
+
 /// Replace the level settings as one undo step (World Settings panel; the
 /// frontend debounces the calls). Emits `world://delta` so the panel + any
 /// listener re-sync. The host applies the render block to the live viewport on

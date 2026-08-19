@@ -15,6 +15,10 @@ inf-ecs = { workspace = true }
 # The frozen pre-v9 `TerrainV8` record names `TerrainData` directly (schema v9
 # froze `Terrain`'s layout when it gained its `.inf_terrain` asset reference).
 inf-terrain = { workspace = true }
+# The Wave-G geo-anchor (`inf_math::geo::GeoAnchor`) the schema-v24 file record
+# carries. Ring-0 → Ring-0, and inf-terrain already depends on inf-math, so this
+# adds no crate to the tree — only an edge that was already there transitively.
+inf-math = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
 uuid = { workspace = true }

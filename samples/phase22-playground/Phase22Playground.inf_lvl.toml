@@ -1,8 +1,8 @@
-schema_version = 23
+schema_version = 24
 guid = "22040000-0000-4000-8000-000000000001"
 title = "Phase 22 Playground"
 entity_count = 13
-content_hash = "3a10c0043ff59a57"
+content_hash = "befe2cfb63372116"
 dependencies = [
     "22040000-0000-4000-8000-000000000002",
     "22040000-0000-4000-8000-000000000003",

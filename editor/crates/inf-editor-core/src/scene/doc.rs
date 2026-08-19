@@ -61,6 +61,8 @@ pub struct SceneDoc {
     /// File-level simulation settings (gravity + rate), persisted in `.inf_lvl`
     /// (schema v3). Defaults preserve pre-v3 behaviour.
     settings: LevelSettings,
+    /// Where on Earth this level is (schema v24). Disabled by default.
+    geo: inf_math::geo::GeoAnchor,
     history: EditHistory,
     /// The pre-preview authored scalars captured when a sequencer scrub arms a
     /// live preview — `(target, reflection-path, authored-value)` — or `None`
@@ -104,6 +106,7 @@ impl SceneDoc {
             dirty: false,
             title: "Untitled".to_string(),
             settings: LevelSettings::default(),
+            geo: Default::default(),
             history: EditHistory::default(),
             preview: None,
             doc_id: NEXT_DOC_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -151,6 +154,36 @@ impl SceneDoc {
     /// Loader-only: does **not** dirty the document or bump the version.
     pub fn set_settings(&mut self, settings: LevelSettings) {
         self.settings = settings;
+    }
+
+    /// Where on Earth world `(0, 0, 0)` is (schema v24, Wave G).
+    ///
+    /// Disabled on an ordinary made-up world. Every GIS import door reads this
+    /// to know what to reproject into, and the cook compares it against
+    /// `TimeOfDay`'s hand-authored latitude.
+    pub fn geo(&self) -> &inf_math::geo::GeoAnchor {
+        &self.geo
+    }
+
+    /// Replace the geo-anchor. **Loader-only**: does not dirty the document or
+    /// bump the version, exactly like [`set_settings`](Self::set_settings).
+    pub fn set_geo(&mut self, geo: inf_math::geo::GeoAnchor) {
+        self.geo = geo;
+    }
+
+    /// Replace the geo-anchor **as an author edit**: dirties the document and
+    /// bumps the version so the viewport and the panels re-sync.
+    ///
+    /// Not an undo step. Anchoring a level is a once-per-project act that every
+    /// subsequent import is interpreted against, and quietly reversing it with a
+    /// Ctrl+Z aimed at something else would silently move every georeferenced
+    /// asset in the level. The panel is the place to change it back.
+    pub fn edit_geo(&mut self, geo: inf_math::geo::GeoAnchor) {
+        if self.geo == geo {
+            return;
+        }
+        self.geo = geo;
+        self.touch();
     }
 
     /// Raw (non-recording) level-settings write for the undo layer + [`Self::edit_settings`].

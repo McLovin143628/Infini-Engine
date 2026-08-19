@@ -125,6 +125,7 @@ fn export_bindings() {
     ViewportGizmoDto::export_all(&cfg).expect("export ViewportGizmoDto");
     SaveResultDto::export_all(&cfg).expect("export SaveResultDto");
     HeightmapProbeDto::export_all(&cfg).expect("export HeightmapProbeDto");
+    inf_editor_core::ipc::GeoAnchorDto::export_all(&cfg).expect("export GeoAnchorDto");
     TerrainImportSettingsDto::export_all(&cfg).expect("export TerrainImportSettingsDto");
     TerrainImportPlanDto::export_all(&cfg).expect("export TerrainImportPlanDto");
     TerrainImportResultDto::export_all(&cfg).expect("export TerrainImportResultDto");

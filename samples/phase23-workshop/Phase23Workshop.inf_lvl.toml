@@ -1,6 +1,6 @@
-schema_version = 23
+schema_version = 24
 guid = "23060000-0000-4000-8000-000000000001"
 title = "Phase 23 Workshop"
 entity_count = 3
-content_hash = "1e851943c7b0319f"
+content_hash = "eb52ebd8f4132296"
 dependencies = ["23060000-0000-4000-8000-000000000002"]

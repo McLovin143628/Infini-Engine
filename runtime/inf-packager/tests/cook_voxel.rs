@@ -108,6 +108,7 @@ fn level(entities: Vec<inf_scene::RuntimeEntity>) -> inf_scene::RuntimeLevel {
         title: "Caves".into(),
         entities,
         settings: inf_scene::RuntimeSettings::default(),
+        geo: Default::default(),
     }
 }
 

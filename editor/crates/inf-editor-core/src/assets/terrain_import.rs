@@ -125,11 +125,6 @@ impl Default for TerrainImportSettings {
 }
 
 impl TerrainImportSettings {
-    /// The Ring-0 settings these map onto for a `width × height` source.
-    ///
-    /// Centring is resolved **here**, against the probed dimensions, into an
-    /// integral tile origin — so the value that reaches Ring 0 is exact and a
-    /// reimport of the same file re-lands on the same tiles.
     /// The Ring-0 no-data handling these settings name, for a given source.
     ///
     /// **The file's own declared sentinel wins** over the author's: a GeoTIFF
@@ -175,6 +170,11 @@ impl TerrainImportSettings {
         probe?.geo.as_ref()?.world_origin(anchor?)
     }
 
+    /// The Ring-0 settings these map onto for a `width × height` source.
+    ///
+    /// Centring is resolved **here**, against the probed dimensions, into an
+    /// integral tile origin — so the value that reaches Ring 0 is exact and a
+    /// reimport of the same file re-lands on the same tiles.
     pub fn to_import(&self, width: u32, height: u32) -> HeightmapImport {
         let base = HeightmapImport {
             tile_resolution: self.tile_resolution.max(2),

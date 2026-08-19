@@ -346,7 +346,38 @@ use uuid::Uuid;
 ///   `CharacterController3D` precisely because of the paragraph above: that
 ///   struct appears inside eighteen frozen records across two mirrors, and
 ///   growing it would mean freezing a copy of it into every one of them.
-pub const SCHEMA_VERSION: u32 = 23;
+/// * **v24** — Wave G, and the wave's **only** scene bump. It carries two
+///   unrelated things on purpose, because the alternative is two bumps:
+///
+///   **(a) The geo-anchor** ([`inf_math::geo::GeoAnchor`]) — where on Earth
+///   world `(0, 0, 0)` is, and in what CRS the world plane lies. Without it a
+///   DEM, a road centreline and a coastline each arrive in their own numbers and
+///   nothing can put them on the same ground.
+///
+///   It is appended to the **file record**, after `settings`, and *not* inside
+///   [`RuntimeSettings`]. That placement was measured, not assumed. Every frozen
+///   file record from `SceneFileV10` to `SceneFileV23` carries the **live**
+///   settings type, so growing `RuntimeSettings` would have meant freezing a
+///   `RuntimeSettingsV23` and repointing thirty-one declarations across the two
+///   mirrors — the expensive `v10` shape of bump. Appending to the file record
+///   costs one frozen record, because the file record is the outermost struct
+///   and its tail is a genuine tail.
+///
+///   And the design argument agrees with the cheap answer rather than merely
+///   tolerating it: `RuntimeSettings` holds what the *simulation and renderer*
+///   read every frame — gravity, tick rate, post-processing, streaming. The
+///   anchor is read three times in a level's life (at an import door, by the
+///   cook advisory, and to derive the sky's latitude) and is document
+///   provenance, sitting naturally beside `title`.
+///
+///   **(b) `TerrainLayer::material`** — Wave T's named remainder, a real
+///   per-layer material reference where the splat layer previously had only a
+///   solid albedo and a procedural grain. This one *is* the expensive shape:
+///   `TerrainLayer` is nested inside `Terrain` inside the entity record, so it
+///   costs a frozen [`TerrainLayerV23`], a frozen [`TerrainV23`], and repointing
+///   the seven frozen entity records that carried the live `Terrain`. There is
+///   no cheaper placement that puts the field where it belongs — on the layer.
+pub const SCHEMA_VERSION: u32 = 24;
 
 /// File-level simulation settings (schema v3+), mirroring the editor's
 /// `LevelSettings` byte-for-byte. The serde defaults preserve pre-v3 behaviour:
@@ -460,12 +491,25 @@ pub type Result<T> = std::result::Result<T, SceneError>;
 
 /// One entity's persisted state — the runtime record.
 ///
-/// This is the **current (schema-v7)** wire layout: field order and the
-/// `#[serde(default)]` markers mirror the editor's `EntityRecord` byte-for-byte so
-/// the same bincode payload decodes here. Component slots are `Option`s (a slot is
-/// `Some` when the entity carries that component).
+/// This is the **current** wire layout: field order and the `#[serde(default)]`
+/// markers mirror the editor's `EntityRecord` byte-for-byte so the same bincode
+/// payload decodes here. Component slots are `Option`s (a slot is `Some` when
+/// the entity carries that component).
+///
+/// # Generic in its terrain slot only (Wave G / v24)
+///
+/// [`RuntimeEntity`] is the alias, and it is byte-for-byte what this declaration
+/// always was. The parameter exists for the same reason `EntityRecordV20Gen`'s
+/// material parameter does: v24 grew exactly ONE nested component
+/// ([`inf_ecs::TerrainLayer`] gained its material binding), and the frozen v23
+/// record needs the *old* shape of that component composed with the other
+/// forty-odd fields — restating them would be forty chances to mistype a field
+/// list that the compiler cannot check against anything.
+///
+/// Nothing outside this module's ladder ever instantiates it at anything but
+/// [`Terrain`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RuntimeEntity {
+pub struct RuntimeEntityGen<T = Terrain> {
     /// Stable entity GUID (what selection/hierarchy reference across a reload).
     pub guid: Uuid,
     /// Display / Outliner name.
@@ -513,8 +557,10 @@ pub struct RuntimeEntity {
     pub actor: Option<Uuid>,
     // ── v4 (P10.6) world components ───────────────────────────────────────
     /// A heightfield terrain (paged heights + splat weights + material layers).
+    ///
+    /// The one generic slot — see the type's own docs.
     #[serde(default)]
-    pub terrain: Option<Terrain>,
+    pub terrain: Option<T>,
     /// A procedural scatter volume; its `evaluated` cache is `#[serde(skip)]`, so
     /// only the `graph` ref + region + seed persist and the player re-evaluates
     /// the scatter on load.
@@ -632,6 +678,137 @@ pub struct RuntimeEntity {
     pub character_movement: Option<CharacterMovement>,
 }
 
+/// One entity's persisted state — **the live record**. Byte-for-byte what
+/// [`RuntimeEntityGen`] always was; see its docs for why the parameter exists.
+pub type RuntimeEntity = RuntimeEntityGen<Terrain>;
+
+/// **The frozen v23 entity record.** Identical to the live one except that its
+/// terrain carries the pre-v24 [`TerrainV23`] — the shape before
+/// `TerrainLayer` gained its material binding.
+type EntityRecordV23 = RuntimeEntityGen<TerrainV23>;
+
+impl EntityRecordV23 {
+    /// Lift a frozen v23 record to the live [`RuntimeEntity`]: every splat layer
+    /// comes up with `material: None`, which is exactly what a v23 level meant —
+    /// a solid albedo plus the procedural grain, and no textures.
+    fn into_runtime(self) -> RuntimeEntity {
+        // Only the terrain slot differs, so the rest is moved wholesale rather
+        // than restated field by field — a restatement is where a slot goes
+        // missing without the compiler noticing.
+        let RuntimeEntityGen { terrain, .. } = &self;
+        let lifted = terrain.clone().map(TerrainV23::into_current);
+        let this = self;
+        RuntimeEntity {
+            terrain: lifted,
+            guid: this.guid,
+            name: this.name,
+            parent: this.parent,
+            transform: this.transform,
+            visible: this.visible,
+            mesh: this.mesh,
+            material: this.material,
+            light: this.light,
+            camera: this.camera,
+            sprite: this.sprite,
+            tilemap: this.tilemap,
+            nine_slice: this.nine_slice,
+            text2d: this.text2d,
+            light_2d: this.light_2d,
+            rigid_body_2d: this.rigid_body_2d,
+            collider_2d: this.collider_2d,
+            character_controller_2d: this.character_controller_2d,
+            rigid_body_3d: this.rigid_body_3d,
+            collider_3d: this.collider_3d,
+            character_controller_3d: this.character_controller_3d,
+            actor: this.actor,
+            pcg_volume: this.pcg_volume,
+            skeletal_mesh: this.skeletal_mesh,
+            anim_player: this.anim_player,
+            anim_state_machine: this.anim_state_machine,
+            root_motion: this.root_motion,
+            attached_to: this.attached_to,
+            joint_2d: this.joint_2d,
+            joint_3d: this.joint_3d,
+            audio_source: this.audio_source,
+            audio_listener: this.audio_listener,
+            decal: this.decal,
+            volume: this.volume,
+            spline: this.spline,
+            foliage: this.foliage,
+            streaming_source: this.streaming_source,
+            always_loaded: this.always_loaded,
+            time_of_day: this.time_of_day,
+            sky_atmosphere: this.sky_atmosphere,
+            water_body: this.water_body,
+            buoyancy: this.buoyancy,
+            voxel_volume: this.voxel_volume,
+            destructible: this.destructible,
+            ik_target: this.ik_target,
+            cloth_sim: this.cloth_sim,
+            hair_guides: this.hair_guides,
+            character_movement: this.character_movement,
+        }
+    }
+
+    /// Project a live record back onto the frozen v23 shape (the
+    /// **downgrade-bless** path that regenerates the committed v23 fixture).
+    /// Only the per-layer material binding is lost.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn from_current(r: RuntimeEntity) -> Self {
+        let terrain = r.terrain.clone().map(TerrainV23::from_current);
+        Self {
+            terrain,
+            guid: r.guid,
+            name: r.name,
+            parent: r.parent,
+            transform: r.transform,
+            visible: r.visible,
+            mesh: r.mesh,
+            material: r.material,
+            light: r.light,
+            camera: r.camera,
+            sprite: r.sprite,
+            tilemap: r.tilemap,
+            nine_slice: r.nine_slice,
+            text2d: r.text2d,
+            light_2d: r.light_2d,
+            rigid_body_2d: r.rigid_body_2d,
+            collider_2d: r.collider_2d,
+            character_controller_2d: r.character_controller_2d,
+            rigid_body_3d: r.rigid_body_3d,
+            collider_3d: r.collider_3d,
+            character_controller_3d: r.character_controller_3d,
+            actor: r.actor,
+            pcg_volume: r.pcg_volume,
+            skeletal_mesh: r.skeletal_mesh,
+            anim_player: r.anim_player,
+            anim_state_machine: r.anim_state_machine,
+            root_motion: r.root_motion,
+            attached_to: r.attached_to,
+            joint_2d: r.joint_2d,
+            joint_3d: r.joint_3d,
+            audio_source: r.audio_source,
+            audio_listener: r.audio_listener,
+            decal: r.decal,
+            volume: r.volume,
+            spline: r.spline,
+            foliage: r.foliage,
+            streaming_source: r.streaming_source,
+            always_loaded: r.always_loaded,
+            time_of_day: r.time_of_day,
+            sky_atmosphere: r.sky_atmosphere,
+            water_body: r.water_body,
+            buoyancy: r.buoyancy,
+            voxel_volume: r.voxel_volume,
+            destructible: r.destructible,
+            ik_target: r.ik_target,
+            cloth_sim: r.cloth_sim,
+            hair_guides: r.hair_guides,
+            character_movement: r.character_movement,
+        }
+    }
+}
+
 /// A decoded level ready for the runtime to instantiate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeLevel {
@@ -641,6 +818,11 @@ pub struct RuntimeLevel {
     pub entities: Vec<RuntimeEntity>,
     /// File-level simulation settings (gravity + rate).
     pub settings: RuntimeSettings,
+    /// Where on Earth world `(0, 0, 0)` is (schema v24, Wave G).
+    ///
+    /// Disabled by default, which is what every level authored before v24 meant:
+    /// an ordinary made-up world with no place on Earth.
+    pub geo: inf_math::geo::GeoAnchor,
 }
 
 impl RuntimeLevel {
@@ -686,12 +868,33 @@ struct Header {
     schema_version: u32,
 }
 
-/// The schema-v23 file layout (current). `entities` reuses [`RuntimeEntity`].
+/// The schema-v24 file layout (current). `entities` reuses [`RuntimeEntity`].
+///
+/// The geo-anchor is the file's **tail** — see the [`SCHEMA_VERSION`] ladder for
+/// why it lives here rather than inside [`RuntimeSettings`].
+#[derive(Serialize, Deserialize)]
+struct SceneFileV24 {
+    schema_version: u32,
+    title: String,
+    entities: Vec<RuntimeEntity>,
+    #[serde(default)]
+    settings: RuntimeSettings,
+    /// Where on Earth world `(0, 0, 0)` is (schema v24). Additive:
+    /// `#[serde(default)]` → a disabled anchor, which is exactly what every
+    /// pre-v24 level meant.
+    #[serde(default)]
+    geo: inf_math::geo::GeoAnchor,
+}
+
+/// A frozen schema-v23 file layout. v24 appended the geo-anchor to the file
+/// record and repointed `entities` at the frozen [`EntityRecordV23`] — the shape
+/// this file held as [`RuntimeEntity`] until v24 gave `TerrainLayer` its
+/// material binding.
 #[derive(Serialize, Deserialize)]
 struct SceneFileV23 {
     schema_version: u32,
     title: String,
-    entities: Vec<RuntimeEntity>,
+    entities: Vec<EntityRecordV23>,
     #[serde(default)]
     settings: RuntimeSettings,
 }
@@ -1791,8 +1994,8 @@ struct TerrainV8 {
     /// tiles have no data maps, so the frozen wire type is what reads them.
     #[serde(default)]
     data: inf_terrain::TerrainDataFrozenV1,
-    #[serde(default = "inf_ecs::components::default_terrain_layers")]
-    layers: [TerrainLayer; inf_ecs::components::TERRAIN_LAYERS],
+    #[serde(default = "default_terrain_layers_v23")]
+    layers: [TerrainLayerV23; inf_ecs::components::TERRAIN_LAYERS],
     #[serde(default = "default_macro_variation")]
     macro_variation: f64,
 }
@@ -1817,8 +2020,8 @@ struct TerrainV14 {
     tile_resolution: u32,
     #[serde(default)]
     data: inf_terrain::TerrainDataFrozenV1,
-    #[serde(default = "inf_ecs::components::default_terrain_layers")]
-    layers: [TerrainLayer; inf_ecs::components::TERRAIN_LAYERS],
+    #[serde(default = "default_terrain_layers_v23")]
+    layers: [TerrainLayerV23; inf_ecs::components::TERRAIN_LAYERS],
     #[serde(default = "default_macro_variation")]
     macro_variation: f64,
     #[serde(default)]
@@ -1834,7 +2037,7 @@ impl TerrainV14 {
             meters_per_sample: self.meters_per_sample,
             tile_resolution: self.tile_resolution,
             data: self.data.into_current(),
-            layers: self.layers,
+            layers: TerrainLayerV23::lift_all(self.layers),
             macro_variation: self.macro_variation,
             asset: self.asset,
             biome_set: None,
@@ -1852,7 +2055,7 @@ impl TerrainV14 {
             meters_per_sample: t.meters_per_sample,
             tile_resolution: t.tile_resolution,
             data: inf_terrain::TerrainDataFrozenV1::from_current(&t.data),
-            layers: t.layers,
+            layers: TerrainLayerV23::freeze_all(t.layers),
             macro_variation: t.macro_variation,
             asset: t.asset,
         }
@@ -1884,8 +2087,8 @@ struct TerrainV15 {
     /// biome ids (generation 2 of the frozen-tile ladder).
     #[serde(default)]
     data: inf_terrain::TerrainDataFrozenV2,
-    #[serde(default = "inf_ecs::components::default_terrain_layers")]
-    layers: [TerrainLayer; inf_ecs::components::TERRAIN_LAYERS],
+    #[serde(default = "default_terrain_layers_v23")]
+    layers: [TerrainLayerV23; inf_ecs::components::TERRAIN_LAYERS],
     #[serde(default = "default_macro_variation")]
     macro_variation: f64,
     #[serde(default)]
@@ -1902,7 +2105,7 @@ impl TerrainV15 {
             meters_per_sample: self.meters_per_sample,
             tile_resolution: self.tile_resolution,
             data: self.data.into_current(),
-            layers: self.layers,
+            layers: TerrainLayerV23::lift_all(self.layers),
             macro_variation: self.macro_variation,
             asset: self.asset,
             biome_set: None,
@@ -1920,10 +2123,140 @@ impl TerrainV15 {
             meters_per_sample: t.meters_per_sample,
             tile_resolution: t.tile_resolution,
             data: inf_terrain::TerrainDataFrozenV2::from_current(&t.data),
-            layers: t.layers,
+            layers: TerrainLayerV23::freeze_all(t.layers),
             macro_variation: t.macro_variation,
             asset: t.asset,
         }
+    }
+}
+
+/// The **pre-v24** [`TerrainLayer`] byte layout (schema v24 froze this when
+/// Wave G gave every splat layer a real material binding).
+///
+/// Three fields, and the fourth is exactly what v24 added. A v23 payload's bytes
+/// end at `tex_scale`, so decoding one through the grown layer would read the
+/// next layer's albedo as this layer's material discriminant — four times per
+/// terrain, and then run off the end of the component.
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+struct TerrainLayerV23 {
+    albedo: Color,
+    #[serde(default)]
+    roughness: f64,
+    #[serde(default)]
+    tex_scale: f64,
+}
+
+impl TerrainLayerV23 {
+    /// Lift to the live layer: **no material binding**, which is what a pre-v24
+    /// level meant — a solid albedo plus the procedural triplanar grain.
+    fn into_current(self) -> TerrainLayer {
+        TerrainLayer {
+            albedo: self.albedo,
+            roughness: self.roughness,
+            tex_scale: self.tex_scale,
+            material: None,
+        }
+    }
+
+    /// Project a live layer back (the downgrade-bless path). The material
+    /// binding has no v23 home and is dropped — lossy, and used only to
+    /// regenerate old fixtures from a current sample.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn from_current(l: TerrainLayer) -> Self {
+        Self {
+            albedo: l.albedo,
+            roughness: l.roughness,
+            tex_scale: l.tex_scale,
+        }
+    }
+
+    fn lift_all(
+        layers: [TerrainLayerV23; inf_ecs::components::TERRAIN_LAYERS],
+    ) -> [TerrainLayer; inf_ecs::components::TERRAIN_LAYERS] {
+        layers.map(TerrainLayerV23::into_current)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn freeze_all(
+        layers: [TerrainLayer; inf_ecs::components::TERRAIN_LAYERS],
+    ) -> [TerrainLayerV23; inf_ecs::components::TERRAIN_LAYERS] {
+        layers.map(TerrainLayerV23::from_current)
+    }
+}
+
+fn default_terrain_layers_v23() -> [TerrainLayerV23; inf_ecs::components::TERRAIN_LAYERS] {
+    TerrainLayerV23::freeze_all(inf_ecs::components::default_terrain_layers())
+}
+
+/// The **pre-v24** `Terrain` byte layout. Identical to the live component except
+/// that its `layers` carry the frozen [`TerrainLayerV23`]. Frozen entity records
+/// v16..v23 carry `terrain` as `Option<TerrainV23>`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct TerrainV23 {
+    #[serde(default = "default_terrain_mps")]
+    meters_per_sample: f64,
+    #[serde(default = "default_terrain_resolution")]
+    tile_resolution: u32,
+    #[serde(default)]
+    data: inf_terrain::TerrainData,
+    #[serde(default = "default_terrain_layers_v23")]
+    layers: [TerrainLayerV23; inf_ecs::components::TERRAIN_LAYERS],
+    #[serde(default = "default_macro_variation")]
+    macro_variation: f64,
+    #[serde(default)]
+    asset: Option<Uuid>,
+    #[serde(default)]
+    biome_set: Option<Uuid>,
+    /// Derived, #[serde(skip)] exactly as the live component has it, so the
+    /// frozen record and the live one agree byte for byte.
+    #[serde(skip)]
+    biome_population: Vec<inf_ecs::components::ScatteredInstance>,
+}
+
+impl TerrainV23 {
+    fn into_current(self) -> Terrain {
+        Terrain {
+            meters_per_sample: self.meters_per_sample,
+            tile_resolution: self.tile_resolution,
+            data: self.data,
+            layers: TerrainLayerV23::lift_all(self.layers),
+            macro_variation: self.macro_variation,
+            asset: self.asset,
+            biome_set: self.biome_set,
+            biome_population: self.biome_population,
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn from_current(t: Terrain) -> Self {
+        Self {
+            meters_per_sample: t.meters_per_sample,
+            tile_resolution: t.tile_resolution,
+            data: t.data,
+            layers: TerrainLayerV23::freeze_all(t.layers),
+            macro_variation: t.macro_variation,
+            asset: t.asset,
+            biome_set: t.biome_set,
+            biome_population: t.biome_population,
+        }
+    }
+}
+
+impl std::fmt::Debug for TerrainLayerV23 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerrainLayerV23")
+            .field("albedo", &self.albedo)
+            .field("roughness", &self.roughness)
+            .field("tex_scale", &self.tex_scale)
+            .finish()
+    }
+}
+
+impl PartialEq for TerrainLayerV23 {
+    fn eq(&self, other: &Self) -> bool {
+        self.albedo == other.albedo
+            && self.roughness == other.roughness
+            && self.tex_scale == other.tex_scale
     }
 }
 
@@ -1946,7 +2279,7 @@ impl TerrainV8 {
             meters_per_sample: self.meters_per_sample,
             tile_resolution: self.tile_resolution,
             data: self.data.into_current(),
-            layers: self.layers,
+            layers: TerrainLayerV23::lift_all(self.layers),
             macro_variation: self.macro_variation,
             asset: None,
             biome_set: None,
@@ -1964,7 +2297,7 @@ impl TerrainV8 {
             meters_per_sample: t.meters_per_sample,
             tile_resolution: t.tile_resolution,
             data: inf_terrain::TerrainDataFrozenV1::from_current(&t.data),
-            layers: t.layers,
+            layers: TerrainLayerV23::freeze_all(t.layers),
             macro_variation: t.macro_variation,
         }
     }
@@ -4088,7 +4421,7 @@ struct EntityRecordV16 {
     #[serde(default)]
     actor: Option<Uuid>,
     #[serde(default)]
-    terrain: Option<Terrain>,
+    terrain: Option<TerrainV23>,
     #[serde(default)]
     pcg_volume: Option<PcgVolume>,
     #[serde(default)]
@@ -4154,7 +4487,7 @@ impl EntityRecordV16 {
             collider_3d: self.collider_3d,
             character_controller_3d: self.character_controller_3d,
             actor: self.actor,
-            terrain: self.terrain,
+            terrain: self.terrain.map(TerrainV23::into_current),
             pcg_volume: self.pcg_volume,
             skeletal_mesh: self.skeletal_mesh,
             anim_player: self.anim_player,
@@ -4212,7 +4545,7 @@ impl EntityRecordV16 {
             collider_3d: r.collider_3d,
             character_controller_3d: r.character_controller_3d,
             actor: r.actor,
-            terrain: r.terrain,
+            terrain: r.terrain.map(TerrainV23::from_current),
             pcg_volume: r.pcg_volume,
             skeletal_mesh: r.skeletal_mesh,
             anim_player: r.anim_player,
@@ -4276,7 +4609,7 @@ struct EntityRecordV17 {
     #[serde(default)]
     actor: Option<Uuid>,
     #[serde(default)]
-    terrain: Option<Terrain>,
+    terrain: Option<TerrainV23>,
     #[serde(default)]
     pcg_volume: Option<PcgVolume>,
     #[serde(default)]
@@ -4349,7 +4682,7 @@ impl EntityRecordV17 {
             collider_3d: self.collider_3d,
             character_controller_3d: self.character_controller_3d,
             actor: self.actor,
-            terrain: self.terrain,
+            terrain: self.terrain.map(TerrainV23::into_current),
             pcg_volume: self.pcg_volume,
             skeletal_mesh: self.skeletal_mesh,
             anim_player: self.anim_player,
@@ -4407,7 +4740,7 @@ impl EntityRecordV17 {
             collider_3d: r.collider_3d,
             character_controller_3d: r.character_controller_3d,
             actor: r.actor,
-            terrain: r.terrain,
+            terrain: r.terrain.map(TerrainV23::from_current),
             pcg_volume: r.pcg_volume,
             skeletal_mesh: r.skeletal_mesh,
             anim_player: r.anim_player,
@@ -4477,7 +4810,7 @@ struct EntityRecordV18 {
     #[serde(default)]
     actor: Option<Uuid>,
     #[serde(default)]
-    terrain: Option<Terrain>,
+    terrain: Option<TerrainV23>,
     #[serde(default)]
     pcg_volume: Option<PcgVolume>,
     #[serde(default)]
@@ -4605,7 +4938,7 @@ impl EntityRecordV18 {
             collider_3d: r.collider_3d,
             character_controller_3d: r.character_controller_3d,
             actor: r.actor,
-            terrain: r.terrain,
+            terrain: r.terrain.map(TerrainV23::from_current),
             pcg_volume: r.pcg_volume,
             skeletal_mesh: r.skeletal_mesh,
             anim_player: r.anim_player,
@@ -4676,7 +5009,7 @@ struct EntityRecordV19 {
     #[serde(default)]
     actor: Option<Uuid>,
     #[serde(default)]
-    terrain: Option<Terrain>,
+    terrain: Option<TerrainV23>,
     #[serde(default)]
     pcg_volume: Option<PcgVolume>,
     #[serde(default)]
@@ -4811,7 +5144,7 @@ impl EntityRecordV19 {
             collider_3d: r.collider_3d,
             character_controller_3d: r.character_controller_3d,
             actor: r.actor,
-            terrain: r.terrain,
+            terrain: r.terrain.map(TerrainV23::from_current),
             pcg_volume: r.pcg_volume,
             skeletal_mesh: r.skeletal_mesh,
             anim_player: r.anim_player,
@@ -4857,7 +5190,7 @@ impl EntityRecordV19 {
 /// restating them. Nothing outside `#[cfg(test)]` ever instantiates it at
 /// anything but [`MaterialV21`].
 #[derive(Clone, Serialize, Deserialize)]
-struct EntityRecordV20Gen<M> {
+struct EntityRecordV20Gen<M, T = TerrainV23> {
     guid: Uuid,
     name: String,
     parent: Option<Uuid>,
@@ -4892,7 +5225,7 @@ struct EntityRecordV20Gen<M> {
     #[serde(default)]
     actor: Option<Uuid>,
     #[serde(default)]
-    terrain: Option<Terrain>,
+    terrain: Option<T>,
     #[serde(default)]
     pcg_volume: Option<PcgVolume>,
     #[serde(default)]
@@ -4976,7 +5309,7 @@ impl EntityRecordV20 {
             collider_3d: self.collider_3d,
             character_controller_3d: self.character_controller_3d,
             actor: self.actor,
-            terrain: self.terrain,
+            terrain: self.terrain.map(TerrainV23::into_current),
             pcg_volume: self.pcg_volume,
             skeletal_mesh: self.skeletal_mesh,
             anim_player: self.anim_player,
@@ -5034,7 +5367,7 @@ impl EntityRecordV20 {
             collider_3d: r.collider_3d,
             character_controller_3d: r.character_controller_3d,
             actor: r.actor,
-            terrain: r.terrain,
+            terrain: r.terrain.map(TerrainV23::from_current),
             pcg_volume: r.pcg_volume,
             skeletal_mesh: r.skeletal_mesh,
             anim_player: r.anim_player,
@@ -5104,7 +5437,7 @@ struct EntityRecordV22 {
     #[serde(default)]
     actor: Option<Uuid>,
     #[serde(default)]
-    terrain: Option<Terrain>,
+    terrain: Option<TerrainV23>,
     #[serde(default)]
     pcg_volume: Option<PcgVolume>,
     #[serde(default)]
@@ -5185,7 +5518,7 @@ impl EntityRecordV22 {
             collider_3d: self.collider_3d,
             character_controller_3d: self.character_controller_3d,
             actor: self.actor,
-            terrain: self.terrain,
+            terrain: self.terrain.map(TerrainV23::into_current),
             pcg_volume: self.pcg_volume,
             skeletal_mesh: self.skeletal_mesh,
             anim_player: self.anim_player,
@@ -5243,7 +5576,7 @@ impl EntityRecordV22 {
             collider_3d: r.collider_3d,
             character_controller_3d: r.character_controller_3d,
             actor: r.actor,
-            terrain: r.terrain,
+            terrain: r.terrain.map(TerrainV23::from_current),
             pcg_volume: r.pcg_volume,
             skeletal_mesh: r.skeletal_mesh,
             anim_player: r.anim_player,
@@ -5318,7 +5651,7 @@ struct EntityRecordV21 {
     #[serde(default)]
     actor: Option<Uuid>,
     #[serde(default)]
-    terrain: Option<Terrain>,
+    terrain: Option<TerrainV23>,
     #[serde(default)]
     pcg_volume: Option<PcgVolume>,
     #[serde(default)]
@@ -5401,7 +5734,7 @@ impl EntityRecordV21 {
             collider_3d: self.collider_3d,
             character_controller_3d: self.character_controller_3d,
             actor: self.actor,
-            terrain: self.terrain,
+            terrain: self.terrain.map(TerrainV23::into_current),
             pcg_volume: self.pcg_volume,
             skeletal_mesh: self.skeletal_mesh,
             anim_player: self.anim_player,
@@ -5459,7 +5792,7 @@ impl EntityRecordV21 {
             collider_3d: r.collider_3d,
             character_controller_3d: r.character_controller_3d,
             actor: r.actor,
-            terrain: r.terrain,
+            terrain: r.terrain.map(TerrainV23::from_current),
             pcg_volume: r.pcg_volume,
             skeletal_mesh: r.skeletal_mesh,
             anim_player: r.anim_player,
@@ -5512,6 +5845,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV1::into_runtime)
                     .collect(),
                 settings: RuntimeSettings::default(),
+                geo: Default::default(),
             })
         }
         2 => {
@@ -5526,6 +5860,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV2::into_runtime)
                     .collect(),
                 settings: RuntimeSettings::default(),
+                geo: Default::default(),
             })
         }
         3 => {
@@ -5540,6 +5875,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV3::into_runtime)
                     .collect(),
                 settings: v3.settings.into_current(),
+                geo: Default::default(),
             })
         }
         4 => {
@@ -5554,6 +5890,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV4::into_runtime)
                     .collect(),
                 settings: v4.settings.into_current(),
+                geo: Default::default(),
             })
         }
         5 => {
@@ -5568,6 +5905,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV5::into_runtime)
                     .collect(),
                 settings: v5.settings.into_current(),
+                geo: Default::default(),
             })
         }
         6 => {
@@ -5582,6 +5920,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV6::into_runtime)
                     .collect(),
                 settings: v6.settings.into_current(),
+                geo: Default::default(),
             })
         }
         7 => {
@@ -5596,6 +5935,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV7::into_runtime)
                     .collect(),
                 settings: v7.settings.into_current(),
+                geo: Default::default(),
             })
         }
         8 => {
@@ -5610,6 +5950,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV8::into_runtime)
                     .collect(),
                 settings: v8.settings.into_current(),
+                geo: Default::default(),
             })
         }
         9 => {
@@ -5624,6 +5965,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV9::into_runtime)
                     .collect(),
                 settings: v9.settings.into_current(),
+                geo: Default::default(),
             })
         }
         10 => {
@@ -5638,6 +5980,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV10::into_runtime)
                     .collect(),
                 settings: v10.settings,
+                geo: Default::default(),
             })
         }
         11 => {
@@ -5652,6 +5995,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV11::into_runtime)
                     .collect(),
                 settings: v11.settings,
+                geo: Default::default(),
             })
         }
         12 => {
@@ -5666,6 +6010,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV12::into_runtime)
                     .collect(),
                 settings: v12.settings,
+                geo: Default::default(),
             })
         }
         13 => {
@@ -5680,6 +6025,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV13::into_runtime)
                     .collect(),
                 settings: v13.settings,
+                geo: Default::default(),
             })
         }
         14 => {
@@ -5694,6 +6040,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV14::into_runtime)
                     .collect(),
                 settings: v14.settings,
+                geo: Default::default(),
             })
         }
         15 => {
@@ -5708,6 +6055,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV15::into_runtime)
                     .collect(),
                 settings: v15.settings,
+                geo: Default::default(),
             })
         }
         16 => {
@@ -5722,6 +6070,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV16::into_runtime)
                     .collect(),
                 settings: v16.settings,
+                geo: Default::default(),
             })
         }
         17 => {
@@ -5736,6 +6085,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV17::into_runtime)
                     .collect(),
                 settings: v17.settings,
+                geo: Default::default(),
             })
         }
         18 => {
@@ -5752,6 +6102,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV20::into_runtime)
                     .collect(),
                 settings: v18.settings,
+                geo: Default::default(),
             })
         }
         19 => {
@@ -5767,6 +6118,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV20::into_runtime)
                     .collect(),
                 settings: v19.settings,
+                geo: Default::default(),
             })
         }
         20 => {
@@ -5781,6 +6133,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV20::into_runtime)
                     .collect(),
                 settings: v20.settings,
+                geo: Default::default(),
             })
         }
         21 => {
@@ -5795,6 +6148,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV21::into_runtime)
                     .collect(),
                 settings: v21.settings,
+                geo: Default::default(),
             })
         }
         22 => {
@@ -5809,6 +6163,7 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map(EntityRecordV22::into_runtime)
                     .collect(),
                 settings: v22.settings,
+                geo: Default::default(),
             })
         }
         23 => {
@@ -5817,8 +6172,24 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
                     .map_err(|e| SceneError::Decode(format!("v23: {e}")))?;
             Ok(RuntimeLevel {
                 title: v23.title,
-                entities: v23.entities,
+                entities: v23
+                    .entities
+                    .into_iter()
+                    .map(EntityRecordV23::into_runtime)
+                    .collect(),
                 settings: v23.settings,
+                geo: Default::default(),
+            })
+        }
+        24 => {
+            let (v24, _): (SceneFileV24, usize) =
+                bincode::serde::decode_from_slice(bytes, bincode_config())
+                    .map_err(|e| SceneError::Decode(format!("v24: {e}")))?;
+            Ok(RuntimeLevel {
+                title: v24.title,
+                entities: v24.entities,
+                settings: v24.settings,
+                geo: v24.geo,
             })
         }
         // A refusal that names the wrong cause sends the user to the wrong fix
@@ -5838,11 +6209,12 @@ pub fn decode(bytes: &[u8]) -> Result<RuntimeLevel> {
 
 /// Encode a level to the current schema (v23) as a deterministic bincode payload.
 pub fn encode(level: &RuntimeLevel) -> Result<Vec<u8>> {
-    let file = SceneFileV23 {
+    let file = SceneFileV24 {
         schema_version: SCHEMA_VERSION,
         title: level.title.clone(),
         entities: level.entities.clone(),
         settings: level.settings,
+        geo: level.geo.clone(),
     };
     bincode::serde::encode_to_vec(&file, bincode_config())
         .map_err(|e| SceneError::Encode(e.to_string()))
@@ -6234,6 +6606,7 @@ mod tests {
             title: "x".into(),
             entities: vec![],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
         let mut bytes = level.encode().unwrap();
         // schema_version is the first byte for small values; bump it well past us.
@@ -6793,6 +7166,7 @@ mod tests {
                 ..v8_rec(uuid::Uuid::from_u128(0x9001), "Streamed", None).into_runtime()
             }],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
 
         let bytes = level.encode().unwrap();
@@ -7171,6 +7545,7 @@ mod tests {
                 },
                 ..RuntimeSettings::default()
             },
+            geo: Default::default(),
         };
 
         let bytes = level.encode().unwrap();
@@ -7375,6 +7750,7 @@ mod tests {
                 v9_rec(g(0xC002), "Prop", None).into_runtime(),
             ],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
 
         let bytes = level.encode().unwrap();
@@ -7666,6 +8042,7 @@ mod tests {
                 v9_rec(g(0xD002), "Prop", None).into_runtime(),
             ],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
 
         let bytes = level.encode().unwrap();
@@ -7713,6 +8090,7 @@ mod tests {
         // ground and nothing breakable.
         let entities = RuntimeLevel::decode(&v11).unwrap().entities.len();
         let materialed = materialed_entities(&v11);
+        let terrained = terrained_entities(&v11);
         assert_eq!(
             lifted.len(),
             v11.len()
@@ -7726,7 +8104,9 @@ mod tests {
                         + DESTRUCTIBLE_SLOT_BYTES
                         + CHARACTER_SLOT_BYTES
                         + MOVEMENT_SLOT_BYTES)
-                + materialed * MATERIAL_BINDING_BYTES,
+                + materialed * MATERIAL_BINDING_BYTES
+                + terrained * TERRAIN_LAYER_MATERIAL_BYTES
+                + geo_anchor_bytes(),
             "the one entity carrying an atmosphere grew by the physical block"
         );
     }
@@ -8027,6 +8407,7 @@ mod tests {
                 v9_rec(g(0xF002), "Prop", None).into_runtime(),
             ],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
 
         let bytes = level.encode().unwrap();
@@ -8167,6 +8548,7 @@ mod tests {
         // and named here rather than folded into the number.
         let entities = RuntimeLevel::decode(&v12).unwrap().entities.len();
         let materialed = materialed_entities(&v12);
+        let terrained = terrained_entities(&v12);
         assert_eq!(
             lifted.len(),
             v12.len()
@@ -8179,7 +8561,9 @@ mod tests {
                         + DESTRUCTIBLE_SLOT_BYTES
                         + CHARACTER_SLOT_BYTES
                         + MOVEMENT_SLOT_BYTES)
-                + materialed * MATERIAL_BINDING_BYTES,
+                + materialed * MATERIAL_BINDING_BYTES
+                + terrained * TERRAIN_LAYER_MATERIAL_BYTES
+                + geo_anchor_bytes(),
             "the one entity carrying an atmosphere grew by the cloud block"
         );
     }
@@ -8503,6 +8887,7 @@ mod tests {
                 v9_rec(g(0xA102), "Prop", None).into_runtime(),
             ],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
 
         let bytes = level.encode().unwrap();
@@ -8587,6 +8972,7 @@ mod tests {
 
         let entities = RuntimeLevel::decode(&v13).unwrap().entities.len();
         let materialed = materialed_entities(&v13);
+        let terrained = terrained_entities(&v13);
         assert_eq!(
             lifted.len(),
             v13.len()
@@ -8598,7 +8984,9 @@ mod tests {
                         + DESTRUCTIBLE_SLOT_BYTES
                         + CHARACTER_SLOT_BYTES
                         + MOVEMENT_SLOT_BYTES)
-                + materialed * MATERIAL_BINDING_BYTES,
+                + materialed * MATERIAL_BINDING_BYTES
+                + terrained * TERRAIN_LAYER_MATERIAL_BYTES
+                + geo_anchor_bytes(),
             "the one entity carrying an atmosphere grew by the weather block"
         );
     }
@@ -9169,7 +9557,7 @@ mod tests {
     #[test]
     fn the_frozen_tile_generation_covers_this_schema() {
         assert_eq!(
-            SCHEMA_VERSION, 23,
+            SCHEMA_VERSION, 24,
             "the scene schema moved. Generation-1 frozen tiles (TerrainTileFrozenV1, via \
              TerrainV14) cover .inf_lvl v1..=v14, generation-2 (TerrainTileFrozenV2, via \
              TerrainV15) covers v15, and generation-3 (TerrainTileFrozenV3, which \
@@ -9182,7 +9570,11 @@ mod tests {
              not touch a single heightfield tile. P21.2's hole mask DID grow the tile, and \
              the scene answered by pinning rather than bumping — see the table above. v22 \
              is the latter case too: it grew the MATERIAL component, which no tile has \
-             ever contained.)"
+             ever contained, and v23 appended an entity slot. v24 is the latter case \
+             twice over: it appended the geo-anchor to the FILE record, and it gave \
+             TerrainLayer a material binding — a splat LAYER is a property of the terrain \
+             COMPONENT, not of a tile, so no tile stream moved and TerrainV23 is the \
+             frozen record that carries the old layer.)"
         );
         // The mapping the pin is about, one rung at a time. Start from a terrain
         // that exercises BOTH post-v14 layers.
@@ -9244,6 +9636,7 @@ mod tests {
             title: "dry".into(),
             entities: vec![v9_rec(uuid::Uuid::from_u128(1), "A", None).into_runtime()],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
         let mut wet = dry.clone();
         wet.entities[0].water_body = Some(WaterBody::default());
@@ -9355,7 +9748,7 @@ mod tests {
                     ..v16_rec(g(0xF001), "Cube", None)
                 },
                 EntityRecordV16 {
-                    terrain: Some(v16_fixture_terrain()),
+                    terrain: Some(TerrainV23::from_current(v16_fixture_terrain())),
                     ..v16_rec(g(0xF002), "Terrain", None)
                 },
                 EntityRecordV16 {
@@ -9511,7 +9904,7 @@ mod tests {
                     ..v17_rec(g(0xF101), "Cube", None)
                 },
                 EntityRecordV17 {
-                    terrain: Some(v16_fixture_terrain()),
+                    terrain: Some(TerrainV23::from_current(v16_fixture_terrain())),
                     ..v17_rec(g(0xF102), "Terrain", None)
                 },
                 EntityRecordV17 {
@@ -9639,6 +10032,7 @@ mod tests {
             title: "sinks".into(),
             entities: vec![v9_rec(Uuid::from_u128(1), "A", None).into_runtime()],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
         let mut floats = sinks.clone();
         floats.entities[0].buoyancy = Some(Buoyancy::default());
@@ -9746,7 +10140,7 @@ mod tests {
                     ..v18_rec(g(0xF201), "Cube", None)
                 },
                 EntityRecordV18 {
-                    terrain: Some(v16_fixture_terrain()),
+                    terrain: Some(TerrainV23::from_current(v16_fixture_terrain())),
                     ..v18_rec(g(0xF202), "Terrain", None)
                 },
                 EntityRecordV18 {
@@ -9883,6 +10277,7 @@ mod tests {
             title: "solid".into(),
             entities: vec![v9_rec(Uuid::from_u128(1), "A", None).into_runtime()],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
         let mut carved = solid.clone();
         carved.entities[0].voxel_volume = Some(VoxelVolume {
@@ -9995,7 +10390,7 @@ mod tests {
                     ..v19_rec(g(0xF201), "Cube", None)
                 },
                 EntityRecordV19 {
-                    terrain: Some(v16_fixture_terrain()),
+                    terrain: Some(TerrainV23::from_current(v16_fixture_terrain())),
                     ..v19_rec(g(0xF202), "Terrain", None)
                 },
                 EntityRecordV19 {
@@ -10127,6 +10522,7 @@ mod tests {
             title: "solid".into(),
             entities: vec![v9_rec(Uuid::from_u128(1), "A", None).into_runtime()],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
         let mut breakable = solid.clone();
         breakable.entities[0].destructible = Some(Destructible {
@@ -10183,8 +10579,9 @@ mod tests {
         // is what makes the line above a price rather than a coincidence.
         assert_eq!(
             solid_bytes.len(),
-            v20_bytes.len() + CHARACTER_SLOT_BYTES + MOVEMENT_SLOT_BYTES,
-            "the v21 slots must cost exactly three discriminant bytes, and v23's one"
+            v20_bytes.len() + CHARACTER_SLOT_BYTES + MOVEMENT_SLOT_BYTES + geo_anchor_bytes(),
+            "the v21 slots must cost exactly three discriminant bytes, v23's one, \
+             and v24's anchor its file-level constant"
         );
 
         // …and the whole component round-trips through the live codec, which is
@@ -10220,6 +10617,41 @@ mod tests {
             .iter()
             .filter(|e| e.material.is_some())
             .count()
+    }
+
+    // ── schema v24 (Wave G) price terms ───────────────────────────────────
+
+    /// What one splat layer's new material binding costs an entity that carries
+    /// a terrain: one `Option` discriminant, four layers.
+    ///
+    /// Written against [`TERRAIN_LAYERS`] rather than as the literal 4, so a
+    /// future layer count moves the price with it.
+    const TERRAIN_LAYER_MATERIAL_BYTES: usize = inf_ecs::components::TERRAIN_LAYERS;
+
+    /// How many entities of an encoded level carry a terrain — the multiplier
+    /// for [`TERRAIN_LAYER_MATERIAL_BYTES`], counted for the same reason
+    /// [`materialed_entities`] is.
+    fn terrained_entities(bytes: &[u8]) -> usize {
+        RuntimeLevel::decode(bytes)
+            .unwrap()
+            .entities
+            .iter()
+            .filter(|e| e.terrain.is_some())
+            .count()
+    }
+
+    /// The bytes a **disabled** geo-anchor costs a file (schema v24) — the
+    /// file-level constant every lift-price arm now carries.
+    ///
+    /// **Measured, not written down.** The anchor is a bool, a CRS string, six
+    /// f64s, two more strings and a datum name; hand-counting that is exactly the
+    /// kind of arithmetic that goes stale the first time somebody adds a field,
+    /// and a stale constant here would make every price arm wrong at once while
+    /// still looking authoritative.
+    fn geo_anchor_bytes() -> usize {
+        bincode::serde::encode_to_vec(inf_math::geo::GeoAnchor::default(), bincode_config())
+            .expect("the default anchor encodes")
+            .len()
     }
 
     /// The **v20** destructible the fixture's wall carries: every field away from
@@ -10431,6 +10863,7 @@ mod tests {
             title: "t".into(),
             entities: vec![plain.clone()],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         })
         .unwrap();
         let frozen = bincode::serde::encode_to_vec(
@@ -10445,7 +10878,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             live.len(),
-            frozen.len() + CHARACTER_SLOT_BYTES + MOVEMENT_SLOT_BYTES,
+            frozen.len() + CHARACTER_SLOT_BYTES + MOVEMENT_SLOT_BYTES + geo_anchor_bytes(),
             "the three v21 slots must cost exactly one discriminant byte each, \
              and v23's movement slot one more"
         );
@@ -10462,6 +10895,7 @@ mod tests {
             title: "t".into(),
             entities: vec![rigged],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         })
         .unwrap();
         assert!(rigged_bytes.len() > live.len() + CHARACTER_SLOT_BYTES);
@@ -10480,6 +10914,7 @@ mod tests {
                 ..v9_rec(Uuid::from_u128(0xFB01), "Hero", None).into_runtime()
             }],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
         let bytes = encode(&level).unwrap();
         assert_eq!(bytes[0], SCHEMA_VERSION as u8);
@@ -10593,21 +11028,62 @@ mod tests {
     /// and P29.3's movement slot **re-declared field-for-field**. A `type`
     /// because clippy counts the tuple's nesting, and because naming it says
     /// what it is.
-    type V23EntityWire = (
-        EntityRecordV20Gen<MaterialV22Wire>,
+    type V24EntityWire = (
+        EntityRecordV20Gen<MaterialV22Wire, TerrainV24Wire>,
         Option<IkTarget>,
         Option<ClothSim>,
         Option<HairGuides>,
         Option<CharacterMovementWire>,
     );
 
-    /// The live entity plus one appended slot — the shadow v24's entity.
+    /// The **v24 splat layer**, re-declared independently of `inf_ecs`.
+    ///
+    /// This is the shape v24 exists for, so the pin has to be able to see it. If
+    /// the wire simply reused the frozen `TerrainLayerV23` the pin would decode a
+    /// v24 payload and silently mis-assign four bytes per terrain — a positional
+    /// format lets exactly that happen, which is what these pins are for.
+    #[derive(Default, serde::Deserialize)]
+    struct TerrainLayerV24Wire {
+        albedo: Color,
+        roughness: f64,
+        tex_scale: f64,
+        material: Option<Uuid>,
+    }
+
+    /// The **v24 terrain component**, re-declared field-for-field so the layer
+    /// array above is reached through a shape independent of the live one.
+    #[derive(Default, serde::Deserialize)]
+    struct TerrainV24Wire {
+        meters_per_sample: f64,
+        tile_resolution: u32,
+        data: inf_terrain::TerrainData,
+        layers: [TerrainLayerV24Wire; inf_ecs::components::TERRAIN_LAYERS],
+        macro_variation: f64,
+        asset: Option<Uuid>,
+        biome_set: Option<Uuid>,
+    }
+
+    /// The **v24 geo-anchor**, re-declared independently — the file's new tail.
+    #[derive(Default, serde::Deserialize)]
+    struct GeoAnchorWire {
+        enabled: bool,
+        crs: String,
+        origin_easting_m: f64,
+        origin_northing_m: f64,
+        origin_height_m: f64,
+        origin_latitude_deg: f64,
+        origin_longitude_deg: f64,
+        grid_convergence_deg: f64,
+        vertical_datum: String,
+    }
+
+    /// The live entity plus one appended slot — the shadow v25's entity.
     ///
     /// Serialized from the **live** record rather than reassembled from frozen
     /// parts, because the shadow's only job is to produce bytes that carry one
     /// slot more than the current wire; reassembling it would make the fixture
     /// depend on the very downgrade the pin is meant to be independent of.
-    type V24EntityShadow<'a> = (&'a RuntimeEntity, Option<u8>);
+    type V25EntityShadow<'a> = (&'a RuntimeEntity, Option<u8>);
 
     /// **The v23 wire shape, pinned against an INDEPENDENT declaration.**
     ///
@@ -10629,25 +11105,30 @@ mod tests {
     /// `Material` without a bump shifts every byte after it, which is the case
     /// v22 itself is.
     #[derive(serde::Deserialize)]
-    struct SceneFileV23Wire {
+    struct SceneFileV24Wire {
         schema_version: u32,
         title: String,
-        entities: Vec<V23EntityWire>,
+        entities: Vec<V24EntityWire>,
         settings: RuntimeSettings,
+        /// The v24 tail. Declared here so a payload whose anchor is short or
+        /// long by a field cannot pass — the anchor is the *file's* growth, and
+        /// nothing else in this shape would notice it.
+        geo: GeoAnchorWire,
     }
 
-    /// A **shadow v24** — the live wire plus one appended tail slot, exactly
+    /// A **shadow v25** — the live wire plus one appended tail slot, exactly
     /// what an author adding a component would write.
     #[derive(serde::Serialize)]
-    struct SceneFileV24Shadow<'a> {
+    struct SceneFileV25Shadow<'a> {
         schema_version: u32,
         title: &'a str,
-        entities: Vec<V24EntityShadow<'a>>,
+        entities: Vec<V25EntityShadow<'a>>,
         settings: RuntimeSettings,
+        geo: &'a inf_math::geo::GeoAnchor,
     }
 
     #[test]
-    fn the_v23_wire_shape_is_pinned_against_an_independent_declaration() {
+    fn the_v24_wire_shape_is_pinned_against_an_independent_declaration() {
         let bound = Uuid::from_u128(0x00FA_7E12);
         let level = RuntimeLevel {
             title: "Pinned".into(),
@@ -10666,12 +11147,13 @@ mod tests {
                 v9_rec(Uuid::from_u128(0xFD11), "Prop", None).into_runtime(),
             ],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
         let bytes = encode(&level).unwrap();
 
-        let (wire, consumed): (SceneFileV23Wire, usize) =
+        let (wire, consumed): (SceneFileV24Wire, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode_config())
-                .expect("the pinned v23 shape decodes the v23 wire");
+                .expect("the pinned v24 shape decodes the v24 wire");
         assert_eq!(
             consumed,
             bytes.len(),
@@ -10740,14 +11222,16 @@ mod tests {
                 v9_rec(Uuid::from_u128(0xFD11), "Prop", None).into_runtime(),
             ],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
         let v23 = encode(&level).unwrap();
         let v24 = bincode::serde::encode_to_vec(
-            &SceneFileV24Shadow {
+            &SceneFileV25Shadow {
                 schema_version: SCHEMA_VERSION,
                 title: &level.title,
                 entities: vec![(&level.entities[0], Some(7u8))],
                 settings: RuntimeSettings::default(),
+                geo: &level.geo,
             },
             bincode_config(),
         )
@@ -10761,7 +11245,7 @@ mod tests {
         .unwrap();
         assert!(
             v24.len() > one_entity.len(),
-            "the shadow v24 is not longer than v23, so nothing was appended and \
+            "the shadow v25 is not longer than v24, so nothing was appended and \
              this test is measuring nothing"
         );
         // 2. …and the pinned v22 shape CANNOT READ THEM AT ALL.
@@ -10774,15 +11258,15 @@ mod tests {
         // needs a version bump rather than a `#[serde(default)]`, and it is the
         // failure this pin exists to produce.
         let err =
-            bincode::serde::decode_from_slice::<SceneFileV23Wire, _>(&v24, bincode_config()).err();
+            bincode::serde::decode_from_slice::<SceneFileV24Wire, _>(&v24, bincode_config()).err();
         assert!(
             err.is_some(),
-            "the pinned v23 shape read a payload with an extra entity slot as if nothing had changed — the shape pin has no forcing function at all"
+            "the pinned v24 shape read a payload with an extra entity slot as if nothing had changed — the shape pin has no forcing function at all"
         );
         // …and the SAME bytes minus the appended slot decode cleanly, so the
         // refusal above is the slot's doing and not a broken fixture.
         assert!(
-            bincode::serde::decode_from_slice::<SceneFileV23Wire, _>(&one_entity, bincode_config())
+            bincode::serde::decode_from_slice::<SceneFileV24Wire, _>(&one_entity, bincode_config())
                 .is_ok(),
             "the control payload does not decode either — the fixture is wrong, not the pin"
         );
@@ -11017,18 +11501,23 @@ mod tests {
                 title: "t".into(),
                 entities: vec![e.clone()],
                 settings: RuntimeSettings::default(),
+                geo: Default::default(),
             })
             .unwrap()
         };
         assert_eq!(
             live(&materialed).len(),
-            frozen(&materialed).len() + MATERIAL_BINDING_BYTES + MOVEMENT_SLOT_BYTES,
+            frozen(&materialed).len()
+                + MATERIAL_BINDING_BYTES
+                + MOVEMENT_SLOT_BYTES
+                + geo_anchor_bytes(),
             "the v22 binding must cost exactly one discriminant byte on a \
-             materialed entity (and v23's slot one more, since `live` is v23)"
+             materialed entity (v23's slot one more, and v24's anchor a \
+             file-level constant, since `live` is v24)"
         );
         assert_eq!(
             live(&bare).len(),
-            frozen(&bare).len() + MOVEMENT_SLOT_BYTES,
+            frozen(&bare).len() + MOVEMENT_SLOT_BYTES + geo_anchor_bytes(),
             "an entity with no Material must pay nothing for v22 — the field is \
              inside the component, not on the entity record — and exactly one \
              byte for v23, whose slot is on the record"
@@ -11064,6 +11553,7 @@ mod tests {
                 ..v9_rec(Uuid::from_u128(0xFB02), "Wall", None).into_runtime()
             }],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
         let bytes = encode(&level).unwrap();
         assert_eq!(bytes[0], SCHEMA_VERSION as u8);
@@ -11214,6 +11704,305 @@ mod tests {
         assert_eq!(decode(&re).unwrap(), level);
     }
 
+    // ── v24 (Wave G) the geo-anchor + the per-layer material binding ──────
+
+    /// The `.inf_mat` the v24 tests bind to a splat layer. A fixed GUID so the
+    /// two codec mirrors can be byte-compared.
+    fn v24_fixture_layer_material() -> Uuid {
+        Uuid::from_u128(0xFA7E_0024)
+    }
+
+    /// The **v24** geo-anchor the fixture carries: every field away from its
+    /// default, so a hop that produced defaults would be caught.
+    ///
+    /// The literals must match the editor codec's `v24_fixture_geo` exactly —
+    /// the two committed fixtures are byte-compared.
+    fn v24_fixture_geo() -> inf_math::geo::GeoAnchor {
+        inf_math::geo::GeoAnchor {
+            enabled: true,
+            crs: "EPSG:32610".into(),
+            origin_easting_m: 491_000.0,
+            origin_northing_m: 5_459_000.0,
+            origin_height_m: 12.5,
+            origin_latitude_deg: 49.28,
+            origin_longitude_deg: -123.12,
+            grid_convergence_deg: 0.09,
+            vertical_datum: "EGM2008".into(),
+        }
+    }
+
+    /// Rebuild the exact schema-v23 file the committed v23 fixture was generated
+    /// from, out of the frozen v23 record type (the provenance lock).
+    ///
+    /// Built by downgrading the **v22** reference's lift one rung, so the field
+    /// list can never drift from the ladder.
+    fn v23_scene_reference() -> SceneFileV23 {
+        let v22 = v22_scene_reference();
+        let mut entities: Vec<EntityRecordV23> = v22
+            .entities
+            .into_iter()
+            .map(|e| EntityRecordV23::from_current(e.into_runtime()))
+            .collect();
+        // The movement component is what only v23 could write.
+        let hero = entities
+            .iter_mut()
+            .find(|e| e.name == "Cube")
+            .expect("the v22 fixture has a Cube");
+        hero.character_movement = Some(v23_fixture_movement());
+        SceneFileV23 {
+            schema_version: 23,
+            title: "V23 Fixture Level".into(),
+            entities,
+            settings: v22.settings,
+        }
+    }
+
+    /// Regenerate `tests/fixtures/scene_v23.inf_lvl` — the **downgrade-bless**
+    /// path, walked only under `INF_BLESS_FIXTURES=1`.
+    #[test]
+    fn bless_scene_v23_fixture() {
+        if std::env::var("INF_BLESS_FIXTURES").as_deref() != Ok("1") {
+            return;
+        }
+        let bytes = bincode::serde::encode_to_vec(v23_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(bytes[0], 23);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v23.inf_lvl");
+        std::fs::write(&path, &bytes).unwrap();
+        eprintln!("blessed {} ({} bytes)", path.display(), bytes.len());
+    }
+
+    #[test]
+    fn v23_fixture_is_reproducible_and_genuinely_v23() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v23.inf_lvl");
+        let bytes = std::fs::read(&path).expect("committed v23 fixture present");
+        assert_eq!(bytes[0], 23, "fixture must be a genuine schema-v23 payload");
+        let rebuilt =
+            bincode::serde::encode_to_vec(v23_scene_reference(), bincode_config()).unwrap();
+        assert_eq!(
+            rebuilt, bytes,
+            "the committed v23 fixture must match our frozen v23 writer"
+        );
+    }
+
+    /// **The "old bytes load forever" gate for the v24 bump.**
+    ///
+    /// A committed v23 payload still loads, keeps everything v23 could express,
+    /// and lifts with **no geo-anchor and no per-layer material** — which is
+    /// exactly what a v23 level was.
+    #[test]
+    fn v23_loads_and_lifts_without_an_anchor_or_layer_materials() {
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scene_v23.inf_lvl"),
+        )
+        .expect("committed v23 fixture present");
+        assert_eq!(bytes[0], 23);
+        let level = decode(&bytes).expect("a v23 level decodes");
+        assert!(!level.entities.is_empty());
+
+        // Nothing in a v23 file could have authored either v24 addition.
+        assert!(
+            !level.geo.enabled,
+            "a v23 file has no anchor, so the level must come up un-georeferenced"
+        );
+        assert_eq!(level.geo, Default::default());
+        for e in &level.entities {
+            if let Some(t) = &e.terrain {
+                for (i, l) in t.layers.iter().enumerate() {
+                    assert!(
+                        l.material.is_none(),
+                        "{}'s splat layer {i} arrived with a material out of a v23 file",
+                        e.name
+                    );
+                }
+            }
+        }
+
+        // …and everything v23 COULD express survived the hop, or "it loads"
+        // would be satisfied by a decoder that dropped the payload.
+        let hero = level
+            .entities
+            .iter()
+            .find(|e| e.name == "Cube")
+            .expect("the fixture's hero");
+        assert!(hero.ik_target.is_some(), "the v21 IK survived");
+        assert!(hero.cloth_sim.is_some(), "the v21 garment survived");
+        assert!(hero.hair_guides.is_some(), "the v21 hair survived");
+        assert_eq!(
+            hero.material.and_then(|m| m.asset),
+            Some(v22_fixture_material_binding()),
+            "the v22 material binding survived"
+        );
+        assert!(
+            hero.character_movement.is_some(),
+            "the v23 movement component survived"
+        );
+
+        // Re-encoding stamps the CURRENT version — the lift is a real upgrade.
+        let re = encode(&level).unwrap();
+        assert_eq!(re[0], SCHEMA_VERSION as u8);
+        assert_eq!(decode(&re).unwrap(), level);
+    }
+
+    /// **The v24 additions round-trip through the whole codec** — including the
+    /// new decode arm, which only a payload stamped v24 exercises.
+    ///
+    /// Un-fix mutation: drop `geo` from `SceneFileV24` and the anchor comes back
+    /// disabled; drop `material` from `TerrainLayer` and the layer bindings do.
+    #[test]
+    fn v24_anchor_and_layer_materials_round_trip_through_the_codec() {
+        let mut terrain = fixture_terrain();
+        // Bind two of the four layers, and deliberately leave two unbound: a
+        // codec that wrote the same value into every slot would pass a
+        // one-layer check.
+        terrain.layers[0].material = Some(v24_fixture_layer_material());
+        terrain.layers[2].material = Some(Uuid::from_u128(0xFA7E_0025));
+
+        let level = RuntimeLevel {
+            title: "V24".into(),
+            entities: vec![RuntimeEntity {
+                terrain: Some(terrain),
+                ..v9_rec(Uuid::from_u128(0xFD24), "Ground", None).into_runtime()
+            }],
+            settings: RuntimeSettings::default(),
+            geo: v24_fixture_geo(),
+        };
+
+        let bytes = encode(&level).unwrap();
+        assert_eq!(bytes[0], SCHEMA_VERSION as u8);
+        let back = decode(&bytes).expect("a v24 level decodes");
+        assert_eq!(back, level);
+
+        // The anchor came back field for field, not merely enabled.
+        assert_eq!(back.geo, v24_fixture_geo());
+        assert!((back.geo.origin_easting_m - 491_000.0).abs() < 1e-9);
+        assert_eq!(back.geo.vertical_datum, "EGM2008");
+
+        // Each layer binding landed in ITS OWN slot.
+        let t = back.entities[0].terrain.as_ref().unwrap();
+        assert_eq!(t.layers[0].material, Some(v24_fixture_layer_material()));
+        assert_eq!(t.layers[1].material, None, "layer 1 was never bound");
+        assert_eq!(t.layers[2].material, Some(Uuid::from_u128(0xFA7E_0025)));
+        assert_eq!(t.layers[3].material, None, "layer 3 was never bound");
+        // …and the layers' other fields did not move with it.
+        assert_eq!(
+            t.layers[0].albedo,
+            level.entities[0].terrain.as_ref().unwrap().layers[0].albedo
+        );
+
+        // Clearing them really changes the bytes (the fields are persisted, not
+        // inferred).
+        let mut bare = level.clone();
+        bare.geo = Default::default();
+        if let Some(t) = bare.entities[0].terrain.as_mut() {
+            for l in t.layers.iter_mut() {
+                l.material = None;
+            }
+        }
+        assert_ne!(encode(&bare).unwrap(), bytes);
+    }
+
+    /// The **downgrade** direction for v24: projecting a live record onto the
+    /// frozen v23 shape loses the per-layer material bindings and **nothing
+    /// else**.
+    ///
+    /// Asserted as a property — the record is compared by `PartialEq` after
+    /// patching back the one field v23 cannot carry — rather than as a field
+    /// list, which would silently stop covering a slot added later.
+    #[test]
+    fn v23_entity_downgrade_is_lossless_except_for_the_layer_materials() {
+        let mut terrain = fixture_terrain();
+        terrain.layers[1].material = Some(v24_fixture_layer_material());
+        let live = RuntimeEntity {
+            terrain: Some(terrain),
+            character_movement: Some(v23_fixture_movement()),
+            ..v9_rec(Uuid::from_u128(0xFD25), "Ground", None).into_runtime()
+        };
+
+        let round = EntityRecordV23::from_current(live.clone()).into_runtime();
+        assert_ne!(round, live, "the binding must really be lost");
+        // Patch back exactly the one thing v23 cannot say, and the two records
+        // must then be identical.
+        let mut patched = round.clone();
+        if let Some(t) = patched.terrain.as_mut() {
+            t.layers = live.terrain.as_ref().unwrap().layers;
+        }
+        assert_eq!(
+            patched, live,
+            "the v23 downgrade lost something other than the layer materials"
+        );
+        // And the loss is exactly the bindings, not the whole layer.
+        let rt = round.terrain.as_ref().unwrap();
+        assert!(rt.layers.iter().all(|l| l.material.is_none()));
+        assert_eq!(
+            rt.layers[1].albedo,
+            live.terrain.as_ref().unwrap().layers[1].albedo
+        );
+        assert_eq!(
+            rt.layers[1].tex_scale,
+            live.terrain.as_ref().unwrap().layers[1].tex_scale
+        );
+    }
+
+    /// What v24 costs: the anchor once per FILE, and one discriminant per splat
+    /// layer on an entity that carries a terrain — nothing at all on one that
+    /// does not.
+    #[test]
+    fn v24_costs_an_anchor_per_file_and_four_bytes_per_terrain() {
+        let plain = v9_rec(Uuid::from_u128(0xFD26), "Marker", None).into_runtime();
+        let live = |e: &RuntimeEntity| {
+            encode(&RuntimeLevel {
+                title: "t".into(),
+                entities: vec![e.clone()],
+                settings: RuntimeSettings::default(),
+                geo: Default::default(),
+            })
+            .unwrap()
+        };
+        let frozen = |e: &RuntimeEntity| {
+            bincode::serde::encode_to_vec(
+                &SceneFileV23 {
+                    schema_version: 23,
+                    title: "t".into(),
+                    entities: vec![EntityRecordV23::from_current(e.clone())],
+                    settings: RuntimeSettings::default(),
+                },
+                bincode_config(),
+            )
+            .unwrap()
+        };
+
+        // An entity with no terrain pays only the file-level anchor.
+        assert_eq!(
+            live(&plain).len(),
+            frozen(&plain).len() + geo_anchor_bytes(),
+            "an entity with no terrain must pay nothing for the layer bindings — \
+             the field is inside the component"
+        );
+
+        // One with a terrain pays four more: one discriminant per splat layer.
+        let ground = RuntimeEntity {
+            terrain: Some(fixture_terrain()),
+            ..plain.clone()
+        };
+        assert_eq!(
+            live(&ground).len(),
+            frozen(&ground).len() + geo_anchor_bytes() + TERRAIN_LAYER_MATERIAL_BYTES,
+            "a terrain must pay exactly one discriminant per splat layer"
+        );
+
+        // …and a CARRIED binding costs a great deal more than its discriminant,
+        // so the four bytes above really are the empty slots.
+        let mut bound = ground.clone();
+        if let Some(t) = bound.terrain.as_mut() {
+            t.layers[0].material = Some(v24_fixture_layer_material());
+        }
+        assert!(
+            live(&bound).len() > live(&ground).len() + 8,
+            "a carried layer binding is {} bytes, which is not a GUID",
+            live(&bound).len() - live(&ground).len()
+        );
+    }
+
     /// The **downgrade** direction: projecting a live record onto the frozen v22
     /// shape loses the movement component and **nothing else**.
     ///
@@ -11262,6 +12051,7 @@ mod tests {
                 title: "t".into(),
                 entities: vec![e.clone()],
                 settings: RuntimeSettings::default(),
+                geo: Default::default(),
             })
             .unwrap()
         };
@@ -11279,7 +12069,7 @@ mod tests {
         };
         assert_eq!(
             live(&plain).len(),
-            frozen(&plain).len() + MOVEMENT_SLOT_BYTES,
+            frozen(&plain).len() + MOVEMENT_SLOT_BYTES + geo_anchor_bytes(),
             "the v23 slot must cost exactly one discriminant byte on an entity \
              that has no movement component"
         );
@@ -11309,6 +12099,7 @@ mod tests {
                 ..v9_rec(Uuid::from_u128(0xFB03), "Hero", None).into_runtime()
             }],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
         let bytes = encode(&level).unwrap();
         assert_eq!(bytes[0], SCHEMA_VERSION as u8);
@@ -11359,6 +12150,7 @@ mod tests {
             title: "Future".into(),
             entities: vec![v9_rec(Uuid::from_u128(0xFF01), "A", None).into_runtime()],
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
         let mut bytes = encode(&level).unwrap();
         bytes[0] = SCHEMA_VERSION as u8 + 1;
@@ -11412,6 +12204,7 @@ mod tests {
             title: "Real".into(),
             entities: Vec::new(),
             settings: RuntimeSettings::default(),
+            geo: Default::default(),
         };
         assert!(decode(&encode(&level).unwrap()).is_ok());
     }

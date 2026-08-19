@@ -1,6 +1,6 @@
-schema_version = 23
+schema_version = 24
 guid = "00000000-0000-0000-0000-000084020000"
 title = "Hybrid 2.5D"
 entity_count = 5
-content_hash = "e206f4a6280a8b7e"
+content_hash = "cd64c13099f461d5"
 dependencies = []

@@ -1,6 +1,6 @@
-schema_version = 23
+schema_version = 24
 guid = "00000000-0000-0000-0000-000084060000"
 title = "First Person"
 entity_count = 4
-content_hash = "cd63813c1eec3ebe"
+content_hash = "dc81e161d9c7e895"
 dependencies = []

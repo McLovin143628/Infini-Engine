@@ -1,8 +1,8 @@
-schema_version = 23
+schema_version = 24
 guid = "00000000-0000-0000-0000-000084190000"
 title = "Phase 19 Town"
 entity_count = 25
-content_hash = "5ceb41373807d756"
+content_hash = "da6290a56fec3ff5"
 dependencies = [
     "00000000-0000-0000-0000-0000841900a0",
     "00000000-0000-0000-0000-0000841900a1",

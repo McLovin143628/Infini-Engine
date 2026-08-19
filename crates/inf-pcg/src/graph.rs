@@ -420,6 +420,21 @@ fn grammar_nodes() -> Vec<NodeDef> {
                     .range(0.0, 1000.0)
                     .described("Perimeter mode: metres each corner reserves (insets both edges)"),
             ]),
+        // **Wave G** — the door a GIS road centreline, stream course, coastline
+        // or parcel boundary reaches the grammar through. Before it, the only
+        // area-shaped thing the grammar could take was an axis-aligned
+        // rectangle, which is why an imported polygon collapsed to its bounding
+        // box: `Span::from_points` was public the whole time and nothing could
+        // call it.
+        NodeDef::new("grammar.polyline", "Polyline Span", "grammar")
+            .described("A span from explicit world-space points — a road centreline, a river, a parcel boundary")
+            .with_outputs(vec![span("out")])
+            .with_params(vec![
+                ParamDef::multiline("points", "")
+                    .described("One position per line, `x,z` or `x,y,z`, in world metres (blank y → on the ground)"),
+                ParamDef::toggle("closed", false)
+                    .described("Close the path back to its first point — a polygon ring rather than an open route"),
+            ]),
         NodeDef::new("grammar.expand", "Expand Grammar", "grammar")
             .described("Rewrite the rules along the span and place the module instances")
             .with_inputs(vec![span("span"), rules("rules")])
@@ -1054,6 +1069,41 @@ impl Ctx<'_> {
                 }
                 (SpanSource::Footprint { size, mode }, corner)
             }
+            // **Wave G** — explicit world-space points, the door a GIS road
+            // centreline or a polygon ring reaches the grammar through.
+            //
+            // The points ride the node's own param as text rather than as a
+            // typed list because the graph JSON is the wire here (the player
+            // re-lowers it), and a self-describing text field is additive where
+            // a new param TYPE would not be. `x,z` or `x,y,z` per line; a `y`
+            // omitted means "sit on the ground", which is what a published
+            // 2-D centreline means and what the pass's own `Ground` mode then
+            // resolves.
+            "grammar.polyline" => {
+                let closed = pb(&sp, "closed");
+                let (points, bad) = parse_polyline_points(&ptext(&sp, "points"));
+                if bad > 0 {
+                    self.warn(
+                        Some(span_node),
+                        format!(
+                            "{bad} line(s) of this polyline could not be read as a \
+                             coordinate and were skipped — each line wants `x,z` or \
+                             `x,y,z` in world metres"
+                        ),
+                    );
+                }
+                if points.len() < 2 {
+                    self.warn(
+                        Some(span_node),
+                        format!(
+                            "this polyline has {} usable position(s); a span needs at \
+                             least 2, so this pass places nothing",
+                            points.len()
+                        ),
+                    );
+                }
+                (SpanSource::Polyline { points, closed }, String::new())
+            }
             other => {
                 self.error(
                     Some(span_node),
@@ -1243,6 +1293,13 @@ impl Ctx<'_> {
                     }
                 };
                 Some(SpanSource::Footprint { size, mode })
+            }
+            "grammar.polyline" => {
+                let (points, _bad) = parse_polyline_points(&ptext(&sp, "points"));
+                Some(SpanSource::Polyline {
+                    points,
+                    closed: pb(&sp, "closed"),
+                })
             }
             other => {
                 self.error(
@@ -1441,6 +1498,105 @@ fn resolved(reg: &NodeRegistry, node: &inf_graph::Node) -> inf_graph::ParamMap {
 }
 
 /// A numeric param as `f64` (Float or Int; missing → 0.0).
+#[cfg(test)]
+mod polyline_tests {
+    use super::parse_polyline_points;
+
+    /// **The GIS coordinate-paste door.** Real coordinate lists arrive with
+    /// blank lines, comments, mixed separators and the occasional junk row, and
+    /// a parser that refuses the whole block on one bad line is a parser nobody
+    /// can paste into.
+    #[test]
+    fn a_pasted_coordinate_list_parses_and_counts_what_it_could_not_read() {
+        let (pts, bad) = parse_polyline_points(
+            "\
+# Main Street centreline, EPSG:32610 minus the anchor
+0,0
+100, 0
+100,4.5,50   # this one carries a height
+
+  200 0
+not a coordinate
+300,0,
+",
+        );
+        // Only the junk line. A TRAILING SEPARATOR is tolerated on purpose:
+        // empty segments are filtered before parsing, so `300,0,` is the pair it
+        // obviously means. Coordinate lists are pasted, and pasted lists have
+        // trailing commas.
+        assert_eq!(bad, 1, "only the junk line should fail: {pts:?}");
+        assert_eq!(pts.len(), 5);
+        assert_eq!(pts[4], glam::DVec3::new(300.0, 0.0, 0.0));
+        assert_eq!(pts[0], glam::DVec3::new(0.0, 0.0, 0.0));
+        assert_eq!(pts[1], glam::DVec3::new(100.0, 0.0, 0.0));
+        // Three numbers means x,y,z — the middle one is the HEIGHT, not the
+        // second planar axis. Getting that backwards would lay every road on its
+        // side.
+        assert_eq!(pts[2], glam::DVec3::new(100.0, 4.5, 50.0));
+        // Two numbers means x,z with the height left for the ground rule.
+        assert_eq!(pts[3], glam::DVec3::new(200.0, 0.0, 0.0));
+    }
+
+    /// Non-finite text never becomes a position. A `nan` here produces module
+    /// transforms whose bounds still read healthy (`f32::min`/`max` ignore NaN),
+    /// so it has to be stopped where it enters.
+    #[test]
+    fn non_finite_coordinates_are_dropped_and_counted() {
+        let (pts, bad) = parse_polyline_points("0,0\nnan,5\n1,inf\n2,2\n-1e400,0");
+        assert_eq!(
+            pts,
+            vec![glam::DVec3::ZERO, glam::DVec3::new(2.0, 0.0, 2.0)]
+        );
+        assert_eq!(
+            bad, 3,
+            "each non-finite line is REPORTED, not silently dropped"
+        );
+    }
+
+    /// Empty and comment-only input yields nothing and reports no failure —
+    /// a blank node is not an error, it just places nothing.
+    #[test]
+    fn blank_input_is_not_an_error() {
+        assert_eq!(parse_polyline_points(""), (vec![], 0));
+        assert_eq!(parse_polyline_points("\n\n  \n"), (vec![], 0));
+        assert_eq!(parse_polyline_points("# just a note\n"), (vec![], 0));
+    }
+}
+
+/// Parse a `grammar.polyline` node's `points` text into world positions.
+///
+/// One coordinate per line, `x,z` or `x,y,z`, in world metres. Returns the
+/// positions and **the count of lines that could not be read**, because a
+/// silently-dropped coordinate is a road that ends early for no visible reason.
+///
+/// Blank lines and `#` comments are skipped without counting as failures — an
+/// author pasting a coordinate list will have both.
+///
+/// Non-finite values are dropped and counted: this text can be pasted, and a
+/// `nan` reaching a span produces module transforms whose bounds still look
+/// healthy (the `f32::min`/`max` mechanism).
+fn parse_polyline_points(text: &str) -> (Vec<glam::DVec3>, usize) {
+    let mut out = Vec::new();
+    let mut bad = 0usize;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let nums: Vec<Option<f64>> = line
+            .split([',', ';', ' ', '\t'])
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().parse::<f64>().ok().filter(|v| v.is_finite()))
+            .collect();
+        match nums.as_slice() {
+            [Some(x), Some(z)] => out.push(glam::DVec3::new(*x, 0.0, *z)),
+            [Some(x), Some(y), Some(z)] => out.push(glam::DVec3::new(*x, *y, *z)),
+            _ => bad += 1,
+        }
+    }
+    (out, bad)
+}
+
 fn pf(params: &inf_graph::ParamMap, key: &str) -> f64 {
     match params.get(key) {
         Some(ParamValue::Float(f)) => *f,
@@ -2256,7 +2412,7 @@ Fence -> Post Panel* Post
         let parsed = crate::grammar::Grammar::parse(&default).expect("default rules must parse");
         assert_eq!(parsed.default_axiom(), Some("Fence"));
 
-        for id in ["grammar.spline", "grammar.footprint"] {
+        for id in ["grammar.spline", "grammar.footprint", "grammar.polyline"] {
             let def = reg.get(id).unwrap();
             assert!(def.inputs.is_empty(), "{id} is a source");
             assert_eq!(def.outputs[0].ty, PortType::Named(SPAN_KEY.into()), "{id}");

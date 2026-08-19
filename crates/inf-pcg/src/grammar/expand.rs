@@ -158,6 +158,36 @@ pub enum SpanSource {
     /// back to the volume's own extent, so a footprint dropped on a `PcgVolume`
     /// matches the box the author already sized.
     Footprint { size: DVec2, mode: FootprintMode },
+    /// **Explicit world-space points** (Wave G) — a road centreline, a river, a
+    /// coastline, a parcel boundary.
+    ///
+    /// # The 80% of "the engine has no polygon"
+    ///
+    /// Before this the grammar could reach a span only two ways: a `Spline`
+    /// entity, or an axis-aligned rectangle. That is why a GIS polygon fed into
+    /// this engine collapsed to its bounding box — not because a polygon ring is
+    /// hard, but because there was no way to *hand it in*. `Span::from_points`
+    /// has been public the whole time; nothing could call it.
+    ///
+    /// A polygon ring is a closed polyline, so this one variant unlocks polygon
+    /// perimeters, road centrelines, stream courses and coastlines all at once —
+    /// which is why it is the highest leverage-to-cost item in the Wave G plan.
+    ///
+    /// # It costs no schema bump, and that is deliberate
+    ///
+    /// [`SpanSource`] is not part of [`PcgDocument`] (see the type's own note):
+    /// it rides `LoweredPcg::grammars`, and the player re-lowers the stored graph
+    /// JSON, which is the source of truth. The graph JSON is self-describing, so
+    /// an added variant and an added node are additive.
+    ///
+    /// Points are **world metres** — already through the GIS import door, so
+    /// nothing here knows what a CRS is.
+    Polyline {
+        points: Vec<DVec3>,
+        /// `true` for a ring (a polygon boundary walked as a line), `false` for
+        /// an open path.
+        closed: bool,
+    },
 }
 
 /// One lowered grammar pass — the runtime shape of a `grammar.expand` node.
@@ -971,6 +1001,20 @@ pub fn build_spans(pass: &GrammarPass, splines: &dyn SplineSource, cx: &GrammarC
                 FootprintMode::Rows { rows, axis } => footprint_rows(cx.center, size, rows, axis),
             }
         }
+        SpanSource::Polyline { points, closed } => {
+            // Guarded here rather than trusted: these points come from a file,
+            // and a span built on a NaN produces module placements whose
+            // transforms are non-finite — which `f32::min`/`max` then report
+            // healthy bounds for. Refusing is not an option at this seam (a
+            // grammar pass has no error channel and an erroring pass takes its
+            // whole handler down — the P21 law that a gameplay refusal is a
+            // VALUE), so a bad polyline yields NO spans, which is the same
+            // outcome an unresolvable spline reference already has.
+            if points.len() < 2 || points.iter().any(|p| !p.is_finite()) {
+                return SpanSet::default();
+            }
+            SpanSet::one(Span::from_points(points.iter().copied(), *closed))
+        }
     }
 }
 
@@ -1727,6 +1771,109 @@ mod tests {
         // Unresolvable ⇒ no span at all (fails closed).
         assert!(build_spans(&pass, &map, &GrammarContext::default()).is_empty());
         assert!(build_spans(&pass, &super::super::span::NoSplines, &cx).is_empty());
+    }
+
+    /// **The Wave G span door**: explicit world points become a span, a closed
+    /// one walks its return leg, and bad input fails closed rather than
+    /// producing a degenerate span.
+    ///
+    /// This is the variant that unlocks GIS geometry for the grammar — a road
+    /// centreline, a river, a coastline, a parcel boundary — because a polygon
+    /// ring is a closed polyline and `Span::from_points` was already public with
+    /// nothing able to call it.
+    #[test]
+    fn a_polyline_span_takes_explicit_world_points() {
+        let g = fence_grammar();
+        let cx = GrammarContext::default();
+
+        // An open path: a 3-4-5 dogleg is 5 + 12 = 17 m and not 17-something,
+        // so a length that arrives right is arriving through arc length rather
+        // than through a straight line between the ends.
+        let pass = pass_with(
+            g.clone(),
+            "Fence",
+            SpanSource::Polyline {
+                points: vec![
+                    DVec3::ZERO,
+                    DVec3::new(3.0, 0.0, 4.0),
+                    DVec3::new(3.0, 0.0, 16.0),
+                ],
+                closed: false,
+            },
+        );
+        let set = build_spans(&pass, &super::super::span::NoSplines, &cx);
+        assert_eq!(set.spans.len(), 1);
+        assert!(
+            (set.spans[0].length() - 17.0).abs() < 1e-9,
+            "got {}",
+            set.spans[0].length()
+        );
+
+        // A ring: the same three points closed walk the return leg home too.
+        let ring = pass_with(
+            g.clone(),
+            "Fence",
+            SpanSource::Polyline {
+                points: vec![
+                    DVec3::ZERO,
+                    DVec3::new(3.0, 0.0, 4.0),
+                    DVec3::new(3.0, 0.0, 16.0),
+                ],
+                closed: true,
+            },
+        );
+        let ring_len = build_spans(&ring, &super::super::span::NoSplines, &cx).spans[0].length();
+        let home = (DVec3::new(3.0, 0.0, 16.0) - DVec3::ZERO).length();
+        assert!(
+            (ring_len - (17.0 + home)).abs() < 1e-9,
+            "a closed ring is {ring_len}, expected {} — the return leg is missing",
+            17.0 + home
+        );
+
+        // The points really are world positions: a translated polyline puts its
+        // span somewhere else rather than being re-centred on the context.
+        let moved = pass_with(
+            g.clone(),
+            "Fence",
+            SpanSource::Polyline {
+                points: vec![DVec3::new(500.0, 0.0, 500.0), DVec3::new(500.0, 0.0, 510.0)],
+                closed: false,
+            },
+        );
+        let mset = build_spans(&moved, &super::super::span::NoSplines, &cx);
+        assert!((mset.spans[0].length() - 10.0).abs() < 1e-9);
+        let f = mset.spans[0].frame_at(0.0);
+        assert!(
+            (f.position.x - 500.0).abs() < 1e-6 && (f.position.z - 500.0).abs() < 1e-6,
+            "the span starts at {:?}, not at the world position it was given",
+            f.position
+        );
+
+        // **Fails closed**, exactly as an unresolvable spline reference does: a
+        // grammar pass has no error channel, so a bad polyline places nothing
+        // rather than taking its handler down.
+        for bad in [
+            vec![],
+            vec![DVec3::ZERO],
+            vec![DVec3::ZERO, DVec3::new(f64::NAN, 0.0, 1.0)],
+            vec![
+                DVec3::new(0.0, f64::INFINITY, 0.0),
+                DVec3::new(1.0, 0.0, 1.0),
+            ],
+        ] {
+            let p = pass_with(
+                g.clone(),
+                "Fence",
+                SpanSource::Polyline {
+                    points: bad.clone(),
+                    closed: false,
+                },
+            );
+            assert!(
+                build_spans(&p, &super::super::span::NoSplines, &cx).is_empty(),
+                "{bad:?} produced a span"
+            );
+        }
     }
 
     // ── the pass-level evaluation ───────────────────────────────────────────

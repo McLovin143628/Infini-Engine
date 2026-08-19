@@ -151,7 +151,15 @@ pub const PIE_FRAME_VERSION: u16 = 1;
 ///   refusal ("rebuild both from the same commit") is the one that names the
 ///   actual fix, and it only fires if the envelope moves when the contract does.
 ///   A version with no field behind it is exactly what an envelope is for.
-pub const SCENE_PAYLOAD_VERSION: u32 = 9;
+///
+/// * **v10** — Wave G, and the same shape of bump as v9 for the same reason:
+///   **no new slot**, recording that `level_bytes` is now a scene **v24**
+///   payload (the geo-anchor and `TerrainLayer::material`).
+///
+///   The anchor needs no envelope field of its own because it rides inside
+///   `level_bytes` — the scene file record carries it, and this envelope's whole
+///   job is to say which scene contract those bytes obey.
+pub const SCENE_PAYLOAD_VERSION: u32 = 10;
 
 /// Upper bound on a single frame; anything larger means a desynced or
 /// corrupt stream and is treated as an error rather than an allocation. A

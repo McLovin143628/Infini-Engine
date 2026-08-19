@@ -1,6 +1,6 @@
-schema_version = 23
+schema_version = 24
 guid = "84060001-0000-0000-0000-000000000001"
 title = "Vgeom Demo"
 entity_count = 325
-content_hash = "8787804cb02fd801"
+content_hash = "d274a92c1e1a5db6"
 dependencies = ["84060002-0000-0000-0000-000000000002"]

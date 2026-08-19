@@ -545,6 +545,7 @@ fn make_streaming_terrain_project_with(root: &Path, biomes: BiomeSetFixture) -> 
             character_movement: None,
         }],
         settings: Default::default(),
+        geo: Default::default(),
     };
     // The `.inf_biomes` (P19.2), when the fixture wants one. Its sidecar declares
     // no dependencies either, so — exactly like the terrain — the only way the
@@ -1043,6 +1044,7 @@ fn make_textured_mesh_project(root: &Path) -> (AssetId, AssetId, AssetId) {
         title: "Textured Cluster Pages".into(),
         entities: vec![e],
         settings: Default::default(),
+        geo: Default::default(),
     };
     let level_bytes = level.encode().unwrap();
     let level_path = content.join("Prop.inf_lvl");
