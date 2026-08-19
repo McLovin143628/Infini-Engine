@@ -3993,7 +3993,7 @@ impl EngineHost {
         py: u32,
         payload: &str,
     ) -> bool {
-        use inf_editor_core::viewport_drop::{parse_drop_payload, DropPayload};
+        use inf_editor_core::viewport_drop::{parse_drop_payload, spawn_asset_entity, DropPayload};
 
         let parsed = parse_drop_payload(payload);
         let (kind, name) = match parsed {
@@ -4013,9 +4013,12 @@ impl EngineHost {
 
         let point = self.pick_world_point(doc, view, px, py);
         doc.begin_transaction("Spawn");
-        let guid = match mesh_asset {
-            Some(asset) => doc.edit_create_mesh_asset(name, asset, None),
-            None => doc.edit_create(kind, name, None),
+        let guid = match parsed {
+            DropPayload::Spawn { .. } => doc.edit_create(kind, name, None),
+            // An asset goes through the door `scene_spawn_asset` also uses, so
+            // the binding rule cannot be true on one drop path and false on the
+            // other (Wave E audit, A6 — one door for two paths).
+            DropPayload::Asset { .. } => spawn_asset_entity(doc, name, mesh_asset, None),
         };
         doc.edit_set_transform(guid, EcsTransform::from_translation(point));
         doc.select(&[guid], false);

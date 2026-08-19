@@ -21,8 +21,10 @@ import { bootstrapShellCommands } from "../shellCommands";
 import {
   OBJECT_EDIT_COMMANDS,
   commandIdFor,
+  openObject,
   registerObjectEditorCommands,
 } from "../../stores/objectEditorCommands";
+import { useShellStore } from "../../stores/shellStore";
 
 function actionsOf(nodes: MenuNode[]): MenuAction[] {
   const out: MenuAction[] = [];
@@ -65,6 +67,34 @@ describe("object editor command wiring", () => {
   it("commandIdFor agrees with the table (one naming rule, not two)", () => {
     for (const c of OBJECT_EDIT_COMMANDS) {
       expect(commandIdFor(c.route)).toBe(c.id);
+    }
+  });
+
+  /**
+   * **A stale target is a refusal, not silence** (Wave E audit, A5).
+   *
+   * `entity_editors_many` deliberately SKIPS guids the document no longer has —
+   * a context menu left open across a delete is a normal race, not a failure. So
+   * `openObject` gets an empty list back, and returning quietly makes a
+   * double-click on a just-deleted row look like a broken feature. The wave's
+   * own doctrine is that a refusal is a value; this is where it applies.
+   */
+  it("opening an object that no longer exists says so", async () => {
+    useShellStore.setState({ statusMessage: null });
+    await openObject("00000000-0000-0000-0000-0000000dead0");
+    expect(useShellStore.getState().statusMessage).toContain("no longer exists");
+  });
+
+  /**
+   * The `object.edit.*` handlers must RETURN their promise: `executeCommand`
+   * surfaces a rejected handler in the status bar, and a `void`-ed promise turns
+   * a backend refusal into an unhandled rejection nobody sees.
+   */
+  it("the edit handlers return a promise so executeCommand can surface a failure", () => {
+    for (const c of OBJECT_EDIT_COMMANDS) {
+      const result = getCommand(c.id)!.run!();
+      expect(typeof (result as Promise<void>)?.then).toBe("function");
+      void (result as Promise<void>).catch(() => {});
     }
   });
 });

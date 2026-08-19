@@ -27,7 +27,12 @@ import {
   __resetSettingsStoreForTest,
   useSettingsStore,
 } from "../../stores/settingsStore";
-import { __resetKeybindingsForTest, bindingFor, registerDefaultKeybindings } from "../keybindings";
+import {
+  __resetKeybindingsForTest,
+  bindKey,
+  bindingFor,
+  registerDefaultKeybindings,
+} from "../keybindings";
 import {
   PREFS_MIGRATED_KEY,
   applySettings,
@@ -149,6 +154,33 @@ describe("applySettings — what actually applies live", () => {
     expect(bindingFor("Ctrl+Alt+P")).toBeUndefined();
   });
 
+  /**
+   * **The settings file does not own the whole keymap** (Wave E audit, A1).
+   *
+   * `simStore` binds `Alt+P` and `pieStore` binds `Shift+Alt+P` at bootstrap —
+   * before `initSettingsSync` resolves, and from nowhere the preferences file
+   * can see. The first version of `applyKeybindingOverrides` rebuilt the live
+   * map with `bindings.clear()`, so BOTH shortcuts died the instant the file
+   * loaded, on every launch, with nothing said. The symptom is invisible: no
+   * menu id dispatches them, so the only evidence is the key not working.
+   */
+  it("leaves chords other subsystems bound alone (Alt+P Simulate, Shift+Alt+P PIE)", () => {
+    bindKey({ chord: "Alt+P", command: "sim.play" });
+    bindKey({ chord: "Shift+Alt+P", command: "pie.play" });
+
+    applySettings({ ...base(), keybindings: { "Ctrl+Alt+P": "tools.commandPalette" } }, null);
+    expect(bindingFor("Alt+P")?.command).toBe("sim.play");
+    expect(bindingFor("Shift+Alt+P")?.command).toBe("pie.play");
+    expect(bindingFor("Ctrl+Alt+P")?.command).toBe("tools.commandPalette");
+
+    // …and a second apply (the every-change path) still leaves them, while
+    // undoing exactly the override the first apply installed.
+    applySettings({ ...base(), keybindings: {} }, { ...base(), keybindings: { "Ctrl+Alt+P": "tools.commandPalette" } });
+    expect(bindingFor("Alt+P")?.command).toBe("sim.play");
+    expect(bindingFor("Shift+Alt+P")?.command).toBe("pie.play");
+    expect(bindingFor("Ctrl+Alt+P")).toBeUndefined();
+  });
+
   it("the pointer feel reaches the native viewport, and only when it CHANGES", () => {
     vi.mocked(viewportIpc.setInteraction).mockClear();
     const prev = base();
@@ -224,12 +256,17 @@ describe("initSettingsSync", () => {
    * the file replaces the user's preferences with defaults.
    */
   it("a REFUSED load surfaces the message and writes NOTHING", async () => {
+    vi.mocked(viewportIpc.setInteraction).mockClear();
     getMock.mockRejectedValue(new Error("editor-settings.toml exists but cannot be read"));
     const dispose = initSettingsSync();
     await vi.waitFor(() => expect(useSettingsStore.getState().loaded).toBe(true));
     expect(useSettingsStore.getState().error).toContain("cannot be read");
     expect(useSettingsStore.getState().settings).toEqual(DEFAULT_EDITOR_SETTINGS);
     expect(setMock).not.toHaveBeenCalled();
+    // …and the in-memory defaults are applied ONCE, not twice (Wave E audit,
+    // A9): the refusal path used to `setState` — firing the subscription — and
+    // then call `applySettings` again by hand.
+    expect(viewportIpc.setInteraction).toHaveBeenCalledTimes(1);
     dispose();
   });
 });

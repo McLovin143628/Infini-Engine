@@ -42,7 +42,17 @@ pub const AUTOSAVE_INTERVAL_RANGE_S: (f32, f32) = (1.0, 3600.0);
 /// Default editor flycam speed, m/s (mirrors `EditorCamera::default`).
 pub const DEFAULT_FLY_SPEED_MPS: f32 = 8.0;
 /// Flycam speed bounds, m/s.
-pub const FLY_SPEED_RANGE_MPS: (f32, f32) = (0.05, 10_000.0);
+///
+/// **These are the CAMERA's own bounds, not a wider range of our own** (Wave E
+/// audit, A2). `EditorCamera` clamps `fly_speed` to
+/// `inf_viewport::camera::{FLY_SPEED_MIN, FLY_SPEED_MAX}` on every write, so a
+/// file allowed to hold 1 000 m/s showed 1 000 in Preferences and flew at 250:
+/// the setting and the thing it sets, silently disagreeing, with the round trip
+/// through `editor_settings_set` "confirming" the number that would never take
+/// effect. Ring 1 cannot name `inf-viewport` (that crate depends on this one),
+/// so the pair is repeated here and PINNED from the other side by
+/// `inf_viewport::camera`'s `the_preference_range_is_the_cameras_range`.
+pub const FLY_SPEED_RANGE_MPS: (f32, f32) = (0.2, 250.0);
 /// Default mouse-look sensitivity **multiplier** over the viewport's built-in
 /// radians-per-pixel constants (1.0 = the shipped feel, unchanged).
 pub const DEFAULT_LOOK_SENSITIVITY: f32 = 1.0;
@@ -475,6 +485,75 @@ mod tests {
         assert_eq!(s.theme_id, "midnight");
         assert_eq!(s.autosave_interval_s, DEFAULT_AUTOSAVE_INTERVAL_S);
         assert_eq!(s.snap_3d, default_snap_3d());
+    }
+
+    /// **A settings file is a text file a human — or something else — can
+    /// write** (Wave E audit). It is the wave's one new attack surface, so the
+    /// hostile shapes are asserted rather than assumed: each must be REFUSED as
+    /// a value, must not panic or hang, and must leave the bytes on disk exactly
+    /// as they were. "Refused" is the load-bearing half — the alternative is
+    /// that a malformed file silently becomes the defaults and eats the user's
+    /// theme and keybindings.
+    #[test]
+    fn hostile_settings_files_are_refused_and_left_alone() {
+        let cases: Vec<(&str, String)> = vec![
+            // Wrong type per field, on each of the three kinds of field.
+            (
+                "string where a number goes",
+                "autosave_interval_s = \"soon\"\n".into(),
+            ),
+            ("number where a bool goes", "tour_seen = 3\n".into()),
+            ("table where a scalar goes", "theme_id = { a = 1 }\n".into()),
+            ("scalar where a table goes", "snap_3d = 7\n".into()),
+            ("array where a map goes", "keybindings = [1, 2]\n".into()),
+            // Duplicate keys — TOML forbids them, and "last one wins" would make
+            // the file's meaning depend on the parser.
+            (
+                "duplicate keys",
+                "theme_id = \"a\"\ntheme_id = \"b\"\n".into(),
+            ),
+            // Deep nesting: the parser must return an error, not recurse until
+            // the stack ends. 512 levels is far past anything legitimate.
+            (
+                "deeply nested inline arrays",
+                format!("theme_id = {}{}\n", "[".repeat(512), "]".repeat(512)),
+            ),
+            // A huge scalar in a numeric field: refused for its TYPE, before
+            // anything tries to size it.
+            (
+                "a megabyte-long string in a numeric field",
+                format!("autosave_interval_s = \"{}\"\n", "x".repeat(1 << 20)),
+            ),
+            ("not TOML at all", "\u{0}\u{1}\u{2}not toml".into()),
+        ];
+
+        for (label, body) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = settings_path(dir.path());
+            std::fs::write(&path, body.as_bytes()).unwrap();
+            let err = EditorSettings::load_or_default(dir.path())
+                .err()
+                .unwrap_or_else(|| panic!("{label}: must be refused, not read as defaults"));
+            assert!(!err.trim().is_empty(), "{label}: an empty refusal");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                body.as_bytes(),
+                "{label}: the file must be left byte-identical"
+            );
+        }
+
+        // The one hostile shape that is NOT an error, and must not be: a huge
+        // but well-typed string in the theme field. It is refused later, by the
+        // theme lookup falling back — losing the file over it would be worse.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            settings_path(dir.path()),
+            format!("theme_id = \"{}\"\n", "z".repeat(1 << 16)),
+        )
+        .unwrap();
+        let s = EditorSettings::load_or_default(dir.path()).expect("a long theme id is legal TOML");
+        assert_eq!(s.theme_id.len(), 1 << 16);
+        assert_eq!(s.autosave_interval_s, DEFAULT_AUTOSAVE_INTERVAL_S);
     }
 
     #[test]

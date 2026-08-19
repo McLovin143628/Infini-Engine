@@ -198,11 +198,15 @@ pub async fn scene_spawn_asset(
     let is_mesh = assets.asset_kind(id) == Some(inf_asset::AssetKind::Mesh);
     let guid = {
         let mut doc = lock(&state.doc)?;
-        let guid = if is_mesh {
-            doc.edit_create_mesh_asset(&name, id.uuid(), None)
-        } else {
-            doc.edit_create(SpawnKind::Cube, &name, None)
-        };
+        // The SAME door the viewport's drag-drop path uses
+        // (`inf_viewport::host::spawn_drop`), so the binding rule cannot be true
+        // on one drop path and false on the other (Wave E audit, A6).
+        let guid = inf_editor_core::viewport_drop::spawn_asset_entity(
+            &mut doc,
+            &name,
+            is_mesh.then(|| id.uuid()),
+            None,
+        );
         doc.select(&[guid], false);
         guid
     };
@@ -1382,6 +1386,38 @@ mod tests {
     use inf_editor_core::ipc::SpawnKind;
     use inf_editor_core::voxel_store::{shared_volumes, SharedVoxelVolumes};
     use std::path::{Path, PathBuf};
+
+    /// **The Ring-2 drop door must reach the shared one** (Wave E audit, A6).
+    ///
+    /// `scene_spawn_asset` needs a Tauri `State` and an `AppHandle`, so its
+    /// behaviour has no runtime arm here; what it CAN be held to is that it
+    /// creates the entity through `viewport_drop::spawn_asset_entity`, the door
+    /// `EngineHost::spawn_drop` also uses and whose two branches are
+    /// arm-covered in `inf-editor-core`. Wave E taught the binding rule to the
+    /// two paths separately, which is precisely how they come to disagree.
+    ///
+    /// The pin reads the FUNCTION BODY, not a spelling anywhere in the file
+    /// (the P23 law). `.rs` is `text eol=lf` (P22.4); the strip is belt and
+    /// braces.
+    #[test]
+    fn the_spawn_command_uses_the_shared_drop_door() {
+        let src = include_str!("scene.rs").replace("\r\n", "\n");
+        let start = src
+            .find("pub async fn scene_spawn_asset(")
+            .expect("scene_spawn_asset is the Ring-2 drop door");
+        let rest = &src[start..];
+        let end = rest[1..]
+            .find("\n/// ")
+            .map(|i| i + 1)
+            .unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(
+            body.contains("viewport_drop::spawn_asset_entity("),
+            "a dropped asset must be spawned through the shared door, or this \
+             path and the viewport's can disagree about binding a mesh. \
+             Body:\n{body}"
+        );
+    }
 
     #[test]
     fn save_target_precedence_explicit_current_quicksave() {

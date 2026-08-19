@@ -844,24 +844,43 @@ pub async fn viewport_set_view_mode(
 /// a NaN sensitivity would put the camera's yaw beyond recovery. Guarding at
 /// both ends is deliberate — the settings file is not the only caller a door
 /// can have.
+///
+/// The bounds are `inf_editor_core::editor_settings`'s own constants, not
+/// literals repeated here (Wave E audit, A2): a second door with a second range
+/// is how "the file says 1 000 and the camera flies at 250" happens.
 #[tauri::command]
 pub async fn viewport_set_interaction(
     interaction: ViewportInteractionDto,
     viewport: Option<String>,
     state: tauri::State<'_, ViewportState>,
 ) -> Result<(), String> {
-    fn guard(v: f32, lo: f32, hi: f32, fallback: f32) -> f32 {
+    use inf_editor_core::editor_settings as es;
+    fn guard(v: f32, range: (f32, f32), fallback: f32) -> f32 {
         if v.is_finite() {
-            v.clamp(lo, hi)
+            v.clamp(range.0, range.1)
         } else {
             fallback
         }
     }
     let settings = inf_viewport::camera::InteractionSettings {
-        fly_speed_mps: guard(interaction.fly_speed_mps, 0.05, 10_000.0, 8.0),
-        look_sensitivity: guard(interaction.look_sensitivity, 0.05, 10.0, 1.0),
-        rmb_click_travel_px: guard(interaction.rmb_click_travel_px, 0.0, 64.0, 4.0),
-        rmb_click_ms: interaction.rmb_click_ms.clamp(0, 2000),
+        fly_speed_mps: guard(
+            interaction.fly_speed_mps,
+            es::FLY_SPEED_RANGE_MPS,
+            es::DEFAULT_FLY_SPEED_MPS,
+        ),
+        look_sensitivity: guard(
+            interaction.look_sensitivity,
+            es::LOOK_SENSITIVITY_RANGE,
+            es::DEFAULT_LOOK_SENSITIVITY,
+        ),
+        rmb_click_travel_px: guard(
+            interaction.rmb_click_travel_px,
+            es::RMB_CLICK_TRAVEL_RANGE_PX,
+            es::DEFAULT_RMB_CLICK_TRAVEL_PX,
+        ),
+        rmb_click_ms: interaction
+            .rmb_click_ms
+            .clamp(es::RMB_CLICK_MS_RANGE.0, es::RMB_CLICK_MS_RANGE.1),
     };
     state.with(Target::from_arg(viewport), |h| h.set_interaction(settings));
     Ok(())

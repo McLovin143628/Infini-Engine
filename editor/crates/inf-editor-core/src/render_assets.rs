@@ -989,13 +989,22 @@ mod tests {
     /// This arm walks the whole path in one place, because each half passes on
     /// its own while the feature stays broken: the payload parses, the spawn
     /// binds, the component holds the guid, and the store resolves that guid to
-    /// real streamable geometry. Delete the `mesh_asset()` branch in
-    /// `spawn_drop` and the second assertion fails; delete the binding in
-    /// `edit_create_mesh_asset` and the third does.
+    /// real streamable geometry.
+    ///
+    /// **What it does and does not reach** (corrected by the Wave E audit, A6).
+    /// The first write-up of this arm claimed "delete the `mesh_asset()` branch
+    /// in `spawn_drop` and the second assertion fails" — measured, that mutation
+    /// left this test GREEN, because `spawn_drop` lives in `inf-viewport`, which
+    /// this crate does not depend on and cannot call. Step 2 now goes through
+    /// `viewport_drop::spawn_asset_entity`, the ONE door both real drop paths
+    /// (`EngineHost::spawn_drop` and `scene_spawn_asset`) were refactored onto,
+    /// so deleting the binding there DOES turn this red. That each of those two
+    /// callers still reaches the door is a source-level fact, pinned by
+    /// `inf-viewport`'s `drop_gate` and `inf-studio`'s `the_spawn_command_uses_the_shared_drop_door`.
     #[test]
     fn a_dropped_mesh_is_bound_to_the_entity_and_resolves_to_real_geometry() {
         use crate::scene::SceneDoc;
-        use crate::viewport_drop::parse_drop_payload;
+        use crate::viewport_drop::{parse_drop_payload, spawn_asset_entity};
 
         let (_dir, root, mesh_id) = project_with_derived_mesh(12);
 
@@ -1005,9 +1014,9 @@ mod tests {
         let bound = parsed.mesh_asset().expect("a mesh payload binds");
         assert_eq!(bound, mesh_id);
 
-        // 2. What the viewport host does with it — the entity carries the asset.
+        // 2. What both drop doors do with it — the entity carries the asset.
         let mut doc = SceneDoc::new();
-        let guid = doc.edit_create_mesh_asset("Barrel", bound, None);
+        let guid = spawn_asset_entity(&mut doc, "Barrel", Some(bound), None);
         assert_eq!(
             doc.mesh_asset_of(guid),
             Some(mesh_id),

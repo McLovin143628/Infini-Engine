@@ -122,6 +122,16 @@ export default function PreferencesDialog() {
   const rows = [...live].sort((a, b) => a.command.localeCompare(b.command));
   const defaultChordFor = (command: string) =>
     DEFAULT_KEYBINDINGS.find((b) => b.command === command)?.chord;
+  /**
+   * "Default" means **not overridden by this file**, not "listed in
+   * `DEFAULT_KEYBINDINGS`" (Wave E audit, A1). The live map also holds chords
+   * registered by other subsystems — `Alt+P` for Simulate, `Shift+Alt+P` for
+   * PIE — which are shipped defaults this table does not enumerate. Keying off
+   * the table painted both as user overrides, with a Reset button that had
+   * nothing to reset.
+   */
+  const isOverridden = (chord: string) =>
+    Object.prototype.hasOwnProperty.call(settings.keybindings, chord);
 
   const rebind = (command: string, oldChord: string, e: React.KeyboardEvent) => {
     e.preventDefault();
@@ -259,12 +269,16 @@ export default function PreferencesDialog() {
             {tab === "viewport" && (
               <>
                 <div className="mb-2 text-xs text-(--ink-text-dim)">Camera</div>
+                {/* 0.2 … 250 m/s is `EditorCamera`'s own clamp
+                    (`inf_viewport::camera::{FLY_SPEED_MIN, FLY_SPEED_MAX}`), not
+                    a range of the dialog's choosing — offering more would show a
+                    number the camera silently refuses (Wave E audit, A2). */}
                 <NumberRow
                   label="Fly speed"
                   hint="(m/s)"
                   value={settings.camera_fly_speed_mps}
-                  min={0.05}
-                  max={10000}
+                  min={0.2}
+                  max={250}
                   step={0.5}
                   onChange={(camera_fly_speed_mps) => patch({ camera_fly_speed_mps })}
                 />
@@ -378,7 +392,7 @@ export default function PreferencesDialog() {
                 </div>
                 {rows.map((b) => {
                   const cmd = getCommand(b.command);
-                  const isDefault = defaultChordFor(b.command) === b.chord;
+                  const isDefault = !isOverridden(b.chord);
                   return (
                     <div key={b.chord} className="mb-1 flex items-center gap-2 text-xs">
                       {capturing === b.chord ? (

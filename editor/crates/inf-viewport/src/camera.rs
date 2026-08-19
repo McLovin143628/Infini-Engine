@@ -970,14 +970,28 @@ pub struct InteractionSettings {
     pub rmb_click_ms: u32,
 }
 
-impl Default for InteractionSettings {
-    fn default() -> Self {
+impl InteractionSettings {
+    /// The shipped feel, as a `const fn`.
+    ///
+    /// `const` because `win32.rs`'s thread-local mirror is initialized in a
+    /// `const` block and cannot call `Default::default()` — before this it
+    /// repeated the four numbers, which made **four** copies of the shipped feel
+    /// (here, `Default`, the thread-local, and `editor_settings`'s `DEFAULT_*`).
+    /// Three is already one too many; the fourth is deleted by this, and the
+    /// remaining pair is pinned by `the_preference_defaults_are_the_shipped_feel`.
+    pub const fn shipped() -> Self {
         Self {
             fly_speed_mps: 8.0,
             look_sensitivity: 1.0,
             rmb_click_travel_px: 4.0,
             rmb_click_ms: 250,
         }
+    }
+}
+
+impl Default for InteractionSettings {
+    fn default() -> Self {
+        Self::shipped()
     }
 }
 
@@ -1049,6 +1063,51 @@ mod interaction_tests {
         let s = InteractionSettings::default();
         assert_eq!(s.fly_speed_mps, EditorCamera::default().fly_speed);
         assert_eq!(s.look_sensitivity, 1.0);
+        // `Default` IS `shipped()`, so the win32 thread-local mirror (which must
+        // be a `const` and therefore cannot call `Default`) cannot drift.
+        assert_eq!(s, InteractionSettings::shipped());
+    }
+
+    /// **The preference's range must be the camera's range** (Wave E audit, A2).
+    ///
+    /// `EditorCamera` clamps `fly_speed` to `[FLY_SPEED_MIN, FLY_SPEED_MAX]` on
+    /// every write. Wave E shipped `FLY_SPEED_RANGE_MPS = (0.05, 10_000.0)` in
+    /// `inf_editor_core::editor_settings`, so a hand-edited or dialog-entered
+    /// 1 000 m/s normalized to 1 000, round-tripped back to the UI as 1 000, and
+    /// flew at 250 — the setting and the thing it sets, disagreeing silently and
+    /// with the round trip vouching for the wrong number.
+    ///
+    /// Ring 1's settings crate cannot import this one (the dependency runs the
+    /// other way), so the pin lives here, where both are visible.
+    #[test]
+    fn the_preference_range_is_the_cameras_range() {
+        assert_eq!(
+            inf_editor_core::editor_settings::FLY_SPEED_RANGE_MPS,
+            (FLY_SPEED_MIN, FLY_SPEED_MAX),
+            "a flycam speed the preferences accept must be one the camera keeps"
+        );
+    }
+
+    /// The other half of the same seam: the four shipped numbers, in the two
+    /// crates that both claim to hold them.
+    #[test]
+    fn the_preference_defaults_are_the_shipped_feel() {
+        use inf_editor_core::editor_settings as es;
+        let s = InteractionSettings::shipped();
+        assert_eq!(s.fly_speed_mps, es::DEFAULT_FLY_SPEED_MPS);
+        assert_eq!(s.look_sensitivity, es::DEFAULT_LOOK_SENSITIVITY);
+        assert_eq!(s.rmb_click_travel_px, es::DEFAULT_RMB_CLICK_TRAVEL_PX);
+        assert_eq!(s.rmb_click_ms, es::DEFAULT_RMB_CLICK_MS);
+        // …and every default is inside its own range, which is the check that
+        // catches a range narrowed without moving the default it now excludes.
+        assert!(s.fly_speed_mps >= es::FLY_SPEED_RANGE_MPS.0);
+        assert!(s.fly_speed_mps <= es::FLY_SPEED_RANGE_MPS.1);
+        assert!(s.look_sensitivity >= es::LOOK_SENSITIVITY_RANGE.0);
+        assert!(s.look_sensitivity <= es::LOOK_SENSITIVITY_RANGE.1);
+        assert!(s.rmb_click_travel_px >= es::RMB_CLICK_TRAVEL_RANGE_PX.0);
+        assert!(s.rmb_click_travel_px <= es::RMB_CLICK_TRAVEL_RANGE_PX.1);
+        assert!(s.rmb_click_ms >= es::RMB_CLICK_MS_RANGE.0);
+        assert!(s.rmb_click_ms <= es::RMB_CLICK_MS_RANGE.1);
     }
 }
 

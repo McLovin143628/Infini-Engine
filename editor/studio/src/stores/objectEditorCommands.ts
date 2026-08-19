@@ -108,7 +108,15 @@ export async function openObjectEditor(
  */
 export async function openObject(guid: string): Promise<void> {
   const [dto] = await sceneIpc.entityEditors([guid]);
-  if (!dto) return;
+  if (!dto) {
+    // The object went away between the gesture and the answer — a context menu
+    // left open across a delete, or a double-click on a row the outliner has
+    // not re-synced yet. `entity_editors_many` SKIPS unknown guids, so this is
+    // a value the command has to name: silence here reads as "the feature is
+    // broken", which is the exact failure this wave exists to remove.
+    refuse("That object no longer exists.");
+    return;
+  }
   const primary = primaryRoute(dto);
   if (!primary) {
     refuse(noEditorReason([dto]) ?? "This object has no editable asset.");
@@ -136,12 +144,16 @@ export async function fetchEntityEditors(guids: string[]): Promise<EntityEditors
  * `bootstrapShellCommands` (which enumerates the menu tree).
  */
 export function registerObjectEditorCommands(): void {
+  // The handlers RETURN their promise rather than `void`-ing it: `executeCommand`
+  // surfaces a rejected handler in the status bar with the command's title
+  // (`lib/commands.ts`), and a discarded promise makes a backend refusal an
+  // unhandled rejection in the console instead.
   registerCommands(
     OBJECT_EDIT_COMMANDS.map((c) => ({
       id: c.id,
       title: c.title,
       category: "Actor",
-      run: () => void openObjectEditor(c.route),
+      run: () => openObjectEditor(c.route),
     })),
   );
   registerCommands([
@@ -155,7 +167,7 @@ export function registerObjectEditorCommands(): void {
           refuse("Select an object first.");
           return;
         }
-        void openObject(sel[0]);
+        return openObject(sel[0]);
       },
     },
   ]);

@@ -104,6 +104,27 @@ describe("settingsStore", () => {
     expect(setMock).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * **A cancelled debounce must not leave an un-resolvable promise behind**
+   * (Wave E audit, A4). `resetToDefaults` cleared the timer but not the promise
+   * the timer was going to resolve, so the next `flush()` — which the
+   * Preferences dialog's Close button calls — took the `await pending` branch on
+   * a promise nobody would ever settle. Nothing throws; the await simply never
+   * returns.
+   */
+  it("flush after resetToDefaults settles instead of awaiting a dead promise", async () => {
+    store().patch({ theme_id: "midnight" });
+    await store().resetToDefaults();
+    await Promise.race([
+      store().flush(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("flush never settled")), 1000),
+      ),
+    ]);
+    // The reset's write is the only one; flush had nothing pending to send.
+    expect(setMock).toHaveBeenCalledTimes(1);
+  });
+
   it("the frontend defaults mirror the Rust defaults field for field", () => {
     // `EditorSettings::default()` in `editor/crates/inf-editor-core/src/
     // editor_settings.rs` is asserted there by `defaults_match_the_shipped_feel`;

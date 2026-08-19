@@ -247,8 +247,14 @@ export function initSettingsSync(): () => void {
     })
     .catch((e: unknown) => {
       // Corrupt / unavailable: keep the defaults, say so, write NOTHING.
-      useSettingsStore.setState({ loaded: true, error: String(e) });
-      applySettings(useSettingsStore.getState().settings, null);
+      //
+      // Hydrating with the values ALREADY in memory is what applies them, and it
+      // goes through the store so the subscription above does it exactly once —
+      // a bare `setState` plus an explicit `applySettings` applied everything
+      // twice, which meant two `setTheme` writes and two pushes at the native
+      // viewport on every refused load (Wave E audit, A9).
+      const s = useSettingsStore.getState();
+      s.hydrate(s.settings, String(e));
     });
 
   return unsub;

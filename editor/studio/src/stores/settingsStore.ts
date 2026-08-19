@@ -73,6 +73,20 @@ let writeTimer: ReturnType<typeof setTimeout> | undefined;
 let pending: Promise<void> | null = null;
 
 /**
+ * Cancel a scheduled write and drop the promise it was going to settle.
+ *
+ * **Both halves, always** (Wave E audit, A4): clearing the timer without
+ * dropping `pending` leaves a promise nobody will ever resolve, and the next
+ * `flush()` — the Preferences dialog's Close button — takes its `await pending`
+ * branch and never returns. Nothing throws; the await simply hangs.
+ */
+function cancelScheduledWrite(): void {
+  if (writeTimer !== undefined) clearTimeout(writeTimer);
+  writeTimer = undefined;
+  pending = null;
+}
+
+/**
  * Call the backend, converting a SYNCHRONOUS throw into a rejection.
  *
  * `invoke` is not available outside a Tauri webview (headless tests, a detached
@@ -117,10 +131,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 
   resetToDefaults: async () => {
-    if (writeTimer !== undefined) {
-      clearTimeout(writeTimer);
-      writeTimer = undefined;
-    }
+    cancelScheduledWrite();
     set({ settings: DEFAULT_EDITOR_SETTINGS });
     try {
       const saved = await writeSettings(DEFAULT_EDITOR_SETTINGS);
@@ -132,15 +143,13 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
   flush: async () => {
     if (writeTimer !== undefined) {
-      clearTimeout(writeTimer);
-      writeTimer = undefined;
+      cancelScheduledWrite();
       try {
         const saved = await writeSettings(get().settings);
         set({ settings: saved, error: null });
       } catch (e) {
         set({ error: String(e) });
       }
-      pending = null;
       return;
     }
     if (pending) await pending;
@@ -149,9 +158,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 
 /** Test-only: drop the debounce timer so cases cannot leak into each other. */
 export function __resetSettingsStoreForTest(): void {
-  if (writeTimer !== undefined) clearTimeout(writeTimer);
-  writeTimer = undefined;
-  pending = null;
+  cancelScheduledWrite();
   useSettingsStore.setState({
     settings: DEFAULT_EDITOR_SETTINGS,
     loaded: false,

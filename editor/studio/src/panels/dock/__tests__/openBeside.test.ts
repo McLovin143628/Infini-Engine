@@ -46,6 +46,33 @@ describe("openBesidePanel", () => {
     );
   });
 
+  /**
+   * **The arm above is vacuous on its own** (Wave E audit, A7).
+   *
+   * `model`, `skeleton` and `blueprint` all register `defaultLocation:
+   * "bottom"`, so a plain `openPanel` already lands them in the same group —
+   * measured: replacing the whole body of `openBesidePanel` with `openPanel`
+   * leaves that test GREEN. The claim only has teeth across a side boundary, so
+   * this one anchors on a RIGHT-docked panel and asserts the new tab followed it
+   * there rather than going to its own default.
+   */
+  it("follows the anchor ACROSS dock sides, not the panel's own default", () => {
+    const anchor = dock().openPanel("details"); // registered defaultLocation: "right"
+    expect(groupOf(anchor)!.side).toBe("right");
+
+    const beside = dock().openBesidePanel(anchor, "model", "mesh-a");
+    const group = groupOf(beside);
+    expect(group).not.toBeNull();
+    expect(group!.side).toBe("right");
+    expect(group!.tabs).toContain(anchor);
+    expect(group!.tabs).toContain(beside);
+    // And nothing was left behind in the bottom dock, where a plain open would
+    // have put it.
+    for (const g of dock().layout.docks.bottom.groups) {
+      expect(g.tabs).not.toContain(beside);
+    }
+  });
+
   it("is idempotent: opening the same panel beside the same anchor twice keeps one tab", () => {
     const anchor = dock().openPanel("model", "mesh-a");
     const a = dock().openBesidePanel(anchor, "skeleton", "rig-a");

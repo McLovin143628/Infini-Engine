@@ -68,6 +68,38 @@ fn the_double_click_message_is_handled() {
     );
 }
 
+/// **Neither pointer gesture may fire during Simulate** (Wave E audit, A8).
+///
+/// Both routes end in an overlay, and every overlay in this shell acquires the
+/// airspace guard, which HIDES the native child window. Firing either one while
+/// a preview is running blanks the running preview — so the double-click arm
+/// consults `SIM_RUNNING` and, after the audit, so does the right-click arm.
+/// They are asserted together because the failure is asymmetric by nature: the
+/// two arms are in different message handlers and only one of them had the gate.
+#[test]
+fn neither_pointer_gesture_fires_while_simulate_is_running() {
+    let src = WIN32.replace("\r\n", "\n");
+    // Each arm is bounded by the NEXT arm's `WM_… => {`, not by a comment: a
+    // scope that ends at a sentence ends wherever someone reworded it.
+    for (msg, next) in [
+        ("WM_LBUTTONDBLCLK => {", "WM_LBUTTONUP => {"),
+        ("WM_RBUTTONUP => {", "WM_LBUTTONDOWN => {"),
+    ] {
+        let start = src
+            .find(msg)
+            .unwrap_or_else(|| panic!("{msg} arm must exist"));
+        let end = src[start..]
+            .find(next)
+            .unwrap_or_else(|| panic!("{msg} arm must be followed by {next}"));
+        let arm = &src[start..start + end];
+        assert!(
+            arm.contains("SIM_RUNNING"),
+            "the {msg} arm must consult SIM_RUNNING, or the gesture blanks a \
+             running preview through the airspace guard. Arm:\n{arm}"
+        );
+    }
+}
+
 /// The right-button gesture must still begin its capture on button-DOWN.
 ///
 /// This is the flycam-feel pin. The obvious way to implement a context menu is

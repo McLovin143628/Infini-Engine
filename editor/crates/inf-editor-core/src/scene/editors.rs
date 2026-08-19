@@ -149,7 +149,17 @@ mod tests {
         let mut doc = SceneDoc::new();
         let mesh = Uuid::from_u128(0xAA);
         let skel = Uuid::from_u128(0xBB);
-        let guid = doc.edit_create(SpawnKind::Empty, "Hero", None);
+        // **Spawned as a CUBE, not an Empty** (Wave E audit): the P24.5 wizard's
+        // character carries a `MeshRef` as well as its `SkeletalMesh`, and
+        // `kind_of`'s new arm claims to be checked BEFORE `MeshRef` for exactly
+        // that reason. Over an Empty the claim is vacuous — the ordering it
+        // asserts is unreachable and moving the arm below `MeshRef` would leave
+        // the test green while every character read "Static Mesh" again.
+        let guid = doc.edit_create(SpawnKind::Cube, "Hero", None);
+        assert!(
+            doc.primitive_of(guid).is_some(),
+            "the rig must sit on a MeshRef"
+        );
         let entity = doc.world_mut().entity_of(guid).unwrap();
         doc.world_mut()
             .world_mut()

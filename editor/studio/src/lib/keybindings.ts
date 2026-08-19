@@ -78,11 +78,24 @@ export const DEFAULT_KEYBINDINGS: readonly Keybinding[] = [
   { chord: "F2", command: "actor.rename" },
 ] as const;
 
-/** Install the defaults (dropping any overrides currently in force). */
+/** Install the defaults over whatever is bound now. */
 export function registerDefaultKeybindings(): void {
-  bindings.clear();
   for (const b of DEFAULT_KEYBINDINGS) bindKey({ ...b });
 }
+
+/**
+ * The chords the last {@link applyKeybindingOverrides} installed.
+ *
+ * **The live map holds chords no settings file knows about.** `simStore` binds
+ * `Alt+P` and `pieStore` binds `Shift+Alt+P` at bootstrap, before the
+ * preferences file has resolved; nothing else registers them, and no menu id
+ * dispatches them. The Wave-E audit found that rebuilding the map by CLEARING
+ * it deleted both the instant `initSettingsSync` applied its first (usually
+ * empty) override set — Simulate and PIE silently lost their shortcuts on every
+ * launch. So an apply undoes exactly what a previous apply did, and owns nothing
+ * it did not install.
+ */
+let appliedOverrideChords: string[] = [];
 
 /**
  * Rebuild the live map as `defaults + overrides` (Wave E).
@@ -93,14 +106,21 @@ export function registerDefaultKeybindings(): void {
  *
  * `allowInInputs` is inherited from the default binding of the SAME COMMAND, so
  * rebinding the palette to another chord keeps working inside a text field.
- * Rebuilding from scratch (rather than mutating) is what makes this idempotent:
- * applying overrides twice, or applying a smaller set after a larger one, always
- * lands on exactly `defaults + overrides`.
+ *
+ * Idempotent without being destructive: the previous override set is unbound
+ * first, then the defaults are re-installed (which restores anything a previous
+ * override had unbound), then the new set is applied. Applying twice, or
+ * applying a smaller set after a larger one, always lands on exactly
+ * `defaults + overrides + whatever other subsystems bound` — and that last term
+ * is why this is not a `bindings.clear()`.
  */
 export function applyKeybindingOverrides(overrides: Record<string, string>): void {
+  for (const chord of appliedOverrideChords) unbindKey(chord);
+  appliedOverrideChords = [];
   registerDefaultKeybindings();
   for (const [chord, command] of Object.entries(overrides)) {
     if (!chord) continue;
+    appliedOverrideChords.push(chord);
     if (!command) {
       unbindKey(chord);
       continue;
@@ -146,4 +166,5 @@ export function dispatchChord(chord: string): boolean {
 /** Test-only: reset global state between cases. */
 export function __resetKeybindingsForTest(): void {
   bindings.clear();
+  appliedOverrideChords = [];
 }

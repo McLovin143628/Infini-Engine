@@ -181,9 +181,15 @@ pub struct ActorGraphDto {
 /// # Identity
 ///
 /// The document id is `bp:<asset>` — **idempotent by asset**, mirroring
-/// `dcc_open`'s `dcc:{id}`. That also retires, for actor graphs, the
-/// process-scoped `bp:{counter}` identity `blueprintStore` documents at length:
-/// the same actor gets the same document id in every session.
+/// `dcc_open`'s `dcc:{id}`, and idempotent in the sense `dcc_open` means it:
+/// a second open of the same actor on the same handler returns the document
+/// already in flight rather than discarding its edits and its undo journal.
+/// (The first Wave-E version rebuilt unconditionally, which the audit caught —
+/// "idempotent" was true of the ID and false of the DOCUMENT.) Asking for a
+/// *different* handler does rebuild: that is a deliberate switch, not a re-open.
+/// It also retires, for actor graphs, the process-scoped `bp:{counter}`
+/// identity `blueprintStore` documents at length: the same actor gets the same
+/// document id in every session.
 ///
 /// # Refusals are values
 ///
@@ -203,63 +209,33 @@ pub async fn graph_open_actor(
     let id: inf_asset::AssetId = asset_id.parse().map_err(|e| format!("bad asset id: {e}"))?;
     let class = assets.load_blueprint_class_result(id)?;
 
-    // Events first, then member functions — the order the class declares them,
-    // so the switcher is stable across sessions.
-    let mut candidates: Vec<(String, String, &inf_blueprint::BlueprintFn)> = Vec::new();
-    for ev in &class.events {
-        candidates.push((ev.event.key().to_string(), event_label(&ev.event), &ev.body));
-    }
-    for f in &class.functions {
-        candidates.push((f.id.clone(), f.name.clone(), f));
-    }
+    let candidates = actor_candidates(&class);
     if candidates.is_empty() {
         return Err(format!(
             "“{}” has no event handlers or functions to show as a graph.",
             class.name
         ));
     }
+    let handlers = actor_handlers(&candidates);
+    let chosen = choose_handler(&class.name, &candidates, &handlers, handler.as_deref())?;
 
-    let handlers: Vec<ActorHandlerDto> = candidates
-        .iter()
-        .map(|(key, label, body)| match inf_blueprint::raise_fn(body) {
-            Ok(_) => ActorHandlerDto {
-                key: key.clone(),
-                label: label.clone(),
-                raisable: true,
-                reason: None,
-            },
-            Err(e) => ActorHandlerDto {
-                key: key.clone(),
-                label: label.clone(),
-                raisable: false,
-                reason: Some(format!(
-                    "{e} — this handler has no unambiguous node form; open the generated code \
-                     instead."
-                )),
-            },
-        })
-        .collect();
+    let doc_id = format!("bp:{id}");
+    let doc_name = actor_doc_name(&class.name, &chosen.1);
 
-    // The requested handler, else the first that can actually be drawn.
-    let chosen = match &handler {
-        Some(k) => candidates
-            .iter()
-            .find(|(key, _, _)| key == k)
-            .ok_or_else(|| format!("“{}” has no handler `{k}`.", class.name))?,
-        None => candidates
-            .iter()
-            .find(|(key, _, _)| handlers.iter().any(|h| &h.key == key && h.raisable))
-            .ok_or_else(|| {
-                let first = handlers
-                    .iter()
-                    .find_map(|h| h.reason.clone())
-                    .unwrap_or_else(|| "no raisable handler".to_string());
-                format!(
-                    "No handler of “{}” can be drawn as a graph: {first}",
-                    class.name
-                )
-            })?,
-    };
+    // Idempotent by asset AND handler: a re-open of what is already showing
+    // hands back the live document. Rebuilding would silently throw away the
+    // author's in-flight edits and their undo stack — `dcc_open` says so at its
+    // own signature and this is its twin.
+    if let Some(existing) = state.with(|s| Ok(reusable_actor_doc(s, &doc_id, &doc_name)))? {
+        return Ok(ActorGraphDto {
+            doc: existing,
+            asset_id: id.to_string(),
+            class_name: class.name.clone(),
+            handler: chosen.0.clone(),
+            handlers,
+        });
+    }
+
     let graph = inf_blueprint::raise_fn(chosen.2).map_err(|e| {
         format!(
             "“{}” ▸ {} cannot be drawn as a graph ({e}); open the generated code instead.",
@@ -267,11 +243,10 @@ pub async fn graph_open_actor(
         )
     })?;
 
-    let doc_id = format!("bp:{id}");
     let doc = state.with(|s| {
         let doc = GraphDoc {
             id: doc_id.clone(),
-            name: format!("{} ▸ {}", class.name, chosen.1),
+            name: doc_name,
             graph,
             viewport: None,
             modified_ms: 0,
@@ -292,6 +267,106 @@ pub async fn graph_open_actor(
         handler: chosen.0.clone(),
         handlers,
     })
+}
+
+/// One openable handler: `(stable key, display label, body)`.
+///
+/// The key is what the frontend's switcher sends back, so it must not be the
+/// label — two `Custom` events could share a label after a rename, never a key.
+type ActorCandidate<'a> = (String, String, &'a inf_blueprint::BlueprintFn);
+
+/// The document title for a raised handler. One spelling, because it is also
+/// the equality test the idempotent re-open above uses.
+fn actor_doc_name(class_name: &str, handler_label: &str) -> String {
+    format!("{class_name} ▸ {handler_label}")
+}
+
+/// The live document for `doc_id`, but **only when it is already showing
+/// `doc_name`** — i.e. this actor, on this handler.
+///
+/// Pulled out of the command so the idempotency claim has an arm (Wave E audit,
+/// A3): re-opening must hand back the document in flight, edits and undo
+/// journal intact, exactly as `dcc_open` does. Switching handler is a different
+/// title and therefore a genuine rebuild, which is what the switcher wants.
+fn reusable_actor_doc(s: &GraphStore, doc_id: &str, doc_name: &str) -> Option<GraphDoc> {
+    s.docs.get(doc_id).filter(|d| d.name == doc_name).cloned()
+}
+
+/// Every handler a class offers, **events first then member functions**, in the
+/// order the class declares them — so the switcher is stable across sessions.
+///
+/// Pulled out of the command (Wave E audit, A3) so the routing rules are
+/// testable: the command itself needs a Tauri `State` and an `AppHandle` and
+/// therefore had no arm at all.
+fn actor_candidates(class: &inf_blueprint::BlueprintClass) -> Vec<ActorCandidate<'_>> {
+    let mut out: Vec<ActorCandidate<'_>> = Vec::new();
+    for ev in &class.events {
+        out.push((ev.event.key().to_string(), event_label(&ev.event), &ev.body));
+    }
+    for f in &class.functions {
+        out.push((f.id.clone(), f.name.clone(), f));
+    }
+    out
+}
+
+/// Report EVERY handler with `raisable`/`reason`.
+///
+/// A handler that cannot be drawn is reported, not dropped: hiding it would
+/// make the actor look like it has fewer handlers than it has, and the user
+/// would never learn that the one they are looking for is hand-edited past the
+/// node kit's image.
+fn actor_handlers(candidates: &[ActorCandidate<'_>]) -> Vec<ActorHandlerDto> {
+    candidates
+        .iter()
+        .map(|(key, label, body)| match inf_blueprint::raise_fn(body) {
+            Ok(_) => ActorHandlerDto {
+                key: key.clone(),
+                label: label.clone(),
+                raisable: true,
+                reason: None,
+            },
+            Err(e) => ActorHandlerDto {
+                key: key.clone(),
+                label: label.clone(),
+                raisable: false,
+                reason: Some(format!(
+                    "{e} — this handler has no unambiguous node form; open the generated code \
+                     instead."
+                )),
+            },
+        })
+        .collect()
+}
+
+/// Pick the handler to draw: the one asked for, else the first that **can** be
+/// drawn — so a class where two of three handlers raise opens on one of the two
+/// rather than failing whole.
+///
+/// `Err` only when the request names a handler the class does not have, or when
+/// nothing at all can be drawn; the latter names the first cause instead of
+/// handing back an empty canvas.
+fn choose_handler<'c>(
+    class_name: &str,
+    candidates: &'c [ActorCandidate<'c>],
+    handlers: &[ActorHandlerDto],
+    requested: Option<&str>,
+) -> Result<&'c ActorCandidate<'c>, String> {
+    match requested {
+        Some(k) => candidates
+            .iter()
+            .find(|(key, _, _)| key == k)
+            .ok_or_else(|| format!("“{class_name}” has no handler `{k}`.")),
+        None => candidates
+            .iter()
+            .find(|(key, _, _)| handlers.iter().any(|h| &h.key == key && h.raisable))
+            .ok_or_else(|| {
+                let first = handlers
+                    .iter()
+                    .find_map(|h| h.reason.clone())
+                    .unwrap_or_else(|| "no raisable handler".to_string());
+                format!("No handler of “{class_name}” can be drawn as a graph: {first}")
+            }),
+    }
 }
 
 /// The switcher label for an event kind (its `key` is the identity).
@@ -816,6 +891,212 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    // ── graph_open_actor's routing rules (Wave E audit, A3) ──────────────────
+    //
+    // The command needs a Tauri `State` and an `AppHandle` and so had no arm at
+    // all; these cover the three claims that are actually load-bearing — the
+    // handler ORDER, the partial-raise subset, and the all-refused message.
+
+    use inf_blueprint::semantics::{EventBinding, EventKind};
+    use inf_blueprint::{BlueprintClass, BlueprintFn, Ty};
+
+    /// A handler whose body raises cleanly (an empty body is in lowering's
+    /// image: the event node alone).
+    fn raisable_fn(id: &str) -> BlueprintFn {
+        BlueprintFn {
+            id: id.to_string(),
+            name: id.to_string(),
+            params: vec![],
+            ret: Ty::Unit,
+            body: vec![],
+        }
+    }
+
+    /// A handler that is NOT in lowering's image: a hand-written Rust snippet
+    /// has no unambiguous node form, which is exactly the case the DTO's
+    /// `raisable`/`reason` pair exists for.
+    fn unraisable_fn(id: &str) -> BlueprintFn {
+        BlueprintFn {
+            body: vec![inf_blueprint::Stmt::Snippet("self.x += 1;".into())],
+            ..raisable_fn(id)
+        }
+    }
+
+    fn class_with(events: Vec<EventBinding>, functions: Vec<BlueprintFn>) -> BlueprintClass {
+        let mut c = BlueprintClass::new("cls", "Turret");
+        c.events = events;
+        c.functions = functions;
+        c
+    }
+
+    /// Events before functions, declaration order preserved, keys stable.
+    #[test]
+    fn actor_candidates_lists_events_then_functions_in_declaration_order() {
+        let class = class_with(
+            vec![
+                EventBinding {
+                    event: EventKind::Tick,
+                    body: raisable_fn("tick"),
+                },
+                EventBinding {
+                    event: EventKind::BeginPlay,
+                    body: raisable_fn("begin_play"),
+                },
+            ],
+            vec![raisable_fn("fire")],
+        );
+        let c = actor_candidates(&class);
+        assert_eq!(
+            c.iter().map(|(k, _, _)| k.as_str()).collect::<Vec<_>>(),
+            ["tick", "begin_play", "fire"]
+        );
+        assert_eq!(c[0].1, "Tick");
+        assert_eq!(c[1].1, "Begin Play");
+    }
+
+    /// **Two of three raise: the doc opens on one of the two, and the third is
+    /// reported with a reason — not hidden, and not a whole-class failure.**
+    #[test]
+    fn a_partly_raisable_class_opens_on_a_raisable_handler_and_names_the_rest() {
+        let class = class_with(
+            vec![
+                EventBinding {
+                    event: EventKind::BeginPlay,
+                    body: unraisable_fn("begin_play"),
+                },
+                EventBinding {
+                    event: EventKind::Tick,
+                    body: raisable_fn("tick"),
+                },
+            ],
+            vec![raisable_fn("fire")],
+        );
+        let candidates = actor_candidates(&class);
+        let handlers = actor_handlers(&candidates);
+
+        // All three are OFFERED — a hidden handler teaches the user nothing.
+        assert_eq!(handlers.len(), 3);
+        assert!(!handlers[0].raisable);
+        let reason = handlers[0].reason.as_deref().expect("a refusal is a value");
+        assert!(!reason.trim().is_empty());
+        assert!(reason.contains("no unambiguous node form"), "{reason}");
+        assert!(handlers[1].raisable && handlers[1].reason.is_none());
+        assert!(handlers[2].raisable);
+
+        // …and the default open lands on the first one that can be DRAWN, not
+        // the first one declared.
+        let chosen = choose_handler("Turret", &candidates, &handlers, None).unwrap();
+        assert_eq!(chosen.0, "tick");
+        assert!(inf_blueprint::raise_fn(chosen.2).is_ok());
+    }
+
+    /// A class where nothing raises refuses **by name**, carrying the first
+    /// cause — never an empty canvas.
+    #[test]
+    fn a_class_where_nothing_raises_refuses_with_the_first_cause() {
+        let class = class_with(
+            vec![EventBinding {
+                event: EventKind::Tick,
+                body: unraisable_fn("tick"),
+            }],
+            vec![],
+        );
+        let candidates = actor_candidates(&class);
+        let handlers = actor_handlers(&candidates);
+        let err = choose_handler("Turret", &candidates, &handlers, None)
+            .expect_err("nothing raisable must refuse");
+        assert!(err.contains("No handler of “Turret”"), "{err}");
+        assert!(err.contains("can be drawn as a graph"), "{err}");
+        // The first CAUSE travels with the refusal — "nothing raised" alone
+        // sends the user looking for a bug in the editor.
+        assert!(err.contains("no unambiguous node form"), "{err}");
+    }
+
+    /// An explicit request for a handler the class does not have is refused by
+    /// name rather than silently falling back to another one.
+    #[test]
+    fn an_unknown_handler_request_is_refused_by_name() {
+        let class = class_with(
+            vec![EventBinding {
+                event: EventKind::Tick,
+                body: raisable_fn("tick"),
+            }],
+            vec![],
+        );
+        let candidates = actor_candidates(&class);
+        let handlers = actor_handlers(&candidates);
+        let err = choose_handler("Turret", &candidates, &handlers, Some("custom:nope"))
+            .expect_err("an unknown handler must refuse");
+        assert!(err.contains("custom:nope"), "{err}");
+        // …and the request that DOES name a handler resolves to that one, even
+        // when it is not the first raisable — that is what the switcher needs.
+        let chosen = choose_handler("Turret", &candidates, &handlers, Some("tick")).unwrap();
+        assert_eq!(chosen.0, "tick");
+    }
+
+    /// **Re-opening the same actor on the same handler keeps the live document**
+    /// (Wave E audit, A3) — edits and undo journal intact, as `dcc_open` says at
+    /// its own signature. The first Wave-E version rebuilt unconditionally, so
+    /// "idempotent by asset" was true of the ID and false of the DOCUMENT.
+    #[test]
+    fn re_opening_the_same_handler_reuses_the_live_document() {
+        let state = GraphState::default();
+        let doc_id = "bp:11111111-1111-1111-1111-111111111111";
+        let name = actor_doc_name("Turret", "Tick");
+        seed(&state, doc_id);
+        // Give the seeded doc the title a re-open would compute, plus a node the
+        // author "added" — the thing a rebuild would throw away.
+        state
+            .with(|s| {
+                let d = s.docs.get_mut(doc_id).unwrap();
+                d.name = name.clone();
+                d.graph.insert("event.tick", inf_graph::NodeUi::default());
+                Ok(())
+            })
+            .unwrap();
+
+        let reused = state
+            .with(|s| Ok(reusable_actor_doc(s, doc_id, &name)))
+            .unwrap()
+            .expect("the same actor on the same handler must reuse");
+        assert_eq!(reused.graph.nodes.len(), 1, "the author's work survives");
+
+        // A DIFFERENT handler is a different title, so it rebuilds — which is
+        // what the switcher asks for, and the reason the test is on the title
+        // rather than on the id alone.
+        assert!(
+            state
+                .with(|s| Ok(reusable_actor_doc(
+                    s,
+                    doc_id,
+                    &actor_doc_name("Turret", "Begin Play")
+                )))
+                .unwrap()
+                .is_none(),
+            "switching handler must rebuild, not hand back the other handler's nodes"
+        );
+        // …and an actor with no document open yet has nothing to reuse.
+        assert!(state
+            .with(|s| Ok(reusable_actor_doc(s, "bp:nope", &name)))
+            .unwrap()
+            .is_none());
+    }
+
+    /// The re-open equality test is the document NAME, so it must be built by
+    /// one function — a second `format!` at the comparison site is how an
+    /// "idempotent" open silently stops being one.
+    #[test]
+    fn the_document_name_has_exactly_one_spelling() {
+        assert_eq!(actor_doc_name("Turret", "Tick"), "Turret ▸ Tick");
+        let src = include_str!("graph.rs");
+        assert_eq!(
+            src.matches("format!(\"{class_name} ▸ {handler_label}\")")
+                .count(),
+            1,
+            "the class ▸ handler title must be minted only by `actor_doc_name`"
+        );
     }
 
     fn wire(

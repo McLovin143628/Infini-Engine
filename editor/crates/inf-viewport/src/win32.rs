@@ -480,14 +480,12 @@ thread_local! {
     /// `SIM_RUNNING`'s reason and by its rule: written by the frame loop when
     /// `Cmd::SetInteraction` arrives, read by the wnd_proc on the same thread,
     /// so the two can never race.
-    static INTERACTION: RefCell<InteractionSettings> = const {
-        RefCell::new(InteractionSettings {
-            fly_speed_mps: 8.0,
-            look_sensitivity: 1.0,
-            rmb_click_travel_px: 4.0,
-            rmb_click_ms: 250,
-        })
-    };
+    /// Seeded from [`InteractionSettings::shipped`] rather than repeating the
+    /// four numbers: a `const` block cannot call `Default::default()`, and a
+    /// fourth copy of the shipped feel is a fourth thing to forget (Wave E
+    /// audit, A2).
+    static INTERACTION: RefCell<InteractionSettings> =
+        const { RefCell::new(InteractionSettings::shipped()) };
 }
 
 fn modifier(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bool {
@@ -669,6 +667,12 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             end_capture(Capture::Fly);
             end_capture(Capture::Dolly);
             let settings = INTERACTION.with(|i| *i.borrow());
+            // **Not during Simulate** (Wave E audit, A8), the same gate the
+            // double-click arm carries. Opening the menu acquires the airspace
+            // guard, which HIDES the native child — so a stray right-click tap
+            // would blank a running preview. The flycam half is untouched:
+            // suppressing the menu suppresses only the menu.
+            let simulating = SIM_RUNNING.with(|r| r.get());
             INPUT.with(|s| {
                 let mut s = s.borrow_mut();
                 let elapsed = s
@@ -678,7 +682,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     .unwrap_or(u128::MAX);
                 let travel = std::mem::take(&mut s.right_travel);
                 if let Some(at) = s.right_press.take() {
-                    if crate::camera::is_context_click(travel, elapsed, &settings) {
+                    if !simulating && crate::camera::is_context_click(travel, elapsed, &settings) {
                         s.context_menu = Some(at);
                     }
                 }

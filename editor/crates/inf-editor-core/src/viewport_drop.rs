@@ -33,6 +33,36 @@
 
 use uuid::Uuid;
 
+use crate::ipc::SpawnKind;
+use crate::scene::SceneDoc;
+
+/// **Create the entity a dropped Content-Drawer asset becomes — the ONE door
+/// both drop paths use** (Wave E audit, A6).
+///
+/// There are two of them: `EngineHost::spawn_drop` (a drag that lands on the
+/// native hole) and `scene_spawn_asset` (the Ring-2 command). Wave E taught the
+/// binding rule to each of them separately, and the arm that certified the fix
+/// called neither — it called `SceneDoc::edit_create_mesh_asset` directly, so
+/// its own comment ("delete the `mesh_asset()` branch in `spawn_drop` and the
+/// second assertion fails") named a mutation it could not catch, and the two
+/// doors were free to disagree. This is the P22 law: **one door for two paths.**
+///
+/// `mesh_asset` is `Some` only for a payload that named the `mesh` kind AND a
+/// parseable id ([`DropPayload::mesh_asset`]); everything else keeps the honest
+/// placeholder cube, because binding a texture's GUID to a `MeshRef` renders a
+/// missing mesh instead of a cube that says "I am a placeholder".
+pub fn spawn_asset_entity(
+    doc: &mut SceneDoc,
+    name: &str,
+    mesh_asset: Option<Uuid>,
+    parent: Option<Uuid>,
+) -> Uuid {
+    match mesh_asset {
+        Some(asset) => doc.edit_create_mesh_asset(name, asset, parent),
+        None => doc.edit_create(SpawnKind::Cube, name, parent),
+    }
+}
+
 /// A parsed viewport drop payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DropPayload<'a> {
@@ -176,6 +206,25 @@ mod tests {
                 name: "",
             }
         );
+    }
+
+    /// The shared door, both branches (Wave E audit, A6). Deleting the `Some`
+    /// arm's binding — the mutation the drop-gap arm claimed to catch and could
+    /// not — turns this red, and both production drop paths route through here.
+    #[test]
+    fn the_shared_door_binds_a_mesh_and_only_a_mesh() {
+        let mut doc = SceneDoc::new();
+        let asset = Uuid::from_u128(0x5EED);
+
+        let bound = spawn_asset_entity(&mut doc, "Barrel", Some(asset), None);
+        assert_eq!(doc.mesh_asset_of(bound), Some(asset));
+
+        // A non-mesh keeps the honest placeholder: a real, named, selectable
+        // entity with NO asset bound.
+        let placeholder = spawn_asset_entity(&mut doc, "Bricks", None, None);
+        assert_eq!(doc.mesh_asset_of(placeholder), None);
+        assert_eq!(doc.display_name(placeholder), "Bricks");
+        assert!(doc.primitive_of(placeholder).is_some());
     }
 
     #[test]
