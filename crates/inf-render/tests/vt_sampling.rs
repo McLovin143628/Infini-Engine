@@ -2104,3 +2104,460 @@ fn a_committed_camera_reaches_the_shipped_streaming_loop() {
     assert!(renderer.camera_history().is_empty());
     assert!(renderer.prediction().is_none());
 }
+
+// ── (h) WAVE T: the two sampling channels, executed on the GPU ──────────────
+
+/// A pool config with Wave T's trilinear flag.
+fn pool_cfg_tri(format: PageFormat, pages: u64, trilinear: bool) -> VtPoolConfig {
+    VtPoolConfig {
+        trilinear,
+        ..pool_cfg(format, pages)
+    }
+}
+
+/// A tiled container from raw RGBA8, uncompressed, with a full mip chain.
+fn raw_container(n: u32, mut texel: impl FnMut(u32, u32) -> [u8; 4]) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((n * n * 4) as usize);
+    for y in 0..n {
+        for x in 0..n {
+            rgba.extend_from_slice(&texel(x, y));
+        }
+    }
+    inf_material::build_tiled_texture(
+        rgba,
+        n,
+        n,
+        inf_material::TextureImportSettings {
+            srgb: false,
+            generate_mips: true,
+            compression: inf_material::TextureCompression::None,
+            hdr: false,
+        },
+    )
+    .expect("the fixture tiles")
+    .into_bytes()
+}
+
+/// Register `payloads` (GUID = index + 1) and make **every tile of every level**
+/// resident, so nothing below is a statement about the pyramid's tail.
+fn resident_many(
+    gpu: &GpuContext,
+    payloads: Vec<Vec<u8>>,
+    trilinear: bool,
+) -> (VtTextures, VtPools) {
+    let (mut lib, _) = VtTextures::new(pool_cfg_tri(PageFormat::Rgba8, 256, trilinear));
+    for (i, bytes) in payloads.into_iter().enumerate() {
+        lib.register_or_record(i as u128 + 1, Arc::new(bytes))
+            .expect("the fixture registers");
+    }
+    let mut pools = VtPools::new(&gpu.device, &gpu.queue, lib.residency(), false);
+    let mut wants = Vec::new();
+    for t in 0..lib.residency().texture_count() {
+        let h = VtTextureHandle(t as u32);
+        let desc = lib.residency().desc(h).expect("registered").clone();
+        for m in 0..desc.mip_count() {
+            let g = desc.mips[m as usize];
+            for y in 0..g.tiles_y {
+                for x in 0..g.tiles_x {
+                    wants.push(inf_vt::VtWant::new(h, TileCoord::new(m, x, y)));
+                }
+            }
+        }
+    }
+    let (txn, report) = lib.sync(&gpu.device, &gpu.queue, &mut pools, &wants);
+    assert_eq!(txn.deferred, 0, "the fixture pyramids did not fit");
+    assert!(
+        report.missing.is_empty(),
+        "{} pages missing",
+        report.missing.len()
+    );
+    (lib, pools)
+}
+
+/// One `vt_surface` probe: the three map words, a uv, and the two derivatives.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct SurfaceProbe {
+    maps: [u32; 4],
+    uv: [f32; 2],
+    dd: [f32; 2],
+}
+
+/// Run the **shipped** `vt_surface` on the GPU for every probe and read back
+/// `(normal_ts, roughness)` and `(albedo, alpha)`.
+///
+/// The `vt_sample.wgsl` in this shader is the file the lit passes compose, not a
+/// transliteration — the P26.4 rule that a twin agreeing with a shader nobody
+/// ran is a twin agreeing with itself.
+fn run_surface_probe(
+    gpu: &GpuContext,
+    pools: &VtPools,
+    probes: &[SurfaceProbe],
+) -> Vec<([f32; 4], [f32; 4])> {
+    let vt = include_str!("../src/shaders/vt_sample.wgsl").replace("GROUP_ENV", "0");
+    let src = format!(
+        "{vt}
+struct SProbe {{ maps: vec4<u32>, uv: vec2<f32>, dd: vec2<f32> }};
+@group(0) @binding(0) var<storage, read> probes: array<SProbe>;
+@group(0) @binding(1) var<storage, read_write> outp: array<vec4<f32>>;
+@compute @workgroup_size(64)
+fn cs_surface(@builtin(global_invocation_id) gid: vec3<u32>) {{
+    let i = gid.x;
+    if (i >= arrayLength(&probes)) {{ return; }}
+    let p = probes[i];
+    let s = vt_surface(p.maps.xyz, p.uv,
+                       vec2<f32>(p.dd.x, 0.0), vec2<f32>(0.0, p.dd.y),
+                       vec3<f32>(1.0, 1.0, 1.0), 1.0, 0.0, 0.5);
+    outp[i * 2u] = vec4<f32>(s.normal_ts, s.roughness);
+    outp[i * 2u + 1u] = vec4<f32>(s.albedo, s.alpha);
+}}
+"
+    );
+    let module = gpu
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vt-surface-probe"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+    let in_size = std::mem::size_of_val(probes) as u64;
+    let probe_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("sprobes"),
+        size: in_size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    gpu.queue
+        .write_buffer(&probe_buf, 0, bytemuck::cast_slice(probes));
+    let out_size = (probes.len() * 2 * 16) as u64;
+    let out_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("surface-out"),
+        size: out_size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let rb = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("surface-rb"),
+        size: out_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let storage = |read_only: bool| wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Storage { read_only },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let mut entries = vec![
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: storage(true),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: storage(false),
+            count: None,
+        },
+    ];
+    for mut e in VtPools::bind_group_layout_entries(14) {
+        e.visibility = wgpu::ShaderStages::COMPUTE;
+        entries.push(e);
+    }
+    let bgl = gpu
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vt-surface-probe"),
+            entries: &entries,
+        });
+    let mut bg_entries = vec![
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: probe_buf.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: out_buf.as_entire_binding(),
+        },
+    ];
+    bg_entries.extend(pools.bind_group_entries(14));
+    let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vt-surface-probe"),
+        layout: &bgl,
+        entries: &bg_entries,
+    });
+    let layout = gpu
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vt-surface-probe"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+    let pipeline = gpu
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("vt-surface-probe"),
+            layout: Some(&layout),
+            module: &module,
+            entry_point: Some("cs_surface"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let mut enc = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("vt-surface-probe"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.dispatch_workgroups((probes.len() as u32).div_ceil(64).max(1), 1, 1);
+    }
+    enc.copy_buffer_to_buffer(&out_buf, 0, &rb, 0, out_size);
+    gpu.queue.submit([enc.finish()]);
+    let slice = rb.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let mapped = slice.get_mapped_range().expect("map surface readback");
+    let raw: Vec<[f32; 4]> = bytemuck::cast_slice::<u8, [f32; 4]>(&mapped).to_vec();
+    drop(mapped);
+    rb.unmap();
+    raw.chunks_exact(2).map(|c| (c[0], c[1])).collect()
+}
+
+/// **WAVE T: the detail map reaches the surface, and is INERT without one**
+/// (the texture document's section 3 A).
+///
+/// A feature that ships behind a default-off lane has two claims to prove and
+/// they falsify opposite mistakes:
+///
+/// 1. **inert** — with the detail lane zero, `vt_surface` returns exactly what
+///    it returned before Wave T. That is what makes "the 54 goldens did not
+///    move" a measurement rather than a hope, and it is asserted as equality,
+///    not as a tolerance.
+/// 2. **engaged** — with the lane set, the tangent-space normal moves in the
+///    direction the detail map's XY says and the roughness is multiplied by its
+///    alpha. Without this the whole channel could be dead code and every other
+///    arm in the file would still pass.
+///
+/// A third case is the one a shipping bug lives in: the slot set and the SCALE
+/// zero must be inert, because the two fields are one decision and a surface
+/// that sampled a detail map at 0x would tile it once across the whole object.
+#[test]
+fn the_detail_map_reaches_the_surface_and_is_inert_without_one() {
+    let Some(gpu) = gpu_or_skip("Wave T detail maps") else {
+        return;
+    };
+    // Texture 1: the base normal map — flat (0,0,1) everywhere, so any XY in the
+    // result came from the detail map and nowhere else.
+    let base = raw_container(128, |_, _| [128, 128, 255, 255]);
+    // Texture 2: the detail map — a constant, strongly non-neutral normal whose
+    // X is +1 and Y is -1, with alpha 0.5 so the roughness term is visible too.
+    let detail = raw_container(64, |_, _| [255, 0, 128, 128]);
+    let (lib, pools) = resident_many(&gpu, vec![base, detail], false);
+    let base_slot = lib.set_for(Some(1), Some(1), None).normal;
+    let detail_slot = lib.set_for(Some(2), None, None).albedo;
+    assert!(
+        base_slot != 0 && detail_slot != 0,
+        "the fixture is not warm"
+    );
+
+    // The three map words: albedo unbound, normal = the base map, ORM unbound.
+    // The detail slot rides the ALBEDO word's top half and the scale the NORMAL
+    // word's, exactly as `VtTextureSet::slots` packs them.
+    let plain = [0u32, base_slot, 0, 0];
+    let with_detail = [
+        detail_slot << 16,
+        base_slot | (u32::from(inf_render::detail_scale_q8(4.0)) << 16),
+        0,
+        0,
+    ];
+    let scale_zero = [detail_slot << 16, base_slot, 0, 0];
+
+    // A tiny derivative, so the detail texture resolves near mip 0 and its fade
+    // weight is 1 — the arm is about the blend, not about the ramp.
+    let dd = [1e-5f32, 1e-5];
+    let probes: Vec<SurfaceProbe> = [plain, with_detail, scale_zero]
+        .into_iter()
+        .flat_map(|maps| {
+            [(0.25f32, 0.25f32), (0.5, 0.5), (0.75, 0.6)]
+                .into_iter()
+                .map(move |(u, v)| SurfaceProbe {
+                    maps,
+                    uv: [u, v],
+                    dd,
+                })
+        })
+        .collect();
+    let got = run_surface_probe(&gpu, &pools, &probes);
+
+    for k in 0..3 {
+        let (no_detail, _) = got[k];
+        let (detailed, _) = got[3 + k];
+        let (zero_scale, _) = got[6 + k];
+
+        // (1) INERT — both ways of saying "no detail" give the same surface.
+        assert_eq!(
+            no_detail, zero_scale,
+            "probe {k}: a detail slot with scale 0 changed the surface; the slot \
+             and the scale are one decision"
+        );
+        // The base map really is flat, so the un-detailed normal is +Z.
+        assert!(
+            no_detail[0].abs() < 0.02 && no_detail[1].abs() < 0.02 && no_detail[2] > 0.9,
+            "probe {k}: the base normal is not flat: {no_detail:?} — the arm below \
+             cannot attribute a change to the detail map"
+        );
+        assert!(
+            (no_detail[3] - 0.5).abs() < 1e-6,
+            "probe {k}: the scalar roughness did not pass through: {}",
+            no_detail[3]
+        );
+
+        // (2) ENGAGED — and in the direction the detail map says.
+        assert!(
+            detailed[0] > 0.4,
+            "probe {k}: the detail map's +X did not reach the normal: {detailed:?}"
+        );
+        assert!(
+            detailed[1] < -0.4,
+            "probe {k}: the detail map's -Y did not reach the normal: {detailed:?}"
+        );
+        assert!(
+            (detailed[3] - 0.25).abs() < 0.02,
+            "probe {k}: roughness is {} — the detail alpha (about 0.5) did not \
+             multiply the scalar 0.5",
+            detailed[3]
+        );
+        // The result is still a unit vector: a blend that forgot to normalize
+        // reads as a lighting error nobody traces back to here.
+        let len =
+            (detailed[0] * detailed[0] + detailed[1] * detailed[1] + detailed[2] * detailed[2])
+                .sqrt();
+        assert!((len - 1.0).abs() < 1e-3, "probe {k}: |n| = {len}");
+    }
+}
+
+/// **WAVE T: trilinear blends two levels, and is OFF by default** (T47).
+///
+/// The same two claims, on the other channel. The derivative is picked so the
+/// level of detail lands at **1.5**, i.e. the worst case for a truncating
+/// sampler: half a level of error, which is exactly the mip band a camera dolly
+/// walks through.
+///
+/// # The fixture, and the one this arm started with
+///
+/// **A 32-texel stripe pattern does not work, and it is worth writing down why**
+/// — it was this arm's first fixture and it measured *zero* of 24 probes
+/// changing. A power-of-two-aligned stripe is very nearly **scale-invariant
+/// under a box downsample**: every pair of texels averaged lies inside the same
+/// stripe, so mip 1 is mip 0 at half the resolution with the same values, and
+/// blending two levels of it changes nothing anywhere except within one texel of
+/// an edge. The arm would have failed for a good reason and read as a broken
+/// feature.
+///
+/// A **1-in-6 bright pattern** is not aligned to the halving, so each level
+/// genuinely averages differently from the one above it, and "the two levels
+/// disagree at this uv" is true almost everywhere. The final assertion measures
+/// that property directly rather than trusting this paragraph.
+#[test]
+fn trilinear_blends_two_levels_and_is_off_by_default() {
+    let Some(gpu) = gpu_or_skip("Wave T trilinear") else {
+        return;
+    };
+    let stripes = || {
+        raw_container(256, |x, _| {
+            let v = if x % 6 == 0 { 250 } else { 10 };
+            [v, v, v, 255]
+        })
+    };
+    let (lib_off, pools_off) = resident_many(&gpu, vec![stripes()], false);
+    let (lib_on, pools_on) = resident_many(&gpu, vec![stripes()], true);
+    let slot_off = lib_off.set_for(Some(1), None, None).albedo;
+    let slot_on = lib_on.set_for(Some(1), None, None).albedo;
+    assert!(slot_off != 0 && slot_on != 0, "the fixture is not warm");
+
+    // rho = 2^1.5 texels of a 256-texel level, so lod = 1.5 — the maximum
+    // possible distance from an integer level.
+    let dd = [2f32.powf(1.5) / 256.0, 2f32.powf(1.5) / 256.0];
+    // …and an integer level, where the two paths must agree exactly.
+    let dd_int = [2.0f32 / 256.0, 2.0 / 256.0];
+
+    let sweep: Vec<(f32, f32)> = (0..24).map(|i| (i as f32 / 24.0 + 0.01, 0.37)).collect();
+    let build = |slot: u32, dd: [f32; 2]| -> Vec<SurfaceProbe> {
+        sweep
+            .iter()
+            .map(|&(u, v)| SurfaceProbe {
+                maps: [slot, 0, 0, 0],
+                uv: [u, v],
+                dd,
+            })
+            .collect()
+    };
+
+    let off = run_surface_probe(&gpu, &pools_off, &build(slot_off, dd));
+    let on = run_surface_probe(&gpu, &pools_on, &build(slot_on, dd));
+    let off_int = run_surface_probe(&gpu, &pools_off, &build(slot_off, dd_int));
+    let on_int = run_surface_probe(&gpu, &pools_on, &build(slot_on, dd_int));
+
+    // (2) ENGAGED at a fractional level.
+    let differing = off
+        .iter()
+        .zip(&on)
+        .filter(|(a, b)| (a.1[0] - b.1[0]).abs() > 1.0 / 255.0)
+        .count();
+    assert!(
+        differing >= sweep.len() / 4,
+        "only {differing} of {} probes changed with trilinear on — the second tap \
+         is not reaching the result",
+        sweep.len()
+    );
+
+    // (1) INERT at an integer level: `blend < 0.01` takes the early-out, so the
+    // flag costs nothing and returns the same value.
+    for (i, (a, b)) in off_int.iter().zip(&on_int).enumerate() {
+        assert_eq!(
+            a.1, b.1,
+            "probe {i}: trilinear changed a sample at an INTEGER level of detail, \
+             where the document's own early-out says it must not"
+        );
+    }
+    // ANTI-VACUITY, and the finding this arm's first fixture produced: the two
+    // levels being blended must actually DISAGREE. A pattern aligned to the
+    // halving (a 32-texel stripe) is scale-invariant under a box downsample, so
+    // mip 1 and mip 2 are the same image at the same uv and a correct trilinear
+    // sampler changes nothing — measured as 0 of 24 probes, which reads exactly
+    // like a dead feature. Asserted here on the levels themselves rather than
+    // trusted from the doc comment.
+    let spread = off
+        .iter()
+        .map(|(_, c)| c[0])
+        .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
+    assert!(
+        spread.1 - spread.0 > 0.05,
+        "the fixture is flat at this level of detail ({spread:?}) — nothing here \
+         could have differed"
+    );
+    let coarser = run_surface_probe(
+        &gpu,
+        &pools_off,
+        &build(slot_off, [dd_int[0] * 2.0, dd_int[1] * 2.0]),
+    );
+    let level_gap = off_int
+        .iter()
+        .zip(&coarser)
+        .filter(|(a, b)| (a.1[0] - b.1[0]).abs() > 1.0 / 255.0)
+        .count();
+    assert!(
+        level_gap >= sweep.len() / 2,
+        "mip 1 and mip 2 of the fixture agree at {} of {} probes — a blend \
+         between them could not change anything, so the arm above certifies \
+         nothing",
+        sweep.len() - level_gap,
+        sweep.len()
+    );
+}

@@ -138,8 +138,8 @@ pub use scene::{
     DEFAULT_SUN_DIR, HAIR_TINT, ID_GIZMO_BASE, ID_NONE,
 };
 pub use scene::{
-    take_unchanged_terrain, take_unchanged_voxel, terrain_id_from_guid, Ambient2D, LightKind,
-    MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D, RenderScene,
+    detail_scale_q8, take_unchanged_terrain, take_unchanged_voxel, terrain_id_from_guid, Ambient2D,
+    LightKind, MeshInstance, PrebatchedRun, RenderChunk, RenderLight, RenderLight2D, RenderScene,
     RenderTerrain, RenderTerrainLayer, RenderTerrainTile, SeamSample, VtTextureSet,
     DEFAULT_SEAM_BAND_M,
 };

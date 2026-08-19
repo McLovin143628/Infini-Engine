@@ -283,7 +283,7 @@ pub fn plan_map_set(files: &[String], float_sources: &[bool]) -> MapSetPlan {
         found.iter().find(|(kind, _, _)| *kind == k)
     };
 
-    let mut push = |plan: &mut MapSetPlan, k: MapKind| {
+    let push = |plan: &mut MapSetPlan, k: MapKind| {
         if let Some((_, file, is_float)) = take(k) {
             plan.textures.push(PlannedTexture {
                 kind: k,

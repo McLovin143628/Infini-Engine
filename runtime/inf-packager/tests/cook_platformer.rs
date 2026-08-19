@@ -1080,10 +1080,23 @@ fn cook_pairs_cluster_pages_with_the_tiles_their_materials_sample() {
 
     let reader = PackReader::open(&out.join(DEFAULT_PACK_NAME)).unwrap();
     let vbytes = reader.read(derived_vmesh_id(mesh_id)).unwrap();
+    // **The MINIMUM version this payload needs, not the newest the build knows**
+    // (Wave T). `.inf_vmesh` v4 appends a per-meshlet materials section, and a
+    // mesh that carries none — which this fixture does not — is still written as
+    // v3, byte-identical to what it was before the bump. That is the whole point
+    // of `vmesh_min_schema_version`: no content hash moves and no older reader is
+    // refused for a section that is not there. The assertion is therefore on the
+    // rule rather than on the constant, and it fails the day the writer starts
+    // stamping something else.
     assert_eq!(
         inf_vgeom::asset::container_version(&vbytes),
-        Some(inf_vgeom::VMESH_ASSET_SCHEMA_VERSION),
-        "the cook emits the current container"
+        Some(inf_vgeom::asset::vmesh_min_schema_version(false)),
+        "the cook emits the lowest container version its payload needs"
+    );
+    assert_eq!(
+        inf_vgeom::asset::vmesh_min_schema_version(true),
+        inf_vgeom::VMESH_ASSET_SCHEMA_VERSION,
+        "a mesh WITH per-meshlet materials must stamp the current version"
     );
     let r = inf_vgeom::VgeomAssetReader::new(vbytes.as_slice()).expect("index");
 
