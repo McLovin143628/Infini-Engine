@@ -580,7 +580,7 @@ impl Default for RenderSettingsRecord {
 ///
 /// [`EntityRecord`] is the alias and is byte-for-byte what this declaration
 /// always was. The parameter exists so the frozen v23 record can compose the old
-/// [`inf_ecs::TerrainLayer`] shape with the other forty-odd fields instead of
+/// [`inf_ecs::components::TerrainLayer`] shape with the other forty-odd fields instead of
 /// restating them — the same idiom `EntityRecordV20Gen`'s material parameter
 /// already uses. The Ring-0 mirror (`inf_scene::RuntimeEntityGen`) does exactly
 /// the same thing, and must: these two are byte-compared.
@@ -909,7 +909,7 @@ fn freeze_entity_shell(r: EntityRecord) -> EntityRecordV23 {
     }
 }
 
-/// The **pre-v24** [`inf_ecs::TerrainLayer`] byte layout — the Ring-1 mirror of
+/// The **pre-v24** [`inf_ecs::components::TerrainLayer`] byte layout — the Ring-1 mirror of
 /// `inf_scene`'s frozen copy. See that one for the full argument; the short
 /// version is that a v23 payload's layer bytes end at `tex_scale`, so decoding
 /// one through the grown layer mis-assigns four bytes per terrain.

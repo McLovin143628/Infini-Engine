@@ -5,7 +5,7 @@
 //! editors use — with a PCG-specific [`pcg_registry`] and no exec pins. A single
 //! `output.pcg` SINK collects one scatter chain; [`lower_graph`] walks the graph
 //! backward from that sink into the stable, serialization-locked
-//! [`PcgDocument`](crate::rules::PcgDocument) runtime model (the way the material
+//! [`PcgDocument`] runtime model (the way the material
 //! emitter walks to WGSL and the blueprint lowerer targets `BlueprintFn`). The
 //! runtime evaluates the lowered document, so **editor preview == runtime**.
 //!
@@ -80,7 +80,7 @@
 //! ## `mask.image` and the [`MaskSource`] seam
 //!
 //! `mask.image` names a texture asset by GUID, and the runtime
-//! [`SamplerDef::Mask`](crate::rules::SamplerDef::Mask) carries **pixels**, not a
+//! [`SamplerDef::Mask`] carries **pixels**, not a
 //! reference — a lowered document is self-contained by design. The lowerer
 //! therefore resolves the GUID through a [`MaskSource`] the caller supplies:
 //! [`lower_graph_with`] takes one, and [`lower_graph`] passes [`NoMasks`], under

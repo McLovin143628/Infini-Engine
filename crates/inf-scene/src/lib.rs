@@ -376,7 +376,7 @@ use uuid::Uuid;
 ///   per-layer material reference where the splat layer previously had only a
 ///   solid albedo and a procedural grain. This one *is* the expensive shape:
 ///   `TerrainLayer` is nested inside `Terrain` inside the entity record, so it
-///   costs a frozen [`TerrainLayerV23`], a frozen [`TerrainV23`], and repointing
+///   costs a frozen `TerrainLayerV23`, a frozen `TerrainV23`, and repointing
 ///   the seven frozen entity records that carried the live `Terrain`. There is
 ///   no cheaper placement that puts the field where it belongs — on the layer.
 pub const SCHEMA_VERSION: u32 = 24;
@@ -503,7 +503,7 @@ pub type Result<T> = std::result::Result<T, SceneError>;
 /// [`RuntimeEntity`] is the alias, and it is byte-for-byte what this declaration
 /// always was. The parameter exists for the same reason `EntityRecordV20Gen`'s
 /// material parameter does: v24 grew exactly ONE nested component
-/// ([`inf_ecs::TerrainLayer`] gained its material binding), and the frozen v23
+/// (`inf_ecs::components::TerrainLayer` gained its material binding), and the frozen v23
 /// record needs the *old* shape of that component composed with the other
 /// forty-odd fields — restating them would be forty chances to mistype a field
 /// list that the compiler cannot check against anything.

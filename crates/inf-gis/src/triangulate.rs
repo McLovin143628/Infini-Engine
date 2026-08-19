@@ -29,7 +29,7 @@
 //! the vertex type** ([`GisVertex`]), so there is no parallel array to fall out
 //! of step, and the output vertex buffer is built by walking
 //! `triangulation.vertices()` in spade's own order — so `index()` is correct by
-//! construction rather than by coincidence. [`elevations_follow_their_own_vertices`]
+//! construction rather than by coincidence. `elevations_follow_their_own_vertices`
 //! pins it on input that contains duplicates.
 //!
 //! # Holes

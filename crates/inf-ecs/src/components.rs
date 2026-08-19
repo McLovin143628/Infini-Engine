@@ -5454,7 +5454,7 @@ pub struct IkGoalRecord {
     /// Follow this entity: the goal is `target` **offset from** its world
     /// position. Unbound ⇒ `target` is an absolute world position.
     ///
-    /// An [`EntityRef`](crate::refs::EntityRef) (E-P1) rather than a bare
+    /// An [`EntityRef`] (E-P1) rather than a bare
     /// `Option<Uuid>`, so the Details panel surfaces the entity-picker widget it
     /// already has instead of `#[reflect(ignore)]`-ing the one field an author is
     /// most likely to want to set by clicking. `#[serde(transparent)]` on that

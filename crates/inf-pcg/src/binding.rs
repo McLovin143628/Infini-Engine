@@ -35,7 +35,7 @@
 //!    doctrine); the tuple simply grew the biome.
 //!
 //!    **What actually prevents co-placement today is disjointness, not the
-//!    seed.** [`TerrainFields::biome_id`](crate::fields::TerrainFields::biome_id)
+//!    seed.** [`TerrainFields::biome_id`]
 //!    answers with exactly **one** id per world position, and
 //!    [`BiomeMask`](crate::sampler::BiomeMask) scores `0` unless that id matches —
 //!    so at any point at most one biome's mask is positive, and the feather only

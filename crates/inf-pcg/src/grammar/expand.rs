@@ -175,7 +175,7 @@ pub enum SpanSource {
     ///
     /// # It costs no schema bump, and that is deliberate
     ///
-    /// [`SpanSource`] is not part of [`PcgDocument`] (see the type's own note):
+    /// [`SpanSource`] is not part of [`crate::PcgDocument`] (see the type's own note):
     /// it rides `LoweredPcg::grammars`, and the player re-lowers the stored graph
     /// JSON, which is the source of truth. The graph JSON is self-describing, so
     /// an added variant and an added node are additive.

@@ -28,7 +28,7 @@
 //!
 //! **This engine takes file order, always:** the first component is X
 //! (easting/longitude), the second is Y (northing/latitude). One convention, at
-//! one door, pinned by [`the_axis_convention_is_file_order_not_authority_order`].
+//! one door, pinned by `the_axis_convention_is_file_order_not_authority_order`.
 //! A transposed import is caught by the range check inside
 //! [`Transform::to_world`] for geographic sources — a "latitude" of 123 is
 //! impossible — which turns the silent failure into a named one for the single

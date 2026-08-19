@@ -1,7 +1,7 @@
 //! The lowered runtime shape of a `building.plan` node, and its evaluation.
 //!
-//! A [`BuildingPass`] is to [`build`](super::build) what a
-//! [`GrammarPass`](crate::grammar::GrammarPass) is to
+//! A [`BuildingPass`] is to [`build`] what a
+//! [`GrammarPass`] is to
 //! [`expand_span`](crate::grammar::expand_span): everything the node authored,
 //! resolved against the evaluating volume at run time and not before.
 //!
@@ -20,7 +20,7 @@
 //! A building needs a rectangle. It gets one of three ways, in order:
 //!
 //! 1. a **span** connected to the node's `lot` pin — the XZ bounding box of
-//!    whatever [`build_spans`](crate::grammar::build_spans) produces, so a
+//!    whatever [`build_spans`] produces, so a
 //!    spline-derived lot and a footprint-derived lot both work and neither
 //!    needed a new concept. **This is the closure P19.4's remainder pointed at**
 //!    ("a biome is a painted *region* and a grammar needs a *span*"): a region

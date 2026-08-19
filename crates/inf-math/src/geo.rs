@@ -43,7 +43,7 @@
 //!
 //! Getting the `z` sign backwards would mirror every imported map east-for-west
 //! while leaving the sun where it was — a defect with no visual signature until
-//! somebody notices the shadows fall the wrong way at noon. [`anchor_axes_match_the_solar_frame`]
+//! somebody notices the shadows fall the wrong way at noon. `anchor_axes_match_the_solar_frame`
 //! pins it against the solar module's own constants rather than against a
 //! restatement of them.
 //!

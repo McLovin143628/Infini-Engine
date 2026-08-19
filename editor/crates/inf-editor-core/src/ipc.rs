@@ -2584,7 +2584,7 @@ impl MixerConfigDto {
 
     /// Convert the edited DTO back into a Ring-0 [`inf_audio::MixerConfig`],
     /// stamping the current schema version. Does NOT validate — the command layer
-    /// runs [`validate_mixer`](crate::ipc::validate_mixer) before persisting.
+    /// runs [`validate_mixer`] before persisting.
     pub fn to_config(&self) -> inf_audio::MixerConfig {
         inf_audio::MixerConfig {
             schema_version: inf_audio::mixer::MIXER_SCHEMA_VERSION,

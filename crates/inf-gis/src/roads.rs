@@ -14,7 +14,7 @@
 //! affect the output". With a `HashMap`, two cooks of the same Shapefile emit
 //! different bytes, the cook-determinism gate goes red, and the reason would be
 //! hard to find because the *geometry* would be identical every time. See
-//! [`the_graph_is_order_independent`].
+//! `the_graph_is_order_independent`.
 //!
 //! **2. `spine_coordinates: Vec<[f64; 2]>` must carry a Y.** The engine is Y-up
 //! f64 (architecture rule 3), and a road that cannot say what height it is at is

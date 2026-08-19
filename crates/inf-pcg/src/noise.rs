@@ -1,7 +1,7 @@
 //! Hand-rolled, seedable **value noise + fBm** — the procedural density source.
 //!
 //! Deterministic and dependency-free: lattice corner values come from the
-//! counter-based [`Hash64`](crate::hash::Hash64) so the field is a pure function
+//! counter-based [`Hash64`] so the field is a pure function
 //! of `(seed, position)`. Value noise (hash-per-lattice-point, quintic-faded
 //! bilinear interpolation) is cheaper and lower-quality than gradient/simplex
 //! noise; swapping in a simplex kernel later is contained to [`value_noise_2d`]

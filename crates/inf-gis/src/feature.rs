@@ -53,7 +53,7 @@ fn fold_field_name(s: &str) -> String {
 /// [`Attr::Number`] holds an `f64`, which has no total order, and the sort a
 /// reader would reach for — `sort_by(|a, b| a.partial_cmp(b).unwrap())` — panics
 /// on the first NaN. Determinism here comes from the container instead: a
-/// feature's attributes are a [`BTreeMap`](std::collections::BTreeMap) keyed on
+/// feature's attributes are a [`BTreeMap`] keyed on
 /// the field NAME, which is a `String` and does have a total order, and a
 /// layer's features keep their file order. Sort by an attribute with
 /// [`f64::total_cmp`] through [`Attr::as_number`] if you need to.

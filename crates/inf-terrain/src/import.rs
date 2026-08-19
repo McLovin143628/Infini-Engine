@@ -488,7 +488,7 @@ impl NodataHandling {
     /// # Why this exists (Wave-G audit finding A1)
     ///
     /// A GeoTIFF's `GDAL_NODATA` is stated in the file's **own vertical unit**,
-    /// and [`decode_rows_tiff`] converts feet to metres *before* a row reaches
+    /// and `decode_rows_tiff` converts feet to metres *before* a row reaches
     /// the policy. Comparing an unscaled sentinel against a scaled sample
     /// matches nothing at all, silently: a foot DEM declaring `-9999` hands the
     /// policy `-3047.6952`, [`is_nodata`](Self::is_nodata) says no, the void
@@ -969,7 +969,7 @@ fn tiff_err(what: &str, e: &tiff::TiffError) -> TerrainError {
 
 /// The most a TIFF chunk row may cost before the import is refused.
 ///
-/// See the refusal inside [`decode_rows_tiff`] for why a ceiling is needed at
+/// See the refusal inside `decode_rows_tiff` for why a ceiling is needed at
 /// all: for a single-strip TIFF "one chunk row" *is* the whole image, and the
 /// P16.4a streaming bound is a property of the file's layout rather than of this
 /// decoder. 256 MiB is deliberately generous — it takes a 4 k x 4 k single-strip

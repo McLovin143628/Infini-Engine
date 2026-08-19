@@ -26,13 +26,13 @@
 //!
 //! P19.5 grows this into buildings: floor stacks, room partitioning, doors and
 //! windows, per-room furniture, and building-type palettes. The seams that batch
-//! needs are already the shape it wants — a [`SpanSet`](span::SpanSet) can carry
-//! a floor plate's partition lines, a [`ModuleDef`](dsl::ModuleDef) is one entry
+//! needs are already the shape it wants — a [`SpanSet`] can carry
+//! a floor plate's partition lines, a [`ModuleDef`] is one entry
 //! of what becomes a building set — but nothing here knows about interiors.
 //!
 //! # Where a pass lives, and why it is not in `PcgDocument`
 //!
-//! A [`GrammarPass`](expand::GrammarPass) rides
+//! A [`GrammarPass`] rides
 //! [`LoweredPcg::grammars`](crate::graph::LoweredPcg), **not** the serialized
 //! [`PcgDocument`](crate::rules::PcgDocument). `PcgDocument` is the frozen v2
 //! `.inf_pcg` wire and bincode is positional, so growing it by one field would
