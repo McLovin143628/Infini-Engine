@@ -96,10 +96,15 @@ export async function openObjectEditor(
  * **What a double-click means**: open this object's primary editor, and dock
  * every other editor it has as a TAB of the same group.
  *
- * That is the mandate's shape — the DCC opens with the object loaded, and the
- * object's blueprint (and its code, when there is a file) sit beside it. The
- * grouping is why `openBesidePanel` exists; without it three routes would open
- * three panels in three places.
+ * That is the mandate's shape — the DCC opens with the object loaded and the
+ * object's blueprint sits beside it. The grouping is why `openBesidePanel`
+ * exists; without it three routes would open three panels in three places.
+ *
+ * **A CODE tab is not among them, and that is honest rather than an oversight**:
+ * a blueprint class has no on-disk Rust to open. `.inf_act` stores the lowered
+ * IR, and `graph_generate`'s output has never been written to a file — inventing
+ * a path for it is a transpiler-workflow decision, not a UX one. Carried as a
+ * named remainder in the Wave E ledger.
  */
 export async function openObject(guid: string): Promise<void> {
   const [dto] = await sceneIpc.entityEditors([guid]);
