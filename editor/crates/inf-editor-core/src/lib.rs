@@ -24,6 +24,11 @@ pub mod groom;
 // `SkeletonAsset`, snapshot-undone (see the module docs for why not a journal).
 pub mod diagnostics;
 pub mod erosion_gpu;
+// Wave G: GIS vector layers become scene entities through the doors that
+// already exist — a stream becomes the same WaterBody+Spline the hydrology tool
+// creates, so the river validator and the cook advisory apply to imported water
+// on the day it lands.
+pub mod gis;
 pub mod hydro;
 pub mod ipc;
 pub mod layouts;

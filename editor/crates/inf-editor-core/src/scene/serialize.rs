@@ -6786,6 +6786,13 @@ pub fn apply_to_doc(doc: &mut SceneDoc, file: &SceneFile) {
     }
     doc.set_title(&file.title);
     doc.set_settings(file.settings);
+    // **The anchor loads too.** Omitting this compiles, passes every codec
+    // round-trip test (they compare `SceneFile`s, which never touch a document)
+    // and silently drops a level's geo-anchor on every open — the exact shape of
+    // the P21 law that a boot path which forgets an attachment does not crash,
+    // it agrees with itself. `v24_anchor_and_layer_materials_round_trip_through_
+    // the_codec_and_the_world` is the arm that watches this line.
+    doc.set_geo(file.geo.clone());
     doc.world_mut().mark_dirty();
     doc.world_mut().propagate();
 }
@@ -14182,6 +14189,10 @@ mod tests {
     /// Reusing the frozen `TerrainLayerV23` here would let the pin decode a v24
     /// payload while silently mis-assigning four bytes per terrain.
     #[derive(Default, serde::Deserialize)]
+    // A wire pin exists to be DECODED THROUGH, not read — the same reason
+    // CharacterMovementWire beside it carries this. Its fields ARE the
+    // assertion: naming them is what makes the shape independent.
+    #[allow(dead_code)]
     struct TerrainLayerV24Wire {
         albedo: Color,
         roughness: f64,
@@ -14191,6 +14202,10 @@ mod tests {
 
     /// The **v24 terrain component**, re-declared field-for-field.
     #[derive(Default, serde::Deserialize)]
+    // A wire pin exists to be DECODED THROUGH, not read — the same reason
+    // CharacterMovementWire beside it carries this. Its fields ARE the
+    // assertion: naming them is what makes the shape independent.
+    #[allow(dead_code)]
     struct TerrainV24Wire {
         meters_per_sample: f64,
         tile_resolution: u32,
@@ -14203,6 +14218,10 @@ mod tests {
 
     /// The **v24 geo-anchor**, re-declared independently — the file's new tail.
     #[derive(Default, serde::Deserialize)]
+    // A wire pin exists to be DECODED THROUGH, not read — the same reason
+    // CharacterMovementWire beside it carries this. Its fields ARE the
+    // assertion: naming them is what makes the shape independent.
+    #[allow(dead_code)]
     struct GeoAnchorWire {
         enabled: bool,
         crs: String,
@@ -14970,8 +14989,18 @@ mod tests {
         assert_eq!(t.layers[3].material, None, "layer 3 was never bound");
 
         // **Through the world.** The codec agreeing with itself proves nothing
-        // about whether the document can carry the field.
+        // about whether the document can carry the field — every round-trip arm
+        // above compares `SceneFile`s, and a `SceneFile` never touches a
+        // document. This is the arm that caught `apply_to_doc` setting the
+        // settings and dropping the anchor.
         apply_to_doc(&mut doc, &back);
+        assert_eq!(
+            *doc.geo(),
+            v24_fixture_geo(),
+            "loading a level dropped its geo-anchor — the document has the field \
+             and the loader does not set it, which loses a level's place on Earth \
+             on every open without failing anything"
+        );
         let guid = uuid::Uuid::from_u128(0xFD24);
         let rec = record_of(&doc, guid).expect("the ground came back out of the world");
         let wt = rec.terrain.as_ref().expect("its terrain came back");

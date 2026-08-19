@@ -3194,6 +3194,7 @@ dependencies = [
  "inf-core",
  "inf-dcc",
  "inf-ecs",
+ "inf-gis",
  "inf-graph",
  "inf-input",
  "inf-material",

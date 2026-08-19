@@ -22317,3 +22317,71 @@ far side of the new refusal, manufacturing files that reader rejects. Neither is
 a criticism of the wave. Both are one measurement: **a fix is closed when
 something that can see it break is watching, and a report saying so is not that
 thing.**
+
+---
+
+## Terrain & GIS Wave (2026-08-19) — the owner's terrain / height-map / vector-data document
+
+**Not** one of the hardening waves A–J above; a separate, feature-shaped wave answering
+`Rust_Game_Engine_Terrain_Height_Maps_Vector_Data.md`. Its full item-by-item disposition —
+every prescription, every CANNOT written for a human, every deferral with a landing site — is
+`docs/memos/wave-g-terrain-gis-disposition.md`. **Read that, not this.** This block is the
+engineering summary.
+
+**First finding, and it goes to the owner:** the document contains **no bold markup at all**
+(0 `**`, 0 `__`, 0 `<b>`, 0 Unicode math-bold; all 34 `*` are list bullets), so the brief's
+"bolded passages are highest priority" could not be honoured literally. Priority followed the
+document's own emphasis devices instead. Re-pasting it with bold intact would let the priority
+be re-derived.
+
+**Tally:** 14 SHIPPED · 11 ALREADY-HAD · 4 PARTIAL · 6 DEFERRED · 3 CANNOT. The document's
+Part 3 (streaming architecture) is essentially a description of Phases 9 and 16.
+
+### What shipped
+
+* **`inf-gis`** — the one crate naming `proj4rs`/`shapefile`/`geojson`/`geo-types`/`spade`,
+  per the facade discipline. Host-only: nothing in the shipped player links it. Seven new
+  crates, all pure Rust, all MIT/Apache-family, zero native C, `cargo deny` green.
+* **`inf_math::geo::GeoAnchor`** — where on Earth world (0,0,0) is. Placed in `inf-math`
+  because `inf-scene` depends on `inf-terrain` and the terrain importer must subtract it; the
+  leaf both share is the only non-cyclic placement, and it is where P17.1 already pinned the
+  compass the anchor has to agree with.
+* **GeoTIFF import** through the existing `decode_rows` seam, with the byte-identity
+  determinism gate extended to cover it, plus **the nodata policy door** (refuse / clamp /
+  fill-row, recorded in the sidecar so a re-import reproduces the same terrain).
+* **The `.inf_terrain` header's `origin`** finally written — a field the format has carried
+  since v2 with every importer writing zero into it. **No header bump**: the bytes were always
+  there.
+* **Scene schema v24**, once, carrying the geo-anchor **and** `TerrainLayer::material`.
+  `.inf_mat` v2→v3 and `.inf_matd` v1→v2 in their own containers for the detail slot.
+  `SCENE_PAYLOAD_VERSION` 9→10 by the envelope's own doctrine.
+* **The layered-terrain fragment probe** — Wave T's third carried item. `dpdx` is
+  fragment-stage-only, so no compute probe could ever have executed that branch.
+* **Vector in**: Shapefile + GeoJSON → one normalized feature type in world metres; road
+  graphs (`BTreeMap`, per the determinism law), terrain-conforming road ribbons, and
+  constrained-Delaunay polygon triangulation — the engine's **first polygon primitive**.
+* **`SpanSource::Polyline` + `grammar.polyline`** — the cheap 80% of "this engine has no
+  polygon", at no schema cost.
+
+### Laws and findings this wave paid for
+
+* **A range measures the scene, not the texture.** Two successive controls for the fragment
+  probe failed in opposite directions before the right one (hold the code path fixed, vary
+  only the texels) was found. Written up in the test file.
+* **`vt_engaged_frames` counts pool BINDINGS, not samples.** Measured, not assumed; now pinned
+  with the distinction spelled out.
+* **A finiteness door must run before deduplication.** Every comparison against a NaN is
+  false, so a dedupe pass silently *drops* a non-finite vertex and the refusal then names the
+  wrong cause.
+* **`proj4rs` reports a failed projection by returning NaN**, by design. Correct for a browser
+  map, exactly backwards at an import door.
+* **Axis order is decided once, at one door.** Authority order is lat/lon; every real file is
+  lon/lat. File order is taken and a transposed record is refused by name.
+* **Field-name matching needs separator folding, not just case folding.**
+
+### Named remainders
+
+The geo-anchor has commands and typed bindings but no World Settings panel row; the vector
+import doors are library code without a wizard; LAS/LiDAR, polygon interiors and oriented
+building lots, a global silhouette LOD, and 2-D nodata fill are deferred with reasons. All six
+are in the memo with their landing sites.

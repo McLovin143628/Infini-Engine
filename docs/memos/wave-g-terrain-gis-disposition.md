@@ -352,7 +352,51 @@ This whole section describes a system shipped in Phases 9 and 16.
 | **OSM protobuf** | The government portals the document names serve Shapefile and GeoJSON, which are covered. |
 | **GeoPackage, cloud-optimised GeoTIFF over HTTP, WMS/WMTS, LERC** | Each is a named gap with a stated author-side conversion step. |
 
-## 5. Honest limits of what shipped
+## 5. Things that were measured and turned out otherwise
+
+Recorded because each one was believed before it was checked, and each would
+have shipped as a plausible-looking mistake.
+
+**A range measures the scene, not the texture.** The first version of the
+terrain fragment probe compared the textured terrain's red-channel *range*
+against the same terrain untextured, expecting the control to be narrow. The
+control spans 206 of 255 levels all by itself — from lighting and the terrain's
+silhouette against the sky. The second version counted sharp descents instead
+(a ramp texture falls off a cliff once per repeat; smooth shading does not fall
+at all) and failed in the *opposite* direction: the untextured terrain scores 335
+descents on its own, because it carries a procedural triplanar grain that the
+texture then largely replaces. The control that works holds the **code path**
+fixed and varies only the texels — same pools, same slot, same gradients, a
+constant-colour texture instead of a ramp.
+
+**`vt_engaged_frames` counts pool *bindings*, not samples.** The probe was
+written asserting that a terrain naming no textures would not engage the virtual-
+texture path even with pools bound. It measured one. The counter's honest meaning
+is "frames drawn with a pool bound", which is what it was introduced to measure —
+evidence about the command stream — and it is never evidence that a sample
+happened. That is now pinned in a test with the distinction spelled out, because
+the name reads like the other question.
+
+**`+datum=NAD27` cannot be built at all.** The pure-Rust projection library asks
+for an NTv2 grid it does not ship and refuses the projection outright, so a NAD27
+source would have been unimportable. It is spelled with its ellipsoid and an
+explicit shift instead, and the residual is advised rather than hidden.
+
+**A finiteness check must run before deduplication, not after.** Every comparison
+against a NaN is false, so a ring-cleaning pass that removes coincident points
+silently *drops* a non-finite vertex — and the polygon is then refused for the
+wrong reason, or quietly triangulated without it.
+
+**The upward-facing winding wants the shoelace sign negated.** For a triangle on
+the ground plane, the 3-D cross product's vertical component is the negation of
+the usual 2-D orientation term. The first version had it the other way round and
+every face pointed at the ground.
+
+**Field names need separator folding, not just case folding.** `ROAD_TYPE` and
+`RoadType` differ by an underscore, not by case, and they are exactly the pair a
+real attribute table will hand you.
+
+## 6. Honest limits of what shipped
 
 Stated plainly, because these are the things that will surprise somebody:
 
@@ -375,3 +419,17 @@ Stated plainly, because these are the things that will surprise somebody:
 * **A terrain in a different coordinate system from the level is refused, not reprojected.**
   Reprojecting a raster means resampling it, which changes the elevations rather than placing
   them.
+* **The geo-anchor has commands and typed bindings but no panel yet.** It can be read and
+  written over the editor's typed IPC, and the terrain import wizard shows a source's
+  georeferencing and offers to place against it; a World Settings row for typing the anchor
+  by hand is not built. The import path sets it, which is the flow that matters, but an
+  author who wants to change it afterwards currently needs the API.
+* **The vector import doors are library code, not a wizard.** Shapefile and GeoJSON read into
+  layers, layers become road graphs, ribbons and triangulated polygons — all callable and all
+  tested — but the GIS Import dialog that would walk an author through picking a file, naming
+  its CRS and choosing a layer kind is not built. That is the next batch's shape, not a
+  defect in this one.
+* **The road graph is derived at bake, never persisted.** Deliberate, following the
+  procedural-generation precedent: the vector layer is the source of truth and a derived thing
+  that is also stored is a thing that can disagree with its own source. It also means the road
+  system costs no schema ladder.

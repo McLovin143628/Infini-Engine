@@ -11043,6 +11043,10 @@ mod tests {
     /// v24 payload and silently mis-assign four bytes per terrain — a positional
     /// format lets exactly that happen, which is what these pins are for.
     #[derive(Default, serde::Deserialize)]
+    // A wire pin exists to be DECODED THROUGH, not read — the same reason
+    // CharacterMovementWire beside it carries this. Its fields ARE the
+    // assertion: naming them is what makes the shape independent.
+    #[allow(dead_code)]
     struct TerrainLayerV24Wire {
         albedo: Color,
         roughness: f64,
@@ -11053,6 +11057,10 @@ mod tests {
     /// The **v24 terrain component**, re-declared field-for-field so the layer
     /// array above is reached through a shape independent of the live one.
     #[derive(Default, serde::Deserialize)]
+    // A wire pin exists to be DECODED THROUGH, not read — the same reason
+    // CharacterMovementWire beside it carries this. Its fields ARE the
+    // assertion: naming them is what makes the shape independent.
+    #[allow(dead_code)]
     struct TerrainV24Wire {
         meters_per_sample: f64,
         tile_resolution: u32,
@@ -11065,6 +11073,10 @@ mod tests {
 
     /// The **v24 geo-anchor**, re-declared independently — the file's new tail.
     #[derive(Default, serde::Deserialize)]
+    // A wire pin exists to be DECODED THROUGH, not read — the same reason
+    // CharacterMovementWire beside it carries this. Its fields ARE the
+    // assertion: naming them is what makes the shape independent.
+    #[allow(dead_code)]
     struct GeoAnchorWire {
         enabled: bool,
         crs: String,
