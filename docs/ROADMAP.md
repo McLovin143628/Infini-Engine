@@ -22973,6 +22973,12 @@ report fields · the bake's re-openability.
 
 ### Counts
 
-`inf-dcc` 300 lib + 12 property + 10 determinism-law + 2 fracture; `inf-editor-core` 719
-lib + report_drift + capture_wizard_gate 13 + photogrammetry_gate 24; `inf-studio` 110;
-`phase23_gate` 13/13. Frontend **687 tests / 76 files**. Goldens **54**, byte-untouched.
+Full battery **290 blocks / 5 483 passed / 0 failed / 13 ignored** (baseline 290 / 5 428 /
+0 / 13, so **+55 arms** with no block-count drift — the six ts-rs auto-export tests removed
+along the way offset the new binaries). Per crate: `inf-dcc` 300 lib + 12 property + 10
+determinism-law + 2 fracture; `inf-editor-core` 712 lib + bindings + report_drift +
+capture_wizard_gate 13 + photogrammetry_gate 24; `inf-studio` 110; `phase23_gate` 13/13.
+Frontend **687 tests / 76 files** (baseline 681 / 75). `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets` under `-D warnings`, `npm run typecheck`, eslint
+`--max-warnings 0` and `npm run build` all green. Goldens **54**, byte-untouched. Schema:
+`SessionSave` v3 → v4, **once**; `MeshAsset` v2 and scene v20 unmoved.
