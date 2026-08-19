@@ -46,6 +46,7 @@ fn tiled(n: u32) -> Vec<u8> {
             srgb: true,
             generate_mips: true,
             compression: inf_material::TextureCompression::None,
+            hdr: false,
         },
     )
     .expect("the fixture tiles")
@@ -68,6 +69,8 @@ fn library(n: u32, budget_pages: u64) -> VtTextures {
             albedo: Some(7),
             normal: None,
             orm: None,
+            detail: None,
+            detail_scale_q8: 0,
         },
     );
     assert_eq!(

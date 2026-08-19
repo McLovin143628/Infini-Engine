@@ -92,6 +92,7 @@ fn container() -> Vec<u8> {
             srgb: false,
             generate_mips: true,
             compression: inf_material::TextureCompression::None,
+            hdr: false,
         },
     )
     .expect("the fixture tiles")

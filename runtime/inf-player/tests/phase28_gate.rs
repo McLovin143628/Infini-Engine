@@ -664,6 +664,7 @@ fn the_visbuffer_path_shades_at_parity_with_the_forward_path() {
             srgb: false,
             generate_mips: true,
             compression: inf_material::TextureCompression::None,
+            hdr: false,
         },
     )
     .expect("the fixture tiles")

@@ -87,7 +87,10 @@ impl InstanceRaw {
                 n[2][0], n[2][1], n[2][2], 0.0,
             ],
             color: inst.color,
-            misc: [inst.id, inst.vt.albedo, inst.vt.normal, inst.vt.orm],
+            misc: {
+                let s = inst.vt.slots();
+                [inst.id, s[0], s[1], s[2]]
+            },
             pbr: [
                 inst.metallic,
                 inst.roughness,

@@ -102,6 +102,17 @@ pub struct VtTextureDesc {
     /// Whether the stored data is sRGB-encoded. Carried through to the atlas
     /// format decision and to the table, never interpreted here.
     pub srgb: bool,
+    /// Whether the stored data is **two-channel**, so a sampler has to rebuild
+    /// the third as `z = sqrt(1 − x² − y²)` (Wave T's BC5 normal maps).
+    ///
+    /// Rides beside `srgb` and for the same reason: one atlas holds base colours
+    /// and normal maps at once, so neither can be a pool-wide decision. Like
+    /// `srgb` it is carried, never interpreted here — the table hands it to the
+    /// shader as a flag bit and the shader is the only reader.
+    ///
+    /// `false` for every format that predates Wave T, which is what makes a
+    /// pre-Wave-T texture shade exactly as it did.
+    pub reconstruct_z: bool,
     /// The pyramid, **finest first** — exactly the container's mip directory.
     pub mips: Vec<VtMipDesc>,
 }
@@ -416,6 +427,10 @@ pub fn full_pyramid(
         tile_size,
         border,
         srgb,
+        // A test helper builds a pyramid, not a normal map: the two-channel
+        // rebuild is a property of the stored FORMAT, which this door does not
+        // take, so it is false here and set from the container in `vt_desc`.
+        reconstruct_z: false,
         mips,
     }
 }
@@ -762,6 +777,7 @@ mod tests {
             tile_size: 128,
             border: 4,
             srgb: false,
+            reconstruct_z: false,
             mips: vec![VtMipDesc {
                 width: 320,
                 height: 192,
@@ -798,6 +814,7 @@ mod tests {
             tile_size: 128,
             border: 4,
             srgb: false,
+            reconstruct_z: false,
             mips: Vec::new(),
         };
         assert_eq!(d.validate(), Err(DescError::EmptyPyramid));

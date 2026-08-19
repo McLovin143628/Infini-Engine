@@ -116,6 +116,7 @@ fn container(w: u32, h: u32, srgb: bool, compression: inf_material::TextureCompr
             srgb,
             generate_mips: true,
             compression,
+            hdr: false,
         },
     )
     .expect("the fixture tiles")
@@ -774,6 +775,7 @@ fn ramp_container(n: u32, srgb: bool) -> Vec<u8> {
             srgb,
             generate_mips: true,
             compression: inf_material::TextureCompression::None,
+            hdr: false,
         },
     )
     .expect("the fixture tiles")
@@ -861,6 +863,8 @@ fn the_slot_routing_and_the_srgb_flag_reach_the_pixel() {
         albedo: 0,
         normal: 0,
         orm: warm.albedo,
+        detail: 0,
+        detail_scale_q8: 0,
     };
     let (orm, _) = render_face(&gpu, Some(orm_pools), orm_set);
     assert_ne!(
@@ -1024,6 +1028,7 @@ fn a_geometry_mismatch_is_refused_at_the_door() {
         tile_size: 64,
         border: 4,
         srgb: false,
+        reconstruct_z: false,
         mips: full_pyramid(64, 64, 64, 4, false).mips,
     };
     assert!(matches!(
@@ -1372,6 +1377,8 @@ fn the_registration_door_decides_the_pool_format_from_the_level() {
                     albedo: Some(*g),
                     normal: None,
                     orm: None,
+                    detail: None,
+                    detail_scale_q8: 0,
                 },
             );
         }
@@ -1777,6 +1784,7 @@ fn flat_container(n: u32, red: u8) -> Vec<u8> {
             srgb: false,
             generate_mips: true,
             compression: inf_material::TextureCompression::None,
+            hdr: false,
         },
     )
     .expect("the fixture tiles")

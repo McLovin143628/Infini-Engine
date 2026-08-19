@@ -1095,6 +1095,7 @@ mod tests {
             tile_size: 128,
             border: 4,
             srgb: false,
+            reconstruct_z: false,
             mips: vec![crate::VtMipDesc {
                 width: 320,
                 height: 192,
@@ -1119,6 +1120,7 @@ mod tests {
             tile_size: 128,
             border: 4,
             srgb: false,
+            reconstruct_z: false,
             mips: vec![crate::VtMipDesc {
                 width: 1024,
                 height: 1024,

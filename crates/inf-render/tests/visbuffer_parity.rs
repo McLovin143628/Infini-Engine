@@ -775,6 +775,7 @@ fn parity_textured_virtual_texture() {
             srgb: false,
             generate_mips: true,
             compression: inf_material::TextureCompression::None,
+            hdr: false,
         },
     )
     .expect("the fixture tiles")

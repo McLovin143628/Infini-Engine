@@ -1014,6 +1014,13 @@ impl MaterialContent {
                         albedo: rec.albedo.map(|t| t.uuid().as_u128()),
                         normal: rec.normal.map(|t| t.uuid().as_u128()),
                         orm: rec.orm.map(|t| t.uuid().as_u128()),
+                        // Wave T's detail slot is a renderer capability with no
+                        // `.inf_mat` field yet to carry it — see
+                        // `docs/memos/wave-t-textures-disposition.md`, item T25.
+                        // Both hosts spell the default the same way, here and in
+                        // `inf_editor_core::render_assets`, so neither can start
+                        // binding one without the other.
+                        ..Default::default()
                     },
                 )
             })

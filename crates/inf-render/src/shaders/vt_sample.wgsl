@@ -104,14 +104,51 @@ fn vt_active() -> bool {
     return arrayLength(&vt_table) >= VT_HEADER_WORDS && vt_table[0] == VT_MAGIC;
 }
 
+/// The low half of a per-instance map word is the slot; the high half is Wave T's
+/// detail lane (see [`vt_detail_slot`] / [`vt_detail_scale`]).
+const VT_SLOT_MASK: u32 = 0xFFFFu;
+
 /// Whether a per-instance texture slot names a virtual texture.
 ///
 /// **A slot holds `handle + 1`, so 0 is "no texture"** — the three reserved
 /// per-instance words this rides in have shipped as zero since P7.1, so an
 /// instance that names nothing is byte-identical to what it always was, and the
 /// no-texture fallback is structural rather than a flag someone has to set.
-fn vt_bound(slot: u32) -> bool {
+///
+/// Wave T masks to 16 bits on the way in. A handle is bounded by the texture
+/// count and the atlas slot field is 16 bits (`inf_vt::table::MAX_SLOT_INDEX`),
+/// so the high half of the word was always zero and is now the detail lane —
+/// which is why an instance written before Wave T reads identically.
+fn vt_bound(word: u32) -> bool {
+    let slot = word & VT_SLOT_MASK;
     return slot != 0u && vt_active() && (slot - 1u) < vt_table[1];
+}
+
+/// **The detail-map slot** (Wave T, the document's §3 A): `handle + 1` of the
+/// high-frequency tileable map, packed into the top 16 bits of the *albedo* word.
+///
+/// It rides there rather than in a fourth per-instance word because there is no
+/// fourth word to be had: `InstanceRaw::misc` is `[pick_id, albedo, normal, orm]`
+/// and the skinned pipeline already sits exactly on `max_vertex_attributes: 16`
+/// (`docs/memos/p26-5-vertex-streams.md`). Both halves were free by construction,
+/// so the whole channel costs zero bytes of instance data and zero bindings.
+fn vt_detail_slot(maps: vec3<u32>) -> u32 {
+    return maps.x >> 16u;
+}
+
+/// **How many times the detail map tiles across one unit of the base uv**
+/// (Wave T) — unsigned 8.8 fixed point in the top 16 bits of the *normal* word.
+///
+/// Fixed point rather than a half-float because the whole useful range is a
+/// multiplier of roughly 1 to 256 and 8.8 covers it to 1/256 with an *exact*
+/// integer round-trip in both directions: `inf_render::scene::detail_scale_q8`
+/// is the CPU half and it is pure integer arithmetic, so the value the author
+/// authored is the value the shader reads, on every target, with no float
+/// conversion anywhere in the chain. Zero — the pre-Wave-T value of these bits —
+/// reads back as `0.0`, which `vt_apply_detail` treats as "no detail", so the
+/// disabled state and the never-written state are the same state.
+fn vt_detail_scale(maps: vec3<u32>) -> f32 {
+    return f32(maps.y >> 16u) / 256.0;
 }
 
 /// The exact sRGB→linear transfer function (IEC 61966-2-1), applied to the
@@ -209,7 +246,8 @@ fn vt_resolve(b: u32, w_uv: vec2<f32>, m: u32) -> VtResolved {
 /// Returns the raw stored value — sRGB is NOT decoded here, because a caller
 /// that wants a normal or an ORM triple must not have it decoded and a caller
 /// that wants a base colour must. `vt_sample_color` below is the decoded face.
-fn vt_sample(slot: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f32> {
+fn vt_sample(word: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f32> {
+    let slot = word & VT_SLOT_MASK;
     let b = vt_table[VT_HEADER_WORDS + (slot - 1u)];
     let tsz = vt_table[b + 1u];
     let tile_sz = f32(tsz);
@@ -238,13 +276,42 @@ fn vt_sample(slot: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f
 }
 
 /// [`vt_sample`] with the texture's own sRGB flag applied — the base-colour face.
-fn vt_sample_color(slot: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f32> {
-    let b = vt_table[VT_HEADER_WORDS + (slot - 1u)];
-    let texel = vt_sample(slot, uv, ddx, ddy);
+fn vt_sample_color(word: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f32> {
+    let b = vt_table[VT_HEADER_WORDS + ((word & VT_SLOT_MASK) - 1u)];
+    let texel = vt_sample(word, uv, ddx, ddy);
     if ((vt_table[b + 3u] & 1u) != 0u) {
         return vec4<f32>(vt_srgb_to_linear(texel.rgb), texel.a);
     }
     return texel;
+}
+
+/// **The tangent-space normal a normal map carries, whichever way it stores it**
+/// (Wave T).
+///
+/// Two storage conventions now reach this function and they must produce the
+/// same vector:
+///
+/// * three channels (RGBA8 / BC1 / BC3, everything imported before Wave T) —
+///   `xyz · 2 − 1`, exactly what shipped;
+/// * **two** channels (BC5, `reconstruct_z` set in the table's flags bit 1) —
+///   `xy · 2 − 1`, with `z = sqrt(max(0, 1 − x² − y²))`.
+///
+/// The rebuild is not an approximation: a tangent-space normal is a *unit*
+/// vector, so its Z is determined by X and Y up to a sign, and the sign is
+/// positive by the definition of tangent space (a normal pointing into the
+/// surface is not a normal map, it is damage). The `max(0, …)` is the only
+/// slack, and it exists because a *filtered* pair of quantised channels can land
+/// a hair outside the unit disc; there the honest answer is the flattest normal
+/// consistent with the data, which is `z = 0` and then `normalize`.
+fn vt_normal_ts(word: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec3<f32> {
+    let b = vt_table[VT_HEADER_WORDS + ((word & VT_SLOT_MASK) - 1u)];
+    let t = vt_sample(word, uv, ddx, ddy);
+    if ((vt_table[b + 3u] & 2u) != 0u) {
+        let xy = t.xy * 2.0 - vec2<f32>(1.0);
+        let z = sqrt(max(1.0 - dot(xy, xy), 0.0));
+        return normalize(vec3<f32>(xy, z) + vec3<f32>(0.0, 0.0, 1e-6));
+    }
+    return normalize(t.xyz * 2.0 - vec3<f32>(1.0) + vec3<f32>(0.0, 0.0, 1e-6));
 }
 
 /// The three maps a surface samples, resolved for one fragment.
@@ -297,8 +364,9 @@ fn vt_surface(
         // Tangent-space normal, stored unsigned. Never sRGB-decoded: the
         // container's `srgb` flag is false for a normal map by import rule, and
         // `vt_sample` (not `vt_sample_color`) is the door that cannot decode.
-        let n = vt_sample(maps.y, uv, ddx, ddy).xyz * 2.0 - vec3<f32>(1.0);
-        out.normal_ts = normalize(n + vec3<f32>(0.0, 0.0, 1e-6));
+        // `vt_normal_ts` is what knows whether the third channel is stored or
+        // rebuilt (Wave T's BC5).
+        out.normal_ts = vt_normal_ts(maps.y, uv, ddx, ddy);
         out.has_normal = true;
     }
     if (vt_bound(maps.z)) {
@@ -307,7 +375,84 @@ fn vt_surface(
         out.roughness = roughness * orm.g;
         out.metallic = metallic * orm.b;
     }
+    // ── WAVE T · DETAIL MAPS (the document's §3 A) ───────────────────────────
+    // Applied LAST, so it modifies whatever the three base maps resolved to
+    // rather than racing them. Structurally inert without a detail slot: the
+    // high half of the albedo word is zero on every instance written before
+    // Wave T, `vt_detail_slot` returns 0, `vt_bound(0)` is false, and this is a
+    // branch that never taken.
+    vt_apply_detail(&out, maps, uv, ddx, ddy);
     return out;
+}
+
+/// **Blend a high-frequency tileable detail map over a resolved surface**
+/// (Wave T — the document's §3 A, verbatim: *"2K base textures paired with
+/// high-frequency 512×512 tileable detail normal/roughness maps"*).
+///
+/// # What it costs, and what it buys
+///
+/// The saving the document is after is not subtle. A unique 8K albedo + normal +
+/// ORM set is ~340 MB of `.inf_tex`; a 2K set with one *shared* 512² detail map
+/// is ~21 MB plus a single 512² page set that **every object referencing it
+/// registers once** — because a detail map is a tiling texture and this engine
+/// deduplicates virtual textures by GUID (`VtTextures::by_guid`), so the second
+/// user of a detail map pays nothing at all, in the atlas or on disk.
+///
+/// # The blend
+///
+/// * **Normal** — the UDN blend, `normalize(vec3(base.xy + detail.xy, base.z))`.
+///   Cheaper than reoriented normal mapping and, unlike a naive `mix`, it cannot
+///   flatten the base normal where the detail is neutral: a neutral detail normal
+///   is `(0, 0, 1)`, whose XY is zero, so it adds nothing. That is the property
+///   that makes this safe to leave on.
+/// * **Roughness** — multiplied by the detail sample's **alpha**. A three- or
+///   four-channel detail map can therefore carry a micro-roughness break-up in a
+///   channel it was not using; a BC5 detail map samples alpha as exactly `1.0`,
+///   so it modulates nothing. One rule, no format branch, and the two storage
+///   choices disagree about nothing.
+///
+/// # The fade, and why it is the mip chain rather than a distance
+///
+/// A detail map tiled 64× is aliasing noise at any range where its texel is
+/// smaller than a pixel, and the classical fix is a distance ramp with two magic
+/// numbers in it. This uses the pyramid instead: the detail texture's own
+/// gradient mip is already the answer to "how far away is this", and by the time
+/// it resolves to the coarsest levels the map has averaged toward neutral
+/// anyway. The weight ramps to zero across the last two levels, so the detail
+/// leaves smoothly and the fade needs no camera, no uniform and no tuning — and
+/// it is correct under a magnifying zoom as well as a walk, which a distance
+/// ramp is not.
+fn vt_apply_detail(
+    s: ptr<function, VtSurface>,
+    maps: vec3<u32>,
+    uv: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+) {
+    let word = vt_detail_slot(maps);
+    let scale = vt_detail_scale(maps);
+    if (!vt_bound(word) || !(scale > 0.0)) {
+        return;
+    }
+    let duv = uv * scale;
+    let dx = ddx * scale;
+    let dy = ddy * scale;
+
+    let b = vt_table[VT_HEADER_WORDS + ((word & VT_SLOT_MASK) - 1u)];
+    let mip_count = vt_table[b];
+    let lod = vt_mip(b, dx, dy);
+    // Ramp out over the last two levels of the detail texture's own pyramid.
+    let w = clamp(f32(mip_count - 1u) - f32(lod), 0.0, 1.0);
+    if (!(w > 0.0)) {
+        return;
+    }
+
+    let d = vt_sample(word, duv, dx, dy);
+    let dn = vt_normal_ts(word, duv, dx, dy);
+    let base = (*s).normal_ts;
+    (*s).normal_ts = normalize(vec3<f32>(base.xy + dn.xy * w, base.z) + vec3<f32>(0.0, 0.0, 1e-6));
+    (*s).has_normal = true;
+    (*s).roughness = (*s).roughness * mix(1.0, d.a, w);
 }
 
 /// Re-anchor a tangent-space normal onto an interpolated geometric normal
@@ -467,7 +612,9 @@ fn vt_heat(maps: vec3<u32>, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> ve
     if (slot == 0u) {
         return vec3<f32>(0.06, 0.06, 0.07);
     }
-    let b = vt_table[VT_HEADER_WORDS + (slot - 1u)];
+    // Wave T: the map words carry a detail lane in their top half — mask it off
+    // before indexing the directory, exactly as `vt_sample` does.
+    let b = vt_table[VT_HEADER_WORDS + ((slot & VT_SLOT_MASK) - 1u)];
     let w_uv = uv - floor(uv);
     let m = vt_mip(b, ddx, ddy);
     let r = vt_resolve(b, w_uv, m);

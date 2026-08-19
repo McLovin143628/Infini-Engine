@@ -604,6 +604,8 @@ mod packing {
             albedo: 1,
             normal: 0,
             orm: 3,
+            detail: 0,
+            detail_scale_q8: 0,
         };
         let raw = pack_vgeom_instance(&origin, &instance(set));
         assert_eq!(

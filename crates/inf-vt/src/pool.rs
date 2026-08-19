@@ -26,6 +26,28 @@ pub enum PageFormat {
     Rgba8,
     Bc1,
     Bc3,
+    /// **BC5 / RGTC2** — two independent 8-bit channels at 8 bpp (Wave T).
+    ///
+    /// The normal-map format. It stores only X and Y; Z is rebuilt in the shader
+    /// as `sqrt(1 − x² − y²)`, which is exact for a unit normal and is why a
+    /// two-channel format loses *nothing* a three-channel one carried. The
+    /// alternative already in this enum is actively wrong for the job:
+    /// [`Bc1`](PageFormat::Bc1)'s 5:6:5 endpoints quantise exactly the two axes
+    /// that carry the whole signal, which is why normal maps have shipped
+    /// **uncompressed** until now (`TextureImportSettings::data`) at four times
+    /// the page bytes of this.
+    Bc5,
+    /// **RGBA16F** — four half-floats per texel, 8 bytes (Wave T).
+    ///
+    /// The one format in this enum that can hold a value outside `[0, 1]`, and
+    /// the reason it exists: every EXR/HDR source was flattened to 8 bits at
+    /// import, so a Megascans displacement or cavity map arrived with its whole
+    /// dynamic range gone and nothing said so. It is deliberately **not**
+    /// compressed — BC6H is the compressed HDR format and this project has no
+    /// BC6H encoder (see `docs/memos/wave-t-textures-disposition.md`), so the
+    /// honest choice is 4× the bytes of BC1 with the data intact rather than
+    /// 8 bits with the data gone.
+    Rgba16F,
 }
 
 impl PageFormat {
@@ -40,12 +62,36 @@ impl PageFormat {
             PageFormat::Rgba8 => s * s * 4,
             PageFormat::Bc1 => (s / 4) * (s / 4) * 8,
             PageFormat::Bc3 => (s / 4) * (s / 4) * 16,
+            PageFormat::Bc5 => (s / 4) * (s / 4) * 16,
+            PageFormat::Rgba16F => s * s * 8,
         }
     }
 
     /// Whether this format needs `TEXTURE_COMPRESSION_BC`.
+    ///
+    /// **RGBA16F does not** — it is an uncompressed float format every adapter
+    /// this engine targets can sample — which is why it is spelled out here
+    /// rather than left to `!matches!(self, Rgba8)`: the transcode tier exists to
+    /// rescue a *block* format from an adapter without BC, and there is nothing
+    /// to rescue a float format from.
     pub fn needs_bc(&self) -> bool {
-        !matches!(self, PageFormat::Rgba8)
+        matches!(self, PageFormat::Bc1 | PageFormat::Bc3 | PageFormat::Bc5)
+    }
+
+    /// Whether this format stores only two channels, so the third has to be
+    /// rebuilt (`z = sqrt(1 − x² − y²)`) by whoever samples it.
+    ///
+    /// Read by the indirection table, which carries it to the shader as a
+    /// per-texture flag — the same route the `srgb` bit takes, and for the same
+    /// reason: one atlas holds base colours and normal maps at once, so the
+    /// decision cannot be a pool-wide one.
+    pub fn is_two_channel(&self) -> bool {
+        matches!(self, PageFormat::Bc5)
+    }
+
+    /// Whether a texel of this format can hold a value outside `[0, 1]`.
+    pub fn is_float(&self) -> bool {
+        matches!(self, PageFormat::Rgba16F)
     }
 }
 

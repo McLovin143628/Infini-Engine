@@ -1500,6 +1500,7 @@ pub fn finish_reconstruction_with_progress(
             srgb: true,
             generate_mips: true,
             compression: TextureCompression::Auto,
+            hdr: false,
         },
     )
     .map_err(|e| FinishError::Texture {

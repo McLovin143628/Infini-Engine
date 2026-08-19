@@ -63,6 +63,40 @@ pub struct VtTextureSet {
     /// Occlusion (R) / roughness (G) / metallic (B) — the glTF packing the
     /// importer already writes. `0` = none.
     pub orm: u32,
+    /// **The detail map** (Wave T — the texture document's §3 A): a shared,
+    /// tileable, high-frequency normal/roughness map blended over the three
+    /// above. `0` = none, which is every instance written before Wave T.
+    pub detail: u32,
+    /// How many times [`detail`](Self::detail) tiles across one unit of the base
+    /// uv, as unsigned **8.8 fixed point** — see [`detail_scale_q8`].
+    ///
+    /// Fixed point rather than an `f32` for two reasons that both matter: the
+    /// GPU reads it out of 16 spare bits of an existing instance word, and this
+    /// struct derives `Eq`, which an `f32` field would take away from every
+    /// consumer that compares two sets (the projector's material diff among
+    /// them).
+    pub detail_scale_q8: u16,
+}
+
+/// **Encode a detail tiling multiplier as unsigned 8.8 fixed point** (Wave T).
+///
+/// Pure integer arithmetic on the way out, so the value an author sets is the
+/// value the shader reads on every target — the same reasoning that keeps
+/// `inf_material::bc` free of floats, applied to the one number that travels
+/// beside a texture handle. Out-of-range and non-finite inputs saturate rather
+/// than wrap: `0` means "no detail", so a scale that rounded to zero from a tiny
+/// positive value would silently switch the feature off, and the floor of `1`
+/// below is what stops that.
+#[inline]
+pub fn detail_scale_q8(scale: f32) -> u16 {
+    if !(scale > 0.0) {
+        return 0;
+    }
+    let q = (scale * 256.0).round();
+    if q >= 65535.0 {
+        return u16::MAX;
+    }
+    (q as u16).max(1)
 }
 
 impl VtTextureSet {
@@ -71,6 +105,8 @@ impl VtTextureSet {
         albedo: 0,
         normal: 0,
         orm: 0,
+        detail: 0,
+        detail_scale_q8: 0,
     };
 
     /// Whether this instance samples any virtual texture at all.
@@ -79,10 +115,26 @@ impl VtTextureSet {
         *self == Self::NONE
     }
 
-    /// The three slots as the GPU reads them.
+    /// **The three GPU words**, with Wave T's detail lane folded into the spare
+    /// top half of the first two.
+    ///
+    /// A handle is bounded by the registry's texture count and an atlas slot
+    /// index is 16 bits (`inf_vt::table::MAX_SLOT_INDEX`), so the top half of
+    /// each of these words has been zero on every instance ever uploaded — which
+    /// is why the detail channel costs no instance bytes, no vertex attribute
+    /// (the skinned pipeline sits exactly on `max_vertex_attributes: 16`) and no
+    /// bind group. The masks are belt-and-braces: a handle that somehow exceeded
+    /// 16 bits would otherwise corrupt the *detail* slot rather than merely
+    /// itself, which is the kind of failure that reads as a texture bug in a
+    /// different material.
     #[inline]
     pub fn slots(&self) -> [u32; 3] {
-        [self.albedo, self.normal, self.orm]
+        const M: u32 = 0xFFFF;
+        [
+            (self.albedo & M) | ((self.detail & M) << 16),
+            (self.normal & M) | ((self.detail_scale_q8 as u32) << 16),
+            self.orm & M,
+        ]
     }
 }
 

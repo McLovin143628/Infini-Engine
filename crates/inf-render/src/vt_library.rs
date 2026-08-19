@@ -115,20 +115,52 @@ pub struct VtMaterialMaps {
     pub albedo: Option<u128>,
     pub normal: Option<u128>,
     pub orm: Option<u128>,
+    /// **The detail map** (Wave T — the texture document's §3 A): a shared,
+    /// tileable, high-frequency normal/roughness map blended over the three
+    /// above at [`detail_scale_q8`](Self::detail_scale_q8) tiles per unit uv.
+    ///
+    /// `None` on every material resolved before Wave T, and on every material
+    /// that names none — which is what makes the whole channel a structural
+    /// no-op rather than a default somebody has to turn off.
+    pub detail: Option<u128>,
+    /// The detail map's tiling multiplier, unsigned 8.8 fixed point
+    /// (`crate::scene::detail_scale_q8`). `0` disables the blend even when
+    /// [`detail`](Self::detail) names a texture, so the two fields cannot
+    /// disagree about whether the feature is on.
+    pub detail_scale_q8: u16,
 }
 
 impl VtMaterialMaps {
     /// The GUIDs this material names, in the **fixed slot order** albedo →
-    /// normal → ORM, with absent slots skipped rather than shifting the next
-    /// one into their place.
+    /// normal → ORM → detail, with absent slots skipped rather than shifting the
+    /// next one into their place.
+    ///
+    /// **Detail is appended, never inserted.** This order *is* the residency —
+    /// `registration_order` walks it and `want_floor` is a pure function of the
+    /// registration sequence — so putting the new slot anywhere but the end
+    /// would re-order the pages of every existing material and move a residency
+    /// trace the phase gates pin byte for byte.
     pub fn texture_guids(&self) -> impl Iterator<Item = u128> + '_ {
-        [self.albedo, self.normal, self.orm].into_iter().flatten()
+        [self.albedo, self.normal, self.orm, self.detail]
+            .into_iter()
+            .flatten()
     }
 
     /// Whether this material names any texture at all — `false` is the
     /// scalars-only surface, the permanent no-texture path.
     pub fn is_empty(&self) -> bool {
-        self.albedo.is_none() && self.normal.is_none() && self.orm.is_none()
+        self.albedo.is_none()
+            && self.normal.is_none()
+            && self.orm.is_none()
+            && self.detail.is_none()
+    }
+
+    /// This material with a detail map bound at `scale` tiles per unit uv — the
+    /// door a host uses, so the fixed-point encoding lives in one place.
+    pub fn with_detail(mut self, detail: u128, scale: f32) -> Self {
+        self.detail = Some(detail);
+        self.detail_scale_q8 = crate::scene::detail_scale_q8(scale);
+        self
     }
 }
 
@@ -313,9 +345,26 @@ impl VtTextures {
     /// so the warm gate is not written twice.
     pub fn set_for_material(&self, material: u128) -> VtTextureSet {
         match self.materials.get(&material) {
-            Some(m) => self.set_for(m.albedo, m.normal, m.orm),
+            Some(m) => self.set_for_maps(m),
             None => VtTextureSet::NONE,
         }
+    }
+
+    /// [`set_for_material`](Self::set_for_material)'s body, over a record rather
+    /// than a GUID — the door Wave T's detail slot arrives through, so
+    /// `set_for`'s three-argument shape (which several call sites pass loose
+    /// GUIDs to) does not have to grow a fourth and a fifth parameter.
+    pub fn set_for_maps(&self, m: &VtMaterialMaps) -> VtTextureSet {
+        let mut set = self.set_for(m.albedo, m.normal, m.orm);
+        set.detail = self.warm_slot(m.detail);
+        // The scale rides only when the map does: a scale beside slot 0 would be
+        // an instance word that says "detail at 8×" and names no texture.
+        set.detail_scale_q8 = if set.detail == 0 {
+            0
+        } else {
+            m.detail_scale_q8
+        };
+        set
     }
 
     /// The materials this registry was built from, in GUID order.
@@ -354,16 +403,21 @@ impl VtTextures {
         normal: Option<u128>,
         orm: Option<u128>,
     ) -> VtTextureSet {
-        let slot = |g: Option<u128>| {
-            g.and_then(|g| self.by_guid.get(&g))
-                .filter(|h| self.residency.is_warm(**h))
-                .map_or(0, |h| h.0 + 1)
-        };
         VtTextureSet {
-            albedo: slot(albedo),
-            normal: slot(normal),
-            orm: slot(orm),
+            albedo: self.warm_slot(albedo),
+            normal: self.warm_slot(normal),
+            orm: self.warm_slot(orm),
+            ..VtTextureSet::NONE
         }
+    }
+
+    /// `handle + 1` for a GUID that is registered **and warm**, else `0`. The
+    /// warm gate, in one place — see [`set_for`](Self::set_for) for why it is
+    /// not a nicety.
+    fn warm_slot(&self, guid: Option<u128>) -> u32 {
+        guid.and_then(|g| self.by_guid.get(&g))
+            .filter(|h| self.residency.is_warm(**h))
+            .map_or(0, |h| h.0 + 1)
     }
 
     /// **The deterministic want floor**: the coarsest [`VT_FLOOR_LEVELS`] levels
@@ -707,8 +761,7 @@ mod tests {
             lib.set_for(Some(7), None, None),
             VtTextureSet {
                 albedo: h.0 + 1,
-                normal: 0,
-                orm: 0
+                ..VtTextureSet::NONE
             },
             "a warm texture is named as handle + 1, and the absent maps as 0"
         );
@@ -763,6 +816,7 @@ mod tests {
             albedo: a,
             normal: n,
             orm: o,
+            ..VtMaterialMaps::default()
         }
     }
 
@@ -845,8 +899,7 @@ mod tests {
             lib.set_for_material(1),
             VtTextureSet {
                 albedo: 1,
-                normal: 0,
-                orm: 0
+                ..VtTextureSet::NONE
             },
             "the bound albedo is handle 0 + 1, and the unfetchable normal is 0"
         );
@@ -854,8 +907,7 @@ mod tests {
             lib.set_for_material(2),
             VtTextureSet {
                 albedo: 2,
-                normal: 0,
-                orm: 0
+                ..VtTextureSet::NONE
             }
         );
         // A material this registry never saw is the SCALAR surface, not a panic
@@ -921,6 +973,7 @@ mod tests {
                 srgb,
                 generate_mips: true,
                 compression: inf_material::TextureCompression::Bc1,
+                hdr: false,
             },
         )
         .expect("the fixture tiles")

@@ -3143,6 +3143,7 @@ dependencies = [
 name = "inf-material"
 version = "0.1.0"
 dependencies = [
+ "half",
  "image",
  "inf-asset",
  "inf-graph",

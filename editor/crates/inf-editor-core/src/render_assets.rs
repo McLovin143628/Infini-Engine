@@ -580,6 +580,9 @@ impl EditorRenderAssets {
                     albedo: rec.albedo.map(|t| t.uuid().as_u128()),
                     normal: rec.normal.map(|t| t.uuid().as_u128()),
                     orm: rec.orm.map(|t| t.uuid().as_u128()),
+                    // Wave T's detail slot, defaulted exactly as the player
+                    // defaults it (`inf_player`) — see the note there.
+                    ..Default::default()
                 },
             );
             for tex in rec.texture_dependencies() {
@@ -1438,6 +1441,7 @@ mod tests {
                 srgb,
                 generate_mips: true,
                 compression: inf_material::TextureCompression::None,
+                hdr: false,
             },
         )
         .expect("the fixture tiles")

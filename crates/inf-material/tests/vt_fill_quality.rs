@@ -310,6 +310,7 @@ fn replicating_the_ancestor_beats_every_interpolation_of_it() {
             // arm equally and make the three numbers harder to read, and the
             // fill's own adoption is on the RGBA8 tier anyway (see the memo).
             compression: TextureCompression::None,
+            hdr: false,
         },
     )
     .expect("the fixture tiles")
@@ -538,6 +539,7 @@ fn the_fill_is_reproducible_byte_for_byte() {
             srgb: true,
             generate_mips: true,
             compression: TextureCompression::Bc1,
+            hdr: false,
         },
     )
     .expect("the fixture tiles")

@@ -50,6 +50,7 @@ fn tiled(n: u32) -> Vec<u8> {
             srgb: true,
             generate_mips: true,
             compression: inf_material::TextureCompression::None,
+            hdr: false,
         },
     )
     .expect("the fixture tiles")

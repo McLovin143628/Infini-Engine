@@ -40,7 +40,7 @@
 //! │ [b+0] mip_count                                                   │
 //! │ [b+1] tile_size        (PAYLOAD texels per tile side)             │
 //! │ [b+2] border                                                      │
-//! │ [b+3] flags            bit 0 = srgb                               │
+//! │ [b+3] flags            bit 0 = srgb · bit 1 = reconstruct_z       │
 //! ├ mip records (mip_count × [`TABLE_MIP_REC_WORDS`] = 4) ────────────┤
 //! │ width · height · tiles_x · first_entry (ABSOLUTE word offset)     │
 //! ├ entries (one per tile of the pyramid, in (mip, y, x) order) ──────┤
@@ -224,7 +224,11 @@ impl TableImage {
             words.push(desc.mip_count());
             words.push(desc.tile_size);
             words.push(desc.border);
-            words.push(u32::from(desc.srgb));
+            // bit 0 = srgb, bit 1 = reconstruct_z (Wave T). Appended rather than
+            // renumbered: the flags word is read by a shipped shader, so a bit
+            // is a wire position. `reconstruct_z` is false for every format that
+            // predates Wave T, so the word is unchanged for existing content.
+            words.push(u32::from(desc.srgb) | (u32::from(desc.reconstruct_z) << 1));
             let entries = base + TABLE_TEXTURE_HEADER_WORDS + TABLE_MIP_REC_WORDS * desc.mips.len();
             for (m, mip) in desc.mips.iter().enumerate() {
                 words.push(mip.width);

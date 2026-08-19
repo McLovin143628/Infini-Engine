@@ -147,6 +147,7 @@ fn texture_bytes(n: u32, tint: u8) -> Vec<u8> {
             srgb: true,
             generate_mips: true,
             compression: TextureCompression::None,
+            hdr: false,
         },
     )
     .expect("the fixture tiles")

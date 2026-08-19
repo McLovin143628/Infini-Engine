@@ -198,7 +198,10 @@ fn instance_raw(origin: &FloatingOrigin, inst: &SkinnedInstance) -> InstanceRaw 
         // P26.3: the same three reserved words the rigid path uses, packed by
         // the same rule — so a skinned surface and a rigid one cannot disagree
         // about what "this instance samples nothing" looks like on the wire.
-        misc: [inst.id, inst.vt.albedo, inst.vt.normal, inst.vt.orm],
+        misc: {
+            let s = inst.vt.slots();
+            [inst.id, s[0], s[1], s[2]]
+        },
         pbr: [inst.metallic, inst.roughness, 0.0, 0.0],
         emissive: [inst.emissive[0], inst.emissive[1], inst.emissive[2], 0.0],
     }

@@ -22,9 +22,33 @@ pub enum TextureFormat {
     Bc1,
     /// BC3 / DXT5 — full alpha, 4:1.
     Bc3,
+    /// **BC5 / RGTC2** — two 8-bit channels at 8 bpp, the normal-map format
+    /// (Wave T). X and Y are stored; Z is rebuilt by the sampler. 4:1 against the
+    /// RGBA8 normal maps this engine shipped before it. See
+    /// [`crate::bc::compress_bc5`].
+    Bc5,
+    /// **RGBA16F** — four half-floats, 8 bytes a texel (Wave T).
+    ///
+    /// The format an EXR or Radiance source keeps its dynamic range in. Every
+    /// float source used to be flattened to 8 bits on the way in, silently; this
+    /// is the alternative, and it is *bigger* than the source rather than smaller
+    /// because the compressed HDR format (BC6H) has no encoder in this project.
+    /// The trade is written down in `docs/memos/wave-t-textures-disposition.md`
+    /// and surfaced to the importing author as an advisory.
+    Rgba16F,
 }
 
 impl TextureFormat {
+    /// Bytes one texel occupies in an **uncompressed** format, or `None` for a
+    /// block format.
+    pub fn texel_bytes(self) -> Option<usize> {
+        match self {
+            TextureFormat::Rgba8 => Some(4),
+            TextureFormat::Rgba16F => Some(8),
+            TextureFormat::Bc1 | TextureFormat::Bc3 | TextureFormat::Bc5 => None,
+        }
+    }
+
     /// Bytes one mip level of `w×h` occupies in this format.
     ///
     /// **`usize`, not `u32`** (C4-5): `w * h * 4` in `u32` is exactly `0` at
@@ -34,12 +58,21 @@ impl TextureFormat {
     pub fn level_size(self, w: u32, h: u32) -> usize {
         match self {
             TextureFormat::Rgba8 => w as usize * h as usize * 4,
+            TextureFormat::Rgba16F => w as usize * h as usize * 8,
             TextureFormat::Bc1 => bc::compressed_size(w, h, false),
             TextureFormat::Bc3 => bc::compressed_size(w, h, true),
+            TextureFormat::Bc5 => bc::compressed_size_bc5(w, h),
         }
     }
     pub fn is_compressed(self) -> bool {
-        !matches!(self, TextureFormat::Rgba8)
+        matches!(
+            self,
+            TextureFormat::Bc1 | TextureFormat::Bc3 | TextureFormat::Bc5
+        )
+    }
+    /// Whether a texel can hold a value outside `[0, 1]`.
+    pub fn is_float(self) -> bool {
+        matches!(self, TextureFormat::Rgba16F)
     }
 }
 
@@ -93,6 +126,14 @@ impl TextureAsset {
             TextureFormat::Rgba8 => mip.data.clone(),
             TextureFormat::Bc1 => bc::decode_bc1(&mip.data, mip.width, mip.height),
             TextureFormat::Bc3 => bc::decode_bc3(&mip.data, mip.width, mip.height),
+            TextureFormat::Bc5 => bc::decode_bc5(&mip.data, mip.width, mip.height),
+            // **This one loses data, and it is the only door that may** (Wave T).
+            // A thumbnail is 8 bits per channel because a PNG is; asking a float
+            // texture for RGBA8 is asking for a preview, and a preview that
+            // clamps is honest where a *storage* format that clamps is not. The
+            // hot path never comes here — a float page uploads as RGBA16F and is
+            // sampled as one.
+            TextureFormat::Rgba16F => rgba16f_to_rgba8(&mip.data, mip.width, mip.height),
         })
     }
 
@@ -246,6 +287,9 @@ pub enum TextureCompression {
     Bc1,
     /// Force BC3.
     Bc3,
+    /// Force **BC5** — two channels (R, G), the normal-map format (Wave T).
+    /// Blue and alpha are discarded and the sampler rebuilds Z.
+    Bc5,
     /// BC1 if fully opaque, else BC3.
     #[default]
     Auto,
@@ -257,6 +301,23 @@ pub struct TextureImportSettings {
     pub srgb: bool,
     pub generate_mips: bool,
     pub compression: TextureCompression,
+    /// **Keep a float source's dynamic range** (Wave T).
+    ///
+    /// `false` — the default, and exactly what every import did before Wave T —
+    /// decodes an EXR or Radiance source to 8 bits per channel like any PNG,
+    /// which is lossy in a way nothing used to say out loud.
+    /// [`hdr_import_advisory`] now says it.
+    ///
+    /// `true` imports a float source as [`TextureFormat::Rgba16F`] instead:
+    /// 8 bytes a texel, no block compression (there is no BC6H encoder here),
+    /// and the values arrive as authored. It has no effect on an 8-bit source —
+    /// promoting a PNG to half-float invents precision it never had and costs
+    /// twice the bytes to do it.
+    ///
+    /// `#[serde(default)]`: the sidecar is TOML, so every settings block written
+    /// before Wave T reads back with the pre-Wave-T behaviour.
+    #[serde(default)]
+    pub hdr: bool,
 }
 
 impl Default for TextureImportSettings {
@@ -265,18 +326,51 @@ impl Default for TextureImportSettings {
             srgb: true,
             generate_mips: true,
             compression: TextureCompression::Auto,
+            hdr: false,
         }
     }
 }
 
 impl TextureImportSettings {
-    /// Preset for non-color data (normal maps, masks): linear, uncompressed by
-    /// default (BC introduces artifacts in normals; a BC5 path is future work).
+    /// Preset for non-color data (masks, ORM, height): linear, uncompressed.
+    ///
+    /// **Still uncompressed, and deliberately** (Wave T). BC1 on a data map
+    /// quantises the channels the data lives in, and Wave T's answer for the one
+    /// data map that has a *correct* compressed form — the normal map — is
+    /// [`normal_map`](Self::normal_map), not a change of default here. Anything
+    /// that changed what this preset produces would move the bytes of every
+    /// asset that has ever been imported through it.
     pub fn data() -> Self {
         Self {
             srgb: false,
             generate_mips: true,
             compression: TextureCompression::None,
+            hdr: false,
+        }
+    }
+
+    /// Preset for a **tangent-space normal map** (Wave T): linear, BC5.
+    ///
+    /// The preset [`data`](Self::data) could not be, because it is the preset for
+    /// every data map and BC5 keeps only two channels. Opting in per map is what
+    /// makes that safe: an ORM triple through `data()` still stores three
+    /// channels, and a normal map through this one stores the two it needs at a
+    /// quarter of the page bytes.
+    pub fn normal_map() -> Self {
+        Self {
+            srgb: false,
+            generate_mips: true,
+            compression: TextureCompression::Bc5,
+            hdr: false,
+        }
+    }
+
+    /// [`data`](Self::data) with the float range kept — the preset a Megascans
+    /// EXR displacement/cavity map wants.
+    pub fn data_hdr() -> Self {
+        Self {
+            hdr: true,
+            ..Self::data()
         }
     }
 }
@@ -394,11 +488,72 @@ fn tail_cost_advisory(width: u32, height: u32) -> Option<String> {
     })
 }
 
+/// **The HDR advisory** (Wave T): what an import is about to do to a float
+/// source's dynamic range, said out loud.
+///
+/// The P16 house rule is "a cook advisory for every silent hazard", and this is
+/// one of the purest examples the project has had. `image::load_from_memory(…)
+/// .to_rgba8()` is one call and it is the *only* decode an import has ever done,
+/// so a 32-bit Radiance or OpenEXR source — the exact shape the Megascans/Fab
+/// pipeline delivers displacement, cavity and bent-normal maps in — arrived with
+/// everything above 1.0 clipped and everything below quantised to 256 steps, and
+/// the import reported success. Nothing downstream could tell the difference
+/// between that and a PNG.
+///
+/// Two sentences, never both: one when the range is being thrown away, one when
+/// it is being kept and the author should know what it costs. Pure, so it is
+/// unit-tested with no file and no project.
+pub fn hdr_import_advisory(source_is_float: bool, kept_float: bool) -> Option<String> {
+    if !source_is_float {
+        return None;
+    }
+    if kept_float {
+        Some(format!(
+            "this is a floating-point source and it is being kept as RGBA16F — 8 bytes a texel, \
+             {}× a BC1 page and {}× a BC5 one, because there is no BC6H encoder in this project \
+             (see docs/memos/wave-t-textures-disposition.md); import it with hdr = false if the \
+             map's values all live in [0, 1]",
+            8 * 4 / 4,
+            8 * 4 / 8
+        ))
+    } else {
+        Some(
+            "this is a floating-point source (EXR/Radiance) and it is being imported at 8 bits \
+             per channel: every value above 1.0 is clipped and the rest is quantised to 256 \
+             steps. Set hdr = true on the import to keep it as RGBA16F"
+                .to_string(),
+        )
+    }
+}
+
+/// Whether an encoded source carries **floating-point** samples — the question
+/// [`hdr_import_advisory`] is asked.
+///
+/// Sniffed from the container rather than from a decode, because the answer has
+/// to be available before deciding which decode to run. Radiance `.hdr` and
+/// OpenEXR are the two float containers the accepted-extension list admits; a
+/// 16-bit PNG is high-precision and is *not* float (it cannot hold a value above
+/// 1.0), so it is not one of these and does not want an RGBA16F page.
+pub fn source_is_float(bytes: &[u8]) -> bool {
+    matches!(
+        image::guess_format(bytes),
+        Ok(image::ImageFormat::Hdr) | Ok(image::ImageFormat::OpenExr)
+    )
+}
+
 /// Decode an encoded image (PNG/JPEG/…) and import it with `settings`.
+///
+/// **The one place the float branch is taken** (Wave T): a float source with
+/// `settings.hdr` keeps its range, and everything else takes the path it always
+/// did, byte for byte.
 pub fn import_texture_bytes(
     bytes: &[u8],
     settings: TextureImportSettings,
 ) -> Result<TextureAsset, MaterialError> {
+    if settings.hdr && source_is_float(bytes) {
+        let (halfs, w, h) = decode_image_rgba16f(bytes)?;
+        return texture_from_rgba16f(halfs, w, h, settings);
+    }
     let (rgba, w, h) = decode_image_rgba8(bytes)?;
     texture_from_rgba8(rgba, w, h, settings)
 }
@@ -418,6 +573,66 @@ pub fn decode_image_rgba8(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), MaterialE
     Ok((img.into_raw(), w, h))
 }
 
+/// Decode an encoded image to **RGBA16F**, four little-endian halves a texel
+/// (Wave T).
+///
+/// The float twin of [`decode_image_rgba8`], and the same "one decode site" rule
+/// applies: the advisory, the tiler and the v1 writer all read the extent this
+/// returns.
+///
+/// `to_rgba32f` is `image`'s own widening — it is exact for a float source and
+/// it is why this is not a second decoder. The narrowing to half is
+/// round-to-nearest-even and therefore a pure function of the input bits, on
+/// every target: this file writes bytes that are content-hashed into a
+/// reproducible pack, which is the same claim `crate::bc`'s no-float gate
+/// defends by banning floats outright. It cannot ban them here — a half *is* a
+/// float — so it defends the claim the other way, by using only operations IEEE
+/// 754 specifies exactly (`from_f32`, and in the mip chain a sum of four values
+/// scaled by a power of two). No transcendental, no fused multiply-add, no
+/// libm.
+pub fn decode_image_rgba16f(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), MaterialError> {
+    let img = image::load_from_memory(bytes).map_err(|e| MaterialError::Image(e.to_string()))?;
+    let f = img.to_rgba32f();
+    let (w, h) = f.dimensions();
+    let mut out = Vec::with_capacity(w as usize * h as usize * 8);
+    for px in f.pixels() {
+        for c in px.0 {
+            out.extend_from_slice(&half::f16::from_f32(c).to_le_bytes());
+        }
+    }
+    Ok((out, w, h))
+}
+
+/// Import an already-decoded **RGBA16F** buffer (four LE halves a texel).
+///
+/// The format is `Rgba16F` whatever `settings.compression` says: none of BC1,
+/// BC3 or BC5 can hold a value outside `[0, 1]`, so honouring a compression
+/// request here would be the silent flattening this path exists to end. A caller
+/// that wants a compressed HDR page wants BC6H, which this project does not have.
+pub fn texture_from_rgba16f(
+    halfs: Vec<u8>,
+    width: u32,
+    height: u32,
+    settings: TextureImportSettings,
+) -> Result<TextureAsset, MaterialError> {
+    let levels = rgba16f_mip_chain(halfs, width, height, settings.generate_mips)?;
+    Ok(TextureAsset {
+        schema_version: TextureAsset::CURRENT_VERSION,
+        width,
+        height,
+        format: TextureFormat::Rgba16F,
+        srgb: false,
+        mips: levels
+            .into_iter()
+            .map(|(w, h, data)| TextureMip {
+                width: w,
+                height: h,
+                data,
+            })
+            .collect(),
+    })
+}
+
 /// Import an already-decoded RGBA8 buffer (e.g. a glTF-embedded image).
 pub fn texture_from_rgba8(
     rgba: Vec<u8>,
@@ -435,6 +650,12 @@ pub fn texture_from_rgba8(
                 TextureFormat::Rgba8 => data,
                 TextureFormat::Bc1 => bc::compress_bc1(&data, w, h),
                 TextureFormat::Bc3 => bc::compress_bc3(&data, w, h),
+                TextureFormat::Bc5 => bc::compress_bc5(&data, w, h),
+                // Unreachable: `choose_format` never answers a float format for
+                // an 8-bit source (promoting one invents precision). Answering
+                // the bytes unchanged rather than panicking, because a wrong
+                // *size* is caught by `validate` at the very next door.
+                TextureFormat::Rgba16F => data,
             };
             TextureMip {
                 width: w,
@@ -487,6 +708,86 @@ pub(crate) fn rgba_mip_chain(
     Ok(levels)
 }
 
+/// The **RGBA16F** mip chain of a float source, largest first, down to 1×1
+/// (Wave T).
+///
+/// The twin of [`rgba_mip_chain`], and shared by the v1 writer and the v2 tiler
+/// for exactly the same reason: two chains that agree today are two chains.
+///
+/// Every arithmetic step is IEEE-exact. A half widens to `f32` losslessly; four
+/// `f32` adds are correctly rounded; and the scale is `0.25`, a power of two, so
+/// it is exact too. Rust emits no fused multiply-add without being asked, and
+/// there is no transcendental here — so the bytes this writes are the same bytes
+/// on every target, which is the property `crate::bc`'s gate defends for the
+/// integer formats and this paragraph defends for the float one.
+pub(crate) fn rgba16f_mip_chain(
+    halfs: Vec<u8>,
+    width: u32,
+    height: u32,
+    generate_mips: bool,
+) -> Result<Vec<(u32, u32, Vec<u8>)>, MaterialError> {
+    if width == 0 || height == 0 {
+        return Err(MaterialError::Image("zero-sized texture".into()));
+    }
+    if halfs.len() < width as usize * height as usize * 8 {
+        return Err(MaterialError::Image("truncated pixel buffer".into()));
+    }
+    let mut levels: Vec<(u32, u32, Vec<u8>)> = vec![(width, height, halfs)];
+    if generate_mips {
+        while levels.last().unwrap().0 > 1 || levels.last().unwrap().1 > 1 {
+            let (pw, ph, ref prev) = *levels.last().unwrap();
+            let (nw, nh) = ((pw / 2).max(1), (ph / 2).max(1));
+            let down = downsample_box_rgba16f(prev, pw, ph, nw, nh);
+            levels.push((nw, nh, down));
+        }
+    }
+    Ok(levels)
+}
+
+/// One half at texel `(x, y)`, channel `c`.
+#[inline]
+fn half_at(src: &[u8], w: u32, x: u32, y: u32, c: usize) -> f32 {
+    let i = ((y as usize * w as usize + x as usize) * 4 + c) * 2;
+    half::f16::from_le_bytes([src[i], src[i + 1]]).to_f32()
+}
+
+/// 2×2 box-filter downsample of an RGBA16F image, mirroring `downsample_box`.
+fn downsample_box_rgba16f(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let mut out = vec![0u8; dw as usize * dh as usize * 8];
+    for y in 0..dh {
+        for x in 0..dw {
+            let sx0 = (x * 2).min(sw - 1);
+            let sy0 = (y * 2).min(sh - 1);
+            let sx1 = (x * 2 + 1).min(sw - 1);
+            let sy1 = (y * 2 + 1).min(sh - 1);
+            for c in 0..4 {
+                let acc = half_at(src, sw, sx0, sy0, c)
+                    + half_at(src, sw, sx1, sy0, c)
+                    + half_at(src, sw, sx0, sy1, c)
+                    + half_at(src, sw, sx1, sy1, c);
+                let o = ((y as usize * dw as usize + x as usize) * 4 + c) * 2;
+                out[o..o + 2].copy_from_slice(&half::f16::from_f32(acc * 0.25).to_le_bytes());
+            }
+        }
+    }
+    out
+}
+
+/// RGBA16F → RGBA8 for a **preview**, clamping to `[0, 1]`. See
+/// [`TextureAsset::level_rgba8`] for why this is the only door allowed to.
+fn rgba16f_to_rgba8(src: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let n = width as usize * height as usize * 4;
+    let mut out = vec![0u8; n];
+    for (i, o) in out.iter_mut().enumerate() {
+        let Some(b) = src.get(i * 2..i * 2 + 2) else {
+            break;
+        };
+        let v = half::f16::from_le_bytes([b[0], b[1]]).to_f32();
+        *o = (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    }
+    out
+}
+
 /// The storage format an import setting resolves to for a given level-0 image.
 /// Shared with the v2 tiler for the same reason [`rgba_mip_chain`] is.
 pub(crate) fn choose_format(compression: TextureCompression, level0: &[u8]) -> TextureFormat {
@@ -494,6 +795,7 @@ pub(crate) fn choose_format(compression: TextureCompression, level0: &[u8]) -> T
         TextureCompression::None => TextureFormat::Rgba8,
         TextureCompression::Bc1 => TextureFormat::Bc1,
         TextureCompression::Bc3 => TextureFormat::Bc3,
+        TextureCompression::Bc5 => TextureFormat::Bc5,
         TextureCompression::Auto => {
             if is_fully_opaque(level0) {
                 TextureFormat::Bc1
@@ -579,6 +881,7 @@ mod tests {
                 compression: TextureCompression::None,
                 generate_mips: false,
                 srgb: false,
+                hdr: false,
             },
         )
         .unwrap();
@@ -902,6 +1205,150 @@ mod tests {
         assert_eq!(
             texture_import_advisories(4095, 15),
             texture_import_advisories(4095, 15)
+        );
+    }
+
+    /// **THE HDR FINDING, and its fix** (Wave T).
+    ///
+    /// Before this batch there was exactly one decode on the import path —
+    /// `image::load_from_memory(bytes)?.to_rgba8()` — so an OpenEXR or Radiance
+    /// source, which is what Megascans/Fab ship displacement, cavity and
+    /// bent-normal maps as, arrived with **everything above 1.0 clipped** and the
+    /// rest quantised to 256 steps, and the import reported success. Nothing
+    /// downstream could tell it from a PNG.
+    ///
+    /// This arm builds a real Radiance file with values above 1.0 in it and
+    /// measures both paths against the source, so the loss is a number rather
+    /// than an assertion: the 8-bit path is the *control* and it must be badly
+    /// wrong, or the float path is not proving anything.
+    #[test]
+    fn a_float_source_survives_import_when_hdr_is_asked_for() {
+        // A 4×4 Radiance image whose brightest texel is 8.0 — an ordinary value
+        // for a cavity/displacement map and four stops past what RGBA8 holds.
+        let (w, h) = (4u32, 4u32);
+        let mut src = image::Rgb32FImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = 0.25f32 * (1 + x + y * w) as f32; // 0.25 … 4.0
+                src.put_pixel(x, y, image::Rgb([v, v * 2.0, v * 0.5]));
+            }
+        }
+        let mut encoded: Vec<u8> = Vec::new();
+        image::DynamicImage::ImageRgb32F(src.clone())
+            .write_to(
+                &mut std::io::Cursor::new(&mut encoded),
+                image::ImageFormat::Hdr,
+            )
+            .expect("the fixture encodes");
+        assert!(source_is_float(&encoded), "the fixture must sniff as float");
+        assert!(
+            !source_is_float(include_bytes!("bc.rs")),
+            "a non-image must not sniff as float"
+        );
+
+        // The control: the pre-Wave-T path, which is still the default.
+        let flat = import_texture_bytes(&encoded, TextureImportSettings::data()).unwrap();
+        assert_eq!(flat.format, TextureFormat::Rgba8);
+        let flat0 = flat.level_rgba8(0).unwrap();
+        assert!(
+            flat0.chunks_exact(4).all(|p| p[0] == 255 || p[1] == 255) || flat0.contains(&255),
+            "the 8-bit control must be clipping — otherwise this arm proves nothing"
+        );
+
+        // The fix.
+        let kept = import_texture_bytes(&encoded, TextureImportSettings::data_hdr()).unwrap();
+        assert_eq!(kept.format, TextureFormat::Rgba16F);
+        assert_eq!(kept.mips[0].data.len(), (w * h * 8) as usize);
+        kept.validate().expect("a float asset is a valid asset");
+
+        // Every source value comes back, including the ones past 1.0.
+        let mut biggest = 0f32;
+        for (i, px) in src.pixels().enumerate() {
+            for c in 0..3 {
+                let o = (i * 4 + c) * 2;
+                let got =
+                    half::f16::from_le_bytes([kept.mips[0].data[o], kept.mips[0].data[o + 1]])
+                        .to_f32();
+                assert!(
+                    (got - px.0[c]).abs() <= px.0[c] * 0.001 + 1e-3,
+                    "texel {i} channel {c}: kept {got}, source {}",
+                    px.0[c]
+                );
+                biggest = biggest.max(got);
+            }
+        }
+        assert!(
+            biggest > 4.0,
+            "the fixture must carry a value the 8-bit path cannot: max {biggest}"
+        );
+
+        // …and the advisory says which of the two happened, both ways.
+        assert!(hdr_import_advisory(false, false).is_none());
+        let lost = hdr_import_advisory(true, false).unwrap();
+        assert!(
+            lost.contains("clipped") && lost.contains("hdr = true"),
+            "{lost}"
+        );
+        let cost = hdr_import_advisory(true, true).unwrap();
+        assert!(cost.contains("RGBA16F") && cost.contains("BC6H"), "{cost}");
+        for a in [lost, cost] {
+            assert!(
+                !a.contains("  ") && !a.contains('\n'),
+                "eaten continuation: {a:?}"
+            );
+        }
+    }
+
+    /// The float mip chain halves like every other chain, and is a **pure
+    /// function of its input** — the property a content hash rests on.
+    #[test]
+    fn the_float_mip_chain_halves_and_is_deterministic() {
+        let halfs: Vec<u8> = (0..(8 * 8 * 4))
+            .flat_map(|i| half::f16::from_f32(i as f32 * 0.125).to_le_bytes())
+            .collect();
+        let a =
+            texture_from_rgba16f(halfs.clone(), 8, 8, TextureImportSettings::data_hdr()).unwrap();
+        let b = texture_from_rgba16f(halfs, 8, 8, TextureImportSettings::data_hdr()).unwrap();
+        assert_eq!(a, b, "two imports of one buffer differ");
+        assert_eq!(a.mip_count(), 4);
+        for (i, m) in a.mips.iter().enumerate() {
+            assert_eq!(m.data.len(), (m.width * m.height * 8) as usize, "mip {i}");
+        }
+        a.validate().expect("the chain validates");
+        // A promoted 8-bit source is NOT float: `hdr` only preserves, never
+        // invents.
+        let png = texture_from_rgba8(
+            checker(4, 4, 255),
+            4,
+            4,
+            TextureImportSettings {
+                hdr: true,
+                ..TextureImportSettings::data()
+            },
+        )
+        .unwrap();
+        assert_eq!(png.format, TextureFormat::Rgba8);
+    }
+
+    /// BC5 reaches the asset through the ordinary import door, and the level
+    /// sizes it declares are the ones it stores.
+    #[test]
+    fn the_normal_map_preset_imports_as_bc5() {
+        let s = TextureImportSettings::normal_map();
+        assert_eq!(s.compression, TextureCompression::Bc5);
+        assert!(!s.srgb, "a normal map is never sRGB");
+        let tex = texture_from_rgba8(checker(16, 16, 255), 16, 16, s).unwrap();
+        assert_eq!(tex.format, TextureFormat::Bc5);
+        assert!(tex.format.is_compressed() && !tex.format.is_float());
+        assert_eq!(tex.mips[0].data.len(), 4 * 4 * 16);
+        tex.validate().expect("a BC5 asset is a valid asset");
+        // And the preset that must NOT have moved: `data()` is what every
+        // existing data map imported through, and it still answers RGBA8.
+        assert_eq!(
+            texture_from_rgba8(checker(16, 16, 255), 16, 16, TextureImportSettings::data())
+                .unwrap()
+                .format,
+            TextureFormat::Rgba8
         );
     }
 

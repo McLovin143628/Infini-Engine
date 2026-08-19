@@ -81,6 +81,15 @@ pub fn page_format(format: PageFormat, srgb: bool) -> wgpu::TextureFormat {
         (PageFormat::Bc1, false) => wgpu::TextureFormat::Bc1RgbaUnorm,
         (PageFormat::Bc3, true) => wgpu::TextureFormat::Bc3RgbaUnormSrgb,
         (PageFormat::Bc3, false) => wgpu::TextureFormat::Bc3RgbaUnorm,
+        // **Neither of Wave T's formats has an sRGB variant, and neither wants
+        // one.** BC5 stores a normal's X and Y — a transfer curve on a direction
+        // is meaningless — and RGBA16F is linear by construction. The `srgb`
+        // argument is not ignored for them so much as answered: the atlas has
+        // always been created in the LINEAR variant and the shader decodes per
+        // texture from the table's flag (see `vt_sample.wgsl`'s header), so
+        // there was never a second view to pick.
+        (PageFormat::Bc5, _) => wgpu::TextureFormat::Bc5RgUnorm,
+        (PageFormat::Rgba16F, _) => wgpu::TextureFormat::Rgba16Float,
     }
 }
 
@@ -96,8 +105,15 @@ pub fn page_format(format: PageFormat, srgb: bool) -> wgpu::TextureFormat {
 /// `TiledTextureReader::tile_rgba8` instead of `tile`, which is **the same
 /// residency door, one format decision earlier**, at 8× the page bytes for BC1
 /// and 4× for BC3.
+/// **The clamp is on the BC formats, not on "everything but RGBA8"** (Wave T).
+/// `PageFormat::Rgba16F` needs no `TEXTURE_COMPRESSION_BC` — it is an
+/// uncompressed float format — so an adapter without BC keeps it whole rather
+/// than being handed a transcode that would clamp exactly the range the format
+/// exists to carry. `PageFormat::needs_bc` is the one place that decision lives;
+/// `TiledTextureReader::tile_rgba8` refuses a float page for the same reason, so
+/// the two ends of this seam cannot drift into disagreeing.
 pub fn pool_format(settings: &RenderSettings, stored: PageFormat) -> PageFormat {
-    if settings.vt.bc_tiles {
+    if settings.vt.bc_tiles || !stored.needs_bc() {
         stored
     } else {
         PageFormat::Rgba8

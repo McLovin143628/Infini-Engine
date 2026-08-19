@@ -81,6 +81,7 @@ fn container(w: u32, h: u32) -> TiledTextureImage {
             srgb: true,
             generate_mips: true,
             compression: TextureCompression::Bc1,
+            hdr: false,
         },
     )
     .expect("the fixture tiles")

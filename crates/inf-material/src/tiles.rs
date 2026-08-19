@@ -134,10 +134,10 @@ use crate::texture::{TextureAsset, TextureFormat, TextureMip};
 /// stayed, and for the one deliberate deviation (the BC *decoder* went with the
 /// reader; the encoder did not).
 pub use inf_vt::container::{
-    align_up, format_code, format_from_code, is_v2, parse, TexMipEntry, TexTileEntry,
-    TiledTextureError, TiledTextureHeader, TiledTextureReader, TiledTextureView, HEADER_LEN,
-    MIP_ENTRY_LEN, SECTION_ALIGN, STORED_TILE_SIZE, TEX_ASSET_MAGIC, TEX_ASSET_SCHEMA_VERSION,
-    TILE_BORDER, TILE_ENTRY_LEN, TILE_SIZE,
+    align_up, format_code, format_from_code, is_v2, min_schema_version, parse, TexMipEntry,
+    TexTileEntry, TiledTextureError, TiledTextureHeader, TiledTextureReader, TiledTextureView,
+    HEADER_LEN, MIP_ENTRY_LEN, SECTION_ALIGN, STORED_TILE_SIZE, TEX_ASSET_MAGIC,
+    TEX_ASSET_SCHEMA_VERSION, TILE_BORDER, TILE_ENTRY_LEN, TILE_SIZE,
 };
 
 type Result<T> = std::result::Result<T, TiledTextureError>;
@@ -187,6 +187,47 @@ pub fn build_tiled_texture(
     Ok(tile_levels(&levels, format, settings.srgb))
 }
 
+/// Lay an **RGBA16F** source (four LE halves a texel) out as a tiled image
+/// (Wave T) — the float twin of [`build_tiled_texture`].
+///
+/// The format is `Rgba16F` regardless of `settings.compression`, for the reason
+/// `crate::texture::texture_from_rgba16f` states: no block format in this
+/// container can hold a value outside `[0, 1]`, so honouring a compression
+/// request would silently undo the whole point.
+pub fn build_tiled_texture_rgba16f(
+    halfs: Vec<u8>,
+    width: u32,
+    height: u32,
+    settings: crate::texture::TextureImportSettings,
+) -> std::result::Result<TiledTextureImage, MaterialError> {
+    let levels = crate::texture::rgba16f_mip_chain(halfs, width, height, settings.generate_mips)?;
+    Ok(tile_levels(&levels, TextureFormat::Rgba16F, false))
+}
+
+/// Decode `bytes` and lay it out as a tiled image, taking the **float** path
+/// when the source is float and `settings.hdr` asks for it (Wave T).
+///
+/// The one door an importer should call: it is where `source_is_float` and
+/// `hdr` meet, so no call site has to remember to check both. Returns the image
+/// and the [`crate::texture::hdr_import_advisory`] the decision earned, if any —
+/// a value rather than a log line, on the house advisory doctrine.
+pub fn build_tiled_texture_from_bytes(
+    bytes: &[u8],
+    settings: crate::texture::TextureImportSettings,
+) -> std::result::Result<(TiledTextureImage, Option<String>), MaterialError> {
+    let float_source = crate::texture::source_is_float(bytes);
+    let kept = float_source && settings.hdr;
+    let advisory = crate::texture::hdr_import_advisory(float_source, kept);
+    let image = if kept {
+        let (halfs, w, h) = crate::texture::decode_image_rgba16f(bytes)?;
+        build_tiled_texture_rgba16f(halfs, w, h, settings)?
+    } else {
+        let (rgba, w, h) = crate::texture::decode_image_rgba8(bytes)?;
+        build_tiled_texture(rgba, w, h, settings)?
+    };
+    Ok((image, advisory))
+}
+
 /// Lay an **already-imported v1 [`TextureAsset`]** out as a v2 tiled image — the
 /// lift path, the twin of `VgeomSource::from_payload`'s v1 branch.
 ///
@@ -210,13 +251,20 @@ pub fn lift_texture_asset(
     }
     let mut levels: Vec<(u32, u32, Vec<u8>)> = Vec::with_capacity(tex.mips.len());
     for (i, mip) in tex.mips.iter().enumerate() {
-        let rgba = tex
-            .level_rgba8(i)
-            .ok_or_else(|| MaterialError::Image(format!("mip {i} will not decode")))?;
-        if rgba.len() < (mip.width as usize * mip.height as usize * 4) {
+        // **A float level is carried, never decoded** (Wave T). `level_rgba8`
+        // clamps to `[0, 1]` for previews; taking that door here would make a
+        // lift the very flattening the float format exists to end.
+        let texels = if tex.format.is_float() {
+            mip.data.clone()
+        } else {
+            tex.level_rgba8(i)
+                .ok_or_else(|| MaterialError::Image(format!("mip {i} will not decode")))?
+        };
+        let want = tex.format.texel_bytes().unwrap_or(4);
+        if texels.len() < (mip.width as usize * mip.height as usize * want) {
             return Err(MaterialError::Image(format!("mip {i} is truncated")));
         }
-        levels.push((mip.width, mip.height, rgba));
+        levels.push((mip.width, mip.height, texels));
     }
     Ok(tile_levels(&levels, tex.format, tex.srgb))
 }
@@ -258,7 +306,13 @@ fn tile_levels(
     // ── 3. Emit the header ──
     let mut out: Vec<u8> = Vec::with_capacity(total_len as usize);
     out.extend_from_slice(&TEX_ASSET_MAGIC);
-    out.extend_from_slice(&TEX_ASSET_SCHEMA_VERSION.to_le_bytes());
+    // **The LOWEST version that can express this format, not the newest this
+    // build knows** (Wave T). A BC1 albedo therefore still stamps v2 and is
+    // byte-identical to what it was before Wave T — no content hash moves, no
+    // import cache is invalidated, no `.inf_pack` stops reproducing — while a
+    // BC5 or RGBA16F payload stamps v3 and is refused by name by a build that
+    // cannot read its format code. See `inf_vt::container::min_schema_version`.
+    out.extend_from_slice(&min_schema_version(format.into()).to_le_bytes());
     out.extend_from_slice(&levels[0].0.to_le_bytes());
     out.extend_from_slice(&levels[0].1.to_le_bytes());
     out.extend_from_slice(&format_code(format.into()).to_le_bytes());
@@ -305,15 +359,21 @@ fn tile_levels(
     out.resize(tile_base as usize, 0);
 
     // ── 6. The blobs, in directory order ──
+    // Bytes a source texel occupies. Every format but the float one gathers from
+    // an RGBA8 level; `Rgba16F` gathers from four halves. The clamp rule, the
+    // border ring and the tile order are identical either way — which is why
+    // this is a stride and not a second tiler.
+    let src_texel = format.texel_bytes().unwrap_or(4);
     for (mip, m) in mips.iter().enumerate() {
         let (lw, lh, ref rgba) = levels[mip];
         for y in 0..m.tiles_y {
             for x in 0..m.tiles_x {
-                let gathered = gather_stored_tile(rgba, lw, lh, x, y);
+                let gathered = gather_stored_tile(rgba, lw, lh, x, y, src_texel);
                 let blob = match format {
-                    TextureFormat::Rgba8 => gathered,
+                    TextureFormat::Rgba8 | TextureFormat::Rgba16F => gathered,
                     TextureFormat::Bc1 => bc::compress_bc1(&gathered, stored, stored),
                     TextureFormat::Bc3 => bc::compress_bc3(&gathered, stored, stored),
+                    TextureFormat::Bc5 => bc::compress_bc5(&gathered, stored, stored),
                 };
                 debug_assert_eq!(blob.len(), tile_bytes);
                 out.extend_from_slice(&blob);
@@ -333,18 +393,18 @@ fn tile_levels(
 /// Gather one stored tile's `STORED_TILE_SIZE²` RGBA8 texels out of a level,
 /// clamping every coordinate that falls outside it (the border ring and the
 /// right/bottom remainder alike — see the module docs).
-fn gather_stored_tile(rgba: &[u8], lw: u32, lh: u32, tx: u32, ty: u32) -> Vec<u8> {
+fn gather_stored_tile(rgba: &[u8], lw: u32, lh: u32, tx: u32, ty: u32, texel: usize) -> Vec<u8> {
     let stored = STORED_TILE_SIZE as usize;
-    let mut out = vec![0u8; stored * stored * 4];
+    let mut out = vec![0u8; stored * stored * texel];
     let x0 = tx * TILE_SIZE;
     let y0 = ty * TILE_SIZE;
     for j in 0..stored {
         let sy = (y0 as i64 + j as i64 - TILE_BORDER as i64).clamp(0, lh as i64 - 1) as u32;
         for i in 0..stored {
             let sx = (x0 as i64 + i as i64 - TILE_BORDER as i64).clamp(0, lw as i64 - 1) as u32;
-            let si = ((sy * lw + sx) * 4) as usize;
-            let di = (j * stored + i) * 4;
-            out[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+            let si = (sy as usize * lw as usize + sx as usize) * texel;
+            let di = (j * stored + i) * texel;
+            out[di..di + texel].copy_from_slice(&rgba[si..si + texel]);
         }
     }
     out
@@ -426,9 +486,12 @@ impl<B: AsRef<[u8]>> TiledTextureExt for TiledTextureReader<B> {
         let stored = self.header().stored_tile_size();
         let border = self.header().border;
         let tile_size = self.header().tile_size;
-        match TextureFormat::from(self.header().format) {
-            TextureFormat::Rgba8 => {
-                let mut out = vec![0u8; (m.width as usize) * (m.height as usize) * 4];
+        let fmt = TextureFormat::from(self.header().format);
+        match fmt.texel_bytes() {
+            // The uncompressed arm, at whichever texel width the format has —
+            // 4 for RGBA8, 8 for RGBA16F (Wave T). One loop, one stride.
+            Some(texel) => {
+                let mut out = vec![0u8; (m.width as usize) * (m.height as usize) * texel];
                 for ty in 0..m.tiles_y {
                     for tx in 0..m.tiles_x {
                         let blob = self.tile(mip, tx, ty)?;
@@ -443,17 +506,21 @@ impl<B: AsRef<[u8]>> TiledTextureExt for TiledTextureReader<B> {
                                 if dx >= m.width {
                                     break;
                                 }
-                                let si = (sj * stored as usize + (i + border) as usize) * 4;
-                                let di = ((dy * m.width + dx) * 4) as usize;
-                                out[di..di + 4].copy_from_slice(&blob[si..si + 4]);
+                                let si = (sj * stored as usize + (i + border) as usize) * texel;
+                                let di = (dy as usize * m.width as usize + dx as usize) * texel;
+                                out[di..di + texel].copy_from_slice(&blob[si..si + texel]);
                             }
                         }
                     }
                 }
                 Some(out)
             }
-            f => {
-                let block = if f == TextureFormat::Bc3 { 16usize } else { 8 };
+            None => {
+                let block = if fmt == TextureFormat::Bc1 {
+                    8usize
+                } else {
+                    16
+                };
                 let lbx = m.width.div_ceil(4);
                 let lby = m.height.div_ceil(4);
                 let sbx = (stored / 4) as usize; // blocks per stored tile row
@@ -517,6 +584,8 @@ impl From<TextureFormat> for inf_vt::PageFormat {
             TextureFormat::Rgba8 => inf_vt::PageFormat::Rgba8,
             TextureFormat::Bc1 => inf_vt::PageFormat::Bc1,
             TextureFormat::Bc3 => inf_vt::PageFormat::Bc3,
+            TextureFormat::Bc5 => inf_vt::PageFormat::Bc5,
+            TextureFormat::Rgba16F => inf_vt::PageFormat::Rgba16F,
         }
     }
 }
@@ -537,9 +606,22 @@ impl From<inf_vt::PageFormat> for TextureFormat {
             inf_vt::PageFormat::Rgba8 => TextureFormat::Rgba8,
             inf_vt::PageFormat::Bc1 => TextureFormat::Bc1,
             inf_vt::PageFormat::Bc3 => TextureFormat::Bc3,
+            inf_vt::PageFormat::Bc5 => TextureFormat::Bc5,
+            inf_vt::PageFormat::Rgba16F => TextureFormat::Rgba16F,
         }
     }
 }
+
+/// Every storage format, for a sweep to iterate — one list, so a format added to
+/// the enum and forgotten here fails the bijection gate rather than being missed
+/// by every test at once.
+pub const ALL_TEXTURE_FORMATS: [TextureFormat; 5] = [
+    TextureFormat::Rgba8,
+    TextureFormat::Bc1,
+    TextureFormat::Bc3,
+    TextureFormat::Bc5,
+    TextureFormat::Rgba16F,
+];
 
 /// Decode a `.inf_tex` payload of **either** version into the v1 record.
 ///
@@ -594,6 +676,7 @@ mod tests {
             srgb: true,
             generate_mips: true,
             compression: c,
+            hdr: false,
         }
     }
 
@@ -623,10 +706,130 @@ mod tests {
         assert_eq!(format_code(TextureFormat::Rgba8.into()), 0);
         assert_eq!(format_code(TextureFormat::Bc1.into()), 1);
         assert_eq!(format_code(TextureFormat::Bc3.into()), 2);
-        for f in [TextureFormat::Rgba8, TextureFormat::Bc1, TextureFormat::Bc3] {
+        // Wave T APPENDED 3 and 4 — the three codes above did not move, which is
+        // the whole content of "freeze-pinned".
+        assert_eq!(format_code(TextureFormat::Bc5.into()), 3);
+        assert_eq!(format_code(TextureFormat::Rgba16F.into()), 4);
+        for f in ALL_TEXTURE_FORMATS {
             assert_eq!(format_from_code(format_code(f.into())), Some(f.into()));
         }
-        assert_eq!(format_from_code(3), None);
+        assert_eq!(format_from_code(5), None);
+        // …and the version a format demands is the version the writer stamps.
+        // A build that predates Wave T refuses codes 3 and 4 by *version*, not
+        // by guessing at the code — and every older format still stamps v2, so
+        // no existing texture's bytes moved.
+        for f in [TextureFormat::Rgba8, TextureFormat::Bc1, TextureFormat::Bc3] {
+            assert_eq!(min_schema_version(f.into()), 2, "{f:?}");
+        }
+        for f in [TextureFormat::Bc5, TextureFormat::Rgba16F] {
+            assert_eq!(min_schema_version(f.into()), 3, "{f:?}");
+        }
+    }
+
+    /// **The v3 bump moved no existing byte** (Wave T).
+    ///
+    /// The one claim that makes a container version cheap: a texture in a
+    /// pre-Wave-T format is the same file it was, version word included, so no
+    /// content hash moves, no import cache is invalidated and no `.inf_pack`
+    /// stops reproducing. Asserted on the header word rather than on a memory of
+    /// the decision — and on both axes, because "the version is 2" and "a v3
+    /// format actually stamps 3" are two different mistakes.
+    #[test]
+    fn a_pre_wave_t_format_still_writes_a_v2_container() {
+        for c in [
+            TextureCompression::None,
+            TextureCompression::Bc1,
+            TextureCompression::Bc3,
+        ] {
+            let img = build_tiled_texture(corners(160, 160), 160, 160, settings(c)).unwrap();
+            let v = u32::from_le_bytes(img.as_bytes()[8..12].try_into().unwrap());
+            assert_eq!(v, 2, "{c:?} stamped v{v}; every pre-Wave-T byte must stand");
+        }
+        let bc5 = build_tiled_texture(
+            corners(160, 160),
+            160,
+            160,
+            settings(TextureCompression::Bc5),
+        )
+        .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(bc5.as_bytes()[8..12].try_into().unwrap()),
+            3
+        );
+        let hdr = build_tiled_texture_rgba16f(
+            vec![0u8; 160 * 160 * 8],
+            160,
+            160,
+            settings(TextureCompression::None),
+        )
+        .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(hdr.as_bytes()[8..12].try_into().unwrap()),
+            3
+        );
+    }
+
+    /// **A v2 stamp over a v3 format code is refused** — the version and the
+    /// format lane are one contract (Wave T).
+    ///
+    /// Without this the file would be one no build in the world but this one
+    /// could read: every pre-Wave-T reader refuses the code, and this reader
+    /// would accept a version claim its own writer would never make.
+    #[test]
+    fn a_v3_format_stamped_v2_is_refused() {
+        let mut bad = build_tiled_texture(
+            corners(160, 160),
+            160,
+            160,
+            settings(TextureCompression::Bc5),
+        )
+        .unwrap()
+        .into_bytes();
+        assert!(TiledTextureImage::from_bytes(bad.clone()).is_ok());
+        bad[8..12].copy_from_slice(&2u32.to_le_bytes());
+        let e = TiledTextureImage::from_bytes(bad).unwrap_err();
+        assert!(
+            matches!(&e, TiledTextureError::Malformed(m) if m.contains("needs container v3")),
+            "{e:?}"
+        );
+    }
+
+    /// **The downgrade bless**: every container this build can write, read back
+    /// through the public door, for every format including the two Wave T added.
+    #[test]
+    fn every_format_round_trips_through_the_container() {
+        for c in [
+            TextureCompression::None,
+            TextureCompression::Bc1,
+            TextureCompression::Bc3,
+            TextureCompression::Bc5,
+            TextureCompression::Auto,
+        ] {
+            for (w, h) in [(320u32, 192u32), (129, 129), (4, 4), (1, 1)] {
+                let img = build_tiled_texture(corners(w, h), w, h, settings(c)).unwrap();
+                let r = img.reader();
+                let v1 = r.to_texture_asset().expect("reconstructs");
+                assert_eq!((v1.width, v1.height), (w, h), "{c:?} {w}×{h}");
+                assert_eq!(
+                    v1.mips[0].data.len(),
+                    v1.format.level_size(w, h),
+                    "{c:?} {w}×{h}: level 0 is not its own declared size"
+                );
+                // …and the payload decodes through the ONE door every consumer
+                // that wants whole levels uses.
+                assert_eq!(decode_texture_payload(img.as_bytes()).unwrap(), v1);
+            }
+        }
+        // The float container, whose levels are 8 bytes a texel.
+        let halfs: Vec<u8> = (0..(64 * 64 * 4))
+            .flat_map(|i| ((i % 251) as u16).to_le_bytes())
+            .collect();
+        let img =
+            build_tiled_texture_rgba16f(halfs, 64, 64, settings(TextureCompression::None)).unwrap();
+        let v1 = img.reader().to_texture_asset().expect("reconstructs");
+        assert_eq!(v1.format, TextureFormat::Rgba16F);
+        assert_eq!(v1.mips[0].data.len(), 64 * 64 * 8);
+        assert_eq!(v1.mips.len(), 7);
     }
 
     /// The two format enums are **one bijection**, both ways and totally — the
@@ -981,7 +1184,7 @@ mod tests {
             TiledTextureImage::from_bytes(bad).unwrap_err(),
             TiledTextureError::SchemaTooNew {
                 found: 99,
-                current: 2
+                current: TEX_ASSET_SCHEMA_VERSION
             }
         );
         // A tile offset dragged off its 16-byte boundary.

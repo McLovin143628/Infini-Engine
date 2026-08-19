@@ -21,6 +21,13 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 image = { workspace = true }
+# Wave T: the RGBA16F storage format an EXR/Radiance source keeps its dynamic
+# range in. **Not a new dependency** — `half` has been pinned in
+# `[workspace.dependencies]` and linked by `inf-terrain` since P16; this is one
+# more member crate naming a version that already lives once. It rides on the
+# importer side only: `inf-material` is a *dev* dependency of `inf-render`, so
+# the shipped player still links no half-float code to sample one.
+half = { workspace = true }
 # Author-time validation of graph-generated WGSL (P7.2).
 naga = { workspace = true }
 

@@ -30,10 +30,50 @@ pub fn compress_bc3(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
     compress(rgba, width, height, true)
 }
 
+/// Compress an RGBA8 image to **BC5 / RGTC2** — the normal-map format (Wave T).
+/// 16 bytes/block: two independent one-channel blocks, R then G. The source's
+/// blue and alpha are **discarded**, because that is the point.
+///
+/// # Why this is the right format for a normal map, in one paragraph
+///
+/// A tangent-space normal is a unit vector, so its Z is not data: it is
+/// `sqrt(1 − x² − y²)`, recoverable exactly from the other two. Storing it costs
+/// a third of the signal budget to carry a redundancy, and every endpoint scheme
+/// that packs three channels into shared endpoints then spends part of X and Y's
+/// precision describing it. BC1 is the worst case and is what a "just compress
+/// it" import would reach for: its 5:6:5 endpoints quantise the red axis to 32
+/// levels, which is *the* axis a normal map's X lives on. That is why normal maps
+/// have shipped **uncompressed** in this engine until now — 73 984 B a page — and
+/// why this format is a 4× saving rather than a quality trade: BC5 gives each of
+/// X and Y its own pair of 8-bit endpoints and eight interpolated levels, which
+/// is strictly more precision per surviving channel than the RGBA8 it replaces
+/// has per texel of gradient.
+///
+/// Each half is byte-for-byte the BC4 block the BC3 alpha encoder below already
+/// writes, which is why this is a short function and not a new encoder.
+pub fn compress_bc5(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let bw = width.div_ceil(4);
+    let bh = height.div_ceil(4);
+    let mut out = Vec::with_capacity((bw * bh) as usize * 16);
+    for by in 0..bh {
+        for bx in 0..bw {
+            let block = gather_block(rgba, width, height, bx * 4, by * 4);
+            encode_bc4_block(&block, 0, &mut out);
+            encode_bc4_block(&block, 1, &mut out);
+        }
+    }
+    out
+}
+
 /// Bytes a compressed image occupies: `ceil(w/4) * ceil(h/4) * block_bytes`.
 pub fn compressed_size(width: u32, height: u32, bc3: bool) -> usize {
     let blocks = width.div_ceil(4) as usize * height.div_ceil(4) as usize;
     blocks * if bc3 { 16 } else { 8 }
+}
+
+/// Bytes a BC5 image occupies — two 8-byte blocks per 4×4, i.e. the BC3 size.
+pub fn compressed_size_bc5(width: u32, height: u32) -> usize {
+    compressed_size(width, height, true)
 }
 
 fn compress(rgba: &[u8], width: u32, height: u32, bc3: bool) -> Vec<u8> {
@@ -147,12 +187,22 @@ fn nearest(palette: &[[u8; 3]; 4], px: [u8; 3]) -> usize {
 }
 
 /// Encode an 8-byte BC3/DXT5 alpha block (8 interpolated alphas, a0 > a1 mode).
+///
+/// A BC3 alpha block and a BC4/RGTC1 block are the **same eight bytes** — which
+/// is why BC5 above is two calls to [`encode_bc4_block`] and not a second
+/// encoder.
 fn encode_alpha_block(block: &[[u8; 4]; 16], out: &mut Vec<u8>) {
+    encode_bc4_block(block, 3, out)
+}
+
+/// The one-channel block: 8 bytes describing `channel` of a 4×4 as two endpoints
+/// plus 3-bit indices into an 8-entry interpolated palette.
+fn encode_bc4_block(block: &[[u8; 4]; 16], channel: usize, out: &mut Vec<u8>) {
     let mut lo = 255u8;
     let mut hi = 0u8;
     for px in block {
-        lo = lo.min(px[3]);
-        hi = hi.max(px[3]);
+        lo = lo.min(px[channel]);
+        hi = hi.max(px[channel]);
     }
     let a0 = hi;
     let a1 = lo;
@@ -176,7 +226,7 @@ fn encode_alpha_block(block: &[[u8; 4]; 16], out: &mut Vec<u8>) {
     // 16 texels × 3 bits = 48 bits packed into 6 bytes.
     let mut bits: u64 = 0;
     for (n, px) in block.iter().enumerate() {
-        let idx = nearest_alpha(&palette, px[3]) as u64;
+        let idx = nearest_alpha(&palette, px[channel]) as u64;
         bits |= idx << (3 * n);
     }
     for b in 0..6 {
@@ -213,7 +263,7 @@ fn nearest_alpha(palette: &[u8; 8], a: u8) -> usize {
 /// guards it — a texture's bytes are content-hashed into a reproducible pack, so
 /// one `as f32` in an endpoint fit would make them a property of the machine that
 /// imported it.
-pub use inf_vt::container::{decode_bc1, decode_bc3};
+pub use inf_vt::container::{decode_bc1, decode_bc3, decode_bc5};
 
 #[cfg(test)]
 mod tests {
@@ -271,8 +321,13 @@ mod tests {
         // (`fn decode_bc3` used to stand here; P26.3 moved the DECODERS to
         // `inf_vt::container` and left the encoder, so naming one would now
         // assert the gate onto code that is not in this file.)
+        // (`fn encode_alpha_block` stood here until Wave T made it a one-line
+        // forwarder onto `encode_bc4_block`; naming the forwarder would have
+        // asserted the gate onto a signature and not onto the block fit.)
         assert!(
-            code.contains("fn compress_bc1") && code.contains("fn encode_alpha_block"),
+            code.contains("fn compress_bc1")
+                && code.contains("fn compress_bc5")
+                && code.contains("fn encode_bc4_block"),
             "the source filter ate the encoder"
         );
     }
@@ -297,6 +352,114 @@ mod tests {
             let diff = (dec[c] as i32 - color[c] as i32).abs();
             assert!(diff <= 8, "channel {c}: {} vs {}", dec[c], color[c]);
         }
+    }
+
+    /// **BC5 is the normal-map format, and this is the number that says so**
+    /// (Wave T).
+    ///
+    /// Three claims, measured rather than argued:
+    ///
+    /// 1. **Size.** A stored virtual-texture tile is 136² texels. As RGBA8 —
+    ///    what every normal map in this engine shipped as until now — that is
+    ///    73 984 B a page; as BC5 it is 18 496 B. Exactly 4×.
+    /// 2. **Quality against the alternative that was actually available.** BC1
+    ///    is what "just compress the normal map" reaches for, and its 5:6:5
+    ///    endpoints quantise the red channel to 32 levels — the channel a
+    ///    tangent-space X lives in. On a swept normal field BC5's per-channel
+    ///    error is a fraction of BC1's, and the assertion is on the *ratio*, so
+    ///    it cannot be satisfied by both being bad.
+    /// 3. **Z is redundant, so discarding it is free.** A unit normal's Z is
+    ///    `sqrt(1 − x² − y²)`; the reconstruction is asserted here on the CPU
+    ///    against the source, which is the same arithmetic `vt_sample.wgsl`'s
+    ///    `vt_normal_ts` does on the GPU.
+    #[test]
+    fn bc5_costs_a_quarter_of_rgba8_and_beats_bc1_on_a_normal_map() {
+        // A swept tangent-space normal field: X and Y ramp independently, so no
+        // block is flat and both channels carry a real gradient.
+        let (w, h) = (64u32, 64u32);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        let mut truth: Vec<[f64; 3]> = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let nx = (x as f64 / (w - 1) as f64) * 1.4 - 0.7;
+                let ny = (y as f64 / (h - 1) as f64) * 1.4 - 0.7;
+                let nz = (1.0 - nx * nx - ny * ny).max(0.0).sqrt();
+                truth.push([nx, ny, nz]);
+                let enc = |v: f64| ((v * 0.5 + 0.5) * 255.0).round().clamp(0.0, 255.0) as u8;
+                rgba.extend_from_slice(&[enc(nx), enc(ny), enc(nz), 255]);
+            }
+        }
+
+        // (1) Size. A 136² stored tile, the unit the atlas allocates in.
+        assert_eq!(compressed_size_bc5(136, 136), 34 * 34 * 16);
+        assert_eq!(compressed_size_bc5(136, 136), 18_496);
+        assert_eq!(136usize * 136 * 4, 73_984);
+        assert_eq!(73_984 / compressed_size_bc5(136, 136), 4);
+        assert_eq!(compress_bc5(&rgba, w, h).len(), compressed_size_bc5(w, h));
+
+        // (2) Quality, per channel, against BC1 — the alternative that existed.
+        let bc5 = decode_bc5(&compress_bc5(&rgba, w, h), w, h);
+        let bc1 = decode_bc1(&compress_bc1(&rgba, w, h), w, h);
+        let mut err5 = 0f64;
+        let mut err1 = 0f64;
+        for i in 0..(w * h) as usize {
+            for c in 0..2 {
+                err5 += (bc5[i * 4 + c] as f64 - rgba[i * 4 + c] as f64).abs();
+                err1 += (bc1[i * 4 + c] as f64 - rgba[i * 4 + c] as f64).abs();
+            }
+        }
+        let n = (w * h * 2) as f64;
+        let (mae5, mae1) = (err5 / n, err1 / n);
+        assert!(
+            mae5 * 3.0 < mae1,
+            "BC5 must beat BC1 on the two channels a normal map lives in by a \
+             wide margin: BC5 MAE {mae5:.3}, BC1 MAE {mae1:.3}"
+        );
+        assert!(
+            mae5 < 1.0,
+            "BC5 MAE on X/Y is {mae5:.3}, expected well under 1"
+        );
+
+        // (3) The rebuild. `sqrt(1 - x^2 - y^2)` off the two stored channels is
+        // the source normal back, to within the quantisation of X and Y.
+        let mut worst = 0f64;
+        let mut total = 0f64;
+        for (i, t) in truth.iter().enumerate() {
+            let x = bc5[i * 4] as f64 / 255.0 * 2.0 - 1.0;
+            let y = bc5[i * 4 + 1] as f64 / 255.0 * 2.0 - 1.0;
+            let z = (1.0 - x * x - y * y).max(0.0).sqrt();
+            let d = ((x - t[0]).powi(2) + (y - t[1]).powi(2) + (z - t[2]).powi(2)).sqrt();
+            worst = worst.max(d);
+            total += d;
+        }
+        let mean = total / truth.len() as f64;
+        // **The worst case is the rim of the unit disc, and that is arithmetic
+        // rather than a defect.** `z = sqrt(1 − x² − y²)` has an infinite slope
+        // where `z → 0`, so a normal lying almost in the tangent plane amplifies
+        // the quantisation of X and Y — this fixture deliberately sweeps out to
+        // `|xy| = 0.99`, i.e. all the way onto that rim. Both numbers are
+        // asserted because the mean is what a surface looks like and the worst
+        // case is what a silhouette does.
+        assert!(
+            worst < 0.03 && mean < 0.005,
+            "the rebuilt normal is {worst:.4} away from the source at worst, \
+             {mean:.5} on average"
+        );
+        // The blue channel is genuinely gone — this is a two-channel format and
+        // an arm that passed while B survived would be testing nothing.
+        assert!(bc5.chunks_exact(4).all(|p| p[2] == 0));
+    }
+
+    /// The encoder is a **pure function of its input**, for the format Wave T
+    /// added as much as for the two that came before — a texture's bytes are
+    /// content-hashed into a reproducible pack.
+    #[test]
+    fn bc5_is_deterministic() {
+        let rgba: Vec<u8> = (0..(16 * 16 * 4)).map(|i| (i * 37 % 253) as u8).collect();
+        assert_eq!(compress_bc5(&rgba, 16, 16), compress_bc5(&rgba, 16, 16));
+        // And it is NOT the BC3 encoding of the same block: BC5 carries R and G,
+        // BC3 carries alpha and colour.
+        assert_ne!(compress_bc5(&rgba, 16, 16), compress_bc3(&rgba, 16, 16));
     }
 
     #[test]

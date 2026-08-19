@@ -89,6 +89,7 @@ fn container(compression: TextureCompression) -> TiledTextureImage {
             srgb: true,
             generate_mips: true,
             compression,
+            hdr: false,
         },
     )
     .expect("the fixture tiles")

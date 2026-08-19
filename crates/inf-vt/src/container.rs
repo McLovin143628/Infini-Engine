@@ -83,13 +83,43 @@ use crate::pool::PageFormat;
 /// Magic at the head of every v2 `.inf_tex` payload.
 pub const TEX_ASSET_MAGIC: [u8; 8] = *b"INFVTEX\0";
 
-/// Current `.inf_tex` **container** schema version.
+/// Current `.inf_tex` **container** schema version — the newest this build can
+/// read.
 ///
 /// v1 is the bare bincode `TextureAsset` (no magic) and keeps loading forever;
 /// v2 is the tiled image `inf_material::tiles` writes. This versions the
 /// *container* and is independent of `TextureAsset::CURRENT_VERSION`, which
 /// versions the in-memory record.
-pub const TEX_ASSET_SCHEMA_VERSION: u32 = 2;
+///
+/// # v3 (Wave T): two format codes, and not one byte else
+///
+/// v3 appends [`PageFormat::Bc5`] (code 3) and [`PageFormat::Rgba16F`] (code 4)
+/// to the freeze-pinned format lane. **The layout does not move** — same 128-byte
+/// header, same two directories, same uniform stride — so the version is doing
+/// exactly one job: telling a build that predates Wave T that it cannot read the
+/// format code it is about to find.
+///
+/// Which is why the writer emits [`min_schema_version`] rather than this
+/// constant. A BC1 albedo cooked after Wave T is **byte-identical** to the same
+/// albedo cooked before it, version word included, so no content hash moves, no
+/// import cache is invalidated, and no `.inf_pack` stops reproducing. Only a
+/// texture that actually uses a v3 format is stamped v3, and only that texture is
+/// refused by an older build — by name, at the door, instead of being mis-read.
+pub const TEX_ASSET_SCHEMA_VERSION: u32 = 3;
+
+/// The **lowest** container version that can express `format` — what the writer
+/// stamps.
+///
+/// See [`TEX_ASSET_SCHEMA_VERSION`] for why this exists rather than a constant
+/// bump: a version is a refusal contract, and stamping v3 on a payload every v2
+/// reader could have read would refuse readers for nothing while moving every
+/// existing texture's bytes.
+pub const fn min_schema_version(format: PageFormat) -> u32 {
+    match format {
+        PageFormat::Rgba8 | PageFormat::Bc1 | PageFormat::Bc3 => 2,
+        PageFormat::Bc5 | PageFormat::Rgba16F => 3,
+    }
+}
 
 /// Tile blobs start on multiples of this many bytes — the same constant, and the
 /// same reasoning, as `inf_asset::BLOB_ALIGN` and `.inf_vmesh`'s `SECTION_ALIGN`.
@@ -154,6 +184,8 @@ pub fn format_code(f: PageFormat) -> u32 {
         PageFormat::Rgba8 => 0,
         PageFormat::Bc1 => 1,
         PageFormat::Bc3 => 2,
+        PageFormat::Bc5 => 3,
+        PageFormat::Rgba16F => 4,
     }
 }
 
@@ -163,6 +195,8 @@ pub fn format_from_code(c: u32) -> Option<PageFormat> {
         0 => Some(PageFormat::Rgba8),
         1 => Some(PageFormat::Bc1),
         2 => Some(PageFormat::Bc3),
+        3 => Some(PageFormat::Bc5),
+        4 => Some(PageFormat::Rgba16F),
         _ => None,
     }
 }
@@ -295,6 +329,7 @@ impl<B: AsRef<[u8]>> TiledTextureReader<B> {
             tile_size: self.header.tile_size,
             border: self.header.border,
             srgb: self.header.srgb,
+            reconstruct_z: self.header.format.is_two_channel(),
             mips: self
                 .mips
                 .iter()
@@ -346,6 +381,13 @@ impl<B: AsRef<[u8]>> TiledTextureReader<B> {
     ///
     /// This is the fallback an adapter without `TEXTURE_COMPRESSION_BC` takes —
     /// the *same* residency door, one page-format decision earlier.
+    /// **A float page is never transcoded, and that is the answer rather than a
+    /// gap** (Wave T). [`PageFormat::Rgba16F`] needs no `TEXTURE_COMPRESSION_BC`
+    /// — [`PageFormat::needs_bc`] says so, and [`crate::PageFormat`] is what the
+    /// pool decision reads — so the tier this door exists to serve never asks for
+    /// one. Answering anyway would mean flattening exactly the dynamic range the
+    /// format was added to keep, silently, on the one adapter class that cannot
+    /// argue back. `None` is the refusal, and it is unreachable by construction.
     pub fn tile_rgba8(&self, mip: u32, x: u32, y: u32) -> Option<Vec<u8>> {
         let blob = self.tile(mip, x, y)?;
         let n = self.header.stored_tile_size();
@@ -353,6 +395,8 @@ impl<B: AsRef<[u8]>> TiledTextureReader<B> {
             PageFormat::Rgba8 => blob.to_vec(),
             PageFormat::Bc1 => decode_bc1(blob, n, n),
             PageFormat::Bc3 => decode_bc3(blob, n, n),
+            PageFormat::Bc5 => decode_bc5(blob, n, n),
+            PageFormat::Rgba16F => return None,
         })
     }
 }
@@ -378,6 +422,18 @@ pub fn parse(data: &[u8]) -> Result<(TiledTextureHeader, Vec<TexMipEntry>, Vec<T
     let format = format_from_code(u32_at(20)).ok_or_else(|| {
         TiledTextureError::Malformed(format!("unknown format code {}", u32_at(20)))
     })?;
+    // The version and the format lane are one contract, not two facts that
+    // happen to agree (Wave T). A payload stamped v2 carrying a v3 format code
+    // is a file no v2 reader could have written and every v2 reader will refuse
+    // — accepting it here would make this build the only one in the world that
+    // reads it, which is the shape a silent divergence starts in.
+    if schema_version < min_schema_version(format) {
+        return Err(TiledTextureError::Malformed(format!(
+            "format code {} needs container v{}, but the payload declares v{schema_version}",
+            u32_at(20),
+            min_schema_version(format)
+        )));
+    }
     let header = TiledTextureHeader {
         schema_version,
         width: u32_at(12),
@@ -628,6 +684,40 @@ pub fn decode_bc3(data: &[u8], width: u32, height: u32) -> Vec<u8> {
     out
 }
 
+/// Decode a **BC5 / RGTC2** image to RGBA8 (Wave T): `R` and `G` from the two
+/// interpolated one-channel blocks, `B = 0`, `A = 255`.
+///
+/// **`B` is left at zero on purpose.** A BC5 page stores a normal's X and Y and
+/// nothing else; the Z that belongs there is `sqrt(1 − x² − y²)`, and a square
+/// root is a float — which this file may not touch, for the recorded reason that
+/// a transcoded page must be the same bytes on a phone as on a desktop.
+/// Rebuilding Z is therefore the *sampler's* job in both tiers alike: the shader
+/// reads the texture's `reconstruct_z` flag out of the indirection table and does
+/// it there, so the BC tier and this transcode tier hand the shading path the
+/// same two channels and get the same normal out.
+pub fn decode_bc5(data: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let mut out = vec![0u8; rgba8_len(width, height)];
+    let mut p = 0;
+    for by in 0..height.div_ceil(4) {
+        for bx in 0..width.div_ceil(4) {
+            if p + 16 > data.len() {
+                return out;
+            }
+            // Each half is an ordinary BC4 block, which is byte-for-byte the
+            // BC3 alpha block this file already decodes.
+            let red = decode_alpha_block(&data[p..p + 8]);
+            let green = decode_alpha_block(&data[p + 8..p + 16]);
+            p += 16;
+            let mut colors = [[0u8; 3]; 16];
+            for (n, c) in colors.iter_mut().enumerate() {
+                *c = [red[n], green[n], 0];
+            }
+            blit_block(&mut out, width, height, bx, by, &colors, None);
+        }
+    }
+    out
+}
+
 fn from_565(c: u16) -> [u8; 3] {
     let r = ((c >> 11) & 0x1F) as u8;
     let g = ((c >> 5) & 0x3F) as u8;
@@ -792,11 +882,42 @@ mod tests {
             (PageFormat::Rgba8, 0u32),
             (PageFormat::Bc1, 1),
             (PageFormat::Bc3, 2),
+            // Wave T APPENDED these two. The three above did not move, which is
+            // the whole content of the pin.
+            (PageFormat::Bc5, 3),
+            (PageFormat::Rgba16F, 4),
         ] {
             assert_eq!(format_code(f), c, "{f:?}");
             assert_eq!(format_from_code(c), Some(f));
+            // …and each code names the container version it needs, so an older
+            // build refuses a newer format by version rather than by luck.
+            assert_eq!(min_schema_version(f), if c < 3 { 2 } else { 3 }, "{f:?}");
         }
-        assert_eq!(format_from_code(3), None);
+        assert_eq!(format_from_code(5), None);
+        assert!(TEX_ASSET_SCHEMA_VERSION >= 3);
+    }
+
+    /// The page-byte arithmetic of the two formats Wave T added, and the two
+    /// questions the pool and the shader ask about them.
+    #[test]
+    fn the_wave_t_formats_size_and_classify_themselves() {
+        // A 136² stored tile: BC5 is two 8-byte blocks per 4×4 — the BC3 size,
+        // a quarter of the RGBA8 a normal map used to cost.
+        assert_eq!(stored_tile_bytes(PageFormat::Bc5), 34 * 34 * 16);
+        assert_eq!(stored_tile_bytes(PageFormat::Rgba8) / 4, 18_496);
+        assert_eq!(stored_tile_bytes(PageFormat::Bc5), 18_496);
+        assert_eq!(stored_tile_bytes(PageFormat::Rgba16F), 136 * 136 * 8);
+        // Every page is still 16-byte aligned by its own size — the property
+        // that lets the atlas allocate with no per-slot padding.
+        for f in [PageFormat::Bc5, PageFormat::Rgba16F] {
+            assert_eq!(stored_tile_bytes(f) % SECTION_ALIGN as usize, 0, "{f:?}");
+        }
+        // BC5 needs the BC feature; a float format does NOT — which is what
+        // keeps `pool_format` from transcoding (and clamping) it on a mobile
+        // adapter, and what makes `tile_rgba8` refuse one.
+        assert!(PageFormat::Bc5.needs_bc() && !PageFormat::Rgba16F.needs_bc());
+        assert!(PageFormat::Bc5.is_two_channel() && !PageFormat::Bc1.is_two_channel());
+        assert!(PageFormat::Rgba16F.is_float() && !PageFormat::Bc5.is_float());
     }
 
     /// The stored tile is a whole number of BC blocks in every format, and the
