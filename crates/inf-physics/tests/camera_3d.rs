@@ -349,3 +349,131 @@ fn the_camera_follows_the_movement_mode() {
         sim.cam.settings.arm_length_m
     );
 }
+
+// ── the seat (P29.7) ────────────────────────────────────────────────────────
+
+const CAR: Uuid = Uuid::from_u128(0x2906_0010);
+const WHEEL: u128 = 0x2906_0020;
+
+/// Put a **long** vehicle where the character can climb into it.
+///
+/// Six metres long on purpose. The seat is the chassis collider's top face, so a
+/// third-person boom leaves the pivot above the roof and comes down behind it —
+/// and on a two-metre car it is past the tail before it has dropped far enough
+/// to matter. On the showcase course's own car the boom clears the bodywork
+/// entirely and the exclusion never fires, which is exactly why this fixture is
+/// not that car: a rule with no falsifier is a rule nobody can break.
+fn park_a_car(world: &mut EcsWorld, half_z: f64) {
+    let e = world.spawn_with_guid(CAR, "Car", None);
+    let mut t = Transform::IDENTITY;
+    // Beside the character rather than in front of it: a six-metre car whose
+    // seat is its own centre cannot be reached from its nose, and the reach is
+    // measured to the seat.
+    t.translation = Vec3d::new(2.5, 0.75 + 0.35, 0.0);
+    world.world_mut().entity_mut(e).insert((
+        RigidBody3D {
+            kind: BodyKind3D::Dynamic,
+            angular_damping: 0.5,
+            ..Default::default()
+        },
+        Collider3D {
+            shape_kind: ColliderShape3DKind::Box,
+            half_extents: Vec3d::new(2.0, 0.5, half_z),
+            density: 150.0,
+            ..Default::default()
+        },
+        t,
+    ));
+    for (i, (x, z)) in [(-0.9, 1.4), (0.9, 1.4), (-0.9, -1.4), (0.9, -1.4)]
+        .into_iter()
+        .enumerate()
+    {
+        let w = world.spawn_with_guid(Uuid::from_u128(WHEEL + i as u128), "Wheel", Some(e));
+        let mut wt = Transform::IDENTITY;
+        wt.translation = Vec3d::new(x, -0.75, z);
+        world.world_mut().entity_mut(w).insert((
+            wt,
+            Collider3D {
+                shape_kind: ColliderShape3DKind::Sphere,
+                radius: 0.35,
+                sensor: true,
+                ..Default::default()
+            },
+        ));
+    }
+    world.mark_dirty();
+    world.propagate();
+}
+
+/// **The camera excludes the vehicle its subject is driving** — the P29.6
+/// audit's A4, a third time.
+///
+/// The first two were the character's own collider and the ragdoll's limbs (a
+/// ragdoll spawns a dozen and *disables* the one the camera knew about). The
+/// third is a vehicle: a seated character's capsule is parked and the thing
+/// filling the space around it is a chassis, so without the exclusion the sweep
+/// finds bodywork at nearly zero distance and the camera sits at
+/// `min_arm_fraction` — inside the driver — for the whole drive.
+///
+/// The fixture is a **six-metre-long** car and the camera is pitched **up**,
+/// which drops the boom into the bodywork behind the seat. Both halves are
+/// needed: on a two-metre car the boom is past the tail before it has fallen far
+/// enough to touch anything, so an arm built on the showcase's own rig passed
+/// with the exclusion deleted — measured, before this fixture was this shape.
+#[test]
+fn the_camera_excludes_the_vehicle_its_subject_is_driving() {
+    let mut sim = Sim::new(None);
+    park_a_car(&mut sim.world, 3.0);
+    let idle = MovementIntent::default();
+    for _ in 0..60 {
+        sim.step(&idle);
+    }
+    // Climb in, and let the warp finish.
+    sim.step(&MovementIntent {
+        interact: true,
+        ..Default::default()
+    });
+    for _ in 0..90 {
+        sim.step(&idle);
+    }
+    let cm = {
+        let e = sim.world.entity_of(HERO).unwrap();
+        sim.world
+            .world()
+            .get::<CharacterMovement>(e)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        cm.mode,
+        inf_ecs::components::MovementMode::Driving,
+        "the fixture must be driving before it can measure a drive camera"
+    );
+    assert_eq!(cm.runtime.seat.vehicle, CAR);
+
+    // Pitch UP: a third-person camera looking up drops its boom, which is what
+    // sends it into the roof of the thing the character is sitting on.
+    let look_up = MovementIntent {
+        look_pitch_dps: 30.0,
+        ..Default::default()
+    };
+    let mut worst = f64::MAX;
+    for _ in 0..150 {
+        if let Some(pose) = sim.step(&look_up) {
+            let e = sim.world.entity_of(HERO).unwrap();
+            let at = sim
+                .world
+                .world()
+                .get::<Transform>(e)
+                .unwrap()
+                .translation
+                .to_dvec3();
+            worst = worst.min((pose.position.to_dvec3() - at).length());
+        }
+    }
+    assert!(
+        worst > 1.0,
+        "the camera came within {worst:.3} m of the driver — it is sweeping into \
+         the car it is riding"
+    );
+}

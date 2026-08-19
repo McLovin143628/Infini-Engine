@@ -60,10 +60,15 @@ const STEPS: u32 = 4900;
 /// transition to fire and for the difference to persist, short enough that the
 /// arm is about the diff rather than about the whole course.
 const DIFF_STEPS: u32 = 240;
-/// The prefix the camera arms run. The course's first thousand steps carry the
-/// gaits, the roof and the low stances, which is where a third-person camera has
-/// the most to do.
-const CAMERA_STEPS: u32 = 1800;
+/// How many steps the camera arms run — **the whole course** (P29.7).
+///
+/// It was a 1 800-step prefix, chosen because the gaits, the roof and the low
+/// stances are where a third-person camera has the most to do. That stopped
+/// being true when the course gained a car: the camera excludes the chassis its
+/// subject is driving (the P29.6 audit's A4, a third time), the drive begins at
+/// step 3 662, and a prefix that ends at 1 800 leaves that branch covered by
+/// nothing at all. A gate must aim at the thing it names.
+const CAMERA_STEPS: u32 = STEPS;
 /// The course segment the Blueprint-versus-transpiled parity arm replays. Long
 /// enough to contain a run and several footfalls, which its own anti-vacuity
 /// half asserts.
@@ -1898,6 +1903,77 @@ fn the_camera_sweeps_against_the_course() {
         worst > 0.25,
         "the worst pull was {worst:.3} m, which is a rounding error rather than \
          a collision"
+    );
+}
+
+/// **The drive camera does not sit inside the car it is filming** — the P29.6
+/// audit's A4, a third time.
+///
+/// The first two were the character's own collider (excluded since the camera
+/// existed) and the ragdoll's limbs, which a ragdoll spawns while *disabling*
+/// the one collider the camera knew about. The third is a vehicle: a seated
+/// character's capsule is parked and the thing filling the space around it is a
+/// four-metre chassis, so without the exclusion the sweep finds bodywork at
+/// nearly zero distance on the first frame of the drive and the camera sits at
+/// `min_arm_fraction` — seventeen centimetres from the pivot, inside the
+/// driver — for the whole segment.
+///
+/// The claim is the **distance**, over the drive: a camera at its tuned arm is
+/// metres behind, a camera against the car is centimetres.
+///
+/// # What this arm is NOT, measured rather than assumed
+///
+/// It is **not** the exclusion's falsifier. Deleting the seat clause from
+/// `d3::camera`'s exclusion set leaves this green, because the showcase's car is
+/// a metre tall with the driver on its roof and a third-person boom clears the
+/// bodywork on its way past. The falsifier is
+/// `camera_3d::the_camera_excludes_the_vehicle_its_subject_is_driving`, whose
+/// fixture is six metres long precisely so the boom comes down inside it — and
+/// there the same deletion puts the camera 0.896 m from the driver.
+///
+/// So what this one asserts is the **outcome on the committed content**: that
+/// the drive segment of the shipped course really does film the car from behind
+/// rather than from inside it. Both arms are worth having, and saying which is
+/// which is the difference between a gate and a decoration.
+#[test]
+fn the_camera_keeps_its_distance_while_driving() {
+    let mut sim = pie_sim(None);
+    let mut driver = Driver::default();
+    let mut driving = 0u32;
+    let mut close = 0u32;
+    let mut worst = f64::MAX;
+    for _ in 0..STEPS {
+        let (z, mode, grounded) = state_of(sim.world());
+        let (held, ax) = driver.step(z, mode, grounded);
+        sim.step_once(RuntimeInput::with_down(held).with_axes(ax));
+        if state_of(sim.world()).1 != MovementMode::Driving {
+            continue;
+        }
+        driving += 1;
+        let Some(pose) = sim.camera_pose() else {
+            continue;
+        };
+        let subject = sim
+            .world()
+            .entity_of(hero())
+            .and_then(|e| sim.world().world().get::<Transform>(e))
+            .map(|t| t.translation.to_dvec3())
+            .expect("the driver is in the world");
+        let d = (pose.position.to_dvec3() - subject).length();
+        worst = worst.min(d);
+        if d < 1.0 {
+            close += 1;
+        }
+    }
+    assert!(driving > 300, "only {driving} steps of Driving to measure");
+    assert!(
+        close * 5 < driving,
+        "the camera was within a metre of the driver on {close} of {driving} \
+         driving steps — it is sweeping into the car it is riding"
+    );
+    assert!(
+        worst > 0.3,
+        "the camera came within {worst:.3} m of the driver, which is inside them"
     );
 }
 
